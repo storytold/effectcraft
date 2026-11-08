@@ -221,8 +221,9 @@ impl FootageSource for CancellableFootage<'_> {
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
         self.inner.audio(item, footage, t, frames, rate)
     }
+    // (decoding channels is a read like a frame's: called off with the render, between batches)
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
-        self.inner.aux(item, footage, t)
+        self.read(|| self.inner.aux(item, footage, t))
     }
     fn aux_for(
         &self,
@@ -231,7 +232,7 @@ impl FootageSource for CancellableFootage<'_> {
         t: Tick,
         need: &effectcraft_raster::channels3d::AuxNeed,
     ) -> Option<Arc<effectcraft_raster::AuxChannels>> {
-        self.inner.aux_for(item, footage, t, need)
+        self.read(|| self.inner.aux_for(item, footage, t, need))
     }
     fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux_names(item, footage, t)

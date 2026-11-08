@@ -13,8 +13,6 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 
 ## 3D Channel
 
-The parameters that pick which channels or Cryptomatte layer an effect reads are not animatable, as in After Effects (see [footage](footage.md)).
-
 | Effect | Id | Params | GPU | 32 | Status |
 |---|---|---:|:-:|:-:|---|
 | 3D Channel Extract | `ec.3d.channelextract` | 6 | GPU | 32 | Implemented |

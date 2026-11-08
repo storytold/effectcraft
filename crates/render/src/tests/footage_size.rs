@@ -187,3 +187,41 @@ fn a_source_that_reads_whole_frames_keeps_the_layer_cached_under_a_region() {
         }
     }
 }
+
+/// #3271 review: a render's channel reads (an effect's EXR channels) are called off with the
+/// render like its frame reads: they run under the render's cancel flag (a decode stops between
+/// batches), and once it is set they don't start.
+#[test]
+fn channel_reads_are_called_off_with_the_render() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    thread_local! {
+        static UNDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    #[derive(Default)]
+    struct Channels {
+        reads: Mutex<Vec<bool>>,
+    }
+    impl FootageSource for Channels {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn cancellable(&self, _: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
+            UNDER.with(|u| u.set(true));
+            f();
+            UNDER.with(|u| u.set(false));
+        }
+        fn aux_for(&self, _: ItemId, f: &Footage, _: Tick, _: &effectcraft_raster::channels3d::AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+            self.reads.lock().unwrap().push(UNDER.with(|u| u.get()));
+            Some(Arc::new(effectcraft_raster::AuxChannels::new(f.width, f.height, 1.0)))
+        }
+    }
+    let inner = Channels::default();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let src = crate::CancellableFootage { inner: &inner, cancel: cancel.clone() };
+    let f = Footage { width: 4, height: 2, ..Default::default() };
+    let need = effectcraft_raster::channels3d::AuxNeed::Lookups(vec![]);
+    assert!(src.aux_for(ItemId(1), &f, Tick::ZERO, &need).is_some());
+    cancel.store(true, Ordering::Relaxed);
+    assert!(src.aux_for(ItemId(1), &f, Tick::ZERO, &need).is_none(), "called off");
+    assert_eq!(*inner.reads.lock().unwrap(), [true], "read once, under the render's flag");
+}
