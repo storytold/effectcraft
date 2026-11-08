@@ -20,11 +20,15 @@ fn serif() -> TextStyle {
 
 #[test]
 fn bundled_faces_list_their_features() {
-    let inter = fonts::face(fonts::resolve("Inter", "Regular").face).features();
+    // The bundled faces themselves: an installed copy of the family would take their place.
+    let bundled = |family: &str| {
+        fonts::all_faces().into_iter().find(|f| f.info.origin == "bundled" && f.info.family == family && f.info.style == "Regular").unwrap().features()
+    };
+    let inter = bundled("Inter");
     for t in ["ss01", "dlig", "frac", "tnum", "sups", "ordn"] {
         assert!(inter.iter().any(|f| f == t), "{t} in {inter:?}");
     }
-    let serif = fonts::face(fonts::resolve("Noto Serif", "Regular").face).features();
+    let serif = bundled("Noto Serif");
     for t in ["smcp", "c2sc", "onum", "lnum"] {
         assert!(serif.iter().any(|f| f == t), "{t} in {serif:?}");
     }

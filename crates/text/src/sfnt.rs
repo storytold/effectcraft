@@ -282,7 +282,12 @@ pub(crate) mod test_font {
     /// with its own name ids; `with_ps_ids` gives the instance records room for a PostScript name
     /// id (names without one get 0xFFFF, "none").
     pub(crate) fn variable(family: &str, instances: &[(&str, f32, Option<&str>)], with_ps_ids: bool) -> Vec<u8> {
-        let mut strings: Vec<(u16, String)> = vec![(1, family.into()), (2, "Light".into())];
+        variable_styled(family, "Light", instances, with_ps_ids)
+    }
+
+    /// [`variable`] with `style` as the face's own style (name id 2).
+    pub(crate) fn variable_styled(family: &str, style: &str, instances: &[(&str, f32, Option<&str>)], with_ps_ids: bool) -> Vec<u8> {
+        let mut strings: Vec<(u16, String)> = vec![(1, family.into()), (2, style.into())];
         let mut recs = Vec::new();
         for (i, (style, w, ps)) in instances.iter().enumerate() {
             let sid = 256 + 2 * i as u16;

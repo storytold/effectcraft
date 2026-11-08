@@ -139,7 +139,7 @@ fn bundled_families_and_resolution() {
     assert!(fams.iter().any(|(f, _)| f == "Noto Serif"));
     assert!(fams.iter().any(|(f, _)| f == "JetBrains Mono"));
     let b = resolve("inter", "bold");
-    assert_eq!(face(b.face).info.style, "Bold");
+    assert_eq!(style_of(b), "Bold");
     assert!(!b.synth_bold);
     let faces = all_faces();
     assert!(faces.iter().any(|f| f.info.family == "Noto Serif" && f.info.style == "Regular" && f.info.origin == "bundled"));
@@ -214,17 +214,24 @@ fn system_scan_finds_fonts() {
     }
 }
 
+/// The style a resolved request draws: the named instance's, or the face's own.
+fn style_of(r: Resolved) -> String {
+    let f = face(r.face);
+    r.instance.and_then(|i| f.info.instances.get(usize::from(i))).map_or_else(|| f.info.style.clone(), |i| i.style.clone())
+}
+
 #[test]
 fn postscript_and_full_names_resolve() {
-    // Bundled Inter: name id 6 is `Inter-Bold`, name id 4 is `Inter Bold`.
+    // Bundled Inter: name id 6 is `Inter-Bold`, name id 4 is `Inter Bold` (an installed variable
+    // Inter's named instances take their place).
     let ps = resolve("Inter-Bold", "");
-    assert_eq!(face(ps.face).info.style, "Bold");
+    assert_eq!(style_of(ps), "Bold");
     assert!(!ps.missing && !ps.synth_bold);
     let full = resolve("inter semibold", "");
-    assert_eq!(face(full.face).info.style, "SemiBold");
+    assert_eq!(style_of(full), "SemiBold");
     assert!(!full.missing);
     // A family name still wins over a name lookup.
-    assert_eq!(face(resolve("Inter", "Bold").face).info.style, "Bold");
+    assert_eq!(style_of(resolve("Inter", "Bold")), "Bold");
 }
 
 /// #1563: a variable font's named instances are styles of its family. `fontStyle = "Black"`,
@@ -270,8 +277,11 @@ fn variable_named_instances_resolve_and_list() {
     let fams = families();
     let styles = &fams.iter().find(|(f, _)| f == FAMILY).unwrap().1;
     assert_eq!(styles, &["Light", "Regular", "Extra Bold", "Black", "Bold Italic"]);
-    // Static fonts are untouched.
-    assert_eq!(resolve("Inter", "Bold").instance, None);
+    // Static fonts are untouched (the bundled Inter is static; an installed one may not be).
+    let inter = resolve("Inter", "Bold");
+    if !face(inter.face).info.variable {
+        assert_eq!(inter.instance, None);
+    }
 }
 
 /// Axis values set on the text win over the instance's; the others keep the instance's.
@@ -566,4 +576,57 @@ fn unknown_face_id_returns_bundled_default() {
     assert_eq!(fallback.info.family, DEFAULT_FAMILY);
     assert!(fallback.font().is_some());
     assert!(Arc::ptr_eq(&fallback, &face(0)));
+}
+
+/// An installed font with a bundled family and style is not skipped as a duplicate: with a
+/// variable Inter in the user's font folder (Inter Regular, its default instance), Inter is that
+/// font, with its axes and named instances, and the bundled faces fill only the styles it lacks.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn an_installed_face_takes_the_place_of_a_bundled_one() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_INSTALLED_INTER";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_child(CHILD, "fonts::tests::an_installed_face_takes_the_place_of_a_bundled_one");
+        return;
+    }
+    db().write().unwrap().scanned = true; // This test process uses only bundled and synthetic fonts.
+    let bundled = |r: Resolved| face(r.face).info.origin == "bundled";
+    assert!(bundled(resolve("Inter", "Regular")) && bundled(resolve("Inter", "Black")));
+    let dir = std::env::temp_dir().join(format!("ec-installed-inter-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let instances = [
+        ("Thin", 100.0, Some("Inter-Thin")),
+        ("Regular", 400.0, Some("Inter-Regular")),
+        ("Bold", 700.0, Some("Inter-Bold")),
+        ("Black", 900.0, Some("Inter-Black")),
+    ];
+    std::fs::write(dir.join("Inter-Variable.ttf"), crate::sfnt::test_font::variable_styled("Inter", "Regular", &instances, true)).unwrap();
+    let source = DirectorySource { dirs: vec![dir.clone()] };
+    assert_eq!(add_source(&source), 1, "the bundled Inter Regular does not hide it");
+    let installed = all_faces().into_iter().find(|f| f.info.family == "Inter" && f.info.origin == "system").unwrap();
+    assert!(installed.info.variable);
+    // Listed: its named instances are Inter's styles, and Inter is a variable family.
+    let fams = families();
+    let styles = &fams.iter().find(|(f, _)| f == "Inter").unwrap().1;
+    for s in ["Thin", "Regular", "Bold", "Black", "Italic"] {
+        assert!(styles.iter().any(|x| x == s), "{s} in {styles:?}");
+    }
+    assert!(variable_families().contains("Inter"));
+    // Resolved: the installed face, at an instance's axis values, over a bundled face's own style.
+    let regular = resolve("Inter", "Regular");
+    assert_eq!((regular.face, regular.instance), (installed.id, None));
+    for (style, wght) in [("Black", 900.0), ("Bold", 700.0)] {
+        let r = resolve("Inter", style);
+        assert_eq!(r.face, installed.id, "{style}");
+        assert!(!r.synth_bold, "{style}");
+        assert_eq!(instance_variations(&r), vec![("wght".to_string(), wght)], "{style}");
+    }
+    assert_eq!(resolve("Inter-Regular", "").face, installed.id, "a shared PostScript name");
+    // The bundled faces fill the styles the installed family lacks; their ids are unchanged.
+    let italic = resolve("Inter", "Italic");
+    assert!(bundled(italic) && face(italic.face).info.style == "Italic");
+    assert_eq!(face(0).info.origin, "bundled");
+    // A rescan finds the installed face already listed.
+    assert_eq!(add_source(&source), 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
