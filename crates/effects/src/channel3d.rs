@@ -619,6 +619,39 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- EXtractoR
 
+/// EXtractoR's channel name for After Effects' `(copy)`: the effect input's own channel of the
+/// same position (red's red ... alpha's alpha), as the earlier effects left it, never a footage
+/// channel of some name (an OpenEXR's `A` is the file's alpha, not the input's).
+pub const EXTRACTOR_COPY: &str = "(copy)";
+
+/// Whether an EXtractoR channel name is [`EXTRACTOR_COPY`].
+pub fn is_extractor_copy(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(EXTRACTOR_COPY)
+}
+
+/// The layer's own channel an EXtractoR output channel at position `k` reads when no footage
+/// channel of that name exists: `R`/`G`/`B`/`A` (or the long names) by name, [`EXTRACTOR_COPY`]
+/// its own position.
+pub fn extractor_own_channel(k: usize, name: &str) -> Option<usize> {
+    if is_extractor_copy(name) {
+        return (k < 4).then_some(k);
+    }
+    match name.trim().to_ascii_uppercase().as_str() {
+        "R" | "RED" => Some(0),
+        "G" | "GREEN" => Some(1),
+        "B" | "BLUE" => Some(2),
+        "A" | "ALPHA" => Some(3),
+        _ => None,
+    }
+}
+
+/// The footage channel an EXtractoR output channel reads by name: none for an empty name or
+/// [`EXTRACTOR_COPY`] (the input's own channel).
+pub fn extractor_aux_channel<'a>(a: &'a AuxChannels, name: &str) -> Option<&'a [f32]> {
+    let n = name.trim();
+    if n.is_empty() || is_extractor_copy(n) { None } else { a.get(n) }
+}
+
 fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let a = aux(ctx);
     let names = [ctx.params.s("red"), ctx.params.s("green"), ctx.params.s("blue"), ctx.params.s("alpha")];
@@ -626,17 +659,11 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let unmult = ctx.params.b("unMult");
     let clip = ctx.params.b("clip");
     let idx = a.as_ref().map(|a| index_map(&b, a));
-    // Each output channel: an aux channel by name, or the layer's own R/G/B/A.
-    let own = |n: &str| match n.trim().to_ascii_uppercase().as_str() {
-        "R" | "RED" => Some(0),
-        "G" | "GREEN" => Some(1),
-        "B" | "BLUE" => Some(2),
-        "A" | "ALPHA" => Some(3),
-        "" => None,
-        _ => None,
-    };
-    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| if n.trim().is_empty() { None } else { a.get(n.trim()) })).collect();
-    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(n) == Some(k)) {
+    // Each output channel: an aux channel by name, or the layer's own R/G/B/A (`(copy)`: its
+    // own position, never an aux channel).
+    let own = |k: usize, n: &str| extractor_own_channel(k, n);
+    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| extractor_aux_channel(a, n))).collect();
+    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(k, n) == Some(k)) {
         return b;
     }
     let src = b.img.clone();
@@ -652,7 +679,7 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
             o[k] = match (src_ch[k], idx.as_ref().and_then(|m| m[i])) {
                 (Some(ch), Some(j)) => ch[j],
                 (Some(_), None) => 0.0,
-                (None, _) => match own(names[k]) {
+                (None, _) => match own(k, names[k]) {
                     Some(c) => straight[c],
                     None => {
                         if k == 3 {
