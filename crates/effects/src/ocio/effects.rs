@@ -360,7 +360,8 @@ pub(super) fn profile_converter(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---- Color Stabilizer
 
-/// Mean straight colour of a square (half-size `r` layer pixels) around layer point `pt`.
+/// Mean straight colour of a square (half-size `r` layer pixels, half the Sample Size) around
+/// layer point `pt`.
 fn sample_mean(b: &Buf, pt: [f64; 2], r: f64) -> [f64; 3] {
     let (cx, cy) = b.to_px(pt);
     let rr = (r * b.scale).max(0.5);
@@ -410,7 +411,10 @@ fn stabilizer_samples(ctx: &EffectCtx, b: &Buf) -> Option<([[f64; 3]; 3], [[f64;
     let host = ctx.env.host?;
     let t_ref = ctx.params.f("referenceFrame");
     let reference = host.self_at(t_ref, ctx.env.effect_index)?;
-    let r = ctx.params.f("sampleSize").max(0.5);
+    // Sample Size is the full width of the sampled square in layer pixels: After Effects 2026
+    // reacts to a bright square 7 px from the point at Sample Size 15 but not at 12, at any
+    // layer size (#3125), so the half-width is half of it.
+    let r = (ctx.params.f("sampleSize") / 2.0).max(0.5);
     let pts = STABILIZER_POINTS.map(|id| ctx.params.v2(id));
     let ref_params = host.params_at(t_ref);
     let ref_pts = match &ref_params {

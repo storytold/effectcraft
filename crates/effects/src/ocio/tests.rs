@@ -396,3 +396,55 @@ fn color_stabilizer_samples_the_reference_at_the_points_reference_positions() {
         assert!((o(x) - (a + b * v(x))).abs() < 1e-3, "x {x}");
     }
 }
+
+/// After Effects 2026's Sample Size sample (#3125): a horizontal ramp, Stabilize Levels with
+/// the Black Point at 25 % of the width, mid-height, and a 6 px white square appearing `d` px
+/// to the right of it (near edge `d − 3`). The card at `square: None` is the reference.
+fn sample_size_card(w: u32, h: u32, square: Option<f64>) -> Image {
+    let mut img = Image::new(w, h);
+    let (bx, by) = (w as f64 * 0.25, h as f64 * 0.5);
+    for y in 0..h {
+        for x in 0..w {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let mut v = (cx / w as f64) as f32;
+            if square.is_some_and(|d| (cx - (bx + d)).abs() < 3.0 && (cy - by).abs() < 3.0) {
+                v = 1.0;
+            }
+            img.set(x, y, [v, v, v, 1.0]);
+        }
+    }
+    img
+}
+
+/// #3125: Sample Size is the full width of the sampled area in layer pixels, at any layer size.
+/// After Effects reacts to the square at near edge 7 px from Sample Size 15 (not at 12), at
+/// 17 px from 35 (not at 30), and never to one at 37 px up to 50. EffectCraft used Sample Size
+/// as the half-width and reacted at 12 and 30.
+#[test]
+fn color_stabilizer_sample_size_is_the_full_width_in_pixels() {
+    let reacts = |w: u32, h: u32, d: f64, size: f64| {
+        let host = RefHost(sample_size_card(w, h, None));
+        let env = EffectEnv { host: Some(&host), ..Default::default() };
+        let (bx, by) = (w as f64 * 0.25, h as f64 * 0.5);
+        let vals = [
+            ("stabilize", Value::Enum(1)),
+            ("blackPoint", Value::Vec2([bx, by])),
+            ("whitePoint", Value::Vec2([w as f64 * 0.75, by])),
+            ("sampleSize", num(size)),
+        ];
+        let input = sample_size_card(w, h, Some(d));
+        let out = run_fx("ec.color.colorstabilizer", &vals, input.clone(), 0.0, env);
+        // The change on the right half of the layer, far from the square.
+        let (x, y) = (w as i64 * 7 / 8, h as i64 / 4);
+        (out.img.get(x, y)[0] - input.get(x, y)[0]).abs() > 1e-4
+    };
+    for (w, h) in [(320, 180), (640, 360)] {
+        assert!(reacts(w, h, 10.0, 15.0), "{w}x{h}: d 10 at 15");
+        assert!(!reacts(w, h, 10.0, 12.0), "{w}x{h}: d 10 at 12");
+        assert!(reacts(w, h, 20.0, 35.0), "{w}x{h}: d 20 at 35");
+        assert!(!reacts(w, h, 20.0, 30.0), "{w}x{h}: d 20 at 30");
+        for size in [1.0, 5.0, 12.0, 25.0, 40.0, 50.0] {
+            assert!(!reacts(w, h, 40.0, size), "{w}x{h}: d 40 at {size}");
+        }
+    }
+}
