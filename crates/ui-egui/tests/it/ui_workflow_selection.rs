@@ -14,7 +14,7 @@ fn harness() -> Harness<'static, EffectcraftApp> {
         s.execute("layer.newSolid", json!({"name":format!("Tile {n}"),"width":80,"height":80,"color":"#406080"})).unwrap();
     }
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     h
 }
@@ -389,7 +389,7 @@ fn project_edit_commands_do_not_target_timeline_layers() {
 
 #[test]
 fn compact_settings_keeps_confirmation_buttons_clickable() {
-    let mut h = Harness::builder().with_size(vec2(1024.0, 768.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(vec2(1024.0, 768.0)).build_eframe(|_| crate::app_for_test(Session::default()));
     h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::Settings);
     h.run_steps(4);
     h.get_by_label("   OK   ").click();
@@ -607,7 +607,7 @@ fn timeline_context_menu_creates_shapes_and_masks_from_text() {
     s.execute("edit.deselectAll", json!({})).unwrap();
     let text = s.active_comp().unwrap().layers.iter().find(|l| matches!(l.source, LayerSource::Text)).unwrap().id.0;
     let plate = s.active_comp().unwrap().layers.iter().find(|l| l.name == "Plate").unwrap().id.0;
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     let row = |h: &Harness<'_, EffectcraftApp>, id: u64| {
         let r = rect(h, &format!("timeline.layer.{id}.row"));
@@ -663,7 +663,7 @@ fn layer_context_menus_offer_create_shapes_from_vector_layer_for_vector_footage(
     let logo = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
     let plate = s.execute("layer.newSolid", json!({"name":"Plate","width":40,"height":40,"color":"#406080"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     let right_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
         for pressed in [true, false] {

@@ -12,7 +12,7 @@ use serde_json::json;
 fn harness() -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     h
 }
@@ -187,7 +187,7 @@ fn relink_menu_uses_engine_availability_and_folder_picker_cancel_is_a_noop() {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    let mut app = EffectcraftApp::new(Session::default());
+    let mut app = crate::app_for_test(Session::default());
     let menu = effectcraft_ui_egui::menus::menu_items(&app);
     let entry = menu.iter().find(|e| e.id == "file.relinkFootage").unwrap();
     assert_eq!(entry.path, ["File", "Dependencies"]);
@@ -273,7 +273,7 @@ fn import_and_proxy_dialogs_offer_every_movie_type() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    let mut app = EffectcraftApp::new(Session::default());
+    let mut app = crate::app_for_test(Session::default());
     let offered = Rc::new(RefCell::new(Vec::<String>::new()));
     let seen = offered.clone();
     app.hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
@@ -297,7 +297,7 @@ fn import_and_proxy_dialogs_offer_every_movie_type() {
 fn space_previews_after_opening_the_demo_from_home() {
     let mut h = {
         let s = Session::default();
-        let mut app = EffectcraftApp::new(s);
+        let mut app = crate::app_for_test(s);
         app.ui.start_screen = true;
         Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app)
     };

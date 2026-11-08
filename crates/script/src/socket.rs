@@ -437,7 +437,30 @@ mod tests {
         rx.recv_timeout(limit).ok()
     }
 
-    /// A bounded write times out even when the peer never drains its receive buffer.
+    /// A successful multi-chunk write sends the complete payload and leaves the connection usable.
+    #[test]
+    fn a_chunked_write_preserves_all_bytes_and_allows_a_following_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let data = "sensor-frame".repeat(20_000);
+        let expected = data.clone();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut received = vec![0; expected.len()];
+            stream.read_exact(&mut received).unwrap();
+            assert_eq!(received, expected.as_bytes());
+            stream.write_all(b"complete\n").unwrap();
+        });
+        let id = open(&host);
+        let result = run("write", id, &json!({"data": data, "encoding": "UTF-8", "timeout": 5}));
+        assert_eq!(result["ok"], true, "{result}");
+        let result = run("readln", id, &json!({"encoding": "UTF-8", "timeout": 5}));
+        assert_eq!(result["data"], "complete", "{result}");
+        run("close", id, &J::Null);
+        peer.join().unwrap();
+    }
+
     #[test]
     fn a_write_to_a_peer_that_stops_reading_fails_after_the_timeout() {
         // #1248: it used to block for good.

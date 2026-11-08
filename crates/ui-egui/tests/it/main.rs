@@ -120,6 +120,15 @@ mod ui_workspace_focus;
 mod viewer_geometry;
 mod viewer_passive_display;
 
+/// Keep English-source UI interaction tests independent of the machine's display language.
+/// Tests that cover translations keep their explicit `general.language` preference.
+pub(crate) fn app_for_test(mut session: effectcraft_engine::Session) -> effectcraft_ui_egui::EffectcraftApp {
+    if session.prefs.general.language == "system" {
+        session.prefs.general.language = "en".into();
+    }
+    effectcraft_ui_egui::EffectcraftApp::new(session)
+}
+
 /// Register the managed build's canonical craft-fonts checkout (`CRAFT_FONTS_DIR/fonts`) through
 /// the same directory source production scans for `EFFECTCRAFT_FONT_DIRS`. The UI tests then render
 /// real Japanese glyphs from the canonical external input instead of relying on host fonts.

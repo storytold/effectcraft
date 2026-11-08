@@ -655,7 +655,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
         "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate".into())),
         "essential.importTemplate" => ("path", Ask::Open(&["ectemplate"])),
-        "file.setProxy" => ("path", Ask::OpenFootage(&["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"])),
+        "file.setProxy" => ("path", Ask::OpenFootage(&["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr", "arw"])),
         _ => return None,
     };
     if params.get(key).is_some()
@@ -669,7 +669,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     // Importable files besides movies.
     const MEDIA: &[&str] = &[
         "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3", "flac", "ogg", "opus", "svg", "pdf", "ai",
-        "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
+        "eps", "psd", "psb", "tga", "hdr", "arw", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
     let footage = |more: &[&'static str]| effectcraft_project::VIDEO_EXTENSIONS.iter().chain(more).copied().collect::<Vec<_>>();
     // A host whose blocking dialogs are unsafe inside this frame shows the dialog without

@@ -17,7 +17,7 @@ use super::ui_tail::drag;
 fn harness(w: f32, h: f32) -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(w, h)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(w, h)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     h
 }
@@ -499,7 +499,7 @@ fn settings_page_column_fits_japanese_names() {
 
     let mut session = Session::default();
     session.prefs.general.language = "ja".into();
-    let app = EffectcraftApp::new(session);
+    let app = crate::app_for_test(session);
     // The panel titles a page with its Settings menu row, minus the ellipsis.
     let name = effectcraft_ui_egui::menus::menu_items(&app)
         .into_iter()

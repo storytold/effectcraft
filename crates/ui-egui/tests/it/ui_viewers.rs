@@ -65,7 +65,7 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
     let c = new_comp(&mut s, "C");
     let b = new_comp(&mut s, "B");
     let a = new_comp(&mut s, "A");
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     // View ▸ New Viewer: viewer 1 shows A too, viewer 0 (the Composition panel) is locked.
     invoke(&mut h, "view.newViewer", json!({}));
@@ -127,7 +127,7 @@ fn a_locked_viewer_keeps_its_comp_when_the_project_panel_opens_another() {
     let mut s = Session::default();
     let b = new_comp(&mut s, "B");
     let a = new_comp(&mut s, "A");
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     // Viewer 0 locked to A, and B in viewer 1 (a tab next to it).
     invoke(&mut h, "view.newViewer", json!({}));
@@ -150,7 +150,7 @@ fn viewers_snapshot() {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     let other = s.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.id).find(|id| Some(*id) != s.active_comp_id()).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     invoke(&mut h, "view.newViewer", json!({}));
     h.state_mut()

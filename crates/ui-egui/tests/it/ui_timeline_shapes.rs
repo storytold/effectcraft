@@ -13,7 +13,7 @@ use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
 fn harness(s: Session) -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| crate::app_for_test(s));
     h.run_steps(3);
     h
 }

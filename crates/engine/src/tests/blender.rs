@@ -177,7 +177,11 @@ fn blender_export_defaults_and_script_escaping() {
     assert_eq!(d["frames"][0]["lens"], 22.5);
     assert_eq!(d["frames"][0]["dof"], false);
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("cannot be recovered")));
-    match std::process::Command::new("python3").args(["-c", "import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())", &output]).status() {
+    #[cfg(windows)]
+    let python = "python";
+    #[cfg(not(windows))]
+    let python = "python3";
+    match std::process::Command::new(python).args(["-c", "import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())", &output]).status() {
         Ok(status) => assert!(status.success(), "generated script must parse even with quoted/Unicode paths"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => eprintln!("Python AST oracle skipped: python3 is not installed"),
         Err(e) => panic!("Python AST oracle failed: {e}"),
