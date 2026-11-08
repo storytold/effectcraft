@@ -44,6 +44,9 @@ pub use arbitrary::{
 pub use camera::{CameraPosition, DEFAULT_CAMERA_ZOOM};
 pub use chunk::{AepFile, Body, Chunk, LIST, NESTED_IDS, Walk};
 pub use effects::{DefinitionSource, Effect, EffectDefinitions, EffectParam, LayerRef, ParamKind, ParamValue};
+// The export's tests read their encoded definitions back through the importer's decoder.
+#[cfg(test)]
+pub(crate) use effects::Pard;
 pub use error::AepError;
 pub use footage::{Footage, SequenceInfo};
 pub use header::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Quality, Rational, Renderer};

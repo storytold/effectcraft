@@ -186,7 +186,8 @@ impl ParDef {
             10 => vec![d(0)],
             2 | 3 => vec![fixed(d(0))],
             1 => vec![int(d(0))],
-            4 => vec![f64::from(d(0).round().max(0.0) as u32)],
+            // On when the stored word is not 0 (as the importer reads it).
+            4 => vec![if d(0).round().max(0.0) as u32 != 0 { 1.0 } else { 0.0 }],
             7 => vec![f64::from(d(0).round().clamp(0.0, f64::from(u16::MAX)) as u32)],
             // Fractions of the layer, or percent after an After Effects re-save (see the reader).
             6 => {
@@ -1113,27 +1114,10 @@ pub(crate) fn put_project_lists(protos: &FxProtos, file: &mut AepFile<'static>, 
 mod tests {
     use super::*;
 
-    /// The definitions as they were found before: the prototype's `parT` encoded from the table
-    /// and parsed back (the reference for [`ParDef::from_table`]).
+    /// The definitions as the importer's decoder reads them back from the prototype's `parT`
+    /// encoded from the table (the reference for [`ParDef::from_table`]; one `pard` decoder).
     mod reference {
         use super::super::*;
-
-        fn be_i32(d: &[u8], at: usize) -> Option<i32> {
-            Some(i32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
-        }
-        fn be_u32(d: &[u8], at: usize) -> Option<u32> {
-            Some(u32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
-        }
-        fn be_f32(d: &[u8], at: usize) -> Option<f64> {
-            Some(f64::from(f32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?)))
-        }
-        fn be_f64(d: &[u8], at: usize) -> Option<f64> {
-            Some(f64::from_be_bytes(d.get(at..at.checked_add(8)?)?.try_into().ok()?))
-        }
-
-        fn cname(d: &[u8]) -> String {
-            d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect()
-        }
 
         /// A definition as the decoder read it, with the name and popup items it also read.
         pub(super) struct Old {
@@ -1142,42 +1126,38 @@ mod tests {
             pub items: Vec<String>,
         }
 
-        /// The decoder of an encoded `pard` that `ParDef::from_table` replaces.
+        /// An encoded `pard` as the importer's decoder (`container::Pard`) reads it, in the
+        /// export's stored units: what `ParDef::from_table` must agree with.
         pub(super) fn from_pard(pard: &[u8], pdnm: Option<&str>, data: Option<&[u8]>) -> Old {
-            let code = be_u32(pard, 12).unwrap_or(u32::MAX);
-            let fx = |at: usize| be_i32(pard, at).map(|v| f64::from(v) / 65536.0);
-            let default: Vec<f64> = match code {
-                10 => be_f64(pard, 56).into_iter().collect(),
-                2 | 3 => fx(56).into_iter().collect(),
-                1 => be_i32(pard, 56).map(f64::from).into_iter().collect(),
-                4 | 7 => be_u32(pard, 56).map(f64::from).into_iter().collect(),
-                // Fractions of the layer, or percent after an After Effects re-save (see the reader).
-                6 => {
-                    let p: Vec<f64> = [fx(56), fx(60)].into_iter().flatten().collect();
-                    if p.iter().any(|c| c.abs() > 1.0 + 1e-9) { p.iter().map(|c| c / 100.0).collect() } else { p }
-                }
-                5 => pard.get(56..60).map(|c| c.iter().map(|b| f64::from(*b)).collect()).unwrap_or_default(),
+            use crate::ParamValue as Pv;
+            let d = crate::container::Pard(pard);
+            let kind = d.kind();
+            let default: Vec<f64> = match d.default(kind) {
+                Some(Pv::Number(x)) => vec![x],
+                Some(Pv::Bool(on)) => vec![if on { 1.0 } else { 0.0 }],
+                Some(Pv::Index(i)) => vec![f64::from(i)],
+                Some(Pv::Point(pt)) => pt.to_vec(),
+                // Bytes 0..255, read as fractions.
+                Some(Pv::Argb(c)) => c.iter().map(|x| (x * 255.0).round()).collect(),
+                Some(Pv::Layer(_)) | None => Vec::new(),
+            };
+            let items = match pdnm {
+                Some(text) if kind == crate::ParamKind::Popup && !text.is_empty() => text.split('|').map(str::to_string).collect(),
                 _ => Vec::new(),
             };
-            let range = match code {
-                10 => be_f32(pard, 112).zip(be_f32(pard, 116)),
-                2 => fx(132).zip(fx(136)),
-                1 => be_i32(pard, 132).map(f64::from).zip(be_i32(pard, 136).map(f64::from)),
-                _ => None,
+            let name = match (kind, pdnm) {
+                (crate::ParamKind::Checkbox, Some(text)) if d.name().unwrap_or_default().trim().is_empty() => text.to_string(),
+                _ => d.name().unwrap_or_default(),
             };
-            let valid_max = match code {
-                10 => be_f32(pard, 108),
-                2 => fx(128),
-                1 => be_i32(pard, 128).map(f64::from),
-                _ => None,
+            let def = ParDef {
+                record: String::new(),
+                code: d.code().unwrap_or(u32::MAX),
+                default,
+                range: d.slider_range(kind),
+                valid_max: d.valid_max(kind),
+                data: data.map(<[u8]>::to_vec),
             };
-            let pname = pard.get(16..48).map(cname).unwrap_or_default();
-            let (name, items) = match (code, pdnm) {
-                (7, Some(p)) if !p.is_empty() => (pname, p.split('|').map(str::to_string).collect()),
-                (4, Some(p)) if pname.trim().is_empty() => (p.to_string(), Vec::new()),
-                _ => (pname, Vec::new()),
-            };
-            Old { def: ParDef { record: String::new(), code, default, range, valid_max, data: data.map(<[u8]>::to_vec) }, name, items }
+            Old { def, name, items }
         }
 
         /// The parameter definitions of an instance's `parT`, by position (the table's index).
@@ -1247,7 +1227,16 @@ mod tests {
     #[test]
     fn the_table_definitions_equal_the_encoded_and_parsed_ones() {
         for fx in FX_DEFS {
-            let parsed = reference::par_defs(&crate::export::fxsynth::default_sspc(fx));
+            let sspc = crate::export::fxsynth::default_sspc(fx);
+            // The decoder only tells a checkbox on from off: the table's words are 0 or 1.
+            let part = sspc.child_list(b"parT").map(|p| p.children()).unwrap_or_default();
+            for pard in part.iter().filter(|c| c.is(b"pard")).filter_map(|c| c.bytes()) {
+                if crate::container::Pard(pard).kind() == crate::ParamKind::Checkbox {
+                    let word = pard.get(56..60).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+                    assert!(matches!(word, Some(0 | 1)), "{}: checkbox word {word:?}", fx.match_name);
+                }
+            }
+            let parsed = reference::par_defs(&sspc);
             assert_same(&parsed, &ParDef::of_effect(fx), fx.match_name);
         }
     }

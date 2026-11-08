@@ -271,8 +271,8 @@ impl<'f, 'a> Effect<'f, 'a> {
                 out.push(EffectParam {
                     index: out.len(),
                     match_name,
-                    kind: ParamKind::from_u32(be_u32(pard, 12).unwrap_or(u32::MAX)),
-                    name: cstr(pard, 16, 32).unwrap_or_default(),
+                    kind: Pard(pard).kind(),
+                    name: Pard(pard).name().unwrap_or_default(),
                     items: None,
                     borrowed_definition: borrowed,
                     pard,
@@ -485,26 +485,7 @@ impl<'f, 'a> EffectParam<'f, 'a> {
     pub fn pard_default(&self) -> Option<ParamValue> {
         match self.kind {
             ParamKind::Popup if self.borrowed_definition => None,
-            ParamKind::FloatSlider => be_f64(self.pard, 56).map(ParamValue::Number),
-            ParamKind::FixedSlider | ParamKind::Angle => be_i32(self.pard, 56).map(|v| ParamValue::Number(f64::from(v) / 65536.0)),
-            ParamKind::IntSlider => be_i32(self.pard, 56).map(|v| ParamValue::Number(f64::from(v))),
-            ParamKind::Checkbox => be_u32(self.pard, 56).map(|v| ParamValue::Bool(v != 0)),
-            ParamKind::Popup => be_u32(self.pard, 56).map(ParamValue::Index),
-            ParamKind::Point => {
-                let p = [f64::from(be_i32(self.pard, 56)?) / 65536.0, f64::from(be_i32(self.pard, 60)?) / 65536.0];
-                // A fresh instance stores fractions of the layer (0.5, 0.5); After Effects' save of
-                // a project it opened stores percent (50, 50: the re-saves of read-back tests e1 and
-                // e2, where Gradient Ramp's Start and End and every other point default came back
-                // as 50 / 0 and 50 / 100). Point
-                // defaults lie inside the layer, so a component beyond 1 tells percent.
-                let percent = p.iter().any(|c| c.abs() > 1.0 + 1e-9);
-                Some(ParamValue::Point(if percent { p.map(|c| c / 100.0) } else { p }))
-            }
-            ParamKind::Color => {
-                let [a, r, g, b] = array::<4>(self.pard, 56)?.map(|c| f64::from(c) / 255.0);
-                Some(ParamValue::Argb([a, r, g, b]))
-            }
-            _ => None,
+            kind => Pard(self.pard).default(kind),
         }
     }
 
@@ -558,22 +539,14 @@ impl<'f, 'a> EffectParam<'f, 'a> {
     /// slider differs per parameter (Amount 37.5 % is stored 37.5, Blend 25 % is stored 0.25), so
     /// this is what tells a reader the scale. `None` for other types.
     pub fn valid_max(&self) -> Option<f64> {
-        match self.kind {
-            ParamKind::FixedSlider => be_i32(self.pard, 128).map(|v| f64::from(v) / 65536.0),
-            ParamKind::FloatSlider => be_f32(self.pard, 108).map(f64::from),
-            ParamKind::IntSlider => be_i32(self.pard, 128).map(f64::from),
-            _ => None,
-        }
+        Pard(self.pard).valid_max(self.kind)
     }
 
     /// The smallest valid value of a float slider, the `f32` at byte 104 of `pard` (Exposure
     /// -100, Offset -2, Gamma Correction 0.1: 389). `None` for other types (a fixed slider's
     /// minimum is not decoded).
     pub fn valid_min(&self) -> Option<f64> {
-        match self.kind {
-            ParamKind::FloatSlider => be_f32(self.pard, 104).map(f64::from),
-            _ => None,
-        }
+        Pard(self.pard).valid_min(self.kind)
     }
 
     /// The range of a float slider's slider (what the control's drag covers, inside the valid
@@ -582,7 +555,7 @@ impl<'f, 'a> EffectParam<'f, 'a> {
     /// for other types.
     pub fn slider_range(&self) -> Option<(f64, f64)> {
         match self.kind {
-            ParamKind::FloatSlider => Some((f64::from(be_f32(self.pard, 112)?), f64::from(be_f32(self.pard, 116)?))),
+            ParamKind::FloatSlider => Pard(self.pard).slider_range(self.kind),
             _ => None,
         }
     }
@@ -592,7 +565,7 @@ impl<'f, 'a> EffectParam<'f, 'a> {
         if self.kind != ParamKind::Popup {
             return None;
         }
-        be_u16(self.pard, 60)
+        Pard(self.pard).popup_item_count()
     }
 
     /// For a popup: the selected item index (1-based): the stored selection, else the default.
@@ -617,6 +590,93 @@ impl<'f, 'a> EffectParam<'f, 'a> {
             ParamKind::Checkbox if self.stored.is_none() => Some(ParamValue::Bool(false)),
             _ => None,
         })
+    }
+}
+
+/// A parameter definition (`pard`, 148 bytes; aep-format.md 3.7): the one decoder of its fields.
+/// The import reads them through [`EffectParam`]; the export writes them from its effect table and
+/// its tests read them back through this.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Pard<'f>(pub(crate) &'f [u8]);
+
+impl Pard<'_> {
+    /// The type code, the `u32` at byte 12.
+    pub(crate) fn code(self) -> Option<u32> {
+        be_u32(self.0, 12)
+    }
+
+    /// The parameter type (an unreadable code is [`ParamKind::Other`]).
+    pub(crate) fn kind(self) -> ParamKind {
+        ParamKind::from_u32(self.code().unwrap_or(u32::MAX))
+    }
+
+    /// The parameter name at byte 16 (32 bytes).
+    pub(crate) fn name(self) -> Option<String> {
+        cstr(self.0, 16, 32)
+    }
+
+    /// The default at byte 56 as a parameter of type `kind` reads it (see
+    /// [`EffectParam::pard_default`]).
+    pub(crate) fn default(self, kind: ParamKind) -> Option<ParamValue> {
+        let p = self.0;
+        match kind {
+            ParamKind::FloatSlider => be_f64(p, 56).map(ParamValue::Number),
+            ParamKind::FixedSlider | ParamKind::Angle => be_i32(p, 56).map(|v| ParamValue::Number(f64::from(v) / 65536.0)),
+            ParamKind::IntSlider => be_i32(p, 56).map(|v| ParamValue::Number(f64::from(v))),
+            ParamKind::Checkbox => be_u32(p, 56).map(|v| ParamValue::Bool(v != 0)),
+            ParamKind::Popup => be_u32(p, 56).map(ParamValue::Index),
+            ParamKind::Point => {
+                let pt = [f64::from(be_i32(p, 56)?) / 65536.0, f64::from(be_i32(p, 60)?) / 65536.0];
+                // A fresh instance stores fractions of the layer (0.5, 0.5); After Effects' save of
+                // a project it opened stores percent (50, 50: the re-saves of read-back tests e1 and
+                // e2, where Gradient Ramp's Start and End and every other point default came back
+                // as 50 / 0 and 50 / 100). Point
+                // defaults lie inside the layer, so a component beyond 1 tells percent.
+                let percent = pt.iter().any(|c| c.abs() > 1.0 + 1e-9);
+                Some(ParamValue::Point(if percent { pt.map(|c| c / 100.0) } else { pt }))
+            }
+            ParamKind::Color => {
+                let [a, r, g, b] = array::<4>(p, 56)?.map(|c| f64::from(c) / 255.0);
+                Some(ParamValue::Argb([a, r, g, b]))
+            }
+            _ => None,
+        }
+    }
+
+    /// The valid maximum of a slider (see [`EffectParam::valid_max`]).
+    pub(crate) fn valid_max(self, kind: ParamKind) -> Option<f64> {
+        match kind {
+            ParamKind::FixedSlider => be_i32(self.0, 128).map(|v| f64::from(v) / 65536.0),
+            ParamKind::FloatSlider => be_f32(self.0, 108).map(f64::from),
+            ParamKind::IntSlider => be_i32(self.0, 128).map(f64::from),
+            _ => None,
+        }
+    }
+
+    /// The valid minimum of a float slider (see [`EffectParam::valid_min`]).
+    pub(crate) fn valid_min(self, kind: ParamKind) -> Option<f64> {
+        match kind {
+            ParamKind::FloatSlider => be_f32(self.0, 104).map(f64::from),
+            _ => None,
+        }
+    }
+
+    /// A slider's range, the one its value records repeat as `tdum` / `tduM`: a float slider's
+    /// `f32` pair at 112 / 116, a fixed slider's 16.16 pair and an integer slider's `i32` pair at
+    /// 132 / 136.
+    pub(crate) fn slider_range(self, kind: ParamKind) -> Option<(f64, f64)> {
+        let p = self.0;
+        match kind {
+            ParamKind::FloatSlider => Some((f64::from(be_f32(p, 112)?), f64::from(be_f32(p, 116)?))),
+            ParamKind::FixedSlider => Some((f64::from(be_i32(p, 132)?) / 65536.0, f64::from(be_i32(p, 136)?) / 65536.0)),
+            ParamKind::IntSlider => Some((f64::from(be_i32(p, 132)?), f64::from(be_i32(p, 136)?))),
+            _ => None,
+        }
+    }
+
+    /// A popup's item count, the `u16` at byte 60.
+    pub(crate) fn popup_item_count(self) -> Option<u16> {
+        be_u16(self.0, 60)
     }
 }
 

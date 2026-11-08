@@ -480,7 +480,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
     let mut above: Option<u32> = None;
     // The comps that use this one, directly or through others: a precomp layer of one of them
     // would close a loop. Found once, at the first precomp layer (see `Precomps`).
-    let mut users: Option<HashSet<ItemId>> = None;
+    let mut users = Users::NotSearched;
 
     for layer in comp_view.layers() {
         let Some(h) = layer.header() else {
@@ -548,9 +548,16 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
                 SourceKind::Solid => (LayerSource::Solid { item: s.item }, (s.width.max(1), s.height.max(1))),
                 SourceKind::Footage => (LayerSource::Footage { item: s.item }, (s.width.max(1), s.height.max(1))),
                 SourceKind::Comp => {
-                    if !cx.precomps.accept(p.id, s.item, &mut users) {
-                        skip(cx, &mut skipped, LossCategory::UnsupportedLayers, "precomposition loop, layer");
-                        continue;
+                    match cx.precomps.accept(p.id, s.item, &mut users) {
+                        Link::Accepted => {}
+                        Link::Loop => {
+                            skip(cx, &mut skipped, LossCategory::UnsupportedLayers, "precomposition loop, layer");
+                            continue;
+                        }
+                        Link::Unchecked => {
+                            skip(cx, &mut skipped, LossCategory::UnsupportedLayers, "precomposition in a loop of compositions too large to check, layer");
+                            continue;
+                        }
                     }
                     (LayerSource::Comp { item: s.item }, (s.width.max(1), s.height.max(1)))
                 }
@@ -777,26 +784,75 @@ pub(crate) fn components(edges: &HashMap<ItemId, HashSet<ItemId>>) -> HashMap<It
 /// `from`'s layers are built the only links added start at `from`, and a path that reaches `from`
 /// never needs one of them. (Before, every precomp layer walked the whole graph, which held one
 /// link per layer.)
-#[derive(Default)]
+///
+/// Which links of a loop are refused depends on the order they come in (the first link that
+/// closes it), so inside a component the answer cannot be computed once for all compositions:
+/// each composition's search covers the links accepted so far, and a component of K compositions
+/// and L links costs up to K x L steps. Those searches share one budget
+/// ([`MAX_LOOP_SEARCH_STEPS`] links visited per import); once it is spent, a precomp layer inside a
+/// loop's component whose search would have to visit a link is refused unchecked (reported),
+/// which never closes a loop; a search that needs no step still decides exactly. Every file of
+/// the corpus has no precomp loop and never searches.
 struct Precomps {
     used_by: HashMap<ItemId, HashSet<ItemId>>,
     component: HashMap<ItemId, usize>,
+    /// Links the searches may still visit.
+    steps_left: usize,
+}
+
+impl Default for Precomps {
+    fn default() -> Self {
+        Precomps { used_by: HashMap::new(), component: HashMap::new(), steps_left: MAX_LOOP_SEARCH_STEPS }
+    }
+}
+
+/// The most links the precomp loop searches of one import visit together (see [`Precomps`]).
+const MAX_LOOP_SEARCH_STEPS: usize = 4_000_000;
+
+/// The comps that use the composition being built, as far as they were needed.
+enum Users {
+    /// Not looked for yet (no layer needed them).
+    NotSearched,
+    Found(HashSet<ItemId>),
+    /// The search budget ran out.
+    OutOfBudget,
+}
+
+/// What becomes of a precomp layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Link {
+    Accepted,
+    /// It would close a loop.
+    Loop,
+    /// Inside a loop's component after the search budget is spent: refused without a check.
+    Unchecked,
 }
 
 impl Precomps {
     /// `candidates`: comp -> the comps its layers could show.
     fn new(candidates: &HashMap<ItemId, HashSet<ItemId>>) -> Self {
-        Precomps { used_by: HashMap::new(), component: components(candidates) }
+        Precomps { component: components(candidates), ..Precomps::default() }
     }
 
-    /// Decides a precomp layer of `to` in `from`: recorded and `true`, or `false` when it closes a
-    /// loop. `users` holds the comps that use `from` once they are needed (one per composition).
-    fn accept(&mut self, from: ItemId, to: ItemId, users: &mut Option<HashSet<ItemId>>) -> bool {
-        let looped = closes_loop(from, to, |to| self.same_component(from, to) && users.get_or_insert_with(|| self.users_of(from)).contains(&to));
-        if !looped {
-            self.used_by.entry(to).or_default().insert(from);
+    /// Decides a precomp layer of `to` in `from`, recording it when it is accepted. `users` holds
+    /// the comps that use `from` once they are needed (one search per composition).
+    fn accept(&mut self, from: ItemId, to: ItemId, users: &mut Users) -> Link {
+        let inside = to != from && self.same_component(from, to);
+        if inside && matches!(users, Users::NotSearched) {
+            *users = self.users_of(from).map_or(Users::OutOfBudget, Users::Found);
         }
-        !looped
+        let found = match users {
+            Users::Found(u) => Some(&*u),
+            Users::NotSearched | Users::OutOfBudget => None,
+        };
+        if inside && found.is_none() {
+            return Link::Unchecked;
+        }
+        if closes_loop(from, to, |to| inside && found.is_some_and(|u| u.contains(&to))) {
+            return Link::Loop;
+        }
+        self.used_by.entry(to).or_default().insert(from);
+        Link::Accepted
     }
 
     /// Whether `a` and `b` are in one component of the candidate graph.
@@ -805,18 +861,19 @@ impl Precomps {
     }
 
     /// The comps of `comp`'s component that use it over accepted links, directly or through
-    /// others (each visited once).
-    fn users_of(&self, comp: ItemId) -> HashSet<ItemId> {
+    /// others (each visited once); `None` when the search budget runs out.
+    fn users_of(&mut self, comp: ItemId) -> Option<HashSet<ItemId>> {
         let mut found = HashSet::new();
         let mut stack = vec![comp];
         while let Some(c) = stack.pop() {
             for u in self.used_by.get(&c).into_iter().flatten() {
+                self.steps_left = self.steps_left.checked_sub(1)?;
                 if self.same_component(*u, comp) && found.insert(*u) {
                     stack.push(*u);
                 }
             }
         }
-        found
+        Some(found)
     }
 }
 
@@ -1124,11 +1181,12 @@ mod tests {
         let (mut uses, mut new) = (HashMap::<ItemId, Vec<ItemId>>::new(), Precomps::new(&candidates));
         let mut refused = 0;
         for (from, tos) in &plan {
-            let mut users: Option<HashSet<ItemId>> = None;
+            let mut users = Users::NotSearched;
             for to in tos {
-                let accepted = new.accept(*from, *to, &mut users);
-                assert_eq!(!accepted, old_would_loop(&uses, *from, *to), "{from:?} -> {to:?}");
-                if accepted {
+                let link = new.accept(*from, *to, &mut users);
+                assert_ne!(link, Link::Unchecked, "the budget is not reached here");
+                assert_eq!(link == Link::Loop, old_would_loop(&uses, *from, *to), "{from:?} -> {to:?}");
+                if link == Link::Accepted {
                     uses.entry(*from).or_default().push(*to);
                 } else {
                     refused += 1;
@@ -1156,11 +1214,11 @@ mod tests {
         let candidates = HashMap::from([(b, HashSet::from([a])), (c, HashSet::from([b]))]);
         let mut p = Precomps::new(&candidates);
         for (from, to) in [(b, a), (c, b)] {
-            let mut users = None;
+            let mut users = Users::NotSearched;
             for _ in 0..200_000 {
-                assert!(p.accept(from, to, &mut users));
+                assert_eq!(p.accept(from, to, &mut users), Link::Accepted);
             }
-            assert!(users.is_none(), "no search");
+            assert!(matches!(users, Users::NotSearched), "no search");
         }
     }
 
@@ -1178,12 +1236,52 @@ mod tests {
         }
         let mut p = Precomps::new(&candidates);
         for from in (0..k).map(top).chain((0..k).map(mid)) {
-            let mut users = None;
+            let mut users = Users::NotSearched;
             for to in candidates.get(&from).into_iter().flatten() {
-                assert!(p.accept(from, *to, &mut users));
+                assert_eq!(p.accept(from, *to, &mut users), Link::Accepted);
             }
-            assert!(users.is_none(), "no search");
+            assert!(matches!(users, Users::NotSearched), "no search");
         }
+    }
+
+    #[test]
+    fn a_large_loop_of_compositions_is_checked_within_the_budget() {
+        // 100 000 compositions in one loop (each shows the next, the last the first), built in
+        // order: the users of each one are all the ones before it, so checking every layer
+        // exactly is 5e9 steps. The searches stop at the budget; past it the layers inside the
+        // loop that need a search are refused unchecked (one whose composition has no accepted
+        // user needs none and is still decided exactly). The loop never closes.
+        let n = 100_000u64;
+        let c = |i: u64| ItemId(i);
+        let candidates: HashMap<ItemId, HashSet<ItemId>> = (0..n).map(|i| (c(i), HashSet::from([c((i + 1) % n)]))).collect();
+        let mut p = Precomps::new(&candidates);
+        let mut seen = HashMap::new();
+        for i in 0..n {
+            let link = p.accept(c(i), c((i + 1) % n), &mut Users::NotSearched);
+            *seen.entry(link).or_insert(0usize) += 1;
+        }
+        // Before the budget runs out every link is accepted (none closes the loop yet); after
+        // it, the ones that need a search are refused unchecked; the closing one never gets in.
+        let accepted = seen.get(&Link::Accepted).copied().unwrap_or(0);
+        assert!(accepted > 1000 && accepted < n as usize, "{seen:?}");
+        assert!(seen.get(&Link::Unchecked).copied().unwrap_or(0) > 0, "{seen:?}");
+        assert!(!seen.contains_key(&Link::Loop), "{seen:?}");
+        assert_eq!(accepted + seen.get(&Link::Unchecked).copied().unwrap_or(0), n as usize, "{seen:?}");
+        // The accepted links hold no loop: every component of them is a single composition.
+        let mut forward: HashMap<ItemId, HashSet<ItemId>> = HashMap::new();
+        for (to, froms) in &p.used_by {
+            for from in froms {
+                forward.entry(*from).or_default().insert(*to);
+            }
+        }
+        let parts = components(&forward);
+        assert_eq!(parts.values().collect::<HashSet<_>>().len(), parts.len());
+        // Below the budget the same loop is decided exactly: the closing link is refused.
+        let small: HashMap<ItemId, HashSet<ItemId>> = (0..100).map(|i| (c(i), HashSet::from([c((i + 1) % 100)]))).collect();
+        let mut p = Precomps::new(&small);
+        let links: Vec<Link> = (0..100).map(|i| p.accept(c(i), c((i + 1) % 100), &mut Users::NotSearched)).collect();
+        assert!(links[..99].iter().all(|l| *l == Link::Accepted));
+        assert_eq!(links[99], Link::Loop);
     }
 
     #[test]
