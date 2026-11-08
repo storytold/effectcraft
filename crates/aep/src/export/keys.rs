@@ -91,6 +91,38 @@ mod tests {
     use crate::export::synth::key_list;
 
     #[test]
+    fn keys_are_timed_sorted_merged_and_reported() {
+        use effectcraft_keyframe::Value;
+        use effectcraft_time::{TICKS_PER_SECOND, Tick};
+        let tb = TimeBase { frame_duration: 1024, timescale: 25600 };
+        // Out of order; 1/3 s is not on the time base; two keys meet at 1 s (the first one kept).
+        let keys = [
+            Keyframe::new(Tick(TICKS_PER_SECOND), Value::Scalar(1.0)),
+            Keyframe::new(Tick(TICKS_PER_SECOND / 3), Value::Scalar(2.0)),
+            Keyframe::new(Tick(0), Value::Scalar(3.0)),
+            Keyframe::new(Tick(TICKS_PER_SECOND), Value::Scalar(4.0)),
+        ];
+        let mut col = Collector::default();
+        let timed = timed_keys(&keys, &tb, "L", "path key", &mut col);
+        let got: Vec<(i64, f64)> = timed.iter().map(|(u, k)| (*u, if let Value::Scalar(v) = k.value { v } else { f64::NAN })).collect();
+        assert_eq!(got, [(0, 3.0), (8533, 2.0), (25600, 1.0)]);
+        // The report lists its categories in a fixed order; one merge report for the pair.
+        let report = col.finish();
+        let lines: Vec<(LossCategory, &str)> = report.losses.iter().flat_map(|l| l.details.iter().map(move |d| (l.category, d.as_str()))).collect();
+        assert_eq!(
+            lines,
+            [
+                (LossCategory::ApproximatedKeyframes, "L: path keys at the same time were merged"),
+                (LossCategory::RoundedTimes, "L: path key at 0.3333 s moved to the time base"),
+            ]
+        );
+        // No keys, no report.
+        let mut col = Collector::default();
+        assert!(timed_keys(&[], &tb, "L", "key", &mut col).is_empty());
+        assert!(col.finish().losses.is_empty());
+    }
+
+    #[test]
     fn a_key_list_is_filled_and_replaces_the_value() {
         let mut list = Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", vec![0; 52])]);
         fill_key_list(&mut list, vec![7; 96], 2, 48).unwrap();

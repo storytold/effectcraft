@@ -12,7 +12,11 @@ use crate::export::tree::{R, fixed, put};
 /// A zero buffer of `len` bytes with `fields` (offset, bytes) written into it. The layouts are
 /// fixed in code ([`fixed`]).
 pub(crate) fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
-    fixed("a record", try_bytes(len, fields), || vec![0u8; len])
+    fixed("base::bytes", try_bytes(len, fields), || {
+        // Which layout: its length and fields (the builders are named in the comments above).
+        log::error!("aep export: base::bytes layout of {len} bytes, fields at {:?}", fields.iter().map(|(at, v)| (*at, v.len())).collect::<Vec<_>>());
+        vec![0u8; len]
+    })
 }
 
 fn try_bytes(len: usize, fields: &[(usize, &[u8])]) -> R<Vec<u8>> {
