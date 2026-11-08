@@ -224,7 +224,9 @@ impl<'a> Renderer<'a> {
             LayerSource::Footage { item } => {
                 let item = ctx.media_item(layer, *item);
                 let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
-                let a = self.read(|| self.footage.aux(item, f, ctx.source_time(layer)))?;
+                // Only what the layer's effects read (#3271).
+                let need = self.layer_aux_need(ctx, layer);
+                let a = self.read(|| self.footage.aux_for(item, f, ctx.source_time(layer), &need))?;
                 // Aux pixels per layer pixel (the layer is the footage at its nominal size). The
                 // planes are only copied when that changes the scale.
                 let scale = a.width as f64 / f.width as f64;
@@ -243,6 +245,27 @@ impl<'a> Renderer<'a> {
             }
             _ => None,
         }
+    }
+
+    /// What the enabled effects of `layer` read of its auxiliary channels at the context time
+    /// ([`effectcraft_effects::aux_needs`], #3271): the union of their lookups, or all channels
+    /// when one doesn't say (or none reads them).
+    pub fn layer_aux_need(&self, ctx: &EvalCtx, layer: &Layer) -> effectcraft_raster::channels3d::AuxNeed {
+        use effectcraft_raster::channels3d::AuxNeed;
+        let mut need: Option<AuxNeed> = None;
+        for g in layer.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+            let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
+            if !effectcraft_effects::reads_aux(effect) {
+                continue;
+            }
+            let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
+            let one = effectcraft_effects::aux_needs(effect, &params).map_or(AuxNeed::All, AuxNeed::Lookups);
+            need = Some(match need {
+                Some(n) => n.union(one),
+                None => one,
+            });
+        }
+        need.unwrap_or_default()
     }
 
     /// Evaluation context of comp `comp_id` at comp time `t`.

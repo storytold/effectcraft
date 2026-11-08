@@ -49,12 +49,29 @@ pub trait FootageSource: Send + Sync {
     fn aux(&self, _item: ItemId, _footage: &Footage, _t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         None
     }
+    /// [`FootageSource::aux`] of only what `need` reads (#3271): the channels its lookups find,
+    /// or more (sources may hand over a set that holds them; [`effectcraft_raster::AuxChannels::listed`]
+    /// then names every channel). Sources that read every channel anyway can leave the default.
+    fn aux_for(&self, item: ItemId, footage: &Footage, t: Tick, need: &effectcraft_raster::channels3d::AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        let _ = need;
+        self.aux(item, footage, t)
+    }
+    /// The channel names of [`FootageSource::aux`] (planes may be empty: read from the file's
+    /// headers alone), for channel lists and popups. Never handed to an effect.
+    fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.aux(item, footage, t)
+    }
     /// The footage files (by [`Footage::path`]) whose channels effects of the project read
     /// through [`FootageSource::aux`] (EXtractoR, Cryptomatte and the other 3D Channel effects),
     /// replacing the set given before. A source that decodes a file's picture and its channels
     /// separately can decode both at once for these from the first frame on. Sources that don't
     /// ignore it.
     fn set_aux_footage(&self, _paths: &[String]) {}
+    /// What the effects reading the channels of each footage file (by [`Footage::path`], as
+    /// [`FootageSource::set_aux_footage`] names them) read of them (#3271), replacing what was
+    /// given before: the picture of such footage is then decoded together with those channels
+    /// only. A file not named here reads every channel. Sources that don't care ignore it.
+    fn set_aux_needs(&self, _needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {}
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
     fn model(&self, _item: ItemId, _footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         None
@@ -174,8 +191,17 @@ impl FootageSource for CancellableFootage<'_> {
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux(item, footage, t)
     }
+    fn aux_for(&self, item: ItemId, footage: &Footage, t: Tick, need: &effectcraft_raster::channels3d::AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.inner.aux_for(item, footage, t, need)
+    }
+    fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.inner.aux_names(item, footage, t)
+    }
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
+    }
+    fn set_aux_needs(&self, needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {
+        self.inner.set_aux_needs(needs)
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inner.model(item, footage)

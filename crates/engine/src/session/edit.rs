@@ -220,6 +220,7 @@ impl Session {
         self.project = Arc::new(p);
         // The set of footage effects read the channels of is sent again, even when it is empty.
         self.aux_footage = None;
+        self.aux_needs = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;

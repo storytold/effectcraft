@@ -389,9 +389,21 @@ impl FootageSource for ConfinedFootage {
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
         self.readable(footage).then(|| self.inner.aux(item, footage, t)).flatten()
     }
+    /// The channels `need` reads of the footage frame, or `None` when the footage lies outside the allowed roots.
+    fn aux_for(&self, item: ItemId, footage: &Footage, t: Tick, need: &effectcraft_engine::raster::channels3d::AuxNeed) -> Option<Arc<AuxChannels>> {
+        self.readable(footage).then(|| self.inner.aux_for(item, footage, t, need)).flatten()
+    }
+    /// The channel names of the footage frame, or `None` when the footage lies outside the allowed roots.
+    fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        self.readable(footage).then(|| self.inner.aux_names(item, footage, t)).flatten()
+    }
     /// Forwards the auxiliary footage paths to the inner source.
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
+    }
+    /// Forwards what effects read of each auxiliary footage to the inner source.
+    fn set_aux_needs(&self, needs: &[(String, effectcraft_engine::raster::channels3d::AuxNeed)]) {
+        self.inner.set_aux_needs(needs)
     }
     /// The 3D model for the footage, or `None` when the footage lies outside the allowed roots.
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {

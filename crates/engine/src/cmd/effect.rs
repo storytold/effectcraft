@@ -422,7 +422,7 @@ struct CryptoHit {
 
 impl CryptoHit {
     fn manifest(&self) -> Option<&[(String, u32)]> {
-        self.aux.manifests.iter().find(|(l, _)| *l == self.layer).map(|(_, m)| m.as_slice())
+        self.aux.manifest(&self.layer)
     }
     fn reply(&self, sel: &str) -> Value {
         let selected = effectcraft_effects::selection_hashes(sel, self.manifest()).contains(&self.hash);
@@ -1259,12 +1259,14 @@ fn list(_: &mut Session, p: &Value) -> Result<Value> {
 impl Session {
     /// The named channels of layer `lid` in the active comp at the current time: its
     /// multi-layer OpenEXR footage's layers and channels (`diffuse.R`, `depth.Z`, …), which
-    /// EXtractoR and the 3D Channel effects read. `None` for other layers.
+    /// EXtractoR and the 3D Channel effects read, and its Cryptomatte manifests. The names come
+    /// from the file's headers ([`effectcraft_render::FootageSource::aux_names`]): the planes
+    /// may be empty, so this is for lists and popups only. `None` for other layers.
     pub fn layer_channels(&self, lid: LayerId) -> Option<std::sync::Arc<effectcraft_raster::AuxChannels>> {
         let layer = self.active_comp()?.layer(lid)?;
         let effectcraft_project::LayerSource::Footage { item } = layer.source else { return None };
         let effectcraft_project::ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
-        self.footage.aux(item, f, layer.layer_time(self.time()))
+        self.footage.aux_names(item, f, layer.layer_time(self.time()))
     }
 }
 

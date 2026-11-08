@@ -155,7 +155,49 @@ impl Session {
             self.footage.set_aux_footage(&paths);
             self.aux_footage = Some(paths);
         }
+        let needs = aux_needs(&self.project);
+        if self.aux_needs.as_ref() != Some(&needs) {
+            self.footage.set_aux_needs(&needs);
+            self.aux_needs = Some(needs);
+        }
     }
+}
+
+/// What the effects of [`aux_footage`]'s layers read of each file's channels (#3271), by
+/// [`effectcraft_project::Footage::path`], sorted: the union of what each enabled effect reading
+/// them declares ([`effectcraft_effects::aux_needs`]) with its parameters' values. An effect that
+/// doesn't declare, or whose parameters change over time (keyframes, an expression), reads all
+/// channels. Several layers of one file add up.
+pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, effectcraft_raster::channels3d::AuxNeed)> {
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource, Node};
+    use effectcraft_raster::channels3d::AuxNeed;
+    let mut out: std::collections::BTreeMap<String, AuxNeed> = std::collections::BTreeMap::new();
+    for l in project.comps().flat_map(|(_, c)| c.layers.iter()).filter(|l| l.switches.effects) {
+        let LayerSource::Footage { item } = &l.source else { continue };
+        let Some(ItemKind::Footage(f)) = project.item(*item).map(|i| &i.kind) else { continue };
+        if f.path.is_empty() {
+            continue;
+        }
+        for g in l.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+            let GroupKind::Effect { effect } = &g.kind else { continue };
+            if !effectcraft_effects::reads_aux(effect) {
+                continue;
+            }
+            let moving = g.children.iter().any(|c| matches!(c, Node::Prop(p) if p.is_animated() || p.has_expression()));
+            let need = if moving {
+                AuxNeed::All
+            } else {
+                let params = effectcraft_effects::flatten_params(g, &mut |p| p.value.clone());
+                effectcraft_effects::aux_needs(effect, &params).map_or(AuxNeed::All, AuxNeed::Lookups)
+            };
+            let merged = match out.remove(&f.path) {
+                Some(e) => e.union(need),
+                None => need,
+            };
+            out.insert(f.path.clone(), merged);
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The files (each footage item's [`effectcraft_project::Footage::path`], sorted, once each) of

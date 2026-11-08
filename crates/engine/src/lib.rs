@@ -260,6 +260,9 @@ pub struct Session {
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
+    /// What the effects read of each of those files, as last given ([`Session::refresh_aux_footage`],
+    /// #3271); `None` = not given yet.
+    pub aux_needs: Option<Vec<(String, effectcraft_raster::channels3d::AuxNeed)>>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -388,6 +391,7 @@ impl Default for Session {
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             aux_footage: None,
+            aux_needs: None,
             script_calls: ScriptCalls::default(),
         }
     }
