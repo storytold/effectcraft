@@ -176,10 +176,12 @@ fn mask_motion_blur_ramps_across_the_motion() {
 
 #[test]
 fn adaptive_sample_limit_drives_layer_samples() {
-    assert_eq!(effectcraft_render::adaptive_samples(0.5, 16, 128), 16);
-    assert_eq!(effectcraft_render::adaptive_samples(100.0, 16, 128), 100);
-    assert_eq!(effectcraft_render::adaptive_samples(400.0, 16, 128), 128);
-    assert_eq!(effectcraft_render::adaptive_samples(400.0, 16, 9999), 256);
+    // Sample counts read from the steps of a moving edge in After Effects 2026.
+    for (travel, samples) in [(0.5, 2), (2.0, 2), (2.135, 2), (3.0, 3), (4.0, 4), (6.0, 5), (8.0, 7), (12.0, 10), (16.0, 13), (24.0, 20)] {
+        assert_eq!(effectcraft_render::adaptive_samples(travel, 128), samples, "{travel} px");
+    }
+    assert_eq!(effectcraft_render::adaptive_samples(400.0, 128), 128);
+    assert_eq!(effectcraft_render::adaptive_samples(400.0, 9999), 256);
     let mut s = comp(400, 100);
     s.execute("comp.settings", json!({"shutterAngle": 360, "shutterPhase": 0})).unwrap();
     let l = s.execute("layer.newSolid", json!({"color": "#ffffff", "width": 20, "height": 20})).unwrap()["layer"].as_u64().unwrap();
