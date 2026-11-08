@@ -708,7 +708,14 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &
         col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch is zero or unreadable, 100 % is used"));
         Rational { num: 1, den: 1 }
     });
-    l.stretch = stretch.to_f64().map_or(100.0, |r| r * 100.0);
+    let stored = stretch.to_f64().map_or(100.0, |r| r * 100.0);
+    // A ratio such as 1/2^31 (5e-8 %) or 2^31/1 is outside what After Effects allows (±1 % to
+    // ±9900 %); taken as stored, the layer and audio time would divide by ~0 (#3247). The in and
+    // out points keep the comp times the file stores.
+    l.stretch = effectcraft_project::limits::stretch(stored);
+    if l.stretch.to_bits() != stored.to_bits() {
+        col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch of {stored:e} % is outside ±1 % to ±9900 %, {} % is used", l.stretch));
+    }
     // A stored time with a zero denominator (or a sum that overflows) has no value; it is read as 0
     // and reported, so the layer's timing never changes silently.
     let unreadable: Vec<&str> = [("start", h.start), ("in point", h.in_relative), ("out point", h.out_relative)]
