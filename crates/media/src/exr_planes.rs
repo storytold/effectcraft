@@ -889,15 +889,21 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     let file = ReadFile::new(path, opened.stamp);
     let batch = Arc::new(Batch { index, ids, all, aux: Arc::new(aux), file });
     // Kept on disk for the next time, each channel read from the file in an entry of its own,
-    // in one job the disk cache's writer thread encodes from the planes the batch holds (a file
-    // from memory, which can't be checked later, isn't).
+    // encoded on the disk cache's writer thread (a file from memory, which can't be checked
+    // later, isn't).
     if let Some(d) = &disk {
         let mut files = effectcraft_render::reads::ReadFiles::default();
         files.add(batch.file.clone());
         if let Some(entry) = effectcraft_render::disk_cache::EntryFiles::of(&files, None) {
-            let planes: Vec<(u128, usize)> =
-                to_read.iter().filter_map(|id| Some((key(&batch.index.channels.get(*id)?.name), batch.ids.binary_search(id).ok()?))).collect();
-            d.put_planes(&batch.aux, &planes, &entry, since);
+            // (copies, each owned by its write: a queued write never keeps the store's set)
+            let planes: Vec<(u128, String, Vec<f32>)> = to_read
+                .par_iter()
+                .filter_map(|id| {
+                    let (name, plane) = batch.aux.channels.get(batch.ids.binary_search(id).ok()?)?;
+                    Some((key(name), name.clone(), plane.clone()))
+                })
+                .collect();
+            d.put_planes(w as u32, h as u32, planes, &entry, since);
         }
     }
     Ok(batch)

@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use effectcraft_effects::Buf;
-use effectcraft_raster::{AuxChannels, Image};
+use effectcraft_raster::Image;
 
 use crate::reads::ReadFiles;
 
@@ -124,6 +124,13 @@ const FORMAT_LAYER_FILES: u8 = 4;
 /// Plane entries: their source file ([`EntryFiles`]), then one named plane ([`encode_plane`]).
 /// (5, several `f32` planes per entry, reads as a miss and is deleted.)
 const FORMAT_PLANES_FILES: u8 = 6;
+
+/// The most plane bytes one queued write of decoded footage channels holds
+/// ([`DiskCache::put_planes`]).
+#[cfg(not(test))]
+const PLANE_JOB_BYTES: usize = 256 << 20;
+#[cfg(test)]
+const PLANE_JOB_BYTES: usize = 64 << 10;
 
 /// The most pixels a plane entry holds (a damaged entry can't ask for more).
 const MAX_ENTRY_PIXELS: usize = 1 << 28;
@@ -305,9 +312,10 @@ enum Payload {
     /// An 8-bit or half-float frame (width, height, pixels) and its source files.
     Frame8(u32, u32, Vec<u8>, EntryFiles),
     FrameF16(u32, u32, Vec<u16>, EntryFiles),
-    /// Decoded footage channels: planes of a set the plane store holds (no copy), each written
-    /// as an entry of its own (key, plane index), and their source file.
-    Planes(Arc<AuxChannels>, Vec<(u128, usize)>, EntryFiles),
+    /// Decoded footage channels of width x height, each written as an entry of its own (key,
+    /// name, plane), and their source file. The job owns its planes: what it holds is what it
+    /// counts, and dropping it frees them.
+    Planes(u32, u32, Vec<(u128, String, Vec<f32>)>, EntryFiles),
     /// Bytes to compress with LZ4 (a segmentation).
     Lz4(Vec<u8>),
 }
@@ -342,9 +350,9 @@ impl Payload {
             Payload::Layer(buf, files) => one(key, &|| with_files(&files, encode_layer(&buf))),
             Payload::Frame8(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame(w, h, &rgba))),
             Payload::FrameF16(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame_f16(w, h, &rgba))),
-            Payload::Planes(aux, planes, files) => {
-                for (key, at) in planes {
-                    one(key, &|| with_files(&files, encode_plane(&aux, at)));
+            Payload::Planes(w, h, planes, files) => {
+                for (key, name, plane) in planes {
+                    one(key, &|| with_files(&files, encode_plane(w, h, &name, &plane)));
                 }
             }
             Payload::Lz4(raw) => one(key, &|| lz4_flex::compress_prepend_size(&raw)),
@@ -358,26 +366,34 @@ impl Payload {
             Payload::Layer(buf, _) => buf.img.data.len().saturating_mul(16),
             Payload::Frame8(_, _, p, _) => p.len(),
             Payload::FrameF16(_, _, p, _) => p.len().saturating_mul(2),
-            Payload::Planes(aux, planes, _) => {
-                planes.iter().filter_map(|(_, at)| aux.channels.get(*at)).map(|(_, p)| p.len().saturating_mul(4)).fold(0, usize::saturating_add)
-            }
+            Payload::Planes(_, _, planes, _) => planes.iter().map(|(_, _, p)| p.len().saturating_mul(4)).fold(0, usize::saturating_add),
             Payload::Lz4(raw) => raw.len(),
         }
     }
 
-    /// The bytes only this payload holds: a layer buffer the RAM cache shares counts there, and
-    /// so do planes the plane store still holds.
+    /// The bytes only this payload holds: a layer buffer the RAM cache shares counts there.
     fn unique(&self) -> usize {
         match self {
             Payload::Layer(buf, _) if Arc::strong_count(buf) > 1 => 0,
-            Payload::Planes(aux, _, _) if Arc::strong_count(aux) > 1 => 0,
             _ => self.held(),
         }
     }
 
-    /// At least the bytes its entry takes uncompressed (the pixels; files and header are small).
+    /// At least the bytes its largest entry takes uncompressed (the pixels; files and header
+    /// are small): planes are entries of their own.
     fn raw(&self) -> u64 {
-        self.held() as u64
+        match self {
+            Payload::Planes(_, _, planes, _) => planes.iter().map(|(_, _, p)| p.len().saturating_mul(4)).max().unwrap_or(0) as u64,
+            _ => self.held() as u64,
+        }
+    }
+
+    /// The entries it writes.
+    fn entries(&self) -> u64 {
+        match self {
+            Payload::Planes(_, _, planes, _) => planes.len() as u64,
+            _ => 1,
+        }
     }
 }
 
@@ -454,20 +470,15 @@ impl Queue {
         self.frames.is_empty() && self.jobs.is_empty()
     }
 
-    /// Drop queued layer and plane writes, newest first, until the ones left hold at most `bytes`
-    /// of their own and of plane sets the plane store also holds (a queued plane set keeps the
-    /// store from letting go of it, so it is dropped too); frame writes are never dropped (a
-    /// fully cached comp would come back with gaps). The writes dropped.
+    /// Drop queued layer and plane writes that alone hold their bytes, newest first, until the
+    /// ones left hold at most `bytes` of their own ([`Queue::unique_job_bytes`], what the memory
+    /// holder reports); frame writes are never dropped (a fully cached comp would come back with
+    /// gaps). The writes dropped.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn trim(&mut self, bytes: usize) -> u64 {
-        let pins = |p: &Payload| match p {
-            Payload::Planes(..) => p.held(),
-            _ => p.unique(),
-        };
-        let held = |q: &Queue| q.jobs.iter().map(|j| if let Job::Write(_, _, _, p) = j { pins(p) } else { 0 }).fold(0, usize::saturating_add);
         let mut dropped = 0;
-        while held(self) > bytes {
-            let Some(i) = self.jobs.iter().rposition(|j| matches!(j, Job::Write(_, _, _, p) if pins(p) > 0)) else { break };
+        while self.unique_job_bytes() > bytes {
+            let Some(i) = self.jobs.iter().rposition(|j| matches!(j, Job::Write(_, _, _, p) if p.unique() > 0)) else { break };
             if let Some(Job::Write(_, _, _, p)) = self.jobs.remove(i) {
                 self.job_bytes = self.job_bytes.saturating_sub(p.held());
             }
@@ -740,8 +751,8 @@ impl DiskCache {
     }
 
     /// Count one entry compressed for a queued write.
-    fn count_encode(&self) {
-        self.encodes.fetch_add(1, Ordering::Relaxed);
+    fn count_encodes(&self, n: u64) {
+        self.encodes.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Layer buffers faster to render than this are not worth a disk write.
@@ -935,7 +946,7 @@ impl DiskCache {
                 return false;
             }
             if !matches!(payload, Payload::Lz4(_)) {
-                self.count_encode();
+                self.count_encodes(payload.entries());
             }
             payload.write(self, kind, key, format);
             true
@@ -957,7 +968,7 @@ impl DiskCache {
             }
             // (counted as it is accepted: the writer compresses it)
             if !matches!(payload, Payload::Lz4(_)) {
-                self.count_encode();
+                self.count_encodes(payload.entries());
             }
             if kind == Kind::Frame {
                 q.pending_frames.insert(key);
@@ -1285,23 +1296,41 @@ impl DiskCache {
         self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, None, |p| decode_plane(p, (width, height))).map(|(plane, _)| plane)
     }
 
-    /// Queue planes of `aux` (decoded footage channels: each [`plane_key`] and plane index)
-    /// for writing, with the source file they were read from: one job for all of them, which
-    /// the writer thread encodes from the set itself (no copy). Planes stored already or of
-    /// another size are left out; refused when there is no room or the source file was dropped
-    /// after `since`.
-    pub fn put_planes(&self, aux: &Arc<AuxChannels>, planes: &[(u128, usize)], files: &EntryFiles, since: u64) -> bool {
-        let n = (aux.width as usize).checked_mul(aux.height as usize);
-        let planes: Vec<(u128, usize)> = planes
-            .iter()
-            .copied()
-            .filter(|(key, at)| !self.contains(Kind::Plane, *key) && aux.channels.get(*at).is_some_and(|(_, p)| Some(p.len()) == n))
+    /// Queue decoded footage channels of `width` x `height` (each [`plane_key`], name and plane)
+    /// for writing, with the source file they were read from; encoded on the writer thread.
+    /// Planes stored already, of another size or larger than the cache may hold are left out;
+    /// the rest go in jobs of at most [`PLANE_JOB_BYTES`] each, so a set the queue can't take
+    /// whole still gets as many as fit. `false` when some were refused (no room, a full queue,
+    /// or the source file dropped after `since`).
+    pub fn put_planes(&self, width: u32, height: u32, planes: Vec<(u128, String, Vec<f32>)>, files: &EntryFiles, since: u64) -> bool {
+        let n = (width as usize).checked_mul(height as usize);
+        let most = self.limit_bytes();
+        let planes: Vec<(u128, String, Vec<f32>)> = planes
+            .into_iter()
+            .filter(|(key, _, p)| Some(p.len()) == n && (p.len() as u64).saturating_mul(4) <= most && !self.contains(Kind::Plane, *key))
             .collect();
-        let Some((first, _)) = planes.first().copied() else { return true };
+        if planes.is_empty() {
+            return true;
+        }
         if !self.accepts_writes() {
             return false;
         }
-        self.enqueue_format(Kind::Plane, first, FORMAT_PLANES_FILES, Payload::Planes(aux.clone(), planes, files.clone()), Some((files, since)))
+        let mut all = true;
+        let mut job: Vec<(u128, String, Vec<f32>)> = vec![];
+        let mut bytes = 0usize;
+        let mut rest = planes.into_iter().peekable();
+        while let Some(plane) = rest.next() {
+            bytes = bytes.saturating_add(plane.2.len().saturating_mul(4));
+            job.push(plane);
+            let next = rest.peek().map_or(0, |p| p.2.len().saturating_mul(4));
+            if rest.peek().is_none() || bytes.saturating_add(next) > PLANE_JOB_BYTES {
+                let first = job.first().map_or(0, |p| p.0);
+                let payload = Payload::Planes(width, height, std::mem::take(&mut job), files.clone());
+                all &= self.enqueue_format(Kind::Plane, first, FORMAT_PLANES_FILES, payload, Some((files, since)));
+                bytes = 0;
+            }
+        }
+        all
     }
 
     /// A segmentation (chain key, scale) written by [`DiskCache::put_seg`].
@@ -1620,44 +1649,46 @@ fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
     Some(FrameF16 { width: w, height: h, rgba })
 }
 
-/// A plane entry's pixels (plane `at` of `aux`): width, height, the name (length and UTF-8
-/// bytes) and the sample type, then the samples' bytes shuffled into byte planes (the first
-/// bytes of all samples, then the second...), LZ4-compressed. Type 1: half floats, when every
-/// value is one exactly (a half channel: half the bytes); type 2: `f32` (bit-exact: Cryptomatte
-/// IDs are float bit patterns).
-fn encode_plane(aux: &AuxChannels, at: usize) -> Vec<u8> {
-    let Some((name, plane)) = aux.channels.get(at) else { return vec![] };
+/// A plane entry's pixels (`plane`, named `name`, of `w` x `h`): width, height, the name
+/// (length and UTF-8 bytes) and the sample type, then the samples' bytes shuffled into byte
+/// planes (the first bytes of all samples, then the second...), LZ4-compressed. Type 1: half
+/// floats, when every value is one exactly (a half channel: half the bytes); type 2: `f32`
+/// (bit-exact: Cryptomatte IDs are float bit patterns).
+fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(&aux.width.to_le_bytes());
-    out.extend_from_slice(&aux.height.to_le_bytes());
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
     let name = name.as_bytes();
     let len = name.len().min(u16::MAX as usize);
     out.extend_from_slice(&(len as u16).to_le_bytes());
     out.extend_from_slice(name.get(..len).unwrap_or_default());
-    let mut halves = vec![half::f16::ZERO; plane.len()];
+    let n = plane.len();
+    let mut halves = vec![half::f16::ZERO; n];
     half::slice::HalfFloatSliceExt::convert_from_f32_slice(halves.as_mut_slice(), plane);
     // (NaNs stay `f32`: their payloads must come back as they were)
     let exact = halves.iter().zip(plane).all(|(h, v)| !v.is_nan() && h.to_f32().to_bits() == v.to_bits());
+    // Shuffled straight from the samples' bits into byte planes.
     let shuffled = if exact {
         out.push(1);
-        shuffle(&halves.iter().map(|h| u32::from(h.to_bits())).collect::<Vec<_>>(), 2)
+        let mut s = vec![0u8; n.saturating_mul(2)];
+        let (lo, hi) = s.split_at_mut(n);
+        for ((l, hb), x) in lo.iter_mut().zip(hi.iter_mut()).zip(&halves) {
+            [*l, *hb] = x.to_bits().to_le_bytes();
+        }
+        s
     } else {
+        drop(halves);
         out.push(2);
-        shuffle(&plane.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), 4)
+        let mut s = vec![0u8; n.saturating_mul(4)];
+        let (b0, rest) = s.split_at_mut(n);
+        let (b1, rest) = rest.split_at_mut(n);
+        let (b2, b3) = rest.split_at_mut(n);
+        for ((((a, b), c), d), v) in b0.iter_mut().zip(b1.iter_mut()).zip(b2.iter_mut()).zip(b3.iter_mut()).zip(plane) {
+            [*a, *b, *c, *d] = v.to_bits().to_le_bytes();
+        }
+        s
     };
     out.extend_from_slice(&lz4_flex::compress_prepend_size(&shuffled));
-    out
-}
-
-/// The low `width` bytes of each of `words` as byte planes: the first bytes of all, then the
-/// second... (similar bytes side by side compress better).
-fn shuffle(words: &[u32], width: usize) -> Vec<u8> {
-    let mut out = vec![0u8; words.len().saturating_mul(width)];
-    for (b, dst) in out.chunks_exact_mut(words.len().max(1)).enumerate() {
-        for (o, w) in dst.iter_mut().zip(words) {
-            *o = (w >> (8 * b)) as u8;
-        }
-    }
     out
 }
 
@@ -2069,15 +2100,13 @@ mod tests {
         mixed[2] = f32::from_bits(1);
         let mut nan_half = halves.clone();
         nan_half[3] = f32::from_bits(0x7fc0_0000 | 0x2000);
-        let mut aux = AuxChannels::new(w, h, 1.0);
-        aux.channels = vec![("A.R".into(), halves.clone()), ("A.id".into(), mixed.clone()), ("A.nan".into(), nan_half.clone())];
-        let aux = Arc::new(aux);
-        for (at, want) in [(0, 1u8), (1, 2), (2, 2)] {
-            let p = encode_plane(&aux, at);
+        let set = vec![(1, "A.R".to_string(), halves.clone()), (2, "A.id".to_string(), mixed.clone()), (3, "A.nan".to_string(), nan_half.clone())];
+        for ((_, name, plane), want) in set.iter().zip([1u8, 2, 2]) {
+            let p = encode_plane(w, h, name, plane);
             let len = p[8] as usize;
-            assert_eq!(p[10 + len], want, "plane {at}: sample type");
+            assert_eq!(p[10 + len], want, "{name}: sample type");
         }
-        assert!(dc.put_planes(&aux, &[(1, 0), (2, 1), (3, 2)], &files, 0));
+        assert!(dc.put_planes(w, h, set, &files, 0));
         dc.flush();
         for (key, name, want) in [(1, "A.R", &halves), (2, "A.id", &mixed), (3, "A.nan", &nan_half)] {
             let (got_name, got) = dc.get_plane(key, w, h).unwrap();
@@ -2085,56 +2114,75 @@ mod tests {
             assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}");
         }
         assert!(dc.get_plane(1, w, h + 1).is_none(), "another size: a miss");
-        let entry = encode_plane(&aux, 1);
+        let entry = encode_plane(w, h, "A.id", &mixed);
         assert!(decode_plane(entry.get(..entry.len() - 9).unwrap(), (w, h)).is_none(), "short");
         let mut damaged = entry.clone();
         let len = damaged[8] as usize;
         damaged[10 + len] = 3;
         assert!(decode_plane(&damaged, (w, h)).is_none(), "unknown sample type");
         // An entry of the earlier format (5) is a miss, and deleted.
-        dc.write_format(Kind::Plane, 9, 5, &with_files(&files, encode_plane(&aux, 0)));
+        dc.write_format(Kind::Plane, 9, 5, &with_files(&files, encode_plane(w, h, "A.R", &halves)));
         assert!(dc.contains(Kind::Plane, 9));
         assert!(dc.get_plane(9, w, h).is_none());
         assert!(!dc.contains(Kind::Plane, 9), "deleted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// #3271: the planes of one decode are queued as one job (a file of 69 channels lost some to
-    /// the queue's job limit), each written as an entry of its own; while the plane store holds
-    /// them they count there, once it let go of them they count in the queue.
+    /// #3271: a queued plane write owns its planes, counts them for the memory accountant (all
+    /// of them, not a share of the store's set) and frees them when the accountant drops it;
+    /// frames stay. 69 channels are queued without loss, each written as an entry of its own
+    /// and counted as one encode.
     #[test]
-    fn a_decode_queues_its_planes_as_one_job() {
+    fn queued_planes_count_what_they_hold_and_are_written_each() {
         let dir = tmpdir("planes-job");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         let (files, _) = plane_source(&dir.join("src"));
-        let mut aux = AuxChannels::new(4, 2, 1.0);
-        aux.channels = (0..69).map(|i| (format!("c{i:02}"), vec![i as f32; 8])).collect();
-        let aux = Arc::new(aux);
-        let planes: Vec<(u128, usize)> = (0..69).map(|i| (100 + i as u128, i)).collect();
-        let job = Payload::Planes(aux.clone(), planes.clone(), files.clone());
-        assert_eq!(job.held(), 69 * 8 * 4);
-        assert_eq!(job.unique(), 0, "the store holds them");
-        let kept = Arc::downgrade(&aux);
-        drop(aux);
-        assert_eq!(job.unique(), 69 * 8 * 4, "the queue alone holds them");
-        let aux = kept.upgrade().unwrap();
-        drop(job);
-        // Trimmed by the memory accountant, a queued plane set is dropped also while the store
-        // holds it (it keeps the store from letting go); frames stay.
+        let planes = || -> Vec<(u128, String, Vec<f32>)> { (0..69).map(|i| (100 + i as u128, format!("c{i:02}"), vec![i as f32; 8])).collect() };
         {
             let mut q = dc.queue.0.lock().unwrap();
-            q.jobs.push_back(Job::Write(Kind::Plane, 1, FORMAT_PLANES_FILES, Payload::Planes(aux.clone(), planes.clone(), files.clone())));
+            let job = Payload::Planes(4, 2, planes(), files.clone());
+            assert_eq!((job.held(), job.unique(), job.raw(), job.entries()), (69 * 8 * 4, 69 * 8 * 4, 32, 69));
+            q.jobs.push_back(Job::Write(Kind::Plane, 1, FORMAT_PLANES_FILES, job));
             q.frames.push_back(Job::Write(Kind::Frame, 2, FORMAT_RGBA8_FILES, Payload::Frame8(1, 1, vec![0; 4], files.clone())));
-            assert_eq!(q.trim(0), 1);
+            assert_eq!(q.unique_job_bytes(), 69 * 8 * 4, "what the memory holder reports");
+            assert_eq!(q.trim(0), 1, "trimmed as reported");
             assert!(q.jobs.is_empty() && q.frames.len() == 1);
             q.frames.clear();
         }
-        assert!(dc.put_planes(&aux, &planes, &files, 0));
+        let encodes = dc.encodes();
+        assert!(dc.put_planes(4, 2, planes(), &files, 0));
         dc.flush();
         assert_eq!(dc.keys(Kind::Plane).len(), 69);
+        assert_eq!(dc.encodes() - encodes, 69, "one encode per entry");
         assert_eq!(dc.stats().dropped, 0);
         assert_eq!(crate::memory::MemoryHolder::bytes(&*dc), 0, "written: the queue holds nothing");
         assert_eq!(dc.get_plane(168, 4, 2).map(|(n, p)| (n, p[0])), Some(("c68".to_string(), 68.0)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271 review: a set of planes larger together than the cache may hold, or than one queued
+    /// write takes ([`PLANE_JOB_BYTES`]), still reaches the disk plane by plane (a 4K file of 31
+    /// channels or more was refused whole); only a single plane larger than the cache is left out.
+    #[test]
+    fn a_large_plane_set_is_written_plane_by_plane() {
+        let dir = tmpdir("planes-large");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        // 8 planes of 32 KiB: 256 KiB together, over the cache's 80 KiB and over a queued write.
+        let (w, h) = (128u32, 64u32);
+        let plane = (w * h) as usize;
+        dc.set_max_bytes(80 << 10);
+        let set: Vec<(u128, String, Vec<f32>)> = (0..8).map(|i| (200 + i as u128, format!("p{i}"), vec![0.5; plane])).collect();
+        assert!(set.len() * plane * 4 > PLANE_JOB_BYTES);
+        assert!(dc.put_planes(w, h, set, &files, 0));
+        dc.flush();
+        assert!(!dc.keys(Kind::Plane).is_empty(), "planes reached the disk");
+        assert!(dc.get_plane(207, w, h).is_some(), "the last one too");
+        // One plane larger than the whole cache: left out.
+        dc.set_max_bytes(16 << 10);
+        assert!(dc.put_planes(w, h, vec![(300, "big".into(), vec![0.5; plane])], &files, 0));
+        dc.flush();
+        assert!(!dc.contains(Kind::Plane, 300));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
