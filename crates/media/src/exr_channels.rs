@@ -87,8 +87,9 @@ pub(crate) enum Rgb {
 /// they are.
 pub const CACHE_BUDGET: usize = if cfg!(target_arch = "wasm32") { WEB_CACHE_CAP } else { crate::DEFAULT_BUDGET };
 
-/// The most decoded planes the plane store keeps in the browser, whatever the footage budget.
-pub const WEB_CACHE_CAP: usize = 512 << 20;
+/// The most decoded planes the plane store keeps in the browser: the browser's largest footage
+/// budget (Footage Frame Cache, frames and planes together, `WEB_MEDIA_CACHE` in the engine).
+pub const WEB_CACHE_CAP: usize = 256 << 20;
 
 /// The index of an EXR file's bytes and the planes of `ids` (all when `None`). `None` when it is
 /// not a readable EXR or the planes need too much memory.

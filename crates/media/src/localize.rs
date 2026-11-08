@@ -55,6 +55,9 @@ struct State {
     space: Option<((u64, u64), std::time::Instant)>,
     /// The limit is held below the setting by free disk space.
     reserve_limited: bool,
+    /// Folders being adopted now ([`configure`]): the worker starts no copy meanwhile (a copy
+    /// already running is left alone by the scan, see [`adopt`]).
+    adopting: u32,
 }
 
 /// At most this many files wait to be copied (older requests are dropped first).
@@ -104,10 +107,18 @@ pub fn configure(config: Option<LocalizeConfig>) {
             st.bytes = 0;
         }
         let adopt_from = st.config.as_ref().filter(|_| new_folder).map(|c| c.folder.clone());
-        (st.epoch, adopt_from, st.config.as_ref().and_then(|c| c.disk_space.clone()))
+        if adopt_from.is_some() {
+            st.adopting = st.adopting.saturating_add(1);
+        }
+        // (the file being copied now keeps its files: its copy may land in this folder)
+        let busy = st.copying.as_ref().map(|(p, _)| local_name(p));
+        (st.epoch, adopt_from.map(|f| (f, busy)), st.config.as_ref().and_then(|c| c.disk_space.clone()))
     };
-    let found = adopt_from.map(|f| adopt(&f)).unwrap_or_default();
+    // (ends the adoption also when the scan or the free-space reader panics)
+    let guard = adopt_from.is_some().then_some(Adopting);
+    let found = adopt_from.map(|(f, busy)| adopt(&f, busy.as_deref())).unwrap_or_default();
     let space = space_of.and_then(|read| read());
+    drop(guard);
     let gone = {
         let mut st = lock();
         // (set again meanwhile: that setting's call does the work)
@@ -115,6 +126,10 @@ pub fn configure(config: Option<LocalizeConfig>) {
             return;
         }
         for (original, copy) in found {
+            // (a copy made meanwhile is the current one: never counted twice)
+            if st.copies.contains_key(&original) {
+                continue;
+            }
             st.clock += 1;
             st.bytes = st.bytes.saturating_add(copy.len);
             let last_use = st.clock;
@@ -162,16 +177,34 @@ fn ours(name: &str) -> bool {
     name.len() > 17 && name.as_bytes().get(16) == Some(&b'_') && name.get(..16).is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// Ends an adoption ([`State::adopting`]) when dropped.
+struct Adopting;
+
+impl Drop for Adopting {
+    fn drop(&mut self) {
+        let mut st = lock();
+        st.adopting = st.adopting.saturating_sub(1);
+        state().1.notify_all();
+    }
+}
+
 /// The copies `folder` holds from an earlier session, by source; temporaries and copies without
 /// a record are deleted (only the localizer's own files: other files in the folder are left
-/// alone). Runs without the localizer's lock.
-fn adopt(folder: &Path) -> Vec<(PathBuf, Copy)> {
+/// alone, and those of `busy`, the copy being made now). Runs without the localizer's lock.
+fn adopt(folder: &Path, busy: Option<&str>) -> Vec<(PathBuf, Copy)> {
+    #[cfg(test)]
+    {
+        let hook = BEFORE_ADOPT.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(h) = hook {
+            h(folder);
+        }
+    }
     let mut found = vec![];
     let Ok(dir) = std::fs::read_dir(folder) else { return found };
     let mut records = vec![];
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if !ours(&name) {
+        if !ours(&name) || busy.is_some_and(|b| name.starts_with(b)) {
             continue;
         }
         if name.ends_with(".part") {
@@ -372,7 +405,9 @@ fn worker() {
         let (job, config, epoch, room) = {
             let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
             loop {
-                if let (Some(p), Some(c)) = (st.queue.front().cloned(), st.config.clone()) {
+                if st.adopting == 0
+                    && let (Some(p), Some(c)) = (st.queue.front().cloned(), st.config.clone())
+                {
                     st.queue.pop_front();
                     st.queued.remove(&p);
                     st.copying = Some((p.clone(), st.epoch));
@@ -406,10 +441,18 @@ fn worker() {
                 let max = limit(&mut st);
                 gone = evict_to(&mut st, max);
             }
-            Some((local, _, _)) => gone.push(local),
-            None => {
+            // (made under an earlier setting: thrown away, unless the folder's adoption took it
+            // as the current copy meanwhile)
+            Some((local, _, _)) => {
+                if !st.copies.get(&job).is_some_and(|c| c.local == local) {
+                    gone.push(local);
+                }
+            }
+            // (only under the setting it was asked for under: a new one asks again)
+            None if st.epoch == epoch => {
                 st.skipped.insert(job);
             }
+            None => {}
         }
         drop(st);
         for local in gone {
@@ -471,6 +514,9 @@ fn copy_file(original: &Path, folder: &Path, room: u64) -> Option<(PathBuf, u64,
 type CopyHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 #[cfg(test)]
 static BEFORE_COPY: Mutex<Option<CopyHook>> = Mutex::new(None);
+/// Runs before a folder is adopted, with the folder (tests).
+#[cfg(test)]
+static BEFORE_ADOPT: Mutex<Option<CopyHook>> = Mutex::new(None);
 
 /// The localizer state is process-wide: tests that use it take turns.
 #[cfg(test)]
@@ -601,7 +647,45 @@ mod tests {
     impl Drop for HookGuard {
         fn drop(&mut self) {
             *BEFORE_COPY.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *BEFORE_ADOPT.lock().unwrap_or_else(PoisonError::into_inner) = None;
             configure(None);
         }
+    }
+
+    /// #3271 review: while a new folder's copies are adopted (outside the lock), the worker
+    /// starts no copy: the scan can't delete its temporary or count a copy it makes twice.
+    #[test]
+    fn no_copy_starts_while_a_folder_is_adopted() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _hooks = HookGuard;
+        let root = std::env::temp_dir().join(format!("ec-3271-localize-adopt-{}", std::process::id()));
+        let (share, first, second) = (root.join("share"), root.join("first"), root.join("second"));
+        std::fs::create_dir_all(&share).unwrap();
+        treat_as_network(&share);
+        let file = share.join("plate_0004.exr");
+        std::fs::write(&file, vec![5u8; 1500]).unwrap();
+        configure(config(&first, 1 << 20, vec![]));
+        // The next folder's scan waits until the test lets it go on.
+        let (entered, scanning) = std::sync::mpsc::channel::<()>();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        {
+            let (entered, wait) = (Mutex::new(entered), Mutex::new(wait));
+            *BEFORE_ADOPT.lock().unwrap() = Some(std::sync::Arc::new(move |_: &Path| {
+                let _ = entered.lock().unwrap().send(());
+                let _ = wait.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10));
+            }));
+        }
+        let second_cfg = config(&second, 1 << 20, vec![]);
+        let switching = std::thread::spawn(move || configure(second_cfg));
+        scanning.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        request(&file);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let s = status().unwrap();
+        assert!(s.copying.is_none() && s.files == 0, "no copy while adopting: {s:?}");
+        go.send(()).unwrap();
+        switching.join().unwrap();
+        let s = wait_for(|s| s.files == 1 && s.copying.is_none());
+        assert_eq!((s.files, s.bytes), (1, 1500), "copied once, counted once: {s:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

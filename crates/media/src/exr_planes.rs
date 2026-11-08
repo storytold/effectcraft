@@ -67,9 +67,14 @@ enum Step {
     },
 }
 
-/// A request for `want` asks for at least what `failed` asked for.
-fn asks_at_least(want: &Want, failed: &Want) -> bool {
-    want.all || (!failed.all && failed.ids.is_subset(&want.ids))
+/// A request for `want` of the file `index` describes asks for at least what `failed` asked for
+/// (`all` is every channel but the picture's: it doesn't cover a picture channel asked for by id).
+fn asks_at_least(index: &ExrIndex, want: &Want, failed: &Want) -> bool {
+    if failed.all && !want.all {
+        return false;
+    }
+    let aux = if want.all { index.aux_ids() } else { Vec::new() };
+    failed.ids.iter().all(|id| want.ids.contains(id) || aux.contains(id))
 }
 
 /// Decode `want` for this request alone (kept nowhere), noting the file it read.
@@ -516,7 +521,7 @@ impl PlaneStore {
             return Step::Done(Ok(b));
         }
         // (a failure of the file as it was before: the file changed since, it is read again)
-        if let Some((_, _, why)) = e.failed.iter().find(|(of, failed, _)| Arc::ptr_eq(of, index) && asks_at_least(want, failed)) {
+        if let Some((_, _, why)) = e.failed.iter().find(|(of, failed, _)| Arc::ptr_eq(of, index) && asks_at_least(index, want, failed)) {
             return Step::Done(Err(why.clone()));
         }
         if let Some(flight) = e.flight.clone() {

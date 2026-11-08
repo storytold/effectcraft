@@ -1411,3 +1411,23 @@ fn a_failure_is_forgotten_once_the_file_changes() {
     assert!(!Arc::ptr_eq(&old, &new));
     assert!(store.get(path, &source, &new, &all, Use::Other).is_ok(), "the new file is read");
 }
+
+/// #3271 review: a failed picture request (too large here) doesn't refuse a later request for
+/// the other channels: "all channels" is every channel but the picture's, so it doesn't ask for
+/// what failed.
+#[test]
+fn a_failed_picture_leaves_the_other_channels_readable() {
+    let bytes: Arc<[u8]> =
+        write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false)], (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let path = "/3271-failed-picture.exr";
+    // (room for three planes: the picture's four don't fit, the depth plane does)
+    set_cap(path, 3 * 8 * 8 * 4);
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let source = ExrSource::Bytes(bytes);
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture = Want { all: false, ids: index.picture_ids().unwrap().into_iter().collect() };
+    assert!(matches!(store.get(path, &source, &index, &picture, Use::Other), Err(Refused::TooLarge(_))));
+    assert!(store.get(path, &source, &index, &picture, Use::Other).is_err(), "remembered");
+    let rest = store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other).expect("the other channels");
+    assert!(rest.aux.get("Z").is_some());
+}

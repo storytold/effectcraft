@@ -128,7 +128,8 @@ read (EXtractoR's channel names, Cryptomatte's layer, the 3D Channel effects' ch
 The decoded channels are kept for a while, in the one memory budget the caches share
 (Settings ▸ Memory & CPU, see [preferences.md](preferences.md)): the least valuable item goes
 first, whichever cache holds it, and among channel sets and frames that cost the same to decode
-again, the least recently used; in the browser the channels take at most 512 MB. Files still in
+again, the least recently used; in the browser the channels take at most 256 MB, the footage
+frames' cap there. Files still in
 use stay whatever their size. The picture is kept once, converted: its own R, G, B and A planes are
 not kept beside it, unless an effect names one of them. Several frames asking for the same
 file at once wait for one decode. Once no enabled effect reads the item any more, its frames
