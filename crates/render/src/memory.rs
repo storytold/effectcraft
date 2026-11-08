@@ -22,8 +22,8 @@
 //! holder while it holds its own lock, and holders call [`Accountant::note_growth`] after
 //! releasing theirs.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 
 /// The share of the budget the accountant frees down to once it is over (hysteresis).
 pub const TRIM_TO: f64 = 0.9;
@@ -132,9 +132,12 @@ pub struct Accountant {
     freed: AtomicUsize,
     /// Bytes the holders said they grew by since the last balance ([`Accountant::note_growth`]).
     grown: AtomicUsize,
-    /// One balance at a time (another one asked for meanwhile is skipped), and when the last
-    /// one ran.
+    /// One balance at a time (another one asked for meanwhile is run by the one running, see
+    /// `requested`), and when the last one ran.
     balancing: Mutex<Option<web_time::Instant>>,
+    /// A balance was asked for since the running one read the budget: it runs again (a budget
+    /// lowered meanwhile is not lost, #3301 review).
+    requested: AtomicBool,
     /// The clock items' ages are measured with ([`tick`]; tests give their own).
     clock: fn() -> u64,
 }
@@ -159,6 +162,7 @@ impl Accountant {
             freed: AtomicUsize::new(0),
             grown: AtomicUsize::new(0),
             balancing: Mutex::new(None),
+            requested: AtomicBool::new(false),
             clock,
         }
     }
@@ -201,8 +205,15 @@ impl Accountant {
         }
         let grown = self.grown.fetch_add(bytes, Ordering::Relaxed).saturating_add(bytes);
         let burst = grown > budget / GROWTH_PART;
-        let recent = self.balancing.try_lock().map(|g| g.is_some_and(|t| t.elapsed() < BALANCE_EVERY)).unwrap_or(true);
-        if burst || !recent {
+        let ran_lately = |last: &Option<web_time::Instant>| last.is_some_and(|t| t.elapsed() < BALANCE_EVERY);
+        // (a balance running now counts as recent; a poisoned lock still holds the time)
+        let recent = match self.balancing.try_lock() {
+            Ok(g) => ran_lately(&g),
+            Err(TryLockError::Poisoned(p)) => ran_lately(&p.into_inner()),
+            Err(TryLockError::WouldBlock) => true,
+        };
+        // (a balance asked for while this read held the lock found it busy: serve it here)
+        if burst || !recent || self.requested.load(Ordering::SeqCst) {
             self.balance();
         }
     }
@@ -241,14 +252,38 @@ impl Accountant {
     /// When the holders together are over the budget, free down to [`TRIM_TO`] of it, the least
     /// valuable item first whichever holder keeps it ([`value`]; equal values: the least
     /// recently used first, then the holder registered first).
+    ///
+    /// One balance runs at a time. One asked for while another runs (a lowered budget, more
+    /// growth) is run by that one when it is done, with the budget then in force (or by
+    /// [`Accountant::note_growth`], when that held the lock to read the time); a poisoned lock
+    /// (a holder panicked in a balance) doesn't stop balancing.
     pub fn balance(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        loop {
+            let mut last: MutexGuard<'_, Option<web_time::Instant>> = match self.balancing.try_lock() {
+                Ok(g) => g,
+                Err(TryLockError::Poisoned(p)) => p.into_inner(),
+                // (the running balance sees `requested` and runs again)
+                Err(TryLockError::WouldBlock) => return,
+            };
+            while self.requested.swap(false, Ordering::SeqCst) {
+                *last = Some(web_time::Instant::now());
+                self.balance_once();
+            }
+            drop(last);
+            // (asked for between the last pass and the unlock: run it, unless another took over)
+            if !self.requested.load(Ordering::SeqCst) {
+                return;
+            }
+        }
+    }
+
+    /// One pass of [`Accountant::balance`] with the budget in force now.
+    fn balance_once(&self) {
         let budget = self.budget();
         if budget == usize::MAX {
             return;
         }
-        // (one at a time: a balance running meanwhile does the work)
-        let Ok(mut last) = self.balancing.try_lock() else { return };
-        *last = Some(web_time::Instant::now());
         self.grown.store(0, Ordering::Relaxed);
         let holders = self.alive();
         let mut total: usize = holders.iter().map(|(h, _)| h.bytes()).fold(0, usize::saturating_add);
@@ -510,5 +545,91 @@ mod tests {
         eprintln!("halving {full} bytes of 10000 items took {took:?}");
         assert!(acc.total() <= (full as f64 / 2.0 * TRIM_TO) as usize + 1024);
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A holder that lowers the accountant's budget the first time it is asked to drop an item
+    /// (another thread setting a lower budget while a balance runs).
+    struct Lowering {
+        inner: Arc<Fake>,
+        acc: std::sync::OnceLock<Arc<Accountant>>,
+        to: usize,
+        done: AtomicBool,
+    }
+
+    impl MemoryHolder for Lowering {
+        fn name(&self) -> &'static str {
+            "lowering"
+        }
+        fn bytes(&self) -> usize {
+            self.inner.held()
+        }
+        fn oldest(&self) -> Option<Candidate> {
+            self.inner.oldest()
+        }
+        fn drop_oldest(&self) -> usize {
+            if !self.done.swap(true, Ordering::SeqCst)
+                && let Some(acc) = self.acc.get()
+            {
+                acc.set_budget(self.to);
+            }
+            self.inner.drop_oldest()
+        }
+    }
+
+    /// #3301 review: a budget lowered while a balance runs is kept: the running balance runs
+    /// again with it (it was skipped, and the caches stayed over the new budget).
+    #[test]
+    fn a_budget_lowered_during_a_balance_is_kept() {
+        let items: Vec<(u64, usize, u64)> = (0..20).map(|i| (i * S, 100, 1_000)).collect();
+        let lowering = Arc::new(Lowering { inner: Fake::new("frames", &items), acc: std::sync::OnceLock::new(), to: 500, done: AtomicBool::new(false) });
+        let acc = Arc::new(Accountant::with_clock(1900, at_100s));
+        let _ = lowering.acc.set(acc.clone());
+        let held: Arc<dyn MemoryHolder> = lowering.clone();
+        acc.register(&held);
+        acc.balance();
+        assert_eq!(acc.budget(), 500);
+        assert!(acc.total() <= 450, "{}", acc.total());
+    }
+
+    /// #3301 review: a holder that panicked in a balance poisons its lock; balancing goes on
+    /// (it stopped for good), and growth still balances.
+    #[test]
+    fn a_poisoned_balance_lock_does_not_stop_balancing() {
+        let frames = Fake::new("frames", &[]);
+        let (acc, _held) = accountant(1000, &[&frames]);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = acc.balancing.lock().unwrap();
+            *g = None;
+            std::panic::resume_unwind(Box::new("a holder panicked"));
+        }));
+        assert!(poisoned.is_err() && acc.balancing.is_poisoned());
+        for i in 0..12 {
+            frames.push(i * S, 100, 1_000);
+        }
+        // (a small growth: no burst; the last balance is long ago)
+        acc.note_growth(1);
+        assert!(frames.held() <= 900, "growth balanced: {}", frames.held());
+        for i in 12..20 {
+            frames.push(i * S, 100, 1_000);
+        }
+        acc.balance();
+        assert!(frames.held() <= 900, "{}", frames.held());
+    }
+
+    /// #3301 review: a balance asked for while `note_growth` held the lock to read the time
+    /// (it found the lock busy and left the work to the holder) is served by `note_growth`.
+    #[test]
+    fn a_balance_asked_for_during_a_growth_check_is_served() {
+        let frames = Fake::new("frames", &[]);
+        let (acc, _held) = accountant(1000, &[&frames]);
+        acc.balance();
+        for i in 0..12 {
+            frames.push(i * S, 100, 1_000);
+        }
+        // Just balanced (recent), a small growth (no burst), and a balance left pending.
+        *acc.balancing.lock().unwrap() = Some(web_time::Instant::now());
+        acc.requested.store(true, Ordering::SeqCst);
+        acc.note_growth(1);
+        assert!(frames.held() <= 900, "{}", frames.held());
     }
 }
