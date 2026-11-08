@@ -140,6 +140,8 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
 - **Placed Illustrator and PDF files** (`.ai`, `.pdf`; `Footage::placed_page`): the page is
   framed as After Effects places it (the ArtBox clipped to the crop box, `/Rotate` ignored) and
   drawn to fill the stored footage size, which masks and anchors are measured against (#3099).
+  Create Shapes from Vector Layer on such a layer adds a hidden `<layer> Frame` shape layer, the
+  Alpha track matte of every layer it makes, so they show only the frame, as the footage does.
   EPS files keep their bounding box at their own size: how After Effects sizes them is not
   measured.
 - **Track mattes.** The mode and the matte layer's id are in the target layer's header

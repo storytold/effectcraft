@@ -466,6 +466,11 @@ fn psd_smart_objects_with_perspective_and_warp_bake_as_placed() {
 
 /// A PDF with two placed images (one turned a quarter) between a background and a shape.
 fn image_pdf() -> Vec<u8> {
+    image_pdf_with("")
+}
+
+/// [`image_pdf`] with `boxes` added to the page dictionary.
+fn image_pdf_with(boxes: &str) -> Vec<u8> {
     let content = "0.9 0.9 0.9 rg 0 0 120 80 re f\nq 60 0 0 30 10 40 cm /Im Do Q\nq 0 40 -20 0 110 10 cm /Im Do Q\n0 0 1 rg 20 5 30 20 re f\n";
     // 8×8 pixels in quadrants: red, green / white, black.
     let quad = |x: usize, y: usize| -> [u8; 3] { [[[255, 0, 0], [0, 255, 0]], [[255, 255, 255], [0, 0, 0]]][y / 4][x / 4] };
@@ -474,7 +479,7 @@ fn image_pdf() -> Vec<u8> {
         &[
             (1, "<< /Type /Catalog /Pages 2 0 R >>".into(), None),
             (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), None),
-            (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".into(), None),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] {boxes} /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"), None),
             (4, "<< >>".into(), Some(content.as_bytes().to_vec())),
             (5, "<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceRGB /BitsPerComponent 8 >>".into(), Some(px)),
         ],
@@ -617,6 +622,100 @@ fn placed_vector_footage_fills_its_stored_size_at_every_resolution() {
             let (a, b) = (shapes.get(l, y), shapes.get(r, y));
             assert!(red(a) && blue(b), "{w}×{h}, shapes, row {y}: {a:?} {b:?}");
         }
+    }
+}
+
+/// #3099 review: Create Shapes from Vector Layer on a placed page keeps the page's frame. The
+/// footage's raster shows only the ArtBox (241 × 121) of `art_box_ai()`, whose grey media box
+/// reaches past it on every side; in a composition larger than the footage, the outlines show
+/// the same colours inside the frame and nothing (the background) outside it. Without the clip
+/// they showed the whole page: the grey background around the art.
+#[test]
+fn shapes_from_a_placed_page_stay_inside_its_frame() {
+    use effectcraft_project::ItemKind;
+    use effectcraft_time::Tick;
+
+    let path = tmp("placed-frame.ai");
+    std::fs::write(&path, art_box_ai()).unwrap();
+    let mut s = effectcraft_host::session();
+    let item = ItemId(s.execute_checked("file.import", json!({"paths": [path]})).unwrap()["items"][0].as_u64().unwrap());
+    // As an After Effects project stores it: the ArtBox's size, placed.
+    let ItemKind::Footage(f) = &mut std::sync::Arc::make_mut(&mut s.project).item_mut(item).unwrap().kind else { panic!("footage") };
+    (f.width, f.height, f.placed_page) = (241, 121, true);
+    s.execute("comp.new", json!({"name": "Big", "width": 400, "height": 300, "frameRate": 25, "duration": 1})).unwrap();
+    let lid = s.execute_checked("layer.addItem", json!({"item": item.0})).unwrap()["layer"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    // The layer is centred: layer pixel (x, y) is comp (x + 79.5, y + 89.5).
+    let at = |img: &Image, x: f64, y: f64| img.get((x + 79.5).floor() as i64, (y + 89.5).floor() as i64);
+    let red = |p: [f32; 4]| p[3] > 0.99 && p[0] > 0.9 && p[1] < 0.1 && p[2] < 0.1;
+    let blue = |p: [f32; 4]| p[3] > 0.99 && p[2] > 0.9 && p[0] < 0.1 && p[1] < 0.1;
+    let empty = |p: [f32; 4]| p[0] < 0.02 && p[1] < 0.02 && p[2] < 0.02;
+    let inside = [([20.0, 20.0], true), ([110.0, 100.0], true), ([130.0, 20.0], false), ([230.0, 110.0], false)];
+    // Outside the frame, where the page's grey media box would show: left, right, above, below.
+    let outside = [[-20.0, 60.0], [-55.0, 100.0], [260.0, 60.0], [300.0, 10.0], [120.0, -20.0], [120.0, 140.0]];
+    let check = |img: &Image, what: &str| {
+        for (p, want_red) in inside {
+            let px = at(img, p[0], p[1]);
+            assert!(if want_red { red(px) } else { blue(px) }, "{what}: inside the frame at {p:?}: {px:?}");
+        }
+        for p in outside {
+            let px = at(img, p[0], p[1]);
+            assert!(empty(px), "{what}: outside the frame at {p:?}: {px:?}");
+        }
+    };
+    check(&s.render(cid, Tick::ZERO, RenderOpts::default()), "footage");
+    s.execute_checked("layer.create", json!({"op": "shapesFromVector", "layers": [lid]})).unwrap();
+    let comp = s.project.comp(cid).unwrap();
+    assert!(!comp.layers.iter().find(|l| l.id.0 == lid).unwrap().switches.video, "the source is switched off");
+    check(&s.render(cid, Tick::ZERO, RenderOpts::default()), "shapes");
+}
+
+/// #3099 review: the images of a placed page become footage layers clipped to the frame too.
+/// `image_pdf_with` an ArtBox [20 15 100 70]: the upright image reaches past the frame's left
+/// edge, the turned one past its right and bottom edges, the grey page around it. After the
+/// conversion the layers inside the frame match the footage, and outside it nothing shows.
+#[test]
+fn images_from_a_placed_page_stay_inside_its_frame() {
+    use effectcraft_project::{ItemKind, MatteKind, TrackMatte};
+    use effectcraft_time::Tick;
+
+    let path = tmp("placed-images.pdf");
+    std::fs::write(&path, image_pdf_with("/ArtBox [20 15 100 70]")).unwrap();
+    let mut s = effectcraft_host::session();
+    let item = ItemId(s.execute_checked("file.import", json!({"paths": [path]})).unwrap()["items"][0].as_u64().unwrap());
+    let ItemKind::Footage(f) = &mut std::sync::Arc::make_mut(&mut s.project).item_mut(item).unwrap().kind else { panic!("footage") };
+    (f.width, f.height, f.placed_page) = (80, 55, true);
+    s.execute("comp.new", json!({"name": "Big", "width": 200, "height": 150, "frameRate": 25, "duration": 1})).unwrap();
+    let lid = s.execute_checked("layer.addItem", json!({"item": item.0})).unwrap()["layer"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    // Centred: layer pixel (x, y) is comp (x + 60, y + 47.5).
+    let at = |img: &Image, x: f64, y: f64| img.get((x + 60.0).floor() as i64, (y + 47.5).floor() as i64);
+    let empty = |p: [f32; 4]| p[0] < 0.02 && p[1] < 0.02 && p[2] < 0.02;
+    // Inside: both images and the grey page; outside: the images past the frame, the grey page.
+    let inside = [[10.0, 8.0], [40.0, 8.0], [10.0, 22.0], [40.0, 22.0], [75.0, 25.0], [75.0, 50.0], [5.0, 40.0], [60.0, 10.0]];
+    let outside = [[-5.0, 15.0], [85.0, 40.0], [75.0, 58.0], [-15.0, 50.0], [40.0, -5.0]];
+    let footage = s.render(cid, Tick::ZERO, RenderOpts::default());
+    for p in outside {
+        assert!(empty(at(&footage, p[0], p[1])), "footage outside the frame at {p:?}: {:?}", at(&footage, p[0], p[1]));
+    }
+    let r = s.execute_checked("layer.create", json!({"op": "shapesFromVector", "layers": [lid]})).unwrap();
+    assert_eq!(r["skipped"], json!([]), "{r}");
+    // One hidden frame layer is the Alpha track matte of every layer made from the page.
+    let comp = s.project.comp(cid).unwrap();
+    let frame = comp.layers.iter().find(|l| l.name.ends_with(" Frame")).expect("the frame matte layer");
+    assert!(!frame.switches.video);
+    let made: Vec<_> = comp.layers.iter().filter(|l| l.id != frame.id && l.id.0 != lid).collect();
+    assert_eq!(made.iter().filter(|l| l.name == "Image").count(), 2);
+    for l in &made {
+        assert_eq!(l.track_matte, Some(TrackMatte { layer: frame.id, kind: MatteKind::Alpha }), "{}", l.name);
+    }
+    let shapes = s.render(cid, Tick::ZERO, RenderOpts::default());
+    for p in inside {
+        let (a, b) = (at(&shapes, p[0], p[1]), at(&footage, p[0], p[1]));
+        assert!((0..4).all(|k| (a[k] - b[k]).abs() < 0.05), "inside the frame at {p:?}: {a:?} vs footage {b:?}");
+    }
+    for p in outside {
+        assert!(empty(at(&shapes, p[0], p[1])), "shapes outside the frame at {p:?}: {:?}", at(&shapes, p[0], p[1]));
     }
 }
 

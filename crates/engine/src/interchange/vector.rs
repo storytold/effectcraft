@@ -273,6 +273,39 @@ pub fn fitted_to_footage(mut doc: Doc, f: &effectcraft_project::Footage) -> Doc 
     doc
 }
 
+/// Create Shapes from Vector Layer on a placed page of an After Effects project: a hidden shape
+/// layer filling the frame the footage is drawn in (its `width` × `height` raster, in the layer
+/// pixels of [`fitted_to_footage`]'s document), to be the Alpha track matte of every layer made
+/// from the page, so bleed, art past the artboard and the page's background stay hidden as on
+/// the footage (#3099). `None` for other footage, whose shapes are converted whole as before.
+///
+/// A track matte is drawn at the composition's resolution, so its edge is the footage's raster
+/// edge on shape and image layers alike; a mask on an image layer would be drawn at the image's
+/// own resolution and blur its edge when the image is scaled up.
+pub fn frame_matte(proj: &mut Project, comp: &Comp, src: &Layer, f: &effectcraft_project::Footage) -> Option<Layer> {
+    if !f.placed_page || f.width == 0 || f.height == 0 {
+        return None;
+    }
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{0}" height="{1}"><rect width="{0}" height="{1}" fill="#ffffff"/></svg>"##,
+        f.width, f.height
+    );
+    let doc = effectcraft_svg::parse(svg.as_bytes()).ok()?;
+    let mut l = build::layer(proj, comp, &format!("{} Frame", src.name), LayerSource::Shape, (0, 0), None);
+    add_doc_shapes(proj, &mut l, &doc);
+    copy_transform(proj, src, &mut l);
+    like_source(&mut l, src);
+    // The layers it mattes carry the source's opacity already.
+    if let Some(o) = l.props.prop_mut("transform/opacity") {
+        o.value = Value::Scalar(100.0);
+        o.keys.clear();
+        o.expr = None;
+    }
+    l.name = comp.unique_layer_name(&format!("{} Frame", src.name));
+    l.switches.video = false;
+    Some(l)
+}
+
 /// The vector document of footage `f` (its file read as `bytes`; `None` for other formats): its
 /// page, framed as [`effectcraft_project::Footage::placed_page`] says, restricted to its layer.
 pub fn footage_doc(f: &effectcraft_project::Footage, bytes: &[u8]) -> Option<Result<Doc, String>> {
