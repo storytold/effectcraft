@@ -84,11 +84,21 @@ pub(crate) fn placeholder<'f, 'a>(
         col.lose(LossCategory::Effects, format!("{here}, kept as a placeholder without parameters (the import holds too many)"));
         return group;
     }
-    let params: Vec<EffectParam<'_, '_>> = defs.params(fx).into_iter().filter(|p| !carries_nothing(p)).collect();
+    let all = defs.params(fx);
+    let mut lost = Vec::new();
+    // Borrowed definitions (another instance's or the project copy) may not name every value
+    // record this instance has: such a record (its value, keys, expression) has nothing to go
+    // into, so it is reported, as for the mapped effects.
+    if all.first().is_some_and(|p| p.borrowed_definition) {
+        let defined: std::collections::HashSet<&str> = all.iter().map(|p| p.match_name.as_str()).collect();
+        for name in fx.value_record_names().iter().filter(|n| !defined.contains(n.as_str())) {
+            lost.push(format!("the value record {name} has no parameter definition, not kept"));
+        }
+    }
+    let params: Vec<EffectParam<'_, '_>> = all.into_iter().filter(|p| !carries_nothing(p)).collect();
     // Reading the definitions copied every popup's item names: they count, kept or not.
     let names: usize = params.iter().filter_map(|p| p.items.as_ref()).map(Vec::len).fold(0, usize::saturating_add);
     col.placeholder_cost = col.placeholder_cost.saturating_add(names);
-    let mut lost = Vec::new();
     for (n, p) in params.iter().enumerate() {
         if n >= MAX_PARAMS || col.placeholder_cost >= BUDGET {
             lost.push(format!("{} more parameters not kept (too many)", params.len() - n));
@@ -226,6 +236,11 @@ fn param(
         match value.and_then(|v| convert(v, kind)) {
             Some(v) => prop.value = v,
             None if p.stored().is_some() && !p.is_animated() => why = Some(format!("{label} holds an unreadable value, default used")),
+            // A borrowed popup's default slot holds the other copy's selection, not the default
+            // (`EffectParam::pard_default`); this effect's default item is not known here.
+            None if p.kind == ParamKind::Popup && p.borrowed_definition => {
+                why = Some(format!("{label}: the default item is not known (borrowed definition), the first item used"));
+            }
             None => {}
         }
     }

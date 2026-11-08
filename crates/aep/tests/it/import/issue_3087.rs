@@ -328,6 +328,108 @@ fn a_hostile_placeholder_stays_bounded() {
     assert!(lost.iter().any(|d| d.contains("not kept")), "{lost:?}");
 }
 
+/// `fx` built into `synthetic.aep` with the layer's instance borrowing its definitions from the
+/// project copy (`EfdG`; the instance's own `parT` emptied), the copy without the definition of
+/// parameter `drop` (when given).
+fn borrowed(fx: &Fx, drop: Option<usize>) -> Vec<u8> {
+    fn walk(chunks: &mut [Chunk<'_>], in_efdg: bool, fx: &Fx, drop: Option<usize>, done: &mut (usize, usize)) {
+        for c in chunks.iter_mut() {
+            let efdg = in_efdg || matches!(&c.body, Body::List { list_type, .. } if list_type == b"EfdG");
+            if c.is_list(b"parT") && c.children().iter().any(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.starts_with(fx.match_name.as_bytes()))) {
+                let Body::List { children, .. } = &mut c.body else { continue };
+                if efdg {
+                    if let Some(i) = drop {
+                        let name = format!("{}-{i:04}", fx.match_name);
+                        if let Some(at) = children.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.starts_with(name.as_bytes()))) {
+                            let end = children.iter().skip(at + 1).position(|k| k.is(b"tdmn")).map_or(children.len(), |n| at + 1 + n);
+                            children.drain(at..end);
+                        }
+                    }
+                    done.0 += 1;
+                } else {
+                    children.retain(|k| k.is(b"parn"));
+                    done.1 += 1;
+                }
+                continue;
+            }
+            walk(c.children_mut(), efdg, fx, drop, done);
+        }
+    }
+    let bytes = super::fx_inject::bytes_with(fx);
+    let mut file = parse(&bytes).unwrap();
+    let mut done = (0, 0);
+    walk(&mut file.chunks, false, fx, drop, &mut done);
+    assert_eq!(done, (1, 1), "the project copy and the instance");
+    write(&file).unwrap()
+}
+
+/// A value record the borrowed definitions do not name is reported (it was dropped silently, so a
+/// pseudo effect imported as no loss).
+#[test]
+fn a_placeholder_record_without_a_borrowed_definition_is_reported() {
+    let fx = Fx {
+        match_name: "Pseudo/borrow",
+        name: "Settings",
+        defs: vec![slider(ParamKind::FloatSlider, "A", 0.0, (0.0, 100.0)), slider(ParamKind::FloatSlider, "B", 0.0, (0.0, 100.0))],
+        values: vec![(1, 3.0), (2, 5.0)],
+        data: vec![],
+        keys: vec![],
+    };
+    let (p, r) = import_all(&borrowed(&fx, Some(2)));
+    let lost = losses(&r, LossCategory::Effects, "Pseudo/borrow");
+    assert!(lost.iter().any(|d| d.contains("Pseudo/borrow-0002") && d.contains("no parameter definition")), "{lost:?}");
+    // The defined parameter still arrives with the instance's value.
+    let g = p
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .find_map(|l| l.props.sub("effects").and_then(|fx| fx.children.iter().filter_map(|n| n.as_group()).find(|g| g.match_id == "Pseudo_borrow").cloned()))
+        .expect("the placeholder");
+    assert_eq!(g.children.iter().filter_map(|n| n.as_prop()).find(|p| p.name == "A").map(|p| p.value.clone()), Some(Value::Scalar(3.0)));
+}
+
+/// A popup without a value record whose definition is borrowed has no known default: the first
+/// item is used and that is reported (it was used silently). A recorded item stays as it is.
+#[test]
+fn a_borrowed_popup_without_a_record_reports_its_unknown_default() {
+    let fx = |values: Vec<(usize, f64)>| Fx {
+        match_name: "Pseudo/menu",
+        name: "Settings",
+        defs: vec![popup("Mode", 2, &["One", "Two", "Three"]), slider(ParamKind::FloatSlider, "Size", 0.0, (0.0, 100.0))],
+        values,
+        data: vec![],
+        keys: vec![],
+    };
+    let (_, r) = import_all(&borrowed(&fx(vec![(2, 1.0)]), None));
+    let lost = losses(&r, LossCategory::Effects, "Pseudo/menu");
+    assert!(lost.iter().any(|d| d.contains("Mode") && d.contains("default item is not known")), "{lost:?}");
+    // With a record the item is the file's, and nothing is reported.
+    let (p, r) = import_all(&borrowed(&fx(vec![(1, 3.0)]), None));
+    assert!(losses(&r, LossCategory::Effects, "Pseudo/menu").is_empty(), "{:?}", r.report.losses);
+    let mode = p
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .find_map(|l| l.props.sub("effects").and_then(|fx| fx.children.iter().filter_map(|n| n.as_group()).find(|g| g.match_id == "Pseudo_menu").cloned()))
+        .and_then(|g| g.children.iter().filter_map(|n| n.as_prop()).find(|p| p.name == "Mode").map(|p| p.value.clone()));
+    assert_eq!(mode, Some(Value::Enum(2)), "the third item");
+}
+
+/// The same for a Dropdown Menu Control: reported once, EffectCraft's control keeps the first item.
+#[test]
+fn a_borrowed_dropdown_without_a_record_reports_its_unknown_default_once() {
+    let fx = Fx { match_name: "Pseudo/@@bWVudQ", name: "Choice", defs: vec![popup("Menu", 2, &["A", "B"])], values: vec![], data: vec![], keys: vec![] };
+    let (p, r) = import_all(&borrowed(&fx, None));
+    let lost = losses(&r, LossCategory::Effects, "Pseudo/@@bWVudQ");
+    assert_eq!(lost.iter().filter(|d| d.contains("default item is not known")).count(), 1, "{lost:?}");
+    let menu = p
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .find_map(|l| {
+            l.props.sub("effects").and_then(|fx| fx.children.iter().filter_map(|n| n.as_group()).find(|g| g.match_id == "ec.control.dropdown").cloned())
+        })
+        .and_then(|g| g.prop("menu").map(|p| p.value.clone()));
+    assert_eq!(menu, Some(Value::Enum(0)));
+}
+
 // ---- Orientation ----
 
 /// `synthetic.aep` with every Orientation set to `[10, 20, 30]` and the expression `text`.
