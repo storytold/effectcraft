@@ -492,7 +492,8 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
         Extra::Extractor => match ExtractorChannels::parse(data).map(|c| (c.sources(), c)) {
             // Each output channel reads the footage's channel of the stored name, which
             // EffectCraft's EXtractoR finds by the same name (`Z`); After Effects' `(copy)` is the
-            // input's own channel, EffectCraft's R, G, B or A (the fresh channels are R, G, B, A).
+            // input's own channel, EffectCraft's `(copy)` (not `A`, which EffectCraft reads from an
+            // OpenEXR footage's alpha plane, losing what earlier effects did to it).
             Some((Ok(names), _)) => {
                 for (id, name) in ["red", "green", "blue", "alpha"].into_iter().zip(names) {
                     if let Some(prop) = group.prop_mut(id) {

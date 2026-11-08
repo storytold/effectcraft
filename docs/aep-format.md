@@ -571,7 +571,9 @@ data layouts, read from default instances only):**
 EXtractoR's Channel Info is the plug-in's own **little-endian** layout: `u32` 1 and 28 bytes, then
 four 164-byte records (Red, Green, Blue, Alpha), each a kind in byte 0 (1 a channel of the footage by
 name: `R`, `G`, `B` by default; 2 the input's own channel, named `(copy)`: Alpha by default) and the
-channel name NUL-terminated from record byte 35. The rest is not read: it differs between instances
+channel name NUL-terminated from record byte 35. EffectCraft imports kind 2 as its EXtractoR's `(copy)`,
+the effect input's channel of the same position as earlier effects left it, not as `A` (which names
+an OpenEXR footage's own alpha plane). The rest is not read: it differs between instances
 with the same channels (uninitialised-looking values, also in bytes 1..4 of a record: `02 00 00 32`
 on Alpha in one definition's default, which is why only byte 0 is the kind). **A chosen channel**
 (`extractor-07-preset-channel-z`, a preset of our own that reads `Z` into Red, Green and Blue) is kind

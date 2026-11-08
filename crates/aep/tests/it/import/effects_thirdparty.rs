@@ -118,7 +118,7 @@ fn extractor_channel_info_layout() {
     // `02 00 00 32` on Alpha, still the input's own channel.
     let c = ExtractorChannels::parse(&channels([(1, "R"), (1, "G"), (1, "B"), (0x3200_0002, "(copy)")])).expect("parses");
     assert!(c.is_default());
-    assert_eq!(c.sources(), Ok(["R", "G", "B", "A"].map(String::from)));
+    assert_eq!(c.sources(), Ok(["R", "G", "B", "(copy)"].map(String::from)));
 }
 
 #[test]
@@ -130,8 +130,9 @@ fn extractor_points_unmult_and_default_channels() {
     near(&g, "blackPoint", 10.0);
     near(&g, "whitePoint", 14.0);
     assert_eq!((v(&g, "unMult"), v(&g, "clip")), (Value::Bool(true), Value::Bool(false)));
-    // After Effects' `(copy)` Alpha is the input's alpha: EffectCraft's A.
-    for (id, want) in [("red", "R"), ("green", "G"), ("blue", "B"), ("alpha", "A")] {
+    // After Effects' `(copy)` Alpha is the input's alpha: EffectCraft's `(copy)`, not `A` (an
+    // OpenEXR's own alpha plane).
+    for (id, want) in [("red", "R"), ("green", "G"), ("blue", "B"), ("alpha", "(copy)")] {
         assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
     }
 }
@@ -143,13 +144,13 @@ fn extractor_channels_are_imported_by_name() {
     let (g, r) = run(&extractor(vec![], channels([(1, "Z"), (1, "Z"), (1, "Z"), (2, "(copy)")])), "ec.3d.extractor");
     assert_eq!(losses(&r, LossCategory::Effects, "EXtractoR"), Vec::<String>::new());
     let g = g.expect("imported");
-    for (id, want) in [("red", "Z"), ("green", "Z"), ("blue", "Z"), ("alpha", "A")] {
+    for (id, want) in [("red", "Z"), ("green", "Z"), ("blue", "Z"), ("alpha", "(copy)")] {
         assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
     }
-    // `(copy)` on another channel is that channel of the input.
+    // `(copy)` on another channel is that channel of the input (EffectCraft's `(copy)` there).
     let (g, _) = run(&extractor(vec![], channels([(2, "(copy)"), (1, "CryptoObject00.R"), (2, "(copy)"), (1, "Z")])), "ec.3d.extractor");
     let g = g.expect("imported");
-    for (id, want) in [("red", "R"), ("green", "CryptoObject00.R"), ("blue", "B"), ("alpha", "Z")] {
+    for (id, want) in [("red", "(copy)"), ("green", "CryptoObject00.R"), ("blue", "(copy)"), ("alpha", "Z")] {
         assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
     }
 }
