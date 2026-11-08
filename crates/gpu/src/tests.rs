@@ -731,6 +731,47 @@ fn small_blurs_fall_back_to_the_cpu() {
     }
 }
 
+/// A layer shrunk on one of its own axes averages the source under each destination pixel, as
+/// on the CPU (`raster::box_footprint`): 5 % tall reads twenty rows per pixel, not the one of the
+/// pyramid level the mean of both scales picks. Also off the pixel grid and turned.
+#[test]
+fn a_layer_shrunk_on_its_own_axes_averages_a_box_like_the_cpu() {
+    use effectcraft_geom::{Mat3, vec2};
+    let Some(g) = gpu() else { return };
+    let rows: Vec<f32> = (0..40).map(|i| if i % 7 == 0 || i % 3 == 1 { 1.0 } else { 0.0 }).collect();
+    let mut img = Image::new(5, rows.len() as u32);
+    for (y, v) in rows.iter().enumerate() {
+        for x in 0..5 {
+            img.set(x, y as u32, [*v, *v, *v, 1.0]);
+        }
+    }
+    let up = g.ctx.upload_image(&img).expect("upload");
+    let cases = [
+        ("10 × 0.05", Mat3::scale(vec2(10.0, 0.05))),
+        ("0.4 tall, half a pixel down", Mat3::translate(vec2(0.0, 0.5)) * Mat3::scale(vec2(1.0, 0.4))),
+        ("0.3 × 0.6 turned 30°", Mat3::translate(vec2(9.3, 2.6)) * Mat3::rotate_deg(30.0) * Mat3::scale(vec2(0.3, 0.6))),
+    ];
+    for (name, m) in cases {
+        let mut want = Image::new(60, 24);
+        effectcraft_raster::composite_warp(&mut want, &img, &m, &effectcraft_raster::WarpOpts::default());
+        let mut e = crate::context::Enc::new(&g.ctx);
+        let empty = e.image(want.width, want.height);
+        let opts = crate::ops::WarpOptions { sampling: effectcraft_raster::Sampling::Bilinear, mode: BlendMode::Normal, opacity: 1.0, seed: 0 };
+        let out = crate::ops::warp(&mut e, &empty, &up, &m, opts, None);
+        let got = e.download(&out).expect("download");
+        let d = diff(&want, &got, tolerance(BitDepth::Bpc32));
+        assert_eq!(d.over, 0, "{name}: max {} at {:?} on {}", d.max, d.worst, g.ctx.name);
+    }
+    // The first case's top row is the mean of source rows 0 to 20.
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let empty = e.image(60, 24);
+    let opts = crate::ops::WarpOptions { sampling: effectcraft_raster::Sampling::Bilinear, mode: BlendMode::Normal, opacity: 1.0, seed: 0 };
+    let out = crate::ops::warp(&mut e, &empty, &up, &Mat3::scale(vec2(10.0, 0.05)), opts, None);
+    let got = e.download(&out).expect("download");
+    let mean = rows[..20].iter().sum::<f32>() / 20.0;
+    assert!((got.get(20, 0)[0] - mean).abs() < 1e-4, "{:?} vs {mean}", got.get(20, 0));
+}
+
 /// Horizontal GPU box passes used to restart the running sum every 256 px; the CPU keeps one sum
 /// per row, so images wider than 256 disagreed in f32 rounding. Width 320 forces that path.
 /// Exact on llvmpipe (CI lavapipe), which fails without the fix; other adapters use the usual

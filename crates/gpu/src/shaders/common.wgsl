@@ -225,6 +225,33 @@ fn sample(t: texture_2d<f32>, sampling: u32, x: f32, y: f32) -> vec4<f32> {
     return sample_bilinear(t, x, y);
 }
 
+// raster::warp::sample_box: the mean of `t` over the box of half-sizes (hx, hy) centred on (x, y),
+// on the source's own axes; what lies outside the texture is transparent. Each row is summed
+// with its horizontal coverage, then weighted by its vertical one.
+fn sample_box(t: texture_2d<f32>, x: f32, y: f32, hx: f32, hy: f32) -> vec4<f32> {
+    let sz = vec2<f32>(textureDimensions(t));
+    let l = x - hx;
+    let r = x + hx;
+    let top = y - hy;
+    let bot = y + hy;
+    // Clamped as floats first: a tiny scale makes the box far wider than i32.
+    let x0 = i32(clamp(floor(l), 0.0, sz.x));
+    let x1 = i32(clamp(ceil(r), 0.0, sz.x));
+    let y0 = i32(clamp(floor(top), 0.0, sz.y));
+    let y1 = i32(clamp(ceil(bot), 0.0, sz.y));
+    var acc = vec4<f32>(0.0);
+    for (var j = y0; j < y1; j = j + 1) {
+        let cy = min(bot, f32(j + 1)) - max(top, f32(j));
+        var row = vec4<f32>(0.0);
+        for (var i = x0; i < x1; i = i + 1) {
+            let cx = min(r, f32(i + 1)) - max(l, f32(i));
+            row = row + textureLoad(t, vec2<i32>(i, j), 0) * cx;
+        }
+        acc = acc + row * cy;
+    }
+    return acc / (4.0 * hx * hy);
+}
+
 // raster::hash_noise.
 fn hash_noise(x: u32, y: u32, seed: u32) -> f32 {
     var h = (x * 0x8da6b343u) ^ (y * 0xd8163841u) ^ (seed * 0xcb1ab31fu);
