@@ -106,7 +106,9 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
             Item::Setting { key, label, kind, live } => {
                 let v = get(key);
                 let id = format!("settings.{key}");
-                let tip = (!live).then(|| tr("Stored, but not used by EffectCraft yet"));
+                let tip = (!live)
+                    .then(|| tr("Stored, but not used by EffectCraft yet"))
+                    .or_else(|| (key == "disk.networkFootageLocations").then(|| tr(LOCATIONS_HINT)));
                 let mut resp: Option<egui::Response> = None;
                 // What the control is set to, for assistive technology.
                 let mut value_text = String::new();
@@ -184,7 +186,11 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 }
                                 Kind::Text | Kind::Path => {
                                     let mut s = v.as_str().unwrap_or("").to_string();
-                                    let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(if kind == Kind::Path { 230.0 } else { 260.0 }));
+                                    let mut edit = egui::TextEdit::singleline(&mut s).desired_width(if kind == Kind::Path { 230.0 } else { 260.0 });
+                                    if key == "disk.networkFootageLocations" {
+                                        edit = edit.hint_text(tr(LOCATIONS_HINT));
+                                    }
+                                    let r = ui.add(edit);
                                     value_text = s.clone();
                                     if r.changed() {
                                         acts.push(Act::Set(key.into(), json!(s)));
@@ -248,11 +254,24 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
     }
 }
 
+/// The hint of Network Footage Locations: what the field takes.
+const LOCATIONS_HINT: &str = "Folders or drives, separated by ;";
+
+/// How soon to draw the localizer's status again: while it has files to copy, every half
+/// second; idle, not at all.
+pub(crate) fn localize_repaint(s: &effectcraft_engine::render::LocalizeReport) -> Option<std::time::Duration> {
+    (s.queued > 0 || s.copying.is_some()).then(|| std::time::Duration::from_millis(500))
+}
+
 /// Settings ▸ Disk, under Localize Network Footage (#3271): the local copies, what is queued and
 /// being copied, and which locations count as network. Automation id
 /// `settings.disk.localizeStatus`, labelled `files=… bytes=… queued=… skipped=…`.
 fn localize_status_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, s: &effectcraft_engine::render::LocalizeReport) {
     const GB: f64 = (1u64 << 30) as f64;
+    // (the status changes on its own while files are copied: drawn again until it is idle)
+    if let Some(after) = localize_repaint(s) {
+        ui.ctx().request_repaint_after(after);
+    }
     let mut lines = vec![tr_args(
         "Local copies: {} files, {} of {} GB; {} queued, {} skipped",
         &[&s.files, &format!("{:.1}", s.bytes as f64 / GB), &format!("{:.1}", s.max_bytes as f64 / GB), &s.queued, &s.skipped],
@@ -1361,5 +1380,15 @@ mod tests {
         assert!(shown(&mut app).is_none());
         drop(dc);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271 review: the localizer's status is drawn again while files are queued or copied,
+    /// and not while it is idle.
+    #[test]
+    fn the_localizer_status_repaints_only_while_busy() {
+        use effectcraft_engine::render::LocalizeReport;
+        assert_eq!(super::localize_repaint(&LocalizeReport::default()), None, "idle");
+        assert!(super::localize_repaint(&LocalizeReport { queued: 2, ..Default::default() }).is_some(), "queued");
+        assert!(super::localize_repaint(&LocalizeReport { copying: Some("x.exr".into()), ..Default::default() }).is_some(), "copying");
     }
 }
