@@ -968,6 +968,39 @@ fn convert_to_bezier_leaves_a_locked_layers_masks_alone() {
     assert!(roto(&s, a) && roto(&s, b), "neither mask converts");
 }
 
+/// #3057 review: an explicit `comp` that is not the active composition is where `items` and
+/// `mask` are looked up and converted.
+#[test]
+fn convert_to_bezier_in_a_composition_that_is_not_active() {
+    let mut s = comp();
+    let main = s.active_comp_id().unwrap();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (rect, _) = first_shape(&s, l);
+    let (solid, m) = masked(&mut s);
+    s.state.selected_props.clear();
+    s.state.selected_vertices.clear();
+    s.execute("path.rotoBezier", json!({"layer": solid, "value": true})).unwrap();
+    s.execute("comp.new", json!({"name": "Other", "width": 400, "height": 300, "frameRate": 30, "duration": 4})).unwrap();
+    assert_ne!(s.active_comp_id(), Some(main), "another composition is active");
+    let in_main = |s: &Session| s.project.comp(main).unwrap().clone();
+    let main_mask_roto = |s: &Session| {
+        let c = in_main(s);
+        matches!(c.layer(LayerId(solid)).unwrap().masks().unwrap().find_group(m).unwrap().kind, GroupKind::Mask { roto_bezier: true, .. })
+    };
+
+    // Explicit shape items.
+    let out = s.execute("path.convertToBezier", json!({"comp": main.0, "layer": l, "items": [rect]})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    let c = in_main(&s);
+    let contents = c.layer(LayerId(l)).unwrap().props.sub("contents").unwrap();
+    assert!(contents.find_group(rect).is_none(), "the rectangle is replaced in that composition");
+
+    // An explicit mask.
+    assert!(main_mask_roto(&s));
+    s.execute("path.convertToBezier", json!({"comp": main.0, "layer": solid, "mask": m})).unwrap();
+    assert!(!main_mask_roto(&s), "the mask converts in that composition");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {

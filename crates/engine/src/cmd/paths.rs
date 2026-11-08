@@ -9,7 +9,7 @@ use effectcraft_render::EvalCtx;
 use serde_json::{Value, json};
 
 use super::layer_menu::target_masks;
-use super::{CommandSpec, b_p, bad, f_p, has_comp, has_layers, layer_mut, layer_p, layers_p, merge_p, str_p, unlocked};
+use super::{CommandSpec, b_p, bad, comp_id, f_p, has_comp, has_layers, layer_mut, layer_p, layers_p, merge_p, str_p, unlocked};
 use crate::{EngineError, Result, Session, VertexRef, cmd};
 
 // ---------------------------------------------------------------- RotoBezier
@@ -177,10 +177,14 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     const LABEL: &str = "Convert To Bezier Path";
     // An explicit `mask` is what converts: selected shape items (or `items`) don't take its place,
     // and a `mask` that matches nothing is reported below rather than converting a shape.
-    let (cid, mut items) = if p.get("mask").is_some() {
-        (s.active_comp_id().ok_or(EngineError::NoComp)?, Vec::new())
+    // The composition is the one `comp` names (else the active one), as the mask and layer
+    // resolvers use; a selection made in another composition doesn't apply to it.
+    let cid = comp_id(s, p)?;
+    let mut items = if p.get("mask").is_some() {
+        Vec::new()
     } else {
-        selected_shape_items(s, p, "path.convertToBezier")?
+        let (items_cid, items) = selected_shape_items(s, p, "path.convertToBezier")?;
+        if items_cid == cid { items } else { Vec::new() }
     };
     // An explicit `layer` / `layers` limits the selected shape items to those layers.
     let explicit_layers = p.get("layer").is_some_and(|v| !v.is_null()) || p.get("layers").is_some();
@@ -574,24 +578,25 @@ const SHAPE_ITEMS: &[&str] = &[
     "wiggle", "wiggler", "merge", "front", "bevel", "side", "back",
 ];
 
-/// Selected shape items (contents entries) of shape layers: (layer, uid).
+/// Selected shape items (contents entries) of shape layers: (layer, uid), with their composition.
+/// Explicit `items` are on the layer `layer_p` resolves, in the composition it resolves (`comp`,
+/// else the active one); selected items are the active composition's.
 fn selected_shape_items(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, Vec<(LayerId, Uid)>)> {
+    if let Some(Value::Array(a)) = p.get("items") {
+        let (cid, lid) = layer_p(s, p, cmd)?;
+        return Ok((cid, a.iter().filter_map(Value::as_u64).map(|u| (lid, u)).collect()));
+    }
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let mut out = vec![];
-    if let Some(Value::Array(a)) = p.get("items") {
-        let (_, lid) = layer_p(s, p, cmd)?;
-        out.extend(a.iter().filter_map(Value::as_u64).map(|u| (lid, u)));
-    } else {
-        for (lid, uid) in &s.state.selected_props {
-            let Some(l) = comp.layer(*lid).filter(|l| matches!(l.source, LayerSource::Shape)) else { continue };
-            if l.props
-                .sub("contents")
-                .and_then(|c| c.find_group(*uid))
-                .is_some_and(|g| g.uid != l.props.sub("contents").map(|c| c.uid).unwrap_or(0) && SHAPE_ITEMS.contains(&g.match_id.as_str()))
-            {
-                out.push((*lid, *uid));
-            }
+    for (lid, uid) in &s.state.selected_props {
+        let Some(l) = comp.layer(*lid).filter(|l| matches!(l.source, LayerSource::Shape)) else { continue };
+        if l.props
+            .sub("contents")
+            .and_then(|c| c.find_group(*uid))
+            .is_some_and(|g| g.uid != l.props.sub("contents").map(|c| c.uid).unwrap_or(0) && SHAPE_ITEMS.contains(&g.match_id.as_str()))
+        {
+            out.push((*lid, *uid));
         }
     }
     Ok((cid, out))
