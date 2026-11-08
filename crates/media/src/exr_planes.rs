@@ -152,15 +152,27 @@ pub(crate) enum Refused {
 struct Flight {
     state: Mutex<FlightState>,
     ready: Condvar,
-    /// The decode began: on the decode threads, or claimed by a decode thread that asked for the
-    /// same planes before the queued decode began ([`Flight::claim`]).
-    started: std::sync::atomic::AtomicBool,
-    /// A decode thread claimed it: the outcome comes through `handed`, not the queued job.
-    claimed: std::sync::atomic::AtomicBool,
+    /// [`QUEUED`], [`RUNNING`] (the decode began where it was asked for) or [`CLAIMED`] (a
+    /// decode thread took it over before it began, [`Flight::claim`]: the outcome comes through
+    /// `handed`).
+    phase: std::sync::atomic::AtomicU8,
     handed: Mutex<Option<Result<Arc<Batch>, Refused>>>,
     handed_ready: Condvar,
     /// What the store held when the decode was asked for (the decode adds to it).
     base: Option<Arc<Batch>>,
+    /// The disk cache's drop generation before the file was opened for this request (#3191: a
+    /// plane entry made of a file reloaded since is refused).
+    since: u64,
+}
+
+/// [`Flight::phase`] values.
+const QUEUED: u8 = 0;
+const RUNNING: u8 = 1;
+const CLAIMED: u8 = 2;
+
+/// The disk cache's drop generation now (0 without one): taken before a file is opened.
+fn drop_generation() -> u64 {
+    disk_cache().map_or(0, |d| d.drop_generation())
 }
 
 struct FlightState {
@@ -173,31 +185,36 @@ struct FlightState {
 
 impl Flight {
     fn new(index: Arc<ExrIndex>, want: Want) -> Arc<Flight> {
-        Flight::with_base(index, want, None)
+        Flight::with_base(index, want, None, drop_generation())
     }
 
-    fn with_base(index: Arc<ExrIndex>, want: Want, base: Option<Arc<Batch>>) -> Arc<Flight> {
+    fn with_base(index: Arc<ExrIndex>, want: Want, base: Option<Arc<Batch>>, since: u64) -> Arc<Flight> {
         Arc::new(Flight {
             state: Mutex::new(FlightState { index, want, sealed: false, outcome: None }),
             ready: Condvar::new(),
-            started: std::sync::atomic::AtomicBool::new(false),
-            claimed: std::sync::atomic::AtomicBool::new(false),
+            phase: std::sync::atomic::AtomicU8::new(QUEUED),
             handed: Mutex::new(None),
             handed_ready: Condvar::new(),
             base,
+            since,
         })
+    }
+
+    /// Move the flight from [`QUEUED`] to `to`; `false` when it left that phase already.
+    fn take(&self, to: u8) -> bool {
+        use std::sync::atomic::Ordering;
+        self.phase.compare_exchange(QUEUED, to, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
     /// Take over the decode while it is still queued (a decode thread asking for the planes
     /// it would wait for: waiting there could starve the queue it waits on). `false` once it
     /// began.
     fn claim(&self) -> bool {
-        use std::sync::atomic::Ordering;
-        let won = self.started.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok();
-        if won {
-            self.claimed.store(true, Ordering::SeqCst);
-        }
-        won
+        self.take(CLAIMED)
+    }
+
+    fn claimed(&self) -> bool {
+        self.phase.load(std::sync::atomic::Ordering::SeqCst) == CLAIMED
     }
 
     /// Hand the claimed decode's outcome to the request that queued it.
@@ -337,6 +354,10 @@ pub(crate) struct DecodeRecord {
 #[cfg(test)]
 static DECODES: Mutex<Vec<(String, DecodeRecord)>> = Mutex::new(Vec::new());
 
+/// Paths whose queued decode a decode thread took over (tests).
+#[cfg(test)]
+pub(crate) static CLAIMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// The decodes of `path` so far (tests; paths are unique per test).
 #[cfg(test)]
 pub(crate) fn decodes_of(path: &str) -> Vec<DecodeRecord> {
@@ -394,12 +415,14 @@ impl PlaneStore {
     /// file it was read from is noted ([`crate::reads`]). A request that keeps finding the
     /// decodes it waits for called off decodes a copy itself.
     pub(crate) fn get(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use) -> Result<Arc<Batch>, Refused> {
-        self.get_opened(path, source, index, want, by, None)
+        self.get_opened(path, source, index, want, by, None, drop_generation())
     }
 
     /// [`PlaneStore::get`] with the file already open (`opened`, as indexing it opened it): a
     /// decode reads from it instead of opening the file again, so a new frame opens its file
-    /// once (#3271). Dropped unused when the store serves the request.
+    /// once (#3271). Dropped unused when the store serves the request. `since`: the disk cache's
+    /// drop generation before the file was opened ([`drop_generation`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_opened(
         &self,
         path: &str,
@@ -408,10 +431,11 @@ impl PlaneStore {
         want: &Want,
         by: Use,
         mut opened: Option<Opened>,
+        since: u64,
     ) -> Result<Arc<Batch>, Refused> {
         let mut retries = 0;
         for _ in 0..ROUNDS {
-            match self.step(path, source, index, want, by, &mut opened) {
+            match self.step(path, source, index, want, by, &mut opened, since) {
                 Step::Done(r) => return r,
                 Step::Again { retry: true } if retries >= RETRIES => break,
                 Step::Again { retry } => retries += u32::from(retry),
@@ -421,7 +445,8 @@ impl PlaneStore {
     }
 
     /// One round of [`PlaneStore::get`].
-    fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use, opened: &mut Option<Opened>) -> Step {
+    #[allow(clippy::too_many_arguments)]
+    fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use, opened: &mut Option<Opened>, since: u64) -> Step {
         let level = 0;
         let mut st = self.lock();
         st.clock += 1;
@@ -474,7 +499,7 @@ impl PlaneStore {
         }
         // This request decodes: what it asks for, minus what the store holds.
         let base = e.batch.clone().filter(|b| Arc::ptr_eq(&b.index, index));
-        let flight = Flight::with_base(index.clone(), want.clone(), base.clone());
+        let flight = Flight::with_base(index.clone(), want.clone(), base.clone(), since);
         e.flight = Some(flight.clone());
         drop(st);
         #[cfg(test)]
@@ -696,6 +721,8 @@ impl Drop for Handing<'_> {
 /// Decode a flight claimed by this thread (see [`Flight::claim`]) here, hand the outcome to the
 /// request that queued it, and answer this request with it (or a copy when it doesn't cover it).
 fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
+    #[cfg(test)]
+    CLAIMS.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
     let mut handing = Handing { flight, outcome: None };
     let outcome = decode(path, source, flight, flight.base.clone(), None);
     handing.outcome = Some(outcome.clone());
@@ -722,20 +749,20 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
         let hints = filmcraft_media::cancel::Context::current();
         threads.spawn(move || {
             // (claimed meanwhile by a decode thread: it decodes, and hands the outcome over)
-            if !queued.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if queued.take(RUNNING) {
                 let _ = tx.send(hints.run(|| decode(&path, &source, &queued, base, opened)));
             }
         });
         // A plain block: this thread runs nothing else meanwhile.
         return match rx.recv() {
             Ok(outcome) => outcome,
-            Err(_) if flight.claimed.load(std::sync::atomic::Ordering::SeqCst) => flight.take_handed(),
+            Err(_) if flight.claimed() => flight.take_handed(),
             // (a decode that panicked sent nothing)
             Err(_) => Err(Refused::Stopped),
         };
     }
     // (claimed by a decode thread before this one began: it hands the outcome over)
-    if flight.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if !flight.take(RUNNING) {
         return flight.take_handed();
     }
     decode(path, source, flight, base, opened)
@@ -781,13 +808,13 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
     // The disk tier first (#3271): what an earlier session or a decode RAM let go of kept.
     let disk = disk_cache().filter(|_| !missing.is_empty() && unique(&names));
-    let since = disk.as_ref().map_or(0, |d| d.drop_generation());
+    let since = flight.since;
     let key = {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         effectcraft_render::disk_cache::plane_key(path, &opened.stamp, &refs, 0, None)
     };
     let (w, h) = index.size();
-    let kept = disk.as_ref().and_then(|d| d.get_planes(key, None)).map(|(p, _)| p).filter(|p| {
+    let kept = disk.as_ref().and_then(|d| d.get_planes(key, None, (w as u32, h as u32, names.len()))).map(|(p, _)| p).filter(|p| {
         (p.width as usize, p.height as usize) == (w, h)
             && p.planes.len() == names.len()
             && p.planes.iter().zip(&names).all(|((n, v), want)| n == want && v.len() == w * h)
@@ -939,6 +966,8 @@ pub(crate) enum Picture {
 pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option<&AuxNeed>) -> Picture {
     let mut extra = extra;
     for _ in 0..3 {
+        // (before the file is opened: see `Flight::since`)
+        let since = drop_generation();
         let (index, opened) = match index_of(path, source) {
             Ok(ix) => ix,
             Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
@@ -953,7 +982,7 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             }
         }
         let by = if extra.is_some() { Use::Picture } else { Use::Other };
-        let batch = match store().get_opened(path, source, &index, &want, by, opened) {
+        let batch = match store().get_opened(path, source, &index, &want, by, opened, since) {
             Ok(b) => b,
             Err(Refused::Changed) => continue,
             // The channels with it are too many: the picture alone (the effects ask for theirs).
@@ -1054,12 +1083,13 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
 /// store. `None` when it isn't a readable OpenEXR (or the request was called off).
 pub(crate) fn aux(path: &str, source: &ExrSource, need: &AuxNeed) -> Option<Arc<AuxChannels>> {
     for _ in 0..2 {
+        let since = drop_generation();
         let (index, opened) = index_of(path, source).ok()?;
         let want = match need_ids(&index, need) {
             Some(ids) => Want { all: false, ids },
             None => Want { all: true, ids: BTreeSet::new() },
         };
-        match store().get_opened(path, source, &index, &want, Use::Other, opened) {
+        match store().get_opened(path, source, &index, &want, Use::Other, opened, since) {
             Ok(b) => return Some(b.aux.clone()),
             Err(Refused::Changed) => continue,
             Err(_) => return None,

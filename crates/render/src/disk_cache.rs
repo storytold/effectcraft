@@ -58,6 +58,10 @@ const QUEUE_LIMIT: usize = 64;
 /// frames, so a fully cached comp came back with gaps in its blue bar.
 #[cfg(not(target_arch = "wasm32"))]
 const FRAME_QUEUE_BYTES: usize = 1 << 30;
+/// Pending layer and plane bytes (uncompressed: they are encoded on the writer thread, #3271)
+/// before new ones are dropped.
+#[cfg(not(target_arch = "wasm32"))]
+const JOB_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -379,8 +383,10 @@ struct Queue {
     frames: std::collections::VecDeque<Job>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     frame_bytes: usize,
-    /// Layer and matte writes.
+    /// Layer and matte writes, and the bytes they hold.
     jobs: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    job_bytes: usize,
     busy: bool,
     /// Keys of frames queued or being written.
     pending_frames: std::collections::HashSet<u128>,
@@ -435,7 +441,11 @@ impl Queue {
             }
             return Some(j);
         }
-        self.jobs.pop_front()
+        let j = self.jobs.pop_front()?;
+        if let Job::Write(_, _, _, p) = &j {
+            self.job_bytes = self.job_bytes.saturating_sub(p.held());
+        }
+        Some(j)
     }
     fn is_empty(&self) -> bool {
         self.frames.is_empty() && self.jobs.is_empty()
@@ -576,6 +586,7 @@ impl DiskCache {
                     frames: Default::default(),
                     frame_bytes: 0,
                     jobs: Default::default(),
+                    job_bytes: 0,
                     busy: cfg!(not(target_arch = "wasm32")),
                     pending_frames: Default::default(),
                     drops: Drops::default(),
@@ -917,7 +928,7 @@ impl DiskCache {
             }
             let full = match kind {
                 Kind::Frame => q.frame_bytes.saturating_add(payload.held()) > FRAME_QUEUE_BYTES,
-                _ => q.jobs.len() >= QUEUE_LIMIT,
+                _ => q.jobs.len() >= QUEUE_LIMIT || q.job_bytes.saturating_add(payload.held()) > JOB_QUEUE_BYTES,
             };
             if full {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -932,6 +943,7 @@ impl DiskCache {
                 q.frame_bytes = q.frame_bytes.saturating_add(payload.held());
                 q.frames.push_back(Job::Write(kind, key, format, payload));
             } else {
+                q.job_bytes = q.job_bytes.saturating_add(payload.held());
                 q.jobs.push_back(Job::Write(kind, key, format, payload));
             }
             cv.notify_all();
@@ -1238,8 +1250,10 @@ impl DiskCache {
 
     /// Decoded footage channels ([`plane_key`]) whose source file is unchanged, with that file,
     /// as [`DiskCache::get_checked`] (#3271). `virtual_id` names files served from memory.
-    pub fn get_planes(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(DiskPlanes, ReadFiles)> {
-        self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, virtual_id, decode_planes)
+    /// `expect`: the planes' width, height and count; an entry of another shape is a miss
+    /// (nothing larger is decompressed).
+    pub fn get_planes(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>, expect: (u32, u32, usize)) -> Option<(DiskPlanes, ReadFiles)> {
+        self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, virtual_id, |p| decode_planes(p, expect))
     }
 
     /// Queue decoded footage channels for writing: the planes of `aux` named `names` (in that
@@ -1469,7 +1483,13 @@ impl crate::memory::MemoryHolder for DiskCache {
         while q.held_bytes() > bytes {
             // Layer and plane writes first (newest first), then frames.
             let job = match q.jobs.iter().rposition(|j| matches!(j, Job::Write(..))) {
-                Some(i) => q.jobs.remove(i),
+                Some(i) => {
+                    let j = q.jobs.remove(i);
+                    if let Some(Job::Write(_, _, _, p)) = &j {
+                        q.job_bytes = q.job_bytes.saturating_sub(p.held());
+                    }
+                    j
+                }
                 None => match q.frames.pop_back() {
                     Some(j) => {
                         if let Job::Write(_, key, _, p) = &j {
@@ -1625,9 +1645,12 @@ fn encode_planes(aux: &effectcraft_raster::AuxChannels, names: &[String]) -> Vec
 }
 
 /// The planes of a plane entry's pixels ([`encode_planes`]); `None` when damaged.
-fn decode_planes(p: &[u8]) -> Option<DiskPlanes> {
+fn decode_planes(p: &[u8], expect: (u32, u32, usize)) -> Option<DiskPlanes> {
     let u32_at = |at: usize| Some(u32::from_le_bytes(p.get(at..at + 4)?.try_into().ok()?));
     let (w, h, count) = (u32_at(0)?, u32_at(4)?, u32_at(8)? as usize);
+    if (w, h, count) != expect {
+        return None;
+    }
     let n = (w as usize).checked_mul(h as usize).filter(|n| *n <= MAX_ENTRY_PIXELS)?;
     if count > MAX_ENTRY_PLANES {
         return None;

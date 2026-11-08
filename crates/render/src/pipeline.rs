@@ -969,7 +969,16 @@ impl<'a> Renderer<'a> {
         if !lo.is_finite() || !hi.is_finite() {
             return None;
         }
-        let margin = 2.0 + (2.0 / self.opts.scale.max(1e-3)).ceil() + fx_margin.ceil();
+        // The warp samples its source with point taps (bilinear, bicubic: ±2 source pixels), so
+        // the rows reach 2 buffer pixels past the region's mapped centres (a reduced buffer's
+        // pixels are 1/scale footage rows), plus the region's rounding to output pixels: one
+        // output pixel is `k / scale` footage rows, `k` the footage rows per comp pixel.
+        let s = self.opts.scale.max(1e-3);
+        let k = [effectcraft_geom::vec3(1.0, 0.0, 0.0), effectcraft_geom::vec3(0.0, 1.0, 0.0)].iter().map(|v| inv.apply_vec(*v).length()).fold(1.0f64, f64::max);
+        if !k.is_finite() {
+            return None;
+        }
+        let margin = 2.0 + (2.0 / s).ceil() + (2.0 * k / s).ceil() + fx_margin.ceil();
         let h = i64::from(f.height);
         let (y0, y1) = (((lo - margin).floor() as i64).clamp(0, h), ((hi + margin).ceil() as i64).clamp(0, h));
         (y0 > 0 || y1 < h).then_some((y0, y1.max(y0)))
@@ -1152,9 +1161,6 @@ impl<'a> Renderer<'a> {
         mut timing: Option<&mut LayerTiming>,
     ) -> Option<(Arc<Buf>, Option<u64>, Arc<ReadFiles>)> {
         let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        // A footage layer read in part (a region of interest, #3271) isn't kept: its key names
-        // the whole layer.
-        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
         let key = self.content_key(ctx, layer, key);
         if let Some((b, files)) = self.cached(key) {
             if let Some(t) = timing.as_deref_mut() {
@@ -1162,6 +1168,9 @@ impl<'a> Renderer<'a> {
             }
             return Some((b, key, files));
         }
+        // A footage layer read in part (a region of interest, #3271) isn't kept: its key names
+        // the whole layer (a whole buffer kept before is used above).
+        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
         let (buf, files) = self.recorded(key, |r| {
             // (what expressions read while it is made, at shutter times too, goes to its files)
             let ctx = &r.with_reads(ctx);
