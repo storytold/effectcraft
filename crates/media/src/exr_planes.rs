@@ -261,9 +261,10 @@ struct Entry {
     path: String,
     batch: Option<Arc<Batch>>,
     flight: Option<Arc<Flight>>,
-    /// Requests that failed for good (unreadable, too large) and why: a request asking for at
+    /// Requests that failed for good (unreadable, too large), the index they were made with, and
+    /// why: a request of that index (the file as it was) asking for at
     /// least as much fails the same way until the file is forgotten.
-    failed: Vec<(Want, Refused)>,
+    failed: Vec<(Arc<ExrIndex>, Want, Refused)>,
     bytes: usize,
     /// When it was last asked for or finished decoding ([`effectcraft_render::memory::tick`]).
     used: u64,
@@ -504,7 +505,8 @@ impl PlaneStore {
             crate::reads::note(b.file.clone());
             return Step::Done(Ok(b));
         }
-        if let Some((_, why)) = e.failed.iter().find(|(failed, _)| asks_at_least(want, failed)) {
+        // (a failure of the file as it was before: the file changed since, it is read again)
+        if let Some((_, _, why)) = e.failed.iter().find(|(of, failed, _)| Arc::ptr_eq(of, index) && asks_at_least(want, failed)) {
             return Step::Done(Err(why.clone()));
         }
         if let Some(flight) = e.flight.clone() {
@@ -641,11 +643,16 @@ impl PlaneStore {
                 e.batch = Some(b.clone());
             }
             Err(why @ (Refused::Unreadable | Refused::TooLarge(_))) => {
-                let want = flight.state().want.clone();
+                let (index, want) = {
+                    let fs = flight.state();
+                    (fs.index.clone(), fs.want.clone())
+                };
+                // (failures of another version of the file no longer apply)
+                e.failed.retain(|(of, _, _)| Arc::ptr_eq(of, &index));
                 if e.failed.len() >= FAILED_KEPT {
                     e.failed.remove(0);
                 }
-                e.failed.push((want, why.clone()));
+                e.failed.push((index, want, why.clone()));
             }
             // (the file changed: what is held is of the old one)
             Err(Refused::Changed) => {

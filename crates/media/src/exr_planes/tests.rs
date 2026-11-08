@@ -1382,3 +1382,26 @@ fn the_picture_planes_are_not_kept_beside_the_picture() {
     assert!(shared().kept(path).is_none());
     forget(path);
 }
+
+/// #3271 review (#3301): a remembered failure belongs to the file as it was. A file that was
+/// unreadable and is then replaced on disk (no Reload Footage: the new index comes from its new
+/// stamp) is read again, not refused with the old file's failure.
+#[test]
+fn a_failure_is_forgotten_once_the_file_changes() {
+    let good: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let mut broken = good.to_vec();
+    broken.truncate(broken.len() - 64);
+    let path = "/3271-failed-then-fixed.exr";
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let all = Want { all: true, ids: (0..4).collect() };
+    let source = ExrSource::Bytes(broken.into());
+    let old = crate::exr_index::get(path, &source).unwrap();
+    assert!(store.get(path, &source, &old, &all, Use::Other).is_err());
+    assert!(store.get(path, &source, &old, &all, Use::Other).is_err(), "remembered for the same file");
+    // The file is replaced: another index (here read under another name, as the file's new stamp
+    // would give it).
+    let source = ExrSource::Bytes(good);
+    let new = crate::exr_index::get("/3271-failed-then-fixed-new.exr", &source).unwrap();
+    assert!(!Arc::ptr_eq(&old, &new));
+    assert!(store.get(path, &source, &new, &all, Use::Other).is_ok(), "the new file is read");
+}
