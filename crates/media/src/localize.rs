@@ -504,6 +504,8 @@ mod tests {
     #[test]
     fn a_file_being_copied_is_not_queued_again() {
         let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        // (dropped before `_serial`, also when an assertion fails)
+        let _hook = HookGuard;
         let root = std::env::temp_dir().join(format!("ec-3271-localize-dup-{}", std::process::id()));
         let (share, local) = (root.join("share"), root.join("local"));
         std::fs::create_dir_all(&share).unwrap();
@@ -542,8 +544,17 @@ mod tests {
         let s = wait_for(|s| s.files == 2 && s.queued == 0 && s.copying.is_none());
         assert_eq!(s.files, 2, "{s:?}");
         assert_eq!(copies_now(), 3);
-        *BEFORE_COPY.lock().unwrap() = None;
-        configure(None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Takes the copy hook out and turns the localizer off when dropped (also when the test
+    /// fails), so the next test doesn't inherit a hook that holds its copies.
+    struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            *BEFORE_COPY.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            configure(None);
+        }
     }
 }
