@@ -22,6 +22,7 @@ mod nested;
 mod paint;
 mod remap;
 mod roi;
+mod stretch_limits;
 mod styles;
 mod time;
 

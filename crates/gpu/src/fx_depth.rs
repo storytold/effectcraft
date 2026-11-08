@@ -292,19 +292,14 @@ fn extractor(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: Option<&AuxChannels>) -> 
     let names = [pr.s("red"), pr.s("green"), pr.s("blue"), pr.s("alpha")];
     let (bp, wp) = (pr.f("blackPoint") as f32, pr.f("whitePoint") as f32);
     let unmult = pr.b("unMult");
-    let own = |n: &str| match n.trim().to_ascii_uppercase().as_str() {
-        "R" | "RED" => Some(0u32),
-        "G" | "GREEN" => Some(1),
-        "B" | "BLUE" => Some(2),
-        "A" | "ALPHA" => Some(3),
-        _ => None,
-    };
-    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.and_then(|a| if n.trim().is_empty() { None } else { a.get(n.trim()) })).collect();
-    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(n) == Some(k as u32)) {
+    // `(copy)`: the input's own channel of the same position, never an aux channel.
+    let own = |k: usize, n: &str| effectcraft_effects::extractor_own_channel(k, n).and_then(|c| u32::try_from(c).ok());
+    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.and_then(|a| effectcraft_effects::extractor_aux_channel(a, n))).collect();
+    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(k, n) == Some(k as u32)) {
         return Some(b);
     }
     // Per output channel: 0..3 = the layer's own channel, 4 = aux, 5 = default (0, alpha 1).
-    let sources: [u32; 4] = std::array::from_fn(|k| if src_ch[k].is_some() { 4 } else { own(names[k]).unwrap_or(5) });
+    let sources: [u32; 4] = std::array::from_fn(|k| if src_ch[k].is_some() { 4 } else { own(k, names[k]).unwrap_or(5) });
     let plane = match a {
         Some(a) if src_ch.iter().any(Option::is_some) => {
             let tex = aux_texture(e, a, [src_ch[0], src_ch[1], src_ch[2], src_ch[3]])?;
