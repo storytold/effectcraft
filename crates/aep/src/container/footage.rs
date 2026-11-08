@@ -1,7 +1,7 @@
 //! Item ids and labels, footage items (solids and files), precomp linkage, and the name and size
 //! of a layer's source.
 
-use crate::container::bytes::{be_f32, be_f64, be_u32, cstr, le_u32, text};
+use crate::container::bytes::{be_f32, be_f64, be_i32, be_u32, cstr, le_u32, text, until_nul};
 use crate::container::chunk::Chunk;
 use crate::container::header::Rational;
 use crate::container::typed::{Item, ItemKind, Layer, Project};
@@ -337,6 +337,48 @@ impl<'f, 'a> Item<'f, 'a> {
     /// `opti`.
     pub fn display_name(&self) -> Option<String> {
         self.name().or_else(|| self.footage().and_then(|f| f.name))
+    }
+
+    /// The Photoshop layer a footage item shows (a `.psd` imported as a composition, or one layer
+    /// chosen), from its `opti` (tag `8BPS`): the layer record index as a big-endian `i32` at
+    /// byte 14 (-1, `ffffffff`, for the merged image: 651), the layer bounds top, left, bottom,
+    /// right as little-endian `i32` at 78, 82, 86, 90, and the layer name (UTF-8, NUL terminated) at 344 (the #3087
+    /// repro: ten layers, every index the record's position in the file, bottom first). `None` for
+    /// the merged image and for any other footage.
+    pub(crate) fn psd_layer(&self) -> Option<PsdLayer> {
+        if self.kind()? != ItemKind::Footage {
+            return None;
+        }
+        let opti = self.chunk.child_list(b"Pin ")?.child(b"opti")?.bytes()?;
+        if opti.get(..4) != Some(&b"8BPS"[..]) {
+            return None;
+        }
+        let index = u32::try_from(be_i32(opti, 14)?).ok()?;
+        let at = |i: usize| le_u32(opti, i).map(|v| i32::from_le_bytes(v.to_le_bytes()));
+        // The name as UTF-8 (a file's own bytes; anything else is replaced, never dropped).
+        let name = opti.get(344..opti.len().min(600)).map(|b| text(until_nul(b))).unwrap_or_default();
+        Some(PsdLayer { index, name, bounds: [at(78)?, at(82)?, at(86)?, at(90)?] })
+    }
+}
+
+/// One layer of a Photoshop file shown by a footage item ([`Item::psd_layer`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PsdLayer {
+    /// The layer record's position in the file (bottom of the stack = 0).
+    pub index: u32,
+    pub name: String,
+    /// Top, left, bottom, right in document pixels (all 0 for a layer without pixels, such as
+    /// an adjustment layer).
+    pub bounds: [i32; 4],
+}
+
+impl PsdLayer {
+    /// The bounds' width and height, `None` when they are empty.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        let [top, left, bottom, right] = self.bounds;
+        let w = u32::try_from(i64::from(right) - i64::from(left)).ok().filter(|w| *w > 0)?;
+        let h = u32::try_from(i64::from(bottom) - i64::from(top)).ok().filter(|h| *h > 0)?;
+        Some((w, h))
     }
 }
 

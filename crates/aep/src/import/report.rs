@@ -269,6 +269,9 @@ pub(crate) struct Collector {
     losses: BTreeMap<LossCategory, Loss>,
     pub missing_footage: Vec<String>,
     pub missing_fonts: Vec<String>,
+    /// What the placeholder effects of this import hold so far (properties and popup items),
+    /// bounded by `placeholder::BUDGET`.
+    pub placeholder_cost: usize,
 }
 
 impl Collector {

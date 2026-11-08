@@ -284,19 +284,34 @@ impl Psd {
     /// One layer's pixels with its layer mask (and vector-less fill colour) applied to alpha.
     /// `canvas`: document-sized with the layer in place; otherwise the layer's own bounds.
     pub fn layer_pixels(&self, index: usize, canvas: bool) -> Result<Pixels> {
-        self.layer_pixels_with_budget(index, canvas, DECODE_BUDGET)
+        self.layer_pixels_opts(index, canvas, false)
+    }
+
+    /// [`Self::layer_pixels`]; with `adjustment_white` an adjustment layer (which has no pixels)
+    /// covers the canvas (or its mask) in opaque white instead of nothing: where its effect
+    /// applies when an After Effects project shows the layer as footage (#3087; what After
+    /// Effects itself draws for that footage is not sampled).
+    pub fn layer_pixels_opts(&self, index: usize, canvas: bool, adjustment_white: bool) -> Result<Pixels> {
+        self.layer_pixels_inner(index, canvas, DECODE_BUDGET, adjustment_white)
     }
 
     /// [`Self::layer_pixels`] with at most `limit` bytes live at once: the result (16 bytes a
     /// pixel) with the channels written straight into it, the CMYK black channel, the one channel
     /// being decoded, and the mask.
+    #[cfg(test)]
     pub(crate) fn layer_pixels_with_budget(&self, index: usize, canvas: bool, limit: u64) -> Result<Pixels> {
+        self.layer_pixels_inner(index, canvas, limit, false)
+    }
+
+    fn layer_pixels_inner(&self, index: usize, canvas: bool, limit: u64, adjustment_white: bool) -> Result<Pixels> {
         let mut budget = Budget::new(limit);
         let l = self.layers.get(index).ok_or_else(|| Error::Invalid(format!("no layer {index}")))?;
         let doc = Rect { top: 0, left: 0, bottom: self.height as i32, right: self.width as i32 };
-        // Fill layers often have no pixel data: they cover the canvas (or the mask).
+        // Fill layers often have no pixel data: they cover the canvas (or the mask). So does an
+        // adjustment layer when asked, in opaque white.
+        let solid = l.fill.or_else(|| l.adjustment.as_ref().filter(|_| adjustment_white).map(|_| [1.0; 3]));
         let fill_rect =
-            if l.fill.is_some() && !l.has_pixels() { l.mask.filter(|m| !m.rect.is_empty() && m.default_color == 0).map_or(doc, |m| m.rect) } else { l.rect };
+            if solid.is_some() && !l.has_pixels() { l.mask.filter(|m| !m.rect.is_empty() && m.default_color == 0).map_or(doc, |m| m.rect) } else { l.rect };
         let out_rect = if canvas {
             doc
         } else if fill_rect.is_empty() {
@@ -336,7 +351,7 @@ impl Psd {
             let (ys, oy) = span(src.top, sh, out_rect.top, oh);
             let (xs, ox) = span(src.left, sw, out_rect.left, ow);
             let dest = |y: usize, x: usize| (y as i64 - oy) as usize * ow + (x as i64 - ox) as usize;
-            let fill = l.fill.map(|c| c.map(|v| v as f32));
+            let fill = solid.map(|c| c.map(|v| v as f32));
             match fill {
                 Some(f) if !l.has_pixels() => {
                     for y in ys {

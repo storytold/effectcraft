@@ -12,7 +12,8 @@ use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{
-    AutoOrient, Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerId, LayerSource, LightKind, MatteKind, Project, Quality, Solid, TrackMatte,
+    AutoOrient, Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerId, LayerSource, LightKind, MatteKind, Project, Quality, Solid, SourceLayer,
+    TrackMatte,
 };
 use effectcraft_time::Tick;
 
@@ -217,6 +218,13 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     // An item without a stored name shows its file's name, a sequence `shot_[0101-0103].exr`
     // (126, 603-607).
     let name = if name.is_empty() { default_footage_name(item, &f).unwrap_or_else(|| "Footage".to_string()) } else { name };
+    // One layer of a Photoshop file shows that layer, named `<layer>/<file>` as After Effects and
+    // EffectCraft's own Photoshop import name it (#3087).
+    let psd = item.psd_layer();
+    let name = match &psd {
+        Some(l) if !l.name.is_empty() && item.name().is_none() => format!("{}/{name}", l.name),
+        _ => name,
+    };
     if f.is_solid {
         // A null object's placeholder solid is not an item here.
         if aep_id.is_some_and(|i| null_only.contains(&i)) {
@@ -296,6 +304,15 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         has_audio: kind == FootageKind::Audio || (kind == FootageKind::Video && f.audio_sample_rate.is_some()),
         missing: !present,
         sequence,
+        // Retain Layer Sizes: the item is as big as the layer's bounds (else the document). An
+        // adjustment layer shows white where it applies (not sampled in After Effects).
+        layer: psd.map(|l| SourceLayer {
+            index: l.index,
+            layer_size: l.size() == Some((f.width, f.height)),
+            name: l.name,
+            adjustment_white: true,
+            ..SourceLayer::default()
+        }),
         ..Footage::default()
     };
     // The native frame rate and the stored duration of sequences and clips (352, 603, 606).

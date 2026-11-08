@@ -219,15 +219,26 @@ pub(crate) fn import_transform(
         }
         import_expression(&node, prop, col);
     }
-    if let Some(PropNode::Other(_)) = group.get("ADBE Orientation") {
+    if let Some(PropNode::Other(otst)) = group.get("ADBE Orientation") {
         match (layer.orientation(), target.get_mut("orientation")) {
-            (Some(o), Some(prop)) if !o.animated && !o.has_expression && sane(&Value::Vec3(o.degrees)) => prop.value = Value::Vec3(o.degrees),
+            // The value or the keys, then the expression: it is stored in the `tdbs` of the `otst`
+            // as on any property, and evaluates in degrees `[x, y, z]` as EffectCraft's does.
+            (Some(o), Some(prop)) if o.animated || sane(&Value::Vec3(o.degrees)) => {
+                if o.animated {
+                    import_orientation_keys(layer, layer_name, tm, prop, col);
+                } else {
+                    prop.value = Value::Vec3(o.degrees);
+                }
+                if let Some(node) = otst.child_list(b"tdbs").and_then(AepProp::from_chunk) {
+                    import_expression(&node, prop, col);
+                    // Text without readable flags is not taken as an expression; nor dropped silently.
+                    if prop.expr.is_none() && node.expression().is_some() {
+                        col.lose(LossCategory::DamagedData, format!("{layer_name}: ADBE Orientation expression flags unreadable, not imported"));
+                    }
+                }
+            }
             // A layer without an orientation (an ambient light) loses nothing with the default.
             (Some(o), None) if !o.animated && !o.has_expression && o.degrees == [0.0; 3] => {}
-            (Some(o), Some(prop)) if o.animated && !o.has_expression => import_orientation_keys(layer, layer_name, tm, prop, col),
-            (Some(o), Some(_)) if o.has_expression => {
-                col.lose(LossCategory::TransformProperties, format!("{layer_name}: ADBE Orientation expression (not decoded)"));
-            }
             _ => col.lose(LossCategory::TransformProperties, format!("{layer_name}: ADBE Orientation")),
         }
     }

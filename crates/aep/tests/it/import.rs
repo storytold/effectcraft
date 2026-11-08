@@ -16,6 +16,7 @@ mod effects_quickwins;
 mod effects_round2;
 mod effects_round3;
 mod fx_inject;
+mod issue_3087;
 mod markers;
 mod masks;
 mod mattes;

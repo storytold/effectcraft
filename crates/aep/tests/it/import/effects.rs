@@ -271,15 +271,13 @@ fn exposure_keyframes() {
 }
 
 #[test]
-fn unmapped_effects_stay_reported_by_match_name() {
-    // A dropdown is not in the table (a Layer Control is since 905).
-    {
-        let (name, matchname) = ("077-fx-dropdown-default.aep", "Pseudo/");
-        let report = analyze(&fixture!(name), &|_| false).unwrap();
-        assert_eq!(report.count(LossCategory::Effects), 1, "{name}");
-        assert_eq!(report.imported.effects, 0);
-        assert!(report.losses[0].details[0].contains(matchname), "{:?}", report.losses);
-    }
+fn a_dropdown_menu_control_arrives_as_effectcrafts() {
+    // A dropdown (`Pseudo/@@...`, one popup) is EffectCraft's Dropdown Menu Control since #3087;
+    // it was reported and dropped.
+    let name = "077-fx-dropdown-default.aep";
+    let report = analyze(&fixture!(name), &|_| false).unwrap();
+    assert_eq!(report.count(LossCategory::Effects), 0, "{name}: {:?}", report.losses);
+    assert_eq!(report.imported.effects, 1);
 }
 
 #[test]

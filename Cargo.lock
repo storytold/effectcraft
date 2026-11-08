@@ -1450,6 +1450,7 @@ version = "0.21.0"
 dependencies = [
  "effectcraft-color",
  "effectcraft-effects",
+ "effectcraft-expr",
  "effectcraft-keyframe",
  "effectcraft-project",
  "effectcraft-time",

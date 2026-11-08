@@ -105,24 +105,43 @@ fn import_aep_creates_the_project_items_and_is_undoable() {
     assert!(s.project.comp(cid).is_some());
 }
 
+/// `effectcraft-aep`'s committed `synthetic.aep` with its Glow renamed to an effect EffectCraft
+/// has no counterpart for (kept as a placeholder and reported, a loss), written to a temporary
+/// file: runs without the external corpus.
+fn unknown_effect_project() -> String {
+    const SYNTHETIC: &[u8] = include_bytes!("../../../aep/tests/fixtures/synthetic.aep");
+    let (from, to) = (b"ADBE Glo2\0", b"XYZQ Glo2\0");
+    let mut bytes = SYNTHETIC.to_vec();
+    let mut i = 0;
+    while let Some(at) = bytes.get(i..).and_then(|b| b.windows(from.len()).position(|w| w == from)) {
+        bytes[i + at..i + at + to.len()].copy_from_slice(to);
+        i += at + to.len();
+    }
+    let dir = std::env::temp_dir().join(format!("effectcraft-aep-unknown-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("unknown-effect.aep");
+    std::fs::write(&path, bytes).unwrap();
+    path.to_string_lossy().to_string()
+}
+
 #[test]
 fn losses_are_refused_unless_allowed() {
     let mut s = Session::default();
-    let path = fixture!("077-fx-dropdown-default.aep");
+    let path = unknown_effect_project();
     let err = s.execute_checked("file.importAep", json!({"path": path})).unwrap_err().to_string();
-    assert!(err.contains("effects: 1") && err.contains("allowLosses"), "{err}");
+    assert!(err.contains("effects: ") && err.contains("allowLosses"), "{err}");
     assert!(s.project.items.is_empty());
     assert!(s.history.undo.is_empty());
 
     // A dry run reports without importing.
     let r = s.execute_checked("file.importAep", json!({"path": path, "dryRun": true})).unwrap();
     assert_eq!(r["dryRun"], true);
-    assert_eq!(r["report"]["losses"][0]["category"], "effects");
-    assert_eq!(r["report"]["losses"][0]["count"], 1);
+    let effects = r["report"]["losses"].as_array().unwrap().iter().find(|l| l["category"] == "effects").expect("an effects loss").clone();
+    assert!(effects["details"].as_array().unwrap().iter().any(|d| d.as_str().unwrap().contains("(XYZQ Glo2), kept as a placeholder")), "{effects}");
     assert!(s.project.items.is_empty());
 
     let r = s.execute_checked("file.importAep", json!({"path": path, "allowLosses": true})).unwrap();
-    assert_eq!(r["report"]["losses"][0]["category"], "effects");
+    assert!(r["report"]["losses"].as_array().unwrap().iter().any(|l| l["category"] == "effects"));
     assert!(!s.project.items.is_empty());
     s.execute("edit.undo", json!({})).unwrap();
     assert!(s.project.items.is_empty());

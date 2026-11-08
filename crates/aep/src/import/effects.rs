@@ -1,7 +1,8 @@
 //! Effects: a table maps an After Effects effect (its match name) and its parameters (by their
-//! index in `parT`) to an EffectCraft effect, a parameter id and a unit conversion. Effects and
-//! parameters outside the table are reported in [`LossCategory::Effects`] by match name, never
-//! dropped silently.
+//! index in `parT`) to an EffectCraft effect, a parameter id and a unit conversion. Parameters
+//! outside the table are reported in [`LossCategory::Effects`] by match name, never dropped
+//! silently; an effect outside it arrives as a placeholder with its parameters
+//! (`placeholder.rs`).
 //!
 //! Every conversion is backed by the corpus (`docs/aep-format.md` 3.7, cases 356-450, 511-516):
 //!
@@ -78,7 +79,10 @@ pub(crate) fn import_effects<'f, 'a>(
     for fx in layer.effects() {
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
         let Some(map) = EFFECTS.iter().find(|m| m.match_name == fx.match_name()) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
+            // No counterpart: kept as a placeholder (its parameters, for expressions), reported.
+            let group = crate::import::placeholder::placeholder(defs, &fx, cx, &shown, ids, refs, col);
+            col.imported.effects = col.imported.effects.saturating_add(1);
+            target.children.push(Node::Group(group));
             continue;
         };
         let Some(spec) = effectcraft_effects::find(map.effect) else {
@@ -128,7 +132,7 @@ pub(crate) fn import_effects<'f, 'a>(
 }
 
 /// Parameters that never carry a value to import.
-fn carries_nothing(p: &EffectParam<'_, '_>) -> bool {
+pub(crate) fn carries_nothing(p: &EffectParam<'_, '_>) -> bool {
     matches!(p.kind, ParamKind::Button | ParamKind::NoData | ParamKind::GroupStart | ParamKind::GroupEnd) || (p.index == 0 && p.kind == ParamKind::Layer)
 }
 
@@ -147,10 +151,10 @@ pub(crate) struct PendingLayerRef {
 
 /// Where a parameter is imported to: the effect's group, the layer parameters still to resolve
 /// and the report.
-struct ParamOut<'a> {
-    group: &'a mut PropGroup,
-    refs: &'a mut Vec<PendingLayerRef>,
-    col: &'a mut Collector,
+pub(crate) struct ParamOut<'a> {
+    pub group: &'a mut PropGroup,
+    pub refs: &'a mut Vec<PendingLayerRef>,
+    pub col: &'a mut Collector,
 }
 
 /// Imports one parameter of `fx` into its EffectCraft property: its keyframes, the value in its
@@ -344,7 +348,7 @@ fn report_beyond_limit<'v>(limit: Option<(f64, f64)>, values: impl Iterator<Item
 /// A layer parameter: None stays unset, the owning layer is itself (`own`) or unset, another layer
 /// is resolved by [`resolve_layer_refs`] once the composition's layers exist.
 /// `names` is `(here, label)`, the effect and the parameter for the report.
-fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
+pub(crate) fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
     let (here, label) = names;
     let ParamOut { group, refs, col } = out;
     // After Effects hands the named layer's source to the effect, without its masks and effects
@@ -713,7 +717,7 @@ fn px(v: f64) -> String {
 
 /// A decoded value in EffectCraft's units, `None` when it does not fit the kind or is not a valid
 /// number.
-fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
+pub(crate) fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
     let raw = match (value, kind) {
         // The reader gives colours as ARGB fractions; `Kind` takes the stored 0..255.
         (ParamValue::Argb(c), Kind::EffectColor) => c.map(|x| x * 255.0).to_vec(),

@@ -63,7 +63,7 @@ outside the sampled ones keeps the current value and is reported as `project set
 | Shape layers | groups (nested, with anchor, position, scale, skew, skew axis, rotation, opacity), rectangle (size, position, roundness), ellipse (size, position), polystar (star or polygon, points, position, rotation, radii, roundness), bezier path (vertices and tangents in layer pixels, path keys), fill (colour, opacity, fill rule), stroke (colour, opacity, width, cap, join, miter limit), gradient fill and stroke (linear or radial, start and end point; the default white-to-black colours), trim paths (start, end, offset, trim multiple shapes), round corners (radius), merge paths (mode; 707, 708), offset paths (amount, line join, miter limit, copies, copy offset; 710; After Effects offsets copy *i* by Amount x (*i* + Copy Offset), default 1, EffectCraft by Amount x (*i* + 1 + copyOffset), so the copy offset arrives 1 less, also its keys; an expression on it is kept and reported; 826-828, 828 renders equal to After Effects on every grid point), repeater (copies, offset, composite, transform; 709), in file order, with keyframes and expressions, the operators' defaults as After Effects reads them back (731); the layer anchor in pixels; 238-242, 330-333, 451-484, 519, 705-710, 731 |
 | Markers | layer and composition markers: time (layer time for layer markers, exact frames), duration (1/600 s units, 509, 510), comment, chapter, URL, frame target, label, cue point (name, event or navigation, parameters); 122, 123, 249, 347-349, 509, 510 |
 | Time Remapping | an enabled remap becomes the `timeRemap` property (source seconds, keys in layer time with their interpolation and ease, expression), first in the layer's properties as Layer > Time > Enable Time Remapping puts it; 319, 354 |
-| Footage | a link to the stored path; **missing-footage placeholder** when the path does not exist where the import runs (listed in `missingFootage`), a normal link when it does. The importer never opens footage. **An image sequence** (its alias is the folder) becomes a sequence of its files, named from the stored numbering (`shot_0101.exr` .. `shot_0103.exr` in 603, `seq_001.png` .. in 353), at its native frame rate; the first file is the footage's path and the one checked. Sequences and clips take the stored native frame rate and duration (603, 606). A sequence of more than 100 000 frames, or beyond a million file names in one import, links only its first file and is reported |
+| Footage | a link to the stored path; **missing-footage placeholder** when the path does not exist where the import runs (listed in `missingFootage`), a normal link when it does. The importer never opens footage. **One layer of a Photoshop file** (a `.psd` imported as a composition) shows that layer (the record index and name stored in the item, the layer's own size with Retain Layer Sizes) and is named `<layer>/<file>`; a Photoshop adjustment layer, which has no pixels, shows opaque white over the document, where its effect applies (#3087; only for these items, and what After Effects draws for such footage is not sampled). **An image sequence** (its alias is the folder) becomes a sequence of its files, named from the stored numbering (`shot_0101.exr` .. `shot_0103.exr` in 603, `seq_001.png` .. in 353), at its native frame rate; the first file is the footage's path and the one checked. Sequences and clips take the stored native frame rate and duration (603, 606). A sequence of more than 100 000 frames, or beyond a million file names in one import, links only its first file and is reported |
 
 Units, the "absent = default" rule and the keyframe templates are the reader's
 ([aep-format.md](aep-format.md), sections 3.3–3.6). The importer converts them to EffectCraft's:
@@ -146,6 +146,22 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
   in-test, hostile ids and modes).
 
 ### Effects
+
+**An effect outside the table arrives as a placeholder** (#3087): an effect group whose effect id
+is the After Effects match name, so nothing renders it (as a missing plug-in in After Effects) and
+Find Missing Effects lists it. It holds the effect's parameters from the file's definitions, flat
+in stack order and named as in After Effects, each with its stored value or default, keyframes and
+expression, in the units After Effects' expressions read (sliders and angles as stored, colours
+RGB 0..1, points in layer pixels, popups by item with the file's item names, layers resolved), so
+expressions such as `effect("Settings")("Menu")` keep working. A third-party effect is reported in
+`effects` ("kept as a placeholder ... (not rendered)"); a pseudo effect (`Pseudo/...`, controls only)
+renders nothing in After Effects either and is reported only for a parameter it cannot hold
+(arbitrary data, paths); a Dropdown Menu Control (`Pseudo/@@...` with one popup) becomes
+EffectCraft's Dropdown Menu Control with the file's items. A popup separator stays an item (After
+Effects counts it), shown as a dash. Find Missing Effects lists placeholders, pseudo effects
+included. The `.aep` export does not write placeholders back (it reports them), so a round trip
+loses them. A placeholder holds at most 1000 parameters and 1024 items per popup, and one import
+at most 200 000 placeholder properties and items; what is beyond is reported.
 
 A table in `crates/aep/src/container/effect_map.rs` (shared with the exporter, which writes the inverse) maps an effect's match name and each parameter's
 index in the file's parameter list to an EffectCraft effect id, a parameter id and a unit

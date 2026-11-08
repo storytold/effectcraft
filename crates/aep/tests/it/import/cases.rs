@@ -456,34 +456,51 @@ fn loss(r: &ImportReport, c: LossCategory) -> usize {
     r.count(c)
 }
 
+/// The committed `synthetic.aep` with an effect that has no counterpart (a real loss: kept as a
+/// placeholder, not rendered), and its import with losses allowed.
+fn unknown() -> (Vec<u8>, Project, effectcraft_aep::import::ImportResult) {
+    let bytes = crate::import::issue_3087::with_unknown_glow();
+    let mut p = Project::default();
+    let none = |_: &str| false;
+    let r = effectcraft_aep::import::import(
+        &mut p,
+        &bytes,
+        &effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) },
+    )
+    .unwrap();
+    (bytes, p, r)
+}
+
 #[test]
 fn unsupported_features_are_reported_per_category() {
-    let expect: [(&str, LossCategory, usize); 1] = [("077-fx-dropdown-default.aep", LossCategory::Effects, 1)];
-    for (name, category, n) in expect {
-        let (p, r) = load!(name);
-        assert_eq!(loss(&r.report, category), n, "{name}: {:?}", r.report.losses);
-        assert_eq!(r.report.total_losses(), n, "{name}: {:?}", r.report.losses);
-        // The solid layer L still arrived.
-        let (_, c) = comp(&p, &r, "C");
-        assert!(c.layers.iter().any(|l| l.name == "L"), "{name}");
-    }
-    // Effect detail names the effect.
+    // A Dropdown Menu Control is no loss since #3087 (EffectCraft's Dropdown Menu Control).
     let (_, r) = load!("077-fx-dropdown-default.aep");
-    assert!(r.report.losses[0].details[0].contains("Dropdown"), "{:?}", r.report.losses);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    // An effect without a counterpart: reported by name, the layers still arrive.
+    let (_, p, r) = unknown();
+    assert!(loss(&r.report, LossCategory::Effects) >= 1, "{:?}", r.report.losses);
+    let details: Vec<&String> = r.report.losses.iter().filter(|l| l.category == LossCategory::Effects).flat_map(|l| &l.details).collect();
+    assert!(details.iter().any(|d| d.contains("(XYZQ Glo2), kept as a placeholder")), "{details:?}");
+    assert!(p.comps().all(|(_, c)| !c.layers.is_empty()));
 }
 
 #[test]
 fn losses_are_refused_unless_allowed_and_a_refusal_changes_nothing() {
+    let (bytes, _, allowed) = unknown();
+    let none = |_: &str| false;
+    let refuse = effectcraft_aep::import::ImportOptions::new(&none);
     let mut p = Project::default();
     let before = p.clone();
-    let err = try_import!(&mut p, "077-fx-dropdown-default.aep", false).unwrap_err();
+    let err = effectcraft_aep::import::import(&mut p, &bytes, &refuse).unwrap_err();
     let AepImportError::Refused(report) = &err else { panic!("{err:?}") };
-    assert_eq!(report.count(LossCategory::Effects), 1);
-    assert!(err.to_string().contains("effects: 1"), "{err}");
+    assert!(report.count(LossCategory::Effects) >= 1);
+    assert!(err.to_string().contains("effects: "), "{err}");
     assert_eq!(p, before);
     // Allowed: imported, the report is the same.
-    let r = try_import!(&mut p, "077-fx-dropdown-default.aep", true).unwrap();
+    let allow = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
+    let r = effectcraft_aep::import::import(&mut p, &bytes, &allow).unwrap();
     assert_eq!(&r.report, report.as_ref());
+    assert_eq!(r.report, allowed.report);
     assert!(p.items.len() > before.items.len());
     // A lossless file needs no permission.
     let mut p = Project::default();
@@ -492,22 +509,22 @@ fn losses_are_refused_unless_allowed_and_a_refusal_changes_nothing() {
 
 #[test]
 fn the_report_round_trips_through_json() {
-    let (_, r) = load!("077-fx-dropdown-default.aep");
+    let (_, _, r) = unknown();
     let json = serde_json::to_string(&r.report).unwrap();
     let back: ImportReport = serde_json::from_str(&json).unwrap();
     assert_eq!(back, r.report);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["losses"][0]["category"], "effects");
-    assert_eq!(v["imported"]["layers"], 1);
+    assert_eq!(v["imported"]["layers"], r.report.imported.layers);
     assert!(v["limitations"].as_array().unwrap().len() >= 2);
 }
 
 #[test]
 fn analyze_is_a_dry_run() {
-    let bytes = fixture!("077-fx-dropdown-default.aep");
+    let (bytes, _, r) = unknown();
     let report = analyze(&bytes, &|_| false).unwrap();
-    assert_eq!(report.count(LossCategory::Effects), 1);
-    assert_eq!(report.imported.layers, 1);
+    assert_eq!(report.count(LossCategory::Effects), r.report.count(LossCategory::Effects));
+    assert_eq!(report.imported.layers, r.report.imported.layers);
 }
 
 #[test]

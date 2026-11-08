@@ -19,9 +19,6 @@ pub struct Pending {
     pub command: Option<(String, Value, Value)>,
 }
 
-/// How many detail lines of a loss category the prompt shows.
-const DETAILS: usize = 3;
-
 /// Whether command `id` with `params` needs the prompt first. When it does, the prompt opens
 /// holding the command and the caller must not run it. `Err` when the dry run fails (the file
 /// cannot be read or is not a project), with the message.
@@ -51,14 +48,22 @@ fn category(c: &str) -> String {
     chars.next().map(|f| f.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The report's losses as lines: one per category with its count, and a few of its details.
+/// The report's losses as lines: one per category with its count and every detail line the
+/// report keeps (the list scrolls), then how many more there are (#3087: with only the first few
+/// lines shown, most unsupported effects had no line at all).
 pub fn lines(report: &Value) -> Vec<(String, Vec<String>)> {
     let Some(losses) = report["losses"].as_array() else { return vec![] };
     losses
         .iter()
         .map(|l| {
-            let head = format!("{} ({})", category(l["category"].as_str().unwrap_or("other")), l["count"].as_u64().unwrap_or(0));
-            let details = l["details"].as_array().map(|d| d.iter().filter_map(Value::as_str).take(DETAILS).map(str::to_string).collect()).unwrap_or_default();
+            let count = l["count"].as_u64().unwrap_or(0);
+            let head = format!("{} ({count})", category(l["category"].as_str().unwrap_or("other")));
+            let mut details: Vec<String> =
+                l["details"].as_array().map(|d| d.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+            let more = count.saturating_sub(u64::try_from(details.len()).unwrap_or(u64::MAX));
+            if more > 0 && !details.is_empty() {
+                details.push(tr("... and {} more").replace("{}", &more.to_string()));
+            }
             (head, details)
         })
         .collect()
@@ -137,9 +142,22 @@ mod tests {
     fn the_report_reads_as_categories_with_counts_and_details() {
         let report = json!({"losses": [{"category": "layer_styles", "count": 4, "details": ["a", "b", "c", "d"]}, {"category": "effects", "count": 1}]});
         let l = lines(&report);
-        assert_eq!(l[0], ("Layer styles (4)".to_string(), vec!["a".to_string(), "b".into(), "c".into()]));
+        assert_eq!(l[0], ("Layer styles (4)".to_string(), vec!["a".to_string(), "b".into(), "c".into(), "d".into()]));
         assert_eq!(l[1], ("Effects (1)".to_string(), vec![]));
         assert!(lines(&json!({})).is_empty());
+    }
+
+    /// #3087: every detail line the report keeps is shown (not only the first three), and the
+    /// lines beyond the report's own limit are counted.
+    #[test]
+    fn every_kept_detail_is_shown_and_the_rest_counted() {
+        let details: Vec<String> = (1..=20).map(|i| format!("effect {i}")).collect();
+        let report = json!({"losses": [{"category": "effects", "count": 27, "details": details}]});
+        let l = lines(&report);
+        assert_eq!(l[0].0, "Effects (27)");
+        assert_eq!(l[0].1.len(), 21);
+        assert_eq!(l[0].1[..20], details[..]);
+        assert_eq!(l[0].1[20], "... and 7 more");
     }
 
     #[test]

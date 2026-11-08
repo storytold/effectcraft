@@ -104,7 +104,7 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
             return Ok(Some(straight_to_image(px.width, px.height, &px.data, op)));
         }
         let px = match &footage.layer {
-            Some(l) => psd.layer_pixels(l.index as usize, !l.layer_size),
+            Some(l) => psd.layer_pixels_opts(l.index as usize, !l.layer_size, l.adjustment_white),
             None => psd.composite(),
         }
         .map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
