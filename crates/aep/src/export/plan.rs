@@ -1047,9 +1047,10 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     let props = plan_transform(layer, &src, comp, source_size, cp, comp_name, col);
     let remap = remap_prop.filter(|_| remapped).map(|p| plan_remap(p, comp, cp, &layer.name, comp_name, col));
     let mut name = cut_name(&layer.name, 255, &what("layer"), col);
-    // A text layer named after its text stores no name (110, 113: After Effects shows the text).
+    // A text layer named after its text stores no name (110, 113: After Effects shows the text):
+    // the layer's own rule decides (#3233).
     if let LayerSrc::Text(tp) = &src
-        && tp.text.split('\r').next().is_some_and(|first| first.chars().take(64).collect::<String>() == name)
+        && layer.name_follows_text(&effectcraft_project::text_layer_name(&tp.text))
     {
         name.clear();
     }

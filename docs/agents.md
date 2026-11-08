@@ -713,6 +713,11 @@ in the Plug-in Library: [publishing-plugins.md](publishing-plugins.md).
   step (separated X/Y/Z Position; Orientation and X/Y/Z Rotation on 3D layers).
 * Rename a layer with Enter (or double-click a name): the whole name is selected, Enter or a
   click elsewhere commits, Escape cancels; `layer.rename {layer, name}` does it directly.
+  A text layer's name follows its text until it is renamed; renaming it to an empty name makes
+  it follow the text again (After Effects). `layer.setText` and typing on canvas rename a text
+  layer whose name still follows its text; `layer.newText {name}` and a name set by
+  `layer.settings` or a script's `layer.name = …` (which runs `layer.rename`) stay, and an empty
+  `layer.settings` name follows the text again too.
 * Ctrl/Cmd-click on the current-time display (Timeline or Composition panel) toggles the Time
   Display Style between Timecode and Frames: `file.projectSettings {"timeDisplay": "frames"}`.
 * `prop.pickWhip {layer, prop, target: {layer, prop, dimension?}}` links a property as its
