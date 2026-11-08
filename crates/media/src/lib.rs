@@ -36,7 +36,7 @@ pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
 
 /// Errors from probing or decoding footage.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MediaError {
     #[error("I/O error: {0}")]
     Io(String),
