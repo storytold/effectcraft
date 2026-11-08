@@ -248,7 +248,13 @@ impl AudioPlayback {
                 })
                 .map_err(|e| e.to_string())?
         };
-        device.start(feed.clone())?;
+        if let Err(e) = device.start(feed.clone()) {
+            // The feeder is mixing into a feed nothing plays: stop and join it, or every refused
+            // open (the timed retry re-opens on failure) leaks a thread.
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+            return Err(e);
+        }
         Ok(AudioPlayback { feed, device, stop, thread: Some(thread), feeder: None, rate, span })
     }
 
@@ -746,6 +752,90 @@ mod tests {
         tick(&mut app, &ctx, &frame);
         assert_eq!(calls.load(Ordering::Relaxed), 2, "a stream that just died waits for its interval");
         assert_eq!(app.playback.audio_retry_at, Some(2.0 + AUDIO_RETRY_S), "the next retry is a full interval after the open");
+    }
+
+    /// A refused open stops and joins the feeder thread instead of leaking it: `start` returns
+    /// its error only after the feeder's current block (a slow footage read) has finished, and
+    /// the timed retry's repeated refused opens do not accumulate threads.
+    #[test]
+    fn a_failed_open_stops_the_feeder_thread() {
+        use std::time::{Duration, Instant};
+
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+        use effectcraft_engine::render::FootageSource;
+        use effectcraft_engine::render::cache::LayerCache;
+
+        /// Footage audio whose first read is slow: the feeder is inside it when the open fails.
+        /// It signals the shared `entered` once the read begins.
+        struct FirstReadSlow {
+            entered: Arc<AtomicBool>,
+        }
+        impl FootageSource for FirstReadSlow {
+            fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<effectcraft_engine::raster::Image>> {
+                None
+            }
+            fn audio(&self, _: ItemId, _: &Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+                self.entered.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_secs(2));
+                Some(vec![0.5; frames * 2])
+            }
+        }
+        /// An output that never opens, after waiting for the feeder to be inside its slow read.
+        struct Refusing {
+            entered: Arc<AtomicBool>,
+        }
+        impl AudioDevice for Refusing {
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !self.entered.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err("device unavailable".into())
+            }
+            fn stop(&mut self) {}
+        }
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "song.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(600.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("song.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
+        let layer = build::layer(&mut p, &comp, "song.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let entered = Arc::new(AtomicBool::new(false));
+        let src = RenderSource {
+            project: Arc::new(p),
+            footage: Arc::new(FirstReadSlow { entered: entered.clone() }),
+            expr: None,
+            layer_cache: Arc::new(LayerCache::default()),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+
+        let t = Instant::now();
+        let err = match AudioPlayback::start(
+            Box::new(Refusing { entered: entered.clone() }),
+            src,
+            cid,
+            Tick::ZERO,
+            Tick::ZERO,
+            Tick::from_seconds_f64(10.0),
+            true,
+            0,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("the device refuses"),
+        };
+        assert_eq!(err, "device unavailable");
+        // The feeder's second block was mid-read when the open failed: returning the error means
+        // the feeder was signalled and joined, not left mixing into a feed nothing plays.
+        assert!(t.elapsed() >= Duration::from_millis(1500), "start returned after {:?}, without joining the feeder", t.elapsed());
     }
 
     #[test]
