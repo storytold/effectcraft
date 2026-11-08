@@ -188,6 +188,7 @@ pub(crate) fn set_utf8(c: &mut Chunk<'static>, text: &str) -> R<()> {
 mod tests {
     use super::*;
 
+    /// The writer errors instead of dropping.
     #[test]
     fn the_writer_errors_instead_of_dropping() {
         let mut d = [0u8; 4];
@@ -200,6 +201,7 @@ mod tests {
         assert_eq!(d, [0, 0, 1, 2]);
     }
 
+    /// A cut string keeps a nul and whole characters.
     #[test]
     fn a_cut_string_keeps_a_nul_and_whole_characters() {
         let mut d = [0xffu8; 6];
@@ -219,6 +221,7 @@ mod tests {
         assert_eq!(fixed_layout_errors(), before);
     }
 
+    /// A broken fixed layout writes what fits and is counted.
     #[test]
     fn a_broken_fixed_layout_writes_what_fits_and_is_counted() {
         let before = fixed_layout_errors();
@@ -231,6 +234,7 @@ mod tests {
         assert_eq!(fixed_layout_errors(), before + 1);
     }
 
+    /// A group splits into header and entries.
     #[test]
     fn a_group_splits_into_header_and_entries() {
         use crate::export::synth::{tdmn, tdsn};

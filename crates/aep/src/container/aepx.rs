@@ -658,6 +658,7 @@ mod tests {
         assert!(matches!(read_aepx(b"<AfterEffectsProject>\xff</AfterEffectsProject>"), Err(AepError::Xml { .. })));
     }
 
+    /// Attribute values decode entities only where they have them.
     #[test]
     fn attribute_values_decode_entities_only_where_they_have_them() {
         // An entity inside `bdata` still decodes before the hex does.
@@ -672,6 +673,7 @@ mod tests {
         assert_eq!(f.chunks[0].bytes(), Some(&[0x0a, 0xff][..]));
     }
 
+    /// A large bdata with a bad digit is refused before it is sized.
     #[test]
     fn a_large_bdata_with_a_bad_digit_is_refused_before_it_is_sized() {
         // 10 MB of hex that is bad from the first pair (and once more at the very end).
@@ -685,6 +687,7 @@ mod tests {
         assert!(matches!(read_aepx(x.as_bytes()), Err(AepError::Xml { .. })));
     }
 
+    /// Bdata decodes up to the size limit and not past it.
     #[test]
     fn bdata_decodes_up_to_the_size_limit_and_not_past_it() {
         assert_eq!(decode_hex_at_most(b"00ff10", 0, 3), Ok(vec![0x00, 0xff, 0x10]));
@@ -697,8 +700,10 @@ mod tests {
         assert_eq!(MAX_BDATA as u64, u64::from(u32::MAX));
     }
 
+    /// Decode hex matches the collecting version.
     #[test]
     fn decode_hex_matches_the_collecting_version() {
+        /// The collecting decoder this one replaced, as the reference.
         fn old(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
             if text.len() % 2 == 1 {
                 return Err(xml(offset, "bdata has an odd number of hex digits"));

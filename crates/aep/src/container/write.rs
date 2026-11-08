@@ -125,6 +125,7 @@ mod tests {
 
     use super::*;
 
+    /// The output is sized once to its exact length.
     #[test]
     fn the_output_is_sized_once_to_its_exact_length() {
         let odd = |n: u8| Chunk::data(*b"cdat", vec![n; usize::from(n)]);
@@ -151,6 +152,7 @@ mod tests {
         }
     }
 
+    /// A tree past the container size fails before serialising.
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn a_tree_past_the_container_size_fails_before_serialising() {
@@ -163,6 +165,7 @@ mod tests {
         assert!(sequence_len(&file.chunks[..4000], 1).is_some_and(|n| u32::try_from(n + 4).is_ok()));
     }
 
+    /// A tree past the depth limit has no size.
     #[test]
     fn a_tree_past_the_depth_limit_has_no_size() {
         let mut deep = Chunk::data(*b"cdat", vec![0]);

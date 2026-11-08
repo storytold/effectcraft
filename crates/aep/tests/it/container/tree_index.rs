@@ -74,6 +74,7 @@ fn arbitrary(fx: &Effect<'_, '_>, name: &str, s: &mut String) {
     let _ = writeln!(s, "        {:?} {:?} {:?}", CurvesData::parse(data), MeshData::parse(data), CryptomatteData::parse(data));
 }
 
+/// Appends a group and everything below it to the dump, depth-limited.
 fn tree(group: &PropGroup<'_, '_>, depth: usize, s: &mut String) {
     if depth > 32 {
         return;
@@ -93,6 +94,7 @@ fn tree(group: &PropGroup<'_, '_>, depth: usize, s: &mut String) {
     }
 }
 
+/// The index is the parsed tree and the view reads the same on every file.
 #[test]
 fn the_index_is_the_parsed_tree_and_the_view_reads_the_same_on_every_file() {
     for path in every_file() {
@@ -124,6 +126,7 @@ fn the_index_is_the_parsed_tree_and_the_view_reads_the_same_on_every_file() {
     }
 }
 
+/// The index and the parser fail alike under tight limits.
 #[test]
 fn the_index_and_the_parser_fail_alike_under_tight_limits() {
     for path in every_file().into_iter().filter(|p| p.extension().is_some_and(|x| x == "aep")) {
@@ -155,6 +158,7 @@ fn tdmn(name: &str) -> Chunk<'static> {
     Chunk::data(*b"tdmn", b)
 }
 
+/// A nested chunk `id` holding one `Utf8` with `text`.
 fn utf8(id: [u8; 4], text: &str) -> Chunk<'static> {
     Chunk { id, body: effectcraft_aep::Body::Chunks(vec![Chunk::data(*b"Utf8", text.as_bytes().to_vec())]), pad: None }
 }
@@ -196,6 +200,7 @@ fn synthetic() -> Vec<u8> {
     write(&file).expect("write")
 }
 
+/// The view reads arbitrary effect data the same through the index.
 #[test]
 fn the_view_reads_arbitrary_effect_data_the_same_through_the_index() {
     let bytes = synthetic();

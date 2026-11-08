@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use crate::{AepFile, Chunk};
 use effectcraft_project::{ItemId, LayerId};
 
+use crate::export::keys::fill_key_list;
 use crate::export::plan::{CompPlan, Entry, ItemPlan, KeyPlan, LayerPlan, LayerSrc, ProjectPlan, PropKind, PropPlan, SolidPlan, natural_key};
+use crate::export::synth::{is_tdmn, tdmn_name};
 use crate::export::template::{self, Template};
 use crate::export::tree::{
     R, child_data, data_mut, kids_mut, list_mut, put, put_bits, put_cstr, put_f32, put_f64, put_i32, put_u8, put_u16, put_u32, set_utf8, tpl,
@@ -437,7 +439,7 @@ fn put_used_comps(cx: &Cx<'_>, item: &mut Chunk<'static>, cp: &CompPlan) -> R<()
 fn put_time_remap_max(layr: &mut Chunk<'static>, seconds: f64) -> R<()> {
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, "ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
     let tdbs = kids.get_mut(at + 1).ok_or_else(|| tpl("Time Remapping without a record"))?;
     put_f64(child_data(tdbs, b"tduM")?, 0, seconds)
 }
@@ -452,7 +454,7 @@ fn put_time_remap_max(layr: &mut Chunk<'static>, seconds: f64) -> R<()> {
 fn put_time_remap(cx: &Cx<'_>, layr: &mut Chunk<'static>, remap: &PropPlan) -> R<()> {
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, "ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
     let tdbs = kids.get_mut(at + 1).ok_or_else(|| tpl("Time Remapping without a record"))?;
     put_u32(child_data(tdbs, b"tdsb")?, 0, 1)?;
     {
@@ -490,7 +492,7 @@ fn put_time_remap(cx: &Cx<'_>, layr: &mut Chunk<'static>, remap: &PropPlan) -> R
         for k in &remap.keys {
             ldat.extend(plain_record(1, k, size)?);
         }
-        set_key_list(&mut list, ldat, remap.keys.len(), size)?;
+        fill_key_list(&mut list, ldat, remap.keys.len(), size)?;
         if let Some(slot) = rk.get_mut(cdat_at) {
             *slot = list;
         }
@@ -638,7 +640,7 @@ fn put_masks(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan) -> R<()> {
     let parade = crate::export::masks::build_parade(&cx.t.masks, &lp.masks, lp.source_size)?;
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
     kids.splice(at..at, parade);
     Ok(())
 }
@@ -652,7 +654,7 @@ fn put_effects(cx: &mut Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, layer
     let parade = crate::export::effects::build_parade(&cx.t.effects, &lp.fx, layer_id, layer_ids, lp.source_size, &mut cx.fx_use)?;
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
     kids.splice(at..at, parade);
     Ok(())
 }
@@ -675,19 +677,6 @@ const GROUP_ORDER: [&str; 13] = [
     "ADBE Group End",
 ];
 
-/// The match name of a `tdmn` chunk: its bytes up to the first NUL, not decoded (empty for a chunk
-/// without data). Every name the exporter looks for is ASCII, so comparing bytes is the same as
-/// comparing the Latin-1 text the other exporter modules decode.
-fn tdmn_bytes<'c>(c: &'c Chunk<'_>) -> &'c [u8] {
-    let d = c.bytes().unwrap_or_default();
-    d.split(|b| *b == 0).next().unwrap_or_default()
-}
-
-/// True when `c` has data and names `name`.
-fn tdmn_is(c: &Chunk<'_>, name: &str) -> bool {
-    c.bytes().is_some() && tdmn_bytes(c) == name.as_bytes()
-}
-
 /// Inserts the properties of `lp` into the layer's Transform group, in the order the file uses.
 fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &CompPlan) -> R<()> {
     if lp.props.is_empty() {
@@ -695,7 +684,7 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
     }
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
     let group = kids.get_mut(at + 1).ok_or_else(|| tpl("Transform group without a list"))?;
     let gk = kids_mut(group)?;
     // Split the group into its header (up to the first match name) and (tdmn, node) pairs.
@@ -704,7 +693,9 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
     let mut pairs: Vec<(Vec<u8>, Vec<Chunk<'static>>)> = Vec::new();
     let mut it = std::mem::take(gk).into_iter();
     while let Some(m) = it.next() {
-        let name = tdmn_bytes(&m).to_vec();
+        // The match name as the shared decoder reads it (lossy UTF-8 up to the first NUL). Every
+        // name looked up below is ASCII, so a name matches exactly when its bytes do.
+        let name = tdmn_name(&m).unwrap_or_default().into_bytes();
         if name == b"ADBE Group End" {
             pairs.push((name, vec![m]));
             continue;
@@ -716,7 +707,7 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
         let name = p.kind.match_name();
         let built = build_prop(cx, p, lp, cp)?;
         let tdmn = pairs.iter().find(|(n, _)| n == name.as_bytes()).and_then(|(_, v)| v.first().cloned()).unwrap_or_else(|| {
-            cx.t.stat.iter().chain(cx.t.keyd.iter()).find(|c| c.is(b"tdmn") && tdmn_is(c, name)).cloned().unwrap_or_else(|| Chunk::data(*b"tdmn", Vec::new()))
+            cx.t.stat.iter().chain(cx.t.keyd.iter()).find(|c| is_tdmn(c, name)).cloned().unwrap_or_else(|| Chunk::data(*b"tdmn", Vec::new()))
         });
         let entry = vec![tdmn, built];
         if let Some(slot) = pairs.iter_mut().find(|(n, _)| n == name.as_bytes()) {
@@ -766,7 +757,7 @@ fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chu
         for k in &p.keys {
             ldat.extend(key_record(p.kind, k, size)?);
         }
-        set_key_list(list_mut(&mut tdbs, b"list")?, ldat, p.keys.len(), size)?;
+        fill_key_list(list_mut(&mut tdbs, b"list")?, ldat, p.keys.len(), size)?;
     }
     if let Some((text, _)) = &p.expr {
         let kids = kids_mut(&mut tdbs)?;
@@ -774,25 +765,6 @@ fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chu
         kids.insert(at, Chunk::data(*b"Utf8", text.as_bytes().to_vec()));
     }
     Ok(tdbs)
-}
-
-/// Writes `count` key records of `size` bytes into the key list `list`: the counts into `lhd3`,
-/// the records as its `ldat` (replaced, or added when missing).
-///
-/// The same as `masks::set_key_list`, which takes the property record (`tdbs`) instead of the
-/// list; the time remap fills a list before it is put into its record.
-fn set_key_list(list: &mut Chunk<'static>, records: Vec<u8>, count: usize, size: usize) -> R<()> {
-    let n = u32::try_from(count).map_err(|_| tpl("too many keys"))?;
-    {
-        let lhd3 = child_data(list, b"lhd3")?;
-        crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-    }
-    let ld = kids_mut(list)?;
-    match ld.iter_mut().find(|c| c.is(b"ldat")) {
-        Some(c) => *c = Chunk::data(*b"ldat", records),
-        None => ld.push(Chunk::data(*b"ldat", records)),
-    }
-    Ok(())
 }
 
 /// One keyframe record (`docs/aep-format.md`, 3.5).
@@ -856,10 +828,12 @@ mod tests {
     use effectcraft_project::{Comp, Expression, ItemKind, LayerSource, Project, Property, Solid, build};
     use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
+    /// Seconds as ticks.
     fn secs(s: f64) -> Tick {
         Tick((s * TICKS_PER_SECOND as f64).round() as i64)
     }
 
+    /// Adds a layer to `comp`, changed by `edit` first.
     fn add_layer(p: &mut Project, comp: ItemId, name: &str, source: LayerSource, edit: impl FnOnce(&mut effectcraft_project::Layer)) {
         let mut c = p.comp(comp).cloned().expect("comp");
         let mut l = build::layer(p, &c, name, source, (640, 360), None);
@@ -871,6 +845,7 @@ mod tests {
         }
     }
 
+    /// Gives the property two keys (0 s and 1.5 s) holding its value.
     fn two_keys(prop: Option<&mut Property>) {
         let prop = prop.expect("property");
         let v = prop.value.clone();
@@ -912,6 +887,7 @@ mod tests {
         p
     }
 
+    /// The export plan of `p`.
     fn plan_of(p: &Project) -> ProjectPlan {
         let mut col = crate::export::report::Collector::default();
         crate::export::plan::plan(p, &mut col)
@@ -973,6 +949,7 @@ mod tests {
     /// The comparator `sort_named` used before its keys were cached: `natural_key` built on every
     /// comparison.
     fn old_sort_named(v: &mut [Sorted]) {
+        /// The natural name order the cached sort keys replaced, as the reference.
         fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             let (ka, kb) = (natural_key(a), natural_key(b));
             for (x, y) in ka.iter().zip(kb.iter()) {
@@ -1072,10 +1049,11 @@ mod tests {
         assert!(natural_bytes(&worst).len() <= 1_275);
     }
 
-    /// `tdmn_is` and `tdmn_bytes` agree with the Latin-1 decoding they replaced for every name the
-    /// emitter looks up, which holds because those names are ASCII.
+    /// The shared `is_tdmn` / `tdmn_name` the emitter uses agree with the Latin-1 decoding it used
+    /// before for every name it looks up, which holds because those names are ASCII.
     #[test]
     fn match_names_compare_as_the_latin1_decoding_did() {
+        /// The Latin-1 decoding the emitter used before.
         fn old_tdmn_name(c: &Chunk<'_>) -> Option<String> {
             let d = c.bytes()?;
             Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
@@ -1096,28 +1074,26 @@ mod tests {
         ]);
         for c in &chunks {
             for n in &wanted {
-                assert_eq!(tdmn_is(c, n), old_tdmn_name(c).as_deref() == Some(*n), "{c:?} {n}");
-            }
-            let old = old_tdmn_name(c).unwrap_or_default();
-            if old.is_ascii() {
-                assert_eq!(tdmn_bytes(c), old.as_bytes());
+                assert_eq!(is_tdmn(c, n), old_tdmn_name(c).as_deref() == Some(*n), "{c:?} {n}");
+                let key = tdmn_name(c).unwrap_or_default().into_bytes();
+                assert_eq!(key == n.as_bytes(), old_tdmn_name(c).as_deref() == Some(*n), "{c:?} {n}");
             }
         }
     }
 
-    /// `set_key_list` writes the counts and replaces the records, or adds them when the list has
-    /// none.
+    /// `fill_key_list`, which the time remap and the Transform keys use, writes the counts and
+    /// replaces the records, or adds them when the list has none.
     #[test]
-    fn set_key_list_writes_counts_and_records() {
+    fn fill_key_list_writes_counts_and_records() {
         let lhd3 = || Chunk::data(*b"lhd3", vec![0; 52]);
         let mut want_lhd3 = vec![0; 52];
         crate::export::synth::put_key_counts(&mut want_lhd3, 3, 48).expect("counts");
         for start in [vec![lhd3(), Chunk::data(*b"ldat", vec![9; 4])], vec![lhd3()]] {
             let mut list = Chunk::list(*b"list", start);
-            set_key_list(&mut list, vec![7; 144], 3, 48).expect("set");
+            fill_key_list(&mut list, vec![7; 144], 3, 48).expect("set");
             assert_eq!(list.children(), &[Chunk::data(*b"lhd3", want_lhd3.clone()), Chunk::data(*b"ldat", vec![7; 144])]);
         }
         let mut no_header = Chunk::list(*b"list", Vec::new());
-        assert!(set_key_list(&mut no_header, Vec::new(), 0, 48).is_err());
+        assert!(fill_key_list(&mut no_header, Vec::new(), 0, 48).is_err());
     }
 }

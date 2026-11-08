@@ -386,6 +386,7 @@ fn the_last_style_run_absorbs_the_final_carriage_return() {
 
 // ------------------------------------------------------------------ camera and light (341-345)
 
+/// Camera zoom keeps the auto position.
 #[test]
 fn camera_zoom_keeps_the_auto_position() {
     // 341: Zoom 2000 is stored (checked on import); the auto Position keeps [0, 0, -2666.67].

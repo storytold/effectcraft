@@ -251,6 +251,7 @@ impl AeVersionInfo {
         Self::of_root(Root::from(file))
     }
 
+    /// Reads the versions from the top-level chunks of either tree.
     pub(crate) fn of_root(file: Root<'_, '_>) -> Self {
         let file_version = file.file_version();
         Self {
@@ -342,6 +343,7 @@ pub const LIMITATIONS: &[&str] = &[
 mod tests {
     use super::*;
 
+    /// A report with losses in two categories and a missing file, as the collector finishes it.
     fn collected() -> ImportReport {
         let mut col = Collector::default();
         col.imported.layers = 2;
@@ -366,6 +368,7 @@ mod tests {
         assert_eq!(back, collected());
     }
 
+    /// The queries read the losses.
     #[test]
     fn the_queries_read_the_losses() {
         let report = collected();

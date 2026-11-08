@@ -191,12 +191,14 @@ mod tests {
         }
     }
 
+    /// A 40-byte NUL-padded match name.
     fn tdmn(name: &str) -> Chunk<'static> {
         let mut b = name.as_bytes().to_vec();
         b.resize(40, 0);
         Chunk::data(*b"tdmn", b)
     }
 
+    /// A synthetic project imports the same through the index.
     #[test]
     fn a_synthetic_project_imports_the_same_through_the_index() {
         // A composition with a layer whose effect stores arbitrary data and a named value group.

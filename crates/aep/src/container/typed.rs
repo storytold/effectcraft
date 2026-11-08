@@ -46,6 +46,7 @@ impl<'f, 'a> Project<'f, 'a> {
         Self::of(Root::from(index))
     }
 
+    /// The project view of either tree: its `LIST Fold` and `LIST EfdG`.
     pub(crate) fn of(root: Root<'f, 'a>) -> Option<Self> {
         root.list(b"Fold").map(|fold| Self { fold, effect_defs: root.list(b"EfdG") })
     }
@@ -572,6 +573,7 @@ mod tests {
         assert_eq!(g.names(), ["A", "B", "A"]);
     }
 
+    /// Match name is agrees with comparing the decoded name.
     #[test]
     fn match_name_is_agrees_with_comparing_the_decoded_name() {
         let bodies: [&[u8]; 9] =

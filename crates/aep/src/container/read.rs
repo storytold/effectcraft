@@ -63,6 +63,7 @@ pub(super) fn container_end(data: &[u8]) -> Result<usize, AepError> {
     usize::try_from(declared).map_err(|_| AepError::TooLarge)?.checked_add(8).ok_or(AepError::TooLarge)
 }
 
+/// The 4-byte id at `at`, `None` when the input is too short.
 pub(super) fn id4(data: &[u8], at: usize) -> Option<[u8; 4]> {
     array::<4>(data, at)
 }
@@ -183,6 +184,7 @@ mod tests {
         }
     }
 
+    /// Every sibling list is allocated once at its exact length.
     #[test]
     fn every_sibling_list_is_allocated_once_at_its_exact_length() {
         let inner: Vec<Chunk<'static>> = (0..37u8).map(|i| Chunk::data(*b"cdat", vec![i; usize::from(i % 5)])).collect();
@@ -201,6 +203,7 @@ mod tests {
         }
     }
 
+    /// The preallocation is bounded by the input and the chunk limit.
     #[test]
     fn the_preallocation_is_bounded_by_the_input_and_the_chunk_limit() {
         // 1000 empty headers: the most chunks the bytes can hold.
@@ -245,6 +248,7 @@ mod tests {
         out
     }
 
+    /// Nested lists with broken tails parse each header once.
     #[test]
     fn nested_lists_with_broken_tails_parse_each_header_once() {
         // A wide, well-formed list at the bottom, then 50 levels that each fail and fall back to

@@ -83,6 +83,7 @@ fn ntsc_and_odd_frame_rates_use_the_time_bases_after_effects_writes() {
     }
 }
 
+/// Every ntsc rate reads back as the rate it was written for.
 #[test]
 fn every_ntsc_rate_reads_back_as_the_rate_it_was_written_for() {
     // The export's time base for each NTSC rate and the import's rate for that time base use the

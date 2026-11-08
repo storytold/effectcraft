@@ -293,6 +293,7 @@ impl<'f, 'a> Effect<'f, 'a> {
     }
 }
 
+/// True when a `LIST parT` holds parameter definitions (a `pard`).
 fn has_pard(part: Node<'_, '_>) -> bool {
     part.children().any(|c| c.is(b"pard"))
 }

@@ -64,6 +64,7 @@ impl ProjectSettings {
         Self::of(Root::from(index))
     }
 
+    /// Reads the settings from the top-level chunks of either tree.
     pub(crate) fn of(file: Root<'_, '_>) -> ProjectSettings {
         let nhed = file.chunk(b"nhed").and_then(Node::bytes);
         let byte = |i: usize| nhed.and_then(|b| b.get(i).copied());

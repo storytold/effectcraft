@@ -368,6 +368,7 @@ pub(crate) fn shph() -> Vec<u8> {
     shph_layout().finish(|| "shph".to_string())
 }
 
+/// The 24-byte `shph` layout of a closed path with a unit box.
 fn shph_layout() -> Fixed {
     let mut b = Fixed::zeroed(24);
     b.put(0, &[0xb3, 0xde, 0x02, 0x01]);
@@ -634,6 +635,7 @@ mod tests {
     use super::*;
     use crate::export::synth::is_tdmn;
 
+    /// A closed three-point mask.
     fn mask() -> MaskPlan {
         let shape = ShapePlan { bbox: [0.0, 0.0, 1.0, 1.0], open: false, points: vec![[0.0, 0.0]; 3] };
         MaskPlan {
@@ -649,6 +651,7 @@ mod tests {
         }
     }
 
+    /// An atom without its path is an error.
     #[test]
     fn an_atom_without_its_path_is_an_error() {
         let mut t = MaskProtos::build();

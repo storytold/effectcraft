@@ -57,6 +57,7 @@ struct Entry<'a> {
 }
 
 impl<'a> Entry<'a> {
+    /// An entry for a chunk whose body is not read yet.
     fn placeholder(id: [u8; 4]) -> Self {
         Self { data: &[], id, list_type: [0; 4], end: 0, kind: Kind::Data, pad: None }
     }
@@ -70,6 +71,7 @@ pub struct TreeIndex<'a> {
 }
 
 impl fmt::Debug for TreeIndex<'_> {
+    /// The sizes only: the chunk count and the trailer length.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TreeIndex").field("chunks", &self.nodes.len()).field("trailer", &self.trailer.len()).finish()
     }
@@ -196,6 +198,7 @@ impl<'a> TreeIndex<'a> {
         AepFile { chunks: self.build(0, u32::try_from(self.nodes.len()).unwrap_or(u32::MAX)), trailer: Cow::Borrowed(self.trailer) }
     }
 
+    /// The entry at `at`, `None` past the end.
     fn entry(&self, at: u32) -> Option<&Entry<'a>> {
         self.nodes.get(usize::try_from(at).ok()?)
     }
@@ -332,10 +335,12 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The input bytes `start..end` (empty when out of range).
     fn slice(&self, start: usize, end: usize) -> &'a [u8] {
         self.data.get(start..end).unwrap_or(&[])
     }
 
+    /// Fills in the body of the entry at `at` once the parser knows what it is.
     fn set(&mut self, at: usize, kind: Kind, data: &'a [u8], list_type: [u8; 4]) {
         if let Some(e) = self.nodes.get_mut(at) {
             e.kind = kind;
@@ -382,6 +387,7 @@ enum NodeRepr<'f, 'a> {
 }
 
 impl<'f, 'a> From<&'f Chunk<'a>> for Node<'f, 'a> {
+    /// The handle for this value.
     fn from(chunk: &'f Chunk<'a>) -> Self {
         Node(NodeRepr::Chunk(chunk))
     }
@@ -390,6 +396,7 @@ impl<'f, 'a> From<&'f Chunk<'a>> for Node<'f, 'a> {
 /// Prints the chunk as [`Chunk`]'s `Debug` does, whichever tree it is in, without copying the
 /// subtree.
 impl fmt::Debug for Node<'_, '_> {
+    /// The chunk as `Chunk`'s `Debug` prints it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             NodeRepr::Chunk(c) => fmt::Debug::fmt(c, f),
@@ -405,6 +412,7 @@ struct BodyDebug<'f, 'a>(Node<'f, 'a>);
 struct ChildrenDebug<'f, 'a>(Node<'f, 'a>);
 
 impl fmt::Debug for BodyDebug<'_, '_> {
+    /// The body as `Body`'s `Debug` prints it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Some(e) = self.0.entry() else { return f.write_str("?") };
         match e.kind {
@@ -417,12 +425,14 @@ impl fmt::Debug for BodyDebug<'_, '_> {
 }
 
 impl fmt::Debug for ChildrenDebug<'_, '_> {
+    /// The children as a list.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.0.children()).finish()
     }
 }
 
 impl<'f, 'a> Node<'f, 'a> {
+    /// The entry at `at`, `None` past the end.
     fn entry(self) -> Option<&'f Entry<'a>> {
         match self.0 {
             NodeRepr::Index(tree, at) => tree.entry(at),
@@ -570,6 +580,7 @@ enum NodesRepr<'f, 'a> {
 impl<'f, 'a> Iterator for Nodes<'f, 'a> {
     type Item = Node<'f, 'a>;
 
+    /// The next item, `None` at the end of the range.
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.0 {
             NodesRepr::Slice(it) => it.next().map(Node::from),
@@ -605,6 +616,7 @@ enum WalkRepr<'f, 'a> {
 impl<'f, 'a> Iterator for NodeWalk<'f, 'a> {
     type Item = (usize, Node<'f, 'a>);
 
+    /// The next item, `None` at the end of the range.
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.0 {
             WalkRepr::Chunk(w) => w.next().map(|(d, c)| (d, Node::from(c))),
@@ -637,12 +649,14 @@ pub(crate) enum Root<'f, 'a> {
 }
 
 impl<'f, 'a> From<&'f AepFile<'a>> for Root<'f, 'a> {
+    /// The handle for this value.
     fn from(file: &'f AepFile<'a>) -> Self {
         Root::File(file)
     }
 }
 
 impl<'f, 'a> From<&'f TreeIndex<'a>> for Root<'f, 'a> {
+    /// The handle for this value.
     fn from(index: &'f TreeIndex<'a>) -> Self {
         Root::Index(index)
     }
@@ -677,6 +691,7 @@ mod tests {
     struct Rng(u64);
 
     impl Rng {
+        /// The next pseudo-random number (xorshift64*).
         fn next(&mut self) -> u64 {
             let mut x = self.0;
             x ^= x >> 12;
@@ -686,6 +701,7 @@ mod tests {
             x.wrapping_mul(0x2545_f491_4f6c_dd1d)
         }
 
+        /// A number below `n` (0 for `n == 0`).
         fn below(&mut self, n: u64) -> u64 {
             if n == 0 { 0 } else { self.next() % n }
         }
@@ -745,6 +761,7 @@ mod tests {
         }
     }
 
+    /// The default limits and four tight ones (depth 1 and 3, 7 and 40 chunks).
     fn limits() -> [Limits; 5] {
         [
             Limits::default(),
@@ -755,6 +772,7 @@ mod tests {
         ]
     }
 
+    /// The index matches the chunk parser on generated and damaged trees.
     #[test]
     fn the_index_matches_the_chunk_parser_on_generated_and_damaged_trees() {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
@@ -785,6 +803,7 @@ mod tests {
         }
     }
 
+    /// Header errors are the same.
     #[test]
     fn header_errors_are_the_same() {
         for bytes in [&b""[..], b"RIFX", b"RIFX\0\0\0\x04Egg", b"RIFX\0\0\0\x04Fnord", b"RIFX\0\0\0\x08Egg!", b"RIFX\0\0\0\x03Egg!", b"RIFF\0\0\0\x04Egg!"] {
@@ -824,6 +843,7 @@ mod tests {
         }
     }
 
+    /// The index never reserves more than the input or the limit allows.
     #[test]
     fn the_index_never_reserves_more_than_the_input_or_the_limit_allows() {
         // 1000 empty headers: the most chunks the bytes can hold.
@@ -875,6 +895,7 @@ mod tests {
         data
     }
 
+    /// The index grows with the chunk count not the byte size.
     #[test]
     fn the_index_grows_with_the_chunk_count_not_the_byte_size() {
         // 4 MB in 4 chunks: a few slots, not one per 32 bytes (that would be 131 072 slots, 4 MB).
@@ -903,6 +924,7 @@ mod tests {
         out
     }
 
+    /// Failed attempts count once and leave nothing behind.
     #[test]
     fn failed_attempts_count_once_and_leave_nothing_behind() {
         let mut wide = b"Fold".to_vec();
@@ -928,6 +950,7 @@ mod tests {
         same(&data, Limits::default());
     }
 
+    /// Depth beyond the limit stays opaque without recursion past it.
     #[test]
     fn depth_beyond_the_limit_stays_opaque_without_recursion_past_it() {
         // 5000 nested lists: far deeper than the limit; everything below depth 64 stays bytes.

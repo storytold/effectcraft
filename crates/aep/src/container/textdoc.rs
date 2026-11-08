@@ -184,29 +184,35 @@ struct Parser<'b> {
     items: Vec<V<'b>>,
 }
 
+/// Whitespace between tokens.
 fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+/// A byte that ends a bare word.
 fn is_delimiter(c: u8) -> bool {
     is_ws(c) || matches!(c, b'/' | b'[' | b']' | b'<' | b'>' | b'(' | b')')
 }
 
 impl<'b> Parser<'b> {
+    /// The next byte, `None` at the end.
     fn peek(&self) -> Option<u8> {
         self.b.get(self.i).copied()
     }
 
+    /// Moves past whitespace.
     fn skip_ws(&mut self) {
         while self.peek().is_some_and(is_ws) {
             self.i = self.i.saturating_add(1);
         }
     }
 
+    /// True when the unread bytes start with `s`.
     fn starts_with(&self, s: &[u8]) -> bool {
         self.b.get(self.i..).is_some_and(|rest| rest.starts_with(s))
     }
 
+    /// The bare word at the position (up to the next delimiter), borrowed from the body.
     fn word(&mut self) -> &'b [u8] {
         let start = self.i;
         while self.peek().is_some_and(|c| !is_delimiter(c)) {
@@ -242,6 +248,7 @@ impl<'b> Parser<'b> {
         }
     }
 
+    /// The value at the position, `None` when it is malformed or nested deeper than the limit.
     fn parse(&mut self, depth: usize) -> Option<V<'b>> {
         self.skip_ws();
         if depth > MAX_DEPTH {
@@ -322,6 +329,7 @@ impl<'b> Parser<'b> {
     }
 }
 
+/// A big-endian UTF-16 string as text (unpaired surrogates become U+FFFD).
 fn decode_utf16be(bytes: &[u8]) -> String {
     let (pairs, rest) = bytes.as_chunks::<2>();
     let units = pairs.iter().map(|p| u16::from_be_bytes(*p));
@@ -369,10 +377,12 @@ fn val(v: f64) -> V<'static> {
     V::Float(v)
 }
 
+/// A dictionary value with these keys, for the built-in defaults.
 fn dict(pairs: Vec<(&'static str, V<'static>)>) -> V<'static> {
     V::Dict(pairs.into_iter().map(|(k, v)| (Cow::Borrowed(k), v)).collect())
 }
 
+/// An array of numbers, for the built-in defaults.
 fn numbers(v: &[f64]) -> V<'static> {
     V::Array(v.iter().map(|x| val(*x)).collect())
 }
@@ -774,11 +784,13 @@ pub struct TextBox {
     pub height: f64,
 }
 
+/// The RGBA colour in a style slot (`slot/0/1`), `None` when it is not four numbers.
 fn colour_of(style: &V<'_>, slot: &str) -> Option<[f64; 4]> {
     let c = style.get(slot)?.get("0")?.get("1")?;
     Some([c.at(0)?.as_f64()?, c.at(1)?.as_f64()?, c.at(2)?.as_f64()?, c.at(3)?.as_f64()?])
 }
 
+/// A non-negative integer value as `usize`.
 fn usize_of(v: &V<'_>) -> Option<usize> {
     usize::try_from(v.as_i64()?).ok()
 }
@@ -1203,6 +1215,7 @@ mod oracle {
     }
 
     impl TextValue {
+        /// The canonical text of a key, as the owning parser built it.
         fn key_text(&self) -> String {
             match self {
                 Self::Name(s) | Self::Str(s) | Self::Token(s) => s.clone(),
@@ -1220,29 +1233,35 @@ mod oracle {
         i: usize,
     }
 
+    /// Whitespace between tokens.
     fn is_ws(c: u8) -> bool {
         matches!(c, b' ' | b'\t' | b'\r' | b'\n')
     }
 
+    /// A byte that ends a bare word.
     fn is_delimiter(c: u8) -> bool {
         is_ws(c) || matches!(c, b'/' | b'[' | b']' | b'<' | b'>' | b'(' | b')')
     }
 
     impl Parser<'_> {
+        /// The next byte, `None` at the end.
         fn peek(&self) -> Option<u8> {
             self.b.get(self.i).copied()
         }
 
+        /// Moves past whitespace.
         fn skip_ws(&mut self) {
             while self.peek().is_some_and(is_ws) {
                 self.i = self.i.saturating_add(1);
             }
         }
 
+        /// True when the unread bytes start with `s`.
         fn starts_with(&self, s: &[u8]) -> bool {
             self.b.get(self.i..).is_some_and(|rest| rest.starts_with(s))
         }
 
+        /// The bare word at the position (up to the next delimiter), borrowed from the body.
         fn word(&mut self) -> &[u8] {
             let start = self.i;
             while self.peek().is_some_and(|c| !is_delimiter(c)) {
@@ -1251,6 +1270,7 @@ mod oracle {
             self.b.get(start..self.i).unwrap_or(&[])
         }
 
+        /// The value at the position, `None` when it is malformed or nested deeper than the limit.
         fn parse(&mut self, depth: usize) -> Option<TextValue> {
             self.skip_ws();
             if depth > MAX_DEPTH {
@@ -1332,6 +1352,7 @@ mod oracle {
         }
     }
 
+    /// A big-endian UTF-16 string as text (unpaired surrogates become U+FFFD).
     fn decode_utf16be(bytes: &[u8]) -> String {
         let (pairs, rest) = bytes.as_chunks::<2>();
         let units = pairs.iter().map(|p| u16::from_be_bytes(*p));
@@ -1364,10 +1385,12 @@ mod oracle {
         TextValue::Float(v)
     }
 
+    /// A dictionary value with these keys, for the built-in defaults.
     fn dict(pairs: Vec<(&str, TextValue)>) -> TextValue {
         TextValue::Dict(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
 
+    /// An array of numbers, for the built-in defaults.
     fn numbers(v: &[f64]) -> TextValue {
         TextValue::Array(v.iter().map(|x| val(*x)).collect())
     }
@@ -1434,6 +1457,7 @@ mod tests {
     use super::*;
     use crate::container::Chunk;
 
+    /// A `LIST` of this type holding `kids`.
     fn list(t: &[u8; 4], kids: Vec<Chunk<'static>>) -> Chunk<'static> {
         Chunk::list(*t, kids)
     }
@@ -1451,6 +1475,7 @@ mod tests {
     struct Rng(u64);
 
     impl Rng {
+        /// The next pseudo-random number (xorshift).
         fn next(&mut self) -> u64 {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
@@ -1458,11 +1483,13 @@ mod tests {
             self.0
         }
 
+        /// A number below `n` (0 for `n == 0`).
         fn below(&mut self, n: usize) -> usize {
             usize::try_from(self.next() % (n as u64)).unwrap_or(0)
         }
     }
 
+    /// The borrowing parser reads what the owning one read.
     #[test]
     fn the_borrowing_parser_reads_what_the_owning_one_read() {
         // Every key form the owned keys canonicalise (`06`, `+6`, `-0`, `1.0`, `1e2`, strings,
@@ -1515,6 +1542,7 @@ mod tests {
             b")",
         ];
         // A value: mostly well formed, with a random part in its place now and then.
+        /// Appends one generated value to `out`: mostly well formed, now and then a random part.
         fn value(rng: &mut Rng, parts: &[&[u8]], depth: usize, out: &mut Vec<u8>) {
             let pick = |rng: &mut Rng| parts.get(rng.below(parts.len())).copied().unwrap_or_default();
             match rng.below(if depth > 6 { 5 } else { 10 }) {
@@ -1597,6 +1625,7 @@ mod tests {
         }
     }
 
+    /// A realistic document is read in full.
     #[test]
     fn a_realistic_document_is_read_in_full() {
         let doc = TextDocument::parse(DOC).expect("a document");
@@ -1612,6 +1641,7 @@ mod tests {
         assert_eq!(doc.line_orientation, Some(2));
     }
 
+    /// The defaults are the sampled ones and built once.
     #[test]
     fn the_defaults_are_the_sampled_ones_and_built_once() {
         assert_eq!(STYLE_DEFAULTS.clone().into_owned(), oracle::style_defaults());
@@ -1619,6 +1649,7 @@ mod tests {
         assert!(std::ptr::eq(&*STYLE_DEFAULTS, &*STYLE_DEFAULTS));
     }
 
+    /// Names keys and strings are borrowed from the body.
     #[test]
     fn names_keys_and_strings_are_borrowed_from_the_body() {
         let V::Dict(pairs) = parse_dict(b"/a /b /c (\xfe\xff\0x) /d (plain) /e word /f 1.5 /g (\\(esc) 07 1") else { panic!("a dict") };
@@ -1637,6 +1668,7 @@ mod tests {
         assert!(matches!(outer.get(1).map(|p| &p.1), Some(V::Array(a)) if a.len() == 9 && a.capacity() >= a.len()));
     }
 
+    /// Slot checks agree with the owned ones.
     #[test]
     fn slot_checks_agree_with_the_owned_ones() {
         // Slots: defaults, decoded, neutral-listed and unknown ones. Values: each default as
@@ -1710,6 +1742,7 @@ mod tests {
         assert!(listed > 10_000, "{listed} slots listed");
     }
 
+    /// Values compare by their text.
     #[test]
     fn values_compare_by_their_text() {
         // Two names that are not UTF-8 read as the same text with replacement characters, as the
@@ -1721,6 +1754,7 @@ mod tests {
         assert!(is_neutral(&V::Name(b"nil")) && !is_neutral(&V::Token(b"nil")) && is_neutral(&V::Float(0.0)) && !is_neutral(&V::Str(Cow::Borrowed(b""))));
     }
 
+    /// A layers marker list is the one in its root group.
     #[test]
     fn a_layers_marker_list_is_the_one_in_its_root_group() {
         let marked = |tag: u8| list(b"mrst", vec![Chunk::data(*b"test", vec![tag])]);
@@ -1737,6 +1771,7 @@ mod tests {
         assert_eq!(Node::from(&secl).marker_list().and_then(|m| m.child(b"test")).and_then(Node::bytes), Some(&[3u8][..]));
     }
 
+    /// The source text record is found in the text group.
     #[test]
     fn the_source_text_record_is_found_in_the_text_group() {
         let doc = b"/1 << /1 [ << /0 << /0 (\xfe\xff\0H\0\r) /6 << /0 [ << /0 << /0 << /6 << /0 0 /1 50 /53 << /0 << /1 [ 1 1 0 0 ] >> >> >> >> >> /1 2 >> ] >> >> >> ] >>";
