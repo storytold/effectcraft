@@ -224,6 +224,9 @@ fn channel_selection_is_static_and_says_what_is_read() {
     assert!(s.execute_checked("prop.toggleKey", json!({"layer": l, "path": red})).is_err(), "no keyframe");
     assert!(s.execute_checked("prop.toggleAnimation", json!({"layer": l, "path": red})).is_err(), "no stopwatch");
     assert!(s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "expression": "'Z'"})).is_err(), "no expression");
+    // (the forms that add the default expression: a toggle, and switching one on)
+    assert!(s.execute_checked("prop.setExpression", json!({"layer": l, "path": red})).is_err(), "no expression by toggle");
+    assert!(s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "enabled": true})).is_err(), "no expression switched on");
     assert!(prop(&s, red).keys.is_empty() && prop(&s, red).expr.is_none());
     // The value changes; the channels read are exactly those picked.
     s.execute_checked("prop.set", json!({"layer": l, "path": red, "value": "Z"})).unwrap();
@@ -268,4 +271,28 @@ fn a_keyed_channel_selection_opens_static() {
     let said = o.drain_events().into_iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.contains("Channel selection")));
     assert!(said, "the loss is reported");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #3271 review: an expression a channel selection has from an older document (set here by
+/// hand) can still be switched off and removed.
+#[test]
+fn a_channel_selections_old_expression_can_be_removed() {
+    let rec = Arc::new(Recorder::default());
+    let mut s = session(&rec);
+    let item = import(&mut s, "/renders/old-expr.exr");
+    let l = add_layer(&mut s, &item);
+    s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let red = "effects/#1/red";
+    {
+        let p = Arc::make_mut(&mut s.project);
+        let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut(red).unwrap();
+        pr.expr = Some(effectcraft_project::Expression { text: "'Z'".into(), enabled: true });
+    }
+    let expr = |s: &Session| s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap().props.prop(red).unwrap().expr.clone();
+    s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "enabled": false})).unwrap();
+    assert!(expr(&s).is_some_and(|e| !e.enabled), "switched off");
+    assert!(s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "enabled": true})).is_err(), "not on again");
+    s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "expression": ""})).unwrap();
+    assert!(expr(&s).is_none(), "removed");
 }
