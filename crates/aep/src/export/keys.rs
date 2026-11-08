@@ -90,6 +90,7 @@ mod tests {
     use super::*;
     use crate::export::synth::key_list;
 
+    /// Keys are timed sorted merged and reported.
     #[test]
     fn keys_are_timed_sorted_merged_and_reported() {
         use effectcraft_keyframe::Value;
@@ -122,6 +123,7 @@ mod tests {
         assert!(col.finish().losses.is_empty());
     }
 
+    /// A key list is filled and replaces the value.
     #[test]
     fn a_key_list_is_filled_and_replaces_the_value() {
         let mut list = Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", vec![0; 52])]);
@@ -142,6 +144,7 @@ mod tests {
         assert!(set_key_list(&mut Chunk::list(*b"tdbs", Vec::new()), Vec::new(), 0, 48).is_err());
     }
 
+    /// A spatial record holds the point layout.
     #[test]
     fn a_spatial_record_holds_the_point_layout() {
         let k = KeyPlan {

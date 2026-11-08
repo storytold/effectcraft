@@ -20,8 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::container::Chunk;
 use crate::container::bytes::{array, be_f32, be_f64, be_i32, be_u16, be_u32, cstr, text, until_nul};
+use crate::container::index::Node;
 use crate::container::typed::{KeyList, Layer, Project, PropGroup, PropNode, Property};
 
 /// The parameter type, the `u32` at byte 12 of `pard`. The numbering matches the plug-in
@@ -132,7 +132,7 @@ pub enum LayerRef {
 #[derive(Debug, Clone)]
 pub struct Effect<'f, 'a> {
     match_name: String,
-    chunk: &'f Chunk<'a>,
+    chunk: Node<'f, 'a>,
 }
 
 /// Where the parameter definitions of an effect instance come from.
@@ -178,13 +178,13 @@ impl<'f, 'a> Effect<'f, 'a> {
     }
 
     /// The underlying `LIST sspc` chunk.
-    pub fn chunk(&self) -> &'f Chunk<'a> {
+    pub fn chunk(&self) -> Node<'f, 'a> {
         self.chunk
     }
 
     /// The instance name shown in the effect controls (`fnam`).
     pub fn name(&self) -> Option<String> {
-        self.chunk.child(b"fnam")?.children().iter().find(|c| c.is(b"Utf8"))?.bytes().map(text)
+        self.chunk.child(b"fnam")?.child(b"Utf8")?.bytes().map(text)
     }
 
     /// The name the user gave the instance: the `tdsn` of the instance's value group when it is
@@ -192,7 +192,7 @@ impl<'f, 'a> Effect<'f, 'a> {
     /// `None` while the instance shows the effect's name.
     pub fn user_name(&self) -> Option<String> {
         let values = self.chunk.child_list(b"tdgp")?;
-        let name = values.child(b"tdsn")?.children().iter().find(|c| c.is(b"Utf8"))?.bytes().map(text)?;
+        let name = values.child(b"tdsn")?.child(b"Utf8")?.bytes().map(text)?;
         (name != "-_0_/-" && !name.is_empty()).then_some(name)
     }
 
@@ -250,7 +250,7 @@ impl<'f, 'a> Effect<'f, 'a> {
     }
 
     /// The parameters described by `part` (a `LIST parT`) with the values of this instance.
-    fn params_from(&self, part: &'f Chunk<'a>, borrowed: bool) -> Vec<EffectParam<'f, 'a>> {
+    fn params_from(&self, part: Node<'f, 'a>, borrowed: bool) -> Vec<EffectParam<'f, 'a>> {
         let mut out: Vec<EffectParam<'f, 'a>> = Vec::new();
         // The stored values by match name: the first entry of a name, as `PropGroup::get` finds it
         // (a group of that name means no stored value). Indexed once: a lookup per parameter
@@ -280,7 +280,7 @@ impl<'f, 'a> Effect<'f, 'a> {
                 });
             } else if c.is(b"pdnm")
                 && let Some(last) = out.last_mut()
-                && let Some(u) = c.children().iter().find(|u| u.is(b"Utf8"))
+                && let Some(u) = c.child(b"Utf8")
                 && let Some(b) = u.bytes()
                 // An empty `pdnm` names nothing (EffectCraft's exports write one: the effect
                 // supplies its items).
@@ -293,8 +293,9 @@ impl<'f, 'a> Effect<'f, 'a> {
     }
 }
 
-fn has_pard(part: &Chunk<'_>) -> bool {
-    part.children().iter().any(|c| c.is(b"pard"))
+/// True when a `LIST parT` holds parameter definitions (a `pard`).
+fn has_pard(part: Node<'_, '_>) -> bool {
+    part.children().any(|c| c.is(b"pard"))
 }
 
 impl<'f, 'a> Project<'f, 'a> {
@@ -302,18 +303,18 @@ impl<'f, 'a> Project<'f, 'a> {
     /// name and the `LIST parT` of the copied instance, in file order (the stack order of the
     /// types, 365/366). The `EfDC` count before them is little-endian and is not needed to read
     /// them. A type whose copy has no definitions is left out.
-    pub fn effect_definitions(&self) -> Vec<(String, &'f Chunk<'a>)> {
-        let mut out: Vec<(String, &'f Chunk<'a>)> = Vec::new();
+    pub fn effect_definitions(&self) -> Vec<(String, Node<'f, 'a>)> {
+        let mut out: Vec<(String, Node<'f, 'a>)> = Vec::new();
         let Some(defs) = self.effect_defs else { return out };
         let mut seen: HashSet<String> = HashSet::new();
-        for df in defs.children().iter().filter(|c| c.is_list(b"EfDf")) {
+        for df in defs.children().filter(|c| c.is_list(b"EfDf")) {
             let mut name: Option<String> = None;
             for c in df.children() {
                 if c.is(b"tdmn") {
                     name = c.bytes().map(|b| text(until_nul(b)));
                 } else if c.is_list(b"sspc")
                     && let Some(n) = name.take()
-                    && let Some(part) = c.child_list(b"parT").filter(|p| has_pard(p))
+                    && let Some(part) = c.child_list(b"parT").filter(|p| has_pard(*p))
                     && seen.insert(n.clone())
                 {
                     out.push((n, part));
@@ -328,8 +329,8 @@ impl<'f, 'a> Project<'f, 'a> {
     /// For a type without a project-level copy it also keeps the own `parT` of the first instance
     /// in the file (items, layers and effects in file order) that has one.
     pub fn effect_definition_index(&self) -> EffectDefinitions<'f, 'a> {
-        let by_name: HashMap<String, &'f Chunk<'a>> = self.effect_definitions().into_iter().collect();
-        let mut instances: HashMap<String, &'f Chunk<'a>> = HashMap::new();
+        let by_name: HashMap<String, Node<'f, 'a>> = self.effect_definitions().into_iter().collect();
+        let mut instances: HashMap<String, Node<'f, 'a>> = HashMap::new();
         for item in self.all_items() {
             let Some(comp) = item.comp() else { continue };
             for layer in comp.layers() {
@@ -337,7 +338,7 @@ impl<'f, 'a> Project<'f, 'a> {
                     if by_name.contains_key(&fx.match_name) || instances.contains_key(&fx.match_name) {
                         continue;
                     }
-                    if let Some(part) = fx.chunk.child_list(b"parT").filter(|p| has_pard(p)) {
+                    if let Some(part) = fx.chunk.child_list(b"parT").filter(|p| has_pard(*p)) {
                         instances.insert(fx.match_name, part);
                     }
                 }
@@ -363,9 +364,9 @@ impl<'f, 'a> Project<'f, 'a> {
 #[derive(Debug, Clone, Default)]
 pub struct EffectDefinitions<'f, 'a> {
     /// The project-level copies (`EfdG`).
-    by_name: HashMap<String, &'f Chunk<'a>>,
+    by_name: HashMap<String, Node<'f, 'a>>,
     /// For a type without a project-level copy: the own `parT` of the first instance that has one.
-    instances: HashMap<String, &'f Chunk<'a>>,
+    instances: HashMap<String, Node<'f, 'a>>,
 }
 
 impl<'f, 'a> EffectDefinitions<'f, 'a> {
@@ -392,7 +393,7 @@ impl<'f, 'a> EffectDefinitions<'f, 'a> {
             return effect.params();
         }
         match self.by_name.get(effect.match_name()).or_else(|| self.instances.get(effect.match_name())) {
-            Some(part) => effect.params_from(part, true),
+            Some(part) => effect.params_from(*part, true),
             None => Vec::new(),
         }
     }
@@ -638,6 +639,7 @@ impl<'f, 'a> Layer<'f, 'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::Chunk;
 
     fn tdmn(name: &str) -> Chunk<'static> {
         let mut b = name.as_bytes().to_vec();
@@ -670,11 +672,11 @@ mod tests {
             ("A".to_string(), Chunk::list(*b"tdbs", vec![Chunk::data(*b"cdat", vec![0u8; 8])])),
         ];
         let chunk = instance(&names, &stored);
-        let fx = Effect { match_name: "X".into(), chunk: &chunk };
+        let fx = Effect { match_name: "X".into(), chunk: Node::from(&chunk) };
         let params = fx.params();
         assert_eq!(params.iter().map(|p| p.match_name.as_str()).collect::<Vec<_>>(), ["A", "B", "C"]);
         let first = params.first().and_then(|p| p.stored).expect("A stored");
-        assert!(first.chunk.children().is_empty(), "the first A (the second has a cdat)");
+        assert!(first.chunk.children().next().is_none(), "the first A (the second has a cdat)");
         assert!(params.get(1).is_some_and(|p| p.stored.is_none()), "a group of that name is no stored value");
         assert!(params.get(2).is_some_and(|p| p.stored.is_none()));
     }
@@ -687,7 +689,7 @@ mod tests {
         let names: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
         let stored: Vec<(String, Chunk<'static>)> = names.iter().map(|m| (m.clone(), tdbs())).collect();
         let chunk = instance(&names, &stored);
-        let fx = Effect { match_name: "X".into(), chunk: &chunk };
+        let fx = Effect { match_name: "X".into(), chunk: Node::from(&chunk) };
         let params = fx.params();
         assert_eq!(params.len(), n);
         assert!(params.iter().all(|p| p.stored.is_some()));
@@ -707,19 +709,19 @@ mod tests {
         }
         let efdg = Chunk::list(*b"EfdG", defs);
         let fold = Chunk::list(*b"Fold", Vec::new());
-        let project = Project { fold: &fold, effect_defs: Some(&efdg) };
+        let project = Project { fold: Node::from(&fold), effect_defs: Some(Node::from(&efdg)) };
         let all = project.effect_definitions();
         assert_eq!(all.len(), n);
         let index = project.effect_definition_index();
         let bare = Chunk::list(*b"sspc", vec![Chunk::list(*b"parT", Vec::new())]);
         for i in (0..n).step_by(50) {
-            let fx = Effect { match_name: format!("FX{i}"), chunk: &bare };
+            let fx = Effect { match_name: format!("FX{i}"), chunk: Node::from(&bare) };
             assert_eq!(index.source(&fx), DefinitionSource::Project);
             let params = index.params(&fx);
             assert_eq!(params.iter().map(|p| p.match_name.as_str()).collect::<Vec<_>>(), ["R0"], "the first copy's definitions");
             assert!(params.iter().all(|p| p.borrowed_definition));
         }
-        let unknown = Effect { match_name: "nope".into(), chunk: &bare };
+        let unknown = Effect { match_name: "nope".into(), chunk: Node::from(&bare) };
         assert_eq!(index.source(&unknown), DefinitionSource::Missing);
         assert!(index.params(&unknown).is_empty());
         assert_eq!(project.definition_source(&unknown), DefinitionSource::Missing);

@@ -2,8 +2,8 @@
 //! of a layer's source.
 
 use crate::container::bytes::{be_f32, be_f64, be_u32, cstr, le_u32, text};
-use crate::container::chunk::Chunk;
 use crate::container::header::Rational;
+use crate::container::index::Node;
 use crate::container::typed::{Item, ItemKind, Layer, Project};
 
 /// The footage data of an item (`LIST Pin ` with `sspc`, `opti` and, for files, `Als2/alas`).
@@ -201,14 +201,13 @@ impl SequenceInfo {
 /// is unreadable (empty). A name that is not a plain file name (holding `/`, `\`, `:` or a control
 /// character such as NUL, or being `.` or `..`) makes the whole list unreadable (empty): the names
 /// are joined to the folder.
-fn sequence_file_list(list: &Chunk<'_>) -> Vec<String> {
+fn sequence_file_list(list: Node<'_, '_>) -> Vec<String> {
     // After Effects writes the count first (the one sample); a list without a readable count is
     // not read rather than guessed.
     let Some(count) = list.child(b"StVS").and_then(|c| c.bytes()).and_then(|b| le_u32(b, 0)).and_then(|n| usize::try_from(n).ok()) else {
         return Vec::new();
     };
-    let names: Vec<String> =
-        list.children().iter().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).take(count).map(text).filter(|n| !n.is_empty()).collect();
+    let names: Vec<String> = list.children().filter(|c| c.is(b"Utf8")).filter_map(Node::bytes).take(count).map(text).filter(|n| !n.is_empty()).collect();
     if names.iter().any(|n| n.contains(|c: char| matches!(c, '/' | '\\' | ':') || c.is_control()) || n == "." || n == "..") {
         return Vec::new();
     }
@@ -240,9 +239,8 @@ impl<'f, 'a> Item<'f, 'a> {
         }
         let pin = self.chunk.child_list(b"Pin ")?;
         let sspc = pin.child(b"sspc")?.bytes()?;
-        let kids = pin.children();
-        let after = kids.iter().position(|c| c.is_list(b"Als2"))?;
-        let naming = || kids.iter().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
+        let after = pin.children().position(|c| c.is_list(b"Als2"))?;
+        let naming = || pin.children().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
         let (start, end, digits) = (be_u32(sspc, 172)?, be_u32(sspc, 176)?, be_u32(sspc, 180)?);
         // Force alphabetical order: the file list replaces the numbering.
         if let Some(list) = naming().find(|c| c.is_list(b"StVc")) {
@@ -252,7 +250,7 @@ impl<'f, 'a> Item<'f, 'a> {
             }
             return Some(SequenceInfo { prefix: String::new(), suffix: String::new(), start, end, digits, files });
         }
-        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).map(text).take(2).collect();
+        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(Node::bytes).map(text).take(2).collect();
         let (prefix, suffix) = match names.as_slice() {
             [prefix, suffix] => (prefix.clone(), suffix.clone()),
             // An empty prefix is not stored (`0001.png` has only `.png`).

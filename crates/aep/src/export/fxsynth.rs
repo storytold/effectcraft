@@ -61,6 +61,7 @@ pub(crate) fn pard(p: &PDef, popup_items: Option<u16>) -> Vec<u8> {
     pard_layout(p, popup_items).finish(|| format!("pard (type {})", p.code))
 }
 
+/// The 148-byte `pard` layout of a parameter definition: type, name and defaults.
 fn pard_layout(p: &PDef, popup_items: Option<u16>) -> Fixed {
     let mut b = Fixed::zeroed(148);
     b.put(12, &u32::from(p.code).to_be_bytes());

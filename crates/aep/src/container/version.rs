@@ -10,6 +10,7 @@ use std::fmt;
 
 use crate::container::bytes::be_u32;
 use crate::container::chunk::AepFile;
+use crate::container::index::{Root, TreeIndex};
 
 /// An After Effects version as packed in `head` / `svap`: `26.2.1x2` is major 26, minor 2, bug-fix
 /// 1, build 2 (the form of the scripting API's `app.version`).
@@ -71,13 +72,35 @@ impl AepFile<'_> {
     /// version there, and the older version for File ▸ Save a Copy As 25.x / 24.x. `None` when the
     /// chunk is missing, short or holds no version.
     pub fn file_version(&self) -> Option<AeVersion> {
-        AeVersion::from_word(be_u32(self.chunk(b"head")?.bytes()?, 4)?)
+        Root::from(self).file_version()
     }
 
     /// The version of the After Effects that wrote the file: `svap` bytes 0 to 3 (the same word in a
     /// down-saved copy as in a normal save). `None` when the chunk is missing (After Effects opens such
     /// a file), short or holds no version.
     pub fn saved_by_version(&self) -> Option<AeVersion> {
+        Root::from(self).saved_by_version()
+    }
+}
+
+impl TreeIndex<'_> {
+    /// [`AepFile::file_version`] of the indexed file.
+    pub fn file_version(&self) -> Option<AeVersion> {
+        Root::from(self).file_version()
+    }
+
+    /// [`AepFile::saved_by_version`] of the indexed file.
+    pub fn saved_by_version(&self) -> Option<AeVersion> {
+        Root::from(self).saved_by_version()
+    }
+}
+
+impl Root<'_, '_> {
+    pub(crate) fn file_version(self) -> Option<AeVersion> {
+        AeVersion::from_word(be_u32(self.chunk(b"head")?.bytes()?, 4)?)
+    }
+
+    pub(crate) fn saved_by_version(self) -> Option<AeVersion> {
         AeVersion::from_word(be_u32(self.chunk(b"svap")?.bytes()?, 0)?)
     }
 }

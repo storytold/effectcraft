@@ -262,6 +262,7 @@ impl Collector {
 mod tests {
     use super::*;
 
+    /// A report with losses in two categories, as the collector finishes it.
     fn collected() -> ExportReport {
         let mut col = Collector::default();
         col.exported.layers = 2;
@@ -286,6 +287,7 @@ mod tests {
         assert_eq!(back, collected());
     }
 
+    /// The queries read the losses.
     #[test]
     fn the_queries_read_the_losses() {
         let report = collected();
@@ -296,6 +298,7 @@ mod tests {
         assert_eq!((empty.total_losses(), empty.is_lossless(), empty.summary()), (0, true, String::new()));
     }
 
+    /// Details stop at the cap.
     #[test]
     fn details_stop_at_the_cap() {
         let mut col = Collector::default();

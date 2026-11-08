@@ -140,7 +140,7 @@ fn number(group: &PropGroup<'_, '_>, name: &str) -> Option<Tracked<f64>> {
 fn paths_of(group: &PropGroup<'_, '_>) -> Vec<ShapePath> {
     let Some(PropNode::Other(oms)) = group.get("ADBE Vector Shape") else { return Vec::new() };
     let Some(omks) = oms.child_list(b"omks") else { return Vec::new() };
-    omks.children().iter().filter(|c| c.is_list(b"shap")).filter_map(ShapePath::from_chunk).collect()
+    omks.children().filter(|c| c.is_list(b"shap")).filter_map(ShapePath::from_chunk).collect()
 }
 
 fn item(match_name: String, group: &PropGroup<'_, '_>) -> ShapeItem {

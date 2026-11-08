@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::container::AepFile;
+use crate::container::index::Root;
 
 /// Most example lines kept per loss category (the count is always exact).
 pub const MAX_DETAILS: usize = 20;
@@ -247,6 +248,11 @@ pub const UNKNOWN: &str = "unknown";
 impl AeVersionInfo {
     /// Reads the versions of a parsed file.
     pub fn of(file: &AepFile<'_>) -> Self {
+        Self::of_root(Root::from(file))
+    }
+
+    /// Reads the versions from the top-level chunks of either tree.
+    pub(crate) fn of_root(file: Root<'_, '_>) -> Self {
         let file_version = file.file_version();
         Self {
             file_version: file_version.map_or_else(|| UNKNOWN.to_string(), |v| v.text()),
@@ -337,6 +343,7 @@ pub const LIMITATIONS: &[&str] = &[
 mod tests {
     use super::*;
 
+    /// A report with losses in two categories and a missing file, as the collector finishes it.
     fn collected() -> ImportReport {
         let mut col = Collector::default();
         col.imported.layers = 2;
@@ -361,6 +368,7 @@ mod tests {
         assert_eq!(back, collected());
     }
 
+    /// The queries read the losses.
     #[test]
     fn the_queries_read_the_losses() {
         let report = collected();

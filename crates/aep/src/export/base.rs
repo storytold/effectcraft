@@ -15,6 +15,7 @@ pub(crate) fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
     layout(len, fields).finish(|| format!("base::bytes ({len} bytes, fields at {:?})", fields.iter().map(|(at, v)| (*at, v.len())).collect::<Vec<_>>()))
 }
 
+/// The fixed layout of `len` zero bytes with `fields` written at their offsets.
 fn layout(len: usize, fields: &[(usize, &[u8])]) -> Fixed {
     let mut b = Fixed::zeroed(len);
     for (at, v) in fields {
@@ -280,6 +281,7 @@ pub(crate) fn solid_item() -> Chunk<'static> {
 mod tests {
     use super::*;
 
+    /// A field out of range is an error.
     #[test]
     fn a_field_out_of_range_is_an_error() {
         let ok = layout(4, &[(0, &[1]), (3, &[2])]);

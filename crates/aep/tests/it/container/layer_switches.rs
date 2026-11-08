@@ -170,6 +170,7 @@ fn cameras_auto_orient_and_position() {
     assert_eq!(pos.stored, [100.0, 200.0, -1000.0]);
 }
 
+/// Lights type and position.
 #[test]
 fn lights_type_and_position() {
     // 254: a spot light (its Intensity 50 is checked on import).

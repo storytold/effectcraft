@@ -126,6 +126,7 @@ pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
     tdb4_layout(spec, keyed, time_scale).finish(|| "tdb4".to_string())
 }
 
+/// The 124-byte `tdb4` property header layout for a record spec.
 fn tdb4_layout(spec: &RecSpec, keyed: bool, time_scale: u32) -> Fixed {
     let mut b = Fixed::zeroed(124);
     b.put(0, &[0xdb, 0x99, 0x00, spec.dims]);
@@ -161,6 +162,7 @@ pub(crate) fn key_list(size: u32, count: u32, records: Vec<u8>) -> Chunk<'static
     Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", lhd3), Chunk::data(*b"ldat", records)])
 }
 
+/// The 52-byte `lhd3` key list header for `count` records of `size` bytes.
 fn key_list_header(size: u32, count: u32) -> Fixed {
     let mut lhd3 = Fixed::zeroed(52);
     lhd3.put(0, &0x00d0_0bee_u32.to_be_bytes());
@@ -229,6 +231,7 @@ mod tests {
         assert_eq!(rec.child(b"cdat").and_then(|c| c.bytes()).map(<[u8]>::len), Some(40));
     }
 
+    /// Every record header fits.
     #[test]
     fn every_record_header_fits() {
         for dims in 0..=u8::MAX {
@@ -246,6 +249,7 @@ mod tests {
         }
     }
 
+    /// A match name reads as the importer reads it.
     #[test]
     fn a_match_name_reads_as_the_importer_reads_it() {
         let m = tdmn("ADBE Group End");

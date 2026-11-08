@@ -227,7 +227,7 @@ impl Reader<'_> {
         let at = self.pos;
         self.pos = self.pos.saturating_add(1);
         let name = self.name()?;
-        let mut attrs: Vec<((usize, usize), Vec<u8>)> = Vec::new();
+        let mut attrs = Vec::new();
         let self_closing = loop {
             self.skip_ws();
             let rest = self.rest();
@@ -259,8 +259,15 @@ impl Reader<'_> {
             if raw.contains(&b'<') {
                 return Err(xml(vstart, "`<` inside an attribute value"));
             }
-            let mut value = Vec::new();
-            decode_entities(raw, vstart, &mut value)?;
+            // A value without `&` is its own decoding (most of them, every `bdata` After Effects
+            // writes): borrow it instead of copying it.
+            let value = if raw.contains(&b'&') {
+                let mut value = Vec::new();
+                decode_entities(raw, vstart, &mut value)?;
+                Cow::Owned(value)
+            } else {
+                Cow::Borrowed(raw)
+            };
             self.pos = vend.saturating_add(1);
             attrs.push((key, value));
         };
@@ -466,6 +473,15 @@ fn decode_entities(raw: &[u8], offset: usize, out: &mut Vec<u8>) -> Result<(), A
 
 /// Decodes a `bdata` value (hex digits, two per byte).
 fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
+    decode_hex_at_most(text, offset, MAX_BDATA)
+}
+
+/// The most bytes one `bdata` may decode to: what the 32-bit size field of a chunk can hold (a
+/// larger body could not be written back as an `.aep` either).
+const MAX_BDATA: usize = u32::MAX as usize;
+
+/// [`decode_hex`] with the decoded-size limit as a parameter (so tests can reach it).
+fn decode_hex_at_most(text: &[u8], offset: usize, max: usize) -> Result<Vec<u8>, AepError> {
     if text.len() % 2 == 1 {
         return Err(xml(offset, "bdata has an odd number of hex digits"));
     }
@@ -476,11 +492,25 @@ fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
         _ => None,
     };
     let (pairs, _) = text.as_chunks::<2>();
-    pairs
-        .iter()
-        .map(|[hi, lo]| digit(*hi).zip(digit(*lo)).map(|(h, l)| (h << 4) | l))
-        .collect::<Option<Vec<u8>>>()
-        .ok_or(xml(offset, "bdata holds a character that is not a hex digit"))
+    if pairs.len() > max {
+        return Err(AepError::TooLarge);
+    }
+    // Nothing is reserved for a value that does not decode: one cheap pass checks every digit first.
+    // Blocks without an early exit inside, so the check vectorises; it stops at the first bad block.
+    if !text.chunks(4096).all(|block| block.iter().fold(true, |ok, b| ok & b.is_ascii_hexdigit())) {
+        return Err(xml(offset, "bdata holds a character that is not a hex digit"));
+    }
+    // Sized once (collecting into `Option<Vec>` has no size hint and regrows step by step), and
+    // without aborting when the memory is not there.
+    let mut out = Vec::new();
+    out.try_reserve_exact(pairs.len()).map_err(|_| xml(offset, "bdata is too large to hold in memory"))?;
+    for [hi, lo] in pairs {
+        match (digit(*hi), digit(*lo)) {
+            (Some(h), Some(l)) => out.push((h << 4) | l),
+            _ => return Err(xml(offset, "bdata holds a character that is not a hex digit")),
+        }
+    }
+    Ok(out)
 }
 
 /// The JSON body of an `alas` chunk from the attributes of a `fileReference`, keys in document
@@ -626,6 +656,92 @@ mod tests {
             assert!(matches!(read_aepx(b.as_bytes()), Err(AepError::Xml { .. })), "{b}");
         }
         assert!(matches!(read_aepx(b"<AfterEffectsProject>\xff</AfterEffectsProject>"), Err(AepError::Xml { .. })));
+    }
+
+    /// Attribute values decode entities only where they have them.
+    #[test]
+    fn attribute_values_decode_entities_only_where_they_have_them() {
+        // An entity inside `bdata` still decodes before the hex does.
+        let f = read_aepx(doc("<a bdata=\"&#x30;1&#65;b\"/>").as_bytes()).unwrap();
+        assert_eq!(f.chunks[0].bytes(), Some(&[0x01, 0xab][..]));
+        // A bad entity in any attribute, even of an element that is skipped, is still an error.
+        for bad in ["<a other=\"&nbsp;\"/>", "<Unknown x=\"&bogus;\"/>", "<a bdata=\"00\" note=\"&amp\"/>"] {
+            assert!(matches!(read_aepx(doc(bad).as_bytes()), Err(AepError::Xml { .. })), "{bad}");
+        }
+        // Without `&` the value is taken as written.
+        let f = read_aepx(doc("<a bdata=\"0aFf\" x=\"y\"/>").as_bytes()).unwrap();
+        assert_eq!(f.chunks[0].bytes(), Some(&[0x0a, 0xff][..]));
+    }
+
+    /// A large bdata with a bad digit is refused before it is sized.
+    #[test]
+    fn a_large_bdata_with_a_bad_digit_is_refused_before_it_is_sized() {
+        // 10 MB of hex that is bad from the first pair (and once more at the very end).
+        let mut text = b"zz".to_vec();
+        text.extend(std::iter::repeat_n(*b"00", 5_000_000).flatten());
+        assert_eq!(decode_hex(&text, 3), Err(xml(3, "bdata holds a character that is not a hex digit")));
+        let mut late = vec![b'0'; 10_000_000];
+        late.extend_from_slice(b"0g");
+        assert_eq!(decode_hex(&late, 3), Err(xml(3, "bdata holds a character that is not a hex digit")));
+        let x = doc(&format!("<a bdata=\"{}\"/>", std::str::from_utf8(&text).unwrap()));
+        assert!(matches!(read_aepx(x.as_bytes()), Err(AepError::Xml { .. })));
+    }
+
+    /// Bdata decodes up to the size limit and not past it.
+    #[test]
+    fn bdata_decodes_up_to_the_size_limit_and_not_past_it() {
+        assert_eq!(decode_hex_at_most(b"00ff10", 0, 3), Ok(vec![0x00, 0xff, 0x10]));
+        assert_eq!(decode_hex_at_most(b"00ff10", 0, 2), Err(AepError::TooLarge));
+        assert_eq!(decode_hex_at_most(b"", 0, 0), Ok(Vec::new()));
+        assert_eq!(decode_hex_at_most(b"00", 0, 0), Err(AepError::TooLarge));
+        // The odd-length error still comes first.
+        assert_eq!(decode_hex_at_most(b"001", 0, 0), Err(xml(0, "bdata has an odd number of hex digits")));
+        // The real limit is what a chunk's 32-bit size field holds.
+        assert_eq!(MAX_BDATA as u64, u64::from(u32::MAX));
+    }
+
+    /// Decode hex matches the collecting version.
+    #[test]
+    fn decode_hex_matches_the_collecting_version() {
+        /// The collecting decoder this one replaced, as the reference.
+        fn old(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
+            if text.len() % 2 == 1 {
+                return Err(xml(offset, "bdata has an odd number of hex digits"));
+            }
+            let digit = |b: u8| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            };
+            let (pairs, _) = text.as_chunks::<2>();
+            pairs
+                .iter()
+                .map(|[hi, lo]| digit(*hi).zip(digit(*lo)).map(|(h, l)| (h << 4) | l))
+                .collect::<Option<Vec<u8>>>()
+                .ok_or(xml(offset, "bdata holds a character that is not a hex digit"))
+        }
+        let alphabet = b"0123456789abcdefABCDEFgG \0";
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for len in 0..200usize {
+            for _ in 0..20 {
+                let text: Vec<u8> = (0..len)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        // Mostly hex digits, now and then a byte that is not one.
+                        let i = (seed % 1000) as usize;
+                        alphabet[if i < 990 { i % 22 } else { 22 + i % 4 }]
+                    })
+                    .collect();
+                let new = decode_hex(&text, 7);
+                assert_eq!(new, old(&text, 7));
+                if let Ok(v) = new {
+                    assert_eq!(v.capacity(), v.len());
+                }
+            }
+        }
     }
 
     #[test]

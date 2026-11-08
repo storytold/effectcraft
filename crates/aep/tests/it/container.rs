@@ -25,5 +25,6 @@ mod shapes;
 mod text_fields;
 mod text_markers_footage;
 mod text_style_slots;
+mod tree_index;
 mod typed;
 mod values;

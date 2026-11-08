@@ -117,8 +117,8 @@ fn a_transform_set_to_its_default_adds_no_record() {
         assert_eq!(t.opacity_percent.source, ValueSource::Default);
         assert!(layer.properties().unwrap().find(&["ADBE Transform Group", "ADBE Position"]).is_none());
         // The two cases are layers of one file: they differ in the layer id only.
-        let a = without_layer_id(layer.chunk());
-        skip!(with_layer("299-save-noise.aep", L, |_, other| assert_eq!(a, without_layer_id(other.chunk()))));
+        let a = without_layer_id(&layer.chunk().to_chunk());
+        skip!(with_layer("299-save-noise.aep", L, |_, other| assert_eq!(a, without_layer_id(&other.chunk().to_chunk()))));
     }));
 }
 

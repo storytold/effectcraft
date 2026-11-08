@@ -67,7 +67,7 @@ fn graft<'a>(file: &mut AepFile<'a>, pair: &[Chunk<'a>]) {
 /// target's project copy does not hold the donor's types.
 fn own_definitions<'a>(pair: &mut [Chunk<'a>], donor: &AepFile<'_>) {
     let defs: Vec<(String, Chunk<'static>)> = effectcraft_aep::Project::new(donor)
-        .map(|p| p.effect_definitions().into_iter().map(|(m, part)| (m, part.clone().into_owned())).collect())
+        .map(|p| p.effect_definitions().into_iter().map(|(m, part)| (m, part.to_chunk().into_owned())).collect())
         .unwrap_or_default();
     let Some(effectcraft_aep::Body::List { children, .. }) = pair.get_mut(1).map(|g| &mut g.body) else { return };
     let mut name: Option<String> = None;

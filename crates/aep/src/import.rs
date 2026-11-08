@@ -42,6 +42,8 @@ mod time;
 
 use effectcraft_project::{ItemId, Project, ProjectSettings};
 
+use crate::container::index::{Root, TreeIndex};
+
 pub use effects::supported_effects;
 pub use report::{AeVersionInfo, ImportReport, Imported, LIMITATIONS, Loss, LossCategory, MAX_DETAILS, TESTED_MAJORS, UNKNOWN};
 
@@ -115,17 +117,29 @@ pub struct ImportResult {
 /// [`AepImportError::Refused`] when something would be lost and `allow_losses` is not set. On any
 /// error `project` is unchanged.
 pub fn import(project: &mut Project, bytes: &[u8], options: &ImportOptions<'_>) -> Result<ImportResult, AepImportError> {
-    let file = crate::parse_any(bytes)?;
-    let view = crate::Project::new(&file).ok_or(AepImportError::NoProject)?;
+    // The importer only reads: an `.aep` is indexed in place (one flat array that borrows the
+    // bytes); an `.aepx` is read into the chunk tree, which the view reads directly.
+    if crate::is_aepx(bytes) {
+        let file = crate::read_aepx(bytes)?;
+        import_root(project, Root::from(&file), options)
+    } else {
+        let index = TreeIndex::parse(bytes)?;
+        import_root(project, Root::from(&index), options)
+    }
+}
+
+/// [`import`] of a file read into either tree.
+fn import_root(project: &mut Project, file: Root<'_, '_>, options: &ImportOptions<'_>) -> Result<ImportResult, AepImportError> {
+    let view = crate::Project::of(file).ok_or(AepImportError::NoProject)?;
     // Work on a copy so a refusal leaves the project untouched (compositions are shared, cheap).
     let mut work = project.clone();
     let (folder, comps, items, mut report) = build::run(&mut work, &view, options);
-    report.ae_version = report::AeVersionInfo::of(&file);
+    report.ae_version = report::AeVersionInfo::of_root(file);
     if let Some(line) = report.ae_version.limitation() {
         report.limitations.push(line);
     }
     let mut col = report::Collector::default();
-    let settings = settings::map(&file, &work.settings, &mut col);
+    let settings = settings::map(file, &work.settings, &mut col);
     for loss in col.finish().losses.into_iter().filter(|_| options.settings) {
         let at = report.losses.iter().position(|l| l.category > loss.category).unwrap_or(report.losses.len());
         report.losses.insert(at, loss);
@@ -156,4 +170,77 @@ pub fn analyze_with(bytes: &[u8], options: &ImportOptions<'_>) -> Result<ImportR
     let mut scratch = Project::default();
     let options = ImportOptions { allow_losses: true, ..*options };
     Ok(import(&mut scratch, bytes, &options)?.report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::container::{AepFile, Body, Chunk, parse, write};
+
+    /// Imports `bytes` through the owned chunk tree and through the index: the same project, report
+    /// and settings, or the same error.
+    fn both(bytes: &[u8], name: &str) {
+        let exists = |_: &str| true;
+        let options = ImportOptions { allow_losses: true, ..ImportOptions::new(&exists) };
+        match (parse(bytes), TreeIndex::parse(bytes)) {
+            (Ok(file), Ok(index)) => {
+                let a = import_root(&mut Project::default(), Root::from(&file), &options);
+                let b = import_root(&mut Project::default(), Root::from(&index), &options);
+                assert!(a == b, "{name}: the import differs through the index");
+            }
+            (Err(a), Err(b)) => assert_eq!(a, b, "{name}"),
+            (a, b) => panic!("{name}: {:?} vs {:?}", a.err(), b.err()),
+        }
+    }
+
+    /// A 40-byte NUL-padded match name.
+    fn tdmn(name: &str) -> Chunk<'static> {
+        let mut b = name.as_bytes().to_vec();
+        b.resize(40, 0);
+        Chunk::data(*b"tdmn", b)
+    }
+
+    /// A synthetic project imports the same through the index.
+    #[test]
+    fn a_synthetic_project_imports_the_same_through_the_index() {
+        // A composition with a layer whose effect stores arbitrary data and a named value group.
+        let utf8 = |id: [u8; 4], t: &str| Chunk { id, body: Body::Chunks(vec![Chunk::data(*b"Utf8", t.as_bytes().to_vec())]), pad: None };
+        let record = Chunk::list(*b"tdbs", vec![Chunk::data(*b"tdsb", vec![0, 0, 0, 1]), Chunk::data(*b"cdat", vec![0, 0, 0, 1])]);
+        let values = Chunk::list(
+            *b"tdgp",
+            vec![
+                utf8(*b"tdsn", "Mine"),
+                tdmn("ADBE Easy Levels2-0001"),
+                record,
+                Chunk::list(*b"aRbs", vec![Chunk::data(*b"aRbp", vec![0u8; 108])]),
+                tdmn("ADBE Group End"),
+            ],
+        );
+        let part = Chunk::list(*b"parT", vec![Chunk::data(*b"parn", vec![0, 0, 0, 2]), tdmn("ADBE Easy Levels2-0001"), Chunk::data(*b"pard", vec![0u8; 148])]);
+        let sspc = Chunk::list(*b"sspc", vec![utf8(*b"fnam", "Levels"), part, values]);
+        let parade = Chunk::list(*b"tdgp", vec![tdmn("ADBE Easy Levels2"), sspc, tdmn("ADBE Group End")]);
+        let root = Chunk::list(*b"tdgp", vec![tdmn("ADBE Effect Parade"), parade, tdmn("ADBE Group End")]);
+        let layer = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0u8; 160]), Chunk::data(*b"Utf8", b"Layer".to_vec()), root]);
+        let mut idta = vec![0u8; 64];
+        idta[..2].copy_from_slice(&4u16.to_be_bytes());
+        let mut cdta = vec![0u8; 200];
+        cdta[4..12].copy_from_slice(&[0, 0, 0, 1, 0, 0, 0, 30]);
+        let item = Chunk::list(*b"Item", vec![Chunk::data(*b"idta", idta), Chunk::data(*b"Utf8", b"Comp".to_vec()), Chunk::data(*b"cdta", cdta), layer]);
+        let file = AepFile { chunks: vec![Chunk::data(*b"head", vec![0u8; 20]), Chunk::list(*b"Fold", vec![item])], trailer: std::borrow::Cow::Borrowed(&[]) };
+        both(&write(&file).expect("write"), "synthetic");
+    }
+
+    /// Every `.aep` of the fixture directory (skipped without `EFFECTCRAFT_AEP_FIXTURES`).
+    #[test]
+    fn every_fixture_imports_the_same_through_the_index() {
+        let Some(dir) = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES").filter(|d| !d.is_empty()) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut paths: Vec<std::path::PathBuf> =
+            entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "aep")).collect();
+        paths.sort();
+        for path in paths {
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            both(&bytes, &path.display().to_string());
+        }
+    }
 }
