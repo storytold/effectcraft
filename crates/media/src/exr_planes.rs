@@ -30,7 +30,7 @@ use crate::convert::AlphaOp;
 use crate::exr_channels::CACHE_BUDGET;
 use crate::exr_channels::{Rgb, planes_picture};
 use crate::exr_index::{self, ExrIndex, IndexError};
-use crate::exr_read::{ExrSource, ReadError, ReadRequest, read_planes};
+use crate::exr_read::{ExrSource, Opened, ReadError, ReadRequest, read_planes};
 
 /// At most this many entries are kept (unreadable files hold no bytes).
 const CACHE_FILES: usize = 64;
@@ -68,7 +68,7 @@ fn asks_at_least(want: &Want, failed: &Want) -> bool {
 
 /// Decode `want` for this request alone (kept nowhere), noting the file it read.
 fn copy(path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
-    let b = run(path, source, &Flight::new(index.clone(), want.clone()), None);
+    let b = run(path, source, &Flight::new(index.clone(), want.clone()), None, None);
     if let Ok(b) = &b {
         crate::reads::note(b.file.clone());
     }
@@ -337,9 +337,24 @@ impl PlaneStore {
     /// file it was read from is noted ([`crate::reads`]). A request that keeps finding the
     /// decodes it waits for called off decodes a copy itself.
     pub(crate) fn get(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use) -> Result<Arc<Batch>, Refused> {
+        self.get_opened(path, source, index, want, by, None)
+    }
+
+    /// [`PlaneStore::get`] with the file already open (`opened`, as indexing it opened it): a
+    /// decode reads from it instead of opening the file again, so a new frame opens its file
+    /// once (#3271). Dropped unused when the store serves the request.
+    pub(crate) fn get_opened(
+        &self,
+        path: &str,
+        source: &ExrSource,
+        index: &Arc<ExrIndex>,
+        want: &Want,
+        by: Use,
+        mut opened: Option<Opened>,
+    ) -> Result<Arc<Batch>, Refused> {
         let mut retries = 0;
         for _ in 0..ROUNDS {
-            match self.step(path, source, index, want, by) {
+            match self.step(path, source, index, want, by, &mut opened) {
                 Step::Done(r) => return r,
                 Step::Again { retry: true } if retries >= RETRIES => break,
                 Step::Again { retry } => retries += u32::from(retry),
@@ -349,7 +364,7 @@ impl PlaneStore {
     }
 
     /// One round of [`PlaneStore::get`].
-    fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use) -> Step {
+    fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use, opened: &mut Option<Opened>) -> Step {
         let level = 0;
         let mut st = self.lock();
         st.clock += 1;
@@ -403,7 +418,7 @@ impl PlaneStore {
         #[cfg(test)]
         crate::exr_channels::count_decode(true);
         let mut owning = Owning { store: self, path, level, flight: &flight, ended: false };
-        let outcome = run(path, source, &flight, base);
+        let outcome = run(path, source, &flight, base, opened.take());
         match owning.end(outcome) {
             Ok(b) if b.covers(index, want) => {
                 let mut st = self.lock();
@@ -564,7 +579,7 @@ impl PlaneStore {
 
 /// Run `flight`'s decode on the footage decode threads (here when this is one of them, or
 /// there are none) and block until it is done.
-fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>) -> Result<Arc<Batch>, Refused> {
+fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>, opened: Option<Opened>) -> Result<Arc<Batch>, Refused> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(threads) = crate::pool::decode_threads()
         && threads.current_thread_index().is_none()
@@ -574,20 +589,25 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
         // The request's cancel flag and decoding hints go with it.
         let hints = filmcraft_media::cancel::Context::current();
         threads.spawn(move || {
-            let _ = tx.send(hints.run(|| decode(&path, &source, &flight, base)));
+            let _ = tx.send(hints.run(|| decode(&path, &source, &flight, base, opened)));
         });
         // A plain block: this thread runs nothing else meanwhile.
         // (a decode that panicked sent nothing)
         return rx.recv().unwrap_or(Err(Refused::Stopped));
     }
-    decode(path, source, flight, base)
+    decode(path, source, flight, base, opened)
 }
 
 /// Decode what `flight` asks for and `base` doesn't hold, and make the union of both.
-fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>) -> Result<Arc<Batch>, Refused> {
+fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>, opened: Option<Opened>) -> Result<Arc<Batch>, Refused> {
     let _decoding = Decoding::new();
-    // (a share that doesn't answer just now isn't remembered as unreadable)
-    let mut opened = source.open().map_err(|e| {
+    // The file as indexing opened it, else opened now (a share that doesn't answer just now
+    // isn't remembered as unreadable).
+    let opened = match opened {
+        Some(o) => Ok(o),
+        None => source.open(),
+    };
+    let mut opened = opened.map_err(|e| {
         log::warn!("media: {path}: {e}");
         Refused::Stopped
     })?;
@@ -676,8 +696,8 @@ pub(crate) fn is_exr(path: &str) -> bool {
 }
 
 /// The index of `path`, and the store's verdict on an unreadable one.
-fn index_of(path: &str, source: &ExrSource) -> Result<Arc<ExrIndex>, IndexError> {
-    exr_index::get(path, source)
+fn index_of(path: &str, source: &ExrSource) -> Result<(Arc<ExrIndex>, Option<Opened>), IndexError> {
+    exr_index::get_opened(path, source)
 }
 
 /// The ids `need` reads of the file `index` describes (`None`: all).
@@ -702,14 +722,13 @@ pub(crate) enum Picture {
 pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option<&AuxNeed>) -> Picture {
     let mut extra = extra;
     for _ in 0..3 {
-        let index = match index_of(path, source) {
+        let (index, opened) = match index_of(path, source) {
             Ok(ix) => ix,
             Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
             Err(_) => return Picture::Legacy,
         };
         let Some(ids) = index.picture_ids() else { return Picture::Legacy };
-        let alone = Want { all: false, ids: ids.into_iter().collect() };
-        let mut want = alone.clone();
+        let mut want = Want { all: false, ids: ids.into_iter().collect() };
         if let Some(need) = extra {
             match need_ids(&index, need) {
                 Some(more) => want.ids.extend(more),
@@ -717,7 +736,7 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             }
         }
         let by = if extra.is_some() { Use::Picture } else { Use::Other };
-        let batch = match store().get(path, source, &index, &want, by) {
+        let batch = match store().get_opened(path, source, &index, &want, by, opened) {
             Ok(b) => b,
             Err(Refused::Changed) => continue,
             // The channels with it are too many: the picture alone (the effects ask for theirs).
@@ -770,12 +789,12 @@ fn picture_of(index: &ExrIndex, batch: &Batch, op: AlphaOp) -> Option<Image> {
 /// store. `None` when it isn't a readable OpenEXR (or the request was called off).
 pub(crate) fn aux(path: &str, source: &ExrSource, need: &AuxNeed) -> Option<Arc<AuxChannels>> {
     for _ in 0..2 {
-        let index = index_of(path, source).ok()?;
+        let (index, opened) = index_of(path, source).ok()?;
         let want = match need_ids(&index, need) {
             Some(ids) => Want { all: false, ids },
             None => Want { all: true, ids: BTreeSet::new() },
         };
-        match store().get(path, source, &index, &want, Use::Other) {
+        match store().get_opened(path, source, &index, &want, Use::Other, opened) {
             Ok(b) => return Some(b.aux.clone()),
             Err(Refused::Changed) => continue,
             Err(_) => return None,
@@ -787,7 +806,7 @@ pub(crate) fn aux(path: &str, source: &ExrSource, need: &AuxNeed) -> Option<Arc<
 /// The channel names (planes empty), manifests and aliases of the OpenEXR at `path`, from its
 /// headers alone. Never handed to an effect.
 pub(crate) fn names(path: &str, source: &ExrSource) -> Option<Arc<AuxChannels>> {
-    index_of(path, source).ok().map(|ix| ix.names.clone())
+    exr_index::get(path, source).ok().map(|ix| ix.names.clone())
 }
 
 /// Drop what is kept of `path`: its index and planes.

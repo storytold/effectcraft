@@ -22,7 +22,7 @@ use exr::meta::MetaData;
 use exr::meta::attribute::{AttributeValue, IntegerBounds, Text};
 
 use crate::exr_channels::{MAX_DISPLAY_PIXELS, Rgb, channel_name, is_depth, parse_manifest, part_name, picture_names};
-use crate::exr_read::{ExrSource, ReadSeek};
+use crate::exr_read::{ExrSource, Opened, ReadSeek};
 
 /// One channel of the file, in file order (parts in order, each part's channels as its header
 /// lists them): the order of [`AuxChannels::channels`] when every channel is read.
@@ -417,10 +417,16 @@ pub(crate) fn keep(path: &str, index: Arc<ExrIndex>) {
 /// [`forget`]). A file whose identity changed since (size, modification time) is indexed again;
 /// a read checks it again on the file it opens.
 pub(crate) fn get(path: &str, source: &ExrSource) -> Result<Arc<ExrIndex>, IndexError> {
+    get_opened(path, source).map(|(ix, _)| ix)
+}
+
+/// [`get`], with the file left open when indexing it opened it: a decode that follows reads from
+/// it instead of opening the file again (one open per new frame, #3271).
+pub(crate) fn get_opened(path: &str, source: &ExrSource) -> Result<(Arc<ExrIndex>, Option<Opened>), IndexError> {
     let kept = lock().map.get(path).cloned();
     if let Some(ix) = kept {
         match source.stamp() {
-            Ok(stamp) if stamp == ix.stamp => return Ok(ix),
+            Ok(stamp) if stamp == ix.stamp => return Ok((ix, None)),
             Ok(_) => {}
             Err(e) => {
                 log::debug!("media: {path}: {e}");
@@ -434,7 +440,7 @@ pub(crate) fn get(path: &str, source: &ExrSource) -> Result<Arc<ExrIndex>, Index
     })?;
     let ix = Arc::new(build(&mut *opened.reader, opened.len, opened.stamp)?);
     keep(path, ix.clone());
-    Ok(ix)
+    Ok((ix, Some(opened)))
 }
 
 /// The index of `path` if it is kept.

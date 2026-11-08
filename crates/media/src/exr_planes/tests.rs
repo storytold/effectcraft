@@ -804,3 +804,20 @@ fn rows_and_levels_on_every_compression() {
     assert_eq!(stats.chunks, [4], "two rows of two tiles");
     assert_eq!(band.unwrap()[0][10 * 32..20 * 32], full[0][10 * 32..20 * 32]);
 }
+
+/// #3271: a new frame of an OpenEXR on disk opens its file once: indexing it and decoding the
+/// picture share the open file.
+#[test]
+fn a_new_frame_opens_its_file_once() {
+    let dir = std::env::temp_dir().join(format!("ec-3271-open-once-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("plate_0001.exr");
+    std::fs::write(&file, multipart()).unwrap();
+    let f = crate::probe(&file).unwrap();
+    let before = crate::opens_under(&dir);
+    let pool = crate::MediaPool::new();
+    pool.frame_at(&f, Tick::ZERO).unwrap();
+    assert_eq!(crate::opens_under(&dir) - before, 1, "one open for the index and the decode");
+    assert_eq!(decodes_of(&f.path).len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
