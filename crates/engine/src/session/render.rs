@@ -122,6 +122,37 @@ impl Session {
         }
     }
 
+    /// What a Project panel thumbnail of `item` at `t` (longest side `max_side`) shows depends
+    /// on, as a key (#3271): a comp's content as the disk cache keys frames
+    /// ([`effectcraft_render::disk_cache::comp_content_key`]), footage's item and settings, the
+    /// time, the size, the render switches the thumbnail uses and the footage reloads so far.
+    /// An edit that doesn't change the picture (a selection, another comp, a marker) keeps it, so
+    /// the thumbnail isn't rendered again. `None` for items without pixels.
+    pub fn thumbnail_key(&self, item: ItemId, t: Tick, max_side: u32) -> Option<u128> {
+        use effectcraft_render::disk_cache::Hash128;
+        let it = self.project.item(item)?;
+        let mut h = Hash128::default();
+        h.write(b"thumbnail-v1");
+        match &it.kind {
+            effectcraft_project::ItemKind::Comp(_) => {
+                h.write_u64(1);
+                h.write(&effectcraft_render::disk_cache::comp_content_key(&self.project, item).to_le_bytes());
+                h.write_u64(t.0 as u64);
+                h.write_u64(u64::from(self.prefs.general.switches_affect_nested_comps));
+                h.write_u64(u64::from(self.prefs.three_d.realtime_shadows));
+            }
+            effectcraft_project::ItemKind::Footage(f) if f.has_video => {
+                h.write_u64(2);
+                h.write_u64(item.0);
+                h.write(format!("{f:?}").as_bytes());
+            }
+            _ => return None,
+        }
+        h.write_u64(u64::from(max_side));
+        h.write_u64(self.footage_reloads.load(std::sync::atomic::Ordering::Relaxed));
+        Some(h.finish())
+    }
+
     /// [`Session::render_rgba8`], or with `transparent` the frame's own straight alpha (what a
     /// render with RGB + Alpha channels writes) instead of compositing over the background.
     pub fn render_rgba8_alpha(&self, comp: ItemId, t: Tick, max_side: u32, transparent: bool) -> Result<(u32, u32, Vec<u8>)> {
@@ -138,6 +169,7 @@ impl Session {
     /// Make the media layer and the layer cache let go of what they decoded from `footage`'s
     /// files (it keys frames by path, so an overwritten file would keep showing its old pixels).
     pub(crate) fn forget_decoded(&self, footage: &effectcraft_project::Footage) {
+        self.footage_reloads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for p in std::iter::once(&footage.path).chain(&footage.sequence) {
             self.footage.forget(p);
         }

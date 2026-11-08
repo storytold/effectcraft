@@ -64,3 +64,4 @@ mod timeline_interchange;
 pub(crate) mod track;
 mod vector_import;
 mod viewer;
+mod thumbnails;

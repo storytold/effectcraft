@@ -257,6 +257,9 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
+    /// Footage reloaded so far ([`Session::forget_decoded`]): part of the Project panel's
+    /// thumbnail keys ([`Session::thumbnail_key`]), which otherwise look at no file.
+    pub footage_reloads: std::sync::atomic::AtomicU64,
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
@@ -390,6 +393,7 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
+            footage_reloads: Default::default(),
             aux_footage: None,
             aux_needs: None,
             script_calls: ScriptCalls::default(),
