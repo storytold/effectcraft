@@ -14,6 +14,7 @@ use effectcraft_project::render_queue::{OutputFormat, OutputModule, PostRenderAc
 use effectcraft_project::{ItemId, ItemKind, LayerSource, Project};
 use effectcraft_render::{ExprHost, FootageSource};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{Event, Session};
 
@@ -113,6 +114,14 @@ pub struct JobShared {
     pub cancel: AtomicBool,
     pub state: Mutex<JobState>,
     pub updates: Mutex<Vec<ItemUpdate>>,
+    /// A waiting control request retains its own items across requeue/removal/project edits.
+    reply: Mutex<Option<RenderReply>>,
+}
+
+#[derive(Default)]
+struct RenderReply {
+    items: Vec<Value>,
+    finished: bool,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -120,6 +129,48 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl JobShared {
+    /// Retain the requesting command's items before the UI can edit or replace the queue.
+    pub fn retain_reply_items(&self, items: Vec<Value>) {
+        *lock(&self.reply) = Some(RenderReply { items, finished: false });
+    }
+
+    /// Whether completion and post-render actions have been applied to this run.
+    pub fn reply_finished(&self) -> bool {
+        lock(&self.reply).as_ref().is_some_and(|reply| reply.finished)
+    }
+
+    /// Final items for this run, independent of the current project and any later render.
+    pub fn completed_items(&self) -> Option<Vec<Value>> {
+        lock(&self.reply).as_ref().filter(|reply| reply.finished).map(|reply| reply.items.clone())
+    }
+
+    fn update_reply(&self, updates: &[ItemUpdate]) {
+        let mut reply = lock(&self.reply);
+        let Some(reply) = reply.as_mut() else { return };
+        for update in updates {
+            let id = match update {
+                ItemUpdate::Started { id, .. } | ItemUpdate::Finished { id, .. } => *id,
+            };
+            let Some(item) = reply.items.iter_mut().find(|item| item["id"].as_u64() == Some(id)).and_then(Value::as_object_mut) else { continue };
+            match update {
+                ItemUpdate::Started { unix, .. } => {
+                    item.insert("status".into(), json!(RenderStatus::Rendering));
+                    item.insert("statusLabel".into(), json!(RenderStatus::Rendering.label()));
+                    item.insert("started".into(), json!(unix));
+                    item.insert("render_time".into(), Value::Null);
+                }
+                ItemUpdate::Finished { status, seconds, output, .. } => {
+                    item.insert("status".into(), json!(status));
+                    item.insert("statusLabel".into(), json!(status.label()));
+                    item.insert("render_time".into(), json!(seconds));
+                    if let Some(output) = output {
+                        item.insert("last_output".into(), json!(output));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> JobState {
         lock(&self.state).clone()
     }
@@ -626,8 +677,11 @@ impl Session {
     pub fn poll_render(&mut self) -> bool {
         self.drain_remote_render();
         let Some(job) = &self.render_job else { return false };
-        let updates = std::mem::take(&mut *lock(&job.shared.updates));
+        // Observe completion before draining updates so a worker finishing between the two
+        // reads cannot leave its final item statuses behind when this job is removed.
         let finished = job.is_finished();
+        let updates = std::mem::take(&mut *lock(&job.shared.updates));
+        job.shared.update_reply(&updates);
         let changed = !updates.is_empty();
         let mut post: Vec<(u64, String)> = vec![];
         if changed {
@@ -659,6 +713,7 @@ impl Session {
             }
             self.bump();
         }
+        let mut completed = None;
         if finished && let Some(mut job) = self.render_job.take() {
             if let Some(t) = job.thread.take() {
                 let _ = t.join();
@@ -685,11 +740,17 @@ impl Session {
                 self.events.push(Event::Frontend { command: "renderQueue.notify".into(), params: serde_json::json!({"message": msg, "error": failed > 0}) });
             }
             self.events.push(Event::Toast { message: msg, error: failed > 0 });
+            completed = Some(job.shared);
         }
         for (id, path) in post {
             if let Err(e) = self.post_render_action(id, &path) {
                 self.events.push(Event::Toast { message: format!("Post-render action: {e}"), error: true });
             }
+        }
+        if let Some(shared) = completed
+            && let Some(reply) = lock(&shared.reply).as_mut()
+        {
+            reply.finished = true;
         }
         changed || finished
     }

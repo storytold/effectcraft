@@ -200,6 +200,7 @@ fn bounds_of(pts: &[Pos2]) -> Option<Rect> {
     Some(r)
 }
 
+/// Creates the shape for a drag from `a` to `b` with the given tool, as a mask or as a shape layer.
 pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers) {
     let Some(d) = shape_drag(app, tool, a, b, mods) else { return };
     let (kind, (w, h), (cx, cy)) = (d.kind, (d.size[0], d.size[1]), (d.centre[0], d.centre[1]));
@@ -219,6 +220,7 @@ pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b:
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             let inv = l2c(&ectx, &l).0.inverse().unwrap_or(Mat3::IDENTITY);
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));

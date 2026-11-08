@@ -67,9 +67,10 @@ fn generates(l: &Layer) -> bool {
 }
 
 /// Does the mix play the layer at its time stretch? Reversed layers (negative stretch) are
-/// silent for now; the Timeline waveform shares this rule so it draws what is heard.
+/// silent for now; the Timeline waveform shares this rule so it draws what is heard. The stretch
+/// is the one the layer's time uses (#3247): 0 and NaN play at 100 %.
 pub fn stretch_is_mixed(l: &Layer) -> bool {
-    l.stretch > 0.0
+    l.effective_stretch() > 0.0
 }
 
 /// Does an enabled audio effect (Backwards) play the layer's [in, out) span reversed?
@@ -166,7 +167,9 @@ impl MixEnv<'_> {
             return out;
         }
         let m = b - a;
-        let speed = 100.0 / l.stretch;
+        // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
+        // usize::MAX source samples for one block.
+        let speed = 100.0 / l.effective_stretch();
         let src_n = ((m as f64 * speed).ceil() as usize).max(1);
         let lt = l.layer_time(sample_tick(i0 + a as i64, rate));
         let buf = match &l.source {
@@ -302,6 +305,7 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
+        // The stretch the layer's time uses (#3247): 0 and NaN play at 100 %, as `layer_time`.
         if !audible(project, l) || (any_solo && !l.switches.solo) || !stretch_is_mixed(l) {
             continue;
         }

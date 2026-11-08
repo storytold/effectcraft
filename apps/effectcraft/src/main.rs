@@ -276,9 +276,6 @@ fn main() -> eframe::Result {
             // written on background threads (M13.14).
             session.check_footage_on_open = true;
             session.autosave.background = true;
-            // The disk cache's footage stamps too: an imported or opened project with thousands of
-            // sequence frames on a network share took half a minute to stamp.
-            session.disk_salt_background = true;
             // Settings, shortcut presets and the crash-recovery sentinel live in the platform
             // config directory. Agent-driven runs (`--control`) skip crash recovery.
             if let Some(dir) = effectcraft_host::config_dir() {

@@ -705,32 +705,37 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 pub fn specs() -> Vec<EffectSpec> {
     let grey = || col(0.5, 0.5, 0.5);
+    // After Effects' valid ranges (a value past the slider's drag range is still kept: .aep
+    // import, 1200), the slider over the range After Effects' slider covers.
+    let wb = || slider(-300.0, 300.0, -100.0, 100.0, 1);
+    let tone = || slider(-150.0, 150.0, -100.0, 100.0, 1);
+    let sat = || slider(0.0, 300.0, 0.0, 200.0, 1);
     let mut lum = vec![
         p("highDynamicRange", "High Dynamic Range", Value::Bool(false), ParamUi::Checkbox),
         p("basicCorrection/inputLut", "Input LUT", Value::Enum(0), popup(&["None", "Custom"])),
         // A .cube file path (or the file's text) for Input LUT = Custom.
         p("basicCorrection/inputLutFile", "Input LUT File", Value::Str(String::new()), ParamUi::Text),
-        p("basicCorrection/whiteBalance/temperature", "Temperature", num(0.0), bipolar()),
-        p("basicCorrection/whiteBalance/tint", "Tint", num(0.0), bipolar()),
-        p("basicCorrection/tone/exposure", "Exposure", num(0.0), slider(-5.0, 5.0, -5.0, 5.0, 2)),
-        p("basicCorrection/tone/contrast", "Contrast", num(0.0), bipolar()),
-        p("basicCorrection/tone/highlights", "Highlights", num(0.0), bipolar()),
-        p("basicCorrection/tone/shadows", "Shadows", num(0.0), bipolar()),
-        p("basicCorrection/tone/whites", "Whites", num(0.0), bipolar()),
-        p("basicCorrection/tone/blacks", "Blacks", num(0.0), bipolar()),
+        p("basicCorrection/whiteBalance/temperature", "Temperature", num(0.0), wb()),
+        p("basicCorrection/whiteBalance/tint", "Tint", num(0.0), wb()),
+        p("basicCorrection/tone/exposure", "Exposure", num(0.0), slider(-7.0, 7.0, -5.0, 5.0, 2)),
+        p("basicCorrection/tone/contrast", "Contrast", num(0.0), tone()),
+        p("basicCorrection/tone/highlights", "Highlights", num(0.0), tone()),
+        p("basicCorrection/tone/shadows", "Shadows", num(0.0), tone()),
+        p("basicCorrection/tone/whites", "Whites", num(0.0), tone()),
+        p("basicCorrection/tone/blacks", "Blacks", num(0.0), tone()),
         p("basicCorrection/tone/hdrWhite", "HDR White", num(100.0), slider(100.0, 10000.0, 100.0, 4000.0, 0)),
-        p("basicCorrection/tone/hdrSpecular", "HDR Specular", num(0.0), bipolar()),
-        p("basicCorrection/saturation", "Saturation", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
+        p("basicCorrection/tone/hdrSpecular", "HDR Specular", num(0.0), tone()),
+        p("basicCorrection/saturation", "Saturation", num(100.0), sat()),
         p("creative/look", "Look", Value::Enum(0), popup(&LUMETRI_LOOKS)),
         p("creative/lookFile", "Look File", Value::Str(String::new()), ParamUi::Text),
         p("creative/lookIntensity", "Intensity", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
-        p("creative/adjustments/fadedFilm", "Faded Film", num(0.0), pct()),
+        p("creative/adjustments/fadedFilm", "Faded Film", num(0.0), slider(0.0, 150.0, 0.0, 100.0, 1)),
         p("creative/adjustments/sharpen", "Sharpen", num(0.0), bipolar()),
         p("creative/adjustments/vibrance", "Vibrance", num(0.0), bipolar()),
-        p("creative/adjustments/creativeSaturation", "Saturation", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
+        p("creative/adjustments/creativeSaturation", "Saturation", num(100.0), sat()),
         p("creative/adjustments/shadowTint", "Shadow Tint", grey(), ParamUi::Color),
         p("creative/adjustments/highlightTint", "Highlight Tint", grey(), ParamUi::Color),
-        p("creative/adjustments/tintBalance", "Tint Balance", num(0.0), bipolar()),
+        p("creative/adjustments/tintBalance", "Tint Balance", num(0.0), tone()),
     ];
     const CURVES: [(&str, &str); 12] = [
         ("curves/curveMasterShadows", "RGB Curve Shadows"),
@@ -786,13 +791,13 @@ pub fn specs() -> Vec<EffectSpec> {
         p("hslSecondary/key/maskStyle", "Mask Style", Value::Enum(0), popup(&HSL_MASK_STYLES)),
         p("hslSecondary/key/invertMask", "Invert Mask", Value::Bool(false), ParamUi::Checkbox),
         p("hslSecondary/refine/denoise", "Denoise", num(0.0), pct()),
-        p("hslSecondary/refine/blur", "Blur", num(0.0), pct()),
+        p("hslSecondary/refine/blur", "Blur", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
         p("hslSecondary/correction/correctionWheel", "Correction", grey(), ParamUi::Color),
-        p("hslSecondary/correction/temperature", "Temperature", num(0.0), bipolar()),
-        p("hslSecondary/correction/tint", "Tint", num(0.0), bipolar()),
-        p("hslSecondary/correction/contrast", "Contrast", num(0.0), bipolar()),
+        p("hslSecondary/correction/temperature", "Temperature", num(0.0), wb()),
+        p("hslSecondary/correction/tint", "Tint", num(0.0), wb()),
+        p("hslSecondary/correction/contrast", "Contrast", num(0.0), tone()),
         p("hslSecondary/correction/sharpen", "Sharpen", num(0.0), bipolar()),
-        p("hslSecondary/correction/saturation", "Saturation", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
+        p("hslSecondary/correction/saturation", "Saturation", num(100.0), sat()),
         p("vignette/vignetteAmount", "Amount", num(0.0), slider(-5.0, 5.0, -5.0, 5.0, 2)),
         p("vignette/vignetteMidpoint", "Midpoint", num(50.0), pct()),
         p("vignette/vignetteRoundness", "Roundness", num(0.0), bipolar()),
