@@ -29,14 +29,17 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::effect_map::{Conv, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, by_effect, by_match_name, popup_key};
-use crate::{AepFile, Body, CURVE_IDENTITY, Chunk, CurvesData, MeshData, ParamKind};
-use effectcraft_keyframe::{Interp, Keyframe, Value};
+use crate::effect_map::{Conv, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, by_effect, by_match_name, popup_keys_match};
+use crate::{AepFile, CURVE_IDENTITY, Chunk, CurvesData, MeshData, ParamKind};
+use effectcraft_keyframe::{Interp, Value};
 use effectcraft_project::{GroupKind, Layer, LayerId, Node, ParamUi, PropGroup, Property};
 
+use crate::export::fx_defs::{FX_DEFS, FxDef, PDef};
+use crate::export::keys::{fill_key_list, replace_cdat, spatial_record, timed_keys};
 use crate::export::plan::{CompPlan, EaseSlot, KeyPlan, LIMIT};
 use crate::export::report::{Collector, LossCategory};
-use crate::export::tree::{R, child_data, child_mut, data_mut, kids_mut, list_mut, put, put_f64, put_u8, put_u16, put_u32, tpl};
+use crate::export::synth::{NO_NAME, is_tdmn, tdmn, tdmn_name, tdsn, utf8_in};
+use crate::export::tree::{R, child_data, child_mut, data_mut, kids_mut, list_mut, put, put_f64, put_u8, put_u32, tpl};
 
 /// How a parameter is stored in its value record.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -154,10 +157,6 @@ pub(crate) struct ParDef {
     pub record: String,
     /// `pard@12`.
     pub code: u32,
-    /// `pard@16`, or a checkbox's `pdnm` label.
-    pub name: String,
-    /// The popup items (`pdnm`, separated by `|`).
-    pub items: Vec<String>,
     /// The default in stored units (`pard@56`).
     pub default: Vec<f64>,
     /// The slider range a value record repeats as `tdum` / `tduM`.
@@ -168,114 +167,76 @@ pub(crate) struct ParDef {
     pub data: Option<Vec<u8>>,
 }
 
-fn be_i32(d: &[u8], at: usize) -> Option<i32> {
-    Some(i32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
-}
-fn be_u32(d: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
-}
-fn be_f32(d: &[u8], at: usize) -> Option<f64> {
-    Some(f64::from(f32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?)))
-}
-fn be_f64(d: &[u8], at: usize) -> Option<f64> {
-    Some(f64::from_be_bytes(d.get(at..at.checked_add(8)?)?.try_into().ok()?))
-}
-
-fn cname(d: &[u8]) -> String {
-    d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect()
+/// A fixed slider's or angle's value as its 16.16 `pard` copy holds it (`fxsynth::pard`).
+fn fixed(v: f64) -> f64 {
+    f64::from(crate::export::fxsynth::fixed_i32(v)) / 65536.0
 }
 
 impl ParDef {
-    fn from_pard(pard: &[u8], pdnm: Option<&str>, data: Option<&[u8]>) -> ParDef {
-        let code = be_u32(pard, 12).unwrap_or(u32::MAX);
-        let fx = |at: usize| be_i32(pard, at).map(|v| f64::from(v) / 65536.0);
-        let default: Vec<f64> = match code {
-            10 => be_f64(pard, 56).into_iter().collect(),
-            2 | 3 => fx(56).into_iter().collect(),
-            1 => be_i32(pard, 56).map(f64::from).into_iter().collect(),
-            4 | 7 => be_u32(pard, 56).map(f64::from).into_iter().collect(),
+    /// The definition of parameter `p` of the table row `fx`, in the stored units the
+    /// prototype's `pard` holds (`fxsynth::default_sspc` writes it from the same row): fixed
+    /// sliders, angles and points at 16.16, integers, checkboxes and popups rounded, colours as
+    /// bytes, float slider ranges as `f32`. Read straight from the table; the round trip through
+    /// the encoded `pard` that this replaces is the reference in the tests.
+    fn from_table(fx: &FxDef, p: &PDef) -> ParDef {
+        let d = |i: usize| p.default.get(i).copied().unwrap_or(0.0);
+        let int = |v: f64| f64::from(crate::export::fxsynth::int_i32(v));
+        let f32_of = |v: f64| f64::from(v as f32);
+        let default: Vec<f64> = match p.code {
+            10 => vec![d(0)],
+            2 | 3 => vec![fixed(d(0))],
+            1 => vec![int(d(0))],
+            4 => vec![f64::from(d(0).round().max(0.0) as u32)],
+            7 => vec![f64::from(d(0).round().clamp(0.0, f64::from(u16::MAX)) as u32)],
             // Fractions of the layer, or percent after an After Effects re-save (see the reader).
             6 => {
-                let p: Vec<f64> = [fx(56), fx(60)].into_iter().flatten().collect();
-                if p.iter().any(|c| c.abs() > 1.0 + 1e-9) { p.iter().map(|c| c / 100.0).collect() } else { p }
+                let pt = [fixed(d(0)), fixed(d(1))];
+                if pt.iter().any(|c| c.abs() > 1.0 + 1e-9) { pt.iter().map(|c| c / 100.0).collect() } else { pt.to_vec() }
             }
-            5 => pard.get(56..60).map(|c| c.iter().map(|b| f64::from(*b)).collect()).unwrap_or_default(),
+            5 => (0..4).map(|i| f64::from(d(i).round().clamp(0.0, 255.0) as u8)).collect(),
             _ => Vec::new(),
         };
-        let range = match code {
-            10 => be_f32(pard, 112).zip(be_f32(pard, 116)),
-            2 => fx(132).zip(fx(136)),
-            1 => be_i32(pard, 132).map(f64::from).zip(be_i32(pard, 136).map(f64::from)),
-            _ => None,
+        // A slider without a range or valid maximum in the table stores zeros there.
+        let (lo, hi) = p.range.unwrap_or((0.0, 0.0));
+        let max = p.valid_max.unwrap_or(0.0);
+        let (range, valid_max) = match p.code {
+            10 => (Some((f32_of(lo), f32_of(hi))), Some(f32_of(max))),
+            2 => (Some((fixed(lo), fixed(hi))), Some(fixed(max))),
+            1 => (Some((int(lo), int(hi))), Some(int(max))),
+            _ => (None, None),
         };
-        let valid_max = match code {
-            10 => be_f32(pard, 108),
-            2 => fx(128),
-            1 => be_i32(pard, 128).map(f64::from),
-            _ => None,
-        };
-        let pname = pard.get(16..48).map(cname).unwrap_or_default();
-        let (name, items) = match (code, pdnm) {
-            (7, Some(p)) if !p.is_empty() => (pname, p.split('|').map(str::to_string).collect()),
-            (4, Some(p)) if pname.trim().is_empty() => (p.to_string(), Vec::new()),
-            _ => (pname, Vec::new()),
-        };
-        ParDef { record: String::new(), code, name, items, default, range, valid_max, data: data.map(<[u8]>::to_vec) }
+        // The record is the text of its `tdmn` as the exporter reads it back (`synth::tdmn_name`),
+        // so the instance finds its records by it.
+        let record = tdmn_name(&tdmn(&fx.record(p))).unwrap_or_default();
+        // The prototype's `pard` holds no name and its `pdnm` is empty: no name, no popup items.
+        let data = if p.code == 11 { crate::export::fxsynth::default_data(fx.match_name) } else { None };
+        ParDef { record, code: u32::from(p.code), default, range, valid_max, data }
+    }
+
+    /// The definitions of the table row `fx`, by position (the table's index).
+    fn of_effect(fx: &FxDef) -> HashMap<u16, ParDef> {
+        let mut out = HashMap::with_capacity(fx.params.len());
+        let mut position = 0u16;
+        for p in fx.params {
+            out.insert(position, ParDef::from_table(fx, p));
+            position = position.saturating_add(1);
+        }
+        out
     }
 }
 
-/// The parameter definitions of an instance's `parT`, by position (the table's index).
-fn par_defs(sspc: &Chunk<'_>) -> HashMap<u16, ParDef> {
-    let mut out = HashMap::new();
-    let Some(part) = sspc.child_list(b"parT") else { return out };
-    let k = part.children();
-    let mut i = 0usize;
-    let mut position = 0u16;
-    while i < k.len() {
-        let (Some(m), Some(p)) = (k.get(i), k.get(i + 1)) else { break };
-        if !(m.is(b"tdmn") && p.is(b"pard")) {
-            i += 1;
-            continue;
-        }
-        let name = tdmn_name(m).unwrap_or_default();
-        let mut j = i + 2;
-        let mut pdnm = None;
-        let mut data = None;
-        while let Some(c) = k.get(j) {
-            if c.is(b"tdmn") {
-                break;
-            }
-            if c.is(b"pdnm") {
-                pdnm = c.children().iter().find(|u| u.is(b"Utf8")).and_then(|u| u.bytes()).map(|b| String::from_utf8_lossy(b).to_string());
-            }
-            if c.is(b"aRbp") {
-                data = c.bytes();
-            }
-            j += 1;
-        }
-        if let Some(bytes) = p.bytes() {
-            out.insert(position, ParDef { record: name, ..ParDef::from_pard(bytes, pdnm.as_deref(), data) });
-        }
-        position = position.saturating_add(1);
-        i = j;
-    }
-    out
-}
-
-/// The parameter definitions of every effect type, by match name (read from the default
-/// instances built from the effect table).
+/// The parameter definitions of every effect type, by match name (from the effect table the
+/// default instances are built from).
 fn defs() -> &'static HashMap<String, HashMap<u16, ParDef>> {
     static DEFS: OnceLock<HashMap<String, HashMap<u16, ParDef>>> = OnceLock::new();
-    DEFS.get_or_init(|| {
-        crate::export::fx_defs::FX_DEFS.iter().map(|fx| (fx.match_name.to_string(), par_defs(&crate::export::fxsynth::default_sspc(fx)))).collect()
-    })
+    DEFS.get_or_init(|| FX_DEFS.iter().map(|fx| (fx.match_name.to_string(), ParDef::of_effect(fx))).collect())
 }
 
 // ---------------------------------------------------------------------------------------------
 // Planning.
 
 /// The stored components of an EffectCraft value, `None` when it does not fit.
-fn stored(conv: Conv, kind: PKind, v: &Value, size: (f64, f64), ui: &ParamUi, def: &ParDef) -> Option<Vec<f64>> {
+fn stored(conv: Conv, kind: PKind, v: &Value, size: (f64, f64), ui: &ParamUi) -> Option<Vec<f64>> {
     let c = v.components();
     let g = |i: usize| c.get(i).copied().and_then(sane);
     let one = |x: f64| -> Vec<f64> {
@@ -306,8 +267,8 @@ fn stored(conv: Conv, kind: PKind, v: &Value, size: (f64, f64), ui: &ParamUi, de
             };
             let ParamUi::Popup { options } = ui else { return None };
             let name = options.get(i)?;
-            let file: Vec<&str> = if def.items.is_empty() { items.to_vec() } else { def.items.iter().map(String::as_str).collect() };
-            let at = file.iter().position(|f| f.trim() != "(-" && popup_key(f) == popup_key(name))?;
+            // The prototype's `pdnm` names no items: the table's are After Effects'.
+            let at = items.iter().position(|f| f.trim() != "(-" && popup_keys_match(f, name))?;
             vec![f64::from(u32::try_from(at).ok()?.checked_add(1)?)]
         }
         // Not a value record (layer parameters, histograms).
@@ -317,16 +278,15 @@ fn stored(conv: Conv, kind: PKind, v: &Value, size: (f64, f64), ui: &ParamUi, de
 
 /// Whether a popup's items are After Effects' items in the same order (separators included, as
 /// After Effects counts them), so an expression's 1-based result picks the same item in both.
-fn same_popup_order(items: &[&str], ui: &ParamUi, def: &ParDef) -> bool {
+fn same_popup_order(items: &[&str], ui: &ParamUi) -> bool {
     let ParamUi::Popup { options } = ui else { return false };
-    let file: Vec<&str> = if def.items.is_empty() { items.to_vec() } else { def.items.iter().map(String::as_str).collect() };
-    file.len() == options.len() && file.iter().zip(options).all(|(f, o)| f.trim() != "(-" && popup_key(f) == popup_key(o))
+    items.len() == options.len() && items.iter().zip(options).all(|(f, o)| f.trim() != "(-" && popup_keys_match(f, o))
 }
 
 /// [`stored`], reporting what it changes in a value it can store: a colour channel outside 0 to 1
 /// (written as the nearest limit) and a fraction on an integer parameter (rounded).
-fn stored_reported(conv: Conv, kind: PKind, v: &Value, (size, ui, def): ((f64, f64), &ParamUi, &ParDef), what: &str, col: &mut Collector) -> Option<Vec<f64>> {
-    let s = stored(conv, kind, v, size, ui, def)?;
+fn stored_reported(conv: Conv, kind: PKind, v: &Value, (size, ui): ((f64, f64), &ParamUi), what: &str, col: &mut Collector) -> Option<Vec<f64>> {
+    let s = stored(conv, kind, v, size, ui)?;
     if matches!(conv, Conv::Color) {
         let c = v.components();
         if c.iter().take(3).any(|x| !(0.0..=1.0).contains(x)) {
@@ -339,7 +299,7 @@ fn stored_reported(conv: Conv, kind: PKind, v: &Value, (size, ui, def): ((f64, f
         }
     }
     if kind == PKind::Int
-        && let Some(raw) = stored(conv, PKind::Fixed, v, size, ui, def)
+        && let Some(raw) = stored(conv, PKind::Fixed, v, size, ui)
         && raw.iter().zip(&s).any(|(a, b)| a.to_bits() != b.to_bits())
     {
         col.lose(LossCategory::Effects, format!("{what}: {raw:?} is written as the whole number {s:?}"));
@@ -501,16 +461,26 @@ fn plan_extra(spec: &EffectMap, g: &PropGroup, pdefs: &HashMap<u16, ParDef>, her
     (data != before).then_some((index, data))
 }
 
-/// `x,y` pairs (EffectCraft's curve points and mesh offsets; whitespace or `;` between pairs).
-fn pairs_of(s: &str) -> Vec<(f64, f64)> {
-    s.split(|c: char| c.is_whitespace() || c == ';')
+/// `x,y` pairs (EffectCraft's curve points; whitespace or `;` between pairs), and how many
+/// entries are not a pair of finite numbers (left out).
+fn pairs_of(s: &str) -> (Vec<(f64, f64)>, usize) {
+    let mut unreadable = 0usize;
+    let pairs = s
+        .split(|c: char| c.is_whitespace() || c == ';')
         .filter(|t| !t.is_empty())
         .filter_map(|t| {
-            let (x, y) = t.split_once(',')?;
-            let (x, y) = (x.trim().parse::<f64>().ok()?, y.trim().split(',').next()?.trim().parse::<f64>().ok()?);
-            (x.is_finite() && y.is_finite()).then_some((x, y))
+            let pair = (|| {
+                let (x, y) = t.split_once(',')?;
+                let (x, y) = (x.trim().parse::<f64>().ok()?, y.trim().split(',').next()?.trim().parse::<f64>().ok()?);
+                (x.is_finite() && y.is_finite()).then_some((x, y))
+            })();
+            if pair.is_none() {
+                unreadable = unreadable.saturating_add(1);
+            }
+            pair
         })
-        .collect()
+        .collect();
+    (pairs, unreadable)
 }
 
 /// The arbitrary-data parameter's index and default data.
@@ -537,7 +507,10 @@ fn static_str<'p>(g: &'p PropGroup, id: &str, here: &str, col: &mut Collector) -
 fn plan_curves(g: &PropGroup, pdefs: &HashMap<u16, ParDef>, here: &str, col: &mut Collector) -> Option<(u16, Vec<u8>)> {
     let mut curves: [Vec<(u8, u8)>; 5] = Default::default();
     for (slot, id) in curves.iter_mut().zip(["rgb", "red", "green", "blue", "alpha"]) {
-        let pts = static_str(g, id, here, col).map(pairs_of).unwrap_or_default();
+        let (pts, unreadable) = static_str(g, id, here, col).map(pairs_of).unwrap_or_default();
+        if unreadable > 0 {
+            col.lose(LossCategory::InvalidValues, format!("{here}: curve '{id}': {unreadable} entries are not an x,y pair of numbers and are not written"));
+        }
         let mut ints: Vec<(u8, u8)> = Vec::with_capacity(pts.len());
         let (mut rounded, mut clipped) = (false, false);
         for (x, y) in pts {
@@ -584,17 +557,25 @@ fn plan_mesh(g: &PropGroup, pdefs: &HashMap<u16, ParDef>, size: (f64, f64), here
     let (rows, columns) = (int("rows"), int("columns"));
     // Per vertex `dx,dy` (pixels), optionally followed by the eight pixel moves of its handles
     // (top, right, bottom, left) that the importer keeps.
+    let mut unreadable = 0usize;
     let offs: Vec<Vec<f64>> = static_str(g, "mesh", here, col)
         .map(|s| {
             s.split(|c: char| c.is_whitespace() || c == ';')
                 .filter(|t| !t.is_empty())
                 .filter_map(|t| {
-                    let v: Vec<f64> = t.split(',').map(|x| x.trim().parse::<f64>().ok().filter(|x| x.is_finite())).collect::<Option<_>>()?;
-                    (v.len() >= 2).then_some(v)
+                    let v: Option<Vec<f64>> = t.split(',').map(|x| x.trim().parse::<f64>().ok().filter(|x| x.is_finite())).collect();
+                    let v = v.filter(|v| v.len() >= 2);
+                    if v.is_none() {
+                        unreadable = unreadable.saturating_add(1);
+                    }
+                    v
                 })
                 .collect()
         })
         .unwrap_or_default();
+    if unreadable > 0 {
+        col.lose(LossCategory::InvalidValues, format!("{here}: the Distortion Mesh has {unreadable} entries that are not numbers, left out"));
+    }
     let count = usize::try_from((rows + 1) * (columns + 1)).ok()?;
     let moved = offs.iter().any(|v| v.iter().any(|x| *x != 0.0));
     if !moved && rows == 7 && columns == 7 {
@@ -714,7 +695,7 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
         // factor parameter has other units) or a popup's items are in another order, its result
         // means something else in After Effects. Popups count from 1 in both programs' expressions.
         let other_units = match conv {
-            Conv::Popup { items, .. } => !same_popup_order(items, &prop.ui, def),
+            Conv::Popup { items, .. } => !same_popup_order(items, &prop.ui),
             Conv::Percent { valid_max } => (valid_max - 100.0).abs() > 1e-9,
             Conv::Factor { factor, .. } => (factor - 1.0).abs() > 1e-9,
             _ => false,
@@ -724,7 +705,7 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
         }
     }
     if prop.keys.is_empty() {
-        let Some(s) = stored_reported(conv, kind, &prop.value, (size, &prop.ui, def), &what, col) else {
+        let Some(s) = stored_reported(conv, kind, &prop.value, (size, &prop.ui), &what, col) else {
             if matches!(conv, Conv::Popup { .. }) {
                 col.lose(LossCategory::Effects, format!("{what}: the popup item has no After Effects counterpart, the default was written"));
             } else {
@@ -744,7 +725,7 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
             format!("{what}: keys on a popup, checkbox, angle or integer slider are not written (not sampled), the first key's value was written"),
         );
         let first = prop.keys.first().map(|k| &k.value).unwrap_or(&prop.value);
-        let s = stored_reported(conv, kind, first, (size, &prop.ui, def), &what, col)?;
+        let s = stored_reported(conv, kind, first, (size, &prop.ui), &what, col)?;
         return (!is_default(kind, &s, def) || expr.is_some()).then_some(ParamPlan { index, kind, value: ParamValue::Static(s), expr });
     }
     let keys = plan_keys(pin, cp, &what, col);
@@ -756,22 +737,8 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
 }
 
 fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -> Vec<KeyPlan> {
-    let ParamIn { conv, kind, def, prop, size } = pin;
-    let keys: &[Keyframe] = &prop.keys;
-    let mut timed: Vec<(i64, &Keyframe)> = Vec::with_capacity(keys.len());
-    for k in keys {
-        let (u, inexact) = cp.tb.units(k.time);
-        if inexact {
-            col.lose(LossCategory::RoundedTimes, format!("{what}: key at {:.4} s moved to the time base", k.time.seconds()));
-        }
-        timed.push((u, k));
-    }
-    timed.sort_by_key(|(u, _)| *u);
-    let before = timed.len();
-    timed.dedup_by_key(|(u, _)| *u);
-    if timed.len() != before {
-        col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: keys at the same time were merged"));
-    }
+    let ParamIn { conv, kind, prop, size, .. } = pin;
+    let timed = timed_keys(&prop.keys, &cp.tb, what, "key", col);
     // The ease of colour keys is sampled only as speed 0 / influence 0, which After Effects
     // interpolates linearly (598): a colour key is written linear.
     let ease_ok = matches!(kind, PKind::Fixed | PKind::Float | PKind::Point);
@@ -790,7 +757,7 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
             col.lose(LossCategory::InvalidValues, format!("{what}: key time out of range, key dropped"));
             continue;
         };
-        let Some(value) = stored_reported(conv, kind, &k.value, (size, &prop.ui, def), what, col) else {
+        let Some(value) = stored_reported(conv, kind, &k.value, (size, &prop.ui), what, col) else {
             col.lose(LossCategory::InvalidValues, format!("{what}: a key value that cannot be stored, key dropped"));
             continue;
         };
@@ -884,11 +851,6 @@ fn keyed_kind(k: PKind) -> Option<KeyedKind> {
     }
 }
 
-pub(crate) fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let d = c.bytes()?;
-    Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
-}
-
 impl FxProtos {
     /// The prototypes built in code from the effect table (`fx_defs`, `fxsynth`).
     pub(crate) fn build() -> FxProtos {
@@ -919,27 +881,10 @@ pub(crate) struct FxUse {
     pub types: Vec<&'static str>,
 }
 
-/// A `tdsn` chunk holding `text`.
-fn tdsn(text: &str) -> Chunk<'static> {
-    nested(*b"tdsn", text)
-}
-
-/// A chunk that holds one `Utf8` chunk (`tdsn`, `fnam`).
-fn nested(id: [u8; 4], text: &str) -> Chunk<'static> {
-    Chunk { id, body: Body::Chunks(vec![Chunk::data(*b"Utf8", text.as_bytes().to_vec())]), pad: None }
-}
-
 /// The value record of `p`, built from the record of its parameter type.
 pub(crate) fn value_record(protos: &FxProtos, p: &ParamPlan, def: &ParDef, source_size: (u32, u32)) -> R<(Chunk<'static>, Chunk<'static>)> {
     let mut rec = protos.kinds.get(&p.kind.code()).cloned().ok_or_else(|| tpl("effect value prototype missing"))?;
-    {
-        let kids = kids_mut(&mut rec)?;
-        if let Some(slot) = kids.iter_mut().find(|c| c.is(b"tdsn"))
-            && !def.name.is_empty()
-        {
-            *slot = tdsn(&def.name);
-        }
-    }
+    // The record keeps the prototype's `tdsn`: the prototypes name no parameter.
     if p.kind == PKind::Point {
         // The layer's aspect, as on the Anchor Point (369: 16 / 9, 383: 1 on 100 x 100).
         put_f64(child_data(&mut rec, b"tdb4")?, 24, f64::from(source_size.0) / f64::from(source_size.1.max(1)))?;
@@ -970,35 +915,22 @@ pub(crate) fn value_record(protos: &FxProtos, p: &ParamPlan, def: &ParDef, sourc
                     put_u8(tdb4, at, *ktdb4.get(at).ok_or_else(|| tpl("short tdb4"))?)?;
                 }
             }
-            let n = u32::try_from(keys.len()).map_err(|_| tpl("too many keys"))?;
             let dims = p.kind.dims();
             let size = match kk {
                 KeyedKind::Fixed | KeyedKind::Float => 8 + 40 * dims,
                 KeyedKind::Color | KeyedKind::Point => 56 + 24 * dims,
             };
-            {
-                let lhd3 = child_data(&mut list, b"lhd3")?;
-                crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-            }
-            let mut ldat = Vec::with_capacity(size * keys.len());
+            let mut ldat = Vec::with_capacity(size.saturating_mul(keys.len()));
             for k in keys {
                 ldat.extend(match kk {
                     KeyedKind::Fixed | KeyedKind::Float => crate::export::emit::plain_record(1, k, size)?,
-                    KeyedKind::Color | KeyedKind::Point => spatial_record(kk, k, dims, size)?,
+                    // A colour (flags `0x0001`, 210, 364) or a point (flags `0x0007`, the
+                    // temporal ease in layer heights per second, 382, 598).
+                    KeyedKind::Color | KeyedKind::Point => spatial_record(k, dims, kk == KeyedKind::Point, size)?,
                 });
             }
-            {
-                let lk = kids_mut(&mut list)?;
-                match lk.iter_mut().find(|c| c.is(b"ldat")) {
-                    Some(c) => *c = Chunk::data(*b"ldat", ldat),
-                    None => lk.push(Chunk::data(*b"ldat", ldat)),
-                }
-            }
-            let kids = kids_mut(&mut rec)?;
-            let at = kids.iter().position(|c| c.is(b"cdat")).ok_or_else(|| tpl("value record without cdat"))?;
-            if let Some(slot) = kids.get_mut(at) {
-                *slot = list;
-            }
+            fill_key_list(&mut list, ldat, keys.len(), size)?;
+            replace_cdat(&mut rec, list)?;
         }
     }
     if let Some((text, enabled)) = &p.expr {
@@ -1013,46 +945,7 @@ pub(crate) fn value_record(protos: &FxProtos, p: &ParamPlan, def: &ParDef, sourc
         let at = kids.iter().position(|c| c.is(b"tdum")).unwrap_or(kids.len());
         kids.insert(at, Chunk::data(*b"Utf8", text.as_bytes().to_vec()));
     }
-    Ok((Chunk::data(*b"tdmn", tdmn_bytes(&def.record)), rec))
-}
-
-/// A key of a colour (flags `0x0001`, 210, 364) or point (flags `0x0007`, `u32@8` the automatic
-/// tangent switch, 382) parameter: the spatial layout with the value at 56.
-fn spatial_record(kk: KeyedKind, k: &KeyPlan, n: usize, size: usize) -> R<Vec<u8>> {
-    let mut r = vec![0u8; size];
-    put(&mut r, 0, &k.time.to_be_bytes())?;
-    put_u8(&mut r, 4, k.in_interp)?;
-    put_u8(&mut r, 5, k.out_interp)?;
-    let base: u16 = if kk == KeyedKind::Point { 0x0007 } else { 0x0001 };
-    put_u16(&mut r, 6, base | (u16::from(k.label) << 6))?;
-    if kk == KeyedKind::Point {
-        put_u32(&mut r, 8, u32::from(k.spatial_auto))?;
-        // The temporal ease (598): speed in layer heights per second, influence a fraction.
-        let (i, o) = (k.in_ease.first().copied().unwrap_or_default(), k.out_ease.first().copied().unwrap_or_default());
-        put_f64(&mut r, 24, i.speed)?;
-        put_f64(&mut r, 32, i.influence)?;
-        put_f64(&mut r, 40, o.speed)?;
-        put_f64(&mut r, 48, o.influence)?;
-    }
-    for j in 0..n {
-        put_f64(&mut r, 56 + 8 * j, k.value.get(j).copied().unwrap_or(0.0))?;
-        if kk == KeyedKind::Point {
-            put_f64(&mut r, 56 + 8 * n + 8 * j, k.spatial_in.get(j).copied().unwrap_or(0.0))?;
-            put_f64(&mut r, 56 + 16 * n + 8 * j, k.spatial_out.get(j).copied().unwrap_or(0.0))?;
-        }
-    }
-    Ok(r)
-}
-
-/// A match name padded to the 40 bytes of `tdmn`.
-fn tdmn_bytes(name: &str) -> Vec<u8> {
-    let mut v = vec![0u8; 40];
-    for (i, b) in name.bytes().take(39).enumerate() {
-        if let Some(slot) = v.get_mut(i) {
-            *slot = b;
-        }
-    }
-    v
+    Ok((tdmn(&def.record), rec))
 }
 
 /// The `tdmn` + `sspc` of one instance on the layer with id `layer_id`.
@@ -1066,14 +959,15 @@ fn instance(
 ) -> R<Vec<Chunk<'static>>> {
     let (tdmn, sspc, _) = protos.defaults.get(fx.match_name).ok_or_else(|| tpl("effect prototype missing"))?;
     let mut sspc = sspc.clone();
-    let pdefs = par_defs(&sspc);
+    // The prototype's definitions are the table's (the prototype is built from it).
+    let pdefs = defs().get(fx.match_name).ok_or_else(|| tpl("effect definitions missing"))?;
     // `fnam` keeps the effect's own name; a name of the user's goes into the value group's
     // `tdsn`, which holds the placeholder `-_0_/-` otherwise (610 against 609).
     let own = child_mut(&mut sspc, b"fnam")?.children().iter().find(|c| c.is(b"Utf8")).and_then(|c| c.bytes()).map(|b| String::from_utf8_lossy(b).to_string());
     if own.as_deref() != Some(fx.name.as_str()) && !fx.name.is_empty() {
         let values = list_mut(&mut sspc, b"tdgp")?;
         let slot = child_mut(values, b"tdsn")?;
-        *slot = nested(*b"tdsn", &fx.name);
+        *slot = utf8_in(*b"tdsn", &fx.name);
     }
     // The fx switch: the value group's `tdsb` (`fx-switch` cases).
     put_u32(child_data(list_mut(&mut sspc, b"tdgp")?, b"tdsb")?, 0, u32::from(fx.enabled))?;
@@ -1086,9 +980,7 @@ fn instance(
         let values = list_mut(&mut sspc, b"tdgp")?;
         let kids = kids_mut(values)?;
         // The input layer (`-0000`) names the layer that owns the effect (320).
-        let tdpi_of = |kids: &mut Vec<Chunk<'static>>, record: &str| -> Option<usize> {
-            kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(record)).map(|i| i + 1)
-        };
+        let tdpi_of = |kids: &mut Vec<Chunk<'static>>, record: &str| -> Option<usize> { kids.iter().position(|c| is_tdmn(c, record)).map(|i| i + 1) };
         let input = pdefs.get(&0).map(|d| d.record.clone()).unwrap_or_default();
         // The prototype's own layer id (its input layer), to tell "the owning layer" from None.
         let mut proto_owner = None;
@@ -1108,7 +1000,7 @@ fn instance(
         let mapped: Vec<u16> = by_match_name(fx.match_name)
             .map(|s| s.params.iter().filter(|p| matches!(p.conv, Conv::LayerRef { .. })).filter_map(|p| u16::try_from(p.index).ok()).collect())
             .unwrap_or_default();
-        for (index, def) in &pdefs {
+        for (index, def) in pdefs {
             if *index == 0 || def.code != 0 {
                 continue;
             }
@@ -1130,10 +1022,7 @@ fn instance(
         // Arbitrary data: the `aRbp` of the `LIST aRbs` after the parameter's record.
         if let Some((index, data)) = &fx.data {
             let want = pdefs.get(index).map(|d| d.record.clone()).unwrap_or_default();
-            let i = kids
-                .iter()
-                .position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(want.as_str()))
-                .ok_or_else(|| tpl("arbitrary data record missing"))?;
+            let i = kids.iter().position(|c| is_tdmn(c, &want)).ok_or_else(|| tpl("arbitrary data record missing"))?;
             let list = kids.iter_mut().skip(i + 1).take(3).find(|c| c.is_list(b"aRbs")).ok_or_else(|| tpl("arbitrary data missing"))?;
             let arbp = child_mut(list, b"aRbp")?;
             *data_mut(arbp)? = data.clone();
@@ -1161,7 +1050,7 @@ fn instance(
             let Some(sel) = v.first().map(|x| x.round()).filter(|x| *x >= 1.0 && *x <= 1000.0) else { continue };
             let want = pdefs.get(&p.index).map(|d| d.record.clone()).unwrap_or_default();
             let kids = kids_mut(part)?;
-            if let Some(i) = kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(want.as_str()))
+            if let Some(i) = kids.iter().position(|c| is_tdmn(c, &want))
                 && let Some(pard) = kids.get_mut(i + 1)
             {
                 put_u32(data_mut(pard)?, 56, sel as u32)?;
@@ -1187,12 +1076,12 @@ pub(crate) fn build_parade(
     source_size: (u32, u32),
     uses: &mut FxUse,
 ) -> R<Vec<Chunk<'static>>> {
-    let mut kids = vec![Chunk::data(*b"tdsb", vec![0, 0, 0, 1]), tdsn("-_0_/-")];
+    let mut kids = vec![Chunk::data(*b"tdsb", vec![0, 0, 0, 1]), tdsn(NO_NAME)];
     for fx in fxs {
         kids.extend(instance(protos, fx, layer_id, layer_ids, source_size, uses)?);
     }
-    kids.push(Chunk::data(*b"tdmn", tdmn_bytes("ADBE Group End")));
-    Ok(vec![Chunk::data(*b"tdmn", tdmn_bytes("ADBE Effect Parade")), Chunk::list(*b"tdgp", kids)])
+    kids.push(tdmn(crate::export::synth::GROUP_END));
+    Ok(vec![tdmn("ADBE Effect Parade"), Chunk::list(*b"tdgp", kids)])
 }
 
 /// Writes the project-level effect lists: `Pefl` (one `pjef` per type, sorted by match name, 365)
@@ -1218,4 +1107,222 @@ pub(crate) fn put_project_lists(protos: &FxProtos, file: &mut AepFile<'static>, 
     }
     file.chunks.insert(at + 1, Chunk::list(*b"EfdG", efdg));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The definitions as they were found before: the prototype's `parT` encoded from the table
+    /// and parsed back (the reference for [`ParDef::from_table`]).
+    mod reference {
+        use super::super::*;
+
+        fn be_i32(d: &[u8], at: usize) -> Option<i32> {
+            Some(i32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
+        }
+        fn be_u32(d: &[u8], at: usize) -> Option<u32> {
+            Some(u32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
+        }
+        fn be_f32(d: &[u8], at: usize) -> Option<f64> {
+            Some(f64::from(f32::from_be_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?)))
+        }
+        fn be_f64(d: &[u8], at: usize) -> Option<f64> {
+            Some(f64::from_be_bytes(d.get(at..at.checked_add(8)?)?.try_into().ok()?))
+        }
+
+        fn cname(d: &[u8]) -> String {
+            d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect()
+        }
+
+        /// A definition as the decoder read it, with the name and popup items it also read.
+        pub(super) struct Old {
+            pub def: ParDef,
+            pub name: String,
+            pub items: Vec<String>,
+        }
+
+        /// The decoder of an encoded `pard` that `ParDef::from_table` replaces.
+        pub(super) fn from_pard(pard: &[u8], pdnm: Option<&str>, data: Option<&[u8]>) -> Old {
+            let code = be_u32(pard, 12).unwrap_or(u32::MAX);
+            let fx = |at: usize| be_i32(pard, at).map(|v| f64::from(v) / 65536.0);
+            let default: Vec<f64> = match code {
+                10 => be_f64(pard, 56).into_iter().collect(),
+                2 | 3 => fx(56).into_iter().collect(),
+                1 => be_i32(pard, 56).map(f64::from).into_iter().collect(),
+                4 | 7 => be_u32(pard, 56).map(f64::from).into_iter().collect(),
+                // Fractions of the layer, or percent after an After Effects re-save (see the reader).
+                6 => {
+                    let p: Vec<f64> = [fx(56), fx(60)].into_iter().flatten().collect();
+                    if p.iter().any(|c| c.abs() > 1.0 + 1e-9) { p.iter().map(|c| c / 100.0).collect() } else { p }
+                }
+                5 => pard.get(56..60).map(|c| c.iter().map(|b| f64::from(*b)).collect()).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let range = match code {
+                10 => be_f32(pard, 112).zip(be_f32(pard, 116)),
+                2 => fx(132).zip(fx(136)),
+                1 => be_i32(pard, 132).map(f64::from).zip(be_i32(pard, 136).map(f64::from)),
+                _ => None,
+            };
+            let valid_max = match code {
+                10 => be_f32(pard, 108),
+                2 => fx(128),
+                1 => be_i32(pard, 128).map(f64::from),
+                _ => None,
+            };
+            let pname = pard.get(16..48).map(cname).unwrap_or_default();
+            let (name, items) = match (code, pdnm) {
+                (7, Some(p)) if !p.is_empty() => (pname, p.split('|').map(str::to_string).collect()),
+                (4, Some(p)) if pname.trim().is_empty() => (p.to_string(), Vec::new()),
+                _ => (pname, Vec::new()),
+            };
+            Old { def: ParDef { record: String::new(), code, default, range, valid_max, data: data.map(<[u8]>::to_vec) }, name, items }
+        }
+
+        /// The parameter definitions of an instance's `parT`, by position (the table's index).
+        pub(super) fn par_defs(sspc: &Chunk<'_>) -> HashMap<u16, Old> {
+            let mut out = HashMap::new();
+            let Some(part) = sspc.child_list(b"parT") else { return out };
+            let k = part.children();
+            let mut i = 0usize;
+            let mut position = 0u16;
+            while i < k.len() {
+                let (Some(m), Some(p)) = (k.get(i), k.get(i + 1)) else { break };
+                if !(m.is(b"tdmn") && p.is(b"pard")) {
+                    i += 1;
+                    continue;
+                }
+                let name = tdmn_name(m).unwrap_or_default();
+                let mut j = i + 2;
+                let mut pdnm = None;
+                let mut data = None;
+                while let Some(c) = k.get(j) {
+                    if c.is(b"tdmn") {
+                        break;
+                    }
+                    if c.is(b"pdnm") {
+                        pdnm = c.children().iter().find(|u| u.is(b"Utf8")).and_then(|u| u.bytes()).map(|b| String::from_utf8_lossy(b).to_string());
+                    }
+                    if c.is(b"aRbp") {
+                        data = c.bytes();
+                    }
+                    j += 1;
+                }
+                if let Some(bytes) = p.bytes() {
+                    let mut old = from_pard(bytes, pdnm.as_deref(), data);
+                    old.def.record = name;
+                    out.insert(position, old);
+                }
+                position = position.saturating_add(1);
+                i = j;
+            }
+            out
+        }
+    }
+
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// Every field equal, numbers bit for bit.
+    fn assert_same(a: &HashMap<u16, reference::Old>, b: &HashMap<u16, ParDef>, what: &str) {
+        let mut keys: Vec<&u16> = a.keys().collect();
+        keys.sort_unstable();
+        assert_eq!(keys.len(), b.len(), "{what}");
+        for k in keys {
+            let (old, y) = (&a[k], b.get(k).unwrap_or_else(|| panic!("{what}: {k}")));
+            // The prototypes name no parameter and no popup item.
+            assert!(old.name.is_empty() && old.items.is_empty(), "{what}: parameter {k}");
+            let x = &old.def;
+            let range = |r: Option<(f64, f64)>| r.map(|(lo, hi)| (lo.to_bits(), hi.to_bits()));
+            assert_eq!(
+                (&x.record, x.code, bits(&x.default), range(x.range), x.valid_max.map(f64::to_bits), &x.data),
+                (&y.record, y.code, bits(&y.default), range(y.range), y.valid_max.map(f64::to_bits), &y.data),
+                "{what}: parameter {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_table_definitions_equal_the_encoded_and_parsed_ones() {
+        for fx in FX_DEFS {
+            let parsed = reference::par_defs(&crate::export::fxsynth::default_sspc(fx));
+            assert_same(&parsed, &ParDef::of_effect(fx), fx.match_name);
+        }
+    }
+
+    #[test]
+    fn a_record_name_that_is_not_ascii_is_found_in_its_prototype() {
+        static PARAMS: [PDef; 1] = [PDef { id: 1, code: 2, default: &[0.0], range: None, valid_max: None, valid_min: None, display: 0 }];
+        let fx = FxDef { match_name: "Effekt Größe", name: "x", params: &PARAMS };
+        let record = ParDef::of_effect(&fx).get(&0).map(|d| d.record.clone()).expect("the parameter");
+        assert_eq!(record, "Effekt Größe-0001");
+        let sspc = crate::export::fxsynth::default_sspc(&fx);
+        let part = sspc.child_list(b"parT").expect("parT");
+        assert!(part.children().iter().any(|c| is_tdmn(c, &record)));
+    }
+
+    #[test]
+    fn generated_definitions_equal_the_encoded_and_parsed_ones() {
+        // Every parameter type with defaults, ranges and maxima that are fractional, negative,
+        // huge, beyond the 16.16 and f32 ranges, and not numbers.
+        let values = [0.0, -0.0, 1.0, -1.0, 0.5, 1.0 / 3.0, 1.01, 100.0, 255.4, 255.6, 256.0, -3.7, 65535.6, 70000.0, 1e9, -1e9, 1e40, f64::NAN, f64::INFINITY];
+        let mut state = 7u64;
+        let mut pick = move |n: usize| {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap_or(0) % n
+        };
+        for round in 0..400 {
+            let params: Vec<PDef> = (0..16u16)
+                .map(|id| {
+                    let code = [0u8, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15][pick(15)];
+                    let default: &'static [f64] = Box::leak((0..pick(5)).map(|_| values[pick(values.len())]).collect::<Vec<_>>().into_boxed_slice());
+                    let opt = |pick: &mut dyn FnMut(usize) -> usize| (pick(3) > 0).then(|| values[pick(values.len())]);
+                    let range = opt(&mut pick).map(|lo| (lo, values[pick(values.len())]));
+                    PDef { id, code, default, range, valid_max: opt(&mut pick), valid_min: opt(&mut pick), display: u32::try_from(pick(40)).unwrap_or(0) }
+                })
+                .collect();
+            let fx =
+                FxDef { match_name: Box::leak(format!("Generated {round}").into_boxed_str()), name: "Generated", params: Box::leak(params.into_boxed_slice()) };
+            let parsed = reference::par_defs(&crate::export::fxsynth::default_sspc(&fx));
+            assert_same(&parsed, &ParDef::of_effect(&fx), fx.match_name);
+        }
+    }
+
+    fn group(effect: &str, text: (&str, &str)) -> PropGroup {
+        let spec = effectcraft_effects::find(effect).expect("the effect");
+        let mut next = 1;
+        let mut g = effectcraft_effects::instantiate(spec, &mut effectcraft_project::build::Ids(&mut next), "fx", [100.0, 100.0]);
+        g.prop_mut(text.0).expect("the text parameter").value = Value::Str(text.1.to_string());
+        g
+    }
+
+    fn invalid(col: Collector) -> Vec<String> {
+        col.finish().losses.into_iter().filter(|l| l.category == LossCategory::InvalidValues).flat_map(|l| l.details).collect()
+    }
+
+    #[test]
+    fn unreadable_curve_points_are_reported() {
+        let pdefs = defs().get("ADBE CurvesCustom").expect("the Curves prototype");
+        let mut col = Collector::default();
+        plan_curves(&group("ec.color.curves", ("rgb", "0,0 junk 0.5,0.7 nan,1 1,1")), pdefs, "fx", &mut col);
+        let found = invalid(col);
+        assert!(found.iter().any(|d| d.contains("curve 'rgb': 2 entries")), "{found:?}");
+        let mut col = Collector::default();
+        plan_curves(&group("ec.color.curves", ("rgb", "0,0 0.5,0.7 1,1")), pdefs, "fx", &mut col);
+        assert_eq!(invalid(col), Vec::<String>::new());
+    }
+
+    #[test]
+    fn unreadable_mesh_entries_are_reported() {
+        let pdefs = defs().get("ADBE MESH WARP").expect("the Mesh Warp prototype");
+        let mut col = Collector::default();
+        plan_mesh(&group("ec.distort.meshwarp", ("mesh", "0,0 x,1 2")), pdefs, (100.0, 100.0), "fx", &mut col);
+        let found = invalid(col);
+        assert!(found.iter().any(|d| d.contains("2 entries that are not numbers")), "{found:?}");
+        let mut col = Collector::default();
+        plan_mesh(&group("ec.distort.meshwarp", ("mesh", "0,0 1,1")), pdefs, (100.0, 100.0), "fx", &mut col);
+        assert_eq!(invalid(col), Vec::<String>::new());
+    }
 }

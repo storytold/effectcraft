@@ -56,7 +56,7 @@ struct PendingComp<'f, 'a> {
 struct Ctx<'o> {
     sources: HashMap<u32, Source>,
     /// Which comps use which comps as precomps (to refuse loops).
-    uses: HashMap<ItemId, Vec<ItemId>>,
+    precomps: Precomps,
     created: Vec<ItemId>,
     col: Collector,
     options: &'o ImportOptions<'o>,
@@ -69,7 +69,7 @@ struct Ctx<'o> {
 pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &ImportOptions<'_>) -> (ItemId, Vec<ItemId>, Vec<ItemId>, ImportReport) {
     let mut cx = Ctx {
         sources: HashMap::new(),
-        uses: HashMap::new(),
+        precomps: Precomps::default(),
         created: Vec::new(),
         col: Collector::default(),
         options,
@@ -101,9 +101,9 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
                 // After Effects writes an `Sfdr` even for an empty folder (and other chunks next to the
                 // items in it); without one the contents are lost.
                 if !item.has_folder_contents() {
-                    cx.col.lose(LossCategory::DamagedData, format!("folder '{name}': its contents list is missing, imported empty"));
+                    cx.col.lose_with(LossCategory::DamagedData, || format!("folder '{name}': its contents list is missing, imported empty"));
                 } else if item.folder_contents_unreadable() {
-                    cx.col.lose(LossCategory::DamagedData, format!("folder '{name}': its contents list is damaged, imported empty"));
+                    cx.col.lose_with(LossCategory::DamagedData, || format!("folder '{name}': its contents list is damaged, imported empty"));
                 }
                 let mut kids: Vec<_> = item.children().map(|k| (k, id)).collect();
                 kids.reverse();
@@ -112,16 +112,16 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
             Some(AepKind::Composition) => {
                 let name = if name.is_empty() { "Composition".to_string() } else { name };
                 let Some(comp_view) = item.comp() else {
-                    cx.col.lose(LossCategory::DamagedData, format!("composition '{name}': composition data missing, not imported"));
+                    cx.col.lose_with(LossCategory::DamagedData, || format!("composition '{name}': composition data missing, not imported"));
                     continue;
                 };
                 let Some(header) = comp_view.header() else {
-                    cx.col.lose(LossCategory::DamagedData, format!("composition '{name}': header unreadable, not imported"));
+                    cx.col.lose_with(LossCategory::DamagedData, || format!("composition '{name}': header unreadable, not imported"));
                     continue;
                 };
                 let tb = header.time_base;
                 let Some(rate) = frame_rate(tb.timescale, tb.frame_duration) else {
-                    cx.col.lose(LossCategory::DamagedData, format!("composition '{name}': time base unreadable, not imported"));
+                    cx.col.lose_with(LossCategory::DamagedData, || format!("composition '{name}': time base unreadable, not imported"));
                     continue;
                 };
                 let map = TimeMap { timescale: tb.timescale, frame_duration: tb.frame_duration, rate };
@@ -137,12 +137,13 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
                 pending.push(PendingComp { id, item, map });
             }
             Some(AepKind::Footage) => import_footage(project, &mut cx, &item, name, label, parent, &null_only),
-            Some(AepKind::Other(code)) => cx.col.lose(LossCategory::UnsupportedItems, format!("'{name}': item type {code}")),
+            Some(AepKind::Other(code)) => cx.col.lose_with(LossCategory::UnsupportedItems, || format!("'{name}': item type {code}")),
             None => cx.col.lose(LossCategory::DamagedData, "a project item without a readable type".to_string()),
         }
     }
 
     // Pass 2: the layers. The effect definitions are indexed once for every layer of every comp.
+    cx.precomps = Precomps::new(&precomp_candidates(&cx.sources, &pending));
     let defs = view.effect_definition_index();
     for p in &pending {
         build_layers(project, &mut cx, &defs, p);
@@ -185,12 +186,12 @@ fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap, name: 
     comp.work_area = if start >= Tick::ZERO && end > start {
         (start, end)
     } else {
-        col.lose(LossCategory::DamagedData, format!("composition '{name}': the work area is empty or negative, the whole composition is used"));
+        col.lose_with(LossCategory::DamagedData, || format!("composition '{name}': the work area is empty or negative, the whole composition is used"));
         (Tick::ZERO, duration)
     };
     comp.background = h.background.map(|c| f32::from(c) / 255.0);
     comp.pixel_aspect = h.pixel_aspect.to_f64().filter(|v| v.is_finite() && *v > 0.0).unwrap_or_else(|| {
-        col.lose(LossCategory::DamagedData, format!("composition '{name}': the pixel aspect ratio is not valid, 1 is used"));
+        col.lose_with(LossCategory::DamagedData, || format!("composition '{name}': the pixel aspect ratio is not valid, 1 is used"));
         1.0
     });
     comp.shutter_angle = f64::from(h.shutter_angle);
@@ -210,7 +211,7 @@ fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap, name: 
 /// Unreadable footage is recorded as a loss, solids and null placeholders are handled separately, and file and sequence footage is linked to its files.
 fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_>, name: String, label: Label, parent: ItemId, null_only: &HashSet<u32>) {
     let Some(f) = item.footage() else {
-        cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': data unreadable, not imported"));
+        cx.col.lose_with(LossCategory::DamagedData, || format!("footage '{name}': data unreadable, not imported"));
         return;
     };
     let aep_id = item.id();
@@ -229,7 +230,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         let mut rgb = f.solid_rgb().unwrap_or([0.0; 3]);
         if rgb.iter().any(|c| !c.is_finite()) {
             rgb = rgb.map(|c| if c.is_finite() { c } else { 0.0 });
-            cx.col.lose(LossCategory::DamagedData, format!("solid '{name}': a color channel is not a number, replaced by 0"));
+            cx.col.lose_with(LossCategory::DamagedData, || format!("solid '{name}': a color channel is not a number, replaced by 0"));
         }
         let solid = Solid { color: rgb, width: f.width, height: f.height, pixel_aspect: 1.0 };
         let id = project.add_item(&name, label, Some(parent), ItemKind::Solid(solid));
@@ -262,10 +263,9 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         let bytes = len(folder.len().saturating_add(1)).saturating_mul(u64::from(frames)).saturating_add(file_bytes);
         if frames > MAX_SEQUENCE_FRAMES || frames > cx.sequence_budget || bytes > cx.sequence_bytes {
             // Not expanded: the item keeps its first file (a still standing for the sequence).
-            cx.col.lose(
-                LossCategory::DamagedData,
-                format!("footage '{name}': a sequence of {frames} frames is longer than the import expands; only its first file is linked"),
-            );
+            cx.col.lose_with(LossCategory::DamagedData, || {
+                format!("footage '{name}': a sequence of {frames} frames is longer than the import expands; only its first file is linked")
+            });
             path = format!("{folder}{sep}{}", seq.nth_file_name(0).unwrap_or_default());
         } else {
             cx.sequence_budget -= frames;
@@ -277,7 +277,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         }
     } else if f.is_sequence && !path.is_empty() {
         // The alias is a folder, but the file names could not be read: the item links the folder.
-        cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': image sequence naming not read, linked to its folder"));
+        cx.col.lose_with(LossCategory::DamagedData, || format!("footage '{name}': image sequence naming not read, linked to its folder"));
     }
     let present = !path.is_empty() && (cx.options.exists)(&path);
     if !present {
@@ -478,10 +478,13 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
     let mut layer_refs: Vec<PendingLayerRef> = Vec::new();
     // The id of the layer above in the file (the matte of the older "layer above" form).
     let mut above: Option<u32> = None;
+    // The comps that use this one, directly or through others: a precomp layer of one of them
+    // would close a loop. Found once, at the first precomp layer (see `Precomps`).
+    let mut users: Option<HashSet<ItemId>> = None;
 
     for layer in comp_view.layers() {
         let Some(h) = layer.header() else {
-            cx.col.lose(LossCategory::DamagedData, format!("{comp_name}: a layer header is unreadable, layer not imported"));
+            cx.col.lose_with(LossCategory::DamagedData, || format!("{comp_name}: a layer header is unreadable, layer not imported"));
             above = None;
             continue;
         };
@@ -545,11 +548,10 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
                 SourceKind::Solid => (LayerSource::Solid { item: s.item }, (s.width.max(1), s.height.max(1))),
                 SourceKind::Footage => (LayerSource::Footage { item: s.item }, (s.width.max(1), s.height.max(1))),
                 SourceKind::Comp => {
-                    if would_loop(&cx.uses, p.id, s.item) {
+                    if !cx.precomps.accept(p.id, s.item, &mut users) {
                         skip(cx, &mut skipped, LossCategory::UnsupportedLayers, "precomposition loop, layer");
                         continue;
                     }
-                    cx.uses.entry(p.id).or_default().push(s.item);
                     (LayerSource::Comp { item: s.item }, (s.width.max(1), s.height.max(1)))
                 }
             },
@@ -571,7 +573,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
             Some(b) => l.blend_mode = b,
             // Cameras and lights have no blend mode (their byte is 0, 251).
             None if is_camera || light.is_some() => {}
-            None => cx.col.lose(LossCategory::BlendModes, format!("{comp_name}: '{name}' uses blend mode code {}", h.blend_mode.code())),
+            None => cx.col.lose_with(LossCategory::BlendModes, || format!("{comp_name}: '{name}' uses blend mode code {}", h.blend_mode.code())),
         }
         let what = format!("{comp_name}: '{name}'");
         l.markers = import_markers(layer.markers(), layer.chunk(), &what, &tm, &mut cx.col);
@@ -640,9 +642,13 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         comp.layers.push(l);
     }
 
-    resolve_parents(&mut comp, &parents, &ids, &skipped, &comp_name, &mut cx.col);
-    resolve_mattes(&mut comp, &mattes, &ids, &skipped, &comp_name, &mut cx.col);
-    resolve_layer_refs(&mut comp, &layer_refs, &ids, &mut cx.col);
+    // Project layer id -> position in `comp.layers` (the first, as `Comp::layer_mut` finds it):
+    // one lookup per link instead of a scan of the layers, which made a composition of many
+    // parented, matted or referenced layers quadratic.
+    let at = layer_positions(&comp);
+    resolve_parents(&mut comp, &at, &parents, &ids, &skipped, &comp_name, &mut cx.col);
+    resolve_mattes(&mut comp, &at, &mattes, &ids, &skipped, &comp_name, &mut cx.col);
+    resolve_layer_refs(&mut comp, &at, &layer_refs, &ids, &mut cx.col);
     // Global Light is one setting per composition here: the layers' stored values are adopted.
     effectcraft_project::styles::sync_comp(&mut comp);
 
@@ -662,10 +668,10 @@ fn import_source_text(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, cx: &
             let value = text_doc(&doc, what, cx.options.has_font, &mut cx.col);
             match l.props.prop_mut("text/sourceText") {
                 Some(p) => p.value = Value::Text(Box::new(value)),
-                None => cx.col.lose(LossCategory::DamagedData, format!("{what}: the text layer has no Source Text property, the text is not imported")),
+                None => cx.col.lose_with(LossCategory::DamagedData, || format!("{what}: the text layer has no Source Text property, the text is not imported")),
             }
         }
-        None => cx.col.lose(LossCategory::DamagedData, format!("{what}: the text document is unreadable, the layer is imported with empty text")),
+        None => cx.col.lose_with(LossCategory::DamagedData, || format!("{what}: the text document is unreadable, the layer is imported with empty text")),
     }
     report_text_extras(layer, what, &mut cx.col);
 }
@@ -679,33 +685,176 @@ fn import_text_animators(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, tm
     }
     match l.props.group_mut("text/animators") {
         Some(target) => import_animators(&animators, what, tm, ids, target, col),
-        None => col.lose(LossCategory::TextLayers, format!("{what}: the text layer has no animator group, its text animators are not imported")),
+        None => col.lose_with(LossCategory::TextLayers, || format!("{what}: the text layer has no animator group, its text animators are not imported")),
     }
 }
 
-/// Whether adding `to` as a precomp of `from` would close a loop.
-fn would_loop(uses: &HashMap<ItemId, Vec<ItemId>>, from: ItemId, to: ItemId) -> bool {
-    if from == to {
-        return true;
+/// Whether a precomp layer of `to` in `from` closes a loop: `to` is `from`, or `to` already uses
+/// `from` (`uses_from`, directly or through others). Shared by the import and the export.
+pub(crate) fn closes_loop(from: ItemId, to: ItemId, uses_from: impl FnOnce(ItemId) -> bool) -> bool {
+    to == from || uses_from(to)
+}
+
+/// The walk's own stack in [`components`]: a node, the nodes it links to and how many are done.
+type Walk = Vec<(ItemId, Vec<ItemId>, usize)>;
+
+/// The strongly connected components of the graph `edges` (node -> the nodes it links to): each
+/// node's component number (every node of a loop has the same one). Iterative (Tarjan), linear in
+/// nodes and links.
+pub(crate) fn components(edges: &HashMap<ItemId, HashSet<ItemId>>) -> HashMap<ItemId, usize> {
+    struct Tarjan<'e> {
+        edges: &'e HashMap<ItemId, HashSet<ItemId>>,
+        index: HashMap<ItemId, usize>,
+        low: HashMap<ItemId, usize>,
+        on_stack: HashSet<ItemId>,
+        stack: Vec<ItemId>,
+        counter: usize,
     }
-    let mut seen = HashSet::new();
-    let mut stack = vec![to];
-    while let Some(c) = stack.pop() {
-        if c == from {
-            return true;
-        }
-        if seen.insert(c) {
-            stack.extend(uses.get(&c).into_iter().flatten().copied());
+    impl Tarjan<'_> {
+        fn enter(&mut self, n: ItemId, walk: &mut Walk) {
+            self.index.insert(n, self.counter);
+            self.low.insert(n, self.counter);
+            self.counter = self.counter.saturating_add(1);
+            self.stack.push(n);
+            self.on_stack.insert(n);
+            walk.push((n, self.edges.get(&n).map(|s| s.iter().copied().collect()).unwrap_or_default(), 0));
         }
     }
-    false
+    let mut t = Tarjan { edges, index: HashMap::new(), low: HashMap::new(), on_stack: HashSet::new(), stack: Vec::new(), counter: 0 };
+    let mut component: HashMap<ItemId, usize> = HashMap::new();
+    let mut found = 0usize;
+    for &root in edges.keys() {
+        if t.index.contains_key(&root) {
+            continue;
+        }
+        let mut walk: Walk = Vec::new();
+        t.enter(root, &mut walk);
+        while let Some((v, next, done)) = walk.last_mut() {
+            let v = *v;
+            if let Some(w) = next.get(*done).copied() {
+                *done += 1;
+                if !t.index.contains_key(&w) {
+                    t.enter(w, &mut walk);
+                } else if t.on_stack.contains(&w) {
+                    let iw = t.index.get(&w).copied().unwrap_or(usize::MAX);
+                    if let Some(lv) = t.low.get_mut(&v) {
+                        *lv = (*lv).min(iw);
+                    }
+                }
+                continue;
+            }
+            walk.pop();
+            let lv = t.low.get(&v).copied().unwrap_or(usize::MAX);
+            if let Some((u, _, _)) = walk.last()
+                && let Some(lu) = t.low.get_mut(u)
+            {
+                *lu = (*lu).min(lv);
+            }
+            if Some(lv) == t.index.get(&v).copied() {
+                while let Some(x) = t.stack.pop() {
+                    t.on_stack.remove(&x);
+                    component.insert(x, found);
+                    if x == v {
+                        break;
+                    }
+                }
+                found = found.saturating_add(1);
+            }
+        }
+    }
+    component
+}
+
+/// The precomp links of the import: the links every precomp layer of the file could make (the
+/// candidates, known before any layer is built), and the ones accepted so far, stored as precomp
+/// -> the comps that use it.
+///
+/// A precomp layer of `to` in `from` closes a loop when `to` already uses `from` over accepted
+/// links ([`closes_loop`]). That path and the layer's own link form a loop of candidate links, so
+/// `to` and `from` share a component of the candidate graph: between components the answer is no
+/// without a search (a file without a precomp loop never searches). Within a component, the comps
+/// that use `from` are found once per composition, among that component's comps only: while
+/// `from`'s layers are built the only links added start at `from`, and a path that reaches `from`
+/// never needs one of them. (Before, every precomp layer walked the whole graph, which held one
+/// link per layer.)
+#[derive(Default)]
+struct Precomps {
+    used_by: HashMap<ItemId, HashSet<ItemId>>,
+    component: HashMap<ItemId, usize>,
+}
+
+impl Precomps {
+    /// `candidates`: comp -> the comps its layers could show.
+    fn new(candidates: &HashMap<ItemId, HashSet<ItemId>>) -> Self {
+        Precomps { used_by: HashMap::new(), component: components(candidates) }
+    }
+
+    /// Decides a precomp layer of `to` in `from`: recorded and `true`, or `false` when it closes a
+    /// loop. `users` holds the comps that use `from` once they are needed (one per composition).
+    fn accept(&mut self, from: ItemId, to: ItemId, users: &mut Option<HashSet<ItemId>>) -> bool {
+        let looped = closes_loop(from, to, |to| self.same_component(from, to) && users.get_or_insert_with(|| self.users_of(from)).contains(&to));
+        if !looped {
+            self.used_by.entry(to).or_default().insert(from);
+        }
+        !looped
+    }
+
+    /// Whether `a` and `b` are in one component of the candidate graph.
+    fn same_component(&self, a: ItemId, b: ItemId) -> bool {
+        matches!((self.component.get(&a), self.component.get(&b)), (Some(x), Some(y)) if x == y)
+    }
+
+    /// The comps of `comp`'s component that use it over accepted links, directly or through
+    /// others (each visited once).
+    fn users_of(&self, comp: ItemId) -> HashSet<ItemId> {
+        let mut found = HashSet::new();
+        let mut stack = vec![comp];
+        while let Some(c) = stack.pop() {
+            for u in self.used_by.get(&c).into_iter().flatten() {
+                if self.same_component(*u, comp) && found.insert(*u) {
+                    stack.push(*u);
+                }
+            }
+        }
+        found
+    }
+}
+
+/// Every link a precomp layer of the file could make: comp -> the comps its layers name as their
+/// source (resolved as `build_layers` resolves them).
+fn precomp_candidates(sources: &HashMap<u32, Source>, pending: &[PendingComp<'_, '_>]) -> HashMap<ItemId, HashSet<ItemId>> {
+    let mut links: HashMap<ItemId, HashSet<ItemId>> = HashMap::new();
+    for p in pending {
+        let Some(comp) = p.item.comp() else { continue };
+        for layer in comp.layers() {
+            let Some(s) = layer.header().and_then(|h| h.source_id).and_then(|s| sources.get(&s)) else { continue };
+            if s.kind == SourceKind::Comp {
+                links.entry(p.id).or_default().insert(s.item);
+            }
+        }
+    }
+    links
+}
+
+/// Each layer's position in `comp.layers`, the first one for an id that repeats.
+fn layer_positions(comp: &Comp) -> HashMap<LayerId, usize> {
+    let mut at = HashMap::with_capacity(comp.layers.len());
+    for (i, l) in comp.layers.iter().enumerate() {
+        at.entry(l.id).or_insert(i);
+    }
+    at
+}
+
+/// The layer with project id `id`, through [`layer_positions`].
+pub(crate) fn layer_at<'c>(comp: &'c mut Comp, at: &HashMap<LayerId, usize>, id: LayerId) -> Option<&'c mut Layer> {
+    comp.layers.get_mut(*at.get(&id)?)
 }
 
 fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &mut Collector) {
     // The exact ratio `stretch / stretch_den` (50 % is 1/2, -100 % is -1/1); a zero or unreadable
     // one is 100 %.
     let stretch = h.stretch_ratio().filter(|r| r.num != 0).unwrap_or_else(|| {
-        col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch is zero or unreadable, 100 % is used"));
+        col.lose_with(LossCategory::DamagedData, || format!("layer '{name}': the time stretch is zero or unreadable, 100 % is used"));
         Rational { num: 1, den: 1 }
     });
     let stored = stretch.to_f64().map_or(100.0, |r| r * 100.0);
@@ -714,7 +863,9 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &
     // out points keep the comp times the file stores.
     l.stretch = effectcraft_project::limits::stretch(stored);
     if l.stretch.to_bits() != stored.to_bits() {
-        col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch of {stored:e} % is outside ±1 % to ±9900 %, {} % is used", l.stretch));
+        col.lose_with(LossCategory::DamagedData, || {
+            format!("layer '{name}': the time stretch of {stored:e} % is outside ±1 % to ±9900 %, {} % is used", l.stretch)
+        });
     }
     // A stored time with a zero denominator (or a sum that overflows) has no value; it is read as 0
     // and reported, so the layer's timing never changes silently.
@@ -726,9 +877,11 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &
     l.start_time = tm.ticks(h.start.num, h.start.den);
     let points = [(h.in_relative, h.in_point()), (h.out_relative, h.out_point())].map(|(offset, reduced)| absolute(h.start, offset, stretch, reduced));
     if !unreadable.is_empty() {
-        col.lose(LossCategory::DamagedData, format!("layer '{name}': the stored {} time is unreadable (zero denominator), 0 is used", unreadable.join(", ")));
+        col.lose_with(LossCategory::DamagedData, || {
+            format!("layer '{name}': the stored {} time is unreadable (zero denominator), 0 is used", unreadable.join(", "))
+        });
     } else if points.iter().any(Option::is_none) {
-        col.lose(LossCategory::DamagedData, format!("layer '{name}': the in or out point is out of range, 0 is used"));
+        col.lose_with(LossCategory::DamagedData, || format!("layer '{name}': the in or out point is out of range, 0 is used"));
     }
     let [a, b] = points.map(|p| p.map_or(Tick::ZERO, |(n, d)| tm.ticks(n, d)));
     // A negative stretch reverses the layer (981-983): the stored in point is then the later
@@ -799,7 +952,15 @@ struct PendingMatte {
 /// above: that layer is used. The matte layer's video switch is imported as stored (After Effects
 /// switches it off when the matte is set, 403; EffectCraft, like After Effects, still uses a
 /// hidden layer as a matte).
-fn resolve_mattes(comp: &mut Comp, mattes: &[PendingMatte], ids: &HashMap<u32, LayerId>, skipped: &HashMap<u32, String>, comp_name: &str, col: &mut Collector) {
+fn resolve_mattes(
+    comp: &mut Comp,
+    at: &HashMap<LayerId, usize>,
+    mattes: &[PendingMatte],
+    ids: &HashMap<u32, LayerId>,
+    skipped: &HashMap<u32, String>,
+    comp_name: &str,
+    col: &mut Collector,
+) {
     for m in mattes {
         let kind = match m.matte.mode {
             MatteMode::Alpha => MatteKind::Alpha,
@@ -807,24 +968,24 @@ fn resolve_mattes(comp: &mut Comp, mattes: &[PendingMatte], ids: &HashMap<u32, L
             MatteMode::Luma => MatteKind::Luma,
             MatteMode::LumaInverted => MatteKind::LumaInverted,
             MatteMode::Other(code) => {
-                col.lose(LossCategory::TrackMattes, format!("{comp_name}: '{}' has a track matte of unknown mode {code}", m.name));
+                col.lose_with(LossCategory::TrackMattes, || format!("{comp_name}: '{}' has a track matte of unknown mode {code}", m.name));
                 continue;
             }
         };
         let Some(source) = m.matte.layer.or(m.above) else {
-            col.lose(LossCategory::TrackMattes, format!("{comp_name}: '{}' has a track matte but no layer above it", m.name));
+            col.lose_with(LossCategory::TrackMattes, || format!("{comp_name}: '{}' has a track matte but no layer above it", m.name));
             continue;
         };
         let Some(target) = ids.get(&source).copied() else {
             let why = skipped.get(&source).map_or("a layer that does not exist", |s| s.as_str());
-            col.lose(LossCategory::TrackMattes, format!("{comp_name}: '{}' has {why} as its track matte", m.name));
+            col.lose_with(LossCategory::TrackMattes, || format!("{comp_name}: '{}' has {why} as its track matte", m.name));
             continue;
         };
         if target == m.layer {
-            col.lose(LossCategory::TrackMattes, format!("{comp_name}: '{}' is its own track matte", m.name));
+            col.lose_with(LossCategory::TrackMattes, || format!("{comp_name}: '{}' is its own track matte", m.name));
             continue;
         }
-        if let Some(l) = comp.layer_mut(m.layer) {
+        if let Some(l) = layer_at(comp, at, m.layer) {
             l.track_matte = Some(TrackMatte { layer: target, kind });
             col.imported.track_mattes += 1;
         }
@@ -869,6 +1030,7 @@ fn parent_cycles(links: &HashMap<LayerId, LayerId>) -> HashSet<LayerId> {
 /// Sets the parent links that point at an imported layer, without loops.
 fn resolve_parents(
     comp: &mut Comp,
+    at: &HashMap<LayerId, usize>,
     parents: &[(u32, LayerId, String, u32)],
     ids: &HashMap<u32, LayerId>,
     skipped: &HashMap<u32, String>,
@@ -883,7 +1045,7 @@ fn resolve_parents(
             }
             None => {
                 let why = skipped.get(parent).map_or("a layer that does not exist", |s| s.as_str());
-                col.lose(LossCategory::ParentLinks, format!("{comp_name}: '{name}' has {why} as its parent"));
+                col.lose_with(LossCategory::ParentLinks, || format!("{comp_name}: '{name}' has {why} as its parent"));
             }
         }
     }
@@ -892,11 +1054,11 @@ fn resolve_parents(
     let looped: Vec<LayerId> = links.keys().copied().filter(|l| on_loop.contains(l)).collect();
     for l in &looped {
         links.remove(l);
-        let name = comp.layer(*l).map(|x| x.name.clone()).unwrap_or_default();
-        col.lose(LossCategory::ParentLinks, format!("{comp_name}: '{name}' has a parent loop"));
+        let name = at.get(l).and_then(|i| comp.layers.get(*i)).map(|x| x.name.clone()).unwrap_or_default();
+        col.lose_with(LossCategory::ParentLinks, || format!("{comp_name}: '{name}' has a parent loop"));
     }
     for (layer, parent) in links {
-        if let Some(l) = comp.layer_mut(layer) {
+        if let Some(l) = layer_at(comp, at, layer) {
             l.parent = Some(parent);
         }
     }
@@ -926,6 +1088,137 @@ mod tests {
         let mut found: Vec<u64> = parent_cycles(&links).into_iter().map(|x| x.0).collect();
         found.sort_unstable();
         assert_eq!(found, [1, 2, 3, 5]);
+    }
+
+    /// The loop check as it was (a walk over every link per precomp layer), the reference.
+    fn old_would_loop(uses: &HashMap<ItemId, Vec<ItemId>>, from: ItemId, to: ItemId) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut seen = HashSet::new();
+        let mut stack = vec![to];
+        while let Some(c) = stack.pop() {
+            if c == from {
+                return true;
+            }
+            if seen.insert(c) {
+                stack.extend(uses.get(&c).into_iter().flatten().copied());
+            }
+        }
+        false
+    }
+
+    /// Builds the compositions `0..comps` in order, each with `layers` precomp layers of
+    /// pseudo-random compositions, deciding every layer with the old and the new check.
+    fn decide_both(comps: u64, layers: u64, seed: u64) -> usize {
+        let mut state = seed;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let plan: Vec<(ItemId, Vec<ItemId>)> = (0..comps).map(|c| (ItemId(c), (0..layers).map(|_| ItemId(next() % comps)).collect())).collect();
+        let mut candidates: HashMap<ItemId, HashSet<ItemId>> = HashMap::new();
+        for (from, tos) in &plan {
+            candidates.entry(*from).or_default().extend(tos.iter().copied());
+        }
+        let (mut uses, mut new) = (HashMap::<ItemId, Vec<ItemId>>::new(), Precomps::new(&candidates));
+        let mut refused = 0;
+        for (from, tos) in &plan {
+            let mut users: Option<HashSet<ItemId>> = None;
+            for to in tos {
+                let accepted = new.accept(*from, *to, &mut users);
+                assert_eq!(!accepted, old_would_loop(&uses, *from, *to), "{from:?} -> {to:?}");
+                if accepted {
+                    uses.entry(*from).or_default().push(*to);
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+        refused
+    }
+
+    #[test]
+    fn the_precomp_loop_check_decides_as_the_full_walk_did() {
+        let mut refused = 0;
+        for seed in 0..200 {
+            refused += decide_both(1 + seed % 12, 1 + seed % 5, seed);
+        }
+        // Both kinds of answer occur.
+        assert!(refused > 0);
+    }
+
+    #[test]
+    fn many_layers_of_one_precomp_are_checked_in_linear_time() {
+        // C holds 200 000 layers of B, B 200 000 of A, built B first: before, every layer of C
+        // walked B's 200 000 links (4e10 steps); now no layer searches (no loop in the file).
+        let (a, b, c) = (ItemId(1), ItemId(2), ItemId(3));
+        let candidates = HashMap::from([(b, HashSet::from([a])), (c, HashSet::from([b]))]);
+        let mut p = Precomps::new(&candidates);
+        for (from, to) in [(b, a), (c, b)] {
+            let mut users = None;
+            for _ in 0..200_000 {
+                assert!(p.accept(from, to, &mut users));
+            }
+            assert!(users.is_none(), "no search");
+        }
+    }
+
+    #[test]
+    fn layered_precomps_are_checked_without_a_search() {
+        // K top comps each show K middle comps, each of which shows K leaf comps, built leaves
+        // last (the order that made each leaf's users the whole graph): K^3 steps before the
+        // components, now none. K = 300: 180 000 links.
+        let k = 300u64;
+        let (top, mid, leaf) = (|i: u64| ItemId(i), |i: u64| ItemId(1000 + i), |i: u64| ItemId(2000 + i));
+        let mut candidates: HashMap<ItemId, HashSet<ItemId>> = HashMap::new();
+        for i in 0..k {
+            candidates.insert(top(i), (0..k).map(mid).collect());
+            candidates.insert(mid(i), (0..k).map(leaf).collect());
+        }
+        let mut p = Precomps::new(&candidates);
+        for from in (0..k).map(top).chain((0..k).map(mid)) {
+            let mut users = None;
+            for to in candidates.get(&from).into_iter().flatten() {
+                assert!(p.accept(from, *to, &mut users));
+            }
+            assert!(users.is_none(), "no search");
+        }
+    }
+
+    #[test]
+    fn components_are_the_loops() {
+        let n = |i: u64| ItemId(i);
+        // 1 -> 2 -> 3 -> 1 is a loop, 4 leads into it, 5 -> 5 links to itself, 6 -> 7 ends.
+        let edges: HashMap<ItemId, HashSet<ItemId>> = [(1, 2), (2, 3), (3, 1), (4, 1), (5, 5), (6, 7)].into_iter().fold(HashMap::new(), |mut m, (a, b)| {
+            m.entry(n(a)).or_default().insert(n(b));
+            m
+        });
+        let c = components(&edges);
+        assert!(c[&n(1)] == c[&n(2)] && c[&n(2)] == c[&n(3)]);
+        let others = [4, 5, 6, 7].map(|i| c[&n(i)]);
+        assert!(others.iter().all(|x| *x != c[&n(1)]));
+        assert_eq!(others.iter().collect::<HashSet<_>>().len(), 4);
+        // A chain of 200 000 links closed into one loop, walked without recursion.
+        let big: HashMap<ItemId, HashSet<ItemId>> = (0..200_000u64).map(|i| (n(i), HashSet::from([n((i + 1) % 200_000)]))).collect();
+        let c = components(&big);
+        assert_eq!(c.values().collect::<HashSet<_>>().len(), 1);
+    }
+
+    #[test]
+    fn layer_positions_find_the_first_layer_of_an_id() {
+        let mut project = Project::default();
+        let mut comp = Comp::new(10, 10, effectcraft_time::FrameRate::new(25, 1), Tick::ZERO);
+        for (id, name) in [(5, "a"), (6, "b"), (5, "c")] {
+            let mut l = build::layer(&mut project, &comp, name, LayerSource::Null, (10, 10), None);
+            l.id = LayerId(id);
+            l.name = name.into();
+            comp.layers.push(l);
+        }
+        let at = layer_positions(&comp);
+        assert_eq!(layer_at(&mut comp, &at, LayerId(5)).map(|l| l.name.clone()).as_deref(), Some("a"));
+        assert_eq!(layer_at(&mut comp, &at, LayerId(6)).map(|l| l.name.clone()).as_deref(), Some("b"));
+        assert!(layer_at(&mut comp, &at, LayerId(7)).is_none());
     }
 
     #[test]

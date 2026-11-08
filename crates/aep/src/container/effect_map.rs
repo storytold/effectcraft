@@ -1143,8 +1143,25 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 /// The key a popup item is matched by between the two programs: trimmed, lower case, and
 /// Set Matte's "Red Channel" ... "Alpha Channel" are EffectCraft's "Red" ... "Alpha" (904 E24).
 pub fn popup_key(item: &str) -> String {
-    let s = item.trim().to_ascii_lowercase();
-    s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+    popup_stem(item).to_ascii_lowercase()
+}
+
+/// [`popup_key`] before the lower-casing, borrowed: `item` trimmed, without a final ` channel`
+/// in any case (the suffix is ASCII, so the cut is on a character boundary).
+pub(crate) fn popup_stem(item: &str) -> &str {
+    let t = item.trim();
+    let cut = t.len().saturating_sub(SUFFIX.len());
+    match (t.as_bytes().get(cut..), t.get(..cut)) {
+        (Some(end), Some(stem)) if t.len() >= SUFFIX.len() && end.eq_ignore_ascii_case(SUFFIX) => stem,
+        _ => t,
+    }
+}
+
+const SUFFIX: &[u8] = b" channel";
+
+/// Whether two popup items have the same [`popup_key`], without building either key.
+pub(crate) fn popup_keys_match(a: &str, b: &str) -> bool {
+    popup_stem(a).eq_ignore_ascii_case(popup_stem(b))
 }
 
 /// The table row of an After Effects match name.
@@ -1164,3 +1181,43 @@ pub const HUE_SATURATION_MASTER: [&str; 3] = ["hue", "saturation", "lightness"];
 /// The EffectCraft parameters Levels' RGB channel values (`Extra::Levels`) go to, in the order of
 /// the data (input black, input white, gamma, output black, output white: 512-516).
 pub const LEVELS_RGB: [&str; 5] = ["inBlack", "inWhite", "gamma", "outBlack", "outWhite"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key as it was built before the borrowed form (the reference for the differential test).
+    fn old_key(item: &str) -> String {
+        let s = item.trim().to_ascii_lowercase();
+        s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+    }
+
+    #[test]
+    fn the_borrowed_popup_key_matches_the_owned_one() {
+        let items = [
+            "",
+            " ",
+            "(-",
+            "Red",
+            "red channel",
+            "Red Channel",
+            " Alpha CHANNEL ",
+            "channel",
+            " channel",
+            "x channel",
+            "Xchannel",
+            "Ä channel",
+            "Grün Channel",
+            "é",
+            "Ünit  channel",
+            "a channel channel",
+            "Luminance",
+        ];
+        for a in items {
+            assert_eq!(popup_key(a), old_key(a), "{a:?}");
+            for b in items {
+                assert_eq!(popup_keys_match(a, b), old_key(a) == old_key(b), "{a:?} {b:?}");
+            }
+        }
+    }
+}

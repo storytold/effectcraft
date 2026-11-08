@@ -7,6 +7,7 @@ use crate::{AepFile, Chunk};
 use effectcraft_project::{ItemId, LayerId};
 
 use crate::export::plan::{CompPlan, Entry, ItemPlan, KeyPlan, LayerPlan, LayerSrc, ProjectPlan, PropKind, PropPlan, SolidPlan, natural_key};
+use crate::export::synth::tdmn_name;
 use crate::export::template::Template;
 use crate::export::tree::{
     R, child_data, data_mut, kids_mut, list_mut, put, put_bits, put_cstr, put_f32, put_f64, put_i32, put_u8, put_u16, put_u32, set_utf8, tpl,
@@ -658,11 +659,6 @@ const GROUP_ORDER: [&str; 13] = [
     "ADBE Envir Appear in Reflect",
     "ADBE Group End",
 ];
-
-fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let d = c.bytes()?;
-    Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
-}
 
 /// Inserts the properties of `lp` into the layer's Transform group, in the order the file uses.
 fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &CompPlan) -> R<()> {
