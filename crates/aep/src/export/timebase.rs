@@ -60,11 +60,6 @@ pub(crate) fn time_base(rate: FrameRate) -> Option<TimeBase> {
 }
 
 impl TimeBase {
-    /// The NTSC rates and the typed value After Effects stores for each: the one table the
-    /// importer and the exporter use.
-    pub(crate) const NTSC: [(FrameRate, f32); 4] =
-        [(FrameRate::FPS_23_976, 23.976), (FrameRate::FPS_29_97, 29.97), (FrameRate::FPS_59_94, 59.94), (FrameRate::FPS_119_88, 119.88)];
-
     /// `tick` in time units, rounded to the nearest unit (saturated to `i64`); the second value
     /// tells whether it was not exact.
     pub(crate) fn units(&self, tick: Tick) -> (i64, bool) {

@@ -148,7 +148,8 @@ fn a_mask_box_is_normalised_to_the_layer_size() {
     for (got, want) in m.shapes[0].bbox.iter().zip(want_box) {
         assert!(near(f64::from(*got), want, 1e-6), "{:?}", m.shapes[0].bbox);
     }
-    // The importer scales the box by the layer's source size.
+    // The box scales by the size of the layer's source (the importer takes that size from the
+    // source item it matched, the same item `layer_source_size` reads).
     let (w, h) = project.layer_source_size(&layer).unwrap();
     assert_eq!(m.shapes.len(), 1);
     let got: Vec<[f64; 2]> = m.shapes[0].vertices((f64::from(w), f64::from(h))).iter().map(|v| v.position).collect();

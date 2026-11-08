@@ -81,11 +81,6 @@ mod tests {
         assert_eq!(frame_rate(30720, 1024), Some(FrameRate::new(30, 1)));
         assert_eq!(frame_rate(0, 1), None);
         assert_eq!(frame_rate(1, 0), None);
-        // The time bases the exporter writes for the NTSC rates read back as those rates.
-        let written = [(23976, 1000), (23976, 800), (23976, 400), (23976, 200)];
-        for ((rate, _), (ts, fd)) in TimeBase::NTSC.into_iter().zip(written) {
-            assert_eq!(frame_rate(ts, fd), Some(rate));
-        }
     }
 
     #[test]

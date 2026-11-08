@@ -46,7 +46,7 @@ fn cameras() {
     assert_eq!(c.auto_orient, AutoOrient::TowardsPointOfInterest);
     close(&v(&c, "transform/poi"), &[960.0, 540.0, 0.0]);
     close(&v(&c, "transform/position"), &[0.0, 0.0, -2666.6667]);
-    close(&v(&c, "cameraOptions/zoom"), &[2666.6667]);
+    close(&v(&c, "cameraOptions/zoom"), &[effectcraft_aep::DEFAULT_CAMERA_ZOOM]);
     close(&v(&c, "cameraOptions/focusDistance"), &[2666.6667]);
     close(&v(&c, "cameraOptions/aperture"), &[25.3093]);
     assert_eq!(v(&c, "cameraOptions/dof"), Value::Bool(false));
@@ -62,6 +62,8 @@ fn cameras() {
     close(&v(&skip!(layer("341-camera-zoom-2000.aep", "Camera 1")), "cameraOptions/zoom"), &[2000.0]);
     let c = skip!(layer("342-camera-dof-800-30.aep", "Camera 1"));
     assert_eq!(v(&c, "cameraOptions/dof"), Value::Bool(true));
+    // The zoom it does not store stays the default.
+    close(&v(&c, "cameraOptions/zoom"), &[2666.6667]);
     close(&v(&c, "cameraOptions/focusDistance"), &[800.0]);
     close(&v(&c, "cameraOptions/aperture"), &[30.0]);
     // 535-537: a camera above the 3D solid of 486.
@@ -83,10 +85,14 @@ fn spot_and_point_lights() {
     close(&v(&l, "lightOptions/color"), &[1.0, 1.0, 1.0, 1.0]);
     close(&v(&l, "lightOptions/coneAngle"), &[90.0]);
     close(&v(&l, "lightOptions/coneFeather"), &[50.0]);
-    close(&v(&skip!(layer("343-light-spot-color-red.aep", "Light 1")), "lightOptions/color"), &[1.0, 0.0, 0.0, 1.0]);
+    let l = skip!(layer("343-light-spot-color-red.aep", "Light 1"));
+    close(&v(&l, "lightOptions/color"), &[1.0, 0.0, 0.0, 1.0]);
+    close(&v(&l, "lightOptions/coneAngle"), &[90.0]);
+    close(&v(&l, "lightOptions/coneFeather"), &[50.0]);
     let l = skip!(layer("344-light-spot-coneangle-60.aep", "Light 1"));
     close(&v(&l, "lightOptions/coneAngle"), &[60.0]);
     close(&v(&l, "lightOptions/coneFeather"), &[50.0]);
+    close(&v(&l, "lightOptions/color"), &[1.0, 1.0, 1.0, 1.0]);
     let l = skip!(layer("345-light-spot-conefeather-30.aep", "Light 1"));
     close(&v(&l, "lightOptions/coneFeather"), &[30.0]);
     close(&v(&l, "lightOptions/coneAngle"), &[90.0]);
@@ -94,6 +100,8 @@ fn spot_and_point_lights() {
     let l = skip!(layer("252-light-point.aep", "Light 1"));
     assert!(matches!(l.source, LayerSource::Light { kind: LightKind::Point }));
     close(&v(&l, "lightOptions/intensity"), &[100.0]);
+    // Its stored Cone Angle 90 (a default-state record) has no counterpart: a point light has no cone.
+    assert!(l.props.prop("lightOptions/coneAngle").is_none());
     assert_eq!(l.auto_orient, AutoOrient::Off);
 }
 

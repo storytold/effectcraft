@@ -84,6 +84,23 @@ fn ntsc_and_odd_frame_rates_use_the_time_bases_after_effects_writes() {
 }
 
 #[test]
+fn every_ntsc_rate_reads_back_as_the_rate_it_was_written_for() {
+    // The export's time base for each NTSC rate and the import's rate for that time base use the
+    // one NTSC table; the real paths must agree both ways.
+    for rate in [FrameRate::FPS_23_976, FrameRate::FPS_29_97, FrameRate::FPS_59_94, FrameRate::FPS_119_88] {
+        let mut p = Project::default();
+        add_comp(&mut p, "R", 640, 360, rate, 2.0, None);
+        let r = export_all(&p);
+        let exists = |_: &str| true;
+        let options = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&exists) };
+        let mut back = Project::default();
+        let imported = effectcraft_aep::import::import(&mut back, &r.bytes, &options).expect("import");
+        let comp = imported.comps.first().and_then(|c| back.comp(*c)).expect("comp");
+        assert_eq!(comp.frame_rate, rate, "{}", rate.label());
+    }
+}
+
+#[test]
 fn layer_header_fields() {
     let mut p = Project::default();
     let c = add_comp(&mut p, "C", 800, 600, FrameRate::new(30, 1), 10.0, None);
