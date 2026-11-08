@@ -299,6 +299,8 @@ impl Layer {
         let Layer {
             id,
             name,
+            // Whether the name follows the text changes no pixels until the name changes.
+            name_follows_text: _,
             source,
             label,
             comment,
@@ -488,6 +490,11 @@ fn scaled(t: Tick, mul: f64, div: f64) -> Tick {
 pub struct Layer {
     pub id: LayerId,
     pub name: String,
+    /// A text layer's name follows the first line of its Source Text until the user renames it
+    /// (After Effects). `Some(true)`: it follows, `Some(false)`: the user named it. `None` (older
+    /// projects, layers made before this was recorded): see [`Layer::name_follows_text()`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_follows_text: Option<bool>,
     pub source: LayerSource,
     pub label: Label,
     #[serde(default)]
@@ -527,7 +534,26 @@ pub struct Layer {
     pub props: PropGroup,
 }
 
+/// The name a text layer takes from its text: the first 40 characters of the first line. A line
+/// ends at a line feed or at a bare carriage return (After Effects' paragraph break).
+pub fn text_layer_name(text: &str) -> String {
+    text.split(['\r', '\n']).next().unwrap_or("").chars().take(40).collect()
+}
+
+/// A text layer's default name when its text gives none: "Text", numbered "Text 2", "Text 3"…
+fn is_default_text_name(name: &str) -> bool {
+    name == "Text" || name.strip_prefix("Text ").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 impl Layer {
+    /// Whether this text layer's name follows its Source Text, whose first line gives the name
+    /// `current` (see [`text_layer_name`]). Without a recorded state (an older project), a name
+    /// that is empty, the text's own, or the default "Text"/"Text 2"… follows; any other name was
+    /// given by the user.
+    pub fn name_follows_text(&self, current: &str) -> bool {
+        self.name_follows_text.unwrap_or_else(|| self.name.is_empty() || self.name == current || is_default_text_name(&self.name))
+    }
+
     /// The layers this layer reads: its parent, track matte, layer parameters (Displacement Map,
     /// Audio Spectrum's Audio Layer…) and tracker targets.
     pub fn referenced_layers(&self) -> Vec<LayerId> {
