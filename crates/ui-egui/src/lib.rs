@@ -207,7 +207,8 @@ pub struct Playback {
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently
     /// while they rendered and the sound started at the later frame, so the opening was lost.
-    /// A stall later on still falls back to [`Playback::audio_held`].
+    /// Once the sound plays, a stall no longer stops it: the picture drops frames to follow it
+    /// (#2473).
     pub starting: bool,
     /// When the preview started (seconds): [`Playback::starting`] gives up after `STARTUP_LIMIT`.
     pub starting_since: f64,

@@ -27,6 +27,14 @@ fn startup_frames(ahead: i64, window: i64, budget: usize, frame_bytes: usize) ->
     ahead.min(window).min(fit).max(1)
 }
 
+/// Whether frame `f` comes after the current frame `cur` and before the sound's frame `target` in
+/// play order. A looping preview whose sound is at a lower frame than the picture has wrapped
+/// to the loop's start, so the frames up to the end and then from the start count; otherwise
+/// (and always without a loop) only the frames strictly between them do.
+fn between_picture_and_sound(cur: i64, f: i64, target: i64, looping: bool) -> bool {
+    if target >= cur || !looping { cur < f && f < target } else { f > cur || f < target }
+}
+
 impl EffectcraftApp {
     /// RAM preview: advance at the preview's frame rate when frames are cached; otherwise hold
     /// and keep rendering ahead (the green cache bar fills, then playback runs in real time).
@@ -318,14 +326,16 @@ impl EffectcraftApp {
     }
 
     /// The last cached frame after the current one and before `target`, in play order: what a
-    /// preview behind its sound shows (`None` when no such frame is cached).
+    /// preview behind its sound shows (`None` when no such frame is cached). The walk stops at
+    /// the first frame that isn't before the sound's, which it can step over without meeting
+    /// (a picture off the plan's frame step) or never reach (a sound behind the picture).
     fn latest_cached_before(&self, pass: &PlaybackPass<'_>, target: i64) -> Option<i64> {
-        let PlaybackPass { plan, series, cur, window, .. } = *pass;
+        let PlaybackPass { plan, series, cur, window, looping, .. } = *pass;
         let cached = self.frames.cached_frames(&series);
         let mut best = None;
         for k in 1..=(window.last - window.first + 1).max(1) {
             let Some(f) = plan.map_or(Some(cur + k), |p| p.frame_after(cur, k)) else { break };
-            if f == target {
+            if !between_picture_and_sound(cur, f, target, looping) {
                 break;
             }
             if cached.binary_search(&f).is_ok() {
@@ -495,7 +505,28 @@ impl EffectcraftApp {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::startup_frames;
+    use super::{between_picture_and_sound, startup_frames};
+
+    /// The frames a preview behind its sound may show are only those before the sound's frame in
+    /// play order, so the picture is never ahead of the sound (#2473).
+    #[test]
+    fn a_dropped_frame_preview_never_shows_past_the_sound() {
+        // Sound ahead of the picture: only the frames between them.
+        assert!(between_picture_and_sound(10, 12, 14, false));
+        assert!(!between_picture_and_sound(10, 14, 14, false), "not the sound's own frame");
+        assert!(!between_picture_and_sound(10, 15, 14, true), "nor one past it, stepped over off the grid");
+        assert!(!between_picture_and_sound(10, 10, 14, true), "nor the current frame");
+        // A looping preview whose sound wrapped to the start: the end of the loop, then its start.
+        assert!(between_picture_and_sound(90, 95, 3, true));
+        assert!(between_picture_and_sound(90, 1, 3, true));
+        assert!(!between_picture_and_sound(90, 3, 3, true));
+        assert!(!between_picture_and_sound(90, 50, 3, true), "the wrapped walk stops before reaching the picture again");
+        // Without a loop, a sound behind the picture allows nothing ahead of it.
+        assert!(!between_picture_and_sound(90, 95, 3, false));
+        assert!(!between_picture_and_sound(90, 1, 3, false));
+        // The sound on the picture's frame: nothing.
+        assert!(!between_picture_and_sound(10, 11, 10, true));
+    }
 
     /// The frames a preview with sound waits for are always requested and fit together (#947).
     #[test]
