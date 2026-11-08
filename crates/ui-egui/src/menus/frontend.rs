@@ -798,7 +798,7 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     // image sequence. Not while the losses prompt of a project picked with them is open: there is
     // one dialog at a time, so they import with the defaults.
     let picked = Value::Object(p.clone());
-    let asking = app.dialog_state.aep_losses.command.is_some();
+    let asking = crate::panels::aep_losses::asking(app);
     if !asking && id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)
         || !asking && matches!(id, "file.import" | "file.importMultiple") && crate::panels::forms::open_import_sequence(app, &picked)
     {

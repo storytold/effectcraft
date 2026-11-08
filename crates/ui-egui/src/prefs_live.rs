@@ -125,7 +125,9 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
             "position": at,
             "background": true
         });
-        if !layered {
+        // While the losses prompt of a project dropped with it shows, a Photoshop file imports
+        // with Default Drag Import As: one dialog at a time (#3103).
+        if !layered || crate::panels::aep_losses::asking(app) {
             params["importAs"] = json!(app.session.prefs.drag_import_as());
         }
         if alt {

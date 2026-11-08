@@ -28,13 +28,20 @@ pub fn is_aep(path: &str) -> bool {
     lower.ends_with(".aep") || lower.ends_with(".aepx")
 }
 
+/// Whether the losses prompt is showing.
+pub fn asking(app: &EffectcraftApp) -> bool {
+    app.dialog == Some(Dialog::AepLosses) && app.dialog_state.aep_losses.command.is_some()
+}
+
 /// Import After Effects projects picked with File ▸ Import ▸ File… or dropped, as their own menu
 /// entry does: one with losses opens the prompt, and the ones after it wait for its answer. The
 /// messages of the files that could not be read.
 pub fn import_projects(app: &mut EffectcraftApp, paths: Vec<String>) -> Vec<String> {
     let mut errors = Vec::new();
     for path in paths {
-        if app.dialog_state.aep_losses.command.is_some() {
+        // Queued only behind a prompt that is showing: a pending command whose prompt another
+        // dialog replaced must not hold back every later import.
+        if asking(app) {
             app.dialog_state.aep_losses.queue.push(path);
             continue;
         }
@@ -213,6 +220,21 @@ mod tests {
         assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
         finish(&mut app, &ctx, true);
         assert!(app.dialog.is_none() && path.is_file(), "Export Anyway wrote the file");
+    }
+
+    /// Projects picked or dropped together wait only behind a prompt that shows: one whose dialog
+    /// another replaced does not hold back later imports (#3103).
+    #[test]
+    fn projects_queue_only_behind_a_showing_prompt() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.dialog_state.aep_losses.command = Some(("file.importAep".into(), json!({"path": "a.aep"}), json!({})));
+        app.dialog = Some(Dialog::AepLosses);
+        assert!(import_projects(&mut app, vec!["/no/such/b.aep".into()]).is_empty());
+        assert_eq!(app.dialog_state.aep_losses.queue, ["/no/such/b.aep"]);
+        app.dialog = None;
+        let errors = import_projects(&mut app, vec!["/no/such/c.aep".into()]);
+        assert_eq!(errors.len(), 1, "tried at once: {errors:?}");
+        assert_eq!(app.dialog_state.aep_losses.queue.len(), 1);
     }
 
     #[test]
