@@ -28,6 +28,7 @@ pub mod display_gpu;
 pub mod dock;
 pub mod dock_ui;
 mod expression_diagnostics;
+mod fallback_fonts;
 pub mod frames;
 pub mod gpu_failure;
 pub mod header;
