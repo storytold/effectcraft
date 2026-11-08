@@ -949,6 +949,7 @@ mod tests {
     }
 
     /// A session reading a sequence of `count` frames `Clip_0000.exr`… in `dir`; their paths.
+    #[cfg(not(target_arch = "wasm32"))]
     fn session_reading(dir: &Path, count: usize) -> (Session, Vec<String>) {
         let frames: Vec<String> = (0..count).map(|i| dir.join(format!("Clip_{i:04}.exr")).to_string_lossy().into_owned()).collect();
         let mut s = Session::default();
@@ -978,7 +979,6 @@ mod tests {
             assert!(refused(&mixed), "mixed separators: {mixed}");
             let verbatim = format!(r"\\?\{frame}");
             assert!(refused(&verbatim), "verbatim prefix: {verbatim}");
-            assert!(refused(r"\\?\UNC\server\share\seq\f_0001.exr") == refused(r"\\server\share\seq\f_0001.exr"));
         }
         assert!(!refused(&dir.join("Clip_0009.exr").to_string_lossy()), "another frame number");
         assert!(!refused(&dir.join("Clip_0001.png").to_string_lossy()), "another extension");

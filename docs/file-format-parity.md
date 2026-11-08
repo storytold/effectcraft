@@ -119,7 +119,8 @@ are checked too. No render parameter overrides this protection.
 Checks compare paths by name once resolved: made absolute, `.` and `..` resolved, either
 separator, a Windows verbatim prefix (`\\?\`) as the plain path, and without case on Windows and
 macOS. No file is opened, so a check costs the same for a sequence of thousands of frames on a
-network share. A link or hard link to a source under another name is not recognised.
+network share. A link or hard link to a source under another name is not recognised, nor
+another Unicode normalization of its name on macOS.
 
 Default output names move aside when they would replace a protected file. This also applies to
 Create Proxy: recreating a proxy chooses a new default name and attaches the new proxy, leaving
