@@ -123,13 +123,15 @@ pub fn drop_folder(project: &effectcraft_engine::project::Project, row: Option<I
 type PendingThumb = (u128, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
 
 /// The content key of item `it`'s thumbnail at `t` ([`effectcraft_engine::Session::thumbnail_key`]),
-/// worked out again only when the project's revision or the time changed.
+/// worked out again only when the project's revision, the footage reloads (Reload Footage or a
+/// watched file that changed: the project's revision stays) or the time changed.
 fn thumbnail_key(app: &EffectcraftApp, ctx: &egui::Context, it: &Item, t: effectcraft_engine::time::Tick) -> u128 {
     let id = egui::Id::unique(("proj-thumb-key", it.id.0));
     let rev = app.session.revision;
+    let reloads = app.session.footage_reloads.load(std::sync::atomic::Ordering::Relaxed);
     let now = ctx.input(|i| i.time);
-    if let Some((r, at, k, when)) = ctx.data(|d| d.get_temp::<(u64, i64, u128, f64)>(id)) {
-        if r == rev && at == t.0 {
+    if let Some((r, n, at, k, when)) = ctx.data(|d| d.get_temp::<ThumbKey>(id)) {
+        if r == rev && n == reloads && at == t.0 {
             return k;
         }
         // (the key hashes the comp's content: while edits come fast, at most every 0.25 s)
@@ -140,9 +142,13 @@ fn thumbnail_key(app: &EffectcraftApp, ctx: &egui::Context, it: &Item, t: effect
     }
     // (no key: the revision stands in, as before)
     let k = app.session.thumbnail_key(it.id, t, THUMB_SIDE).unwrap_or(u128::from(rev) | (1 << 127));
-    ctx.data_mut(|d| d.insert_temp(id, (rev, t.0, k, now)));
+    ctx.data_mut(|d| d.insert_temp::<ThumbKey>(id, (rev, reloads, t.0, k, now)));
     k
 }
+
+/// A thumbnail's content key as last worked out: (project revision, footage reloads, time, key,
+/// when, in seconds of UI time).
+type ThumbKey = (u64, u64, i64, u128, f64);
 
 /// The longest side of a Project panel thumbnail, in pixels.
 const THUMB_SIDE: u32 = 192;
