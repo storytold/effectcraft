@@ -7,6 +7,8 @@
 
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
+use crate::container::TimeBase;
+
 /// The composition's frame structure: the stored time base and the rate the project gets.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TimeMap {
@@ -27,12 +29,8 @@ pub(crate) fn frame_rate(timescale: u32, frame_duration: u32) -> Option<FrameRat
     }
     let exact = FrameRate::new(i64::from(timescale), i64::from(frame_duration));
     let fps = exact.as_f64();
-    for ntsc in [FrameRate::FPS_23_976, FrameRate::FPS_29_97, FrameRate::FPS_59_94, FrameRate::FPS_119_88] {
-        if (ntsc.as_f64() - fps).abs() < 0.0005 {
-            return Some(ntsc);
-        }
-    }
-    Some(exact)
+    let ntsc = TimeBase::NTSC.into_iter().map(|(rate, _)| rate).find(|ntsc| (ntsc.as_f64() - fps).abs() < 0.0005);
+    Some(ntsc.unwrap_or(exact))
 }
 
 impl TimeMap {
@@ -83,6 +81,11 @@ mod tests {
         assert_eq!(frame_rate(30720, 1024), Some(FrameRate::new(30, 1)));
         assert_eq!(frame_rate(0, 1), None);
         assert_eq!(frame_rate(1, 0), None);
+        // The time bases the exporter writes for the NTSC rates read back as those rates.
+        let written = [(23976, 1000), (23976, 800), (23976, 400), (23976, 200)];
+        for ((rate, _), (ts, fd)) in TimeBase::NTSC.into_iter().zip(written) {
+            assert_eq!(frame_rate(ts, fd), Some(rate));
+        }
     }
 
     #[test]

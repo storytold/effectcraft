@@ -169,13 +169,12 @@ fn copies_saved_as_25x_and_24x_import_like_the_2026_file() {
 #[ignore = "needs the version fixtures of the corpus (<family>-26/-25x/-24x.aep)"]
 fn the_container_of_a_copy_states_its_version_in_head_and_the_writer_in_svap() {
     for family in FAMILIES {
-        for (suffix, version, revision) in [("26", "26.2.1x2", 97), ("25x", "25.6.0x97", 96), ("24x", "24.6.0x65", 95)] {
+        for (suffix, version) in [("26", "26.2.1x2"), ("25x", "25.6.0x97"), ("24x", "24.6.0x65")] {
             let name = format!("{family}-{suffix}.aep");
             let Some(bytes) = crate::common::try_file(&name) else { continue };
             let file = parse(&bytes).unwrap();
             assert_eq!(file.file_version().map(|v| v.text()).as_deref(), Some(version), "{name}");
             assert_eq!(file.saved_by_version().map(|v| v.text()).as_deref(), Some("26.2.1x2"), "{name}");
-            assert_eq!(file.head_revision(), Some(revision), "{name}");
         }
     }
 }

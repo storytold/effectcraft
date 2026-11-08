@@ -379,7 +379,8 @@ pub fn layer_named<'f, 'a>(comp: &Comp<'f, 'a>, name: &str) -> Layer<'f, 'a> {
 
 /// The layer that shows this name: its own name, or its source's while it has none.
 pub fn layer_shown_as<'f, 'a>(project: &Project<'f, 'a>, comp: &Comp<'f, 'a>, name: &str) -> Layer<'f, 'a> {
-    comp.layers().find(|l| project.layer_display_name(l).as_deref() == Some(name)).unwrap_or_else(|| panic!("no layer shown as {name}"))
+    let shown = |l: &Layer<'f, 'a>| l.name().or_else(|| project.layer_source(l)?.display_name());
+    comp.layers().find(|l| shown(l).as_deref() == Some(name)).unwrap_or_else(|| panic!("no layer shown as {name}"))
 }
 
 /// The first layer of this type in a composition.

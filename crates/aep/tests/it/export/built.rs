@@ -139,8 +139,7 @@ fn layer_header_fields() {
     assert!(h[2].is_motion_blur() && h[2].is_guide());
     assert_eq!(h[2].blend_mode, AepBlend::Screen);
     assert_eq!((h[2].start.num, h[2].start.den), (46_080, 30_720));
-    assert_eq!(h[2].in_point_seconds(), Some(2.0));
-    assert_eq!(h[2].out_point_seconds(), Some(6.0));
+    assert_eq!((h[2].in_point(), h[2].out_point()), (effectcraft_aep::Rational::new(2, 1), effectcraft_aep::Rational::new(6, 1)));
     assert_eq!(h[2].name_copy, "Mid");
     // Ids are unique.
     let mut ids: Vec<u32> = h.iter().map(|x| x.id).collect();

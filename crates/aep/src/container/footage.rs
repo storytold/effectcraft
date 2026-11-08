@@ -48,21 +48,6 @@ pub struct Footage {
 }
 
 impl Footage {
-    /// The number of frames of an image sequence (`duration * native_frame_rate`: 3/30 s at 30 fps is
-    /// 3); `None` for anything else.
-    pub fn sequence_frame_count(&self) -> Option<u32> {
-        if !self.is_sequence {
-            return None;
-        }
-        let d = self.duration?;
-        let frames = i128::from(d.num).checked_mul(i128::from(self.native_frame_rate))?;
-        let den = i128::from(d.den);
-        if den <= 0 || frames % den != 0 {
-            return None;
-        }
-        u32::try_from(frames / den).ok()
-    }
-
     /// The solid's colour as fractions R, G, B.
     pub fn solid_rgb(&self) -> Option<[f32; 3]> {
         let [_, r, g, b] = self.solid_argb?;
@@ -297,12 +282,6 @@ impl<'f, 'a> Item<'f, 'a> {
         self.chunk.child(b"idta")?.bytes()?.get(58).copied()
     }
 
-    /// The ids of the compositions this item uses as precomp layers: the little-endian `u32` of
-    /// each `idpi` chunk.
-    pub fn used_item_ids(&self) -> Vec<u32> {
-        self.chunk.children().iter().filter(|c| c.is(b"idpi")).filter_map(|c| le_u32(c.bytes()?, 0)).collect()
-    }
-
     /// The footage data of a footage item.
     pub fn footage(&self) -> Option<Footage> {
         if self.kind()? != ItemKind::Footage {
@@ -349,11 +328,6 @@ impl<'f, 'a> Project<'f, 'a> {
     /// The item a layer is made from (its source id), e.g. the solid, the footage or the precomp.
     pub fn layer_source(&self, layer: &Layer<'f, 'a>) -> Option<Item<'f, 'a>> {
         self.item_by_id(layer.header()?.source_id?)
-    }
-
-    /// The name a layer shows: its own name, or its source's name when it has none.
-    pub fn layer_display_name(&self, layer: &Layer<'f, 'a>) -> Option<String> {
-        layer.name().or_else(|| self.layer_source(layer)?.display_name())
     }
 
     /// The pixel size of a layer's source: a footage item's width and height, or a precomp's
