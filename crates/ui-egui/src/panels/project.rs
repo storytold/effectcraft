@@ -127,20 +127,29 @@ type PendingThumb = (u128, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
 fn thumbnail_key(app: &EffectcraftApp, ctx: &egui::Context, it: &Item, t: effectcraft_engine::time::Tick) -> u128 {
     let id = egui::Id::unique(("proj-thumb-key", it.id.0));
     let rev = app.session.revision;
-    if let Some((r, at, k)) = ctx.data(|d| d.get_temp::<(u64, i64, u128)>(id))
-        && r == rev
-        && at == t.0
-    {
-        return k;
+    let now = ctx.input(|i| i.time);
+    if let Some((r, at, k, when)) = ctx.data(|d| d.get_temp::<(u64, i64, u128, f64)>(id)) {
+        if r == rev && at == t.0 {
+            return k;
+        }
+        // (the key hashes the comp's content: while edits come fast, at most every 0.25 s)
+        if now - when < THUMB_KEY_EVERY {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(THUMB_KEY_EVERY));
+            return k;
+        }
     }
     // (no key: the revision stands in, as before)
     let k = app.session.thumbnail_key(it.id, t, THUMB_SIDE).unwrap_or(u128::from(rev) | (1 << 127));
-    ctx.data_mut(|d| d.insert_temp(id, (rev, t.0, k)));
+    ctx.data_mut(|d| d.insert_temp(id, (rev, t.0, k, now)));
     k
 }
 
 /// The longest side of a Project panel thumbnail, in pixels.
 const THUMB_SIDE: u32 = 192;
+
+/// A thumbnail's content key is worked out again at most this often (seconds) while the
+/// project keeps changing.
+const THUMB_KEY_EVERY: f64 = 0.25;
 
 /// Thumbnail of a comp (its current time) or footage (first frame), cached per item by what it
 /// shows ([`thumbnail_key`], #3271): an edit that doesn't change the picture doesn't render it

@@ -335,6 +335,8 @@ pub(crate) fn forget_media(s: &mut Session, paths: &BTreeSet<String>) {
     for p in paths {
         s.footage.forget(p);
     }
+    // (thumbnails look at no file: a reload gives them new keys, #3271)
+    s.footage_reloads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     s.layer_cache.clear();
     s.events.push(crate::Event::PurgeCaches);
 }

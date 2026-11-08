@@ -84,10 +84,7 @@ pub(crate) enum Rgb {
 /// pictures waiting for their effects, decodes in progress), so memory can go above it while
 /// they are. (Measured on such a sequence decoded one frame at a time: 1 GiB held peak memory
 /// about 1 GB lower than 2 GiB, at the same speed.)
-#[cfg(not(target_arch = "wasm32"))]
-pub const CACHE_BUDGET: usize = 1 << 30;
-#[cfg(target_arch = "wasm32")]
-pub const CACHE_BUDGET: usize = 512 << 20;
+pub const CACHE_BUDGET: usize = effectcraft_render::memory::PLANE_BUDGET;
 
 /// The index of an EXR file's bytes and the planes of `ids` (all when `None`). `None` when it is
 /// not a readable EXR or the planes need too much memory.

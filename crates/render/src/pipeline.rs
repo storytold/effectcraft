@@ -947,6 +947,11 @@ impl<'a> Renderer<'a> {
     /// parameter, an expression).
     pub(crate) fn footage_rows(&self, ctx: &EvalCtx, layer: &Layer, f: &Footage) -> Option<(i64, i64)> {
         let roi = self.opts.roi.filter(|_| self.top)?;
+        // (a collapsed precomp's layers are placed through the outer layers too, and an
+        // adjustment layer's footprint is keyed whole: the whole frame there)
+        if self.outer.is_some() || self.collapse3d.is_some() || self.depth > 0 || layer.switches.adjustment {
+            return None;
+        }
         if layer.switches.three_d
             || f.fields != effectcraft_project::FieldOrder::Off
             || !matches!(f.kind, FootageKind::Still | FootageKind::Sequence)
@@ -974,7 +979,8 @@ impl<'a> Renderer<'a> {
         // pixels are 1/scale footage rows), plus the region's rounding to output pixels: one
         // output pixel is `k / scale` footage rows, `k` the footage rows per comp pixel.
         let s = self.opts.scale.max(1e-3);
-        let k = [effectcraft_geom::vec3(1.0, 0.0, 0.0), effectcraft_geom::vec3(0.0, 1.0, 0.0)].iter().map(|v| inv.apply_vec(*v).length()).fold(1.0f64, f64::max);
+        let k =
+            [effectcraft_geom::vec3(1.0, 0.0, 0.0), effectcraft_geom::vec3(0.0, 1.0, 0.0)].iter().map(|v| inv.apply_vec(*v).length()).fold(1.0f64, f64::max);
         if !k.is_finite() {
             return None;
         }
@@ -986,7 +992,16 @@ impl<'a> Renderer<'a> {
 
     /// [`Renderer::footage_frame`] of only the rows `rows` (see [`Renderer::footage_rows`]).
     #[allow(clippy::too_many_arguments)]
-    fn footage_frame_in(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>, rows: Option<(i64, i64)>) -> Option<Arc<Image>> {
+    fn footage_frame_in(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        item: ItemId,
+        f: &Footage,
+        t: Tick,
+        size: Option<(u32, u32)>,
+        rows: Option<(i64, i64)>,
+    ) -> Option<Arc<Image>> {
         // Interpret Footage ▸ Separate Fields: each field is a frame at twice the rate.
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
@@ -1053,7 +1068,7 @@ impl<'a> Renderer<'a> {
     }
 
     /// Is footage layer `layer` read in part ([`Renderer::footage_rows`]).
-    fn reads_footage_rows(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
+    pub(crate) fn reads_footage_rows(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
         let LayerSource::Footage { item } = &layer.source else { return false };
         let item = ctx.media_item(layer, *item);
         if self.opts.roi.is_none() || !self.top || self.proxy_for(item).is_some() {
@@ -1187,6 +1202,8 @@ impl<'a> Renderer<'a> {
     /// so scrubbing reuses frames rendered for earlier output frames.
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
+        // (a footage layer read in part is never kept under a whole layer's key, #3271)
+        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
         let key = self.content_key(ctx, layer, key);
         if let Some((b, _)) = self.cached(key) {
             return Some(b);

@@ -406,11 +406,11 @@ impl FootageSource for ConfinedFootage {
         self.inner.set_aux_footage(paths)
     }
     /// Forwards the localizer settings to the inner source.
-    fn set_localizer(&self, folder: Option<(std::path::PathBuf, u64)>) {
-        self.inner.set_localizer(folder)
+    fn set_localizer(&self, config: Option<effectcraft_engine::render::LocalizeConfig>) {
+        self.inner.set_localizer(config)
     }
     /// The inner source's localizer state.
-    fn localize_status(&self) -> Option<String> {
+    fn localize_status(&self) -> Option<effectcraft_engine::render::LocalizeReport> {
         self.inner.localize_status()
     }
     /// Forwards the disk cache to the inner source.

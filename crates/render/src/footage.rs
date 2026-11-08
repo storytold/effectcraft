@@ -90,12 +90,12 @@ pub trait FootageSource: Send + Sync {
     /// decode costly footage keep what they decoded there too (#3271: OpenEXR channels).
     /// Sources without such a tier ignore it.
     fn set_disk_cache(&self, _cache: Option<Arc<crate::disk_cache::DiskCache>>) {}
-    /// Settings ▸ Disk ▸ Localize Network Footage: copy footage on network shares to `folder`
-    /// in the background, up to the byte limit, and read the copies once they are complete and
-    /// verified (`None`: off). Sources that don't read files ignore it.
-    fn set_localizer(&self, _folder: Option<(std::path::PathBuf, u64)>) {}
-    /// What the localizer is doing, as a line to show (`None`: off or not supported).
-    fn localize_status(&self) -> Option<String> {
+    /// Settings ▸ Disk ▸ Localize Network Footage: copy network footage in the background and
+    /// read the copies once they are complete and verified (`None`: off). Sources that don't read
+    /// files ignore it.
+    fn set_localizer(&self, _config: Option<LocalizeConfig>) {}
+    /// What the localizer is doing (`None`: off or not supported).
+    fn localize_status(&self) -> Option<LocalizeReport> {
         None
     }
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
@@ -238,10 +238,10 @@ impl FootageSource for CancellableFootage<'_> {
     fn set_disk_cache(&self, cache: Option<Arc<crate::disk_cache::DiskCache>>) {
         self.inner.set_disk_cache(cache)
     }
-    fn set_localizer(&self, folder: Option<(std::path::PathBuf, u64)>) {
-        self.inner.set_localizer(folder)
+    fn set_localizer(&self, config: Option<LocalizeConfig>) {
+        self.inner.set_localizer(config)
     }
-    fn localize_status(&self) -> Option<String> {
+    fn localize_status(&self) -> Option<LocalizeReport> {
         self.inner.localize_status()
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
@@ -303,4 +303,35 @@ impl FootageSource for NoFootage {
     fn recording(&self, _: &ReadLog, f: &mut dyn FnMut()) {
         f()
     }
+}
+
+/// Settings ▸ Disk ▸ Localize Network Footage (#3271): where network footage is copied, how much
+/// the copies may take, which locations count as network besides UNC paths, and how to read the
+/// copies' disk's free space (the disk cache's reserve stays free there).
+#[derive(Clone)]
+pub struct LocalizeConfig {
+    pub folder: std::path::PathBuf,
+    pub max_bytes: u64,
+    /// Path prefixes that count as network footage (a drive letter mapped to a share, `P:\`).
+    pub network: Vec<std::path::PathBuf>,
+    /// The copies' disk: `(total, available)` bytes, `None` unknown.
+    pub disk_space: Option<Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync>>,
+}
+
+/// What the footage localizer is doing (Settings ▸ Disk shows it).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalizeReport {
+    /// Complete local copies and their bytes, and the most they may take.
+    pub files: usize,
+    pub bytes: u64,
+    pub max_bytes: u64,
+    /// Files waiting to be copied, and those too large or that failed to copy.
+    pub queued: usize,
+    pub skipped: usize,
+    /// The file being copied now.
+    pub copying: Option<String>,
+    /// The locations that count as network besides UNC paths.
+    pub network: Vec<String>,
+    /// Free disk space holds the copies below the size limit.
+    pub reserve_limited: bool,
 }

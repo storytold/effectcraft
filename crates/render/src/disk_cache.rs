@@ -321,15 +321,15 @@ enum Job {
 /// the pixels they made (a layer buffer shared with the RAM cache, a frame moved in) and go on;
 /// converting and compressing them is the writer's work.
 enum Payload {
-    /// Already encoded.
-    Bytes(Vec<u8>),
     /// A layer buffer and its source files.
     Layer(Arc<Buf>, EntryFiles),
     /// An 8-bit or half-float frame (width, height, pixels) and its source files.
     Frame8(u32, u32, Vec<u8>, EntryFiles),
     FrameF16(u32, u32, Vec<u16>, EntryFiles),
-    /// The planes named (in order) of decoded footage channels, and their source file.
-    Planes(Arc<effectcraft_raster::AuxChannels>, Vec<String>, EntryFiles),
+    /// Decoded footage planes (width, height, named planes), and their source file.
+    Planes(u32, u32, Vec<(String, Vec<f32>)>, EntryFiles),
+    /// Bytes to compress with LZ4 (a segmentation).
+    Lz4(Vec<u8>),
 }
 
 #[cfg(test)]
@@ -348,15 +348,15 @@ impl Payload {
     /// The entry's payload bytes: its source files, then its pixels, compressed.
     fn encode(self) -> Vec<u8> {
         #[cfg(test)]
-        if !matches!(self, Payload::Bytes(_)) {
+        if !matches!(self, Payload::Lz4(_)) {
             ENCODED_HERE.with(|n| n.set(n.get() + 1));
         }
         match self {
-            Payload::Bytes(b) => b,
             Payload::Layer(buf, files) => with_files(&files, encode_layer(&buf)),
             Payload::Frame8(w, h, rgba, files) => with_files(&files, encode_frame(w, h, &rgba)),
             Payload::FrameF16(w, h, rgba, files) => with_files(&files, encode_frame_f16(w, h, &rgba)),
-            Payload::Planes(aux, names, files) => with_files(&files, encode_planes(&aux, &names)),
+            Payload::Planes(w, h, planes, files) => with_files(&files, encode_planes(w, h, &planes)),
+            Payload::Lz4(raw) => lz4_flex::compress_prepend_size(&raw),
         }
     }
 
@@ -364,11 +364,19 @@ impl Payload {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn held(&self) -> usize {
         match self {
-            Payload::Bytes(b) => b.len(),
             Payload::Layer(buf, _) => buf.img.data.len().saturating_mul(16),
             Payload::Frame8(_, _, p, _) => p.len(),
             Payload::FrameF16(_, _, p, _) => p.len().saturating_mul(2),
-            Payload::Planes(aux, names, _) => (aux.width as usize).saturating_mul(aux.height as usize).saturating_mul(4).saturating_mul(names.len()),
+            Payload::Planes(_, _, planes, _) => planes.iter().map(|(_, p)| p.len().saturating_mul(4)).fold(0, usize::saturating_add),
+            Payload::Lz4(raw) => raw.len(),
+        }
+    }
+
+    /// The bytes only this payload holds: a layer buffer the RAM cache shares counts there.
+    fn unique(&self) -> usize {
+        match self {
+            Payload::Layer(buf, _) if Arc::strong_count(buf) > 1 => 0,
+            _ => self.held(),
         }
     }
 
@@ -451,13 +459,14 @@ impl Queue {
         self.frames.is_empty() && self.jobs.is_empty()
     }
 
-    /// The bytes the queued writes hold.
-    fn held_bytes(&self) -> usize {
+    /// The bytes only the queued layer and plane writes hold (no frames: see the memory holder).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn unique_job_bytes(&self) -> usize {
         let job = |j: &Job| match j {
-            Job::Write(_, _, _, p) => p.held(),
+            Job::Write(_, _, _, p) => p.unique(),
             Job::Drop(_) => 0,
         };
-        self.frames.iter().chain(&self.jobs).map(job).fold(0, usize::saturating_add)
+        self.jobs.iter().map(job).fold(0, usize::saturating_add)
     }
 }
 
@@ -894,11 +903,6 @@ impl DiskCache {
         }
     }
 
-    /// Queue a write; `false` when it was dropped (a full queue).
-    fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
-        self.enqueue_format(kind, key, FORMAT_RGBA8, Payload::Bytes(payload), None)
-    }
-
     /// [`DiskCache::enqueue`] with the entry's header format byte. `made`: the source files of a
     /// frame or layer entry and the drop generation its reads started at
     /// ([`DiskCache::drop_generation`]); refused (`false`) when one of them was dropped since.
@@ -913,7 +917,7 @@ impl DiskCache {
             if self.queue.0.lock().is_ok_and(|q| stale(&q)) {
                 return false;
             }
-            if !matches!(payload, Payload::Bytes(_)) {
+            if !matches!(payload, Payload::Lz4(_)) {
                 self.count_encode();
             }
             self.write_format(kind, key, format, &payload.encode());
@@ -935,7 +939,7 @@ impl DiskCache {
                 return false;
             }
             // (counted as it is accepted: the writer compresses it)
-            if !matches!(payload, Payload::Bytes(_)) {
+            if !matches!(payload, Payload::Lz4(_)) {
                 self.count_encode();
             }
             if kind == Kind::Frame {
@@ -1196,7 +1200,16 @@ impl DiskCache {
     /// [`DiskCache::put_frame`] taking the pixels: they move to the writer thread, which converts
     /// and compresses them (#3271); the caller goes on at once.
     #[allow(clippy::too_many_arguments)]
-    pub fn put_frame_owned(&self, key: u128, width: u32, height: u32, rgba: Vec<u8>, files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
+    pub fn put_frame_owned(
+        &self,
+        key: u128,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        files: &ReadFiles,
+        virtual_id: Option<VirtualFileId<'_>>,
+        since: u64,
+    ) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
@@ -1256,18 +1269,19 @@ impl DiskCache {
         self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, virtual_id, |p| decode_planes(p, expect))
     }
 
-    /// Queue decoded footage channels for writing: the planes of `aux` named `names` (in that
-    /// order, as [`plane_key`] names them), with the source file they were read from. Encoded on
-    /// the writer thread (a reference to the planes, no copy). Refused when there is no room, the
-    /// file can't be checked later, or it was dropped after `since`.
-    pub fn put_planes(&self, key: u128, aux: &Arc<effectcraft_raster::AuxChannels>, names: Vec<String>, files: &EntryFiles, since: u64) -> bool {
+    /// Queue decoded footage channels for writing: named `width` × `height` planes (in the order
+    /// [`plane_key`] names them), with the source file they were read from; encoded on the writer
+    /// thread. Refused when a plane is of another size, there is no room, or the source file was
+    /// dropped after `since`.
+    pub fn put_planes(&self, key: u128, width: u32, height: u32, planes: Vec<(String, Vec<f32>)>, files: &EntryFiles, since: u64) -> bool {
         if self.contains(Kind::Plane, key) {
             return true;
         }
-        if names.is_empty() || !self.accepts_writes() {
+        let n = (width as usize).checked_mul(height as usize);
+        if planes.is_empty() || planes.iter().any(|(_, p)| Some(p.len()) != n) || !self.accepts_writes() {
             return false;
         }
-        self.enqueue_format(Kind::Plane, key, FORMAT_PLANES_FILES, Payload::Planes(aux.clone(), names, files.clone()), Some((files, since)))
+        self.enqueue_format(Kind::Plane, key, FORMAT_PLANES_FILES, Payload::Planes(width, height, planes, files.clone()), Some((files, since)))
     }
 
     /// A segmentation (chain key, scale) written by [`DiskCache::put_seg`].
@@ -1283,7 +1297,8 @@ impl DiskCache {
         if self.contains(Kind::Matte, k) {
             return;
         }
-        let _ = self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
+        // (compressed on the writer thread)
+        let _ = self.enqueue_format(Kind::Matte, k, FORMAT_RGBA8, Payload::Lz4(seg.to_bytes()), None);
     }
 
     /// Make the frame at key `from` the frame at key `to` too (an edit that can't change it gave
@@ -1472,37 +1487,21 @@ impl crate::memory::MemoryHolder for DiskCache {
     fn name(&self) -> &'static str {
         "disk write queue"
     }
+    /// The bytes only the queue holds (a layer buffer the RAM cache still holds counts there).
     fn bytes(&self) -> usize {
-        self.queue.0.lock().map(|q| q.held_bytes()).unwrap_or(0)
+        self.queue.0.lock().map(|q| q.unique_job_bytes()).unwrap_or(0)
     }
     fn priority(&self) -> u8 {
         0
     }
+    /// Drops queued layer and plane writes (newest first) that alone hold their bytes; frame
+    /// writes are never dropped (a fully cached comp would come back with gaps).
     fn trim_to(&self, bytes: usize) {
         let Ok(mut q) = self.queue.0.lock() else { return };
-        while q.held_bytes() > bytes {
-            // Layer and plane writes first (newest first), then frames.
-            let job = match q.jobs.iter().rposition(|j| matches!(j, Job::Write(..))) {
-                Some(i) => {
-                    let j = q.jobs.remove(i);
-                    if let Some(Job::Write(_, _, _, p)) = &j {
-                        q.job_bytes = q.job_bytes.saturating_sub(p.held());
-                    }
-                    j
-                }
-                None => match q.frames.pop_back() {
-                    Some(j) => {
-                        if let Job::Write(_, key, _, p) = &j {
-                            q.frame_bytes = q.frame_bytes.saturating_sub(p.held());
-                            q.pending_frames.remove(key);
-                        }
-                        Some(j)
-                    }
-                    None => None,
-                },
-            };
-            if job.is_none() {
-                break;
+        while q.unique_job_bytes() > bytes {
+            let Some(i) = q.jobs.iter().rposition(|j| matches!(j, Job::Write(_, _, _, p) if p.unique() > 0)) else { break };
+            if let Some(Job::Write(_, _, _, p)) = q.jobs.remove(i) {
+                q.job_bytes = q.job_bytes.saturating_sub(p.held());
             }
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -1614,26 +1613,25 @@ fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
 /// bytes) and type (2: `f32`), then every plane's bytes shuffled into byte planes (plane by plane,
 /// the first bytes of its floats, then the second…), LZ4-compressed. Planes of `aux` named
 /// `names` that it doesn't hold, or holds at another size, are written as zeros.
-fn encode_planes(aux: &effectcraft_raster::AuxChannels, names: &[String]) -> Vec<u8> {
-    let (w, h) = (aux.width, aux.height);
+fn encode_planes(w: u32, h: u32, planes: &[(String, Vec<f32>)]) -> Vec<u8> {
     let n = (w as usize).saturating_mul(h as usize);
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(&w.to_le_bytes());
     out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(&(names.len() as u32).to_le_bytes());
-    for name in names {
+    out.extend_from_slice(&(planes.len() as u32).to_le_bytes());
+    for (name, _) in planes {
         let bytes = name.as_bytes();
-        out.extend_from_slice(&(bytes.len().min(u16::MAX as usize) as u16).to_le_bytes());
-        out.extend_from_slice(bytes.get(..bytes.len().min(u16::MAX as usize)).unwrap_or_default());
+        let len = bytes.len().min(u16::MAX as usize);
+        out.extend_from_slice(&(len as u16).to_le_bytes());
+        out.extend_from_slice(bytes.get(..len).unwrap_or_default());
         out.push(2);
     }
-    let mut shuffled = vec![0u8; n.saturating_mul(4).saturating_mul(names.len())];
-    for (k, name) in names.iter().enumerate() {
-        let Some(plane) = aux.channels.iter().find(|(c, _)| c == name).map(|(_, p)| p).filter(|p| p.len() == n) else { continue };
-        let base = k * n * 4;
-        for (i, v) in plane.iter().enumerate() {
-            let b = v.to_bits().to_le_bytes();
-            for (byte, value) in b.iter().enumerate() {
+    let Some(total) = n.checked_mul(4).and_then(|b| b.checked_mul(planes.len())) else { return out };
+    let mut shuffled = vec![0u8; total];
+    for (k, (_, plane)) in planes.iter().enumerate() {
+        let Some(base) = k.checked_mul(n).and_then(|b| b.checked_mul(4)) else { continue };
+        for (i, v) in plane.iter().take(n).enumerate() {
+            for (byte, value) in v.to_bits().to_le_bytes().iter().enumerate() {
                 if let Some(o) = shuffled.get_mut(base + byte * n + i) {
                     *o = *value;
                 }

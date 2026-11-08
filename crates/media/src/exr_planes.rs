@@ -163,6 +163,10 @@ struct Flight {
     /// The disk cache's drop generation before the file was opened for this request (#3191: a
     /// plane entry made of a file reloaded since is refused).
     since: u64,
+    /// The cancel flag and decoding hints of the request that asked for the decode: a decode
+    /// thread that claims it decodes under them (its own being called off doesn't call off the
+    /// asker's decode).
+    hints: filmcraft_media::cancel::Context,
 }
 
 /// [`Flight::phase`] values.
@@ -197,6 +201,7 @@ impl Flight {
             handed_ready: Condvar::new(),
             base,
             since,
+            hints: filmcraft_media::cancel::Context::current(),
         })
     }
 
@@ -291,7 +296,7 @@ impl Owning<'_> {
         self.ended = true;
         let outcome = self.store.finish(self.path, self.level, self.flight, outcome);
         self.flight.end(outcome.clone());
-        effectcraft_render::memory::Accountant::global().balance();
+        effectcraft_render::memory::Accountant::global().note_growth();
         outcome
     }
 }
@@ -354,14 +359,31 @@ pub(crate) struct DecodeRecord {
 #[cfg(test)]
 static DECODES: Mutex<Vec<(String, DecodeRecord)>> = Mutex::new(Vec::new());
 
-/// Paths whose queued decode a decode thread took over (tests).
+/// Paths whose queued decode a decode thread took over (tests), and a signal for each.
 #[cfg(test)]
 pub(crate) static CLAIMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) static CLAIM_SIGNAL: Condvar = Condvar::new();
 
 /// The decodes of `path` so far (tests; paths are unique per test).
 #[cfg(test)]
 pub(crate) fn decodes_of(path: &str) -> Vec<DecodeRecord> {
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|(p, _)| p == path).map(|(_, d)| d.clone()).collect()
+}
+
+/// Run before a decode of a path is queued on the decode threads (`QUEUING`) and when the
+/// queued job begins (`STARTING`), keyed by path (tests: holding a decode queued).
+#[cfg(test)]
+pub(crate) static QUEUING: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) static STARTING: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn run_hook(hooks: &Mutex<Vec<(String, Hook)>>, path: &str) {
+    let hook = hooks.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(p, _)| p == path).map(|(_, h)| h.clone());
+    if let Some(h) = hook {
+        h(path);
+    }
 }
 
 /// Runs before a decode reads its chunks, with the file's path (tests).
@@ -414,6 +436,7 @@ impl PlaneStore {
     /// from a decode in progress, or decoded now (only what the store doesn't hold yet). The
     /// file it was read from is noted ([`crate::reads`]). A request that keeps finding the
     /// decodes it waits for called off decodes a copy itself.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn get(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use) -> Result<Arc<Batch>, Refused> {
         self.get_opened(path, source, index, want, by, None, drop_generation())
     }
@@ -678,11 +701,6 @@ impl PlaneStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn in_flight(&self, path: &str) -> bool {
-        self.lock().entries.iter().any(|e| e.path == path && e.flight.is_some())
-    }
-
-    #[cfg(test)]
     pub(crate) fn is_held(&self, path: &str) -> bool {
         self.lock().held.iter().any(|(p, _)| p == path)
     }
@@ -722,9 +740,12 @@ impl Drop for Handing<'_> {
 /// request that queued it, and answer this request with it (or a copy when it doesn't cover it).
 fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
     #[cfg(test)]
-    CLAIMS.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
+    {
+        CLAIMS.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
+        CLAIM_SIGNAL.notify_all();
+    }
     let mut handing = Handing { flight, outcome: None };
-    let outcome = decode(path, source, flight, flight.base.clone(), None);
+    let outcome = flight.hints.clone().run(|| decode(path, source, flight, flight.base.clone(), None));
     handing.outcome = Some(outcome.clone());
     drop(handing);
     match outcome {
@@ -747,7 +768,11 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
         let (path, source, queued) = (path.to_string(), source.clone(), flight.clone());
         // The request's cancel flag and decoding hints go with it.
         let hints = filmcraft_media::cancel::Context::current();
+        #[cfg(test)]
+        run_hook(&QUEUING, &path);
         threads.spawn(move || {
+            #[cfg(test)]
+            run_hook(&STARTING, &path);
             // (claimed meanwhile by a decode thread: it decodes, and hands the outcome over)
             if queued.take(RUNNING) {
                 let _ = tx.send(hints.run(|| decode(&path, &source, &queued, base, opened)));
@@ -806,32 +831,35 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
     let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
     let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
-    // The disk tier first (#3271): what an earlier session or a decode RAM let go of kept.
-    let disk = disk_cache().filter(|_| !missing.is_empty() && unique(&names));
-    let since = flight.since;
-    let key = {
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        effectcraft_render::disk_cache::plane_key(path, &opened.stamp, &refs, 0, None)
-    };
     let (w, h) = index.size();
-    let kept = disk.as_ref().and_then(|d| d.get_planes(key, None, (w as u32, h as u32, names.len()))).map(|(p, _)| p).filter(|p| {
-        (p.width as usize, p.height as usize) == (w, h)
-            && p.planes.len() == names.len()
-            && p.planes.iter().zip(&names).all(|((n, v), want)| n == want && v.len() == w * h)
-    });
-    let from_disk = kept.is_some();
-    let (planes, stats) = match kept {
-        Some(p) => (Ok(p.planes.into_iter().map(|(_, v)| v).collect()), Default::default()),
-        None => {
-            let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(missing.clone()) };
-            read_planes(&mut *opened.reader, &index, &request)
-        }
+    // The disk tier first (#3271): what an earlier session or a decode RAM let go of kept, one
+    // entry per channel (any request is assembled from them, whatever was asked before).
+    // (a file naming two channels alike can't tell their entries apart: not kept)
+    let unique = index.channels.iter().map(|c| c.name.as_str()).collect::<std::collections::HashSet<_>>().len() == index.channels.len();
+    let disk = disk_cache_for(path).filter(|_| !missing.is_empty() && unique);
+    let since = flight.since;
+    let key = |name: &str| effectcraft_render::disk_cache::plane_key(path, &opened.stamp, &[name], 0, None);
+    let mut kept: Vec<Option<Vec<f32>>> = names
+        .iter()
+        .map(|n| {
+            let (planes, _) = disk.as_ref()?.get_planes(key(n), None, (w as u32, h as u32, 1))?;
+            let (name, plane) = planes.planes.into_iter().next()?;
+            (name == *n && plane.len() == w.saturating_mul(h)).then_some(plane)
+        })
+        .collect();
+    let to_read: Vec<usize> = missing.iter().zip(&kept).filter(|(_, k)| k.is_none()).map(|(id, _)| *id).collect();
+    let from_disk = to_read.is_empty();
+    let (read, stats) = if to_read.is_empty() {
+        (Ok(vec![]), Default::default())
+    } else {
+        let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(to_read.clone()) };
+        read_planes(&mut *opened.reader, &index, &request)
     };
     #[cfg(test)]
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), DecodeRecord { channels: names.clone(), stats: stats.clone(), from_disk }));
     #[cfg(not(test))]
-    let _ = &stats;
-    let planes: Vec<Vec<f32>> = planes.map_err(|e| match e {
+    let _ = (&stats, from_disk);
+    let read: Vec<Vec<f32>> = read.map_err(|e| match e {
         ReadError::Cancelled => Refused::Cancelled,
         // (a read that failed just now: the next request reads again)
         ReadError::Io(why) => {
@@ -847,6 +875,22 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
             Refused::Unreadable
         }
     })?;
+    // Kept on disk for the next time, each channel read from the file in an entry of its own
+    // (encoded on the disk cache's writer thread; a file from memory, which can't be checked
+    // later, isn't).
+    if let Some(d) = &disk {
+        let mut files = effectcraft_render::reads::ReadFiles::default();
+        files.add(ReadFile::new(path, opened.stamp));
+        if let Some(entry) = effectcraft_render::disk_cache::EntryFiles::of(&files, None) {
+            for (id, plane) in to_read.iter().zip(&read) {
+                if let Some(c) = index.channels.get(*id) {
+                    d.put_planes(key(&c.name), w as u32, h as u32, vec![(c.name.clone(), plane.clone())], &entry, since);
+                }
+            }
+        }
+    }
+    let mut read = read.into_iter();
+    let planes: Vec<Vec<f32>> = kept.iter_mut().map(|k| k.take().or_else(|| read.next()).unwrap_or_default()).collect();
     // The union, in file order: the planes held and the ones just read.
     let mut new: Vec<(usize, Vec<f32>)> = missing.into_iter().zip(planes).collect();
     if let Some(b) = &base {
@@ -868,23 +912,8 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     let ids: Vec<usize> = new.iter().map(|(id, _)| *id).collect();
     aux.channels = new.into_iter().filter_map(|(id, p)| Some((index.channels.get(id)?.name.clone(), p))).collect();
     let file = ReadFile::new(path, opened.stamp);
-    let batch = Arc::new(Batch { index, ids, all, aux: Arc::new(aux), file: file.clone() });
-    // Kept on disk for the next time (encoded on the disk cache's writer thread; a file from
-    // memory, which can't be checked later, isn't).
-    if let Some(d) = disk.filter(|_| !from_disk) {
-        let mut read = effectcraft_render::reads::ReadFiles::default();
-        read.add(file);
-        if let Some(entry) = effectcraft_render::disk_cache::EntryFiles::of(&read, None) {
-            d.put_planes(key, &batch.aux, names, &entry, since);
-        }
-    }
+    let batch = Arc::new(Batch { index, ids, all, aux: Arc::new(aux), file });
     Ok(batch)
-}
-
-/// Every name once (a plane entry is read back by name).
-fn unique(names: &[String]) -> bool {
-    let set: std::collections::HashSet<&String> = names.iter().collect();
-    set.len() == names.len()
 }
 
 /// The disk cache decoded planes are kept in ([`set_disk_cache`]).
@@ -898,6 +927,26 @@ pub(crate) fn set_disk_cache(cache: Option<&Arc<effectcraft_render::disk_cache::
 
 fn disk_cache() -> Option<Arc<effectcraft_render::disk_cache::DiskCache>> {
     DISK.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(std::sync::Weak::upgrade)
+}
+
+/// The disk cache planes of `path` are kept in (tests: only for the paths of the test that set
+/// it, [`use_disk_for`], so tests running beside it don't share it).
+fn disk_cache_for(path: &str) -> Option<Arc<effectcraft_render::disk_cache::DiskCache>> {
+    #[cfg(test)]
+    if !DISK_PATHS.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|p| path.starts_with(p.as_str())) {
+        return None;
+    }
+    let _ = path;
+    disk_cache()
+}
+
+#[cfg(test)]
+static DISK_PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Keep the planes of paths under `prefix` in the disk cache (tests).
+#[cfg(test)]
+pub(crate) fn use_disk_for(prefix: &str) {
+    DISK_PATHS.lock().unwrap_or_else(PoisonError::into_inner).push(prefix.to_string());
 }
 
 /// The store all footage shares.

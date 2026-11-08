@@ -195,7 +195,9 @@ page!(Disk {
     /// Where the local copies go (empty: beside the media cache).
     localize_folder: String = String::new(),
     /// The most the local copies take (GB).
-    localize_max_gb: u32 = 100,
+    localize_max_gb: u32 = 20,
+    /// Path prefixes counted as network footage besides UNC paths (`P:\`), `;`-separated.
+    network_footage_locations: String = String::new(),
 });
 
 page!(Memory {

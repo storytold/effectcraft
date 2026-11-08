@@ -239,15 +239,42 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                     disk_cache_limit_ui(app, ui, t);
                 }
                 if key == "disk.localizeFootage"
-                    && let Some(line) = app.session.localize_status()
+                    && let Some(s) = app.session.localize_status()
                 {
-                    // (the localizer's state: local copies, what is queued and being copied)
-                    let r = ui.label(RichText::new(line).color(t.text_dim));
-                    app.auto.add("settings.disk.localizeStatus", r.rect, "localize status");
+                    localize_status_ui(app, ui, t, &s);
                 }
             }
         }
     }
+}
+
+/// Settings ▸ Disk, under Localize Network Footage (#3271): the local copies, what is queued and
+/// being copied, and which locations count as network. Automation id
+/// `settings.disk.localizeStatus`, labelled `files=… bytes=… queued=… skipped=…`.
+fn localize_status_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, s: &effectcraft_engine::render::LocalizeReport) {
+    const GB: f64 = (1u64 << 30) as f64;
+    let mut lines = vec![tr_args(
+        "Local copies: {} files, {} of {} GB; {} queued, {} skipped",
+        &[&s.files, &format!("{:.1}", s.bytes as f64 / GB), &format!("{:.1}", s.max_bytes as f64 / GB), &s.queued, &s.skipped],
+    )];
+    if let Some(p) = &s.copying {
+        lines.push(tr_args("Copying {}", &[p]));
+    }
+    let mut network = vec![tr("UNC paths (\\\\server\\share)").to_string()];
+    network.extend(s.network.iter().cloned());
+    lines.push(tr_args("Network footage: {}", &[&network.join(", ")]));
+    if s.reserve_limited {
+        lines.push(tr("Limited by free disk space").to_string());
+    }
+    let r = ui
+        .vertical(|ui| {
+            for line in &lines {
+                ui.label(RichText::new(line).color(t.text_dim));
+            }
+        })
+        .response;
+    let label = format!("files={} bytes={} queued={} skipped={}", s.files, s.bytes, s.queued, s.skipped);
+    app.auto.add("settings.disk.localizeStatus", r.rect, &label);
 }
 
 /// Settings ▸ Disk, under Maximum Disk Cache Size: the limit in effect, and why it is lower when

@@ -530,7 +530,7 @@ impl Drop for Owner<'_> {
         drop(c);
         *lock(&self.flight.outcome) = Some(outcome);
         self.flight.ready.notify_all();
-        effectcraft_render::memory::Accountant::global().balance();
+        effectcraft_render::memory::Accountant::global().note_growth();
     }
 }
 
@@ -1097,6 +1097,12 @@ impl Inner {
                 loc.key.nominal = (footage.width, footage.height);
             }
         }
+        // Some rows of an OpenEXR frame (a region of interest, #3271): the whole frame when the
+        // cache has it, else those rows read for this request alone (not kept: a frame cache
+        // entry of a few rows would hold a whole frame's memory).
+        if loc.key.rows.is_some() {
+            return self.frame_rows_of(&loc, footage);
+        }
         // What is decoded: a movie frame at its size, a still whole (its key has no size).
         let source =
             Loc { key: if movie { loc.key.clone() } else { Key { size: (0, 0), nominal: (0, 0), ..loc.key.clone() } }, media_t: loc.media_t, float: loc.float };
@@ -1173,6 +1179,32 @@ impl Inner {
         Ok(if as_asked { whole } else { self.keep(&loc.key, shape(whole), files, generation) })
     }
 
+    /// [`Inner::frame_at_rows`] of a request for rows (`loc.key.rows`): the whole frame at that
+    /// size or the whole still from the frame cache, else the rows decoded now.
+    fn frame_rows_of(self: &Arc<Self>, loc: &Loc, footage: &Footage) -> Result<Arc<Image>> {
+        let whole = Key { rows: None, ..loc.key.clone() };
+        let still = Key { size: (0, 0), nominal: (0, 0), ..whole.clone() };
+        let mut c = lock(&self.cache);
+        if let Some((img, files)) = c.lru.get(&whole) {
+            drop(c);
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            reads::note_all(&files);
+            return Ok(img);
+        }
+        if let Some((img, files)) = c.lru.get(&still).or_else(|| c.recent(&still)) {
+            drop(c);
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            reads::note_all(&files);
+            return Ok(Self::sized_still(img, loc, footage));
+        }
+        drop(c);
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let source = Loc { key: Key { size: (0, 0), nominal: (0, 0), ..loc.key.clone() }, media_t: None, float: loc.float };
+        let (img, files) = self.run_decode(&source, footage);
+        reads::note_all(&files);
+        Ok(Self::sized_still(Arc::new(img?), loc, footage))
+    }
+
     /// Keep `img`, made of `files`, in the frame cache as `key` (unless a file was forgotten
     /// since `generation`, see [`CacheState::generation`]), and return it.
     fn keep(&self, key: &Key, img: Arc<Image>, files: Arc<ReadFiles>, generation: u64) -> Arc<Image> {
@@ -1181,7 +1213,7 @@ impl Inner {
             c.lru.insert(key.clone(), img.clone(), files, self.budget());
         }
         drop(c);
-        effectcraft_render::memory::Accountant::global().balance();
+        effectcraft_render::memory::Accountant::global().note_growth();
         img
     }
 
@@ -1536,22 +1568,12 @@ impl FootageSource for MediaPool {
         wanted.learned.clear();
     }
 
-    fn set_localizer(&self, folder: Option<(std::path::PathBuf, u64)>) {
-        crate::localize::configure(folder.map(|(folder, max_bytes)| crate::localize::LocalizeSettings { folder, max_bytes }));
+    fn set_localizer(&self, config: Option<effectcraft_render::LocalizeConfig>) {
+        crate::localize::configure(config);
     }
 
-    fn localize_status(&self) -> Option<String> {
-        let s = crate::localize::status()?;
-        let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
-        let copying = s.copying.as_deref().map(|p| format!(", copying {p}")).unwrap_or_default();
-        Some(format!(
-            "Local copies: {} files, {:.1} of {:.1} GB; {} queued, {} skipped{copying}",
-            s.files,
-            gb(s.bytes),
-            gb(s.max_bytes),
-            s.queued,
-            s.skipped
-        ))
+    fn localize_status(&self) -> Option<effectcraft_render::LocalizeReport> {
+        crate::localize::status()
     }
 
     fn set_disk_cache(&self, cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>) {

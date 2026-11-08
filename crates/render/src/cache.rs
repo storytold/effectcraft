@@ -349,7 +349,7 @@ impl LayerCache {
         }
         drop(g);
         // (with the lock released: the accountant asks every cache for its bytes)
-        crate::memory::Accountant::global().balance();
+        crate::memory::Accountant::global().note_growth();
         (buf, files)
     }
 
@@ -829,7 +829,19 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             item.hash(&mut h);
             // A still is the same at every time (unless a proxy, which may be a movie, stands in).
             if f.kind != FootageKind::Still || it.proxy.is_some() {
-                ctx.source_time(layer).0.hash(&mut h);
+                // A sequence frame without frame blending or fields shows one file for its whole
+                // frame duration: keyed by its frame, so times within it (a faster comp, a
+                // stretched layer) share the entry (#3271).
+                let whole_frames = f.kind == FootageKind::Sequence
+                    && it.proxy.is_none()
+                    && f.fields == effectcraft_project::FieldOrder::Off
+                    && crate::frames::frame_blend_mode(ctx, layer) == effectcraft_project::FrameBlend::Off;
+                if whole_frames {
+                    0x5e9_u16.hash(&mut h);
+                    crate::frames::frame_position(ctx.source_time(layer), f.frame_rate).0.hash(&mut h);
+                } else {
+                    ctx.source_time(layer).0.hash(&mut h);
+                }
             }
             // Frame blending mixes neighbouring source frames.
             ctx.comp.enable_frame_blending.hash(&mut h);
@@ -973,7 +985,6 @@ pub fn derive(key: u64, i: u64) -> u64 {
     i.hash(&mut h);
     h.finish()
 }
-
 
 /// The layer cache in the common memory budget (#3271): rendered layer buffers, costly to make
 /// again, are freed after footage frames and planes.

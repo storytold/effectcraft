@@ -822,9 +822,10 @@ fn a_new_frame_opens_its_file_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// #3271: decoded channels are kept in the disk cache: once RAM has let them go they are read
-/// back from there, bit for bit (Cryptomatte IDs included), instead of decoding the file; Reload
-/// Footage drops them.
+/// #3271: decoded channels are kept in the disk cache, one entry per channel: once RAM has let
+/// them go they are read back from there, bit for bit (Cryptomatte IDs included), whatever was
+/// asked for before (the picture first, then the channels, then all of it after an eviction);
+/// Reload Footage drops them.
 #[test]
 fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
     use effectcraft_render::disk_cache::{DiskCache, Kind};
@@ -833,30 +834,36 @@ fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
     let file = dir.join("crypto_0001.exr");
     std::fs::write(&file, multipart()).unwrap();
     let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+    // (only this test's files use it)
+    use_disk_for(&dir.to_string_lossy());
     set_disk_cache(Some(&dc));
     let f = crate::probe(&file).unwrap();
     let pool = crate::MediaPool::new();
+    // The picture first, then every channel: 4, then the other 5 read from the file.
+    pool.frame_at(&f, Tick::ZERO).unwrap();
     let first = pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
     dc.flush();
-    assert_eq!(dc.keys(Kind::Plane).len(), 1, "{:?}", dc.stats());
-    forget(&f.path);
+    assert_eq!(dc.keys(Kind::Plane).len(), 9, "one entry per channel: {:?}", dc.stats());
+    // RAM lets go: all of it again comes from disk, without reading the file.
+    pool.forget(&f.path);
     let again = pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
     let bits = |a: &AuxChannels| a.channels.iter().map(|(n, p)| (n.clone(), p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
     assert_eq!(bits(&again), bits(&first), "bit for bit");
-    // Reload Footage: the entry goes, the file is decoded again.
+    // Reload Footage: the entries go, the file is decoded again.
     dc.drop_files([f.path.clone()]);
     dc.flush();
-    forget(&f.path);
+    pool.forget(&f.path);
     pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
     set_disk_cache(None);
     let from_disk: Vec<bool> = decodes_of(&f.path).iter().map(|d| d.from_disk).collect();
-    assert_eq!(from_disk, [false, true, false]);
+    assert_eq!(from_disk, [false, false, true, false]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// #3271: a decode thread asking for planes whose decode is still queued on the decode threads
 /// (an aux request on a frame worker queued it, then the picture's decode asks) takes it over
-/// instead of decoding a copy: one decode, and both requests get its planes.
+/// instead of decoding a copy: one decode, and both requests get its planes. The queued job is
+/// held back until the claim (a hook), so the order is the same every time.
 #[test]
 fn a_decode_thread_takes_over_a_queued_decode() {
     let bytes: Arc<[u8]> = single_part_zips().into();
@@ -866,43 +873,31 @@ fn a_decode_thread_takes_over_a_queued_decode() {
     let index = crate::exr_index::get(path, &source).unwrap();
     let all = Want { all: true, ids: Default::default() };
     let threads = crate::pool::decode_threads().unwrap();
-    let n = threads.current_num_threads();
-    // Every decode thread busy: n - 1 hold until released, one waits for the queued decode.
-    let (release, held) = std::sync::mpsc::channel::<()>();
-    let held = Arc::new(Mutex::new(held));
-    for _ in 1..n {
-        let held = held.clone();
-        threads.spawn(move || {
-            let _ = held.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20));
-        });
-    }
     let (tx, rx) = std::sync::mpsc::channel();
+    // When the asker queues its decode: a decode thread asks for the same planes.
     {
         let (store, source, index, all, tx) = (store.clone(), source.clone(), index.clone(), all.clone(), tx.clone());
-        threads.spawn(move || {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !store.in_flight(path) && std::time::Instant::now() < until {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            let _ = tx.send(store.get(path, &source, &index, &all, Use::Other).map(|b| b.ids.len()));
+        let hook: Hook = Arc::new(move |_: &str| {
+            let (store, source, index, all, tx) = (store.clone(), source.clone(), index.clone(), all.clone(), tx.clone());
+            threads.spawn(move || {
+                let _ = tx.send(store.get(path, &source, &index, &all, Use::Other).map(|b| b.ids.len()));
+            });
         });
+        QUEUING.lock().unwrap().push((path.to_string(), hook));
     }
-    // The other request, from a thread of its own: its decode is queued behind them.
-    let asker = {
-        let (store, source, index, all) = (store.clone(), source.clone(), index.clone(), all.clone());
-        std::thread::spawn(move || store.get(path, &source, &index, &all, Use::Other).map(|b| b.ids.len()))
-    };
+    // The queued job waits until that decode thread claimed it.
+    let hold: Hook = Arc::new(|p: &str| {
+        let claims = CLAIMS.lock().unwrap();
+        let _ = CLAIM_SIGNAL.wait_timeout_while(claims, std::time::Duration::from_secs(10), |c| !c.iter().any(|c| c == p));
+    });
+    STARTING.lock().unwrap().push((path.to_string(), hold));
+    let asked = store.get(path, &source, &index, &all, Use::Other).map(|b| b.ids.len());
     let claimed = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
-    let asked = asker.join().unwrap();
-    for _ in 1..n {
-        let _ = release.send(());
-    }
-    assert!(claimed.is_ok() && claimed == asked, "{claimed:?} {asked:?}");
-    // (other tests share the decode threads: when one of theirs ran first, the queued decode
-    // began before the decode thread asked, and it decoded a copy, as before)
-    if CLAIMS.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|p| p == path) {
-        assert_eq!(decodes_of(path).len(), 1, "decoded once");
-    }
+    QUEUING.lock().unwrap().retain(|(p, _)| p != path);
+    STARTING.lock().unwrap().retain(|(p, _)| p != path);
+    assert!(CLAIMS.lock().unwrap().iter().any(|p| p == path), "claimed");
+    assert!(asked.is_ok() && claimed == asked, "{claimed:?} {asked:?}");
+    assert_eq!(decodes_of(path).len(), 1, "decoded once");
 }
 
 /// #3271: the plane store in the common memory budget: trimmed least recently used first,
@@ -958,13 +953,13 @@ fn a_localized_network_file_is_read_from_its_copy() {
     std::fs::write(&file, multipart()).unwrap();
     let f = crate::probe(&file).unwrap();
     let pool = crate::MediaPool::new();
-    pool.set_localizer(Some((local.clone(), 1 << 30)));
+    pool.set_localizer(Some(effectcraft_render::LocalizeConfig { folder: local.clone(), max_bytes: 1 << 30, network: vec![], disk_space: None }));
     let from_share = pool.frame_at(&f, Tick::ZERO).unwrap();
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while crate::localize::status().is_some_and(|s| s.files == 0) && std::time::Instant::now() < until {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(pool.localize_status().is_some_and(|s| s.contains("1 files")), "{:?}", pool.localize_status());
+    assert!(pool.localize_status().is_some_and(|s| s.files == 1), "{:?}", pool.localize_status());
     pool.forget(&f.path);
     let before = crate::opens_under(&local);
     let (img, read) = crate::reads::captured(|| pool.frame_at(&f, Tick::ZERO).unwrap());
@@ -978,13 +973,15 @@ fn a_localized_network_file_is_read_from_its_copy() {
 
 /// #3271: a viewer region of interest reads only the footage rows it shows of an OpenEXR layer
 /// (with one scan line per chunk, only those lines are decompressed), and the region renders
-/// bit for bit what reading the whole frame renders, at full and reduced resolution.
+/// bit for bit what reading the whole frame renders, at full and reduced resolution and at
+/// several layer scales. In a collapsed precomp the whole frame is read (its layers are placed
+/// through the precomp layer too).
 #[test]
 fn a_region_of_interest_reads_only_its_rows() {
     use effectcraft_project::{Comp, ItemKind, LayerSource, Project, Value, build};
     use effectcraft_render::{RenderOpts, Renderer};
     use effectcraft_time::FrameRate;
-    /// The pool, reading whole frames (the region's rows ignored).
+    /// A pool reading whole frames (the region's rows ignored).
     struct Whole<'a>(&'a crate::MediaPool);
     impl FootageSource for Whole<'_> {
         fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
@@ -996,9 +993,12 @@ fn a_region_of_interest_reads_only_its_rows() {
     }
     let bytes: Arc<[u8]> = single_part_zips().into();
     let path = "/3271-roi.exr";
-    let pool = crate::MediaPool::new();
-    pool.add_bytes(path, bytes.clone());
-    let f = crate::probe_bytes(path, bytes).unwrap();
+    let fresh = || {
+        let pool = crate::MediaPool::new();
+        pool.add_bytes(path, bytes.clone());
+        pool
+    };
+    let f = crate::probe_bytes(path, bytes.clone()).unwrap();
     let mut p = Project::default();
     let comp = Comp::new(96, 96, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
     let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
@@ -1006,18 +1006,35 @@ fn a_region_of_interest_reads_only_its_rows() {
     let mut l = build::layer(&mut p, &comp, "plate", LayerSource::Footage { item: fid }, (64, 64), None);
     l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 46.0, 0.0]);
     l.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(12.0);
-    l.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([90.0, 110.0, 100.0]);
-    p.comp_mut(cid).unwrap().layers = vec![l].into();
+    p.comp_mut(cid).unwrap().layers = vec![l.clone()].into();
+    // The same layer inside a collapsed precomp, moved by the precomp layer.
+    let inner = p.add_item("Inner", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    p.comp_mut(inner).unwrap().layers = vec![l].into();
+    let outer = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let mut pre = build::layer(&mut p, &comp, "Inner", LayerSource::Comp { item: inner }, (96, 96), None);
+    pre.switches.collapse = true;
+    pre.props.prop_mut("transform/position").unwrap().value = Value::Vec3([40.0, 60.0, 0.0]);
+    p.comp_mut(outer).unwrap().layers = vec![pre].into();
     for (layer_scale, scale) in [(100.0, 1.0), (100.0, 0.5), (30.0, 0.25), (30.0, 1.0), (250.0, 0.5)] {
-        let comp = p.comp_mut(cid).unwrap();
-        comp.layers[0].props.prop_mut("transform/scale").unwrap().value = Value::Vec3([layer_scale * 0.9, layer_scale * 1.1, 100.0]);
+        for c in [cid, inner] {
+            p.comp_mut(c).unwrap().layers[0].props.prop_mut("transform/scale").unwrap().value = Value::Vec3([layer_scale * 0.9, layer_scale * 1.1, 100.0]);
+        }
         let opts = RenderOpts { scale, roi: Some([38.0, 40.0, 24.0, 10.0]), ..Default::default() };
-        let whole = Renderer::new(&p, &Whole(&pool), opts).comp_frame(cid, Tick::ZERO);
+        let whole = Renderer::new(&p, &Whole(&fresh()), opts).comp_frame(cid, Tick::ZERO);
         let before = decodes_of(path).len();
-        let rows = Renderer::new(&p, &pool, opts).comp_frame(cid, Tick::ZERO);
-        assert_eq!(bits(&rows), bits(&whole), "at {scale}");
-        let d = decodes_of(path);
-        let last = d.get(before..).and_then(|d| d.last()).expect("a read of the region's rows");
-        assert!(last.stats.lines < SIZE.1, "at {scale}: {} lines", last.stats.lines);
+        let rows = Renderer::new(&p, &fresh(), opts).comp_frame(cid, Tick::ZERO);
+        assert_eq!(bits(&rows), bits(&whole), "{layer_scale}% at {scale}");
+        // (a layer shrunk this far shows all of its rows in the region, grown by the warp's reach)
+        if layer_scale >= 100.0 {
+            let d = decodes_of(path);
+            let last = d.get(before..).and_then(|d| d.last()).expect("a read of the region's rows");
+            assert!(last.stats.lines < SIZE.1, "{layer_scale}% at {scale}: {} lines", last.stats.lines);
+        }
+        // Collapsed: the whole frame.
+        let whole = Renderer::new(&p, &Whole(&fresh()), opts).comp_frame(outer, Tick::ZERO);
+        let before = decodes_of(path).len();
+        let collapsed = Renderer::new(&p, &fresh(), opts).comp_frame(outer, Tick::ZERO);
+        assert_eq!(bits(&collapsed), bits(&whole), "collapsed, {layer_scale}% at {scale}");
+        assert!(decodes_of(path).get(before..).unwrap_or_default().iter().all(|d| d.stats.lines == SIZE.1), "collapsed: the whole frame");
     }
 }

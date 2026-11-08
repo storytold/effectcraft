@@ -73,17 +73,21 @@ impl ExrSource {
                 }
                 Ok(Opened { len: meta.len(), stamp: FileStamp::of_metadata(&meta), reader: Box::new(file) })
             }
-            ExrSource::Localized { copy, stamp, .. } => {
-                #[cfg(test)]
-                crate::count_open(copy);
-                let file = std::fs::File::open(copy)?;
-                let meta = file.metadata()?;
-                // (the copy must still be complete: its size is the original's)
-                let complete = matches!(stamp, FileStamp::Native { len, .. } if *len == meta.len());
-                if !meta.is_file() || !complete {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: not a complete copy", copy.display())));
-                }
-                Ok(Opened { len: meta.len(), stamp: *stamp, reader: Box::new(file) })
+            ExrSource::Localized { original, copy, stamp } => {
+                let local = || -> std::io::Result<Opened> {
+                    #[cfg(test)]
+                    crate::count_open(copy);
+                    let file = std::fs::File::open(copy)?;
+                    let meta = file.metadata()?;
+                    // (the copy must still be complete: its size is the original's)
+                    let complete = matches!(stamp, FileStamp::Native { len, .. } if *len == meta.len());
+                    if !meta.is_file() || !complete {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: not a complete copy", copy.display())));
+                    }
+                    Ok(Opened { len: meta.len(), stamp: *stamp, reader: Box::new(file) })
+                };
+                // (a copy evicted or damaged meanwhile: the share)
+                local().or_else(|_| ExrSource::File(original.clone()).open())
             }
         }
     }

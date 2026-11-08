@@ -26,7 +26,6 @@ mod exr_read;
 mod gif_anim;
 mod layered;
 mod localize;
-pub use localize::{LocalizeSettings, LocalizeStatus};
 pub use layered::vector_doc;
 mod pool;
 mod probe;

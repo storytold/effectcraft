@@ -302,6 +302,7 @@ pub fn pages() -> Vec<Page> {
                 s("disk.localizeFootage", "Localize Network Footage", B, true),
                 s("disk.localizeMaxGb", "Maximum Local Copies Size", Kind::Int(1, 100_000, "GB"), true),
                 s("disk.localizeFolder", "Local Copies Folder", Kind::Path, true),
+                s("disk.networkFootageLocations", "Network Footage Locations", Kind::Text, true),
             ],
         },
         Page {

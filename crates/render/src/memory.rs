@@ -19,6 +19,19 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 /// The share of the budget the accountant frees down to once it is over (hysteresis).
 pub const TRIM_TO: f64 = 0.9;
 
+/// The decoded footage planes' own budget (the plane store in `effectcraft-media`): part of the
+/// common budget's sum.
+#[cfg(not(target_arch = "wasm32"))]
+pub const PLANE_BUDGET: usize = 1 << 30;
+#[cfg(target_arch = "wasm32")]
+pub const PLANE_BUDGET: usize = 512 << 20;
+
+/// How long a holder that refilled stays protected.
+const THRASH_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Inserts balance at most this often ([`Accountant::note_growth`]).
+const BALANCE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// A cache the accountant keeps within the common budget.
 pub trait MemoryHolder: Send + Sync {
     /// A name for logs and stats.
@@ -39,9 +52,9 @@ pub trait MemoryHolder: Send + Sync {
 
 struct Registered {
     holder: Weak<dyn MemoryHolder>,
-    /// Its refills at the last balance, and whether it was thrashing then.
+    /// Its refills at the last balance, and until when it counts as thrashing (it refilled).
     refills: u64,
-    thrashing: bool,
+    thrash_until: Option<web_time::Instant>,
 }
 
 /// The common budget of the big caches (see the module notes).
@@ -50,6 +63,9 @@ pub struct Accountant {
     holders: Mutex<Vec<Registered>>,
     /// Bytes freed by the accountant so far (stats, tests).
     freed: AtomicUsize,
+    /// One balance at a time (another one asked for meanwhile is skipped), and when the last
+    /// one ran.
+    balancing: Mutex<Option<web_time::Instant>>,
 }
 
 impl Default for Accountant {
@@ -61,7 +77,7 @@ impl Default for Accountant {
 impl Accountant {
     /// An accountant with `budget` bytes (`usize::MAX`: no limit).
     pub const fn new(budget: usize) -> Accountant {
-        Accountant { budget: AtomicUsize::new(budget), holders: Mutex::new(Vec::new()), freed: AtomicUsize::new(0) }
+        Accountant { budget: AtomicUsize::new(budget), holders: Mutex::new(Vec::new()), freed: AtomicUsize::new(0), balancing: Mutex::new(None) }
     }
 
     /// The process's accountant.
@@ -89,7 +105,19 @@ impl Accountant {
         if h.iter().any(|r| r.holder.ptr_eq(&weak)) {
             return;
         }
-        h.push(Registered { holder: weak, refills: holder.refills(), thrashing: false });
+        h.push(Registered { holder: weak, refills: holder.refills(), thrash_until: None });
+    }
+
+    /// A holder grew (an insert): balance, at most every [`BALANCE_EVERY`] (the holders' locks
+    /// aren't taken on every insert).
+    pub fn note_growth(&self) {
+        if self.budget() == usize::MAX {
+            return;
+        }
+        let recent = self.balancing.try_lock().map(|g| g.is_some_and(|t| t.elapsed() < BALANCE_EVERY)).unwrap_or(true);
+        if !recent {
+            self.balance();
+        }
     }
 
     /// The holders alive now, with their effective priority (raised while thrashing).
@@ -100,9 +128,13 @@ impl Accountant {
             .filter_map(|r| {
                 let holder = r.holder.upgrade()?;
                 let refills = holder.refills();
-                r.thrashing = refills > r.refills;
+                let now = web_time::Instant::now();
+                if refills > r.refills {
+                    r.thrash_until = Some(now + THRASH_FOR);
+                }
                 r.refills = refills;
-                let p = holder.priority().saturating_add(u8::from(r.thrashing));
+                let thrashing = r.thrash_until.is_some_and(|t| t > now);
+                let p = holder.priority().saturating_add(u8::from(thrashing));
                 Some((holder, p))
             })
             .collect()
@@ -128,6 +160,9 @@ impl Accountant {
         if budget == usize::MAX {
             return;
         }
+        // (one at a time: a balance running meanwhile does the work)
+        let Ok(mut last) = self.balancing.try_lock() else { return };
+        *last = Some(web_time::Instant::now());
         let mut holders = self.alive();
         let mut total: usize = holders.iter().map(|(h, _)| h.bytes()).fold(0, usize::saturating_add);
         if total <= budget {
