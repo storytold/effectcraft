@@ -230,6 +230,11 @@ impl LayerCache {
     /// used. (A render that started before a drop may publish its buffer after the drop's
     /// purge, Reload Footage clearing the cache while the buffer was being written: the check
     /// here, not the order of the two, keeps it from being served.)
+    /// Whether a buffer is kept in memory under `key` (a peek: no hit, no miss, no disk read).
+    pub(crate) fn holds(&self, key: u64) -> bool {
+        self.kept(key, false).is_some()
+    }
+
     fn kept(&self, key: u64, hit: bool) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
         let found = {
             let mut g = self.inner.lock().ok()?;

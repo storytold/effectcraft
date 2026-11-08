@@ -28,8 +28,10 @@ use crate::Gpu;
 
 mod adjust;
 mod adv3d;
+mod bench_share;
 mod deferred;
 mod deferred_jobs;
+mod footage_share;
 mod fx_color;
 mod fx_depth;
 mod fx_distort;
