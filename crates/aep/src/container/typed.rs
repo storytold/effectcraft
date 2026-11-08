@@ -287,7 +287,7 @@ impl<'f, 'a> PropGroup<'f, 'a> {
                 pending = c.bytes();
             } else if c.id == crate::container::chunk::LIST
                 && let Some(body) = pending.take()
-                && match_name(body) == name
+                && match_name_is(body, name)
             {
                 return Some(PropNode::of(c));
             }
@@ -312,6 +312,14 @@ impl<'f, 'a> PropGroup<'f, 'a> {
 /// The match name in a `tdmn` body: ASCII up to the first NUL.
 fn match_name(body: &[u8]) -> String {
     text(until_nul(body))
+}
+
+/// `match_name(body) == name` without building the `String`: equal bytes match; otherwise only
+/// a body that is not valid UTF-8 can still match (through its U+FFFD replacements), and only a
+/// name that holds U+FFFD.
+fn match_name_is(body: &[u8], name: &str) -> bool {
+    let bytes = until_nul(body);
+    bytes == name.as_bytes() || (name.contains('\u{FFFD}') && String::from_utf8_lossy(bytes) == name)
 }
 
 /// A property (`LIST tdbs`): `tdsb`, `tdsn`, the 124-byte header `tdb4`, then either the static
@@ -535,5 +543,22 @@ mod tests {
         assert!(matches!(g.get("B"), Some(PropNode::Property(_))));
         assert!(g.get("C").is_none());
         assert_eq!(g.names(), ["A", "B", "A"]);
+    }
+
+    #[test]
+    fn match_name_is_agrees_with_comparing_the_decoded_name() {
+        let bodies: [&[u8]; 9] =
+            [b"ADBE Position\0\0\0", b"ADBE Position", b"ADBE Pos", b"", b"\0ADBE", b"ADBE \xff Bad\0", b"\xff", b"\xef\xbf\xbd", "Gr\u{fc}n\0".as_bytes()];
+        let names = ["ADBE Position", "ADBE Pos", "", "ADBE \u{FFFD} Bad", "\u{FFFD}", "Gr\u{fc}n", "ADBE Position\0", "ADBE \u{FFFD}"];
+        for body in bodies {
+            for name in names {
+                assert_eq!(match_name_is(body, name), match_name(body) == name, "{body:?} vs {name:?}");
+            }
+        }
+        // Names read back from a group find their entries, a damaged one included.
+        let group = Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdmn", b"X\xffY\0".to_vec()), Chunk::list(*b"tdbs", Vec::new())]);
+        let g = PropGroup::from_chunk(&group).expect("group");
+        let names = g.names();
+        assert!(g.get(&names[0]).is_some());
     }
 }

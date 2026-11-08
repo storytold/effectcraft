@@ -122,7 +122,7 @@ struct Reader<'d> {
     trailer: Option<Vec<u8>>,
 }
 
-impl Reader<'_> {
+impl<'d> Reader<'d> {
     fn run(mut self) -> Result<AepFile<'static>, AepError> {
         if self.data.starts_with(&[0xef, 0xbb, 0xbf]) {
             self.pos = 3;
@@ -227,7 +227,8 @@ impl Reader<'_> {
         let at = self.pos;
         self.pos = self.pos.saturating_add(1);
         let name = self.name()?;
-        let mut attrs: Vec<((usize, usize), Vec<u8>)> = Vec::new();
+        let data = self.data;
+        let mut attrs: Vec<((usize, usize), Cow<'d, [u8]>)> = Vec::new();
         let self_closing = loop {
             self.skip_ws();
             let rest = self.rest();
@@ -255,12 +256,19 @@ impl Reader<'_> {
             }
             let vstart = self.pos.saturating_add(1);
             let vend = self.find(vstart, &[quote]).ok_or(xml(vstart, "an attribute value is not closed"))?;
-            let raw = self.data.get(vstart..vend).unwrap_or(&[]);
+            let raw = data.get(vstart..vend).unwrap_or(&[]);
             if raw.contains(&b'<') {
                 return Err(xml(vstart, "`<` inside an attribute value"));
             }
-            let mut value = Vec::new();
-            decode_entities(raw, vstart, &mut value)?;
+            // A value without `&` is its own decoding (most of them, every `bdata` After Effects
+            // writes): borrow it instead of copying it.
+            let value = if raw.contains(&b'&') {
+                let mut value = Vec::new();
+                decode_entities(raw, vstart, &mut value)?;
+                Cow::Owned(value)
+            } else {
+                Cow::Borrowed(raw)
+            };
             self.pos = vend.saturating_add(1);
             attrs.push((key, value));
         };
@@ -476,11 +484,15 @@ fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
         _ => None,
     };
     let (pairs, _) = text.as_chunks::<2>();
-    pairs
-        .iter()
-        .map(|[hi, lo]| digit(*hi).zip(digit(*lo)).map(|(h, l)| (h << 4) | l))
-        .collect::<Option<Vec<u8>>>()
-        .ok_or(xml(offset, "bdata holds a character that is not a hex digit"))
+    // Sized once (collecting into `Option<Vec>` has no size hint and regrows step by step).
+    let mut out = Vec::with_capacity(pairs.len());
+    for [hi, lo] in pairs {
+        match (digit(*hi), digit(*lo)) {
+            (Some(h), Some(l)) => out.push((h << 4) | l),
+            _ => return Err(xml(offset, "bdata holds a character that is not a hex digit")),
+        }
+    }
+    Ok(out)
 }
 
 /// The JSON body of an `alas` chunk from the attributes of a `fileReference`, keys in document
@@ -626,6 +638,62 @@ mod tests {
             assert!(matches!(read_aepx(b.as_bytes()), Err(AepError::Xml { .. })), "{b}");
         }
         assert!(matches!(read_aepx(b"<AfterEffectsProject>\xff</AfterEffectsProject>"), Err(AepError::Xml { .. })));
+    }
+
+    #[test]
+    fn attribute_values_decode_entities_only_where_they_have_them() {
+        // An entity inside `bdata` still decodes before the hex does.
+        let f = read_aepx(doc("<a bdata=\"&#x30;1&#65;b\"/>").as_bytes()).unwrap();
+        assert_eq!(f.chunks[0].bytes(), Some(&[0x01, 0xab][..]));
+        // A bad entity in any attribute, even of an element that is skipped, is still an error.
+        for bad in ["<a other=\"&nbsp;\"/>", "<Unknown x=\"&bogus;\"/>", "<a bdata=\"00\" note=\"&amp\"/>"] {
+            assert!(matches!(read_aepx(doc(bad).as_bytes()), Err(AepError::Xml { .. })), "{bad}");
+        }
+        // Without `&` the value is taken as written.
+        let f = read_aepx(doc("<a bdata=\"0aFf\" x=\"y\"/>").as_bytes()).unwrap();
+        assert_eq!(f.chunks[0].bytes(), Some(&[0x0a, 0xff][..]));
+    }
+
+    #[test]
+    fn decode_hex_matches_the_collecting_version() {
+        fn old(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
+            if text.len() % 2 == 1 {
+                return Err(xml(offset, "bdata has an odd number of hex digits"));
+            }
+            let digit = |b: u8| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            };
+            let (pairs, _) = text.as_chunks::<2>();
+            pairs
+                .iter()
+                .map(|[hi, lo]| digit(*hi).zip(digit(*lo)).map(|(h, l)| (h << 4) | l))
+                .collect::<Option<Vec<u8>>>()
+                .ok_or(xml(offset, "bdata holds a character that is not a hex digit"))
+        }
+        let alphabet = b"0123456789abcdefABCDEFgG \0";
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for len in 0..200usize {
+            for _ in 0..20 {
+                let text: Vec<u8> = (0..len)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        // Mostly hex digits, now and then a byte that is not one.
+                        let i = (seed % 1000) as usize;
+                        alphabet[if i < 990 { i % 22 } else { 22 + i % 4 }]
+                    })
+                    .collect();
+                let new = decode_hex(&text, 7);
+                assert_eq!(new, old(&text, 7));
+                if let Ok(v) = new {
+                    assert_eq!(v.capacity(), v.len());
+                }
+            }
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use crate::container::bytes::{array, be_u32};
 use crate::container::chunk::{AepFile, Body, Chunk, LIST, NESTED_IDS};
 use crate::container::error::AepError;
 
@@ -39,7 +40,7 @@ pub fn parse_with_limits(data: &[u8], limits: Limits) -> Result<AepFile<'_>, Aep
     if id4(data, 0) != Some(*b"RIFX") {
         return Err(AepError::NotRifx);
     }
-    let declared = u64::from(be32(data, 4).ok_or(AepError::NotRifx)?);
+    let declared = u64::from(be_u32(data, 4).ok_or(AepError::NotRifx)?);
     let form = id4(data, 8).ok_or(AepError::NotRifx)?;
     if &form != b"Egg!" {
         return Err(AepError::BadFormType(form));
@@ -56,13 +57,8 @@ pub fn parse_with_limits(data: &[u8], limits: Limits) -> Result<AepFile<'_>, Aep
     Ok(AepFile { chunks, trailer: Cow::Borrowed(trailer) })
 }
 
-fn be32(data: &[u8], at: usize) -> Option<u32> {
-    id4(data, at).map(u32::from_be_bytes)
-}
-
 fn id4(data: &[u8], at: usize) -> Option<[u8; 4]> {
-    let b = data.get(at..at.checked_add(4)?)?;
-    Some([*b.first()?, *b.get(1)?, *b.get(2)?, *b.get(3)?])
+    array::<4>(data, at)
 }
 
 struct Parser<'a> {
@@ -74,13 +70,16 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Parses the sibling chunks that exactly fill `start..end`.
     fn sequence(&mut self, start: usize, end: usize, depth: usize) -> Result<Vec<Chunk<'a>>, AepError> {
-        let mut out = Vec::new();
+        // Sized once: a well-formed sequence fills exactly this many slots. The count is bounded by
+        // the input (one per 8 bytes at most) and by the chunks the limit still allows.
+        let capacity = self.count_siblings(start, end).min(self.limits.max_chunks.saturating_sub(self.count));
+        let mut out = Vec::with_capacity(capacity);
         let mut pos = start;
         while pos < end {
             let short = AepError::Malformed { offset: pos, what: "bytes left over that are too short for a chunk header" };
             let body_start = pos.checked_add(8).filter(|b| *b <= end).ok_or(short)?;
             let id = id4(self.data, pos).ok_or(AepError::Malformed { offset: pos, what: "short read" })?;
-            let size = be32(self.data, pos + 4).ok_or(AepError::Malformed { offset: pos, what: "short read" })? as usize;
+            let size = be_u32(self.data, pos + 4).ok_or(AepError::Malformed { offset: pos, what: "short read" })? as usize;
             let avail = end - body_start;
             if size > avail {
                 return Err(AepError::ChunkTooLarge { offset: pos, size: size as u64, available: avail as u64 });
@@ -101,6 +100,20 @@ impl<'a> Parser<'a> {
             pos = next;
         }
         Ok(out)
+    }
+
+    /// The number of chunk headers that tile `start..end` the way [`Self::sequence`] walks them,
+    /// stopping at the first that does not fit. Never more than `(end - start) / 8`.
+    fn count_siblings(&self, start: usize, end: usize) -> usize {
+        let mut n = 0usize;
+        let mut pos = start;
+        while let Some(body_start) = pos.checked_add(8).filter(|b| *b <= end) {
+            let Some(size) = be_u32(self.data, pos.saturating_add(4)) else { break };
+            let Some(next) = usize::try_from(size).ok().and_then(|s| body_start.checked_add(s)).filter(|e| *e <= end) else { break };
+            n = n.saturating_add(1);
+            pos = if size % 2 == 1 && next < end { next.saturating_add(1) } else { next };
+        }
+        n
     }
 
     /// Like [`Self::sequence`] but a structural problem yields `None` (the caller keeps bytes).
@@ -138,5 +151,62 @@ impl<'a> Parser<'a> {
             return Ok(Body::Chunks(children));
         }
         Ok(Body::Data(Cow::Borrowed(self.slice(start, end))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every children `Vec` in the tree, depth first.
+    fn child_vecs<'f, 'a>(chunks: &'f [Chunk<'a>], out: &mut Vec<&'f Vec<Chunk<'a>>>) {
+        for c in chunks {
+            match &c.body {
+                Body::List { children, .. } | Body::Chunks(children) => {
+                    out.push(children);
+                    child_vecs(children, out);
+                }
+                Body::Data(_) | Body::OpaqueList { .. } => {}
+            }
+        }
+    }
+
+    #[test]
+    fn every_sibling_list_is_allocated_once_at_its_exact_length() {
+        let inner: Vec<Chunk<'static>> = (0..37u8).map(|i| Chunk::data(*b"cdat", vec![i; usize::from(i % 5)])).collect();
+        let middle: Vec<Chunk<'static>> = (0..9).map(|_| Chunk::list(*b"tdbs", inner.clone())).collect();
+        let file = AepFile { chunks: vec![Chunk::data(*b"head", vec![0; 3]), Chunk::list(*b"Fold", middle)], trailer: Cow::Borrowed(&[]) };
+        let bytes = crate::container::write(&file).expect("write");
+        let parsed = parse(&bytes).expect("parse");
+        assert_eq!(crate::container::write(&parsed).expect("rewrite"), bytes);
+        let mut vecs = vec![&parsed.chunks];
+        child_vecs(&parsed.chunks, &mut vecs);
+        assert_eq!(vecs.len(), 11);
+        for v in vecs {
+            assert_eq!(v.capacity(), v.len(), "a sibling Vec grew past its length");
+        }
+    }
+
+    #[test]
+    fn the_preallocation_is_bounded_by_the_input_and_the_chunk_limit() {
+        // 1000 empty headers: the most chunks the bytes can hold.
+        let mut data = b"RIFX\0\0\0\0Egg!".to_vec();
+        data.extend(std::iter::repeat_n(*b"abcd\0\0\0\0", 1000).flatten());
+        let declared = u32::try_from(data.len() - 8).expect("small");
+        data[4..8].copy_from_slice(&declared.to_be_bytes());
+        let parser = Parser { data: &data, limits: Limits::default(), count: 0 };
+        assert_eq!(parser.count_siblings(12, data.len()), 1000);
+        assert!(parser.count_siblings(12, data.len()) <= (data.len() - 12) / 8);
+        // A header whose size runs past the end stops the count; a stray tail is not counted.
+        assert_eq!(parser.count_siblings(12, data.len() - 3), 999);
+        let mut big = data.clone();
+        big[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+        let parser = Parser { data: &big, limits: Limits::default(), count: 0 };
+        assert_eq!(parser.count_siblings(12, big.len()), 0);
+        let f = parse(&data).expect("parse");
+        assert_eq!((f.chunks.len(), f.chunks.capacity()), (1000, 1000));
+        // Under a tighter limit the parse fails as before, without sizing for more than allowed.
+        let tight = Limits { max_depth: 64, max_chunks: 10 };
+        assert_eq!(parse_with_limits(&data, tight), Err(AepError::TooManyChunks));
     }
 }
