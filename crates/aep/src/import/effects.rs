@@ -76,6 +76,11 @@ pub(crate) fn import_effects<'f, 'a>(
     col: &mut Collector,
 ) {
     for fx in layer.effects() {
+        // Puppet keeps its meshes and pins in nested groups, not in `parT` (its own step).
+        if fx.match_name() == crate::import::puppet::MATCH_NAME {
+            crate::import::puppet::import_puppet(defs, &fx, cx, ids, target, col);
+            continue;
+        }
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
         let Some(map) = EFFECTS.iter().find(|m| m.match_name == fx.match_name()) else {
             col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
@@ -128,7 +133,7 @@ pub(crate) fn import_effects<'f, 'a>(
 }
 
 /// Parameters that never carry a value to import.
-fn carries_nothing(p: &EffectParam<'_, '_>) -> bool {
+pub(crate) fn carries_nothing(p: &EffectParam<'_, '_>) -> bool {
     matches!(p.kind, ParamKind::Button | ParamKind::NoData | ParamKind::GroupStart | ParamKind::GroupEnd) || (p.index == 0 && p.kind == ParamKind::Layer)
 }
 
