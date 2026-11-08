@@ -100,11 +100,11 @@ fn render_frame_never_writes_over_a_file_the_project_reads() {
 fn render_frame_over_an_existing_file_checks_the_project_once() {
     let mut r = Rig::new("render-frame-once");
     std::fs::write(r.dir.join("frame.png"), b"an older frame").unwrap();
-    let before = r.h.state().session.output_identities.built();
+    let before = r.h.state().session.output_guards.load(std::sync::atomic::Ordering::Relaxed);
     let v = r.reply("render.frame", json!({"path": r.text("frame.png")}));
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(&r.read("frame.png")[..8], b"\x89PNG\r\n\x1a\n", "replaced");
-    assert_eq!(r.h.state().session.output_identities.built() - before, 1, "one guard");
+    assert_eq!(r.h.state().session.output_guards.load(std::sync::atomic::Ordering::Relaxed) - before, 1, "one guard");
 }
 
 #[test]

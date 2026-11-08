@@ -265,10 +265,9 @@ pub struct Session {
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
-    /// What the output guard learnt of the protected files' identities, for the next check
-    /// (#3328). Public only so that other crates can build a `Session { .. }`.
-    #[doc(hidden)]
-    pub output_identities: output_guard::IdentityCache,
+    /// Output guards built so far ([`Session::output_guard`]; a command checks all the files it
+    /// writes with one, #3328).
+    pub output_guards: std::sync::atomic::AtomicU64,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.
@@ -394,7 +393,7 @@ impl Default for Session {
             footage_stamps: Default::default(),
             aux_footage: None,
             script_calls: ScriptCalls::default(),
-            output_identities: Default::default(),
+            output_guards: Default::default(),
         }
     }
 }
