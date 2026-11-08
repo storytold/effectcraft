@@ -1,6 +1,6 @@
-//! The `.aepx` reader as it was before it fed the flat index: it builds the owned chunk tree
-//! element by element. Kept for the tests only, as the reference the index reader is compared
-//! with (the same tree and the same errors on generated, damaged and corpus input).
+//! The `.aepx` reader of the owned chunk tree ([`super::read_aepx`]): it builds the tree element by
+//! element. The importer uses the index reader in `aepx.rs` instead; the tests compare the two on
+//! generated, damaged and corpus input (the same tree and the same errors).
 
 use std::borrow::Cow;
 
@@ -9,8 +9,8 @@ use crate::container::chunk::{AepFile, Body, Chunk, LIST, NESTED_IDS};
 use crate::container::error::AepError;
 use crate::container::read::Limits;
 
-/// [`super::read_aepx_with_limits`] as it was.
-pub(crate) fn read(data: &[u8], limits: Limits) -> Result<AepFile<'static>, AepError> {
+/// [`super::read_aepx_with_limits`].
+pub(super) fn read(data: &[u8], limits: Limits) -> Result<AepFile<'static>, AepError> {
     let text = match std::str::from_utf8(data) {
         Ok(t) => t.as_bytes(),
         Err(e) => return Err(xml(e.valid_up_to(), "the file is not valid UTF-8")),

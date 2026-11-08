@@ -13,22 +13,21 @@
 //! recursion; the nesting depth and the element count are bounded by [`Limits`], and everything
 //! it allocates is bounded by the size of the input.
 //!
-//! It does not build the owned tree element by element. It decodes every body (hex, text, the
-//! alias JSON, the numbers) into one buffer and records the chunks as entries of the flat index
-//! ([`Draft`]s, in depth-first order, bodies as ranges of the buffer). The importer indexes that
-//! buffer ([`TreeIndex::from_drafts`]) and reads it like an `.aep`; [`read_aepx`] converts the
-//! index into the owned tree. The reader this replaced is kept in the tests as the reference
-//! (`aepx/reference.rs`): both give the same tree and the same errors.
+//! There are two readers. [`read_aepx`] builds the owned tree element by element
+//! (`aepx/tree.rs`). The importer, which only reads, uses `index_aepx`: it decodes every body
+//! (hex, text, the alias JSON, the numbers) into one buffer and records the chunks as entries of
+//! the flat index ([`Draft`]s, in depth-first order, bodies as ranges of the buffer), which
+//! [`crate::container::TreeIndex::from_drafts`] turns into an index that borrows the buffer.
+//! The tests hold both to the same tree and the same errors.
 
 use std::borrow::Cow;
 
 use crate::container::chunk::{AepFile, LIST, NESTED_IDS};
 use crate::container::error::AepError;
-use crate::container::index::{Draft, Kind as EntryKind, TreeIndex};
+use crate::container::index::{Draft, Kind as EntryKind};
 use crate::container::read::{Limits, parse};
 
-#[cfg(test)]
-pub(crate) mod reference;
+mod tree;
 
 /// The root element of an `.aepx`.
 const ROOT: &[u8] = b"AfterEffectsProject";
@@ -77,18 +76,14 @@ pub fn read_aepx(data: &[u8]) -> Result<AepFile<'static>, AepError> {
 /// element's children are depth 1), `max_chunks` the number of elements.
 ///
 /// # Errors
-/// See [`read_aepx`]. Two errors are only reachable when memory runs out, where the reader
-/// before the flat index would abort or could have succeeded: [`AepError::TooLarge`] when the
-/// chunk list cannot grow, and [`AepError::Xml`] "bdata is too large to hold in memory" when the
-/// shared body buffer cannot grow.
+/// See [`read_aepx`].
 pub fn read_aepx_with_limits(data: &[u8], limits: Limits) -> Result<AepFile<'static>, AepError> {
-    let AepxDrafts { buffer, nodes, trailer } = index_aepx(data, limits)?;
-    Ok(TreeIndex::from_drafts(&buffer, nodes, trailer).to_owned_file())
+    tree::read(data, limits)
 }
 
 /// An `.aepx` read for the flat index: every body decoded into one buffer, and the chunks as
 /// [`Draft`]s in depth-first order with their bodies as ranges of that buffer.
-/// [`TreeIndex::from_drafts`] makes the index, which borrows the buffer.
+/// [`crate::container::TreeIndex::from_drafts`] makes the index, which borrows the buffer.
 pub(crate) struct AepxDrafts {
     /// The decoded bodies (hex, text, alias JSON, numbers) and the XMP packet.
     pub(crate) buffer: Vec<u8>,
@@ -101,7 +96,10 @@ pub(crate) struct AepxDrafts {
 /// errors, without one allocation per chunk.
 ///
 /// # Errors
-/// See [`read_aepx_with_limits`].
+/// See [`read_aepx_with_limits`]. When memory runs out, two errors come up in more cases than
+/// there: [`AepError::TooLarge`] when the chunk list cannot grow (the owned-tree reader would
+/// abort), and [`AepError::Xml`] "bdata is too large to hold in memory" also when the shared body
+/// buffer cannot grow (the owned-tree reader reserves each value on its own).
 pub(crate) fn index_aepx(data: &[u8], limits: Limits) -> Result<AepxDrafts, AepError> {
     let text = match std::str::from_utf8(data) {
         Ok(t) => t.as_bytes(),
@@ -120,7 +118,8 @@ pub(crate) fn index_aepx(data: &[u8], limits: Limits) -> Result<AepxDrafts, AepE
     reader.run()
 }
 
-/// The slots the chunk list starts with; it doubles from there (as [`TreeIndex`]'s does).
+/// The slots the chunk list starts with; it doubles from there (as the array of
+/// [`crate::container::TreeIndex`] does).
 const INITIAL_SLOTS: usize = 1024;
 
 fn xml(offset: usize, what: &'static str) -> AepError {
@@ -604,7 +603,6 @@ fn decode_entities(raw: &[u8], offset: usize, out: &mut Vec<u8>) -> Result<(), A
 }
 
 /// Decodes a `bdata` value (hex digits, two per byte) into a new `Vec` of exactly its size.
-#[cfg(test)]
 fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
     decode_hex_at_most(text, offset, MAX_BDATA)
 }
@@ -614,13 +612,13 @@ fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
 const MAX_BDATA: usize = u32::MAX as usize;
 
 /// [`decode_hex`] with the decoded-size limit as a parameter (so tests can reach it).
-#[cfg(test)]
 fn decode_hex_at_most(text: &[u8], offset: usize, max: usize) -> Result<Vec<u8>, AepError> {
-    // Checked before anything is reserved, then sized once.
+    // Checked before anything is reserved, then sized once (collecting into `Option<Vec>` has no
+    // size hint and regrows step by step), and without aborting when the memory is not there.
     let pairs = check_hex(text, offset, max)?;
     let mut out = Vec::new();
     out.try_reserve_exact(pairs).map_err(|_| xml(offset, "bdata is too large to hold in memory"))?;
-    decode_hex_into(text, offset, max, &mut out)?;
+    decode_checked(text, offset, &mut out)?;
     Ok(out)
 }
 
@@ -628,15 +626,21 @@ fn decode_hex_at_most(text: &[u8], offset: usize, max: usize) -> Result<Vec<u8>,
 /// On an error `out` is unchanged.
 fn decode_hex_into(text: &[u8], offset: usize, max: usize, out: &mut Vec<u8>) -> Result<(), AepError> {
     let pairs = check_hex(text, offset, max)?;
+    // Grown at most once per value (amortised over a shared buffer), and without aborting when the
+    // memory is not there.
+    out.try_reserve(pairs).map_err(|_| xml(offset, "bdata is too large to hold in memory"))?;
+    decode_checked(text, offset, out)
+}
+
+/// Appends the bytes of a `bdata` value that [`check_hex`] accepted. On an error (a digit the
+/// check let through, which it does not) `out` is unchanged.
+fn decode_checked(text: &[u8], offset: usize, out: &mut Vec<u8>) -> Result<(), AepError> {
     let digit = |b: u8| match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     };
-    // Grown at most once per value (amortised over a shared buffer), and without aborting when the
-    // memory is not there.
-    out.try_reserve(pairs).map_err(|_| xml(offset, "bdata is too large to hold in memory"))?;
     let mark = out.len();
     for [hi, lo] in text.as_chunks::<2>().0 {
         match (digit(*hi), digit(*lo)) {
@@ -713,6 +717,7 @@ fn json_str(out: &mut String, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::index::TreeIndex;
 
     fn doc(body: &str) -> String {
         format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<AfterEffectsProject xmlns=\"x\">{body}</AfterEffectsProject>\n")
@@ -1035,11 +1040,11 @@ mod tests {
         ]
     }
 
-    /// The reader and the reference give the same `Result` (the tree, or the error), and the index
-    /// of the reader is the index of the reference's tree.
+    /// The index reader and the owned-tree reader give the same `Result` (the tree, or the error),
+    /// and the index walks like the index of the owned tree.
     fn same(bytes: &[u8], limits: Limits) {
-        let old = reference::read(bytes, limits);
-        let new = read_aepx_with_limits(bytes, limits);
+        let old = read_aepx_with_limits(bytes, limits);
+        let new = index_aepx(bytes, limits).map(|d| TreeIndex::from_drafts(&d.buffer, d.nodes, d.trailer).to_file().into_owned());
         assert_eq!(new, old, "{}", String::from_utf8_lossy(bytes));
         if let Ok(file) = &old {
             let AepxDrafts { buffer, nodes, trailer } = index_aepx(bytes, limits).unwrap();
@@ -1053,9 +1058,9 @@ mod tests {
         }
     }
 
-    /// The reader gives the reference's tree and errors on generated and damaged documents.
+    /// The two readers give the same tree and errors on generated and damaged documents.
     #[test]
-    fn the_index_reader_matches_the_reference_on_generated_and_damaged_documents() {
+    fn the_two_readers_agree_on_generated_and_damaged_documents() {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
         let noise = b"<>/=\"'&;#x0aZ \n![]-?";
         for _ in 0..600 {
@@ -1154,9 +1159,9 @@ mod tests {
         same(deep.as_bytes(), Limits::default());
     }
 
-    /// Hostile input is refused with the reference's errors, without allocating from what it declares.
+    /// Hostile input is refused by both readers with the same errors.
     #[test]
-    fn hostile_input_is_refused_like_the_reference() {
+    fn hostile_input_is_refused_alike_by_both_readers() {
         let hostile = [
             format!("<AfterEffectsProject>{}{}</AfterEffectsProject>", "<a>".repeat(100_000), "</a>".repeat(100_000)),
             format!("<AfterEffectsProject>{}", "<string>".repeat(1000)),
@@ -1179,10 +1184,10 @@ mod tests {
         }
     }
 
-    /// Every `.aepx` of the fixture directory gives the reference's tree (skipped without
-    /// `EFFECTCRAFT_AEP_FIXTURES`).
+    /// Every `.aepx` of the fixture directory gives the same tree through both readers (skipped
+    /// without `EFFECTCRAFT_AEP_FIXTURES`).
     #[test]
-    fn every_fixture_aepx_gives_the_reference_tree() {
+    fn every_fixture_aepx_gives_the_same_tree_through_both_readers() {
         let Some(dir) = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES").filter(|d| !d.is_empty()) else { return };
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         let mut paths: Vec<std::path::PathBuf> =
@@ -1191,7 +1196,8 @@ mod tests {
         for path in paths {
             let bytes = std::fs::read(&path).unwrap();
             for l in limit_sets() {
-                assert_eq!(read_aepx_with_limits(&bytes, l), reference::read(&bytes, l), "{}", path.display());
+                let index = index_aepx(&bytes, l).map(|d| TreeIndex::from_drafts(&d.buffer, d.nodes, d.trailer).to_file().into_owned());
+                assert_eq!(index, read_aepx_with_limits(&bytes, l), "{}", path.display());
             }
         }
     }

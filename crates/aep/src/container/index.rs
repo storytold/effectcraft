@@ -232,14 +232,7 @@ impl<'a> TreeIndex<'a> {
     /// The owned chunk tree (the bodies stay borrowed from the input): what
     /// [`crate::container::parse`] gives for the same file.
     pub fn to_file(&self) -> AepFile<'a> {
-        AepFile { chunks: self.build(0, u32::try_from(self.nodes.len()).unwrap_or(u32::MAX), Cow::Borrowed), trailer: Cow::Borrowed(self.trailer) }
-    }
-
-    /// [`Self::to_file`] with every body copied, in one pass without recursion (what
-    /// `to_file().into_owned()` gives, without the borrowed tree in between).
-    pub(crate) fn to_owned_file(&self) -> AepFile<'static> {
-        let owned = |d: &[u8]| Cow::Owned(d.to_vec());
-        AepFile { chunks: self.build(0, u32::try_from(self.nodes.len()).unwrap_or(u32::MAX), owned), trailer: Cow::Owned(self.trailer.to_vec()) }
+        AepFile { chunks: self.build(0, u32::try_from(self.nodes.len()).unwrap_or(u32::MAX)), trailer: Cow::Borrowed(self.trailer) }
     }
 
     /// The entry at `at`, `None` past the end.
@@ -254,7 +247,7 @@ impl<'a> TreeIndex<'a> {
 
     /// The owned chunks for the siblings that start at `next` and fill `next..end`, without
     /// recursion.
-    fn build<'o>(&self, next: u32, end: u32, body_of: impl Fn(&'a [u8]) -> Cow<'o, [u8]>) -> Vec<Chunk<'o>> {
+    fn build(&self, next: u32, end: u32) -> Vec<Chunk<'a>> {
         struct Frame<'a> {
             /// The list or nested chunk being filled; `None` for the outermost range.
             at: Option<u32>,
@@ -277,9 +270,9 @@ impl<'a> TreeIndex<'a> {
                         let sub_end = self.end_of(at);
                         stack.push(Frame { at: Some(at), kids: Vec::new(), next: at.saturating_add(1), end: sub_end });
                     }
-                    Kind::Data => top.kids.push(Chunk { id: e.id, body: Body::Data(body_of(e.data)), pad: e.pad }),
+                    Kind::Data => top.kids.push(Chunk { id: e.id, body: Body::Data(Cow::Borrowed(e.data)), pad: e.pad }),
                     Kind::OpaqueList => {
-                        top.kids.push(Chunk { id: e.id, body: Body::OpaqueList { list_type: e.list_type, data: body_of(e.data) }, pad: e.pad });
+                        top.kids.push(Chunk { id: e.id, body: Body::OpaqueList { list_type: e.list_type, data: Cow::Borrowed(e.data) }, pad: e.pad });
                     }
                 }
             } else {
@@ -497,7 +490,7 @@ impl<'f, 'a> Node<'f, 'a> {
     pub fn to_chunk(self) -> Chunk<'a> {
         match self.0 {
             NodeRepr::Chunk(c) => c.clone(),
-            NodeRepr::Index(tree, at) => tree.build(at, tree.end_of(at), Cow::Borrowed).into_iter().next().unwrap_or_else(|| Chunk::data(self.id(), &[][..])),
+            NodeRepr::Index(tree, at) => tree.build(at, tree.end_of(at)).into_iter().next().unwrap_or_else(|| Chunk::data(self.id(), &[][..])),
         }
     }
 

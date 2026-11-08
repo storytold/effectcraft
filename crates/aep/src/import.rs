@@ -246,14 +246,12 @@ mod tests {
         }
     }
 
-    /// Imports an `.aepx` through the owned tree of the reader this replaced and through the
-    /// index ([`import`]): the same project, report and settings, or the same error.
+    /// Imports an `.aepx` through the owned tree ([`crate::read_aepx`]) and through the index
+    /// ([`import`]): the same project, report and settings, or the same error.
     fn both_aepx(bytes: &[u8], name: &str) -> Result<ImportResult, AepImportError> {
         let exists = |_: &str| true;
         let options = ImportOptions { allow_losses: true, ..ImportOptions::new(&exists) };
-        let a = crate::container::aepx_reference::read(bytes, Limits::default())
-            .map_err(AepImportError::from)
-            .and_then(|file| import_root(&mut Project::default(), Root::from(&file), &options));
+        let a = crate::read_aepx(bytes).map_err(AepImportError::from).and_then(|file| import_root(&mut Project::default(), Root::from(&file), &options));
         let b = import(&mut Project::default(), bytes, &options);
         assert!(a == b, "{name}: the .aepx import differs through the index");
         b

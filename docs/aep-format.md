@@ -119,11 +119,11 @@ counterpart (a name that is not 1 to 4 characters) are skipped with their conten
   with the byte offset. It runs without recursion; the nesting depth (`Limits::max_depth`) and the
   element count (`Limits::max_chunks`) are bounded, and everything it allocates is bounded by the
   size of the input.
-- The reader decodes every body (hex, text, the alias JSON, the numbers) into one buffer and records
-  the chunks as a flat depth-first list whose bodies are ranges of that buffer. The importer
-  indexes that buffer (`TreeIndex`) as it indexes an `.aep`; `read_aepx` converts it into the
-  owned tree. The tree is the one the element-by-element reader gave, which the crate's tests keep
-  as the reference.
+- There are two readers. `read_aepx` builds the owned tree element by element. The importer, which
+  only reads, uses a second reader that decodes every body (hex, text, the alias JSON, the
+  numbers) into one buffer and records the chunks as a flat depth-first list whose bodies are
+  ranges of that buffer; it indexes that buffer (`TreeIndex`) as it indexes an `.aep`. The tests
+  hold both readers to the same tree and the same errors.
 - Tests: `tests/aepx.rs` compares the five fixture pairs chunk by chunk and byte by byte, compares
   the typed view of both forms, and runs truncated, bit-flipped, deeply nested and oversized
   inputs; `crates/aep/tests/it/import/aepx.rs` imports both forms of each pair and expects the same
