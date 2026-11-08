@@ -70,10 +70,10 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Parses the sibling chunks that exactly fill `start..end`.
     fn sequence(&mut self, start: usize, end: usize, depth: usize) -> Result<Vec<Chunk<'a>>, AepError> {
-        // Sized once: a well-formed sequence fills exactly this many slots. The count is bounded by
-        // the input (one per 8 bytes at most) and by the chunks the limit still allows.
-        let capacity = self.count_siblings(start, end).min(self.limits.max_chunks.saturating_sub(self.count));
-        let mut out = Vec::with_capacity(capacity);
+        // Sized once: a well-formed sequence fills exactly this many slots. `try_reserve` so a
+        // limit raised past what the target can allocate fails nothing here (the Vec then grows).
+        let mut out = Vec::new();
+        let _ = out.try_reserve_exact(self.capacity_for(start, end));
         let mut pos = start;
         while pos < end {
             let short = AepError::Malformed { offset: pos, what: "bytes left over that are too short for a chunk header" };
@@ -100,6 +100,12 @@ impl<'a> Parser<'a> {
             pos = next;
         }
         Ok(out)
+    }
+
+    /// The slots to reserve for the sequence `start..end`: its header count, bounded by the input
+    /// (one per 8 bytes at most) and by the chunks the limit still allows.
+    fn capacity_for(&self, start: usize, end: usize) -> usize {
+        self.count_siblings(start, end).min(self.limits.max_chunks.saturating_sub(self.count))
     }
 
     /// The number of chunk headers that tile `start..end` the way [`Self::sequence`] walks them,
@@ -182,6 +188,8 @@ mod tests {
         let mut vecs = vec![&parsed.chunks];
         child_vecs(&parsed.chunks, &mut vecs);
         assert_eq!(vecs.len(), 11);
+        // `try_reserve_exact` gives exactly the requested capacity with std's allocator today; a
+        // Vec grown push by push would have rounded up to a power of two (37 -> 64, 9 -> 16).
         for v in vecs {
             assert_eq!(v.capacity(), v.len(), "a sibling Vec grew past its length");
         }
@@ -208,5 +216,53 @@ mod tests {
         // Under a tighter limit the parse fails as before, without sizing for more than allowed.
         let tight = Limits { max_depth: 64, max_chunks: 10 };
         assert_eq!(parse_with_limits(&data, tight), Err(AepError::TooManyChunks));
+        // The reservation never exceeds what the chunk limit still allows.
+        let mut parser = Parser { data: &data, limits: tight, count: 0 };
+        assert_eq!(parser.capacity_for(12, data.len()), 10);
+        parser.count = 7;
+        assert_eq!(parser.capacity_for(12, data.len()), 3);
+        parser.count = 11;
+        assert_eq!(parser.capacity_for(12, data.len()), 0);
+        let parser = Parser { data: &data, limits: Limits::default(), count: 0 };
+        assert_eq!(parser.capacity_for(12, data.len()), 1000);
+    }
+
+    /// `LIST Fold` around `inner`, followed by 6 bytes too short for a header, so the list's
+    /// sequence fails and the list is kept opaque.
+    fn broken_level(inner: &[u8]) -> Vec<u8> {
+        let mut body = b"Fold".to_vec();
+        body.extend_from_slice(inner);
+        body.extend_from_slice(&[0xee; 6]);
+        let mut out = b"LIST".to_vec();
+        out.extend_from_slice(&u32::try_from(body.len()).expect("small").to_be_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn nested_lists_with_broken_tails_parse_each_header_once() {
+        // A wide, well-formed list at the bottom, then 50 levels that each fail and fall back to
+        // opaque: every level re-parses its child before giving up.
+        let mut wide = b"Fold".to_vec();
+        wide.extend(std::iter::repeat_n(*b"abcd\0\0\0\0", 1000).flatten());
+        let mut level = b"LIST".to_vec();
+        level.extend_from_slice(&u32::try_from(wide.len()).expect("small").to_be_bytes());
+        level.extend_from_slice(&wide);
+        for _ in 0..50 {
+            level = broken_level(&level);
+        }
+        let mut data = b"RIFX\0\0\0\0Egg!".to_vec();
+        data.extend_from_slice(&level);
+        let declared = u32::try_from(data.len() - 8).expect("small");
+        data[4..8].copy_from_slice(&declared.to_be_bytes());
+        // 1 + 50 + 1000 headers in the file: the parse counts each exactly once (the count spans
+        // every attempt), so the work stays linear in the input.
+        let headers = 1 + 50 + 1000;
+        let f = parse_with_limits(&data, Limits { max_depth: 64, max_chunks: headers }).expect("parse");
+        assert_eq!(parse_with_limits(&data, Limits { max_depth: 64, max_chunks: headers - 1 }), Err(AepError::TooManyChunks));
+        // The outermost list keeps its bytes, and the file writes back unchanged.
+        let [top] = f.chunks.as_slice() else { panic!("one top-level chunk") };
+        assert!(matches!(&top.body, Body::OpaqueList { list_type, data } if list_type == b"Fold" && data.len() + 12 == level.len()));
+        assert_eq!(crate::container::write(&f).expect("write"), data);
     }
 }

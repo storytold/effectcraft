@@ -122,7 +122,7 @@ struct Reader<'d> {
     trailer: Option<Vec<u8>>,
 }
 
-impl<'d> Reader<'d> {
+impl Reader<'_> {
     fn run(mut self) -> Result<AepFile<'static>, AepError> {
         if self.data.starts_with(&[0xef, 0xbb, 0xbf]) {
             self.pos = 3;
@@ -227,8 +227,7 @@ impl<'d> Reader<'d> {
         let at = self.pos;
         self.pos = self.pos.saturating_add(1);
         let name = self.name()?;
-        let data = self.data;
-        let mut attrs: Vec<((usize, usize), Cow<'d, [u8]>)> = Vec::new();
+        let mut attrs = Vec::new();
         let self_closing = loop {
             self.skip_ws();
             let rest = self.rest();
@@ -256,7 +255,7 @@ impl<'d> Reader<'d> {
             }
             let vstart = self.pos.saturating_add(1);
             let vend = self.find(vstart, &[quote]).ok_or(xml(vstart, "an attribute value is not closed"))?;
-            let raw = data.get(vstart..vend).unwrap_or(&[]);
+            let raw = self.data.get(vstart..vend).unwrap_or(&[]);
             if raw.contains(&b'<') {
                 return Err(xml(vstart, "`<` inside an attribute value"));
             }

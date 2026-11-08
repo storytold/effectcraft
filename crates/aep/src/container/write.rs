@@ -17,14 +17,17 @@ const MAX_WRITE_DEPTH: usize = 256;
 /// [`AepError::TooDeep`] for an absurdly deep hand-built tree.
 pub fn write(file: &AepFile<'_>) -> Result<Vec<u8>, AepError> {
     let mut out = Vec::new();
-    // Sized once to the exact output when the tree fits a container (a tree that does not fails
-    // below anyway). `try_reserve` so a hand-built tree that repeats one large borrowed body many
-    // times cannot abort on the allocation; the writer then grows as it goes, as before.
-    if let Some(len) = sequence_len(&file.chunks, 1)
-        && u32::try_from(len.saturating_add(4)).is_ok()
-        && let Some(total) = len.checked_add(12).and_then(|n| n.checked_add(file.trailer.len()))
-    {
-        let _ = out.try_reserve_exact(total);
+    // Sized once to the exact output. A tree past the 32-bit container size fails at once (the
+    // same error the write below would give after serialising it). `try_reserve` so a hand-built
+    // tree that repeats one large borrowed body many times cannot abort on the allocation; the
+    // writer then grows as it goes, as before.
+    if let Some(len) = sequence_len(&file.chunks, 1) {
+        if u32::try_from(len.saturating_add(4)).is_err() {
+            return Err(AepError::TooLarge);
+        }
+        if let Some(total) = len.checked_add(12).and_then(|n| n.checked_add(file.trailer.len())) {
+            let _ = out.try_reserve_exact(total);
+        }
     }
     out.extend_from_slice(b"RIFX");
     out.extend_from_slice(&[0; 4]);
@@ -143,8 +146,21 @@ mod tests {
         for file in &trees {
             let out = write(file).expect("write");
             assert_eq!(sequence_len(&file.chunks, 1).map(|n| n + 12 + file.trailer.len()), Some(out.len()));
+            // Exact with std's allocator today; grown push by push it would be rounded up.
             assert_eq!(out.capacity(), out.len(), "the output grew past its size");
         }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_tree_past_the_container_size_fails_before_serialising() {
+        // 4097 chunks borrowing one 1 MiB body: over 4 GiB of output, none of it written.
+        let body = vec![0u8; 1 << 20];
+        let chunks: Vec<Chunk<'_>> = (0..4097).map(|_| Chunk::data(*b"cdat", &body[..])).collect();
+        let file = AepFile { chunks, trailer: Cow::Borrowed(&[]) };
+        assert_eq!(write(&file), Err(AepError::TooLarge));
+        // Just under the limit still sizes, and fails nothing up front.
+        assert!(sequence_len(&file.chunks[..4000], 1).is_some_and(|n| u32::try_from(n + 4).is_ok()));
     }
 
     #[test]
