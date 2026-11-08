@@ -525,6 +525,9 @@ pub struct DiskCache {
     /// Files whose entries are being deleted ([`DiskCache::drop_files`]), each with the number
     /// of drops of it pending: until then an entry made of one is a miss.
     dropping: Mutex<HashMap<Arc<str>, u32>>,
+    /// Bytes [`DiskCache::entry_files`] read (tests).
+    #[cfg(test)]
+    head_bytes: AtomicU64,
 }
 
 /// FNV-1a 128-bit (content keys).
@@ -632,6 +635,8 @@ impl DiskCache {
             )),
             min_layer_ms: AtomicU64::new(30),
             dropping: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            head_bytes: AtomicU64::new(0),
         });
         dc.rescan();
         // Shrinking a large cache deletes many files: the writer thread does it.
@@ -1144,7 +1149,9 @@ impl DiskCache {
     /// earlier format, gone, damaged): such an entry is never used anyway.
     fn entry_files(&self, kind: Kind, key: u128) -> Option<EntryFiles> {
         use std::io::Read;
-        const HEAD: u64 = 64 << 10;
+        // (a plane entry lists its one source file: a short read holds it; there are many of
+        // them, one per channel and frame, and Reload Footage reads each one's head)
+        let head_len: u64 = if kind == Kind::Plane { 4 << 10 } else { 64 << 10 };
         let parse = |d: &[u8]| {
             let format = *d.get(5)?;
             let ours = d.get(..4)? == MAGIC && *d.get(4)? == kind.tag();
@@ -1155,8 +1162,10 @@ impl DiskCache {
         };
         let path = self.path(kind, key);
         let mut head = Vec::new();
-        std::fs::File::open(&path).ok()?.take(HEAD).read_to_end(&mut head).ok()?;
-        parse(&head).or_else(|| if head.len() as u64 == HEAD { parse(&std::fs::read(&path).ok()?) } else { None })
+        std::fs::File::open(&path).ok()?.take(head_len).read_to_end(&mut head).ok()?;
+        #[cfg(test)]
+        self.head_bytes.fetch_add(head.len() as u64, Ordering::Relaxed);
+        parse(&head).or_else(|| if head.len() as u64 == head_len { parse(&std::fs::read(&path).ok()?) } else { None })
     }
 
     // ------------------------------------------------------------ typed entries
@@ -2157,6 +2166,42 @@ mod tests {
         assert_eq!(dc.stats().dropped, 0);
         assert_eq!(crate::memory::MemoryHolder::bytes(&*dc), 0, "written: the queue holds nothing");
         assert_eq!(dc.get_plane(168, 4, 2).map(|(n, p)| (n, p[0])), Some(("c68".to_string(), 68.0)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271 review: Reload Footage looks at each plane entry's head for its source file; a plane
+    /// entry lists one, so only a short head is read (a sequence of many channels has a great
+    /// many plane entries), and the entry is still found and deleted.
+    #[test]
+    fn reload_reads_only_a_short_head_of_plane_entries() {
+        let dir = tmpdir("planes-sweep");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        // A plane that doesn't compress: its entry is far larger than any head read.
+        let (w, h) = (256u32, 256u32);
+        let mut x = 0x1234_5678u32;
+        let plane: Vec<f32> = (0..w * h)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                f32::from_bits(0x3f00_0000 | (x >> 9))
+            })
+            .collect();
+        assert!(dc.put_planes(w, h, vec![(400, "noise".into(), plane)], &files, 0));
+        dc.flush();
+        assert_eq!(dc.keys(Kind::Plane), [400]);
+        assert!(std::fs::metadata(dc.path(Kind::Plane, 400)).unwrap().len() > 64 << 10);
+        let before = dc.head_bytes.load(Ordering::Relaxed);
+        dc.drop_files([dir.join("src").join("plate.exr").to_string_lossy().to_string()]);
+        dc.flush();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while dc.is_dropping() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(dc.keys(Kind::Plane).is_empty(), "the plane entry of the reloaded file is deleted");
+        let read = dc.head_bytes.load(Ordering::Relaxed) - before;
+        assert!(read > 0 && read <= 4 << 10, "{read} bytes read");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
