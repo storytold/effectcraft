@@ -270,6 +270,11 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         }
         masks.sort();
         masks.dedup();
+        // Masks on a locked layer are left alone, as shape items are. This comes after the scope
+        // and its fallback, so a locked selected mask doesn't hand the conversion to other masks.
+        let mut mask_layers: Vec<LayerId> = masks.iter().map(|(l, _)| *l).collect();
+        mask_layers.dedup();
+        masks.retain(|(l, _)| comp.layer(*l).is_some_and(|ly| !ly.switches.locked));
         // Masks take priority when they are targeted (a `mask`, a selected mask or mask vertices)
         // or when one of them has RotoBezier tangents to turn off. A selected layer's plain masks
         // are already Bezier paths: converting them would do nothing and hide the layer's
@@ -281,6 +286,11 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
                 .iter()
                 .any(|(l, u)| in_scope(l) && comp.layer(*l).and_then(|l| l.masks()).is_some_and(|m| m.uid != *u && m.find_group(*u).is_some()));
         let any_roto = masks.iter().any(|(l, u)| mask_of(*l, *u).is_some_and(is_roto));
+        // Every targeted mask is on a locked layer: say so rather than convert anything else.
+        if mask_targeted && masks.is_empty() && !mask_layers.is_empty() {
+            unlocked(s, cid, mask_layers, "path.convertToBezier")?;
+            return Err(bad(LABEL, "the masks are on locked layers"));
+        }
         // A selected group whose paths were all skipped as animated reports that, rather than
         // turning to the layer's masks.
         if !masks.is_empty() && (mask_targeted || (any_roto && skipped_animated == 0)) {

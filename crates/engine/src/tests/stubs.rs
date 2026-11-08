@@ -939,6 +939,35 @@ fn convert_to_bezier_keeps_masks_to_an_explicit_layer() {
     assert!(matches!(mask_kind(&s, b), GroupKind::Mask { roto_bezier: true, .. }), "the mask selected on another layer does not");
 }
 
+/// #3057 review: a RotoBezier mask on a locked layer stays as it is, given as the layer or
+/// selected, and removing it as a target does not hand the conversion to another layer's mask.
+#[test]
+fn convert_to_bezier_leaves_a_locked_layers_masks_alone() {
+    let mut s = comp();
+    let (a, ma) = masked(&mut s);
+    let (b, _) = masked(&mut s);
+    for l in [a, b] {
+        s.state.selected_props.clear();
+        s.state.selected_vertices.clear();
+        s.execute("path.rotoBezier", json!({"layer": l, "value": true})).unwrap();
+    }
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "locked", "value": true})).unwrap();
+    let roto = |s: &Session, l: u64| matches!(mask_kind(s, l), GroupKind::Mask { roto_bezier: true, .. });
+
+    // The locked layer given explicitly.
+    s.state.selected_props.clear();
+    s.state.selected_vertices.clear();
+    let err = s.execute("path.convertToBezier", json!({"layer": a})).unwrap_err().to_string();
+    assert!(err.contains("locked"), "{err}");
+    assert!(roto(&s, a), "the locked layer's mask stays RotoBezier");
+
+    // Its mask selected, with the unlocked layer in scope too: B's mask is not converted instead.
+    s.state.selected_props = vec![(LayerId(a), ma)];
+    let err = s.execute("path.convertToBezier", json!({"layers": [a, b]})).unwrap_err().to_string();
+    assert!(err.contains("locked"), "{err}");
+    assert!(roto(&s, a) && roto(&s, b), "neither mask converts");
+}
+
 /// #3057: parametric paths in nested groups convert from the layer and from the outer group.
 #[test]
 fn convert_to_bezier_finds_paths_in_nested_groups() {
