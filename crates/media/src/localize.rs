@@ -82,29 +82,53 @@ fn same(a: Option<&LocalizeConfig>, b: Option<&LocalizeConfig>) -> bool {
 /// longer read. A new folder's earlier copies are adopted (their records beside them), stale
 /// temporaries deleted.
 pub fn configure(config: Option<LocalizeConfig>) {
-    let mut st = lock();
-    if same(st.config.as_ref(), config.as_ref()) {
-        if let Some(c) = config {
-            st.config = Some(c);
+    // (the file system is read and written outside the lock: reads ask the localizer for copies
+    // on every frame, and a slow folder must not hold them up)
+    let (epoch, adopt_from, space_of) = {
+        let mut st = lock();
+        if same(st.config.as_ref(), config.as_ref()) {
+            if let Some(c) = config {
+                st.config = Some(c);
+            }
+            return;
         }
-        return;
-    }
-    st.epoch = st.epoch.wrapping_add(1);
-    let new_folder = st.config.as_ref().map(|c| &c.folder) != config.as_ref().map(|c| &c.folder);
-    st.queue.clear();
-    st.queued.clear();
-    st.skipped.clear();
-    st.space = None;
-    st.config = config;
-    if new_folder {
-        st.copies.clear();
-        st.bytes = 0;
-        if let Some(folder) = st.config.as_ref().map(|c| c.folder.clone()) {
-            adopt(&mut st, &folder);
+        st.epoch = st.epoch.wrapping_add(1);
+        let new_folder = st.config.as_ref().map(|c| &c.folder) != config.as_ref().map(|c| &c.folder);
+        st.queue.clear();
+        st.queued.clear();
+        st.skipped.clear();
+        st.space = None;
+        st.config = config;
+        if new_folder {
+            st.copies.clear();
+            st.bytes = 0;
         }
+        let adopt_from = st.config.as_ref().filter(|_| new_folder).map(|c| c.folder.clone());
+        (st.epoch, adopt_from, st.config.as_ref().and_then(|c| c.disk_space.clone()))
+    };
+    let found = adopt_from.map(|f| adopt(&f)).unwrap_or_default();
+    let space = space_of.and_then(|read| read());
+    let gone = {
+        let mut st = lock();
+        // (set again meanwhile: that setting's call does the work)
+        if st.epoch != epoch {
+            return;
+        }
+        for (original, copy) in found {
+            st.clock += 1;
+            st.bytes = st.bytes.saturating_add(copy.len);
+            let last_use = st.clock;
+            st.copies.insert(original, Copy { last_use, ..copy });
+        }
+        if let Some(space) = space {
+            st.space = Some((space, std::time::Instant::now()));
+        }
+        let max = limit(&mut st);
+        evict_to(&mut st, max)
+    };
+    for local in gone {
+        remove_copy(&local);
     }
-    let max = limit(&mut st);
-    evict_to(&mut st, max);
 }
 
 /// The copies' record beside a copy.
@@ -138,10 +162,12 @@ fn ours(name: &str) -> bool {
     name.len() > 17 && name.as_bytes().get(16) == Some(&b'_') && name.get(..16).is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// Take over the copies `folder` holds from an earlier session; delete temporaries and copies
-/// without a record (only the localizer's own files: other files in the folder are left alone).
-fn adopt(st: &mut State, folder: &Path) {
-    let Ok(dir) = std::fs::read_dir(folder) else { return };
+/// The copies `folder` holds from an earlier session, by source; temporaries and copies without
+/// a record are deleted (only the localizer's own files: other files in the folder are left
+/// alone). Runs without the localizer's lock.
+fn adopt(folder: &Path) -> Vec<(PathBuf, Copy)> {
+    let mut found = vec![];
+    let Ok(dir) = std::fs::read_dir(folder) else { return found };
     let mut records = vec![];
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
@@ -159,18 +185,14 @@ fn adopt(st: &mut State, folder: &Path) {
         let parsed = std::fs::read_to_string(&rec).ok().and_then(|t| parse_record(&t));
         let fine = parsed.as_ref().is_some_and(|(_, _, len)| std::fs::metadata(&local).is_ok_and(|m| m.is_file() && m.len() == *len));
         match parsed {
-            Some((original, source, len)) if fine => {
-                st.clock += 1;
-                let last_use = st.clock;
-                st.bytes = st.bytes.saturating_add(len);
-                st.copies.insert(original, Copy { local, len, source, last_use });
-            }
+            Some((original, source, len)) if fine => found.push((original, Copy { local, len, source, last_use: 0 })),
             _ => {
                 let _ = std::fs::remove_file(&rec);
                 let _ = std::fs::remove_file(&local);
             }
         }
     }
+    found
 }
 
 /// What the localizer is doing; `None` when it is off.
@@ -251,19 +273,35 @@ pub(crate) fn request(original: &Path) {
 /// modification time when it was copied) and the copy its size; `None` otherwise (read the
 /// source). A copy whose source changed is forgotten (and copied again when asked for).
 pub(crate) fn local_copy(original: &Path, now: &FileStamp) -> Option<PathBuf> {
+    let (local, len, source) = {
+        let st = lock();
+        st.config.as_ref()?;
+        let c = st.copies.get(original)?;
+        (c.local.clone(), c.len, c.source)
+    };
+    // (the copy is looked at without the lock)
+    let ok = source == *now && std::fs::metadata(&local).is_ok_and(|m| m.is_file() && m.len() == len);
     let mut st = lock();
-    st.config.as_ref()?;
     st.clock += 1;
     let clock = st.clock;
-    let c = st.copies.get_mut(original)?;
-    let ok = c.source == *now && std::fs::metadata(&c.local).is_ok_and(|m| m.is_file() && m.len() == c.len);
-    if ok {
-        c.last_use = clock;
-        return Some(c.local.clone());
+    // (the same copy as looked at: it may have been replaced or dropped meanwhile)
+    let same = st.copies.get(original).is_some_and(|c| c.local == local && c.len == len && c.source == source);
+    if !same {
+        return None;
     }
-    if let Some(gone) = st.copies.remove(original) {
-        st.bytes = st.bytes.saturating_sub(gone.len);
-        remove_copy(&gone.local);
+    if ok {
+        if let Some(c) = st.copies.get_mut(original) {
+            c.last_use = clock;
+        }
+        return Some(local);
+    }
+    let gone = st.copies.remove(original);
+    if let Some(g) = &gone {
+        st.bytes = st.bytes.saturating_sub(g.len);
+    }
+    drop(st);
+    if let Some(g) = gone {
+        remove_copy(&g.local);
     }
     None
 }
@@ -302,15 +340,19 @@ fn limit(st: &mut State) -> u64 {
     c.max_bytes.min(cap)
 }
 
-/// Drop the least recently used copies until they take at most `max` bytes.
-fn evict_to(st: &mut State, max: u64) {
+/// Drop the least recently used copies until they take at most `max` bytes; their files, which
+/// the caller deletes once it let go of the lock ([`remove_copy`]).
+#[must_use]
+fn evict_to(st: &mut State, max: u64) -> Vec<PathBuf> {
+    let mut gone = vec![];
     while st.bytes > max {
         let Some(oldest) = st.copies.iter().min_by_key(|(_, c)| c.last_use).map(|(p, _)| p.clone()) else { break };
         if let Some(c) = st.copies.remove(&oldest) {
             st.bytes = st.bytes.saturating_sub(c.len);
-            remove_copy(&c.local);
+            gone.push(c.local);
         }
     }
+    gone
 }
 
 /// The copies' folder name of `original`: a hash of its path, then its file name.
@@ -351,6 +393,7 @@ fn worker() {
         let copied = copy_file(&job, &config.folder, room);
         let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
         st.copying = None;
+        let mut gone = vec![];
         match copied {
             Some((local, len, source)) if st.epoch == epoch => {
                 if let Some(old) = st.copies.remove(&job) {
@@ -361,12 +404,16 @@ fn worker() {
                 st.copies.insert(job, Copy { local, len, source, last_use });
                 st.bytes = st.bytes.saturating_add(len);
                 let max = limit(&mut st);
-                evict_to(&mut st, max);
+                gone = evict_to(&mut st, max);
             }
-            Some((local, _, _)) => remove_copy(&local),
+            Some((local, _, _)) => gone.push(local),
             None => {
                 st.skipped.insert(job);
             }
+        }
+        drop(st);
+        for local in gone {
+            remove_copy(&local);
         }
     }
 }
