@@ -37,6 +37,10 @@ pub struct ControlRequest {
     pub method: String,
     pub params: Value,
     pub reply: Sender<Value>,
+    /// Set by whoever sent it once nobody waits for the reply any more (the control server's
+    /// timeout): a request not begun by then is not run (#3328: requests that had timed out ran
+    /// later, one after another, and a client that went on sending kept the window busy).
+    pub abandoned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ControlRequest {
@@ -44,7 +48,12 @@ impl ControlRequest {
     /// receive the UI thread's reply.
     pub fn new(method: impl Into<String>, params: Value) -> (Self, std::sync::mpsc::Receiver<Value>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (Self { method: method.into(), params, reply: tx }, rx)
+        (Self { method: method.into(), params, reply: tx, abandoned: Default::default() }, rx)
+    }
+
+    /// Whether the sender stopped waiting for the reply ([`ControlRequest::abandoned`]).
+    pub fn is_abandoned(&self) -> bool {
+        self.abandoned.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -741,9 +750,11 @@ fn quit(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
 /// temp file) or inline as base64 when `base64: true`. `write: true` with `base64: true` does both.
 fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     let s = &app.session;
-    // A file the project reads is never the output (checked before rendering).
+    // A file the project reads is never the output (checked before rendering, and the write
+    // after it uses the same guard: it looks at the project's files once, #3328).
+    let guard = s.output_guard();
     if let Some(path) = p.get("path").and_then(Value::as_str)
-        && let Err(e) = s.refuse_export(path)
+        && let Err(e) = guard.refuse(path)
     {
         return err(e);
     }
@@ -777,7 +788,7 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     if inline {
         out["png"] = json!(base64(&png));
     }
-    match s.write_output(&path, &png) {
+    match s.write_output_guarded(&guard, &path, &png) {
         Ok(()) => {
             out["path"] = json!(path);
             ok(out)

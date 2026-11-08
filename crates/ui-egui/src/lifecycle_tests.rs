@@ -79,6 +79,76 @@ fn a_control_command_that_needs_no_ui_completes_without_a_pass() {
     assert_eq!(app.ui_passes(), 0);
 }
 
+/// A `comp.new` request named `name`, sent on `tx`; its reply, and its abandoned flag.
+fn queue_comp(
+    tx: &std::sync::mpsc::Sender<ControlRequest>,
+    name: &str,
+) -> (std::sync::mpsc::Receiver<serde_json::Value>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let (request, reply) =
+        ControlRequest::new("engine.execute", json!({"command": "comp.new", "params": {"name": name, "width": 8, "height": 8, "duration": 1}}));
+    let abandoned = request.abandoned.clone();
+    tx.send(request).unwrap();
+    (reply, abandoned)
+}
+
+/// The names of the project's comps, oldest first.
+fn comp_names(app: &EffectcraftApp) -> Vec<String> {
+    app.session.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.name.clone()).collect()
+}
+
+fn has_comp(app: &EffectcraftApp, name: &str) -> bool {
+    comp_names(app).iter().any(|n| n == name)
+}
+
+/// #3328: a request whose sender stopped waiting (the control server's timeout) before it ran
+/// is not run; the ones around it are.
+#[test]
+fn a_control_request_nobody_waits_for_is_not_run() {
+    let ctx = egui::Context::default();
+    let frame = eframe::Frame::_new_kittest();
+    let mut app = app_with_comp();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.control_rx = Some(rx);
+    let (first, _) = queue_comp(&tx, "Before");
+    let (gone, abandoned) = queue_comp(&tx, "Abandoned");
+    abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (last, _) = queue_comp(&tx, "After");
+    hidden_tick(&mut app, &ctx, &frame);
+    assert!(has_comp(&app, "Before") && has_comp(&app, "After"));
+    assert!(!has_comp(&app, "Abandoned"), "the abandoned request did not run");
+    assert!(gone.try_recv().is_err(), "and is not answered");
+    assert_eq!(first.try_recv().unwrap()["ok"], true);
+    assert_eq!(last.try_recv().unwrap()["ok"], true);
+}
+
+/// #3328: once a tick's time for control requests is spent, the rest run on the next ticks,
+/// in their order, ahead of requests that came later; the window paints in between.
+#[test]
+fn control_requests_over_a_ticks_budget_wait_for_the_next_tick_in_order() {
+    let ctx = egui::Context::default();
+    let frame = eframe::Frame::_new_kittest();
+    let mut app = app_with_comp();
+    app.control_budget = std::time::Duration::ZERO;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.control_rx = Some(rx);
+    let names = ["One", "Two", "Three"];
+    let replies: Vec<_> = names.iter().map(|n| queue_comp(&tx, n).0).collect();
+    hidden_tick(&mut app, &ctx, &frame);
+    assert!(has_comp(&app, "One") && !has_comp(&app, "Two"), "one request per tick at a zero budget");
+    assert_eq!(app.control_backlog.len(), 2);
+    let (later, _) = queue_comp(&tx, "Later");
+    hidden_tick(&mut app, &ctx, &frame);
+    assert!(has_comp(&app, "Two") && !has_comp(&app, "Three") && !has_comp(&app, "Later"), "the backlog first");
+    hidden_tick(&mut app, &ctx, &frame);
+    hidden_tick(&mut app, &ctx, &frame);
+    assert!(has_comp(&app, "Three") && has_comp(&app, "Later"));
+    let order: Vec<String> = comp_names(&app).into_iter().filter(|n| names.contains(&n.as_str()) || n == "Later").collect();
+    assert_eq!(order, ["One", "Two", "Three", "Later"]);
+    for reply in replies.iter().chain([&later]) {
+        assert_eq!(reply.try_recv().unwrap()["ok"], true);
+    }
+}
+
 #[test]
 fn a_pass_that_cannot_draw_receives_no_synthetic_input() {
     let ctx = egui::Context::default();

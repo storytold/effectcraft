@@ -96,6 +96,7 @@ pub use doc_state::{CompSelection, EditorState, KeyClip, KeyMove, KeyRef, LinkCl
 pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
+pub use output_guard::OutputGuard;
 pub use services::{FsServices, Importer, Services};
 pub use session::upgrade_effects;
 
@@ -264,6 +265,10 @@ pub struct Session {
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
+    /// What the output guard learnt of the protected files' identities, for the next check
+    /// (#3328). Public only so that other crates can build a `Session { .. }`.
+    #[doc(hidden)]
+    pub output_identities: output_guard::IdentityCache,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.
@@ -389,6 +394,7 @@ impl Default for Session {
             footage_stamps: Default::default(),
             aux_footage: None,
             script_calls: ScriptCalls::default(),
+            output_identities: Default::default(),
         }
     }
 }

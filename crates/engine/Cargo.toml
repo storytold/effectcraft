@@ -46,3 +46,7 @@ exr = { workspace = true }
 same-file = { workspace = true }
 tempfile = { workspace = true }
 effectcraft-sam2 = { workspace = true }
+
+# The volume a file is on, for the output guard (#3328).
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }

@@ -23,7 +23,9 @@ someone closes that box.
 - **Reply:** `{"id": 1, "ok": true, "result": ...}` or `{"id": 1, "ok": false, "error": "message"}`.
 - Requests run on the UI thread between frames. Input methods (`ui.click`, `ui.key` and similar)
   reply after the synthetic input has been processed. Methods that need an element that isn't drawn
-  yet are retried for a few frames. A request times out after 60 s.
+  yet are retried for a few frames. A request times out after 60 s; one that hasn't begun by then
+  is not run. Requests run until a tenth of a second has passed in one frame, and the rest wait
+  for the next frames in their order, so the window keeps drawing.
 - **Only requests are read:** every line must be a JSON object with a string `method` (blank lines are
   skipped). Anything else (text that isn't JSON, a JSON array or number, an object without `method`,
   invalid UTF-8, a line longer than 4 MiB) gets one error reply ending in "closing the connection", and

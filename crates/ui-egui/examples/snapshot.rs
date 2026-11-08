@@ -134,7 +134,7 @@ fn main() {
             continue;
         }
         let (reply_tx, reply_rx) = mpsc::channel();
-        let _ = tx.send(ControlRequest { method: method.clone(), params, reply: reply_tx });
+        let _ = tx.send(ControlRequest { method: method.clone(), params, reply: reply_tx, abandoned: Default::default() });
         // Requests are answered on a later frame (some wait for input to be processed).
         let deadline = Instant::now() + Duration::from_secs(10);
         let reply = loop {

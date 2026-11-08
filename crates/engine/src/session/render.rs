@@ -143,6 +143,8 @@ impl Session {
         }
         self.layer_cache.clear();
         self.drop_crypto_probe();
+        // (its files may be other files now: the output guard looks at them again)
+        self.output_identities.clear();
     }
 
     /// Tell the footage source which files effects read the channels of ([`aux_footage`]), so

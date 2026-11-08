@@ -94,6 +94,19 @@ fn render_frame_never_writes_over_a_file_the_project_reads() {
     assert_eq!(v["result"]["png"].as_str(), Some(control::base64(&r.read("inline.png")).as_str()));
 }
 
+/// #3328: `render.frame` over an existing file checks the project's files once, before the
+/// render, and writes with that check (it looked at every footage frame twice).
+#[test]
+fn render_frame_over_an_existing_file_checks_the_project_once() {
+    let mut r = Rig::new("render-frame-once");
+    std::fs::write(r.dir.join("frame.png"), b"an older frame").unwrap();
+    let before = r.h.state().session.output_identities.built();
+    let v = r.reply("render.frame", json!({"path": r.text("frame.png")}));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(&r.read("frame.png")[..8], b"\x89PNG\r\n\x1a\n", "replaced");
+    assert_eq!(r.h.state().session.output_identities.built() - before, 1, "one guard");
+}
+
 #[test]
 fn screenshot_never_writes_over_a_file_the_project_reads() {
     let mut r = Rig::new("screenshot");

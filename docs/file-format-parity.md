@@ -118,8 +118,13 @@ are checked too. No render parameter overrides this protection.
 
 Checks compare normalized paths and native file identities, so an existing symbolic link,
 hard link, junction or Windows short name cannot disguise a source as another output file.
-Source identities are indexed once per check and matching identities are verified. The index
-does not keep file handles open for the lifetime of a long sequence.
+Only the sources that can be the output are compared: those in folders on the output's volume
+(a hard link cannot leave its volume) and those in folders that hold symbolic links. An output
+on another volume than a long sequence opens none of its frames. The session keeps the
+identities it learnt for the next check; a folder that changed since (its modification time or
+the folder itself) is looked at again, and Reload Footage forgets them all. Frames that are
+links are looked up for every check. Matching identities are verified, and no file handle is
+kept open between checks.
 
 Default output names move aside when they would replace a protected file. This also applies to
 Create Proxy: recreating a proxy chooses a new default name and attaches the new proxy, leaving
