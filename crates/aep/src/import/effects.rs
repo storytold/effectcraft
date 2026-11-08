@@ -438,7 +438,15 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
         col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {} are not imported", p.name));
     }
     let Some(data) = fx.arbitrary_data(&p.match_name) else {
-        // No data: every value is at its default.
+        // No record: every value is at its default. A Channel Info value record without its
+        // aRbs/aRbp payload (every sampled record has it) is damaged: the payload may have chosen
+        // other channels (`Z`), so the defaults are not what After Effects renders.
+        if p.stored().is_some() && matches!(extra, Extra::Extractor | Extra::Identifier) {
+            col.lose(
+                LossCategory::DamagedData,
+                format!("{here}: the Channel Info data is missing (a value record without its data), the default channels used"),
+            );
+        }
         return;
     };
     let mut set = |id: &str, v: f64| {

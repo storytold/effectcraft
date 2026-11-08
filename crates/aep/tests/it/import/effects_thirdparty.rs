@@ -270,13 +270,16 @@ fn identifier_names_without_a_terminator_or_in_invalid_utf8_are_refused() {
 }
 
 /// A Channel Info value record without its arbitrary data (no `aRbs`): the effect still imports,
-/// with the defaults, and nothing panics.
+/// with the defaults, nothing panics, and the missing data is reported as damaged (it may have
+/// chosen other channels, so the defaults are not what After Effects renders).
 #[test]
-fn a_missing_channel_info_payload_leaves_the_defaults() {
+fn a_missing_channel_info_payload_is_reported_and_leaves_the_defaults() {
     let mut fx = extractor(vec![], vec![]);
     fx.data.clear();
     let (g, r) = run(&fx, "ec.3d.extractor");
     assert_eq!(losses(&r, LossCategory::Effects, "EXtractoR"), Vec::<String>::new());
+    let found = losses(&r, LossCategory::DamagedData, "EXtractoR");
+    assert!(found.len() == 1 && found[0].contains("Channel Info data is missing"), "{found:?}");
     let g = g.expect("imported");
     for (id, want) in [("red", "R"), ("green", "G"), ("blue", "B"), ("alpha", "A")] {
         assert_eq!(v(&g, id), Value::Str(want.into()), "{id}");
@@ -285,6 +288,8 @@ fn a_missing_channel_info_payload_leaves_the_defaults() {
     fx.data.clear();
     let (g, r) = run(&fx, "ec.3d.identifier");
     assert_eq!(losses(&r, LossCategory::Effects, "IDentifier"), Vec::<String>::new());
+    let found = losses(&r, LossCategory::DamagedData, "IDentifier");
+    assert!(found.len() == 1 && found[0].contains("Channel Info data is missing"), "{found:?}");
     let g = g.expect("imported");
     assert_eq!(v(&g, "channelType"), Value::Enum(0));
     near(&g, "id", 5.0);
