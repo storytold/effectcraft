@@ -215,6 +215,11 @@ pub struct Playback {
     pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
+    /// How many stalls have stopped this preview's sound. After each one the held sound waits
+    /// for twice as many cached frames ahead before it starts again (up to what fits in the RAM
+    /// preview), so a preview that renders just below real time settles instead of starting and
+    /// stopping its sound every few frames, which plays as distortion (#2473, #3260).
+    pub stalls: u32,
 }
 
 impl Playback {
