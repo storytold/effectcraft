@@ -24,7 +24,7 @@ use crate::import::time::TimeMap;
 
 /// The time scale of the marker list below `holder` (the layer, or the composition's `SecL`).
 fn marker_scale(holder: &Chunk<'_>) -> Option<u32> {
-    holder.find_list(b"mrst")?.child_list(b"tdbs").and_then(AepProp::from_chunk)?.time_scale().filter(|s| *s != 0)
+    holder.marker_list()?.child_list(b"tdbs").and_then(AepProp::from_chunk)?.time_scale().filter(|s| *s != 0)
 }
 
 /// The markers of a layer (`holder` = the layer chunk) or a composition (`holder` = its `SecL`).
