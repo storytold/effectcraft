@@ -545,6 +545,82 @@ fn what_expressions_read_goes_to_the_files_of_the_buffer_they_make() {
     assert!(files.get("/sampled.png").is_some(), "footprint: {files:?}");
 }
 
+/// A text Expression Selector whose Amount is 0 for the first character and the width of the
+/// footage item named `ref.png` for the others (`textIndex == 1 ? 0 : footage("ref.png").width`).
+struct WidthOfRef;
+
+impl crate::eval::ExprHost for WidthOfRef {
+    fn eval(&self, _: &crate::eval::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        Ok(value.clone())
+    }
+    fn eval_text_selector(
+        &self,
+        ctx: &crate::eval::EvalCtx,
+        _: &effectcraft_project::Layer,
+        _: &effectcraft_project::Property,
+        index: usize,
+        _: usize,
+        _: [f64; 3],
+    ) -> Result<[f64; 3], String> {
+        let width = ctx.project.items.values().find(|i| i.name == "ref.png").and_then(|i| i.dimensions()).map_or(0.0, |d| d.0 as f64);
+        Ok([if index == 1 { 0.0 } else { width }; 3])
+    }
+}
+
+/// A text layer whose Expression Selector reads a footage item's size for every character but
+/// the first: the layer's key holds the first character's amount only, so its buffer is not
+/// stored on disk. Reopened over the same disk cache after the footage's width changed (16 to
+/// 64), the frame matches one rendered without a cache.
+#[test]
+fn a_text_expression_selector_is_not_served_from_the_disk_cache() {
+    use crate::disk_cache::{DiskCache, Kind};
+    use crate::{LayerCache, NoFootage, RenderOpts, Renderer};
+    let project = |width: u32| {
+        let (mut p, cid, comp) = setup();
+        let f = effectcraft_project::Footage { has_video: true, width, height: 16, ..Default::default() };
+        p.add_item("ref.png", Label::None, None, ItemKind::Footage(f));
+        let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+        l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "HH".into(), size: 60.0, ..Default::default() }));
+        let mut next = p.next_id;
+        let mut ids = Ids(&mut next);
+        let mut props = build::text_anim_props(&mut ids, "opacity", false);
+        for pr in &mut props {
+            pr.value = Value::Scalar(0.0);
+        }
+        let mut animator = build::text_animator(&mut ids, "Animator 1", props);
+        let sel = build::expression_selector(&mut ids, "Expression Selector 1");
+        p.next_id = next;
+        animator.sub_mut("selectors").unwrap().children.push(sel.into());
+        l.props.group_mut("text/animators").unwrap().children.push(animator.into());
+        p.comp_mut(cid).unwrap().layers.push(l);
+        (p, cid)
+    };
+    let render = |p: &Project, cid: ItemId, cache: Option<&LayerCache>| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&WidthOfRef);
+        r.cache = cache;
+        r.comp_frame(cid, Tick::ZERO)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let dc = DiskCache::open(dir.path(), 1 << 30).unwrap();
+    dc.set_min_layer_ms(0);
+    // First session: the 16 px wide footage.
+    let (p16, cid) = project(16);
+    let cache = LayerCache::default();
+    cache.set_disk(Some(dc.clone()));
+    let first = render(&p16, cid, Some(&cache));
+    dc.flush();
+    assert!(first.data.iter().any(|px| px[3] > 0.5), "the text renders");
+    // Reopened with a fresh memory cache, the footage now 64 px wide.
+    let (p64, cid) = project(64);
+    let uncached = render(&p64, cid, None);
+    assert_ne!(uncached.data, first.data, "the second character's opacity follows the width");
+    let reopened = LayerCache::default();
+    reopened.set_disk(Some(dc.clone()));
+    assert_eq!(render(&p64, cid, Some(&reopened)).data, uncached.data, "not the buffer from before the change");
+    assert!(dc.keys(Kind::Layer).is_empty(), "the text layer's buffer is not on disk");
+}
+
 /// A Birth Rate expression reading another layer: changing that layer changes the history but
 /// not the current rate (0) nor this layer's properties, which is all the layer cache key sees.
 /// CC Particle World layers with expressions therefore aren't layer cached.

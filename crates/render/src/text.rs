@@ -243,6 +243,13 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
             }
             "expressionSelector" => {
                 let Some(prop) = sel.get("amount") else { continue };
+                // Evaluated per character (`textIndex`): the layer's cache key holds the amount
+                // for the first character only, so the buffer must not outlive the session.
+                if prop.has_expression()
+                    && let Some(log) = ctx.reads
+                {
+                    log.mark_unkeyed();
+                }
                 let stat = ctx.v3(layer, sel, "amount", [100.0; 3]);
                 Box::new(move |i, n, prev| {
                     let pv = prev.map(|x| x * 100.0);

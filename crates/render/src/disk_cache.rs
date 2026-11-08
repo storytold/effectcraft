@@ -917,9 +917,12 @@ impl DiskCache {
         self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.generation
     }
 
-    /// Whether one of `files` was dropped after generation `since` ([`DiskCache::drop_generation`]):
-    /// what a render that started then made of them is from before the drop (shown, never stored).
+    /// Whether one of `files` was dropped after generation `since` ([`DiskCache::drop_generation`]),
+    /// or after the earlier generation the list's own reads started at ([`ReadFiles::since`]: a
+    /// buffer made by an earlier render, from memory): what was made of them then is from before
+    /// the drop (shown, never stored).
     pub fn dropped_since(&self, files: &ReadFiles, since: u64) -> bool {
+        let since = files.since().map_or(since, |s| s.min(since));
         self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.stale(files.files().iter().map(|f| &f.path), since)
     }
 
@@ -1295,6 +1298,9 @@ impl crate::cache::LayerStore for DiskCache {
     /// The current drop generation of the disk cache.
     fn drop_generation(&self) -> u64 {
         DiskCache::drop_generation(self)
+    }
+    fn dropped_since(&self, files: &ReadFiles, since: u64) -> bool {
+        DiskCache::dropped_since(self, files, since)
     }
     fn min_layer_ms(&self) -> u64 {
         DiskCache::min_layer_ms(self)

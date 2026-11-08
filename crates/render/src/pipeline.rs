@@ -183,7 +183,8 @@ impl<'a> Renderer<'a> {
         if key.is_none() || self.cache.is_none() {
             return (make(self), Arc::default());
         }
-        let log = ReadLog::new();
+        // (the generation before any read: a file dropped while `make` runs makes it stale)
+        let log = self.cache.and_then(LayerCache::drop_generation).map_or_else(ReadLog::new, ReadLog::starting_at);
         let out = make(&Renderer { reads: Some(&log), ..*self });
         let files = log.into_files();
         if let Some(own) = self.reads {
@@ -870,7 +871,18 @@ impl<'a> Renderer<'a> {
             }
             // (the font files go to this render's log, which `ctx` may not carry: see
             // [`Renderer::with_reads`])
-            LayerSource::Text => Some(self.authored(text::render(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer)))),
+            LayerSource::Text => {
+                // An Expression Selector evaluates per character: its results at other characters
+                // than the first are not in the layer's cache key (an amount reading a footage
+                // item's size by name, `textIndex == 1 ? 0 : footage("ref.png").width`), so the
+                // buffer is kept in memory only, never on disk (the frame's key covers them).
+                if cache::per_character_expressions(layer)
+                    && let Some(log) = self.reads
+                {
+                    log.mark_unkeyed();
+                }
+                Some(self.authored(text::render(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer))))
+            }
             LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
             _ => None,
         }

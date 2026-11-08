@@ -63,9 +63,10 @@ struct Inner {
     clock: u64,
     hits: u64,
     misses: u64,
-    /// When each recent miss happened (to time the render that follows it), with the store's
-    /// drop generation then ([`LayerStore::drop_generation`]).
-    missed_at: HashMap<u64, (web_time::Instant, u64)>,
+    /// When each recent miss happened, to time the render that follows it (the drop generation
+    /// a render's reads started at travels with its files instead, [`ReadFiles::since`]: two
+    /// renders of a key may overlap).
+    missed_at: HashMap<u64, web_time::Instant>,
 }
 
 /// Hit/miss counters and memory use (for perf readouts and tests).
@@ -169,18 +170,19 @@ impl LayerCache {
                 g.misses += 1;
                 drop(g);
                 let store = self.persistent();
-                // (before the buffer's reads: what it is made of may be dropped meanwhile)
+                // (before the entry is read: what it is made of may be dropped meanwhile)
                 let since = store.as_ref().map_or(0, |s| s.drop_generation());
                 if let Ok(mut g) = self.inner.lock() {
                     if g.missed_at.len() > 4096 {
                         g.missed_at.clear();
                     }
-                    g.missed_at.insert(key, (web_time::Instant::now(), since));
+                    g.missed_at.insert(key, web_time::Instant::now());
                 }
-                // Disk cache: a hit comes back into memory.
+                // Disk cache: a hit comes back into memory, read at generation `since`.
                 let store = store?;
                 let id = self.virtual_id();
-                let (buf, files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
+                let (buf, mut files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
+                files.note_since(since);
                 let files = Arc::new(files);
                 Some(self.insert_mem(key, buf, files))
             }
@@ -195,6 +197,12 @@ impl LayerCache {
     /// the very work it waits for. `files`: the source files `buf` was made of (see
     /// [`crate::reads`]); a buffer whose files can't all be named stays in memory. The files
     /// returned are the ones the returned buffer was made of.
+    ///
+    /// The drop generation `buf`'s reads started at comes with `files` ([`ReadFiles::since`],
+    /// from [`LayerCache::drop_generation`] when the render began): a buffer made of a file
+    /// dropped since (File ▸ Reload Footage while it rendered) is kept neither on disk nor in
+    /// memory. A list that doesn't say counts as made before every drop. A buffer made of values
+    /// its key doesn't capture ([`ReadFiles::is_unkeyed`]) stays in memory.
     pub fn insert(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
         if self.gated() {
             return (buf, files);
@@ -202,11 +210,18 @@ impl LayerCache {
         if let Some(kept) = self.inner.lock().ok().and_then(|g| g.map.get(&key).map(|e| (e.buf.clone(), e.files.clone()))) {
             return kept;
         }
+        let store = self.persistent();
+        let since = files.since().unwrap_or(0);
+        // (before the miss's time is taken: it may time another render of the key)
+        if store.as_ref().is_some_and(|s| s.dropped_since(&files, since)) {
+            return (buf, files);
+        }
         let started = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key));
-        if let Some(store) = self.persistent() {
+        if let Some(store) = store {
             let id = self.virtual_id();
             // (an incomplete list, or a file from memory without its identity: not stored)
-            if let Some((t, since)) = started
+            if let Some(t) = started
+                && !files.is_unkeyed()
                 && t.elapsed().as_secs_f64() * 1e3 >= store.min_layer_ms() as f64
                 && let Some(entry) = EntryFiles::of(&files, id.as_deref())
             {
@@ -214,6 +229,12 @@ impl LayerCache {
             }
         }
         self.insert_mem(key, buf, files)
+    }
+
+    /// The persistent store's drop generation now ([`LayerStore::drop_generation`]), taken by a
+    /// render before it starts reading (`None` without a store).
+    pub fn drop_generation(&self) -> Option<u64> {
+        self.persistent().map(|s| s.drop_generation())
     }
 
     /// See [`LayerCache::insert`]: the buffer kept under `key` and its files (`buf` and `files`,
@@ -300,6 +321,11 @@ pub trait LayerStore: Send + Sync {
     /// [`crate::disk_cache::DiskCache::drop_files`]); `0` for a store that never drops.
     fn drop_generation(&self) -> u64 {
         0
+    }
+    /// Whether one of `files` was dropped after generation `since`: what was made of them is
+    /// from before the drop. `false` for a store that never drops.
+    fn dropped_since(&self, _files: &ReadFiles, _since: u64) -> bool {
+        false
     }
     /// Buffers faster to render than this (ms) are not stored.
     fn min_layer_ms(&self) -> u64 {
@@ -540,6 +566,12 @@ fn time_dependent(layer: &Layer, effects: bool) -> bool {
         return group_has(t, "wigglySelector") || group_has(t, "expressionSelector");
     }
     false
+}
+
+/// A text layer with an Expression Selector: its amount is evaluated per character, and the
+/// layer's key holds only the first character's (see [`crate::reads::ReadFiles::is_unkeyed`]).
+pub(crate) fn per_character_expressions(layer: &Layer) -> bool {
+    matches!(layer.source, LayerSource::Text) && layer.props.sub("text").is_some_and(|t| group_has(t, "expressionSelector"))
 }
 
 fn group_has(g: &PropGroup, match_id: &str) -> bool {
@@ -927,24 +959,48 @@ mod shared_insert_tests {
     #[test]
     fn a_buffer_rendered_across_a_drop_is_not_written() {
         use crate::disk_cache::{DiskCache, Kind, layer_disk_key};
-        use crate::reads::{FileStamp, ReadFile, ReadFiles};
+        use crate::reads::{FileStamp, ReadFile, ReadLog};
         let dir = tempfile::tempdir().unwrap();
         let dc = DiskCache::open(dir.path(), 1 << 30).unwrap();
         dc.set_min_layer_ms(0);
         let cache = LayerCache::default();
         cache.set_disk(Some(dc.clone()));
         let buf = || Arc::new(Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 });
-        let files = Arc::new([ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) })].into_iter().collect::<ReadFiles>());
+        // A render's files, read after it took the drop generation (`Renderer::recorded`).
+        let render = || {
+            let log = ReadLog::starting_at(cache.drop_generation().unwrap());
+            move || {
+                log.note(ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) }));
+                Arc::new(log.into_files())
+            }
+        };
         // The miss starts the render; the file is reloaded before the buffer is kept.
         assert!(cache.get(1).is_none());
+        let a = render();
         dc.drop_files(["/a.png"]);
-        cache.insert(1, buf(), files.clone());
-        // A render after the drop.
-        assert!(cache.get(2).is_none());
-        cache.insert(2, buf(), files);
+        dc.flush();
+        // Another render of the same key starts after the drop, while the first one still runs
+        // (its miss must not lend the first render its generation).
+        assert!(cache.get(1).is_none());
+        let b = render();
+        let (stale, _) = cache.insert(1, buf(), a());
         dc.flush();
         assert!(!dc.contains(Kind::Layer, layer_disk_key(1)), "made of the file as it was before the drop");
+        // Not kept in memory either: the second render keeps its own buffer, and writes it.
+        let fresh = buf();
+        let (kept, _) = cache.insert(1, fresh.clone(), b());
+        assert!(Arc::ptr_eq(&kept, &fresh) && !Arc::ptr_eq(&kept, &stale));
+        // A render of another key after the drop.
+        assert!(cache.get(2).is_none());
+        cache.insert(2, buf(), render()());
+        dc.flush();
+        assert!(dc.contains(Kind::Layer, layer_disk_key(1)), "the render after the drop");
         assert!(dc.contains(Kind::Layer, layer_disk_key(2)));
+        // A list that doesn't say when its reads began counts as made before the drop.
+        assert!(cache.get(3).is_none());
+        cache.insert(3, buf(), Arc::new([ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) })].into_iter().collect()));
+        dc.flush();
+        assert!(!dc.contains(Kind::Layer, layer_disk_key(3)));
         drop((cache, dc));
     }
 

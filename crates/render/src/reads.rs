@@ -75,10 +75,39 @@ pub const MAX_READ_FILES: usize = 4096;
 /// buffer from a store that doesn't keep its files, more than [`MAX_READ_FILES`] files, or one
 /// file read with two identities (it changed during the render). A cache entry whose list is
 /// incomplete can't be checked against the files, so it must not outlive the session.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+///
+/// It also carries where its reads come from, which equality and hashing ignore: the drop
+/// generation the earliest of them started at ([`ReadFiles::since`]), and whether a layer cache
+/// key can't capture what it was made of ([`ReadFiles::is_unkeyed`]).
+#[derive(Clone, Debug, Default)]
 pub struct ReadFiles {
     files: Vec<ReadFile>,
     incomplete: bool,
+    /// The disk cache's drop generation ([`DiskCache::drop_generation`]) when the earliest read
+    /// behind the list started; `None` when nothing says (a list built by hand).
+    ///
+    /// [`DiskCache::drop_generation`]: crate::disk_cache::DiskCache::drop_generation
+    since: Option<u64>,
+    /// Made of values a layer's cache key doesn't capture (a text Expression Selector evaluates
+    /// per character): such a buffer is not stored on disk.
+    unkeyed: bool,
+}
+
+impl PartialEq for ReadFiles {
+    /// The same files with the same identities (where the reads come from doesn't count).
+    fn eq(&self, other: &Self) -> bool {
+        self.files == other.files && self.incomplete == other.incomplete
+    }
+}
+
+impl Eq for ReadFiles {}
+
+impl std::hash::Hash for ReadFiles {
+    /// Hashes what [`PartialEq`] compares.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.files.hash(state);
+        self.incomplete.hash(state);
+    }
 }
 
 impl ReadFiles {
@@ -100,9 +129,13 @@ impl ReadFiles {
         }
     }
 
-    /// Note every file of `other` (and whether it is incomplete).
+    /// Note every file of `other` (whether it is incomplete or unkeyed, and its generation).
     pub fn extend(&mut self, other: &ReadFiles) {
         self.incomplete |= other.incomplete;
+        self.unkeyed |= other.unkeyed;
+        if let Some(g) = other.since {
+            self.note_since(g);
+        }
         for f in &other.files {
             self.add(f.clone());
         }
@@ -116,6 +149,28 @@ impl ReadFiles {
     /// Whether the list names every file read.
     pub fn is_complete(&self) -> bool {
         !self.incomplete
+    }
+
+    /// The drop generation the earliest read behind the list started at (`None`: unknown). A
+    /// buffer made of a file dropped after it holds that file as it was before the drop.
+    pub fn since(&self) -> Option<u64> {
+        self.since
+    }
+
+    /// A read behind the list started at drop generation `generation` (the earliest one counts).
+    pub fn note_since(&mut self, generation: u64) {
+        self.since = Some(self.since.map_or(generation, |s| s.min(generation)));
+    }
+
+    /// Made of values a layer cache key doesn't capture (see [`ReadFiles::is_unkeyed`]).
+    pub fn mark_unkeyed(&mut self) {
+        self.unkeyed = true;
+    }
+
+    /// Made of values a layer cache key doesn't capture: kept in memory, never stored on disk as
+    /// a layer buffer. (A frame's key captures them: frame entries are not affected.)
+    pub fn is_unkeyed(&self) -> bool {
+        self.unkeyed
     }
 
     /// The files, sorted by path.
@@ -164,6 +219,14 @@ impl ReadLog {
         ReadLog::default()
     }
 
+    /// An empty read log for reads that start at drop generation `generation` (see
+    /// [`ReadFiles::since`]).
+    pub fn starting_at(generation: u64) -> ReadLog {
+        let mut files = ReadFiles::default();
+        files.note_since(generation);
+        ReadLog { files: Mutex::new(files) }
+    }
+
     /// Locks the file list, recovering from a poisoned lock.
     fn lock(&self) -> std::sync::MutexGuard<'_, ReadFiles> {
         self.files.lock().unwrap_or_else(PoisonError::into_inner)
@@ -176,7 +239,7 @@ impl ReadLog {
 
     /// Note every file of `files` (and whether it is incomplete).
     pub fn note_all(&self, files: &ReadFiles) {
-        if files.is_empty() && files.is_complete() {
+        if files.is_empty() && files.is_complete() && files.since.is_none() && !files.unkeyed {
             return;
         }
         self.lock().extend(files);
@@ -185,6 +248,12 @@ impl ReadLog {
     /// Some files read can't be listed (see [`ReadFiles`]).
     pub fn mark_incomplete(&self) {
         self.lock().mark_incomplete();
+    }
+
+    /// What is read is made of values a layer cache key doesn't capture
+    /// ([`ReadFiles::is_unkeyed`]).
+    pub fn mark_unkeyed(&self) {
+        self.lock().mark_unkeyed();
     }
 
     /// The files noted so far.
