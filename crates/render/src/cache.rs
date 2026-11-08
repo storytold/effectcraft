@@ -154,19 +154,13 @@ impl LayerCache {
 
     /// The buffer kept under `key` and the source files it was made of (see [`crate::reads`]).
     /// A buffer from the disk cache or another store comes with the files its entry lists, after
-    /// they were found unchanged.
+    /// they were found unchanged. A buffer made of a file dropped since its reads began (File ▸
+    /// Reload Footage) is never served: it is forgotten, and the lookup is a miss.
     pub fn get(&self, key: u64) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
-        let mut g = self.inner.lock().ok()?;
-        g.clock += 1;
-        let now = g.clock;
-        match g.map.get_mut(&key) {
-            Some(e) => {
-                e.last_use = now;
-                let found = (e.buf.clone(), e.files.clone());
-                g.hits += 1;
-                Some(found)
-            }
+        match self.kept(key, true) {
+            Some(found) => Some(found),
             None => {
+                let mut g = self.inner.lock().ok()?;
                 g.misses += 1;
                 drop(g);
                 let store = self.persistent();
@@ -207,7 +201,7 @@ impl LayerCache {
         if self.gated() {
             return (buf, files);
         }
-        if let Some(kept) = self.inner.lock().ok().and_then(|g| g.map.get(&key).map(|e| (e.buf.clone(), e.files.clone()))) {
+        if let Some(kept) = self.kept(key, false) {
             return kept;
         }
         let store = self.persistent();
@@ -231,6 +225,44 @@ impl LayerCache {
         self.insert_mem(key, buf, files)
     }
 
+    /// The buffer kept in memory under `key` with its files, if it is not made of a file dropped
+    /// since its reads began (one that is, is forgotten). `hit`: count it as a hit and as just
+    /// used. (A render that started before a drop may publish its buffer after the drop's
+    /// purge, Reload Footage clearing the cache while the buffer was being written: the check
+    /// here, not the order of the two, keeps it from being served.)
+    fn kept(&self, key: u64, hit: bool) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
+        let found = {
+            let mut g = self.inner.lock().ok()?;
+            g.clock += 1;
+            let now = g.clock;
+            let e = g.map.get_mut(&key)?;
+            if hit {
+                e.last_use = now;
+            }
+            (e.buf.clone(), e.files.clone())
+        };
+        if self.made_before_a_drop(&found.1) {
+            if let Ok(mut g) = self.inner.lock()
+                && g.map.get(&key).is_some_and(|e| Arc::ptr_eq(&e.files, &found.1))
+                && let Some(e) = g.map.remove(&key)
+            {
+                g.bytes = g.bytes.saturating_sub(e.bytes);
+            }
+            return None;
+        }
+        if hit && let Ok(mut g) = self.inner.lock() {
+            g.hits += 1;
+        }
+        Some(found)
+    }
+
+    /// Whether a buffer made of `files` holds a file as it was before a drop that came after its
+    /// reads began ([`ReadFiles::since`]; a list that doesn't say counts as made before every
+    /// drop).
+    fn made_before_a_drop(&self, files: &ReadFiles) -> bool {
+        self.persistent().is_some_and(|s| s.dropped_since(files, files.since().unwrap_or(0)))
+    }
+
     /// The persistent store's drop generation now ([`LayerStore::drop_generation`]), taken by a
     /// render before it starts reading (`None` without a store).
     pub fn drop_generation(&self) -> Option<u64> {
@@ -248,8 +280,19 @@ impl LayerCache {
         g.clock += 1;
         let now = g.clock;
         if let Some(e) = g.map.get_mut(&key) {
-            e.last_use = now;
-            return (e.buf.clone(), e.files.clone());
+            // (one made before a drop gives way: see [`LayerCache::kept`])
+            if !self.made_before_a_drop(&e.files) {
+                e.last_use = now;
+                return (e.buf.clone(), e.files.clone());
+            }
+            if let Some(old) = g.map.remove(&key) {
+                g.bytes = g.bytes.saturating_sub(old.bytes);
+            }
+        }
+        // (checked again just before it is published: a drop may have come since `insert`
+        // checked; one that comes later is caught when the buffer is looked up)
+        if self.made_before_a_drop(&files) {
+            return (buf, files);
         }
         g.map.insert(key, Entry { buf: buf.clone(), files: files.clone(), bytes, last_use: now });
         g.bytes += bytes;
@@ -1002,6 +1045,82 @@ mod shared_insert_tests {
         dc.flush();
         assert!(!dc.contains(Kind::Layer, layer_disk_key(3)));
         drop((cache, dc));
+    }
+
+    /// A disk cache whose layer writes stop at a barrier until the test lets them go on.
+    struct PausedWrites {
+        dc: Arc<crate::disk_cache::DiskCache>,
+        arrived: std::sync::Barrier,
+        go_on: std::sync::Barrier,
+    }
+
+    impl super::LayerStore for PausedWrites {
+        fn get_layer(&self, key: u128, virtual_id: Option<crate::disk_cache::VirtualFileId<'_>>) -> Option<(Arc<Buf>, crate::reads::ReadFiles)> {
+            super::LayerStore::get_layer(&*self.dc, key, virtual_id)
+        }
+        fn put_layer(&self, key: u128, buf: &Buf, files: &crate::disk_cache::EntryFiles, since: u64) {
+            self.arrived.wait();
+            self.go_on.wait();
+            super::LayerStore::put_layer(&*self.dc, key, buf, files, since);
+        }
+        fn drop_generation(&self) -> u64 {
+            self.dc.drop_generation()
+        }
+        fn dropped_since(&self, files: &crate::reads::ReadFiles, since: u64) -> bool {
+            self.dc.dropped_since(files, since)
+        }
+    }
+
+    /// Reload Footage while a render from before it is writing its buffer: the cache is cleared
+    /// and the file dropped after the buffer passed its check, before it is kept. The buffer
+    /// then reaches memory after the purge, but it is never served, and a render after the drop
+    /// keeps its own buffer (#3191 review).
+    #[test]
+    fn a_buffer_kept_after_the_purge_of_a_reload_is_not_served() {
+        use crate::reads::{FileStamp, ReadFile, ReadLog};
+        let dir = tempfile::tempdir().unwrap();
+        let dc = crate::disk_cache::DiskCache::open(dir.path(), 1 << 30).unwrap();
+        let store = Arc::new(PausedWrites { dc: dc.clone(), arrived: std::sync::Barrier::new(2), go_on: std::sync::Barrier::new(2) });
+        let cache = Arc::new(LayerCache::default());
+        cache.set_store(Some(store.clone()));
+        let buf = || Arc::new(Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 });
+        let files = |cache: &LayerCache| {
+            let log = ReadLog::starting_at(cache.drop_generation().unwrap());
+            log.note(ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) }));
+            Arc::new(log.into_files())
+        };
+        // The old render: a miss, its reads, then its insert, which stops in the disk write.
+        assert!(cache.get(1).is_none());
+        let old_files = files(&cache);
+        let old = buf();
+        let writer = {
+            let (cache, old) = (cache.clone(), old.clone());
+            std::thread::spawn(move || cache.insert(1, old, old_files))
+        };
+        store.arrived.wait();
+        // Reload Footage meanwhile: the layer cache is purged and the file dropped.
+        cache.clear();
+        dc.drop_files(["/a.png"]);
+        dc.flush();
+        store.go_on.wait();
+        let _ = writer.join().unwrap();
+        dc.flush();
+        assert!(!dc.contains(crate::disk_cache::Kind::Layer, crate::disk_cache::layer_disk_key(1)), "not on disk");
+        assert!(cache.get(1).is_none(), "the old pixels are not served from memory");
+        // A render after the drop keeps its own buffer.
+        let fresh = buf();
+        let new_files = files(&cache);
+        let mut kept = None;
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                store.arrived.wait();
+                store.go_on.wait();
+            });
+            kept = Some(cache.insert(1, fresh.clone(), new_files).0);
+        });
+        let kept = kept.unwrap();
+        assert!(Arc::ptr_eq(&kept, &fresh) && !Arc::ptr_eq(&kept, &old));
+        assert!(Arc::ptr_eq(&cache.get(1).unwrap().0, &fresh));
     }
 
     /// A render that gets another render's buffer gets that buffer's files too (#3184): when a
