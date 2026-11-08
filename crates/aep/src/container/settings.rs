@@ -5,6 +5,7 @@
 use crate::container::bytes::be_u32;
 use crate::container::chunk::AepFile;
 use crate::container::footage::json_string;
+use crate::container::index::{Node, Root, TreeIndex};
 
 /// The time display style (`nhed` byte 8, feet + frames byte 11, film type byte 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +56,16 @@ pub struct ProjectSettings {
 impl ProjectSettings {
     /// Reads the settings from the top-level chunks.
     pub fn read(file: &AepFile<'_>) -> ProjectSettings {
-        let nhed = file.chunk(b"nhed").and_then(|c| c.bytes());
+        Self::of(Root::from(file))
+    }
+
+    /// Reads the settings from the top-level chunks of an indexed file.
+    pub fn read_index(index: &TreeIndex<'_>) -> ProjectSettings {
+        Self::of(Root::from(index))
+    }
+
+    pub(crate) fn of(file: Root<'_, '_>) -> ProjectSettings {
+        let nhed = file.chunk(b"nhed").and_then(Node::bytes);
         let byte = |i: usize| nhed.and_then(|b| b.get(i).copied());
         let bits_per_channel = byte(15).and_then(|v| match v {
             0 => Some(8),
@@ -74,9 +84,9 @@ impl ProjectSettings {
             1 => Some(1),
             _ => None,
         });
-        let flag = |id: &[u8; 4]| file.chunk(id).and_then(|c| c.bytes()).and_then(|b| b.first().copied()) == Some(1);
-        let working_gamma_24 = file.chunk(b"dwga").and_then(|c| c.bytes()).and_then(|b| b.get(..4)).map(|b| b != [0, 0, 0, 0]);
-        let scene_compensation = file.chunk(b"acer").and_then(|c| c.bytes()).and_then(|b| b.first().copied()).map(|v| v != 0);
+        let flag = |id: &[u8; 4]| file.chunk(id).and_then(Node::bytes).and_then(|b| b.first().copied()) == Some(1);
+        let working_gamma_24 = file.chunk(b"dwga").and_then(Node::bytes).and_then(|b| b.get(..4)).map(|b| b != [0, 0, 0, 0]);
+        let scene_compensation = file.chunk(b"acer").and_then(Node::bytes).and_then(|b| b.first().copied()).map(|v| v != 0);
         ProjectSettings {
             bits_per_channel,
             working_space: working_space(file),
@@ -91,9 +101,10 @@ impl ProjectSettings {
 }
 
 /// The working space: the `Utf8` right after `PwCs`.
-fn working_space(file: &AepFile<'_>) -> Option<WorkingSpace> {
-    let at = file.chunks.iter().position(|c| c.is(b"PwCs"))?;
-    let json = file.chunks.get(at.checked_add(1)?).filter(|c| c.is(b"Utf8"))?.bytes()?;
+fn working_space(file: Root<'_, '_>) -> Option<WorkingSpace> {
+    let mut chunks = file.chunks();
+    chunks.find(|c| c.is(b"PwCs"))?;
+    let json = chunks.next().filter(|c| c.is(b"Utf8"))?.bytes()?;
     let trimmed: Vec<u8> = json.iter().copied().filter(|b| !b.is_ascii_whitespace() && *b != 0).collect();
     if trimmed == b"{}" {
         return Some(WorkingSpace::None);

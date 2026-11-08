@@ -37,6 +37,16 @@ pub fn parse(data: &[u8]) -> Result<AepFile<'_>, AepError> {
 /// # Errors
 /// See [`parse`]; also fails with [`AepError::TooManyChunks`].
 pub fn parse_with_limits(data: &[u8], limits: Limits) -> Result<AepFile<'_>, AepError> {
+    let end = container_end(data)?;
+    let mut parser = Parser { data, limits, count: 0 };
+    let chunks = parser.sequence(12, end, 1)?;
+    let trailer = data.get(end..).unwrap_or(&[]);
+    Ok(AepFile { chunks, trailer: Cow::Borrowed(trailer) })
+}
+
+/// Checks the `RIFX`/`Egg!` header and returns where the container ends (its chunks fill
+/// `12..end`; the trailer follows). Shared with [`crate::container::index::TreeIndex::parse`].
+pub(super) fn container_end(data: &[u8]) -> Result<usize, AepError> {
     if id4(data, 0) != Some(*b"RIFX") {
         return Err(AepError::NotRifx);
     }
@@ -50,14 +60,10 @@ pub fn parse_with_limits(data: &[u8], limits: Limits) -> Result<AepFile<'_>, Aep
         return Err(AepError::Truncated { declared, available });
     }
     // `declared <= available < data.len()`, so the end is inside the input.
-    let end = usize::try_from(declared).map_err(|_| AepError::TooLarge)?.checked_add(8).ok_or(AepError::TooLarge)?;
-    let mut parser = Parser { data, limits, count: 0 };
-    let chunks = parser.sequence(12, end, 1)?;
-    let trailer = data.get(end..).unwrap_or(&[]);
-    Ok(AepFile { chunks, trailer: Cow::Borrowed(trailer) })
+    usize::try_from(declared).map_err(|_| AepError::TooLarge)?.checked_add(8).ok_or(AepError::TooLarge)
 }
 
-fn id4(data: &[u8], at: usize) -> Option<[u8; 4]> {
+pub(super) fn id4(data: &[u8], at: usize) -> Option<[u8; 4]> {
     array::<4>(data, at)
 }
 

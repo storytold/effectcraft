@@ -8,8 +8,8 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use crate::container::Chunk;
 use crate::container::bytes::{be_u32, text};
+use crate::container::index::Node;
 use crate::container::typed::{Comp, Layer, Property};
 
 /// How deep dictionaries and arrays may nest before the parser gives up.
@@ -1012,9 +1012,9 @@ impl<'f, 'a> Layer<'f, 'a> {
     /// `ADBE Text Properties` group, which is a direct child of the layer's root `tdgp`
     /// (`Layr/tdgp/tdgp/btds` in every sample, and where the exporter writes it), so only that
     /// level is searched rather than the whole layer.
-    fn source_text_record(&self) -> Option<&'f Chunk<'a>> {
+    fn source_text_record(&self) -> Option<Node<'f, 'a>> {
         let root = self.chunk.child_list(b"tdgp")?;
-        root.children().iter().filter(|g| g.is_list(b"tdgp")).find_map(|g| g.child_list(b"btds"))
+        root.children().filter(|g| g.is_list(b"tdgp")).find_map(|g| g.child_list(b"btds"))
     }
 
     /// The text document of a text layer: the first `LIST btdk` in the Source Text record `btds`
@@ -1078,13 +1078,13 @@ pub enum CueType {
     Other(u32),
 }
 
-impl<'a> Chunk<'a> {
+impl<'f, 'a> Node<'f, 'a> {
     /// The marker list `LIST mrst` of a marker holder: a layer (`LIST Layr`) or a composition's
     /// `SecL` list. A layer's `mrst` is a direct child of its root `tdgp` (`ADBE Marker`, where
     /// After Effects and the exporter write it), so only that place is looked at; most layers have
     /// none, and searching their whole property tree for it was a large part of an import. Any
     /// other holder is searched depth-first.
-    pub(crate) fn marker_list(&self) -> Option<&Chunk<'a>> {
+    pub(crate) fn marker_list(self) -> Option<Node<'f, 'a>> {
         if self.is_list(b"Layr") {
             return self.child_list(b"tdgp")?.child_list(b"mrst");
         }
@@ -1094,7 +1094,7 @@ impl<'a> Chunk<'a> {
 
 /// Reads the markers below `holder` (a layer or the composition's `SecL` list): the `mrst` list has a
 /// property whose 16-byte records give the times and one `Nmrd` list per marker with the strings.
-fn markers_in(holder: &Chunk<'_>) -> Vec<Marker> {
+fn markers_in(holder: Node<'_, '_>) -> Vec<Marker> {
     let Some(mrst) = holder.marker_list() else { return Vec::new() };
     let Some(prop) = mrst.child_list(b"tdbs").and_then(Property::from_chunk) else { return Vec::new() };
     let Some(keys) = prop.keys() else { return Vec::new() };
@@ -1105,11 +1105,11 @@ fn markers_in(holder: &Chunk<'_>) -> Vec<Marker> {
         .filter_map(|(k, nmrd)| {
             let time_units = k.time_units()?;
             // The five strings, in the order comment, chapter, URL, frame target, cue point name.
-            let mut strings = nmrd.children().iter().filter(|c| c.is(b"Utf8")).map(|c| c.bytes().map(text).unwrap_or_default());
+            let mut strings = nmrd.children().filter(|c| c.is(b"Utf8")).map(|c| c.bytes().map(text).unwrap_or_default());
             let mut next = || strings.next().unwrap_or_default();
             let (comment, chapter, url, frame_target, cue_point_name) = (next(), next(), next(), next(), next());
             let extras: Vec<String> = strings.collect();
-            let header = nmrd.child(b"NmHd").and_then(Chunk::bytes);
+            let header = nmrd.child(b"NmHd").and_then(Node::bytes);
             let duration_seconds = header.and_then(|h| {
                 let (duration, per_second) = (be_u32(h, 8)?, be_u32(h, 12)?);
                 (per_second != 0).then(|| f64::from(duration) / f64::from(per_second))
@@ -1432,6 +1432,7 @@ mod oracle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::Chunk;
 
     fn list(t: &[u8; 4], kids: Vec<Chunk<'static>>) -> Chunk<'static> {
         Chunk::list(*t, kids)
@@ -1725,15 +1726,15 @@ mod tests {
         let marked = |tag: u8| list(b"mrst", vec![Chunk::data(*b"test", vec![tag])]);
         // The stored place: `Layr/tdgp/mrst`.
         let layer = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![]), marked(1)])]);
-        assert_eq!(layer.marker_list().and_then(|m| m.child(b"test")).and_then(Chunk::bytes), Some(&[1u8][..]));
+        assert_eq!(Node::from(&layer).marker_list().and_then(|m| m.child(b"test")).and_then(Node::bytes), Some(&[1u8][..]));
         // A list deeper in the layer is not the layer's marker list (the old depth-first search
         // found it); a layer without a marker list in its root group has no markers.
         let deep = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![marked(2)])])]);
-        assert!(deep.marker_list().is_none());
-        assert!(Layer { chunk: &deep }.markers().is_empty());
+        assert!(Node::from(&deep).marker_list().is_none());
+        assert!(Layer { chunk: Node::from(&deep) }.markers().is_empty());
         // Any other holder (a composition's `SecL`) is still searched depth-first.
         let secl = list(b"SecL", vec![list(b"tdgp", vec![list(b"tdgp", vec![marked(3)])])]);
-        assert_eq!(secl.marker_list().and_then(|m| m.child(b"test")).and_then(Chunk::bytes), Some(&[3u8][..]));
+        assert_eq!(Node::from(&secl).marker_list().and_then(|m| m.child(b"test")).and_then(Node::bytes), Some(&[3u8][..]));
     }
 
     #[test]
@@ -1743,13 +1744,13 @@ mod tests {
         let btdk = || Chunk { id: *b"LIST", body: crate::container::Body::OpaqueList { list_type: *b"btdk", data: doc.to_vec().into() }, pad: None };
         let btds_real = |n: usize| list(b"btds", std::iter::once(list(b"tdbs", vec![])).chain((0..n).map(|_| btdk())).collect());
         let layer = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![]), list(b"tdgp", vec![btds_real(2)])])]);
-        let view = Layer { chunk: &layer };
+        let view = Layer { chunk: Node::from(&layer) };
         assert_eq!(view.text_document().map(|d| d.text), Some("H".to_string()));
         assert!(view.source_text_property().is_some());
         assert_eq!(view.text_document_count(), 2);
         // A record anywhere else in the layer is not its Source Text.
         let elsewhere = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![list(b"tdgp", vec![btds_real(1)])])])]);
-        let view = Layer { chunk: &elsewhere };
+        let view = Layer { chunk: Node::from(&elsewhere) };
         assert!(view.text_document().is_none() && view.source_text_property().is_none());
         assert_eq!(view.text_document_count(), 0);
     }

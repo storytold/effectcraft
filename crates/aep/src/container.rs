@@ -23,6 +23,7 @@ mod effects;
 mod error;
 mod footage;
 mod header;
+pub mod index;
 mod keys;
 mod masks;
 mod matte;
@@ -44,6 +45,7 @@ pub use effects::{DefinitionSource, Effect, EffectDefinitions, EffectParam, Laye
 pub use error::AepError;
 pub use footage::{Footage, SequenceInfo};
 pub use header::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Quality, Rational, Renderer};
+pub use index::{Node, NodeWalk, Nodes, TreeIndex};
 pub use keys::{ExpressionFlags, Interpolation, KeyEase, KeyframeKind, SpatialKey};
 pub use masks::{Mask, MaskAtom, MaskMode, PathVertex, ShapePath};
 pub use matte::{MatteMode, TrackMatte};

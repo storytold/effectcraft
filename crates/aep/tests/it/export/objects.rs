@@ -493,7 +493,7 @@ fn shape_records(bytes: &[u8]) -> std::collections::BTreeMap<(usize, String), ef
     for item in view.all_items() {
         let Some(comp) = item.comp() else { continue };
         for (li, layer) in comp.layers().enumerate() {
-            if let Some(g) = layer.chunk().child_list(b"tdgp") {
+            if let Some(g) = layer.chunk().child_list(b"tdgp").map(|g| g.to_chunk()) {
                 walk(g.children(), "", li, false, &mut out);
             }
         }
@@ -618,7 +618,7 @@ fn keyed_shape_records(bytes: &[u8]) -> Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, 
     for item in view.all_items() {
         let Some(comp) = item.comp() else { continue };
         for layer in comp.layers() {
-            if let Some(g) = layer.chunk().child_list(b"tdgp") {
+            if let Some(g) = layer.chunk().child_list(b"tdgp").map(|g| g.to_chunk()) {
                 walk(g.children(), "", false, &mut out);
             }
         }
@@ -853,7 +853,8 @@ fn a_camera_transform_group_ends_with_its_group_end() {
     let view = effectcraft_aep::Project::new(&file).expect("project");
     let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
     let layer = comp.layers().next().expect("camera");
-    let root = layer.chunk().child_list(b"tdgp").expect("tree").children();
+    let tree = layer.chunk().child_list(b"tdgp").expect("tree").to_chunk();
+    let root = tree.children();
     let name =
         |c: &effectcraft_aep::Chunk<'_>| String::from_utf8_lossy(c.bytes().unwrap_or_default().split(|b| *b == 0).next().unwrap_or_default()).into_owned();
     let at = root.iter().position(|c| c.is(b"tdmn") && name(c) == "ADBE Transform Group").expect("transform");

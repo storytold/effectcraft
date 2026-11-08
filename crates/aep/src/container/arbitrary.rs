@@ -7,9 +7,9 @@
 //! Hue/Saturation (444-446) or a Levels value (512-516) changes only bytes of this `aRbp` (and stale
 //! UI bytes of `pard`); the visible parameters of the same names keep no record.
 
-use crate::container::Chunk;
 use crate::container::bytes::{be_f32, be_i32, be_u16, be_u32};
 use crate::container::effects::Effect;
+use crate::container::index::Node;
 
 impl<'f, 'a> Effect<'f, 'a> {
     /// The arbitrary data stored for the parameter with this match name (`<effect>-NNNN`): the
@@ -17,13 +17,13 @@ impl<'f, 'a> Effect<'f, 'a> {
     /// none.
     pub fn arbitrary_data(&self, match_name: &str) -> Option<&'f [u8]> {
         let values = self.chunk().child_list(b"tdgp")?;
-        let kids = values.children();
-        let at = kids.iter().position(|c| c.is(b"tdmn") && c.bytes().is_some_and(|b| name_is(b, match_name)))?;
-        // The value record, then the data list (no match name of its own).
-        let rest = kids.get(at.checked_add(1)?..)?;
-        let mut it = rest.iter().take(3);
+        let mut kids = values.children();
+        // Up to the parameter's match name, then the value record, then the data list (no match
+        // name of its own).
+        kids.find(|c| c.is(b"tdmn") && c.bytes().is_some_and(|b| name_is(b, match_name)))?;
+        let mut it = kids.take(3);
         let _record = it.next().filter(|c| c.is_list(b"tdbs"))?;
-        it.find(|c| c.is_list(b"aRbs")).and_then(|l| l.child(b"aRbp")).and_then(Chunk::bytes)
+        it.find(|c| c.is_list(b"aRbs")).and_then(|l| l.child(b"aRbp")).and_then(Node::bytes)
     }
 }
 

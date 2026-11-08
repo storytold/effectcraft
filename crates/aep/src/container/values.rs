@@ -223,7 +223,6 @@ impl<'f, 'a> Layer<'f, 'a> {
             .child_list(b"otky")
             .map(|k| {
                 k.children()
-                    .iter()
                     .filter(|c| c.is(b"otda"))
                     .map(|c| {
                         let b = c.bytes()?;
