@@ -470,6 +470,20 @@ pub enum AutoOrient {
     TowardsPointOfInterest,
 }
 
+/// A stretch written as `null` (a NaN or infinite stretch: JSON holds neither, and auto-saves
+/// write it so) reads as NaN, so the project still opens and loading brings it to 100 % with a
+/// note ([`crate::limits::stretch`], #3247) instead of the whole file being refused. An infinite
+/// stretch therefore also reopens at 100 %, not at ±9900 %.
+fn stretch_or_nan<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+}
+
+/// `t × mul / div` in ticks, within [`Tick::MIN`]..=[`Tick::MAX`] (the cast saturates, NaN is 0),
+/// so a layer time of an extreme stretch can't overflow later tick arithmetic.
+fn scaled(t: Tick, mul: f64, div: f64) -> Tick {
+    Tick(((t.0 as f64 * mul / div) as i64).clamp(Tick::MIN.0, Tick::MAX.0))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: LayerId,
@@ -484,6 +498,7 @@ pub struct Layer {
     pub in_point: Tick,
     pub out_point: Tick,
     /// Time stretch in percent (100 = normal, negative = reversed).
+    #[serde(deserialize_with = "stretch_or_nan")]
     pub stretch: f64,
     pub switches: Switches,
     pub blend_mode: BlendMode,
@@ -555,15 +570,24 @@ impl Layer {
         t >= self.in_point && t < self.out_point
     }
 
+    /// The time stretch the layer plays at: [`Layer::stretch`] within
+    /// [`limits::stretch`](crate::limits::stretch) (a damaged value that got past loading, 0 or
+    /// NaN, never divides the layer's time by zero).
+    pub fn effective_stretch(&self) -> f64 {
+        crate::limits::stretch(self.stretch)
+    }
+
     /// Layer time for a comp time (stretch-aware).
     pub fn layer_time(&self, comp_t: Tick) -> Tick {
         let d = comp_t - self.start_time;
-        if (self.stretch - 100.0).abs() < 1e-9 { d } else { Tick((d.0 as f64 * 100.0 / self.stretch) as i64) }
+        let s = self.effective_stretch();
+        if (s - 100.0).abs() < 1e-9 { d } else { scaled(d, 100.0, s) }
     }
 
     /// Comp time for a layer time.
     pub fn comp_time(&self, layer_t: Tick) -> Tick {
-        if (self.stretch - 100.0).abs() < 1e-9 { self.start_time + layer_t } else { self.start_time + Tick((layer_t.0 as f64 * self.stretch / 100.0) as i64) }
+        let s = self.effective_stretch();
+        if (s - 100.0).abs() < 1e-9 { self.start_time + layer_t } else { self.start_time + scaled(layer_t, s, 100.0) }
     }
 
     pub fn transform(&self) -> Option<&PropGroup> {
