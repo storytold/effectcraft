@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemId};
 use effectcraft_raster::{Image, Px};
+use effectcraft_raster::channels3d::AuxNeed;
 use effectcraft_render::reads::{FileStamp, ReadFile, ReadFiles, ReadLog};
 use effectcraft_render::{FloatCurve, FootageSource};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
@@ -316,7 +317,7 @@ impl Drop for Decoding {
 /// frame job that waits on it. The decode's own parallel work runs on these threads, which
 /// never wait for a picture.
 #[cfg(not(target_arch = "wasm32"))]
-fn decode_threads() -> Option<&'static rayon::ThreadPool> {
+pub(crate) fn decode_threads() -> Option<&'static rayon::ThreadPool> {
     static THREADS: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     THREADS
         .get_or_init(|| {
@@ -436,11 +437,20 @@ struct AuxFootage {
     /// Read through [`FootageSource::aux`] but not given (a reader the project doesn't name, or
     /// a source that never gives a set). Cleared with each new set.
     learned: HashSet<String>,
+    /// What the effects reading each footage's channels read of them
+    /// ([`FootageSource::set_aux_needs`], #3271); a footage read without one reads them all.
+    needs: HashMap<String, AuxNeed>,
 }
 
 impl AuxFootage {
     fn contains(&self, path: &str) -> bool {
         self.given.contains(path) || self.learned.contains(path)
+    }
+
+    /// The channels to read with the picture of footage `path`: what its effects read, all of
+    /// them when they didn't say, none (`None`) when no effect reads them.
+    fn plan(&self, path: &str) -> Option<AuxNeed> {
+        self.contains(path).then(|| self.needs.get(path).cloned().unwrap_or_default())
     }
 }
 
@@ -621,7 +631,7 @@ impl MediaPool {
         c.generation = c.generation.wrapping_add(1);
         c.last.remove(path);
         drop(c);
-        crate::exr_channels::forget(path);
+        crate::exr_planes::forget(path);
     }
 
     /// Provide the contents of `path` from memory (used instead of the file system; web builds).
@@ -869,6 +879,14 @@ impl Inner {
         let (bytes, file) = self.read_file(path);
         reads::note(file);
         bytes
+    }
+
+    /// Where the OpenEXR file at `path` is read from: registered bytes, else the file.
+    fn exr_source(&self, path: &str) -> crate::exr_read::ExrSource {
+        match lock(&self.files).get(path) {
+            Some(b) => crate::exr_read::ExrSource::Bytes(b.clone()),
+            None => crate::exr_read::ExrSource::File(std::path::PathBuf::from(path)),
+        }
     }
 
     /// The bytes of the file at `path` and its identity as read ([`FileStamp::Missing`] when it
@@ -1281,8 +1299,21 @@ impl Inner {
         if &**path == PLACEHOLDER {
             return Ok(colour_bars(footage.width, footage.height));
         }
+        // OpenEXR: the picture's channels from the plane store, read chunk by chunk (#3271), with
+        // the channels effects read when they read this footage's (#474).
+        if crate::exr_planes::is_exr(path) {
+            use crate::exr_planes::Picture;
+            let extra = lock(&self.aux_footage).plan(&footage.path);
+            match crate::exr_planes::picture(path, &self.exr_source(path), op, extra.as_ref()) {
+                Picture::Done(Ok(img)) => return Ok(img),
+                Picture::Done(Err(why)) => return Err(MediaError::Decode(format!("{path}: {why}"))),
+                Picture::Cancelled => return Err(MediaError::Cancelled),
+                // (the `image` crate decodes the whole file)
+                Picture::Legacy => {}
+            }
+        }
         let (bytes, file) = self.read_file(path);
-        reads::note(file.clone());
+        reads::note(file);
         let bytes = bytes?;
         if let Some(img) = crate::dpx::decode(path, &bytes)? {
             return Ok(dynamic_to_image(&img, op));
@@ -1297,21 +1328,15 @@ impl Inner {
         {
             return Err(MediaError::Decode(format!("{path}: {why}")));
         }
-        // An effect reads this footage's channels: the picture is made of the same decode (#474).
-        let shared = lock(&self.aux_footage).contains(&footage.path);
-        if shared
-            && path.to_ascii_lowercase().ends_with(".exr")
-            && let Some(img) = crate::exr_channels::cached_picture(path, bytes.clone(), &file, op)
-        {
-            return Ok(img);
-        }
         #[cfg(test)]
         crate::exr_channels::count_decode(false);
         match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
             Ok(img) => Ok(dynamic_to_image(&img, op)),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
-            Err(e) => crate::exr_channels::layered_picture(path, bytes, &file, op, shared)
-                .map_err(|why| MediaError::Decode(format!("{path}: {}", why.unwrap_or_else(|| e.to_string())))),
+            Err(e) => match crate::exr_channels::layered_image(&bytes) {
+                Some(img) => Ok(dynamic_to_image(&img, op)),
+                None => Err(MediaError::Decode(format!("{path}: {e}"))),
+            },
         }
     }
 
@@ -1347,6 +1372,20 @@ impl Inner {
                 Ok(turned(frame_to_image_in(&vf, op, buf), turn))
             }
         }
+    }
+}
+
+impl MediaPool {
+    /// The OpenEXR file holding the channels of `footage` at `t` (a still or a sequence frame).
+    fn aux_path(&self, footage: &Footage, t: Tick) -> Option<Arc<str>> {
+        if footage.missing || !footage.has_video {
+            return None;
+        }
+        let loc = Inner::locate(footage, t, FloatCurve::Srgb);
+        if loc.media_t.is_some() || !crate::exr_planes::is_exr(&loc.key.path) {
+            return None;
+        }
+        Some(loc.key.path)
     }
 }
 
@@ -1414,21 +1453,32 @@ impl FootageSource for MediaPool {
         let given: HashSet<String> = paths.iter().cloned().collect();
         let mut wanted = lock(&self.inner.aux_footage);
         if given != wanted.given || !wanted.learned.is_empty() {
-            crate::exr_channels::release_held();
+            crate::exr_planes::release_held();
         }
         wanted.given = given;
         wanted.learned.clear();
     }
 
-    fn aux(&self, _item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
-        if footage.missing || !footage.has_video {
-            return None;
+    fn set_aux_needs(&self, needs: &[(String, AuxNeed)]) {
+        let mut wanted = lock(&self.inner.aux_footage);
+        let needs: HashMap<String, AuxNeed> = needs.iter().cloned().collect();
+        if needs != wanted.needs {
+            crate::exr_planes::release_held();
         }
-        let loc = Inner::locate(footage, t, FloatCurve::Srgb);
-        if loc.media_t.is_some() || !loc.key.path.to_ascii_lowercase().ends_with(".exr") {
-            return None;
-        }
-        let path = loc.key.path.clone();
+        wanted.needs = needs;
+    }
+
+    fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.aux_for(item, footage, t, &AuxNeed::All)
+    }
+
+    fn aux_names(&self, _item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        let path = self.aux_path(footage, t)?;
+        crate::exr_planes::names(&path, &self.inner.exr_source(&path))
+    }
+
+    fn aux_for(&self, _item: ItemId, footage: &Footage, t: Tick, need: &AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        let path = self.aux_path(footage, t)?;
         {
             let mut wanted = lock(&self.inner.aux_footage);
             if !wanted.contains(&footage.path) {
@@ -1439,7 +1489,7 @@ impl FootageSource for MediaPool {
                 wanted.learned.insert(footage.path.clone());
             }
         }
-        crate::exr_channels::cached(&path, || self.inner.read(&path).ok())
+        crate::exr_planes::aux(&path, &self.inner.exr_source(&path), need)
     }
 
     fn audio(&self, _item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {

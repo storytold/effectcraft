@@ -1,0 +1,331 @@
+//! The OpenEXR reader (#3271): only the chunks a request needs, fetched by the offset table in
+//! file order (part by part as the file stores them), decompressed with the `exr` crate's block
+//! API on the thread pool the caller runs on (the footage decode threads), and only the
+//! requested channels converted, straight into their display-window planes.
+//!
+//! - **No whole-file read.** A request reads the headers it is given ([`ExrIndex`]) and then
+//!   exactly the bytes of the chunks it needs; a multi-part file's other parts are never read.
+//! - **Rows and levels.** A request names display rows and a level (every 2^level-th row and
+//!   column). With one scan line per chunk (NONE, RLE, ZIPS) a chunk is a line and the lines not
+//!   needed are not read or decompressed; with larger chunks (ZIP, PIZ, DWA, tiles) whole chunks
+//!   are skipped and the rows within a chunk are only skipped when converting.
+//! - **Cancellable** between batches of chunks ([`filmcraft_media::cancel::cancelled`]).
+//! - **Bit-identical** to the high-level reader: the same decompression, and each line placed
+//!   as `exr_channels`' planes reader placed it (clipped to the display window, the fill value
+//!   outside the data window, `u32` samples as `f32`).
+
+use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
+use std::sync::Arc;
+
+use effectcraft_render::reads::FileStamp;
+use exr::block::UncompressedBlock;
+use exr::block::chunk::Chunk;
+use exr::meta::attribute::SampleType;
+use rayon::prelude::*;
+
+use crate::exr_index::ExrIndex;
+
+/// A source to read an OpenEXR file from: in-memory bytes or a file on disk.
+pub(crate) trait ReadSeek: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeek for T {}
+
+/// Where an OpenEXR file's bytes come from.
+#[derive(Clone, Debug)]
+pub(crate) enum ExrSource {
+    /// Registered in memory (`MediaPool::add_bytes`, web builds, tests).
+    Bytes(Arc<[u8]>),
+    /// A file, opened for each read and read in place.
+    File(std::path::PathBuf),
+}
+
+/// An opened [`ExrSource`].
+pub(crate) struct Opened {
+    pub(crate) reader: Box<dyn ReadSeek>,
+    pub(crate) len: u64,
+    pub(crate) stamp: FileStamp,
+}
+
+impl ExrSource {
+    /// Open it: a file only when it is a regular file (a project can name `/dev/zero` or a FIFO,
+    /// #2134), with its identity from the open file.
+    pub(crate) fn open(&self) -> std::io::Result<Opened> {
+        match self {
+            ExrSource::Bytes(b) => Ok(Opened { len: b.len() as u64, reader: Box::new(std::io::Cursor::new(b.clone())), stamp: FileStamp::Virtual }),
+            ExrSource::File(path) => {
+                #[cfg(test)]
+                crate::count_open(path);
+                let file = std::fs::File::open(path)?;
+                let meta = file.metadata()?;
+                if !meta.is_file() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
+                }
+                Ok(Opened { len: meta.len(), stamp: FileStamp::of_metadata(&meta), reader: Box::new(file) })
+            }
+        }
+    }
+}
+
+/// What to read: channels (indices into [`ExrIndex::channels`]), display rows, and a level.
+#[derive(Clone, Debug)]
+pub(crate) struct ReadRequest {
+    pub(crate) channels: Vec<usize>,
+    /// Rows of the display window (full resolution); `None`: all.
+    pub(crate) rows: Option<Range<i64>>,
+    /// Every 2^level-th row and column of the display window (0: full resolution).
+    pub(crate) level: u32,
+}
+
+impl ReadRequest {
+    /// Every row of `channels` at full resolution.
+    pub(crate) fn full(channels: Vec<usize>) -> ReadRequest {
+        ReadRequest { channels, rows: None, level: 0 }
+    }
+}
+
+/// What a read did, for measurements and tests.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ReadStats {
+    /// Chunks fetched, per part.
+    pub(crate) chunks: Vec<usize>,
+    /// Bytes of chunks read from the source.
+    pub(crate) bytes: u64,
+    /// Scan lines decompressed (rows of the chunks fetched).
+    pub(crate) lines: usize,
+}
+
+/// Why a read gave no planes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ReadError {
+    /// A chunk can't be read or decompressed.
+    Unreadable(String),
+    /// The planes need more memory than one read may allocate (the reason, to show).
+    TooLarge(String),
+    /// The request was called off.
+    Cancelled,
+}
+
+/// The most bytes of planes one read allocates (every requested channel is a display-window
+/// plane of f32): a header can ask for far more than the file holds.
+#[cfg(target_pointer_width = "64")]
+pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
+#[cfg(not(target_pointer_width = "64"))]
+pub(crate) const MAX_DECODE_BYTES: usize = 512 << 20;
+
+/// At most this many chunks, or bytes of them, are read before they are decompressed (and the
+/// request is checked for being called off).
+const BATCH_CHUNKS: usize = 256;
+const BATCH_BYTES: u64 = 64 << 20;
+
+/// Samples of one line placed in a plane.
+struct Placed {
+    /// The requested channel's position in the request.
+    slot: usize,
+    /// The first sample's index in the plane.
+    start: usize,
+    values: Vec<f32>,
+}
+
+/// The size of the planes of a read at `level` of a `w` × `h` display window.
+pub(crate) fn level_size((w, h): (usize, usize), level: u32) -> (usize, usize) {
+    let stride = 1usize << level.min(16);
+    (w.div_ceil(stride), h.div_ceil(stride))
+}
+
+/// Read `req` from `src` (the file `index` describes): one plane per requested channel, in
+/// request order, covering the display window at the request's level (the channel's fill value
+/// where the file has no samples or the request no rows).
+pub(crate) fn read_planes(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest) -> (Result<Vec<Vec<f32>>, ReadError>, ReadStats) {
+    let mut stats = ReadStats { chunks: vec![0; index.parts.len()], ..Default::default() };
+    let planes = read_into(src, index, req, &mut stats);
+    (planes, stats)
+}
+
+fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats: &mut ReadStats) -> Result<Vec<Vec<f32>>, ReadError> {
+    let level = req.level.min(16);
+    let stride = 1i64 << level;
+    let (w, h) = index.size();
+    let (ow, oh) = level_size((w, h), level);
+    let n = ow.checked_mul(oh).ok_or_else(|| ReadError::Unreadable("display window".into()))?;
+    let need = n.saturating_mul(req.channels.len()).saturating_mul(std::mem::size_of::<f32>());
+    if need > MAX_DECODE_BYTES {
+        let gb = |b: usize| b as f64 / f64::from(1u32 << 30);
+        return Err(ReadError::TooLarge(format!(
+            "its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use",
+            w,
+            h,
+            gb(need),
+            gb(MAX_DECODE_BYTES)
+        )));
+    }
+    // Per part: the plane slot of each of its channels (`None`: not requested).
+    let mut slots: Vec<Vec<Option<usize>>> = index.meta.headers.iter().map(|h| vec![None; h.channels.list.len()]).collect();
+    let mut planes = Vec::with_capacity(req.channels.len());
+    for (slot, id) in req.channels.iter().enumerate() {
+        let c = index.channels.get(*id).ok_or_else(|| ReadError::Unreadable("no such channel".into()))?;
+        if let Some(s) = slots.get_mut(c.part).and_then(|p| p.get_mut(c.channel)) {
+            *s = Some(slot);
+        }
+        planes.push(vec![c.fill; n]);
+    }
+    let rows = req.rows.clone().unwrap_or(0..h as i64);
+    let (r0, r1) = (rows.start.max(0), rows.end.min(h as i64));
+    // A display row is read: in the rows, on the level's grid.
+    let wanted = move |ty: i64| ty >= r0 && ty < r1 && ty.rem_euclid(stride) == 0;
+    // A chunk holding display rows `a..b` has a row read.
+    let any_wanted = move |a: i64, b: i64| {
+        let first = a.max(r0);
+        let first = first + (stride - first.rem_euclid(stride)) % stride;
+        first < b.min(r1)
+    };
+    // The chunks to read, in file order.
+    let mut jobs: Vec<(usize, u64, u64)> = vec![];
+    for (pi, part) in index.parts.iter().enumerate() {
+        if !slots.get(pi).is_some_and(|s| s.iter().any(Option::is_some)) {
+            continue;
+        }
+        for c in &part.chunks {
+            let ty0 = c.y.saturating_add(part.offset.1);
+            if !c.largest || !any_wanted(ty0, ty0.saturating_add(c.rows as i64)) {
+                continue;
+            }
+            if c.len == 0 {
+                return Err(ReadError::Unreadable("a chunk offset outside the file".into()));
+            }
+            jobs.push((pi, c.offset, c.len));
+        }
+    }
+    jobs.sort_by_key(|(_, offset, _)| *offset);
+    let geometry = Geometry { size: (w, h), out: (ow, oh), stride, wanted: &wanted };
+    let mut pos: Option<u64> = None;
+    let mut rest = jobs.as_slice();
+    while !rest.is_empty() {
+        if filmcraft_media::cancel::cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        // A batch: up to BATCH_CHUNKS chunks or BATCH_BYTES bytes (at least one chunk).
+        let mut take = 0;
+        let mut bytes = 0u64;
+        while let Some((_, _, len)) = rest.get(take) {
+            if take > 0 && (take >= BATCH_CHUNKS || bytes.saturating_add(*len) > BATCH_BYTES) {
+                break;
+            }
+            bytes = bytes.saturating_add(*len);
+            take += 1;
+        }
+        let (batch, more) = rest.split_at(take.min(rest.len()));
+        rest = more;
+        // Raw bytes on this thread, in file order (one seek per gap).
+        let mut raw = Vec::with_capacity(batch.len());
+        for (pi, offset, len) in batch {
+            if pos != Some(*offset) {
+                src.seek(SeekFrom::Start(*offset)).map_err(|e| ReadError::Unreadable(e.to_string()))?;
+            }
+            let size = usize::try_from(*len).map_err(|_| ReadError::Unreadable("chunk size".into()))?;
+            let mut buf = Vec::new();
+            buf.try_reserve_exact(size).map_err(|e| ReadError::Unreadable(e.to_string()))?;
+            (&mut *src).take(*len).read_to_end(&mut buf).map_err(|e| ReadError::Unreadable(e.to_string()))?;
+            pos = Some(offset.saturating_add(buf.len() as u64));
+            stats.bytes = stats.bytes.saturating_add(buf.len() as u64);
+            if let Some(c) = stats.chunks.get_mut(*pi) {
+                *c += 1;
+            }
+            raw.push((*pi, buf));
+        }
+        // Decompressed and converted on this pool's threads, placed here.
+        let done: Vec<Result<(Vec<Placed>, usize), String>> =
+            raw.into_par_iter().map(|(pi, buf)| chunk_lines(index, pi, &buf, slots.get(pi).map_or(&[][..], Vec::as_slice), &geometry)).collect();
+        for d in done {
+            let (placed, lines) = d.map_err(ReadError::Unreadable)?;
+            stats.lines = stats.lines.saturating_add(lines);
+            for p in placed {
+                let end = p.start.saturating_add(p.values.len());
+                if let Some(dst) = planes.get_mut(p.slot).and_then(|pl| pl.get_mut(p.start..end)) {
+                    dst.copy_from_slice(&p.values);
+                }
+            }
+        }
+    }
+    Ok(planes)
+}
+
+/// The planes' geometry for [`chunk_lines`].
+struct Geometry<'w> {
+    /// The display window's size, and the planes' (at the level).
+    size: (usize, usize),
+    out: (usize, usize),
+    stride: i64,
+    wanted: &'w (dyn Fn(i64) -> bool + Sync),
+}
+
+/// Decompress the chunk `buf` of part `pi` and convert the lines of the requested channels
+/// (`slots`: each channel's plane slot): the samples to place, and the scan lines decompressed.
+/// A chunk that names another part than its offset-table slot's is not placed.
+fn chunk_lines(index: &ExrIndex, pi: usize, buf: &[u8], slots: &[Option<usize>], g: &Geometry) -> Result<(Vec<Placed>, usize), String> {
+    let meta = &index.meta;
+    let mut read = buf;
+    let chunk = Chunk::read(&mut read, meta).map_err(|e| e.to_string())?;
+    if chunk.layer_index != pi {
+        return Ok((vec![], 0));
+    }
+    let block = UncompressedBlock::decompress_chunk(chunk, meta, false).map_err(|e| e.to_string())?;
+    let (Some(header), Some(part)) = (meta.headers.get(pi), index.parts.get(pi)) else { return Ok((vec![], 0)) };
+    let lines = block.index.pixel_size.1;
+    let ((lw, lh), (w, h)) = (part.layer, g.size);
+    let (ow, _) = g.out;
+    let mut out = vec![];
+    let (mut f16s, mut f32s, mut u32s) = (vec![], vec![], vec![]);
+    for line in block.lines(&header.channels) {
+        let Some(Some(slot)) = slots.get(line.location.channel).copied() else { continue };
+        let Some(kind) = header.channels.list.get(line.location.channel).map(|c| c.sample_type) else { continue };
+        let (x0, y, count) = (line.location.position.0, line.location.position.1, line.location.sample_count);
+        // The samples of data-window row `y`, columns `x0..x0 + count`, at display row `ty`
+        // from display column `tx0`; clipped to the display window.
+        if y >= lh || x0.checked_add(count).is_none_or(|end| end > lw) {
+            continue;
+        }
+        let Some(ty) = usize::try_from(y as i64 + part.offset.1).ok().filter(|ty| *ty < h) else { continue };
+        if !(g.wanted)(ty as i64) {
+            continue;
+        }
+        let tx0 = x0 as i64 + part.offset.0;
+        let skip = usize::try_from(-tx0).unwrap_or(0).min(count);
+        let tx = usize::try_from(tx0.max(0)).unwrap_or(usize::MAX);
+        let take = (count - skip).min(w.saturating_sub(tx));
+        if take == 0 {
+            continue;
+        }
+        let samples: Vec<f32> = match kind {
+            SampleType::F16 => {
+                f16s.resize(count, exr::prelude::f16::ZERO);
+                line.read_samples_into_slice(&mut f16s).map_err(|e| e.to_string())?;
+                f16s.iter().skip(skip).take(take).map(|s| s.to_f32()).collect()
+            }
+            SampleType::F32 => {
+                f32s.resize(count, 0.0);
+                line.read_samples_into_slice(&mut f32s).map_err(|e| e.to_string())?;
+                f32s.iter().skip(skip).take(take).copied().collect()
+            }
+            SampleType::U32 => {
+                u32s.resize(count, 0);
+                line.read_samples_into_slice(&mut u32s).map_err(|e| e.to_string())?;
+                u32s.iter().skip(skip).take(take).map(|s| *s as f32).collect()
+            }
+        };
+        if g.stride == 1 {
+            let Some(start) = ty.checked_mul(w).and_then(|row| row.checked_add(tx)) else { continue };
+            out.push(Placed { slot, start, values: samples });
+            continue;
+        }
+        // A reduced level: every stride-th column of the row, on the level's grid.
+        let stride = g.stride as usize;
+        let first = tx.div_ceil(stride) * stride;
+        let values: Vec<f32> = samples.iter().enumerate().filter(|(j, _)| (tx + j) % stride == 0).map(|(_, v)| *v).collect();
+        if values.is_empty() {
+            continue;
+        }
+        let Some(start) = (ty / stride).checked_mul(ow).and_then(|row| row.checked_add(first / stride)) else { continue };
+        out.push(Placed { slot, start, values });
+    }
+    Ok((out, lines))
+}
