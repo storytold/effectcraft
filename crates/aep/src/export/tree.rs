@@ -97,27 +97,61 @@ pub(crate) fn put_cstr(d: &mut [u8], at: usize, len: usize, text: &str) -> R<()>
     Ok(())
 }
 
-/// How many fixed layouts did not fit their buffer (see [`fixed`]); the tests keep it at zero.
-static FIXED_LAYOUT_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// The result of a builder whose layout is fixed in code (constant sizes and offsets, no input):
-/// its writes go through [`put`], which errors when one does not fit. Such an error is a bug in
-/// the layout, never something a project can cause, and the tests build every one of these
-/// layouts and require no error. The builders keep their infallible signatures because files
-/// outside this module call them without a `Result`; if a layout ever broke, `fallback` is used
-/// and the error goes to the log.
-pub(crate) fn fixed<T>(builder: &'static str, built: R<T>, fallback: impl FnOnce() -> T) -> T {
-    built.unwrap_or_else(|e| {
-        FIXED_LAYOUT_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        log::error!("aep export: the fixed layout of {builder} does not fit: {e}");
-        fallback()
-    })
+thread_local! {
+    /// How many fixed layouts on this thread did not fit their buffer (see [`Fixed`]); the tests
+    /// keep it at zero.
+    static FIXED_LAYOUT_ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How many fixed layouts have failed in this process (for the tests).
+/// A buffer whose layout is fixed in code (constant size and offsets, no input from a project).
+/// Every write goes through [`put`]; a write that does not fit is skipped and its error kept, the
+/// others are written. Such an error is a bug in the layout, never something a project can cause:
+/// the tests build every one of these layouts and require no error. The builders keep their
+/// infallible signatures because files outside this module call them without a `Result`; if a
+/// layout ever broke, [`Fixed::finish`] logs it once and returns what fit.
+pub(crate) struct Fixed {
+    bytes: Vec<u8>,
+    error: Option<AepExportError>,
+}
+
+impl Fixed {
+    /// `len` zero bytes.
+    pub(crate) fn zeroed(len: usize) -> Fixed {
+        Fixed { bytes: vec![0u8; len], error: None }
+    }
+
+    /// Writes `bytes` at `at`, or keeps the error (the first one) when they do not fit.
+    pub(crate) fn put(&mut self, at: usize, bytes: &[u8]) {
+        self.apply(|d| put(d, at, bytes));
+    }
+
+    /// Runs a writer on the buffer, keeping its error (the first one).
+    pub(crate) fn apply(&mut self, write: impl FnOnce(&mut [u8]) -> R<()>) {
+        if let Err(e) = write(&mut self.bytes) {
+            self.error.get_or_insert(e);
+        }
+    }
+
+    /// The error of the first write that did not fit (for the tests).
+    #[cfg(test)]
+    pub(crate) fn error(&self) -> Option<&AepExportError> {
+        self.error.as_ref()
+    }
+
+    /// The bytes; a write that did not fit is logged once, with what `layout` says.
+    pub(crate) fn finish(self, layout: impl FnOnce() -> String) -> Vec<u8> {
+        if let Some(e) = self.error {
+            FIXED_LAYOUT_ERRORS.with(|n| n.set(n.get().saturating_add(1)));
+            log::error!("aep export: the fixed layout of {} does not fit: {e}", layout());
+        }
+        self.bytes
+    }
+}
+
+/// How many fixed layouts have failed on this thread (for the tests).
 #[cfg(test)]
 pub(crate) fn fixed_layout_errors() -> usize {
-    FIXED_LAYOUT_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
+    FIXED_LAYOUT_ERRORS.with(std::cell::Cell::get)
 }
 
 /// The entries of a property group by match name (see [`split_group`]).
@@ -179,8 +213,21 @@ mod tests {
     /// text, cameras, lights, shapes, styles) are built and no write went out of range.
     #[test]
     fn every_fixed_layout_fits() {
+        assert_eq!(fixed_layout_errors(), 0);
         assert!(crate::export::template::Template::load().is_ok());
         assert_eq!(fixed_layout_errors(), 0);
+    }
+
+    #[test]
+    fn a_broken_fixed_layout_writes_what_fits_and_is_counted() {
+        let before = fixed_layout_errors();
+        let mut b = Fixed::zeroed(4);
+        b.put(0, &[1]);
+        b.put(3, &[2, 2]);
+        b.put(2, &[3]);
+        assert!(b.error().is_some());
+        assert_eq!(b.finish(|| "a test layout".to_string()), [1, 0, 3, 0]);
+        assert_eq!(fixed_layout_errors(), before + 1);
     }
 
     #[test]

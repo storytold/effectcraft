@@ -21,7 +21,7 @@ use crate::export::keys::{set_key_list, timed_keys};
 use crate::export::plan::{CompPlan, EaseSlot, KeyPlan, LIMIT, cut_name};
 use crate::export::report::{Collector, LossCategory};
 use crate::export::synth::GROUP_END;
-use crate::export::tree::{R, child_data, child_mut, fixed, kids_mut, list_mut, put, put_f32, put_f64, put_i32, put_u8, put_u16, put_u32, split_group, tpl};
+use crate::export::tree::{Fixed, R, child_data, child_mut, kids_mut, list_mut, put_f32, put_f64, put_i32, put_u8, put_u16, put_u32, split_group, tpl};
 
 /// The most vertices one mask path may have (as the importer).
 pub(crate) const MAX_VERTICES: usize = 65_536;
@@ -365,26 +365,25 @@ const MASK_LIMIT: f64 = 32_000.0;
 /// s13-m1), byte 3 `0x01` (`0x09` once the path is open), the box at 4..19 (written per shape),
 /// byte 20 1.
 pub(crate) fn shph() -> Vec<u8> {
-    fixed("shph", try_shph(), || vec![0u8; 24])
+    shph_layout().finish(|| "shph".to_string())
 }
 
-fn try_shph() -> R<Vec<u8>> {
-    let mut b = vec![0u8; 24];
-    put(&mut b, 0, &[0xb3, 0xde, 0x02, 0x01])?;
-    put_u8(&mut b, 20, 1)?;
-    Ok(b)
+fn shph_layout() -> Fixed {
+    let mut b = Fixed::zeroed(24);
+    b.put(0, &[0xb3, 0xde, 0x02, 0x01]);
+    b.put(20, &[1]);
+    b
 }
 
 /// The two prototype records of a keyed path (093): 64 bytes each, flags `0x0001`, the `f64` at
 /// 16 1 in the first (the rest is zero: its last bytes were uninitialised).
-fn path_key_records() -> R<Vec<u8>> {
-    let mut first = vec![0u8; 64];
-    let mut later = vec![0u8; 64];
-    for r in [&mut first, &mut later] {
-        put_u16(r, 6, 0x0001)?;
+fn path_key_records() -> Fixed {
+    let mut b = Fixed::zeroed(128);
+    for at in [6, 64 + 6] {
+        b.put(at, &0x0001u16.to_be_bytes());
     }
-    put_f64(&mut first, 16, 1.0)?;
-    Ok([first, later].concat())
+    b.put(16, &1.0f64.to_be_bytes());
+    b
 }
 
 impl MaskProtos {
@@ -400,7 +399,7 @@ impl MaskProtos {
         let path_rec = |keyed: bool| {
             let mut kids = vec![state(), tdsn(NO_NAME), Chunk::data(*b"tdb4", tdb4(&path, keyed, 25_600))];
             if keyed {
-                kids.push(key_list(64, 2, fixed("keyed path", path_key_records(), || vec![0u8; 128])));
+                kids.push(key_list(64, 2, path_key_records().finish(|| "the keyed path records".to_string())));
             } else {
                 kids.push(Chunk::data(*b"cdat", vec![0u8; 4]));
             }
@@ -465,6 +464,7 @@ fn build_atom(t: &MaskProtos, m: &MaskPlan, size: (u32, u32)) -> R<Chunk<'static
         crate::export::tree::set_utf8(tdsn, &m.name)?;
     }
     let (mut out, entries) = split_group(kids_mut(&mut atom)?)?;
+    let mut has_shape = false;
     for (name, entry) in entries {
         // The closing Group End (no node) is kept as it is.
         let [tdmn, mut node]: [Chunk<'static>; 2] = match entry.try_into() {
@@ -477,6 +477,7 @@ fn build_atom(t: &MaskProtos, m: &MaskPlan, size: (u32, u32)) -> R<Chunk<'static
         let keep = match name.as_str() {
             "ADBE Mask Shape" => {
                 build_shape(t, &mut node, m, size)?;
+                has_shape = true;
                 true
             }
             "ADBE Mask Feather" => {
@@ -510,6 +511,10 @@ fn build_atom(t: &MaskProtos, m: &MaskPlan, size: (u32, u32)) -> R<Chunk<'static
             out.push(tdmn);
             out.push(node);
         }
+    }
+    // A prototype without the path would drop every mask's shape.
+    if !has_shape {
+        return Err(tpl("mask atom without its path"));
     }
     *kids_mut(&mut atom)? = out;
     Ok(atom)
@@ -622,4 +627,36 @@ pub(crate) fn build_shap(proto: &Chunk<'static>, s: &ShapePlan) -> R<Chunk<'stat
         None => ld.push(Chunk::data(*b"ldat", ldat)),
     }
     Ok(shap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::synth::is_tdmn;
+
+    fn mask() -> MaskPlan {
+        let shape = ShapePlan { bbox: [0.0, 0.0, 1.0, 1.0], open: false, points: vec![[0.0, 0.0]; 3] };
+        MaskPlan {
+            name: "M".into(),
+            mode: 1,
+            inverted: false,
+            shape,
+            path_keys: Vec::new(),
+            feather: None,
+            feather_keys: Vec::new(),
+            opacity: None,
+            expansion: None,
+        }
+    }
+
+    #[test]
+    fn an_atom_without_its_path_is_an_error() {
+        let mut t = MaskProtos::build();
+        assert!(build_atom(&t, &mask(), (100, 100)).is_ok());
+        // Without the Mask Shape pair the path of every mask would be dropped quietly.
+        let kids = kids_mut(&mut t.atom).unwrap();
+        let at = kids.iter().position(|c| is_tdmn(c, "ADBE Mask Shape")).unwrap();
+        kids.drain(at..at + 2);
+        assert!(build_atom(&t, &mask(), (100, 100)).is_err());
+    }
 }

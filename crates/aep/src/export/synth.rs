@@ -4,7 +4,7 @@
 //! evidence, or zero where After Effects was shown to accept zero (the read-backs listed in
 //! `docs/aep-export.md`, "Built in code").
 
-use crate::export::tree::{R, fixed, put, put_u32};
+use crate::export::tree::{Fixed, R, put_u32};
 use crate::{Body, Chunk};
 
 /// `tdmn`: a match name padded to 40 bytes (at most 39 bytes of the name, so that a NUL remains).
@@ -123,12 +123,12 @@ impl RecSpec {
 /// word and the constant doubles at 16..56 are written; After Effects reads the other bytes as
 /// zero (read-back e1-ztdb4d).
 pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
-    fixed("tdb4", try_tdb4(spec, keyed, time_scale), || vec![0u8; 124])
+    tdb4_layout(spec, keyed, time_scale).finish(|| "tdb4".to_string())
 }
 
-fn try_tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> R<Vec<u8>> {
-    let mut b = vec![0u8; 124];
-    put(&mut b, 0, &[0xdb, 0x99, 0x00, spec.dims])?;
+fn tdb4_layout(spec: &RecSpec, keyed: bool, time_scale: u32) -> Fixed {
+    let mut b = Fixed::zeroed(124);
+    b.put(0, &[0xdb, 0x99, 0x00, spec.dims]);
     let spatial = match spec.template {
         KeyTemplate::Plain => 0,
         KeyTemplate::Spatial(t) => t,
@@ -137,36 +137,36 @@ fn try_tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> R<Vec<u8>> {
         Some(b) => (b & !0x01) | u8::from(!keyed),
         None => (if spatial == 0 { 0 } else { spatial_byte5(spatial) }) | u8::from(!keyed),
     };
-    put(&mut b, 5, &[byte5])?;
-    put(&mut b, 7, &[spatial])?;
-    put(&mut b, 8, &spec.class.to_be_bytes())?;
-    put(&mut b, 12, &time_scale.to_be_bytes())?;
+    b.put(5, &[byte5]);
+    b.put(7, &[spatial]);
+    b.put(8, &spec.class.to_be_bytes());
+    b.put(12, &time_scale.to_be_bytes());
     // Every record After Effects writes carries 0.0001 and four 1.0 here; without them a roving
     // key reads back at time zero instead of its retimed place (read-back s14-re-keyframes).
-    put(&mut b, 16, &1e-4f64.to_be_bytes())?;
+    b.put(16, &1e-4f64.to_be_bytes());
     for at in [24, 32, 40, 48] {
-        put(&mut b, at, &1.0f64.to_be_bytes())?;
+        b.put(at, &1.0f64.to_be_bytes());
     }
-    put(&mut b, 68, &[u8::from(keyed)])?;
+    b.put(68, &[u8::from(keyed)]);
     // Set on a static spatial property, cleared once it is keyed (aep-format.md 3.4, byte 79).
-    put(&mut b, 79, &[u8::from(spatial != 0 && !keyed)])?;
-    Ok(b)
+    b.put(79, &[u8::from(spatial != 0 && !keyed)]);
+    b
 }
 
 /// A key list (`LIST list`: `lhd3` + `ldat`) of `count` records of `size` bytes (aep-format.md
 /// 3.5): word 0 `0x00d00bee`, word 2 the count, word 3 the blocks of four (at least one), word 4
 /// the size, words 5 and 7 the capacity (the count rounded up to four, at least two), word 6 one.
 pub(crate) fn key_list(size: u32, count: u32, records: Vec<u8>) -> Chunk<'static> {
-    let lhd3 = fixed("lhd3", key_list_header(size, count), || vec![0u8; 52]);
+    let lhd3 = key_list_header(size, count).finish(|| "lhd3".to_string());
     Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", lhd3), Chunk::data(*b"ldat", records)])
 }
 
-fn key_list_header(size: u32, count: u32) -> R<Vec<u8>> {
-    let mut lhd3 = vec![0u8; 52];
-    put_u32(&mut lhd3, 0, 0x00d0_0bee)?;
-    put_u32(&mut lhd3, 24, 1)?;
-    put_key_counts(&mut lhd3, count, size)?;
-    Ok(lhd3)
+fn key_list_header(size: u32, count: u32) -> Fixed {
+    let mut lhd3 = Fixed::zeroed(52);
+    lhd3.put(0, &0x00d0_0bee_u32.to_be_bytes());
+    lhd3.put(24, &1u32.to_be_bytes());
+    lhd3.apply(|d| put_key_counts(d, count, size));
+    lhd3
 }
 
 /// Sets the count words of a key list header for `count` keys of `size` bytes.
@@ -235,12 +235,14 @@ mod tests {
             for template in [KeyTemplate::Plain, KeyTemplate::Spatial(1), KeyTemplate::Spatial(3), KeyTemplate::Spatial(u8::MAX)] {
                 for byte5 in [None, Some(0xff)] {
                     let spec = RecSpec { dims, template, class: u32::MAX, limits: None, byte5 };
-                    assert!(try_tdb4(&spec, false, u32::MAX).is_ok() && try_tdb4(&spec, true, 0).is_ok());
+                    assert!(tdb4_layout(&spec, false, u32::MAX).error().is_none() && tdb4_layout(&spec, true, 0).error().is_none());
                 }
             }
         }
         for (size, count) in [(0, 0), (u32::MAX, u32::MAX), (48, 5)] {
-            assert_eq!(key_list_header(size, count).map(|h| h.len()).ok(), Some(52));
+            let h = key_list_header(size, count);
+            assert!(h.error().is_none());
+            assert_eq!(h.finish(String::new).len(), 52);
         }
     }
 

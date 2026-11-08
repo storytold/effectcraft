@@ -7,24 +7,20 @@
 
 use crate::Chunk;
 use crate::export::synth::{GROUP_END, tdmn, tdsn};
-use crate::export::tree::{R, fixed, put};
+use crate::export::tree::Fixed;
 
 /// A zero buffer of `len` bytes with `fields` (offset, bytes) written into it. The layouts are
-/// fixed in code ([`fixed`]).
+/// fixed in code ([`Fixed`]).
 pub(crate) fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
-    fixed("base::bytes", try_bytes(len, fields), || {
-        // Which layout: its length and fields (the builders are named in the comments above).
-        log::error!("aep export: base::bytes layout of {len} bytes, fields at {:?}", fields.iter().map(|(at, v)| (*at, v.len())).collect::<Vec<_>>());
-        vec![0u8; len]
-    })
+    layout(len, fields).finish(|| format!("base::bytes ({len} bytes, fields at {:?})", fields.iter().map(|(at, v)| (*at, v.len())).collect::<Vec<_>>()))
 }
 
-fn try_bytes(len: usize, fields: &[(usize, &[u8])]) -> R<Vec<u8>> {
-    let mut b = vec![0u8; len];
+fn layout(len: usize, fields: &[(usize, &[u8])]) -> Fixed {
+    let mut b = Fixed::zeroed(len);
     for (at, v) in fields {
-        put(&mut b, *at, v)?;
+        b.put(*at, v);
     }
-    Ok(b)
+    b
 }
 
 pub(crate) fn utf8(text: &str) -> Chunk<'static> {
@@ -286,9 +282,11 @@ mod tests {
 
     #[test]
     fn a_field_out_of_range_is_an_error() {
-        assert_eq!(try_bytes(4, &[(0, &[1]), (3, &[2])]).ok(), Some(vec![1, 0, 0, 2]));
-        assert!(try_bytes(4, &[(3, &[1, 2])]).is_err());
-        assert!(try_bytes(4, &[(usize::MAX, &[1])]).is_err());
+        let ok = layout(4, &[(0, &[1]), (3, &[2])]);
+        assert!(ok.error().is_none());
+        assert_eq!(ok.finish(String::new), [1, 0, 0, 2]);
+        assert!(layout(4, &[(3, &[1, 2])]).error().is_some());
+        assert!(layout(4, &[(usize::MAX, &[1])]).error().is_some());
     }
 
     /// The chunks After Effects refuses a file without, or crashes on (aep-export.md, "What After

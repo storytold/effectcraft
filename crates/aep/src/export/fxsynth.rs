@@ -12,7 +12,7 @@ use crate::Chunk;
 use crate::effect_map::{Conv, by_match_name};
 use crate::export::fx_defs::{BUILT_IN, FxDef, PDef};
 use crate::export::synth::{GROUP_END, KeyTemplate, NO_NAME, RecSpec, class, tdmn, tdsn, utf8_in};
-use crate::export::tree::{R, fixed as fixed_layout, put};
+use crate::export::tree::Fixed;
 use crate::{CURVE_IDENTITY, CurvesData, MeshData};
 
 /// The layer a prototype's layer parameters name when their default is the owning layer; the
@@ -48,91 +48,91 @@ fn fixed(v: f64) -> [u8; 4] {
 /// display 124; fixed and integer: 124 / 128 / 132 / 136, default 140, display 144). Every other
 /// byte is zero (the switches at 48 are not needed: s12-e2-nofl).
 pub(crate) fn pard(p: &PDef, popup_items: Option<u16>) -> Vec<u8> {
-    fixed_layout("pard", try_pard(p, popup_items), || vec![0u8; 148])
+    pard_layout(p, popup_items).finish(|| format!("pard (type {})", p.code))
 }
 
-fn try_pard(p: &PDef, popup_items: Option<u16>) -> R<Vec<u8>> {
-    let mut b = vec![0u8; 148];
-    put(&mut b, 12, &u32::from(p.code).to_be_bytes())?;
+fn pard_layout(p: &PDef, popup_items: Option<u16>) -> Fixed {
+    let mut b = Fixed::zeroed(148);
+    b.put(12, &u32::from(p.code).to_be_bytes());
     let d = |i: usize| p.default.get(i).copied().unwrap_or(0.0);
     // After Effects takes the default of a parameter without a value record from here (s8-e1:
     // the copies below are the ones it reads).
     match p.code {
         10 => {
-            put(&mut b, 56, &d(0).to_be_bytes())?;
+            b.put(56, &d(0).to_be_bytes());
             // The default again as `f32` at 120, the display word (decimals) at 124.
-            put(&mut b, 120, &(d(0) as f32).to_be_bytes())?;
-            put(&mut b, 124, &p.display.to_be_bytes())?;
+            b.put(120, &(d(0) as f32).to_be_bytes());
+            b.put(124, &p.display.to_be_bytes());
         }
-        2 => put(&mut b, 56, &fixed(d(0)))?,
+        2 => b.put(56, &fixed(d(0))),
         // An angle: the default again at 60.
         3 => {
-            put(&mut b, 56, &fixed(d(0)))?;
-            put(&mut b, 60, &fixed(d(0)))?;
+            b.put(56, &fixed(d(0)));
+            b.put(60, &fixed(d(0)));
         }
-        1 => put(&mut b, 56, &(d(0).round() as i32).to_be_bytes())?,
+        1 => b.put(56, &(d(0).round() as i32).to_be_bytes()),
         // A checkbox: the default again as a byte at 60.
         4 => {
-            put(&mut b, 56, &(d(0).round().max(0.0) as u32).to_be_bytes())?;
-            put(&mut b, 60, &[u8::from(d(0) != 0.0)])?;
+            b.put(56, &(d(0).round().max(0.0) as u32).to_be_bytes());
+            b.put(60, &[u8::from(d(0) != 0.0)]);
         }
         // A popup: the default again as `u16` at 62 (the item count is at 60).
         7 => {
             let sel = d(0).round().clamp(0.0, f64::from(u16::MAX));
-            put(&mut b, 56, &(sel as u32).to_be_bytes())?;
-            put(&mut b, 62, &(sel as u16).to_be_bytes())?;
+            b.put(56, &(sel as u32).to_be_bytes());
+            b.put(62, &(sel as u16).to_be_bytes());
         }
         6 => {
             // Fractions of the layer at 56 / 60 and the same in percent at 68 / 72.
-            put(&mut b, 56, &fixed(d(0)))?;
-            put(&mut b, 60, &fixed(d(1)))?;
-            put(&mut b, 68, &fixed(d(0) * 100.0))?;
-            put(&mut b, 72, &fixed(d(1) * 100.0))?;
+            b.put(56, &fixed(d(0)));
+            b.put(60, &fixed(d(1)));
+            b.put(68, &fixed(d(0) * 100.0));
+            b.put(72, &fixed(d(1) * 100.0));
         }
         5 => {
             // ARGB at 56 and the same at 60.
             let c: Vec<u8> = (0..4).map(|i| d(i).round().clamp(0.0, 255.0) as u8).collect();
-            put(&mut b, 56, &c)?;
-            put(&mut b, 60, &c)?;
+            b.put(56, &c);
+            b.put(60, &c);
         }
         _ => {}
     }
     if p.code == 7 {
         let n = popup_items.unwrap_or_else(|| u16::try_from(p.display).unwrap_or(0));
-        put(&mut b, 60, &n.to_be_bytes())?;
+        b.put(60, &n.to_be_bytes());
     }
     match p.code {
         10 => {
             if let Some(m) = p.valid_min {
-                put(&mut b, 104, &(m as f32).to_be_bytes())?;
+                b.put(104, &(m as f32).to_be_bytes());
             }
             if let Some(m) = p.valid_max {
-                put(&mut b, 108, &(m as f32).to_be_bytes())?;
+                b.put(108, &(m as f32).to_be_bytes());
             }
             if let Some((lo, hi)) = p.range {
-                put(&mut b, 112, &(lo as f32).to_be_bytes())?;
-                put(&mut b, 116, &(hi as f32).to_be_bytes())?;
+                b.put(112, &(lo as f32).to_be_bytes());
+                b.put(116, &(hi as f32).to_be_bytes());
             }
         }
         1 | 2 => {
             let enc = |v: f64| if p.code == 2 { fixed(v) } else { (v.round() as i32).to_be_bytes() };
             if let Some(m) = p.valid_min {
-                put(&mut b, 124, &enc(m))?;
+                b.put(124, &enc(m));
             }
             if let Some(m) = p.valid_max {
-                put(&mut b, 128, &enc(m))?;
+                b.put(128, &enc(m));
             }
             if let Some((lo, hi)) = p.range {
-                put(&mut b, 132, &enc(lo))?;
-                put(&mut b, 136, &enc(hi))?;
+                b.put(132, &enc(lo));
+                b.put(136, &enc(hi));
             }
             // The default again at 140, the display word (decimals, percent) at 144.
-            put(&mut b, 140, &enc(d(0)))?;
-            put(&mut b, 144, &p.display.to_be_bytes())?;
+            b.put(140, &enc(d(0)));
+            b.put(144, &p.display.to_be_bytes());
         }
         _ => {}
     }
-    Ok(b)
+    b
 }
 
 /// The default arbitrary data of an effect (its type-11 parameter), from the decoded layouts
@@ -278,7 +278,9 @@ mod tests {
     fn every_parameter_definition_fits() {
         for fx in FX_DEFS {
             for (i, p) in fx.params.iter().enumerate() {
-                assert_eq!(try_pard(p, popup_items(fx, i)).map(|b| b.len()).ok(), Some(148), "{} {}", fx.match_name, i);
+                let b = pard_layout(p, popup_items(fx, i));
+                assert!(b.error().is_none(), "{} {}", fx.match_name, i);
+                assert_eq!(b.finish(String::new).len(), 148);
             }
         }
     }
