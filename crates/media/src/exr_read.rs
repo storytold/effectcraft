@@ -328,11 +328,11 @@ fn read_batch(src: &mut dyn ReadSeek, batch: &[(usize, u64, u64)], pos: &mut Opt
             src.seek(SeekFrom::Start(start)).map_err(|e| ReadError::Io(e.to_string()))?;
         }
         let at = raw.data.len();
-        (&mut *src).take(end - start).read_to_end(&mut raw.data).map_err(|e| ReadError::Io(e.to_string()))?;
-        let got = raw.data.len() - at;
+        (&mut *src).take(end.saturating_sub(start)).read_to_end(&mut raw.data).map_err(|e| ReadError::Io(e.to_string()))?;
+        let got = raw.data.len().saturating_sub(at);
         *pos = Some(start.saturating_add(got as u64));
         for (pi, offset, len) in batch.get(i..j).unwrap_or_default() {
-            let a = usize::try_from(offset - start).map_or(raw.data.len(), |o| at.saturating_add(o)).min(raw.data.len());
+            let a = usize::try_from(offset.saturating_sub(start)).map_or(raw.data.len(), |o| at.saturating_add(o)).min(raw.data.len());
             let b = usize::try_from(*len).map_or(raw.data.len(), |l| a.saturating_add(l)).min(raw.data.len());
             raw.chunks.push((*pi, a..b));
             if let Some(c) = stats.chunks.get_mut(*pi) {

@@ -1039,13 +1039,13 @@ fn a_region_of_interest_reads_only_its_rows() {
     }
 }
 
-/// A source that calls the request off after `cancel_after` reads, or fails every read after
-/// `fail_after` (tests of a read in several batches).
+/// A source that calls the request off after `cancel_after` reads, or fails every read from
+/// byte `fail_from` on (tests of a read in several batches).
 struct Flaky {
     inner: std::io::Cursor<Vec<u8>>,
     reads: usize,
     cancel_after: Option<(usize, Arc<std::sync::atomic::AtomicBool>)>,
-    fail_after: Option<usize>,
+    fail_from: Option<u64>,
 }
 
 impl std::io::Read for Flaky {
@@ -1056,7 +1056,7 @@ impl std::io::Read for Flaky {
         {
             flag.store(true, Ordering::SeqCst);
         }
-        if self.fail_after.is_some_and(|n| self.reads > n) {
+        if self.fail_from.is_some_and(|at| self.inner.position() >= at) {
             return Err(std::io::Error::other("the share went away"));
         }
         self.inner.read(buf)
@@ -1103,18 +1103,20 @@ fn a_read_in_several_batches_is_whole_and_stops_between_them() {
     }
     // Called off while the first batch is read: it stops before the next.
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut flaky = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: Some((1, flag.clone())), fail_after: None };
+    let mut flaky = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: Some((1, flag.clone())), fail_from: None };
     let (got, stats) = filmcraft_media::cancel::with_cancel(&flag, || crate::exr_read::read_planes(&mut flaky, &ix, &all));
     assert_eq!(got.err(), Some(ReadError::Cancelled));
     assert!(stats.lines < h, "stopped early: {} lines", stats.lines);
     // Chunks that follow each other in the file are read in one go, not one read per chunk.
-    let mut counted = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: None, fail_after: None };
+    let mut counted = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: None, fail_from: None };
     assert!(crate::exr_read::read_planes(&mut counted, &ix, &all).0.is_ok());
     assert!(counted.reads <= 12, "{} reads for {h} chunks", counted.reads);
-    // A read failing in the second batch.
-    let mut flaky = Flaky { inner: std::io::Cursor::new(bytes), reads: 0, cancel_after: None, fail_after: Some(1) };
-    let (got, _) = crate::exr_read::read_planes(&mut flaky, &ix, &all);
+    // A read failing in a later batch (at chunk 300): an I/O error after the first was decoded.
+    let at = ix.parts[0].chunks[300].offset;
+    let mut flaky = Flaky { inner: std::io::Cursor::new(bytes), reads: 0, cancel_after: None, fail_from: Some(at) };
+    let (got, stats) = crate::exr_read::read_planes(&mut flaky, &ix, &all);
     assert!(matches!(got, Err(ReadError::Io(_))), "{got:?}");
+    assert!(stats.lines > 0, "the batches before it were decoded");
 }
 
 /// #3271: dropping entries for bytes (a decode over the budget, the memory accountant) drops

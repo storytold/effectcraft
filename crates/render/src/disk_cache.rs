@@ -454,6 +454,28 @@ impl Queue {
         self.frames.is_empty() && self.jobs.is_empty()
     }
 
+    /// Drop queued layer and plane writes, newest first, until the ones left hold at most `bytes`
+    /// of their own and of plane sets the plane store also holds (a queued plane set keeps the
+    /// store from letting go of it, so it is dropped too); frame writes are never dropped (a
+    /// fully cached comp would come back with gaps). The writes dropped.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn trim(&mut self, bytes: usize) -> u64 {
+        let pins = |p: &Payload| match p {
+            Payload::Planes(..) => p.held(),
+            _ => p.unique(),
+        };
+        let held = |q: &Queue| q.jobs.iter().map(|j| if let Job::Write(_, _, _, p) = j { pins(p) } else { 0 }).fold(0, usize::saturating_add);
+        let mut dropped = 0;
+        while held(self) > bytes {
+            let Some(i) = self.jobs.iter().rposition(|j| matches!(j, Job::Write(_, _, _, p) if pins(p) > 0)) else { break };
+            if let Some(Job::Write(_, _, _, p)) = self.jobs.remove(i) {
+                self.job_bytes = self.job_bytes.saturating_sub(p.held());
+            }
+            dropped += 1;
+        }
+        dropped
+    }
+
     /// The bytes only the queued layer and plane writes hold (no frames: see the memory holder).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn unique_job_bytes(&self) -> usize {
@@ -1489,17 +1511,11 @@ impl crate::memory::MemoryHolder for DiskCache {
     fn priority(&self) -> u8 {
         0
     }
-    /// Drops queued layer and plane writes (newest first) that alone hold their bytes; frame
-    /// writes are never dropped (a fully cached comp would come back with gaps).
+    /// Drops queued layer and plane writes (newest first), see [`Queue::trim`].
     fn trim_to(&self, bytes: usize) {
         let Ok(mut q) = self.queue.0.lock() else { return };
-        while q.unique_job_bytes() > bytes {
-            let Some(i) = q.jobs.iter().rposition(|j| matches!(j, Job::Write(_, _, _, p) if p.unique() > 0)) else { break };
-            if let Some(Job::Write(_, _, _, p)) = q.jobs.remove(i) {
-                q.job_bytes = q.job_bytes.saturating_sub(p.held());
-            }
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-        }
+        let dropped = q.trim(bytes);
+        self.dropped.fetch_add(dropped, Ordering::Relaxed);
     }
 }
 
@@ -2103,6 +2119,16 @@ mod tests {
         assert_eq!(job.unique(), 69 * 8 * 4, "the queue alone holds them");
         let aux = kept.upgrade().unwrap();
         drop(job);
+        // Trimmed by the memory accountant, a queued plane set is dropped also while the store
+        // holds it (it keeps the store from letting go); frames stay.
+        {
+            let mut q = dc.queue.0.lock().unwrap();
+            q.jobs.push_back(Job::Write(Kind::Plane, 1, FORMAT_PLANES_FILES, Payload::Planes(aux.clone(), planes.clone(), files.clone())));
+            q.frames.push_back(Job::Write(Kind::Frame, 2, FORMAT_RGBA8_FILES, Payload::Frame8(1, 1, vec![0; 4], files.clone())));
+            assert_eq!(q.trim(0), 1);
+            assert!(q.jobs.is_empty() && q.frames.len() == 1);
+            q.frames.clear();
+        }
         assert!(dc.put_planes(&aux, &planes, &files, 0));
         dc.flush();
         assert_eq!(dc.keys(Kind::Plane).len(), 69);
