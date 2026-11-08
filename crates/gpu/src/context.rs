@@ -128,6 +128,11 @@ const POOL_BUDGET: usize = 256 << 20;
 /// miss (a new allocation), never a wrong pixel.
 const STALE_FRAMES: u64 = 2;
 
+/// The pool owner of uploaded textures: never registered by an [`Enc`] (their ids start at 1),
+/// so an upload takes only from the shared free list ([`Pool::take`], textures no open encoder
+/// can read) and gives its texture back through the guarded [`Pool::release`].
+const UPLOAD_OWNER: u64 = 0;
+
 /// Readback staging buffers kept for reuse across sizes (bytes).
 const STAGING_BUDGET: u64 = 256 << 20;
 
@@ -693,6 +698,10 @@ pub struct GpuContext {
     dummy_tex: wgpu::TextureView,
     dummy_buf: wgpu::Buffer,
     uploads: Mutex<Uploads>,
+    /// Uploaded footage pictures, shared by the layers that show them (see [`crate::upload`]).
+    pictures: Mutex<crate::upload::Pictures>,
+    /// Reused staging buffers of large uploads (see [`crate::upload::Staging`]).
+    upload_staging: crate::upload::Staging,
     upload_budget: std::sync::atomic::AtomicUsize,
     upload_full_warned: std::sync::atomic::AtomicBool,
     pool: Arc<Mutex<Pool>>,
@@ -1017,6 +1026,8 @@ impl GpuContext {
             dummy,
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
+            pictures: Default::default(),
+            upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
             pool,
@@ -1132,11 +1143,11 @@ impl GpuContext {
     /// Bytes held in long-lived or still-referenced GPU caches/leases that submitting and waiting
     /// on `owner` (`closing_enc`) cannot free.
     fn kept_bytes(&self, owner: u64, closing_enc: Option<u64>) -> u64 {
-        let uploads = self.uploads.lock().map(|u| u.bytes as u64).unwrap_or(0);
+        // (uploaded layer and footage textures are pooled: the pool's leases count them)
         let pool = self.pool.lock().map(|p| p.kept_after_flush(owner, closing_enc) as u64).unwrap_or(0);
         let staging: u64 = self.staging.lock().map(|s| s.iter().map(|(k, v)| k * v.len() as u64).sum()).unwrap_or(0);
         let zeros: u64 = self.zeros.lock().map(|z| z.keys().map(|&(w, h)| w as u64 * h as u64 * 16).sum()).unwrap_or(0);
-        uploads + pool + staging + zeros
+        pool + staging + self.upload_staging.bytes() + zeros
     }
 
     #[cfg(test)]
@@ -1549,6 +1560,8 @@ impl GpuContext {
             dummy: self.dummy.clone(),
             dummy_buf: self.dummy_buf.clone(),
             uploads: Mutex::new(Uploads::default()),
+            pictures: Default::default(),
+            upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
             pool: self.pool.clone(),
@@ -1728,14 +1741,52 @@ impl GpuContext {
             return None;
         }
         self.transfers.count(true, img.data.len() * 16);
-        let g = self.image(img.width, img.height);
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &g.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&img.data),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width * 16), rows_per_image: Some(img.height) },
-            wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
-        );
+        // A texture from the pool's shared free list: no open encoder can still read it, and the
+        // copy below runs before anything recorded after this call.
+        let (g, _) = self.pooled(img.width, img.height, UPLOAD_OWNER);
+        if !self.upload_staging.write(&self.device, &self.queue, img, &g.texture) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &g.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&img.data),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width * 16), rows_per_image: Some(img.height) },
+                wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
+            );
+        }
         Some(g)
+    }
+
+    /// Upload a decoded footage picture once while the footage source keeps it: every layer
+    /// and effect input showing the same frame shares the texture (`Renderer::footage_picture`).
+    pub(crate) fn upload_picture(&self, img: &Arc<Image>) -> Option<GpuImage> {
+        if let Some(t) = self.pictures.lock().ok().and_then(|mut p| p.get(img)) {
+            return Some(t);
+        }
+        let tex = self.upload_image(img)?;
+        if let Ok(mut p) = self.pictures.lock() {
+            p.insert(img, tex.clone(), crate::upload::PICTURE_BUDGET.min(self.upload_budget() / 4));
+        }
+        Some(tex)
+    }
+
+    /// Entries in the footage picture cache.
+    #[cfg(test)]
+    pub(crate) fn picture_entries(&self) -> usize {
+        self.pictures.lock().map(|p| p.len()).unwrap_or_default()
+    }
+
+    /// The upload staging buffers (tests).
+    #[cfg(test)]
+    pub(crate) fn upload_staging(&self) -> &crate::upload::Staging {
+        &self.upload_staging
+    }
+
+    /// A render is done: drop the footage picture textures and the upload staging buffers
+    /// (the next render's pictures upload again; their textures come from the pool).
+    pub fn trim_uploads(&self) {
+        if let Ok(mut p) = self.pictures.lock() {
+            p.clear();
+        }
+        self.upload_staging.clear();
     }
 
     /// Entries in the layer upload cache.
@@ -1799,6 +1850,10 @@ impl GpuContext {
             u.map.clear();
             u.bytes = 0;
         }
+        if let Ok(mut p) = self.pictures.lock() {
+            p.clear();
+        }
+        self.upload_staging.clear();
         if let Ok(mut p) = self.pool.lock() {
             p.clear();
         }
