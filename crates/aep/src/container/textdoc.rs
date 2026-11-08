@@ -5,6 +5,9 @@
 //! as `(` + BOM `fe ff` + UTF-16BE + `)` with `\` escapes. [`parse_text_dict`] reads it (depth
 //! limited, never panics) and [`Layer::text_document`] pulls out the verified fields.
 
+use std::borrow::Cow;
+use std::sync::LazyLock;
+
 use crate::container::Chunk;
 use crate::container::bytes::{be_u32, text};
 use crate::container::typed::{Comp, Layer, Property};
@@ -73,15 +76,99 @@ impl TextValue {
             _ => None,
         }
     }
+}
 
-    fn key_text(&self) -> String {
+/// The text of a key the way the dictionary stores it: a `/name` as written, any other value in
+/// its canonical form (`06` and `+6` are `6`, `1.0` is `1`, a string its decoded text).
+fn owned_key(value: &V<'_>) -> String {
+    match value {
+        V::Name(s) | V::Token(s) => text(s),
+        V::Str(utf16) => decode_utf16be(utf16),
+        V::Int(i) => i.to_string(),
+        V::Float(f) => f.to_string(),
+        V::Bool(b) => b.to_string(),
+        V::Bytes(b) => text(b),
+        V::Dict(_) | V::Array(_) => String::new(),
+    }
+}
+
+/// A value of the text dictionary as [`TextDocument::parse`] reads it: it borrows names, bare
+/// words and strings from the body, so a document is read without a `String` per token. A key is
+/// borrowed when it is a `/name` (every key After Effects writes); its text is the same as the
+/// [`TextValue`] key's. [`V::into_owned`] gives the public [`TextValue`].
+#[derive(Debug, Clone)]
+enum V<'b> {
+    Dict(Vec<(Cow<'b, str>, V<'b>)>),
+    Array(Vec<V<'b>>),
+    /// A string that started with the byte order mark: the UTF-16BE bytes after it, unescaped.
+    Str(Cow<'b, [u8]>),
+    Bytes(Cow<'b, [u8]>),
+    Name(&'b [u8]),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Token(&'b [u8]),
+}
+
+impl<'b> V<'b> {
+    /// The value of a dictionary key (the last one when a key repeats).
+    fn get(&self, key: &str) -> Option<&V<'b>> {
         match self {
-            Self::Name(s) | Self::Str(s) | Self::Token(s) => s.clone(),
-            Self::Int(i) => i.to_string(),
-            Self::Float(f) => f.to_string(),
-            Self::Bool(b) => b.to_string(),
-            Self::Bytes(b) => text(b),
-            Self::Dict(_) | Self::Array(_) => String::new(),
+            Self::Dict(pairs) => pairs.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn at(&self, index: usize) -> Option<&V<'b>> {
+        match self {
+            Self::Array(items) => items.get(index),
+            _ => None,
+        }
+    }
+
+    /// The decoded text of a string value.
+    fn string(&self) -> Option<String> {
+        match self {
+            Self::Str(utf16) => Some(decode_utf16be(utf16)),
+            _ => None,
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Int(i) => Some(*i as f64),
+            Self::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// The key a value makes when it is written in a key position.
+    fn into_key(self) -> Cow<'b, str> {
+        match self {
+            Self::Name(s) => String::from_utf8_lossy(s),
+            other => Cow::Owned(owned_key(&other)),
+        }
+    }
+
+    /// The public form. Recursion is bounded: a parsed value nests at most [`MAX_DEPTH`] + 1 deep.
+    fn into_owned(self) -> TextValue {
+        match self {
+            Self::Dict(pairs) => TextValue::Dict(pairs.into_iter().map(|(k, v)| (k.into_owned(), v.into_owned())).collect()),
+            Self::Array(items) => TextValue::Array(items.into_iter().map(V::into_owned).collect()),
+            Self::Str(utf16) => TextValue::Str(decode_utf16be(&utf16)),
+            Self::Bytes(b) => TextValue::Bytes(b.into_owned()),
+            Self::Name(s) => TextValue::Name(text(s)),
+            Self::Int(i) => TextValue::Int(i),
+            Self::Float(f) => TextValue::Float(f),
+            Self::Bool(b) => TextValue::Bool(b),
+            Self::Token(s) => TextValue::Token(text(s)),
         }
     }
 }
@@ -89,6 +176,12 @@ impl TextValue {
 struct Parser<'b> {
     b: &'b [u8],
     i: usize,
+    /// The pairs of the dictionaries being read, innermost last: a dictionary's pairs are moved
+    /// into a vector of their exact size when it closes (one allocation per dictionary instead of
+    /// one per doubling).
+    pairs: Vec<(Cow<'b, str>, V<'b>)>,
+    /// The same for the items of arrays.
+    items: Vec<V<'b>>,
 }
 
 fn is_ws(c: u8) -> bool {
@@ -99,7 +192,7 @@ fn is_delimiter(c: u8) -> bool {
     is_ws(c) || matches!(c, b'/' | b'[' | b']' | b'<' | b'>' | b'(' | b')')
 }
 
-impl Parser<'_> {
+impl<'b> Parser<'b> {
     fn peek(&self) -> Option<u8> {
         self.b.get(self.i).copied()
     }
@@ -114,7 +207,7 @@ impl Parser<'_> {
         self.b.get(self.i..).is_some_and(|rest| rest.starts_with(s))
     }
 
-    fn word(&mut self) -> &[u8] {
+    fn word(&mut self) -> &'b [u8] {
         let start = self.i;
         while self.peek().is_some_and(|c| !is_delimiter(c)) {
             self.i = self.i.saturating_add(1);
@@ -122,79 +215,104 @@ impl Parser<'_> {
         self.b.get(start..self.i).unwrap_or(&[])
     }
 
-    fn parse(&mut self, depth: usize) -> Option<TextValue> {
+    /// The body of a `( ... )` string after the `(`, with `\` escapes resolved: borrowed when it
+    /// has none. `None` when the string or an escape is not closed.
+    fn string_body(&mut self) -> Option<Cow<'b, [u8]>> {
+        let rest = self.b.get(self.i..)?;
+        let stop = rest.iter().position(|c| matches!(c, b')' | b'\\'))?;
+        let head = rest.get(..stop)?;
+        self.i = self.i.saturating_add(stop);
+        if self.peek()? == b')' {
+            self.i = self.i.saturating_add(1);
+            return Some(Cow::Borrowed(head));
+        }
+        let mut out = head.to_vec();
+        loop {
+            let c = self.peek()?;
+            if c == b'\\' {
+                out.push(*self.b.get(self.i.saturating_add(1))?);
+                self.i = self.i.saturating_add(2);
+            } else if c == b')' {
+                self.i = self.i.saturating_add(1);
+                return Some(Cow::Owned(out));
+            } else {
+                out.push(c);
+                self.i = self.i.saturating_add(1);
+            }
+        }
+    }
+
+    fn parse(&mut self, depth: usize) -> Option<V<'b>> {
         self.skip_ws();
         if depth > MAX_DEPTH {
             return None;
         }
         if self.starts_with(b"<<") {
             self.i = self.i.saturating_add(2);
-            let mut pairs = Vec::new();
+            // On an error the pairs read so far stay on the stack: the error ends the whole parse.
+            let mark = self.pairs.len();
             loop {
                 self.skip_ws();
                 if self.starts_with(b">>") {
                     self.i = self.i.saturating_add(2);
-                    return Some(TextValue::Dict(pairs));
+                    return Some(V::Dict(self.pairs.drain(mark..).collect()));
                 }
                 let key = self.parse(depth.saturating_add(1))?;
                 let value = self.parse(depth.saturating_add(1))?;
-                pairs.push((key.key_text(), value));
+                self.pairs.push((key.into_key(), value));
             }
         }
         match self.peek()? {
             b'[' => {
                 self.i = self.i.saturating_add(1);
-                let mut items = Vec::new();
+                let mark = self.items.len();
                 loop {
                     self.skip_ws();
                     if self.peek()? == b']' {
                         self.i = self.i.saturating_add(1);
-                        return Some(TextValue::Array(items));
+                        return Some(V::Array(self.items.drain(mark..).collect()));
                     }
-                    items.push(self.parse(depth.saturating_add(1))?);
+                    let item = self.parse(depth.saturating_add(1))?;
+                    self.items.push(item);
                 }
             }
             b'(' => {
                 self.i = self.i.saturating_add(1);
-                let mut out = Vec::new();
-                loop {
-                    let c = self.peek()?;
-                    if c == b'\\' {
-                        out.push(*self.b.get(self.i.saturating_add(1))?);
-                        self.i = self.i.saturating_add(2);
-                    } else if c == b')' {
-                        self.i = self.i.saturating_add(1);
-                        break;
-                    } else {
-                        out.push(c);
-                        self.i = self.i.saturating_add(1);
-                    }
-                }
-                Some(match out.strip_prefix(&[0xfe, 0xff]) {
-                    Some(utf16) => TextValue::Str(decode_utf16be(utf16)),
-                    None => TextValue::Bytes(out),
+                let body = self.string_body()?;
+                Some(if body.starts_with(&[0xfe, 0xff]) {
+                    V::Str(match body {
+                        Cow::Borrowed(b) => Cow::Borrowed(b.get(2..).unwrap_or(&[])),
+                        Cow::Owned(mut v) => {
+                            v.drain(..2);
+                            Cow::Owned(v)
+                        }
+                    })
+                } else {
+                    V::Bytes(body)
                 })
             }
             b'/' => {
                 self.i = self.i.saturating_add(1);
-                Some(TextValue::Name(text(self.word())))
+                Some(V::Name(self.word()))
             }
             _ => {
                 let word = self.word();
                 if word.is_empty() {
                     return None;
                 }
-                let w = text(word);
-                Some(match w.as_str() {
-                    "true" => TextValue::Bool(true),
-                    "false" => TextValue::Bool(false),
+                // A word that is not UTF-8 reads as text with replacement characters, which is
+                // neither a boolean nor a number: a token.
+                let Ok(w) = std::str::from_utf8(word) else { return Some(V::Token(word)) };
+                Some(match w {
+                    "true" => V::Bool(true),
+                    "false" => V::Bool(false),
                     _ => match w.parse::<i64>() {
-                        Ok(i) => TextValue::Int(i),
+                        Ok(i) => V::Int(i),
                         // `parse` also takes `nan`, `inf` and overflowing exponents; those are not
                         // numbers a text document holds, so they stay tokens and read as missing.
                         Err(_) => match w.parse::<f64>() {
-                            Ok(f) if f.is_finite() => TextValue::Float(f),
-                            _ => TextValue::Token(w),
+                            Ok(f) if f.is_finite() => V::Float(f),
+                            _ => V::Token(word),
                         },
                     },
                 })
@@ -213,11 +331,9 @@ fn decode_utf16be(bytes: &[u8]) -> String {
     s
 }
 
-/// Parses the body of a `btdk` list into its top-level `key value` pairs (as a [`TextValue::Dict`]).
-/// Parsing stops silently at the first syntax error or at nesting deeper than 64 levels; what was
-/// read before is returned.
-pub fn parse_text_dict(body: &[u8]) -> TextValue {
-    let mut parser = Parser { b: body, i: 0 };
+/// The top-level `key value` pairs of a `btdk` body, borrowed (see [`parse_text_dict`]).
+fn parse_dict(body: &[u8]) -> V<'_> {
+    let mut parser = Parser { b: body, i: 0, pairs: Vec::new(), items: Vec::new() };
     let mut pairs = Vec::new();
     loop {
         parser.skip_ws();
@@ -226,13 +342,20 @@ pub fn parse_text_dict(body: &[u8]) -> TextValue {
         }
         let Some(key) = parser.parse(0) else { break };
         let Some(value) = parser.parse(0) else { break };
-        pairs.push((key.key_text(), value));
+        pairs.push((key.into_key(), value));
     }
-    TextValue::Dict(pairs)
+    V::Dict(pairs)
+}
+
+/// Parses the body of a `btdk` list into its top-level `key value` pairs (as a [`TextValue::Dict`]).
+/// Parsing stops silently at the first syntax error or at nesting deeper than 64 levels; what was
+/// read before is returned.
+pub fn parse_text_dict(body: &[u8]) -> TextValue {
+    parse_dict(body).into_owned()
 }
 
 /// The run style slots (`RUN/6/0[n]/0/0/6/<slot>`) that are decoded; every other slot is compared
-/// with its default (`style_defaults`) and listed in
+/// with its default (`STYLE_DEFAULTS`) and listed in
 /// [`TextDocument::undecoded_style_fields`] when it differs.
 pub const DECODED_STYLE_SLOTS: &[&str] =
     &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "11", "12", "13", "18", "35", "36", "52", "53", "54", "56", "57", "58", "62", "63", "70"];
@@ -241,24 +364,25 @@ pub const DECODED_STYLE_SLOTS: &[&str] =
 pub const DECODED_PARAGRAPH_SLOTS: &[&str] = &["0", "1", "2", "3", "4", "5", "8", "9", "21", "29", "33"];
 
 /// A number slot.
-fn val(v: f64) -> TextValue {
-    TextValue::Float(v)
+fn val(v: f64) -> V<'static> {
+    V::Float(v)
 }
 
-fn dict(pairs: Vec<(&str, TextValue)>) -> TextValue {
-    TextValue::Dict(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+fn dict(pairs: Vec<(&'static str, V<'static>)>) -> V<'static> {
+    V::Dict(pairs.into_iter().map(|(k, v)| (Cow::Borrowed(k), v)).collect())
 }
 
-fn numbers(v: &[f64]) -> TextValue {
-    TextValue::Array(v.iter().map(|x| val(*x)).collect())
+fn numbers(v: &[f64]) -> V<'static> {
+    V::Array(v.iter().map(|x| val(*x)).collect())
 }
 
 /// The default of every run style slot that is not decoded and not neutral (zero, `false`,
 /// empty, `/nil`): the value an untouched point text holds in every sample (110, 243-245). A slot
 /// with a neutral default is left out; [`undecoded_fields`] treats a missing default as neutral.
-fn style_defaults() -> TextValue {
-    let paint = |a: f64| dict(vec![("99", TextValue::Name("SimplePaint".into())), ("0", dict(vec![("0", val(1.0)), ("1", numbers(&[1.0, 1.0, 1.0, a]))]))]);
-    let class = |name: &str| dict(vec![("99", TextValue::Name(name.into()))]);
+/// Built once.
+static STYLE_DEFAULTS: LazyLock<V<'static>> = LazyLock::new(|| {
+    let paint = |a: f64| dict(vec![("99", V::Name(b"SimplePaint")), ("0", dict(vec![("0", val(1.0)), ("1", numbers(&[1.0, 1.0, 1.0, a]))]))]);
+    let class = |name: &'static [u8]| dict(vec![("99", V::Name(name))]);
     dict(vec![
         ("37", val(2.0)),
         ("41", val(2.0)),
@@ -268,24 +392,24 @@ fn style_defaults() -> TextValue {
         ("46", val(7.0)),
         ("49", val(-1.0)),
         ("50", val(-1.0)),
-        ("55", class("SimpleBlender")),
+        ("55", class(b"SimpleBlender")),
         ("64", val(4.0)),
         ("71", val(4.0)),
-        ("77", TextValue::Bool(true)),
-        ("78", TextValue::Bool(true)),
+        ("77", V::Bool(true)),
+        ("78", V::Bool(true)),
         ("79", paint(0.0)),
         ("82", val(3.0)),
         ("83", val(3.0)),
-        ("86", class("SimpleCustomFeature")),
+        ("86", class(b"SimpleCustomFeature")),
         ("87", val(100.0)),
-        ("88", TextValue::Bool(true)),
+        ("88", V::Bool(true)),
         ("95", dict(vec![("0", val(0.0)), ("1", val(0.0))])),
-        ("96", TextValue::Bool(true)),
+        ("96", V::Bool(true)),
     ])
-}
+});
 
-/// The same for the paragraph slots (110, 243-245).
-fn paragraph_defaults() -> TextValue {
+/// The same for the paragraph slots (110, 243-245). Built once.
+static PARAGRAPH_DEFAULTS: LazyLock<V<'static>> = LazyLock::new(|| {
     dict(vec![
         ("6", val(1.0)),
         ("7", val(1.2)),
@@ -293,30 +417,35 @@ fn paragraph_defaults() -> TextValue {
         ("11", val(2.0)),
         ("12", val(2.0)),
         ("14", val(36.0)),
-        ("15", TextValue::Bool(true)),
+        ("15", V::Bool(true)),
         ("16", val(0.5)),
         ("17", numbers(&[0.8, 1.0, 1.33])),
         ("18", numbers(&[0.0, 0.0, 0.0])),
         ("19", numbers(&[1.0, 1.0, 1.0])),
         ("20", val(6.0)),
         ("22", val(1.0)),
-        ("23", TextValue::Bool(true)),
+        ("23", V::Bool(true)),
         ("24", val(1.0)),
-        ("26", TextValue::Bool(true)),
+        ("26", V::Bool(true)),
         ("31", val(36.0)),
         ("35", val(1.0)),
         ("40", val(2.0)),
     ])
-}
+});
 
-/// Equal values; numbers compare by value (`0` equals `0.0`).
-fn same(a: &TextValue, b: &TextValue) -> bool {
+/// Equal values; numbers compare by value (`0` equals `0.0`), names and words by their text,
+/// strings by their decoded text.
+fn same(a: &V<'_>, b: &V<'_>) -> bool {
     match (a, b) {
-        (TextValue::Dict(x), TextValue::Dict(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && same(v, v2))),
-        (TextValue::Array(x), TextValue::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q)),
+        (V::Dict(x), V::Dict(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && same(v, v2))),
+        (V::Array(x), V::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q)),
+        (V::Str(x), V::Str(y)) => x == y || decode_utf16be(x) == decode_utf16be(y),
+        (V::Bytes(x), V::Bytes(y)) => x == y,
+        (V::Name(x), V::Name(y)) | (V::Token(x), V::Token(y)) => x == y || text(x) == text(y),
+        (V::Bool(x), V::Bool(y)) => x == y,
         _ => match (a.as_f64(), b.as_f64()) {
             (Some(p), Some(q)) => p == q,
-            _ => a == b,
+            _ => false,
         },
     }
 }
@@ -325,12 +454,12 @@ fn same(a: &TextValue, b: &TextValue) -> bool {
 /// listed when it holds something else (a neutral value carries nothing that could be lost).
 /// `/nil` is how an untouched document stores a slot without a value (244: paragraph `/27`, `/28`,
 /// `/36`).
-fn is_neutral(v: &TextValue) -> bool {
+fn is_neutral(v: &V<'_>) -> bool {
     match v {
-        TextValue::Name(n) => n == "nil",
-        TextValue::Bool(b) => !b,
-        TextValue::Array(a) => a.is_empty(),
-        TextValue::Dict(d) => d.is_empty(),
+        V::Name(n) => *n == b"nil",
+        V::Bool(b) => !b,
+        V::Array(a) => a.is_empty(),
+        V::Dict(d) => d.is_empty(),
         other => other.as_f64() == Some(0.0),
     }
 }
@@ -355,13 +484,13 @@ pub const MAX_UNDECODED_FIELDS: usize = 64;
 
 /// Adds to `out` the slots of `actual` that are not decoded and differ from `sampled`, each once
 /// and at most [`MAX_UNDECODED_FIELDS`] in all.
-fn undecoded_fields(actual: &TextValue, sampled: Option<&TextValue>, decoded: &[&str], neutral: &[(&str, &[i64])], out: &mut Vec<String>) {
-    let TextValue::Dict(pairs) = actual else { return };
+fn undecoded_fields(actual: &V<'_>, sampled: Option<&V<'_>>, decoded: &[&str], neutral: &[(&str, &[i64])], out: &mut Vec<String>) {
+    let V::Dict(pairs) = actual else { return };
     for (key, value) in pairs {
         if out.len() >= MAX_UNDECODED_FIELDS {
             return;
         }
-        if decoded.contains(&key.as_str()) || out.contains(key) {
+        if decoded.contains(&key.as_ref()) || out.iter().any(|o| o == key) {
             continue;
         }
         if neutral.iter().any(|(slot, values)| slot == key && value.as_i64().is_some_and(|v| values.contains(&v))) {
@@ -372,7 +501,7 @@ fn undecoded_fields(actual: &TextValue, sampled: Option<&TextValue>, decoded: &[
             None => !is_neutral(value),
         };
         if differs {
-            out.push(key.clone());
+            out.push(key.to_string());
         }
     }
 }
@@ -432,13 +561,13 @@ pub struct KernRun {
 
 /// The manual kerning list of a text run dictionary (`RUN/8/0`): entries `<< /0 << /0 amount >> /1
 /// length >>` (554 kerns each of `HHHH` by 50; the closing `\r` has an entry without an amount).
-fn kern_runs(run: &TextValue) -> Vec<KernRun> {
-    let Some(TextValue::Array(items)) = run.get("8").and_then(|v| v.get("0")) else { return Vec::new() };
+fn kern_runs(run: &V<'_>) -> Vec<KernRun> {
+    let Some(V::Array(items)) = run.get("8").and_then(|v| v.get("0")) else { return Vec::new() };
     let runs: Vec<KernRun> = items
         .iter()
         .filter_map(|e| {
             let length = e.get("1").and_then(usize_of)?;
-            let amount = e.get("0").and_then(|v| v.get("0")).and_then(TextValue::as_f64).filter(|v| v.is_finite());
+            let amount = e.get("0").and_then(|v| v.get("0")).and_then(V::as_f64).filter(|v| v.is_finite());
             Some(KernRun { length, amount })
         })
         .collect();
@@ -644,24 +773,24 @@ pub struct TextBox {
     pub height: f64,
 }
 
-fn colour_of(style: &TextValue, slot: &str) -> Option<[f64; 4]> {
+fn colour_of(style: &V<'_>, slot: &str) -> Option<[f64; 4]> {
     let c = style.get(slot)?.get("0")?.get("1")?;
     Some([c.at(0)?.as_f64()?, c.at(1)?.as_f64()?, c.at(2)?.as_f64()?, c.at(3)?.as_f64()?])
 }
 
-fn usize_of(v: &TextValue) -> Option<usize> {
+fn usize_of(v: &V<'_>) -> Option<usize> {
     usize::try_from(v.as_i64()?).ok()
 }
 
 /// A finite number slot of a style, `default` when it is missing or not a finite number.
-fn num(style: &TextValue, slot: &str, default: f64) -> f64 {
-    style.get(slot).and_then(TextValue::as_f64).filter(|v| v.is_finite()).unwrap_or(default)
+fn num(style: &V<'_>, slot: &str, default: f64) -> f64 {
+    style.get(slot).and_then(V::as_f64).filter(|v| v.is_finite()).unwrap_or(default)
 }
 
 /// A boolean slot of a style, `default` when it is missing or not a boolean.
-fn flag(style: &TextValue, slot: &str, default: bool) -> bool {
+fn flag(style: &V<'_>, slot: &str, default: bool) -> bool {
     match style.get(slot) {
-        Some(TextValue::Bool(b)) => *b,
+        Some(V::Bool(b)) => *b,
         _ => default,
     }
 }
@@ -675,9 +804,9 @@ struct RunNotes {
 }
 
 /// The paragraph runs of a text run dictionary (`RUN/5/0`).
-fn paragraph_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<ParagraphRun> {
-    let Some(TextValue::Array(items)) = run.get("5").and_then(|v| v.get("0")) else { return Vec::new() };
-    let sampled = Some(paragraph_defaults());
+fn paragraph_runs(run: &V<'_>, notes: &mut RunNotes) -> Vec<ParagraphRun> {
+    let Some(V::Array(items)) = run.get("5").and_then(|v| v.get("0")) else { return Vec::new() };
+    let sampled = Some(&*PARAGRAPH_DEFAULTS);
     let mut out: Vec<ParagraphRun> = Vec::with_capacity(items.len());
     for e in items {
         let Some(length) = e.get("1").and_then(usize_of) else {
@@ -685,7 +814,7 @@ fn paragraph_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<ParagraphRun> {
             continue;
         };
         let para = e.get("0").and_then(|v| v.get("0")).and_then(|v| v.get("5"));
-        let justification = match para.and_then(|p| p.get("0")).and_then(TextValue::as_i64) {
+        let justification = match para.and_then(|p| p.get("0")).and_then(V::as_i64) {
             Some(0) => Justification::Left,
             Some(1) => Justification::Right,
             Some(2) => Justification::Center,
@@ -700,12 +829,12 @@ fn paragraph_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<ParagraphRun> {
             }
         };
         if let Some(p) = para {
-            undecoded_fields(p, sampled.as_ref(), DECODED_PARAGRAPH_SLOTS, NEUTRAL_PARAGRAPH_VALUES, &mut notes.paragraph_fields);
+            undecoded_fields(p, sampled, DECODED_PARAGRAPH_SLOTS, NEUTRAL_PARAGRAPH_VALUES, &mut notes.paragraph_fields);
         }
-        let num = |slot: &str| para.and_then(|p| p.get(slot)).and_then(TextValue::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0);
-        let int = |slot: &str, default: i64| para.and_then(|p| p.get(slot)).and_then(TextValue::as_i64).unwrap_or(default);
+        let num = |slot: &str| para.and_then(|p| p.get(slot)).and_then(V::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0);
+        let int = |slot: &str, default: i64| para.and_then(|p| p.get(slot)).and_then(V::as_i64).unwrap_or(default);
         let flag = |slot: &str, default: bool| match para.and_then(|p| p.get(slot)) {
-            Some(TextValue::Bool(b)) => *b,
+            Some(V::Bool(b)) => *b,
             _ => default,
         };
         out.push(ParagraphRun {
@@ -727,9 +856,9 @@ fn paragraph_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<ParagraphRun> {
 }
 
 /// The style runs of a text run dictionary (`RUN/6/0`).
-fn style_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<StyleRun> {
-    let Some(TextValue::Array(items)) = run.get("6").and_then(|v| v.get("0")) else { return Vec::new() };
-    let sampled = Some(style_defaults());
+fn style_runs(run: &V<'_>, notes: &mut RunNotes) -> Vec<StyleRun> {
+    let Some(V::Array(items)) = run.get("6").and_then(|v| v.get("0")) else { return Vec::new() };
+    let sampled = Some(&*STYLE_DEFAULTS);
     let mut out: Vec<StyleRun> = Vec::with_capacity(items.len());
     for e in items {
         let Some(length) = e.get("1").and_then(usize_of) else {
@@ -742,31 +871,31 @@ fn style_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<StyleRun> {
             out.push(StyleRun { length, ..prev });
             continue;
         };
-        let font_size = style.get("1").and_then(TextValue::as_f64);
+        let font_size = style.get("1").and_then(V::as_f64);
         let fill_argb = colour_of(style, "53");
         let font_index = style.get("0").and_then(usize_of);
         if font_size.is_none() || fill_argb.is_none() || font_index.is_none() {
             notes.incomplete = notes.incomplete.saturating_add(1);
         }
-        undecoded_fields(style, sampled.as_ref(), DECODED_STYLE_SLOTS, NEUTRAL_STYLE_VALUES, &mut notes.style_fields);
+        undecoded_fields(style, sampled, DECODED_STYLE_SLOTS, NEUTRAL_STYLE_VALUES, &mut notes.style_fields);
         out.push(StyleRun {
             length,
             font_size: font_size.unwrap_or(prev.font_size),
             fill_argb: fill_argb.unwrap_or(prev.fill_argb),
             stroke_argb: colour_of(style, "54"),
-            tracking: style.get("8").and_then(TextValue::as_f64).unwrap_or(0.0),
-            faux_bold: matches!(style.get("2"), Some(TextValue::Bool(true))),
-            faux_italic: matches!(style.get("3"), Some(TextValue::Bool(true))),
-            caps: match style.get("12").and_then(TextValue::as_i64) {
+            tracking: style.get("8").and_then(V::as_f64).unwrap_or(0.0),
+            faux_bold: matches!(style.get("2"), Some(V::Bool(true))),
+            faux_italic: matches!(style.get("3"), Some(V::Bool(true))),
+            caps: match style.get("12").and_then(V::as_i64) {
                 None | Some(0) => Caps::Normal,
                 Some(1) => Caps::Small,
                 Some(2) => Caps::All,
                 Some(other) => Caps::Other(other),
             },
-            auto_leading: matches!(style.get("4"), Some(TextValue::Bool(true))),
-            leading: style.get("5").and_then(TextValue::as_f64),
+            auto_leading: matches!(style.get("4"), Some(V::Bool(true))),
+            leading: style.get("5").and_then(V::as_f64),
             font_index: font_index.unwrap_or(prev.font_index),
-            baseline: match style.get("13").and_then(TextValue::as_i64) {
+            baseline: match style.get("13").and_then(V::as_i64) {
                 None | Some(0) => FontBaseline::Normal,
                 Some(1) => FontBaseline::Superscript,
                 Some(2) => FontBaseline::Subscript,
@@ -775,22 +904,22 @@ fn style_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<StyleRun> {
             horizontal_scale: num(style, "6", 1.0),
             vertical_scale: num(style, "7", 1.0),
             baseline_shift: num(style, "9", 0.0),
-            auto_kern: match style.get("11").and_then(TextValue::as_i64) {
+            auto_kern: match style.get("11").and_then(V::as_i64) {
                 Some(0) => AutoKern::None,
                 None | Some(1) => AutoKern::Metrics,
                 Some(2) => AutoKern::Optical,
                 Some(other) => AutoKern::Other(other),
             },
             ligatures: flag(style, "18", false),
-            baseline_direction: style.get("35").and_then(TextValue::as_i64).unwrap_or(1),
+            baseline_direction: style.get("35").and_then(V::as_i64).unwrap_or(1),
             tsume: num(style, "36", 0.0),
             no_break: flag(style, "52", false),
             apply_fill: flag(style, "56", true),
             apply_stroke: flag(style, "57", false),
             stroke_over_fill: flag(style, "58", true),
-            line_join: style.get("62").and_then(TextValue::as_i64).unwrap_or(0),
+            line_join: style.get("62").and_then(V::as_i64).unwrap_or(0),
             stroke_width: num(style, "63", 1.0),
-            digit_set: style.get("70").and_then(TextValue::as_i64).unwrap_or(0),
+            digit_set: style.get("70").and_then(V::as_i64).unwrap_or(0),
         });
     }
     out
@@ -798,13 +927,13 @@ fn style_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<StyleRun> {
 
 /// The box of paragraph text from the frame dictionary `/0/8/0[0]/0`: key `/1/0` holds 16 x, y pairs
 /// that trace the rectangle, and `/2/0` is 1; both keys are absent for point text.
-fn text_box(top: &TextValue) -> Option<TextBox> {
+fn text_box(top: &V<'_>) -> Option<TextBox> {
     let frame = top.get("0")?.get("8")?.get("0")?.at(0)?.get("0")?;
     if frame.get("2")?.get("0")?.as_i64()? != 1 {
         return None;
     }
-    let TextValue::Array(coords) = frame.get("1")?.get("0")? else { return None };
-    let numbers: Vec<f64> = coords.iter().map(TextValue::as_f64).collect::<Option<_>>()?;
+    let V::Array(coords) = frame.get("1")?.get("0")? else { return None };
+    let numbers: Vec<f64> = coords.iter().map(V::as_f64).collect::<Option<_>>()?;
     let (pairs, _) = numbers.as_chunks::<2>();
     if pairs.is_empty() {
         return None;
@@ -818,18 +947,15 @@ fn text_box(top: &TextValue) -> Option<TextBox> {
 impl TextDocument {
     /// Decodes the body of a `btdk` list.
     pub fn parse(body: &[u8]) -> Option<Self> {
-        let top = parse_text_dict(body);
+        let top = parse_dict(body);
         let run = top.get("1")?.get("1")?.at(0)?.get("0")?;
-        let raw_text = run.get("0")?.as_str()?.to_string();
+        let raw_text = run.get("0")?.string()?;
         let style = run.get("6")?.get("0")?.at(0)?.get("0")?.get("0")?.get("6")?;
         let fill_argb = colour_of(style, "53")?;
         let font_index = usize::try_from(style.get("0")?.as_i64()?).ok()?;
         let mut fonts = Vec::new();
-        if let Some(TextValue::Array(list)) = top.get("0").and_then(|v| v.get("1")).and_then(|v| v.get("0")) {
-            fonts = list
-                .iter()
-                .map(|f| f.get("0").and_then(|v| v.get("0")).and_then(|v| v.get("0")).and_then(TextValue::as_str).unwrap_or_default().to_string())
-                .collect();
+        if let Some(V::Array(list)) = top.get("0").and_then(|v| v.get("1")).and_then(|v| v.get("0")) {
+            fonts = list.iter().map(|f| f.get("0").and_then(|v| v.get("0")).and_then(|v| v.get("0")).and_then(V::string).unwrap_or_default()).collect();
         }
         let mut notes = RunNotes::default();
         let paragraphs = paragraph_runs(run, &mut notes);
@@ -857,7 +983,7 @@ impl TextDocument {
                 .and_then(|v| v.get("0"))
                 .and_then(|v| v.get("2"))
                 .and_then(|v| v.get("1"))
-                .and_then(TextValue::as_i64),
+                .and_then(V::as_i64),
         })
     }
 
@@ -1023,12 +1149,446 @@ impl<'f, 'a> Comp<'f, 'a> {
     }
 }
 
+/// The dictionary parser and the defaults as they were before they borrowed from the body (#3276),
+/// kept as the reference the differential tests compare with.
+#[cfg(test)]
+mod oracle {
+    use super::{MAX_DEPTH, TextValue};
+    use crate::container::bytes::text;
+
+    impl TextValue {
+        fn key_text(&self) -> String {
+            match self {
+                Self::Name(s) | Self::Str(s) | Self::Token(s) => s.clone(),
+                Self::Int(i) => i.to_string(),
+                Self::Float(f) => f.to_string(),
+                Self::Bool(b) => b.to_string(),
+                Self::Bytes(b) => text(b),
+                Self::Dict(_) | Self::Array(_) => String::new(),
+            }
+        }
+    }
+
+    struct Parser<'b> {
+        b: &'b [u8],
+        i: usize,
+    }
+
+    fn is_ws(c: u8) -> bool {
+        matches!(c, b' ' | b'\t' | b'\r' | b'\n')
+    }
+
+    fn is_delimiter(c: u8) -> bool {
+        is_ws(c) || matches!(c, b'/' | b'[' | b']' | b'<' | b'>' | b'(' | b')')
+    }
+
+    impl Parser<'_> {
+        fn peek(&self) -> Option<u8> {
+            self.b.get(self.i).copied()
+        }
+
+        fn skip_ws(&mut self) {
+            while self.peek().is_some_and(is_ws) {
+                self.i = self.i.saturating_add(1);
+            }
+        }
+
+        fn starts_with(&self, s: &[u8]) -> bool {
+            self.b.get(self.i..).is_some_and(|rest| rest.starts_with(s))
+        }
+
+        fn word(&mut self) -> &[u8] {
+            let start = self.i;
+            while self.peek().is_some_and(|c| !is_delimiter(c)) {
+                self.i = self.i.saturating_add(1);
+            }
+            self.b.get(start..self.i).unwrap_or(&[])
+        }
+
+        fn parse(&mut self, depth: usize) -> Option<TextValue> {
+            self.skip_ws();
+            if depth > MAX_DEPTH {
+                return None;
+            }
+            if self.starts_with(b"<<") {
+                self.i = self.i.saturating_add(2);
+                let mut pairs = Vec::new();
+                loop {
+                    self.skip_ws();
+                    if self.starts_with(b">>") {
+                        self.i = self.i.saturating_add(2);
+                        return Some(TextValue::Dict(pairs));
+                    }
+                    let key = self.parse(depth.saturating_add(1))?;
+                    let value = self.parse(depth.saturating_add(1))?;
+                    pairs.push((key.key_text(), value));
+                }
+            }
+            match self.peek()? {
+                b'[' => {
+                    self.i = self.i.saturating_add(1);
+                    let mut items = Vec::new();
+                    loop {
+                        self.skip_ws();
+                        if self.peek()? == b']' {
+                            self.i = self.i.saturating_add(1);
+                            return Some(TextValue::Array(items));
+                        }
+                        items.push(self.parse(depth.saturating_add(1))?);
+                    }
+                }
+                b'(' => {
+                    self.i = self.i.saturating_add(1);
+                    let mut out = Vec::new();
+                    loop {
+                        let c = self.peek()?;
+                        if c == b'\\' {
+                            out.push(*self.b.get(self.i.saturating_add(1))?);
+                            self.i = self.i.saturating_add(2);
+                        } else if c == b')' {
+                            self.i = self.i.saturating_add(1);
+                            break;
+                        } else {
+                            out.push(c);
+                            self.i = self.i.saturating_add(1);
+                        }
+                    }
+                    Some(match out.strip_prefix(&[0xfe, 0xff]) {
+                        Some(utf16) => TextValue::Str(decode_utf16be(utf16)),
+                        None => TextValue::Bytes(out),
+                    })
+                }
+                b'/' => {
+                    self.i = self.i.saturating_add(1);
+                    Some(TextValue::Name(text(self.word())))
+                }
+                _ => {
+                    let word = self.word();
+                    if word.is_empty() {
+                        return None;
+                    }
+                    let w = text(word);
+                    Some(match w.as_str() {
+                        "true" => TextValue::Bool(true),
+                        "false" => TextValue::Bool(false),
+                        _ => match w.parse::<i64>() {
+                            Ok(i) => TextValue::Int(i),
+                            // `parse` also takes `nan`, `inf` and overflowing exponents; those are not
+                            // numbers a text document holds, so they stay tokens and read as missing.
+                            Err(_) => match w.parse::<f64>() {
+                                Ok(f) if f.is_finite() => TextValue::Float(f),
+                                _ => TextValue::Token(w),
+                            },
+                        },
+                    })
+                }
+            }
+        }
+    }
+
+    fn decode_utf16be(bytes: &[u8]) -> String {
+        let (pairs, rest) = bytes.as_chunks::<2>();
+        let units = pairs.iter().map(|p| u16::from_be_bytes(*p));
+        let mut s: String = char::decode_utf16(units).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)).collect();
+        if !rest.is_empty() {
+            s.push(char::REPLACEMENT_CHARACTER);
+        }
+        s
+    }
+
+    /// Parses the body of a `btdk` list into its top-level `key value` pairs (as a [`TextValue::Dict`]).
+    /// Parsing stops silently at the first syntax error or at nesting deeper than 64 levels; what was
+    /// read before is returned.
+    pub(super) fn parse_text_dict(body: &[u8]) -> TextValue {
+        let mut parser = Parser { b: body, i: 0 };
+        let mut pairs = Vec::new();
+        loop {
+            parser.skip_ws();
+            if parser.i >= body.len() {
+                break;
+            }
+            let Some(key) = parser.parse(0) else { break };
+            let Some(value) = parser.parse(0) else { break };
+            pairs.push((key.key_text(), value));
+        }
+        TextValue::Dict(pairs)
+    }
+
+    fn val(v: f64) -> TextValue {
+        TextValue::Float(v)
+    }
+
+    fn dict(pairs: Vec<(&str, TextValue)>) -> TextValue {
+        TextValue::Dict(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    fn numbers(v: &[f64]) -> TextValue {
+        TextValue::Array(v.iter().map(|x| val(*x)).collect())
+    }
+
+    /// The default of every run style slot that is not decoded and not neutral (zero, `false`,
+    /// empty, `/nil`): the value an untouched point text holds in every sample (110, 243-245). A slot
+    /// with a neutral default is left out; [`undecoded_fields`] treats a missing default as neutral.
+    pub(super) fn style_defaults() -> TextValue {
+        let paint = |a: f64| dict(vec![("99", TextValue::Name("SimplePaint".into())), ("0", dict(vec![("0", val(1.0)), ("1", numbers(&[1.0, 1.0, 1.0, a]))]))]);
+        let class = |name: &str| dict(vec![("99", TextValue::Name(name.into()))]);
+        dict(vec![
+            ("37", val(2.0)),
+            ("41", val(2.0)),
+            ("43", dict(vec![("0", val(0.5))])),
+            ("44", val(2.0)),
+            ("45", val(2.0)),
+            ("46", val(7.0)),
+            ("49", val(-1.0)),
+            ("50", val(-1.0)),
+            ("55", class("SimpleBlender")),
+            ("64", val(4.0)),
+            ("71", val(4.0)),
+            ("77", TextValue::Bool(true)),
+            ("78", TextValue::Bool(true)),
+            ("79", paint(0.0)),
+            ("82", val(3.0)),
+            ("83", val(3.0)),
+            ("86", class("SimpleCustomFeature")),
+            ("87", val(100.0)),
+            ("88", TextValue::Bool(true)),
+            ("95", dict(vec![("0", val(0.0)), ("1", val(0.0))])),
+            ("96", TextValue::Bool(true)),
+        ])
+    }
+
+    /// The same for the paragraph slots (110, 243-245).
+    pub(super) fn paragraph_defaults() -> TextValue {
+        dict(vec![
+            ("6", val(1.0)),
+            ("7", val(1.2)),
+            ("10", val(6.0)),
+            ("11", val(2.0)),
+            ("12", val(2.0)),
+            ("14", val(36.0)),
+            ("15", TextValue::Bool(true)),
+            ("16", val(0.5)),
+            ("17", numbers(&[0.8, 1.0, 1.33])),
+            ("18", numbers(&[0.0, 0.0, 0.0])),
+            ("19", numbers(&[1.0, 1.0, 1.0])),
+            ("20", val(6.0)),
+            ("22", val(1.0)),
+            ("23", TextValue::Bool(true)),
+            ("24", val(1.0)),
+            ("26", TextValue::Bool(true)),
+            ("31", val(36.0)),
+            ("35", val(1.0)),
+            ("40", val(2.0)),
+        ])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn list(t: &[u8; 4], kids: Vec<Chunk<'static>>) -> Chunk<'static> {
         Chunk::list(*t, kids)
+    }
+
+    /// A document with every kind of value, close to what After Effects writes: names, numbers,
+    /// a UTF-16 string with escapes, a plain string, nested dictionaries and arrays, an undecoded
+    /// style slot, a font list and a box frame.
+    const DOC: &[u8] = b"/0 << /1 << /0 [ << /0 << /0 << /0 (\xfe\xff\0M\0y\0r) >> /1 1 >> >> << /0 << /0 << /0 (\xfe\xff\0A\0\\)\0b) >> >> >> ] >> \
+        /8 << /0 [ << /0 << /1 << /0 [ 0 0 10 0 10 5 0 5 ] >> /2 << /0 1 /1 2 >> >> >> ] >> >> \
+        /1 << /1 [ << /0 << /0 (\xfe\xff\0H\0i\0\r) /5 << /0 [ << /0 << /0 << /5 << /0 2 /9 false /24 0 /34 7 /17 [ .8 1.0 1.33 ] >> >> >> /1 3 >> ] >> \
+        /6 << /0 [ << /0 << /0 << /6 << /0 1 /1 36.5 /53 << /0 << /0 1 /1 [ 1 0.5 0 1 ] >> >> /79 << /99 /SimplePaint /0 << /0 1 /1 [ 1 1 1 0 ] >> >> /68 1 /90 /x /91 (plain) /92 word >> >> >> /1 3 >> ] >> \
+        /8 << /0 [ << /0 << /0 50 >> /1 2 >> << /1 1 >> ] >> >> >> ] >>";
+
+    /// A deterministic xorshift generator: the tests need varied input, not a dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % (n as u64)).unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn the_borrowing_parser_reads_what_the_owning_one_read() {
+        // Every key form the owned keys canonicalise (`06`, `+6`, `-0`, `1.0`, `1e2`, strings,
+        // booleans, containers), names that are not UTF-8, escapes, unclosed strings and escapes,
+        // non-finite numbers, and bare words.
+        let parts: &[&[u8]] = &[
+            b"<<",
+            b">>",
+            b"[",
+            b"]",
+            b"/0",
+            b"/1",
+            b"/nil",
+            b"/SimplePaint",
+            b"/\xff\xfe",
+            b"/\xc3\xa9",
+            b"/",
+            b"06",
+            b"+6",
+            b"-0",
+            b"1.0",
+            b"1.50",
+            b"1e2",
+            b"-2.5",
+            b".8",
+            b"inf",
+            b"nan",
+            b"1e999",
+            b"9223372036854775808",
+            b"true",
+            b"false",
+            b"(abc)",
+            b"(\xfe\xff\0A\0B)",
+            b"(\xfe\xff\0A\0)",
+            b"(a\\)b)",
+            b"(\\",
+            b"(\xfe\xff\\)\0)",
+            b"(\\\xfe\xff\0C)",
+            b"()",
+            b"(\xfe\xff)",
+            b"(unclosed",
+            b"word",
+            b"\xc3\x28",
+            b"\xff",
+            b" ",
+            b"\n",
+            b"\t\r",
+            b"<",
+            b">",
+            b")",
+        ];
+        // A value: mostly well formed, with a random part in its place now and then.
+        fn value(rng: &mut Rng, parts: &[&[u8]], depth: usize, out: &mut Vec<u8>) {
+            let pick = |rng: &mut Rng| parts.get(rng.below(parts.len())).copied().unwrap_or_default();
+            match rng.below(if depth > 6 { 5 } else { 10 }) {
+                0 => out.extend_from_slice(pick(rng)),
+                1..=4 => out.extend_from_slice([&b"/0"[..], b"1", b"(\xfe\xff\0z)", b"0.5", b"/nil"].get(rng.below(5)).copied().unwrap_or_default()),
+                5..=7 => {
+                    out.extend_from_slice(b"<< ");
+                    for _ in 0..rng.below(5) {
+                        let key = if rng.below(4) == 0 { pick(rng) } else { [&b"/0"[..], b"/1", b"/6", b"/53"].get(rng.below(4)).copied().unwrap_or_default() };
+                        out.extend_from_slice(key);
+                        out.push(b' ');
+                        value(rng, parts, depth + 1, out);
+                        out.push(b' ');
+                    }
+                    if rng.below(20) != 0 {
+                        out.extend_from_slice(b">>");
+                    }
+                }
+                _ => {
+                    out.extend_from_slice(b"[ ");
+                    for _ in 0..rng.below(5) {
+                        value(rng, parts, depth + 1, out);
+                        out.push(b' ');
+                    }
+                    if rng.below(20) != 0 {
+                        out.push(b']');
+                    }
+                }
+            }
+        }
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut read, mut nested) = (0, 0);
+        for case in 0..40_000 {
+            let mut body = Vec::new();
+            if case % 2 == 0 {
+                for _ in 0..rng.below(60) {
+                    body.extend_from_slice(parts.get(rng.below(parts.len())).copied().unwrap_or_default());
+                    if rng.below(3) != 0 {
+                        body.push(b' ');
+                    }
+                }
+            } else {
+                for _ in 0..1 + rng.below(4) {
+                    body.extend_from_slice(b"/0 ");
+                    value(&mut rng, parts, 0, &mut body);
+                    body.push(b'\n');
+                }
+            }
+            let parsed = parse_text_dict(&body);
+            assert_eq!(parsed, oracle::parse_text_dict(&body), "case {case}: {}", String::from_utf8_lossy(&body));
+            let _ = TextDocument::parse(&body);
+            if let TextValue::Dict(pairs) = &parsed {
+                read += usize::from(!pairs.is_empty());
+                nested += usize::from(pairs.iter().any(|(_, v)| matches!(v, TextValue::Dict(d) if !d.is_empty())));
+            }
+        }
+        // The input is not all rejected at the first token.
+        assert!(read > 25_000 && nested > 3_000, "{read} cases read something, {nested} a dictionary");
+        // Every cut of a realistic document, and nesting past the limit.
+        for end in 0..=DOC.len() {
+            let body = DOC.get(..end).unwrap_or_default();
+            assert_eq!(parse_text_dict(body), oracle::parse_text_dict(body), "cut at {end}");
+            let _ = TextDocument::parse(body);
+        }
+        for depth in [63, 64, 65, 66, 200] {
+            let body = [b"/k ".repeat(1), b"<< /a ".repeat(depth), b"1".to_vec(), b" >>".repeat(depth), b" /z 2".to_vec()].concat();
+            assert_eq!(parse_text_dict(&body), oracle::parse_text_dict(&body), "depth {depth}");
+            let body = [b"/k ".repeat(1), b"[ ".repeat(depth), b"]".repeat(depth)].concat();
+            assert_eq!(parse_text_dict(&body), oracle::parse_text_dict(&body), "array depth {depth}");
+        }
+    }
+
+    #[test]
+    fn a_realistic_document_is_read_in_full() {
+        let doc = TextDocument::parse(DOC).expect("a document");
+        assert_eq!((doc.text.as_str(), doc.font_size, doc.fill_argb, doc.font.as_deref()), ("Hi", 36.5, [1.0, 0.5, 0.0, 1.0], Some("A)b")));
+        assert_eq!(doc.fonts, ["Myr", "A)b"]);
+        assert_eq!(doc.paragraphs.first().map(|p| (p.length, p.justification, p.auto_hyphenate)), Some((3, Justification::Center, false)));
+        // `/68 1` and `/34 7` are neutral; `/90 /x`, `/91 (plain)` and `/92 word` differ from the
+        // (missing, neutral) default; `/79` equals its default.
+        assert_eq!(doc.undecoded_style_fields, ["90", "91", "92"]);
+        assert!(doc.undecoded_paragraph_fields.is_empty());
+        assert_eq!(doc.kerning, [KernRun { length: 2, amount: Some(50.0) }, KernRun { length: 1, amount: None }]);
+        assert_eq!(doc.text_box, Some(TextBox { x: 0.0, y: 0.0, width: 10.0, height: 5.0 }));
+        assert_eq!(doc.line_orientation, Some(2));
+    }
+
+    #[test]
+    fn the_defaults_are_the_sampled_ones_and_built_once() {
+        assert_eq!(STYLE_DEFAULTS.clone().into_owned(), oracle::style_defaults());
+        assert_eq!(PARAGRAPH_DEFAULTS.clone().into_owned(), oracle::paragraph_defaults());
+        assert!(std::ptr::eq(&*STYLE_DEFAULTS, &*STYLE_DEFAULTS));
+    }
+
+    #[test]
+    fn names_keys_and_strings_are_borrowed_from_the_body() {
+        let V::Dict(pairs) = parse_dict(b"/a /b /c (\xfe\xff\0x) /d (plain) /e word /f 1.5 /g (\\(esc) 07 1") else { panic!("a dict") };
+        // Every `/name` key, name, string without escapes and bare word points into the body.
+        assert!(pairs.iter().take(6).all(|(k, _)| matches!(k, Cow::Borrowed(_))));
+        assert!(matches!(pairs.first().map(|p| &p.1), Some(V::Name(b"b"))));
+        assert!(matches!(pairs.get(1).map(|p| &p.1), Some(V::Str(Cow::Borrowed(b"\0x")))));
+        assert!(matches!(pairs.get(2).map(|p| &p.1), Some(V::Bytes(Cow::Borrowed(b"plain")))));
+        assert!(matches!(pairs.get(3).map(|p| &p.1), Some(V::Token(b"word"))));
+        // An escaped string is copied; a number key is written in its canonical form.
+        assert!(matches!(pairs.get(5).map(|p| &p.1), Some(V::Bytes(Cow::Owned(b))) if b == b"(esc"));
+        assert_eq!(pairs.get(6).map(|p| p.0.as_ref()), Some("7"));
+        // Containers are sized to what they hold.
+        let V::Dict(outer) = parse_dict(b"/0 << /a 1 /b 2 /c 3 /d 4 /e 5 >> /1 [ 1 2 3 4 5 6 7 8 9 ]") else { panic!("a dict") };
+        assert!(matches!(outer.first().map(|p| &p.1), Some(V::Dict(d)) if d.len() == 5 && d.capacity() == 5));
+        assert!(matches!(outer.get(1).map(|p| &p.1), Some(V::Array(a)) if a.len() == 9 && a.capacity() == 9));
+    }
+
+    #[test]
+    fn values_compare_by_their_text() {
+        // Two names that are not UTF-8 read as the same text with replacement characters, as the
+        // owned values did.
+        assert!(same(&V::Name(b"\xff"), &V::Name(b"\xfe")));
+        assert!(!same(&V::Name(b"a"), &V::Name(b"b")));
+        assert!(same(&V::Str(Cow::Borrowed(b"\xd8\x00")), &V::Str(Cow::Owned(b"\xd8\x01".to_vec()))));
+        assert!(same(&V::Int(0), &V::Float(0.0)) && !same(&V::Int(0), &V::Bool(false)) && !same(&V::Name(b"x"), &V::Token(b"x")));
+        assert!(is_neutral(&V::Name(b"nil")) && !is_neutral(&V::Token(b"nil")) && is_neutral(&V::Float(0.0)) && !is_neutral(&V::Str(Cow::Borrowed(b""))));
     }
 
     #[test]
@@ -1076,13 +1636,13 @@ mod tests {
     fn undecoded_fields_are_capped_and_linear() {
         // 300 000 distinct undecoded slots that differ from a sampled default: before, each was
         // checked against every slot recorded so far (4.5e10 compares) and all were listed.
-        let actual = TextValue::Dict((0..300_000).map(|i| (format!("{}", 9000 + i), TextValue::Int(1))).collect());
+        let actual = V::Dict((0..300_000).map(|i| (Cow::Owned(format!("{}", 9000 + i)), V::Int(1))).collect());
         let mut out = Vec::new();
         undecoded_fields(&actual, None, &["0"], &[], &mut out);
         assert_eq!(out.len(), MAX_UNDECODED_FIELDS);
         assert_eq!(out.first().map(String::as_str), Some("9000"));
         // A slot listed once is not listed again.
-        let again = TextValue::Dict(vec![("9000".into(), TextValue::Int(1))]);
+        let again = V::Dict(vec![(Cow::Borrowed("9000"), V::Int(1))]);
         let mut short = vec!["9000".to_string()];
         undecoded_fields(&again, None, &[], &[], &mut short);
         assert_eq!(short, ["9000"]);
