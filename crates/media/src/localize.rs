@@ -44,7 +44,9 @@ struct State {
     queued: HashSet<PathBuf>,
     bytes: u64,
     clock: u64,
-    copying: Option<PathBuf>,
+    /// The file being copied now and the setting ([`State::epoch`]) it is copied under: asked
+    /// for again meanwhile it isn't queued a second time (unless the setting changed since).
+    copying: Option<(PathBuf, u64)>,
     skipped: HashSet<PathBuf>,
     worker: bool,
     /// Bumped with each new setting: a copy started under another one is thrown away.
@@ -180,7 +182,7 @@ pub fn status() -> Option<LocalizeReport> {
         bytes: st.bytes,
         max_bytes: c.max_bytes,
         queued: st.queue.len(),
-        copying: st.copying.as_ref().map(|p| p.to_string_lossy().to_string()),
+        copying: st.copying.as_ref().map(|(p, _)| p.to_string_lossy().to_string()),
         skipped: st.skipped.len(),
         network: c.network.iter().map(|p| p.to_string_lossy().to_string()).collect(),
         reserve_limited: st.reserve_limited,
@@ -223,13 +225,15 @@ pub(crate) fn is_network(path: &Path) -> bool {
 }
 
 /// Ask for a local copy of the network file `original` (nothing when the localizer is off, the
-/// file is local, already copied, queued or skipped). Returns at once.
+/// file is local, already copied, queued, being copied under this setting, or skipped).
+/// Returns at once.
 pub(crate) fn request(original: &Path) {
     if !is_network(original) {
         return;
     }
     let mut st = lock();
-    if st.config.is_none() || st.copies.contains_key(original) || st.queued.contains(original) || st.skipped.contains(original) {
+    let copying = st.copying.as_ref().is_some_and(|(p, epoch)| p == original && *epoch == st.epoch);
+    if st.config.is_none() || copying || st.copies.contains_key(original) || st.queued.contains(original) || st.skipped.contains(original) {
         return;
     }
     if st.queue.len() >= QUEUE_LIMIT
@@ -329,7 +333,7 @@ fn worker() {
                 if let (Some(p), Some(c)) = (st.queue.front().cloned(), st.config.clone()) {
                     st.queue.pop_front();
                     st.queued.remove(&p);
-                    st.copying = Some(p.clone());
+                    st.copying = Some((p.clone(), st.epoch));
                     let room = limit(&mut st);
                     break (p, c, st.epoch, room);
                 }
@@ -373,6 +377,13 @@ fn worker() {
 /// copied).
 #[cfg(not(target_arch = "wasm32"))]
 fn copy_file(original: &Path, folder: &Path, room: u64) -> Option<(PathBuf, u64, FileStamp)> {
+    #[cfg(test)]
+    {
+        let hook = BEFORE_COPY.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(h) = hook {
+            h(original);
+        }
+    }
     let meta = std::fs::metadata(original).ok().filter(std::fs::Metadata::is_file)?;
     if meta.len() > room {
         return None;
@@ -407,6 +418,12 @@ fn copy_file(original: &Path, folder: &Path, room: u64) -> Option<(PathBuf, u64,
         }
     }
 }
+
+/// Runs before each copy, with the source's path (tests).
+#[cfg(test)]
+type CopyHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+static BEFORE_COPY: Mutex<Option<CopyHook>> = Mutex::new(None);
 
 /// The localizer state is process-wide: tests that use it take turns.
 #[cfg(test)]
@@ -478,6 +495,55 @@ mod tests {
         assert_eq!(status().unwrap().queued, 0);
         configure(None);
         assert!(status().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #3271 review: a file asked for again while it is being copied is not copied a second
+    /// time, but asked for after the setting changed it is (the copy under the old setting is
+    /// thrown away).
+    #[test]
+    fn a_file_being_copied_is_not_queued_again() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let root = std::env::temp_dir().join(format!("ec-3271-localize-dup-{}", std::process::id()));
+        let (share, local) = (root.join("share"), root.join("local"));
+        std::fs::create_dir_all(&share).unwrap();
+        treat_as_network(&share);
+        let file = share.join("plate_0002.exr");
+        std::fs::write(&file, vec![3u8; 2048]).unwrap();
+        // Each copy waits until the test lets it go on.
+        let copies = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        {
+            let (copies, wait) = (copies.clone(), Mutex::new(wait));
+            *BEFORE_COPY.lock().unwrap() = Some(std::sync::Arc::new(move |_: &Path| {
+                copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = wait.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10));
+            }));
+        }
+        let copies_now = || copies.load(std::sync::atomic::Ordering::SeqCst);
+        configure(config(&local, 1 << 20, vec![]));
+        request(&file);
+        wait_for(|s| s.copying.is_some());
+        request(&file);
+        assert_eq!(status().unwrap().queued, 0, "not queued while it is copied");
+        go.send(()).unwrap();
+        wait_for(|s| s.files == 1 && s.copying.is_none());
+        assert_eq!(copies_now(), 1, "copied once");
+        // A new setting while a copy runs: asked for again, it is copied again.
+        let file2 = share.join("plate_0003.exr");
+        std::fs::write(&file2, vec![4u8; 1024]).unwrap();
+        request(&file2);
+        wait_for(|s| s.copying.is_some());
+        configure(config(&local, 2 << 20, vec![]));
+        request(&file2);
+        assert_eq!(status().unwrap().queued, 1, "queued again under the new setting");
+        go.send(()).unwrap();
+        go.send(()).unwrap();
+        let s = wait_for(|s| s.files == 2 && s.queued == 0 && s.copying.is_none());
+        assert_eq!(s.files, 2, "{s:?}");
+        assert_eq!(copies_now(), 3);
+        *BEFORE_COPY.lock().unwrap() = None;
+        configure(None);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
