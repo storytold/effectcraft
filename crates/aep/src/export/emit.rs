@@ -7,7 +7,7 @@ use crate::{AepFile, Chunk};
 use effectcraft_project::{ItemId, LayerId};
 
 use crate::export::plan::{CompPlan, Entry, ItemPlan, KeyPlan, LayerPlan, LayerSrc, ProjectPlan, PropKind, PropPlan, SolidPlan, natural_key};
-use crate::export::template::Template;
+use crate::export::template::{self, Template};
 use crate::export::tree::{
     R, child_data, data_mut, kids_mut, list_mut, put, put_bits, put_cstr, put_f32, put_f64, put_i32, put_u8, put_u16, put_u32, set_utf8, tpl,
 };
@@ -58,10 +58,14 @@ struct Cx<'t> {
 type Sorted = (String, u64, Vec<Chunk<'static>>);
 
 pub(crate) fn emit(plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
-    let t = Template::load()?;
+    emit_with(template::shared()?, plan, extra)
+}
+
+/// [`emit`] with the prototypes of `t`.
+fn emit_with(t: &Template, plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
     let special = plan.root.iter().find(|e| e.name == "Solids" && matches!(e.plan, ItemPlan::Folder(_))).map(|e| e.ec);
     let mut cx = Cx {
-        t: &t,
+        t,
         ids: Ids { next: FIRST_ID },
         solid_ids: HashMap::new(),
         comp_ids: HashMap::new(),
@@ -77,16 +81,14 @@ pub(crate) fn emit(plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
 
     let mut root: Vec<Sorted> = Vec::new();
     build_level(&plan.root, &mut cx, &ids_by_entry, &mut |name, key, chunks| root.push((name, key, chunks)))?;
-    // The Solids folder: root-level solids and the hidden solids of null layers.
-    let mut solids_children: Vec<Sorted> = Vec::new();
-    for (name, key, chunks) in root.iter().filter(|(_, k, _)| *k & ROOT_SOLID != 0) {
-        solids_children.push((name.clone(), *key, chunks.clone()));
-    }
-    root.retain(|(_, k, c)| *k & ROOT_SOLID == 0 && !c.is_empty());
-    for (i, (name, chunk)) in cx.extra_solids.iter().enumerate() {
-        let mut v = vec![chunk.clone()];
+    // The Solids folder: root-level solids and the hidden solids of null layers (moved, not
+    // copied: the root keeps neither).
+    let (mut solids_children, mut root): (Vec<Sorted>, Vec<Sorted>) = root.into_iter().partition(|(_, k, _)| *k & ROOT_SOLID != 0);
+    root.retain(|(_, _, c)| !c.is_empty());
+    for (i, (name, chunk)) in std::mem::take(&mut cx.extra_solids).into_iter().enumerate() {
+        let mut v = vec![chunk];
         v.extend(cx.t.fset.iter().cloned());
-        solids_children.push((name.clone(), i as u64, v));
+        solids_children.push((name, i as u64, v));
     }
     let mut folder = match cx.special_slot.take() {
         Some((item, inner)) => {
@@ -125,24 +127,39 @@ pub(crate) fn emit(plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
 /// Marks a root entry that goes into the `Solids` folder.
 const ROOT_SOLID: u64 = 1 << 63;
 
+/// Sorts by name in natural order, then by the tie-break key. Each name's [`natural_key`] is built
+/// once, not on every comparison; the sort is stable, as `sort_by` is.
 fn sort_named(v: &mut [Sorted]) {
-    v.sort_by(|a, b| natural_cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
+    v.sort_by_cached_key(|(name, key, _)| (Natural(natural_key(name)), *key));
 }
 
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let (ka, kb) = (natural_key(a), natural_key(b));
-    for (x, y) in ka.iter().zip(kb.iter()) {
-        let c = match (x.0, y.0) {
-            (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
-            (false, false) => x.1.cmp(&y.1),
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-        };
-        if c != std::cmp::Ordering::Equal {
-            return c;
+/// A [`natural_key`] ordered segment by segment: a number before text, numbers by value and then
+/// by their digits (`1` before `01`), text by its lowercase string; a key that is a prefix of the
+/// other first. Two keys compare equal only when they are equal.
+#[derive(PartialEq, Eq)]
+struct Natural(Vec<(bool, String, u128)>);
+
+impl Ord for Natural {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        for (x, y) in self.0.iter().zip(other.0.iter()) {
+            let c = match (x.0, y.0) {
+                (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
+                (false, false) => x.1.cmp(&y.1),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+            };
+            if c != std::cmp::Ordering::Equal {
+                return c;
+            }
         }
+        self.0.len().cmp(&other.0.len())
     }
-    ka.len().cmp(&kb.len())
+}
+
+impl PartialOrd for Natural {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 fn assign_ids(entries: &[Entry], cx: &mut Cx<'_>, map: &mut HashMap<ItemId, u32>) -> R<()> {
@@ -404,8 +421,7 @@ fn put_used_comps(cx: &Cx<'_>, item: &mut Chunk<'static>, cp: &CompPlan) -> R<()
 fn put_time_remap_max(layr: &mut Chunk<'static>, seconds: f64) -> R<()> {
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at =
-        kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
+    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
     let tdbs = kids.get_mut(at + 1).ok_or_else(|| tpl("Time Remapping without a record"))?;
     put_f64(child_data(tdbs, b"tduM")?, 0, seconds)
 }
@@ -420,8 +436,7 @@ fn put_time_remap_max(layr: &mut Chunk<'static>, seconds: f64) -> R<()> {
 fn put_time_remap(cx: &Cx<'_>, layr: &mut Chunk<'static>, remap: &PropPlan) -> R<()> {
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at =
-        kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
+    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Time Remapping")).ok_or_else(|| tpl("layer without Time Remapping"))?;
     let tdbs = kids.get_mut(at + 1).ok_or_else(|| tpl("Time Remapping without a record"))?;
     put_u32(child_data(tdbs, b"tdsb")?, 0, 1)?;
     {
@@ -454,21 +469,12 @@ fn put_time_remap(cx: &Cx<'_>, layr: &mut Chunk<'static>, remap: &PropPlan) -> R
             .find(|k| matches!(&k.body, crate::Body::List { list_type, .. } if list_type == b"list"))
             .cloned()
             .ok_or_else(|| tpl("keyed prototype without a list"))?;
-        let n = u32::try_from(remap.keys.len()).map_err(|_| tpl("too many keys"))?;
         let size = 48usize;
-        {
-            let lhd3 = child_data(&mut list, b"lhd3")?;
-            crate::export::synth::put_key_counts(lhd3, n, 48)?;
-        }
         let mut ldat = Vec::with_capacity(size * remap.keys.len());
         for k in &remap.keys {
             ldat.extend(plain_record(1, k, size)?);
         }
-        let ld = kids_mut(&mut list)?;
-        match ld.iter_mut().find(|c| c.is(b"ldat")) {
-            Some(c) => *c = Chunk::data(*b"ldat", ldat),
-            None => ld.push(Chunk::data(*b"ldat", ldat)),
-        }
+        set_key_list(&mut list, ldat, remap.keys.len(), size)?;
         if let Some(slot) = rk.get_mut(cdat_at) {
             *slot = list;
         }
@@ -616,10 +622,7 @@ fn put_masks(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan) -> R<()> {
     let parade = crate::export::masks::build_parade(&cx.t.masks, &lp.masks, lp.source_size)?;
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids
-        .iter()
-        .position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Transform Group"))
-        .ok_or_else(|| tpl("layer without a Transform group"))?;
+    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
     kids.splice(at..at, parade);
     Ok(())
 }
@@ -633,10 +636,7 @@ fn put_effects(cx: &mut Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, layer
     let parade = crate::export::effects::build_parade(&cx.t.effects, &lp.fx, layer_id, layer_ids, lp.source_size, &mut cx.fx_use)?;
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids
-        .iter()
-        .position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Transform Group"))
-        .ok_or_else(|| tpl("layer without a Transform group"))?;
+    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
     kids.splice(at..at, parade);
     Ok(())
 }
@@ -659,9 +659,17 @@ const GROUP_ORDER: [&str; 13] = [
     "ADBE Group End",
 ];
 
-fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let d = c.bytes()?;
-    Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
+/// The match name of a `tdmn` chunk: its bytes up to the first NUL, not decoded (empty for a chunk
+/// without data). Every name the exporter looks for is ASCII, so comparing bytes is the same as
+/// comparing the Latin-1 text the other exporter modules decode.
+fn tdmn_bytes<'c>(c: &'c Chunk<'_>) -> &'c [u8] {
+    let d = c.bytes().unwrap_or_default();
+    d.split(|b| *b == 0).next().unwrap_or_default()
+}
+
+/// True when `c` has data and names `name`.
+fn tdmn_is(c: &Chunk<'_>, name: &str) -> bool {
+    c.bytes().is_some() && tdmn_bytes(c) == name.as_bytes()
 }
 
 /// Inserts the properties of `lp` into the layer's Transform group, in the order the file uses.
@@ -671,20 +679,17 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
     }
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids
-        .iter()
-        .position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Transform Group"))
-        .ok_or_else(|| tpl("layer without a Transform group"))?;
+    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_is(c, "ADBE Transform Group")).ok_or_else(|| tpl("layer without a Transform group"))?;
     let group = kids.get_mut(at + 1).ok_or_else(|| tpl("Transform group without a list"))?;
     let gk = kids_mut(group)?;
     // Split the group into its header (up to the first match name) and (tdmn, node) pairs.
     let first = gk.iter().position(|c| c.is(b"tdmn")).ok_or_else(|| tpl("empty Transform group"))?;
     let header: Vec<Chunk<'static>> = gk.drain(..first).collect();
-    let mut pairs: Vec<(String, Vec<Chunk<'static>>)> = Vec::new();
+    let mut pairs: Vec<(Vec<u8>, Vec<Chunk<'static>>)> = Vec::new();
     let mut it = std::mem::take(gk).into_iter();
     while let Some(m) = it.next() {
-        let name = tdmn_name(&m).unwrap_or_default();
-        if name == "ADBE Group End" {
+        let name = tdmn_bytes(&m).to_vec();
+        if name == b"ADBE Group End" {
             pairs.push((name, vec![m]));
             continue;
         }
@@ -694,22 +699,19 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
     for p in &lp.props {
         let name = p.kind.match_name();
         let built = build_prop(cx, p, lp, cp)?;
-        let tdmn = pairs.iter().find(|(n, _)| n == name).and_then(|(_, v)| v.first().cloned()).unwrap_or_else(|| {
-            cx.t.stat
-                .iter()
-                .chain(cx.t.keyd.iter())
-                .find(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(name))
-                .cloned()
-                .unwrap_or_else(|| Chunk::data(*b"tdmn", Vec::new()))
+        let tdmn = pairs.iter().find(|(n, _)| n == name.as_bytes()).and_then(|(_, v)| v.first().cloned()).unwrap_or_else(|| {
+            cx.t.stat.iter().chain(cx.t.keyd.iter()).find(|c| c.is(b"tdmn") && tdmn_is(c, name)).cloned().unwrap_or_else(|| Chunk::data(*b"tdmn", Vec::new()))
         });
         let entry = vec![tdmn, built];
-        if let Some(slot) = pairs.iter_mut().find(|(n, _)| n == name) {
+        if let Some(slot) = pairs.iter_mut().find(|(n, _)| n == name.as_bytes()) {
             slot.1 = entry;
         } else {
-            pairs.push((name.to_string(), entry));
+            pairs.push((name.as_bytes().to_vec(), entry));
         }
     }
-    let rank = |n: &str| if n == "ADBE Group End" { usize::MAX } else { GROUP_ORDER.iter().position(|g| *g == n).unwrap_or(GROUP_ORDER.len()) };
+    let rank = |n: &[u8]| {
+        if n == b"ADBE Group End" { usize::MAX } else { GROUP_ORDER.iter().position(|g| g.as_bytes() == n).unwrap_or(GROUP_ORDER.len()) }
+    };
     pairs.sort_by_key(|(n, _)| rank(n));
     gk.extend(header);
     gk.extend(pairs.into_iter().flat_map(|(_, v)| v));
@@ -743,22 +745,12 @@ fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chu
             put_f64(cdat, i * 8, *v)?;
         }
     } else {
-        let list = list_mut(&mut tdbs, b"list")?;
-        let n = u32::try_from(p.keys.len()).map_err(|_| tpl("too many keys"))?;
         let size = if p.kind.spatial() { 56 + 24 * p.kind.dims() } else { 8 + 40 * p.kind.dims() };
-        {
-            let lhd3 = child_data(list, b"lhd3")?;
-            crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-        }
         let mut ldat = Vec::with_capacity(size * p.keys.len());
         for k in &p.keys {
             ldat.extend(key_record(p.kind, k, size)?);
         }
-        let ld = kids_mut(list)?;
-        match ld.iter_mut().find(|c| c.is(b"ldat")) {
-            Some(c) => *c = Chunk::data(*b"ldat", ldat),
-            None => ld.push(Chunk::data(*b"ldat", ldat)),
-        }
+        set_key_list(list_mut(&mut tdbs, b"list")?, ldat, p.keys.len(), size)?;
     }
     if let Some((text, _)) = &p.expr {
         let kids = kids_mut(&mut tdbs)?;
@@ -766,6 +758,25 @@ fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chu
         kids.insert(at, Chunk::data(*b"Utf8", text.as_bytes().to_vec()));
     }
     Ok(tdbs)
+}
+
+/// Writes `count` key records of `size` bytes into the key list `list`: the counts into `lhd3`,
+/// the records as its `ldat` (replaced, or added when missing).
+///
+/// The same as `masks::set_key_list`, which takes the property record (`tdbs`) instead of the
+/// list; the time remap fills a list before it is put into its record.
+fn set_key_list(list: &mut Chunk<'static>, records: Vec<u8>, count: usize, size: usize) -> R<()> {
+    let n = u32::try_from(count).map_err(|_| tpl("too many keys"))?;
+    {
+        let lhd3 = child_data(list, b"lhd3")?;
+        crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
+    }
+    let ld = kids_mut(list)?;
+    match ld.iter_mut().find(|c| c.is(b"ldat")) {
+        Some(c) => *c = Chunk::data(*b"ldat", records),
+        None => ld.push(Chunk::data(*b"ldat", records)),
+    }
+    Ok(())
 }
 
 /// One keyframe record (`docs/aep-format.md`, 3.5).
@@ -817,4 +828,253 @@ pub(crate) fn plain_record(n: usize, k: &KeyPlan, size: usize) -> R<Vec<u8>> {
         put_f64(&mut r, base + 24 * n + 8 * j, o.influence)?;
     }
     Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use effectcraft_color::Label;
+    use effectcraft_keyframe::{Keyframe, Value};
+    use effectcraft_project::{Comp, Expression, ItemKind, LayerSource, Project, Property, Solid, build};
+    use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
+
+    fn secs(s: f64) -> Tick {
+        Tick((s * TICKS_PER_SECOND as f64).round() as i64)
+    }
+
+    fn add_layer(p: &mut Project, comp: ItemId, name: &str, source: LayerSource, edit: impl FnOnce(&mut effectcraft_project::Layer)) {
+        let mut c = p.comp(comp).cloned().expect("comp");
+        let mut l = build::layer(p, &c, name, source, (640, 360), None);
+        l.name = name.to_string();
+        edit(&mut l);
+        c.layers.insert(0, l);
+        if let Some(i) = p.item_mut(comp) {
+            i.kind = ItemKind::Comp(Arc::new(c));
+        }
+    }
+
+    fn two_keys(prop: Option<&mut Property>) {
+        let prop = prop.expect("property");
+        let v = prop.value.clone();
+        prop.keys = vec![Keyframe::new(secs(0.0), v.clone()), Keyframe::new(secs(1.5), v)];
+    }
+
+    /// A project that reaches every part of `emit`: folders (one named `Solids`), root and nested
+    /// solids with names that sort naturally, a precomposition, null layers (hidden solids), keyed
+    /// Transform properties, an expression and a keyed time remap.
+    fn varied(tag: &str) -> Project {
+        let mut p = Project::default();
+        let solid = |w| ItemKind::Solid(Solid { color: [0.2, 0.4, 0.6], width: w, height: 360, pixel_aspect: 1.0 });
+        let solids = p.add_item("Solids", Label::None, None, ItemKind::Folder);
+        let nested = p.add_item("Folder 10", Label::None, None, ItemKind::Folder);
+        p.add_item("folder 9", Label::None, Some(nested), ItemKind::Folder);
+        let mut ids = Vec::new();
+        for name in ["Solid 10", "Solid 2", "solid 2", "Solid 02", "Solid", "Ölung 1", ""] {
+            ids.push(p.add_item(&format!("{name}{tag}"), Label::Red, None, solid(640)));
+        }
+        p.add_item("In Solids 3", Label::None, Some(solids), solid(320));
+        p.add_item("In folder", Label::None, Some(nested), solid(100));
+        let pre = p.add_item("Pre 1", Label::None, Some(nested), ItemKind::Comp(Arc::new(Comp::new(640, 360, FrameRate::new(25, 1), secs(3.0)))));
+        add_layer(&mut p, pre, "S", LayerSource::Solid { item: ids[0] }, |_| {});
+        let main = p.add_item("Main", Label::None, None, ItemKind::Comp(Arc::new(Comp::new(1920, 1080, FrameRate::new(30, 1), secs(5.0)))));
+        add_layer(&mut p, main, "Null A", LayerSource::Null, |_| {});
+        add_layer(&mut p, main, "Null B", LayerSource::Null, |l| two_keys(l.props.prop_mut("transform/position")));
+        add_layer(&mut p, main, "Solid layer", LayerSource::Solid { item: ids[1] }, |l| {
+            two_keys(l.props.prop_mut("transform/opacity"));
+            two_keys(l.props.prop_mut("transform/anchor"));
+            if let Some(r) = l.props.prop_mut("transform/rotation") {
+                r.expr = Some(Expression { text: "time * 10".into(), enabled: true });
+            }
+        });
+        add_layer(&mut p, main, "Precomp", LayerSource::Comp { item: pre }, |l| {
+            let mut r = Property::new(9_000, "timeRemap", "Time Remap", Value::Scalar(0.0));
+            r.keys = vec![Keyframe::new(secs(0.0), Value::Scalar(3.0)), Keyframe::new(secs(3.0), Value::Scalar(0.0))];
+            l.props.children.insert(0, r.into());
+        });
+        p
+    }
+
+    fn plan_of(p: &Project) -> ProjectPlan {
+        let mut col = crate::export::report::Collector::default();
+        crate::export::plan::plan(p, &mut col)
+    }
+
+    /// The template is built once and every later export uses the same one.
+    #[test]
+    fn the_template_is_built_once() {
+        let a = template::shared().expect("template");
+        let b = template::shared().expect("template");
+        assert!(std::ptr::eq(a, b));
+    }
+
+    /// Exports with the shared template give the bytes a freshly built template gives, also after
+    /// other exports have used it (nothing an export does reaches the template).
+    #[test]
+    fn the_shared_template_exports_what_a_fresh_one_does() {
+        let (a, b) = (plan_of(&varied("")), plan_of(&varied(" x")));
+        let fresh = |plan: &ProjectPlan| emit_with(&Template::load().expect("template"), plan, b"trailer").expect("emit");
+        let (want_a, want_b) = (fresh(&a), fresh(&b));
+        assert!(want_a != want_b);
+        // The project exports without losses and the remap is written.
+        let r = crate::export::export(&varied(""), &crate::export::ExportOptions { allow_losses: false }).expect("lossless");
+        assert_eq!(r.report.exported.time_remaps, 1);
+        // The null layers' hidden solids and the root solids went into the `Solids` folder.
+        let file = crate::parse(&want_a).expect("parse");
+        let folder = file.walk().map(|(_, c)| c).filter(|c| c.is_list(b"Sfdr")).map(|c| c.children().iter().filter(|k| k.is_list(b"Item")).count()).max();
+        assert_eq!(folder, Some(10));
+        for _ in 0..3 {
+            assert!(emit(&a, b"trailer").expect("emit") == want_a);
+            assert!(emit(&b, b"trailer").expect("emit") == want_b);
+        }
+    }
+
+    /// Exports running at the same time on several threads, the first of them possibly building
+    /// the shared template, all give the single-threaded bytes.
+    #[test]
+    fn concurrent_exports_give_the_same_bytes() {
+        let plans: Vec<ProjectPlan> = ["", " x", " y", " z"].iter().map(|t| plan_of(&varied(t))).collect();
+        let want: Vec<Vec<u8>> = plans.iter().map(|plan| emit_with(&Template::load().expect("template"), plan, &[]).expect("emit")).collect();
+        let got: Vec<Vec<Vec<u8>>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let plans = &plans;
+                    s.spawn(move || (0..4).map(|k| emit(&plans[(i + k) % plans.len()], &[]).expect("emit")).collect::<Vec<_>>())
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("thread")).collect()
+        });
+        for (i, bytes) in got.iter().enumerate() {
+            for (k, b) in bytes.iter().enumerate() {
+                assert!(b == &want[(i + k) % want.len()], "thread {i}, export {k}");
+            }
+        }
+    }
+
+    /// The comparator `sort_named` used before its keys were cached: `natural_key` built on every
+    /// comparison.
+    fn old_sort_named(v: &mut [Sorted]) {
+        fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+            let (ka, kb) = (natural_key(a), natural_key(b));
+            for (x, y) in ka.iter().zip(kb.iter()) {
+                let c = match (x.0, y.0) {
+                    (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
+                    (false, false) => x.1.cmp(&y.1),
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                };
+                if c != std::cmp::Ordering::Equal {
+                    return c;
+                }
+            }
+            ka.len().cmp(&kb.len())
+        }
+        v.sort_by(|a, b| natural_cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
+    }
+
+    /// The cached-key sort orders names exactly as the comparator it replaced, and keeps entries
+    /// with the same name and key in their order (each carries its position as a marker chunk).
+    #[test]
+    fn sort_named_orders_as_the_old_comparator() {
+        let parts = [
+            "",
+            "0",
+            "00",
+            "1",
+            "01",
+            "2",
+            "10",
+            "a",
+            "A",
+            "b",
+            " ",
+            "-",
+            ".",
+            "é",
+            "É",
+            "ß",
+            "İ",
+            "\u{0}",
+            "Solid ",
+            "solid ",
+            "x9",
+            "9x",
+            "340282366920938463463374607431768211455",
+            "340282366920938463463374607431768211456",
+            "999999999999999999999999999999999999999999",
+        ];
+        // A small deterministic generator (splitmix64).
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            (z ^ (z >> 31)) as usize
+        };
+        for round in 0..200 {
+            let n = 1 + next() % 40;
+            let v: Vec<Sorted> = (0..n)
+                .map(|i| {
+                    let name: String = (0..next() % 4).map(|_| parts[next() % parts.len()]).collect();
+                    let key = (next() % 3) as u64 | if next() % 2 == 0 { ROOT_SOLID } else { 0 };
+                    (name, key, vec![Chunk::data(*b"mark", (i as u32).to_le_bytes().to_vec())])
+                })
+                .collect();
+            let (mut old, mut new) = (v.clone(), v);
+            old_sort_named(&mut old);
+            sort_named(&mut new);
+            assert_eq!(old, new, "round {round}");
+        }
+    }
+
+    /// `tdmn_is` and `tdmn_bytes` agree with the Latin-1 decoding they replaced for every name the
+    /// emitter looks up, which holds because those names are ASCII.
+    #[test]
+    fn match_names_compare_as_the_latin1_decoding_did() {
+        fn old_tdmn_name(c: &Chunk<'_>) -> Option<String> {
+            let d = c.bytes()?;
+            Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
+        }
+        let mut wanted: Vec<&str> = GROUP_ORDER.to_vec();
+        wanted.extend(PropKind::ALL.iter().map(|k| k.match_name()));
+        wanted.extend(["ADBE Time Remapping", "ADBE Transform Group", "ADBE Group End"]);
+        assert!(wanted.iter().all(|n| n.is_ascii()));
+        let mut chunks: Vec<Chunk<'static>> = wanted.iter().map(|n| Chunk::data(*b"tdmn", format!("{n}\0\0junk").into_bytes())).collect();
+        chunks.extend([
+            Chunk::data(*b"tdmn", Vec::new()),
+            Chunk::data(*b"tdmn", b"ADBE Position".to_vec()),
+            Chunk::data(*b"tdmn", b"ADBE Position_0\0".to_vec()),
+            Chunk::data(*b"tdmn", b"ADBE Opacit\xe9\0".to_vec()),
+            Chunk::data(*b"tdmn", b"\xc3\x84DBE Scale\0".to_vec()),
+            Chunk::data(*b"tdmn", b"\0ADBE Scale".to_vec()),
+            Chunk::list(*b"tdmn", Vec::new()),
+        ]);
+        for c in &chunks {
+            for n in &wanted {
+                assert_eq!(tdmn_is(c, n), old_tdmn_name(c).as_deref() == Some(*n), "{c:?} {n}");
+            }
+            let old = old_tdmn_name(c).unwrap_or_default();
+            if old.is_ascii() {
+                assert_eq!(tdmn_bytes(c), old.as_bytes());
+            }
+        }
+    }
+
+    /// `set_key_list` writes the counts and replaces the records, or adds them when the list has
+    /// none.
+    #[test]
+    fn set_key_list_writes_counts_and_records() {
+        let lhd3 = || Chunk::data(*b"lhd3", vec![0; 52]);
+        let mut want_lhd3 = vec![0; 52];
+        crate::export::synth::put_key_counts(&mut want_lhd3, 3, 48).expect("counts");
+        for start in [vec![lhd3(), Chunk::data(*b"ldat", vec![9; 4])], vec![lhd3()]] {
+            let mut list = Chunk::list(*b"list", start);
+            set_key_list(&mut list, vec![7; 144], 3, 48).expect("set");
+            assert_eq!(list.children(), &[Chunk::data(*b"lhd3", want_lhd3.clone()), Chunk::data(*b"ldat", vec![7; 144])]);
+        }
+        let mut no_header = Chunk::list(*b"list", Vec::new());
+        assert!(set_key_list(&mut no_header, Vec::new(), 0, 48).is_err());
+    }
 }
