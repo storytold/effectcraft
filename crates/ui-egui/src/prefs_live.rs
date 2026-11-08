@@ -141,6 +141,12 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
 /// reading starts PowerShell in the background, so it isn't done more often).
 pub(crate) fn memory_watch(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     let id = egui::Id::unique("prefs-memory-watch");
+    // While free disk space keeps frames and layers out of the disk cache, the idle passes ask
+    // for no repaint (nothing to write): keep a frame coming so its free space is read again and
+    // the RAM frames are written once there is room (the reading lands between frames).
+    if app.session.disk_cache.as_ref().is_some_and(|dc| !dc.accepts_writes()) {
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
+    }
     let last = ctx.data(|d| d.get_temp::<f64>(id));
     if last.is_some_and(|t| now - t < 30.0) {
         return;

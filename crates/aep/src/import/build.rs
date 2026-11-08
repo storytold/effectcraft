@@ -206,6 +206,8 @@ fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap, name: 
     comp
 }
 
+/// Adds one footage item to the project under the given parent.
+/// Unreadable footage is recorded as a loss, solids and null placeholders are handled separately, and file and sequence footage is linked to its files.
 fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_>, name: String, label: Label, parent: ItemId, null_only: &HashSet<u32>) {
     let Some(f) = item.footage() else {
         cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': data unreadable, not imported"));
@@ -240,31 +242,42 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     }
     let mut path = f.path.clone().unwrap_or_default();
     // An image sequence's alias is its folder; its files are named by the stored numbering
-    // (353, 603). The first file stands for the sequence, as in EffectCraft.
+    // (353, 603), or listed one by one when imported with Force alphabetical order. The first
+    // file stands for the sequence, as in EffectCraft.
     let mut sequence = Vec::new();
-    if let Some(seq) = item.sequence_info().filter(|s| !path.is_empty() && s.end >= s.start) {
-        let frames = (seq.end - seq.start).saturating_add(1);
+    if let Some(seq) = item.sequence_info().filter(|s| !path.is_empty() && s.frame_count() > 0) {
+        let frames = seq.frame_count();
         let sep = if path.contains('\\') { '\\' } else { '/' };
         let folder = path.trim_end_matches(['\\', '/']).to_string();
-        // One name is the folder, a separator and the file name; the number is as wide as the stored
-        // digits or as the largest number, whichever is longer (an upper bound for every frame).
-        let name_bytes = (folder.len() + 1 + seq.prefix.len() + seq.suffix.len() + usize::try_from(seq.digits.min(16)).unwrap_or(16).max(10)) as u64;
-        let bytes = name_bytes.saturating_mul(u64::from(frames));
+        // One name is the folder, a separator and the file name. A numbered name is as wide as the
+        // stored digits or as the largest number, whichever is longer (an upper bound for every
+        // frame); listed names are counted as they are.
+        let len = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let file_bytes = if seq.files.is_empty() {
+            len(seq.prefix.len().saturating_add(seq.suffix.len()).saturating_add(usize::try_from(seq.digits.min(16)).unwrap_or(16).max(10)))
+                .saturating_mul(u64::from(frames))
+        } else {
+            seq.files.iter().fold(0u64, |sum, n| sum.saturating_add(len(n.len())))
+        };
+        let bytes = len(folder.len().saturating_add(1)).saturating_mul(u64::from(frames)).saturating_add(file_bytes);
         if frames > MAX_SEQUENCE_FRAMES || frames > cx.sequence_budget || bytes > cx.sequence_bytes {
             // Not expanded: the item keeps its first file (a still standing for the sequence).
             cx.col.lose(
                 LossCategory::DamagedData,
                 format!("footage '{name}': a sequence of {frames} frames is longer than the import expands; only its first file is linked"),
             );
-            path = format!("{folder}{sep}{}", seq.file_name(seq.start));
+            path = format!("{folder}{sep}{}", seq.nth_file_name(0).unwrap_or_default());
         } else {
             cx.sequence_budget -= frames;
             cx.sequence_bytes -= bytes;
-            sequence = (seq.start..=seq.end).map(|n| format!("{folder}{sep}{}", seq.file_name(n))).collect();
+            sequence = (0..frames).filter_map(|i| seq.nth_file_name(i)).map(|n| format!("{folder}{sep}{n}")).collect();
         }
         if let Some(first) = sequence.first() {
             path = first.clone();
         }
+    } else if f.is_sequence && !path.is_empty() {
+        // The alias is a folder, but the file names could not be read: the item links the folder.
+        cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': image sequence naming not read, linked to its folder"));
     }
     let present = !path.is_empty() && (cx.options.exists)(&path);
     if !present {
@@ -318,6 +331,11 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
 /// sequence the name with the frame range (`shot_[0101-0103].exr`).
 fn default_footage_name(item: &AepItem<'_, '_>, f: &crate::Footage) -> Option<String> {
     if let Some(s) = item.sequence_info() {
+        // A listed sequence (Force alphabetical order) has no numbering: its first file names it.
+        // Assumption: what After Effects shows for such an item without a stored name was not sampled.
+        if let Some(first) = s.files.first() {
+            return Some(first.clone());
+        }
         let w = usize::try_from(s.digits.min(16)).unwrap_or(0);
         return Some(format!("{}[{:0w$}-{:0w$}]{}", s.prefix, s.start, s.end, s.suffix));
     }
