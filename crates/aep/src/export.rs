@@ -26,6 +26,7 @@ mod footage;
 mod fx_defs;
 mod fxsynth;
 pub(crate) mod icc;
+mod keys;
 mod markers;
 mod masks;
 mod plan;
