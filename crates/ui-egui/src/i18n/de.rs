@@ -57,7 +57,7 @@ pub(super) const UI: &[(&str, &str)] = &[
     ("Browser Storage", "Browserspeicher"),
     ("Browse…", "Durchsuchen…"),
     ("Brush Dynamics", "Pinseldynamik"),
-    ("Caching frames…", "Frames werden zwischengespeichert…"),
+    ("Caching frames", "Frames werden zwischengespeichert"),
     ("Cancel", "Abbrechen"),
     ("Casts Shadows", "Wirft Schatten"),
     ("Change Renderer…", "Renderer ändern…"),

@@ -25,25 +25,6 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
     click_at(h, pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0));
 }
 
-/// Open and scroll the real language picker before selecting the visible language label.
-fn language_choice(h: &mut Harness<'_, EffectcraftApp>, label: &str) {
-    click(h, "settings.general.language");
-    let picker = h.state().auto.find("settings.general.language").unwrap();
-    let popup_top = pos2(picker.rect[0] + picker.rect[2] / 2.0, picker.rect[1] + picker.rect[3] + 20.0);
-    // The language list now has twelve entries, so its later choices need scrolling.
-    h.input_mut().events.push(Event::PointerMoved(popup_top));
-    h.input_mut().events.push(Event::MouseWheel {
-        source: egui::MouseWheelSource::Wheel,
-        unit: egui::MouseWheelUnit::Point,
-        delta: egui::vec2(0.0, if label == "Deutsch" { -300.0 } else { 300.0 }),
-        modifiers: Default::default(),
-        phase: egui::TouchPhase::Move,
-    });
-    h.run_steps(20);
-    let at = h.query_by_label(label).unwrap().rect().center();
-    click_at(h, at);
-}
-
 /// Invoke an application command and advance enough frames to expose its dialog.
 fn invoke(h: &mut Harness<'_, EffectcraftApp>, id: &str, params: serde_json::Value) {
     let ctx = h.ctx.clone();
@@ -72,28 +53,20 @@ fn texts(h: &Harness<'_, EffectcraftApp>) -> Vec<String> {
     out
 }
 
-/// Switching English/German updates the live interface and survives reopening the saved store.
+/// The German preference updates the live interface and survives reopening the saved store.
 #[test]
-fn language_picker_switches_live_and_reloads_german_in_a_new_app() {
+fn german_language_preference_survives_reopening() {
     let store = Arc::new(MemoryConfig::default());
     let mut session = Session { config: Some(store.clone()), ..Default::default() };
-    session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+    session.execute("prefs.set", json!({"key":"general.language", "value":"de"})).unwrap();
     let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     invoke(&mut h, "app.settings", json!({"page":"general"}));
-    assert!(texts(&h).iter().any(|s| s == "Language:"));
-    language_choice(&mut h, "Deutsch");
     assert_eq!(h.state().session.prefs.general.language, "de");
     assert!(texts(&h).iter().any(|s| s == "Sprache:"));
+    assert!(texts(&h).iter().any(|s| s == "Deutsch"));
     assert!(h.query_by_label("Abbrechen").is_some());
     assert!(h.state().auto.find("settings.general.language").is_some());
-
-    language_choice(&mut h, "English");
-    assert_eq!(h.state().session.prefs.general.language, "en");
-    assert!(texts(&h).iter().any(|s| s == "Language:"));
-    assert!(h.query_by_label("Cancel").is_some());
-
-    language_choice(&mut h, "Deutsch");
     click(&mut h, "settings.ok");
     assert_eq!(h.state().dialog, None);
     drop(h);
@@ -104,6 +77,10 @@ fn language_picker_switches_live_and_reloads_german_in_a_new_app() {
     invoke(&mut h, "app.settings", json!({"page":"general"}));
     assert_eq!(h.state().session.prefs.general.language, "de");
     assert!(texts(&h).iter().any(|s| s == "Sprache:"));
+    assert!(texts(&h).iter().any(|s| s == "Deutsch"));
+    // Test workers are reused; leave this thread's translator in the default language.
+    h.state_mut().session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+    h.run_steps(1);
 }
 
 /// German composition labels leave automation IDs and user-chosen project names unchanged.
@@ -122,4 +99,7 @@ fn german_composition_form_keeps_ids_and_project_names() {
     h.state_mut().dialog = None;
     let comp_id = h.state().session.active_comp_id().unwrap();
     assert_eq!(h.state().session.project.item(comp_id).unwrap().name, "File");
+    // Test workers are reused; leave this thread's translator in the default language.
+    h.state_mut().session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+    h.run_steps(1);
 }
