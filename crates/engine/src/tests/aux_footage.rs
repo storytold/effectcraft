@@ -18,6 +18,7 @@ use crate::render::{FootageSource, RenderOpts};
 struct Recorder {
     sets: Mutex<Vec<Vec<String>>>,
     at_first_frame: Mutex<Option<Option<Vec<String>>>>,
+    needs: Mutex<Vec<(String, effectcraft_raster::channels3d::AuxNeed)>>,
 }
 
 impl Recorder {
@@ -36,6 +37,9 @@ impl FootageSource for Recorder {
     }
     fn set_aux_footage(&self, paths: &[String]) {
         self.sets.lock().unwrap().push(paths.to_vec());
+    }
+    fn set_aux_needs(&self, needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {
+        *self.needs.lock().unwrap() = needs.to_vec();
     }
 }
 
@@ -196,5 +200,72 @@ fn a_watch_folder_render_gives_the_host_set_back() {
     assert!(rec.calls() > calls + 1, "the watched project gave its own set");
     assert_eq!(rec.last(), paths(&["/renders/a.exr"]), "the host's set is back");
     s.execute("file.watchFolder", json!({"stop": true})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #3271: the parameters that pick the channels an effect reads can't be animated, as in After
+/// Effects (no stopwatch there either): a keyframe or an expression is refused, the value still
+/// changes; what a frame reads is exactly the channels picked.
+#[test]
+fn channel_selection_is_static_and_says_what_is_read() {
+    use effectcraft_raster::channels3d::{AuxLookup, AuxNeed};
+    let rec = Arc::new(Recorder::default());
+    let mut s = session(&rec);
+    let item = import(&mut s, "/renders/static.exr");
+    let l = add_layer(&mut s, &item);
+    s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
+    let red = "effects/#1/red";
+    let prop = |s: &Session, path: &str| {
+        let c = s.active_comp().unwrap();
+        c.layer(effectcraft_project::LayerId(l)).unwrap().props.prop(path).unwrap().clone()
+    };
+    assert!(prop(&s, red).static_only, "no stopwatch");
+    assert!(s.execute_checked("prop.addKey", json!({"layer": l, "path": red})).is_err(), "no keyframe");
+    assert!(s.execute_checked("prop.toggleKey", json!({"layer": l, "path": red})).is_err(), "no keyframe");
+    assert!(s.execute_checked("prop.toggleAnimation", json!({"layer": l, "path": red})).is_err(), "no stopwatch");
+    assert!(s.execute_checked("prop.setExpression", json!({"layer": l, "path": red, "expression": "'Z'"})).is_err(), "no expression");
+    assert!(prop(&s, red).keys.is_empty() && prop(&s, red).expr.is_none());
+    // The value changes; the channels read are exactly those picked.
+    s.execute_checked("prop.set", json!({"layer": l, "path": red, "value": "Z"})).unwrap();
+    for c in ["green", "blue", "alpha"] {
+        s.execute_checked("prop.set", json!({"layer": l, "path": format!("effects/#1/{c}"), "value": ""})).unwrap();
+    }
+    assert_eq!(prop(&s, red).value, effectcraft_keyframe::Value::Str("Z".into()));
+    let needs = rec.needs.lock().unwrap().clone();
+    assert_eq!(needs, [("/renders/static.exr".to_string(), AuxNeed::Lookups(vec![AuxLookup::Name("Z".into())]))]);
+}
+
+/// #3271: a document that animated a channel selection (it can't come from After Effects, nor
+/// from EffectCraft now) opens with the first key's value as the static one, its keys and
+/// expression dropped, and says so.
+#[test]
+fn a_keyed_channel_selection_opens_static() {
+    use effectcraft_keyframe::{Keyframe, Value as K};
+    let rec = Arc::new(Recorder::default());
+    let mut s = session(&rec);
+    let item = import(&mut s, "/renders/keyed.exr");
+    let l = add_layer(&mut s, &item);
+    s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    {
+        let p = Arc::make_mut(&mut s.project);
+        let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut("effects/#1/red").unwrap();
+        // (as a document from before)
+        pr.static_only = false;
+        pr.keys = vec![Keyframe::new(Tick::ZERO, K::Str("Z".into())), Keyframe::new(Tick::from_seconds_f64(1.0), K::Str("N.X".into()))];
+    }
+    let dir = std::env::temp_dir().join(format!("ec-3271-static-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("keyed.ecproj");
+    s.execute_checked("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut o = session(&rec);
+    o.drain_events();
+    o.execute_checked("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    let c = o.active_comp().unwrap();
+    let pr = c.layer(effectcraft_project::LayerId(l)).unwrap().props.prop("effects/#1/red").unwrap();
+    assert!(pr.static_only && pr.keys.is_empty() && pr.expr.is_none());
+    assert_eq!(pr.value, K::Str("Z".into()), "the first key's value");
+    let said = o.drain_events().into_iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.contains("Channel selection")));
+    assert!(said, "the loss is reported");
     let _ = std::fs::remove_dir_all(&dir);
 }

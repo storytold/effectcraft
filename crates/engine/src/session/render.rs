@@ -197,9 +197,8 @@ impl Session {
 
 /// What the effects of [`aux_footage`]'s layers read of each file's channels (#3271), by
 /// [`effectcraft_project::Footage::path`], sorted: the union of what each enabled effect reading
-/// them declares ([`effectcraft_effects::aux_needs`]) with its parameters' values. An effect that
-/// doesn't declare, or whose parameters change over time (keyframes, an expression), reads all
-/// channels. Several layers of one file add up.
+/// them declares ([`effectcraft_effects::aux_needs`]) with its parameters' values (channel
+/// selection is static, as in After Effects). Several layers of one file add up.
 pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, effectcraft_raster::channels3d::AuxNeed)> {
     use effectcraft_project::{GroupKind, ItemKind, LayerSource};
     use effectcraft_raster::channels3d::AuxNeed;
@@ -215,12 +214,15 @@ pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, 
             if !effectcraft_effects::reads_aux(effect) {
                 continue;
             }
-            let need = if commands::moves(g, None) {
-                AuxNeed::All
-            } else {
-                let params = effectcraft_effects::flatten_params(g, &mut |p| p.value.clone());
-                effectcraft_effects::aux_needs(effect, &params).map_or(AuxNeed::All, AuxNeed::Lookups)
-            };
+            // Channel selection is static (as in After Effects): the values say what is read. A
+            // parameter that moves anyway (it can't, see `static_channel_params`) is read at its
+            // static value.
+            if commands::moves(g, None) {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| log::warn!("an effect reading footage channels has animated parameters; its channels are read at their static values"));
+            }
+            let params = effectcraft_effects::flatten_params(g, &mut |p| p.value.clone());
+            let need = effectcraft_effects::aux_need(effect, &params);
             let merged = match out.remove(&f.path) {
                 Some(e) => e.union(need),
                 None => need,

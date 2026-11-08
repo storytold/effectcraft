@@ -522,11 +522,10 @@ impl CryptoProbe {
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
             // The channels the layer's effects read and this effect's (it may be switched off).
             let own = match &g.kind {
-                effectcraft_project::GroupKind::Effect { effect } => effectcraft_effects::aux_needs(effect, &params),
-                _ => None,
+                effectcraft_project::GroupKind::Effect { effect } => effectcraft_effects::aux_need(effect, &params),
+                _ => effectcraft_raster::channels3d::AuxNeed::Lookups(vec![]),
             };
-            let need =
-                r.layer_aux_need(&ctx, layer).union(own.map_or(effectcraft_raster::channels3d::AuxNeed::All, effectcraft_raster::channels3d::AuxNeed::Lookups));
+            let need = r.layer_aux_need(&ctx, layer).union(own);
             let aux = r.layer_aux_with(&ctx, layer, &need).ok_or(NO_CRYPTO)?;
             if !live() {
                 return Ok(None);

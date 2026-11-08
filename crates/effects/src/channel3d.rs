@@ -43,6 +43,22 @@ const READS_AUX: [&str; 8] = [
     "ec.3d.identifier",
 ];
 
+/// The parameters that pick which channels or which Cryptomatte layer an effect reads. They
+/// can't be animated (no stopwatch, no keyframes, no expression), as in After Effects: the
+/// channels a frame needs are known before it renders, from these values alone (#3271).
+const CHANNEL_PARAMS: [(&str, &[&str]); 5] = [
+    ("ec.3d.channelextract", &["channel"]),
+    ("ec.3d.cryptomatte", &["layer", "layerName"]),
+    ("ec.3d.extractor", &["red", "green", "blue", "alpha"]),
+    ("ec.3d.idmatte", &["auxChannel", "useCoverage"]),
+    ("ec.3d.identifier", &["channelType"]),
+];
+
+/// Does parameter `param` of effect `effect` pick the channels it reads ([`CHANNEL_PARAMS`])?
+pub fn selects_channels(effect: &str, param: &str) -> bool {
+    CHANNEL_PARAMS.iter().any(|(e, ps)| *e == effect && ps.contains(&param))
+}
+
 /// Does effect `id` read its layer's auxiliary channels ([`crate::EffectHost::aux`])? The media
 /// layer then decodes the footage's picture together with its channels (#474).
 pub fn reads_aux(id: &str) -> bool {
@@ -86,6 +102,12 @@ pub fn aux_needs(id: &str, params: &crate::Params) -> Option<Vec<AuxLookup>> {
         }
         _ => return None,
     })
+}
+
+/// [`aux_needs`] as an [`AuxNeed`]: what effect `id` reads, nothing for an effect that reads no
+/// channels (every effect that does declares its lookups; a test holds them to it).
+pub fn aux_need(id: &str, params: &crate::Params) -> effectcraft_raster::channels3d::AuxNeed {
+    effectcraft_raster::channels3d::AuxNeed::Lookups(aux_needs(id, params).unwrap_or_default())
 }
 
 /// How far effect `id` with `params` reaches around a pixel of its layer (layer pixels), for
@@ -793,3 +815,17 @@ pub fn specs() -> Vec<EffectSpec> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod aux_need_tests {
+    /// #3271: every effect that reads its layer's channels says which (else a frame would read
+    /// all of them, or none).
+    #[test]
+    fn every_channel_effect_declares_what_it_reads() {
+        for id in super::READS_AUX {
+            let spec = crate::find(id).expect("an effect");
+            let params = crate::Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            assert!(super::aux_needs(id, &params).is_some(), "{id}");
+        }
+    }
+}

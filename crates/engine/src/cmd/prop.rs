@@ -461,7 +461,7 @@ fn toggle_key_selected(s: &mut Session, p: &Value) -> Result<Value> {
         let want = added.as_bool().unwrap_or(true);
         for (olid, ouid) in twins {
             let _ = with_prop(s, "Add/Remove Keyframe", None, cid, olid, ouid, |pr, lt| {
-                if key_at(&pr.keys, lt).is_some() != want {
+                if !pr.static_only && key_at(&pr.keys, lt).is_some() != want {
                     toggle_key_at(pr, lt);
                 }
                 Ok(())
@@ -589,6 +589,9 @@ fn add_key(s: &mut Session, p: &Value) -> Result<Value> {
     let at = snapped_key_time(s, cid, lid, p, "prop.addKey")?;
     let value = p.get("value").cloned();
     let count = with_prop(s, "Add Keyframe", None, cid, lid, uid, |pr, lt| {
+        if pr.static_only {
+            return Err(bad("prop.addKey", "this property can't be animated"));
+        }
         let t = at.unwrap_or(lt);
         let cur = pr.value_at(t);
         let v = match &value {
@@ -611,7 +614,12 @@ fn add_key(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn toggle_key(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "prop.toggleKey")?;
-    with_prop(s, "Add/Remove Keyframe", None, cid, lid, uid, |pr, lt| Ok(json!(toggle_key_at(pr, lt))))
+    with_prop(s, "Add/Remove Keyframe", None, cid, lid, uid, |pr, lt| {
+        if pr.static_only {
+            return Err(bad("prop.toggleKey", "this property can't be animated"));
+        }
+        Ok(json!(toggle_key_at(pr, lt)))
+    })
 }
 
 /// Add a keyframe at layer time `lt` (true), or remove the one there (false).
@@ -723,6 +731,9 @@ fn set_expr(s: &mut Session, p: &Value) -> Result<Value> {
         let mut changed_types = vec![];
         for (((cid, lid, uid), def), time) in targets.iter().zip(&defs).zip(&times) {
             let pr = layer_mut(proj, *cid, *lid)?.props.find_mut(*uid).ok_or_else(|| bad(C, "property vanished"))?;
+            if pr.static_only && text.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                return Err(bad(C, format!("{} can't have an expression", pr.name)));
+            }
             apply_expr(pr, &text, enabled, def);
             out.push(json!(pr.expr.as_ref().map(|e| e.text.clone())));
             if pr.match_id == "type" {
