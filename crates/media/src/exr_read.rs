@@ -145,9 +145,18 @@ pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
 pub(crate) const MAX_DECODE_BYTES: usize = 512 << 20;
 
 /// At most this many chunks, or bytes of them, are read before they are decompressed (and the
-/// request is checked for being called off).
+/// request is checked for being called off). The first batch takes at most [`FIRST_BATCH_BYTES`]
+/// and each one after twice the one before, so decoding starts early.
 const BATCH_CHUNKS: usize = 256;
 const BATCH_BYTES: u64 = 64 << 20;
+const FIRST_BATCH_BYTES: u64 = 1 << 20;
+
+/// The raw chunks of a batch: their bytes one after another, and each chunk's part and bytes.
+#[derive(Default)]
+struct Raw {
+    data: Vec<u8>,
+    chunks: Vec<(usize, Range<usize>)>,
+}
 
 /// Samples of one line placed in a plane.
 struct Placed {
@@ -232,54 +241,108 @@ fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats:
     let geometry = Geometry { size: (w, h), out: (ow, oh), stride, wanted: &wanted };
     let mut pos: Option<u64> = None;
     let mut rest = jobs.as_slice();
-    while !rest.is_empty() {
+    let mut raw = Raw::default();
+    let mut most = FIRST_BATCH_BYTES;
+    loop {
         if filmcraft_media::cancel::cancelled() {
             return Err(ReadError::Cancelled);
         }
-        // A batch: up to BATCH_CHUNKS chunks or BATCH_BYTES bytes (at least one chunk).
-        let mut take = 0;
-        let mut bytes = 0u64;
-        while let Some((_, _, len)) = rest.get(take) {
-            if take > 0 && (take >= BATCH_CHUNKS || bytes.saturating_add(*len) > BATCH_BYTES) {
-                break;
-            }
-            bytes = bytes.saturating_add(*len);
-            take += 1;
-        }
-        let (batch, more) = rest.split_at(take.min(rest.len()));
+        // The next batch is read on this thread while the one read before decompresses and
+        // converts on this pool's other threads (a network read overlaps the decoding).
+        let (batch, more) = rest.split_at(batch_len(rest, most));
         rest = more;
-        // Raw bytes on this thread, in file order (one seek per gap).
-        let mut raw = Vec::with_capacity(batch.len());
-        for (pi, offset, len) in batch {
-            if pos != Some(*offset) {
-                src.seek(SeekFrom::Start(*offset)).map_err(|e| ReadError::Io(e.to_string()))?;
-            }
-            let size = usize::try_from(*len).map_err(|_| ReadError::Unreadable("chunk size".into()))?;
-            let mut buf = Vec::new();
-            buf.try_reserve_exact(size).map_err(|e| ReadError::Io(e.to_string()))?;
-            (&mut *src).take(*len).read_to_end(&mut buf).map_err(|e| ReadError::Io(e.to_string()))?;
-            pos = Some(offset.saturating_add(buf.len() as u64));
-            stats.bytes = stats.bytes.saturating_add(buf.len() as u64);
-            if let Some(c) = stats.chunks.get_mut(*pi) {
-                *c += 1;
-            }
-            raw.push((*pi, buf));
-        }
-        // Decompressed and converted on this pool's threads, placed here.
-        let done: Vec<Result<(Vec<Placed>, usize), String>> =
-            raw.into_par_iter().map(|(pi, buf)| chunk_lines(index, pi, &buf, slots.get(pi).map_or(&[][..], Vec::as_slice), &geometry)).collect();
+        most = most.saturating_mul(2).min(BATCH_BYTES);
+        let decode = std::mem::take(&mut raw);
+        let (next, done) = rayon::join(
+            || read_batch(&mut *src, batch, &mut pos, stats),
+            || -> Vec<Result<(Vec<Placed>, usize), String>> {
+                let data = &decode.data;
+                decode
+                    .chunks
+                    .par_iter()
+                    .map(|(pi, r)| chunk_lines(index, *pi, data.get(r.clone()).unwrap_or_default(), slots.get(*pi).map_or(&[][..], Vec::as_slice), &geometry))
+                    .collect()
+            },
+        );
+        // Placed plane by plane, the planes in parallel.
+        let mut by_slot: Vec<Vec<Placed>> = (0..planes.len()).map(|_| vec![]).collect();
         for d in done {
             let (placed, lines) = d.map_err(ReadError::Unreadable)?;
             stats.lines = stats.lines.saturating_add(lines);
             for p in placed {
-                let end = p.start.saturating_add(p.values.len());
-                if let Some(dst) = planes.get_mut(p.slot).and_then(|pl| pl.get_mut(p.start..end)) {
-                    dst.copy_from_slice(&p.values);
+                if let Some(s) = by_slot.get_mut(p.slot) {
+                    s.push(p);
                 }
             }
         }
+        planes.par_iter_mut().zip(by_slot).for_each(|(plane, placed)| {
+            for p in placed {
+                let end = p.start.saturating_add(p.values.len());
+                if let Some(dst) = plane.get_mut(p.start..end) {
+                    dst.copy_from_slice(&p.values);
+                }
+            }
+        });
+        raw = next?;
+        if raw.chunks.is_empty() {
+            break;
+        }
     }
     Ok(planes)
+}
+
+/// How many of `jobs` (chunks in file order) the next batch takes: up to [`BATCH_CHUNKS`] chunks
+/// or `most` bytes, at least one.
+fn batch_len(jobs: &[(usize, u64, u64)], most: u64) -> usize {
+    let mut take = 0;
+    let mut bytes = 0u64;
+    while let Some((_, _, len)) = jobs.get(take) {
+        if take > 0 && (take >= BATCH_CHUNKS || bytes.saturating_add(*len) > most) {
+            break;
+        }
+        bytes = bytes.saturating_add(*len);
+        take += 1;
+    }
+    take
+}
+
+/// The raw bytes of the chunks `batch` (part, offset, length; in file order): chunks that follow
+/// each other in the file are read in one go (one request to a network share, not one per
+/// chunk), with one seek per gap (`pos`: where the source stands). A chunk the file ends in
+/// keeps the bytes there are.
+fn read_batch(src: &mut dyn ReadSeek, batch: &[(usize, u64, u64)], pos: &mut Option<u64>, stats: &mut ReadStats) -> Result<Raw, ReadError> {
+    let total = batch.iter().map(|(_, _, len)| *len).fold(0u64, u64::saturating_add);
+    let mut raw = Raw::default();
+    raw.data.try_reserve_exact(usize::try_from(total).map_err(|_| ReadError::Unreadable("chunk size".into()))?).map_err(|e| ReadError::Io(e.to_string()))?;
+    let mut i = 0;
+    while let Some((_, start, _)) = batch.get(i) {
+        // A run of chunks, each starting where the one before ends.
+        let (start, mut end, mut j) = (*start, *start, i);
+        while let Some((_, offset, len)) = batch.get(j)
+            && *offset == end
+        {
+            end = offset.saturating_add(*len);
+            j += 1;
+        }
+        if *pos != Some(start) {
+            src.seek(SeekFrom::Start(start)).map_err(|e| ReadError::Io(e.to_string()))?;
+        }
+        let at = raw.data.len();
+        (&mut *src).take(end - start).read_to_end(&mut raw.data).map_err(|e| ReadError::Io(e.to_string()))?;
+        let got = raw.data.len() - at;
+        *pos = Some(start.saturating_add(got as u64));
+        for (pi, offset, len) in batch.get(i..j).unwrap_or_default() {
+            let a = usize::try_from(offset - start).map_or(raw.data.len(), |o| at.saturating_add(o)).min(raw.data.len());
+            let b = usize::try_from(*len).map_or(raw.data.len(), |l| a.saturating_add(l)).min(raw.data.len());
+            raw.chunks.push((*pi, a..b));
+            if let Some(c) = stats.chunks.get_mut(*pi) {
+                *c += 1;
+            }
+        }
+        stats.bytes = stats.bytes.saturating_add(got as u64);
+        i = j.max(i + 1);
+    }
+    Ok(raw)
 }
 
 /// The planes' geometry for [`chunk_lines`].
@@ -332,7 +395,12 @@ fn chunk_lines(index: &ExrIndex, pi: usize, buf: &[u8], slots: &[Option<usize>],
             SampleType::F16 => {
                 f16s.resize(count, exr::prelude::f16::ZERO);
                 line.read_samples_into_slice(&mut f16s).map_err(|e| e.to_string())?;
-                f16s.iter().skip(skip).take(take).map(|s| s.to_f32()).collect()
+                // (the slice conversion runs the same per-value conversion, in vector steps)
+                let mut out = vec![0.0; take];
+                if let Some(src) = f16s.get(skip..skip + take) {
+                    half::slice::HalfFloatSliceExt::convert_to_f32_slice(src, &mut out);
+                }
+                out
             }
             SampleType::F32 => {
                 f32s.resize(count, 0.0);

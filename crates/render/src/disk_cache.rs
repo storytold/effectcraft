@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use effectcraft_effects::Buf;
-use effectcraft_raster::Image;
+use effectcraft_raster::{AuxChannels, Image};
 
 use crate::reads::ReadFiles;
 
@@ -121,43 +121,22 @@ const FORMAT_F16_FILES: u8 = 3;
 /// Layer entries: their source files ([`EntryFiles`]), then the buffer. The format before it
 /// (0, without files) reads as a miss and is deleted.
 const FORMAT_LAYER_FILES: u8 = 4;
-/// Plane entries: their source file ([`EntryFiles`]), then named `f32` planes ([`DiskPlanes`]).
-const FORMAT_PLANES_FILES: u8 = 5;
+/// Plane entries: their source file ([`EntryFiles`]), then one named plane ([`encode_plane`]).
+/// (5, several `f32` planes per entry, reads as a miss and is deleted.)
+const FORMAT_PLANES_FILES: u8 = 6;
 
-/// Decoded footage channels as a plane entry holds them (#3271): named `f32` planes of
-/// `width` × `height`, bit-exact (Cryptomatte IDs are float bit patterns).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DiskPlanes {
-    pub width: u32,
-    pub height: u32,
-    pub planes: Vec<(String, Vec<f32>)>,
-}
-
-/// The most planes and pixels a plane entry holds (a damaged entry can't ask for more).
-const MAX_ENTRY_PLANES: usize = 4096;
+/// The most pixels a plane entry holds (a damaged entry can't ask for more).
 const MAX_ENTRY_PIXELS: usize = 1 << 28;
 
-/// The disk key of decoded footage channels: the source file's path and identity as read, the
-/// channel names (in the order stored), the level and the rows read (`None`: all).
-pub fn plane_key(path: &str, stamp: &crate::reads::FileStamp, channels: &[&str], level: u32, rows: Option<(i64, i64)>) -> u128 {
+/// The disk key of a decoded footage channel: the source file's path and identity as read, and
+/// the channel's name.
+pub fn plane_key(path: &str, stamp: &crate::reads::FileStamp, channel: &str) -> u128 {
     let mut h = Hash128::default();
-    h.write(b"planes-v1");
+    h.write(b"plane-v2");
     h.write(path.as_bytes());
     h.write(format!("{stamp:?}").as_bytes());
-    h.write_u64(channels.len() as u64);
-    for c in channels {
-        h.write_u64(c.len() as u64);
-        h.write(c.as_bytes());
-    }
-    h.write_u64(u64::from(level));
-    match rows {
-        Some((a, b)) => {
-            h.write_u64(1);
-            h.write_u64(a as u64);
-            h.write_u64(b as u64);
-        }
-        None => h.write_u64(0),
-    }
+    h.write_u64(channel.len() as u64);
+    h.write(channel.as_bytes());
     h.finish()
 }
 
@@ -326,8 +305,9 @@ enum Payload {
     /// An 8-bit or half-float frame (width, height, pixels) and its source files.
     Frame8(u32, u32, Vec<u8>, EntryFiles),
     FrameF16(u32, u32, Vec<u16>, EntryFiles),
-    /// Decoded footage planes (width, height, named planes), and their source file.
-    Planes(u32, u32, Vec<(String, Vec<f32>)>, EntryFiles),
+    /// Decoded footage channels: planes of a set the plane store holds (no copy), each written
+    /// as an entry of its own (key, plane index), and their source file.
+    Planes(Arc<AuxChannels>, Vec<(u128, usize)>, EntryFiles),
     /// Bytes to compress with LZ4 (a segmentation).
     Lz4(Vec<u8>),
 }
@@ -345,18 +325,29 @@ pub(crate) fn encoded_here() -> u64 {
 }
 
 impl Payload {
-    /// The entry's payload bytes: its source files, then its pixels, compressed.
-    fn encode(self) -> Vec<u8> {
+    /// Encode it (its source files, then its pixels, compressed) and write it to `cache` as
+    /// `key` (planes: each under its own key); an entry written meanwhile by another render
+    /// isn't encoded again.
+    fn write(self, cache: &DiskCache, kind: Kind, key: u128, format: u8) {
         #[cfg(test)]
         if !matches!(self, Payload::Lz4(_)) {
             ENCODED_HERE.with(|n| n.set(n.get() + 1));
         }
+        let one = |key: u128, bytes: &dyn Fn() -> Vec<u8>| {
+            if !cache.contains(kind, key) {
+                cache.write_format(kind, key, format, &bytes());
+            }
+        };
         match self {
-            Payload::Layer(buf, files) => with_files(&files, encode_layer(&buf)),
-            Payload::Frame8(w, h, rgba, files) => with_files(&files, encode_frame(w, h, &rgba)),
-            Payload::FrameF16(w, h, rgba, files) => with_files(&files, encode_frame_f16(w, h, &rgba)),
-            Payload::Planes(w, h, planes, files) => with_files(&files, encode_planes(w, h, &planes)),
-            Payload::Lz4(raw) => lz4_flex::compress_prepend_size(&raw),
+            Payload::Layer(buf, files) => one(key, &|| with_files(&files, encode_layer(&buf))),
+            Payload::Frame8(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame(w, h, &rgba))),
+            Payload::FrameF16(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame_f16(w, h, &rgba))),
+            Payload::Planes(aux, planes, files) => {
+                for (key, at) in planes {
+                    one(key, &|| with_files(&files, encode_plane(&aux, at)));
+                }
+            }
+            Payload::Lz4(raw) => one(key, &|| lz4_flex::compress_prepend_size(&raw)),
         }
     }
 
@@ -367,15 +358,19 @@ impl Payload {
             Payload::Layer(buf, _) => buf.img.data.len().saturating_mul(16),
             Payload::Frame8(_, _, p, _) => p.len(),
             Payload::FrameF16(_, _, p, _) => p.len().saturating_mul(2),
-            Payload::Planes(_, _, planes, _) => planes.iter().map(|(_, p)| p.len().saturating_mul(4)).fold(0, usize::saturating_add),
+            Payload::Planes(aux, planes, _) => {
+                planes.iter().filter_map(|(_, at)| aux.channels.get(*at)).map(|(_, p)| p.len().saturating_mul(4)).fold(0, usize::saturating_add)
+            }
             Payload::Lz4(raw) => raw.len(),
         }
     }
 
-    /// The bytes only this payload holds: a layer buffer the RAM cache shares counts there.
+    /// The bytes only this payload holds: a layer buffer the RAM cache shares counts there, and
+    /// so do planes the plane store still holds.
     fn unique(&self) -> usize {
         match self {
             Payload::Layer(buf, _) if Arc::strong_count(buf) > 1 => 0,
+            Payload::Planes(aux, _, _) if Arc::strong_count(aux) > 1 => 0,
             _ => self.held(),
         }
     }
@@ -920,7 +915,7 @@ impl DiskCache {
             if !matches!(payload, Payload::Lz4(_)) {
                 self.count_encode();
             }
-            self.write_format(kind, key, format, &payload.encode());
+            payload.write(self, kind, key, format);
             true
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1261,27 +1256,30 @@ impl DiskCache {
         }
     }
 
-    /// Decoded footage channels ([`plane_key`]) whose source file is unchanged, with that file,
-    /// as [`DiskCache::get_checked`] (#3271). `virtual_id` names files served from memory.
-    /// `expect`: the planes' width, height and count; an entry of another shape is a miss
-    /// (nothing larger is decompressed).
-    pub fn get_planes(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>, expect: (u32, u32, usize)) -> Option<(DiskPlanes, ReadFiles)> {
-        self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, virtual_id, |p| decode_planes(p, expect))
+    /// A decoded footage channel ([`plane_key`]) whose source file is unchanged, as
+    /// [`DiskCache::get_checked`] (#3271): its name and its `width` x `height` plane. An entry
+    /// of another size is a miss (nothing larger is decompressed).
+    pub fn get_plane(&self, key: u128, width: u32, height: u32) -> Option<(String, Vec<f32>)> {
+        self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, None, |p| decode_plane(p, (width, height))).map(|(plane, _)| plane)
     }
 
-    /// Queue decoded footage channels for writing: named `width` × `height` planes (in the order
-    /// [`plane_key`] names them), with the source file they were read from; encoded on the writer
-    /// thread. Refused when a plane is of another size, there is no room, or the source file was
-    /// dropped after `since`.
-    pub fn put_planes(&self, key: u128, width: u32, height: u32, planes: Vec<(String, Vec<f32>)>, files: &EntryFiles, since: u64) -> bool {
-        if self.contains(Kind::Plane, key) {
-            return true;
-        }
-        let n = (width as usize).checked_mul(height as usize);
-        if planes.is_empty() || planes.iter().any(|(_, p)| Some(p.len()) != n) || !self.accepts_writes() {
+    /// Queue planes of `aux` (decoded footage channels: each [`plane_key`] and plane index)
+    /// for writing, with the source file they were read from: one job for all of them, which
+    /// the writer thread encodes from the set itself (no copy). Planes stored already or of
+    /// another size are left out; refused when there is no room or the source file was dropped
+    /// after `since`.
+    pub fn put_planes(&self, aux: &Arc<AuxChannels>, planes: &[(u128, usize)], files: &EntryFiles, since: u64) -> bool {
+        let n = (aux.width as usize).checked_mul(aux.height as usize);
+        let planes: Vec<(u128, usize)> = planes
+            .iter()
+            .copied()
+            .filter(|(key, at)| !self.contains(Kind::Plane, *key) && aux.channels.get(*at).is_some_and(|(_, p)| Some(p.len()) == n))
+            .collect();
+        let Some((first, _)) = planes.first().copied() else { return true };
+        if !self.accepts_writes() {
             return false;
         }
-        self.enqueue_format(Kind::Plane, key, FORMAT_PLANES_FILES, Payload::Planes(width, height, planes, files.clone()), Some((files, since)))
+        self.enqueue_format(Kind::Plane, first, FORMAT_PLANES_FILES, Payload::Planes(aux.clone(), planes, files.clone()), Some((files, since)))
     }
 
     /// A segmentation (chain key, scale) written by [`DiskCache::put_seg`].
@@ -1383,10 +1381,7 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
         let Some(cache) = dc.upgrade() else { return };
         let written = match job {
             Job::Write(kind, key, format, payload) => {
-                // (written meanwhile by another render: not encoded again)
-                if !cache.contains(kind, key) {
-                    cache.write_format(kind, key, format, &payload.encode());
-                }
+                payload.write(&cache, kind, key, format);
                 (kind == Kind::Frame).then_some(key)
             }
             Job::Drop(paths) => {
@@ -1609,82 +1604,86 @@ fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
     Some(FrameF16 { width: w, height: h, rgba })
 }
 
-/// A plane entry's pixels: width, height, the plane count, each plane's name (length and UTF-8
-/// bytes) and type (2: `f32`), then every plane's bytes shuffled into byte planes (plane by plane,
-/// the first bytes of its floats, then the second…), LZ4-compressed. Planes of `aux` named
-/// `names` that it doesn't hold, or holds at another size, are written as zeros.
-fn encode_planes(w: u32, h: u32, planes: &[(String, Vec<f32>)]) -> Vec<u8> {
-    let n = (w as usize).saturating_mul(h as usize);
+/// A plane entry's pixels (plane `at` of `aux`): width, height, the name (length and UTF-8
+/// bytes) and the sample type, then the samples' bytes shuffled into byte planes (the first
+/// bytes of all samples, then the second...), LZ4-compressed. Type 1: half floats, when every
+/// value is one exactly (a half channel: half the bytes); type 2: `f32` (bit-exact: Cryptomatte
+/// IDs are float bit patterns).
+fn encode_plane(aux: &AuxChannels, at: usize) -> Vec<u8> {
+    let Some((name, plane)) = aux.channels.get(at) else { return vec![] };
     let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(&w.to_le_bytes());
-    out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(&(planes.len() as u32).to_le_bytes());
-    for (name, _) in planes {
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(u16::MAX as usize);
-        out.extend_from_slice(&(len as u16).to_le_bytes());
-        out.extend_from_slice(bytes.get(..len).unwrap_or_default());
+    out.extend_from_slice(&aux.width.to_le_bytes());
+    out.extend_from_slice(&aux.height.to_le_bytes());
+    let name = name.as_bytes();
+    let len = name.len().min(u16::MAX as usize);
+    out.extend_from_slice(&(len as u16).to_le_bytes());
+    out.extend_from_slice(name.get(..len).unwrap_or_default());
+    let mut halves = vec![half::f16::ZERO; plane.len()];
+    half::slice::HalfFloatSliceExt::convert_from_f32_slice(halves.as_mut_slice(), plane);
+    // (NaNs stay `f32`: their payloads must come back as they were)
+    let exact = halves.iter().zip(plane).all(|(h, v)| !v.is_nan() && h.to_f32().to_bits() == v.to_bits());
+    let shuffled = if exact {
+        out.push(1);
+        shuffle(&halves.iter().map(|h| u32::from(h.to_bits())).collect::<Vec<_>>(), 2)
+    } else {
         out.push(2);
-    }
-    let Some(total) = n.checked_mul(4).and_then(|b| b.checked_mul(planes.len())) else { return out };
-    let mut shuffled = vec![0u8; total];
-    for (k, (_, plane)) in planes.iter().enumerate() {
-        let Some(base) = k.checked_mul(n).and_then(|b| b.checked_mul(4)) else { continue };
-        for (i, v) in plane.iter().take(n).enumerate() {
-            for (byte, value) in v.to_bits().to_le_bytes().iter().enumerate() {
-                if let Some(o) = shuffled.get_mut(base + byte * n + i) {
-                    *o = *value;
-                }
-            }
-        }
-    }
+        shuffle(&plane.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), 4)
+    };
     out.extend_from_slice(&lz4_flex::compress_prepend_size(&shuffled));
     out
 }
 
-/// The planes of a plane entry's pixels ([`encode_planes`]); `None` when damaged.
-fn decode_planes(p: &[u8], expect: (u32, u32, usize)) -> Option<DiskPlanes> {
+/// The low `width` bytes of each of `words` as byte planes: the first bytes of all, then the
+/// second... (similar bytes side by side compress better).
+fn shuffle(words: &[u32], width: usize) -> Vec<u8> {
+    let mut out = vec![0u8; words.len().saturating_mul(width)];
+    for (b, dst) in out.chunks_exact_mut(words.len().max(1)).enumerate() {
+        for (o, w) in dst.iter_mut().zip(words) {
+            *o = (w >> (8 * b)) as u8;
+        }
+    }
+    out
+}
+
+/// The name and plane of a plane entry's pixels ([`encode_plane`]) of `expect` (width, height);
+/// `None` when damaged or of another size.
+fn decode_plane(p: &[u8], expect: (u32, u32)) -> Option<(String, Vec<f32>)> {
     let u32_at = |at: usize| Some(u32::from_le_bytes(p.get(at..at + 4)?.try_into().ok()?));
-    let (w, h, count) = (u32_at(0)?, u32_at(4)?, u32_at(8)? as usize);
-    if (w, h, count) != expect {
+    let (w, h) = (u32_at(0)?, u32_at(4)?);
+    if (w, h) != expect {
         return None;
     }
     let n = (w as usize).checked_mul(h as usize).filter(|n| *n <= MAX_ENTRY_PIXELS)?;
-    if count > MAX_ENTRY_PLANES {
-        return None;
-    }
-    let mut at = 12;
-    let mut names = Vec::with_capacity(count);
-    for _ in 0..count {
-        let len = u16::from_le_bytes(p.get(at..at + 2)?.try_into().ok()?) as usize;
-        let name = std::str::from_utf8(p.get(at + 2..at + 2 + len)?).ok()?.to_string();
-        if *p.get(at + 2 + len)? != 2 {
-            return None;
-        }
-        names.push(name);
-        at += 3 + len;
-    }
-    let body = p.get(at..)?;
-    // (the size the compressed block says must be the planes': nothing larger is allocated)
-    let want = n.checked_mul(4)?.checked_mul(count)?;
+    let len = u16::from_le_bytes(p.get(8..10)?.try_into().ok()?) as usize;
+    let name = std::str::from_utf8(p.get(10..10 + len)?).ok()?.to_string();
+    let width = match *p.get(10 + len)? {
+        1 => 2,
+        2 => 4,
+        _ => return None,
+    };
+    let body = p.get(11 + len..)?;
+    // (the size the compressed block says must be the plane's: nothing larger is allocated)
+    let want = n.checked_mul(width)?;
     if u32::from_le_bytes(body.get(..4)?.try_into().ok()?) as usize != want {
         return None;
     }
-    let shuffled = lz4_flex::decompress_size_prepended(body).ok()?;
-    if shuffled.len() != want {
+    let s = lz4_flex::decompress_size_prepended(body).ok()?;
+    if s.len() != want {
         return None;
     }
-    let mut planes = Vec::with_capacity(count);
-    for (k, name) in names.into_iter().enumerate() {
-        let base = k * n * 4;
-        let mut plane = Vec::with_capacity(n);
-        for i in 0..n {
-            let b = [*shuffled.get(base + i)?, *shuffled.get(base + n + i)?, *shuffled.get(base + 2 * n + i)?, *shuffled.get(base + 3 * n + i)?];
-            plane.push(f32::from_bits(u32::from_le_bytes(b)));
-        }
-        planes.push((name, plane));
-    }
-    Some(DiskPlanes { width: w, height: h, planes })
+    let plane = if width == 2 {
+        let (lo, hi) = s.split_at_checked(n)?;
+        let halves: Vec<half::f16> = lo.iter().zip(hi).map(|(l, h)| half::f16::from_bits(u16::from_le_bytes([*l, *h]))).collect();
+        let mut plane = vec![0.0; n];
+        half::slice::HalfFloatSliceExt::convert_to_f32_slice(halves.as_slice(), &mut plane);
+        plane
+    } else {
+        let (b0, rest) = s.split_at_checked(n)?;
+        let (b1, rest) = rest.split_at_checked(n)?;
+        let (b2, b3) = rest.split_at_checked(n)?;
+        b0.iter().zip(b1).zip(b2).zip(b3).map(|(((a, b), c), d)| f32::from_bits(u32::from_le_bytes([*a, *b, *c, *d]))).collect()
+    };
+    Some((name, plane))
 }
 
 fn encode_layer(b: &Buf) -> Vec<u8> {
@@ -2022,6 +2021,94 @@ mod tests {
         dc.flush();
         assert_eq!(dc.encodes(), encodes, "too large uncompressed: not queued");
         assert!(!dc.contains(Kind::Layer, 4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source file for plane entries (it must exist: hits check it is unchanged).
+    fn plane_source(dir: &Path) -> (EntryFiles, crate::reads::FileStamp) {
+        std::fs::create_dir_all(dir).unwrap();
+        let src = dir.join("plate.exr");
+        std::fs::write(&src, b"exr").unwrap();
+        let stamp = crate::reads::FileStamp::of_metadata(&std::fs::metadata(&src).unwrap());
+        let mut files = ReadFiles::default();
+        files.add(crate::reads::ReadFile::new(src.to_string_lossy().to_string(), stamp));
+        (EntryFiles::of(&files, None).unwrap(), stamp)
+    }
+
+    /// #3271: a plane entry gives back every value bit for bit. A plane of half values is stored
+    /// as half floats (half the bytes), any other (Cryptomatte IDs, NaN payloads, values a half
+    /// can't hold) as `f32`; -0.0 and denormals come back as they were. An entry of another size,
+    /// a damaged one and one of the earlier format read as misses.
+    #[test]
+    fn plane_entries_round_trip_bit_for_bit() {
+        let dir = tmpdir("planes");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        let (w, h) = (16u32, 8u32);
+        let n = (w * h) as usize;
+        let halves: Vec<f32> = (0..n).map(|i| half::f16::from_bits((i * 517) as u16 & 0x7bff).to_f32()).collect();
+        let mut mixed: Vec<f32> = (0..n).map(|i| f32::from_bits(0x3f80_0001 + i as u32 * 7919)).collect();
+        mixed[0] = f32::from_bits(0x7fc0_1234);
+        mixed[1] = -0.0;
+        mixed[2] = f32::from_bits(1);
+        let mut nan_half = halves.clone();
+        nan_half[3] = f32::from_bits(0x7fc0_0000 | 0x2000);
+        let mut aux = AuxChannels::new(w, h, 1.0);
+        aux.channels = vec![("A.R".into(), halves.clone()), ("A.id".into(), mixed.clone()), ("A.nan".into(), nan_half.clone())];
+        let aux = Arc::new(aux);
+        for (at, want) in [(0, 1u8), (1, 2), (2, 2)] {
+            let p = encode_plane(&aux, at);
+            let len = p[8] as usize;
+            assert_eq!(p[10 + len], want, "plane {at}: sample type");
+        }
+        assert!(dc.put_planes(&aux, &[(1, 0), (2, 1), (3, 2)], &files, 0));
+        dc.flush();
+        for (key, name, want) in [(1, "A.R", &halves), (2, "A.id", &mixed), (3, "A.nan", &nan_half)] {
+            let (got_name, got) = dc.get_plane(key, w, h).unwrap();
+            assert_eq!(got_name, name);
+            assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}");
+        }
+        assert!(dc.get_plane(1, w, h + 1).is_none(), "another size: a miss");
+        let entry = encode_plane(&aux, 1);
+        assert!(decode_plane(entry.get(..entry.len() - 9).unwrap(), (w, h)).is_none(), "short");
+        let mut damaged = entry.clone();
+        let len = damaged[8] as usize;
+        damaged[10 + len] = 3;
+        assert!(decode_plane(&damaged, (w, h)).is_none(), "unknown sample type");
+        // An entry of the earlier format (5) is a miss, and deleted.
+        dc.write_format(Kind::Plane, 9, 5, &with_files(&files, encode_plane(&aux, 0)));
+        assert!(dc.contains(Kind::Plane, 9));
+        assert!(dc.get_plane(9, w, h).is_none());
+        assert!(!dc.contains(Kind::Plane, 9), "deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271: the planes of one decode are queued as one job (a file of 69 channels lost some to
+    /// the queue's job limit), each written as an entry of its own; while the plane store holds
+    /// them they count there, once it let go of them they count in the queue.
+    #[test]
+    fn a_decode_queues_its_planes_as_one_job() {
+        let dir = tmpdir("planes-job");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        let mut aux = AuxChannels::new(4, 2, 1.0);
+        aux.channels = (0..69).map(|i| (format!("c{i:02}"), vec![i as f32; 8])).collect();
+        let aux = Arc::new(aux);
+        let planes: Vec<(u128, usize)> = (0..69).map(|i| (100 + i as u128, i)).collect();
+        let job = Payload::Planes(aux.clone(), planes.clone(), files.clone());
+        assert_eq!(job.held(), 69 * 8 * 4);
+        assert_eq!(job.unique(), 0, "the store holds them");
+        let kept = Arc::downgrade(&aux);
+        drop(aux);
+        assert_eq!(job.unique(), 69 * 8 * 4, "the queue alone holds them");
+        let aux = kept.upgrade().unwrap();
+        drop(job);
+        assert!(dc.put_planes(&aux, &planes, &files, 0));
+        dc.flush();
+        assert_eq!(dc.keys(Kind::Plane).len(), 69);
+        assert_eq!(dc.stats().dropped, 0);
+        assert_eq!(crate::memory::MemoryHolder::bytes(&*dc), 0, "written: the queue holds nothing");
+        assert_eq!(dc.get_plane(168, 4, 2).map(|(n, p)| (n, p[0])), Some(("c68".to_string(), 68.0)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

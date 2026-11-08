@@ -1038,3 +1038,107 @@ fn a_region_of_interest_reads_only_its_rows() {
         assert!(decodes_of(path).get(before..).unwrap_or_default().iter().all(|d| d.stats.lines == SIZE.1), "collapsed: the whole frame");
     }
 }
+
+/// A source that calls the request off after `cancel_after` reads, or fails every read after
+/// `fail_after` (tests of a read in several batches).
+struct Flaky {
+    inner: std::io::Cursor<Vec<u8>>,
+    reads: usize,
+    cancel_after: Option<(usize, Arc<std::sync::atomic::AtomicBool>)>,
+    fail_after: Option<usize>,
+}
+
+impl std::io::Read for Flaky {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reads += 1;
+        if let Some((n, flag)) = &self.cancel_after
+            && self.reads > *n
+        {
+            flag.store(true, Ordering::SeqCst);
+        }
+        if self.fail_after.is_some_and(|n| self.reads > n) {
+            return Err(std::io::Error::other("the share went away"));
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl std::io::Seek for Flaky {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// #3271: a file of more chunks than one batch is read in several (the next batch is read while
+/// the one before decompresses, adjacent chunks in one read): the planes are the file's values,
+/// also for a row range across batch boundaries; called off between batches it stops; a read
+/// failing in a later batch is an I/O error.
+#[test]
+fn a_read_in_several_batches_is_whole_and_stops_between_them() {
+    let (w, h) = (8usize, 700usize);
+    let channels = [("A", true), ("B", false), ("G", true), ("R", true)];
+    let bytes = write(vec![part(None, &channels, (w, h), Compression::ZIP1)], (w, h));
+    let (ix, mut src) = indexed(&bytes);
+    let expect = |c: usize, i: usize| {
+        let (name, half) = channels[c];
+        let v = value(i, c, name == "A");
+        if half { f16::from_f32(v).to_f32() } else { v }
+    };
+    let all = ReadRequest::full(vec![0, 1, 2, 3]);
+    let (planes, stats) = crate::exr_read::read_planes(&mut src, &ix, &all);
+    let planes = planes.unwrap();
+    assert_eq!(stats.lines, h, "every line, in three batches");
+    for (c, p) in planes.iter().enumerate() {
+        assert!(p.iter().enumerate().all(|(i, v)| v.to_bits() == expect(c, i).to_bits()), "channel {c}");
+    }
+    let band = ReadRequest { rows: Some(250..520), ..all.clone() };
+    let (got, stats) = crate::exr_read::read_planes(&mut src, &ix, &band);
+    let got = got.unwrap();
+    assert_eq!(stats.lines, 270);
+    for (c, p) in got.iter().enumerate() {
+        for (i, v) in p.iter().enumerate() {
+            let want = if (250..520).contains(&(i / w)) { expect(c, i) } else { 0.0 };
+            assert_eq!(v.to_bits(), want.to_bits(), "channel {c}, sample {i}");
+        }
+    }
+    // Called off while the first batch is read: it stops before the next.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut flaky = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: Some((1, flag.clone())), fail_after: None };
+    let (got, stats) = filmcraft_media::cancel::with_cancel(&flag, || crate::exr_read::read_planes(&mut flaky, &ix, &all));
+    assert_eq!(got.err(), Some(ReadError::Cancelled));
+    assert!(stats.lines < h, "stopped early: {} lines", stats.lines);
+    // Chunks that follow each other in the file are read in one go, not one read per chunk.
+    let mut counted = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: None, fail_after: None };
+    assert!(crate::exr_read::read_planes(&mut counted, &ix, &all).0.is_ok());
+    assert!(counted.reads <= 12, "{} reads for {h} chunks", counted.reads);
+    // A read failing in the second batch.
+    let mut flaky = Flaky { inner: std::io::Cursor::new(bytes), reads: 0, cancel_after: None, fail_after: Some(1) };
+    let (got, _) = crate::exr_read::read_planes(&mut flaky, &ix, &all);
+    assert!(matches!(got, Err(ReadError::Io(_))), "{got:?}");
+}
+
+/// #3271: dropping entries for bytes (a decode over the budget, the memory accountant) drops
+/// only entries that hold bytes: an unreadable file stays remembered (and isn't read again)
+/// until there are too many entries.
+#[test]
+fn trimming_for_bytes_keeps_remembered_failures() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
+    let one = 4 * (32 * 32 * 4 + 1);
+    let store = PlaneStore::new(one);
+    let all = Want { all: true, ids: Default::default() };
+    let mut broken = bytes.to_vec();
+    broken.truncate(broken.len() - 64);
+    let broken = ExrSource::Bytes(broken.into());
+    let path = "/3271-trim-broken.exr";
+    let index = crate::exr_index::get(path, &broken).unwrap();
+    assert!(store.get(path, &broken, &index, &all, Use::Other).is_err());
+    for p in ["/3271-trim-a.exr", "/3271-trim-b.exr"] {
+        let source = ExrSource::Bytes(bytes.clone());
+        let index = crate::exr_index::get(p, &source).unwrap();
+        assert!(store.get(p, &source, &index, &all, Use::Other).is_ok());
+    }
+    store.trim_to(0);
+    assert_eq!(store.cached(), [path], "the planes went, the failure stays");
+    assert!(store.get(path, &broken, &index, &all, Use::Other).is_err());
+    assert_eq!(decodes_of(path).len(), 1, "not read again");
+}
