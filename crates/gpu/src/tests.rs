@@ -1247,6 +1247,49 @@ fn readback_staging_stays_bounded_across_sizes() {
     assert!(held <= (256 << 20) + 2 * 1024 * 16 * 376, "staging buffers hold {held} bytes");
 }
 
+/// #3335: a readback copies the mapped rows straight into the image (no zero-filled buffer,
+/// no intermediate byte vector), skipping each row's padding: odd widths, sub-rectangles and
+/// readbacks from several threads at once (each waiting for its own submission) return the
+/// uploaded pixels exactly.
+#[test]
+fn single_copy_readback_returns_the_exact_pixels() {
+    let Some(g) = gpu() else { return };
+    if !g.ctx.can_wait() {
+        return;
+    }
+    let image = |w: u32, h: u32, seed: f32| {
+        let mut img = Image::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = i as f32 * 0.37 + seed;
+            *p = [v, -v, v * 1e-3, 1.0 / (1.0 + v)];
+        }
+        img
+    };
+    // 37 × 16 bytes = 592 per row: padded to 768 in the staging buffer.
+    let src = image(37, 5, 0.5);
+    let up = g.ctx.upload_image(&src).expect("upload");
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let back = e.download(&up).expect("download");
+    assert_eq!((back.width, back.height), (37, 5));
+    assert_eq!(back.data, src.data);
+    let rect = e.read_rect(&up.texture, 3, 1, 5, 2, 16).expect("read_rect");
+    let want: Vec<[f32; 4]> = (1..3).flat_map(|y| (3..8).map(move |x| (x, y))).map(|(x, y)| src.data[src.idx(x, y)]).collect();
+    assert_eq!(rect, bytemuck::cast_slice::<[f32; 4], u8>(&want));
+    // Frames on several threads, each with its own encoder and submission.
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            s.spawn(move || {
+                for k in 0..3 {
+                    let src = image(61 + t, 7 + k, (t * 10 + k) as f32);
+                    let up = g.ctx.upload_image(&src).expect("upload");
+                    let back = crate::context::Enc::new(&g.ctx).download(&up).expect("download");
+                    assert_eq!(back.data, src.data, "thread {t} frame {k}");
+                }
+            });
+        }
+    });
+}
+
 /// A static adjustment layer with a time-dependent effect (Noise) keeps its footprint key
 /// across frames (the footprint is the source through the masks, not the effects), so the GPU
 /// uploads nothing after the first frame; matches the CPU.

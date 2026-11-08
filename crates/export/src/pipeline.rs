@@ -37,6 +37,42 @@ pub(crate) fn gpu_inflight(var: Option<&str>) -> usize {
     }
 }
 
+/// Overrides the Render Queue's measured choice of compositor for GPU projects with an
+/// accelerator (#3335): `gpu` (no measurement, the GPU), `cpu` (Mercury Software Only) or
+/// `auto` (measure, the default).
+pub const RENDERER_ENV: &str = "EFFECTCRAFT_RQ_RENDERER";
+
+/// Frames each compositor renders, timed, when a job measures which is faster (after one
+/// untimed warm-up frame each: layer cache misses, uploads, kernel builds).
+const PROBE_FRAMES: usize = 2;
+/// Jobs shorter than this render on the project's compositor without measuring: the frames
+/// the slower one renders for the measurement would cost more than they could save.
+const PROBE_MIN_JOB: u64 = 12;
+/// Bytes each of a job's two layer caches (one per compositor) may hold: together what the
+/// job's single cache held before (`LayerCache::default()`).
+pub const CACHE_BUDGET: usize = 1 << 29;
+
+/// The faster compositor from measured milliseconds per frame (`None`: not measured, or the
+/// GPU stopped). As the viewer's Auto ([`effectcraft_render::AutoPick::MARGIN`]), the CPU wins
+/// only when clearly faster: ties and noise stay on the GPU.
+pub fn pick_renderer(gpu_ms: Option<f64>, cpu_ms: Option<f64>) -> crate::JobRenderer {
+    match (gpu_ms, cpu_ms) {
+        (Some(g), Some(c)) if g.is_finite() && c.is_finite() && c < g * effectcraft_render::AutoPick::MARGIN => crate::JobRenderer::Cpu,
+        (None, Some(_)) => crate::JobRenderer::Cpu,
+        _ => crate::JobRenderer::Gpu,
+    }
+}
+
+/// How a job's compositor was chosen, for the render log.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Choice {
+    pub renderer: crate::JobRenderer,
+    /// Measured ms per frame on each (`None`: not measured).
+    pub gpu_ms: Option<f64>,
+    pub cpu_ms: Option<f64>,
+    pub why: &'static str,
+}
+
 /// Caps CPU frames in flight (#1615): a whole number of frames, at least 1. Unset, CPU renders
 /// keep one frame per thread in flight as before. A heavy comp can need gigabytes of working
 /// memory per frame, so 16 threads at once can get the process OOM-killed; the headless CLI
@@ -168,13 +204,32 @@ pub(crate) struct Cx<'a> {
     pub project: Project,
     /// Processed layer buffers shared by the job's frames, as the viewer's layer cache: static
     /// and transform-only layers render once per job (the GPU compositor then uploads them
-    /// once). Dropped with the job.
-    cache: LayerCache,
+    /// once). One per compositor; the job's own (dropped with it) or a Render Queue run's.
+    caches: Caches<'a>,
+    /// The compositor the job renders on, once chosen ([`Cx::backend`]).
+    choice: Mutex<Option<Choice>>,
     /// (output frame, seconds) of every rendered frame (Plus Per Frame Info logs).
     pub frame_times: Option<Mutex<Vec<(u64, f64)>>>,
     /// Files written to an overflow folder.
     pub overflowed: Mutex<Vec<String>>,
     written: Mutex<Vec<String>>,
+}
+
+/// A job's layer caches: its own, or those of the Render Queue run it belongs to.
+enum Caches<'a> {
+    Own { gpu: Box<LayerCache>, cpu: Box<LayerCache> },
+    Run(crate::JobCaches<'a>),
+}
+
+impl Caches<'_> {
+    fn of(&self, r: crate::JobRenderer) -> &LayerCache {
+        match (self, r) {
+            (Caches::Own { gpu, .. }, crate::JobRenderer::Gpu) => gpu,
+            (Caches::Own { cpu, .. }, crate::JobRenderer::Cpu) => cpu,
+            (Caches::Run(c), crate::JobRenderer::Gpu) => c.gpu,
+            (Caches::Run(c), crate::JobRenderer::Cpu) => c.cpu,
+        }
+    }
 }
 
 impl<'a> std::ops::Deref for Cx<'a> {
@@ -222,10 +277,85 @@ impl<'a> Cx<'a> {
         // layer and effect quantises at it), not just the finished frame (#2022).
         project.settings.bit_depth = job.settings.color_depth.resolve(project.settings.bit_depth);
         let frame_times = (job.options.log == RenderLog::PlusPerFrameInfo).then(|| Mutex::new(Vec::new()));
-        let cache = LayerCache::default();
+        let caches = match job.options.caches {
+            Some(c) => Caches::Run(c),
+            None => Caches::Own { gpu: Box::new(LayerCache::new(CACHE_BUDGET)), cpu: Box::new(LayerCache::new(CACHE_BUDGET)) },
+        };
         // With deferred readbacks, buffers computed from a missed pass's placeholders are not kept.
-        cache.set_gate(job.accel.and_then(|a| a.miss_gate()));
-        Cx { job, project, cache, frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]) }
+        for r in [crate::JobRenderer::Gpu, crate::JobRenderer::Cpu] {
+            caches.of(r).set_gate(job.accel.and_then(|a| a.miss_gate()));
+        }
+        let cx = Cx { job, project, caches, choice: Mutex::new(None), frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]) };
+        if let Some(c) = cx.fixed_choice(std::env::var(RENDERER_ENV).ok().as_deref()) {
+            cx.decide(c);
+        }
+        cx
+    }
+
+    /// The project's compositor: the GPU's for Mercury GPU Acceleration with an accelerator.
+    fn project_renderer(&self) -> crate::JobRenderer {
+        if self.project.settings.gpu_acceleration && self.job.accel.is_some() { crate::JobRenderer::Gpu } else { crate::JobRenderer::Cpu }
+    }
+
+    /// The job's compositor when it is decided without measuring: the queue item's first
+    /// output module's, the project's when there is nothing to choose between (Software Only,
+    /// no accelerator, deferred readbacks), or `env` ([`RENDERER_ENV`]). `None`: measure.
+    fn fixed_choice(&self, env: Option<&str>) -> Option<Choice> {
+        let fixed = |renderer, why| Some(Choice { renderer, gpu_ms: None, cpu_ms: None, why });
+        if self.project_renderer() == crate::JobRenderer::Cpu {
+            return fixed(crate::JobRenderer::Cpu, "the project's renderer");
+        }
+        if self.deferred() {
+            return fixed(crate::JobRenderer::Gpu, "the project's renderer");
+        }
+        let shared = self.job.options.renderer.and_then(|s| *s.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let shared = match shared {
+            Some(Backend::Gpu) => Some(crate::JobRenderer::Gpu),
+            Some(Backend::Cpu) => Some(crate::JobRenderer::Cpu),
+            Some(Backend::Auto) | None => None,
+        };
+        if let Some(r) = shared {
+            return Some(Choice { renderer: r, gpu_ms: None, cpu_ms: None, why: "as the queue item's first output module" });
+        }
+        match env.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("gpu") => fixed(crate::JobRenderer::Gpu, "set by EFFECTCRAFT_RQ_RENDERER"),
+            Some("cpu") => fixed(crate::JobRenderer::Cpu, "set by EFFECTCRAFT_RQ_RENDERER"),
+            None | Some("" | "auto") => None,
+            Some(v) => {
+                log::warn!(target: "effectcraft_export", "{RENDERER_ENV}={v:?} is not gpu, cpu or auto: measuring");
+                None
+            }
+        }
+    }
+
+    /// Settle the job's compositor (once): remember it for the queue item's other output
+    /// modules and say so in the log.
+    fn decide(&self, c: Choice) {
+        let mut slot = self.choice.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(c);
+        if let Some(shared) = self.job.options.renderer {
+            let mut shared = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if shared.is_none_or(|b| b == Backend::Auto) {
+                *shared = Some(match c.renderer {
+                    crate::JobRenderer::Gpu => Backend::Gpu,
+                    crate::JobRenderer::Cpu => Backend::Cpu,
+                });
+            }
+        }
+        log::info!(target: "effectcraft_export", "{}: {}", self.job.options.label, describe_choice(&c));
+    }
+
+    /// The job's choice, once made.
+    pub(crate) fn choice(&self) -> Option<Choice> {
+        *self.choice.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The compositor frames render on: the choice, or the project's until it is made.
+    fn backend(&self) -> crate::JobRenderer {
+        self.choice().map_or_else(|| self.project_renderer(), |c| c.renderer)
     }
 
     pub fn comp(&self) -> Option<&Comp> {
@@ -234,12 +364,22 @@ impl<'a> Cx<'a> {
 
     /// The renderer of the job's frames: the Render Settings' options, the job's accelerator
     /// and layer cache.
+    #[cfg(test)]
     fn renderer(&self) -> Renderer<'_> {
+        self.renderer_on(self.backend())
+    }
+
+    /// [`Cx::renderer`] on compositor `on`, with that compositor's layer cache.
+    fn renderer_on(&self, on: crate::JobRenderer) -> Renderer<'_> {
         let s = self.job.settings;
-        // The whole job renders on the project's renderer (Mercury GPU Acceleration or Software
-        // Only), not on whichever compositor Auto timed faster for each frame: the CPU and GPU
-        // compositors differ slightly, so a per-frame choice made renders differ run to run.
-        let backend = if self.project.settings.gpu_acceleration { Backend::Gpu } else { Backend::Cpu };
+        // The whole job renders on one compositor (the project's, or the faster one measured on
+        // the first frames, #3335), not on whichever compositor Auto timed faster for each
+        // frame: the CPU and GPU compositors differ slightly, so a per-frame choice made renders
+        // differ within a render.
+        let backend = match on {
+            crate::JobRenderer::Gpu => Backend::Gpu,
+            crate::JobRenderer::Cpu => Backend::Cpu,
+        };
         let opts = RenderOpts {
             scale: self.comp().map(|c| s.effective_scale(c)).unwrap_or_else(|| s.resolution.clamp(0.01, 4.0)),
             motion_blur: s.motion_blur_override() != SwitchOverride::OffForAll,
@@ -258,13 +398,13 @@ impl<'a> Cx<'a> {
         let mut r = Renderer::new(&self.project, self.job.footage, opts);
         r.expr = self.job.expr;
         r.accel = self.job.accel;
-        r.cache = Some(&self.cache);
+        r.cache = Some(self.caches.of(on));
         r
     }
 
-    async fn render_at(&self, t: Tick) -> Image {
+    async fn render_at(&self, t: Tick, on: crate::JobRenderer) -> Image {
         // With deferred GPU readbacks (a browser worker) the frame renders in passes.
-        effectcraft_render::passes::comp_frame(&self.renderer(), self.job.comp, t).await
+        effectcraft_render::passes::comp_frame(&self.renderer_on(on), self.job.comp, t).await
     }
 
     /// Whether frames render in passes (an accelerator with deferred readbacks).
@@ -283,10 +423,91 @@ impl<'a> Cx<'a> {
             }
             return out;
         }
+        self.render_frames(ks, |k, on| self.frame_on(comp, k, on), f)
+    }
+
+    /// `render` then `encode` over the frames `ks` on the job's compositor, results in `ks`
+    /// order. The first call of a job that still has to choose its compositor measures both on
+    /// its first frames ([`Cx::probe`]) and keeps the faster one's.
+    fn render_frames<I: Send, T: Send>(
+        &self,
+        ks: Vec<u64>,
+        render: impl Fn(u64, crate::JobRenderer) -> I + Sync + Send,
+        encode: impl Fn(u64, I) -> T + Sync + Send,
+    ) -> Vec<T> {
+        use rayon::prelude::*;
+        let probed = self.probe(&ks, &render);
         // The GPU cap is for the GPU's memory: once it has stopped for good, frames render on the
         // CPU, in parallel or under the CPU cap (#1615), which holds throughout.
         let gpu_live = || self.job.accel.is_none_or(|a| a.available());
-        map_frames_while(ks, self.inflight(), gpu_live, |k| self.frame(comp, k), f)
+        let on = self.backend();
+        if probed.is_empty() {
+            return map_frames_while(ks, self.inflight(), gpu_live, |k| render(k, on), encode);
+        }
+        let rest: Vec<u64> = ks.iter().copied().filter(|k| !probed.iter().any(|(p, _)| p == k)).collect();
+        let mut done: Vec<(u64, T)> = probed.into_par_iter().map(|(k, i)| (k, encode(k, i))).collect();
+        done.extend(rest.iter().copied().zip(map_frames_while(rest.clone(), self.inflight(), gpu_live, |k| render(k, on), &encode)));
+        // Back in `ks` order.
+        let mut out = Vec::with_capacity(ks.len());
+        for k in &ks {
+            if let Some(i) = done.iter().position(|(d, _)| d == k) {
+                out.push(done.swap_remove(i).1);
+            }
+        }
+        out
+    }
+
+    /// Choose the job's compositor by timing both on the first frames of `ks` (#3335), as the
+    /// viewer's Auto does per comp: frame 0 warms each up (layer cache misses, uploads, kernel
+    /// builds) untimed, then the GPU renders the next [`PROBE_FRAMES`] under its in-flight cap
+    /// and the CPU the [`PROBE_FRAMES`] after them in parallel. The CPU renders more frames at
+    /// once in the job than here, so the measurement leans towards the GPU, as the margin of
+    /// [`pick_renderer`] does: the CPU is chosen only when clearly faster. Returns
+    /// the frames the faster one rendered (the slower one's are rendered again); empty when
+    /// the choice was made already or is made without measuring (a short job).
+    fn probe<I: Send>(&self, ks: &[u64], render: &(impl Fn(u64, crate::JobRenderer) -> I + Sync + Send)) -> Vec<(u64, I)> {
+        if self.choice().is_some() {
+            return vec![];
+        }
+        let total = self.comp().map_or(0, |c| self.job.settings.frame_count(c));
+        if total < PROBE_MIN_JOB {
+            self.decide(Choice { renderer: crate::JobRenderer::Gpu, gpu_ms: None, cpu_ms: None, why: "the project's renderer (too few frames to measure)" });
+            return vec![];
+        }
+        // Small batches (few threads) measure one frame each; a batch too small for even that
+        // (a resumed sequence skipping frames) renders on the GPU and leaves it to the next.
+        let n = PROBE_FRAMES.min(ks.len().saturating_sub(1) / 2);
+        if n == 0 {
+            return vec![];
+        }
+        let (Some(&first), Some(gpu_ks), Some(cpu_ks)) = (ks.first(), ks.get(1..1 + n), ks.get(1 + n..1 + 2 * n)) else { return vec![] };
+        let logged = || self.frame_times.as_ref().map_or(0, |ft| ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len());
+        let cpu_cap = self.inflight().cpu;
+        let timed = |on: crate::JobRenderer, frames: &[u64], caps: Inflight| {
+            let warm = render(first, on);
+            let t0 = Instant::now();
+            let gpu_live = || on == crate::JobRenderer::Cpu || self.job.accel.is_some_and(|a| a.available());
+            let items = map_frames_while(frames.to_vec(), caps, gpu_live, |k| render(k, on), |k, i| (k, i));
+            let ms = t0.elapsed().as_secs_f64() * 1e3 / frames.len().max(1) as f64;
+            (std::iter::once((first, warm)).chain(items).collect::<Vec<_>>(), ms)
+        };
+        let log0 = logged();
+        let (gpu, gpu_ms) = timed(crate::JobRenderer::Gpu, gpu_ks, Inflight { gpu: Some(self.gpu_inflight()), cpu: cpu_cap });
+        let log1 = logged();
+        let (cpu, cpu_ms) = timed(crate::JobRenderer::Cpu, cpu_ks, Inflight { gpu: None, cpu: cpu_cap });
+        // A GPU that stopped meanwhile rendered its frames on the CPU: it is no choice.
+        let gpu_ms = self.job.accel.is_some_and(|a| a.available()).then_some(gpu_ms);
+        let renderer = pick_renderer(gpu_ms, Some(cpu_ms));
+        // The per-frame log keeps the kept frames' times only.
+        if let Some(ft) = &self.frame_times {
+            let mut v = ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (a, b) = if renderer == crate::JobRenderer::Gpu { (log1, v.len()) } else { (log0, log1) };
+            if a <= b && b <= v.len() {
+                v.drain(a..b);
+            }
+        }
+        self.decide(Choice { renderer, gpu_ms, cpu_ms: Some(cpu_ms), why: "measured on the first frames" });
+        if renderer == crate::JobRenderer::Gpu { gpu } else { cpu }
     }
 
     /// [`Cx::frames`] for `ks` while `encode` runs beside them on `beside`'s threads, so the
@@ -338,9 +559,15 @@ impl<'a> Cx<'a> {
     /// GPU frames rendered at once (#879), decided once per batch: with a GPU accelerator every
     /// frame in flight holds its own working textures, so a whole batch rendered at once can
     /// exhaust VRAM (or shared memory, which crashes instead of falling back). `None` when the
-    /// frames render on the CPU: no accelerator, or a Software Only project.
+    /// frames render on the CPU: no accelerator, a Software Only project, or a job that chose
+    /// the CPU's compositor (#3335), whose frames render in parallel.
     fn gpu_cap(&self) -> Option<usize> {
-        (self.job.accel.is_some() && self.project.settings.gpu_acceleration).then(|| gpu_inflight(std::env::var(GPU_INFLIGHT_ENV).ok().as_deref()))
+        (self.job.accel.is_some() && self.backend() == crate::JobRenderer::Gpu).then(|| self.gpu_inflight())
+    }
+
+    /// GPU frames in flight ([`GPU_INFLIGHT_ENV`] or [`GPU_INFLIGHT_DEFAULT`]).
+    fn gpu_inflight(&self) -> usize {
+        gpu_inflight(std::env::var(GPU_INFLIGHT_ENV).ok().as_deref())
     }
 
     /// The GPU and CPU frames-in-flight caps every frame loop shares (#1615).
@@ -349,18 +576,28 @@ impl<'a> Cx<'a> {
     }
 
     /// Output frame `i`: sampled (fields, pulldown), at the colour depth, cropped and resized.
+    #[cfg(test)]
     pub fn frame(&self, comp: &Comp, i: u64) -> Image {
-        effectcraft_render::passes::block_on(self.frame_async(comp, i))
+        self.frame_on(comp, i, self.backend())
+    }
+
+    /// [`Cx::frame`] on compositor `on`.
+    fn frame_on(&self, comp: &Comp, i: u64, on: crate::JobRenderer) -> Image {
+        effectcraft_render::passes::block_on(self.frame_async_on(comp, i, on))
     }
 
     /// [`Cx::frame`] as a future (deferred readbacks: the frame renders in passes).
     pub async fn frame_async(&self, comp: &Comp, i: u64) -> Image {
+        self.frame_async_on(comp, i, self.backend()).await
+    }
+
+    async fn frame_async_on(&self, comp: &Comp, i: u64, on: crate::JobRenderer) -> Image {
         let t0 = Instant::now();
         let img = match self.job.settings.sample(comp, i) {
-            FrameSample::Progressive(t) => self.render_at(t).await,
+            FrameSample::Progressive(t) => self.render_at(t, on).await,
             FrameSample::Fields { first, second, upper_first } => {
-                let a = self.render_at(first).await;
-                if second == first { a } else { interleave(&a, &self.render_at(second).await, upper_first) }
+                let a = self.render_at(first, on).await;
+                if second == first { a } else { interleave(&a, &self.render_at(second, on).await, upper_first) }
             }
         };
         let img = self.crop_resize(img);
@@ -374,7 +611,7 @@ impl<'a> Cx<'a> {
     /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
     /// frames that need nothing done after the render (progressive, at the project's depth, no
     /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
-    pub fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32) -> Option<Vec<u8>> {
+    fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32, on: crate::JobRenderer) -> Option<Vec<u8>> {
         if self.deferred() {
             return None;
         }
@@ -392,7 +629,7 @@ impl<'a> Cx<'a> {
             return None;
         }
         let t0 = Instant::now();
-        let r = self.renderer();
+        let r = self.renderer_on(on);
         let a = r.active_accel()?;
         let planes = a.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
         let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
@@ -419,12 +656,9 @@ impl<'a> Cx<'a> {
         fallback: impl Fn(u64, Image) -> T + Sync + Send,
     ) -> Vec<T> {
         // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
-        let gpu_live = || self.job.accel.is_none_or(|a| a.available());
-        map_frames_while(
+        self.render_frames(
             ks,
-            self.inflight(),
-            gpu_live,
-            |k| self.yuv420_frame(comp, k, w, h).ok_or_else(|| self.frame(comp, k)),
+            |k, on| self.yuv420_frame(comp, k, w, h, on).ok_or_else(|| self.frame_on(comp, k, on)),
             |k, r| match r {
                 Ok(p) => planes(p),
                 Err(img) => fallback(k, img),
@@ -544,6 +778,9 @@ impl<'a> Cx<'a> {
             Ok(r) => s.push_str(&format!("Result: Done ({} frames, {}×{}, {} bytes) in {seconds:.2} s\n", r.frames, r.width, r.height, r.bytes)),
             Err(e) => s.push_str(&format!("Result: Failed\nError: {e}\n")),
         }
+        if let Some(c) = self.choice() {
+            s.push_str(&format!("Renderer: {}\n", describe_choice(&c)));
+        }
         let over = self.overflowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !over.is_empty() {
             s.push_str(&format!("Storage overflow: {} file(s) written to overflow folders (first: {})\n", over.len(), over[0]));
@@ -572,6 +809,20 @@ impl<'a> Cx<'a> {
         std::io::Write::write_all(&mut f, s.as_bytes()).ok()?;
         f.finish().ok()?;
         Some(path)
+    }
+}
+
+/// The render log's account of a job's compositor: which, why, and what was measured.
+pub(crate) fn describe_choice(c: &Choice) -> String {
+    let name = match c.renderer {
+        crate::JobRenderer::Gpu => "Mercury GPU Acceleration",
+        crate::JobRenderer::Cpu => "Mercury Software Only",
+    };
+    let ms = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |v| format!("{v:.1} ms/frame"));
+    if c.gpu_ms.is_none() && c.cpu_ms.is_none() {
+        format!("{name} ({})", c.why)
+    } else {
+        format!("{name} ({}: GPU {}, CPU {})", c.why, ms(c.gpu_ms), ms(c.cpu_ms))
     }
 }
 
@@ -861,6 +1112,40 @@ mod tests {
     }
 
     #[test]
+    fn a_job_that_chose_the_cpu_is_not_capped() {
+        // #3335: the CPU's frame-parallel compositor is the point of choosing it; a GPU project
+        // that measured the CPU faster must not keep rendering one frame at a time.
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let accel = NoAccel;
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let job = Job {
+            project: &p,
+            footage: &effectcraft_render::NoFootage,
+            expr: None,
+            accel: Some(&accel),
+            comp: effectcraft_project::ItemId(0),
+            settings: &settings,
+            output: &output,
+            path: "/c/f_[#####].png",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let cx = Cx::new(&job);
+        if std::env::var_os(RENDERER_ENV).is_none() {
+            assert_eq!(cx.choice(), None, "a GPU project measures first");
+            assert!(cx.gpu_cap().is_some());
+        }
+        cx.decide(Choice { renderer: crate::JobRenderer::Cpu, gpu_ms: Some(117.0), cpu_ms: Some(68.0), why: "measured on the first frames" });
+        assert_eq!(cx.backend(), crate::JobRenderer::Cpu);
+        assert_eq!(cx.gpu_cap(), None);
+        assert_eq!(cx.renderer().active_accel().map(|a| a.name()), None, "CPU frames don't use the accelerator");
+        assert_eq!(describe_choice(&cx.choice().unwrap()), "Mercury Software Only (measured on the first frames: GPU 117.0 ms/frame, CPU 68.0 ms/frame)");
+    }
+
+    #[test]
     fn cpu_inflight_is_off_unless_a_positive_number() {
         assert_eq!(cpu_inflight(None), None);
         assert_eq!(cpu_inflight(Some("2")), Some(2));
@@ -1002,7 +1287,7 @@ mod tests {
         let cx = Cx::new(&job);
         let comp = cx.comp().unwrap();
         cx.frame(comp, 0);
-        let renders = cx.cache.stats().misses;
+        let renders = cx.caches.of(cx.backend()).stats().misses;
         assert!(renders > 0);
         for i in 1..10 {
             let img = cx.frame(comp, i);
@@ -1012,7 +1297,7 @@ mod tests {
             uncached.cache = None;
             assert_eq!(img.data, uncached.comp_frame(cid, t).data, "frame {i}");
         }
-        let stats = cx.cache.stats();
+        let stats = cx.caches.of(cx.backend()).stats();
         assert_eq!(stats.misses, renders, "the solid rendered on the first frame only");
         assert!(stats.hits >= 9, "{stats:?}");
     }

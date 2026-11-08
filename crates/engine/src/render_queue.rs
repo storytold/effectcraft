@@ -34,6 +34,40 @@ pub struct ExportJob<'a> {
     pub label: String,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     pub nested_switches: bool,
+    /// The layer caches of the Render Queue run this job belongs to (#3335): consecutive jobs
+    /// start warm, and the run trims the accelerator's pooled textures once at its end. `None`:
+    /// a one-off export (its own caches, trimmed when it ends).
+    pub caches: Option<&'a RunCaches>,
+    /// The compositor the queue item's output modules render on (#3335): the first module
+    /// chooses (measuring a GPU project's first frames) and stores it here, the others follow.
+    pub renderer: Option<&'a Mutex<Option<effectcraft_render::Backend>>>,
+}
+
+/// What the jobs of one Render Queue run keep between them (#3335): a layer cache per
+/// compositor (a buffer an effect made on the GPU is not the CPU's), together at the budget
+/// each job's single cache had before.
+pub struct RunCaches {
+    pub gpu: effectcraft_render::LayerCache,
+    pub cpu: effectcraft_render::LayerCache,
+}
+
+impl Default for RunCaches {
+    fn default() -> Self {
+        let half = effectcraft_render::LayerCache::default().budget() / 2;
+        RunCaches { gpu: effectcraft_render::LayerCache::new(half), cpu: effectcraft_render::LayerCache::new(half) }
+    }
+}
+
+/// Calls [`effectcraft_render::Accelerator::render_end`] when a Render Queue run ends, however
+/// it ends (done, failed, stopped, panicked): its jobs leave the pooled textures to each other.
+struct RunEnd<'a>(Option<&'a dyn effectcraft_render::Accelerator>);
+
+impl Drop for RunEnd<'_> {
+    fn drop(&mut self) {
+        if let Some(a) = self.0 {
+            a.render_end();
+        }
+    }
 }
 
 /// What an export wrote.
@@ -317,6 +351,8 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         let mut s = lock(&shared.state);
         s.items_total = w.items.len();
     }
+    let caches = RunCaches::default();
+    let _run_end = RunEnd(w.accel.as_deref());
     for (k, modules) in w.items.iter().enumerate() {
         let Some((item, _)) = modules.first() else { continue };
         if shared.cancel.load(Ordering::Relaxed) {
@@ -337,6 +373,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         // Every output module encodes the same frames (Composition ▸ Add Output Module); the
         // first module's file is the item's output.
         let mut r: Result<ExportResult, String> = Err("no output module".into());
+        let renderer = Mutex::new(None);
         for (mi, (mitem, path)) in modules.iter().enumerate() {
             let name = w.project.item(mitem.comp).map(|i| i.name.clone()).unwrap_or_default();
             let index = w.project.render_queue.iter().position(|i| i.id == mitem.id).map_or(0, |i| i + 1);
@@ -350,6 +387,8 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 storage: w.storage.as_deref(),
                 label: format!("#{index} {name} (output module {})", mi + 1),
                 nested_switches: w.nested_switches,
+                caches: Some(&caches),
+                renderer: Some(&renderer),
             };
             let rr = w
                 .exporter
