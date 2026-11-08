@@ -1247,13 +1247,28 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
 /// The channels `need` reads of the OpenEXR at `path` (all for [`AuxNeed::All`]), from the
 /// store. `None` when it isn't a readable OpenEXR (or the request was called off).
 pub(crate) fn aux(path: &str, source: &ExrSource, need: &AuxNeed) -> Option<Arc<AuxChannels>> {
+    aux_of(path, source, need, false)
+}
+
+/// Every channel of the OpenEXR at `path`, the picture's too ([`FootageSource::aux`]: no render
+/// asks for that; a render asks for what its effects read, [`aux`]).
+///
+/// [`FootageSource::aux`]: effectcraft_render::FootageSource::aux
+pub(crate) fn every_channel(path: &str, source: &ExrSource) -> Option<Arc<AuxChannels>> {
+    aux_of(path, source, &AuxNeed::All, true)
+}
+
+fn aux_of(path: &str, source: &ExrSource, need: &AuxNeed, with_picture: bool) -> Option<Arc<AuxChannels>> {
     for _ in 0..2 {
         let since = drop_generation();
         let (index, opened) = exr_index::get_opened(path, source).ok()?;
-        let want = match need_ids(&index, need) {
+        let mut want = match need_ids(&index, need) {
             Some(ids) => Want { all: false, ids },
             None => Want { all: true, ids: BTreeSet::new() },
         };
+        if with_picture {
+            want.ids.extend(index.picture_ids().unwrap_or_default());
+        }
         match store().get_opened(path, source, &index, &want, Use::Other, opened, since) {
             Ok(b) => return Some(b.aux.clone()),
             Err(Refused::Changed) => continue,

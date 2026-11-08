@@ -181,7 +181,7 @@ fn multipart_channels_are_found_by_their_stored_names() {
     assert_eq!(aux.manifest(&layer).map(<[_]>::len), Some(1));
     // The names alone, from the headers.
     let names = pool.aux_names(ItemId(1), &f, Tick::ZERO).unwrap();
-    assert_eq!(names.names(), aux.listed.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(names.names(), aux.names());
     assert!(names.channels.iter().all(|(_, p)| p.is_empty()), "no pixels decoded");
 }
 
@@ -527,10 +527,10 @@ fn given_aux_footage_decodes_once_from_the_first_frame() {
     pool.set_aux_footage(&[given.to_string()]);
     take_decodes();
     pool.frame_at(&f[given], Tick::ZERO).unwrap();
-    assert!(pool.aux(ItemId(1), &f[given], Tick::ZERO).unwrap().get("diffuse.R").is_some());
+    assert!(pool.aux_for(ItemId(1), &f[given], Tick::ZERO, &AuxNeed::All).unwrap().get("diffuse.R").is_some());
     assert_eq!(take_decodes(), [0, 1], "the picture and the channels share one decode");
     pool.frame_at(&f[learned], Tick::ZERO).unwrap();
-    pool.aux(ItemId(2), &f[learned], Tick::ZERO).unwrap();
+    pool.aux_for(ItemId(2), &f[learned], Tick::ZERO, &AuxNeed::All).unwrap();
     assert_eq!(take_decodes(), [0, 2]);
     let d = decodes_of(learned);
     assert_eq!(d[0].channels.len(), 4, "the picture alone");
@@ -708,8 +708,8 @@ fn a_new_aux_footage_set_returns_to_picture_only() {
     pool.set_aux_footage(&[]);
     assert!(!shared().is_held(&paths[0]), "no longer kept once no effect reads it");
     assert_eq!(frame(1), Some(4), "no longer given: the picture alone");
-    // Learned by `aux()`, then a new set without it: picture only again.
-    pool.aux(ItemId(1), &f, at(1)).unwrap();
+    // Learned by `aux_for()`, then a new set without it: picture only again.
+    pool.aux_for(ItemId(1), &f, at(1), &AuxNeed::All).unwrap();
     assert_eq!(frame(2), Some(all), "learned");
     pool.set_aux_footage(&[]);
     assert_eq!(frame(3), Some(4), "a new set drops what was learned");

@@ -1698,8 +1698,11 @@ impl FootageSource for MediaPool {
         wanted.needs = needs;
     }
 
-    fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
-        self.aux_for(item, footage, t, &AuxNeed::All)
+    /// Every channel, the picture's too (no render asks for that: renders ask for what their
+    /// effects read, [`FootageSource::aux_for`]).
+    fn aux(&self, _item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        let path = self.aux_path(footage, t)?;
+        crate::exr_planes::every_channel(&path, &self.inner.exr_source(&path))
     }
 
     fn aux_names(&self, _item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
