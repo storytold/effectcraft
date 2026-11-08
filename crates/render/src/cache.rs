@@ -67,6 +67,37 @@ struct Inner {
     /// a render's reads started at travels with its files instead, [`ReadFiles::since`]: two
     /// renders of a key may overlap).
     missed_at: HashMap<u64, web_time::Instant>,
+    /// Keys let go of lately (newest last, at most [`EVICTED_KEPT`]) and how many of them were
+    /// asked for again: a cache that keeps making again what it just let go of is thrashing
+    /// ([`crate::memory::MemoryHolder::refills`]).
+    evicted: std::collections::VecDeque<u64>,
+    refills: u64,
+}
+
+/// Keys of evicted buffers remembered to tell a refill (#3271).
+const EVICTED_KEPT: usize = 256;
+
+impl Inner {
+    /// Drop least recently used entries until at most `bytes` are held, remembering their keys.
+    fn evict_to(&mut self, bytes: usize) {
+        if self.bytes <= bytes {
+            return;
+        }
+        let mut by_age: Vec<(u64, u64)> = self.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
+        by_age.sort_unstable();
+        for (_, k) in by_age {
+            if self.bytes <= bytes {
+                break;
+            }
+            if let Some(e) = self.map.remove(&k) {
+                self.bytes -= e.bytes;
+                if self.evicted.len() >= EVICTED_KEPT {
+                    self.evicted.pop_front();
+                }
+                self.evicted.push_back(k);
+            }
+        }
+    }
 }
 
 /// Hit/miss counters and memory use (for perf readouts and tests).
@@ -88,7 +119,17 @@ impl LayerCache {
     /// A cache holding at most `budget` bytes of pixels.
     pub fn new(budget: usize) -> LayerCache {
         LayerCache {
-            inner: Mutex::new(Inner { map: HashMap::new(), bytes: 0, budget, clock: 0, hits: 0, misses: 0, missed_at: HashMap::new() }),
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                bytes: 0,
+                budget,
+                clock: 0,
+                hits: 0,
+                misses: 0,
+                missed_at: HashMap::new(),
+                evicted: Default::default(),
+                refills: 0,
+            }),
             disk: Mutex::new(None),
             store: Mutex::new(None),
             virtual_id: Mutex::new(None),
@@ -162,6 +203,11 @@ impl LayerCache {
             None => {
                 let mut g = self.inner.lock().ok()?;
                 g.misses += 1;
+                // (made again shortly after it was let go of: a refill)
+                if let Some(at) = g.evicted.iter().position(|k| *k == key) {
+                    g.evicted.remove(at);
+                    g.refills += 1;
+                }
                 drop(g);
                 let store = self.persistent();
                 // (before the entry is read: what it is made of may be dropped meanwhile)
@@ -299,17 +345,11 @@ impl LayerCache {
         if g.bytes > g.budget {
             // Evict least-recently used entries down to 3/4 of the budget.
             let target = g.budget / 4 * 3;
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= target {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
+            g.evict_to(target);
         }
+        drop(g);
+        // (with the lock released: the accountant asks every cache for its bytes)
+        crate::memory::Accountant::global().balance();
         (buf, files)
     }
 
@@ -322,18 +362,7 @@ impl LayerCache {
     pub fn set_budget(&self, budget: usize) {
         let Ok(mut g) = self.inner.lock() else { return };
         g.budget = budget;
-        if g.bytes > budget {
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= budget {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
-        }
+        g.evict_to(budget);
     }
 
     pub fn clear(&self) {
@@ -943,6 +972,29 @@ pub fn derive(key: u64, i: u64) -> u64 {
     let mut h = KeyHasher(key);
     i.hash(&mut h);
     h.finish()
+}
+
+
+/// The layer cache in the common memory budget (#3271): rendered layer buffers, costly to make
+/// again, are freed after footage frames and planes.
+impl crate::memory::MemoryHolder for LayerCache {
+    fn name(&self) -> &'static str {
+        "layer cache"
+    }
+    fn bytes(&self) -> usize {
+        self.inner.lock().map(|g| g.bytes).unwrap_or(0)
+    }
+    fn priority(&self) -> u8 {
+        2
+    }
+    fn trim_to(&self, bytes: usize) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.evict_to(bytes);
+        }
+    }
+    fn refills(&self) -> u64 {
+        self.inner.lock().map(|g| g.refills).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

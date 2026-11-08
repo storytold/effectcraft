@@ -527,6 +527,7 @@ impl Drop for Owner<'_> {
         drop(c);
         *lock(&self.flight.outcome) = Some(outcome);
         self.flight.ready.notify_all();
+        effectcraft_render::memory::Accountant::global().balance();
     }
 }
 
@@ -536,8 +537,16 @@ impl MediaPool {
         Self::with_budget(DEFAULT_BUDGET)
     }
 
-    /// A pool whose frame cache holds at most `bytes` of decoded frames.
+    /// A pool whose frame cache holds at most `bytes` of decoded frames, in the common memory
+    /// budget ([`effectcraft_render::memory::Accountant`]).
     pub fn with_budget(bytes: usize) -> Self {
+        let pool = Self::unregistered(bytes);
+        let holder: Arc<dyn effectcraft_render::memory::MemoryHolder> = pool.inner.clone();
+        effectcraft_render::memory::Accountant::global().register(&holder);
+        pool
+    }
+
+    fn unregistered(bytes: usize) -> Self {
         Self {
             inner: Arc::new(Inner {
                 sources: Mutex::default(),
@@ -1140,6 +1149,8 @@ impl Inner {
         if c.generation == generation {
             c.lru.insert(key.clone(), img.clone(), files, self.budget());
         }
+        drop(c);
+        effectcraft_render::memory::Accountant::global().balance();
         img
     }
 
@@ -1377,6 +1388,26 @@ impl Inner {
                 Ok(turned(frame_to_image_in(&vf, op, buf), turn))
             }
         }
+    }
+}
+
+/// The decoded frames in the common memory budget (#3271): converted from decoded footage, the
+/// first freed when the caches together are over it.
+impl effectcraft_render::memory::MemoryHolder for Inner {
+    fn name(&self) -> &'static str {
+        "footage frames"
+    }
+    fn bytes(&self) -> usize {
+        let c = lock(&self.cache);
+        c.lru.bytes.saturating_add(c.recent_bytes())
+    }
+    fn priority(&self) -> u8 {
+        0
+    }
+    fn trim_to(&self, bytes: usize) {
+        let mut c = lock(&self.cache);
+        c.recent.clear();
+        c.lru.evict(bytes);
     }
 }
 

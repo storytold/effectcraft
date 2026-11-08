@@ -274,6 +274,7 @@ impl Owning<'_> {
         self.ended = true;
         let outcome = self.store.finish(self.path, self.level, self.flight, outcome);
         self.flight.end(outcome.clone());
+        effectcraft_render::memory::Accountant::global().balance();
         outcome
     }
 }
@@ -619,6 +620,28 @@ impl PlaneStore {
         st.held.retain(|(p, _)| p != path);
     }
 
+    /// Drop least recently used entries not in use until at most `bytes` are held (the memory
+    /// accountant, #3271).
+    fn trim_to(&self, bytes: usize) {
+        let mut st = self.lock();
+        loop {
+            if st.entries.iter().map(|e| e.bytes).fold(0usize, usize::saturating_add) <= bytes {
+                break;
+            }
+            let held = &st.held;
+            let oldest = st
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.bytes > 0 && !e.in_use())
+                .filter(|(_, e)| !e.batch.as_ref().is_some_and(|b| held.iter().any(|(_, h)| Arc::ptr_eq(h, b))))
+                .min_by_key(|(_, e)| e.used)
+                .map(|(i, _)| i);
+            let Some(i) = oldest else { break };
+            st.entries.remove(i);
+        }
+    }
+
     /// Stop keeping the last pictures' planes for their effects.
     pub(crate) fn release_held(&self) {
         self.lock().held.clear();
@@ -850,9 +873,37 @@ fn disk_cache() -> Option<Arc<effectcraft_render::disk_cache::DiskCache>> {
     DISK.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(std::sync::Weak::upgrade)
 }
 
+/// The store all footage shares.
+static STORE: PlaneStore = PlaneStore::new(CACHE_BUDGET);
+
 fn store() -> &'static PlaneStore {
-    static STORE: PlaneStore = PlaneStore::new(CACHE_BUDGET);
+    // In the common memory budget (#3271), registered once.
+    static HOLDER: std::sync::OnceLock<Arc<dyn effectcraft_render::memory::MemoryHolder>> = std::sync::OnceLock::new();
+    HOLDER.get_or_init(|| {
+        let h: Arc<dyn effectcraft_render::memory::MemoryHolder> = Arc::new(SharedStore);
+        effectcraft_render::memory::Accountant::global().register(&h);
+        h
+    });
     &STORE
+}
+
+/// The shared plane store in the common memory budget: decoded planes the effects read, costly
+/// to decode again, freed after the footage frames and before rendered layers.
+struct SharedStore;
+
+impl effectcraft_render::memory::MemoryHolder for SharedStore {
+    fn name(&self) -> &'static str {
+        "footage planes"
+    }
+    fn bytes(&self) -> usize {
+        STORE.lock().entries.iter().map(|e| e.bytes).fold(0, usize::saturating_add)
+    }
+    fn priority(&self) -> u8 {
+        1
+    }
+    fn trim_to(&self, bytes: usize) {
+        STORE.trim_to(bytes);
+    }
 }
 
 /// Is `path` an OpenEXR file by name (the store reads those; other files, and files named so

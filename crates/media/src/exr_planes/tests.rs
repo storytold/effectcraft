@@ -900,3 +900,42 @@ fn a_decode_thread_takes_over_a_queued_decode() {
     assert!(claimed.is_ok() && claimed == asked, "{claimed:?} {asked:?}");
     assert_eq!(decodes_of(path).len(), 1, "decoded once");
 }
+
+/// #3271: the plane store in the common memory budget: trimmed least recently used first,
+/// never the planes a picture holds for its effects or planes still in use.
+#[test]
+fn the_plane_store_is_trimmed_by_the_accountant() {
+    use effectcraft_render::memory::{Accountant, MemoryHolder};
+    struct Local(Arc<PlaneStore>);
+    impl MemoryHolder for Local {
+        fn name(&self) -> &'static str {
+            "planes"
+        }
+        fn bytes(&self) -> usize {
+            self.0.lock().entries.iter().map(|e| e.bytes).sum()
+        }
+        fn priority(&self) -> u8 {
+            1
+        }
+        fn trim_to(&self, bytes: usize) {
+            self.0.trim_to(bytes);
+        }
+    }
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let all = Want { all: true, ids: Default::default() };
+    let get = |p: &str, by: Use| {
+        let source = ExrSource::Bytes(bytes.clone());
+        let index = crate::exr_index::get(p, &source).unwrap();
+        store.get(p, &source, &index, &all, by).unwrap()
+    };
+    drop(get("/3271-acc-a.exr", Use::Other));
+    drop(get("/3271-acc-b.exr", Use::Picture));
+    let in_use = get("/3271-acc-c.exr", Use::Other);
+    let acc = Accountant::new(1);
+    let holder: Arc<dyn MemoryHolder> = Arc::new(Local(store.clone()));
+    acc.register(&holder);
+    acc.balance();
+    assert_eq!(store.cached(), ["/3271-acc-b.exr", "/3271-acc-c.exr"], "held for effects, and in use");
+    drop(in_use);
+}

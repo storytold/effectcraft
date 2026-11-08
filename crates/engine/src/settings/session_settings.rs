@@ -77,6 +77,12 @@ impl Session {
         let b = self.prefs.cache_budgets(self.sys_memory);
         self.layer_cache.set_budget(b.layer);
         self.footage.set_cache_budget(b.media);
+        // One budget over the big caches together (#3271): the layer cache, the footage frames
+        // and decoded planes, and the preview frames' share.
+        let accountant = effectcraft_render::memory::Accountant::global();
+        let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
+        accountant.register(&layers);
+        accountant.set_budget(b.layer.saturating_add(b.media).saturating_add(b.preview));
     }
 
     /// Take the latest reading of the system's memory and start the next one in the background
@@ -173,6 +179,9 @@ impl Session {
         self.layer_cache.set_disk(Some(dc.clone()));
         // Decoded footage channels (OpenEXR planes) persist there too (#3271).
         self.footage.set_disk_cache(Some(dc.clone()));
+        // Its write queue counts in the common memory budget.
+        let queue: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = dc.clone();
+        effectcraft_render::memory::Accountant::global().register(&queue);
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
         // disk cache off drops it).
         let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();

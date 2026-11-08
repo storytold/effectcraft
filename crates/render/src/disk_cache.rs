@@ -440,6 +440,15 @@ impl Queue {
     fn is_empty(&self) -> bool {
         self.frames.is_empty() && self.jobs.is_empty()
     }
+
+    /// The bytes the queued writes hold.
+    fn held_bytes(&self) -> usize {
+        let job = |j: &Job| match j {
+            Job::Write(_, _, _, p) => p.held(),
+            Job::Drop(_) => 0,
+        };
+        self.frames.iter().chain(&self.jobs).map(job).fold(0, usize::saturating_add)
+    }
 }
 
 pub struct DiskCache {
@@ -1439,6 +1448,44 @@ impl effectcraft_effects::roto::SegStore for DiskCache {
     }
     fn put_seg(&self, key: u64, scale: f64, seg: &effectcraft_effects::roto::FrameSeg) {
         DiskCache::put_seg(self, key, scale, seg);
+    }
+}
+
+/// The disk cache's write queue in the common memory budget (#3271): queued entries hold their
+/// pixels until the writer has written them. The first freed (a dropped write only costs a
+/// later render a disk miss); frames are kept over layer buffers.
+impl crate::memory::MemoryHolder for DiskCache {
+    fn name(&self) -> &'static str {
+        "disk write queue"
+    }
+    fn bytes(&self) -> usize {
+        self.queue.0.lock().map(|q| q.held_bytes()).unwrap_or(0)
+    }
+    fn priority(&self) -> u8 {
+        0
+    }
+    fn trim_to(&self, bytes: usize) {
+        let Ok(mut q) = self.queue.0.lock() else { return };
+        while q.held_bytes() > bytes {
+            // Layer and plane writes first (newest first), then frames.
+            let job = match q.jobs.iter().rposition(|j| matches!(j, Job::Write(..))) {
+                Some(i) => q.jobs.remove(i),
+                None => match q.frames.pop_back() {
+                    Some(j) => {
+                        if let Job::Write(_, key, _, p) = &j {
+                            q.frame_bytes = q.frame_bytes.saturating_sub(p.held());
+                            q.pending_frames.remove(key);
+                        }
+                        Some(j)
+                    }
+                    None => None,
+                },
+            };
+            if job.is_none() {
+                break;
+            }
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
