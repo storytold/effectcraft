@@ -370,6 +370,54 @@ fn a_file_forgotten_while_it_decodes_is_not_kept() {
     assert_eq!(store.cached(), [path], "only the second decode is kept");
 }
 
+/// #3270 review (the pool's flights): a request made after a file was forgotten while its decode
+/// is in flight doesn't join that decode (it would get the old file's planes): the flight lives
+/// in the file's entry, which forget drops, so the request decodes the file anew at once.
+#[test]
+fn a_request_after_forget_does_not_join_the_old_decode() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let path = "/3271-forget-join.exr";
+    let source = ExrSource::Bytes(bytes);
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let all = Want { all: true, ids: Default::default() };
+    let calls = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (store, calls, source, index, all) = (store.clone(), calls.clone(), source.clone(), index.clone(), all.clone());
+        let tx = std::sync::Mutex::new(Some(tx));
+        set_before_read(
+            path,
+            Some(Arc::new(move |p: &str| {
+                if p != "/3271-forget-join.exr" || calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return;
+                }
+                // The old decode is in flight (this thread runs it): the file changes.
+                store.forget(p);
+                let (store, source, index, all) = (store.clone(), source.clone(), index.clone(), all.clone());
+                let tx = tx.lock().unwrap().take();
+                let asked = std::thread::spawn(move || store.get("/3271-forget-join.exr", &source, &index, &all, Use::Other).map(|_| ()));
+                // A request that joined the old decode would wait on this very thread.
+                let done = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !asked.is_finished() && std::time::Instant::now() < done {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let finished = asked.is_finished();
+                if let Some(tx) = tx {
+                    let _ = tx.send((finished, if finished { asked.join().ok() } else { None }));
+                }
+            })),
+        );
+    }
+    let got = store.get(path, &source, &index, &all, Use::Other);
+    set_before_read(path, None);
+    let (finished, asked) = rx.recv().unwrap();
+    assert!(finished, "the request after forget decoded on its own, without waiting for the old decode");
+    assert!(asked.is_some_and(|r| r.is_ok()));
+    assert!(got.is_ok());
+    assert!(decodes_of(path).len() >= 2, "the file was decoded anew after forget");
+}
+
 /// #474: the planes of a picture whose effects read the footage's channels are kept for them
 /// (the renderer asks for the picture, then the channels) until the channels are asked for.
 #[test]
