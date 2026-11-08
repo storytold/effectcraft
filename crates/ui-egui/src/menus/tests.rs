@@ -384,7 +384,7 @@ fn file_dialogs_can_answer_on_a_later_frame() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("Answered.ecproj");
     // Answered from another thread, as the host's dialog does.
-    std::thread::spawn(move || done(vec![path.to_string_lossy().to_string()])).join().unwrap();
+    std::thread::spawn(move || done(Ok(vec![path.to_string_lossy().to_string()]))).join().unwrap();
     app.run_dialog_answers();
     assert_eq!(app.session.path.as_deref(), Some(dir.join("Answered.ecproj").to_string_lossy().as_ref()));
     assert!(dir.join("Answered.ecproj").is_file());
@@ -392,7 +392,7 @@ fn file_dialogs_can_answer_on_a_later_frame() {
     invoke(&mut app, &ctx, "comp.saveFrameAs", json!({})).unwrap();
     let (dialog, done) = pending.lock().unwrap().pop().expect("a dialog was shown");
     assert_eq!(dialog, crate::FileDialog::Save { default: "Frame.png".into(), ext: "png".into(), project: false });
-    done(Vec::new());
+    done(Ok(Vec::new()));
     app.run_dialog_answers();
     assert!(!dir.join("Frame.png").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -423,7 +423,7 @@ fn file_dialogs_block_floating_windows_only_while_up() {
     assert!(blocked(&mut app, true, 0.1), "blocked while the dialog takes the keyboard");
     assert!(blocked(&mut app, false, 0.2));
     let done = pending.lock().unwrap().pop().expect("a dialog was shown");
-    done(Vec::new());
+    done(Ok(Vec::new()));
     app.run_dialog_answers();
     assert!(!blocked(&mut app, false, 0.3));
     // Save As asks again; the sheet ends without answering.
@@ -440,12 +440,77 @@ fn file_dialogs_block_floating_windows_only_while_up() {
     assert!(!blocked(&mut app, true, 12.5));
     // Answers of dialogs taken for gone arrive late: nothing stays blocked.
     for done in pending.lock().unwrap().drain(..) {
-        done(Vec::new());
+        done(Ok(Vec::new()));
     }
     app.run_dialog_answers();
     assert!(!blocked(&mut app, false, 13.0));
     invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
     assert!(blocked(&mut app, false, 13.1), "a later dialog blocks again");
+}
+
+/// #3084: a host whose dialog couldn't open (macOS: `+[NSOpenPanel openPanel]` returned nil)
+/// answers with the error. The status line says why, the command doesn't run and the dialog
+/// no longer blocks floating windows; the next dialog opens as usual.
+#[test]
+fn a_dialog_that_cannot_open_reports_an_error() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |_dialog, done| queue.lock().unwrap().push(done)));
+    let blocked = |app: &mut EffectcraftApp, focused: bool, time: f64| {
+        let input = egui::RawInput { focused, time: Some(time), ..Default::default() };
+        let mut out = false;
+        ctx.run_ui(input, |ui| out = app.floats_blocked(ui.ctx())).textures_delta.clear();
+        out
+    };
+    let items = app.session.project.items.len();
+    assert_eq!(invoke(&mut app, &ctx, "file.importAep", json!({})).unwrap(), json!({"dialog": "file.importAep"}));
+    assert!(blocked(&mut app, true, 0.1));
+    let done = pending.lock().unwrap().pop().expect("a dialog was asked for");
+    std::thread::spawn(move || done(Err("The Open dialog couldn't open".into()))).join().unwrap();
+    app.run_dialog_answers();
+    assert_eq!(app.ui.status, "The Open dialog couldn't open");
+    assert_eq!(app.session.project.items.len(), items, "nothing was imported");
+    assert!(!blocked(&mut app, false, 0.2), "the failed dialog doesn't block floating windows");
+    invoke(&mut app, &ctx, "file.importAep", json!({})).unwrap();
+    assert_eq!(pending.lock().unwrap().len(), 1, "the next dialog opens");
+}
+
+/// Coverage for #3084 (not its regression test, which needs macOS): every enabled File ▸ Import
+/// item that asks for a file asks through the host's one dialog path (`Hooks::file_dialog_async`
+/// where the host has it), never through a blocking picker; After Effects Project is no
+/// different from the others.
+#[test]
+fn every_import_item_asks_through_the_shared_dialog_path() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    app.hooks.pick_files = Some(Box::new(|_: &[&str]| panic!("the blocking picker is not used")));
+    app.hooks.pick_open_project = Some(Box::new(|| panic!("the blocking picker is not used")));
+    app.hooks.pick_folder = Some(Box::new(|| panic!("the blocking picker is not used")));
+    let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    // Placeholder and Solid open a form of the app's own and ask for no file.
+    const IN_APP_FORM: &[&str] = &["file.importPlaceholder", "file.importSolid"];
+    let import: Vec<_> = effectcraft_engine::menus::entries()
+        .into_iter()
+        .filter(|(path, _)| path.iter().map(String::as_str).eq(["File", "Import"]))
+        .map(|(_, e)| e)
+        .filter(|e| app.session.is_enabled(&e.command) && !IN_APP_FORM.contains(&e.command.as_str()))
+        .collect();
+    assert!(import.iter().any(|e| e.command == "file.importAep"), "File ▸ Import has After Effects Project");
+    for entry in import {
+        let r = invoke(&mut app, &ctx, &entry.command, entry.params_or_empty());
+        assert_eq!(r, Ok(json!({"dialog": entry.command})), "{}", entry.command);
+        let dialog = pending.lock().unwrap().pop();
+        assert!(dialog.is_some(), "{}: asks through the shared dialog path", entry.command);
+        if entry.command == "file.importAep" {
+            assert_eq!(dialog, Some(crate::FileDialog::Open { exts: vec!["aep".into(), "aepx".into()], many: false }));
+        }
+    }
 }
 
 #[test]
@@ -677,7 +742,10 @@ fn opening_a_project_leaves_the_home_screen_whatever_its_composition_id() {
     assert!(!app.ui.start_screen, "File ▸ Open leaves the Home screen");
     // The path picked in a file dialog (`run_with_picked`).
     app.ui.start_screen = true;
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.open".into(), key: "path", params: json!({}), paths: vec![path.clone()] });
+    super::frontend::dialog_answered(
+        &mut app,
+        crate::DialogAnswer { command: "file.open".into(), key: "path", params: json!({}), paths: Ok(vec![path.clone()]) },
+    );
     assert_eq!(app.session.active_comp_id(), comp);
     assert!(!app.ui.start_screen, "a picked project leaves the Home screen");
     let _ = std::fs::remove_dir_all(&dir);

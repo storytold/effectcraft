@@ -25,9 +25,10 @@ mod control_server;
 mod launch_guard;
 #[cfg(target_os = "macos")]
 mod native_menu;
-// Built everywhere so it stays checked; the macOS and Linux apps use it.
+// Every native dialog. Built everywhere; only the macOS and Linux apps show the commands'
+// dialogs without blocking the frame.
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
-mod sheet_dialogs;
+mod file_dialogs;
 mod window;
 
 use effectcraft_ui_egui::EffectcraftApp;
@@ -137,12 +138,12 @@ fn control_port(name: &str, value: Option<&str>) -> Result<u16, String> {
 /// answer without pumping events, so the window stops answering the compositor and the desktop
 /// offers to force-quit it while the Open dialog is up (#1275). Windows' blocking dialog pumps
 /// its own messages, so it keeps [`effectcraft_ui_egui::Hooks::pick_files`] and friends.
-/// The dialogs asked for in a frame show at its end ([`sheet_dialogs::show_asked`]), where the
+/// The dialogs asked for in a frame show at its end ([`file_dialogs::show_asked`]), where the
 /// main window's handle is at hand.
-fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>> {
+fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Receiver<file_dialogs::Asked>> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        let (tx, rx) = std::sync::mpsc::channel::<sheet_dialogs::Asked>();
+        let (tx, rx) = std::sync::mpsc::channel::<file_dialogs::Asked>();
         app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| {
             if tx.send((dialog, done)).is_err() {
                 log::error!("file dialog: the window is gone");
@@ -334,12 +335,9 @@ fn main() -> eframe::Result {
             {
                 app.ui.status = note.into();
             }
-            app.hooks.pick_files = Some(Box::new(|exts: &[&str]| {
-                rfd::FileDialog::new().add_filter("Media", exts).pick_files().unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect()
-            }));
-            app.hooks.pick_save = Some(Box::new(|name: &str| {
-                rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj"]).set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string())
-            }));
+            // Every dialog opens through `file_dialogs::guarded`: one that can't open is an error
+            // in the status line, not a crash (#3084).
+            let dialog_errors = file_dialogs::install_pickers(&mut app, &cc.egui_ctx);
             // The window closes after a lost graphics device (#591); say why, unless an agent drives
             // the app through the control channel.
             if control_port.is_none() {
@@ -349,31 +347,15 @@ fn main() -> eframe::Result {
                         Some(Err(e)) => format!("\n\nYour unsaved changes could not be saved ({e})."),
                         None => String::new(),
                     };
-                    rfd::MessageDialog::new()
-                        .set_level(rfd::MessageLevel::Error)
-                        .set_title("EffectCraft: graphics device lost")
-                        .set_description(format!("The graphics driver stopped responding, so EffectCraft has to close.{saved}"))
-                        .show();
+                    file_dialogs::message(
+                        "EffectCraft: graphics device lost",
+                        format!("The graphics driver stopped responding, so EffectCraft has to close.{saved}"),
+                    );
                 }));
             }
-            app.hooks.pick_open_project = Some(Box::new(|| {
-                rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file().map(|p| p.to_string_lossy().to_string())
-            }));
             app.hooks.system_theme = appearance::service();
             app.hooks.audio_device = Some(Box::new(audio_out::open));
             app.hooks.audio_devices = Some(Box::new(audio_out::devices));
-            app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
-            app.hooks.pick_save_file = Some(Box::new(|name: &str, ext: &str| {
-                // A default with a folder that exists opens the dialog there.
-                let path = std::path::Path::new(name);
-                // (No filter for a name without an extension, such as a folder to create.)
-                let mut d = if ext.is_empty() { rfd::FileDialog::new() } else { rfd::FileDialog::new().add_filter(ext, &[ext]) };
-                if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
-                    d = d.set_directory(dir);
-                }
-                let file = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                d.set_file_name(file).save_file().map(|p| p.to_string_lossy().to_string())
-            }));
             // The commands' file dialogs don't block the frame where the platform's backend
             // would (#511, #1275); see [`install_file_dialogs`].
             let file_dialogs = install_file_dialogs(&mut app);
@@ -395,6 +377,7 @@ fn main() -> eframe::Result {
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
                 file_dialogs,
+                dialog_errors,
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
                 launch,
                 drawn: false,
@@ -468,19 +451,16 @@ fn startup_failed(e: &eframe::Error, gl_next: bool) {
     } else {
         eprintln!("effectcraft: {message}");
     }
-    let _ = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Error)
-        .set_title("EffectCraft")
-        .set_description(message)
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+    file_dialogs::message("EffectCraft", message);
 }
 
 /// The desktop app: the egui app plus, on macOS, the system menu bar.
 struct Desktop {
     app: EffectcraftApp,
     /// The commands' file dialogs, shown at the end of the frame that asked for them.
-    file_dialogs: Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>>,
+    file_dialogs: Option<std::sync::mpsc::Receiver<file_dialogs::Asked>>,
+    /// Why a blocking picker couldn't open (#3084), for the status line.
+    dialog_errors: std::sync::mpsc::Receiver<String>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
     /// Documents opened from Finder, the Dock or `open` (macOS).
@@ -501,8 +481,11 @@ impl eframe::App for Desktop {
         self.menu.update(&mut self.app, ctx);
         self.app.tick(ctx, frame);
         self.app.finish_ime_logic(ctx);
+        while let Ok(e) = self.dialog_errors.try_recv() {
+            self.app.ui.status = e;
+        }
         if let Some(asked) = &self.file_dialogs {
-            sheet_dialogs::show_asked(asked, frame, ctx);
+            file_dialogs::show_asked(asked, frame, ctx);
         }
         effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
     }
@@ -510,7 +493,7 @@ impl eframe::App for Desktop {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
         if let Some(asked) = &self.file_dialogs {
-            sheet_dialogs::show_asked(asked, frame, ui.ctx());
+            file_dialogs::show_asked(asked, frame, ui.ctx());
         }
         self.window.frame(ui.ctx(), self.app.session.config.as_deref());
         if !self.drawn {
