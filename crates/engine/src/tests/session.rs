@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use super::import_probe::ProbeGate;
 use crate::Session;
 
 fn demo() -> Session {
@@ -33,15 +34,22 @@ fn import_new_comp_undo(background: bool) {
         }
     }
     let mut s = Session { importer: Some(std::sync::Arc::new(Clip)), ..Default::default() };
+    let gate = background.then(ProbeGate::default);
+    if let Some(gate) = &gate {
+        s.importer = Some(gate.wrap(std::sync::Arc::new(Clip)));
+    }
     s.execute("file.importPlaceholder", json!({"name": "Unrelated"})).unwrap();
     let mut before = serde_json::to_value(&s.project).unwrap();
     let mut undo = s.history.undo.len();
     s.execute_checked("file.import", json!({"paths": ["clip.mov", "other.mov", "broken.bad"], "newComp": true, "background": background})).unwrap();
     if background {
+        gate.as_ref().unwrap().wait_started();
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "the probe is still blocked");
         // A user can keep editing while the probe runs. Its undo must stay separate.
         s.execute("file.importPlaceholder", json!({"name": "During probe"})).unwrap();
         before = serde_json::to_value(&s.project).unwrap();
         undo = s.history.undo.len();
+        gate.as_ref().unwrap().release();
     }
     s.wait_jobs();
     let c = s.active_comp().unwrap();
@@ -56,8 +64,26 @@ fn import_new_comp_undo(background: bool) {
     s.execute("edit.redo", json!({})).unwrap();
     assert_eq!(serde_json::to_value(&s.project).unwrap(), after);
     let undo = s.history.undo.len();
-    s.execute_checked("file.import", json!({"paths": ["broken.bad"], "newComp": true, "background": background})).unwrap();
+    let failed_gate = background.then(ProbeGate::default);
+    if let Some(gate) = &failed_gate {
+        s.importer = Some(gate.wrap(std::sync::Arc::new(Clip)));
+    }
+    let result = s.execute_checked("file.import", json!({"paths": ["broken.bad"], "newComp": true, "background": background})).unwrap();
+    if let Some(gate) = &failed_gate {
+        gate.wait_started();
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), after);
+        assert_eq!(s.history.undo.len(), undo);
+        gate.release();
+    }
     s.wait_jobs();
+    let result = if background {
+        let job = s.job_log.last().unwrap();
+        assert_eq!(job.status, "done");
+        job.result.clone()
+    } else {
+        result
+    };
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
     assert_eq!(serde_json::to_value(&s.project).unwrap(), after);
     assert_eq!(s.history.undo.len(), undo, "an all-failed import adds no undo step");
 }
