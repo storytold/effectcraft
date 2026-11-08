@@ -434,6 +434,47 @@ fn layer_times_with_a_zero_denominator_are_reported() {
     assert!(losses(&r.unwrap(), LossCategory::DamagedData).is_empty());
 }
 
+/// The time stretch of every imported layer.
+fn stretches(p: &Project) -> Vec<f64> {
+    p.items.values().filter_map(|i| if let ItemKind::Comp(c) = &i.kind { Some(c) } else { None }).flat_map(|c| c.layers.iter().map(|l| l.stretch)).collect()
+}
+
+#[test]
+fn a_time_stretch_outside_one_to_9900_percent_is_clamped_and_reported() {
+    // ldta byte 8 is the stretch numerator (i32), byte 108 the denominator (u32). 1/(2^31 - 1) is
+    // about 5e-8 %: imported as stored, the layer and audio time divided by ~0 (#3247).
+    for (num, den, want) in [(1i32, i32::MAX as u32, 1.0), (-1, i32::MAX as u32, -1.0), (i32::MAX, 1, 9900.0), (i32::MIN, 1, -9900.0)] {
+        let bytes = mutate(&mut |c| {
+            if c.id == *b"ldta" {
+                set_data(c, 8, &num.to_be_bytes());
+                set_data(c, 108, &den.to_be_bytes());
+            }
+        });
+        let (p, r) = run(&bytes, true);
+        let r = r.unwrap();
+        let found = losses(&r, LossCategory::DamagedData);
+        assert!(found.iter().any(|d| d.contains("time stretch") && d.contains("outside")), "{num}/{den}: {found:?}");
+        let s = stretches(&p);
+        assert!(!s.is_empty() && s.iter().all(|v| *v == want), "{num}/{den}: {s:?}");
+        let (p, r) = run(&bytes, false);
+        assert!(r.is_err(), "{num}/{den}: strict import must refuse");
+        assert!(p.items.is_empty());
+    }
+    // A small stretch within the range (1/64: 1.5625 %) and -9900 % itself are no damage.
+    for (num, den, want) in [(1i32, 64u32, 1.5625), (-99, 1, -9900.0)] {
+        let bytes = mutate(&mut |c| {
+            if c.id == *b"ldta" {
+                set_data(c, 8, &num.to_be_bytes());
+                set_data(c, 108, &den.to_be_bytes());
+            }
+        });
+        let (p, r) = run(&bytes, true);
+        let r = r.unwrap();
+        assert!(!losses(&r, LossCategory::DamagedData).iter().any(|d| d.contains("time stretch")), "{num}/{den}: {:?}", r.report.losses);
+        assert!(stretches(&p).iter().all(|v| *v == want), "{num}/{den}: {:?}", stretches(&p));
+    }
+}
+
 /// The project with `nhed` bytes from `at` replaced.
 fn header(at: usize, bytes: &[u8]) -> Vec<u8> {
     mutate(&mut |c| {

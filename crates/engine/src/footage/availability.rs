@@ -215,20 +215,18 @@ impl Scanner {
     }
 }
 
-/// A disk observation prepared entirely by the existing worker, including the potentially
-/// expensive sequence stamps used for disk-cache keys. The UI only swaps a current snapshot.
+/// A disk observation prepared entirely by the existing worker. The UI only swaps a current
+/// snapshot (the disk cache needs nothing: its entries check their own files when read, #3184).
 pub(crate) struct Update {
     before: Arc<Project>,
     after: Arc<Project>,
     paths: BTreeSet<String>,
     newly_missing: usize,
-    cache_enabled: bool,
-    salt: Option<(u64, u64)>,
 }
 
-/// Prepare a replacement only when availability changed. Project cloning and optional disk
-/// salt computation belong on the worker; apply later rejects an outdated project snapshot.
-pub(crate) fn prepare(project: &Arc<Project>, sources: &[Source], missing: &[bool], cache_enabled: bool) -> Option<Update> {
+/// Prepare a replacement only when availability changed. Project cloning belongs on the
+/// worker; apply later rejects an outdated project snapshot.
+pub(crate) fn prepare(project: &Arc<Project>, sources: &[Source], missing: &[bool]) -> Option<Update> {
     let mut after = project.clone();
     let mut paths = BTreeSet::new();
     let mut newly_missing = 0;
@@ -245,22 +243,17 @@ pub(crate) fn prepare(project: &Arc<Project>, sources: &[Source], missing: &[boo
     if paths.is_empty() {
         return None;
     }
-    let salt = cache_enabled.then(|| (Session::footage_fingerprint(&after), crate::render::disk_cache::footage_salt(&after)));
-    Some(Update { before: project.clone(), after, paths, newly_missing, cache_enabled, salt })
+    Some(Update { before: project.clone(), after, paths, newly_missing })
 }
 
 impl Update {
-    /// False means a newer project or cache configuration needs a fresh observation.
+    /// False means a newer project needs a fresh observation.
     pub fn apply(self, s: &mut Session) -> bool {
-        if !Arc::ptr_eq(&s.project, &self.before) || s.disk_cache.is_some() != self.cache_enabled {
+        if !Arc::ptr_eq(&s.project, &self.before) {
             return false;
         }
         let dirty = s.is_dirty();
         s.project = self.after;
-        if let Some((fingerprint, salt)) = self.salt {
-            s.disk_salt = Some((fingerprint, salt));
-            s.layer_cache.set_disk_salt(salt);
-        }
         s.bump();
         if !dirty {
             s.mark_saved();
@@ -371,7 +364,7 @@ mod tests {
     fn stale_observation_cannot_mark_a_replacement_missing() {
         let (mut s, id) = session(Arc::new(Disk::default()));
         let old = sources(&s);
-        let update = prepare(&s.project, &old, &[true, true], false).unwrap();
+        let update = prepare(&s.project, &old, &[true, true]).unwrap();
         if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
             f.path = "/new.png".into();
         }
@@ -398,9 +391,12 @@ mod tests {
         assert_eq!(disk.looks.load(Ordering::Relaxed), 2, "one file per source, no scan of an unmounted folder");
     }
 
+    /// An availability change does no disk-cache work (#3184): the cache stays attached and
+    /// no file is looked at for it, on the worker or when the UI applies the observation (it
+    /// used to stamp every footage file for a new layer salt).
     #[test]
-    fn applying_prepared_cache_salt_does_not_restat_files_on_the_ui_thread() {
-        let dir = std::env::temp_dir().join(format!("ec-availability-salt-{}", std::process::id()));
+    fn applying_an_availability_change_does_no_disk_cache_work() {
+        let dir = std::env::temp_dir().join(format!("ec-availability-cache-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("plate.png");
         std::fs::write(&file, b"plate").unwrap();
@@ -413,16 +409,13 @@ mod tests {
         );
         let cache = crate::render::disk_cache::DiskCache::open(dir.join("cache"), 1 << 20).unwrap();
         s.disk_cache = Some(cache.clone());
-        s.layer_cache.set_disk(Some((cache, 0)));
+        s.layer_cache.set_disk(Some(cache.clone()));
         s.mark_saved();
-        let update = prepare(&s.project, &sources(&s), &[false], true).unwrap();
-        let expected = update.salt.unwrap().1;
-        // The filesystem can change again after the worker's observation. Applying it must
-        // retain that observation's salt, rather than scan the disk a second time on the UI.
+        let update = prepare(&s.project, &sources(&s), &[false]).unwrap();
         std::fs::remove_file(file).unwrap();
-        assert_ne!(crate::render::disk_cache::footage_salt(&update.after), expected);
         assert!(update.apply(&mut s));
-        assert_eq!(s.disk_salt.map(|(_, salt)| salt), Some(expected));
+        assert!(s.layer_cache.disk().is_some_and(|d| Arc::ptr_eq(&d, &cache)), "still attached");
+        assert_eq!(cache.file_checks(), 0, "no file looked at for the disk cache");
         assert!(!s.is_dirty());
         drop(s);
         std::fs::remove_dir_all(dir).unwrap();
