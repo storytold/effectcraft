@@ -1533,9 +1533,9 @@ mod tests {
             let _ = TextDocument::parse(body);
         }
         for depth in [63, 64, 65, 66, 200] {
-            let body = [b"/k ".repeat(1), b"<< /a ".repeat(depth), b"1".to_vec(), b" >>".repeat(depth), b" /z 2".to_vec()].concat();
+            let body = [b"/k ".to_vec(), b"<< /a ".repeat(depth), b"1".to_vec(), b" >>".repeat(depth), b" /z 2".to_vec()].concat();
             assert_eq!(parse_text_dict(&body), oracle::parse_text_dict(&body), "depth {depth}");
-            let body = [b"/k ".repeat(1), b"[ ".repeat(depth), b"]".repeat(depth)].concat();
+            let body = [b"/k ".to_vec(), b"[ ".repeat(depth), b"]".repeat(depth)].concat();
             assert_eq!(parse_text_dict(&body), oracle::parse_text_dict(&body), "array depth {depth}");
         }
     }
