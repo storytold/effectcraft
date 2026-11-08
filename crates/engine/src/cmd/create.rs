@@ -99,8 +99,11 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
                     continue;
                 };
                 let bytes = s.services.read_file(&f.path).map_err(|e| EngineError::Other(format!("cannot read {}: {e}", f.path)))?;
-                let doc = crate::vector::vector_doc(&f.path, &bytes, f.layer.as_ref(), f.page)
+                // In the source layer's pixels, as the footage is drawn (a placed page of an After
+                // Effects project fills the stored size, #3099).
+                let doc = crate::vector::footage_doc(&f, &bytes)
                     .unwrap_or_else(|| Err(format!("{}: not a vector file", f.path)))
+                    .map(|d| crate::vector::fitted_to_footage(d, &f))
                     .map_err(EngineError::Other)?;
                 // Images become footage layers (PNG files written next to the source and
                 // imported), parented to the shape layer below it.

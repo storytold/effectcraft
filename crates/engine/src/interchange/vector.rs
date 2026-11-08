@@ -261,15 +261,40 @@ pub fn is_vector(f: &effectcraft_project::Footage) -> bool {
     effectcraft_render::is_vector_footage(f) || f.path.to_ascii_lowercase().ends_with(".svg")
 }
 
+/// `doc` (the document of footage `f`) in the footage's layer pixels, as the renderer draws it
+/// ([`effectcraft_render::vector_fit`]): a placed page of an After Effects project is scaled to
+/// fill the size stored for it; other footage is unchanged.
+pub fn fitted_to_footage(mut doc: Doc, f: &effectcraft_project::Footage) -> Doc {
+    let (_, [sx, sy]) = effectcraft_render::vector_fit(f, [doc.width, doc.height], doc.pixel_size(), 1.0);
+    if f.placed_page {
+        doc.root.transform = Affine::scale_non_uniform(sx, sy) * doc.root.transform;
+        (doc.width, doc.height) = (doc.width * sx, doc.height * sy);
+    }
+    doc
+}
+
+/// The vector document of footage `f` (its file read as `bytes`; `None` for other formats): its
+/// page, framed as [`effectcraft_project::Footage::placed_page`] says, restricted to its layer.
+pub fn footage_doc(f: &effectcraft_project::Footage, bytes: &[u8]) -> Option<Result<Doc, String>> {
+    let framing = if f.placed_page { effectcraft_pdf::Framing::Placed } else { effectcraft_pdf::Framing::Viewer };
+    vector_doc(&f.path, bytes, f.layer.as_ref(), f.page, framing)
+}
+
 /// The vector document of an SVG / PDF / AI / EPS file (`None` for other formats): page
-/// `page` of a PDF, restricted to one layer when `layer` names it.
-pub fn vector_doc(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::SourceLayer>, page: u32) -> Option<Result<Doc, String>> {
+/// `page` of a PDF framed as `framing` says, restricted to one layer when `layer` names it.
+pub fn vector_doc(
+    path: &str,
+    bytes: &[u8],
+    layer: Option<&effectcraft_project::SourceLayer>,
+    page: u32,
+    framing: effectcraft_pdf::Framing,
+) -> Option<Result<Doc, String>> {
     if path.to_ascii_lowercase().ends_with(".svg") || effectcraft_svg::looks_like_svg(bytes) {
         return Some(effectcraft_svg::parse(bytes).map_err(|e| format!("{path}: {e}")));
     }
     effectcraft_pdf::sniff(bytes)?;
     Some(
-        effectcraft_pdf::parse_page(bytes, page as usize)
+        effectcraft_pdf::parse_page_framed(bytes, page as usize, framing)
             .map(|d| match layer {
                 Some(l) => effectcraft_pdf::layer_doc_with_sizes(&d, l.index as usize, l.layer_size).0,
                 None => d,
