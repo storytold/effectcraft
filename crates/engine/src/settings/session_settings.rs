@@ -30,6 +30,7 @@ impl Session {
         self.apply_cache_budgets();
         self.configure_disk_cache();
         self.footage.set_conform_folder(self.conformed_audio_folder());
+        self.footage.set_localizer(self.localize_settings());
         // Switches Affect Nested Comps changes what precomp layers render: drop cached pixels.
         let nested = self.prefs.general.switches_affect_nested_comps;
         if self.applied_nested_switches.replace(nested).is_some_and(|was| was != nested) {
@@ -65,6 +66,42 @@ impl Session {
         self.cache_folder(&self.prefs.disk.media_cache_folder, "Media Cache")
     }
 
+    /// Settings ▸ Disk ▸ Localize Network Footage (#3271): the local copies' folder and size
+    /// limit, `None` when off (or there is no folder for them).
+    pub fn localize_settings(&self) -> Option<effectcraft_render::LocalizeConfig> {
+        let d = &self.prefs.disk;
+        if !d.localize_footage || cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        // Without a folder of their own, the copies go beside the disk cache's folder (a disk
+        // the user chose for caches), else beside the platform cache folder.
+        let folder = if d.localize_folder.trim().is_empty() && !d.disk_cache_folder.trim().is_empty() {
+            let dc = std::path::PathBuf::from(d.disk_cache_folder.trim());
+            dc.parent().map_or_else(|| dc.join("Local Footage Copies"), |p| p.join("Local Footage Copies"))
+        } else {
+            self.cache_folder(&d.localize_folder, "Local Footage Copies")?
+        };
+        let space_of = folder.clone();
+        Some(effectcraft_render::LocalizeConfig {
+            folder,
+            max_bytes: u64::from(d.localize_max_gb.max(1)) << 30,
+            network: network_locations(&d.network_footage_locations),
+            disk_space: Some(std::sync::Arc::new(move || {
+                // (the folder may not exist yet: its nearest existing parent's disk)
+                let mut at = space_of.as_path();
+                while !at.exists() {
+                    at = at.parent()?;
+                }
+                crate::sysinfo::disk_space(at)
+            })),
+        })
+    }
+
+    /// What the footage localizer is doing, for Settings ▸ Disk (`None`: off).
+    pub fn localize_status(&self) -> Option<effectcraft_render::LocalizeReport> {
+        self.footage.localize_status()
+    }
+
     /// Settings ▸ Disk ▸ Conformed Audio Folder (decoded footage audio, see
     /// `MediaPool::set_conform_folder`).
     pub fn conformed_audio_folder(&self) -> Option<std::path::PathBuf> {
@@ -77,6 +114,12 @@ impl Session {
         let b = self.prefs.cache_budgets(self.sys_memory);
         self.layer_cache.set_budget(b.layer);
         self.footage.set_cache_budget(b.media);
+        // One budget over the big caches together (#3271): the layer cache, the footage frames
+        // and decoded planes, and the preview frames' share.
+        let accountant = effectcraft_render::memory::Accountant::global();
+        let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
+        accountant.register(&layers);
+        accountant.set_budget(b.layer.saturating_add(b.media).saturating_add(b.preview).saturating_add(effectcraft_render::memory::PLANE_BUDGET));
     }
 
     /// Take the latest reading of the system's memory and start the next one in the background
@@ -130,6 +173,7 @@ impl Session {
             self.disk_cache = None;
             self.disk_watch = Default::default();
             self.layer_cache.set_disk(None);
+            self.footage.set_disk_cache(None);
             return;
         };
         // Tests: the Roto/Object Matte segment store below is one per process, so a test that
@@ -154,6 +198,7 @@ impl Session {
                     self.disk_cache = None;
                     self.disk_watch = Default::default();
                     self.layer_cache.set_disk(None);
+                    self.footage.set_disk_cache(None);
                     return;
                 }
             },
@@ -169,6 +214,11 @@ impl Session {
         // Used at once (no file is looked at first: each entry checks the source files it lists
         // when it is read, #3184).
         self.layer_cache.set_disk(Some(dc.clone()));
+        // Decoded footage channels (OpenEXR planes) persist there too (#3271).
+        self.footage.set_disk_cache(Some(dc.clone()));
+        // Its write queue counts in the common memory budget.
+        let queue: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = dc.clone();
+        effectcraft_render::memory::Accountant::global().register(&queue);
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
         // disk cache off drops it).
         let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();
@@ -372,4 +422,10 @@ impl Session {
             self.autosave.sentinel = false;
         }
     }
+}
+
+/// Settings ▸ Disk ▸ Network Footage Locations: path prefixes separated by `;` or new lines
+/// (`P:\; Q:\renders`), each counted as network footage (#3271).
+pub fn network_locations(setting: &str) -> Vec<std::path::PathBuf> {
+    setting.split([';', '\n']).map(str::trim).filter(|s| !s.is_empty()).map(std::path::PathBuf::from).collect()
 }

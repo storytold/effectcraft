@@ -153,6 +153,15 @@ Commands (CLI, MCP, control channel):
 - `disk.mediaCacheFolder`: audio waveform summaries kept between sessions (`Peaks/`)
 - `disk.conformedMediaFolder`: decoded (conformed) footage audio, written once per file and
   sample rate and read back instead of decoding again
+- `disk.localizeFootage` (off by default), `disk.localizeMaxGb` (20), `disk.localizeFolder`,
+  `disk.networkFootageLocations`: OpenEXR footage on network shares is copied, one file at a
+  time on a background thread, to a local folder (by default beside the disk cache's folder),
+  and read from the copy once it is complete and the source still has the size and modification
+  time it had when copied. Network footage is UNC paths (`\\server\share\…`) and the locations
+  listed in `disk.networkFootageLocations` (`;`-separated path prefixes, such as a drive letter
+  mapped to a share: `P:\`). The copies take at most `disk.localizeMaxGb` and leave the disk
+  cache's reserve free on their disk; earlier sessions' copies are adopted. The Disk page shows
+  the local copies, what is queued and being copied, and the network locations
 - `memory.ramReservedGb`: the cache budgets together leave this much physical memory free
 - `memory.reduceCacheWhenLow`: cache budgets halve while the system is low on memory (checked
   every 30 s by the desktop app, on a background thread)

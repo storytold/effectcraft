@@ -239,14 +239,18 @@ impl Cache {
     /// prefetch kept refilling while it evicted the next frames (#595). Frames of another scale
     /// than the one on screen go first (a zoom or resolution change).
     fn victim(&self) -> Option<usize> {
+        self.victim_of(|_| true)
+    }
+    /// [`Cache::victim`] among the frames `eligible` accepts (in the same order).
+    fn victim_of(&self, eligible: impl Fn(&FrameKey) -> bool) -> Option<usize> {
         if let Some(s) = self.scale
-            && let Some(i) = self.order.iter().position(|k| k.scale != s)
+            && let Some(i) = self.order.iter().position(|k| k.scale != s && eligible(k))
         {
             return Some(i);
         }
-        let Some(p) = &self.playhead else { return (!self.order.is_empty()).then_some(0) };
+        let Some(p) = &self.playhead else { return self.order.iter().position(&eligible) };
         let mut farthest: Option<(i64, usize)> = None;
-        for (i, k) in self.order.iter().enumerate() {
+        for (i, k) in self.order.iter().enumerate().filter(|(_, k)| eligible(k)) {
             match p.ahead(k) {
                 None => return Some(i),
                 Some(d) if farthest.is_none_or(|(f, _)| d > f) => farthest = Some((d, i)),
@@ -254,6 +258,10 @@ impl Cache {
             }
         }
         farthest.map(|(_, i)| i)
+    }
+    /// [`Cache::victim`] among the frames in RAM (a GPU frame's bytes are video memory).
+    fn cpu_victim(&self) -> Option<usize> {
+        self.victim_of(|k| self.map.get(k).is_some_and(|c| !c.img.is_gpu()))
     }
     /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
     /// than the one on screen first (a zoom or resolution change).
@@ -334,6 +342,30 @@ impl Cache {
         while self.bytes > self.budget {
             let Some(old) = self.victim().and_then(|i| self.order.remove(i)) else { break };
             self.remove(&old);
+        }
+    }
+}
+
+/// The preview frames (in RAM; GPU frames have their own budget) in the common memory budget
+/// (#3271): what the user looks at, freed last.
+struct PreviewMemory(Arc<Mutex<Cache>>);
+
+impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
+    fn name(&self) -> &'static str {
+        "preview frames"
+    }
+    fn bytes(&self) -> usize {
+        self.0.lock().map(|c| c.bytes.saturating_sub(c.gpu_bytes)).unwrap_or(0)
+    }
+    fn priority(&self) -> u8 {
+        3
+    }
+    fn trim_to(&self, bytes: usize) {
+        let Ok(mut c) = self.0.lock() else { return };
+        // (only frames in RAM: dropping a GPU frame frees no RAM, and loses a viewer frame)
+        while c.bytes.saturating_sub(c.gpu_bytes) > bytes {
+            let Some(old) = c.cpu_victim().and_then(|i| c.order.remove(i)) else { break };
+            c.remove(&old);
         }
     }
 }
@@ -487,7 +519,7 @@ fn put_disk_frame(dc: &DiskCache, dk: u128, img: &FrameImage, files: &ReadFiles,
     match img {
         FrameImage::Cpu(img) => {
             let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba, files, virtual_id, since)
+            dc.put_frame_owned(dk, img.size[0] as u32, img.size[1] as u32, rgba, files, virtual_id, since)
         }
         FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits(), files, virtual_id, since),
         FrameImage::Gpu(_) => false,
@@ -556,6 +588,8 @@ pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
 
 pub struct Frames {
     cache: Arc<Mutex<Cache>>,
+    /// The preview frames in the common memory budget (#3271), held here (registered weakly).
+    _memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder>,
     /// Keys queued or rendering.
     inflight: Arc<Mutex<HashSet<FrameKey>>>,
     /// Pending jobs, picked by priority when a pool thread frees up (the viewer's frame first).
@@ -642,8 +676,23 @@ impl Default for Frames {
         let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), ..Default::default() };
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
+        let cache = Arc::new(Mutex::new(Cache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            gpu_bytes: 0,
+            budget: 3 << 30,
+            gpu_budget: GPU_BUDGET,
+            gpu_pressure: None,
+            gpu_adjusted: None,
+            playhead: None,
+            scale: None,
+        }));
+        let memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder> = Arc::new(PreviewMemory(cache.clone()));
+        effectcraft_engine::render::memory::Accountant::global().register(&memory);
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
+            cache,
+            _memory: memory,
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]

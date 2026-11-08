@@ -298,6 +298,11 @@ pub fn pages() -> Vec<Page> {
                 Section("Media Cache"),
                 s("disk.mediaCacheFolder", "Database and Cache Folder", Kind::Path, true),
                 s("disk.conformedMediaFolder", "Conformed Audio Folder", Kind::Path, true),
+                Section("Network Footage"),
+                s("disk.localizeFootage", "Localize Network Footage", B, true),
+                s("disk.localizeMaxGb", "Maximum Local Copies Size", Kind::Int(1, 100_000, "GB"), true),
+                s("disk.localizeFolder", "Local Copies Folder", Kind::Path, true),
+                s("disk.networkFootageLocations", "Network Footage Locations", Kind::Text, true),
             ],
         },
         Page {

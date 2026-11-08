@@ -91,6 +91,7 @@ fn render_project(host: &Session, path: &Path) -> Value {
     // The project shared `host`'s footage source and gave it its own set of footage effects read
     // the channels of (#474): give back the host's.
     host.footage.set_aux_footage(host.aux_footage.as_deref().unwrap_or(&[]));
+    host.footage.set_aux_needs(host.aux_needs.as_deref().unwrap_or(&[]));
     let mut v = match result {
         Ok(v) => v,
         Err(e) => json!({"state": "failed", "error": e, "items": []}),

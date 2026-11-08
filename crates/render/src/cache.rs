@@ -67,6 +67,37 @@ struct Inner {
     /// a render's reads started at travels with its files instead, [`ReadFiles::since`]: two
     /// renders of a key may overlap).
     missed_at: HashMap<u64, web_time::Instant>,
+    /// Keys let go of lately (newest last, at most [`EVICTED_KEPT`]) and how many of them were
+    /// asked for again: a cache that keeps making again what it just let go of is thrashing
+    /// ([`crate::memory::MemoryHolder::refills`]).
+    evicted: std::collections::VecDeque<u64>,
+    refills: u64,
+}
+
+/// Keys of evicted buffers remembered to tell a refill (#3271).
+const EVICTED_KEPT: usize = 256;
+
+impl Inner {
+    /// Drop least recently used entries until at most `bytes` are held, remembering their keys.
+    fn evict_to(&mut self, bytes: usize) {
+        if self.bytes <= bytes {
+            return;
+        }
+        let mut by_age: Vec<(u64, u64)> = self.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
+        by_age.sort_unstable();
+        for (_, k) in by_age {
+            if self.bytes <= bytes {
+                break;
+            }
+            if let Some(e) = self.map.remove(&k) {
+                self.bytes -= e.bytes;
+                if self.evicted.len() >= EVICTED_KEPT {
+                    self.evicted.pop_front();
+                }
+                self.evicted.push_back(k);
+            }
+        }
+    }
 }
 
 /// Hit/miss counters and memory use (for perf readouts and tests).
@@ -88,7 +119,17 @@ impl LayerCache {
     /// A cache holding at most `budget` bytes of pixels.
     pub fn new(budget: usize) -> LayerCache {
         LayerCache {
-            inner: Mutex::new(Inner { map: HashMap::new(), bytes: 0, budget, clock: 0, hits: 0, misses: 0, missed_at: HashMap::new() }),
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                bytes: 0,
+                budget,
+                clock: 0,
+                hits: 0,
+                misses: 0,
+                missed_at: HashMap::new(),
+                evicted: Default::default(),
+                refills: 0,
+            }),
             disk: Mutex::new(None),
             store: Mutex::new(None),
             virtual_id: Mutex::new(None),
@@ -162,6 +203,11 @@ impl LayerCache {
             None => {
                 let mut g = self.inner.lock().ok()?;
                 g.misses += 1;
+                // (made again shortly after it was let go of: a refill)
+                if let Some(at) = g.evicted.iter().position(|k| *k == key) {
+                    g.evicted.remove(at);
+                    g.refills += 1;
+                }
                 drop(g);
                 let store = self.persistent();
                 // (before the entry is read: what it is made of may be dropped meanwhile)
@@ -299,17 +345,11 @@ impl LayerCache {
         if g.bytes > g.budget {
             // Evict least-recently used entries down to 3/4 of the budget.
             let target = g.budget / 4 * 3;
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= target {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
+            g.evict_to(target);
         }
+        drop(g);
+        // (with the lock released: the accountant asks every cache for its bytes)
+        crate::memory::Accountant::global().note_growth();
         (buf, files)
     }
 
@@ -322,18 +362,7 @@ impl LayerCache {
     pub fn set_budget(&self, budget: usize) {
         let Ok(mut g) = self.inner.lock() else { return };
         g.budget = budget;
-        if g.bytes > budget {
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= budget {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
-        }
+        g.evict_to(budget);
     }
 
     pub fn clear(&self) {
@@ -359,7 +388,7 @@ pub trait LayerStore: Send + Sync {
     /// Keep a buffer that was slow to render, with the source files it was made of. `since`: the
     /// [`LayerStore::drop_generation`] when its render started (a buffer made of a file dropped
     /// after that is refused).
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64);
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64);
     /// How many times files were dropped from the store (File ▸ Reload Footage,
     /// [`crate::disk_cache::DiskCache::drop_files`]); `0` for a store that never drops.
     fn drop_generation(&self) -> u64 {
@@ -535,7 +564,7 @@ impl LayerStore for PrefetchStore {
     }
 
     /// Queues the layer for writing to the persistent store the first time `key` is seen.
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, _since: u64) {
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, _since: u64) {
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
             s.writes.push((key, crate::disk_cache::layer_entry(buf, files)));
@@ -700,11 +729,22 @@ fn history_unkeyable(layer: &Layer, effects: Option<usize>) -> bool {
     reads_other_times(layer, effects) && layer.props.children.iter().any(|c| matches!(c, Node::Group(g) if g.match_id != "transform" && has_expression(g)))
 }
 
-/// A still image (no proxy): its layer is cached like a text or shape layer, so the GPU
-/// compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by every
-/// preview worker ran the GPU out of memory). Movies and sequences stay in the media pool only.
-fn still_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
-    ctx.project.item(item).is_some_and(|it| it.proxy.is_none() && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still))
+/// Footage whose processed layer is cached (keyed by item and source time for all but stills):
+/// - a still image (no proxy): its layer is cached like a text or shape layer, so the GPU
+///   compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by
+///   every preview worker ran the GPU out of memory);
+/// - an OpenEXR sequence (no proxy, #3271): each frame is a file read whole and its effects
+///   (EXtractoR, Cryptomatte, depth effects) are costly, so a processed frame is worth keeping in
+///   RAM and on disk. Its entries list the frame file they read, so Reload Footage and a changed
+///   file drop them as any other.
+///
+/// Movies and other sequences stay in the media pool only.
+fn cached_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
+    ctx.project.item(item).is_some_and(|it| {
+        it.proxy.is_none()
+            && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still
+                || (f.kind == FootageKind::Sequence && f.sequence.first().is_some_and(|p| p.to_ascii_lowercase().ends_with(".exr"))))
+    })
 }
 
 /// Does the layer have an animated mask that motion blur may draw at other times (Layer ▸ Mask ▸
@@ -779,7 +819,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             hash_debug(&mut h, s);
         }
         LayerSource::Text | LayerSource::Shape => {}
-        LayerSource::Footage { item } if footage || still_footage(ctx, ctx.media_item(layer, *item)) => {
+        LayerSource::Footage { item } if footage || cached_footage(ctx, ctx.media_item(layer, *item)) => {
             let item = ctx.media_item(layer, *item);
             let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };
@@ -789,7 +829,19 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             item.hash(&mut h);
             // A still is the same at every time (unless a proxy, which may be a movie, stands in).
             if f.kind != FootageKind::Still || it.proxy.is_some() {
-                ctx.source_time(layer).0.hash(&mut h);
+                // A sequence frame without frame blending or fields shows one file for its whole
+                // frame duration: keyed by its frame, so times within it (a faster comp, a
+                // stretched layer) share the entry (#3271).
+                let whole_frames = f.kind == FootageKind::Sequence
+                    && it.proxy.is_none()
+                    && f.fields == effectcraft_project::FieldOrder::Off
+                    && crate::frames::frame_blend_mode(ctx, layer) == effectcraft_project::FrameBlend::Off;
+                if whole_frames {
+                    0x5e9_u16.hash(&mut h);
+                    crate::frames::frame_position(ctx.source_time(layer), f.frame_rate).0.hash(&mut h);
+                } else {
+                    ctx.source_time(layer).0.hash(&mut h);
+                }
             }
             // Frame blending mixes neighbouring source frames.
             ctx.comp.enable_frame_blending.hash(&mut h);
@@ -934,6 +986,28 @@ pub fn derive(key: u64, i: u64) -> u64 {
     h.finish()
 }
 
+/// The layer cache in the common memory budget (#3271): rendered layer buffers, costly to make
+/// again, are freed after footage frames and planes.
+impl crate::memory::MemoryHolder for LayerCache {
+    fn name(&self) -> &'static str {
+        "layer cache"
+    }
+    fn bytes(&self) -> usize {
+        self.inner.lock().map(|g| g.bytes).unwrap_or(0)
+    }
+    fn priority(&self) -> u8 {
+        2
+    }
+    fn trim_to(&self, bytes: usize) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.evict_to(bytes);
+        }
+    }
+    fn refills(&self) -> u64 {
+        self.inner.lock().map(|g| g.refills).unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod shared_insert_tests {
     use std::sync::Arc;
@@ -976,7 +1050,7 @@ mod shared_insert_tests {
         assert!(store.get_layer(5, Some(&two)).is_none());
         assert!(!store.has(5));
         assert_eq!(store.take_misses(), [5]);
-        store.put_layer(5, &buf(), &EntryFiles::of(&files, Some(&two)).unwrap(), 0);
+        store.put_layer(5, &Arc::new(buf()), &EntryFiles::of(&files, Some(&two)).unwrap(), 0);
         assert_eq!(store.take_writes().len(), 1, "written over the changed entry");
         // Through the layer cache: a hit reports its files; incomplete lists are not queued.
         let cache = LayerCache::default();
@@ -1058,7 +1132,7 @@ mod shared_insert_tests {
         fn get_layer(&self, key: u128, virtual_id: Option<crate::disk_cache::VirtualFileId<'_>>) -> Option<(Arc<Buf>, crate::reads::ReadFiles)> {
             super::LayerStore::get_layer(&*self.dc, key, virtual_id)
         }
-        fn put_layer(&self, key: u128, buf: &Buf, files: &crate::disk_cache::EntryFiles, since: u64) {
+        fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &crate::disk_cache::EntryFiles, since: u64) {
             self.arrived.wait();
             self.go_on.wait();
             super::LayerStore::put_layer(&*self.dc, key, buf, files, since);

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
-use effectcraft_raster::channels3d::{BACKGROUND_DEPTH, crypto_hash};
+use effectcraft_raster::channels3d::{AuxLookup, BACKGROUND_DEPTH, crypto_hash};
 use effectcraft_raster::{AuxChannels, Image, Px, gaussian_blur};
 use rayon::prelude::*;
 
@@ -47,6 +47,59 @@ const READS_AUX: [&str; 8] = [
 /// layer then decodes the footage's picture together with its channels (#474).
 pub fn reads_aux(id: &str) -> bool {
     READS_AUX.contains(&id)
+}
+
+/// What effect `id` reads of its layer's auxiliary channels with `params`, declared before the
+/// render (#3271): the lookups it makes on the planes, which the footage resolves against the
+/// file's channel names to read only those channels (with the picture's, in one pass). `None`
+/// for an effect that doesn't say: all channels are read.
+pub fn aux_needs(id: &str, params: &crate::Params) -> Option<Vec<AuxLookup>> {
+    use effectcraft_raster::channels3d::{COVERAGE_NAMES, DEPTH_NAMES, MATERIAL_ID_NAMES, OBJECT_ID_NAMES};
+    let find = AuxLookup::find;
+    // (as `id_channel` picks)
+    let ids = |which: u32| if which == 1 { find(&MATERIAL_ID_NAMES) } else { find(&OBJECT_ID_NAMES) };
+    Some(match id {
+        // (as `channel_extract_at` looks them up, fallbacks included)
+        "ec.3d.channelextract" => match params.e("channel") {
+            0 => vec![find(&DEPTH_NAMES)],
+            1 => vec![find(&OBJECT_ID_NAMES)],
+            7 => vec![find(&MATERIAL_ID_NAMES)],
+            4 => vec![find(&COVERAGE_NAMES)],
+            2 => vec![find(&["UV.U", "U", "uv.x"]), find(&["UV.V", "V", "uv.y"]), find(&["UV.W", "W", "uv.z"])],
+            3 => vec![find(&["N.X", "Normal.X", "normals.x"]), find(&["N.Y", "Normal.Y", "normals.y"]), find(&["N.Z", "Normal.Z", "normals.z"])],
+            5 => vec![find(&["BG.R", "Background.R"]), find(&["BG.G", "Background.G"]), find(&["BG.B", "Background.B"])],
+            _ => vec![find(&["R"]), find(&["G"]), find(&["B"])],
+        },
+        "ec.3d.depthmatte" | "ec.3d.depthoffield" | "ec.3d.fog3d" => vec![find(&DEPTH_NAMES)],
+        "ec.3d.idmatte" => {
+            let mut v = vec![ids(params.e("auxChannel"))];
+            if params.b("useCoverage") {
+                v.push(find(&COVERAGE_NAMES));
+            }
+            v
+        }
+        "ec.3d.identifier" => vec![ids(params.e("channelType"))],
+        "ec.3d.cryptomatte" => vec![AuxLookup::Crypto { name: params.s("layerName").to_string(), index: params.e("layer") as usize }],
+        // (an empty name reads the layer's own channel)
+        "ec.3d.extractor" => {
+            ["red", "green", "blue", "alpha"].iter().map(|k| params.s(k).trim()).filter(|n| !n.is_empty()).map(|n| AuxLookup::Name(n.to_string())).collect()
+        }
+        _ => return None,
+    })
+}
+
+/// How far effect `id` with `params` reaches around a pixel of its layer (layer pixels), for
+/// reading only the footage rows a region of interest shows (#3271): `Some(0)` for effects whose
+/// pixel depends on that pixel alone, `None` for every other (it may read anywhere).
+pub fn pixel_margin(id: &str, params: &crate::Params) -> Option<f64> {
+    match id {
+        "ec.3d.channelextract" | "ec.3d.depthmatte" | "ec.3d.identifier" | "ec.3d.cryptomatte" | "ec.3d.extractor" => Some(0.0),
+        // (its Gradient Layer reads another layer)
+        "ec.3d.fog3d" if params.f("layerContribution") <= 0.0 => Some(0.0),
+        // (Feather blurs the matte)
+        "ec.3d.idmatte" if params.f("feather") <= 0.0 => Some(0.0),
+        _ => None,
+    }
 }
 
 fn aux(ctx: &EffectCtx) -> Option<Arc<AuxChannels>> {
@@ -409,67 +462,9 @@ pub fn selection_hashes(sel: &str, manifest: Option<&[(String, u32)]>) -> Vec<u3
     out
 }
 
-/// The Cryptomatte layers every renderer names, and the Layer popup's options when the footage
-/// has no Cryptomatte metadata. The stored Layer value is an index: 0-2 are these (an exact
-/// match or a suffix such as `ViewLayer.CryptoObject`), 3 and up are the file's other Cryptomatte
-/// layers in name order, so a project saved before the popup followed the footage loads unchanged.
-pub const CRYPTO_LAYERS: [&str; 3] = ["CryptoObject", "CryptoMaterial", "CryptoAsset"];
-
-/// The Layer popup's entries for Cryptomatte `layers` (sorted, as [`AuxChannels::crypto_layers`]
-/// returns them): the stored value and the layer's name, in value order. Of several layers
-/// that fit one standard slot (`A.CryptoObject`, `B.CryptoObject`) the first one keeps the standard
-/// slot, so existing projects load unchanged, and the others get the next custom slots.
-fn crypto_layer_slots(layers: &[String]) -> Vec<(usize, &str)> {
-    let mut out: Vec<(usize, &str)> = vec![];
-    let mut custom = CRYPTO_LAYERS.len();
-    for l in layers {
-        match CRYPTO_LAYERS.iter().position(|w| l == w || l.ends_with(w)) {
-            Some(i) if !out.iter().any(|(j, _)| *j == i) => out.push((i, l)),
-            _ => {
-                out.push((custom, l));
-                custom += 1;
-            }
-        }
-    }
-    out.sort_by_key(|(i, _)| *i);
-    out
-}
-
-/// What the Layer popup lists for the footage `aux`: the Cryptomatte layers the file has, as
-/// (stored value, name), or the three standard ones when there is none (no footage, not an
-/// OpenEXR, no Cryptomatte channels).
-pub fn crypto_layer_choices(aux: Option<&AuxChannels>) -> Vec<(usize, String)> {
-    crypto_layer_menu(aux, 0).0
-}
-
-/// The Layer popup for the stored value `index`: [`crypto_layer_choices`], and the name of the
-/// entry the effect reads (the first when `index` names none, as the effect does).
-pub fn crypto_layer_menu(aux: Option<&AuxChannels>, index: usize) -> (Vec<(usize, String)>, Option<String>) {
-    let layers = aux.map(AuxChannels::crypto_layers).unwrap_or_default();
-    if layers.is_empty() {
-        let all: Vec<(usize, String)> = CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
-        let shown = all.iter().find(|c| c.0 == index).or(all.first()).map(|c| c.1.clone());
-        return (all, shown);
-    }
-    let slots = crypto_layer_slots(&layers);
-    let shown = slots.iter().find(|(i, _)| *i == index).map(|(_, n)| n.to_string()).or_else(|| layers.first().cloned());
-    (slots.into_iter().map(|(i, n)| (i, n.to_string())).collect(), shown)
-}
-
-/// The Cryptomatte layer the effect reads: the one called `name` when the footage has it (Layer
-/// Name, the layer an imported After Effects project names), else [`crypto_layer_name`]'s.
-pub fn crypto_layer_named(aux: &AuxChannels, name: &str, index: usize) -> Option<String> {
-    aux.resolve_crypto_layer_named(name, &crypto_layer_name(aux, index)?)
-}
-
-/// The Cryptomatte layer of `aux` that the stored Layer value `index` reads: its slot's layer, else
-/// the first layer (what a file without that layer has always shown). `None` without any.
-pub fn crypto_layer_name(aux: &AuxChannels, index: usize) -> Option<String> {
-    if aux.crypto_layers().is_empty() {
-        return None;
-    }
-    crypto_layer_menu(Some(aux), index).1
-}
+/// The Cryptomatte Layer popup and the layer the effect reads (the slot rules live with
+/// [`AuxChannels`], so a declared need resolves the layer as the effect does, #3271).
+pub use effectcraft_raster::channels3d::{CRYPTO_LAYERS, crypto_layer_choices, crypto_layer_menu, crypto_layer_name, crypto_layer_named};
 
 /// Rank planes as [`AuxChannels::crypto_rank_planes`] returns them.
 type RankPlanes<'a> = [(&'a [f32], &'a [f32])];
@@ -585,7 +580,7 @@ pub fn matte_only_px(m: f32, in_alpha: bool) -> Px {
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
     let Some(layer) = crypto_layer_named(&a, ctx.params.s("layerName"), ctx.params.e("layer") as usize) else { return b };
-    let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
+    let manifest = a.manifest(&layer);
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
     let idx = index_map(&b, &a);
     let display = ctx.params.e("display");

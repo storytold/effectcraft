@@ -37,6 +37,21 @@ pub trait FootageSource: Send + Sync {
             None => self.frame(item, footage, t),
         }
     }
+    /// [`FootageSource::frame_with`] where only the rows `rows` (of the footage's frame, at
+    /// full resolution) are shown (#3271: a viewer region of interest mapped back through the
+    /// layer): a source may leave the other rows empty (any value) and read only those. Sources
+    /// that read whole frames can leave the default, which reads it all.
+    fn frame_rows(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+        let _ = rows;
+        self.frame_with(item, footage, t, size, float)
+    }
+    /// Whether [`FootageSource::frame_rows`] reads only the rows asked for of `footage` at `t`
+    /// (#3271). A source that reads the whole frame anyway leaves the default: the renderer then
+    /// asks for the whole frame, which its layer cache keeps.
+    fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
+        let _ = (footage, t);
+        false
+    }
     /// `frames` interleaved stereo sample frames of `item`'s audio from source time `t` at
     /// `rate` Hz (`None` when unavailable). The first sample is `t.to_units_floor(rate)`;
     /// a sample boundary uses the earliest representable tick that selects that sample.
@@ -49,12 +64,47 @@ pub trait FootageSource: Send + Sync {
     fn aux(&self, _item: ItemId, _footage: &Footage, _t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         None
     }
+    /// [`FootageSource::aux`] of only what `need` reads (#3271): the channels its lookups find,
+    /// or more (sources may hand over a set that holds them; [`effectcraft_raster::AuxChannels::listed`]
+    /// then names every channel). Sources that read every channel anyway can leave the default.
+    fn aux_for(
+        &self,
+        item: ItemId,
+        footage: &Footage,
+        t: Tick,
+        need: &effectcraft_raster::channels3d::AuxNeed,
+    ) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        let _ = need;
+        self.aux(item, footage, t)
+    }
+    /// The channel names of [`FootageSource::aux`] (planes may be empty: read from the file's
+    /// headers alone), for channel lists and popups. Never handed to an effect.
+    fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.aux(item, footage, t)
+    }
     /// The footage files (by [`Footage::path`]) whose channels effects of the project read
     /// through [`FootageSource::aux`] (EXtractoR, Cryptomatte and the other 3D Channel effects),
     /// replacing the set given before. A source that decodes a file's picture and its channels
     /// separately can decode both at once for these from the first frame on. Sources that don't
     /// ignore it.
     fn set_aux_footage(&self, _paths: &[String]) {}
+    /// What the effects reading the channels of each footage file (by [`Footage::path`], as
+    /// [`FootageSource::set_aux_footage`] names them) read of them (#3271), replacing what was
+    /// given before: the picture of such footage is then decoded together with those channels
+    /// only. A file not named here reads every channel. Sources that don't care ignore it.
+    fn set_aux_needs(&self, _needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {}
+    /// The disk cache (Settings ▸ Media & Disk Cache), `None` when it is off: sources that
+    /// decode costly footage keep what they decoded there too (#3271: OpenEXR channels).
+    /// Sources without such a tier ignore it.
+    fn set_disk_cache(&self, _cache: Option<Arc<crate::disk_cache::DiskCache>>) {}
+    /// Settings ▸ Disk ▸ Localize Network Footage: copy network footage in the background and
+    /// read the copies once they are complete and verified (`None`: off). Sources that don't read
+    /// files ignore it.
+    fn set_localizer(&self, _config: Option<LocalizeConfig>) {}
+    /// What the localizer is doing (`None`: off or not supported).
+    fn localize_status(&self) -> Option<LocalizeReport> {
+        None
+    }
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
     fn model(&self, _item: ItemId, _footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         None
@@ -174,8 +224,32 @@ impl FootageSource for CancellableFootage<'_> {
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux(item, footage, t)
     }
+    fn aux_for(
+        &self,
+        item: ItemId,
+        footage: &Footage,
+        t: Tick,
+        need: &effectcraft_raster::channels3d::AuxNeed,
+    ) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.inner.aux_for(item, footage, t, need)
+    }
+    fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.inner.aux_names(item, footage, t)
+    }
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
+    }
+    fn set_aux_needs(&self, needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {
+        self.inner.set_aux_needs(needs)
+    }
+    fn set_disk_cache(&self, cache: Option<Arc<crate::disk_cache::DiskCache>>) {
+        self.inner.set_disk_cache(cache)
+    }
+    fn set_localizer(&self, config: Option<LocalizeConfig>) {
+        self.inner.set_localizer(config)
+    }
+    fn localize_status(&self) -> Option<LocalizeReport> {
+        self.inner.localize_status()
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inner.model(item, footage)
@@ -214,6 +288,12 @@ impl FootageSource for CancellableFootage<'_> {
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.read(|| self.inner.frame_with(item, footage, t, size, float))
     }
+    fn frame_rows(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+        self.read(|| self.inner.frame_rows(item, footage, t, size, float, rows))
+    }
+    fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
+        self.inner.reads_rows(footage, t)
+    }
 }
 
 /// Footage that can be rasterised at any scale (SVG).
@@ -233,4 +313,35 @@ impl FootageSource for NoFootage {
     fn recording(&self, _: &ReadLog, f: &mut dyn FnMut()) {
         f()
     }
+}
+
+/// Settings ▸ Disk ▸ Localize Network Footage (#3271): where network footage is copied, how much
+/// the copies may take, which locations count as network besides UNC paths, and how to read the
+/// copies' disk's free space (the disk cache's reserve stays free there).
+#[derive(Clone)]
+pub struct LocalizeConfig {
+    pub folder: std::path::PathBuf,
+    pub max_bytes: u64,
+    /// Path prefixes that count as network footage (a drive letter mapped to a share, `P:\`).
+    pub network: Vec<std::path::PathBuf>,
+    /// The copies' disk: `(total, available)` bytes, `None` unknown.
+    pub disk_space: Option<Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync>>,
+}
+
+/// What the footage localizer is doing (Settings ▸ Disk shows it).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalizeReport {
+    /// Complete local copies and their bytes, and the most they may take.
+    pub files: usize,
+    pub bytes: u64,
+    pub max_bytes: u64,
+    /// Files waiting to be copied, and those too large or that failed to copy.
+    pub queued: usize,
+    pub skipped: usize,
+    /// The file being copied now.
+    pub copying: Option<String>,
+    /// The locations that count as network besides UNC paths.
+    pub network: Vec<String>,
+    /// Free disk space holds the copies below the size limit.
+    pub reserve_limited: bool,
 }

@@ -20,8 +20,12 @@ mod convert;
 pub mod downmix;
 mod dpx;
 pub mod exr_channels;
+mod exr_index;
+mod exr_planes;
+mod exr_read;
 mod gif_anim;
 mod layered;
+mod localize;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
@@ -36,7 +40,7 @@ pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
 
 /// Errors from probing or decoding footage.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MediaError {
     #[error("I/O error: {0}")]
     Io(String),

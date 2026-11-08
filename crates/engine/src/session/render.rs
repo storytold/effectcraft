@@ -122,6 +122,37 @@ impl Session {
         }
     }
 
+    /// What a Project panel thumbnail of `item` at `t` (longest side `max_side`) shows depends
+    /// on, as a key (#3271): a comp's content as the disk cache keys frames
+    /// ([`effectcraft_render::disk_cache::comp_content_key`]), footage's item and settings, the
+    /// time, the size, the render switches the thumbnail uses and the footage reloads so far.
+    /// An edit that doesn't change the picture (a selection, another comp, a marker) keeps it, so
+    /// the thumbnail isn't rendered again. `None` for items without pixels.
+    pub fn thumbnail_key(&self, item: ItemId, t: Tick, max_side: u32) -> Option<u128> {
+        use effectcraft_render::disk_cache::Hash128;
+        let it = self.project.item(item)?;
+        let mut h = Hash128::default();
+        h.write(b"thumbnail-v1");
+        match &it.kind {
+            effectcraft_project::ItemKind::Comp(_) => {
+                h.write_u64(1);
+                h.write(&effectcraft_render::disk_cache::comp_content_key(&self.project, item).to_le_bytes());
+                h.write_u64(t.0 as u64);
+                h.write_u64(u64::from(self.prefs.general.switches_affect_nested_comps));
+                h.write_u64(u64::from(self.prefs.three_d.realtime_shadows));
+            }
+            effectcraft_project::ItemKind::Footage(f) if f.has_video => {
+                h.write_u64(2);
+                h.write_u64(item.0);
+                h.write(format!("{f:?}").as_bytes());
+            }
+            _ => return None,
+        }
+        h.write_u64(u64::from(max_side));
+        h.write_u64(self.footage_reloads.load(std::sync::atomic::Ordering::Relaxed));
+        Some(h.finish())
+    }
+
     /// [`Session::render_rgba8`], or with `transparent` the frame's own straight alpha (what a
     /// render with RGB + Alpha channels writes) instead of compositing over the background.
     pub fn render_rgba8_alpha(&self, comp: ItemId, t: Tick, max_side: u32, transparent: bool) -> Result<(u32, u32, Vec<u8>)> {
@@ -138,6 +169,7 @@ impl Session {
     /// Make the media layer and the layer cache let go of what they decoded from `footage`'s
     /// files (it keys frames by path, so an overwritten file would keep showing its old pixels).
     pub(crate) fn forget_decoded(&self, footage: &effectcraft_project::Footage) {
+        self.footage_reloads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for p in std::iter::once(&footage.path).chain(&footage.sequence) {
             self.footage.forget(p);
         }
@@ -155,7 +187,48 @@ impl Session {
             self.footage.set_aux_footage(&paths);
             self.aux_footage = Some(paths);
         }
+        let needs = aux_needs(&self.project);
+        if self.aux_needs.as_ref() != Some(&needs) {
+            self.footage.set_aux_needs(&needs);
+            self.aux_needs = Some(needs);
+        }
     }
+}
+
+/// What the effects of [`aux_footage`]'s layers read of each file's channels (#3271), by
+/// [`effectcraft_project::Footage::path`], sorted: the union of what each enabled effect reading
+/// them declares ([`effectcraft_effects::aux_needs`]) with its parameters' values. An effect that
+/// doesn't declare, or whose parameters change over time (keyframes, an expression), reads all
+/// channels. Several layers of one file add up.
+pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, effectcraft_raster::channels3d::AuxNeed)> {
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource};
+    use effectcraft_raster::channels3d::AuxNeed;
+    let mut out: std::collections::BTreeMap<String, AuxNeed> = std::collections::BTreeMap::new();
+    for l in project.comps().flat_map(|(_, c)| c.layers.iter()).filter(|l| l.switches.effects) {
+        let LayerSource::Footage { item } = &l.source else { continue };
+        let Some(ItemKind::Footage(f)) = project.item(*item).map(|i| &i.kind) else { continue };
+        if f.path.is_empty() {
+            continue;
+        }
+        for g in l.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+            let GroupKind::Effect { effect } = &g.kind else { continue };
+            if !effectcraft_effects::reads_aux(effect) {
+                continue;
+            }
+            let need = if commands::moves(g, None) {
+                AuxNeed::All
+            } else {
+                let params = effectcraft_effects::flatten_params(g, &mut |p| p.value.clone());
+                effectcraft_effects::aux_needs(effect, &params).map_or(AuxNeed::All, AuxNeed::Lookups)
+            };
+            let merged = match out.remove(&f.path) {
+                Some(e) => e.union(need),
+                None => need,
+            };
+            out.insert(f.path.clone(), merged);
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The files (each footage item's [`effectcraft_project::Footage::path`], sorted, once each) of

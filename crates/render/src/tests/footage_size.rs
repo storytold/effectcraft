@@ -106,3 +106,84 @@ fn still_layers_are_cached_across_times_and_movies_are_not() {
         assert_eq!(src.sizes.unwrap().into_inner().unwrap().len(), fetches + 3, "{kind:?}");
     }
 }
+
+/// #3271: an OpenEXR sequence's layer is cached per frame (keyed by its source time): the same
+/// frame again is served from the layer cache, another frame has another key. Other sequences
+/// stay in the media pool only.
+#[test]
+fn exr_sequence_layers_are_cached_per_frame() {
+    for (ext, fetches) in [("exr", 1), ("png", 2)] {
+        let (mut p, cid) = project(BitDepth::Bpc8, false);
+        let Some(LayerSource::Footage { item }) = p.comp(cid).map(|c| c.layers[0].source.clone()) else { panic!("footage layer") };
+        if let Some(ItemKind::Footage(f)) = p.item_mut(item).map(|it| &mut it.kind) {
+            f.kind = FootageKind::Sequence;
+            f.sequence = (1..=30).map(|i| format!("/shot/plate_{i:04}.{ext}")).collect();
+            f.path = f.sequence[0].clone();
+        }
+        let key = |t: f64| {
+            let c = p.comp(cid).unwrap();
+            crate::cache::layer_key(&crate::EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(t)), &c.layers[0], 0.5, false, false)
+        };
+        assert_eq!(key(0.0).is_some(), ext == "exr", "{ext}");
+        if ext == "exr" {
+            assert_ne!(key(0.0), key(0.1), "another frame, another key");
+            assert_eq!(key(0.0), key(0.01), "the same frame");
+        }
+        let cache = crate::LayerCache::default();
+        let src = Clip { sizes: Some(Mutex::default()) };
+        let opts = RenderOpts { scale: 0.5, ..Default::default() };
+        for _ in 0..2 {
+            let mut r = Renderer::new(&p, &src, opts);
+            r.cache = Some(&cache);
+            r.comp_frame(cid, Tick::ZERO);
+        }
+        assert_eq!(src.sizes.unwrap().into_inner().unwrap().len(), fetches, "{ext}");
+    }
+}
+
+/// #3271 review: with a viewer region of interest, a still from a source that reads whole frames
+/// anyway (not by rows) is asked for whole and stays in the layer cache: a second render reads
+/// nothing. A source that reads rows is asked for only the rows the region shows.
+#[test]
+fn a_source_that_reads_whole_frames_keeps_the_layer_cached_under_a_region() {
+    struct Counting {
+        reads: Mutex<Vec<Option<(i64, i64)>>>,
+        by_rows: bool,
+    }
+    impl FootageSource for Counting {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            self.reads.lock().unwrap().push(None);
+            Clip { sizes: None }.frame(item, f, t)
+        }
+        fn frame_rows(&self, item: ItemId, f: &Footage, t: Tick, _: Option<(u32, u32)>, _: crate::FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+            self.reads.lock().unwrap().push(Some(rows));
+            Clip { sizes: None }.frame(item, f, t)
+        }
+        fn reads_rows(&self, _: &Footage, _: Tick) -> bool {
+            self.by_rows
+        }
+    }
+    let (mut p, cid) = project(BitDepth::Bpc8, false);
+    let Some(LayerSource::Footage { item }) = p.comp(cid).map(|c| c.layers[0].source.clone()) else { panic!("footage layer") };
+    if let Some(ItemKind::Footage(f)) = p.item_mut(item).map(|it| &mut it.kind) {
+        f.kind = FootageKind::Still;
+        f.path = "/still.png".into();
+    }
+    let opts = RenderOpts { roi: Some([0.0, 0.0, 96.0, 10.0]), ..Default::default() };
+    for by_rows in [false, true] {
+        let src = Counting { reads: Mutex::default(), by_rows };
+        let cache = crate::LayerCache::default();
+        for _ in 0..2 {
+            let mut r = Renderer::new(&p, &src, opts);
+            r.cache = Some(&cache);
+            r.comp_frame(cid, Tick::ZERO);
+        }
+        let reads = src.reads.into_inner().unwrap();
+        if by_rows {
+            assert_eq!(reads.len(), 2, "by rows, each render: {reads:?}");
+            assert!(reads.iter().all(|r| r.is_some_and(|(y0, y1)| y0 == 0 && y1 < 54)), "{reads:?}");
+        } else {
+            assert_eq!(reads, [None], "whole, once: the layer cache keeps it");
+        }
+    }
+}
