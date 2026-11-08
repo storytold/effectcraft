@@ -17,6 +17,7 @@ mod effects_round2;
 mod effects_round3;
 mod effects_thirdparty;
 mod fx_inject;
+mod lumetri;
 mod markers;
 mod masks;
 mod mattes;
