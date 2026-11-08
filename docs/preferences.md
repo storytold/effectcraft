@@ -79,9 +79,6 @@ Commands (CLI, MCP, control channel):
 - `audio.outputDevice`: Default Output (device list from the desktop host)
 - `audio.outputLeft`: Left (Audio Output Mapping)
 - `audio.outputRight`: Right (Audio Output Mapping)
-- `memory.layerCacheMb`: Layer Cache (in the browser at most 512 MB, see [web.md](web.md))
-- `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB)
-- `memory.previewCacheMb`: Preview (RAM) Cache
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles
@@ -162,9 +159,30 @@ Commands (CLI, MCP, control channel):
   mapped to a share: `P:\`). The copies take at most `disk.localizeMaxGb` and leave the disk
   cache's reserve free on their disk; earlier sessions' copies are adopted. The Disk page shows
   the local copies, what is queued and being copied, and the network locations
-- `memory.ramReservedGb`: the cache budgets together leave this much physical memory free
-- `memory.reduceCacheWhenLow`: cache budgets halve while the system is low on memory (checked
-  every 30 s by the desktop app, on a background thread)
+- `memory.ramReservedGb`: RAM Reserved for Other Applications, the one memory setting (After
+  Effects has a setting of this name too). EffectCraft's big caches (processed layers, decoded
+  footage frames, decoded OpenEXR planes, RAM preview frames, and the disk cache's write queue)
+  share one budget: 80 % of the installed RAM left after the reserve. The other 20 % is room for
+  EffectCraft's own working memory (decoders, render buffers, undo, GPU staging, the interface).
+  With the default 6 GB reserved that is 8.0 GB on a 16 GB machine, 46.4 GB on 64 GB and 97.6 GB
+  on 128 GB. The budget is at least 192 MB for all caches together; while the installed RAM is
+  unknown (a sandbox, the CLI, or the desktop before its first reading) it is 5 GB, in the browser 3.5 GB
+  (with the RAM preview at most 3 GB there). No cache has a share of its own: when they
+  hold more than the budget together, the memory accountant frees the least valuable data first,
+  whichever cache holds it, down to 90 % of the budget. An item's value is what it would cost to
+  make again (its measured render or decode time; when not measured, a typical 4 ms per MB for a
+  layer, 8 ms for a preview frame, 2 ms for footage frames and planes) per byte, halved after
+  30 s unused, a quarter after 90 s, and so on; a copy of data another cache holds (a queued disk write) is worth
+  nothing, and a cache that had to make again what it let go of shortly before is protected for
+  a while. In the browser the layer cache also stays within 512 MB and the footage frames within
+  256 MB (see [web.md](web.md)). The Memory & CPU page shows what EffectCraft may use, of the
+  installed RAM. Settings saved before this (version 4 and earlier) had Layer Cache, Footage
+  Frame Cache and Preview (RAM) Cache budgets (`memory.layerCacheMb`, `memory.mediaCacheMb`,
+  `memory.previewCacheMb`); they are dropped when the settings are read
+- `memory.reduceCacheWhenLow`: the budget halves while the system is low on memory (less than
+  10 % of the RAM, or less than 1 GB, available; checked every 30 s by the desktop app, on a
+  background thread). It stays halved until twice that much is available again, so freeing the
+  caches doesn't end the episode at once, and the toast saying so shows once per episode
 - `video.enableOutput`, `video.device`, `video.outputDuringPlayback`, `video.mirrorOnMonitor`,
   `video.disableWhenBackground`: Video Preview, a second window (or full screen on the display
   it is on) showing the composition frame, Mercury Transmit-style

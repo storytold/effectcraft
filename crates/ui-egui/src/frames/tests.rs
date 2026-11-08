@@ -2989,10 +2989,64 @@ fn the_accountant_trims_only_frames_in_ram() {
     let memory = PreviewMemory(frames.cache.clone());
     use effectcraft_engine::render::memory::MemoryHolder;
     assert_eq!(memory.bytes(), 2 * 16);
-    memory.trim_to(16);
+    let next = memory.oldest().unwrap();
+    assert_eq!(next.bytes, 16, "a frame in RAM is offered");
+    assert!(next.cost_us > 0);
+    assert_eq!(memory.drop_oldest(), 16);
     let c = frames.cache.lock().unwrap();
     assert!(c.map.contains_key(&key(1, 0, 0)) && c.map.contains_key(&key(1, 1, 0)), "the GPU frames stay");
     assert!(!c.map.contains_key(&key(1, 2, 0)) && c.map.contains_key(&key(1, 3, 0)), "the oldest frame in RAM went");
     drop(c);
     assert_eq!(memory.bytes(), 16);
+}
+
+/// #3298 review: preview frames compete with the other caches by value. A frame a playing
+/// preview shows next counts as just used, and a frame rendered quickly (from cached layers)
+/// still costs a typical render: an old, cheap footage frame goes before it.
+#[test]
+fn preview_frames_ahead_of_the_playhead_outlive_old_footage() {
+    use effectcraft_engine::render::memory::{self, Accountant, Candidate, MemoryHolder};
+    struct Footage(Mutex<Vec<Candidate>>);
+    impl MemoryHolder for Footage {
+        fn name(&self) -> &'static str {
+            "footage frames"
+        }
+        fn bytes(&self) -> usize {
+            self.0.lock().unwrap().iter().map(|c| c.bytes).sum()
+        }
+        fn oldest(&self) -> Option<Candidate> {
+            self.0.lock().unwrap().first().copied()
+        }
+        fn drop_oldest(&self) -> usize {
+            let mut v = self.0.lock().unwrap();
+            if v.is_empty() { 0 } else { v.remove(0).bytes }
+        }
+    }
+    let frames = Frames::default();
+    {
+        let mut c = frames.cache.lock().unwrap();
+        for i in 10..12 {
+            c.insert_took(key(1, i, 0), img(), None, None, Some(std::time::Duration::from_micros(100)));
+            // (as old as the footage frame below)
+            c.map.get_mut(&key(1, i, 0)).unwrap().used = 0;
+        }
+    }
+    let preview: Arc<dyn MemoryHolder> = Arc::new(PreviewMemory(frames.cache.clone()));
+    // Stopped: the oldest frame is offered as it is, with at least a typical render's cost.
+    let offered = preview.oldest().unwrap();
+    assert_eq!(offered.used, 0);
+    assert_eq!(offered.cost_us, memory::default_cost(16, memory::DEFAULT_PREVIEW_US_PER_MB));
+    // Playing from frame 10: the frames ahead count as just used.
+    frames.set_playhead(Some(playhead(10, false)));
+    let before = memory::tick();
+    assert!(preview.oldest().unwrap().used >= before);
+    // An old footage frame that cost less per byte goes first.
+    let footage = Arc::new(Footage(Mutex::new(vec![Candidate { used: 0, bytes: 16, cost_us: 6_000 }])));
+    let footage_holder: Arc<dyn MemoryHolder> = footage.clone();
+    let acc = Accountant::new(40);
+    acc.register(&preview);
+    acc.register(&footage_holder);
+    acc.balance();
+    assert_eq!(footage.bytes(), 0, "the footage frame went");
+    assert_eq!(preview.bytes(), 32, "the preview frames stay");
 }

@@ -27,7 +27,10 @@ mod sections;
 pub use choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, THEMES, WINDOW_GRAPHICS, theme_family};
 pub use dialog::{Item, Kind, Page, pages, pages_json, todo_keys};
 pub use document::{migrate, page_id, section_key};
-pub use queries::{CacheBudgets, WEB_LAYER_CACHE, WEB_MEDIA_CACHE, mask_color};
+pub use queries::{
+    CacheCaps, FALLBACK_MEMORY_BUDGET, MEMORY_HEADROOM_PERCENT, MIN_MEMORY_BUDGET, MemoryBudget, WEB_LAYER_CACHE, WEB_MEDIA_CACHE, WEB_MEMORY_BUDGET,
+    WEB_PREVIEW_CACHE, mask_color,
+};
 pub use recent::{MAX_RECENT_SCRIPTS, RecentScript};
 pub use sections::{
     Appearance, Audio, AutoSave, CompPreset, CompositionPrefs, Disk, Export, FacePrefs, General, Grids, Import, LabelPref, Memory, Previews, ProjectPrefs,
@@ -36,7 +39,7 @@ pub use sections::{
 use sections::{Extra, default_labels, lenient_comp_presets};
 
 /// Current settings layout version.
-pub const PREFS_VERSION: u32 = 4;
+pub const PREFS_VERSION: u32 = 5;
 /// Settings file name in the config store.
 pub const PREFS_FILE: &str = "prefs.json";
 

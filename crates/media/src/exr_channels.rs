@@ -77,14 +77,16 @@ pub(crate) enum Rgb {
     Unsupported,
 }
 
-/// How many bytes of decoded planes the plane store keeps, like the frame cache's default
-/// ([`crate::DEFAULT_BUDGET`]): two 2560×1440 files of 32 channels (470 MB each, as every plane
-/// is f32). A soft bound: the newest file is kept whatever its size (so a frame's picture and its
-/// effects share its decode), and files still in use are never dropped (planes an effect holds,
-/// pictures waiting for their effects, decodes in progress), so memory can go above it while
-/// they are. (Measured on such a sequence decoded one frame at a time: 1 GiB held peak memory
-/// about 1 GB lower than 2 GiB, at the same speed.)
-pub const CACHE_BUDGET: usize = effectcraft_render::memory::PLANE_BUDGET;
+/// How many bytes of decoded planes the plane store keeps by itself: no limit on the desktop
+/// (#3298: the planes share one budget with the other big caches, and the memory accountant
+/// frees the least valuable data first, whichever cache holds it), 512 MB in the browser, whose
+/// page addresses at most 4 GiB. Files still in use are never dropped (planes an effect holds,
+/// pictures waiting for their effects, decodes in progress), and the newest file is kept
+/// whatever its size (so a frame's picture and its effects share its decode).
+#[cfg(not(target_arch = "wasm32"))]
+pub const CACHE_BUDGET: usize = usize::MAX;
+#[cfg(target_arch = "wasm32")]
+pub const CACHE_BUDGET: usize = 512 << 20;
 
 /// The index of an EXR file's bytes and the planes of `ids` (all when `None`). `None` when it is
 /// not a readable EXR or the planes need too much memory.

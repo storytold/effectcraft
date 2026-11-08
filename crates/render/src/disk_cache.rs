@@ -470,21 +470,23 @@ impl Queue {
         self.frames.is_empty() && self.jobs.is_empty()
     }
 
-    /// Drop queued layer and plane writes that alone hold their bytes, newest first, until the
-    /// ones left hold at most `bytes` of their own ([`Queue::unique_job_bytes`], what the memory
-    /// holder reports); frame writes are never dropped (a fully cached comp would come back with
-    /// gaps). The writes dropped.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn trim(&mut self, bytes: usize) -> u64 {
-        let mut dropped = 0;
-        while self.unique_job_bytes() > bytes {
-            let Some(i) = self.jobs.iter().rposition(|j| matches!(j, Job::Write(_, _, _, p) if p.unique() > 0)) else { break };
-            if let Some(Job::Write(_, _, _, p)) = self.jobs.remove(i) {
-                self.job_bytes = self.job_bytes.saturating_sub(p.held());
-            }
-            dropped += 1;
+    /// The newest queued layer or plane write holding bytes only the queue holds: its index and
+    /// those bytes. (Frame writes are never dropped: a fully cached comp would come back with
+    /// gaps.)
+    fn newest_unique(&self) -> Option<(usize, usize)> {
+        self.jobs.iter().enumerate().rev().find_map(|(i, j)| match j {
+            Job::Write(_, _, _, p) if p.unique() > 0 => Some((i, p.unique())),
+            _ => None,
+        })
+    }
+
+    /// Drop [`Queue::newest_unique`]; the bytes only it held.
+    fn drop_newest_unique(&mut self) -> Option<usize> {
+        let (i, unique) = self.newest_unique()?;
+        if let Some(Job::Write(_, _, _, p)) = self.jobs.remove(i) {
+            self.job_bytes = self.job_bytes.saturating_sub(p.held());
         }
-        dropped
+        Some(unique)
     }
 
     /// The bytes only the queued layer and plane writes hold (no frames: see the memory holder).
@@ -1535,9 +1537,9 @@ impl effectcraft_effects::roto::SegStore for DiskCache {
     }
 }
 
-/// The disk cache's write queue in the common memory budget (#3271): queued entries hold their
-/// pixels until the writer has written them. The first freed (a dropped write only costs a
-/// later render a disk miss); frames are kept over layer buffers.
+/// The disk cache's write queue in the common memory budget (#3271, #3298): queued entries hold
+/// their pixels until the writer has written them. They are copies (a dropped write only costs
+/// a later render a disk miss), worth nothing to the accountant: the first freed.
 impl crate::memory::MemoryHolder for DiskCache {
     fn name(&self) -> &'static str {
         "disk write queue"
@@ -1546,14 +1548,22 @@ impl crate::memory::MemoryHolder for DiskCache {
     fn bytes(&self) -> usize {
         self.queue.0.lock().map(|q| q.unique_job_bytes()).unwrap_or(0)
     }
-    fn priority(&self) -> u8 {
-        0
+    /// The newest queued write holding bytes only the queue holds (newest first: the oldest is
+    /// the next to be written); a copy, so it costs nothing.
+    fn oldest(&self) -> Option<crate::memory::Candidate> {
+        let q = self.queue.0.lock().ok()?;
+        let (_, bytes) = q.newest_unique()?;
+        Some(crate::memory::Candidate { used: 0, bytes, cost_us: 0 })
     }
-    /// Drops queued layer and plane writes (newest first), see [`Queue::trim`].
-    fn trim_to(&self, bytes: usize) {
-        let Ok(mut q) = self.queue.0.lock() else { return };
-        let dropped = q.trim(bytes);
-        self.dropped.fetch_add(dropped, Ordering::Relaxed);
+    fn drop_oldest(&self) -> usize {
+        let Ok(mut q) = self.queue.0.lock() else { return 0 };
+        match q.drop_newest_unique() {
+            Some(bytes) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                bytes
+            }
+            None => 0,
+        }
     }
 }
 
@@ -2154,7 +2164,8 @@ mod tests {
             q.jobs.push_back(Job::Write(Kind::Plane, 1, FORMAT_PLANES_FILES, job));
             q.frames.push_back(Job::Write(Kind::Frame, 2, FORMAT_RGBA8_FILES, Payload::Frame8(1, 1, vec![0; 4], files.clone())));
             assert_eq!(q.unique_job_bytes(), 69 * 8 * 4, "what the memory holder reports");
-            assert_eq!(q.trim(0), 1, "trimmed as reported");
+            assert_eq!(q.drop_newest_unique(), Some(69 * 8 * 4), "dropped as reported");
+            assert_eq!(q.drop_newest_unique(), None, "frame writes are never dropped");
             assert!(q.jobs.is_empty() && q.frames.len() == 1);
             q.frames.clear();
         }

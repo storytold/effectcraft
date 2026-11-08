@@ -201,13 +201,9 @@ page!(Disk {
 });
 
 page!(Memory {
+    /// RAM Reserved for Other Applications (GB): EffectCraft's caches share most of the rest
+    /// (see [`crate::prefs::Prefs::memory_budget`]).
     ram_reserved_gb: u32 = 6,
-    /// Processed-layer cache budget (MB).
-    layer_cache_mb: u32 = 1024,
-    /// Decoded footage frame cache budget (MB).
-    media_cache_mb: u32 = 1024,
-    /// RAM preview (viewer frame) cache budget (MB).
-    preview_cache_mb: u32 = 3072,
     reduce_cache_when_low: bool = true,
 });
 

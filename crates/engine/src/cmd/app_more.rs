@@ -424,7 +424,8 @@ pub fn system_report(s: &Session) -> Value {
     let gb = |b: u64| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
     let export: Vec<&str> = s.exporter.as_ref().map(|e| e.formats().into_iter().map(|f| f.label()).collect()).unwrap_or_default();
     let gpu = s.accel.as_ref().map(|a| a.name());
-    let budgets = s.prefs.cache_budgets(mem.or(s.sys_memory));
+    let read = mem.or(s.sys_memory);
+    let budget = s.prefs.memory_budget(read, read.is_some_and(|m| m.still_low(s.memory_low)));
     let mut issues = vec![];
     if gpu.is_none() {
         issues.push(match &s.accel_note {
@@ -448,7 +449,7 @@ pub fn system_report(s: &Session) -> Value {
         "gpu": gpu,
         "gpuNote": if gpu.is_none() { s.accel_note.clone() } else { None },
         "windowGraphics": s.window_adapter,
-        "caches": {"layer": gb(budgets.layer as u64), "footage": gb(budgets.media as u64), "preview": gb(budgets.preview as u64)},
+        "caches": {"budget": gb(budget.bytes as u64), "inUse": gb(effectcraft_render::memory::Accountant::global().total() as u64), "reduced": budget.reduced},
         "import": IMPORT_FORMATS,
         "export": export,
         "logging": crate::logging::is_enabled(),
@@ -482,12 +483,7 @@ pub fn report_text(r: &Value) -> String {
         t.push_str(&format!("Window graphics: {w}\n"));
     }
     let c = &r["caches"];
-    t.push_str(&format!(
-        "Cache budgets: layer {}, footage {}, preview {}\n",
-        c["layer"].as_str().unwrap_or("?"),
-        c["footage"].as_str().unwrap_or("?"),
-        c["preview"].as_str().unwrap_or("?")
-    ));
+    t.push_str(&format!("Cache memory: {} in use of {}\n", c["inUse"].as_str().unwrap_or("?"), c["budget"].as_str().unwrap_or("?")));
     t.push_str(&format!("Import: {}\nExport: {}\n", list("import"), list("export")));
     let issues = list("issues");
     t.push_str(&if issues.is_empty() { "No compatibility issues found.".to_string() } else { format!("Issues: {issues}") });

@@ -108,30 +108,48 @@ impl Session {
         self.cache_folder(&self.prefs.disk.conformed_media_folder, "Conformed Audio")
     }
 
-    /// Apply the Memory & CPU cache budgets, limited by RAM Reserved for Other Applications and
-    /// reduced while the system is low on memory (see [`crate::prefs::Prefs::cache_budgets`]).
+    /// Apply the Memory & CPU budget ([`Session::memory_budget`]): one budget the big caches share
+    /// (the layer cache, the footage frames and decoded planes, the preview frames), kept by the
+    /// memory accountant, which frees the least valuable data first whichever cache holds it. No
+    /// cache has a limit of its own below that budget, except the browser's caps
+    /// ([`crate::prefs::MemoryBudget::caps`]; frontends apply the preview frames' cap).
     pub fn apply_cache_budgets(&mut self) {
-        let b = self.prefs.cache_budgets(self.sys_memory);
-        self.layer_cache.set_budget(b.layer);
-        self.footage.set_cache_budget(b.media);
-        // One budget over the big caches together (#3271): the layer cache, the footage frames
-        // and decoded planes, and the preview frames' share.
+        let b = self.memory_budget();
+        let caps = b.caps(cfg!(target_arch = "wasm32"));
+        self.layer_cache.set_budget(caps.layer);
+        self.footage.set_cache_budget(caps.footage);
         let accountant = effectcraft_render::memory::Accountant::global();
         let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
         accountant.register(&layers);
-        accountant.set_budget(b.layer.saturating_add(b.media).saturating_add(b.preview).saturating_add(effectcraft_render::memory::PLANE_BUDGET));
+        accountant.set_budget(b.bytes);
+    }
+
+    /// The memory the caches share for the last memory reading ([`Prefs::memory_budget`]), kept
+    /// reduced through a low-memory episode until the system has recovered
+    /// ([`crate::sysinfo::SysMemory::still_low`]), so the budget (and the toast) doesn't flip
+    /// with every reading.
+    pub fn memory_budget(&self) -> crate::prefs::MemoryBudget {
+        let low = self.sys_memory.is_some_and(|m| m.still_low(self.memory_low));
+        self.prefs.memory_budget(self.sys_memory, low)
     }
 
     /// Take the latest reading of the system's memory and start the next one in the background
     /// (desktop frontends call this every few seconds; it never waits for the system), then
-    /// re-apply the cache budgets when the reading changes them. Returns the effective budgets.
+    /// re-apply the memory budget when the reading changes it. Returns the budget in effect.
     /// The disk cache's free disk space is read the same way (it keeps a reserve free).
-    pub fn memory_tick(&mut self) -> crate::prefs::CacheBudgets {
+    pub fn memory_tick(&mut self) -> crate::prefs::MemoryBudget {
         self.poll_disk_space();
-        let before = self.prefs.cache_budgets(self.sys_memory);
-        self.sys_memory = self.memory_watch.latest().or(self.sys_memory);
+        let reading = self.memory_watch.latest();
         self.memory_watch.poll();
-        let after = self.prefs.cache_budgets(self.sys_memory);
+        self.take_memory_reading(reading)
+    }
+
+    /// [`Session::memory_tick`] with the memory reading taken (`None`: no new one).
+    pub fn take_memory_reading(&mut self, reading: Option<crate::sysinfo::SysMemory>) -> crate::prefs::MemoryBudget {
+        let before = self.memory_budget();
+        self.sys_memory = reading.or(self.sys_memory);
+        self.memory_low = self.sys_memory.is_some_and(|m| m.still_low(self.memory_low));
+        let after = self.memory_budget();
         if after != before {
             self.apply_cache_budgets();
             // Frontends re-apply their preview cache budget.

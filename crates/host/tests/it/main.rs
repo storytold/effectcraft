@@ -7,6 +7,7 @@ mod exr_layers;
 mod footage_reload;
 mod gif_animates;
 mod library;
+mod memory_budget;
 mod pick_whip;
 mod plugins;
 mod relink;

@@ -218,6 +218,9 @@ pub struct Session {
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
     /// (headless sessions don't query it, see [`Session::memory_tick`]).
     pub sys_memory: Option<sysinfo::SysMemory>,
+    /// The system is in a low-memory episode (the cache budgets stay reduced until it ends, see
+    /// [`sysinfo::SysMemory::still_low`] and [`Session::memory_budget`]).
+    pub memory_low: bool,
     /// The keyframe drag in progress (`keys.move` with a merge key).
     pub key_move: Option<KeyMove>,
     /// Reads the system's memory in the background for [`Session::memory_tick`].
@@ -376,6 +379,7 @@ impl Default for Session {
             library: Default::default(),
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
+            memory_low: false,
             key_move: None,
             memory_watch: Default::default(),
             disk_watch: Default::default(),

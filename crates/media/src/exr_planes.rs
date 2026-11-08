@@ -15,9 +15,11 @@
 //!   a parallel loop run other jobs, which could wait on that very decode): it decodes a copy.
 //! - **Nothing made before a Reload is kept or served** ([`forget`]): a decode that started
 //!   before the file was forgotten keeps nothing, and the requests waiting for it ask again.
-//! - Bounded by bytes ([`CACHE_BUDGET`]), least recently used out first; entries in use (planes
-//!   an effect holds, a decode in progress, the last pictures' planes kept for their effects,
-//!   [`HELD_FILES`]) are never dropped, and the newest stays even when it alone is over.
+//! - Kept by the memory accountant (#3298): least recently used offered first, each entry worth
+//!   what decoding it took. In the browser, and while the accountant has no budget, also bounded
+//!   by bytes ([`CACHE_BUDGET`], [`UNMANAGED_BUDGET`]); there the newest entry stays even when it
+//!   alone is over. Entries in use (planes an effect holds, a decode in progress, the last
+//!   pictures' planes kept for their effects, [`HELD_FILES`]) are never dropped, by either.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -33,6 +35,10 @@ use crate::exr_channels::CACHE_BUDGET;
 use crate::exr_channels::{Rgb, planes_picture};
 use crate::exr_index::{self, ExrIndex, IndexError};
 use crate::exr_read::{ExrSource, Opened, ReadError, ReadRequest, read_planes};
+
+/// What the store holds at most while the memory accountant has no budget (a session that never
+/// set one): the planes' own budget before they shared one with the other caches.
+const UNMANAGED_BUDGET: usize = 1 << 30;
 
 /// At most this many entries are kept (unreadable files hold no bytes).
 const CACHE_FILES: usize = 64;
@@ -169,6 +175,9 @@ struct Flight {
     /// thread that claims it decodes under them (its own being called off doesn't call off the
     /// asker's decode).
     hints: filmcraft_media::cancel::Context,
+    /// When the decode was asked for ([`effectcraft_render::memory::tick`]): what it took is the
+    /// planes' cost to the memory accountant.
+    asked: u64,
 }
 
 /// [`Flight::phase`] values.
@@ -204,6 +213,7 @@ impl Flight {
             base,
             since,
             hints: filmcraft_media::cancel::Context::current(),
+            asked: effectcraft_render::memory::tick(),
         })
     }
 
@@ -265,6 +275,10 @@ struct Entry {
     bytes: usize,
     /// When it was last asked for or finished decoding (a counter).
     used: u64,
+    /// The same, for the memory accountant ([`effectcraft_render::memory::tick`]).
+    stamp: u64,
+    /// What decoding its planes took, in microseconds (0: not decoded yet).
+    cost_us: u64,
 }
 
 impl Entry {
@@ -294,9 +308,9 @@ struct Owning<'a> {
 impl Owning<'_> {
     fn end(&mut self, outcome: Result<Arc<Batch>, Refused>) -> Result<Arc<Batch>, Refused> {
         self.ended = true;
-        let outcome = self.store.finish(self.path, self.flight, outcome);
+        let (outcome, grown) = self.store.finish(self.path, self.flight, outcome);
         self.flight.end(outcome.clone());
-        effectcraft_render::memory::Accountant::global().note_growth();
+        effectcraft_render::memory::Accountant::global().note_growth(grown);
         outcome
     }
 }
@@ -479,12 +493,13 @@ impl PlaneStore {
         let at = match st.entries.iter().position(|e| e.path == path) {
             Some(i) => i,
             None => {
-                st.entries.push(Entry { path: path.to_string(), batch: None, flight: None, failed: vec![], bytes: 0, used: clock });
+                st.entries.push(Entry { path: path.to_string(), batch: None, flight: None, failed: vec![], bytes: 0, used: clock, stamp: 0, cost_us: 0 });
                 st.entries.len() - 1
             }
         };
         let Some(e) = st.entries.get_mut(at) else { return Step::Done(Err(Refused::Unreadable)) };
         e.used = clock;
+        e.stamp = effectcraft_render::memory::tick();
         // What the store holds first: a failure of a larger request doesn't hide it.
         if let Some(b) = e.batch.clone().filter(|b| b.covers(index, want)) {
             Self::hold(&mut st, path, &b, by);
@@ -572,22 +587,30 @@ impl PlaneStore {
 
     /// Store the outcome of `flight`'s decode in its entry, unless the file was forgotten
     /// meanwhile (then nothing made of it is kept or handed out); drop what doesn't fit.
-    fn finish(&self, path: &str, flight: &Arc<Flight>, outcome: Result<Arc<Batch>, Refused>) -> Result<Arc<Batch>, Refused> {
+    /// Also the bytes the store grew by (for the memory accountant).
+    fn finish(&self, path: &str, flight: &Arc<Flight>, outcome: Result<Arc<Batch>, Refused>) -> (Result<Arc<Batch>, Refused>, usize) {
         let mut st = self.lock();
         st.clock += 1;
         let clock = st.clock;
         let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.flight.as_ref().is_some_and(|f| Arc::ptr_eq(f, flight))) else {
-            return match outcome {
+            let outcome = match outcome {
                 Err(e @ (Refused::Cancelled | Refused::Stopped)) => Err(e),
                 _ => Err(Refused::Forgotten),
             };
+            return (outcome, 0);
         };
         e.flight = None;
         e.used = clock;
+        e.stamp = effectcraft_render::memory::tick();
+        let had = e.bytes;
         match &outcome {
             Ok(b) => {
                 e.bytes = b.bytes();
                 e.batch = Some(b.clone());
+                let took = e.stamp.saturating_sub(flight.asked).max(1);
+                // A decode adding channels to what was held: both decodes made the planes; one
+                // that read them all anew replaces what was held, and its cost.
+                e.cost_us = if flight.base.is_some() { e.cost_us.saturating_add(took) } else { took };
             }
             Err(why @ (Refused::Unreadable | Refused::TooLarge(_))) => {
                 let want = flight.state().want.clone();
@@ -600,11 +623,20 @@ impl PlaneStore {
             Err(Refused::Changed) => {
                 e.batch = None;
                 e.bytes = 0;
+                e.cost_us = 0;
             }
             Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped) => {}
         }
-        Self::drop_oldest(&mut st, self.budget, CACHE_FILES, Some(path));
-        outcome
+        let grown = st.entries.iter().find(|e| e.path == path).map_or(0, |e| e.bytes.saturating_sub(had));
+        Self::drop_oldest(&mut st, self.own_budget(), CACHE_FILES, Some(path));
+        (outcome, grown)
+    }
+
+    /// The most it holds by itself: its budget ([`CACHE_BUDGET`]), and while nothing keeps the
+    /// caches within a common budget (the memory accountant has none, #3298 review)
+    /// [`UNMANAGED_BUDGET`].
+    fn own_budget(&self) -> usize {
+        if effectcraft_render::memory::Accountant::global().budget() == usize::MAX { self.budget.min(UNMANAGED_BUDGET) } else { self.budget }
     }
 
     /// Drop least recently used entries until the rest take at most `bytes` in at most `files`
@@ -617,18 +649,39 @@ impl PlaneStore {
             }
             // (an entry holding no bytes only goes for the count)
             let over_count = st.entries.len() > files;
-            let held = &st.held;
-            let oldest = st
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| Some(e.path.as_str()) != newest && !e.in_use() && (e.bytes > 0 || over_count))
-                .filter(|(_, e)| !e.batch.as_ref().is_some_and(|b| held.iter().any(|(_, h)| Arc::ptr_eq(h, b))))
-                .min_by_key(|(_, e)| e.used)
-                .map(|(i, _)| i);
-            let Some(i) = oldest else { break };
+            let Some(i) = Self::oldest_droppable(st, newest, over_count) else { break };
             st.entries.remove(i);
         }
+    }
+
+    /// The least recently used entry that may be dropped: not `newest`, not in use, not a
+    /// picture's planes held for its effects, and holding bytes (unless `empty_too`).
+    fn oldest_droppable(st: &State, newest: Option<&str>, empty_too: bool) -> Option<usize> {
+        let held = &st.held;
+        st.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| Some(e.path.as_str()) != newest && !e.in_use() && (e.bytes > 0 || empty_too))
+            .filter(|(_, e)| !e.batch.as_ref().is_some_and(|b| held.iter().any(|(_, h)| Arc::ptr_eq(h, b))))
+            .min_by_key(|(_, e)| e.used)
+            .map(|(i, _)| i)
+    }
+
+    /// The entry the memory accountant may drop next ([`PlaneStore::oldest_droppable`]), with
+    /// what decoding it took (a typical cost when not timed).
+    fn oldest_candidate(&self) -> Option<effectcraft_render::memory::Candidate> {
+        let st = self.lock();
+        let e = st.entries.get(Self::oldest_droppable(&st, None, false)?)?;
+        let cost_us =
+            if e.cost_us > 0 { e.cost_us } else { effectcraft_render::memory::default_cost(e.bytes, effectcraft_render::memory::DEFAULT_PLANE_US_PER_MB) };
+        Some(effectcraft_render::memory::Candidate { used: e.stamp, bytes: e.bytes, cost_us })
+    }
+
+    /// Drop [`PlaneStore::oldest_candidate`]; the bytes freed.
+    fn drop_candidate(&self) -> usize {
+        let mut st = self.lock();
+        let Some(i) = Self::oldest_droppable(&st, None, false) else { return 0 };
+        if i < st.entries.len() { st.entries.remove(i).bytes } else { 0 }
     }
 
     /// Wait for the outcome of another request's decode (`flight`). A thread running a store
@@ -671,12 +724,6 @@ impl PlaneStore {
         let mut st = self.lock();
         st.entries.retain(|e| e.path != path);
         st.held.retain(|(p, _)| p != path);
-    }
-
-    /// Drop least recently used entries not in use until at most `bytes` are held (the memory
-    /// accountant, #3271).
-    fn trim_to(&self, bytes: usize) {
-        Self::drop_oldest(&mut self.lock(), bytes, usize::MAX, None);
     }
 
     /// Stop keeping the last pictures' planes for their effects.
@@ -966,8 +1013,8 @@ fn store() -> &'static PlaneStore {
     &STORE
 }
 
-/// The shared plane store in the common memory budget: decoded planes the effects read, costly
-/// to decode again, freed after the footage frames and before rendered layers.
+/// The shared plane store in the common memory budget (#3271, #3298): decoded planes the effects
+/// read, each file's worth what decoding it took, per byte.
 struct SharedStore;
 
 impl effectcraft_render::memory::MemoryHolder for SharedStore {
@@ -977,11 +1024,11 @@ impl effectcraft_render::memory::MemoryHolder for SharedStore {
     fn bytes(&self) -> usize {
         STORE.lock().entries.iter().map(|e| e.bytes).fold(0, usize::saturating_add)
     }
-    fn priority(&self) -> u8 {
-        1
+    fn oldest(&self) -> Option<effectcraft_render::memory::Candidate> {
+        STORE.oldest_candidate()
     }
-    fn trim_to(&self, bytes: usize) {
-        STORE.trim_to(bytes);
+    fn drop_oldest(&self) -> usize {
+        STORE.drop_candidate()
     }
 }
 

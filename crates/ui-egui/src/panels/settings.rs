@@ -73,6 +73,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
             }
             Item::Labels => labels_ui(app, ui, cur, acts),
             Item::BrowserStorage => browser_storage_ui(app, ui, t, acts),
+            Item::MemoryUse => memory_use_ui(app, ui, t),
             Item::Models(task) => models_ui(app, ui, t, acts, task),
             Item::PluginLibrary => library_ui(app, ui, t, acts),
             Item::AudioDevices { key } => {
@@ -294,6 +295,26 @@ fn localize_status_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, s
         .response;
     let label = format!("files={} bytes={} queued={} skipped={}", s.files, s.bytes, s.queued, s.skipped);
     app.auto.add("settings.disk.localizeStatus", r.rect, &label);
+}
+
+/// Settings ▸ Memory & CPU, under RAM Reserved for Other Applications: the memory EffectCraft's
+/// caches may use (one budget they share, `Session::memory_budget`), of the installed RAM.
+/// Automation id `settings.memory.use`, labelled `budgetMb=… installedMb=… reduced=…` (the same
+/// in every interface language; `installedMb=unknown` without a reading).
+fn memory_use_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let b = app.session.memory_budget();
+    let r = ui.label(RichText::new(memory_use_line(b.bytes as u64, b.installed)).color(t.text_dim));
+    let installed = b.installed.map_or_else(|| "unknown".to_string(), |i| (i >> 20).to_string());
+    app.auto.add("settings.memory.use", r.rect, &format!("budgetMb={} installedMb={installed} reduced={}", b.bytes >> 20, b.reduced));
+}
+
+/// The line [`memory_use_ui`] shows for a budget of `budget` bytes of `installed` bytes of RAM.
+pub(crate) fn memory_use_line(budget: u64, installed: Option<u64>) -> String {
+    let gb = |b: u64| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
+    match installed {
+        Some(i) => tr_args("EffectCraft may use: {} of {}", &[&gb(budget), &gb(i)]),
+        None => tr_args("EffectCraft may use: {} (installed RAM unknown)", &[&gb(budget)]),
+    }
 }
 
 /// Settings ▸ Disk, under Maximum Disk Cache Size: the limit in effect, and why it is lower when
@@ -1322,6 +1343,29 @@ mod tests {
             assert!(app.auto.find(&format!("settings.roto.install.{id}")).is_some());
             assert_eq!(app.auto.find(&format!("settings.roto.source.{id}")).unwrap().label, "model.safetensors");
         }
+        assert!(actions.is_empty());
+    }
+
+    /// Settings ▸ Memory & CPU shows what EffectCraft's caches may use, of the installed RAM
+    /// (#3298: one budget instead of three cache sizes), machine-readable for agents.
+    #[test]
+    fn the_memory_page_shows_what_the_caches_may_use() {
+        assert_eq!(memory_use_line((464u64 << 30) / 10, Some(64 << 30)), "EffectCraft may use: 46.4 GB of 64.0 GB");
+        assert_eq!(memory_use_line(5 << 30, None), "EffectCraft may use: 5.0 GB (installed RAM unknown)");
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.sys_memory = Some(effectcraft_engine::sysinfo::SysMemory { total: 64 << 30, available: 60 << 30 });
+        let page = pages().into_iter().find(|p| p.id == "memory").unwrap();
+        let ctx = egui::Context::default();
+        let tokens = app.tokens;
+        let cur = serde_json::to_value(&app.session.prefs).unwrap();
+        let mut actions = vec![];
+        let mut output = ctx
+            .run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), ..Default::default() }, |ui| {
+                page_ui(&mut app, ui, &page, &cur, &tokens, &mut actions)
+            });
+        output.textures_delta.clear();
+        let budget = (58u64 << 30) * 80 / 100;
+        assert_eq!(app.auto.find("settings.memory.use").unwrap().label, format!("budgetMb={} installedMb=65536 reduced=false", budget >> 20));
         assert!(actions.is_empty());
     }
 

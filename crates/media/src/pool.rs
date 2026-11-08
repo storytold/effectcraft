@@ -64,6 +64,10 @@ struct Entry {
     files: Arc<ReadFiles>,
     stamp: u64,
     bytes: usize,
+    /// When it was last used, for the memory accountant ([`effectcraft_render::memory::tick`]).
+    used: u64,
+    /// What decoding it took, in microseconds (a typical cost when not timed).
+    cost_us: u64,
 }
 
 /// Conformed audio files written by builds before this version are ignored (and written again):
@@ -121,14 +125,22 @@ impl Lru {
         self.order.remove(&e.stamp);
         self.clock += 1;
         e.stamp = self.clock;
+        e.used = effectcraft_render::memory::tick();
         self.order.insert(e.stamp, k.clone());
         Some((e.img.clone(), e.files.clone()))
     }
     /// Stores an image with its read files under `k` and evicts the least recently used entries until the cache fits `budget` bytes.
     fn insert(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize) {
+        self.insert_took(k, img, files, budget, None);
+    }
+    /// [`Lru::insert`] with what decoding the frame took in microseconds (`None`: not timed, a
+    /// typical cost).
+    fn insert_took(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize, took: Option<u64>) {
         let bytes = img.data.len() * std::mem::size_of::<Px>() + 64;
+        let cost_us = took.map_or_else(|| effectcraft_render::memory::default_cost(bytes, effectcraft_render::memory::DEFAULT_FRAME_US_PER_MB), |t| t.max(1));
         self.clock += 1;
-        if let Some(old) = self.map.insert(k.clone(), Entry { img, files, stamp: self.clock, bytes }) {
+        let used = effectcraft_render::memory::tick();
+        if let Some(old) = self.map.insert(k.clone(), Entry { img, files, stamp: self.clock, bytes, used, cost_us }) {
             self.order.remove(&old.stamp);
             self.bytes -= old.bytes;
         }
@@ -141,6 +153,14 @@ impl Lru {
             self.order.remove(&e.stamp);
             self.bytes -= e.bytes;
         }
+    }
+    /// The least recently used frame, if one may go (the newest frame always stays).
+    fn oldest(&self) -> Option<&Entry> {
+        if self.map.len() <= 1 {
+            return None;
+        }
+        let (_, k) = self.order.first_key_value()?;
+        self.map.get(k)
     }
     /// Evict least-recently-used frames until within `budget` (the newest frame always stays).
     fn evict(&mut self, budget: usize) {
@@ -296,6 +316,11 @@ impl CacheState {
                 break;
             }
         }
+    }
+
+    /// The bytes the frame cache and the whole stills beside it hold (the memory holder's).
+    fn held_bytes(&self) -> usize {
+        self.lru.bytes.saturating_add(self.recent_bytes())
     }
 
     /// The bytes of the whole stills [`CacheState::recent`] holds.
@@ -526,6 +551,9 @@ struct Loc {
 /// picture that never comes.
 struct Owner<'a> {
     inner: &'a Inner,
+    /// When the decode started ([`effectcraft_render::memory::tick`]: what it took is the frame's
+    /// cost to the memory accountant).
+    started: u64,
     key: Key,
     flight: Arc<Flight>,
     /// The picture is the one asked for (else a still's whole picture, resampled for the request).
@@ -545,22 +573,25 @@ impl Drop for Owner<'_> {
         });
         let budget = self.inner.budget();
         let mut c = lock(&self.inner.cache);
+        let had = c.held_bytes();
         if let (Ok(img), files) = &outcome
             && !c.stale(&self.key.path, self.generation)
         {
             if self.as_asked {
-                c.lru.insert(self.key.clone(), img.clone(), files.clone(), budget);
+                let took = effectcraft_render::memory::tick().saturating_sub(self.started);
+                c.lru.insert_took(self.key.clone(), img.clone(), files.clone(), budget, Some(took));
             } else {
                 c.keep_recent(self.key.clone(), img.clone(), files.clone(), budget);
             }
         }
+        let grown = c.held_bytes().saturating_sub(had);
         if c.inflight.get(&self.key).is_some_and(|f| Arc::ptr_eq(f, &self.flight)) {
             c.inflight.remove(&self.key);
         }
         drop(c);
         *lock(&self.flight.outcome) = Some(outcome);
         self.flight.ready.notify_all();
-        effectcraft_render::memory::Accountant::global().note_growth();
+        effectcraft_render::memory::Accountant::global().note_growth(grown);
     }
 }
 
@@ -1206,7 +1237,8 @@ impl Inner {
         let flight = Arc::new(Flight { generation, ..Flight::default() });
         c.inflight.insert(source.key.clone(), flight.clone());
         drop(c);
-        let mut owner = Owner { inner: self, key: source.key.clone(), flight, as_asked, generation, outcome: None };
+        let mut owner =
+            Owner { inner: self, started: effectcraft_render::memory::tick(), key: source.key.clone(), flight, as_asked, generation, outcome: None };
         let (decoded, files) = self.run_decode(&source, footage);
         let (decoded, files) = (decoded.map(Arc::new), Arc::new(files));
         reads::note_all(&files);
@@ -1247,11 +1279,13 @@ impl Inner {
     /// since `generation`, see [`CacheState::stale`]), and return it.
     fn keep(&self, key: &Key, img: Arc<Image>, files: Arc<ReadFiles>, generation: u64) -> Arc<Image> {
         let mut c = lock(&self.cache);
+        let had = c.held_bytes();
         if !c.stale(&key.path, generation) {
             c.lru.insert(key.clone(), img.clone(), files, self.budget());
         }
+        let grown = c.held_bytes().saturating_sub(had);
         drop(c);
-        effectcraft_render::memory::Accountant::global().note_growth();
+        effectcraft_render::memory::Accountant::global().note_growth(grown);
         img
     }
 
@@ -1496,23 +1530,33 @@ impl Inner {
     }
 }
 
-/// The decoded frames in the common memory budget (#3271): converted from decoded footage, the
-/// first freed when the caches together are over it.
+/// The decoded frames in the common memory budget (#3271, #3298): each frame is worth what
+/// decoding it took, per byte. The whole stills kept to resample other sizes shortly after
+/// ([`CacheState::recent`]) are offered first, as worth nothing: they are kept for a moment only.
 impl effectcraft_render::memory::MemoryHolder for Inner {
     fn name(&self) -> &'static str {
         "footage frames"
     }
     fn bytes(&self) -> usize {
+        lock(&self.cache).held_bytes()
+    }
+    fn oldest(&self) -> Option<effectcraft_render::memory::Candidate> {
         let c = lock(&self.cache);
-        c.lru.bytes.saturating_add(c.recent_bytes())
+        if let Some(r) = c.recent.front() {
+            return Some(effectcraft_render::memory::Candidate { used: 0, bytes: r.bytes.max(1), cost_us: 0 });
+        }
+        let e = c.lru.oldest()?;
+        Some(effectcraft_render::memory::Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us })
     }
-    fn priority(&self) -> u8 {
-        0
-    }
-    fn trim_to(&self, bytes: usize) {
+    fn drop_oldest(&self) -> usize {
         let mut c = lock(&self.cache);
-        c.recent.clear();
-        c.lru.evict(bytes);
+        if let Some(r) = c.recent.pop_front() {
+            return r.bytes.max(1);
+        }
+        let Some(k) = c.lru.oldest().and_then(|_| c.lru.order.first_key_value().map(|(_, k)| k.clone())) else { return 0 };
+        let had = c.lru.bytes;
+        c.lru.remove(&k);
+        had.saturating_sub(c.lru.bytes)
     }
 }
 

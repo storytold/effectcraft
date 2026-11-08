@@ -179,44 +179,127 @@ fn pick_whip_writes_match_names_without_compact_english() {
 
 // ---------------------------------------------------------------- pure setting helpers
 
+/// #3298: one budget for the caches together, 80 % of the installed RAM left after RAM Reserved
+/// for Other Applications (three fixed budgets of 5 GB in all, whatever the machine had, before).
 #[test]
-fn cache_budgets_leave_reserved_ram_and_shrink_when_low() {
+fn the_memory_budget_follows_the_installed_ram() {
+    use crate::prefs::{FALLBACK_MEMORY_BUDGET, MEMORY_HEADROOM_PERCENT, MIN_MEMORY_BUDGET};
     use crate::sysinfo::SysMemory;
+    assert_eq!(MEMORY_HEADROOM_PERCENT, 80);
     let mut p = crate::prefs::Prefs::default();
-    p.memory.layer_cache_mb = 4096;
-    p.memory.media_cache_mb = 4096;
-    p.memory.preview_cache_mb = 8192;
-    p.memory.ram_reserved_gb = 6;
-    let b = p.cache_budgets(None);
-    assert_eq!((b.layer >> 20, b.preview >> 20, b.capped), (4096, 8192, false));
-    // 16 GB machine, 6 GB reserved: 16 GB of caches scaled into 10 GB.
-    let m = SysMemory { total: 16 << 30, available: 12 << 30 };
-    let b = p.cache_budgets(Some(m));
-    assert!(b.capped && !b.reduced);
-    assert!(((b.layer + b.media + b.preview) as i64 - (10i64 << 30)).abs() < 4, "{b:?}");
+    assert_eq!(p.memory.ram_reserved_gb, 6);
+    let at = |gb: u64| Some(SysMemory { total: gb << 30, available: gb << 30 });
+    for (gb, mb) in [(16u64, 8192u64), (64, 47_513), (128, 99_942)] {
+        let b = p.memory_budget(at(gb), false);
+        assert_eq!(b.bytes as u64 >> 20, mb, "{gb} GB: {b:?}");
+        assert_eq!((b.installed, b.reduced), (Some(gb << 30), false));
+    }
+    // Unknown RAM: the old three budgets' sum.
+    let b = p.memory_budget(None, false);
+    assert_eq!((b.bytes as u64, b.installed), (FALLBACK_MEMORY_BUDGET, None));
+    assert_eq!(FALLBACK_MEMORY_BUDGET, 5 << 30);
+    // Less RAM than the reserve: the floor, for the caches together.
+    assert_eq!(p.memory_budget(at(4), false).bytes as u64, MIN_MEMORY_BUDGET);
+    // A larger reserve leaves less.
+    p.memory.ram_reserved_gb = 32;
+    assert_eq!(p.memory_budget(at(64), false).bytes as u64, (32u64 << 30) * 80 / 100);
     // Low on memory: halved; off: not.
-    let low = SysMemory { total: 16 << 30, available: 512 << 20 };
-    let r = p.cache_budgets(Some(low));
-    assert!(r.reduced && r.preview < b.preview / 2 + 2);
+    let b = p.memory_budget(at(64), true);
+    assert!(b.reduced && b.bytes as u64 == (32u64 << 30) * 80 / 200, "{b:?}");
     p.memory.reduce_cache_when_low = false;
-    assert!(!p.cache_budgets(Some(low)).reduced);
+    assert!(!p.memory_budget(at(64), true).reduced);
 }
 
-/// Eight stacked 1080p clips ran the browser build out of its 4 GiB of memory: the footage and
-/// layer caches kept their desktop sizes there, beside the decoders' own frames.
+/// Halving the caches frees memory: a low-memory episode ends only once twice the threshold is
+/// available again, so the budget (and the toast) doesn't flip with every reading.
 #[test]
-fn web_cache_budgets_leave_room_for_the_decoders() {
-    use crate::prefs::{WEB_LAYER_CACHE, WEB_MEDIA_CACHE};
-    let mut p = crate::prefs::Prefs::default();
-    p.memory.layer_cache_mb = 4096;
-    p.memory.media_cache_mb = 4096;
-    let web = p.cache_budgets_in(None, true);
-    assert_eq!((web.layer as u64, web.media as u64), (WEB_LAYER_CACHE, WEB_MEDIA_CACHE));
-    assert_eq!(web.preview, p.cache_budgets_in(None, false).preview, "the RAM preview keeps its budget");
-    // Smaller settings stay as they are; the desktop is unchanged.
-    p.memory.media_cache_mb = 128;
-    assert_eq!(p.cache_budgets_in(None, true).media, 128 << 20);
-    assert_eq!(p.cache_budgets_in(None, false).layer, 4096 << 20);
+fn low_memory_budgets_hold_until_the_system_recovers() {
+    use crate::sysinfo::SysMemory;
+    // 16 GB: low below 1.6 GB available, recovered from 3.2 GB.
+    let at = |available: u64| SysMemory { total: 16 << 30, available };
+    assert!(at(1 << 30).still_low(false));
+    assert!(!at(2 << 30).still_low(false));
+    assert!(at(2 << 30).still_low(true), "not recovered yet");
+    assert!(!at(4 << 30).still_low(true));
+    let mut s = Session::default();
+    assert!(!s.memory_budget().reduced, "no reading: nothing reduced");
+    s.sys_memory = Some(at(2 << 30));
+    assert!(!s.memory_budget().reduced);
+    s.memory_low = true;
+    assert!(s.memory_budget().reduced, "the episode holds");
+    s.sys_memory = Some(at(4 << 30));
+    assert!(!s.memory_budget().reduced, "recovered");
+}
+
+/// The memory readings over a low-memory episode: the budget is halved once, stays halved while
+/// the system has not recovered (a reading between the low line and twice it), and the toast
+/// shows once; recovered, the budget is whole again, and the next episode toasts again.
+#[test]
+fn a_low_memory_episode_toasts_once_and_reapplies_the_budget() {
+    use crate::sysinfo::SysMemory;
+    let at = |available: u64| Some(SysMemory { total: 64 << 30, available });
+    let mut s = Session::default();
+    s.drain_events();
+    let toasts = |s: &mut Session| s.drain_events().into_iter().filter(|e| matches!(e, crate::Event::Toast { .. })).count();
+    let whole = s.take_memory_reading(at(40 << 30));
+    assert!(!whole.reduced);
+    assert_eq!(s.layer_cache.budget(), whole.bytes, "applied");
+    let revision = s.prefs_revision;
+    // Low (below 6.4 GB): halved, re-applied, one toast.
+    let low = s.take_memory_reading(at(4 << 30));
+    assert!(low.reduced && low.bytes == whole.bytes / 2, "{low:?}");
+    assert_eq!(s.layer_cache.budget(), low.bytes);
+    assert!(s.prefs_revision > revision, "frontends re-apply theirs");
+    assert_eq!(toasts(&mut s), 1);
+    // Between the low line and twice it, then low again: still the same episode.
+    for available in [8u64 << 30, 3 << 30, 10 << 30] {
+        assert!(s.take_memory_reading(at(available)).reduced, "{available}");
+    }
+    assert_eq!(toasts(&mut s), 0, "one toast per episode");
+    // Recovered (13 GB, over twice 6.4 GB): whole again; a new episode toasts again.
+    assert_eq!(s.take_memory_reading(at(13 << 30)), whole);
+    assert_eq!(s.layer_cache.budget(), whole.bytes);
+    assert!(s.take_memory_reading(at(2 << 30)).reduced);
+    assert_eq!(toasts(&mut s), 1);
+}
+
+/// #3298: settings saved with the three cache budgets (version 4, or a later file that still
+/// has them) keep RAM Reserved for Other Applications and lose the budgets: they are not kept
+/// as unknown keys and written back.
+#[test]
+fn the_old_cache_budgets_are_dropped_from_saved_settings() {
+    use crate::prefs::Prefs;
+    for version in [4, 5] {
+        let old = format!(
+            r#"{{"version": {version}, "memory": {{"ramReservedGb": 12, "layerCacheMb": 2048, "mediaCacheMb": 4096, "previewCacheMb": 8192, "reduceCacheWhenLow": false}}}}"#
+        );
+        let p = Prefs::from_json(&old);
+        assert_eq!((p.memory.ram_reserved_gb, p.memory.reduce_cache_when_low), (12, false), "v{version}");
+        let saved: Value = serde_json::from_str(&p.to_json()).unwrap();
+        let memory = saved["memory"].as_object().unwrap();
+        for key in ["layerCacheMb", "mediaCacheMb", "previewCacheMb"] {
+            assert!(!memory.contains_key(key), "v{version}: {key} dropped");
+        }
+        assert_eq!(memory["ramReservedGb"], json!(12));
+    }
+}
+
+/// What each cache may hold by itself: on the desktop all of the budget (the accountant
+/// decides), in the browser its cap, as before one budget: the RAM preview keeps its 3 GB and the
+/// layer and footage caches their 512 / 256 MB (#3298 review: the preview may not take the whole
+/// web budget), all within the web budget.
+#[test]
+fn caches_have_no_limit_of_their_own_below_the_budget() {
+    use crate::prefs::{MemoryBudget, WEB_LAYER_CACHE, WEB_MEDIA_CACHE, WEB_MEMORY_BUDGET, WEB_PREVIEW_CACHE};
+    let b = |bytes: usize| MemoryBudget { bytes, installed: None, reduced: false };
+    let desktop = b(40 << 30).caps(false);
+    assert_eq!((desktop.layer, desktop.footage, desktop.preview), (40 << 30, 40 << 30, 40 << 30));
+    let web = b(WEB_MEMORY_BUDGET as usize).caps(true);
+    assert_eq!((web.layer as u64, web.footage as u64, web.preview as u64), (WEB_LAYER_CACHE, WEB_MEDIA_CACHE, WEB_PREVIEW_CACHE));
+    assert_eq!(WEB_PREVIEW_CACHE, 3 << 30, "the RAM preview keeps its budget");
+    const { assert!(WEB_MEMORY_BUDGET <= 3584 << 20 && WEB_MEMORY_BUDGET >= WEB_PREVIEW_CACHE) };
+    let small = b(100 << 20).caps(true);
+    assert_eq!((small.layer, small.footage, small.preview), (100 << 20, 100 << 20, 100 << 20));
 }
 
 #[test]

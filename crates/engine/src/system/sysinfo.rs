@@ -24,7 +24,20 @@ pub struct SysMemory {
 impl SysMemory {
     /// The system is low on memory: less than 10% (or less than 1 GB) is available.
     pub fn is_low(&self) -> bool {
-        self.total > 0 && (self.available < self.total / 10 || self.available < 1 << 30)
+        self.total > 0 && self.available < self.low_threshold()
+    }
+
+    /// Below this much available memory the system is low: 10% of the total, at least 1 GB.
+    fn low_threshold(&self) -> u64 {
+        (self.total / 10).max(1 << 30)
+    }
+
+    /// Still low on memory, given whether it was (`was_low`): a low episode ends only once twice
+    /// the low threshold is available again. Without that margin, halving the caches frees just
+    /// enough memory to end it, the budgets double again and fill it, and the system is low
+    /// again a reading later.
+    pub fn still_low(&self, was_low: bool) -> bool {
+        if was_low { self.total > 0 && self.available < self.low_threshold().saturating_mul(2) } else { self.is_low() }
     }
 }
 

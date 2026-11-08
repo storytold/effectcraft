@@ -1036,11 +1036,11 @@ fn the_plane_store_is_trimmed_by_the_accountant() {
         fn bytes(&self) -> usize {
             self.0.lock().entries.iter().map(|e| e.bytes).sum()
         }
-        fn priority(&self) -> u8 {
-            1
+        fn oldest(&self) -> Option<effectcraft_render::memory::Candidate> {
+            self.0.oldest_candidate()
         }
-        fn trim_to(&self, bytes: usize) {
-            self.0.trim_to(bytes);
+        fn drop_oldest(&self) -> usize {
+            self.0.drop_candidate()
         }
     }
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
@@ -1262,7 +1262,7 @@ fn trimming_for_bytes_keeps_remembered_failures() {
         let index = crate::exr_index::get(p, &source).unwrap();
         assert!(store.get(p, &source, &index, &all, Use::Other).is_ok());
     }
-    store.trim_to(0);
+    while store.drop_candidate() > 0 {}
     assert_eq!(store.cached(), [path], "the planes went, the failure stays");
     assert!(store.get(path, &broken, &index, &all, Use::Other).is_err());
     assert_eq!(decodes_of(path).len(), 1, "not read again");
