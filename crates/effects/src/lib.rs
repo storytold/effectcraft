@@ -852,7 +852,7 @@ const ALIASES: &[(&str, &[&str])] = &[
     ("ec.transition.ccwarpomatic", &["CC WarpoMatic"]),
     ("ec.time.ccwidetime", &["CC Wide Time"]),
     ("ec.color.lumetri", &["Lumetri Color"]),
-    ("ec.obsolete.mochashape", &["Mocha shape"]),
+    ("ec.obsolete.mochashape", &["Mocha shape", "mocha shape"]),
     ("ec.keying.keylight", keylight::KEYLIGHT_ALIASES),
     ("ec.matte.rotobrush", &["Roto Brush & Refine Edge"]),
     ("ec.distort.warpstabilizer", &["Warp Stabilizer"]),

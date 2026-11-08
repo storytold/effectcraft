@@ -129,6 +129,7 @@ pub(crate) fn category(source: &str) -> String {
 /// `query` (lowercase)? Both names match, so a translated interface can be searched either way.
 pub(crate) fn matches(id: &str, english: &str, query: &str) -> bool {
     english.to_lowercase().contains(query)
+        || effectcraft_engine::effects::find(id).is_some_and(|spec| effectcraft_engine::effects::name_matches(spec, query))
         || catalog(current()).and_then(|c| c.row(id)).is_some_and(|(_, translated)| translated.to_lowercase().contains(query))
 }
 
@@ -2194,6 +2195,8 @@ mod tests {
                 let translated = name(spec.id, spec.name);
                 for alias in effects::aliases(spec.id) {
                     assert_eq!(group(spec.id, alias), translated, "{language}: {alias}");
+                    assert!(matches(spec.id, alias, &spec.name.to_lowercase()), "{language}: search current name of {alias}");
+                    assert!(matches(spec.id, spec.name, &alias.to_lowercase()), "{language}: search legacy name {alias}");
                     assert_eq!(group(spec.id, &format!("{alias} 2")), format!("{translated} 2"));
                     let custom = format!("{alias} custom");
                     assert_eq!(group(spec.id, &custom), custom);
