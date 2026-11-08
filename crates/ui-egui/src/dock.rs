@@ -709,6 +709,16 @@ mod tests {
         w.apply(action, permissions).unwrap();
     }
 
+    /// Only the title changes: existing saved workspace layouts still deserialize.
+    #[test]
+    fn scopes_label_is_descriptive_and_its_saved_identity_stays_compatible() {
+        let panel: PanelKind = serde_json::from_str("\"LumetriScopes\"").unwrap();
+        assert_eq!(panel, LumetriScopes);
+        assert_eq!(panel.title(), "Video Scopes");
+        assert_eq!(panel.id(), "LumetriScopes");
+        assert_eq!(serde_json::to_string(&panel).unwrap(), "\"LumetriScopes\"");
+    }
+
     #[test]
     fn after_effects_workspaces_exist_with_their_core_panels() {
         for name in WORKSPACES {

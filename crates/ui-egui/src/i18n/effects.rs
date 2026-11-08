@@ -2189,7 +2189,7 @@ mod tests {
 
     #[test]
     fn legacy_effect_names_draw_current_labels_without_changing_custom_names() {
-        for language in ["en", "ja", "zh-hans", "zh-hant", "fr", "sv", "ka"] {
+        for language in ["en", "ja", "zh-hans", "zh-hant", "fr", "sv", "ka", "cs", "de", "es", "pl", "pt-br", "ru", "uk"] {
             set_current(language);
             for spec in effects::registry() {
                 let translated = name(spec.id, spec.name);
@@ -2210,8 +2210,10 @@ mod tests {
     fn localized_effect_names_do_not_reintroduce_legacy_branding() {
         for (language, rows) in COMPLETE.iter().chain(PARTIAL) {
             for (_, _, translated) in *rows {
-                for mark in ["CC ", "Lumetri", "Mercury", "Mocha", "mocha", "Keylight", "Warp Stabilizer", "Roto Brush"] {
-                    assert!(!translated.contains(mark), "{language}: {translated}");
+                let label = translated.to_lowercase();
+                assert!(!label.starts_with("cc "), "{language}: {translated}");
+                for mark in ["lumetri", "mercury", "mocha", "keylight", "warp stabilizer", "roto brush"] {
+                    assert!(!label.contains(mark), "{language}: {translated}");
                 }
             }
         }

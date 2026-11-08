@@ -8799,6 +8799,21 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeSet;
 
+    #[test]
+    fn renamed_menu_translations_do_not_reintroduce_vendor_names() {
+        for code in CATALOG_CODES {
+            set_current(code);
+            for (id, source) in [("window.panel", "Video Scopes"), ("track.warpStabilizer", "Motion Stabilizer")] {
+                let rendered = command_label(id, source);
+                let label = rendered.to_lowercase();
+                for mark in ["lumetri", "mercury", "warp stabilizer"] {
+                    assert!(!label.contains(mark), "{code}: {id} -> {rendered}");
+                }
+            }
+        }
+        set_current("en");
+    }
+
     /// The four options at the foot of the header's workspace menu say what After Effects says,
     /// read from its workspace button on 2026-10-31: reset, save over this one, save a copy, then
     /// edit the list.

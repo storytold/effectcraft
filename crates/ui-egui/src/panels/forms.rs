@@ -1051,6 +1051,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renderer_form_keeps_descriptive_labels_and_stable_option_values() {
+        crate::i18n::set_current("en");
+        let (_, fields) = project_settings_form(&effectcraft_engine::Session::default());
+        let renderer = fields.iter().find(|field| field.key == "renderer").unwrap();
+        let FieldKind::Choice { options, .. } = &renderer.kind else { panic!("renderer must be a choice") };
+        assert_eq!(
+            options.as_slice(),
+            &[("GPU Acceleration (no GPU: software)".to_string(), json!("gpu")), ("Software Rendering".to_string(), json!("software"))]
+        );
+    }
+
+    #[test]
     fn form_params_build_arrays_and_choices() {
         let f = Form {
             title: "T".into(),

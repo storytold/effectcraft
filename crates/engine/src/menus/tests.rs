@@ -23,6 +23,27 @@ fn platform_entries(mac: bool) -> Vec<(Vec<String>, MenuEntry)> {
     out
 }
 
+/// Guard the generated display tree, not command IDs, format tokens or dynamic user names.
+#[test]
+fn builtin_menu_labels_do_not_reintroduce_vendor_feature_names() {
+    for mac in [true, false] {
+        let entries = platform_entries(mac);
+        for (path, entry) in &entries {
+            for label in path.iter().chain(std::iter::once(&entry.label)) {
+                let folded = label.to_lowercase();
+                assert!(!folded.starts_with("cc "), "{label}");
+                for mark in ["lumetri", "mercury", "mocha", "keylight", "warp stabilizer", "roto brush"] {
+                    assert!(!folded.contains(mark), "{label}");
+                }
+            }
+        }
+        let scopes = entries.iter().find(|(_, e)| e.command == "window.panel" && e.params["panel"] == "lumetriScopes").unwrap();
+        assert_eq!(scopes.1.label, "Video Scopes");
+        let stabilize = entries.iter().find(|(_, e)| e.command == "track.warpStabilizer").unwrap();
+        assert_eq!(stabilize.1.label, "Motion Stabilizer");
+    }
+}
+
 #[test]
 fn top_level_order_matches_after_effects() {
     let mac: Vec<String> =

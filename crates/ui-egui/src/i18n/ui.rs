@@ -10291,6 +10291,28 @@ const FRENCH: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
+    /// Check rendered feature labels only. Format names, compatibility tokens and user text
+    /// are not subject to this guard, and a missing translation keeps its English fallback.
+    #[test]
+    fn renamed_panel_labels_do_not_reintroduce_vendor_names() {
+        for language in ["en", "ja", "zh-hans", "zh-hant", "fr", "sv", "ka", "cs", "de", "es", "pl", "pt-br", "ru", "uk"] {
+            set_current(language);
+            for source in
+                ["GPU Acceleration ({})", "GPU Acceleration (no GPU: software)", "Software Rendering", "Video Scopes", "Motion Stabilizer", "Rotoscope Brush"]
+            {
+                let rendered = tr(source);
+                assert!(!rendered.is_empty(), "{language}: {source}");
+                let label = rendered.to_lowercase();
+                for mark in ["lumetri", "mercury", "mocha", "keylight", "warp stabilizer", "roto brush"] {
+                    assert!(!label.contains(mark), "{language}: {source} -> {rendered}");
+                }
+            }
+            // A real interchange label remains factual, not rewritten or rejected.
+            assert!(!tr("Export Adobe Premiere Pro Project").is_empty());
+        }
+        set_current("en");
+    }
+
     /// The interface text that has moved into this catalog. Add a panel here when you convert it;
     /// `every_row_is_used_by_a_converted_panel` then looks for its rows' English sources in it.
     pub(super) const CONVERTED: &[(&str, &str)] = &[

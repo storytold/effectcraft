@@ -100,9 +100,10 @@ fn descriptive_display_names_do_not_collide() {
     let mut names = std::collections::HashSet::new();
     for spec in crate::registry() {
         assert!(names.insert(spec.name.to_lowercase()), "duplicate name {}", spec.name);
-        assert!(!spec.name.starts_with("CC "), "{}", spec.name);
-        for mark in ["Lumetri", "Mercury", "Mocha", "Keylight", "Warp Stabilizer", "Roto Brush"] {
-            assert!(!spec.name.contains(mark), "{}", spec.name);
+        let label = spec.name.to_lowercase();
+        assert!(!label.starts_with("cc "), "{}", spec.name);
+        for mark in ["lumetri", "mercury", "mocha", "keylight", "warp stabilizer", "roto brush"] {
+            assert!(!label.contains(mark), "{}", spec.name);
         }
     }
 }
