@@ -354,12 +354,13 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(pos2(sx + 2.0, y), Align2::LEFT_CENTER, format!("{db:.1}"), Tokens::ui(10.0), t.text_faint);
     }
     p.text(pos2(sx + 30.0, top - 9.0), Align2::LEFT_CENTER, "dB", Tokens::ui(10.0), t.text_dim);
-    // Selected layer's Audio Levels (the editable "-12.0 dB" fields need about 110 px).
+    // Selected layer's Audio Levels: "Left" / "Right" and the editable "-12.0 dB" fields need
+    // about 110 px; narrower, "L" / "R" (down to 80 px, below which the section is left out).
     let lx = rect.min.x + 120.0;
-    if rect.max.x - lx < 110.0 {
+    if rect.max.x - lx < 80.0 {
         return;
     }
-    audio_levels(app, ui, &p, pos2(lx, top));
+    audio_levels(app, ui, &p, pos2(lx, top), rect.max.x - lx < 110.0);
     if app.meter.active() || app.audio.is_some() {
         ui.ctx().request_repaint();
     }
@@ -369,8 +370,9 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 /// Levels at the current time, keyframes (read at layer time) and expression included, as the
 /// Timeline and Effect Controls show them (#3227). An edit runs the Timeline's `prop.set`: on a
 /// keyframed property it keys the current time; a scrub is one undo step; with the Timeline's
-/// Link Channels on, the other channel moves by the same dB (#2485).
-fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at: egui::Pos2) {
+/// Link Channels on, the other channel moves by the same dB (#2485). `compact` labels the channels
+/// "L" / "R" to fit a narrow panel.
+fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at: egui::Pos2, compact: bool) {
     let t = app.tokens;
     let (lx, top) = (at.x, at.y);
     let comp = app.session.active_comp_arc();
@@ -412,11 +414,12 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
     // Linked channels move together; Alt edits one alone (Ctrl+Alt is a proportional scrub).
     let linked = app.ui.timeline.is_linked(uid, false) && !ui.input(|i| i.modifiers.alt && !widgets::proportional_scrub(i.modifiers));
     let mut actions: Vec<serde_json::Value> = vec![];
-    for (d, (k, v)) in [("Left", values[0]), ("Right", values[1])].into_iter().enumerate() {
+    let (channels, field_x) = if compact { (["L", "R"], 14.0) } else { (["Left", "Right"], 44.0) };
+    for (d, (k, v)) in channels.into_iter().zip(values).enumerate() {
         let y = top + 12.0 + d as f32 * 20.0;
         p.text(pos2(lx, y), Align2::LEFT_CENTER, k, Tokens::ui(12.0), t.text_dim);
         let spec = widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: " dB" };
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(lx + 44.0, y - 9.0), egui::Id::unique(("audio-level", uid, d)), v, &spec, &vt);
+        let (r, nv, _) = widgets::hot_number_at(ui, pos2(lx + field_x, y - 9.0), egui::Id::unique(("audio-level", uid, d)), v, &spec, &vt);
         app.auto.add(if d == 0 { "audio.levelLeft" } else { "audio.levelRight" }, r, &format!("{v:.1} dB"));
         if let Some(nv) = nv {
             let merge = format!("audio-levels-{uid}");
@@ -432,11 +435,12 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
                 }
                 value
             };
-            // A scrub moves the shown (expression-evaluated) value; `prop.set` takes the change
-            // from the keyframed value under the expression, so the scrub becomes that value
-            // moved by the same change (every selected layer then moves by it). A typed value is
-            // set as it is.
-            let value: Vec<f64> = if scrub { value.iter().zip(values.iter().zip(raw)).map(|(n, (shown, r))| r + (n - shown)).collect() } else { value };
+            // The fields show the value after the expression; `prop.set` writes (and a scrub takes
+            // its change from) the keyframed value under it. So each channel is that value moved
+            // by the change the edit makes to what is shown (every selected layer then moves by
+            // it), except a typed channel, which is set as typed.
+            let value: Vec<f64> =
+                value.iter().zip(values.iter().zip(raw)).enumerate().map(|(e, (n, (shown, r)))| if e == d && !scrub { *n } else { r + (n - shown) }).collect();
             params["value"] = json!(value);
             actions.push(params);
         }

@@ -271,3 +271,65 @@ fn a_scrub_of_expression_driven_levels_moves_every_selected_layer_by_the_scrub()
     assert!((moved[2] - change).abs() < 1e-6, "the last selected moves by the scrub's change ({change}): {moved:?}");
     assert!((moved[1] - change / 2.0).abs() < 1e-6, "the middle one moves by half: {moved:?}");
 }
+
+/// With Link Channels on, a scrub of Left moves Right by the same dB; Alt scrubs Left alone.
+#[test]
+fn a_linked_scrub_moves_both_channels_and_alt_moves_one() {
+    let mut s = Session::default();
+    let l = sound_layer(&mut s, [-6.0, -12.0]);
+    let mut h = harness(s, l);
+    let uid = levels(&h, l).uid;
+    h.state_mut().ui.timeline.toggle_link(uid, false);
+    h.run_steps(2);
+    scrub_left(&mut h, Modifiers::NONE);
+    let c = levels(&h, l).value.components();
+    assert!(c[0] > -6.0, "the scrub raised Left: {c:?}");
+    assert!((c[0] - c[1] - 6.0).abs() < 1e-9, "Right moved by the same dB: {c:?}");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    assert_eq!(levels(&h, l).value.components(), vec![-6.0, -12.0], "one Undo takes back the scrub");
+    scrub_left(&mut h, Modifiers { alt: true, ..Default::default() });
+    let c = levels(&h, l).value.components();
+    assert!(c[0] > -6.0, "the Alt scrub raised Left: {c:?}");
+    assert_eq!(c[1], -12.0, "Alt leaves Right alone: {c:?}");
+}
+
+/// Typed into an expression-driven field, the value is the keyframed value under the expression
+/// (what the expression reads as `value`), as in the Timeline.
+#[test]
+fn typing_into_expression_driven_levels_sets_the_value_under_the_expression() {
+    let mut s = effectcraft_host::session();
+    let l = sound_layer(&mut s, [-6.0, -12.0]);
+    s.execute("prop.setExpression", json!({"layer": l, "path": "audio/levels", "expression": "value + [10, 10]"})).unwrap();
+    let mut h = harness(s, l);
+    assert_eq!(label(&h, LEFT), db(4.0));
+    type_value(&mut h, LEFT, "-5");
+    assert_eq!(levels(&h, l).value.components(), vec![-5.0, -12.0], "Left as typed, Right's own value under the expression kept");
+    assert_eq!(label(&h, LEFT), db(5.0), "shown through the expression");
+    assert_eq!(label(&h, RIGHT), db(-2.0));
+}
+
+/// A narrow Audio panel (200-230 px) still shows the level fields, labelled "L" / "R", and keeps
+/// them inside the panel.
+#[test]
+fn a_narrow_audio_panel_keeps_the_level_fields_inside_it() {
+    for width in [200.0, 215.0, 230.0, 320.0] {
+        let mut s = Session::default();
+        let l = sound_layer(&mut s, [-20.0, -20.0]);
+        s.execute("layer.select", json!({"layers": [l]})).unwrap();
+        let panel = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 400.0));
+        let mut h = Harness::builder().with_size(vec2(width + 100.0, 400.0)).build_ui_state(
+            move |ui, app: &mut EffectcraftApp| {
+                app.auto.begin_frame();
+                effectcraft_ui_egui::panels::misc::audio(app, ui, panel);
+            },
+            EffectcraftApp::new(s),
+        );
+        h.run_steps(3);
+        for id in [LEFT, RIGHT] {
+            let e = h.state().auto.find(id).unwrap_or_else(|| panic!("{width} px: the Audio panel shows no {id}")).clone();
+            assert!(e.rect[0] + e.rect[2] <= width, "{width} px: {id} ends at {} px, past the panel", e.rect[0] + e.rect[2]);
+            assert_eq!(e.label, db(-20.0), "{width} px");
+        }
+    }
+}
