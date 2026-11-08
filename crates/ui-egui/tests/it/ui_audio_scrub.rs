@@ -74,6 +74,16 @@ impl GatedFrames {
         }
     }
 
+    /// Cache every frame the app has asked for since the last call, and nothing else: a renderer
+    /// that keeps up with the real prefetch requests.
+    fn release_requested(&self, h: &mut Harness<'_, EffectcraftApp>) {
+        while h.state().frames.dispatch_remote() != 0 {}
+        for (_, width, height, done) in std::mem::take(&mut *self.pending.lock().unwrap()) {
+            let rgba = vec![0; (width as usize).saturating_mul(height as usize).saturating_mul(4)];
+            done(Ok(RemoteFrame { width, height, rgba, ms: 1.0 }));
+        }
+    }
+
     /// Drop everything queued without caching it (the warm-up passes request viewer frames).
     fn discard(&self, h: &mut Harness<'_, EffectcraftApp>) {
         while h.state().frames.dispatch_remote() != 0 {}
@@ -345,6 +355,55 @@ fn each_stall_doubles_the_frames_ahead_the_sound_waits_for() {
     let now = h.state().now();
     h.state_mut().play(now);
     assert_eq!(h.state().playback.stalls, 0);
+}
+
+/// Once the backoff reaches its cap, the held sound waits only for frames the prefetch really
+/// requests and can keep cached while the silent preview moves on. It used to wait for `fit`
+/// frames, one of which was never asked for, so a stall kept the preview silent almost to its
+/// end even after rendering recovered.
+#[test]
+fn a_held_sound_at_the_ram_limit_starts_on_the_frames_prefetch_requests() {
+    let fake = Fake::default();
+    let (mut app, cid) = setup_long(true, &fake, 30.0);
+    let gate = GatedFrames::default();
+    let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
+    app.frames.set_remote(Some(renderer));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
+    h.state_mut().use_manual_clock();
+    h.run_steps(2);
+    gate.discard(&mut h);
+    let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
+    // A RAM preview of `ahead + 2` frames (a 64x36 frame is 9216 bytes; 90 % of the budget counts).
+    let fit = ahead + 2;
+    h.state().frames.set_budget(((fit as f64 + 0.5) * 9216.0 / 0.9) as usize);
+    h.state().frames.clear();
+    let now = h.state().now();
+    h.state_mut().play(now);
+    for _ in 0..90 {
+        gate.release_requested(&mut h);
+        step(&mut h);
+        if h.state().audio.is_some() {
+            break;
+        }
+    }
+    assert!(h.state().audio.is_some(), "the sound started");
+
+    // A stall, and enough stalls before it that the backoff is past the RAM preview's limit.
+    gate.discard(&mut h);
+    h.state().frames.clear();
+    h.step();
+    assert!(h.state().audio.is_none() && h.state().playback.audio_held, "a stall stops the sound");
+    let stalled = frame(&h, cid);
+    h.state_mut().playback.stalls = 8;
+    // Rendering keeps up again, caching only what playback itself requests.
+    let started = (0..4 * fit).position(|_| {
+        gate.release_requested(&mut h);
+        kept_up(&mut h);
+        step(&mut h);
+        h.state().audio.is_some()
+    });
+    assert!(started.is_some(), "the sound starts again on the frames the prefetch requests (RAM preview of {fit})");
+    assert!(frame(&h, cid) < stalled + 4 * fit, "near where it stalled ({stalled}), not at the end of the preview");
 }
 
 /// Pull `frames` stereo frames from the output, waiting for the feeder thread to mix them.
