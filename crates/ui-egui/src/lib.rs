@@ -222,6 +222,14 @@ pub struct Playback {
     pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
+    /// The rate the silent clock advances at (comp frames per second, at most `fps`; 0 = the
+    /// frame rate): below real time while frames arrive slower than that, so a first playback
+    /// shows them evenly instead of in bursts between freezes (see `pace_for`).
+    pub pace: f64,
+    /// Played frames the paced clock owes (fractional), `Some` while it runs below real time.
+    pub pace_acc: Option<f64>,
+    /// When the silent clock last ran (seconds), for the pace.
+    pub paced_at: Option<f64>,
 }
 
 impl Playback {

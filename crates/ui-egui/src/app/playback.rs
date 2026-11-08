@@ -46,6 +46,9 @@ impl EffectcraftApp {
             starting_since: now,
             first_cached: None,
             shown_at: Default::default(),
+            pace: 0.0,
+            pace_acc: None,
+            paced_at: None,
         };
         if !self.playback.caching {
             if plan.video {

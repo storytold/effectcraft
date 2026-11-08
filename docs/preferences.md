@@ -54,7 +54,8 @@ Commands (CLI, MCP, control channel):
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
   Adaptive Resolution drops to while you drag, and the lowest a playing preview steps down to)
 - `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. On by default. A
-  preview at Resolution Auto that stalls on frames and shows under 80 % of its frame rate steps
+  preview at Resolution Auto that plays under 80 % of its frame rate (frames render slower than
+  that, so it plays them at the rate they arrive rather than freezing between them) steps
   down a resolution (half the scale after two seconds, a quarter two seconds later if still slow,
   no lower than the Adaptive Resolution Limit) for the rest of that play; stopping goes back to the viewer's resolution, and Cache
   Frames When Idle fills it in. An explicit Resolution (the comp's or the Preview panel's) is

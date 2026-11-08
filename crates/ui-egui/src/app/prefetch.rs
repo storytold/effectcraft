@@ -35,6 +35,46 @@ fn between_picture_and_sound(cur: i64, f: i64, target: i64, looping: bool) -> bo
     if target >= cur || !looping { cur < f && f < target } else { f > cur || f < target }
 }
 
+/// How long the pace takes to follow the rate frames arrive at (seconds, the time constant of
+/// its smoothing): short enough to follow a change, long enough to play through a batch of
+/// frames finishing together.
+const PACE_TAU: f64 = 0.5;
+
+/// The rate a preview plays at when frames arrive slower than its frame rate: proportional to
+/// the cached frames ahead (`lead` of `target`), so it settles where the clock takes frames as
+/// fast as they arrive and the lead stays put; smoothed over [`PACE_TAU`] (`dt` seconds since
+/// the last pass). Never above the frame rate, never under an eighth of it (slower reads as
+/// stopped: the clock holds instead). No frame ahead: the previous pace, the clock holds anyway.
+fn pace_for(prev: f64, lead: i64, target: i64, fps: f64, dt: f64) -> f64 {
+    if lead <= 0 || target <= 0 || fps <= 0.0 {
+        return prev;
+    }
+    let raw = (fps * lead as f64 / target as f64).clamp(fps / 8.0, fps);
+    let k = 1.0 - (-dt.max(0.0) / PACE_TAU).exp();
+    prev + (raw - prev) * k
+}
+
+impl PlaybackPass<'_> {
+    /// The frame `k` played frames after `from` (wrapping as the preview loops), `None` once a
+    /// preview that doesn't loop has reached its end.
+    fn frame_after(&self, from: i64, k: i64) -> Option<i64> {
+        match self.plan {
+            Some(p) => p.frame_after(from, k),
+            None => {
+                let FrameWindow { first: wa, last: wb } = self.window;
+                let f = from + k;
+                if f <= wb {
+                    Some(f)
+                } else if self.looping {
+                    Some(wa + (f - wa).rem_euclid((wb - wa + 1).max(1)))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 impl EffectcraftApp {
     /// RAM preview: advance at the preview's frame rate when frames are cached; otherwise hold
     /// and keep rendering ahead (the green cache bar fills, then playback runs in real time).
@@ -376,29 +416,42 @@ impl EffectcraftApp {
     }
 
     /// The wall clock advances the preview when no audio device drives it, and shows the target
-    /// frame (or holds when it is not cached yet).
+    /// frame (or holds when it is not cached yet). While frames arrive slower than the frame
+    /// rate it runs at their pace ([`pace_for`]): every frame shows, evenly, as After Effects
+    /// plays a preview it hasn't cached yet; real time again once the frames ahead are cached.
     fn advance_frame_clock(&mut self, pass: &PlaybackPass<'_>, step: i64) {
-        let PlaybackPass { ctx, now, plan, video, looping, frame_rate: fr, cur, series, .. } = *pass;
-        let FrameWindow { first: wa, last: wb } = pass.window;
-        let elapsed = now - self.playback.start_wall;
+        let PlaybackPass { ctx, now, plan, video, frame_rate: fr, cur, series, .. } = *pass;
+        let FrameWindow { last: wb, .. } = pass.window;
         // The plan carries the rate the preview was started with (and `play_with` copies it to
         // `Playback::fps`). Deriving the frame from the plan keeps a logic-only tick correct even
         // when a host/test supplies only the plan; a stale duplicate cannot hold playback open.
         let fps = plan.map_or(self.playback.fps, |p| p.fps);
-        let n = ((elapsed * fps) / step as f64).floor() as i64;
-        let target = match plan {
-            Some(p) => p.frame_after(self.playback.start_frame, n),
-            None => {
-                let t = self.playback.start_frame + n;
-                if t <= wb {
-                    Some(t)
-                } else if looping {
-                    Some(wa + (t - wa).rem_euclid((wb - wa + 1).max(1)))
-                } else {
-                    None
-                }
+        let dt = self.playback.paced_at.map_or(0.0, |t| (now - t).max(0.0));
+        self.playback.paced_at = Some(now);
+        if video {
+            // The lead counts out of twice the prefetch depth: the prefetch keeps that many
+            // frames coming, so a full lead means rendering keeps up.
+            let target = (pass.ahead * 2).max(1);
+            let lead = self.cached_lead(pass, target);
+            let prev = if self.playback.pace > 0.0 { self.playback.pace } else { fps };
+            let pace = pace_for(prev, lead, target, fps, dt);
+            self.playback.pace = pace;
+            if pace < fps * 0.8 {
+                self.step_down(now, pass.scale);
             }
-        };
+            if pace < fps * 0.98 {
+                self.advance_paced(pass, pace, dt);
+                return;
+            }
+            if self.playback.pace_acc.take().is_some() {
+                // Back to real time from here.
+                self.playback.start_wall = now;
+                self.playback.start_frame = cur;
+            }
+        }
+        let elapsed = now - self.playback.start_wall;
+        let n = ((elapsed * fps) / step as f64).floor() as i64;
+        let target = pass.frame_after(self.playback.start_frame, n);
         let Some(target) = target else {
             if video {
                 self.session.set_time(fr.tick_of(wb));
@@ -424,7 +477,7 @@ impl EffectcraftApp {
             // Not cached yet: hold the clock at the current frame (cache first, then play).
             self.playback.waiting = true;
             self.step_down(now, pass.scale);
-            let next = plan.and_then(|p| p.frame_after(cur, 1)).unwrap_or(if cur + 1 > wb { wa } else { cur + 1 });
+            let next = pass.frame_after(cur, 1).unwrap_or(cur);
             if self.frames.is_cached(&FrameKey { frame: next, ..series }) {
                 self.session.set_time(fr.tick_of(next));
             }
@@ -434,11 +487,54 @@ impl EffectcraftApp {
         ctx.request_repaint();
     }
 
+    /// The paced clock: it owes `pace` played frames a second (plus what the last passes left
+    /// over) and shows them one by one as far as they are cached; on a frame that isn't it holds
+    /// (owing one frame, so that frame shows the moment it arrives), and at the end of a preview
+    /// that doesn't loop it stops.
+    fn advance_paced(&mut self, pass: &PlaybackPass<'_>, pace: f64, dt: f64) {
+        let PlaybackPass { ctx, now, frame_rate: fr, cur, series, .. } = *pass;
+        let step = pass.plan.map_or(1, |p| p.step).max(1) as f64;
+        let mut owed = self.playback.pace_acc.unwrap_or(0.0) + dt * pace / step;
+        let mut f = cur;
+        while owed >= 1.0 {
+            match pass.frame_after(f, 1) {
+                Some(n) if self.frames.is_cached(&FrameKey { frame: n, ..series }) => {
+                    f = n;
+                    owed -= 1.0;
+                }
+                Some(_) => {
+                    owed = 1.0;
+                    break;
+                }
+                None => {
+                    self.session.set_time(fr.tick_of(pass.window.last));
+                    self.stop();
+                    return;
+                }
+            }
+        }
+        self.playback.waiting = owed >= 1.0;
+        if f != cur {
+            self.session.set_time(fr.tick_of(f));
+            self.playback.frame_shown(now);
+        }
+        self.playback.pace_acc = Some(owed);
+        ctx.request_repaint();
+    }
+
+    /// Cached frames among the next `max` in play order. Counted, not the consecutive run: one
+    /// late frame (a GPU warm-up frame, a heavy one) with frames cached beyond it holds the clock
+    /// for a moment when it gets there, rather than slowing the whole preview to a crawl.
+    fn cached_lead(&self, pass: &PlaybackPass<'_>, max: i64) -> i64 {
+        let cached = self.frames.cached_frames(&pass.series);
+        (1..=max).map_while(|k| pass.frame_after(pass.cur, k)).filter(|f| cached.binary_search(f).is_ok()).count() as i64
+    }
+
     /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at
-    /// Resolution Auto stalled on a frame that isn't cached and shows under 80 % of its frame
-    /// rate two seconds after it started or last stepped down (the first frames at a new scale,
-    /// and the GPU's warm-up frames, take a moment), so it plays on at half `scale`, no lower than
-    /// the Adaptive Resolution Limit. An explicit Resolution is kept.
+    /// Resolution Auto plays under 80 % of its frame rate (its pace, or stalled on a frame that
+    /// isn't cached) two seconds after it started or last stepped down (the first frames at a
+    /// new scale, and the GPU's warm-up frames, take a moment), so it plays on at half `scale`,
+    /// no lower than the Adaptive Resolution Limit. An explicit Resolution is kept.
     // ponytail: it never steps back up during a play, and frames cached at the higher scale aren't
     // shown once it stepped down; add both if loops over a partly cached comp need them.
     fn step_down(&mut self, now: f64, scale: f64) {
@@ -553,6 +649,27 @@ impl EffectcraftApp {
     /// workers; without them frames render one at a time on the UI thread, `Frames::pump`).
     fn frames_parallelism(&self) -> usize {
         self.frames.lanes()
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::pace_for;
+
+    /// The pace follows the cached lead: real time with a full lead, a third of it with a third,
+    /// never under an eighth, unchanged with nothing ahead, and smoothed over time.
+    #[test]
+    fn pace_follows_the_cached_lead() {
+        // Settled (a long dt): proportional to the lead.
+        assert!((pace_for(30.0, 12, 12, 30.0, 10.0) - 30.0).abs() < 1e-6);
+        assert!((pace_for(30.0, 4, 12, 30.0, 10.0) - 10.0).abs() < 1e-6);
+        assert!((pace_for(30.0, 1, 100, 30.0, 10.0) - 3.75).abs() < 1e-6, "never under an eighth");
+        assert_eq!(pace_for(17.0, 0, 12, 30.0, 10.0), 17.0, "no frame ahead: unchanged");
+        // Smoothing: after one time constant it has gone 63 % of the way.
+        let p = pace_for(30.0, 4, 12, 30.0, 0.5);
+        assert!((p - (30.0 - 20.0 * (1.0 - (-1.0f64).exp()))).abs() < 1e-6);
+        assert_eq!(pace_for(30.0, 4, 12, 30.0, 0.0), 30.0, "no time passed: unchanged");
+        assert!(pace_for(10.0, 12, 12, 30.0, 0.5) > 10.0, "and up again as the lead fills");
     }
 }
 

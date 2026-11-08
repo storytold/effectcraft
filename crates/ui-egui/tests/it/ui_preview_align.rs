@@ -285,6 +285,9 @@ fn playback_prefetches_past_the_cached_frames_ahead() {
     h.state_mut().use_manual_clock();
     h.state_mut().session.set_time(Tick::ZERO);
     invoke(&mut h, "playback.toggle", json!({}));
+    // The first pass sees the frames ahead cached and starts the clock (a silent preview holds
+    // its first frame until a few are, as one with sound does).
+    h.step();
     h.state_mut().clock_mut().advance(0.25);
     h.run_steps(2);
     assert!(h.state().playback.playing);
