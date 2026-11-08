@@ -60,6 +60,8 @@ pub enum Outcome {
     },
     /// Reply once background jobs end (a `wait: true` command whose job runs in a worker).
     AwaitJobs(JobWaiter),
+    /// A script yielded its session for rendering; reply after its continuation returns.
+    AwaitScript(u32),
 }
 
 /// A `wait: true` engine command whose job was sent to the session's offload (the browser's
@@ -81,23 +83,40 @@ fn waits(command: &str, params: &Value) -> bool {
     params.get("wait").and_then(Value::as_bool).unwrap_or(default)
 }
 
-/// Run an engine command. A waiting command (`wait: true`) whose job the session offloads
-/// runs with `wait: false` instead, and the reply waits for the job ([`Outcome::AwaitJobs`]),
-/// so the browser's UI keeps drawing while it runs.
+/// Run an engine command. A waiting offloaded command or native render runs with `wait: false`
+/// instead, and the reply waits for the job ([`Outcome::AwaitJobs`]), keeping the UI responsive.
 fn execute_engine(app: &mut EffectcraftApp, id: &str, params: Value) -> Result<Outcome, String> {
-    if !app.session.offloads() || !waits(id, &params) {
-        return app.session.execute_checked(id, params).map(ok).map_err(|e| e.to_string());
+    if !(app.session.offloads() || (cfg!(not(target_arch = "wasm32")) && id == "renderQueue.render")) || !waits(id, &params) {
+        let result = app.session.execute_checked(id, params);
+        return result.map(script_outcome).map_err(|e| e.to_string());
     }
     let before: Vec<String> = app.session.jobs().into_iter().map(|j| j.id).collect();
     let log_cursor = app.session.offload_log_start.saturating_add(app.session.offload_log.len());
     let mut p = params.clone();
-    p["wait"] = json!(false);
+    p.as_object_mut().ok_or("command params must be an object")?.insert("wait".into(), json!(false));
     let result = app.session.execute_checked(id, p).map_err(|e| e.to_string())?;
     let jobs: Vec<String> = app.session.jobs().into_iter().map(|j| j.id).filter(|j| !before.contains(j)).collect();
     if jobs.is_empty() {
         return Ok(ok(result));
     }
     Ok(Outcome::AwaitJobs(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor }))
+}
+
+fn script_outcome(result: Value) -> Outcome {
+    match result.get("renderHost").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) {
+        Some(host) => Outcome::AwaitScript(host),
+        None => ok(result),
+    }
+}
+
+/// Suspended scripts retain open undo groups. Let the UI inspect and stop the render, but
+/// never fold an unrelated edit, another script or a project replacement into that group.
+pub(crate) fn check_script_render(app: &EffectcraftApp, id: &str) -> Result<(), String> {
+    if app.session.script_ui.render_host.is_some() && !effectcraft_engine::scriptui::allowed_during_render(id) {
+        Err(effectcraft_engine::scriptui::RENDER_WAIT_MESSAGE.into())
+    } else {
+        Ok(())
+    }
 }
 
 impl JobWaiter {
@@ -178,6 +197,14 @@ fn point(app: &EffectcraftApp, p: &Value) -> Result<egui::Pos2, String> {
 /// [`Outcome::AwaitJobs`] instead of replying in this call.
 pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlRequest, now: f64) -> Outcome {
     let p = &req.params;
+    if app.session.script_ui.render_host.is_some()
+        && !matches!(
+            req.method.as_str(),
+            "engine.execute" | "ui.menu.invoke" | "engine.commands" | "ui.menu.list" | "ui.inspect" | "ui.elements" | "ui.resize" | "ui.focus"
+        )
+    {
+        return err(effectcraft_engine::scriptui::RENDER_WAIT_MESSAGE);
+    }
     match req.method.as_str() {
         "engine.execute" | "ui.menu.invoke" => execute_command(app, ctx, &req.method, p),
         "engine.commands" => engine_commands(app, p),
@@ -211,15 +238,25 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
 fn execute_command(app: &mut EffectcraftApp, ctx: &egui::Context, method: &str, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
+    if let Err(e) = check_script_render(app, id) {
+        return err(e);
+    }
     let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
+    // Only this invocation opts in: CLI, lifecycle scripts and the inline console retain
+    // their synchronous contract. Its host remembers the opt-in across successive renders.
+    let previous = app.session.script_ui.yield_renders;
+    app.session.script_ui.yield_renders = cfg!(not(target_arch = "wasm32")) && id == "script.run";
     // `engine.execute` runs engine commands exactly as headless (never opens a dialog, e.g.
     // `comp.new {}` creates a default comp); UI-only ids (`tool.*`, `view.*`, `window.*`,
     // `playback.*` …) and `ui.menu.invoke` go through the menu dispatcher like a click.
-    let r = if method == "engine.execute" && effectcraft_engine::find_command(id).is_some() {
+    let r = if (method == "engine.execute" && effectcraft_engine::find_command(id).is_some())
+        || (id == "renderQueue.render" && params.get("wait").and_then(Value::as_bool) == Some(true))
+    {
         execute_engine(app, id, params)
     } else {
-        crate::menus::invoke(app, ctx, id, params).map(ok)
+        crate::menus::invoke(app, ctx, id, params).map(script_outcome)
     };
+    app.session.script_ui.yield_renders = previous;
     match r {
         Ok(o) => o,
         Err(e) => {
