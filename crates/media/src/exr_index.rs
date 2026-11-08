@@ -12,7 +12,7 @@
 //! with a bad offset is never read).
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, SeekFrom};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use effectcraft_raster::AuxChannels;
@@ -160,8 +160,42 @@ fn headers_and_tables(src: &mut dyn ReadSeek, len: u64) -> Result<(MetaData, exr
     }
 }
 
+/// The most bytes one uncompressed block of a part may take: the decompressor allocates that
+/// much for a block before it looks at the data, so a hostile header (a data window a billion
+/// pixels wide over one tiny chunk) would ask for gigabytes.
+pub(crate) const MAX_BLOCK_BYTES: usize = 256 << 20;
+
+/// The most pixels of a part's data window (the display window's limit, four times over: data
+/// windows may reach past it).
+const MAX_DATA_PIXELS: usize = 4 * MAX_DISPLAY_PIXELS;
+
+/// The bytes of one uncompressed block of `h` (its pixel bytes times a block's pixels, checked):
+/// `None` past [`MAX_BLOCK_BYTES`] or when it doesn't fit in a `usize`.
+pub(crate) fn block_bytes(h: &exr::meta::header::Header) -> Option<usize> {
+    let (w, rows) = match h.blocks {
+        exr::meta::BlockDescription::Tiles(t) => (t.tile_size.0, t.tile_size.1),
+        exr::meta::BlockDescription::ScanLines => (h.layer_size.0, h.compression.scan_lines_per_block().min(h.layer_size.1.max(1))),
+    };
+    let per_pixel = h.channels.list.iter().map(|c| c.sample_type.bytes_per_sample()).try_fold(0usize, usize::checked_add)?;
+    per_pixel.checked_mul(w)?.checked_mul(rows).filter(|b| *b <= MAX_BLOCK_BYTES)
+}
+
+/// Every part of `meta` is safe to decode: its data window and its blocks within bounds.
+pub(crate) fn parts_in_bounds(meta: &MetaData) -> bool {
+    meta.headers.iter().all(|h| h.layer_size.0.checked_mul(h.layer_size.1).is_some_and(|n| n <= MAX_DATA_PIXELS) && block_bytes(h).is_some())
+}
+
+/// The headers of the OpenEXR `bytes` (read leniently) are safe to hand to a decoder
+/// ([`parts_in_bounds`]); `false` for anything else.
+pub(crate) fn safe_to_decode(bytes: &[u8]) -> bool {
+    MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).is_ok_and(|meta| parts_in_bounds(&meta))
+}
+
 /// Refuse headers this reader doesn't take or that ask for more than the file can hold.
 fn check(meta: &MetaData, len: u64, header_end: u64) -> Result<(), IndexError> {
+    if !parts_in_bounds(meta) {
+        return Err(IndexError::Unreadable);
+    }
     if let Some(why) = unsupported(meta) {
         return Err(IndexError::Unsupported(why));
     }
@@ -195,7 +229,15 @@ pub(crate) fn unsupported(meta: &MetaData) -> Option<&'static str> {
 /// offset tables only.
 pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Result<ExrIndex, IndexError> {
     src.seek(SeekFrom::Start(0)).map_err(|_| IndexError::Io)?;
-    let (meta, tables, chunks_start) = headers_and_tables(&mut *src, len)?;
+    let (mut meta, tables, chunks_start) = headers_and_tables(&mut *src, len)?;
+    // The manifests are parsed, and the other attributes (and previews) aren't kept: an index
+    // stays small however much a renderer writes into the headers.
+    let manifests = manifests(&meta);
+    for h in meta.headers.iter_mut() {
+        h.shared_attributes.other.clear();
+        h.own_attributes.other.clear();
+        h.own_attributes.preview = None;
+    }
     let first = meta.headers.first().ok_or(IndexError::Unreadable)?;
     let display = first.shared_attributes.display_window;
     // Where each chunk ends: at the next chunk's start, or at the end of the file.
@@ -211,7 +253,7 @@ pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Resul
         let table = tables.get(pi).ok_or(IndexError::Unreadable)?;
         // A chunk is at most its block's bytes plus its own small header (part number, position
         // and sizes): never read more for one.
-        let most = (h.max_block_byte_size() as u64).saturating_add(64);
+        let most = (block_bytes(h).ok_or(IndexError::Unreadable)? as u64).saturating_add(64);
         let mut list = Vec::with_capacity(h.chunk_count);
         for (i, tile) in h.blocks_increasing_y_order().enumerate() {
             let bounds = h.get_absolute_block_pixel_coordinates(tile.location).map_err(|_| IndexError::Unreadable)?;
@@ -249,7 +291,6 @@ pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Resul
             channels.push(IndexChannel { name, part: pi, channel: ci, fill });
         }
     }
-    let manifests = manifests(&meta);
     let rgb = rgb_of(&meta, &channels);
     let mut names = AuxChannels::new(display.size.0 as u32, display.size.1 as u32, 1.0);
     names.channels = channels.iter().map(|c| (c.name.clone(), vec![])).collect();
@@ -257,12 +298,7 @@ pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Resul
     names.aliases = aliases;
     let picture = picture_names(&names).map(|(rgb, a)| {
         // Planes are looked up by name ignoring case, so every channel that could answer is read.
-        let ids = channels
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| rgb.iter().chain(&a).any(|k| k.eq_ignore_ascii_case(&c.name)))
-            .map(|(i, _)| i)
-            .collect();
+        let ids = channels.iter().enumerate().filter(|(_, c)| rgb.iter().chain(&a).any(|k| k.eq_ignore_ascii_case(&c.name))).map(|(i, _)| i).collect();
         (ids, rgb, a)
     });
     Ok(ExrIndex { meta, stamp, display, parts, channels, rgb, picture, names: Arc::new(names) })
@@ -292,8 +328,7 @@ fn manifests(meta: &MetaData) -> Vec<(String, Vec<(String, u32)>)> {
     for h in meta.headers.iter() {
         collect(&h.own_attributes.other);
     }
-    let mut out: Vec<(String, Vec<(String, u32)>)> =
-        crypto.into_values().filter_map(|(name, manifest)| Some((name?, parse_manifest(&manifest?)))).collect();
+    let mut out: Vec<(String, Vec<(String, u32)>)> = crypto.into_values().filter_map(|(name, manifest)| Some((name?, parse_manifest(&manifest?)))).collect();
     out.sort();
     out
 }
@@ -321,42 +356,77 @@ fn rgb_of(meta: &MetaData, channels: &[IndexChannel]) -> Rgb {
     Rgb::None
 }
 
-/// At most this many files are indexed (a few kilobytes each); the oldest goes first.
+/// At most this many files are indexed, and their indexes take at most [`INDEXED_BYTES`]; the
+/// oldest goes first.
 const INDEXED_FILES: usize = 4096;
+const INDEXED_BYTES: usize = 64 << 20;
+
+impl ExrIndex {
+    /// About the bytes it holds: its chunks, channels and manifests (the headers' other
+    /// attributes are dropped when it is built).
+    pub(crate) fn bytes(&self) -> usize {
+        let chunks: usize = self.parts.iter().map(|p| p.chunks.len()).sum();
+        let names: usize = self.channels.iter().map(|c| c.name.len() * 2 + 64).sum();
+        let manifests: usize = self.names.manifests.iter().map(|(l, m)| l.len() + m.iter().map(|(n, _)| n.len() + 32).sum::<usize>()).sum();
+        let headers = self.meta.headers.len().saturating_mul(1024);
+        (chunks * std::mem::size_of::<IndexChunk>()).saturating_add(names).saturating_add(manifests.saturating_mul(2)).saturating_add(headers)
+    }
+}
 
 /// Indexed files by path.
 struct Indexes {
     map: HashMap<String, Arc<ExrIndex>>,
     order: VecDeque<String>,
+    bytes: usize,
 }
 
 fn indexes() -> &'static Mutex<Indexes> {
     static INDEXES: std::sync::OnceLock<Mutex<Indexes>> = std::sync::OnceLock::new();
-    INDEXES.get_or_init(|| Mutex::new(Indexes { map: HashMap::new(), order: VecDeque::new() }))
+    INDEXES.get_or_init(|| Mutex::new(Indexes { map: HashMap::new(), order: VecDeque::new(), bytes: 0 }))
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Indexes> {
     indexes().lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Keep `index` as the index of `path`.
+/// Keep `index` as the index of `path`, dropping the oldest beyond the bounds (the newest stays).
 pub(crate) fn keep(path: &str, index: Arc<ExrIndex>) {
     let mut ix = lock();
-    if ix.map.insert(path.to_string(), index).is_none() {
-        ix.order.push_back(path.to_string());
+    let bytes = index.bytes();
+    match ix.map.insert(path.to_string(), index) {
+        Some(old) => ix.bytes = ix.bytes.saturating_sub(old.bytes()),
+        None => ix.order.push_back(path.to_string()),
     }
-    while ix.map.len() > INDEXED_FILES {
+    ix.bytes = ix.bytes.saturating_add(bytes);
+    for _ in 0..=ix.order.len() {
+        if (ix.map.len() <= INDEXED_FILES && ix.bytes <= INDEXED_BYTES) || ix.map.len() <= 1 {
+            break;
+        }
         let Some(old) = ix.order.pop_front() else { break };
-        ix.map.remove(&old);
+        if old == path {
+            ix.order.push_back(old);
+            continue;
+        }
+        if let Some(gone) = ix.map.remove(&old) {
+            ix.bytes = ix.bytes.saturating_sub(gone.bytes());
+        }
     }
 }
 
 /// The index of the file at `path` (read from `source` the first time; kept until
-/// [`forget`]). Header-only users take it as it is; a read checks the file's identity and
-/// indexes it again when it changed.
+/// [`forget`]). A file whose identity changed since (size, modification time) is indexed again;
+/// a read checks it again on the file it opens.
 pub(crate) fn get(path: &str, source: &ExrSource) -> Result<Arc<ExrIndex>, IndexError> {
-    if let Some(ix) = lock().map.get(path).cloned() {
-        return Ok(ix);
+    let kept = lock().map.get(path).cloned();
+    if let Some(ix) = kept {
+        match source.stamp() {
+            Ok(stamp) if stamp == ix.stamp => return Ok(ix),
+            Ok(_) => {}
+            Err(e) => {
+                log::debug!("media: {path}: {e}");
+                return Err(IndexError::Io);
+            }
+        }
     }
     let mut opened = source.open().map_err(|e| {
         log::debug!("media: {path}: {e}");
@@ -376,7 +446,8 @@ pub(crate) fn cached(path: &str) -> Option<Arc<ExrIndex>> {
 /// Drop the index of `path` (the file changed on disk).
 pub(crate) fn forget(path: &str) {
     let mut ix = lock();
-    if ix.map.remove(path).is_some() {
+    if let Some(gone) = ix.map.remove(path) {
+        ix.bytes = ix.bytes.saturating_sub(gone.bytes());
         ix.order.retain(|p| p != path);
     }
 }

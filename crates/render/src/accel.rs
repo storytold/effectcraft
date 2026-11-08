@@ -220,13 +220,18 @@ impl<'a> Renderer<'a> {
     /// OpenEXR footage's at the layer's source time (Time Remap included), or a precomp's
     /// generated 3D channels at its nested time. `None` for other layers.
     pub fn layer_aux(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+        self.layer_aux_with(ctx, layer, &self.layer_aux_need(ctx, layer))
+    }
+
+    /// [`Renderer::layer_aux`] of what `need` reads (a footage layer's channels; a precomp's
+    /// generated channels are all made anyway).
+    pub fn layer_aux_with(&self, ctx: &EvalCtx, layer: &Layer, need: &effectcraft_raster::channels3d::AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         match &layer.source {
             LayerSource::Footage { item } => {
                 let item = ctx.media_item(layer, *item);
                 let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
                 // Only what the layer's effects read (#3271).
-                let need = self.layer_aux_need(ctx, layer);
-                let a = self.read(|| self.footage.aux_for(item, f, ctx.source_time(layer), &need))?;
+                let a = self.read(|| self.footage.aux_for(item, f, ctx.source_time(layer), need))?;
                 // Aux pixels per layer pixel (the layer is the footage at its nominal size). The
                 // planes are only copied when that changes the scale.
                 let scale = a.width as f64 / f.width as f64;

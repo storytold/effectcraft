@@ -257,6 +257,9 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
     {
         return Err(MediaError::Decode(format!("{path}: {why}")));
     }
+    if fmt == image::ImageFormat::OpenExr && !crate::exr_index::safe_to_decode(bytes) {
+        return Err(MediaError::Decode(format!("{path}: an OpenEXR part larger than this reader takes")));
+    }
     let reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt);
     let (w, h, has_alpha) = match reader.into_decoder() {
         Ok(mut dec) => {

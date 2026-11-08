@@ -7,7 +7,9 @@ use effectcraft_raster::channels3d::{AuxLookup, AuxNeed};
 use effectcraft_render::reads::FileStamp;
 use effectcraft_render::{FloatCurve, FootageSource};
 use effectcraft_time::Tick;
-use exr::prelude::{AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, ImageAttributes, IntegerBounds, Layer, LayerAttributes, LineOrder, WritableImage, f16};
+use exr::prelude::{
+    AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, ImageAttributes, IntegerBounds, Layer, LayerAttributes, LineOrder, WritableImage, f16,
+};
 
 use super::*;
 use crate::exr_read::ExrSource;
@@ -36,7 +38,9 @@ fn part(name: Option<&str>, channels: &[(&str, bool)], size: (usize, usize), com
         .collect();
     let mut attrs = name.map_or_else(LayerAttributes::default, LayerAttributes::named);
     if name == Some("Crypto_Material") {
-        attrs.other.insert(exr::prelude::Text::from("cryptomatte/abc1234/name"), exr::prelude::AttributeValue::Text(exr::prelude::Text::from("Crypto_Material")));
+        attrs
+            .other
+            .insert(exr::prelude::Text::from("cryptomatte/abc1234/name"), exr::prelude::AttributeValue::Text(exr::prelude::Text::from("Crypto_Material")));
         attrs.other.insert(
             exr::prelude::Text::from("cryptomatte/abc1234/manifest"),
             exr::prelude::AttributeValue::Text(exr::prelude::Text::from(r#"{"bunny":"13851a76"}"#)),
@@ -56,7 +60,8 @@ fn write(parts: Vec<Layer<AnyChannels<FlatSamples>>>, size: (usize, usize)) -> V
 
 const SIZE: (usize, usize) = (64, 64);
 const RGBA: [(&str, bool); 4] = [("R", true), ("G", true), ("B", true), ("A", true)];
-const CRYPTO: [(&str, bool); 4] = [("Crypto_Material00.R", false), ("Crypto_Material00.G", false), ("Crypto_Material00.B", false), ("Crypto_Material00.A", false)];
+const CRYPTO: [(&str, bool); 4] =
+    [("Crypto_Material00.R", false), ("Crypto_Material00.G", false), ("Crypto_Material00.B", false), ("Crypto_Material00.A", false)];
 
 /// A multi-part file as renderers write one part per pass: the beauty, a Cryptomatte layer whose
 /// channels keep their full names, and depth; one scan line per chunk.
@@ -349,14 +354,17 @@ fn a_file_forgotten_while_it_decodes_is_not_kept() {
     let forgot = Arc::new(AtomicU64::new(0));
     {
         let (store, forgot) = (store.clone(), forgot.clone());
-        set_before_read(Some(Arc::new(move |p: &str| {
-            if p == "/3271-forgotten.exr" && forgot.fetch_add(1, Ordering::SeqCst) == 0 {
-                store.forget(p);
-            }
-        })));
+        set_before_read(
+            path,
+            Some(Arc::new(move |p: &str| {
+                if p == "/3271-forgotten.exr" && forgot.fetch_add(1, Ordering::SeqCst) == 0 {
+                    store.forget(p);
+                }
+            })),
+        );
     }
     let got = store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other);
-    set_before_read(None);
+    set_before_read(path, None);
     assert!(got.is_ok());
     assert_eq!(decodes_of(path).len(), 2, "decoded again after the reload");
     assert_eq!(store.cached(), [path], "only the second decode is kept");
@@ -403,7 +411,7 @@ fn given_aux_footage_decodes_once_from_the_first_frame() {
     assert_eq!(take_decodes(), [0, 2]);
     let d = decodes_of(learned);
     assert_eq!(d[0].channels.len(), 4, "the picture alone");
-    assert_eq!(d[1].channels.len() + 4, crate::exr_index::cached(learned).unwrap().channels.len(), "the rest");
+    assert_eq!(d[1].channels.len(), crate::exr_index::cached(learned).unwrap().channels.len(), "all: a picture read alone isn't kept twice");
 }
 
 /// #474: the picture made of the planes of a file with exact R, G, B channels is the `image`
@@ -417,7 +425,10 @@ fn picture_from_planes_is_the_image_crates() {
         write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", false), ("Z", false)], display, Compression::ZIP16)], display),
         write(vec![part(None, &[("R", false), ("G", false), ("B", false), ("Image.R", true)], display, Compression::RLE)], display),
         write(
-            vec![part(Some("diffuse"), &[("R", true), ("G", true), ("B", true)], display, Compression::ZIP1), part(Some("beauty"), &RGBA, display, Compression::PIZ)],
+            vec![
+                part(Some("diffuse"), &[("R", true), ("G", true), ("B", true)], display, Compression::ZIP1),
+                part(Some("beauty"), &RGBA, display, Compression::PIZ),
+            ],
             display,
         ),
     ];
@@ -451,11 +462,14 @@ fn a_decode_that_panics_is_not_left_in_the_store() {
         let panicked = Arc::new(AtomicU64::new(0));
         {
             let (watch, panicked) = (path.clone(), panicked.clone());
-            set_before_read(Some(Arc::new(move |p: &str| {
-                if p == watch && panicked.fetch_add(1, Ordering::SeqCst) == 0 {
-                    panic!("a decoder bug");
-                }
-            })));
+            set_before_read(
+                &path,
+                Some(Arc::new(move |p: &str| {
+                    if p == watch && panicked.fetch_add(1, Ordering::SeqCst) == 0 {
+                        panic!("a decoder bug");
+                    }
+                })),
+            );
         }
         let ask = || store.get(&path, &source, &index, &all, Use::Other);
         if inline {
@@ -469,9 +483,9 @@ fn a_decode_that_panics_is_not_left_in_the_store() {
             // Handed to the decode threads: the request asks again by itself.
             assert!(ask().is_ok());
         }
-        set_before_read(None);
+        set_before_read(&path, None);
         assert_eq!(panicked.load(Ordering::SeqCst), 2, "inline: {inline}");
-        assert_eq!(store.cached(), [path.clone()]);
+        assert_eq!(store.cached(), std::slice::from_ref(&path));
     }
 }
 
@@ -495,15 +509,18 @@ fn a_file_is_used_as_of_its_decode() {
     {
         let get = get.clone();
         let nested = Arc::new(AtomicU64::new(0));
-        set_before_read(Some(Arc::new(move |p: &str| {
-            // Another frame's file is asked for and decoded while this one decodes.
-            if p == "/3271-used-first.exr" && nested.fetch_add(1, Ordering::SeqCst) == 0 {
-                get("/3271-used-second.exr").unwrap();
-            }
-        })));
+        set_before_read(
+            "/3271-used-first.exr",
+            Some(Arc::new(move |p: &str| {
+                // Another frame's file is asked for and decoded while this one decodes.
+                if p == "/3271-used-first.exr" && nested.fetch_add(1, Ordering::SeqCst) == 0 {
+                    get("/3271-used-second.exr").unwrap();
+                }
+            })),
+        );
     }
     get("/3271-used-first.exr").unwrap();
-    set_before_read(None);
+    set_before_read("/3271-used-first.exr", None);
     get("/3271-used-third.exr").unwrap();
     assert_eq!(store.cached(), ["/3271-used-first.exr", "/3271-used-third.exr"], "the file decoded first went first");
 }
@@ -573,4 +590,217 @@ fn a_new_aux_footage_set_returns_to_picture_only() {
     assert_eq!(frame(2), Some(all), "learned");
     pool.set_aux_footage(&[]);
     assert_eq!(frame(3), Some(4), "a new set drops what was learned");
+}
+
+/// [`part`] with its data window at `pos`.
+fn part_at(name: Option<&str>, channels: &[(&str, bool)], size: (usize, usize), pos: (i32, i32), compression: Compression) -> Layer<AnyChannels<FlatSamples>> {
+    let mut p = part(name, channels, size, compression);
+    p.attributes.layer_position = exr::prelude::Vec2(pos.0, pos.1);
+    p
+}
+
+/// The bytes of a file of `parts` over the display window `display`.
+fn write_in(parts: Vec<Layer<AnyChannels<FlatSamples>>>, display: IntegerBounds) -> Vec<u8> {
+    let image = exr::prelude::Image::from_layers(ImageAttributes::new(display), parts);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write().non_parallel().to_buffered(&mut bytes).unwrap();
+    bytes.into_inner()
+}
+
+/// #474 review: data windows placed inside and around the display window make the `image`
+/// crate's picture too.
+#[test]
+fn picture_from_planes_with_data_window_offsets_is_the_image_crates() {
+    let display = IntegerBounds::new((1, -1), (5, 4));
+    let files = [
+        write_in(vec![part_at(None, &[("R", true), ("G", true), ("B", true), ("A", false), ("Z", false)], (5, 4), (1, -1), Compression::ZIP16)], display),
+        write_in(vec![part_at(None, &[("R", false), ("G", false), ("B", false), ("Image.R", true)], (3, 2), (0, 0), Compression::RLE)], display),
+        write_in(
+            vec![
+                part_at(Some("diffuse"), &[("R", true), ("G", true), ("B", true)], (5, 4), (1, -1), Compression::ZIP1),
+                part_at(Some("beauty"), &RGBA, (2, 2), (2, 0), Compression::PIZ),
+            ],
+            display,
+        ),
+    ];
+    for (k, bytes) in files.iter().enumerate() {
+        let path = format!("/3271-offsets-{k}.exr");
+        let source = ExrSource::Bytes(bytes.as_slice().into());
+        assert!(matches!(crate::exr_index::get(&path, &source).unwrap().rgb, Rgb::Planes(..)), "file {k}");
+        let f = Footage::default();
+        let Picture::Done(Ok(got)) = picture(&path, &source, AlphaOp::of(&f, FloatCurve::Linear), None) else { panic!("file {k}: a picture") };
+        let img = crate::probe::load_oriented(bytes, Some(image::ImageFormat::OpenExr)).unwrap();
+        assert_eq!(bits(&got), bits(&crate::convert::dynamic_to_image(&img, AlphaOp::of(&f, FloatCurve::Linear))), "file {k}");
+    }
+}
+
+/// #3271 review: a request that failed (a broken part) doesn't hide what the store holds, nor
+/// fail smaller requests: the picture read before is served, and read again when asked alone.
+#[test]
+fn a_failed_request_fails_only_requests_as_large() {
+    let mut bytes = multipart();
+    // The depth part is last: its chunks now point past the end of the file.
+    bytes.truncate(bytes.len() - 200);
+    let path = "/3271-broken-part.exr";
+    let source = ExrSource::Bytes(bytes.into());
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture = Want { all: false, ids: index.picture_ids().unwrap().into_iter().collect() };
+    let all = Want { all: true, ids: Default::default() };
+    let held = store.get(path, &source, &index, &picture, Use::Picture).unwrap();
+    assert_eq!(store.get(path, &source, &index, &all, Use::Other).err(), Some(Refused::Unreadable));
+    assert!(Arc::ptr_eq(&store.get(path, &source, &index, &picture, Use::Other).unwrap(), &held), "served from the store");
+    assert_eq!(store.get(path, &source, &index, &all, Use::Other).err(), Some(Refused::Unreadable), "remembered");
+    assert_eq!(decodes_of(path).len(), 2);
+    // Another store: the picture alone after the failure decodes.
+    let other = PlaneStore::new(CACHE_BUDGET);
+    assert!(other.get(path, &source, &index, &all, Use::Other).is_err());
+    assert!(other.get(path, &source, &index, &picture, Use::Other).is_ok(), "a smaller request isn't refused");
+}
+
+/// #3271 review: when the picture with the channels its effects read is more than one file may
+/// allocate, the picture is read alone instead of failing.
+#[test]
+fn a_picture_too_large_with_its_channels_is_read_alone() {
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let path = "/3271-too-large-with-aux.exr";
+    let pool = crate::MediaPool::new();
+    pool.add_bytes(path, bytes.clone());
+    let f = crate::probe_bytes(path, bytes.clone()).unwrap();
+    // Room for the picture's 4 planes, not for all of them.
+    set_cap(path, 5 * SIZE.0 * SIZE.1 * 4);
+    pool.set_aux_footage(&[path.to_string()]);
+    let img = pool.frame_at(&f, Tick::ZERO).unwrap();
+    assert_eq!(bits(&img), bits(&image_crates(&bytes, &f)));
+    let d = decodes_of(path);
+    assert_eq!(d.last().map(|d| d.channels.len()), Some(4), "{d:?}");
+}
+
+/// #474: at most CACHE_FILES entries are kept, however small.
+#[test]
+fn the_store_keeps_a_bounded_number_of_files() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &[("R", true)], (2, 2), Compression::ZIP1)], (2, 2)).into();
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let all = Want { all: true, ids: Default::default() };
+    for i in 0..CACHE_FILES + 10 {
+        let path = format!("/3271-many/{i}.exr");
+        let source = ExrSource::Bytes(bytes.clone());
+        let index = crate::exr_index::get(&path, &source).unwrap();
+        store.get(&path, &source, &index, &all, Use::Other).unwrap();
+    }
+    assert!(store.cached().len() <= CACHE_FILES);
+}
+
+/// `bytes` with the data window's right edge (`xMax`) moved to `x_max`.
+fn with_data_window_x_max(mut bytes: Vec<u8>, x_max: i32) -> Vec<u8> {
+    let tag = b"dataWindow\0box2i\0\x10\0\0\0";
+    let at = bytes.windows(tag.len()).position(|w| w == tag).unwrap() + tag.len() + 8;
+    bytes[at..at + 4].copy_from_slice(&x_max.to_le_bytes());
+    bytes
+}
+
+/// #3271 review (never crash): a tiny file whose data window is a billion pixels wide over one
+/// chunk made the decompressor reserve gigabytes for a block (an abort, not an error). Every
+/// way in refuses it with an error: import, the picture, the channels, the names.
+#[test]
+fn a_hostile_data_window_is_refused_not_allocated() {
+    for compression in [Compression::PIZ, Compression::ZIP1, Compression::B44] {
+        let small = write(vec![part(None, &[("R", true)], (1, 1), compression)], (1, 1));
+        let bytes = with_data_window_x_max(small, (1 << 30) - 3);
+        let path = format!("/3271-hostile-{compression:?}.exr");
+        assert!(!crate::exr_index::safe_to_decode(&bytes));
+        assert!(crate::exr_index::build(&mut std::io::Cursor::new(bytes.as_slice()), bytes.len() as u64, FileStamp::Virtual).is_err());
+        assert!(crate::exr_channels::read_exr_channels(&bytes).is_none());
+        assert!(crate::exr_channels::layered_image(&bytes).is_none());
+        let b: Arc<[u8]> = bytes.into();
+        assert!(crate::probe_bytes(&path, b.clone()).is_err(), "import refuses it");
+        let pool = crate::MediaPool::new();
+        pool.add_bytes(&path, b);
+        let f = Footage { path: path.clone(), kind: effectcraft_project::FootageKind::Still, has_video: true, width: 1, height: 1, ..Default::default() };
+        assert!(pool.frame_at(&f, Tick::ZERO).is_err());
+        assert!(pool.aux(ItemId(1), &f, Tick::ZERO).is_none());
+        assert!(pool.aux_names(ItemId(1), &f, Tick::ZERO).is_none());
+    }
+}
+
+/// #3271 review (never crash): damaged files (bytes changed in the offset table, the chunk
+/// headers or the pixels) read as an error or as some pixels, never a panic.
+#[test]
+fn damaged_files_never_panic() {
+    let files = [single_part_zips(), multipart(), write(vec![part(None, &RGBA, (16, 40), Compression::PIZ)], (16, 40))];
+    for good in &files {
+        let start = crate::exr_index::build(&mut std::io::Cursor::new(good.as_slice()), good.len() as u64, FileStamp::Virtual)
+            .unwrap()
+            .parts
+            .iter()
+            .flat_map(|p| p.chunks.iter().map(|c| c.offset))
+            .min()
+            .unwrap() as usize;
+        // From a little before the chunks (the offset tables) to the end, in steps.
+        let from = start.saturating_sub(64);
+        for (i, at) in (from..good.len()).step_by(((good.len() - from) / 150).max(1)).enumerate() {
+            let mut bad = good.clone();
+            bad[at] ^= [0xff, 0x80, 0x01, 0x7f][i % 4];
+            let _ = crate::exr_channels::read_exr_channels(&bad);
+            let _ = crate::exr_channels::layered_image(&bad);
+            let mut src = std::io::Cursor::new(bad.as_slice());
+            if let Ok(ix) = crate::exr_index::build(&mut src, bad.len() as u64, FileStamp::Virtual) {
+                let req = ReadRequest { rows: Some(3..9), level: 1, ..ReadRequest::full((0..ix.channels.len()).collect()) };
+                let _ = crate::exr_read::read_planes(&mut src, &ix, &req);
+            }
+        }
+    }
+}
+
+/// #3271 review: rows and levels on every compression: the rows read are the full read's,
+/// whole chunks are decompressed (1, 16, 32 or 256 lines), and a level is the full read's
+/// every other row and column.
+#[test]
+fn rows_and_levels_on_every_compression() {
+    let cases = [
+        (Compression::Uncompressed, 1),
+        (Compression::RLE, 1),
+        (Compression::ZIP1, 1),
+        (Compression::ZIP16, 16),
+        (Compression::PXR24, 16),
+        (Compression::PIZ, 32),
+        (Compression::B44, 32),
+        (Compression::DWAA(None), 32),
+        (Compression::DWAB(None), 256),
+    ];
+    for (compression, per_chunk) in cases {
+        let bytes = write(vec![part(None, &RGBA, (32, 64), compression)], (32, 64));
+        let (ix, mut src) = indexed(&bytes);
+        let all = ReadRequest::full(vec![0, 1, 2, 3]);
+        let full = crate::exr_read::read_planes(&mut src, &ix, &all).0.unwrap();
+        let (band, stats) = crate::exr_read::read_planes(&mut src, &ix, &ReadRequest { rows: Some(10..20), ..all.clone() });
+        let band = band.unwrap();
+        // The chunks holding rows 10..20, each `per_chunk` lines (the last one shorter).
+        let lines: usize = (0..64usize).step_by(per_chunk).filter(|y0| *y0 < 20 && y0 + per_chunk > 10).map(|y0| per_chunk.min(64 - y0)).sum();
+        assert_eq!(stats.lines, lines, "{compression:?}");
+        for (b, f) in band.iter().zip(&full) {
+            assert_eq!(
+                b[10 * 32..20 * 32].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                f[10 * 32..20 * 32].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{compression:?}"
+            );
+        }
+        let (half, _) = crate::exr_read::read_planes(&mut src, &ix, &ReadRequest { level: 1, ..all.clone() });
+        let half = half.unwrap();
+        for y in 0..32 {
+            for x in 0..16 {
+                assert_eq!(half[0][y * 16 + x].to_bits(), full[0][y * 2 * 32 + x * 2].to_bits(), "{compression:?} ({x}, {y})");
+            }
+        }
+    }
+    // Tiles: rows read as in the full read.
+    let mut tiled = part(None, &RGBA, (32, 64), Compression::ZIP16);
+    tiled.encoding.blocks = Blocks::Tiles(exr::prelude::Vec2(16, 16));
+    let bytes = write(vec![tiled], (32, 64));
+    let (ix, mut src) = indexed(&bytes);
+    let all = ReadRequest::full(vec![0, 1, 2, 3]);
+    let full = crate::exr_read::read_planes(&mut src, &ix, &all).0.unwrap();
+    let (band, stats) = crate::exr_read::read_planes(&mut src, &ix, &ReadRequest { rows: Some(10..20), ..all.clone() });
+    assert_eq!(stats.chunks, [4], "two rows of two tiles");
+    assert_eq!(band.unwrap()[0][10 * 32..20 * 32], full[0][10 * 32..20 * 32]);
 }

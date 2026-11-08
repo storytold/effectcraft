@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemId};
-use effectcraft_raster::{Image, Px};
 use effectcraft_raster::channels3d::AuxNeed;
+use effectcraft_raster::{Image, Px};
 use effectcraft_render::reads::{FileStamp, ReadFile, ReadFiles, ReadLog};
 use effectcraft_render::{FloatCurve, FootageSource};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
@@ -1327,6 +1327,11 @@ impl Inner {
             && let Some(why) = crate::exr_channels::unsupported_compression(&bytes)
         {
             return Err(MediaError::Decode(format!("{path}: {why}")));
+        }
+        // A hostile OpenEXR header (a data window a billion pixels wide over one tiny chunk) made
+        // the decoder allocate gigabytes for a block: refused before any decoder sees it.
+        if crate::still_format(path, &bytes) == Some(image::ImageFormat::OpenExr) && !crate::exr_index::safe_to_decode(&bytes) {
+            return Err(MediaError::Decode(format!("{path}: an OpenEXR part larger than this reader takes")));
         }
         #[cfg(test)]
         crate::exr_channels::count_decode(false);

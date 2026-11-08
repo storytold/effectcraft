@@ -520,7 +520,14 @@ impl CryptoProbe {
                 reads: None,
             };
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
-            let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
+            // The channels the layer's effects read and this effect's (it may be switched off).
+            let own = match &g.kind {
+                effectcraft_project::GroupKind::Effect { effect } => effectcraft_effects::aux_needs(effect, &params),
+                _ => None,
+            };
+            let need =
+                r.layer_aux_need(&ctx, layer).union(own.map_or(effectcraft_raster::channels3d::AuxNeed::All, effectcraft_raster::channels3d::AuxNeed::Lookups));
+            let aux = r.layer_aux_with(&ctx, layer, &need).ok_or(NO_CRYPTO)?;
             if !live() {
                 return Ok(None);
             }
@@ -540,7 +547,7 @@ impl CryptoProbe {
 }
 
 /// Whether a property in `g` other than `skip` changes over time (keyframes or an expression).
-fn moves(g: &PropGroup, skip: Option<Uid>) -> bool {
+pub(crate) fn moves(g: &PropGroup, skip: Option<Uid>) -> bool {
     g.children.iter().any(|c| match c {
         effectcraft_project::Node::Prop(p) => Some(p.uid) != skip && (p.is_animated() || p.has_expression()),
         effectcraft_project::Node::Group(g) => moves(g, skip),

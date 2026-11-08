@@ -52,7 +52,13 @@ pub trait FootageSource: Send + Sync {
     /// [`FootageSource::aux`] of only what `need` reads (#3271): the channels its lookups find,
     /// or more (sources may hand over a set that holds them; [`effectcraft_raster::AuxChannels::listed`]
     /// then names every channel). Sources that read every channel anyway can leave the default.
-    fn aux_for(&self, item: ItemId, footage: &Footage, t: Tick, need: &effectcraft_raster::channels3d::AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+    fn aux_for(
+        &self,
+        item: ItemId,
+        footage: &Footage,
+        t: Tick,
+        need: &effectcraft_raster::channels3d::AuxNeed,
+    ) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         let _ = need;
         self.aux(item, footage, t)
     }
@@ -191,7 +197,13 @@ impl FootageSource for CancellableFootage<'_> {
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux(item, footage, t)
     }
-    fn aux_for(&self, item: ItemId, footage: &Footage, t: Tick, need: &effectcraft_raster::channels3d::AuxNeed) -> Option<Arc<effectcraft_raster::AuxChannels>> {
+    fn aux_for(
+        &self,
+        item: ItemId,
+        footage: &Footage,
+        t: Tick,
+        need: &effectcraft_raster::channels3d::AuxNeed,
+    ) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux_for(item, footage, t, need)
     }
     fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {

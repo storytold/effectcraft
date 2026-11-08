@@ -17,7 +17,6 @@
 //!   the object name reinterpreted as a float with the exponent nudged off 0 and 255, and the
 //!   manifest maps names to hashes.
 
-
 /// Depth written where nothing was rendered.
 pub const BACKGROUND_DEPTH: f32 = 1.0e10;
 
@@ -624,7 +623,16 @@ mod tests {
     /// the planes; a set holding only some channels keeps listing every Cryptomatte layer.
     #[test]
     fn needs_resolve_as_the_effects_look_up() {
-        let all = named(&["A.CryptoAsset00.R", "A.CryptoAsset00.G", "B.CryptoObject00.R", "B.CryptoObject00.G", "Image.R", "depth.Z", "zz.Custom00.R", "zz.Custom00.G"]);
+        let all = named(&[
+            "A.CryptoAsset00.R",
+            "A.CryptoAsset00.G",
+            "B.CryptoObject00.R",
+            "B.CryptoObject00.G",
+            "Image.R",
+            "depth.Z",
+            "zz.Custom00.R",
+            "zz.Custom00.G",
+        ]);
         let need = AuxNeed::Lookups(vec![
             AuxLookup::Name(" image.r ".into()),
             AuxLookup::find(&DEPTH_NAMES),

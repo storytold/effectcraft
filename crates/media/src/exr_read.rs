@@ -47,6 +47,14 @@ pub(crate) struct Opened {
 }
 
 impl ExrSource {
+    /// Its identity now (a file's size and modification time), without opening it.
+    pub(crate) fn stamp(&self) -> std::io::Result<FileStamp> {
+        match self {
+            ExrSource::Bytes(_) => Ok(FileStamp::Virtual),
+            ExrSource::File(path) => std::fs::metadata(path).map(|m| FileStamp::of_metadata(&m)),
+        }
+    }
+
     /// Open it: a file only when it is a regular file (a project can name `/dev/zero` or a FIFO,
     /// #2134), with its identity from the open file.
     pub(crate) fn open(&self) -> std::io::Result<Opened> {
@@ -74,12 +82,14 @@ pub(crate) struct ReadRequest {
     pub(crate) rows: Option<Range<i64>>,
     /// Every 2^level-th row and column of the display window (0: full resolution).
     pub(crate) level: u32,
+    /// The most bytes of planes the read may allocate.
+    pub(crate) max_bytes: usize,
 }
 
 impl ReadRequest {
     /// Every row of `channels` at full resolution.
     pub(crate) fn full(channels: Vec<usize>) -> ReadRequest {
-        ReadRequest { channels, rows: None, level: 0 }
+        ReadRequest { channels, rows: None, level: 0, max_bytes: MAX_DECODE_BYTES }
     }
 }
 
@@ -97,8 +107,11 @@ pub(crate) struct ReadStats {
 /// Why a read gave no planes.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ReadError {
-    /// A chunk can't be read or decompressed.
+    /// A chunk can't be decompressed, or the file doesn't hold it.
     Unreadable(String),
+    /// Reading the file failed just now (a seek or read error, no memory for a chunk): another
+    /// read may succeed.
+    Io(String),
     /// The planes need more memory than one read may allocate (the reason, to show).
     TooLarge(String),
     /// The request was called off.
@@ -148,14 +161,15 @@ fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats:
     let (ow, oh) = level_size((w, h), level);
     let n = ow.checked_mul(oh).ok_or_else(|| ReadError::Unreadable("display window".into()))?;
     let need = n.saturating_mul(req.channels.len()).saturating_mul(std::mem::size_of::<f32>());
-    if need > MAX_DECODE_BYTES {
+    let most = req.max_bytes.min(MAX_DECODE_BYTES);
+    if need > most {
         let gb = |b: usize| b as f64 / f64::from(1u32 << 30);
         return Err(ReadError::TooLarge(format!(
             "its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use",
             w,
             h,
             gb(need),
-            gb(MAX_DECODE_BYTES)
+            gb(most)
         )));
     }
     // Per part: the plane slot of each of its channels (`None`: not requested).
@@ -219,12 +233,12 @@ fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats:
         let mut raw = Vec::with_capacity(batch.len());
         for (pi, offset, len) in batch {
             if pos != Some(*offset) {
-                src.seek(SeekFrom::Start(*offset)).map_err(|e| ReadError::Unreadable(e.to_string()))?;
+                src.seek(SeekFrom::Start(*offset)).map_err(|e| ReadError::Io(e.to_string()))?;
             }
             let size = usize::try_from(*len).map_err(|_| ReadError::Unreadable("chunk size".into()))?;
             let mut buf = Vec::new();
-            buf.try_reserve_exact(size).map_err(|e| ReadError::Unreadable(e.to_string()))?;
-            (&mut *src).take(*len).read_to_end(&mut buf).map_err(|e| ReadError::Unreadable(e.to_string()))?;
+            buf.try_reserve_exact(size).map_err(|e| ReadError::Io(e.to_string()))?;
+            (&mut *src).take(*len).read_to_end(&mut buf).map_err(|e| ReadError::Io(e.to_string()))?;
             pos = Some(offset.saturating_add(buf.len() as u64));
             stats.bytes = stats.bytes.saturating_add(buf.len() as u64);
             if let Some(c) = stats.chunks.get_mut(*pi) {

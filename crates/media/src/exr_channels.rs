@@ -272,6 +272,7 @@ pub(crate) fn add_decodes(n: [u64; 2]) {
 mod tests {
     use super::*;
     use effectcraft_raster::channels3d::BACKGROUND_DEPTH;
+    use std::sync::Arc;
 
     /// An EXR file of `layers` (with their display window `display`).
     fn file(layers: Vec<exr::prelude::Layer<exr::prelude::AnyChannels<exr::prelude::FlatSamples>>>, display: exr::prelude::IntegerBounds) -> Vec<u8> {
@@ -368,7 +369,14 @@ mod tests {
         assert!(read_exr_channels(&bytes).is_none());
         let pool = crate::MediaPool::new();
         pool.add_bytes("/474-too-large.exr", bytes.as_slice().into());
-        let f = effectcraft_project::Footage { path: "/474-too-large.exr".into(), kind: effectcraft_project::FootageKind::Still, has_video: true, width: 16384, height: 16384, ..Default::default() };
+        let f = effectcraft_project::Footage {
+            path: "/474-too-large.exr".into(),
+            kind: effectcraft_project::FootageKind::Still,
+            has_video: true,
+            width: 16384,
+            height: 16384,
+            ..Default::default()
+        };
         use effectcraft_render::FootageSource;
         assert!(pool.aux(effectcraft_project::ItemId(1), &f, effectcraft_time::Tick::ZERO).is_none());
     }

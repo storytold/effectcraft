@@ -27,9 +27,9 @@ use effectcraft_raster::{AuxChannels, Image};
 use effectcraft_render::reads::ReadFile;
 
 use crate::convert::AlphaOp;
+use crate::exr_channels::CACHE_BUDGET;
 use crate::exr_channels::{Rgb, planes_picture};
 use crate::exr_index::{self, ExrIndex, IndexError};
-use crate::exr_channels::CACHE_BUDGET;
 use crate::exr_read::{ExrSource, ReadError, ReadRequest, read_planes};
 
 /// At most this many entries are kept (unreadable files hold no bytes).
@@ -44,8 +44,36 @@ const HELD_FILES: usize = 4;
 #[cfg(not(target_arch = "wasm32"))]
 const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How often a request asks again after a decode it waited for was called off or forgotten.
+/// How often a request asks again after a decode it waited for was called off or forgotten,
+/// and how many rounds it waits at most, before it decodes a copy itself.
 const RETRIES: u32 = 3;
+const ROUNDS: u32 = 8;
+
+/// At most this many failed requests are remembered per entry.
+const FAILED_KEPT: usize = 8;
+
+/// What a round of [`PlaneStore::get`] ended with.
+enum Step {
+    Done(Result<Arc<Batch>, Refused>),
+    /// Ask again (`retry`: the decode waited for was called off, stopped or forgotten).
+    Again {
+        retry: bool,
+    },
+}
+
+/// A request for `want` asks for at least what `failed` asked for.
+fn asks_at_least(want: &Want, failed: &Want) -> bool {
+    want.all || (!failed.all && failed.ids.is_subset(&want.ids))
+}
+
+/// Decode `want` for this request alone (kept nowhere), noting the file it read.
+fn copy(path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
+    let b = run(path, source, &Flight::new(index.clone(), want.clone()), None);
+    if let Ok(b) = &b {
+        crate::reads::note(b.file.clone());
+    }
+    b
+}
 
 /// Decoded planes of a file: the union of the channels read so far.
 pub(crate) struct Batch {
@@ -154,7 +182,9 @@ struct Entry {
     level: u32,
     batch: Option<Arc<Batch>>,
     flight: Option<Arc<Flight>>,
-    failed: Option<Refused>,
+    /// Requests that failed for good (unreadable, too large) and why: a request asking for at
+    /// least as much fails the same way until the file is forgotten.
+    failed: Vec<(Want, Refused)>,
     bytes: usize,
     /// When it was last asked for or finished decoding (a counter).
     used: u64,
@@ -260,11 +290,37 @@ pub(crate) fn decodes_of(path: &str) -> Vec<DecodeRecord> {
 #[cfg(test)]
 type Hook = Arc<dyn Fn(&str) + Send + Sync>;
 #[cfg(test)]
-static BEFORE_READ: Mutex<Option<Hook>> = Mutex::new(None);
+static BEFORE_READ: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
+
+/// Run `hook` before each decode of `path` reads its chunks (`None`: no longer). Keyed by path,
+/// so tests running at the same time don't see each other's.
+#[cfg(test)]
+pub(crate) fn set_before_read(path: &str, hook: Option<Hook>) {
+    let mut hooks = BEFORE_READ.lock().unwrap_or_else(PoisonError::into_inner);
+    hooks.retain(|(p, _)| p != path);
+    if let Some(h) = hook {
+        hooks.push((path.to_string(), h));
+    }
+}
+
+/// Planes of `path` may take at most this many bytes in a read (tests: a small cap in place of
+/// [`crate::exr_read::MAX_DECODE_BYTES`]).
+#[cfg(test)]
+static CAPS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
-pub(crate) fn set_before_read(hook: Option<Hook>) {
-    *BEFORE_READ.lock().unwrap_or_else(PoisonError::into_inner) = hook;
+pub(crate) fn set_cap(path: &str, bytes: usize) {
+    CAPS.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), bytes));
+}
+
+/// The most bytes of planes one read of `path` may allocate.
+fn cap_of(path: &str) -> usize {
+    #[cfg(test)]
+    if let Some((_, c)) = CAPS.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(p, _)| p == path) {
+        return *c;
+    }
+    let _ = path;
+    crate::exr_read::MAX_DECODE_BYTES
 }
 
 impl PlaneStore {
@@ -278,77 +334,96 @@ impl PlaneStore {
 
     /// The planes of `want` of the file at `path` (`index`, read from `source`): from the store,
     /// from a decode in progress, or decoded now (only what the store doesn't hold yet). The
-    /// file it was read from is noted ([`crate::reads`]).
+    /// file it was read from is noted ([`crate::reads`]). A request that keeps finding the
+    /// decodes it waits for called off decodes a copy itself.
     pub(crate) fn get(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use) -> Result<Arc<Batch>, Refused> {
-        let level = 0;
         let mut retries = 0;
-        loop {
-            let mut st = self.lock();
-            st.clock += 1;
-            let clock = st.clock;
-            let at = match st.entries.iter().position(|e| e.path == path && e.level == level) {
-                Some(i) => i,
-                None => {
-                    st.entries.push(Entry { path: path.to_string(), level, batch: None, flight: None, failed: None, bytes: 0, used: clock });
-                    st.entries.len() - 1
-                }
-            };
-            let Some(e) = st.entries.get_mut(at) else { return Err(Refused::Unreadable) };
-            e.used = clock;
-            if let Some(f) = &e.failed {
-                return Err(f.clone());
+        for _ in 0..ROUNDS {
+            match self.step(path, source, index, want, by) {
+                Step::Done(r) => return r,
+                Step::Again { retry: true } if retries >= RETRIES => break,
+                Step::Again { retry } => retries += u32::from(retry),
             }
-            if let Some(b) = e.batch.clone().filter(|b| b.covers(index, want)) {
+        }
+        copy(path, source, index, want)
+    }
+
+    /// One round of [`PlaneStore::get`].
+    fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use) -> Step {
+        let level = 0;
+        let mut st = self.lock();
+        st.clock += 1;
+        let clock = st.clock;
+        let at = match st.entries.iter().position(|e| e.path == path && e.level == level) {
+            Some(i) => i,
+            None => {
+                st.entries.push(Entry { path: path.to_string(), level, batch: None, flight: None, failed: vec![], bytes: 0, used: clock });
+                st.entries.len() - 1
+            }
+        };
+        let Some(e) = st.entries.get_mut(at) else { return Step::Done(Err(Refused::Unreadable)) };
+        e.used = clock;
+        // What the store holds first: a failure of a larger request doesn't hide it.
+        if let Some(b) = e.batch.clone().filter(|b| b.covers(index, want)) {
+            Self::hold(&mut st, path, &b, by);
+            drop(st);
+            crate::reads::note(b.file.clone());
+            return Step::Done(Ok(b));
+        }
+        if let Some((_, why)) = e.failed.iter().find(|(failed, _)| asks_at_least(want, failed)) {
+            return Step::Done(Err(why.clone()));
+        }
+        if let Some(flight) = e.flight.clone() {
+            {
+                let mut fs = flight.state();
+                if !fs.sealed && Arc::ptr_eq(&fs.index, index) {
+                    fs.want.add(want);
+                }
+            }
+            drop(st);
+            return match self.wait(&flight) {
+                Waited::Got(Ok(b)) if b.covers(index, want) => {
+                    crate::reads::note(b.file.clone());
+                    Step::Done(Ok(b))
+                }
+                // Not all it asks for: ask again (the next decode reads what is missing).
+                Waited::Got(Ok(_)) => Step::Again { retry: false },
+                Waited::Got(Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped)) => Step::Again { retry: true },
+                Waited::Got(Err(e)) => Step::Done(Err(e)),
+                Waited::Cancelled => Step::Done(Err(Refused::Cancelled)),
+                // A copy, kept nowhere.
+                Waited::No => Step::Done(copy(path, source, index, want)),
+            };
+        }
+        // This request decodes: what it asks for, minus what the store holds.
+        let base = e.batch.clone().filter(|b| Arc::ptr_eq(&b.index, index));
+        let flight = Flight::new(index.clone(), want.clone());
+        e.flight = Some(flight.clone());
+        drop(st);
+        #[cfg(test)]
+        crate::exr_channels::count_decode(true);
+        let mut owning = Owning { store: self, path, level, flight: &flight, ended: false };
+        let outcome = run(path, source, &flight, base);
+        match owning.end(outcome) {
+            Ok(b) if b.covers(index, want) => {
+                let mut st = self.lock();
                 Self::hold(&mut st, path, &b, by);
                 drop(st);
                 crate::reads::note(b.file.clone());
-                return Ok(b);
+                Step::Done(Ok(b))
             }
-            if let Some(flight) = e.flight.clone() {
-                {
-                    let mut fs = flight.state();
-                    if !fs.sealed && Arc::ptr_eq(&fs.index, index) {
-                        fs.want.add(want);
-                    }
-                }
-                drop(st);
-                match self.wait(&flight) {
-                    Waited::Got(Ok(b)) if b.covers(index, want) => {
-                        crate::reads::note(b.file.clone());
-                        return Ok(b);
-                    }
-                    // Not all it asks for: ask again (the next decode reads what is missing).
-                    Waited::Got(Ok(_)) => {}
-                    Waited::Got(Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped)) if retries < RETRIES => retries += 1,
-                    Waited::Got(Err(e)) => return Err(e),
-                    Waited::Cancelled => return Err(Refused::Cancelled),
-                    // A copy, kept nowhere.
-                    Waited::No => return run(path, source, &Flight::new(index.clone(), want.clone()), None),
-                }
-                continue;
-            }
-            // This request decodes: what it asks for, minus what the store holds.
-            let base = e.batch.clone().filter(|b| Arc::ptr_eq(&b.index, index));
-            let flight = Flight::new(index.clone(), want.clone());
-            e.flight = Some(flight.clone());
-            drop(st);
-            #[cfg(test)]
-            crate::exr_channels::count_decode(true);
-            let mut owning = Owning { store: self, path, level, flight: &flight, ended: false };
-            let outcome = run(path, source, &flight, base);
-            let outcome = owning.end(outcome);
-            match outcome {
-                Ok(b) if b.covers(index, want) => {
-                    let mut st = self.lock();
-                    Self::hold(&mut st, path, &b, by);
-                    drop(st);
-                    crate::reads::note(b.file.clone());
-                    return Ok(b);
-                }
-                Ok(_) | Err(Refused::Forgotten | Refused::Stopped) if retries < RETRIES => retries += 1,
-                Ok(_) | Err(Refused::Forgotten) => return Err(Refused::Cancelled),
-                Err(e) => return Err(e),
-            }
+            Ok(_) | Err(Refused::Forgotten | Refused::Stopped) => Step::Again { retry: true },
+            Err(e) => Step::Done(Err(e)),
+        }
+    }
+
+    /// Stop keeping the planes `b` of `path` (a picture alone, converted: the pool keeps the
+    /// picture, the planes would be a second copy of it).
+    pub(crate) fn release(&self, path: &str, b: &Arc<Batch>) {
+        let mut st = self.lock();
+        if let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.batch.as_ref().is_some_and(|k| Arc::ptr_eq(k, b))) {
+            e.batch = None;
+            e.bytes = 0;
         }
     }
 
@@ -387,8 +462,13 @@ impl PlaneStore {
                 e.bytes = b.bytes();
                 e.batch = Some(b.clone());
             }
-            Err(Refused::Unreadable) => e.failed = Some(Refused::Unreadable),
-            Err(Refused::TooLarge(why)) => e.failed = Some(Refused::TooLarge(why.clone())),
+            Err(why @ (Refused::Unreadable | Refused::TooLarge(_))) => {
+                let want = flight.state().want.clone();
+                if e.failed.len() >= FAILED_KEPT {
+                    e.failed.remove(0);
+                }
+                e.failed.push((want, why.clone()));
+            }
             // (the file changed: what is held is of the old one)
             Err(Refused::Changed) => {
                 e.batch = None;
@@ -473,7 +553,7 @@ impl PlaneStore {
 
     #[cfg(test)]
     pub(crate) fn cached(&self) -> Vec<String> {
-        self.lock().entries.iter().filter(|e| e.batch.is_some() || e.failed.is_some()).map(|e| e.path.clone()).collect()
+        self.lock().entries.iter().filter(|e| e.batch.is_some() || !e.failed.is_empty()).map(|e| e.path.clone()).collect()
     }
 
     #[cfg(test)]
@@ -520,7 +600,7 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     }
     #[cfg(test)]
     {
-        let hook = BEFORE_READ.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let hook = BEFORE_READ.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(p, _)| p == path).map(|(_, h)| h.clone());
         if let Some(h) = hook {
             h(path);
         }
@@ -531,10 +611,12 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         fs.sealed = true;
         fs.want.clone()
     };
-    let wanted: Vec<usize> = if want.all { (0..index.channels.len()).collect() } else { want.ids.iter().copied().filter(|i| *i < index.channels.len()).collect() };
+    let wanted: Vec<usize> =
+        if want.all { (0..index.channels.len()).collect() } else { want.ids.iter().copied().filter(|i| *i < index.channels.len()).collect() };
     let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
     let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
-    let (planes, stats) = read_planes(&mut *opened.reader, &index, &ReadRequest::full(missing.clone()));
+    let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(missing.clone()) };
+    let (planes, stats) = read_planes(&mut *opened.reader, &index, &request);
     #[cfg(test)]
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((
         path.to_string(),
@@ -544,6 +626,11 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     let _ = &stats;
     let planes = planes.map_err(|e| match e {
         ReadError::Cancelled => Refused::Cancelled,
+        // (a read that failed just now: the next request reads again)
+        ReadError::Io(why) => {
+            log::warn!("media: {path}: {why}");
+            Refused::Stopped
+        }
         ReadError::TooLarge(why) => {
             log::warn!("media: {path}: {why}");
             Refused::TooLarge(why)
@@ -613,14 +700,16 @@ pub(crate) enum Picture {
 /// [`crate::exr_channels::layered_image`]). With `extra` (an effect reads the footage's
 /// channels) those channels are read in the same pass and kept for the effects.
 pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option<&AuxNeed>) -> Picture {
-    for _ in 0..2 {
+    let mut extra = extra;
+    for _ in 0..3 {
         let index = match index_of(path, source) {
             Ok(ix) => ix,
             Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
             Err(_) => return Picture::Legacy,
         };
         let Some(ids) = index.picture_ids() else { return Picture::Legacy };
-        let mut want = Want { all: false, ids: ids.into_iter().collect() };
+        let alone = Want { all: false, ids: ids.into_iter().collect() };
+        let mut want = alone.clone();
         if let Some(need) = extra {
             match need_ids(&index, need) {
                 Some(more) => want.ids.extend(more),
@@ -631,39 +720,50 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
         let batch = match store().get(path, source, &index, &want, by) {
             Ok(b) => b,
             Err(Refused::Changed) => continue,
+            // The channels with it are too many: the picture alone (the effects ask for theirs).
+            Err(Refused::TooLarge(_)) if extra.is_some() => {
+                extra = None;
+                continue;
+            }
+            Err(Refused::TooLarge(why)) => return Picture::Done(Err(why)),
             Err(Refused::Cancelled | Refused::Forgotten) => return Picture::Cancelled,
             // (the whole file's decode says why)
-            Err(Refused::Stopped) => return Picture::Legacy,
-            Err(Refused::TooLarge(why)) => return Picture::Done(Err(why)),
-            Err(Refused::Unreadable) => return Picture::Legacy,
+            Err(Refused::Stopped | Refused::Unreadable) => return Picture::Legacy,
         };
-        let aux = &batch.aux;
-        let img = match index.rgb {
-            Rgb::Planes([r, g, b], a) => {
-                let a = match a {
-                    Some(a) => batch.plane(a).map(Some),
-                    None => Some(None),
-                };
-                match (batch.plane(r), batch.plane(g), batch.plane(b), a) {
-                    (Some(r), Some(g), Some(b), Some(a)) => planes_picture(aux, [r, g, b], a, op),
-                    _ => None,
-                }
-            }
-            Rgb::None => index.picture.as_ref().and_then(|(_, rgb, a)| {
-                let a = match a {
-                    Some(n) => Some(aux.get(n)?),
-                    None => None,
-                };
-                planes_picture(aux, [aux.get(&rgb[0])?, aux.get(&rgb[1])?, aux.get(&rgb[2])?], a, op)
-            }),
-            Rgb::Unsupported => None,
-        };
+        let img = picture_of(&index, &batch, op);
+        // A picture read alone is kept by the pool once converted, not twice.
+        if extra.is_none() && !batch.all && batch.ids.len() == want.ids.len() {
+            store().release(path, &batch);
+        }
         return match img {
             Some(img) => Picture::Done(Ok(img)),
             None => Picture::Legacy,
         };
     }
     Picture::Legacy
+}
+
+/// The picture of the file `index` describes, made of the planes of `batch`.
+fn picture_of(index: &ExrIndex, batch: &Batch, op: AlphaOp) -> Option<Image> {
+    let aux = &batch.aux;
+    match index.rgb {
+        Rgb::Planes([r, g, b], a) => {
+            let a = match a {
+                Some(a) => Some(batch.plane(a)?),
+                None => None,
+            };
+            planes_picture(aux, [batch.plane(r)?, batch.plane(g)?, batch.plane(b)?], a, op)
+        }
+        Rgb::None => {
+            let (_, rgb, a) = index.picture.as_ref()?;
+            let a = match a {
+                Some(n) => Some(aux.get(n)?),
+                None => None,
+            };
+            planes_picture(aux, [aux.get(&rgb[0])?, aux.get(&rgb[1])?, aux.get(&rgb[2])?], a, op)
+        }
+        Rgb::Unsupported => None,
+    }
 }
 
 /// The channels `need` reads of the OpenEXR at `path` (all for [`AuxNeed::All`]), from the

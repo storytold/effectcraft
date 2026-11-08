@@ -169,7 +169,7 @@ impl Session {
 /// doesn't declare, or whose parameters change over time (keyframes, an expression), reads all
 /// channels. Several layers of one file add up.
 pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, effectcraft_raster::channels3d::AuxNeed)> {
-    use effectcraft_project::{GroupKind, ItemKind, LayerSource, Node};
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource};
     use effectcraft_raster::channels3d::AuxNeed;
     let mut out: std::collections::BTreeMap<String, AuxNeed> = std::collections::BTreeMap::new();
     for l in project.comps().flat_map(|(_, c)| c.layers.iter()).filter(|l| l.switches.effects) {
@@ -183,8 +183,7 @@ pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, 
             if !effectcraft_effects::reads_aux(effect) {
                 continue;
             }
-            let moving = g.children.iter().any(|c| matches!(c, Node::Prop(p) if p.is_animated() || p.has_expression()));
-            let need = if moving {
+            let need = if commands::moves(g, None) {
                 AuxNeed::All
             } else {
                 let params = effectcraft_effects::flatten_params(g, &mut |p| p.value.clone());
