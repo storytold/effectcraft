@@ -196,6 +196,69 @@ fn documents_built_in_code_are_written_as_their_fields() {
     assert_eq!(layer.header().map(|h| h.layer_type), Some(effectcraft_aep::LayerType::Text));
 }
 
+/// #3233: whether a text layer's name follows its text survives export and import. A followed
+/// name is written as no name (After Effects shows the text) and comes back following; a name the
+/// user gave is written, even when it equals the text, and comes back as the user's. Without a
+/// recorded state (older projects) a name equal to the text follows.
+#[test]
+fn a_text_layer_name_follows_its_text_through_export_and_import() {
+    for (name, follows, stored) in [
+        ("Hello", Some(false), Some("Hello")),
+        ("Hello 2", Some(true), None),
+        ("Hello", None, None),
+        ("Text 2", None, None),
+        ("Text Title", None, Some("Text Title")),
+        ("Text Title", Some(false), Some("Text Title")),
+    ] {
+        let case = format!("{name:?} {follows:?}");
+        let (mut p, c) = text_project(vec![TextDoc::plain("Hello")]);
+        with_layer(&mut p, c, 0, |l| {
+            l.name = name.into();
+            l.name_follows_text = follows;
+        });
+        let r = export_all(&p);
+        let file = parse(&r.bytes).expect("parse");
+        let view = effectcraft_aep::Project::new(&file).expect("project");
+        let layer = view.all_items().into_iter().find_map(|i| i.comp()).and_then(|c| c.layers().next()).expect("layer");
+        assert_eq!(layer.name().as_deref(), stored, "stored name ({case})");
+        let back = reimport(&r.bytes);
+        let l = back.comps().flat_map(|(_, c)| c.layers.iter()).find(|l| matches!(l.source, LayerSource::Text)).expect("text layer");
+        assert_eq!(l.name, stored.unwrap_or("Hello"), "imported name ({case})");
+        assert_eq!(l.name_follows_text, Some(stored.is_none()), "imported state ({case})");
+    }
+    // An empty text layer that follows its text is written without a name, as After Effects
+    // writes it, and comes back named "Text", still following.
+    let (mut p, c) = text_project(vec![TextDoc::plain("")]);
+    with_layer(&mut p, c, 0, |l| {
+        l.name = "Text".into();
+        l.name_follows_text = Some(true);
+    });
+    let back = reimport(&export_all(&p).bytes);
+    let l = back.comps().flat_map(|(_, c)| c.layers.iter()).find(|l| matches!(l.source, LayerSource::Text)).expect("text layer");
+    assert_eq!((l.name.as_str(), l.name_follows_text), ("Text", Some(true)), "an empty text layer");
+}
+
+/// #3233: a following name cut from a first line longer than 40 characters is written as no name
+/// and comes back as the same cut name, still following; a long name the user gave stays whole.
+#[test]
+fn a_long_first_line_names_a_text_layer_the_same_after_export_and_import() {
+    let line = "A headline that runs past forty characters, to 64";
+    assert!((41..=64).contains(&line.chars().count()));
+    let text = format!("{line}\rSecond");
+    let cut = effectcraft_project::text_layer_name(&text);
+    assert_eq!(cut.chars().count(), 40);
+    for (name, follows, back_name) in [(cut.as_str(), Some(true), cut.as_str()), (line, Some(false), line)] {
+        let (mut p, c) = text_project(vec![TextDoc::plain(&text)]);
+        with_layer(&mut p, c, 0, |l| {
+            l.name = name.into();
+            l.name_follows_text = follows;
+        });
+        let back = reimport(&export_all(&p).bytes);
+        let l = back.comps().flat_map(|(_, c)| c.layers.iter()).find(|l| matches!(l.source, LayerSource::Text)).expect("text layer");
+        assert_eq!((l.name.as_str(), l.name_follows_text), (back_name, follows), "{name:?}");
+    }
+}
+
 #[test]
 fn what_a_text_document_cannot_hold_is_reported() {
     let mut d = TextDoc::plain("x");
