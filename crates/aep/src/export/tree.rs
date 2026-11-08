@@ -213,9 +213,10 @@ mod tests {
     /// text, cameras, lights, shapes, styles) are built and no write went out of range.
     #[test]
     fn every_fixed_layout_fits() {
-        assert_eq!(fixed_layout_errors(), 0);
+        // A delta: other tests on this thread may have counted a broken layout on purpose.
+        let before = fixed_layout_errors();
         assert!(crate::export::template::Template::load().is_ok());
-        assert_eq!(fixed_layout_errors(), 0);
+        assert_eq!(fixed_layout_errors(), before);
     }
 
     #[test]
