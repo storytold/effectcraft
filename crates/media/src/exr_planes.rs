@@ -605,16 +605,6 @@ impl PlaneStore {
         }
     }
 
-    /// Stop keeping the planes `b` of `path` (a picture alone, converted: the pool keeps the
-    /// picture, the planes would be a second copy of it).
-    pub(crate) fn release(&self, path: &str, b: &Arc<Batch>) {
-        let mut st = self.lock();
-        if let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.batch.as_ref().is_some_and(|k| Arc::ptr_eq(k, b))) {
-            e.batch = None;
-            e.bytes = 0;
-        }
-    }
-
     /// Keep `b` for the effects of the picture asking (`Use::Picture`), or stop keeping the
     /// file's planes once its channels are asked for.
     fn hold(st: &mut State, path: &str, b: &Arc<Batch>, by: Use) {
