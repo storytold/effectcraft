@@ -115,6 +115,9 @@ pub(crate) enum Refused {
     Changed,
     /// The file was forgotten while it decoded: ask again.
     Forgotten,
+    /// The decode stopped (it panicked, or the file couldn't be opened just then): not
+    /// remembered, the next request decodes again.
+    Stopped,
 }
 
 /// A decode in progress: what it reads (until it starts reading) and its outcome.
@@ -194,7 +197,7 @@ impl Owning<'_> {
 impl Drop for Owning<'_> {
     fn drop(&mut self) {
         if !self.ended {
-            let _ = self.end(Err(Refused::Unreadable));
+            let _ = self.end(Err(Refused::Stopped));
         }
     }
 }
@@ -316,7 +319,7 @@ impl PlaneStore {
                     }
                     // Not all it asks for: ask again (the next decode reads what is missing).
                     Waited::Got(Ok(_)) => {}
-                    Waited::Got(Err(Refused::Cancelled | Refused::Forgotten)) if retries < RETRIES => retries += 1,
+                    Waited::Got(Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped)) if retries < RETRIES => retries += 1,
                     Waited::Got(Err(e)) => return Err(e),
                     Waited::Cancelled => return Err(Refused::Cancelled),
                     // A copy, kept nowhere.
@@ -342,7 +345,7 @@ impl PlaneStore {
                     crate::reads::note(b.file.clone());
                     return Ok(b);
                 }
-                Ok(_) | Err(Refused::Forgotten) if retries < RETRIES => retries += 1,
+                Ok(_) | Err(Refused::Forgotten | Refused::Stopped) if retries < RETRIES => retries += 1,
                 Ok(_) | Err(Refused::Forgotten) => return Err(Refused::Cancelled),
                 Err(e) => return Err(e),
             }
@@ -373,7 +376,7 @@ impl PlaneStore {
         let clock = st.clock;
         let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.level == level && e.flight.as_ref().is_some_and(|f| Arc::ptr_eq(f, flight))) else {
             return match outcome {
-                Err(Refused::Cancelled) => Err(Refused::Cancelled),
+                Err(e @ (Refused::Cancelled | Refused::Stopped)) => Err(e),
                 _ => Err(Refused::Forgotten),
             };
         };
@@ -391,7 +394,7 @@ impl PlaneStore {
                 e.batch = None;
                 e.bytes = 0;
             }
-            Err(Refused::Cancelled | Refused::Forgotten) => {}
+            Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped) => {}
         }
         Self::evict(&mut st, self.budget, path, level);
         outcome
@@ -422,7 +425,10 @@ impl PlaneStore {
     /// decode doesn't wait (see the module notes); the time limit is a safety net.
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(&self, flight: &Flight) -> Waited {
-        if DECODING.with(std::cell::Cell::get) > 0 {
+        // A decode thread never waits for planes (#3270: a decode doesn't depend on the requests
+        // waiting for it; an owner on a frame worker queues its decode on these threads).
+        let on_decode_thread = crate::pool::decode_threads().is_some_and(|t| t.current_thread_index().is_some());
+        if on_decode_thread || DECODING.with(std::cell::Cell::get) > 0 {
             return Waited::No;
         }
         let until = std::time::Instant::now() + WAIT_LIMIT;
@@ -491,7 +497,8 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
             let _ = tx.send(hints.run(|| decode(&path, &source, &flight, base)));
         });
         // A plain block: this thread runs nothing else meanwhile.
-        return rx.recv().unwrap_or(Err(Refused::Unreadable));
+        // (a decode that panicked sent nothing)
+        return rx.recv().unwrap_or(Err(Refused::Stopped));
     }
     decode(path, source, flight, base)
 }
@@ -499,9 +506,10 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
 /// Decode what `flight` asks for and `base` doesn't hold, and make the union of both.
 fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>) -> Result<Arc<Batch>, Refused> {
     let _decoding = Decoding::new();
+    // (a share that doesn't answer just now isn't remembered as unreadable)
     let mut opened = source.open().map_err(|e| {
         log::warn!("media: {path}: {e}");
-        Refused::Unreadable
+        Refused::Stopped
     })?;
     let index = flight.state().index.clone();
     if opened.stamp != index.stamp {
@@ -624,6 +632,8 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             Ok(b) => b,
             Err(Refused::Changed) => continue,
             Err(Refused::Cancelled | Refused::Forgotten) => return Picture::Cancelled,
+            // (the whole file's decode says why)
+            Err(Refused::Stopped) => return Picture::Legacy,
             Err(Refused::TooLarge(why)) => return Picture::Done(Err(why)),
             Err(Refused::Unreadable) => return Picture::Legacy,
         };

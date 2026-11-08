@@ -91,9 +91,6 @@ impl Temp {
         std::fs::write(&path, bytes).unwrap();
         Temp(path)
     }
-    fn path(&self) -> String {
-        self.0.to_string_lossy().to_string()
-    }
 }
 
 impl Drop for Temp {
@@ -123,8 +120,8 @@ fn chunks(r: &DecodeRecord) -> usize {
 fn a_picture_reads_only_its_part() {
     let bytes = multipart();
     let file = Temp::new("picture-part", &bytes);
-    let path = file.path();
     let f = crate::probe(&file.0).unwrap();
+    let path = f.path.clone();
     let pool = crate::MediaPool::new();
     let img = pool.frame_at(&f, Tick::ZERO).unwrap();
     assert_eq!(bits(&img), bits(&image_crates(&bytes, &f)), "the image crate's picture");
@@ -132,7 +129,9 @@ fn a_picture_reads_only_its_part() {
     assert_eq!(d.len(), 1, "{d:?}");
     assert_eq!(d[0].channels, ["beauty.A", "beauty.B", "beauty.G", "beauty.R"]);
     assert_eq!(d[0].stats.chunks, [SIZE.1, 0, 0], "only the beauty part's chunks");
-    assert!(d[0].stats.bytes * 2 < bytes.len() as u64, "{} of {} bytes", d[0].stats.bytes, bytes.len());
+    let index = crate::exr_index::cached(&path).unwrap();
+    let beauty: u64 = index.parts[0].chunks.iter().map(|c| c.len).sum();
+    assert_eq!(d[0].stats.bytes, beauty, "the beauty part's bytes and nothing else");
 }
 
 /// #3271: EXtractoR reading 3 channels of a multi-part file reads only their part and converts
@@ -142,8 +141,8 @@ fn a_picture_reads_only_its_part() {
 fn three_aux_channels_read_only_their_part() {
     let bytes = multipart();
     let file = Temp::new("aux-part", &bytes);
-    let path = file.path();
     let f = crate::probe(&file.0).unwrap();
+    let path = f.path.clone();
     let pool = crate::MediaPool::new();
     let need = AuxNeed::Lookups(["Crypto_Material00.R", "Crypto_Material00.G", "Crypto_Material00.B"].map(|n| AuxLookup::Name(n.into())).to_vec());
     let aux = pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap();
@@ -187,8 +186,8 @@ fn multipart_channels_are_found_by_their_stored_names() {
 fn picture_and_aux_share_one_read_and_one_decode() {
     let bytes = single_part_zips();
     let file = Temp::new("one-decode", &bytes);
-    let path = file.path();
     let f = crate::probe(&file.0).unwrap();
+    let path = f.path.clone();
     let pool = crate::MediaPool::new();
     let need = AuxNeed::Lookups(vec![AuxLookup::Name("normal.R".into()), AuxLookup::Crypto { name: String::new(), index: 0 }]);
     pool.set_aux_footage(std::slice::from_ref(&f.path));
@@ -436,4 +435,142 @@ fn picture_from_planes_is_the_image_crates() {
             }
         }
     }
+}
+
+/// #474 / #3271: a decode that stops (a panic, on the decode threads or on the thread asking)
+/// leaves nothing behind: the entry isn't "decoding" or "unreadable", the next request decodes.
+#[test]
+fn a_decode_that_panics_is_not_left_in_the_store() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let all = Want { all: true, ids: Default::default() };
+    for (k, inline) in [false, true].into_iter().enumerate() {
+        let path = format!("/3271-panics-{k}.exr");
+        let source = ExrSource::Bytes(bytes.clone());
+        let store = PlaneStore::new(CACHE_BUDGET);
+        let index = crate::exr_index::get(&path, &source).unwrap();
+        let panicked = Arc::new(AtomicU64::new(0));
+        {
+            let (watch, panicked) = (path.clone(), panicked.clone());
+            set_before_read(Some(Arc::new(move |p: &str| {
+                if p == watch && panicked.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("a decoder bug");
+                }
+            })));
+        }
+        let ask = || store.get(&path, &source, &index, &all, Use::Other);
+        if inline {
+            // On a decode thread the decode runs right there, and the panic comes through.
+            let threads = crate::pool::decode_threads().unwrap();
+            let r = threads.install(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(ask)));
+            assert!(r.is_err(), "the panic came through");
+            assert!(store.cached().is_empty(), "nothing left");
+            assert!(ask().is_ok(), "decodes again");
+        } else {
+            // Handed to the decode threads: the request asks again by itself.
+            assert!(ask().is_ok());
+        }
+        set_before_read(None);
+        assert_eq!(panicked.load(Ordering::SeqCst), 2, "inline: {inline}");
+        assert_eq!(store.cached(), [path.clone()]);
+    }
+}
+
+/// #474: a file counts as used when its decode finishes: one asked for first but decoded after
+/// another is the newer of the two, so concurrent frames don't evict each other's files before
+/// their effects read them.
+#[test]
+fn a_file_is_used_as_of_its_decode() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
+    let one = 4 * (32 * 32 * 4 + 1);
+    let store = Arc::new(PlaneStore::new(2 * one));
+    let all = Want { all: true, ids: Default::default() };
+    let get = {
+        let (store, bytes, all) = (store.clone(), bytes.clone(), all.clone());
+        move |p: &str| {
+            let source = ExrSource::Bytes(bytes.clone());
+            let index = crate::exr_index::get(p, &source).unwrap();
+            store.get(p, &source, &index, &all, Use::Other).map(|_| ())
+        }
+    };
+    {
+        let get = get.clone();
+        let nested = Arc::new(AtomicU64::new(0));
+        set_before_read(Some(Arc::new(move |p: &str| {
+            // Another frame's file is asked for and decoded while this one decodes.
+            if p == "/3271-used-first.exr" && nested.fetch_add(1, Ordering::SeqCst) == 0 {
+                get("/3271-used-second.exr").unwrap();
+            }
+        })));
+    }
+    get("/3271-used-first.exr").unwrap();
+    set_before_read(None);
+    get("/3271-used-third.exr").unwrap();
+    assert_eq!(store.cached(), ["/3271-used-first.exr", "/3271-used-third.exr"], "the file decoded first went first");
+}
+
+/// #474: frames rendered at once (each asks for its picture, then its effects for the channels
+/// while other frames decode) decode each file once, though the budget holds only one: a
+/// picture's planes are kept for its effects, and planes in use are never dropped.
+#[test]
+fn concurrent_frames_decode_each_file_once() {
+    let rgbz = [("R", false), ("G", false), ("B", false), ("Z", false)];
+    let bytes: Arc<[u8]> = write(vec![part(None, &rgbz, (64, 64), Compression::ZIP1)], (64, 64)).into();
+    let store = PlaneStore::new(4 * (64 * 64 * 4 + 1));
+    let all = Want { all: true, ids: Default::default() };
+    let (next, frames) = (std::sync::atomic::AtomicUsize::new(0), 24);
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= frames {
+                        break;
+                    }
+                    let path = format!("/3271-frames/{i:04}.exr");
+                    let source = ExrSource::Bytes(bytes.clone());
+                    let index = crate::exr_index::get(&path, &source).unwrap();
+                    drop(store.get(&path, &source, &index, &all, Use::Picture).unwrap());
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                    let b = store.get(&path, &source, &index, &all, Use::Other).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    assert_eq!(b.aux.get("Z").and_then(|z| z.first()).copied(), Some(value(0, 3, false)));
+                }
+            });
+        }
+    });
+    for i in 0..frames {
+        assert_eq!(decodes_of(&format!("/3271-frames/{i:04}.exr")).len(), 1, "frame {i}: one decode");
+    }
+}
+
+/// #474: once the project no longer names footage (its effect removed), later frames decode
+/// only their picture's channels again; what `aux()` learned is dropped with each new set too.
+#[test]
+fn a_new_aux_footage_set_returns_to_picture_only() {
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let paths: Vec<String> = (1..=4).map(|i| format!("/3271-unset_{i:04}.exr")).collect();
+    let pool = crate::MediaPool::new();
+    for p in &paths {
+        pool.add_bytes(p, bytes.clone());
+    }
+    let mut f = crate::probe_bytes(&paths[0], bytes.clone()).unwrap();
+    f.kind = effectcraft_project::FootageKind::Sequence;
+    f.sequence = paths.clone();
+    let at = |i: i64| f.frame_rate.tick_of(i);
+    let all = crate::exr_index::get(&paths[0], &ExrSource::Bytes(bytes.clone())).unwrap().channels.len();
+    // The channels the frame's decode read.
+    let frame = |i: usize| {
+        pool.frame_at(&f, at(i as i64)).unwrap();
+        decodes_of(&paths[i]).first().map(|d| d.channels.len())
+    };
+    pool.set_aux_footage(std::slice::from_ref(&f.path));
+    assert_eq!(frame(0), Some(all), "given: the picture with the channels");
+    pool.set_aux_footage(&[]);
+    assert!(!shared().is_held(&paths[0]), "no longer kept once no effect reads it");
+    assert_eq!(frame(1), Some(4), "no longer given: the picture alone");
+    // Learned by `aux()`, then a new set without it: picture only again.
+    pool.aux(ItemId(1), &f, at(1)).unwrap();
+    assert_eq!(frame(2), Some(all), "learned");
+    pool.set_aux_footage(&[]);
+    assert_eq!(frame(3), Some(4), "a new set drops what was learned");
 }

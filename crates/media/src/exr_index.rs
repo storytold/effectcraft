@@ -116,7 +116,7 @@ pub(crate) enum IndexError {
 
 /// Bytes counted as they are read (the offset tables start where the headers end).
 struct Counted<'r> {
-    inner: &'r mut dyn ReadSeek,
+    inner: &'r mut dyn Read,
     read: u64,
 }
 
@@ -129,19 +129,30 @@ impl Read for Counted<'_> {
 }
 
 /// The headers of the file in `src` as the high-level reader takes them (headers read strictly,
-/// then validated leniently: the files that opened before open now).
-fn headers(src: &mut dyn ReadSeek) -> Result<(MetaData, u64), IndexError> {
-    let (strict, read) = {
-        let mut counted = Counted { inner: &mut *src, read: 0 };
-        let strict = MetaData::read_from_buffered(&mut counted, true).and_then(|meta| MetaData::validate(&meta.headers, false).map(|_| meta));
-        (strict, counted.read)
+/// then validated leniently: the files that opened before open now), checked before anything is
+/// sized by them, and the offset tables: the headers, the tables and where the chunks start.
+/// Read through one buffer (attribute names are read a byte at a time); the bytes taken from it
+/// are counted, so the chunk area's start is exact.
+fn headers_and_tables(src: &mut dyn ReadSeek, len: u64) -> Result<(MetaData, exr::meta::OffsetTables, u64), IndexError> {
+    let strict = {
+        let mut buffered = std::io::BufReader::with_capacity(64 << 10, &mut *src);
+        let mut counted = Counted { inner: &mut buffered, read: 0 };
+        match MetaData::read_from_buffered(&mut counted, true).and_then(|meta| MetaData::validate(&meta.headers, false).map(|_| meta)) {
+            Ok(meta) => {
+                let header_end = counted.read;
+                check(&meta, len, header_end)?;
+                let tables = MetaData::read_offset_tables(&mut exr::io::PeekRead::new(&mut counted), &meta.headers).map_err(|_| IndexError::Unreadable)?;
+                Some((meta, tables, counted.read))
+            }
+            Err(_) => None,
+        }
     };
     match strict {
-        Ok(meta) => Ok((meta, read)),
-        Err(_) => {
+        Some(parsed) => Ok(parsed),
+        None => {
             // (an HTJ2K file fails here: say why)
             src.seek(SeekFrom::Start(0)).map_err(|_| IndexError::Io)?;
-            match MetaData::read_from_buffered(&mut *src, false).ok().as_ref().and_then(unsupported) {
+            match MetaData::read_from_buffered(std::io::BufReader::new(&mut *src), false).ok().as_ref().and_then(unsupported) {
                 Some(why) => Err(IndexError::Unsupported(why)),
                 None => Err(IndexError::Unreadable),
             }
@@ -149,21 +160,9 @@ fn headers(src: &mut dyn ReadSeek) -> Result<(MetaData, u64), IndexError> {
     }
 }
 
-/// [`crate::exr_channels::unsupported_compression`] of parsed headers.
-pub(crate) fn unsupported(meta: &MetaData) -> Option<&'static str> {
-    use exr::compression::Compression;
-    meta.headers
-        .iter()
-        .any(|h| matches!(h.compression, Compression::HTJ2K32 | Compression::HTJ2K256))
-        .then_some("OpenEXR HTJ2K compression isn't supported yet: re-save the file with ZIP, PIZ or DWAA compression")
-}
-
-/// Index the OpenEXR file in `src` (`len` bytes, identity `stamp`), reading its headers and
-/// offset tables only.
-pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Result<ExrIndex, IndexError> {
-    src.seek(SeekFrom::Start(0)).map_err(|_| IndexError::Io)?;
-    let (meta, header_end) = headers(&mut *src)?;
-    if let Some(why) = unsupported(&meta) {
+/// Refuse headers this reader doesn't take or that ask for more than the file can hold.
+fn check(meta: &MetaData, len: u64, header_end: u64) -> Result<(), IndexError> {
+    if let Some(why) = unsupported(meta) {
         return Err(IndexError::Unsupported(why));
     }
     let first = meta.headers.first().ok_or(IndexError::Unreadable)?;
@@ -180,13 +179,25 @@ pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Resul
     if (chunks as u64).saturating_mul(8) > len.saturating_sub(header_end) {
         return Err(IndexError::Unreadable);
     }
-    let tables = {
-        let mut counted = Counted { inner: &mut *src, read: 0 };
-        let tables = MetaData::read_offset_tables(&mut exr::io::PeekRead::new(&mut counted), &meta.headers).map_err(|_| IndexError::Unreadable)?;
-        (tables, counted.read)
-    };
-    let (tables, table_bytes) = tables;
-    let chunks_start = header_end.saturating_add(table_bytes);
+    Ok(())
+}
+
+/// [`crate::exr_channels::unsupported_compression`] of parsed headers.
+pub(crate) fn unsupported(meta: &MetaData) -> Option<&'static str> {
+    use exr::compression::Compression;
+    meta.headers
+        .iter()
+        .any(|h| matches!(h.compression, Compression::HTJ2K32 | Compression::HTJ2K256))
+        .then_some("OpenEXR HTJ2K compression isn't supported yet: re-save the file with ZIP, PIZ or DWAA compression")
+}
+
+/// Index the OpenEXR file in `src` (`len` bytes, identity `stamp`), reading its headers and
+/// offset tables only.
+pub(crate) fn build(src: &mut dyn ReadSeek, len: u64, stamp: FileStamp) -> Result<ExrIndex, IndexError> {
+    src.seek(SeekFrom::Start(0)).map_err(|_| IndexError::Io)?;
+    let (meta, tables, chunks_start) = headers_and_tables(&mut *src, len)?;
+    let first = meta.headers.first().ok_or(IndexError::Unreadable)?;
+    let display = first.shared_attributes.display_window;
     // Where each chunk ends: at the next chunk's start, or at the end of the file.
     let mut starts: Vec<u64> = tables.iter().flatten().copied().filter(|o| *o >= chunks_start && *o < len).collect();
     starts.sort_unstable();
