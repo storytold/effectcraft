@@ -37,6 +37,7 @@ mod values;
 mod version;
 mod write;
 
+pub(crate) use aepx::{AepxDrafts, index_aepx};
 pub use aepx::{is_aepx, parse_any, read_aepx, read_aepx_with_limits};
 pub use arbitrary::{
     CURVE_IDENTITY, CryptomatteData, CurvesData, ExtractorChannels, HueSaturationData, LevelsData, MeshData, curve_lut, identifier_channel_type,

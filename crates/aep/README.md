@@ -21,7 +21,9 @@ tree; pad bytes, odd bodies and the bytes after the container, an XMP packet, ar
 
 The XML form of a project (`.aepx`) is read into the same tree by `read_aepx` (a small bounded
 XML tokenizer, no dependency); `parse_any` picks the reader by content, so the typed view and the
-importer take either form. The mapping is in `docs/aep-format.md`, section 1.
+importer take either form. The mapping is in `docs/aep-format.md`, section 1. The importer, which
+only reads, does not build the owned tree: it reads either form through the flat index
+`TreeIndex`, an `.aep` in place and an `.aepx` decoded into one buffer first.
 
 Bodies that look like lists but are not chunk sequences (for example `LIST btdk`, raw text) stay
 opaque rather than failing the parse. Input is untrusted: sizes are checked against the remaining

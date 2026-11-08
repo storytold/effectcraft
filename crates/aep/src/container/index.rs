@@ -20,6 +20,10 @@
 //! [`AepError::TooLarge`] when the array cannot grow (a failed `try_reserve`), and
 //! [`AepError::TooManyChunks`] for a tree of more than `u32::MAX` chunks.
 //!
+//! An `.aepx` is indexed by its own reader (`container/aepx.rs`), which decodes every body into
+//! one buffer and fills the entries as it reads; the index then borrows that buffer
+//! (`TreeIndex::from_drafts`). It gives the tree [`crate::container::read_aepx`] gives.
+//!
 //! [`Node`] is the handle the typed view ([`crate::container::Project`] and the types below it)
 //! reads through: a chunk of either tree. The view works the same on both.
 
@@ -33,7 +37,7 @@ use crate::container::read::{Limits, container_end, id4};
 
 /// What an entry's body is (the [`Body`] variants).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Data,
     /// [`Body::Chunks`].
     Nested,
@@ -60,6 +64,28 @@ impl<'a> Entry<'a> {
     /// An entry for a chunk whose body is not read yet.
     fn placeholder(id: [u8; 4]) -> Self {
         Self { data: &[], id, list_type: [0; 4], end: 0, kind: Kind::Data, pad: None }
+    }
+}
+
+/// An entry of an index whose bytes are still being written (the `.aepx` reader decodes into a
+/// buffer that grows, so it keeps positions, not slices): the body is `start..start + len` of
+/// that buffer. The fields are those of [`Entry`]; [`TreeIndex::from_drafts`] turns the list
+/// into an index once the buffer is final.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Draft {
+    pub(crate) start: usize,
+    pub(crate) len: usize,
+    pub(crate) id: [u8; 4],
+    pub(crate) list_type: [u8; 4],
+    pub(crate) end: u32,
+    pub(crate) kind: Kind,
+    pub(crate) pad: Option<u8>,
+}
+
+impl Draft {
+    /// A data chunk with no body yet.
+    pub(crate) fn placeholder(id: [u8; 4]) -> Self {
+        Self { start: 0, len: 0, id, list_type: [0; 4], end: 0, kind: Kind::Data, pad: None }
     }
 }
 
@@ -112,8 +138,19 @@ impl<'a> TreeIndex<'a> {
         Ok(Self { nodes: builder.nodes, trailer })
     }
 
-    /// Indexes an already parsed (or built, or `.aepx`) chunk tree. The index borrows the file's
-    /// bytes.
+    /// The index of the entries `drafts` (in depth-first order, see [`Draft`]) whose bodies and
+    /// trailer are ranges of `buffer`. A range outside `buffer` reads as empty. The list is turned
+    /// into entries; a [`Draft`] and an [`Entry`] have the same size and alignment, so the standard
+    /// library reuses the list's allocation for them.
+    pub(crate) fn from_drafts(buffer: &'a [u8], drafts: Vec<Draft>, trailer: (usize, usize)) -> Self {
+        let slice = |start: usize, len: usize| start.checked_add(len).and_then(|end| buffer.get(start..end)).unwrap_or(&[]);
+        let nodes =
+            drafts.into_iter().map(|d| Entry { data: slice(d.start, d.len), id: d.id, list_type: d.list_type, end: d.end, kind: d.kind, pad: d.pad }).collect();
+        let trailer = buffer.get(trailer.0..trailer.1).unwrap_or(&[]);
+        Self { nodes, trailer }
+    }
+
+    /// Indexes an already parsed (or built) chunk tree. The index borrows the file's bytes.
     ///
     /// # Errors
     /// [`AepError::TooManyChunks`] for a tree of more than `u32::MAX` chunks.
