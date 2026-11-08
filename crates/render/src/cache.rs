@@ -700,11 +700,22 @@ fn history_unkeyable(layer: &Layer, effects: Option<usize>) -> bool {
     reads_other_times(layer, effects) && layer.props.children.iter().any(|c| matches!(c, Node::Group(g) if g.match_id != "transform" && has_expression(g)))
 }
 
-/// A still image (no proxy): its layer is cached like a text or shape layer, so the GPU
-/// compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by every
-/// preview worker ran the GPU out of memory). Movies and sequences stay in the media pool only.
-fn still_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
-    ctx.project.item(item).is_some_and(|it| it.proxy.is_none() && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still))
+/// Footage whose processed layer is cached (keyed by item and source time for all but stills):
+/// - a still image (no proxy): its layer is cached like a text or shape layer, so the GPU
+///   compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by
+///   every preview worker ran the GPU out of memory);
+/// - an OpenEXR sequence (no proxy, #3271): each frame is a file read whole and its effects
+///   (EXtractoR, Cryptomatte, depth effects) are costly, so a processed frame is worth keeping in
+///   RAM and on disk. Its entries list the frame file they read, so Reload Footage and a changed
+///   file drop them as any other.
+///
+/// Movies and other sequences stay in the media pool only.
+fn cached_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
+    ctx.project.item(item).is_some_and(|it| {
+        it.proxy.is_none()
+            && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still
+                || (f.kind == FootageKind::Sequence && f.sequence.first().is_some_and(|p| p.to_ascii_lowercase().ends_with(".exr"))))
+    })
 }
 
 /// Does the layer have an animated mask that motion blur may draw at other times (Layer ▸ Mask ▸
@@ -779,7 +790,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             hash_debug(&mut h, s);
         }
         LayerSource::Text | LayerSource::Shape => {}
-        LayerSource::Footage { item } if footage || still_footage(ctx, ctx.media_item(layer, *item)) => {
+        LayerSource::Footage { item } if footage || cached_footage(ctx, ctx.media_item(layer, *item)) => {
             let item = ctx.media_item(layer, *item);
             let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };

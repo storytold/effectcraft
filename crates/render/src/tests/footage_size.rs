@@ -106,3 +106,37 @@ fn still_layers_are_cached_across_times_and_movies_are_not() {
         assert_eq!(src.sizes.unwrap().into_inner().unwrap().len(), fetches + 3, "{kind:?}");
     }
 }
+
+/// #3271: an OpenEXR sequence's layer is cached per frame (keyed by its source time): the same
+/// frame again is served from the layer cache, another frame has another key. Other sequences
+/// stay in the media pool only.
+#[test]
+fn exr_sequence_layers_are_cached_per_frame() {
+    for (ext, fetches) in [("exr", 1), ("png", 2)] {
+        let (mut p, cid) = project(BitDepth::Bpc8, false);
+        let Some(LayerSource::Footage { item }) = p.comp(cid).map(|c| c.layers[0].source.clone()) else { panic!("footage layer") };
+        if let Some(ItemKind::Footage(f)) = p.item_mut(item).map(|it| &mut it.kind) {
+            f.kind = FootageKind::Sequence;
+            f.sequence = (1..=30).map(|i| format!("/shot/plate_{i:04}.{ext}")).collect();
+            f.path = f.sequence[0].clone();
+        }
+        let key = |t: f64| {
+            let c = p.comp(cid).unwrap();
+            crate::cache::layer_key(&crate::EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(t)), &c.layers[0], 0.5, false, false)
+        };
+        assert_eq!(key(0.0).is_some(), ext == "exr", "{ext}");
+        if ext == "exr" {
+            assert_ne!(key(0.0), key(0.1), "another frame, another key");
+            assert_eq!(key(0.0), key(0.01), "the same frame");
+        }
+        let cache = crate::LayerCache::default();
+        let src = Clip { sizes: Some(Mutex::default()) };
+        let opts = RenderOpts { scale: 0.5, ..Default::default() };
+        for _ in 0..2 {
+            let mut r = Renderer::new(&p, &src, opts);
+            r.cache = Some(&cache);
+            r.comp_frame(cid, Tick::ZERO);
+        }
+        assert_eq!(src.sizes.unwrap().into_inner().unwrap().len(), fetches, "{ext}");
+    }
+}
