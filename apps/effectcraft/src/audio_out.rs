@@ -81,6 +81,8 @@ pub fn open(out: &AudioOutput) -> Option<Box<dyn AudioDevice>> {
     Some(Box::new(CpalOut { out: out.clone(), rate, latency: Arc::new(AtomicU64::new(0)), failed: Arc::new(AtomicBool::new(false)), stop: None, thread: None }))
 }
 
+/// Run the output stream for `cfg` on `dev`, pulling interleaved stereo from `feed` and mapping
+/// it onto `map` (left, right) device channels; `failed` records stream errors.
 fn run<T: SizedSample + FromSample<f32>>(
     dev: &cpal::Device,
     cfg: &cpal::StreamConfig,

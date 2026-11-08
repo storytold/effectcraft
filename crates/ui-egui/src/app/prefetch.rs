@@ -201,10 +201,14 @@ impl EffectcraftApp {
     /// one second. With no source but an active meter, drive the meter to silence and request a repaint.
     fn pump_meters(&mut self, ctx: &egui::Context, now: f64) {
         // A stream that failed mid-play is dropped, which also ends the device's error loop;
-        // playing goes on without sound, and the output is opened again on a timer (#3318).
+        // playing goes on without sound, and the output is opened again on a timer (#3318). The
+        // re-open waits AUDIO_RETRY_S less what the stream ran: one that died at once is retried
+        // a full interval after it opened, so a device that keeps dying does not get a new
+        // stream (and thread) every UI pass.
         if self.playback.playing && self.audio.as_ref().is_some_and(audio::AudioPlayback::failed) {
             self.audio = None;
-            self.playback.audio_retry_at = Some(now);
+            self.playback.audio_retry_at = Some(self.playback.audio_opened_at.map_or(now, |opened| (opened + audio::AUDIO_RETRY_S).max(now)));
+            self.playback.audio_opened_at = None;
         }
         if self.playback.playing && self.audio.is_none() && self.playback.audio_retry_at.is_some_and(|at| now >= at) {
             self.playback.audio_retry_at = Some(now + audio::AUDIO_RETRY_S);

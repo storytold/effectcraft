@@ -597,6 +597,7 @@ mod tests {
             fn sample_rate(&self) -> u32 {
                 48000
             }
+            /// Opens fine unless the script refuses; how it behaves later is `failed`.
             fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
                 match self.0 {
                     Script::Refuses => Err("device unavailable".into()),
@@ -604,6 +605,7 @@ mod tests {
                 }
             }
             fn stop(&mut self) {}
+            /// A scripted stream dies (`Dies`) or stays healthy; a refused one never opened.
             fn failed(&self) -> bool {
                 matches!(self.0, Script::Dies)
             }
@@ -644,21 +646,102 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1, "the first device opened");
         assert!(app.audio.is_some());
 
-        // The first pass notices the failure, drops the stream and re-opens at once; that open
-        // is refused, which arms the retry timer while the preview keeps playing.
+        // The first pass notices the failure, drops the stream and arms the retry a full
+        // interval after it opened (it ran none of it); the preview keeps playing without sound.
         tick(&mut app, &ctx, &frame);
-        assert_eq!(calls.load(Ordering::Relaxed), 2, "the failed stream was dropped and re-opened");
-        assert!(app.audio.is_none(), "the refused open leaves no playback");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the failed stream was dropped, not yet re-opened");
+        assert!(app.audio.is_none(), "the dead stream is gone");
         assert_eq!(app.playback.audio_retry_at, Some(AUDIO_RETRY_S), "the retry is armed");
         assert!(app.playback.playing, "the preview plays on without sound");
 
-        // When the timer fires, a healthy device is opened and playback follows its clock again.
+        // When the timer fires, the second device refuses to open, which arms the retry again;
+        // when that fires too, the healthy device takes over and the clock drives playback.
+        app.clock_mut().advance(2.0);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "the timer tried the output again");
+        assert!(app.audio.is_none(), "the refused open leaves no playback");
+        assert_eq!(app.playback.audio_retry_at, Some(2.0 * AUDIO_RETRY_S), "the retry is armed again");
+
         app.clock_mut().advance(2.5);
         tick(&mut app, &ctx, &frame);
         assert_eq!(calls.load(Ordering::Relaxed), 3, "the timer opened the output again");
         let a = app.audio.as_ref().expect("the recovered device plays");
         assert!(!a.failed(), "the recovered device is healthy");
         assert_eq!(app.playback.audio_retry_at, None, "a working output clears the retry");
+    }
+
+    /// A stream that starts and dies at once is not re-opened on every UI pass: the retry waits
+    /// a full interval after it opened, and the preview plays on the wall clock meanwhile.
+    #[test]
+    fn streams_that_keep_dying_are_not_reopened_on_every_pass() {
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::preview::PreviewShortcut;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+        use effectcraft_engine::{EditorState, Session};
+        use std::sync::atomic::AtomicUsize;
+
+        /// Every stream this device opens starts fine and is already dead.
+        struct Dying;
+        impl AudioDevice for Dying {
+            /// Always reports success: the failure shows up in `failed` afterwards.
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                Ok(())
+            }
+            fn stop(&mut self) {}
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            /// The stream died before it delivered anything.
+            fn failed(&self) -> bool {
+                true
+            }
+        }
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "song.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(600.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("song.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(4.0));
+        let layer = build::layer(&mut p, &comp, "song.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let session =
+            Session { project: Arc::new(p), state: EditorState { active_comp: Some(cid), open_comps: vec![cid], ..Default::default() }, ..Default::default() };
+        let mut app = crate::EffectcraftApp::new(session);
+        app.use_manual_clock();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        app.hooks.audio_device = Some(Box::new(move |_| {
+            factory_calls.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Dying))
+        }));
+
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let tick = |app: &mut crate::EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame| {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.tick(ctx, frame));
+        };
+
+        app.play_with(0.0, PreviewShortcut::AltNumpad0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the first stream opened");
+        tick(&mut app, &ctx, &frame);
+        assert!(app.audio.is_none() && app.playback.playing, "the dead stream is dropped, the preview plays on");
+        assert_eq!(app.playback.audio_retry_at, Some(AUDIO_RETRY_S), "the retry waits the interval from the open");
+
+        // Before the timer fires, further passes do nothing: no new stream per UI pass.
+        app.clock_mut().advance(0.5);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "no stream was opened before the timer");
+
+        // When it fires, a new stream opens and dies at once too; the next pass does not open
+        // another one until its own interval has run.
+        app.clock_mut().advance(1.5);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "the timer opened a second stream");
+        app.clock_mut().advance(0.2);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "a stream that just died waits for its interval");
+        assert_eq!(app.playback.audio_retry_at, Some(2.0 + AUDIO_RETRY_S), "the next retry is a full interval after the open");
     }
 
     #[test]

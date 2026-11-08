@@ -40,6 +40,7 @@ impl EffectcraftApp {
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
             audio_retry_at: None,
+            audio_opened_at: None,
             audio_held: false,
             starting: false,
             starting_since: now,
@@ -70,6 +71,7 @@ impl EffectcraftApp {
     /// so a device that recovers — or appears — brings the sound back while playing (#3318).
     pub(super) fn start_audio(&mut self, t: Tick, now: f64) {
         self.audio = None;
+        self.playback.audio_opened_at = None;
         self.meter.clipped = [false; 2];
         let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else {
             self.playback.audio_retry_at = None;
@@ -90,6 +92,7 @@ impl EffectcraftApp {
             Ok(a) => {
                 self.audio = Some(a);
                 self.playback.audio_retry_at = None;
+                self.playback.audio_opened_at = Some(now);
             }
             Err(e) => {
                 log::warn!("audio preview: {e}");
@@ -128,6 +131,7 @@ impl EffectcraftApp {
         self.playback.caching = false;
         self.playback.starting = false;
         self.playback.audio_retry_at = None;
+        self.playback.audio_opened_at = None;
         if !was {
             return;
         }
