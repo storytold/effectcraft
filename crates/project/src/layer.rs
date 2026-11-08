@@ -222,6 +222,102 @@ const READS_OTHER_FRAMES: &[&str] = &[
     "ec.paint.paint",
 ];
 
+/// Does the effect group `g` read its own parameters at times its frame doesn't show, past the
+/// comp's shutter (`EffectHost::params_at`, `param_at`)? Write-on lays a dab at every Brush
+/// Spacing from the layer's start with the Brush Position of its time, Radio Waves keeps the
+/// parameters each wave was born with for its lifespan, and Transform samples past the comp's
+/// shutter with its own Shutter Angle (up to 720°) or on a stretched layer (`unit_stretch`
+/// false: it samples in layer time). A key change of theirs then reaches frames far from the key. The time effects and simulations ([`reads_other_frames`])
+/// read them too, and reach every frame anyway.
+// ponytail: hand-kept list of the effects that call `params_at`/`param_at` beyond the comp's
+// shutter; a new one must be added here.
+fn reads_own_params_elsewhen(g: &PropGroup, unit_stretch: bool) -> bool {
+    let GroupKind::Effect { effect } = &g.kind else { return false };
+    match effect.as_str() {
+        "ec.generate.writeon" | "ec.generate.radiowaves" => true,
+        // (the comp's shutter at 100% stretch is within `Comp::shutter_margin`)
+        "ec.distort.transform" => !unit_stretch || !g.get("useCompositionShutterAngle").is_some_and(|p| p.keys.is_empty() && p.value.as_bool()),
+        _ => false,
+    }
+}
+
+/// `a` and `b` have the same header: every field but the children.
+fn same_head(a: &PropGroup, b: &PropGroup) -> bool {
+    // Every field (no `..`: a new field must be considered here).
+    let PropGroup { uid, match_id, name, kind, enabled, label, children: _ } = a;
+    *uid == b.uid && *match_id == b.match_id && *name == b.name && *kind == b.kind && *enabled == b.enabled && *label == b.label
+}
+
+/// Groups nested deeper than this in a layer's property tree count as changed everywhere.
+const MAX_PROP_DEPTH: usize = 64;
+
+/// Where a group sits in a layer's property tree, for its audio-only children ([`audio_only`]).
+#[derive(Clone, Copy, PartialEq)]
+enum Level {
+    Root,
+    /// The root's Effects group.
+    Effects,
+    Inner,
+}
+
+/// The pairs of properties that differ between `a` and `b` (groups at `level` of two layers'
+/// trees, `depth` deep), when all else is the same: the same headers, children and kinds, and
+/// every difference a property whose value at a time reaches only the frames around that time.
+/// `None` for any other difference: one in a header, a group added, removed or reordered, or a
+/// property that is read at other times (inside an effect that reads its own parameters
+/// elsewhen, [`reads_own_params_elsewhen`]; in the Essential Properties; in the audio something
+/// draws). Audio-only nodes count only when `heard`, as in [`same_picture_props`]. `unit_stretch`:
+/// the layer plays at 100%, so layer time and comp time advance alike.
+fn changed_props<'a>(
+    a: &'a PropGroup,
+    b: &'a PropGroup,
+    level: Level,
+    heard: bool,
+    unit_stretch: bool,
+    depth: usize,
+    out: &mut Vec<(&'a Property, &'a Property)>,
+) -> Option<()> {
+    if depth > MAX_PROP_DEPTH || !same_head(a, b) {
+        return None;
+    }
+    let audio = |n: &Node| match level {
+        Level::Root => audio_only(n, true),
+        Level::Effects => audio_only(n, false),
+        Level::Inner => false,
+    };
+    let mut x = a.children.iter().filter(|n| heard || !audio(n));
+    let mut y = b.children.iter().filter(|n| heard || !audio(n));
+    loop {
+        let (m, n) = match (x.next(), y.next()) {
+            (None, None) => return Some(()),
+            (Some(m), Some(n)) => (m, n),
+            _ => return None,
+        };
+        if m == n {
+            continue;
+        }
+        // Waveform and spectrum effects draw a stretch of the audio they hear; audio effects
+        // (delay, reverb) carry it on.
+        if audio(m) || audio(n) {
+            return None;
+        }
+        match (m, n) {
+            (Node::Group(g), Node::Group(h)) => {
+                // (the Essential Properties override the nested comp's controls, which reach its
+                // layers by paths this walk doesn't follow: time effects and motion blur there,
+                // mirrored masters; conservatively, their whole span)
+                if matches!(g.kind, GroupKind::Essential { .. }) || reads_own_params_elsewhen(g, unit_stretch) || reads_own_params_elsewhen(h, unit_stretch) {
+                    return None;
+                }
+                let level = if level == Level::Root && g.match_id == "effects" { Level::Effects } else { Level::Inner };
+                changed_props(g, h, level, heard, unit_stretch, depth.saturating_add(1), out)?;
+            }
+            (Node::Prop(p), Node::Prop(q)) => out.push((p, q)),
+            _ => return None,
+        }
+    }
+}
+
 impl Switches {
     /// These switches with Audio, Lock and Shy at their defaults.
     pub fn pixels(&self) -> Switches {
@@ -246,11 +342,6 @@ fn audio_only(n: &Node, root: bool) -> bool {
 /// `a` and `b` are equal but for their audio-only nodes ([`audio_only`]: the root's Audio group,
 /// the effects in its Effects group that are audio effects).
 fn same_picture_props(a: &PropGroup, b: &PropGroup) -> bool {
-    fn head(a: &PropGroup, b: &PropGroup) -> bool {
-        // Every field (no `..`: a new field must be considered here).
-        let PropGroup { uid, match_id, name, kind, enabled, label, children: _ } = a;
-        *uid == b.uid && *match_id == b.match_id && *name == b.name && *kind == b.kind && *enabled == b.enabled && *label == b.label
-    }
     fn children(a: &PropGroup, b: &PropGroup, root: bool) -> bool {
         let mut x = a.children.iter().filter(|n| !audio_only(n, root));
         let mut y = b.children.iter().filter(|n| !audio_only(n, root));
@@ -258,7 +349,7 @@ fn same_picture_props(a: &PropGroup, b: &PropGroup) -> bool {
             match (x.next(), y.next()) {
                 (None, None) => return true,
                 (Some(Node::Group(g)), Some(Node::Group(h))) if root && g.match_id == "effects" && h.match_id == "effects" => {
-                    if !(head(g, h) && children(g, h, false)) {
+                    if !(same_head(g, h) && children(g, h, false)) {
                         return false;
                     }
                 }
@@ -267,7 +358,7 @@ fn same_picture_props(a: &PropGroup, b: &PropGroup) -> bool {
             }
         }
     }
-    head(a, b) && children(a, b, true)
+    same_head(a, b) && children(a, b, true)
 }
 
 /// `g` (a layer's property tree) without its audio-only nodes ([`same_picture_props`]).
@@ -343,16 +434,20 @@ impl Layer {
     }
 
     /// The comp-time spans where `self` draws differently than `o` when the two differ only in
-    /// the keyframes of Transform properties (a key's value, ease or interpolation moved in the
-    /// Timeline or Graph Editor): from two keys before the first changed key to two after the
-    /// last (auto-Bezier and continuous tangents reach the neighbouring segments), to the
-    /// layer's in or out point past the first or last key (values hold there). `None` for any
-    /// other difference, a static value, an expression on the layer (it can read the keyed
-    /// property at other times), roving or muted keys, a time remap or a time effect (it reads other
-    /// times): those reach the layer's whole span.
+    /// the keyframes of their properties (a key's value, ease or interpolation moved in the
+    /// Timeline or Graph Editor), anywhere in the property tree: Transform, effects, masks, shape
+    /// contents, text animators, layer styles… Per changed property, from two keys before the
+    /// first changed key to two after the last (auto-Bezier and continuous tangents reach the
+    /// neighbouring segments), to the layer's in or out point past the first or last key (values
+    /// hold there). A keyed value at a time comes from the keys around it, whatever its kind (a
+    /// path, a gradient, Source Text's hold keys, an orientation). `None` for any other
+    /// difference: the tree's structure (a group or effect added, removed or reordered, a
+    /// group's header), a static value, an expression on the layer (it can read the keyed
+    /// property at other times), roving or muted keys, a time remap or a time effect (it reads
+    /// other times), a property read at other times (an effect reading its own parameters
+    /// elsewhen, the Essential Properties, audio something draws, see [`changed_props`]; Position
+    /// under Auto-Orient Along Path; a model's animation clip): those reach the layer's whole span.
     pub fn keyframe_spans(&self, o: &Layer, with_markers: bool, heard: bool) -> Option<Vec<(Tick, Tick)>> {
-        let transform = |l: &Layer| l.props.group("transform").cloned();
-        let (t1, t0) = (transform(self)?, transform(o)?);
         let reads_time = |l: &Layer| {
             l.props.get("timeRemap").is_some()
                 || l.props.group("effects").is_some_and(|e| {
@@ -367,22 +462,35 @@ impl Layer {
         if reads_time(self) || reads_time(o) || has_expr(self) || has_expr(o) {
             return None;
         }
-        // Everything but the Transform group draws the same.
-        let rest = |l: &Layer| {
+        // Everything but the property tree's contents draws the same.
+        let shell = |l: &Layer| {
             let mut l = l.clone();
-            l.props.children.retain(|n| !matches!(n, Node::Group(g) if g.match_id == "transform"));
+            l.props.children.clear();
             l
         };
-        let head = |g: &PropGroup| PropGroup { children: vec![], ..g.clone() };
-        if !rest(self).same_pixels_with(&rest(o), with_markers, heard) || head(&t1) != head(&t0) || t1.children.len() != t0.children.len() {
+        if !shell(self).same_pixels_with(&shell(o), with_markers, heard) {
             return None;
         }
+        // Properties read at other times by the renderer: Position under Auto-Orient Along Path
+        // (where the layer holds still it keeps the direction of the last motion, any distance
+        // back) and a model's animation clip (it plays from the key that chose it).
+        fn at<'a>(l: &'a Layer, group: &str, m: &str) -> Option<&'a Property> {
+            l.props.sub(group).and_then(|g| g.get(m))
+        }
+        let along = self.auto_orient == AutoOrient::AlongPath || o.auto_orient == AutoOrient::AlongPath;
+        if (along && ["position", "positionX", "positionY", "positionZ"].iter().any(|m| at(self, "transform", m) != at(o, "transform", m)))
+            || at(self, "geometryOptions", "animation") != at(o, "geometryOptions", "animation")
+        {
+            return None;
+        }
+        let unit_stretch = (self.effective_stretch() - 100.0).abs() < 1e-9;
+        let mut pairs = Vec::new();
+        changed_props(&self.props, &o.props, Level::Root, heard, unit_stretch, 0, &mut pairs)?;
+        // (a reversed layer plays its first keys last)
+        let reversed = self.effective_stretch() < 0.0;
+        let (early, late) = if reversed { (self.out_point, self.in_point) } else { (self.in_point, self.out_point) };
         let mut spans = Vec::new();
-        for (n1, n0) in t1.children.iter().zip(&t0.children) {
-            if n1 == n0 {
-                continue;
-            }
-            let (Node::Prop(p1), Node::Prop(p0)) = (n1, n0) else { return None };
+        for (p1, p0) in pairs {
             let bare = |p: &Property| Property { keys: vec![], value: Value::Scalar(0.0), ..p.clone() };
             // (muted keys are skipped: the keys around an edit that play can be any distance away)
             if bare(p1) != bare(p0) || p1.keys.is_empty() || p0.keys.is_empty() || p1.keys.iter().chain(&p0.keys).any(|k| k.roving || k.muted) {
@@ -405,7 +513,7 @@ impl Layer {
                 let ahead = if upto >= keys.len() { None } else { keys.get(upto.saturating_add(1).min(keys.len().saturating_sub(1))) };
                 hi = hi.zip(ahead).map(|(a, k)| a.max(k.time));
             }
-            let (x, y) = (lo.map_or(self.in_point, |t| self.comp_time(t)), hi.map_or(self.out_point, |t| self.comp_time(t)));
+            let (x, y) = (lo.map_or(early, |t| self.comp_time(t)), hi.map_or(late, |t| self.comp_time(t)));
             let (x, y) = (x.min(y).max(self.in_point), x.max(y).min(self.out_point));
             if x <= y {
                 spans.push((x, y));
