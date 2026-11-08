@@ -342,6 +342,40 @@ fn the_store_evicts_least_recently_used_by_bytes() {
     assert!(!store.cached().contains(&path.to_string()));
 }
 
+/// #3271 CI: a decode thread that is slow to finish its job after handing the planes over (a
+/// busy machine) doesn't make them look in use: the store still drops the least recently used
+/// file, not another one.
+#[test]
+fn a_decode_thread_finishing_late_does_not_pin_the_planes() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
+    let one = 4 * (32 * 32 * 4 + 1);
+    let store = PlaneStore::new(2 * one);
+    let all = Want { all: true, ids: Default::default() };
+    let get = |p: &str| {
+        let source = ExrSource::Bytes(bytes.clone());
+        let index = crate::exr_index::get(p, &source).unwrap();
+        store.get(p, &source, &index, &all, Use::Other).map(|_| ())
+    };
+    let (a, b, c) = ("/3271-late-a.exr", "/3271-late-b.exr", "/3271-late-c.exr");
+    // b's decode thread stays in its job (at most 10 s) after it sent the planes.
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = std::sync::Mutex::new(wait);
+    SENT.lock().unwrap().push((
+        b.to_string(),
+        Arc::new(move |_: &str| {
+            let _ = wait.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10));
+        }),
+    ));
+    get(a).unwrap();
+    get(b).unwrap();
+    get(a).unwrap();
+    get(c).unwrap();
+    let cached = store.cached();
+    let _ = go.send(());
+    SENT.lock().unwrap().retain(|(p, _)| p != b);
+    assert_eq!(cached, [a, c], "b was least recently used");
+}
+
 /// #474 / #3191: a file forgotten (Reload Footage) while it decodes keeps nothing of that decode,
 /// and the request asks again: no planes made before the reload are kept or served.
 #[test]

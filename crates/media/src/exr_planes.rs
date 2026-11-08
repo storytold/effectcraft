@@ -371,12 +371,15 @@ pub(crate) fn decodes_of(path: &str) -> Vec<DecodeRecord> {
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|(p, _)| p == path).map(|(_, d)| d.clone()).collect()
 }
 
-/// Run before a decode of a path is queued on the decode threads (`QUEUING`) and when the
-/// queued job begins (`STARTING`), keyed by path (tests: holding a decode queued).
+/// Run before a decode of a path is queued on the decode threads (`QUEUING`), when the
+/// queued job begins (`STARTING`) and after it sent its outcome (`SENT`), keyed by path (tests:
+/// holding a decode queued, or its decode thread busy after it).
 #[cfg(test)]
 pub(crate) static QUEUING: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
 #[cfg(test)]
 pub(crate) static STARTING: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) static SENT: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn run_hook(hooks: &Mutex<Vec<(String, Hook)>>, path: &str) {
@@ -761,7 +764,14 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
             run_hook(&STARTING, &path);
             // (claimed meanwhile by a decode thread: it decodes, and hands the outcome over)
             if queued.take(RUNNING) {
-                let _ = tx.send(hints.run(|| decode(&path, &source, &queued, base, opened)));
+                let outcome = hints.run(|| decode(&path, &source, &queued, base, opened));
+                // (let go of the flight before the asker goes on: the flight keeps the outcome
+                // for its waiters, and a flight still held here would keep the planes looking in
+                // use, so the store would drop another file's instead)
+                drop(queued);
+                let _ = tx.send(outcome);
+                #[cfg(test)]
+                run_hook(&SENT, &path);
             }
         });
         // A plain block: this thread runs nothing else meanwhile.
