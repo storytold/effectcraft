@@ -1465,6 +1465,11 @@ fn a_text_layer_name_follows_its_text_until_renamed() {
     s.execute("layer.settings", json!({"layer": t, "name": "Settings Name"})).unwrap();
     s.execute("layer.setText", json!({"layer": t, "text": "Later"})).unwrap();
     assert_eq!(layer_name(&s, t), "Settings Name", "Layer Settings names it for good");
+    // An empty Layer Settings name follows the text again, as `layer.rename` does.
+    s.execute("layer.settings", json!({"layer": t, "name": ""})).unwrap();
+    assert_eq!(layer_name(&s, t), "Later", "an empty Layer Settings name shows the text");
+    s.execute("layer.setText", json!({"layer": t, "text": "Follows"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Follows", "and follows it again");
     // A layer given a name when it is made does not follow.
     let named = s.execute("layer.newText", json!({"text": "Body", "name": "Caption"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.setText", json!({"layer": named, "text": "Other"})).unwrap();
