@@ -631,7 +631,7 @@ a non-zero byte at 112).
 328), so mode and inverted are reported per mask. `mkif` byte 8 is the running mask id counter of the
 **layer** in the session (1, 2 for the two masks of 328; 329 then gets 3; undo does not reset it; a new
 layer starts at 1 again): exposed as `Mask::counter`, a session counter and not a stable id. API:
-`Mask::{mode, inverted, counter}`, `ShapePath::vertices(size)` (vertices in layer pixels, with the size of the layer's source, `Project::layer_source_size`), `Layer::mask_atoms` (`MaskAtom`: the mask with its atom group, its path property and its shapes by position, for the keys and expressions of the mask properties). Tests:
+`Mask::{mode, inverted, counter}`, `ShapePath::vertices(size)` (vertices in layer pixels: `size` is the size of the layer's source, `Project::layer_source_size`; a text or shape layer has no source size and its mask boxes are already pixels, so the importer passes 1 x 1), `Layer::mask_atoms` (`MaskAtom`: the mask with its atom group, its path property and its shapes by position, for the keys and expressions of the mask properties). Tests:
 `tests/masks.rs` (with a synthetic check of the handle order), `tests/batch3_objects.rs`.
 
 ### 3.9 Shape layers (`tdgp[ADBE Root Vectors Group]`)
