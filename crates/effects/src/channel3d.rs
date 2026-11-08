@@ -50,7 +50,7 @@ const CHANNEL_PARAMS: [(&str, &[&str]); 5] = [
     ("ec.3d.channelextract", &["channel"]),
     ("ec.3d.cryptomatte", &["layer", "layerName"]),
     ("ec.3d.extractor", &["red", "green", "blue", "alpha"]),
-    ("ec.3d.idmatte", &["auxChannel", "useCoverage"]),
+    ("ec.3d.idmatte", &["auxChannel"]),
     ("ec.3d.identifier", &["channelType"]),
 ];
 
@@ -87,13 +87,9 @@ pub fn aux_needs(id: &str, params: &crate::Params) -> Option<Vec<AuxLookup>> {
             _ => vec![find(&["R"]), find(&["G"]), find(&["B"])],
         },
         "ec.3d.depthmatte" | "ec.3d.depthoffield" | "ec.3d.fog3d" => vec![find(&DEPTH_NAMES)],
-        "ec.3d.idmatte" => {
-            let mut v = vec![ids(params.e("auxChannel"))];
-            if params.b("useCoverage") {
-                v.push(find(&COVERAGE_NAMES));
-            }
-            v
-        }
+        // (Use Coverage can be animated, as in After Effects: its channel is read whatever its
+        // value, so the need doesn't change over time)
+        "ec.3d.idmatte" => vec![ids(params.e("auxChannel")), find(&COVERAGE_NAMES)],
         "ec.3d.identifier" => vec![ids(params.e("channelType"))],
         "ec.3d.cryptomatte" => vec![AuxLookup::Crypto { name: params.s("layerName").to_string(), index: params.e("layer") as usize }],
         // (an empty name reads the layer's own channel)
@@ -851,6 +847,21 @@ mod tests;
 
 #[cfg(test)]
 mod aux_need_tests {
+    /// #3271: ID Matte's Use Coverage can be animated (as in After Effects): the coverage channel
+    /// is read whether it is on or off, so what a frame reads doesn't depend on it.
+    #[test]
+    fn id_matte_reads_coverage_either_way() {
+        let spec = crate::find("ec.3d.idmatte").expect("an effect");
+        let mut params = crate::Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        let off = super::aux_needs("ec.3d.idmatte", &params);
+        params.values.insert("useCoverage".into(), effectcraft_keyframe::Value::Bool(true));
+        let on = super::aux_needs("ec.3d.idmatte", &params);
+        assert_eq!(off, on);
+        assert_eq!(on.map(|v| v.len()), Some(2), "the ID channel and the coverage channel");
+        assert!(!super::selects_channels("ec.3d.idmatte", "useCoverage"), "animatable");
+        assert!(super::selects_channels("ec.3d.idmatte", "auxChannel"), "static");
+    }
+
     /// #3271: every effect that reads its layer's channels says which (else a frame would read
     /// all of them, or none).
     #[test]
