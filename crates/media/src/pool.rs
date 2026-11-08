@@ -211,9 +211,15 @@ struct CacheState {
     /// decoded again (#3269), and comes out as if decoded on its own. Not in the frame cache: a
     /// large plate shown reduced is not kept whole there (#1812).
     recent: VecDeque<Recent>,
-    /// Counts `forget` calls: a decode that started before one doesn't keep its picture (the file
-    /// may have changed meanwhile).
+    /// Counts `forget` calls (an epoch requests and decodes start in; see [`CacheState::stale`]).
     generation: u64,
+    /// The generation each path was last forgotten at (at most [`MAX_FORGOTTEN`] paths): a
+    /// request or decode of that path that started before it is stale (the file may have changed
+    /// meanwhile), one of another path is not.
+    forgotten: HashMap<Arc<str>, u64>,
+    /// Requests and decodes that started before this generation are stale whatever their path
+    /// (set when `forgotten` is cleared to keep it bounded).
+    stale_before: u64,
     /// Last frame index requested per movie (sequential-playback detection).
     last: HashMap<Arc<str>, i64>,
 }
@@ -229,7 +235,28 @@ struct Recent {
     stamp: u64,
 }
 
+/// At most this many forgotten paths are remembered ([`CacheState::forgotten`]); beyond that
+/// everything that started before is treated as stale instead.
+const MAX_FORGOTTEN: usize = 4096;
+
 impl CacheState {
+    /// Whether what was made of `path` by a request or decode that started at `generation` is
+    /// stale: the path was forgotten since (#3269 review: forgetting one file left every other
+    /// file's decodes uncached and unshared).
+    fn stale(&self, path: &str, generation: u64) -> bool {
+        generation < self.stale_before || self.forgotten.get(path).is_some_and(|&at| at > generation)
+    }
+
+    /// Note that `path` was forgotten.
+    fn forgot(&mut self, path: &str) {
+        self.generation = self.generation.saturating_add(1);
+        if self.forgotten.len() >= MAX_FORGOTTEN {
+            self.forgotten.clear();
+            self.stale_before = self.generation;
+        }
+        self.forgotten.insert(path.into(), self.generation);
+    }
+
     /// The whole still `key` decoded recently, with the files it was decoded from, if it is
     /// still kept.
     fn recent(&mut self, key: &Key) -> Option<(Arc<Image>, Arc<ReadFiles>)> {
@@ -506,7 +533,7 @@ impl Drop for Owner<'_> {
         let budget = self.inner.budget();
         let mut c = lock(&self.inner.cache);
         if let (Ok(img), files) = &outcome
-            && c.generation == self.generation
+            && !c.stale(&self.key.path, self.generation)
         {
             if self.as_asked {
                 c.lru.insert(self.key.clone(), img.clone(), files.clone(), budget);
@@ -621,7 +648,7 @@ impl MediaPool {
             c.lru.remove(&k);
         }
         c.recent.retain(|r| &*r.key.path != path);
-        c.generation = c.generation.wrapping_add(1);
+        c.forgot(path);
         c.last.remove(path);
         drop(c);
         crate::exr_channels::forget(path);
@@ -1075,7 +1102,7 @@ impl Inner {
                 }
             }
             // (one started before the file was forgotten is left to its own requests)
-            let Some(flight) = c.inflight.get(&source.key).filter(|f| f.generation == generation).cloned() else { break };
+            let Some(flight) = c.inflight.get(&source.key).filter(|f| !c.stale(&source.key.path, f.generation)).cloned() else { break };
             // Another request (or the read-ahead) is decoding this picture: wait for it.
             drop(c);
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -1119,11 +1146,11 @@ impl Inner {
         Ok(if as_asked { whole } else { self.keep(&loc.key, shape(whole), files, generation) })
     }
 
-    /// Keep `img`, made of `files`, in the frame cache as `key` (unless a file was forgotten
-    /// since `generation`, see [`CacheState::generation`]), and return it.
+    /// Keep `img`, made of `files`, in the frame cache as `key` (unless its file was forgotten
+    /// since `generation`, see [`CacheState::stale`]), and return it.
     fn keep(&self, key: &Key, img: Arc<Image>, files: Arc<ReadFiles>, generation: u64) -> Arc<Image> {
         let mut c = lock(&self.cache);
-        if c.generation == generation {
+        if !c.stale(&key.path, generation) {
             c.lru.insert(key.clone(), img.clone(), files, self.budget());
         }
         img
@@ -2073,5 +2100,60 @@ mod tests {
         *lock(&pool.inner.gate) = None;
         let again = pool.frame_at(&f, Tick::ZERO).unwrap();
         assert!(again.data.iter().any(|p| p[0] > 0.0), "the old decode's pixels were not kept");
+    }
+
+    /// #3270 review: forgetting one file (a file watcher's change, `add_bytes`) leaves another
+    /// file's decode in flight joinable and cached: a global count made every other decode
+    /// stale, so requests decoded those files again and nothing was kept.
+    #[test]
+    fn forgetting_one_file_keeps_another_files_decode() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/a.exr");
+        let other = plate(&pool, "/b.exr");
+        let (pool_a, f_a) = (pool.clone(), f.clone());
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_a = started.clone();
+        // The decode waits (2 s at most) for a request to join it, then decodes the file.
+        *lock(&pool.inner.gate) = {
+            let inner = Arc::downgrade(&pool.inner);
+            Some(Arc::new(move || {
+                started_a.store(true, Ordering::SeqCst);
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while inner.upgrade().is_some_and(|i| i.waiting.load(Ordering::SeqCst) < 1) && std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                None
+            }))
+        };
+        std::thread::scope(|s| {
+            let first = s.spawn(move || pool_a.frame_at(&f_a, Tick::ZERO));
+            while !started.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            pool.forget(&other.path);
+            let joined = pool.frame_at(&f, Tick::ZERO).unwrap();
+            let first = first.join().unwrap().unwrap();
+            assert!(Arc::ptr_eq(&joined, &first), "the request joined the decode in flight");
+        });
+        assert_eq!(pool.stats().decodes, 1, "one decode");
+        pool.frame_at(&f, Tick::ZERO).unwrap();
+        assert_eq!(pool.stats().decodes, 1, "and its picture was kept");
+        *lock(&pool.inner.gate) = None;
+    }
+
+    /// Forgotten paths are remembered per path and boundedly: past [`MAX_FORGOTTEN`], everything
+    /// that started before counts as stale.
+    #[test]
+    fn forgotten_paths_stay_bounded() {
+        let mut c = CacheState::default();
+        let at = c.generation;
+        c.forgot("/a.exr");
+        assert!(c.stale("/a.exr", at) && !c.stale("/b.exr", at) && !c.stale("/a.exr", c.generation));
+        for i in 0..MAX_FORGOTTEN + 10 {
+            c.forgot(&format!("/{i}.exr"));
+        }
+        assert!(c.forgotten.len() <= MAX_FORGOTTEN);
+        assert!(c.stale("/b.exr", at), "older than the remembered paths: stale");
+        assert!(!c.stale("/b.exr", c.generation));
     }
 }
