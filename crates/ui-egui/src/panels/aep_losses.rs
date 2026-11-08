@@ -105,6 +105,7 @@ pub fn lines(report: &Value) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// Draw the prompt for the conversion waiting on it; its answer runs or drops it.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let Some((id, _, report)) = app.dialog_state.aep_losses.command.clone() else {
         app.dialog = None;
@@ -235,6 +236,23 @@ mod tests {
         let errors = import_projects(&mut app, vec!["/no/such/c.aep".into()]);
         assert_eq!(errors.len(), 1, "tried at once: {errors:?}");
         assert_eq!(app.dialog_state.aep_losses.queue.len(), 1);
+    }
+
+    /// A broken After Effects project picked together with a broken EffectCraft project: the
+    /// status line keeps both errors, the project import's does not replace the other (#3103).
+    #[test]
+    fn picked_projects_report_every_error() {
+        let dir = TempDir::new();
+        let aep = dir.0.join("broken.aep");
+        let ecproj = dir.0.join("broken.ecproj");
+        std::fs::write(&aep, b"not an aep").unwrap();
+        std::fs::write(&ecproj, b"not a project").unwrap();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let paths = vec![aep.to_string_lossy().to_string(), ecproj.to_string_lossy().to_string()];
+        crate::menus::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths });
+        let status = &app.ui.status;
+        assert!(status.contains("broken.aep") && status.contains("broken.ecproj"), "{status}");
+        assert!(app.dialog.is_none() && app.session.project.items.is_empty());
     }
 
     #[test]

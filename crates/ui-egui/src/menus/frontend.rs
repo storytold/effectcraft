@@ -772,10 +772,13 @@ pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
     app.ui.status = msg;
 }
 
-/// Run command `id` with the path picked for it in parameter `key`.
+/// Run command `id` with the path picked for it in parameter `key`. After Effects projects picked
+/// for File ▸ Import go through their own import first (#3103); what they could not import is
+/// kept in the result's `errors`, ahead of the rest's.
 fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value, v: Value) -> Result<Value, String> {
     let mut p = params.as_object().cloned().unwrap_or_default();
     p.insert(key.to_string(), v);
+    let mut aep_errors = Vec::new();
     // Picked files import in the background, with the Importing card showing progress (#270).
     if matches!(id, "file.import" | "file.importMultiple") {
         p.insert("background".into(), Value::Bool(true));
@@ -784,16 +787,46 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
             p.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
         let (aep, rest): (Vec<String>, Vec<String>) = picked.into_iter().partition(|x| crate::panels::aep_losses::is_aep(x));
         if !aep.is_empty() {
-            let errors = crate::panels::aep_losses::import_projects(app, aep);
-            if !errors.is_empty() {
-                app.ui.status = errors.join("; ");
-            }
+            aep_errors = crate::panels::aep_losses::import_projects(app, aep);
             if rest.is_empty() {
-                return Ok(json!({"errors": errors}));
+                let result = json!({"errors": aep_errors});
+                show_result_errors(app, &result);
+                return Ok(result);
             }
             p.insert(key.to_string(), json!(rest));
         }
     }
+    let r = run_picked(app, id, p);
+    with_earlier_errors(app, r, aep_errors)
+}
+
+/// `r` with `earlier` (the picked After Effects projects' errors) ahead of its own: in its
+/// `errors` array when it succeeded, in the message when it failed. The status line shows them all.
+fn with_earlier_errors(app: &mut EffectcraftApp, r: Result<Value, String>, earlier: Vec<String>) -> Result<Value, String> {
+    if earlier.is_empty() {
+        return r;
+    }
+    match r {
+        Ok(mut result) => {
+            if !result.is_object() {
+                result = json!({"result": result});
+            }
+            let own = result.get("errors").and_then(Value::as_array).cloned().unwrap_or_default();
+            result["errors"] = Value::Array(earlier.into_iter().map(Value::from).chain(own).collect());
+            show_result_errors(app, &result);
+            Ok(result)
+        }
+        Err(e) => {
+            let msg = format!("{}; {e}", earlier.join("; "));
+            app.ui.status = msg.clone();
+            Err(msg)
+        }
+    }
+}
+
+/// [`run_with_picked`] for the picked paths left in `p`: the dialogs that ask first, then the
+/// command.
+fn run_picked(app: &mut EffectcraftApp, id: &str, p: serde_json::Map<String, Value>) -> Result<Value, String> {
     // Photoshop files ask how to import them first; numbered stills whether to import them as an
     // image sequence. Not while the losses prompt of a project picked with them is open: there is
     // one dialog at a time, so they import with the defaults.
