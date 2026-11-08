@@ -939,3 +939,35 @@ fn the_plane_store_is_trimmed_by_the_accountant() {
     assert_eq!(store.cached(), ["/3271-acc-b.exr", "/3271-acc-c.exr"], "held for effects, and in use");
     drop(in_use);
 }
+
+/// #3271: with the localizer on, a network OpenEXR is copied in the background and then read
+/// from its local copy, with the same pixels; what is read is still named by the share's path
+/// and identity (caches key it the same either way).
+#[test]
+fn a_localized_network_file_is_read_from_its_copy() {
+    let _serial = crate::localize::TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let root = std::env::temp_dir().join(format!("ec-3271-localized-{}", std::process::id()));
+    let (share, local) = (root.join("share"), root.join("local"));
+    std::fs::create_dir_all(&share).unwrap();
+    crate::localize::treat_as_network(&share);
+    let file = share.join("plate_0001.exr");
+    std::fs::write(&file, multipart()).unwrap();
+    let f = crate::probe(&file).unwrap();
+    let pool = crate::MediaPool::new();
+    pool.set_localizer(Some((local.clone(), 1 << 30)));
+    let from_share = pool.frame_at(&f, Tick::ZERO).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while crate::localize::status().is_some_and(|s| s.files == 0) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(pool.localize_status().is_some_and(|s| s.contains("1 files")), "{:?}", pool.localize_status());
+    pool.forget(&f.path);
+    let before = crate::opens_under(&local);
+    let (img, read) = crate::reads::captured(|| pool.frame_at(&f, Tick::ZERO).unwrap());
+    assert!(crate::opens_under(&local) > before, "read from the local copy");
+    assert_eq!(bits(&img), bits(&from_share));
+    let stamp = FileStamp::of_metadata(&std::fs::metadata(&file).unwrap());
+    assert!(read.files().iter().any(|r| *r.path == *f.path && r.stamp == stamp), "named by the share's file: {read:?}");
+    pool.set_localizer(None);
+    let _ = std::fs::remove_dir_all(&root);
+}

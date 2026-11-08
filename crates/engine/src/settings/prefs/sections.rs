@@ -190,6 +190,12 @@ page!(Disk {
     disk_cache_folder: String = String::new(),
     media_cache_folder: String = String::new(),
     conformed_media_folder: String = String::new(),
+    /// Copy footage on network shares to a local folder in the background (#3271).
+    localize_footage: bool = false,
+    /// Where the local copies go (empty: beside the media cache).
+    localize_folder: String = String::new(),
+    /// The most the local copies take (GB).
+    localize_max_gb: u32 = 100,
 });
 
 page!(Memory {

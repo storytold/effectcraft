@@ -82,6 +82,14 @@ pub trait FootageSource: Send + Sync {
     /// decode costly footage keep what they decoded there too (#3271: OpenEXR channels).
     /// Sources without such a tier ignore it.
     fn set_disk_cache(&self, _cache: Option<Arc<crate::disk_cache::DiskCache>>) {}
+    /// Settings ▸ Disk ▸ Localize Network Footage: copy footage on network shares to `folder`
+    /// in the background, up to the byte limit, and read the copies once they are complete and
+    /// verified (`None`: off). Sources that don't read files ignore it.
+    fn set_localizer(&self, _folder: Option<(std::path::PathBuf, u64)>) {}
+    /// What the localizer is doing, as a line to show (`None`: off or not supported).
+    fn localize_status(&self) -> Option<String> {
+        None
+    }
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
     fn model(&self, _item: ItemId, _footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         None
@@ -221,6 +229,12 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn set_disk_cache(&self, cache: Option<Arc<crate::disk_cache::DiskCache>>) {
         self.inner.set_disk_cache(cache)
+    }
+    fn set_localizer(&self, folder: Option<(std::path::PathBuf, u64)>) {
+        self.inner.set_localizer(folder)
+    }
+    fn localize_status(&self) -> Option<String> {
+        self.inner.localize_status()
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inner.model(item, footage)

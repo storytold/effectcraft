@@ -892,10 +892,23 @@ impl Inner {
 
     /// Where the OpenEXR file at `path` is read from: registered bytes, else the file.
     fn exr_source(&self, path: &str) -> crate::exr_read::ExrSource {
-        match lock(&self.files).get(path) {
-            Some(b) => crate::exr_read::ExrSource::Bytes(b.clone()),
-            None => crate::exr_read::ExrSource::File(std::path::PathBuf::from(path)),
+        use crate::exr_read::ExrSource;
+        if let Some(b) = lock(&self.files).get(path) {
+            return ExrSource::Bytes(b.clone());
         }
+        let file = std::path::PathBuf::from(path);
+        // A network file: copied in the background when the localizer is on, and read from its
+        // copy once that is complete and the file unchanged (#3271).
+        if crate::localize::is_network(&file) && crate::localize::status().is_some() {
+            crate::localize::request(&file);
+            if let Ok(meta) = std::fs::metadata(&file) {
+                let stamp = FileStamp::of_metadata(&meta);
+                if let Some(copy) = crate::localize::local_copy(&file, &stamp) {
+                    return ExrSource::Localized { original: file, copy, stamp };
+                }
+            }
+        }
+        ExrSource::File(file)
     }
 
     /// The bytes of the file at `path` and its identity as read ([`FileStamp::Missing`] when it
@@ -1493,6 +1506,24 @@ impl FootageSource for MediaPool {
         }
         wanted.given = given;
         wanted.learned.clear();
+    }
+
+    fn set_localizer(&self, folder: Option<(std::path::PathBuf, u64)>) {
+        crate::localize::configure(folder.map(|(folder, max_bytes)| crate::localize::LocalizeSettings { folder, max_bytes }));
+    }
+
+    fn localize_status(&self) -> Option<String> {
+        let s = crate::localize::status()?;
+        let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
+        let copying = s.copying.as_deref().map(|p| format!(", copying {p}")).unwrap_or_default();
+        Some(format!(
+            "Local copies: {} files, {:.1} of {:.1} GB; {} queued, {} skipped{copying}",
+            s.files,
+            gb(s.bytes),
+            gb(s.max_bytes),
+            s.queued,
+            s.skipped
+        ))
     }
 
     fn set_disk_cache(&self, cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>) {

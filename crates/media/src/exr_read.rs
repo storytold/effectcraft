@@ -37,6 +37,9 @@ pub(crate) enum ExrSource {
     Bytes(Arc<[u8]>),
     /// A file, opened for each read and read in place.
     File(std::path::PathBuf),
+    /// A network file read from its verified local copy ([`crate::localize`]): it opens the
+    /// copy, but its identity (and every entry made of it) is the original's.
+    Localized { original: std::path::PathBuf, copy: std::path::PathBuf, stamp: FileStamp },
 }
 
 /// An opened [`ExrSource`].
@@ -51,7 +54,7 @@ impl ExrSource {
     pub(crate) fn stamp(&self) -> std::io::Result<FileStamp> {
         match self {
             ExrSource::Bytes(_) => Ok(FileStamp::Virtual),
-            ExrSource::File(path) => std::fs::metadata(path).map(|m| FileStamp::of_metadata(&m)),
+            ExrSource::File(path) | ExrSource::Localized { original: path, .. } => std::fs::metadata(path).map(|m| FileStamp::of_metadata(&m)),
         }
     }
 
@@ -69,6 +72,18 @@ impl ExrSource {
                     return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
                 }
                 Ok(Opened { len: meta.len(), stamp: FileStamp::of_metadata(&meta), reader: Box::new(file) })
+            }
+            ExrSource::Localized { copy, stamp, .. } => {
+                #[cfg(test)]
+                crate::count_open(copy);
+                let file = std::fs::File::open(copy)?;
+                let meta = file.metadata()?;
+                // (the copy must still be complete: its size is the original's)
+                let complete = matches!(stamp, FileStamp::Native { len, .. } if *len == meta.len());
+                if !meta.is_file() || !complete {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: not a complete copy", copy.display())));
+                }
+                Ok(Opened { len: meta.len(), stamp: *stamp, reader: Box::new(file) })
             }
         }
     }

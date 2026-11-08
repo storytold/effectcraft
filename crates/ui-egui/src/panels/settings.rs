@@ -238,6 +238,13 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                 if key == "disk.diskCacheMaxGb" {
                     disk_cache_limit_ui(app, ui, t);
                 }
+                if key == "disk.localizeFootage"
+                    && let Some(line) = app.session.localize_status()
+                {
+                    // (the localizer's state: local copies, what is queued and being copied)
+                    let r = ui.label(RichText::new(line).color(t.text_dim));
+                    app.auto.add("settings.disk.localizeStatus", r.rect, "localize status");
+                }
             }
         }
     }

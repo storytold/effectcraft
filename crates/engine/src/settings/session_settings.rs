@@ -30,6 +30,7 @@ impl Session {
         self.apply_cache_budgets();
         self.configure_disk_cache();
         self.footage.set_conform_folder(self.conformed_audio_folder());
+        self.footage.set_localizer(self.localize_settings());
         // Switches Affect Nested Comps changes what precomp layers render: drop cached pixels.
         let nested = self.prefs.general.switches_affect_nested_comps;
         if self.applied_nested_switches.replace(nested).is_some_and(|was| was != nested) {
@@ -63,6 +64,22 @@ impl Session {
     /// Settings ▸ Disk ▸ Database and Cache Folder (media cache: audio waveform summaries).
     pub fn media_cache_folder(&self) -> Option<std::path::PathBuf> {
         self.cache_folder(&self.prefs.disk.media_cache_folder, "Media Cache")
+    }
+
+    /// Settings ▸ Disk ▸ Localize Network Footage (#3271): the local copies' folder and size
+    /// limit, `None` when off (or there is no folder for them).
+    pub fn localize_settings(&self) -> Option<(std::path::PathBuf, u64)> {
+        let d = &self.prefs.disk;
+        if !d.localize_footage || cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        let folder = self.cache_folder(&d.localize_folder, "Local Footage Copies")?;
+        Some((folder, u64::from(d.localize_max_gb.max(1)) << 30))
+    }
+
+    /// What the footage localizer is doing, as a line for Settings ▸ Disk (`None`: off).
+    pub fn localize_status(&self) -> Option<String> {
+        self.footage.localize_status()
     }
 
     /// Settings ▸ Disk ▸ Conformed Audio Folder (decoded footage audio, see
