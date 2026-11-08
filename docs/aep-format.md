@@ -216,12 +216,12 @@ the value from the corpus manifest (test file in parentheses at the end of each 
 
 API: `LayerHeader` (`is_video_enabled`/`is_enabled`, `is_audio_enabled`, `is_effects_enabled`,
 `is_auto_oriented`, `light_type`, `blend_mode`, `stretch` / `stretch_den`, `stretch_ratio`,
-`stretch_percent`, `in_point`, `out_point`); the same switches on `Layer`; `Layer::track_matte`
+`in_point`, `out_point`); the same switches on `Layer`; `Layer::track_matte`
 (`TrackMatte`, `MatteMode`; test `tests/matte.rs`). `stretch` is now the
 numerator of the ratio (it was the whole multiplier before 50 % and 150 % were sampled). Tests:
 `tests/header.rs`, `tests/layer_switches.rs`. The layer name itself is the `Utf8` child of the
 `Layr` (empty while the name is the source's); the layer then shows the name of its source item
-(`Project::layer_display_name`).
+(`Project::layer_source(...)` then `Item::display_name`, the rule the importer uses).
 
 ### 3.2 Composition header (`Item/cdta`, 204 bytes; the decoder needs the first 176) and renderer
 
@@ -246,9 +246,9 @@ numerator of the ratio (it was the whole multiplier before 50 % and 150 % were s
 
 The inert `ADBE Time Remapping` record of every AV layer has `tduM` = the source's duration in seconds: 5 for 5 s compositions (124, 257, 258), 3 and 2 for a 3 s and a 2 s composition (600, 601), 1 for the 1 s WAV (351), 0.1 for the three-frame sequence (353), 0 on solids and stills (000, 126). Every property's keyframe time scale (`tdb4` bytes 12 to 15) follows the composition (23 976 in every
 property of `L` after 229 and 230). The corpus manifest calls the classic renderer
-`ADBE Advanced 3d`; the file stores `ADBE Escher` / `Classic 3D`. API: `CompHeader::frame_rate_exact`
-(exact fraction), `duration_frames`, `shutter_phase`, `display_start`, `display_start_seconds`,
-`display_start_frame`. Tests: `tests/header.rs`, `tests/layer_switches.rs`.
+`ADBE Advanced 3d`; the file stores `ADBE Escher` / `Classic 3D`. API: `CompHeader::{time_base,
+frame_rate_fixed, duration_units, shutter_phase, display_start}` (`display_start` is the exact
+fraction). Tests: `tests/header.rs`, `tests/layer_switches.rs`.
 
 ### 3.3 Items, footage and precomps
 
@@ -292,7 +292,8 @@ name. A footage layer shows the item's name while it has no name of its own (351
 
 Test: `tests/header.rs` (precomp), `tests/text_markers_footage.rs` and `tests/batch3_objects.rs`
 (footage), `tests/layer_switches.rs` (solid colour). API: `Footage::{duration, native_frame_rate,
-bits_per_pixel, file_size, audio_sample_rate, is_sequence, sequence_frame_count}`.
+bits_per_pixel, file_size, audio_sample_rate, is_sequence}`; `Item::sequence_info` (with
+`SequenceInfo::frame_count`).
 
 ### 3.4 Properties: sparse storage, static values and units
 
@@ -401,8 +402,8 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
-returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::ease_component(i)`
+returns one component's `KeyEase`, `Keyframe::ease_components` all of them. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
 (100 in 204 key 1, 0 on the last key and right after creation; safe to ignore), **ease at 24 in
@@ -427,7 +428,7 @@ in tangent (`n` x `f64`, relative offset from the value) at `56 + 8 n`, out tang
 | **ease, colour switched to bezier** | spatial n=4 @24..55 | keyframe.set_interpolation bezier on two colour keys stores speed 0 and influence 0 on both sides, and After Effects interpolates them linearly (598 Start Color red to blue: 0.75 / 0.5 / 0.25 red at 0.5 / 1 / 1.5 s); a custom colour ease cannot be set by script | 598 | V |
 | **ease, mask path** | 64-byte record @24..55 | in speed, in influence, out speed, out influence as in the spatial template: 599 out / in influence 0.75, 700 0.2 / 0.5, speeds 0 (the path at 0.5 s is 5.42 % / 28.0 % of the way). The `f64` at 16 is 1 (093) or 2 (599, 700) on the first key and 0 on the last (not decoded) | 093, 599, 700 | V (influence), ? (speed unit) |
 
-API: `Keyframe::{interpolation_in, interpolation_out, kind, value, ease, ease_component, ease_components, plain_ease_slots, color_distance, spatial}`;
+API: `Keyframe::{interpolation_in, interpolation_out, kind, value, ease, ease_component, ease_components, spatial}` (the `f64` at byte 16 of a colour key is `SpatialKey::segment_length`);
 `Property::keys()` hands the property's template to its records. Marker record (16 bytes): time,
 `03 03` hold bytes, 8 stale bytes. Mask path record (64 bytes): the common fields and the ease at byte 24 (599, 700). Test:
 `tests/values.rs`, `tests/keyframes.rs`.
@@ -630,7 +631,7 @@ a non-zero byte at 112).
 328), so mode and inverted are reported per mask. `mkif` byte 8 is the running mask id counter of the
 **layer** in the session (1, 2 for the two masks of 328; 329 then gets 3; undo does not reset it; a new
 layer starts at 1 again): exposed as `Mask::counter`, a session counter and not a stable id. API:
-`Mask::{mode, inverted, counter}`, `Project::mask_vertices_px` (vertices in layer pixels), `Layer::mask_atoms` (`MaskAtom`: the mask with its atom group, its path property and its shapes by position, for the keys and expressions of the mask properties). Tests:
+`Mask::{mode, inverted, counter}`, `ShapePath::vertices(size)` (vertices in layer pixels, with the size of the layer's source, `Project::layer_source_size`), `Layer::mask_atoms` (`MaskAtom`: the mask with its atom group, its path property and its shapes by position, for the keys and expressions of the mask properties). Tests:
 `tests/masks.rs` (with a synthetic check of the handle order), `tests/batch3_objects.rs`.
 
 ### 3.9 Shape layers (`tdgp[ADBE Root Vectors Group]`)
@@ -758,7 +759,7 @@ groups as on other layers, with these conventions:
 
 | What | Path | Stored | Evidence | Conf. |
 |---|---|---|---|---|
-| camera Position, default (auto state) | `ADBE Transform Group/ADBE Position`, `tdb4` 76 and 77 = 1 although no expression exists | `[0, 0, -2666.67]` (x and y are 0 whatever the composition size; z = -zoom). A **one-node** camera reports `[0, 0, -2666.67]` (251). **Correction (S16): a reopened two-node camera reports `[0, 0, -2666.67]` too (256 read back), and After Effects renders it there**: the default two-node camera of 537 above the 3D solid of 486 renders from `[0, 0, -2666.67]` towards the point of interest, not like the composition's default view (537 differs from 486 in 24 % of the grid points, and EffectCraft's import with the stored position matches 537 but for 4 edge points). The `[960, 540, ...]` of the batch-3 notes was not reproduced (535 and 537, created by script, read back the stored value too); `CameraPosition::reported` keeps the old rule and is marked as contradicted | 256, 251, 537 | V |
+| camera Position, default (auto state) | `ADBE Transform Group/ADBE Position`, `tdb4` 76 and 77 = 1 although no expression exists | `[0, 0, -2666.67]` (x and y are 0 whatever the composition size; z = -zoom). A **one-node** camera reports `[0, 0, -2666.67]` (251). **Correction (S16): a reopened two-node camera reports `[0, 0, -2666.67]` too (256 read back), and After Effects renders it there**: the default two-node camera of 537 above the 3D solid of 486 renders from `[0, 0, -2666.67]` towards the point of interest, not like the composition's default view (537 differs from 486 in 24 % of the grid points, and EffectCraft's import with the stored position matches 537 but for 4 edge points). The `[960, 540, ...]` of the batch-3 notes was not reproduced (535 and 537, created by script, read back the stored value too); the reader keeps only the stored value (`CameraPosition::stored`) | 256, 251, 537 | V |
 | camera Position, set by the user | same, `tdb4` 76 and 77 = 0 | the absolute value `[100, 200, -1000]` | 253 | V |
 | camera point of interest | `ADBE Anchor Point` | `[960, 540, 0]` in **pixels** (not a fraction); the record's `tdsb` is 1 on a two-node and 3 on the one-node camera (not asserted) | 251, 253, 256 | V (value), E (`tdsb`) |
 | light Position, default | same as the camera | `[0, 0, -1333.33]`, as After Effects reports it (255 read back); the point of interest `[960, 540, 0]` | 254, 255 | V |
@@ -774,10 +775,8 @@ groups as on other layers, with these conventions:
 
 A point light made by converting a spot light has a different property set (`Orientation`, `Rotate
 X/Y/Z`, `Cone Angle`, `Cone Feather 2` in the default state) that a spot light lacks (252); whether that
-is an artefact of the conversion is untested. API: `Layer::camera_position`,
-`CameraPosition::reported`, `Layer::camera_point_of_interest`, `Layer::light_intensity`,
-`Layer::{camera_zoom, camera_depth_of_field, camera_focus_distance, camera_aperture, light_color,
-light_cone_angle, light_cone_feather}`, `DEFAULT_CAMERA_ZOOM` (2 666.67 is verified for the 1920 px
+is an artefact of the conversion is untested. API: `Layer::camera_position`; the camera and light
+options are read by the importer's table (`import/camera.rs`); `DEFAULT_CAMERA_ZOOM` (2 666.67 is verified for the 1920 px
 composition only), `Layer::orientation` (`Orientation`; test `orientation_is_otst_otda` in
 `tests/batch5.rs`). Render checks against After Effects (20 px grid, 5 184 points): 486 1 point
 off, 535 2, 536 0, 537 4 (anti-aliased edges); **488 (Orientation `[10, 20, 30]`): 272 points
