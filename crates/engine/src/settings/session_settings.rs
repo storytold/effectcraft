@@ -137,10 +137,6 @@ impl Session {
         // over the store of a roto test running beside it. Serialise them with the roto tests.
         #[cfg(test)]
         crate::tests::roto::hold_roto_cache_test_lock();
-        // Another setting changed (the disk cache stays as it is): its salt still holds, and
-        // stamping every footage file again would cost each settings change seconds with large
-        // sequences.
-        let kept = self.disk_cache.as_ref().is_some_and(|c| c.folder() == folder.as_path());
         let dc = match &self.disk_cache {
             Some(c) if c.folder() == folder.as_path() => {
                 c.set_max_bytes(max);
@@ -162,11 +158,17 @@ impl Session {
                 }
             },
         };
+        // Files reloaded while the cache was off: their entries go before anything is read from
+        // it (until the writer has deleted them they are misses, and no frame is linked).
+        if !self.pending_disk_drops.is_empty() {
+            dc.drop_files(std::mem::take(&mut self.pending_disk_drops));
+        }
         self.disk_cache = Some(dc.clone());
         // The reserve applies from the start (a new folder's watcher is idle).
         self.poll_disk_space();
-        // Attaches the disk cache to the layer cache once the footage salt is known.
-        self.refresh_disk_salt(!kept);
+        // Used at once (no file is looked at first: each entry checks the source files it lists
+        // when it is read, #3184).
+        self.layer_cache.set_disk(Some(dc.clone()));
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
         // disk cache off drops it).
         let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();

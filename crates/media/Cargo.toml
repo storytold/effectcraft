@@ -36,3 +36,7 @@ rayon = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# (tests render comps that read layers through effects; already a dependency of effectcraft-render)
+effectcraft-effects = { workspace = true }
