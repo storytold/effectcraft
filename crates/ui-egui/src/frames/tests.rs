@@ -2233,6 +2233,56 @@ fn a_keyframe_edit_reaches_only_the_keys_around_it() {
     }
 }
 
+/// A key edit of an effect parameter re-renders only around the keys it changed, as a Transform
+/// key edit does (#3324): Exposure keyed at frames 30, 60 and 90, its middle key changed. Write-on
+/// reads its Brush Position at every earlier time (a dab per Brush Spacing since the layer's
+/// start), so its middle key edit reaches every frame after it. Every frame kept renders as
+/// before.
+#[test]
+fn an_effect_key_edit_reaches_only_the_frames_that_read_it() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{LayerId, Value};
+    use effectcraft_engine::render::render_frame;
+    use serde_json::{Value as Json, json};
+    let v2 = |x: f64, y: f64| (json!([x, y]), Value::Vec2([x, y]));
+    let edits = [
+        ("Exposure", "master/exposure", [json!(0.0), json!(1.0), json!(0.0)], Value::Scalar(3.0)),
+        ("Write-on", "brushPosition", [v2(2.0, 2.0).0, v2(14.0, 14.0).0, v2(2.0, 14.0).0], v2(14.0, 2.0).1),
+    ];
+    for (effect, param, values, mid) in edits {
+        let mut s = Session::default();
+        let cid =
+            ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+        let l = s.execute("layer.newSolid", json!({"color": "#808080", "width": 16, "height": 16})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("effect.apply", json!({"layers": [l], "effect": effect})).unwrap();
+        let path = format!("effects/#1/{param}");
+        let fr = s.project.comp(cid).unwrap().frame_rate;
+        for (f, v) in [30, 60, 90].into_iter().zip(values) {
+            let add: Json = json!({"layer": l, "path": path, "time": fr.tick_of(f).seconds(), "value": v});
+            s.execute("prop.addKey", add).unwrap();
+        }
+        let p0 = s.project.clone();
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..120).for_each(|i| insert(&f, k(id0, i)));
+        let mut p1 = p0.clone();
+        Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().props.prop_mut(&path).unwrap().keys[1].value = mid;
+        let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+        let same = |i: i64| render_frame(&p0, cid, fr.tick_of(i), 1.0).data == render_frame(&p1, cid, fr.tick_of(i), 1.0).data;
+        assert!(!same(60), "{effect}: the edit shows");
+        assert!(![45, 60, 75].iter().any(|i| kept.contains(i)), "{effect}: {kept:?}");
+        if effect == "Exposure" {
+            assert!((0..=27).chain(93..120).all(|i| kept.contains(&i)), "{effect}: the frames outside the keys stay: {kept:?}");
+        } else {
+            assert!(!same(110) && !kept.contains(&110), "{effect}: the stroke drawn by frame 110 passes the edited key: {kept:?}");
+        }
+        for i in kept {
+            assert!(same(i), "{effect}: kept frame {i} renders differently after the edit");
+        }
+    }
+}
+
 /// Music's Audio Levels keep every frame, in RAM and on disk, while the project's expressions
 /// can't read audio (a wiggle); an expression naming the music's Audio Levels re-renders its layer.
 #[test]
