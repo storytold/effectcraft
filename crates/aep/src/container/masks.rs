@@ -8,7 +8,7 @@
 
 use crate::container::Chunk;
 use crate::container::bytes::{be_f32, be_u32, until_nul};
-use crate::container::typed::{KeyList, Layer, Project, PropGroup, PropNode, Property};
+use crate::container::typed::{KeyList, Layer, PropGroup, PropNode, Property};
 use crate::container::values::{Tracked, read};
 
 /// The mask mode (`mkif` `u32` at byte 4).
@@ -191,16 +191,6 @@ fn mask_from_atom(atom: &PropGroup<'_, '_>, mkif: Option<&[u8]>) -> Mask {
         }
     }
     mask
-}
-
-impl<'f, 'a> Project<'f, 'a> {
-    /// The vertices of every path shape of a mask in pixels of the layer: mask boxes are normalised
-    /// to the **layer** size (the size of its source), not the composition's. `None` when the layer
-    /// has no source with a size.
-    pub fn mask_vertices_px(&self, layer: &Layer<'f, 'a>, mask: &Mask) -> Option<Vec<Vec<PathVertex>>> {
-        let (width, height) = self.layer_source_size(layer)?;
-        Some(mask.shapes.iter().map(|s| s.vertices((f64::from(width), f64::from(height)))).collect())
-    }
 }
 
 /// One mask with the views of its records, for readers that need more than [`Mask`]: the

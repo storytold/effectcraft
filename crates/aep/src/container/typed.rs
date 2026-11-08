@@ -135,6 +135,15 @@ pub struct TimeBase {
 }
 
 impl TimeBase {
+    /// The NTSC rates and the value After Effects stores for each (a float32 of exactly these
+    /// decimals): the one table the importer and the exporter use.
+    pub(crate) const NTSC: [(effectcraft_time::FrameRate, f32); 4] = [
+        (effectcraft_time::FrameRate::FPS_23_976, 23.976),
+        (effectcraft_time::FrameRate::FPS_29_97, 29.97),
+        (effectcraft_time::FrameRate::FPS_59_94, 59.94),
+        (effectcraft_time::FrameRate::FPS_119_88, 119.88),
+    ];
+
     /// Frames per second (`timescale / frame_duration`), `None` for a zero duration.
     pub fn frame_rate(&self) -> Option<f64> {
         (self.frame_duration != 0).then(|| f64::from(self.timescale) / f64::from(self.frame_duration))

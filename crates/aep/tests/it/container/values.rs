@@ -119,7 +119,7 @@ fn linear_position_keys() {
         let values: Vec<_> = keys.iter().map(|k| k.spatial().unwrap().value).collect();
         assert_eq!(values, [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 100.0, 0.0]]);
         assert_eq!(p.first_key_value(), Some(vec![0.0, 0.0, 0.0]));
-        assert_eq!(p.is_static_flag_set(), Some(false));
+        assert!(p.is_animated());
     }));
     // The transform of the layer reports the animated Position as keyframed (value at the first key).
     let (t, _) = skip!(transform("055-key-position-3key-inserted-t2.5.aep"));
@@ -181,7 +181,7 @@ fn roving_and_label_flags() {
         assert_eq!(roving, [false, true, false]);
         assert_eq!(keys[1].time_units(), Some(26509));
         assert_eq!(keys[1].seconds(25600), Some(1.0355078125));
-        assert_eq!(keys[1].spatial_value(), Some([100.0, 0.0, 0.0]));
+        assert_eq!(keys[1].value(), Some(vec![100.0, 0.0, 0.0]));
         assert_eq!(keys[1].flags(), Some(0x0027));
         assert_eq!(keys[1].label(), Some(0));
     }));
@@ -193,7 +193,7 @@ fn roving_and_label_flags() {
         assert_eq!(keys[1].flags(), Some(0x0247));
         assert_eq!(keys[0].flags(), Some(0x0007));
         assert_eq!(keys[1].is_roving(), Some(false));
-        assert_eq!(keys[1].spatial_value(), Some([100.0, 0.0, 0.0]));
+        assert_eq!(keys[1].value(), Some(vec![100.0, 0.0, 0.0]));
     }));
 }
 
@@ -204,7 +204,6 @@ fn scalar_opacity_keys() {
         assert!(p.is_animated());
         assert_eq!(p.dims(), Some(1));
         assert_eq!(p.time_scale(), Some(25600));
-        assert_eq!(p.is_static_flag_set(), Some(false));
         let list = p.keys().unwrap();
         assert_eq!(list.header.record_size, 48);
         let keys: Vec<_> = list.keyframes().collect();
@@ -243,10 +242,8 @@ fn expression_text_and_flag_bytes() {
         assert_eq!(p.expression(), None);
         let flags = p.expression_flags().unwrap();
         assert_eq!((flags.byte_76, flags.byte_77, flags.byte_120), (0, 0, 0));
-        assert!(!flags.all_set());
         // A written static property: tdsb 1, byte 5 of tdb4 has bit 0 set (15 for Position).
         assert_eq!(p.flags(), Some(1));
-        assert_eq!(p.is_static_flag_set(), Some(true));
         assert_eq!(p.header().and_then(|h| h.get(5).copied()), Some(15));
     }));
 }

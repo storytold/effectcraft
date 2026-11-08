@@ -19,6 +19,9 @@ fn prop_of<R>(name: &str, path: &[&str], f: impl FnOnce(Property<'_, '_>) -> R) 
 const POSITION: &[&str] = &["ADBE Transform Group", "ADBE Position"];
 const OPACITY: &[&str] = &["ADBE Transform Group", "ADBE Opacity"];
 
+/// The ease of a linear key: all four slots 0.
+const NO_EASE: KeyEase = KeyEase { in_speed: 0.0, in_influence: 0.0, out_speed: 0.0, out_influence: 0.0 };
+
 fn ease(in_speed: f64, in_influence: f64, out_speed: f64, out_influence: f64) -> KeyEase {
     KeyEase { in_speed, in_influence, out_speed, out_influence }
 }
@@ -33,7 +36,7 @@ fn in_and_out_interpolation_are_separate_bytes() {
         assert_eq!((keys[0].interpolation_in(), keys[0].interpolation_out()), (Some(Interpolation::Linear), Some(Interpolation::Hold)));
         assert_eq!((keys[1].interpolation_in(), keys[1].interpolation_out()), (Some(Interpolation::Linear), Some(Interpolation::Linear)));
         assert_eq!(keys.iter().map(|k| k.seconds(25600).unwrap()).collect::<Vec<_>>(), [0.0, 1.0]);
-        assert_eq!(keys[1].spatial_value(), Some([100.0, 0.0, 0.0]));
+        assert_eq!(keys[1].value(), Some(vec![100.0, 0.0, 0.0]));
     }));
     // 203: key 1 inType HOLD, outType LINEAR (bytes 03 01): byte 4 is the incoming side.
     skip!(prop_of("203-key-in-hold-out-linear.aep", POSITION, |p| {
@@ -76,7 +79,7 @@ fn opacity_ease_speed_is_in_stored_units_per_second() {
         assert_near(&[e0.in_speed, e0.in_influence, e0.out_speed, e0.out_influence], &[0.05, 0.2, 0.2, 0.8], 1e-12);
         let e1 = keys[1].ease().unwrap();
         assert_near(&[e1.in_speed, e1.in_influence, e1.out_speed, e1.out_influence], &[0.3, 0.6, 0.09, 0.4], 1e-12);
-        assert_eq!(keys[0].plain_ease_slots().unwrap().len(), 4);
+        assert_eq!(keys[0].ease_components(), Some(vec![e0]));
         for k in &keys {
             assert_eq!((k.interpolation_in(), k.interpolation_out()), (Some(Interpolation::Bezier), Some(Interpolation::Bezier)));
         }
@@ -94,7 +97,7 @@ fn scale_keys_use_the_plain_template_with_three_components() {
             // A 128-byte record is not always spatial: the header's template flag decides.
             assert_eq!(k.kind(), KeyframeKind::Plain { components: 3 });
             assert_eq!(k.spatial(), None);
-            assert_eq!(k.plain_ease_slots(), Some(vec![0.0; 12]));
+            assert_eq!(k.ease_components(), Some(vec![NO_EASE; 3]));
             assert_eq!(k.ease(), None);
             assert_eq!((k.interpolation_in(), k.interpolation_out()), (Some(Interpolation::Linear), Some(Interpolation::Linear)));
         }
@@ -125,7 +128,7 @@ fn two_dimensional_mask_feather_keys() {
     assert!(keys.iter().all(|k| k.raw().len() == 88 && k.kind() == KeyframeKind::Plain { components: 2 }));
     assert_eq!(keys.iter().map(|k| k.value().unwrap()).collect::<Vec<_>>(), [vec![0.0, 0.0], vec![40.0, 20.0]]);
     assert_eq!(keys.iter().map(|k| k.seconds(25600).unwrap()).collect::<Vec<_>>(), [0.0, 1.0]);
-    assert_eq!(keys[0].plain_ease_slots(), Some(vec![0.0; 8]));
+    assert_eq!(keys[0].ease_components(), Some(vec![NO_EASE; 2]));
     let mask = &layer.masks()[0];
     assert!(mask.feather.source == ValueSource::Keyframed && mask.feather.value == [0.0, 0.0]);
 }

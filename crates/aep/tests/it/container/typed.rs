@@ -186,7 +186,7 @@ fn position_keyframes() {
     assert_eq!(times, [0, 25_600, 64_000]);
     let seconds: Vec<f64> = times.iter().map(|t| tb.seconds(*t).unwrap()).collect();
     assert_eq!(seconds, [0.0, 1.0, 2.5]);
-    let values: Vec<[f64; 3]> = keys.keyframes().map(|k| k.spatial_value().unwrap()).collect();
+    let values: Vec<Vec<f64>> = keys.keyframes().map(|k| k.value().unwrap()).collect();
     assert_eq!(values, [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 100.0, 0.0]]);
 }
 
