@@ -9951,7 +9951,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Solid Settings", "Paramètres du solide"),
     ("Save as Template", "Enregistrer en tant que modèle"),
     ("My Custom RGB", "Mon RVB personnalisé"),
-    ("GPU Acceleration (no GPU: software)", "Accélération GPU (aucun GPU : logiciel)"),
+    ("GPU Acceleration (no GPU: software)", "Accélération GPU (aucun GPU : logiciel)"),
     ("Sort by {}, {}", "Trier par {}, {}"),
     ("Sort by {}", "Trier par {}"),
     ("Label of {}: {}", "Étiquette de {} : {}"),
