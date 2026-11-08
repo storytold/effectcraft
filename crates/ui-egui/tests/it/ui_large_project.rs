@@ -84,7 +84,7 @@ fn a_footage_reload_gives_the_panel_thumbnail_a_new_key() {
     h.state_mut().session.execute("project.select", json!({"items": [main.0]})).unwrap();
     h.state_mut().show_panel(PanelKind::Project);
     let id = egui::Id::unique(("proj-thumb-key", main.0));
-    let shown = |h: &egui_kittest::Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<(u64, u64, i64, u128, f64)>(id)).map(|k| k.3);
+    let shown = |h: &egui_kittest::Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<(u64, u64, u64, i64, u128, f64)>(id)).map(|k| k.4);
     let want = |h: &egui_kittest::Harness<'_, EffectcraftApp>| h.state().session.thumbnail_key(main, effectcraft_engine::time::Tick::ZERO, 192);
     h.run_steps(2);
     let before = shown(&h);
@@ -102,6 +102,23 @@ fn a_footage_reload_gives_the_panel_thumbnail_a_new_key() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_ne!(now, before, "a new key after the reload");
+    assert_eq!(now, want(&h));
+    // A preference that changes what a comp shows (Switches Affect Nested Comps) does too; the
+    // project's revision stays.
+    let before = now;
+    let rev = h.state().session.revision;
+    let on = h.state().session.prefs.general.switches_affect_nested_comps;
+    h.state_mut().session.execute("prefs.set", json!({"key": "general.switchesAffectNestedComps", "value": !on})).unwrap();
+    assert_eq!(h.state().session.revision, rev);
+    for _ in 0..100 {
+        h.step();
+        now = shown(&h);
+        if now != before {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_ne!(now, before, "a new key after the preference changed");
     assert_eq!(now, want(&h));
 }
 

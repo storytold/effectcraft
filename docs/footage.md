@@ -126,8 +126,8 @@ decompresses all of its pixels to read them). Once an effect reads an item's cha
 once for the picture and the effects together, and only the channels the effects pick are
 read (EXtractoR's channel names, Cryptomatte's layer, the 3D Channel effects' channel popups).
 The decoded channels are kept for a while, in the Footage Frame Cache together with the
-decoded frames (the least recently used frame or channel set goes first; in the browser the
-channels take at most 512 MB), a soft bound, as the newest file and files still in use stay
+decoded frames (the least recently used frame or channel set goes first; in the browser that
+budget is at most 256 MB for frames and channels together), a soft bound, as the newest file and files still in use stay
 whatever their size. The picture is kept once, converted: its own R, G, B and A planes are
 not kept beside it, unless an effect names one of them. Several frames asking for the same
 file at once wait for one decode. Once no enabled effect reads the item any more, its frames
