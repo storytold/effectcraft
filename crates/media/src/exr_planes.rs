@@ -152,6 +152,15 @@ pub(crate) enum Refused {
 struct Flight {
     state: Mutex<FlightState>,
     ready: Condvar,
+    /// The decode began: on the decode threads, or claimed by a decode thread that asked for the
+    /// same planes before the queued decode began ([`Flight::claim`]).
+    started: std::sync::atomic::AtomicBool,
+    /// A decode thread claimed it: the outcome comes through `handed`, not the queued job.
+    claimed: std::sync::atomic::AtomicBool,
+    handed: Mutex<Option<Result<Arc<Batch>, Refused>>>,
+    handed_ready: Condvar,
+    /// What the store held when the decode was asked for (the decode adds to it).
+    base: Option<Arc<Batch>>,
 }
 
 struct FlightState {
@@ -164,7 +173,52 @@ struct FlightState {
 
 impl Flight {
     fn new(index: Arc<ExrIndex>, want: Want) -> Arc<Flight> {
-        Arc::new(Flight { state: Mutex::new(FlightState { index, want, sealed: false, outcome: None }), ready: Condvar::new() })
+        Flight::with_base(index, want, None)
+    }
+
+    fn with_base(index: Arc<ExrIndex>, want: Want, base: Option<Arc<Batch>>) -> Arc<Flight> {
+        Arc::new(Flight {
+            state: Mutex::new(FlightState { index, want, sealed: false, outcome: None }),
+            ready: Condvar::new(),
+            started: std::sync::atomic::AtomicBool::new(false),
+            claimed: std::sync::atomic::AtomicBool::new(false),
+            handed: Mutex::new(None),
+            handed_ready: Condvar::new(),
+            base,
+        })
+    }
+
+    /// Take over the decode while it is still queued (a decode thread asking for the planes
+    /// it would wait for: waiting there could starve the queue it waits on). `false` once it
+    /// began.
+    fn claim(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let won = self.started.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok();
+        if won {
+            self.claimed.store(true, Ordering::SeqCst);
+        }
+        won
+    }
+
+    /// Hand the claimed decode's outcome to the request that queued it.
+    fn hand(&self, outcome: Result<Arc<Batch>, Refused>) {
+        *self.handed.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+        self.handed_ready.notify_all();
+    }
+
+    /// The outcome a claiming decode thread hands over (a plain block: that decode is running
+    /// and waits for nothing).
+    fn take_handed(&self) -> Result<Arc<Batch>, Refused> {
+        let mut h = self.handed.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(o) = h.as_ref() {
+                return o.clone();
+            }
+            h = match self.handed_ready.wait(h) {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+        }
     }
 
     fn state(&self) -> MutexGuard<'_, FlightState> {
@@ -398,6 +452,11 @@ impl PlaneStore {
                 }
             }
             drop(st);
+            // A decode thread doesn't wait (see `wait`), but takes over a decode still queued:
+            // the planes are decoded once, here, and handed to the request that queued them.
+            if may_not_wait() && flight.claim() {
+                return Step::Done(decode_claimed(path, source, &flight, index, want));
+            }
             return match self.wait(&flight) {
                 Waited::Got(Ok(b)) if b.covers(index, want) => {
                     crate::reads::note(b.file.clone());
@@ -414,7 +473,7 @@ impl PlaneStore {
         }
         // This request decodes: what it asks for, minus what the store holds.
         let base = e.batch.clone().filter(|b| Arc::ptr_eq(&b.index, index));
-        let flight = Flight::new(index.clone(), want.clone());
+        let flight = Flight::with_base(index.clone(), want.clone(), base.clone());
         e.flight = Some(flight.clone());
         drop(st);
         #[cfg(test)]
@@ -522,10 +581,7 @@ impl PlaneStore {
     /// decode doesn't wait (see the module notes); the time limit is a safety net.
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(&self, flight: &Flight) -> Waited {
-        // A decode thread never waits for planes (#3270: a decode doesn't depend on the requests
-        // waiting for it; an owner on a frame worker queues its decode on these threads).
-        let on_decode_thread = crate::pool::decode_threads().is_some_and(|t| t.current_thread_index().is_some());
-        if on_decode_thread || DECODING.with(std::cell::Cell::get) > 0 {
+        if may_not_wait() {
             return Waited::No;
         }
         let until = std::time::Instant::now() + WAIT_LIMIT;
@@ -574,8 +630,59 @@ impl PlaneStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn in_flight(&self, path: &str) -> bool {
+        self.lock().entries.iter().any(|e| e.path == path && e.flight.is_some())
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_held(&self, path: &str) -> bool {
         self.lock().held.iter().any(|(p, _)| p == path)
+    }
+}
+
+/// This thread may not wait for planes: a decode thread (#3270: a decode doesn't depend on the
+/// requests waiting for it; an owner on a frame worker queues its decode on these threads, and
+/// a decode thread waiting for it could starve that queue), or one running a store decode.
+fn may_not_wait() -> bool {
+    let on_decode_thread = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::pool::decode_threads().is_some_and(|t| t.current_thread_index().is_some())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    };
+    on_decode_thread || DECODING.with(std::cell::Cell::get) > 0
+}
+
+/// Hands a claimed decode's outcome over when dropped, an error when the decode stopped
+/// (panicked): the request that queued it never waits for an outcome that doesn't come.
+struct Handing<'a> {
+    flight: &'a Flight,
+    outcome: Option<Result<Arc<Batch>, Refused>>,
+}
+
+impl Drop for Handing<'_> {
+    fn drop(&mut self) {
+        self.flight.hand(self.outcome.take().unwrap_or(Err(Refused::Stopped)));
+    }
+}
+
+/// Decode a flight claimed by this thread (see [`Flight::claim`]) here, hand the outcome to the
+/// request that queued it, and answer this request with it (or a copy when it doesn't cover it).
+fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
+    let mut handing = Handing { flight, outcome: None };
+    let outcome = decode(path, source, flight, flight.base.clone(), None);
+    handing.outcome = Some(outcome.clone());
+    drop(handing);
+    match outcome {
+        Ok(b) if b.covers(index, want) => {
+            crate::reads::note(b.file.clone());
+            Ok(b)
+        }
+        _ => copy(path, source, index, want),
     }
 }
 
@@ -587,15 +694,26 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
         && threads.current_thread_index().is_none()
     {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let (path, source, flight) = (path.to_string(), source.clone(), flight.clone());
+        let (path, source, queued) = (path.to_string(), source.clone(), flight.clone());
         // The request's cancel flag and decoding hints go with it.
         let hints = filmcraft_media::cancel::Context::current();
         threads.spawn(move || {
-            let _ = tx.send(hints.run(|| decode(&path, &source, &flight, base, opened)));
+            // (claimed meanwhile by a decode thread: it decodes, and hands the outcome over)
+            if !queued.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let _ = tx.send(hints.run(|| decode(&path, &source, &queued, base, opened)));
+            }
         });
         // A plain block: this thread runs nothing else meanwhile.
-        // (a decode that panicked sent nothing)
-        return rx.recv().unwrap_or(Err(Refused::Stopped));
+        return match rx.recv() {
+            Ok(outcome) => outcome,
+            Err(_) if flight.claimed.load(std::sync::atomic::Ordering::SeqCst) => flight.take_handed(),
+            // (a decode that panicked sent nothing)
+            Err(_) => Err(Refused::Stopped),
+        };
+    }
+    // (claimed by a decode thread before this one began: it hands the outcome over)
+    if flight.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return flight.take_handed();
     }
     decode(path, source, flight, base, opened)
 }

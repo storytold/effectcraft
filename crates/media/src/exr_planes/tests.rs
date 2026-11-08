@@ -853,3 +853,50 @@ fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
     assert_eq!(from_disk, [false, true, false]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #3271: a decode thread asking for planes whose decode is still queued on the decode threads
+/// (an aux request on a frame worker queued it, then the picture's decode asks) takes it over
+/// instead of decoding a copy: one decode, and both requests get its planes.
+#[test]
+fn a_decode_thread_takes_over_a_queued_decode() {
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let path = "/3271-claimed.exr";
+    let source = ExrSource::Bytes(bytes);
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let all = Want { all: true, ids: Default::default() };
+    let threads = crate::pool::decode_threads().unwrap();
+    let n = threads.current_num_threads();
+    // Every decode thread busy: n - 1 hold until released, one waits for the queued decode.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Arc::new(Mutex::new(held));
+    for _ in 1..n {
+        let held = held.clone();
+        threads.spawn(move || {
+            let _ = held.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20));
+        });
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (store, source, index, all, tx) = (store.clone(), source.clone(), index.clone(), all.clone(), tx.clone());
+        threads.spawn(move || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !store.in_flight(path) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let _ = tx.send(store.get(path, &source, &index, &all, Use::Other).map(|b| b.ids.len()));
+        });
+    }
+    // The other request, from a thread of its own: its decode is queued behind them.
+    let asker = {
+        let (store, source, index, all) = (store.clone(), source.clone(), index.clone(), all.clone());
+        std::thread::spawn(move || store.get(path, &source, &index, &all, Use::Other).map(|b| b.ids.len()))
+    };
+    let claimed = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+    let asked = asker.join().unwrap();
+    for _ in 1..n {
+        let _ = release.send(());
+    }
+    assert!(claimed.is_ok() && claimed == asked, "{claimed:?} {asked:?}");
+    assert_eq!(decodes_of(path).len(), 1, "decoded once");
+}
