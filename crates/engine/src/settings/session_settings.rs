@@ -158,11 +158,17 @@ impl Session {
                 }
             },
         };
+        // Files reloaded while the cache was off: their entries go before anything is read from
+        // it (until the writer has deleted them they are misses, and no frame is linked).
+        if !self.pending_disk_drops.is_empty() {
+            dc.drop_files(std::mem::take(&mut self.pending_disk_drops));
+        }
         self.disk_cache = Some(dc.clone());
         // The reserve applies from the start (a new folder's watcher is idle).
         self.poll_disk_space();
-        let salt = self.refresh_disk_salt(true).unwrap_or_default();
-        self.layer_cache.set_disk(Some((dc.clone(), salt)));
+        // Used at once (no file is looked at first: each entry checks the source files it lists
+        // when it is read, #3184).
+        self.layer_cache.set_disk(Some(dc.clone()));
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
         // disk cache off drops it).
         let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();

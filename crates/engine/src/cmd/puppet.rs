@@ -84,7 +84,17 @@ impl PuppetSource<'_> {
         let comp = self.project.comp(cid)?;
         let layer = comp.layer(lid)?;
         let index = layer.effects()?.groups().position(|g| g.uid == fx_uid)?;
-        let ctx = EvalCtx { project: self.project, comp_id: cid, comp, time: t, expr: self.expr, footage: None, property_overrides: &[], media_overrides: &[] };
+        let ctx = EvalCtx {
+            project: self.project,
+            comp_id: cid,
+            comp,
+            time: t,
+            expr: self.expr,
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+            reads: None,
+        };
         let mut r = Renderer::new(self.project, self.footage, RenderOpts::default());
         r.expr = self.expr;
         r.cache = Some(self.cache);

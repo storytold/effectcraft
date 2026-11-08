@@ -234,7 +234,9 @@ fn gen_lens_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ---------------------------------------------------------------- wipes
 
 // Linear Wipe. data = per column ((x + 0.5)·dx − edge) (hi, lo), then per row ((y + 0.5)·dy)
-// (hi, lo); u[0].x = row table offset; f[0].x = feather.
+// (hi, lo); u[0] = (row table offset, mode); f[0].x = ramp width (the legacy feather, 1 = pixel
+// coverage). Mode 0 multiplies the layer by the ramp, 1 writes the ramp itself (the hard matte
+// Feather blurs), 2 multiplies the layer by aux's alpha (the blurred matte).
 @compute @workgroup_size(16, 16)
 fn gen_linear_wipe(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -242,8 +244,17 @@ fn gen_linear_wipe(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (p.x >= dims.x || p.y >= dims.y) {
         return;
     }
+    if (P.u[0].y == 2u) {
+        let m = clamp(textureLoad(aux, p, 0).w, 0.0, 1.0);
+        textureStore(out, p, textureLoad(src, p, 0) * m);
+        return;
+    }
     let d = gen_sum(gen_hl(2u * u32(p.x)), gen_hl(P.u[0].x + 2u * u32(p.y)));
     let k = clamp(d / P.f[0].x + 0.5, 0.0, 1.0);
+    if (P.u[0].y == 1u) {
+        textureStore(out, p, vec4<f32>(k));
+        return;
+    }
     textureStore(out, p, textureLoad(src, p, 0) * k);
 }
 

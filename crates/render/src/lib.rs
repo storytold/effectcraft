@@ -17,6 +17,7 @@ use color::Region;
 pub mod eval;
 pub mod masks;
 pub mod passes;
+pub mod reads;
 pub mod shapes;
 pub mod styles;
 pub mod text;
@@ -46,7 +47,7 @@ mod opts;
 mod pipeline;
 
 pub use accel::{Accelerator, Backend, FxStep, FxTarget};
-pub use footage::{CancellableFootage, FloatCurve, FootageSource, NoFootage, is_vector_footage};
+pub use footage::{CancellableFootage, FloatCurve, FootageSource, NoFootage, is_vector_footage, missing_item_problem};
 pub use frames::{
     adaptive_samples, blend_frames, cineon_frame, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path,
     render_frame, roi_inside,
@@ -69,6 +70,10 @@ pub struct Renderer<'a> {
     pub opts: RenderOpts,
     /// Processed-layer cache shared across frames (see [`cache`]). `None` renders everything.
     pub cache: Option<&'a LayerCache>,
+    /// Where the source files this render reads are noted (see [`reads`]): the frame's own,
+    /// from the footage source and from the buffers the layer cache serves. `None` records
+    /// nothing for the frame (buffers kept in the layer cache still record theirs).
+    pub reads: Option<&'a reads::ReadLog>,
     /// Optional per-layer timing sink (`frame --bench` / perf readouts).
     pub profile: Option<&'a std::sync::Mutex<Vec<LayerTiming>>>,
     /// GPU backend used when [`RenderOpts::backend`] asks for it.

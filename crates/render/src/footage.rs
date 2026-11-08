@@ -1,4 +1,5 @@
 use super::{Arc, AtomicBool, Footage, Image, ItemId, ItemKind, Ordering, Tick};
+use crate::reads::ReadLog;
 
 /// How a [`FootageSource`] hands over float footage (OpenEXR, float TIFF), whose values are
 /// linear light: encoded with a curve, as the compositor takes footage, or as stored. Other
@@ -92,6 +93,15 @@ pub trait FootageSource: Send + Sync {
     fn called_off(&self) -> bool {
         false
     }
+    /// Run `f`, which reads from this source on this thread, noting in `reads` every source file
+    /// those reads use, with its identity as read (see [`crate::reads`]): the file a frame was
+    /// decoded from, also when it comes from the source's own memory cache (without reading the
+    /// file again). Sources that can't tell which files they read keep the default, which marks
+    /// `reads` incomplete.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        reads.mark_incomplete();
+        f()
+    }
     /// Why `footage` shows no picture although its file is there: a read of it failed because
     /// no decoder handles its codec, profile, chroma format or bit depth, or the stream is damaged
     /// (e.g. "H.264 (High 4:2:2) isn't supported by the built-in decoder: ..."). `None` while it
@@ -99,18 +109,36 @@ pub trait FootageSource: Send + Sync {
     fn problem(&self, _footage: &Footage) -> Option<String> {
         None
     }
-    /// [`Self::problem`] of what `item` shows: its proxy's while Use Proxy shows the proxy
+    /// Missing files and [`Self::problem`] of what `item` shows: its proxy's while Use Proxy shows the proxy
     /// instead (the reason then says it is the proxy's), else the footage item's own. A
     /// composition has one only through its proxy.
     fn item_problem(&self, item: &effectcraft_project::Item) -> Option<String> {
         match item.proxy.as_deref().filter(|px| px.enabled && px.footage.has_video) {
-            Some(px) => self.problem(&px.footage).map(|why| format!("Proxy: {why}")),
+            Some(px) => {
+                missing_problem(&px.footage, "Use Set Proxy to locate the proxy file.").or_else(|| self.problem(&px.footage)).map(|why| format!("Proxy: {why}"))
+            }
             None => match &item.kind {
-                ItemKind::Footage(f) => self.problem(f),
+                ItemKind::Footage(f) => missing_problem(f, "Use File ▸ Dependencies ▸ Relink Missing Footage or Replace Footage.").or_else(|| self.problem(f)),
                 _ => None,
             },
         }
     }
+}
+
+/// A known offline source, without filesystem access while painting or querying.
+fn missing_problem(f: &Footage, remedy: &str) -> Option<String> {
+    (f.missing && !f.path.is_empty() && f.kind != effectcraft_project::FootageKind::Data).then(|| format!("Missing footage: {}. {remedy}", f.path))
+}
+
+/// Inventory warning, including an unused proxy or an original currently replaced by a proxy.
+/// Viewer warnings instead use `item_problem`, which follows the active render source.
+pub fn missing_item_problem(item: &effectcraft_project::Item) -> Option<String> {
+    if let ItemKind::Footage(f) = &item.kind
+        && let Some(why) = missing_problem(f, "Use File ▸ Dependencies ▸ Relink Missing Footage or Replace Footage.")
+    {
+        return Some(why);
+    }
+    item.proxy.as_ref().and_then(|p| missing_problem(&p.footage, "Use Set Proxy to locate the proxy file.")).map(|why| format!("Proxy: {why}"))
 }
 
 /// A render's view of a [`FootageSource`] whose frame reads can be called off with `cancel`
@@ -176,6 +204,10 @@ impl FootageSource for CancellableFootage<'_> {
     fn called_off(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.inner.called_off()
     }
+    /// Runs `f` with the inner source, collecting the files it reads into `reads`.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        self.inner.recording(reads, f)
+    }
     fn problem(&self, footage: &Footage) -> Option<String> {
         self.inner.problem(footage)
     }
@@ -193,7 +225,12 @@ pub fn is_vector_footage(f: &Footage) -> bool {
 pub struct NoFootage;
 
 impl FootageSource for NoFootage {
+    /// Always `None`: there is no footage.
     fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
         None
+    }
+    /// Reads no files.
+    fn recording(&self, _: &ReadLog, f: &mut dyn FnMut()) {
+        f()
     }
 }

@@ -97,41 +97,8 @@ impl Session {
         if Arc::ptr_eq(&self.project, &self.saved_project) {
             self.saved_revision = self.revision;
         }
-        self.refresh_disk_salt(false);
         self.refresh_aux_footage();
         self.events.push(Event::ProjectChanged { revision: self.revision });
-    }
-
-    /// Salt the disk cache's layer keys with the project's footage files
-    /// ([`effectcraft_render::disk_cache::footage_salt`]). Taking it reads the size and time of
-    /// every file, every frame of an image sequence included, so it is taken again only when the
-    /// footage items changed, or with `force` (a project opened, footage reloaded, the disk cache
-    /// attached), not at every edit: with a few large sequences that cost each keystroke in a
-    /// text field over half a second (#1926).
-    pub fn refresh_disk_salt(&mut self, force: bool) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        if self.disk_cache.is_none() {
-            self.disk_salt = None;
-            return None;
-        }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for (id, it) in &self.project.items {
-            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-                id.hash(&mut h);
-                format!("{f:?}").hash(&mut h);
-            }
-        }
-        let footage = h.finish();
-        if let Some((seen, salt)) = self.disk_salt
-            && seen == footage
-            && !force
-        {
-            return Some(salt);
-        }
-        let salt = effectcraft_render::disk_cache::footage_salt(&self.project);
-        self.disk_salt = Some((footage, salt));
-        self.layer_cache.set_disk_salt(salt);
-        Some(salt)
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
@@ -251,8 +218,6 @@ impl Session {
         }
         self.layer_cache.clear();
         self.project = Arc::new(p);
-        // Its files may have changed since they were last stamped.
-        self.disk_salt = None;
         // The set of footage effects read the channels of is sent again, even when it is empty.
         self.aux_footage = None;
         self.history = History::default();

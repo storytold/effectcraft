@@ -722,3 +722,111 @@ fn the_union_of_objects_is_their_largest_extent() {
     let odd = FrameSeg::empty(2, 2);
     assert_eq!(FrameSeg::union(vec![seg(&[1]), odd]).matte, vec![0, 255, 0, 0]);
 }
+
+/// A scene for the band re-cut: `rgb` of a `w`×`h` frame where the foreground is `inside`, with
+/// a background that turns red left of `x = 30` (far from most shapes), and a soft prior that is
+/// `inside` shifted by (3, 2) px with an edge `soft_edge` px wide.
+fn band_scene(w: usize, h: usize, inside: &dyn Fn(f64, f64) -> f64, soft_edge: f64) -> (Vec<[f32; 3]>, Vec<f32>) {
+    let mut rgb = vec![[0.0f32; 3]; w * h];
+    let mut soft = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let a = inside(px, py).clamp(0.0, 1.0) as f32;
+            let f = fg_color(px, py);
+            let b = if px < 30.0 { [0.9, 0.1, 0.1] } else { bg_color(px, py) };
+            rgb[y * w + x] = [f[0] * a + b[0] * (1.0 - a), f[1] * a + b[1] * (1.0 - a), f[2] * a + b[2] * (1.0 - a)];
+            soft[y * w + x] = (inside(px - 3.0, py - 2.0) / soft_edge + 0.5).clamp(0.0, 1.0) as f32;
+        }
+    }
+    (rgb, soft)
+}
+
+#[test]
+fn band_crop_matches_the_full_frame() {
+    let (w, h) = (200usize, 150usize);
+    // Signed coverage: > 0.5 inside, falling off by 1 per pixel across the edge.
+    let disk = |cx: f64, cy: f64, r: f64| move |x: f64, y: f64| r + 0.5 - (x - cx).hypot(y - cy);
+    let mid = disk(120.0, 80.0, 30.0);
+    let corner = disk(185.0, 10.0, 28.0);
+    let donut = move |x: f64, y: f64| (40.0 + 0.5 - (x - 110.0).hypot(y - 75.0)).min((x - 110.0).hypot(y - 75.0) - 14.0 + 0.5);
+    let nothing = |_: f64, _: f64| -10.0;
+    let shapes: [(&str, &dyn Fn(f64, f64) -> f64, f32, f64); 8] = [
+        ("disk", &mid, 8.0, 1.0),
+        ("frame corner", &corner, 8.0, 1.0),
+        ("donut", &donut, 6.0, 1.0),
+        ("r = 2, soft edge", &mid, 2.0, 3.0),
+        // A prior edge wider than the band: the blur sees prior values outside it.
+        ("r = 2, wide soft edge", &mid, 2.0, 10.0),
+        ("r = 3, wide soft edge at the corner", &corner, 3.0, 14.0),
+        ("r = 12, soft edge", &mid, 12.0, 4.0),
+        ("no foreground", &nothing, 8.0, 1.0),
+    ];
+    let mut changed = 0;
+    for (name, inside, r, edge) in shapes {
+        let (rgb, soft) = band_scene(w, h, inside, edge);
+        let start: Vec<u8> = soft.iter().map(|v| (*v >= 0.5) as u8).collect();
+        let fitted = fit_models(&rgb, &start);
+        // Equal models leave the cut to the prior and the smoothness term, which makes it
+        // sensitive to the blurred prior.
+        for models in [None, Some((&fitted.0, &fitted.1)), Some((&fitted.1, &fitted.1))] {
+            let (mut full, mut crop) = (start.clone(), start.clone());
+            recut_band(&rgb, (w, h), &mut full, &soft, r, models, false);
+            recut_band(&rgb, (w, h), &mut crop, &soft, r, models, true);
+            let diff = full.iter().zip(&crop).filter(|(a, b)| a != b).count();
+            assert_eq!(diff, 0, "{name}, models {}: {diff} pixels differ", if models.is_some() { "given" } else { "fitted" });
+            changed += full.iter().zip(&start).filter(|(a, b)| a != b).count();
+        }
+    }
+    // The cut did move edges (the prior is offset from the shapes).
+    assert!(changed > 100, "{changed}");
+}
+
+/// Padded by the blur's reach, the crop blurs the prior exactly as the full frame does at every
+/// band pixel (up to the summation rounding of the box sums); a 1 px pad does not when the prior
+/// edge is wider than the band.
+#[test]
+fn band_rect_pad_covers_the_prior_blur() {
+    let (w, h) = (200usize, 150usize);
+    let mid = |x: f64, y: f64| 30.5 - (x - 120.0).hypot(y - 80.0);
+    let corner = |x: f64, y: f64| 28.5 - (x - 185.0).hypot(y - 10.0);
+    let cases: [(&dyn Fn(f64, f64) -> f64, f32, f64); 4] = [(&mid, 8.0, 1.0), (&mid, 2.0, 10.0), (&corner, 3.0, 14.0), (&mid, 12.0, 30.0)];
+    for (inside, r, edge) in cases {
+        let (_, soft) = band_scene(w, h, inside, edge);
+        let labels: Vec<u8> = soft.iter().map(|v| (*v >= 0.5) as u8).collect();
+        let sd = matting::signed_distance(&labels, w, h);
+        let sigma = (r as f64 / 4.0).max(1.0);
+        let full = matting::gauss(&soft, w, h, sigma);
+        let worst = |pad: usize| -> f32 {
+            let rect = band_rect(&sd, (w, h), r, pad).unwrap();
+            let [x0, y0, x1, y1] = rect;
+            let blurred = matting::gauss(&crop_of(&soft, w, rect), x1 - x0, y1 - y0, sigma);
+            let mut worst = 0.0f32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if sd[y * w + x].abs() <= r {
+                        worst = worst.max((blurred[(y - y0) * (x1 - x0) + x - x0] - full[y * w + x]).abs());
+                    }
+                }
+            }
+            worst
+        };
+        let reach = matting::gauss_reach(sigma);
+        assert!(worst(reach) < 1e-6, "r {r}, edge {edge}: {}", worst(reach));
+        if edge > 2.0 * r as f64 {
+            assert!(worst(1) > 1e-4, "r {r}, edge {edge}: a 1 px pad should differ, {}", worst(1));
+        }
+    }
+}
+
+#[test]
+fn propagate_survives_empty_frames() {
+    let opts = SegOpts::default();
+    for (w, h) in [(4u32, 0u32), (0, 4), (0, 0)] {
+        let img = Image::new(w, h);
+        let prev = FrameSeg::empty(w as usize, h as usize);
+        let next = propagate(&img, &prev, &img, &[], &opts, 0.0);
+        assert_eq!((next.w, next.h), (w as usize, h as usize));
+        assert!(next.matte.is_empty());
+    }
+}

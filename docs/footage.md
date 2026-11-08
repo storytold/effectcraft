@@ -47,8 +47,8 @@ Stills of any format EffectCraft reads can form a sequence: PNG, JPEG, TIFF, Ope
 WebP. Layered and vector documents (PSD, SVG, PDF) import one by one.
 
 **Missing frames.** Where the numbering skips a number (`shot_0003.png` is missing between
-`0002` and `0004`), the sequence shows a placeholder of colour bars for that frame, as After
-Effects does, so every other frame stays at its number. Render or copy the missing files into the
+`0002` and `0004`), the sequence holds the previous frame (`0002`) there, as After Effects 2026
+does, so every other frame stays at its number. Render or copy the missing files into the
 folder and choose File ▸ Reload Footage to fill the gaps.
 
 Agents: `file.import {"paths": ["/shots/shot_0001.png"], "sequence": true, "frameRate": 24}`.
@@ -133,7 +133,14 @@ The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the nam
 file's manifest. Pick them with the eyedropper next to its Selection, then click in the
 Composition viewer (Shift adds, Alt or Ctrl removes). Matte Only shows the matte as grey in
 RGB over full alpha, as After Effects' Cryptomatte plug-in does; projects saved before that
-change keep their matte in alpha as well.
+change keep their matte in alpha as well. Its Layer popup lists the Cryptomatte
+layers the footage has (a file with only `CryptoMaterial` shows just that), and the standard
+`CryptoObject`, `CryptoMaterial` and `CryptoAsset` when the layer has no Cryptomatte footage. The
+stored Layer value is unchanged for those three, so older projects load as they were while each kind appears once. With
+several layers of one kind (`A.CryptoObject`, `B.CryptoObject`) the first keeps the standard
+value; the others, like any other layers, are stored as 3 and up in the file's name order (so a value of 3 reads another layer in
+another file). The popup lists them in Effect Controls and the timeline; scripts and
+`prop.get` still see the three standard options.
 
 ## Replacing and reloading
 
