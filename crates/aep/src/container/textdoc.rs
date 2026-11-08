@@ -282,10 +282,7 @@ impl<'b> Parser<'b> {
                 Some(if body.starts_with(&[0xfe, 0xff]) {
                     V::Str(match body {
                         Cow::Borrowed(b) => Cow::Borrowed(b.get(2..).unwrap_or(&[])),
-                        Cow::Owned(mut v) => {
-                            v.drain(..2);
-                            Cow::Owned(v)
-                        }
+                        Cow::Owned(v) => Cow::Owned(v.get(2..).map(<[u8]>::to_vec).unwrap_or_default()),
                     })
                 } else {
                     V::Bytes(body)
