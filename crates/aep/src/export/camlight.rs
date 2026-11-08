@@ -13,7 +13,8 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::{Layer, LightKind};
 
 use crate::export::report::{Collector, LossCategory};
-use crate::export::tree::{R, child_data, kids_mut, list_mut, put_f64, tpl};
+use crate::export::synth::{GROUP_END, is_tdmn, tdmn};
+use crate::export::tree::{R, child_data, kids_mut, list_mut, put_f64, split_group, tpl};
 
 /// A camera's options in the file's units (pixels, percent, a switch).
 #[derive(Clone, Debug, PartialEq)]
@@ -183,50 +184,24 @@ const LIGHT_ORDER: &[&str] = &[
     "ADBE Casts Shadows",
 ];
 
-pub(crate) fn tdmn_chunk(name: &str) -> Chunk<'static> {
-    let mut b = vec![0u8; 40];
-    for (i, c) in name.bytes().take(39).enumerate() {
-        b[i] = c;
-    }
-    Chunk::data(*b"tdmn", b)
-}
-
-fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let b = c.bytes()?;
-    let end = b.iter().position(|x| *x == 0).unwrap_or(b.len());
-    std::str::from_utf8(b.get(..end)?).ok().map(str::to_string)
-}
-
 /// Sets (or inserts) the records of an options group (`tdmn` named `group`) of a layer.
 fn put_group(layr: &mut Chunk<'static>, group: &str, order: &[&str], set: Vec<(&str, Chunk<'static>)>, remove: &[&str]) -> R<()> {
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(group)).ok_or_else(|| tpl("options group missing"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, group)).ok_or_else(|| tpl("options group missing"))?;
     let g = kids.get_mut(at + 1).ok_or_else(|| tpl("options group without a list"))?;
     let gk = kids_mut(g)?;
-    let first = gk.iter().position(|c| c.is(b"tdmn")).unwrap_or(gk.len());
-    let header: Vec<Chunk<'static>> = gk.drain(..first).collect();
-    let mut pairs: Vec<(String, Vec<Chunk<'static>>)> = Vec::new();
-    let mut it = std::mem::take(gk).into_iter();
-    while let Some(m) = it.next() {
-        let name = tdmn_name(&m).unwrap_or_default();
-        if name == "ADBE Group End" {
-            pairs.push((name, vec![m]));
-            continue;
-        }
-        let Some(node) = it.next() else { break };
-        // An atom group (Light Env Atom) carries its own Group End inside the list.
-        pairs.push((name, vec![m, node]));
-    }
+    // An atom group (Light Env Atom) carries its own Group End inside its list.
+    let (header, mut pairs) = split_group(gk)?;
     pairs.retain(|(n, _)| !remove.contains(&n.as_str()));
     for (name, rec) in set {
-        let entry = vec![tdmn_chunk(name), rec];
+        let entry = vec![tdmn(name), rec];
         match pairs.iter_mut().find(|(n, _)| n == name) {
             Some(slot) => slot.1 = entry,
             None => pairs.push((name.to_string(), entry)),
         }
     }
-    let rank = |n: &str| if n == "ADBE Group End" { usize::MAX } else { order.iter().position(|g| *g == n).unwrap_or(order.len()) };
+    let rank = |n: &str| if n == GROUP_END { usize::MAX } else { order.iter().position(|g| *g == n).unwrap_or(order.len()) };
     pairs.sort_by_key(|(n, _)| rank(n));
     gk.extend(header);
     gk.extend(pairs.into_iter().flat_map(|(_, v)| v));

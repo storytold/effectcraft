@@ -40,6 +40,7 @@ pub(crate) fn child_data<'a>(c: &'a mut Chunk<'static>, id: &[u8; 4]) -> R<&'a m
     data_mut(child_mut(c, id)?)
 }
 
+/// The one byte writer of the exporter: `bytes` at `at`, or an error when they do not fit.
 pub(crate) fn put(d: &mut [u8], at: usize, bytes: &[u8]) -> R<()> {
     let end = at.checked_add(bytes.len()).ok_or_else(|| tpl("offset overflow"))?;
     let dst = d.get_mut(at..end).ok_or_else(|| tpl("chunk shorter than its layout"))?;
@@ -90,15 +91,56 @@ pub(crate) fn put_cstr(d: &mut [u8], at: usize, len: usize, text: &str) -> R<()>
             break;
         }
         let mut buf = [0u8; 4];
-        let enc = ch.encode_utf8(&mut buf);
-        for (i, b) in enc.as_bytes().iter().enumerate() {
-            if let Some(slot) = dst.get_mut(n + i) {
-                *slot = *b;
-            }
-        }
+        put(dst, n, ch.encode_utf8(&mut buf).as_bytes())?;
         n += l;
     }
     Ok(())
+}
+
+/// How many fixed layouts did not fit their buffer (see [`fixed`]); the tests keep it at zero.
+static FIXED_LAYOUT_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The result of a builder whose layout is fixed in code (constant sizes and offsets, no input):
+/// its writes go through [`put`], which errors when one does not fit. Such an error is a bug in
+/// the layout, never something a project can cause, and the tests build every one of these
+/// layouts and require no error. The builders keep their infallible signatures because files
+/// outside this module call them without a `Result`; if a layout ever broke, `fallback` is used
+/// and the error goes to the log.
+pub(crate) fn fixed<T>(builder: &'static str, built: R<T>, fallback: impl FnOnce() -> T) -> T {
+    built.unwrap_or_else(|e| {
+        FIXED_LAYOUT_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        log::error!("aep export: the fixed layout of {builder} does not fit: {e}");
+        fallback()
+    })
+}
+
+/// How many fixed layouts have failed in this process (for the tests).
+#[cfg(test)]
+pub(crate) fn fixed_layout_errors() -> usize {
+    FIXED_LAYOUT_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The entries of a property group by match name (see [`split_group`]).
+pub(crate) type Entries = Vec<(String, Vec<Chunk<'static>>)>;
+
+/// Splits the children of a property group into the header (up to the first `tdmn`) and its
+/// entries by match name: `[tdmn, node]`, or `[tdmn]` for the closing `ADBE Group End`. A match
+/// name without a node is an error.
+pub(crate) fn split_group(kids: &mut Vec<Chunk<'static>>) -> R<(Vec<Chunk<'static>>, Entries)> {
+    let first = kids.iter().position(|c| c.is(b"tdmn")).unwrap_or(kids.len());
+    let header: Vec<Chunk<'static>> = kids.drain(..first).collect();
+    let mut entries = Entries::new();
+    let mut it = std::mem::take(kids).into_iter();
+    while let Some(m) = it.next() {
+        let name = crate::export::synth::tdmn_name(&m).unwrap_or_default();
+        if name == crate::export::synth::GROUP_END {
+            entries.push((name, vec![m]));
+            continue;
+        }
+        let node = it.next().ok_or_else(|| tpl("match name without a node"))?;
+        entries.push((name, vec![m, node]));
+    }
+    Ok((header, entries))
 }
 
 /// Replaces the `Utf8` child of an item or layer with `text`.
@@ -106,4 +148,52 @@ pub(crate) fn set_utf8(c: &mut Chunk<'static>, text: &str) -> R<()> {
     let k = child_mut(c, b"Utf8")?;
     *k = Chunk::data(*b"Utf8", text.as_bytes().to_vec());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_writer_errors_instead_of_dropping() {
+        let mut d = [0u8; 4];
+        assert!(put(&mut d, 2, &[1, 2]).is_ok());
+        assert_eq!(d, [0, 0, 1, 2]);
+        // Out of range, partly or wholly, and an offset that overflows: an error, nothing written.
+        assert!(put(&mut d, 3, &[9, 9]).is_err());
+        assert!(put(&mut d, 8, &[9]).is_err());
+        assert!(put(&mut d, usize::MAX, &[9]).is_err());
+        assert_eq!(d, [0, 0, 1, 2]);
+    }
+
+    #[test]
+    fn a_cut_string_keeps_a_nul_and_whole_characters() {
+        let mut d = [0xffu8; 6];
+        put_cstr(&mut d, 0, 6, "ab\u{e9}\u{e9}").unwrap();
+        assert_eq!(d, [b'a', b'b', 0xc3, 0xa9, 0, 0]);
+        assert!(put_cstr(&mut d, 4, 6, "x").is_err());
+    }
+
+    /// Every layout fixed in code fits its buffer: the prototypes of every export (the project
+    /// skeleton, layers, Transform, masks, effects of the whole table, footage of every kind,
+    /// text, cameras, lights, shapes, styles) are built and no write went out of range.
+    #[test]
+    fn every_fixed_layout_fits() {
+        assert!(crate::export::template::Template::load().is_ok());
+        assert_eq!(fixed_layout_errors(), 0);
+    }
+
+    #[test]
+    fn a_group_splits_into_header_and_entries() {
+        use crate::export::synth::{tdmn, tdsn};
+        let rec = || Chunk::list(*b"tdbs", Vec::new());
+        let mut kids = vec![tdsn("h"), tdmn("A"), rec(), tdmn("ADBE Group End")];
+        let (header, entries) = split_group(&mut kids).unwrap();
+        assert_eq!(header.len(), 1);
+        let names: Vec<(&str, usize)> = entries.iter().map(|(n, v)| (n.as_str(), v.len())).collect();
+        assert_eq!(names, [("A", 2), ("ADBE Group End", 1)]);
+        // A match name without its node is an error, not a quiet stop.
+        let mut broken = vec![tdmn("A")];
+        assert!(split_group(&mut broken).is_err());
+    }
 }
