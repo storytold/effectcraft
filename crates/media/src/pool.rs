@@ -268,6 +268,9 @@ impl CacheState {
 /// waiting on it.
 #[derive(Default)]
 struct Flight {
+    /// [`CacheState::generation`] when it started: a request made after its file was forgotten
+    /// (it changed on disk) doesn't join it, and decodes the file anew.
+    generation: u64,
     outcome: Mutex<Option<Result<Arc<Image>>>>,
     ready: Condvar,
 }
@@ -1024,7 +1027,8 @@ impl Inner {
                     return Ok(self.keep(&loc.key, shape(whole), generation));
                 }
             }
-            let Some(flight) = c.inflight.get(&source.key).cloned() else { break };
+            // (one started before the file was forgotten is left to its own requests)
+            let Some(flight) = c.inflight.get(&source.key).filter(|f| f.generation == generation).cloned() else { break };
             // Another request (or the read-ahead) is decoding this picture: wait for it.
             drop(c);
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -1044,7 +1048,7 @@ impl Inner {
             c = lock(&self.cache);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
-        let flight = Arc::new(Flight::default());
+        let flight = Arc::new(Flight { generation, ..Flight::default() });
         c.inflight.insert(source.key.clone(), flight.clone());
         drop(c);
         let mut owner = Owner { inner: self, key: source.key.clone(), flight, as_asked, generation, outcome: None };
@@ -1878,7 +1882,7 @@ mod tests {
     fn a_thread_decoding_a_picture_does_not_wait_for_one() {
         let pool = MediaPool::new();
         let f = plate(&pool, "/plate.exr");
-        let flight = Arc::new(Flight::default());
+        let flight = current_flight(&pool);
         lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
         let decoding = Decoding::new();
         let started = std::time::Instant::now();
@@ -1893,7 +1897,8 @@ mod tests {
     fn a_waiting_request_called_off_stops_waiting() {
         let pool = MediaPool::new();
         let f = plate(&pool, "/plate.exr");
-        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, Arc::default());
+        let flight = current_flight(&pool);
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
         let cancel = Arc::new(AtomicBool::new(false));
         let started = std::time::Instant::now();
         std::thread::scope(|s| {
@@ -1937,5 +1942,48 @@ mod tests {
         pool.set_budget(whole);
         assert_eq!(pool.stats().recent_bytes, 0, "half the new budget holds no whole still");
         assert!(lock(&pool.inner.cache).recent.is_empty());
+    }
+
+    /// A flight of `pool`'s current generation (one requests join).
+    fn current_flight(pool: &MediaPool) -> Arc<Flight> {
+        Arc::new(Flight { generation: lock(&pool.inner.cache).generation, ..Flight::default() })
+    }
+
+    /// #3270 review: a request made after a file was forgotten (it changed on disk) while its
+    /// decode was in flight doesn't join that decode: it got the old pixels, and kept them as
+    /// the new file's.
+    #[test]
+    fn a_request_after_forget_does_not_join_the_old_decode() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/plate.exr");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let (calls, inner) = (calls.clone(), Arc::downgrade(&pool.inner));
+            // The first decode (of the old file) waits for a request to join it (2 s at most)
+            // and answers with a black picture; later ones decode the file.
+            *lock(&pool.inner.gate) = Some(Arc::new(move || {
+                if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return None;
+                }
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while inner.upgrade().is_some_and(|i| i.waiting.load(Ordering::SeqCst) < 1) && std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Some(Ok(Image::new(16, 8)))
+            }));
+        }
+        std::thread::scope(|s| {
+            let old = s.spawn(|| pool.frame_at(&f, Tick::ZERO));
+            while calls.load(Ordering::SeqCst) == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            pool.forget("/plate.exr");
+            let new = pool.frame_at(&f, Tick::ZERO).unwrap();
+            assert!(new.data.iter().any(|p| p[0] > 0.0), "the file's pixels, not the old decode's");
+            assert!(old.join().unwrap().is_ok());
+        });
+        *lock(&pool.inner.gate) = None;
+        let again = pool.frame_at(&f, Tick::ZERO).unwrap();
+        assert!(again.data.iter().any(|p| p[0] > 0.0), "the old decode's pixels were not kept");
     }
 }
