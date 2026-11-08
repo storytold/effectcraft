@@ -51,11 +51,14 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 - **EPS:** a PostScript interpreter for the subset exported vector EPS uses: operand and
   dictionary stacks, procedures and `def`/`bind`/`load`/`where`, arithmetic, comparisons,
   `if`/`ifelse`/`for`/`repeat`/`loop`/`forall`, arrays and strings, `gsave`/`grestore`,
-  `save`/`restore`, matrices (`concat`, `translate`, `scale`, `rotate`, `transform` …), path
+  `save`/`restore` (dictionary entries come back; arrays and strings do not), matrices (`concat`, `translate`, `scale`, `rotate`, `transform` …), path
   construction including `arc`/`arcn` and relative operators, `fill`/`eofill`/`stroke`,
   `clip`/`eoclip`, `rectfill`/`rectstroke`/`rectclip`, gray / RGB / CMYK / HSB colour. DOS EPS
   binary headers and `%%HiResBoundingBox` / `%%BoundingBox` are honoured; `%%BeginData` /
-  `%%BeginBinary` / preview sections are skipped. **Text:** `findfont` / `findresource`,
+  `%%BeginBinary` / preview sections are skipped unless an image operator reads them. **Images:**
+  `image`, `imagemask` and `colorimage` in the operand and dictionary forms, 1 to 16 bits, gray / RGB /
+  CMYK / Indexed, from strings, procedures, `currentfile` and ASCII85, ASCIIHex, RunLength and LZW
+  filters over it. **Text:** `findfont` / `findresource`,
   `scalefont`, `makefont`, `selectfont`, `setfont`, `currentfont`, `definefont` (re-encoded
   copies made with `forall` and a new `/Encoding`), `StandardEncoding` / `ISOLatin1Encoding`,
   `show`, `ashow`, `widthshow`, `awidthshow`, `xshow` / `yshow` / `xyshow`, `kshow` / `cshow`
@@ -128,7 +131,7 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 - Illustrator EPS files whose drawing depends on Adobe's procedure-set resources (defined in
   the file through constructs beyond this subset) and Level 3 `shfill` gradients in EPS draw
   only what the subset understands; save such artwork as PDF-compatible `.ai` or PDF instead.
-  EPS images are skipped; Type 3 (procedure) fonts defined in EPS files draw nothing (reported).
+  EPS images in other colour spaces or filters (Separation, DeviceN, DCT, Flate) are skipped; Type 3 (procedure) fonts defined in EPS files draw nothing (reported).
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks
   (the first clip Add, later ones Intersect). Nested clipping groups become Merge Paths: each
   closed shape inside them is a group with its geometry merged into one compound path, the clip

@@ -1,11 +1,52 @@
 use super::eps::find_from;
 use super::exec::MAX_STACK;
+use super::image::{cs_from, decode_bytes, known_filter};
 use super::scanner::Src;
 use super::text::encoding_array;
-use super::value::{Flow, V, array, matrix_of, matrix_val, new_dict};
+use super::value::Filter;
+use super::value::{DictRef, Flow, V, array, matrix_of, matrix_val, new_dict};
 use super::{Affine, BezPath, Cap, FillRule, Interp, Join, PathEl, Point, Rc, RefCell, parse_num};
+use crate::color::cmyk_to_rgb;
+
+/// Built-in colour operators `where` finds. Illustrator's EPS prolog replaces those it does not
+/// find with a procedure of its own, which converts CMYK as `(1 - c)(1 - k)`.
+const SYSTEM_COLOR_OPS: [&str; 2] = ["setcmykcolor", "currentcmykcolor"];
+
+/// The most dictionary changes `restore` can undo.
+const MAX_JOURNAL: usize = 1 << 20;
 
 impl Interp {
+    /// `dict[key] = value`, undone by the `restore` of an open `save`.
+    fn dict_put(&mut self, dict: &DictRef, key: String, value: V) {
+        self.note_change(dict, &key);
+        dict.borrow_mut().insert(key, value);
+    }
+
+    /// Remember a dictionary entry about to change while a `save` is open.
+    fn note_change(&mut self, dict: &DictRef, key: &str) {
+        if self.save_marks.is_empty() {
+            return;
+        }
+        if self.journal.len() >= MAX_JOURNAL {
+            self.b.skip("restore (too many changes)");
+            return;
+        }
+        self.journal.push((dict.clone(), key.to_string(), dict.borrow().get(key).cloned()));
+    }
+
+    /// `restore`: put back the dictionary entries changed since the last `save`, as the
+    /// programs that count nested graphics states in a dictionary rely on.
+    fn undo_to_save(&mut self) {
+        let Some(mark) = self.save_marks.pop() else { return };
+        while self.journal.len() > mark {
+            let Some((dict, key, old)) = self.journal.pop() else { return };
+            match old {
+                Some(v) => dict.borrow_mut().insert(key, v),
+                None => dict.borrow_mut().remove(&key),
+            };
+        }
+    }
+
     pub(super) fn builtin(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
         // Every handler leaves the stacks untouched when the operator is outside its family.
         if self.try_stack_op(n)
@@ -27,44 +68,7 @@ impl Interp {
             "scalefont" | "makefont" | "selectfont" | "setfont" | "show" | "charpath" | "glyphshow" | "rootfont" | "currentfont" | "setcachedevice"
             | "setcharwidth" | "ashow" | "widthshow" | "awidthshow" | "xshow" | "yshow" | "xyshow" | "kshow" | "cshow" | "stringwidth" | "definefont"
             | "StandardEncoding" | "ISOLatin1Encoding" | "eexec" | "StartData" | "undefinefont" => self.text_op(n, src)?,
-            // Images: operands popped, inline data skipped.
-            "image" | "imagemask" | "colorimage" => {
-                let mut reads_file = false;
-                let check = |v: &V, rf: &mut bool| {
-                    if matches!(v, V::File) || matches!(v, V::Proc(p) if p.iter().any(|x| matches!(x, V::Name(n) if &**n == "currentfile"))) {
-                        *rf = true;
-                    }
-                };
-                if n == "colorimage" {
-                    let ncomp = self.popn().max(1.0) as usize;
-                    let multi = matches!(self.pop(), V::Bool(true));
-                    for _ in 0..if multi { ncomp.min(4) } else { 1 } {
-                        let v = self.pop();
-                        check(&v, &mut reads_file);
-                    }
-                    for _ in 0..4 {
-                        self.pop();
-                    }
-                } else {
-                    match self.pop() {
-                        V::Dict(d) => {
-                            if let Some(ds) = d.borrow().get("DataSource") {
-                                check(ds, &mut reads_file);
-                            }
-                        }
-                        top => {
-                            check(&top, &mut reads_file);
-                            for _ in 0..4 {
-                                self.pop();
-                            }
-                        }
-                    }
-                }
-                if reads_file {
-                    src.skip_image_data();
-                }
-                self.b.skip("image");
-            }
+            "image" | "imagemask" | "colorimage" => self.image_op(n, src)?,
             _ => {
                 if self.unknown.len() < 32 && !self.unknown.iter().any(|u| u == n) {
                     self.unknown.push(n.to_string());
@@ -412,8 +416,8 @@ impl Interp {
             "def" => {
                 let v = self.pop();
                 let k = self.pop().key();
-                if let Some(d) = self.dicts.last() {
-                    d.borrow_mut().insert(k, v);
+                if let Some(d) = self.dicts.last().cloned() {
+                    self.dict_put(&d, k, v);
                 }
             }
             "store" => {
@@ -421,7 +425,7 @@ impl Interp {
                 let k = self.pop().key();
                 let d = self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).or(self.dicts.last()).cloned();
                 if let Some(d) = d {
-                    d.borrow_mut().insert(k, v);
+                    self.dict_put(&d, k, v);
                 }
             }
             "load" => {
@@ -432,6 +436,7 @@ impl Interp {
             "undef" => {
                 let k = self.pop().key();
                 if let V::Dict(d) = self.pop() {
+                    self.note_change(&d, &k);
                     d.borrow_mut().remove(&k);
                 }
             }
@@ -464,6 +469,10 @@ impl Interp {
                 match self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).cloned() {
                     Some(d) => {
                         self.push(V::Dict(d));
+                        self.push(V::Bool(true));
+                    }
+                    None if SYSTEM_COLOR_OPS.contains(&k.as_str()) => {
+                        self.push(V::Dict(self.dicts[0].clone()));
                         self.push(V::Bool(true));
                     }
                     None => self.push(V::Bool(false)),
@@ -547,9 +556,7 @@ impl Interp {
                 let v = self.pop();
                 let k = self.pop();
                 match self.pop() {
-                    V::Dict(d) => {
-                        d.borrow_mut().insert(k.key(), v);
-                    }
+                    V::Dict(d) => self.dict_put(&d, k.key(), v),
                     V::Array(a) => {
                         let i = k.num().unwrap_or(0.0) as usize;
                         if let Some(slot) = a.borrow_mut().get_mut(i) {
@@ -647,7 +654,7 @@ impl Interp {
                     V::Dict(_) => "dicttype",
                     V::Mark => "marktype",
                     V::Null => "nulltype",
-                    V::File => "filetype",
+                    V::File | V::Filter(_) => "filetype",
                 };
                 self.push(V::Name(t.into()));
             }
@@ -665,13 +672,16 @@ impl Interp {
                 self.spend(self.gs.path.elements().len())?;
                 self.saved.push(self.gs.clone());
                 self.gs.depth = self.b.depth();
+                self.save_marks.push(self.journal.len());
                 self.push(V::Null);
             }
             "restore" => {
                 self.pop();
+                self.undo_to_save();
                 self.grestore();
             }
             "currentfile" => self.push(V::File),
+            "readstring" | "readhexstring" if self.reads_real_data() => self.readstring(n == "readhexstring", src),
             "readstring" | "readhexstring" | "readline" => {
                 self.pop();
                 self.pop();
@@ -772,7 +782,20 @@ impl Interp {
                     if matches!(self.st.last(), Some(V::Dict(_))) {
                         self.pop();
                     }
-                    self.pop()
+                    let source = self.pop();
+                    match &source {
+                        V::File if known_filter(&name) => V::Filter(Rc::new(RefCell::new(Filter { names: vec![name.clone()], data: None, pos: 0 }))),
+                        V::Filter(inner) => {
+                            let mut names = inner.borrow().names.clone();
+                            names.push(name.clone());
+                            V::Filter(Rc::new(RefCell::new(Filter { names, data: None, pos: 0 })))
+                        }
+                        V::Str(data) if known_filter(&name) => {
+                            let decoded = decode_bytes(std::slice::from_ref(&name), &data.borrow()).unwrap_or_default();
+                            V::Str(Rc::new(RefCell::new(decoded)))
+                        }
+                        _ => source,
+                    }
                 };
                 // Data already stepped over leaves nothing for `image` to skip.
                 self.push(if skipped { V::Null } else { source });
@@ -856,10 +879,12 @@ impl Interp {
                 let y = self.popn().clamp(0.0, 1.0);
                 let m = self.popn().clamp(0.0, 1.0);
                 let c = self.popn().clamp(0.0, 1.0);
-                self.gs.color = [(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)];
+                self.gs.color = cmyk_to_rgb(c, m, y, k);
+                self.gs.cmyk = Some((self.gs.color, [c, m, y, k]));
             }
             "setcolorspace" => {
-                self.pop();
+                let cs = self.pop();
+                self.gs.image_cs = cs_from(&cs);
             }
             "setcolor" => {
                 // Device colour by operand count (patterns are not drawn).
@@ -868,9 +893,23 @@ impl Interp {
                 self.gs.color = match c.len() {
                     1 => [c[0]; 3],
                     3 => [c[0], c[1], c[2]],
-                    4 => [(1.0 - c[0]) * (1.0 - c[3]), (1.0 - c[1]) * (1.0 - c[3]), (1.0 - c[2]) * (1.0 - c[3])],
+                    4 => cmyk_to_rgb(c[0], c[1], c[2], c[3]),
                     _ => self.gs.color,
                 };
+            }
+            "currentcmykcolor" => {
+                let [r, g, b] = self.gs.color;
+                let cmyk = match self.gs.cmyk {
+                    Some((rgb, cmyk)) if rgb == self.gs.color => cmyk,
+                    _ => {
+                        let k = 1.0 - r.max(g).max(b);
+                        let of = |v: f64| if k < 1.0 { (1.0 - v - k) / (1.0 - k) } else { 0.0 };
+                        [of(r), of(g), of(b), k]
+                    }
+                };
+                for v in cmyk {
+                    self.push(V::Num(v));
+                }
             }
             "currentgray" => self.push(V::Num((self.gs.color[0] + self.gs.color[1] + self.gs.color[2]) / 3.0)),
             "currentrgbcolor" => {

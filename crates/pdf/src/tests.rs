@@ -106,7 +106,7 @@ fn pdf_forms_rotation_cmyk_and_alpha() {
     // The form (CMYK red, clipped to its 10×10 box, scaled ×2) covers PDF (0..20, 0..20); the
     // half-transparent black square covers PDF (0..10, 0..10). /Rotate 90: PDF (x, y) → (y, x).
     let red = img.get(15, 15);
-    assert!(red[0] > 0.99 && red[1] < 0.01 && red[3] > 0.99, "{red:?}");
+    assert!(red[0] > 0.99 && (red[1] - 0.1424).abs() < 0.01 && (red[2] - 0.0305).abs() < 0.01, "CMYK 0 1 1 0, as After Effects shows it: {red:?}");
     let dark = img.get(5, 5);
     assert!((dark[0] - 0.5).abs() < 0.02 && dark[3] > 0.99, "{dark:?}");
     assert_eq!(img.get(30, 30)[3], 0.0, "form clipped to its bounding box");
