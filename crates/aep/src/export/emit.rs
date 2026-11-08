@@ -127,40 +127,54 @@ fn emit_with(t: &Template, plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
 /// Marks a root entry that goes into the `Solids` folder.
 const ROOT_SOLID: u64 = 1 << 63;
 
-/// Sorts by name in natural order, then by the tie-break key. Each name's [`natural_key`] is built
-/// once, not on every comparison; the sort is stable, as `sort_by` is.
+/// Sorts by name in natural order, then by the tie-break key. Each name's sort key is built once,
+/// not on every comparison; the sort is stable, as `sort_by` is.
 fn sort_named(v: &mut [Sorted]) {
-    v.sort_by_cached_key(|(name, key, _)| (Natural(natural_key(name)), *key));
+    v.sort_by_cached_key(|(name, key, _)| (natural_bytes(name), *key));
 }
 
-/// A [`natural_key`] ordered segment by segment: a number before text, numbers by value and then
-/// by their digits (`1` before `01`), text by its lowercase string; a key that is a prefix of the
-/// other first. Two keys compare equal only when they are equal.
-#[derive(PartialEq, Eq)]
-struct Natural(Vec<(bool, String, u128)>);
-
-impl Ord for Natural {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        for (x, y) in self.0.iter().zip(other.0.iter()) {
-            let c = match (x.0, y.0) {
-                (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
-                (false, false) => x.1.cmp(&y.1),
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-            };
-            if c != std::cmp::Ordering::Equal {
-                return c;
+/// The [`natural_key`] of `name` as one byte string whose plain byte order is the natural order:
+/// segment by segment, a number before text, numbers by value and then by their digits (`1`
+/// before `01`), text by its lowercase string, and a key that is a prefix of the other first.
+///
+/// - A number: `0x01`, the count of significant bytes of its value, those bytes big-endian, its
+///   digits, `0x00` (digits are never `0x00`, so a shorter digit string sorts first).
+/// - Text: `0x02`, its lowercase UTF-8 with each `0x00` written as `0x00 0x01`, then `0x00 0x00`.
+///
+/// At most 5 bytes per byte of `name` (`NATURAL_BYTES_PER_NAME_BYTE`), so the cached keys stay
+/// within a small multiple of the names they sort (one segment as a `(bool, String, u128)` takes
+/// 48 bytes plus its string, which is why the segments themselves are not cached).
+fn natural_bytes(name: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len().saturating_add(4));
+    for (number, text, value) in natural_key(name) {
+        if number {
+            out.push(0x01);
+            let be = value.to_be_bytes();
+            let zeros = be.iter().take_while(|b| **b == 0).count();
+            let significant = be.get(zeros..).unwrap_or_default();
+            out.push(significant.len() as u8);
+            out.extend_from_slice(significant);
+            out.extend_from_slice(text.as_bytes());
+            out.push(0x00);
+        } else {
+            out.push(0x02);
+            for b in text.bytes() {
+                out.push(b);
+                if b == 0 {
+                    out.push(0x01);
+                }
             }
+            out.extend_from_slice(&[0x00, 0x00]);
         }
-        self.0.len().cmp(&other.0.len())
     }
+    out
 }
 
-impl PartialOrd for Natural {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+/// The bound on [`natural_bytes`]: a run of `d` digits takes at most `3 + 2d` bytes (its value
+/// never needs more bytes than digits), a text run of `b` bytes at most `3 + 2b` (lowercasing and
+/// the NUL escape at most double a character), and every run is at least one byte long.
+#[cfg(test)]
+const NATURAL_BYTES_PER_NAME_BYTE: usize = 5;
 
 fn assign_ids(entries: &[Entry], cx: &mut Cx<'_>, map: &mut HashMap<ItemId, u32>) -> R<()> {
     // Iterative to bound the stack by the folder depth the plan already limits.
@@ -998,6 +1012,11 @@ mod tests {
             "ß",
             "İ",
             "\u{0}",
+            "\u{1}",
+            "a\u{0}",
+            "Ⱥ",
+            "K",
+            "ẞ",
             "Solid ",
             "solid ",
             "x9",
@@ -1015,7 +1034,7 @@ mod tests {
             z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             (z ^ (z >> 31)) as usize
         };
-        for round in 0..200 {
+        for round in 0..2000 {
             let n = 1 + next() % 40;
             let v: Vec<Sorted> = (0..n)
                 .map(|i| {
@@ -1029,6 +1048,26 @@ mod tests {
             sort_named(&mut new);
             assert_eq!(old, new, "round {round}");
         }
+    }
+
+    /// The cached sort keys stay within [`NATURAL_BYTES_PER_NAME_BYTE`] bytes per name byte, also
+    /// for the worst name (255 bytes of alternating one-character text and digit runs: 255
+    /// segments, which as `(bool, String, u128)` segments took about 14 KB), and the per-character
+    /// premise of the bound holds for every character.
+    #[test]
+    fn sort_keys_are_bounded_by_the_name() {
+        for c in (0..=0x10_ffff_u32).filter_map(char::from_u32) {
+            let lower: usize = c.to_lowercase().map(char::len_utf8).sum::<usize>() + usize::from(c == '\0');
+            assert!(lower <= 2 * c.len_utf8(), "{c:?}");
+        }
+        let worst: String = (0..255).map(|i| if i % 2 == 0 { 'a' } else { '1' }).collect();
+        let others = ["", "1", "a", "\u{0}", "İ", "Ⱥ1", "99999999999999999999999999999999999999999999", &"\u{0}".repeat(255), &"Ⱥ".repeat(127)];
+        for name in std::iter::once(worst.as_str()).chain(others) {
+            let k = natural_bytes(name);
+            assert!(k.len() <= NATURAL_BYTES_PER_NAME_BYTE * name.len(), "{name:?}: {} bytes", k.len());
+        }
+        assert_eq!(natural_key(&worst).len(), 255);
+        assert!(natural_bytes(&worst).len() <= 1_275);
     }
 
     /// `tdmn_is` and `tdmn_bytes` agree with the Latin-1 decoding they replaced for every name the
