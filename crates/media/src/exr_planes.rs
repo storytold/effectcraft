@@ -83,7 +83,8 @@ pub(crate) struct Batch {
     pub(crate) index: Arc<ExrIndex>,
     /// The channels held, in file order (parallel to `aux.channels`).
     pub(crate) ids: Vec<usize>,
-    /// Every channel of the file.
+    /// Every channel of the file but the picture's ([`ExrIndex::aux_ids`]; the picture's may be
+    /// there too).
     pub(crate) all: bool,
     pub(crate) aux: Arc<AuxChannels>,
     /// The file as read.
@@ -104,14 +105,15 @@ impl Batch {
 
     /// It holds what `want` asks of the file `index` describes.
     fn covers(&self, index: &Arc<ExrIndex>, want: &Want) -> bool {
-        Arc::ptr_eq(&self.index, index) && (self.all || (!want.all && want.ids.iter().all(|id| self.ids.binary_search(id).is_ok())))
+        Arc::ptr_eq(&self.index, index) && (self.all || !want.all) && want.ids.iter().all(|id| self.ids.binary_search(id).is_ok())
     }
 }
 
 /// The channels a request asks for.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Want {
-    /// Every channel.
+    /// Every channel but the picture's ([`ExrIndex::aux_ids`]): the picture's planes are asked
+    /// for by name (`ids`).
     pub(crate) all: bool,
     pub(crate) ids: BTreeSet<usize>,
 }
@@ -554,6 +556,55 @@ impl PlaneStore {
         }
     }
 
+    /// Keep only the channels `keep` of the planes `b` of `path` (a picture converted: the pool
+    /// keeps the picture, its planes would be a second copy of it); nothing when none is left.
+    /// The set is trimmed in place when nobody else holds it, else the kept planes are copied.
+    pub(crate) fn keep_only(&self, path: &str, b: Arc<Batch>, keep: &BTreeSet<usize>) {
+        if b.ids.iter().all(|id| keep.contains(id)) {
+            return;
+        }
+        let mut st = self.lock();
+        let Some(at) = st.entries.iter().position(|e| e.path == path && e.batch.as_ref().is_some_and(|k| Arc::ptr_eq(k, &b))) else { return };
+        let held = st.held.iter().any(|(p, h)| p == path && Arc::ptr_eq(h, &b));
+        // (taken out of the entry and the held list: then this is likely the only holder)
+        if let Some(e) = st.entries.get_mut(at) {
+            e.batch = None;
+            e.bytes = 0;
+        }
+        st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, &b)));
+        let slim = match Arc::try_unwrap(b) {
+            Ok(mut owned) => {
+                let mut aux = Arc::try_unwrap(owned.aux).unwrap_or_else(|shared| AuxChannels::clone(&shared));
+                let channels = std::mem::take(&mut aux.channels);
+                aux.channels = owned.ids.iter().zip(channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c).collect();
+                owned.ids.retain(|id| keep.contains(id));
+                aux.listed = owned.index.channels.iter().map(|c| c.name.clone()).collect();
+                owned.aux = Arc::new(aux);
+                owned
+            }
+            Err(shared) => {
+                let mut aux = AuxChannels::new(shared.aux.width, shared.aux.height, shared.aux.scale);
+                aux.manifests = shared.aux.manifests.clone();
+                aux.aliases = shared.aux.aliases.clone();
+                aux.listed = shared.index.channels.iter().map(|c| c.name.clone()).collect();
+                aux.channels = shared.ids.iter().zip(&shared.aux.channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c.clone()).collect();
+                let ids = shared.ids.iter().copied().filter(|id| keep.contains(id)).collect();
+                Batch { index: shared.index.clone(), ids, all: shared.all, aux: Arc::new(aux), file: shared.file.clone() }
+            }
+        };
+        if slim.ids.is_empty() {
+            return;
+        }
+        let slim = Arc::new(slim);
+        if let Some(e) = st.entries.get_mut(at) {
+            e.bytes = slim.bytes();
+            e.batch = Some(slim.clone());
+        }
+        if held {
+            st.held.push_back((path.to_string(), slim));
+        }
+    }
+
     /// Stop keeping the planes `b` of `path` (a picture alone, converted: the pool keeps the
     /// picture, the planes would be a second copy of it).
     pub(crate) fn release(&self, path: &str, b: &Arc<Batch>) {
@@ -720,6 +771,15 @@ impl PlaneStore {
         self.lock().held.clear();
     }
 
+    /// The channels kept of `path` and their bytes (tests).
+    #[cfg(test)]
+    pub(crate) fn kept(&self, path: &str) -> Option<(Vec<String>, usize)> {
+        let st = self.lock();
+        let e = st.entries.iter().find(|e| e.path == path)?;
+        let b = e.batch.as_ref()?;
+        Some((b.aux.channels.iter().map(|(n, _)| n.clone()).collect(), e.bytes))
+    }
+
     #[cfg(test)]
     pub(crate) fn cached(&self) -> Vec<String> {
         self.lock().entries.iter().filter(|e| e.batch.is_some() || !e.failed.is_empty()).map(|e| e.path.clone()).collect()
@@ -858,8 +918,12 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         fs.sealed = true;
         fs.want.clone()
     };
-    let wanted: Vec<usize> =
-        if want.all { (0..index.channels.len()).collect() } else { want.ids.iter().copied().filter(|i| *i < index.channels.len()).collect() };
+    let wanted: Vec<usize> = if want.all {
+        index.aux_ids().into_iter().chain(want.ids.iter().copied()).collect::<BTreeSet<usize>>().into_iter().collect()
+    } else {
+        want.ids.iter().copied().collect()
+    };
+    let wanted: Vec<usize> = wanted.into_iter().filter(|i| *i < index.channels.len()).collect();
     let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
     let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
     let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
@@ -923,11 +987,11 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     }
     new.sort_by_key(|(id, _)| *id);
     new.dedup_by_key(|(id, _)| *id);
-    let all = new.len() == index.channels.len();
+    let all = index.aux_ids().iter().all(|id| new.binary_search_by_key(id, |(i, _)| *i).is_ok());
     let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
     aux.manifests = index.names.manifests.clone();
     aux.aliases = index.names.aliases.clone();
-    if !all {
+    if new.len() != index.channels.len() {
         aux.listed = index.channels.iter().map(|c| c.name.clone()).collect();
     }
     let ids: Vec<usize> = new.iter().map(|(id, _)| *id).collect();
@@ -1103,9 +1167,13 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             Err(Refused::Stopped | Refused::Unreadable) => return Picture::Legacy,
         };
         let img = picture_of(&index, &batch, op);
-        // A picture read alone is kept by the pool once converted, not twice.
-        if extra.is_none() && !batch.all && batch.ids.len() == want.ids.len() {
-            store().release(path, &batch);
+        // The picture is kept by the pool once converted, not twice: its planes go, but for those
+        // an effect names (EXtractoR reading "R").
+        if img.is_some() {
+            let named = extra.and_then(|n| need_ids(&index, n)).unwrap_or_default();
+            let picture: BTreeSet<usize> = index.picture_ids().unwrap_or_default().into_iter().filter(|id| !named.contains(id)).collect();
+            let keep: BTreeSet<usize> = batch.ids.iter().copied().filter(|id| !picture.contains(id)).collect();
+            store().keep_only(path, batch, &keep);
         }
         return match img {
             Some(img) => Picture::Done(Ok(img)),

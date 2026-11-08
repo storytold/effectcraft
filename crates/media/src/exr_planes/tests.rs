@@ -181,7 +181,7 @@ fn multipart_channels_are_found_by_their_stored_names() {
     assert_eq!(aux.manifest(&layer).map(<[_]>::len), Some(1));
     // The names alone, from the headers.
     let names = pool.aux_names(ItemId(1), &f, Tick::ZERO).unwrap();
-    assert_eq!(names.names(), aux.names());
+    assert_eq!(names.names(), aux.listed.iter().map(String::as_str).collect::<Vec<_>>());
     assert!(names.channels.iter().all(|(_, p)| p.is_empty()), "no pixels decoded");
 }
 
@@ -271,7 +271,7 @@ fn concurrent_requests_decode_a_file_once() {
             .map(|_| {
                 s.spawn(|| {
                     barrier.wait();
-                    store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other).unwrap()
+                    store.get(path, &source, &index, &Want { all: true, ids: (0..4).collect() }, Use::Other).unwrap()
                 })
             })
             .collect();
@@ -311,7 +311,7 @@ fn the_store_evicts_least_recently_used_by_bytes() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = PlaneStore::new(2 * one);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = |p: &str| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -350,7 +350,7 @@ fn a_decode_thread_finishing_late_does_not_pin_the_planes() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = PlaneStore::new(2 * one);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = |p: &str| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -397,7 +397,7 @@ fn a_file_forgotten_while_it_decodes_is_not_kept() {
             })),
         );
     }
-    let got = store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other);
+    let got = store.get(path, &source, &index, &Want { all: true, ids: (0..4).collect() }, Use::Other);
     set_before_read(path, None);
     assert!(got.is_ok());
     assert_eq!(decodes_of(path).len(), 2, "decoded again after the reload");
@@ -414,7 +414,7 @@ fn a_request_after_forget_does_not_join_the_old_decode() {
     let source = ExrSource::Bytes(bytes);
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
     let index = crate::exr_index::get(path, &source).unwrap();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let calls = Arc::new(AtomicU64::new(0));
     let (tx, rx) = std::sync::mpsc::channel();
     {
@@ -460,7 +460,7 @@ fn forgetting_another_file_keeps_a_decode_in_flight() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
     let (a, b) = ("/3271-forget-other-a.exr", "/3271-forget-other-b.exr");
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let source = ExrSource::Bytes(bytes);
     let index = crate::exr_index::get(a, &source).unwrap();
     // B is in the store first.
@@ -502,7 +502,7 @@ fn a_pictures_planes_are_held_for_its_effects() {
     let source = ExrSource::Bytes(bytes);
     let store = PlaneStore::new(1);
     let index = crate::exr_index::get(path, &source).unwrap();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     drop(store.get(path, &source, &index, &all, Use::Picture).unwrap());
     assert!(store.is_held(path));
     drop(store.get(path, &source, &index, &all, Use::Other).unwrap());
@@ -534,7 +534,7 @@ fn given_aux_footage_decodes_once_from_the_first_frame() {
     assert_eq!(take_decodes(), [0, 2]);
     let d = decodes_of(learned);
     assert_eq!(d[0].channels.len(), 4, "the picture alone");
-    assert_eq!(d[1].channels.len(), crate::exr_index::cached(learned).unwrap().channels.len(), "all: a picture read alone isn't kept twice");
+    assert_eq!(d[1].channels.len(), crate::exr_index::cached(learned).unwrap().aux_ids().len(), "all but the picture: a picture read alone isn't kept twice");
 }
 
 /// #474: the picture made of the planes of a file with exact R, G, B channels is the `image`
@@ -576,7 +576,7 @@ fn picture_from_planes_is_the_image_crates() {
 #[test]
 fn a_decode_that_panics_is_not_left_in_the_store() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     for (k, inline) in [false, true].into_iter().enumerate() {
         let path = format!("/3271-panics-{k}.exr");
         let source = ExrSource::Bytes(bytes.clone());
@@ -620,7 +620,7 @@ fn a_file_is_used_as_of_its_decode() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = Arc::new(PlaneStore::new(2 * one));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = {
         let (store, bytes, all) = (store.clone(), bytes.clone(), all.clone());
         move |p: &str| {
@@ -656,7 +656,7 @@ fn concurrent_frames_decode_each_file_once() {
     let rgbz = [("R", false), ("G", false), ("B", false), ("Z", false)];
     let bytes: Arc<[u8]> = write(vec![part(None, &rgbz, (64, 64), Compression::ZIP1)], (64, 64)).into();
     let store = PlaneStore::new(4 * (64 * 64 * 4 + 1));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let (next, frames) = (std::sync::atomic::AtomicUsize::new(0), 24);
     std::thread::scope(|s| {
         for _ in 0..4 {
@@ -769,7 +769,7 @@ fn a_failed_request_fails_only_requests_as_large() {
     let store = PlaneStore::new(CACHE_BUDGET);
     let index = crate::exr_index::get(path, &source).unwrap();
     let picture = Want { all: false, ids: index.picture_ids().unwrap().into_iter().collect() };
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let held = store.get(path, &source, &index, &picture, Use::Picture).unwrap();
     assert_eq!(store.get(path, &source, &index, &all, Use::Other).err(), Some(Refused::Unreadable));
     assert!(Arc::ptr_eq(&store.get(path, &source, &index, &picture, Use::Other).unwrap(), &held), "served from the store");
@@ -804,7 +804,7 @@ fn a_picture_too_large_with_its_channels_is_read_alone() {
 fn the_store_keeps_a_bounded_number_of_files() {
     let bytes: Arc<[u8]> = write(vec![part(None, &[("R", true)], (2, 2), Compression::ZIP1)], (2, 2)).into();
     let store = PlaneStore::new(CACHE_BUDGET);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     for i in 0..CACHE_FILES + 10 {
         let path = format!("/3271-many/{i}.exr");
         let source = ExrSource::Bytes(bytes.clone());
@@ -994,7 +994,7 @@ fn a_decode_thread_takes_over_a_queued_decode() {
     let source = ExrSource::Bytes(bytes);
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
     let index = crate::exr_index::get(path, &source).unwrap();
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let threads = crate::pool::decode_threads().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     // When the asker queues its decode: a decode thread asks for the same planes.
@@ -1045,7 +1045,7 @@ fn the_plane_store_is_trimmed_by_the_accountant() {
     }
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let get = |p: &str, by: Use| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -1250,7 +1250,7 @@ fn trimming_for_bytes_keeps_remembered_failures() {
     let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
     let one = 4 * (32 * 32 * 4 + 1);
     let store = PlaneStore::new(one);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let mut broken = bytes.to_vec();
     broken.truncate(broken.len() - 64);
     let broken = ExrSource::Bytes(broken.into());
@@ -1327,7 +1327,7 @@ fn frames_and_planes_make_room_for_each_other() {
         acc.register(h);
     }
     acc.set_group_budget(FOOTAGE, budget);
-    let all = Want { all: true, ids: Default::default() };
+    let all = Want { all: true, ids: (0..4).collect() };
     let planes = |p: &str| {
         let source = ExrSource::Bytes(bytes.clone());
         let index = crate::exr_index::get(p, &source).unwrap();
@@ -1353,4 +1353,32 @@ fn frames_and_planes_make_room_for_each_other() {
     assert!(!frames.contains(&"/f1".to_string()), "the oldest frame went: {frames:?}");
     assert!(store.cached().contains(&"/3271-share-p6.exr".to_string()), "the newest plane set stays");
     assert!(acc.total() <= budget, "{} of {budget}", acc.total());
+}
+
+/// #3271 (rule: picture channels are never kept twice): once the picture is converted (the
+/// media pool keeps it), its R, G, B, A planes leave the plane store; the channels the effects
+/// read stay, and a picture channel an effect names itself (EXtractoR reading "R") stays too.
+#[test]
+fn the_picture_planes_are_not_kept_beside_the_picture() {
+    let bytes: Arc<[u8]> =
+        write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false), ("N", false)], (16, 8), Compression::ZIP1)], (16, 8)).into();
+    let source = ExrSource::Bytes(bytes);
+    let op = crate::convert::AlphaOp::of(&Footage::default(), FloatCurve::Linear);
+    let plane = 16 * 8 * 4;
+    for (path, need, kept) in [
+        ("/3271-slim-aux.exr", AuxNeed::Lookups(vec![AuxLookup::Name("Z".into())]), vec!["Z"]),
+        ("/3271-slim-named.exr", AuxNeed::Lookups(vec![AuxLookup::Name("Z".into()), AuxLookup::Name("R".into())]), vec!["R", "Z"]),
+        ("/3271-slim-all.exr", AuxNeed::All, vec!["N", "Z"]),
+    ] {
+        let Picture::Done(Ok(_)) = picture(path, &source, op, Some(&need)) else { panic!("{path}: a picture") };
+        let (names, bytes) = shared().kept(path).expect("the effects' channels are kept");
+        assert_eq!(names, kept, "{path}");
+        assert_eq!(bytes, kept.iter().map(|n| n.len() + plane).sum::<usize>(), "{path}");
+        forget(path);
+    }
+    // The picture alone keeps nothing.
+    let path = "/3271-slim-none.exr";
+    let Picture::Done(Ok(_)) = picture(path, &source, op, None) else { panic!("a picture") };
+    assert!(shared().kept(path).is_none());
+    forget(path);
 }
