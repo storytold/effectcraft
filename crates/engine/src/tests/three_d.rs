@@ -438,6 +438,7 @@ fn active_cam(s: &Session) -> effectcraft_render::three_d::CameraState {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     effectcraft_render::three_d::camera::active_camera(&ctx)
 }

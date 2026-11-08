@@ -418,14 +418,24 @@ fn set_view_camera(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"view": v.id()}))
 }
 
+/// Returns the active comp's 3D view state, with the comp size, for the 3D view commands.
 fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let (w, h) = (comp.width as f64, comp.height as f64);
     let vs = s.state.views3d.get(&cid).cloned().unwrap_or_default();
     let t = s.state.times.get(&cid).copied().unwrap_or(Tick::ZERO);
-    let ctx =
-        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
     let cam = vs.override_camera(w, h).unwrap_or_else(|| camera::active_camera(&ctx));
     let f = cam.forward();
     let lights: Vec<Value> = comp
@@ -511,8 +521,17 @@ fn scene_layers(comp: &Comp, t: Tick) -> Vec<LayerId> {
 /// the cursor); layers without content bounds are left out.
 fn layer_quads(s: &Session, cid: ItemId, ids: &[LayerId], t: Tick) -> Vec<[Vec3; 4]> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx =
-        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
     comp.layers
         .iter()
         .filter(|l| ids.contains(&l.id))
@@ -601,6 +620,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             let state = camera::layer_camera(&ctx, l);
             let pw = camera::parent_world(&ctx, l);
@@ -707,8 +727,17 @@ fn auto_orient(s: &mut Session, p: &Value) -> Result<Value> {
 /// through each layer's world matrix; cameras and lights contribute their position).
 fn layer_points(s: &Session, cid: ItemId, ids: &[LayerId], t: Tick) -> Vec<Vec3> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx =
-        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
     let mut out = vec![];
     for l in comp.layers.iter().filter(|l| ids.contains(&l.id)) {
         let m = ctx.world_matrix(l);
