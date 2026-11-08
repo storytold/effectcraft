@@ -418,6 +418,47 @@ fn a_request_after_forget_does_not_join_the_old_decode() {
     assert!(decodes_of(path).len() >= 2, "the file was decoded anew after forget");
 }
 
+/// #3270 review (CodeRabbit): forgetting one file leaves the decodes of other files alone: a
+/// decode of file A in flight while file B is forgotten is still kept and joined (staleness is
+/// per file, not one store-wide counter).
+#[test]
+fn forgetting_another_file_keeps_a_decode_in_flight() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let (a, b) = ("/3271-forget-other-a.exr", "/3271-forget-other-b.exr");
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let all = Want { all: true, ids: Default::default() };
+    let source = ExrSource::Bytes(bytes);
+    let index = crate::exr_index::get(a, &source).unwrap();
+    // B is in the store first.
+    let index_b = crate::exr_index::get(b, &source).unwrap();
+    store.get(b, &source, &index_b, &all, Use::Other).unwrap();
+    let joiner = Arc::new(std::sync::Mutex::new(None));
+    {
+        let (store, joiner, source, index, all) = (store.clone(), joiner.clone(), source.clone(), index.clone(), all.clone());
+        let calls = AtomicU64::new(0);
+        set_before_read(
+            a,
+            Some(Arc::new(move |p: &str| {
+                if p != "/3271-forget-other-a.exr" || calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return;
+                }
+                // A's decode is in flight: B changes on disk, and another request asks for A.
+                store.forget("/3271-forget-other-b.exr");
+                let (store, source, index, all) = (store.clone(), source.clone(), index.clone(), all.clone());
+                *joiner.lock().unwrap() =
+                    Some(std::thread::spawn(move || store.get("/3271-forget-other-a.exr", &source, &index, &all, Use::Other).map(|_| ())));
+            })),
+        );
+    }
+    let got = store.get(a, &source, &index, &all, Use::Other);
+    set_before_read(a, None);
+    assert!(got.is_ok());
+    let joined = joiner.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(joined.is_ok());
+    assert_eq!(decodes_of(a).len(), 1, "the other request joined A's decode (or found it kept)");
+    assert_eq!(store.cached(), [a], "A's decode is kept, B is forgotten");
+}
+
 /// #474: the planes of a picture whose effects read the footage's channels are kept for them
 /// (the renderer asks for the picture, then the channels) until the channels are asked for.
 #[test]
