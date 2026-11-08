@@ -425,6 +425,104 @@ fn camera_tools_on_a_parented_camera_use_the_world_point() {
     assert!((dist3(world_eye(&mut s), pivot) - 1.0).abs() < 1e-6);
 }
 
+/// The comp's active camera as rendered (world space).
+fn active_cam(s: &Session) -> effectcraft_render::three_d::CameraState {
+    let cid = s.active_comp_id().unwrap();
+    let comp = s.project.comp(cid).unwrap();
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
+    effectcraft_render::three_d::camera::active_camera(&ctx)
+}
+
+fn solid3d(s: &mut Session, w: u32, h: u32, pos: [f64; 3]) -> u64 {
+    let id = s.execute("layer.newSolid", json!({"width": w, "height": h})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": id, "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": id, "path": "transform/position", "value": pos})).unwrap();
+    id
+}
+
+/// Pan Under Cursor on a camera layer: the grabbed point, nearer than the point of interest,
+/// follows the drag exactly (#2586).
+#[test]
+fn pan_under_cursor_moves_the_grabbed_point_by_the_drag() {
+    let mut s = session();
+    solid3d(&mut s, 640, 360, [320.0, 180.0, -300.0]);
+    s.execute("layer.newCamera", json!({})).unwrap();
+    let r = s.execute("camera.pan", json!({"dx": 0, "dy": 0, "mode": "underCursor", "cursor": [200, 100]})).unwrap();
+    let pivot = arr3(&r["pivot"]);
+    assert!((pivot[2] + 300.0).abs() < 1e-6, "on the nearer solid: {pivot:?}");
+    let at = effectcraft_geom::Vec3::from(pivot);
+    let before = active_cam(&s).project(640.0, 360.0, at).unwrap();
+    s.execute("camera.pan", json!({"dx": 30, "dy": -12, "mode": "underCursor", "point": pivot})).unwrap();
+    let after = active_cam(&s).project(640.0, 360.0, at).unwrap();
+    assert!((after.x - before.x - 30.0).abs() < 1e-6 && (after.y - before.y + 12.0).abs() < 1e-6, "{before:?} → {after:?}");
+}
+
+/// The point under the cursor is on a visible 3D layer: guides, layers with Video off, nulls,
+/// cameras and lights in front of it are not picked (#2586).
+#[test]
+fn the_point_under_the_cursor_skips_hidden_and_guide_layers() {
+    let mut s = session();
+    solid3d(&mut s, 640, 360, [320.0, 180.0, 0.0]);
+    let guide = solid3d(&mut s, 640, 360, [320.0, 180.0, -200.0]);
+    s.execute("layer.setSwitch", json!({"layer": guide, "switch": "guide", "value": true})).unwrap();
+    let hidden = solid3d(&mut s, 640, 360, [320.0, 180.0, -300.0]);
+    s.execute("layer.setSwitch", json!({"layer": hidden, "switch": "video", "value": false})).unwrap();
+    let nul = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": nul, "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": nul, "path": "transform/position", "value": [320, 180, -400]})).unwrap();
+    s.execute("layer.newCamera", json!({})).unwrap();
+    let r = s.execute("camera.orbit", json!({"yaw": 0, "mode": "aroundCursor", "cursor": [300, 170]})).unwrap();
+    let pivot = arr3(&r["pivot"]);
+    assert!(pivot[2].abs() < 1e-6, "the visible solid at z = 0: {pivot:?}");
+    // The scene's centre counts only that solid too.
+    let r = s.execute("camera.orbit", json!({"yaw": 0, "mode": "aroundScene"})).unwrap();
+    assert!(dist3(arr3(&r["pivot"]), [320.0, 180.0, 0.0]) < 1e-6, "{}", r["pivot"]);
+}
+
+/// Orbit Around Scene without 3D layers turns about the comp's centre (#2586).
+#[test]
+fn orbit_around_scene_without_3d_layers_uses_the_comp_centre() {
+    let mut s = session();
+    s.execute("layer.newSolid", json!({"width": 100, "height": 100})).unwrap();
+    s.execute("layer.newCamera", json!({})).unwrap();
+    let r = s.execute("camera.orbit", json!({"yaw": 10, "mode": "aroundScene"})).unwrap();
+    assert!(dist3(arr3(&r["pivot"]), [320.0, 180.0, 0.0]) < 1e-9, "{}", r["pivot"]);
+}
+
+/// A camera whose parent cannot be inverted (scale 0) works about its point of interest, stays
+/// finite, and reports that point as the one used (#2586).
+#[test]
+fn a_parent_that_cannot_be_inverted_falls_back_to_the_point_of_interest() {
+    let mut s = session();
+    solid3d(&mut s, 100, 100, [400.0, 120.0, 200.0]);
+    let parent = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": parent, "switch": "threeD", "value": true})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setParent", json!({"layers": [cam], "parent": parent, "compensate": false})).unwrap();
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/scale", "value": [0, 0, 0]})).unwrap();
+    let poi0 = prop(&s, cam, "transform/poi").as_vec3();
+    // Through a scale-0 parent every point of the camera lands on the parent's position.
+    let world_poi = prop(&s, parent, "transform/position").as_vec3();
+    let r = s.execute("camera.orbit", json!({"yaw": 20, "pitch": -5, "mode": "aroundScene"})).unwrap();
+    let pivot = arr3(&r["pivot"]);
+    assert!(dist3(pivot, world_poi) < 1e-9, "the point of interest, not the scene's centre: {pivot:?}");
+    assert_eq!(prop(&s, cam, "transform/poi").as_vec3(), poi0, "Orbit Around Camera POI keeps the point of interest");
+    let pos = prop(&s, cam, "transform/position").as_vec3();
+    assert!(pos.iter().all(|v| v.is_finite()), "{pos:?}");
+    // Sent back as `point`, it falls back the same way.
+    let r2 = s.execute("camera.orbit", json!({"yaw": 5, "mode": "aroundScene", "point": pivot})).unwrap();
+    assert!(dist3(arr3(&r2["pivot"]), pivot) < 1e-9);
+}
+
 #[test]
 fn demo_has_3d_showcase() {
     let mut s = Session::default();

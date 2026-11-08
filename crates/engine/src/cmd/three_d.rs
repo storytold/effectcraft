@@ -590,7 +590,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
     .ok_or_else(|| bad(cmd, "the comp has no active camera layer (Layer ▸ New ▸ Camera), or switch to a custom 3D view"))?;
     // The point under the cursor as the camera layer shows it, in world space (returned, and
     // sent back by the viewer as `point`) and in the camera's parent space (what the rig edits).
-    let (pivot, local_pivot) = match comp.layer(cam) {
+    let (pivot, local_pivot, world_poi) = match comp.layer(cam) {
         Some(l) if !matches!(mode, ToolMode::Plain | ToolMode::Target) => {
             let ctx = EvalCtx {
                 project: &s.project,
@@ -610,13 +610,16 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
             };
             let world = tool_pivot(s, cid, p, mode, &state, poi, t);
             let local = world.and_then(|w| pw.inverse().map(|m| m.apply(w))).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite());
-            (world, local)
+            (world, local, poi)
         }
-        _ => (None, None),
+        _ => (None, None, Vec3::ZERO),
     };
     // A parent that cannot be inverted leaves no pivot in the camera's space: work about its
-    // point of interest instead.
-    let mode = if pivot.is_some() && local_pivot.is_none() { ToolMode::Target } else { mode };
+    // point of interest instead, and report that point as the one used (sent back as `point`,
+    // it lands here again).
+    let fallback = pivot.is_some() && local_pivot.is_none();
+    let mode = if fallback { ToolMode::Target } else { mode };
+    let pivot = if fallback { Some(world_poi).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) } else { pivot };
     let merge = merge_p(p).map(str::to_string);
     let r = s.edit(label, merge.as_deref(), |proj, _| {
         let l = layer_mut(proj, cid, cam)?;
@@ -905,7 +908,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Orbit Camera",
             [],
             None,
-            "{yaw|dx deg, pitch|dy deg, mode?: aroundCursor|aroundScene|aroundCameraPoi (default; alias aroundCameraTarget), cursor? [x,y] comp px, point? [x,y,z] pivot, layer?, merge?} — current 3D view (camera layer in Active Camera); returns the pivot used",
+            "{yaw|dx deg, pitch|dy deg, mode?: aroundCursor|aroundScene|aroundCameraPoi (default; alias aroundCameraTarget), cursor? [x,y] comp px, point? [x,y,z] pivot, layer?, merge?} — current 3D view (camera layer in Active Camera); returns `pivot`, the world point used (null when the tool works about the point of interest)",
             has_comp,
             orbit
         ),
@@ -914,7 +917,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pan Camera",
             [],
             None,
-            "{dx, dy (comp px), mode?: underCursor|cameraPoi (default; alias toCameraTarget), cursor? [x,y], point? [x,y,z], layer?, merge?}",
+            "{dx, dy (comp px), mode?: underCursor|cameraPoi (default; alias toCameraTarget), cursor? [x,y], point? [x,y,z], layer?, merge?} — returns `pivot` (null: the point of interest)",
             has_comp,
             pan
         ),
@@ -923,7 +926,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Dolly Camera",
             [],
             None,
-            "{amount (px, + = forward), mode?: towardsCursor|toCursor|toCameraPoi (alias toCameraTarget; default: along the view axis), cursor? [x,y], point? [x,y,z], layer?, merge?}",
+            "{amount (px, + = forward), mode?: towardsCursor|toCursor|toCameraPoi (alias toCameraTarget; default: along the view axis), cursor? [x,y], point? [x,y,z], layer?, merge?} — returns `pivot` (null: the point of interest or, without mode, the view axis)",
             has_comp,
             dolly
         ),

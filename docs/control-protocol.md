@@ -181,7 +181,9 @@ Camera tools: the Tools bar's Orbit, Pan and Dolly slots hold After Effects' var
 `tool.panCamera` and `tool.dolly` (1, 2, 3) select the variant the slot last showed, `tool.camera`
 (C) cycles the three slots, and `tool.<tool>` (e.g. `tool.OrbitScene`) selects one directly. A drag
 runs `camera.orbit` / `camera.pan` / `camera.dolly` with the tool's `mode` and the press point as
-`cursor`; the result's `pivot` is the world point used, sent back as `point` for the rest of the drag.
+`cursor`; the result's `pivot` is the world point used, sent back as `point` for the rest of the drag
+(null when the tool works about the camera's point of interest: the POI variants, and `camera.dolly`
+without `mode`).
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).
