@@ -239,14 +239,18 @@ impl Cache {
     /// prefetch kept refilling while it evicted the next frames (#595). Frames of another scale
     /// than the one on screen go first (a zoom or resolution change).
     fn victim(&self) -> Option<usize> {
+        self.victim_of(|_| true)
+    }
+    /// [`Cache::victim`] among the frames `eligible` accepts (in the same order).
+    fn victim_of(&self, eligible: impl Fn(&FrameKey) -> bool) -> Option<usize> {
         if let Some(s) = self.scale
-            && let Some(i) = self.order.iter().position(|k| k.scale != s)
+            && let Some(i) = self.order.iter().position(|k| k.scale != s && eligible(k))
         {
             return Some(i);
         }
-        let Some(p) = &self.playhead else { return (!self.order.is_empty()).then_some(0) };
+        let Some(p) = &self.playhead else { return self.order.iter().position(&eligible) };
         let mut farthest: Option<(i64, usize)> = None;
-        for (i, k) in self.order.iter().enumerate() {
+        for (i, k) in self.order.iter().enumerate().filter(|(_, k)| eligible(k)) {
             match p.ahead(k) {
                 None => return Some(i),
                 Some(d) if farthest.is_none_or(|(f, _)| d > f) => farthest = Some((d, i)),
@@ -254,6 +258,10 @@ impl Cache {
             }
         }
         farthest.map(|(_, i)| i)
+    }
+    /// [`Cache::victim`] among the frames in RAM (a GPU frame's bytes are video memory).
+    fn cpu_victim(&self) -> Option<usize> {
+        self.victim_of(|k| self.map.get(k).is_some_and(|c| !c.img.is_gpu()))
     }
     /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
     /// than the one on screen first (a zoom or resolution change).
@@ -354,8 +362,9 @@ impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
     }
     fn trim_to(&self, bytes: usize) {
         let Ok(mut c) = self.0.lock() else { return };
+        // (only frames in RAM: dropping a GPU frame frees no RAM, and loses a viewer frame)
         while c.bytes.saturating_sub(c.gpu_bytes) > bytes {
-            let Some(old) = c.victim().and_then(|i| c.order.remove(i)) else { break };
+            let Some(old) = c.cpu_victim().and_then(|i| c.order.remove(i)) else { break };
             c.remove(&old);
         }
     }

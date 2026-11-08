@@ -2957,3 +2957,42 @@ mod frame_files {
         assert_eq!(healed.hits(), (1, 0), "the rewritten entry is used");
     }
 }
+
+/// #3271 review: the memory accountant trims the preview frames held in RAM; GPU frames (video
+/// memory, their own budget) are left alone, even when they are the least recently shown.
+#[test]
+fn the_accountant_trims_only_frames_in_ram() {
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let texture = gpu.device().create_texture(&eframe::wgpu::TextureDescriptor {
+        label: None,
+        size: eframe::wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: eframe::wgpu::TextureDimension::D2,
+        format: eframe::wgpu::TextureFormat::Rgba8Unorm,
+        usage: eframe::wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let gpu_frame = || FrameImage::Gpu(Arc::new(DisplayFrame { texture: texture.clone(), width: 2, height: 2 }));
+    let frames = Frames::default();
+    {
+        let mut c = frames.cache.lock().unwrap();
+        // The oldest frames are on the GPU.
+        c.insert(key(1, 0, 0), gpu_frame());
+        c.insert(key(1, 1, 0), gpu_frame());
+        c.insert(key(1, 2, 0), img());
+        c.insert(key(1, 3, 0), img());
+    }
+    let memory = PreviewMemory(frames.cache.clone());
+    use effectcraft_engine::render::memory::MemoryHolder;
+    assert_eq!(memory.bytes(), 2 * 16);
+    memory.trim_to(16);
+    let c = frames.cache.lock().unwrap();
+    assert!(c.map.contains_key(&key(1, 0, 0)) && c.map.contains_key(&key(1, 1, 0)), "the GPU frames stay");
+    assert!(!c.map.contains_key(&key(1, 2, 0)) && c.map.contains_key(&key(1, 3, 0)), "the oldest frame in RAM went");
+    drop(c);
+    assert_eq!(memory.bytes(), 16);
+}
