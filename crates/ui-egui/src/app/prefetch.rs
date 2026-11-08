@@ -212,6 +212,18 @@ impl EffectcraftApp {
         }
         if self.playback.playing && self.audio.is_none() && self.playback.audio_retry_at.is_some_and(|at| now >= at) {
             self.playback.audio_retry_at = Some(now + audio::AUDIO_RETRY_S);
+            // Advance the audio-only clock to this pass before choosing where to re-open: the
+            // recorded audible frame is the previous pass's, and a pass delayed past the retry
+            // would otherwise replay stale audio. Video re-opens where the picture is.
+            if self.playback.audio_frame.is_some()
+                && let Some(p) = self.playback.plan
+                && let Some(fr) = self.session.active_comp().map(|c| c.frame_rate)
+            {
+                let n = (((now - self.playback.start_wall) * p.fps) / p.step.max(1) as f64).floor() as i64;
+                if let Some(frame) = p.frame_after(self.playback.start_frame, n) {
+                    self.playback.audio_frame = Some(frame);
+                }
+            }
             // Open again where playback got to: where the picture is (video) or where the sound
             // was audible (audio-only).
             let t = match self.playback.audio_frame {

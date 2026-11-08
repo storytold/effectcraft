@@ -667,6 +667,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 3, "the timer opened the output again");
         let a = app.audio.as_ref().expect("the recovered device plays");
         assert!(!a.failed(), "the recovered device is healthy");
+        // The pass is delayed 2.5s past the refusal: the sound re-opens where the wall clock is
+        // now (4.5s = frame 135, wrapped into the 120-frame work area), not at the recorded
+        // audible frame of the previous pass (2s = frame 60).
+        assert_eq!(a.span.start, 24000, "the re-open follows the wall clock (frame 15 = 0.5s), not the last pass");
         assert_eq!(app.playback.audio_retry_at, None, "a working output clears the retry");
     }
 
