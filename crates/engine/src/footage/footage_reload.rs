@@ -6,7 +6,8 @@
 //! or PDF page an item shows and its interpretation (alpha, conformed frame rate, pixel aspect,
 //! fields, colour). A Photoshop layer is found again by name when layers were added or removed
 //! around it. The media layer then forgets the file and the layer cache is emptied, so the next
-//! render reads the new pixels.
+//! render reads the new pixels; File ▸ Reload Footage also deletes the disk cache entries made of
+//! the file (#3184).
 //!
 //! The automatic part compares each footage file's size and modification time with what they
 //! were when the file was last seen. The desktop app keeps a [`Watcher`]: a worker thread that
@@ -76,7 +77,6 @@ pub struct Watched {
     reload: BTreeSet<String>,
     sources: Arc<Vec<Source>>,
     project: Option<Arc<effectcraft_project::Project>>,
-    cache_enabled: bool,
     reload_mode: String,
     stored_paths: crate::doc_path::StoredPaths,
 }
@@ -85,8 +85,7 @@ impl PartialEq for Watched {
     /// Compare watched inputs, excluding unrelated project edits whose latest Arc is refreshed
     /// separately without waking the worker or restarting partial sequence scans.
     fn eq(&self, other: &Self) -> bool {
-        self.cache_enabled == other.cache_enabled
-            && self.stored_paths == other.stored_paths
+        self.stored_paths == other.stored_paths
             && self.reload_mode == other.reload_mode
             && self.reload == other.reload
             && (Arc::ptr_eq(&self.sources, &other.sources) || self.sources == other.sources)
@@ -100,7 +99,6 @@ pub fn watched(s: &Session) -> Watched {
         reload: automatic_paths(s),
         sources: Arc::new(if s.check_footage_on_open { availability::sources(s) } else { Vec::new() }),
         project: Some(s.project.clone()),
-        cache_enabled: s.disk_cache.is_some(),
         reload_mode: s.prefs.import.auto_reload_footage.clone(),
         stored_paths: s.stored_paths.clone(),
     }
@@ -139,10 +137,10 @@ pub struct Scan {
 }
 
 impl Scan {
-    /// Prepare availability and cache state before the session applies the observation.
+    /// Prepare the availability change before the session applies the observation.
     /// Automatic callers construct this result on the worker; explicit commands run inline.
     fn new(watched: Watched, observation: Observation, policy: ReloadPolicy) -> Self {
-        let update = watched.project.as_ref().and_then(|p| availability::prepare(p, &watched.sources, &observation.missing, watched.cache_enabled));
+        let update = watched.project.as_ref().and_then(|p| availability::prepare(p, &watched.sources, &observation.missing));
         Self { watched, observation, update, policy }
     }
 
@@ -281,7 +279,17 @@ fn reload(s: &mut Session, ids: &[ItemId], undoable: bool) -> crate::Result<(usi
     }
     let n = updates.len();
     apply_reloads(s, updates, undoable)?;
-    forget(s, &paths);
+    forget_media(s, &paths);
+    // An explicit reload also reads files again that kept their size and time (the check on hit
+    // can't tell those apart): their entries in the disk cache go (#3184), when the cache is
+    // switched on if it is off now. An automatic one only follows a changed stamp, which the
+    // check catches.
+    if undoable {
+        match &s.disk_cache {
+            Some(dc) => dc.drop_files(paths.iter().map(String::as_str)),
+            None => s.pending_disk_drops.extend(paths),
+        }
+    }
     Ok((n, failed))
 }
 
@@ -320,14 +328,9 @@ fn apply_reloads(s: &mut Session, updates: Vec<(ItemId, Footage)>, undoable: boo
     Ok(())
 }
 
-/// Make the media layer and the layer cache let go of `paths`, so renders read them again.
-fn forget(s: &mut Session, paths: &BTreeSet<String>) {
-    forget_media(s, paths);
-    s.refresh_disk_salt(true);
-}
-
-/// Invalidate decoded and rendered buffers without probing the disk for a new salt.
-/// Availability updates already carry their worker-computed salt; content reload refreshes it.
+/// Make the media layer and the layer cache let go of `paths`, so renders read them again. Disk
+/// cache entries check the files they were made of when read (#3184); File ▸ Reload Footage
+/// also drops the entries of its files ([`reload`]).
 pub(crate) fn forget_media(s: &mut Session, paths: &BTreeSet<String>) {
     for p in paths {
         s.footage.forget(p);
@@ -374,7 +377,7 @@ pub fn apply_stamps(s: &mut Session, now: Vec<(String, Option<Stamp>)>) -> crate
         return Ok(json!({"files": 0, "reloaded": 0}));
     }
     // Changed frames of image sequences (their items keep their metadata).
-    forget(s, &changed);
+    forget_media(s, &changed);
     let files = changed.len();
     s.toast(if reloaded > 0 {
         format!("Reloaded {reloaded} footage item(s) changed on disk")
@@ -391,7 +394,6 @@ pub(crate) fn command(s: &mut Session, _: &Value) -> crate::Result<Value> {
         reload: reload_paths(s),
         sources: Arc::new(availability::sources(s)),
         project: Some(s.project.clone()),
-        cache_enabled: s.disk_cache.is_some(),
         reload_mode: s.prefs.import.auto_reload_footage.clone(),
         stored_paths: s.stored_paths.clone(),
     };
@@ -452,12 +454,7 @@ impl Watcher {
     pub fn update(&mut self, s: &Session) {
         let same_sources = availability::sources_match(s, &self.paths.sources);
         let same_data = self.paths.project.as_ref().is_some_and(|before| data_paths(before).eq(data_paths(&s.project)));
-        if same_sources
-            && same_data
-            && self.paths.stored_paths == s.stored_paths
-            && self.paths.reload_mode == s.prefs.import.auto_reload_footage
-            && self.paths.cache_enabled == s.disk_cache.is_some()
-        {
+        if same_sources && same_data && self.paths.stored_paths == s.stored_paths && self.paths.reload_mode == s.prefs.import.auto_reload_footage {
             let project = Some(s.project.clone());
             self.paths.project = project.clone();
             self.pending.lock().unwrap_or_else(PoisonError::into_inner).paths.project = project;

@@ -391,6 +391,7 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             // The keyframed value before the expression: what `prop.set` writes and scrubs from.
             let raw = pr.value_at(layer.layer_time(ectx.time)).as_vec2();

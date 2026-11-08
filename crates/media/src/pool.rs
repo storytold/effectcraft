@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemId};
 use effectcraft_raster::{Image, Px};
+use effectcraft_render::reads::{FileStamp, ReadFile, ReadFiles, ReadLog};
 use effectcraft_render::{FloatCurve, FootageSource};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 use filmcraft_media::{FrameRequest, SharedSource};
@@ -14,6 +15,7 @@ use image::metadata::Orientation;
 use crate::convert::{AlphaOp, dynamic_to_image, frame_to_image_in, frame_to_image_scaled, turned};
 use crate::downmix::Order;
 use crate::gif_anim::{self, Anim};
+use crate::reads;
 use crate::{MediaError, Result};
 
 /// Default frame-cache budget: 1 GiB of decoded frames.
@@ -53,6 +55,8 @@ struct Key {
 
 struct Entry {
     img: Arc<Image>,
+    /// The files the frame was decoded from (see [`crate::reads`]).
+    files: Arc<ReadFiles>,
     stamp: u64,
     bytes: usize,
 }
@@ -106,18 +110,20 @@ struct Lru {
 }
 
 impl Lru {
-    fn get(&mut self, k: &Key) -> Option<Arc<Image>> {
+    /// The cached image and its read files for `k`, marking the entry as most recently used.
+    fn get(&mut self, k: &Key) -> Option<(Arc<Image>, Arc<ReadFiles>)> {
         let e = self.map.get_mut(k)?;
         self.order.remove(&e.stamp);
         self.clock += 1;
         e.stamp = self.clock;
         self.order.insert(e.stamp, k.clone());
-        Some(e.img.clone())
+        Some((e.img.clone(), e.files.clone()))
     }
-    fn insert(&mut self, k: Key, img: Arc<Image>, budget: usize) {
+    /// Stores an image with its read files under `k` and evicts the least recently used entries until the cache fits `budget` bytes.
+    fn insert(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize) {
         let bytes = img.data.len() * std::mem::size_of::<Px>() + 64;
         self.clock += 1;
-        if let Some(old) = self.map.insert(k.clone(), Entry { img, stamp: self.clock, bytes }) {
+        if let Some(old) = self.map.insert(k.clone(), Entry { img, files, stamp: self.clock, bytes }) {
             self.order.remove(&old.stamp);
             self.bytes -= old.bytes;
         }
@@ -180,8 +186,9 @@ struct CacheState {
 }
 
 /// A movie/audio source by path ([`Opened`]), opened by the first caller while the others wait
-/// for it (`None`: failed to open; not retried until `forget`).
-type SourceSlot = Arc<OnceLock<Option<Opened>>>;
+/// for it (`None`: failed to open; not retried until `forget`), with the file's identity as
+/// opened.
+type SourceSlot = Arc<OnceLock<(Option<Opened>, ReadFile)>>;
 
 /// An opened movie/audio source, the turn its picture is shown with and the order its decoded
 /// audio channels arrive in.
@@ -211,7 +218,7 @@ fn channel_order(src: &SharedSource, header: Option<&[u8]>, file: Option<&dyn fi
 }
 
 /// An animated GIF by path, as [`SourceSlot`] (the error message when it failed to load).
-type GifSlot = Arc<OnceLock<std::result::Result<Arc<Anim>, String>>>;
+type GifSlot = Arc<OnceLock<(std::result::Result<Arc<Anim>, String>, ReadFile)>>;
 
 struct Inner {
     /// Opened movie/audio sources by path.
@@ -220,8 +227,9 @@ struct Inner {
     opened: AtomicU64,
     /// In-memory files registered with `add_bytes` (web builds, tests).
     files: Mutex<HashMap<String, Arc<[u8]>>>,
-    /// Parsed 3D models by path (`None`: failed to load; not retried until `forget`).
-    models: Mutex<HashMap<String, Option<Arc<effectcraft_model::Model>>>>,
+    /// Parsed 3D models by path (`None`: failed to load; not retried until `forget`), with the
+    /// files read for them (the model's and the resources it names).
+    models: Mutex<HashMap<String, (Option<Arc<effectcraft_model::Model>>, Arc<ReadFiles>)>>,
     /// Decoded animated GIFs and WebPs by path, loaded by the first caller while the others wait (an
     /// `Err` is not retried until `forget`).
     gifs: Mutex<HashMap<Arc<str>, GifSlot>>,
@@ -439,11 +447,13 @@ impl MediaPool {
     }
 
     /// The conformed-audio file of `path` at `rate` (named by a hash of the path, size and
-    /// modification time, so an edited file conforms again, and of `CONFORM_VERSION`).
+    /// modification time, so an edited file conforms again, and of `CONFORM_VERSION`). Notes
+    /// `path` as read with that identity (see [`crate::reads`]): its samples come from it.
     pub fn conformed_path(&self, path: &str, rate: u32) -> Option<std::path::PathBuf> {
         use std::hash::{Hash, Hasher};
         let folder = lock(&self.inner.conform).clone()?;
         let meta = std::fs::metadata(path).ok()?;
+        reads::note(ReadFile::new(path, FileStamp::of_metadata(&meta)));
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (CONFORM_VERSION, path, meta.len(), meta.modified().ok()).hash(&mut h);
         Some(folder.join(format!("{:016x}_{rate}.ecaf", h.finish())))
@@ -612,16 +622,20 @@ impl Inner {
 
     /// A 3D model file and its sibling resources (buffers, textures, MTL files), parsed once.
     fn model(&self, path: &str) -> Option<Arc<effectcraft_model::Model>> {
-        if let Some(m) = lock(&self.models).get(path) {
-            return m.clone();
+        let found = lock(&self.models).get(path).cloned();
+        if let Some((m, files)) = found {
+            reads::note_all(&files);
+            return m;
         }
-        let loaded = self.read(path).map_err(|e| e.to_string()).and_then(|bytes| {
-            // Files the model names are read only when local or on the model's own network share.
-            let resolve = |uri: &str| -> Option<Vec<u8>> {
-                let p = craft_docpath::resolve_absolute(uri, Some(std::path::Path::new(path))).ok()?;
-                self.read(&p.to_string_lossy()).ok().map(|b| b.to_vec())
-            };
-            effectcraft_model::load(path, &bytes, &resolve).map_err(|e| e.to_string())
+        let (loaded, files) = reads::captured(|| {
+            self.read(path).map_err(|e| e.to_string()).and_then(|bytes| {
+                // Files the model names are read only when local or on the model's own network share.
+                let resolve = |uri: &str| -> Option<Vec<u8>> {
+                    let p = craft_docpath::resolve_absolute(uri, Some(std::path::Path::new(path))).ok()?;
+                    self.read(&p.to_string_lossy()).ok().map(|b| b.to_vec())
+                };
+                effectcraft_model::load(path, &bytes, &resolve).map_err(|e| e.to_string())
+            })
         });
         let m = match loaded {
             Ok(m) => Some(Arc::new(m)),
@@ -630,14 +644,29 @@ impl Inner {
                 None
             }
         };
-        lock(&self.models).entry(path.to_string()).or_insert(m).clone()
+        let (m, files) = lock(&self.models).entry(path.to_string()).or_insert((m, Arc::new(files))).clone();
+        reads::note_all(&files);
+        m
     }
 
+    /// The bytes of the file at `path`, noted as read (see [`crate::reads`]).
     fn read(&self, path: &str) -> Result<Arc<[u8]>> {
-        if let Some(b) = lock(&self.files).get(path) {
-            return Ok(b.clone());
+        let (bytes, file) = self.read_file(path);
+        reads::note(file);
+        bytes
+    }
+
+    /// The bytes of the file at `path` and its identity as read ([`FileStamp::Missing`] when it
+    /// can't be read), not noted.
+    fn read_file(&self, path: &str) -> (Result<Arc<[u8]>>, ReadFile) {
+        let in_memory = lock(&self.files).get(path).cloned();
+        if let Some(b) = in_memory {
+            return (Ok(b), ReadFile::new(path, FileStamp::Virtual));
         }
-        crate::read_regular_file(std::path::Path::new(path)).map(Into::into).map_err(|e| MediaError::Io(format!("{path}: {e}")))
+        match crate::read_regular_file_stamped(std::path::Path::new(path)) {
+            Ok((bytes, stamp)) => (Ok(bytes.into()), ReadFile::new(path, stamp)),
+            Err(e) => (Err(MediaError::Io(format!("{path}: {e}"))), ReadFile::new(path, FileStamp::Missing)),
+        }
     }
 
     /// The opened movie/audio source for `path` ([`Opened`]). The first caller opens it, outside
@@ -645,35 +674,42 @@ impl Inner {
     /// files are decoded whole); callers asking for the same file meanwhile wait for that instead
     /// of opening it again: a preview's frame workers, audio feeder, conform and waveform threads
     /// each decoded a long FLAC in full at once (#408).
+    /// Each call notes the file as read (see [`crate::reads`]), with its identity as opened.
     fn opened(&self, path: &Arc<str>) -> Option<Opened> {
         let slot = lock(&self.sources).entry(path.clone()).or_default().clone();
-        slot.get_or_init(|| {
-            self.opened.fetch_add(1, Ordering::Relaxed);
-            // Files on disk are read in place (the index, then samples on demand) rather than
-            // whole; in-memory files (`add_bytes`) and wasm32 builds open from bytes.
-            let in_memory = lock(&self.files).contains_key(&**path);
-            let file = std::path::Path::new(&**path);
-            let in_place = if in_memory { None } else { crate::stream::open_source(file) };
-            let in_place = in_place.map(|src| {
-                let (header, reader) = (crate::stream::movie_header(file), crate::stream::file_reader(file));
-                src.map(|src| Opened::new(src, header.as_deref(), reader.as_deref()))
+        let (opened, file) = slot.get_or_init(|| self.open(path));
+        reads::note(file.clone());
+        opened.clone()
+    }
+
+    /// Open the movie/audio file at `path` (see [`Inner::opened`]), with its identity as opened.
+    fn open(&self, path: &Arc<str>) -> (Option<Opened>, ReadFile) {
+        self.opened.fetch_add(1, Ordering::Relaxed);
+        // Files on disk are read in place (the index, then samples on demand) rather than
+        // whole; in-memory files (`add_bytes`) and wasm32 builds open from bytes.
+        let in_memory = lock(&self.files).contains_key(&**path);
+        let file = std::path::Path::new(&**path);
+        let in_place = if in_memory { None } else { crate::stream::open_source(file) };
+        let in_place = in_place.map(|(src, stamp)| {
+            let (header, reader) = (crate::stream::movie_header(file), crate::stream::file_reader(file));
+            (src.map(|src| Opened::new(src, header.as_deref(), reader.as_deref())), ReadFile::new(path.clone(), stamp))
+        });
+        let (opened, read) = in_place.unwrap_or_else(|| {
+            let (bytes, read) = self.read_file(path);
+            let opened = bytes.and_then(|bytes| {
+                let name = std::path::Path::new(&**path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let src = filmcraft_codecs::open_bytes(&name, bytes.clone()).map_err(MediaError::from)?;
+                Ok(Opened::new(src, Some(&bytes), Some(&filmcraft_media::reader::MemReader(bytes.clone()))))
             });
-            let opened = in_place.unwrap_or_else(|| {
-                self.read(path).and_then(|bytes| {
-                    let name = std::path::Path::new(&**path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let src = filmcraft_codecs::open_bytes(&name, bytes.clone()).map_err(MediaError::from)?;
-                    Ok(Opened::new(src, Some(&bytes), Some(&filmcraft_media::reader::MemReader(bytes.clone()))))
-                })
-            });
-            match opened {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    self.note_problem(path, "", &e);
-                    None
-                }
+            (opened, read)
+        });
+        match opened {
+            Ok(s) => (Some(s), read),
+            Err(e) => {
+                self.note_problem(path, "", &e);
+                (None, read)
             }
-        })
-        .clone()
+        }
     }
 
     /// Remember why the movie at `path` cannot be shown (`codec` is the footage's, when known)
@@ -694,13 +730,15 @@ impl Inner {
     /// map's lock; callers asking for the same file meanwhile wait for that.
     fn gif(&self, path: &Arc<str>) -> Result<Arc<Anim>> {
         let slot = lock(&self.gifs).entry(path.clone()).or_default().clone();
-        let loaded = slot.get_or_init(|| {
-            let loaded = self.read(path).and_then(|bytes| Anim::load(&bytes));
-            loaded.map(Arc::new).map_err(|e| {
+        let (loaded, file) = slot.get_or_init(|| {
+            let (bytes, file) = self.read_file(path);
+            let loaded = bytes.and_then(|bytes| Anim::load(&bytes)).map(Arc::new).map_err(|e| {
                 log::warn!("media: cannot decode {path}: {e}");
                 e.to_string()
-            })
+            });
+            (loaded, file)
         });
+        reads::note(file.clone());
         loaded.clone().map_err(|e| MediaError::Decode(format!("{path}: {e}")))
     }
 
@@ -783,19 +821,15 @@ impl Inner {
         let mut c = lock(&self.cache);
         // sequential playback of a movie: read the next frame ahead
         if playback && movie {
-            let prev = c.last.insert(loc.key.path.clone(), loc.key.frame);
-            if prev == Some(loc.key.frame - 1) && self.read_ahead.load(Ordering::Relaxed) {
-                let next_t = t + footage.frame_rate.frame_duration();
-                let mut next = Self::locate(footage, next_t, float);
-                next.key.size = loc.key.size;
-                if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains(&next.key) {
-                    self.prefetch(footage, next_t, size, float);
-                }
-            }
+            self.prefetch_next(&mut c, &loc, footage, t, size, float);
         }
+        // (Each exit notes the files the frame came from, see `crate::reads`; a cached frame
+        // notes those it was decoded from, without touching them.)
         loop {
-            if let Some(img) = c.lru.get(&loc.key) {
+            if let Some((img, files)) = c.lru.get(&loc.key) {
                 self.hits.fetch_add(1, Ordering::Relaxed);
+                drop(c);
+                reads::note_all(&files);
                 return Ok(img);
             }
             if !c.inflight.contains(&loc.key) {
@@ -808,7 +842,9 @@ impl Inner {
             if rayon::current_thread_index().is_some() {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 drop(c);
-                return Ok(Arc::new(self.decode(&loc, footage)?));
+                let (img, files) = reads::captured(|| self.decode(&loc, footage));
+                reads::note_all(&files);
+                return Ok(Arc::new(img?));
             }
             c = self.done.wait(c).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
@@ -816,9 +852,24 @@ impl Inner {
         c.inflight.insert(loc.key.clone());
         drop(c);
         let _guard = Inflight { inner: self, key: loc.key.clone() };
-        let img = Arc::new(self.decode(&loc, footage)?);
-        lock(&self.cache).lru.insert(loc.key, img.clone(), self.budget());
+        let (img, files) = reads::captured(|| self.decode(&loc, footage));
+        reads::note_all(&files);
+        let img = Arc::new(img?);
+        lock(&self.cache).lru.insert(loc.key, img.clone(), Arc::new(files), self.budget());
         Ok(img)
+    }
+
+    /// Sequential playback of a movie (`loc`, at `t`): read the frame after it ahead.
+    fn prefetch_next(self: &Arc<Self>, c: &mut CacheState, loc: &Loc, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) {
+        let prev = c.last.insert(loc.key.path.clone(), loc.key.frame);
+        if prev == Some(loc.key.frame - 1) && self.read_ahead.load(Ordering::Relaxed) {
+            let next_t = t + footage.frame_rate.frame_duration();
+            let mut next = Self::locate(footage, next_t, float);
+            next.key.size = loc.key.size;
+            if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains(&next.key) {
+                self.prefetch(footage, next_t, size, float);
+            }
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -856,13 +907,17 @@ impl Inner {
         }
     }
 
+    /// Decodes the still image at `loc` and applies the footage alpha and float handling.
+    /// A placeholder path decodes to colour bars.
     fn decode_still(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
         let op = AlphaOp::of(footage, loc.float);
         let path = &loc.key.path;
         if &**path == PLACEHOLDER {
             return Ok(colour_bars(footage.width, footage.height));
         }
-        let bytes = self.read(path)?;
+        let (bytes, file) = self.read_file(path);
+        reads::note(file.clone());
+        let bytes = bytes?;
         if let Some(img) = crate::dpx::decode(path, &bytes)? {
             return Ok(dynamic_to_image(&img, op));
         }
@@ -880,7 +935,7 @@ impl Inner {
         let shared = lock(&self.aux_footage).contains(&footage.path);
         if shared
             && path.to_ascii_lowercase().ends_with(".exr")
-            && let Some(img) = crate::exr_channels::cached_picture(path, bytes.clone(), op)
+            && let Some(img) = crate::exr_channels::cached_picture(path, bytes.clone(), &file, op)
         {
             return Ok(img);
         }
@@ -889,7 +944,7 @@ impl Inner {
         match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
             Ok(img) => Ok(dynamic_to_image(&img, op)),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
-            Err(e) => crate::exr_channels::layered_picture(path, bytes, op, shared)
+            Err(e) => crate::exr_channels::layered_picture(path, bytes, &file, op, shared)
                 .map_err(|why| MediaError::Decode(format!("{path}: {}", why.unwrap_or_else(|| e.to_string())))),
         }
     }
@@ -956,6 +1011,13 @@ impl FootageSource for MediaPool {
     /// hold the decoder the frame under the pointer waits for (#329).
     fn cancellable(&self, cancel: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
         filmcraft_media::cancel::with_cancel(cancel, f)
+    }
+    /// Every read of a file notes it (see [`crate::reads`]): a frame's image file or sequence
+    /// frame, a movie, a model and the files it names, an EXR's channels, a movie's audio. A
+    /// frame (or other entry) served from memory notes the files it was made of, as they were
+    /// when read, without reading them again. A missing sequence frame (colour bars) reads none.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        reads::recording(reads, f)
     }
     fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>> {
         self.frame_sized(item, footage, t, None, FloatCurve::Srgb)
@@ -1207,13 +1269,13 @@ mod tests {
         let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0) };
         let budget = 3 * (4096 + 64);
         for i in 0..10 {
-            c.insert(k(i), img(), budget);
+            c.insert(k(i), img(), Arc::default(), budget);
         }
         assert_eq!(c.map.len(), 3);
         assert!(c.get(&k(9)).is_some() && c.get(&k(6)).is_none());
         // touching 7 makes 8 the oldest
         c.get(&k(7));
-        c.insert(k(10), img(), budget);
+        c.insert(k(10), img(), Arc::default(), budget);
         assert!(c.get(&k(7)).is_some() && c.get(&k(8)).is_none());
         assert_eq!(c.spare.len(), MAX_SPARE);
         assert_eq!(c.take_spare(256).len(), 256);
