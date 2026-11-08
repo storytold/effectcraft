@@ -524,6 +524,41 @@ fn a_parent_that_cannot_be_inverted_falls_back_to_the_point_of_interest() {
     assert!(dist3(arr3(&r2["pivot"]), pivot) < 1e-9);
 }
 
+/// A one-node camera under a scale-0 parent: Pan Under Cursor and Dolly to Cursor work as their
+/// Camera POI variants, and report the rig's point of interest through the parent, which is
+/// where the parent puts every point (#2586).
+#[test]
+fn a_one_node_camera_under_a_scale_0_parent_pans_and_dollies_about_its_poi() {
+    let setup = || {
+        let mut s = session();
+        solid3d(&mut s, 100, 100, [400.0, 120.0, 200.0]);
+        let parent = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.setSwitch", json!({"layer": parent, "switch": "threeD", "value": true})).unwrap();
+        s.execute("prop.set", json!({"layer": parent, "path": "transform/position", "value": [100, 50, 30]})).unwrap();
+        let cam = s.execute("layer.newCamera", json!({"type": "oneNode"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.setParent", json!({"layers": [cam], "parent": parent, "compensate": false})).unwrap();
+        s.execute("prop.set", json!({"layer": parent, "path": "transform/scale", "value": [0, 0, 0]})).unwrap();
+        (s, cam)
+    };
+    for (cmd, params, poi_mode) in [
+        ("camera.pan", json!({"dx": 30, "dy": -12, "mode": "underCursor", "cursor": [200, 100]}), "cameraPoi"),
+        ("camera.dolly", json!({"amount": 80, "mode": "toCursor", "cursor": [200, 100]}), "toCameraPoi"),
+    ] {
+        let (mut s, cam) = setup();
+        let r = s.execute(cmd, params.clone()).unwrap();
+        let pivot = arr3(&r["pivot"]);
+        assert!(dist3(pivot, [100.0, 50.0, 30.0]) < 1e-9, "{cmd}: {pivot:?}");
+        let moved = (prop(&s, cam, "transform/position").as_vec3(), prop(&s, cam, "transform/orientation").as_vec3());
+        assert!(moved.0.iter().chain(moved.1.iter()).all(|v| v.is_finite()), "{cmd}: {moved:?}");
+        let (mut t, cam_t) = setup();
+        let mut poi_params = params;
+        poi_params["mode"] = json!(poi_mode);
+        t.execute(cmd, poi_params).unwrap();
+        let want = (prop(&t, cam_t, "transform/position").as_vec3(), prop(&t, cam_t, "transform/orientation").as_vec3());
+        assert!(dist3(moved.0, want.0) < 1e-9 && dist3(moved.1, want.1) < 1e-9, "{cmd}: {moved:?} vs {want:?}");
+    }
+}
+
 #[test]
 fn demo_has_3d_showcase() {
     let mut s = Session::default();

@@ -609,7 +609,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
     .ok_or_else(|| bad(cmd, "the comp has no active camera layer (Layer ▸ New ▸ Camera), or switch to a custom 3D view"))?;
     // The point under the cursor as the camera layer shows it, in world space (returned, and
     // sent back by the viewer as `point`) and in the camera's parent space (what the rig edits).
-    let (pivot, local_pivot, world_poi) = match comp.layer(cam) {
+    let (pivot, local_pivot, pw) = match comp.layer(cam) {
         Some(l) if !matches!(mode, ToolMode::Plain | ToolMode::Target) => {
             let ctx = EvalCtx {
                 project: &s.project,
@@ -630,16 +630,15 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
             };
             let world = tool_pivot(s, cid, p, mode, &state, poi, t);
             let local = world.and_then(|w| pw.inverse().map(|m| m.apply(w))).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite());
-            (world, local, poi)
+            (world, local, pw)
         }
-        _ => (None, None, Vec3::ZERO),
+        _ => (None, None, Mat4::IDENTITY),
     };
     // A parent that cannot be inverted leaves no pivot in the camera's space: work about its
-    // point of interest instead, and report that point as the one used (sent back as `point`,
-    // it lands here again).
+    // point of interest instead, and report that point (the rig's, through the parent) as the one
+    // used; sent back as `point`, it lands here again.
     let fallback = pivot.is_some() && local_pivot.is_none();
     let mode = if fallback { ToolMode::Target } else { mode };
-    let pivot = if fallback { Some(world_poi).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) } else { pivot };
     let merge = merge_p(p).map(str::to_string);
     let r = s.edit(label, merge.as_deref(), |proj, _| {
         let l = layer_mut(proj, cid, cam)?;
@@ -655,6 +654,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
             let fwd = (Mat4::orientation(Vec3::from(o)) * Mat4::rotation_xyz(rx, ry, 0.0)).apply_vec(vec3(0.0, 0.0, 1.0));
             pos + fwd * zoom
         };
+        let used = if fallback { Some(pw.apply(poi)).filter(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) } else { pivot };
         let mut rig = Rig { eye: pos, poi, zoom, ortho: false };
         apply(&mut rig, true, local_pivot, mode);
         set_at(l, "transform/position", t, KV::Vec3(camera::arr(rig.eye)));
@@ -665,7 +665,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
             set_at(l, "transform/rotationX", t, KV::Scalar(0.0));
             set_at(l, "transform/rotationY", t, KV::Scalar(0.0));
         }
-        Ok(json!({"layer": cam.0, "position": camera::arr(rig.eye), "poi": camera::arr(rig.poi), "pivot": pivot_json(pivot)}))
+        Ok(json!({"layer": cam.0, "position": camera::arr(rig.eye), "poi": camera::arr(rig.poi), "pivot": pivot_json(used)}))
     })?;
     Ok(r)
 }
