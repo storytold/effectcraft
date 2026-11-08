@@ -19,6 +19,7 @@ use crate::import::helpers::comp;
 
 const TEXT_SYNTHETIC: &[u8] = include_bytes!("../../fixtures/text-synthetic.aep");
 
+/// Imports `bytes` with losses allowed.
 fn run(bytes: &[u8]) -> (Project, ImportResult) {
     let mut project = Project::default();
     let none = |_: &str| false;
@@ -26,25 +27,30 @@ fn run(bytes: &[u8]) -> (Project, ImportResult) {
     (project, r)
 }
 
+/// The loss details of `category`.
 fn losses(r: &ImportResult, category: LossCategory) -> Vec<String> {
     r.report.losses.iter().filter(|l| l.category == category).flat_map(|l| l.details.clone()).collect()
 }
 
+/// The layer `name` of composition `C`.
 fn layer<'p>(p: &'p Project, r: &ImportResult, name: &str) -> &'p Layer {
     let (_, c) = comp(p, r, "C");
     c.layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("text layer {name}"))
 }
 
+/// The text animator `name` of `l`.
 fn animator<'l>(l: &'l Layer, name: &str) -> &'l PropGroup {
     l.props.group("text/animators").expect("animators").groups().find(|a| a.name == name).unwrap_or_else(|| panic!("animator {name}"))
 }
 
+/// The Source Text of `l`: its stored text and its expression.
 fn source_text(l: &Layer) -> (String, Option<Expression>) {
     let p = l.props.prop("text/sourceText").expect("Source Text");
     let Value::Text(doc) = &p.value else { panic!("{:?}", p.value) };
     (doc.text.clone(), p.expr.clone())
 }
 
+/// Stroke Opacity 40 % and its keys 0 % / 100 % arrive in percent, without a loss.
 #[test]
 fn text_animator_stroke_opacity_is_imported_static_and_keyed() {
     let (p, r) = run(TEXT_SYNTHETIC);
@@ -59,6 +65,7 @@ fn text_animator_stroke_opacity_is_imported_static_and_keyed() {
     assert_eq!(keys, vec![(Tick::ZERO, Value::Scalar(0.0)), (Tick(TICKS_PER_SECOND), Value::Scalar(100.0))]);
 }
 
+/// Both Source Text expressions arrive with their enable switch, next to the stored text.
 #[test]
 fn the_source_text_expression_is_imported_enabled_and_disabled() {
     let (p, r) = run(TEXT_SYNTHETIC);
@@ -70,6 +77,7 @@ fn the_source_text_expression_is_imported_enabled_and_disabled() {
     assert_eq!(r.report.imported.expressions, 2);
 }
 
+/// Calls `f` on every chunk below `chunks`, depth-first.
 fn visit(chunks: &mut [Chunk<'_>], f: &mut dyn FnMut(&mut Chunk<'_>)) {
     for c in chunks {
         f(c);
@@ -77,6 +85,7 @@ fn visit(chunks: &mut [Chunk<'_>], f: &mut dyn FnMut(&mut Chunk<'_>)) {
     }
 }
 
+/// Export and a second import keep the Source Text expressions and Stroke Opacity, unreported.
 #[test]
 fn stroke_opacity_and_source_text_expressions_survive_export() {
     let (p, r0) = run(TEXT_SYNTHETIC);
@@ -95,6 +104,7 @@ fn stroke_opacity_and_source_text_expressions_survive_export() {
     assert_eq!(keys, vec![(Tick::ZERO, Value::Scalar(0.0)), (Tick(TICKS_PER_SECOND), Value::Scalar(100.0))]);
 }
 
+/// Guard: an expression whose `tdb4` flags give no state stays reported instead of imported.
 #[test]
 fn a_source_text_expression_with_unreadable_flags_stays_reported() {
     // `tdb4` byte 120 is 1 on a property with an expression; with 0 the expression's state is

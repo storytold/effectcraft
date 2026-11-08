@@ -195,6 +195,8 @@ fn differs(g: &PropGroup, def: Option<&PropGroup>, depth: usize) -> bool {
     })
 }
 
+/// The text document `doc` in the file's terms (text, style runs, paragraphs, box); what the file
+/// cannot hold is reported for `what`.
 fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
     let base = doc.base_style();
     let runs = doc.runs();
@@ -529,6 +531,7 @@ pub(crate) fn build_doc(proto: &TNode, tp: &TextPlan) -> Option<TNode> {
 fn put_source_text_expression(layr: &mut crate::Chunk<'static>, text: &str, enabled: bool) -> crate::export::tree::R<()> {
     use crate::Body;
     use crate::export::tree::tpl;
+    /// The `tdbs` of the first `btds` below `c`, at most 32 levels down.
     fn find<'c>(c: &'c mut crate::Chunk<'static>, depth: usize) -> Option<&'c mut crate::Chunk<'static>> {
         if depth > 32 {
             return None;
@@ -562,6 +565,7 @@ fn put_source_text_expression(layr: &mut crate::Chunk<'static>, text: &str, enab
 pub(crate) fn put_doc(layr: &mut crate::Chunk<'static>, tp: &TextPlan, guid: [u8; 16]) -> crate::export::tree::R<()> {
     use crate::Body;
     use crate::export::tree::tpl;
+    /// The first `LIST btdk` below `c`, at most 32 levels down.
     fn find<'c>(c: &'c mut crate::Chunk<'static>, depth: usize) -> Option<&'c mut crate::Chunk<'static>> {
         if depth > 32 {
             return None;
@@ -574,6 +578,7 @@ pub(crate) fn put_doc(layr: &mut crate::Chunk<'static>, tp: &TextPlan, guid: [u8
             _ => None,
         }
     }
+    /// The first `pgui` of the first `btgu` below `c`, at most 32 levels down.
     fn find_pgui<'c>(c: &'c mut crate::Chunk<'static>, depth: usize) -> Option<&'c mut crate::Chunk<'static>> {
         if depth > 32 {
             return None;
