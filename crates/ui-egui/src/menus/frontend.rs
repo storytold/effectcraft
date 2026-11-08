@@ -644,7 +644,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
         "effect.plugins.install" if params.get("folder").is_none() && params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
         "effect.helpers.load" => ("path", Ask::Folder),
-        "file.replaceFootage" => ("path", Ask::Import),
+        "file.replaceFootage" => ("path", Ask::OpenFootage(MEDIA)),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
         // An open XML project gets ` copy` too: the copy never writes over the open file.
@@ -672,6 +672,10 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
     let footage = |more: &[&'static str]| effectcraft_project::VIDEO_EXTENSIONS.iter().chain(more).copied().collect::<Vec<_>>();
+    // File ▸ Import ▸ File… and Multiple Files… take projects too, as After Effects' File… takes an
+    // .aep; they import as projects (#3103). Replace Footage takes footage only.
+    const PROJECTS: &[&str] = &["aep", "aepx", "ecproj", "ecprojx"];
+    let import = || footage(MEDIA).into_iter().chain(PROJECTS.iter().copied()).collect::<Vec<_>>();
     // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
     // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
     // window and aborted the app (#511); Linux: the desktop portal's answer never gets pumped,
@@ -680,7 +684,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let request = match ask {
             Ask::Folder => crate::FileDialog::Folder,
-            Ask::Import => crate::FileDialog::Open { exts: footage(MEDIA).iter().map(|e| e.to_string()).collect(), many: key == "paths" },
+            Ask::Import => crate::FileDialog::Open { exts: import().iter().map(|e| e.to_string()).collect(), many: key == "paths" },
             Ask::OpenProject => crate::FileDialog::OpenProject,
             Ask::Open(exts) => crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: false },
             Ask::OpenFootage(more) => crate::FileDialog::Open { exts: footage(more).iter().map(|e| e.to_string()).collect(), many: false },
@@ -704,7 +708,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         }
         Ask::Import => {
             let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `paths`)".into())) };
-            picked_value(key, f(&footage(MEDIA)))
+            picked_value(key, f(&import()))
         }
         Ask::OpenProject => {
             let Some(f) = app.hooks.pick_open_project.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
@@ -775,12 +779,28 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     // Picked files import in the background, with the Importing card showing progress (#270).
     if matches!(id, "file.import" | "file.importMultiple") {
         p.insert("background".into(), Value::Bool(true));
+        // After Effects projects import as their own menu entry does, asking about losses (#3103).
+        let picked: Vec<String> =
+            p.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let (aep, rest): (Vec<String>, Vec<String>) = picked.into_iter().partition(|x| crate::panels::aep_losses::is_aep(x));
+        if !aep.is_empty() {
+            let errors = crate::panels::aep_losses::import_projects(app, aep);
+            if !errors.is_empty() {
+                app.ui.status = errors.join("; ");
+            }
+            if rest.is_empty() {
+                return Ok(json!({"errors": errors}));
+            }
+            p.insert(key.to_string(), json!(rest));
+        }
     }
     // Photoshop files ask how to import them first; numbered stills whether to import them as an
-    // image sequence.
+    // image sequence. Not while the losses prompt of a project picked with them is open: there is
+    // one dialog at a time, so they import with the defaults.
     let picked = Value::Object(p.clone());
-    if id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)
-        || matches!(id, "file.import" | "file.importMultiple") && crate::panels::forms::open_import_sequence(app, &picked)
+    let asking = app.dialog_state.aep_losses.command.is_some();
+    if !asking && id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)
+        || !asking && matches!(id, "file.import" | "file.importMultiple") && crate::panels::forms::open_import_sequence(app, &picked)
     {
         return Ok(json!({"dialog": id}));
     }

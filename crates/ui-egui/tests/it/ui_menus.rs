@@ -291,6 +291,34 @@ fn import_and_proxy_dialogs_offer_every_movie_type() {
     }
 }
 
+/// #3103: File ▸ Import ▸ File… and Multiple Files… offer After Effects and EffectCraft projects
+/// (they import as projects); File ▸ Replace Footage ▸ File… offers footage only.
+#[test]
+fn import_dialogs_offer_projects_and_replace_footage_does_not() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let mut app = EffectcraftApp::new(Session::default());
+    let item = app.session.execute("file.importPlaceholder", json!({"name": "Shot"})).unwrap()["item"].as_u64().unwrap();
+    app.session.state.project_selection = vec![effectcraft_engine::project::ItemId(item)];
+    let offered = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = offered.clone();
+    app.hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
+        *seen.borrow_mut() = exts.iter().map(|e| e.to_string()).collect();
+        Vec::new()
+    }));
+    const PROJECTS: [&str; 4] = ["aep", "aepx", "ecproj", "ecprojx"];
+    for (command, projects) in [("file.import", true), ("file.importMultiple", true), ("file.replaceFootage", false)] {
+        offered.borrow_mut().clear();
+        effectcraft_ui_egui::menus::invoke(&mut app, &egui::Context::default(), command, json!({})).unwrap();
+        let offered = offered.borrow();
+        assert!(offered.iter().any(|e| e == "png"), "{command} asked: {offered:?}");
+        for ext in PROJECTS {
+            assert_eq!(offered.iter().any(|e| e == ext), projects, "{command} and {ext}: {offered:?}");
+        }
+    }
+}
+
 /// #1059: opening the demo from the start screen and immediately pressing Spacebar previews
 /// the demo — the start screen's keyboard focus must not outlive it.
 #[test]

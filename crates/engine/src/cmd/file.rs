@@ -404,12 +404,25 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     let mut comps = vec![];
     let mut items = vec![];
     let mut errors = vec![];
-    // EffectCraft projects import as projects, as After Effects imports an .aep.
-    let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    // EffectCraft projects import as projects, as After Effects imports an .aep; so do After
+    // Effects projects (#3103), refused when parts of them cannot be imported. The app asks about
+    // those before it runs this (`panels::aep_losses`); agents get the refusal.
+    let (project_paths, paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    let (aep_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::aep::is_aep_path(x));
     let mut projects = vec![];
     for path in project_paths {
         match s.execute("file.importProject", json!({"path": path})) {
             Ok(r) => projects.push(r),
+            Err(e) => errors.push(format!("{path}: {e}")),
+        }
+    }
+    for path in aep_paths {
+        match s.execute("file.importAep", json!({"path": path})) {
+            Ok(r) => projects.push(r),
+            // A refusal points at the entry that shows the losses and asks.
+            Err(crate::EngineError::Refused { losses, .. }) => {
+                errors.push(format!("{path}: {losses}; File ▸ Import ▸ Adobe After Effects Project… lists them and can import the rest"))
+            }
             Err(e) => errors.push(format!("{path}: {e}")),
         }
     }

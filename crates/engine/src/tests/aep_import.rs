@@ -1,4 +1,4 @@
-//! File ▸ Import ▸ After Effects Project… through the command registry, with the synthetic
+//! File ▸ Import ▸ Adobe After Effects Project… through the command registry, with the synthetic
 //! fixtures of `effectcraft-aep`.
 
 use serde_json::json;
@@ -151,7 +151,60 @@ fn bad_input_is_an_error_not_a_crash() {
 fn aep_menu_entry_exists() {
     let entries = crate::menus::entries();
     let find = |cmd: &str| entries.iter().find(|(_, e)| e.command == cmd).map(|(p, e)| (p.join(" > "), e.label.clone()));
-    assert_eq!(find("file.importAep"), Some(("File > Import".into(), "After Effects Project...".into())));
+    assert_eq!(find("file.importAep"), Some(("File > Import".into(), "Adobe After Effects Project...".into())));
+}
+
+/// File ▸ Import lists After Effects' entries in After Effects' order, the project imports
+/// together where AE has its Premiere Pro one, and below them the formats only EffectCraft
+/// imports, alphabetical (#3103).
+#[test]
+fn the_import_submenu_keeps_after_effects_order_with_the_projects_together() {
+    let labels: Vec<String> = crate::menus::entries().into_iter().filter(|(p, _)| p == &["File", "Import"]).map(|(_, e)| e.label.clone()).collect();
+    assert_eq!(
+        labels,
+        [
+            "File...",
+            "Multiple Files...",
+            "Adobe After Effects Project...",
+            "Adobe Premiere Pro Project...",
+            "EffectCraft Project...",
+            "Vanishing Point (.vpe)...",
+            "Placeholder...",
+            "Solid...",
+            "Essential Graphics Template...",
+            "Lottie...",
+        ]
+    );
+}
+
+/// File ▸ Import ▸ File… imports an After Effects project as File ▸ Import ▸ Adobe After Effects
+/// Project… does, rather than failing to read it as footage (#3103).
+#[test]
+fn import_file_hands_an_aep_to_the_project_import() {
+    let mut s = Session::default();
+    let r = s.execute_checked("file.import", json!({"paths": [fixture!("055-key-position-3key-inserted-t2.5.aep")]})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    assert_eq!(r["projects"][0]["report"]["imported"]["compositions"], 1, "{r}");
+    assert!(!s.project.items.is_empty());
+
+    // Losses are refused as from the menu entry, which the message names; nothing changes.
+    let mut t = Session::default();
+    let r = t.execute_checked("file.import", json!({"paths": [fixture!("077-fx-dropdown-default.aep")]})).unwrap();
+    let err = r["errors"][0].as_str().unwrap_or_default();
+    assert!(err.contains("effects: 1") && err.contains("Adobe After Effects Project…"), "{r}");
+    assert!(!err.contains("allowLosses"), "no advice for agents in what the app shows: {r}");
+    assert!(r.get("projects").is_none(), "{r}");
+    assert!(t.project.items.is_empty());
+
+    // A file that is no project is an error, not a crash, with no pointer to the losses.
+    let dir = std::env::temp_dir().join(format!("effectcraft-aep-route-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let junk = dir.join("junk.AEPX");
+    std::fs::write(&junk, b"not a project").unwrap();
+    let r = t.execute_checked("file.import", json!({"paths": [junk.to_string_lossy()]})).unwrap();
+    let err = r["errors"][0].as_str().unwrap_or_default();
+    assert!(!err.is_empty() && !err.contains("Adobe After Effects Project…"), "{r}");
+    assert!(t.project.items.is_empty());
 }
 
 #[test]

@@ -82,6 +82,11 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         errors.push(crate::i18n::tr_args("Cannot open dropped project {}: {}", &[&p, &e]));
     }
 
+    // After Effects projects import as File ▸ Import ▸ Adobe After Effects Project… does, asking
+    // about losses first (#3103).
+    let (aep, rest): (Vec<String>, Vec<String>) = rest.into_iter().partition(|p| crate::panels::aep_losses::is_aep(p));
+    errors.extend(crate::panels::aep_losses::import_projects(app, aep));
+
     if !rest.is_empty() {
         let viewer = app
             .auto

@@ -514,6 +514,27 @@ fn dropped_file_on_the_timeline_becomes_a_layer() {
     step_until(&mut h, |h| h.state().session.active_comp().is_some_and(|c| c.layers.iter().any(|l| l.name == "timeline-drop.mp4")));
 }
 
+/// #3103: a dropped After Effects project with parts EffectCraft cannot import opens the losses
+/// prompt, as File ▸ Import ▸ Adobe After Effects Project… does; nothing arrives until Import
+/// Anyway.
+#[test]
+fn dropped_lossy_aep_asks_about_the_losses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aep/tests/fixtures/synthetic.aep");
+    let (mut h, _) = harness();
+    let losses = h.state_mut().session.execute("file.importAep", json!({"path": path.to_string_lossy(), "dryRun": true})).unwrap()["report"]["losses"].clone();
+    assert!(losses.as_array().is_some_and(|l| !l.is_empty()), "the fixture has losses: {losses}");
+    let before = h.state().session.project.items.len();
+    h.event(Event::PointerMoved(rect(&h, "panel.Project").center()));
+    h.step();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(path)));
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::AepLosses), "{}", h.state().ui.status);
+    assert_eq!(h.state().session.project.items.len(), before, "nothing imported before the answer");
+    click_id(&mut h, "dialog.aepLosses.continue");
+    assert_eq!(h.state().dialog, None);
+    assert!(h.state().session.project.items.values().any(|i| i.name == "synthetic.aep"), "Import Anyway imported the project");
+}
+
 /// #678: a dropped Photoshop file asks how to import it, as File ▸ Import ▸ File… does; the
 /// Import Kind starts at Settings ▸ Import ▸ Default Drag Import As, and OK imports the drop.
 #[test]

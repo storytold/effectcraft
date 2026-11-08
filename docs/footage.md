@@ -60,7 +60,9 @@ Order.
 
 ## Importing another project
 
-File ▸ Import ▸ EffectCraft Project… (or an `.ecproj` / `.ecprojx` file given to File ▸ Import)
+File ▸ Import ▸ EffectCraft Project… (or an `.ecproj` / `.ecprojx` file given to File ▸ Import ▸
+File…; an `.aep` / `.aepx` given there goes to File ▸ Import ▸ Adobe After Effects Project…, see
+[aep-import.md](aep-import.md))
 merges that project into the open one, inside a folder named after the file, as After Effects
 imports an `.aep`. Every item, layer and property id moves past the open project's, so precomps,
 parents, track mattes, Layer Control values, Essential Graphics and tracker targets keep pointing

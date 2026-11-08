@@ -1,4 +1,4 @@
-//! File ▸ Import / Export ▸ After Effects Project… from the menu: what the conversion cannot
+//! File ▸ Import / Export ▸ Adobe After Effects Project… from the menu: what the conversion cannot
 //! carry over is shown first (the command's dry run), and the user chooses to cancel or to go on
 //! with those losses (`allowLosses`). Cancel changes nothing; a conversion without losses runs at
 //! once. Agents running `file.importAep` / `file.exportAep` with `engine.execute` are never asked:
@@ -17,6 +17,40 @@ use crate::{Dialog, EffectcraftApp};
 #[derive(Clone, Debug, Default)]
 pub struct Pending {
     pub command: Option<(String, Value, Value)>,
+    /// Further After Effects projects picked or dropped with it, imported once it is answered.
+    pub queue: Vec<String>,
+}
+
+/// Whether `path` names an After Effects project (`.aep`, or `.aepx`), which File ▸ Import ▸
+/// File… and a drop import through File ▸ Import ▸ Adobe After Effects Project… (#3103).
+pub fn is_aep(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".aep") || lower.ends_with(".aepx")
+}
+
+/// Import After Effects projects picked with File ▸ Import ▸ File… or dropped, as their own menu
+/// entry does: one with losses opens the prompt, and the ones after it wait for its answer. The
+/// messages of the files that could not be read.
+pub fn import_projects(app: &mut EffectcraftApp, paths: Vec<String>) -> Vec<String> {
+    let mut errors = Vec::new();
+    for path in paths {
+        if app.dialog_state.aep_losses.command.is_some() {
+            app.dialog_state.aep_losses.queue.push(path);
+            continue;
+        }
+        let params = json!({"path": path});
+        let run = match guard(app, "file.importAep", &params) {
+            Ok(asked) => !asked,
+            Err(e) => {
+                errors.push(format!("{path}: {e}"));
+                false
+            }
+        };
+        if run && let Err(e) = app.session.execute("file.importAep", params) {
+            errors.push(format!("{path}: {e}"));
+        }
+    }
+    errors
 }
 
 /// How many detail lines of a loss category the prompt shows.
@@ -70,7 +104,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         return;
     };
     let import = id == "file.importAep";
-    let title = if import { "Import After Effects Project" } else { "Export After Effects Project" };
+    let title = if import { "Import Adobe After Effects Project" } else { "Export Adobe After Effects Project" };
     let mut answer: Option<bool> = None;
     super::dialogs::modal(ctx, title, vec2(520.0, 340.0), t, |ui| {
         let text = if import {
@@ -119,6 +153,12 @@ fn finish(app: &mut EffectcraftApp, ctx: &egui::Context, go: bool) {
     if go {
         // An error is already in the status bar.
         let _ = crate::menus::run_engine(app, ctx, &id, with_losses(&params));
+    }
+    // The projects picked or dropped with this one: Cancel skips only this one.
+    let queue = std::mem::take(&mut app.dialog_state.aep_losses.queue);
+    let errors = import_projects(app, queue);
+    if !errors.is_empty() {
+        app.ui.status = errors.join("; ");
     }
 }
 
