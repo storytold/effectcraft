@@ -46,14 +46,11 @@
     import init, * as ec from "./effectcraft_web.js";
     const t0 = performance.now();
     window.effectcraftLoad = {};
-    // The agent / test API: the desktop control channel as promises (docs/web.md).
+    // The agent / test API (docs/web.md). `request`, `execute`, `commands`, `docInspect`, `uiInspect`
+    // and `screenshot` are added by craft-web-api when the app starts; these are EffectCraft's own.
     window.effectcraft = {
-      request: (method, params) => ec.request(method, params ?? {}),
-      execute: (command, params) => ec.request("engine.execute", { command, params: params ?? {} }),
-      commands: () => ec.request("engine.commands", {}),
-      inspect: () => ec.request("ui.inspect", {}),
-      screenshot: (params) => ec.request("ui.screenshot", params ?? {}),
-      renderFrame: (params) => ec.request("render.frame", { base64: true, ...(params ?? {}) }),
+      inspect: () => window.effectcraft.uiInspect({}),
+      renderFrame: (params) => window.effectcraft.request("render.frame", { base64: true, ...(params ?? {}) }),
       files: () => ec.files(),
       readFile: (path) => ec.readFile(path),
       addFile: async (fileOrUrl, name) => {

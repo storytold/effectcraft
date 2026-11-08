@@ -404,15 +404,20 @@ first visit the app loads without a network.
 ## `window.effectcraft`: the agent / test API
 
 The control channel of the desktop app (`docs/control-protocol.md`) as promises. Results resolve
-with the method's `result`, errors reject with the message.
+with the method's `result`, errors reject with the message. `request`, `execute`, `commands`,
+`uiInspect` and `screenshot` come from [`craft-web-api`](https://github.com/storytold/craft-libs/tree/main/crates/web-api)
+(storytold/craft-libs#413), the same shape in every Craft app: a call the app does not answer within
+30 seconds rejects, and an app that has not started it still runs it when it reaches it (EffectCraft's
+control requests cannot be withdrawn). EffectCraft has no `document.inspect`, so there is no
+`docInspect`.
 
 | Call | |
 |---|---|
 | `effectcraft.request(method, params)` | any control method: `ui.inspect`, `ui.click`, `ui.key`, `ui.playback`, `ui.menu.invoke`, `render.frame`… |
 | `effectcraft.execute(command, params)` | `engine.execute`: an engine command (same ids and params as MCP / `effectcraft-cli`) |
-| `effectcraft.commands()` / `effectcraft.inspect()` | `engine.commands` / `ui.inspect` |
+| `effectcraft.commands()` / `effectcraft.uiInspect(params)` | `engine.commands` / `ui.inspect` (`effectcraft.inspect()` is `uiInspect` under its earlier name) |
 | `effectcraft.renderFrame(params)` | `render.frame` with `base64: true`: `{comp, time, width, height, png}` |
-| `effectcraft.screenshot(params)` | `ui.screenshot`; without `path` the PNG comes back inline as `png` (base64) |
+| `effectcraft.screenshot(params)` | `ui.screenshot`; without `path` the PNG comes back inline as `png` (base64), also in `data` |
 | `effectcraft.addFile(fileOrUrl, name?)` | put a `File`/`Blob` (or fetched URL) into the file table (stored) and open (`.ecproj`) or import it; resolves with its path |
 | `effectcraft.files()` / `effectcraft.readFile(path)` | the file table `[{path, size}]` / a file's bytes (`Uint8Array`), e.g. a render |
 | `effectcraft.saveToBrowser(path?)` | save the project to browser storage without downloading it (default: its path, or `/<name>.ecproj`); resolves with `{path, bytes}` |
