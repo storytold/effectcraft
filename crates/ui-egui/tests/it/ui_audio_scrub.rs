@@ -74,16 +74,6 @@ impl GatedFrames {
         }
     }
 
-    /// Cache every frame the app has asked for since the last call, and nothing else: a renderer
-    /// that keeps up with the real prefetch requests.
-    fn release_requested(&self, h: &mut Harness<'_, EffectcraftApp>) {
-        while h.state().frames.dispatch_remote() != 0 {}
-        for (_, width, height, done) in std::mem::take(&mut *self.pending.lock().unwrap()) {
-            let rgba = vec![0; (width as usize).saturating_mul(height as usize).saturating_mul(4)];
-            done(Ok(RemoteFrame { width, height, rgba, ms: 1.0 }));
-        }
-    }
-
     /// Drop everything queued without caching it (the warm-up passes request viewer frames).
     fn discard(&self, h: &mut Harness<'_, EffectcraftApp>) {
         while h.state().frames.dispatch_remote() != 0 {}
@@ -215,7 +205,7 @@ fn step(h: &mut Harness<'_, EffectcraftApp>) {
 /// Starting a preview with sound before its frames are cached (#947): the playhead holds the
 /// first frame while the frames ahead render, then sound and picture start together from it (the
 /// sound used to start at a later frame, losing the opening). A frame that isn't cached later on
-/// still stops the sound rather than being skipped (#103).
+/// no longer stops the sound (#2473).
 #[test]
 fn preview_with_audio_holds_the_first_frame_and_sounds_from_it() {
     let fake = Fake::default();
@@ -247,11 +237,12 @@ fn preview_with_audio_holds_the_first_frame_and_sounds_from_it() {
     assert!(h.state().audio.is_some() && fake.0.lock().unwrap().0.is_some(), "the sound started once the frames ahead were cached");
     assert_eq!(audio_frame(&h, cid), Some(0), "from the first frame, not a later one");
     assert!(!h.state().playback.starting);
-    // A frame that isn't cached stops the sound rather than being skipped.
+    // A frame that isn't cached keeps the sound playing; the picture waits for frames (#2473).
     gate.discard(&mut h);
     h.state().frames.clear();
     h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing);
+    assert!(h.state().audio.is_some() && !h.state().playback.audio_held && h.state().playback.playing, "the sound plays on");
+    assert!(h.state().playback.waiting, "the picture waits for its frame");
 }
 
 /// A long (30 s) preview sounds once the frames ahead of its first frame are cached, not the
@@ -279,24 +270,12 @@ fn preview_with_audio_sounds_without_caching_the_work_area() {
     assert!((1..900).contains(&cached), "it started with {cached} of the 900 frames cached, not the whole work area");
 }
 
-/// Pretend the silent preview showed its last ten frames in real time, up to now: the next step
-/// then finds it keeping up (`Playback::keeps_up`), however long steps take on the test host.
-fn kept_up(h: &mut Harness<'_, EffectcraftApp>) {
-    let now = h.state().now();
-    h.state_mut().playback.shown_at = (0..10i32).map(|i| now - f64::from(9 - i) / 30.0).collect();
-}
-
-/// Frames `from..from + n`.
-fn run(from: i64, n: i64) -> Vec<i64> {
-    (from..from + n).collect()
-}
-
-/// A preview that renders just below real time (#2473, #3260): once a stall stopped the sound,
-/// `ahead` cached frames were enough to start it again while the silent preview kept up, so it
-/// ran out of them, stopped and started again every few frames, which played as distortion.
-/// After each stall the sound waits for twice as many cached frames ahead.
+/// A preview whose rendering falls behind its sound keeps the sound playing (#2473, #3260): the
+/// picture shows the latest frame rendered up to the sound, dropping the others, and frames are
+/// rendered ahead of the sound rather than of the picture. Stopping the sound at every frame that
+/// wasn't cached chopped it into bursts.
 #[test]
-fn each_stall_doubles_the_frames_ahead_the_sound_waits_for() {
+fn a_preview_behind_its_sound_drops_frames_and_keeps_the_sound() {
     let fake = Fake::default();
     let (mut app, cid) = setup_long(true, &fake, 30.0);
     let gate = GatedFrames::default();
@@ -309,101 +288,37 @@ fn each_stall_doubles_the_frames_ahead_the_sound_waits_for() {
     let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
     let now = h.state().now();
     h.state_mut().play(now);
-    gate.render(&mut h, cid, &run(0, ahead));
+    gate.render(&mut h, cid, &(0..ahead).collect::<Vec<_>>());
     step(&mut h);
     assert!(h.state().audio.is_some(), "the sound started");
-    assert_eq!(h.state().playback.stalls, 0);
+    let feed = fake.0.lock().unwrap().0.clone().expect("the output has the preview's feed");
 
-    // A stall stops the sound.
-    gate.discard(&mut h);
-    h.state().frames.clear();
-    h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held, "a stall stops the sound");
-    assert_eq!(h.state().playback.stalls, 1);
-    // One and a half times `ahead` cached while it keeps up: that used to start the sound again.
-    let at = frame(&h, cid);
-    gate.render(&mut h, cid, &run(at, ahead + ahead / 2));
-    kept_up(&mut h);
-    step(&mut h);
-    assert!(h.state().audio.is_none(), "after one stall, {} frames ahead are not enough", ahead + ahead / 2);
-    // Twice `ahead` are.
-    let at = frame(&h, cid);
-    gate.render(&mut h, cid, &run(at, 3 * ahead));
-    kept_up(&mut h);
-    step(&mut h);
-    assert!(h.state().audio.is_some(), "after one stall, {} frames ahead start the sound", 3 * ahead);
-
-    // A second stall: now three times `ahead` are not enough, and five times are.
-    gate.discard(&mut h);
-    h.state().frames.clear();
-    h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held);
-    assert_eq!(h.state().playback.stalls, 2);
-    let at = frame(&h, cid);
-    gate.render(&mut h, cid, &run(at, 3 * ahead));
-    kept_up(&mut h);
-    step(&mut h);
-    assert!(h.state().audio.is_none(), "after two stalls, {} frames ahead are not enough", 3 * ahead);
-    let at = frame(&h, cid);
-    gate.render(&mut h, cid, &run(at, 5 * ahead));
-    kept_up(&mut h);
-    step(&mut h);
-    assert!(h.state().audio.is_some(), "after two stalls, {} frames ahead start the sound", 5 * ahead);
-
-    // A new preview starts counting again.
-    h.state_mut().stop();
-    let now = h.state().now();
-    h.state_mut().play(now);
-    assert_eq!(h.state().playback.stalls, 0);
-}
-
-/// Once the backoff reaches its cap, the held sound waits only for frames the prefetch really
-/// requests and can keep cached while the silent preview moves on. It used to wait for `fit`
-/// frames, one of which was never asked for, so a stall kept the preview silent almost to its
-/// end even after rendering recovered.
-#[test]
-fn a_held_sound_at_the_ram_limit_starts_on_the_frames_prefetch_requests() {
-    let fake = Fake::default();
-    let (mut app, cid) = setup_long(true, &fake, 30.0);
-    let gate = GatedFrames::default();
-    let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
-    app.frames.set_remote(Some(renderer));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
-    h.state_mut().use_manual_clock();
-    h.run_steps(2);
-    gate.discard(&mut h);
-    let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
-    // A RAM preview of `ahead + 2` frames (a 64x36 frame is 9216 bytes; 90 % of the budget counts).
-    let fit = ahead + 2;
-    h.state().frames.set_budget(((fit as f64 + 0.5) * 9216.0 / 0.9) as usize);
-    h.state().frames.clear();
-    let now = h.state().now();
-    h.state_mut().play(now);
-    for _ in 0..90 {
-        gate.release_requested(&mut h);
-        step(&mut h);
-        if h.state().audio.is_some() {
+    // Frames 0..ahead and `behind` are cached; the sound plays on to `sound`, which isn't.
+    let (behind, sound) = (ahead + 2, ahead + 4);
+    gate.render(&mut h, cid, &[behind]);
+    // 48 kHz at 30 fps: 1600 samples a frame. Halfway into `sound`.
+    let samples = sound as u64 * 1600 + 800;
+    for _ in 0..10_000 {
+        if feed.consumed() >= samples {
             break;
         }
+        pull(&feed, (samples - feed.consumed()).min(1600) as usize);
     }
-    assert!(h.state().audio.is_some(), "the sound started");
+    assert!(feed.consumed() >= samples, "the device took the sound up to frame {sound}");
+    step(&mut h);
+    assert!(h.state().audio.is_some() && !h.state().playback.audio_held, "the sound plays on");
+    assert_eq!(frame(&h, cid), behind, "the picture shows the latest frame rendered up to the sound");
+    assert!(h.state().playback.waiting);
+    while h.state().frames.dispatch_remote() != 0 {}
+    let requested: Vec<i64> = gate.pending.lock().unwrap().iter().map(|p| p.0).collect();
+    assert!(requested.contains(&sound), "frames are rendered from the sound's frame on: {requested:?}");
+    assert!(!requested.contains(&ahead), "not the frames the picture dropped: {requested:?}");
 
-    // A stall, and enough stalls before it that the backoff is past the RAM preview's limit.
-    gate.discard(&mut h);
-    h.state().frames.clear();
-    h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held, "a stall stops the sound");
-    let stalled = frame(&h, cid);
-    h.state_mut().playback.stalls = 8;
-    // Rendering keeps up again, caching only what playback itself requests.
-    let started = (0..4 * fit).position(|_| {
-        gate.release_requested(&mut h);
-        kept_up(&mut h);
-        step(&mut h);
-        h.state().audio.is_some()
-    });
-    assert!(started.is_some(), "the sound starts again on the frames the prefetch requests (RAM preview of {fit})");
-    assert!(frame(&h, cid) < stalled + 4 * fit, "near where it stalled ({stalled}), not at the end of the preview");
+    // The sound's frame renders: the picture catches up with it.
+    gate.render(&mut h, cid, &[sound]);
+    step(&mut h);
+    assert_eq!(frame(&h, cid), sound, "the picture is back on the sound's frame");
+    assert!(!h.state().playback.waiting && h.state().audio.is_some());
 }
 
 /// Pull `frames` stereo frames from the output, waiting for the feeder thread to mix them.
@@ -721,7 +636,7 @@ impl AudioDevice for Playing {
 }
 
 /// Once started, the sound's clock moves the picture on from the first frame, and a frame that
-/// isn't cached still stops the sound rather than being skipped.
+/// isn't cached doesn't stop the sound (#2473).
 #[test]
 fn a_started_preview_follows_its_sound() {
     let fake = Fake::default();
@@ -744,7 +659,7 @@ fn a_started_preview_follows_its_sound() {
     h.state().frames.set_budget(0);
     h.state().frames.clear();
     step(&mut h);
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing, "a stall stops the sound");
+    assert!(h.state().audio.is_some() && !h.state().playback.audio_held && h.state().playback.playing, "a stall doesn't stop the sound");
     *device.0.lock().unwrap() = true;
 }
 
