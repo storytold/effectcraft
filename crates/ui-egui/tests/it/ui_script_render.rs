@@ -172,3 +172,89 @@ fn malformed_waiting_render_params_return_an_error() {
     assert_eq!(reply.try_recv().unwrap()["ok"], false);
     assert!(!h.state().session.is_rendering());
 }
+
+fn wait_worker(h: &Harness<'_, EffectcraftApp>) {
+    let end = Instant::now() + Duration::from_secs(4);
+    while h.state().session.is_rendering() {
+        assert!(Instant::now() < end, "render worker did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn direct_render_reply_keeps_its_items_after_queue_removal_and_a_new_render() {
+    use effectcraft_ui_egui::control::{Outcome, handle};
+
+    for no_running_jobs in [false, true] {
+        let (mut h, gate, _tx) = harness();
+        let ctx = egui::Context::default();
+        let request = ControlRequest::new("engine.execute", json!({"command": "renderQueue.render"})).0;
+        let Outcome::AwaitJobs(mut first) = handle(h.state_mut(), &ctx, &request, 0.0) else { panic!("expected a deferred render") };
+        let original = first.result["items"][0].clone();
+        // Also cover completion between the command's result and its jobs() snapshot.
+        if no_running_jobs {
+            first.jobs.clear();
+        }
+        gate.0.store(true, Ordering::SeqCst);
+        wait_worker(&h);
+        gate.0.store(false, Ordering::SeqCst);
+        // The worker is done, but no frontend completion pass has run. Removing the item
+        // must not erase the waiting reply, even when the next queue reuses the same id.
+        h.state_mut().session.execute("renderQueue.remove", json!({"item": original["id"]})).unwrap();
+        h.state_mut().session.poll_render();
+        let second_path = std::env::temp_dir().join(format!("ec-ui-second-render-{}.mp4", std::process::id()));
+        h.state_mut().session.execute("renderQueue.add", json!({"output": second_path.to_string_lossy()})).unwrap();
+        let Outcome::AwaitJobs(second) = handle(h.state_mut(), &ctx, &request, 0.0) else { panic!("expected a second deferred render") };
+        assert!(second.pending(h.state()));
+        assert!(!first.pending(h.state()), "the first reply must not wait for a later job with the same jobs.list id");
+        let done = first.finish(h.state_mut());
+        assert_eq!(done["result"]["rendering"], false, "{done}");
+        assert_eq!(done["result"]["items"][0]["statusLabel"], "Done", "{done}");
+        assert_eq!(done["result"]["items"][0]["outputPath"], original["outputPath"]);
+        assert_eq!(done["result"]["items"][0]["last_output"], original["outputPath"]);
+        assert!(h.state().session.is_rendering());
+        gate.0.store(true, Ordering::SeqCst);
+        wait_worker(&h);
+        h.state_mut().session.poll_render();
+        assert!(!second.pending(h.state()));
+        assert_eq!(second.finish(h.state_mut())["result"]["items"][0]["outputPath"], second_path.to_string_lossy().as_ref());
+    }
+}
+
+#[test]
+fn completed_direct_render_reply_is_not_delayed_by_a_later_script_render() {
+    let (mut h, gate, tx) = harness();
+    let first = send(&tx, "engine.execute", json!({"command": "renderQueue.render"}));
+    h.run_steps(2);
+    assert!(matches!(first.try_recv(), Err(TryRecvError::Empty)));
+    gate.0.store(true, Ordering::SeqCst);
+    wait_worker(&h);
+    gate.0.store(false, Ordering::SeqCst);
+    h.state_mut().session.poll_render();
+    h.state_mut().session.execute("renderQueue.setRender", json!({"index": 1, "render": true})).unwrap();
+    let second = send(&tx, "engine.execute", json!({"command": "script.run", "params": {"code": "app.project.renderQueue.render(); 47;"}}));
+    h.run_steps(1);
+    assert!(h.state().session.script_ui.render_host.is_some());
+    assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
+    let done = first.try_recv().expect("an immutable completed reply does not enter the new script's undo group");
+    assert_eq!(done["result"]["rendering"], false);
+    assert_eq!(done["result"]["items"][0]["statusLabel"], "Done");
+    gate.0.store(true, Ordering::SeqCst);
+    assert_eq!(finish(&mut h, &second)["result"]["result"], 47);
+}
+
+#[test]
+fn replacing_project_before_render_poll_returns_an_explicit_error() {
+    use effectcraft_ui_egui::control::{Outcome, handle};
+
+    let (mut h, gate, _tx) = harness();
+    let request = ControlRequest::new("engine.execute", json!({"command": "renderQueue.render"})).0;
+    let Outcome::AwaitJobs(waiter) = handle(h.state_mut(), &egui::Context::default(), &request, 0.0) else { panic!("expected a deferred render") };
+    gate.0.store(true, Ordering::SeqCst);
+    wait_worker(&h);
+    h.state_mut().session.replace_project(Default::default(), None);
+    assert!(!waiter.pending(h.state()));
+    let reply = waiter.finish(h.state_mut());
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert!(reply["error"].as_str().unwrap().contains("replaced before completion"));
+}

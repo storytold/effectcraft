@@ -66,9 +66,7 @@ impl EffectcraftApp {
             }
         }
         self.control_rx = Some(rx);
-        if self.session.script_ui.render_host.is_none() {
-            self.finish_job_waiters(ctx);
-        }
+        self.finish_job_waiters(ctx);
     }
 
     /// Reply to the control requests whose offloaded jobs ended.
@@ -76,11 +74,16 @@ impl EffectcraftApp {
         if self.job_waiters.is_empty() {
             return;
         }
-        self.session.poll_render();
-        self.session.poll_offload();
+        let script_busy = self.session.script_ui.render_host.is_some();
+        if !script_busy {
+            self.session.poll_render();
+            self.session.poll_offload();
+        }
         let waiters = std::mem::take(&mut self.job_waiters);
         for (w, reply) in waiters {
-            if w.pending(self) {
+            // Completed native snapshots are immutable, so even a later suspended script
+            // cannot delay their replies. Other completions can edit its open undo group.
+            if (script_busy && w.render.is_none()) || w.pending(self) {
                 self.job_waiters.push((w, reply));
             } else {
                 let v = w.finish(self);

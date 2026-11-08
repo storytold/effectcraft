@@ -21,6 +21,7 @@
 //!
 //! The full reference with examples is `docs/control-protocol.md`.
 
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use serde_json::{Value, json};
@@ -75,6 +76,8 @@ pub struct JobWaiter {
     pub jobs: Vec<String>,
     /// Absolute completion-log position when it started (including evicted entries).
     pub log_cursor: usize,
+    /// The exact native render, not the reusable `jobs.list` identifier.
+    pub render: Option<Arc<effectcraft_engine::render_queue::JobShared>>,
 }
 
 /// Commands that block with `wait` (and its default).
@@ -96,7 +99,15 @@ fn execute_engine(app: &mut EffectcraftApp, id: &str, params: Value) -> Result<O
     p.as_object_mut().ok_or("command params must be an object")?.insert("wait".into(), json!(false));
     let result = app.session.execute_checked(id, p).map_err(|e| e.to_string())?;
     let jobs: Vec<String> = app.session.jobs().into_iter().map(|j| j.id).filter(|j| !before.contains(j)).collect();
-    Ok(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor }.into_outcome())
+    let render = if cfg!(not(target_arch = "wasm32")) && id == "renderQueue.render" && !app.session.offloads() {
+        app.session.render_job.as_ref().map(|job| {
+            job.shared.retain_reply_items(result["items"].as_array().cloned().unwrap_or_default());
+            job.shared.clone()
+        })
+    } else {
+        None
+    };
+    Ok(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor, render }.into_outcome())
 }
 
 fn script_outcome(result: Value) -> Outcome {
@@ -118,20 +129,31 @@ pub(crate) fn check_script_render(app: &EffectcraftApp, id: &str) -> Result<(), 
 
 impl JobWaiter {
     fn into_outcome(self) -> Outcome {
-        // A native render may finish before jobs() snapshots its running workers. Still use
-        // the completion boundary to apply post-render actions and refresh the cached reply.
-        let native_render = cfg!(not(target_arch = "wasm32")) && self.command == "renderQueue.render";
-        if self.jobs.is_empty() && !native_render { ok(self.result) } else { Outcome::AwaitJobs(self) }
+        // A finished but unpolled native worker still needs its completion boundary even
+        // when jobs() no longer lists it. Already-polled commands have their final result.
+        if self.jobs.is_empty() && self.render.is_none() { ok(self.result) } else { Outcome::AwaitJobs(self) }
     }
 
     /// Whether its jobs are still running.
     pub fn pending(&self, app: &EffectcraftApp) -> bool {
+        if let Some(render) = &self.render {
+            return !render.reply_finished() && app.session.render_job.as_ref().is_some_and(|job| Arc::ptr_eq(render, &job.shared));
+        }
         app.session.jobs().iter().any(|j| self.jobs.contains(&j.id))
     }
 
     /// The reply: what the blocking command would have returned (`running: false`, the final
     /// progress, render items and analysis status), or the job's error.
     pub fn finish(self, app: &mut EffectcraftApp) -> Value {
+        if let Some(render) = self.render {
+            let Some(items) = render.completed_items() else {
+                return json!({"ok": false, "error": "render result unavailable: the project or render job was replaced before completion"});
+            };
+            let mut result = self.result;
+            result["items"] = json!(items);
+            result["rendering"] = json!(false);
+            return json!({"ok": true, "result": result});
+        }
         let s = &mut app.session;
         s.poll_render();
         let error = s
@@ -934,17 +956,15 @@ pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_native_render_with_no_running_jobs_still_refreshes_its_reply() {
-        // Reproduce the completion race deterministically: the worker has already finished,
-        // so jobs() returned nothing, but the command's earlier result still says rendering.
+    fn a_native_render_with_no_running_jobs_still_checks_its_own_completion() {
         let waiter = super::JobWaiter {
             command: "renderQueue.render".into(),
             params: serde_json::json!({}),
             result: serde_json::json!({"rendering": true, "items": []}),
             jobs: vec![],
             log_cursor: 0,
+            render: Some(std::sync::Arc::new(effectcraft_engine::render_queue::JobShared::default())),
         };
         let super::Outcome::AwaitJobs(waiter) = waiter.into_outcome() else {
             panic!("a finished native render must still pass through completion polling");
@@ -952,8 +972,8 @@ mod tests {
         let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
         assert!(!waiter.pending(&app));
         let reply = waiter.finish(&mut app);
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply["result"]["rendering"], false);
+        assert_eq!(reply["ok"], false, "an abandoned render cannot silently report a replacement project's queue");
+        assert!(reply["error"].as_str().unwrap().contains("replaced before completion"));
     }
 
     #[test]
