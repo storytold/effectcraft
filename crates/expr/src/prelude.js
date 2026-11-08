@@ -313,7 +313,9 @@ function noise(x) {
 // ---------------------------------------------------------------------------------------------
 // Time conversion.
 
-// Absolute times round toward negative infinity; durations round away from zero.
+// Frame counts for timeToFrames, timeToTimecode, timeToFeetAndFrames and timeToCurrentFormat:
+// absolute times round toward negative infinity; durations (isDuration true) round away from
+// zero. A timecode or feet-and-frames string takes its sign from the rounded frame count.
 function __frames(t, fps, isDuration) {
   var frames = t * fps;
   // The 1e-6 keeps a whole number of frames that floating point overshoots (31/24 - 5/24) whole.
@@ -339,7 +341,9 @@ function timeToTimecode(t, base, isDuration) {
   if (base === undefined) base = 30;
   var f = __frames(t, base, isDuration), neg = f < 0;
   f = Math.abs(f);
-  var ff = f % base, s = Math.floor(f / base), ss = s % 60, m = Math.floor(s / 60), mm = m % 60, h = Math.floor(m / 60);
+  // A fractional rate (29.97) counts frames at that rate and labels them with its nominal base (30).
+  var nb = Math.max(1, Math.round(base));
+  var ff = f % nb, s = Math.floor(f / nb), ss = s % 60, m = Math.floor(s / 60), mm = m % 60, h = Math.floor(m / 60);
   return (neg ? '-' : '') + h + ':' + __pad(mm) + ':' + __pad(ss) + ':' + __pad(ff);
 }
 

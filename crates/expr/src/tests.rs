@@ -1590,6 +1590,8 @@ fn timecode_strings_round_like_time_to_frames() {
         ("timeToTimecode(-0.01, 24, true)", "-0:00:00:01"),
         ("timeToTimecode(-1e-10, 24)", "0:00:00:00"),
         ("timeToCurrentFormat(0.01, 30, true)", "0:00:00:01"),
+        ("timeToCurrentFormat(1, 29.97, true)", "0:00:01:00"),
+        ("timeToTimecode(2, 29.97)", "0:00:01:29"),
         ("timeToFeetAndFrames(0.01, 24, 16)", "0+00"),
         ("timeToFeetAndFrames(0.01, 24, 16, true)", "0+01"),
         ("timeToFeetAndFrames(-0.01, 24, 16)", "-0+01"),
