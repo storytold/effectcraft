@@ -92,14 +92,43 @@ impl LossCategory {
     }
 }
 
-/// One category of things that were not imported.
+/// One category of things that were not imported. The export report uses the same type with its
+/// own categories (`export::Loss`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Loss {
-    pub category: LossCategory,
+pub struct Loss<C = LossCategory> {
+    pub category: C,
     /// How many occurrences (exact).
     pub count: usize,
     /// Up to [`MAX_DETAILS`] example lines.
     pub details: Vec<String>,
+}
+
+/// The loss bookkeeping the import and the export report share.
+impl<C: Copy + Ord> Loss<C> {
+    /// Counts one loss of `category`; `detail` is only called while the category holds fewer than
+    /// [`MAX_DETAILS`] lines.
+    pub(crate) fn record(losses: &mut BTreeMap<C, Self>, category: C, detail: impl FnOnce() -> String) {
+        let loss = losses.entry(category).or_insert_with(|| Loss { category, count: 0, details: Vec::new() });
+        loss.count = loss.count.saturating_add(1);
+        if loss.details.len() < MAX_DETAILS {
+            loss.details.push(detail());
+        }
+    }
+
+    /// The sum of all loss counts.
+    pub(crate) fn total(losses: &[Self]) -> usize {
+        losses.iter().map(|l| l.count).sum()
+    }
+
+    /// The loss count of a category.
+    pub(crate) fn count_of(losses: &[Self], category: C) -> usize {
+        losses.iter().find(|l| l.category == category).map_or(0, |l| l.count)
+    }
+
+    /// `effects: 3, masks: 1` (empty without losses).
+    pub(crate) fn summary(losses: &[Self], label: impl Fn(C) -> &'static str) -> String {
+        losses.iter().map(|l| format!("{}: {}", label(l.category), l.count)).collect::<Vec<_>>().join(", ")
+    }
 }
 
 /// What arrived in the project.
@@ -243,7 +272,7 @@ impl AeVersionInfo {
 impl ImportReport {
     /// The sum of all loss counts.
     pub fn total_losses(&self) -> usize {
-        self.losses.iter().map(|l| l.count).sum()
+        Loss::total(&self.losses)
     }
 
     /// True when nothing was lost.
@@ -253,12 +282,12 @@ impl ImportReport {
 
     /// The loss count of a category.
     pub fn count(&self, category: LossCategory) -> usize {
-        self.losses.iter().find(|l| l.category == category).map_or(0, |l| l.count)
+        Loss::count_of(&self.losses, category)
     }
 
     /// `effects: 3, masks: 1` (empty when lossless).
     pub fn summary(&self) -> String {
-        self.losses.iter().map(|l| format!("{}: {}", l.category.label(), l.count)).collect::<Vec<_>>().join(", ")
+        Loss::summary(&self.losses, LossCategory::label)
     }
 }
 
@@ -274,11 +303,13 @@ pub(crate) struct Collector {
 impl Collector {
     /// Records one loss.
     pub fn lose(&mut self, category: LossCategory, detail: impl Into<String>) {
-        let loss = self.losses.entry(category).or_insert_with(|| Loss { category, count: 0, details: Vec::new() });
-        loss.count = loss.count.saturating_add(1);
-        if loss.details.len() < MAX_DETAILS {
-            loss.details.push(detail.into());
-        }
+        self.lose_with(category, move || detail.into());
+    }
+
+    /// Records one loss whose detail line is built only while the category holds fewer than
+    /// [`MAX_DETAILS`] lines (for a detail that needs `format!`).
+    pub fn lose_with(&mut self, category: LossCategory, detail: impl FnOnce() -> String) {
+        Loss::record(&mut self.losses, category, detail);
     }
 
     pub fn finish(self) -> ImportReport {
@@ -301,3 +332,60 @@ pub const LIMITATIONS: &[&str] = &[
     "Text: per-character 3D, text on a path and several style slots of unknown meaning are not decoded (stored values that differ from the default are reported as text layer features).",
     "Footage that is not a solid is linked by its stored path with its stored frame rate and duration; the importer never opens the files (use Reload Footage after the files are found).",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collected() -> ImportReport {
+        let mut col = Collector::default();
+        col.imported.layers = 2;
+        col.missing_footage.push("a.png".into());
+        col.lose(LossCategory::Masks, "mask 1");
+        col.lose(LossCategory::Effects, String::from("fx 1"));
+        col.lose_with(LossCategory::Effects, || "fx 2".to_string());
+        let mut report = col.finish();
+        report.limitations.truncate(1);
+        report
+    }
+
+    /// The JSON shape agents read: field names, category spelling, order and the loss entries.
+    #[test]
+    fn the_json_shape_is_pinned() {
+        let json = serde_json::to_string(&collected()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"imported":{"folders":0,"compositions":0,"solids":0,"footage":0,"layers":2,"solidLayers":0,"nullLayers":0,"adjustmentLayers":0,"footageLayers":0,"precompLayers":0,"textLayers":0,"keyframes":0,"expressions":0,"masks":0,"trackMattes":0,"markers":0,"timeRemaps":0,"shapeLayers":0,"shapeItems":0,"cameras":0,"lights":0,"textAnimators":0,"effects":0,"layerStyles":0},"losses":[{"category":"effects","count":2,"details":["fx 1","fx 2"]},{"category":"masks","count":1,"details":["mask 1"]}],"missingFootage":["a.png"],"missingFonts":[],"limitations":["Frame blending, 3D material options, audio levels, guides are not decoded and not imported."],"aeVersion":{"fileVersion":"unknown","savedBy":"unknown","tested":false}}"#
+        );
+        let back: ImportReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, collected());
+    }
+
+    #[test]
+    fn the_queries_read_the_losses() {
+        let report = collected();
+        assert_eq!((report.total_losses(), report.is_lossless()), (3, false));
+        assert_eq!((report.count(LossCategory::Effects), report.count(LossCategory::Lights)), (2, 0));
+        assert_eq!(report.summary(), "effects: 2, masks: 1");
+        let empty = Collector::default().finish();
+        assert_eq!((empty.total_losses(), empty.is_lossless(), empty.summary()), (0, true, String::new()));
+    }
+
+    /// The count stays exact past the detail cap, and a detail past the cap is never built.
+    #[test]
+    fn details_stop_at_the_cap_and_later_ones_are_not_built() {
+        let mut col = Collector::default();
+        let mut built = 0;
+        for i in 0..MAX_DETAILS + 5 {
+            col.lose_with(LossCategory::Masks, || {
+                built += 1;
+                format!("mask {i}")
+            });
+        }
+        let report = col.finish();
+        assert_eq!(report.count(LossCategory::Masks), MAX_DETAILS + 5);
+        assert_eq!(report.losses[0].details.len(), MAX_DETAILS);
+        assert_eq!(report.losses[0].details.last().map(String::as_str), Some("mask 19"));
+        assert_eq!(built, MAX_DETAILS);
+    }
+}

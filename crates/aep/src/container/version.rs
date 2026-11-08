@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::container::bytes::{be_u16, be_u32};
+use crate::container::bytes::be_u32;
 use crate::container::chunk::AepFile;
 
 /// An After Effects version as packed in `head` / `svap`: `26.2.1x2` is major 26, minor 2, bug-fix
@@ -79,13 +79,6 @@ impl AepFile<'_> {
     /// a file), short or holds no version.
     pub fn saved_by_version(&self) -> Option<AeVersion> {
         AeVersion::from_word(be_u32(self.chunk(b"svap")?.bytes()?, 0)?)
-    }
-
-    /// The `u16` at `head` byte 0: 97 (`0x61`) in a 2026 file, 96 in a copy saved as 25.x, 95 as
-    /// 24.x. It steps with the major version of [`AepFile::file_version`]; what it counts is not
-    /// known, so nothing is derived from it.
-    pub fn head_revision(&self) -> Option<u16> {
-        be_u16(self.chunk(b"head")?.bytes()?, 0)
     }
 }
 

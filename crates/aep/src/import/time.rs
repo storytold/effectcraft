@@ -7,6 +7,8 @@
 
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
+use crate::container::TimeBase;
+
 /// The composition's frame structure: the stored time base and the rate the project gets.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TimeMap {
@@ -27,12 +29,8 @@ pub(crate) fn frame_rate(timescale: u32, frame_duration: u32) -> Option<FrameRat
     }
     let exact = FrameRate::new(i64::from(timescale), i64::from(frame_duration));
     let fps = exact.as_f64();
-    for ntsc in [FrameRate::FPS_23_976, FrameRate::FPS_29_97, FrameRate::FPS_59_94, FrameRate::FPS_119_88] {
-        if (ntsc.as_f64() - fps).abs() < 0.0005 {
-            return Some(ntsc);
-        }
-    }
-    Some(exact)
+    let ntsc = TimeBase::NTSC.into_iter().map(|(rate, _)| rate).find(|ntsc| (ntsc.as_f64() - fps).abs() < 0.0005);
+    Some(ntsc.unwrap_or(exact))
 }
 
 impl TimeMap {
