@@ -401,6 +401,10 @@ impl FootageSource for ConfinedFootage {
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
     }
+    /// Forwards the disk cache to the inner source.
+    fn set_disk_cache(&self, cache: Option<Arc<effectcraft_engine::render::disk_cache::DiskCache>>) {
+        self.inner.set_disk_cache(cache)
+    }
     /// Forwards what effects read of each auxiliary footage to the inner source.
     fn set_aux_needs(&self, needs: &[(String, effectcraft_engine::raster::channels3d::AuxNeed)]) {
         self.inner.set_aux_needs(needs)

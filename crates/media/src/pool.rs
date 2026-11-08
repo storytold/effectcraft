@@ -1464,6 +1464,10 @@ impl FootageSource for MediaPool {
         wanted.learned.clear();
     }
 
+    fn set_disk_cache(&self, cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>) {
+        crate::exr_planes::set_disk_cache(cache.as_ref());
+    }
+
     fn set_aux_needs(&self, needs: &[(String, AuxNeed)]) {
         let mut wanted = lock(&self.inner.aux_footage);
         let needs: HashMap<String, AuxNeed> = needs.iter().cloned().collect();

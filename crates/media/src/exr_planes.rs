@@ -275,6 +275,8 @@ enum Waited {
 pub(crate) struct DecodeRecord {
     pub(crate) channels: Vec<String>,
     pub(crate) stats: crate::exr_read::ReadStats,
+    /// Read from the disk cache, not from the file.
+    pub(crate) from_disk: bool,
 }
 
 #[cfg(test)]
@@ -635,16 +637,33 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         if want.all { (0..index.channels.len()).collect() } else { want.ids.iter().copied().filter(|i| *i < index.channels.len()).collect() };
     let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
     let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
-    let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(missing.clone()) };
-    let (planes, stats) = read_planes(&mut *opened.reader, &index, &request);
+    let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
+    // The disk tier first (#3271): what an earlier session or a decode RAM let go of kept.
+    let disk = disk_cache().filter(|_| !missing.is_empty() && unique(&names));
+    let since = disk.as_ref().map_or(0, |d| d.drop_generation());
+    let key = {
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        effectcraft_render::disk_cache::plane_key(path, &opened.stamp, &refs, 0, None)
+    };
+    let (w, h) = index.size();
+    let kept = disk.as_ref().and_then(|d| d.get_planes(key, None)).map(|(p, _)| p).filter(|p| {
+        (p.width as usize, p.height as usize) == (w, h)
+            && p.planes.len() == names.len()
+            && p.planes.iter().zip(&names).all(|((n, v), want)| n == want && v.len() == w * h)
+    });
+    let from_disk = kept.is_some();
+    let (planes, stats) = match kept {
+        Some(p) => (Ok(p.planes.into_iter().map(|(_, v)| v).collect()), Default::default()),
+        None => {
+            let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(missing.clone()) };
+            read_planes(&mut *opened.reader, &index, &request)
+        }
+    };
     #[cfg(test)]
-    DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((
-        path.to_string(),
-        DecodeRecord { channels: missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect(), stats: stats.clone() },
-    ));
+    DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), DecodeRecord { channels: names.clone(), stats: stats.clone(), from_disk }));
     #[cfg(not(test))]
     let _ = &stats;
-    let planes = planes.map_err(|e| match e {
+    let planes: Vec<Vec<f32>> = planes.map_err(|e| match e {
         ReadError::Cancelled => Refused::Cancelled,
         // (a read that failed just now: the next request reads again)
         ReadError::Io(why) => {
@@ -672,7 +691,6 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     new.sort_by_key(|(id, _)| *id);
     new.dedup_by_key(|(id, _)| *id);
     let all = new.len() == index.channels.len();
-    let (w, h) = index.size();
     let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
     aux.manifests = index.names.manifests.clone();
     aux.aliases = index.names.aliases.clone();
@@ -681,7 +699,37 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     }
     let ids: Vec<usize> = new.iter().map(|(id, _)| *id).collect();
     aux.channels = new.into_iter().filter_map(|(id, p)| Some((index.channels.get(id)?.name.clone(), p))).collect();
-    Ok(Arc::new(Batch { index, ids, all, aux: Arc::new(aux), file: ReadFile::new(path, opened.stamp) }))
+    let file = ReadFile::new(path, opened.stamp);
+    let batch = Arc::new(Batch { index, ids, all, aux: Arc::new(aux), file: file.clone() });
+    // Kept on disk for the next time (encoded on the disk cache's writer thread; a file from
+    // memory, which can't be checked later, isn't).
+    if let Some(d) = disk.filter(|_| !from_disk) {
+        let mut read = effectcraft_render::reads::ReadFiles::default();
+        read.add(file);
+        if let Some(entry) = effectcraft_render::disk_cache::EntryFiles::of(&read, None) {
+            d.put_planes(key, &batch.aux, names, &entry, since);
+        }
+    }
+    Ok(batch)
+}
+
+/// Every name once (a plane entry is read back by name).
+fn unique(names: &[String]) -> bool {
+    let set: std::collections::HashSet<&String> = names.iter().collect();
+    set.len() == names.len()
+}
+
+/// The disk cache decoded planes are kept in ([`set_disk_cache`]).
+static DISK: Mutex<Option<std::sync::Weak<effectcraft_render::disk_cache::DiskCache>>> = Mutex::new(None);
+
+/// Keep decoded planes in `cache` too (`None`: no disk tier), #3271. Held weakly: switching the
+/// disk cache off drops it.
+pub(crate) fn set_disk_cache(cache: Option<&Arc<effectcraft_render::disk_cache::DiskCache>>) {
+    *DISK.lock().unwrap_or_else(PoisonError::into_inner) = cache.map(Arc::downgrade);
+}
+
+fn disk_cache() -> Option<Arc<effectcraft_render::disk_cache::DiskCache>> {
+    DISK.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(std::sync::Weak::upgrade)
 }
 
 fn store() -> &'static PlaneStore {

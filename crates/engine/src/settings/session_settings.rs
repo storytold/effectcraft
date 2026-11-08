@@ -130,6 +130,7 @@ impl Session {
             self.disk_cache = None;
             self.disk_watch = Default::default();
             self.layer_cache.set_disk(None);
+            self.footage.set_disk_cache(None);
             return;
         };
         // Tests: the Roto/Object Matte segment store below is one per process, so a test that
@@ -154,6 +155,7 @@ impl Session {
                     self.disk_cache = None;
                     self.disk_watch = Default::default();
                     self.layer_cache.set_disk(None);
+                    self.footage.set_disk_cache(None);
                     return;
                 }
             },
@@ -169,6 +171,8 @@ impl Session {
         // Used at once (no file is looked at first: each entry checks the source files it lists
         // when it is read, #3184).
         self.layer_cache.set_disk(Some(dc.clone()));
+        // Decoded footage channels (OpenEXR planes) persist there too (#3271).
+        self.footage.set_disk_cache(Some(dc.clone()));
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
         // disk cache off drops it).
         let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();

@@ -821,3 +821,35 @@ fn a_new_frame_opens_its_file_once() {
     assert_eq!(decodes_of(&f.path).len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #3271: decoded channels are kept in the disk cache: once RAM has let them go they are read
+/// back from there, bit for bit (Cryptomatte IDs included), instead of decoding the file; Reload
+/// Footage drops them.
+#[test]
+fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
+    use effectcraft_render::disk_cache::{DiskCache, Kind};
+    let dir = std::env::temp_dir().join(format!("ec-3271-disk-planes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("crypto_0001.exr");
+    std::fs::write(&file, multipart()).unwrap();
+    let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+    set_disk_cache(Some(&dc));
+    let f = crate::probe(&file).unwrap();
+    let pool = crate::MediaPool::new();
+    let first = pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
+    dc.flush();
+    assert_eq!(dc.keys(Kind::Plane).len(), 1, "{:?}", dc.stats());
+    forget(&f.path);
+    let again = pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
+    let bits = |a: &AuxChannels| a.channels.iter().map(|(n, p)| (n.clone(), p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+    assert_eq!(bits(&again), bits(&first), "bit for bit");
+    // Reload Footage: the entry goes, the file is decoded again.
+    dc.drop_files([f.path.clone()]);
+    dc.flush();
+    forget(&f.path);
+    pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
+    set_disk_cache(None);
+    let from_disk: Vec<bool> = decodes_of(&f.path).iter().map(|d| d.from_disk).collect();
+    assert_eq!(from_disk, [false, true, false]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

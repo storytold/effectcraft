@@ -78,6 +78,10 @@ pub trait FootageSource: Send + Sync {
     /// given before: the picture of such footage is then decoded together with those channels
     /// only. A file not named here reads every channel. Sources that don't care ignore it.
     fn set_aux_needs(&self, _needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {}
+    /// The disk cache (Settings ▸ Media & Disk Cache), `None` when it is off: sources that
+    /// decode costly footage keep what they decoded there too (#3271: OpenEXR channels).
+    /// Sources without such a tier ignore it.
+    fn set_disk_cache(&self, _cache: Option<Arc<crate::disk_cache::DiskCache>>) {}
     /// The parsed 3D model of a [`effectcraft_project::FootageKind::Model`] item (Advanced 3D).
     fn model(&self, _item: ItemId, _footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         None
@@ -214,6 +218,9 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn set_aux_needs(&self, needs: &[(String, effectcraft_raster::channels3d::AuxNeed)]) {
         self.inner.set_aux_needs(needs)
+    }
+    fn set_disk_cache(&self, cache: Option<Arc<crate::disk_cache::DiskCache>>) {
+        self.inner.set_disk_cache(cache)
     }
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
         self.inner.model(item, footage)
