@@ -27,5 +27,6 @@ mod styles;
 mod synthetic;
 mod text;
 mod text_anim;
+mod text_synthetic;
 mod timing;
 mod versions;

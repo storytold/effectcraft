@@ -1,0 +1,102 @@
+//! A small committed text project (`tests/fixtures/text-synthetic.aep`), so the text animator
+//! Stroke Opacity and the Source Text expression are checked without the external corpus (#3170).
+//!
+//! The project was made in After Effects 2026 with the working space set to None: one composition
+//! `C` (64x48, 25 fps, 2 s) with two text layers. `T` holds `Hi` (Arial, 20 px, a blue 2 px
+//! stroke), the Source Text expression `text.sourceText + "!"` (enabled), an animator `Stroke`
+//! with Stroke Opacity 40 % and an animator `Keyed` with Stroke Opacity keyed 0 % at 0 s and
+//! 100 % at 1 s. `Off` holds `Off` and the Source Text expression `"X"`, disabled. Nothing After
+//! Effects wrote was changed.
+
+use effectcraft_aep::import::{ImportOptions, ImportResult, LossCategory, import};
+use effectcraft_aep::{AepFile, Body, Chunk, parse, write};
+use effectcraft_keyframe::Value;
+use effectcraft_project::{Expression, Layer, Project, PropGroup};
+use effectcraft_time::{TICKS_PER_SECOND, Tick};
+
+use crate::import::helpers::comp;
+
+const TEXT_SYNTHETIC: &[u8] = include_bytes!("../../fixtures/text-synthetic.aep");
+
+fn run(bytes: &[u8]) -> (Project, ImportResult) {
+    let mut project = Project::default();
+    let none = |_: &str| false;
+    let r = import(&mut project, bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).expect("the project imports");
+    (project, r)
+}
+
+fn losses(r: &ImportResult, category: LossCategory) -> Vec<String> {
+    r.report.losses.iter().filter(|l| l.category == category).flat_map(|l| l.details.clone()).collect()
+}
+
+fn layer<'p>(p: &'p Project, r: &ImportResult, name: &str) -> &'p Layer {
+    let (_, c) = comp(p, r, "C");
+    c.layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("text layer {name}"))
+}
+
+fn animator<'l>(l: &'l Layer, name: &str) -> &'l PropGroup {
+    l.props.group("text/animators").expect("animators").groups().find(|a| a.name == name).unwrap_or_else(|| panic!("animator {name}"))
+}
+
+fn source_text(l: &Layer) -> (String, Option<Expression>) {
+    let p = l.props.prop("text/sourceText").expect("Source Text");
+    let Value::Text(doc) = &p.value else { panic!("{:?}", p.value) };
+    (doc.text.clone(), p.expr.clone())
+}
+
+#[test]
+fn text_animator_stroke_opacity_is_imported_static_and_keyed() {
+    let (p, r) = run(TEXT_SYNTHETIC);
+    let text = losses(&r, LossCategory::TextLayers);
+    assert!(!text.iter().any(|d| d.contains("Stroke Opacity")), "{text:?}");
+    let t = layer(&p, &r, "T");
+    // Stored as After Effects shows it: percent.
+    let st = animator(t, "Stroke").prop("properties/strokeOpacity").expect("strokeOpacity");
+    assert_eq!((st.value.clone(), st.keys.len()), (Value::Scalar(40.0), 0));
+    let keyed = animator(t, "Keyed").prop("properties/strokeOpacity").expect("strokeOpacity");
+    let keys: Vec<_> = keyed.keys.iter().map(|k| (k.time, k.value.clone())).collect();
+    assert_eq!(keys, vec![(Tick::ZERO, Value::Scalar(0.0)), (Tick(TICKS_PER_SECOND), Value::Scalar(100.0))]);
+}
+
+#[test]
+fn the_source_text_expression_is_imported_enabled_and_disabled() {
+    let (p, r) = run(TEXT_SYNTHETIC);
+    let text = losses(&r, LossCategory::TextLayers);
+    assert!(!text.iter().any(|d| d.contains("Source Text expression")), "{text:?}");
+    // The stored text stays the Source Text value; the expression comes next to it.
+    assert_eq!(source_text(layer(&p, &r, "T")), ("Hi".to_string(), Some(Expression { text: "text.sourceText + \"!\"".into(), enabled: true })));
+    assert_eq!(source_text(layer(&p, &r, "Off")), ("Off".to_string(), Some(Expression { text: "\"X\"".into(), enabled: false })));
+    assert_eq!(r.report.imported.expressions, 2);
+}
+
+fn visit(chunks: &mut [Chunk<'_>], f: &mut dyn FnMut(&mut Chunk<'_>)) {
+    for c in chunks {
+        f(c);
+        visit(c.children_mut(), f);
+    }
+}
+
+#[test]
+fn a_source_text_expression_with_unreadable_flags_stays_reported() {
+    // `tdb4` byte 120 is 1 on a property with an expression; with 0 the expression's state is
+    // unknown, so it is reported instead of imported.
+    let mut file: AepFile<'_> = parse(TEXT_SYNTHETIC).expect("parse");
+    visit(&mut file.chunks, &mut |c| {
+        if !c.is_list(b"btds") {
+            return;
+        }
+        for tdbs in c.children_mut().iter_mut().filter(|c| c.is_list(b"tdbs")) {
+            for tdb4 in tdbs.children_mut().iter_mut().filter(|c| c.is(b"tdb4")) {
+                if let Body::Data(d) = &mut tdb4.body
+                    && let Some(b) = d.to_mut().get_mut(120)
+                {
+                    *b = 0;
+                }
+            }
+        }
+    });
+    let (p, r) = run(&write(&file).expect("write"));
+    let text = losses(&r, LossCategory::TextLayers);
+    assert_eq!(text.iter().filter(|d| d.contains("the Source Text expression is not imported")).count(), 2, "{text:?}");
+    assert_eq!(source_text(layer(&p, &r, "T")), ("Hi".to_string(), None));
+}

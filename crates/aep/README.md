@@ -69,12 +69,16 @@ tests reach them only through `tests/it/common/mod.rs`, which hands a test its c
 of its own cut from the combined file; a test whose fixture is missing (or with the variable not
 set) prints `SKIPPED: fixture <name> missing` and passes.
 
-`tests/fixtures/synthetic.aep` (115 KB) is the one project in the repository: made in After Effects 2026
+`tests/fixtures/synthetic.aep` (115 KB) is one of the two projects in the repository: made in After Effects 2026
 with the working space set to None (one composition, an image sequence of three 8x8 PNGs, a
 solid, a folder, a Levels and a Glow effect with expressions). Every After Effects project embeds
 the working space's ICC profile (HP sRGB IEC61966-2.1 for the default) in a JSON settings chunk;
 the one `Utf8` chunk of this file that held a profile was replaced by `{}`, and nothing else was
 changed. The tests in `tests/it/import/synthetic.rs` damage copies of it and need no other file.
+`tests/fixtures/text-synthetic.aep` is the other: made in After Effects 2026 the same way (working
+space None, nothing changed after the save), one composition with two text layers that hold a
+text animator's Stroke Opacity (static and keyed) and Source Text expressions (enabled and
+disabled); `tests/it/import/text_synthetic.rs` reads it (#3170).
 
 ## Tools
 
