@@ -64,6 +64,8 @@ struct Entry {
     files: Arc<ReadFiles>,
     stamp: u64,
     bytes: usize,
+    /// When it was last used ([`effectcraft_render::memory::tick`], shared with the plane store).
+    used: u64,
 }
 
 /// Conformed audio files written by builds before this version are ignored (and written again):
@@ -121,6 +123,7 @@ impl Lru {
         self.order.remove(&e.stamp);
         self.clock += 1;
         e.stamp = self.clock;
+        e.used = effectcraft_render::memory::tick();
         self.order.insert(e.stamp, k.clone());
         Some((e.img.clone(), e.files.clone()))
     }
@@ -128,7 +131,7 @@ impl Lru {
     fn insert(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize) {
         let bytes = img.data.len() * std::mem::size_of::<Px>() + 64;
         self.clock += 1;
-        if let Some(old) = self.map.insert(k.clone(), Entry { img, files, stamp: self.clock, bytes }) {
+        if let Some(old) = self.map.insert(k.clone(), Entry { img, files, stamp: self.clock, bytes, used: effectcraft_render::memory::tick() }) {
             self.order.remove(&old.stamp);
             self.bytes -= old.bytes;
         }
@@ -155,6 +158,21 @@ impl Lru {
                 }
             }
         }
+    }
+    /// The least recently used frame it may drop (the newest always stays) and its last use.
+    fn oldest(&self) -> Option<(&Key, u64)> {
+        if self.map.len() <= 1 {
+            return None;
+        }
+        let (_, k) = self.order.first_key_value()?;
+        Some((k, self.map.get(k)?.used))
+    }
+    /// Drop the least recently used frame it may drop; the bytes freed.
+    fn drop_oldest(&mut self) -> usize {
+        let Some(k) = self.oldest().map(|(k, _)| k.clone()) else { return 0 };
+        let had = self.bytes;
+        self.remove(&k);
+        had.saturating_sub(self.bytes)
     }
     /// A recycled buffer of exactly `len` pixels, or an empty Vec.
     fn take_spare(&mut self, len: usize) -> Vec<Px> {
@@ -237,6 +255,8 @@ struct Recent {
     bytes: usize,
     /// The frame cache's clock when it was kept.
     stamp: u64,
+    /// When it was kept ([`effectcraft_render::memory::tick`]).
+    used: u64,
 }
 
 /// At most this many forgotten paths are remembered ([`CacheState::forgotten`]); beyond that
@@ -278,7 +298,7 @@ impl CacheState {
             return;
         }
         let stamp = self.lru.clock;
-        self.recent.push_back(Recent { key, img, files, bytes, stamp });
+        self.recent.push_back(Recent { key, img, files, bytes, stamp, used: effectcraft_render::memory::tick() });
         self.trim_recent(budget);
     }
 
@@ -609,6 +629,29 @@ impl MediaPool {
 
     pub fn budget(&self) -> usize {
         self.inner.budget()
+    }
+
+    /// Keep a frame of `width` by `height` as the frame of `path` (tests of the footage budget).
+    #[cfg(test)]
+    pub(crate) fn keep_test_frame(&self, path: &str, width: u32, height: u32) {
+        let key = Key { path: path.into(), frame: 0, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None };
+        let budget = self.inner.budget();
+        lock(&self.inner.cache).lru.insert(key, Arc::new(Image::new(width, height)), Arc::default(), budget);
+    }
+
+    /// The paths of the frames [`MediaPool::keep_test_frame`] kept that are still cached.
+    #[cfg(test)]
+    pub(crate) fn test_frames(&self) -> Vec<String> {
+        let c = lock(&self.inner.cache);
+        let mut v: Vec<String> = c.lru.map.keys().map(|k| k.path.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    /// The frame cache as the memory accountant sees it (tests).
+    #[cfg(test)]
+    pub(crate) fn memory_holder(&self) -> Arc<dyn effectcraft_render::memory::MemoryHolder> {
+        self.inner.clone()
     }
 
     /// Change the frame-cache budget (evicts immediately when shrinking).
@@ -1514,6 +1557,25 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
         c.recent.clear();
         c.lru.evict(bytes);
     }
+    fn group(&self) -> Option<&'static str> {
+        Some(effectcraft_render::memory::FOOTAGE)
+    }
+    fn oldest_use(&self) -> Option<u64> {
+        let c = lock(&self.cache);
+        let frame = c.lru.oldest().map(|(_, t)| t);
+        let still = c.recent.front().map(|r| r.used);
+        frame.into_iter().chain(still).min()
+    }
+    fn drop_oldest(&self) -> usize {
+        let mut c = lock(&self.cache);
+        let frame = c.lru.oldest().map(|(_, t)| t);
+        let still = c.recent.front().map(|r| r.used);
+        match (frame, still) {
+            (Some(f), Some(s)) if s < f => c.recent.pop_front().map_or(0, |r| r.bytes),
+            (None, Some(_)) => c.recent.pop_front().map_or(0, |r| r.bytes),
+            _ => c.lru.drop_oldest(),
+        }
+    }
 }
 
 impl MediaPool {
@@ -1540,8 +1602,12 @@ impl FootageSource for MediaPool {
         }
         self.inner.model(&footage.path)
     }
+    /// The Footage Frame Cache: the frame cache, the decoded OpenEXR planes and both together
+    /// (#3271: the planes share the footage budget, they have none of their own).
     fn set_cache_budget(&self, bytes: usize) {
         self.set_budget(bytes);
+        crate::exr_planes::set_budget(bytes);
+        effectcraft_render::memory::Accountant::global().set_group_budget(effectcraft_render::memory::FOOTAGE, bytes);
     }
     fn purge(&self) {
         self.clear_frames();

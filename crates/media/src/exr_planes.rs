@@ -263,7 +263,7 @@ struct Entry {
     /// least as much fails the same way until the file is forgotten.
     failed: Vec<(Want, Refused)>,
     bytes: usize,
-    /// When it was last asked for or finished decoding (a counter).
+    /// When it was last asked for or finished decoding ([`effectcraft_render::memory::tick`]).
     used: u64,
 }
 
@@ -276,7 +276,6 @@ impl Entry {
 
 struct State {
     entries: Vec<Entry>,
-    clock: u64,
     /// Pictures' planes kept for their effects, oldest first (at most [`HELD_FILES`]).
     held: VecDeque<(String, Arc<Batch>)>,
 }
@@ -312,7 +311,8 @@ impl Drop for Owning<'_> {
 /// Decoded planes by file, bounded by bytes.
 pub(crate) struct PlaneStore {
     state: Mutex<State>,
-    budget: usize,
+    /// Bytes it keeps at most ([`set_budget`]).
+    budget: std::sync::atomic::AtomicUsize,
 }
 
 thread_local! {
@@ -428,7 +428,17 @@ fn cap_of(path: &str) -> usize {
 
 impl PlaneStore {
     pub(crate) const fn new(budget: usize) -> PlaneStore {
-        PlaneStore { state: Mutex::new(State { entries: Vec::new(), clock: 0, held: VecDeque::new() }), budget }
+        PlaneStore { state: Mutex::new(State { entries: Vec::new(), held: VecDeque::new() }), budget: std::sync::atomic::AtomicUsize::new(budget) }
+    }
+
+    fn budget(&self) -> usize {
+        self.budget.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Keep at most `bytes` from now on, dropping the oldest entries not in use at once.
+    pub(crate) fn set_budget(&self, bytes: usize) {
+        self.budget.store(bytes, std::sync::atomic::Ordering::Relaxed);
+        Self::drop_oldest(&mut self.lock(), bytes, CACHE_FILES, None);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -474,8 +484,8 @@ impl PlaneStore {
     #[allow(clippy::too_many_arguments)]
     fn step(&self, path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, by: Use, opened: &mut Option<Opened>, since: u64) -> Step {
         let mut st = self.lock();
-        st.clock += 1;
-        let clock = st.clock;
+        // (shared with the footage frames: one least-recently-used order across both)
+        let clock = effectcraft_render::memory::tick();
         let at = match st.entries.iter().position(|e| e.path == path) {
             Some(i) => i,
             None => {
@@ -574,8 +584,8 @@ impl PlaneStore {
     /// meanwhile (then nothing made of it is kept or handed out); drop what doesn't fit.
     fn finish(&self, path: &str, flight: &Arc<Flight>, outcome: Result<Arc<Batch>, Refused>) -> Result<Arc<Batch>, Refused> {
         let mut st = self.lock();
-        st.clock += 1;
-        let clock = st.clock;
+        // (shared with the footage frames: one least-recently-used order across both)
+        let clock = effectcraft_render::memory::tick();
         let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.flight.as_ref().is_some_and(|f| Arc::ptr_eq(f, flight))) else {
             return match outcome {
                 Err(e @ (Refused::Cancelled | Refused::Stopped)) => Err(e),
@@ -603,7 +613,7 @@ impl PlaneStore {
             }
             Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped) => {}
         }
-        Self::drop_oldest(&mut st, self.budget, CACHE_FILES, Some(path));
+        Self::drop_oldest(&mut st, self.budget(), CACHE_FILES, Some(path));
         outcome
     }
 
@@ -671,6 +681,32 @@ impl PlaneStore {
         let mut st = self.lock();
         st.entries.retain(|e| e.path != path);
         st.held.retain(|(p, _)| p != path);
+    }
+
+    /// The index of the least recently used entry that may be dropped (holding bytes, not in
+    /// use, not held for a picture's effects).
+    fn oldest_droppable(st: &State) -> Option<usize> {
+        st.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.bytes > 0 && !e.in_use())
+            .filter(|(_, e)| !e.batch.as_ref().is_some_and(|b| st.held.iter().any(|(_, h)| Arc::ptr_eq(h, b))))
+            .min_by_key(|(_, e)| e.used)
+            .map(|(i, _)| i)
+    }
+
+    /// When the least recently used entry that may be dropped was last used (the memory
+    /// accountant's footage group, #3271).
+    pub(crate) fn oldest_use(&self) -> Option<u64> {
+        let st = self.lock();
+        Self::oldest_droppable(&st).and_then(|i| st.entries.get(i)).map(|e| e.used)
+    }
+
+    /// Drop the least recently used entry that may be dropped; the bytes freed.
+    pub(crate) fn drop_oldest_one(&self) -> usize {
+        let mut st = self.lock();
+        let Some(i) = Self::oldest_droppable(&st) else { return 0 };
+        if i < st.entries.len() { st.entries.remove(i).bytes } else { 0 }
     }
 
     /// Drop least recently used entries not in use until at most `bytes` are held (the memory
@@ -983,6 +1019,30 @@ impl effectcraft_render::memory::MemoryHolder for SharedStore {
     fn trim_to(&self, bytes: usize) {
         STORE.trim_to(bytes);
     }
+    fn group(&self) -> Option<&'static str> {
+        Some(effectcraft_render::memory::FOOTAGE)
+    }
+    fn oldest_use(&self) -> Option<u64> {
+        STORE.oldest_use()
+    }
+    fn drop_oldest(&self) -> usize {
+        STORE.drop_oldest_one()
+    }
+}
+
+/// The footage budget (Settings ▸ Memory & CPU ▸ Footage Frame Cache): the shared plane store
+/// keeps at most this much (in the browser at most [`crate::exr_channels::WEB_CACHE_CAP`]); the
+/// footage frames and the planes together stay within it (the memory accountant's
+/// [`effectcraft_render::memory::FOOTAGE`] group).
+pub(crate) fn set_budget(bytes: usize) {
+    let bytes = if cfg!(target_arch = "wasm32") { bytes.min(crate::exr_channels::WEB_CACHE_CAP) } else { bytes };
+    store().set_budget(bytes);
+}
+
+/// The bytes the shared plane store keeps at most.
+#[cfg(test)]
+pub(crate) fn budget() -> usize {
+    STORE.budget()
 }
 
 /// Is `path` an OpenEXR file by name (the store reads those; other files, and files named so

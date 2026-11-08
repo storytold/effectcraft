@@ -80,7 +80,10 @@ Commands (CLI, MCP, control channel):
 - `audio.outputLeft`: Left (Audio Output Mapping)
 - `audio.outputRight`: Right (Audio Output Mapping)
 - `memory.layerCacheMb`: Layer Cache (in the browser at most 512 MB, see [web.md](web.md))
-- `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB)
+- `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB). It covers the
+  decoded footage frames and the decoded OpenEXR channels together: one budget, the least
+  recently used frame or channel set goes first, whichever it is (in the browser the channels
+  take at most 512 MB of it)
 - `memory.previewCacheMb`: Preview (RAM) Cache
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,

@@ -1267,3 +1267,90 @@ fn trimming_for_bytes_keeps_remembered_failures() {
     assert!(store.get(path, &broken, &index, &all, Use::Other).is_err());
     assert_eq!(decodes_of(path).len(), 1, "not read again");
 }
+
+/// #3271 (user test): the decoded planes have no budget of their own; they share the Footage
+/// Frame Cache with the footage frames. A footage budget of 10000 MB lets the plane store hold
+/// far more than 1 GB, and a change of the setting resizes it at once.
+#[test]
+fn the_footage_budget_sizes_the_plane_store() {
+    use effectcraft_render::FootageSource;
+    let pool = crate::MediaPool::new();
+    pool.set_cache_budget(10_000 << 20);
+    assert_eq!(super::budget(), 10_000 << 20);
+    assert!(super::budget() > 1 << 30, "more than the old fixed 1 GB");
+    let acc = effectcraft_render::memory::Accountant::global();
+    assert_eq!(acc.group_budget(effectcraft_render::memory::FOOTAGE), Some(10_000 << 20), "frames and planes share it");
+    pool.set_cache_budget(3_000 << 20);
+    assert_eq!(super::budget(), 3_000 << 20, "resized at run time");
+    // (back to the default for the tests beside it)
+    pool.set_cache_budget(CACHE_BUDGET);
+}
+
+/// #3271 (user decision): the footage frames and the decoded planes share one footage budget
+/// with one least-recently-used order: filling the frame cache drops the oldest plane sets,
+/// filling the plane store drops the oldest frames; neither side has a share of its own.
+#[test]
+fn frames_and_planes_make_room_for_each_other() {
+    use effectcraft_render::memory::{Accountant, FOOTAGE, MemoryHolder};
+    struct Planes(Arc<PlaneStore>);
+    impl MemoryHolder for Planes {
+        fn name(&self) -> &'static str {
+            "planes"
+        }
+        fn bytes(&self) -> usize {
+            self.0.lock().entries.iter().map(|e| e.bytes).sum()
+        }
+        fn priority(&self) -> u8 {
+            1
+        }
+        fn trim_to(&self, bytes: usize) {
+            self.0.trim_to(bytes);
+        }
+        fn group(&self) -> Option<&'static str> {
+            Some(FOOTAGE)
+        }
+        fn oldest_use(&self) -> Option<u64> {
+            self.0.oldest_use()
+        }
+        fn drop_oldest(&self) -> usize {
+            self.0.drop_oldest_one()
+        }
+    }
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (32, 32), Compression::ZIP1)], (32, 32)).into();
+    let one = 4 * (32 * 32 * 4 + 1);
+    let budget = 5 * one;
+    let store = Arc::new(PlaneStore::new(budget));
+    let pool = crate::MediaPool::with_budget(budget);
+    let acc = Accountant::new(usize::MAX);
+    let holders: Vec<Arc<dyn MemoryHolder>> = vec![Arc::new(Planes(store.clone())), pool.memory_holder()];
+    for h in &holders {
+        acc.register(h);
+    }
+    acc.set_group_budget(FOOTAGE, budget);
+    let all = Want { all: true, ids: Default::default() };
+    let planes = |p: &str| {
+        let source = ExrSource::Bytes(bytes.clone());
+        let index = crate::exr_index::get(p, &source).unwrap();
+        drop(store.get(p, &source, &index, &all, Use::Other).unwrap());
+    };
+    // Plane sets first, then frames: the frames push the oldest plane sets out.
+    planes("/3271-share-p1.exr");
+    planes("/3271-share-p2.exr");
+    planes("/3271-share-p3.exr");
+    for f in ["/f1", "/f2", "/f3"] {
+        pool.keep_test_frame(f, 32, 32);
+        acc.balance();
+    }
+    assert_eq!(pool.test_frames(), ["/f1", "/f2", "/f3"], "the frames stay");
+    assert!(!store.cached().contains(&"/3271-share-p1.exr".to_string()), "the oldest plane set went: {:?}", store.cached());
+    assert!(store.cached().contains(&"/3271-share-p3.exr".to_string()));
+    // Now plane sets: they push the oldest frames out.
+    for p in ["/3271-share-p4.exr", "/3271-share-p5.exr", "/3271-share-p6.exr"] {
+        planes(p);
+        acc.balance();
+    }
+    let frames = pool.test_frames();
+    assert!(!frames.contains(&"/f1".to_string()), "the oldest frame went: {frames:?}");
+    assert!(store.cached().contains(&"/3271-share-p6.exr".to_string()), "the newest plane set stays");
+    assert!(acc.total() <= budget, "{} of {budget}", acc.total());
+}

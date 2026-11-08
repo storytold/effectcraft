@@ -115,11 +115,12 @@ impl Session {
         self.layer_cache.set_budget(b.layer);
         self.footage.set_cache_budget(b.media);
         // One budget over the big caches together (#3271): the layer cache, the footage frames
-        // and decoded planes, and the preview frames' share.
+        // and decoded planes (sharing the footage budget, see `set_cache_budget`), and the
+        // preview frames' share.
         let accountant = effectcraft_render::memory::Accountant::global();
         let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
         accountant.register(&layers);
-        accountant.set_budget(b.layer.saturating_add(b.media).saturating_add(b.preview).saturating_add(effectcraft_render::memory::PLANE_BUDGET));
+        accountant.set_budget(b.layer.saturating_add(b.media).saturating_add(b.preview));
     }
 
     /// Take the latest reading of the system's memory and start the next one in the background

@@ -5,6 +5,13 @@
 //! frees from the lowest priority first, in large steps: down to [`TRIM_TO`] of the budget, so
 //! a cache doesn't fill up and trim again with every insert.
 //!
+//! Holders can share a budget of their own ([`MemoryHolder::group`],
+//! [`Accountant::set_group_budget`]): the footage frames and the decoded footage planes
+//! ([`FOOTAGE`]) together take at most the Footage Frame Cache. Within a group the least recently
+//! used item goes first, whichever holder keeps it ([`MemoryHolder::oldest_use`], stamped with
+//! [`tick`]): a frame can push out plane sets and plane sets can push out frames; neither has a
+//! share of its own.
+//!
 //! A holder that had to make again what it let go of shortly before (its "refills",
 //! [`MemoryHolder::refills`]) is thrashing: its priority goes up by one until it settles, so the
 //! data that is needed again is kept longest.
@@ -19,12 +26,16 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 /// The share of the budget the accountant frees down to once it is over (hysteresis).
 pub const TRIM_TO: f64 = 0.9;
 
-/// The decoded footage planes' own budget (the plane store in `effectcraft-media`): part of the
-/// common budget's sum.
-#[cfg(not(target_arch = "wasm32"))]
-pub const PLANE_BUDGET: usize = 1 << 30;
-#[cfg(target_arch = "wasm32")]
-pub const PLANE_BUDGET: usize = 512 << 20;
+/// The group of the footage frames and the decoded footage planes: together within the
+/// Footage Frame Cache ([`Accountant::set_group_budget`]).
+pub const FOOTAGE: &str = "footage";
+
+/// A use stamp the holders of a group share: later uses get larger stamps (a counter, not a
+/// clock: two uses never tie).
+pub fn tick() -> u64 {
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    TICK.fetch_add(1, Ordering::Relaxed)
+}
 
 /// How long a holder that refilled stays protected.
 const THRASH_FOR: std::time::Duration = std::time::Duration::from_secs(10);
@@ -48,6 +59,19 @@ pub trait MemoryHolder: Send + Sync {
     fn refills(&self) -> u64 {
         0
     }
+    /// The budget it shares with other holders ([`Accountant::set_group_budget`]), if any.
+    fn group(&self) -> Option<&'static str> {
+        None
+    }
+    /// The [`tick`] its least recently used item it may drop was last used at (`None`: nothing
+    /// to drop, or it doesn't tell; then its group trims it by priority).
+    fn oldest_use(&self) -> Option<u64> {
+        None
+    }
+    /// Drop its least recently used item it may drop; the bytes freed (0: nothing dropped).
+    fn drop_oldest(&self) -> usize {
+        0
+    }
 }
 
 struct Registered {
@@ -60,6 +84,8 @@ struct Registered {
 /// The common budget of the big caches (see the module notes).
 pub struct Accountant {
     budget: AtomicUsize,
+    /// The budgets holders share ([`MemoryHolder::group`]).
+    groups: Mutex<Vec<(&'static str, usize)>>,
     holders: Mutex<Vec<Registered>>,
     /// Bytes freed by the accountant so far (stats, tests).
     freed: AtomicUsize,
@@ -77,7 +103,13 @@ impl Default for Accountant {
 impl Accountant {
     /// An accountant with `budget` bytes (`usize::MAX`: no limit).
     pub const fn new(budget: usize) -> Accountant {
-        Accountant { budget: AtomicUsize::new(budget), holders: Mutex::new(Vec::new()), freed: AtomicUsize::new(0), balancing: Mutex::new(None) }
+        Accountant {
+            budget: AtomicUsize::new(budget),
+            groups: Mutex::new(Vec::new()),
+            holders: Mutex::new(Vec::new()),
+            freed: AtomicUsize::new(0),
+            balancing: Mutex::new(None),
+        }
     }
 
     /// The process's accountant.
@@ -96,6 +128,23 @@ impl Accountant {
         self.budget.load(Ordering::Relaxed)
     }
 
+    /// Set the budget the holders of `group` share and free down to it at once.
+    pub fn set_group_budget(&self, group: &'static str, bytes: usize) {
+        {
+            let mut g = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
+            match g.iter_mut().find(|(n, _)| *n == group) {
+                Some(e) => e.1 = bytes,
+                None => g.push((group, bytes)),
+            }
+        }
+        self.balance();
+    }
+
+    /// The budget the holders of `group` share (`None`: none set).
+    pub fn group_budget(&self, group: &str) -> Option<usize> {
+        self.groups.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(n, _)| *n == group).map(|(_, b)| *b)
+    }
+
     /// Keep `holder` within the common budget (held weakly).
     pub fn register(&self, holder: &Arc<dyn MemoryHolder>) {
         let mut h = self.holders.lock().unwrap_or_else(PoisonError::into_inner);
@@ -111,7 +160,7 @@ impl Accountant {
     /// A holder grew (an insert): balance, at most every [`BALANCE_EVERY`] (the holders' locks
     /// aren't taken on every insert).
     pub fn note_growth(&self) {
-        if self.budget() == usize::MAX {
+        if self.budget() == usize::MAX && self.groups.lock().unwrap_or_else(PoisonError::into_inner).is_empty() {
             return;
         }
         let recent = self.balancing.try_lock().map(|g| g.is_some_and(|t| t.elapsed() < BALANCE_EVERY)).unwrap_or(true);
@@ -153,24 +202,62 @@ impl Accountant {
         self.freed.load(Ordering::Relaxed)
     }
 
-    /// When the holders together are over the budget, free down to [`TRIM_TO`] of it, lowest
-    /// priority first (a holder is trimmed as far as needed before the next one is touched).
+    /// When the holders of a group are over its budget, or all holders over the common one,
+    /// free down to [`TRIM_TO`] of it, lowest priority first (a holder is trimmed as far as
+    /// needed before the next one is touched): the groups first, then all holders.
     pub fn balance(&self) {
         let budget = self.budget();
-        if budget == usize::MAX {
+        let groups = self.groups.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if budget == usize::MAX && groups.is_empty() {
             return;
         }
         // (one at a time: a balance running meanwhile does the work)
         let Ok(mut last) = self.balancing.try_lock() else { return };
         *last = Some(web_time::Instant::now());
         let mut holders = self.alive();
-        let mut total: usize = holders.iter().map(|(h, _)| h.bytes()).fold(0, usize::saturating_add);
+        holders.sort_by_key(|(_, p)| *p);
+        for (group, bytes) in groups {
+            let members: Vec<&Arc<dyn MemoryHolder>> = holders.iter().filter(|(h, _)| h.group() == Some(group)).map(|(h, _)| h).collect();
+            self.trim_oldest(&members, bytes);
+            self.trim(&members, bytes);
+        }
+        if budget != usize::MAX {
+            let all: Vec<&Arc<dyn MemoryHolder>> = holders.iter().map(|(h, _)| h).collect();
+            self.trim(&all, budget);
+        }
+    }
+
+    /// Free from `holders` least recently used first, whichever holder keeps it, down to
+    /// [`TRIM_TO`] of `budget` when they hold more than it (holders that tell their oldest use).
+    fn trim_oldest(&self, holders: &[&Arc<dyn MemoryHolder>], budget: usize) {
+        let mut total: usize = holders.iter().map(|h| h.bytes()).fold(0, usize::saturating_add);
         if total <= budget {
             return;
         }
         let target = (budget as f64 * TRIM_TO) as usize;
-        holders.sort_by_key(|(_, p)| *p);
-        for (h, _) in holders {
+        let mut left: Vec<&Arc<dyn MemoryHolder>> = holders.to_vec();
+        while total > target {
+            let Some((i, _)) = left.iter().enumerate().filter_map(|(i, h)| Some((i, h.oldest_use()?))).min_by_key(|(_, t)| *t) else { break };
+            let Some(h) = left.get(i) else { break };
+            let freed = h.drop_oldest();
+            if freed == 0 {
+                left.remove(i);
+                continue;
+            }
+            total = total.saturating_sub(freed);
+            self.freed.fetch_add(freed, Ordering::Relaxed);
+        }
+    }
+
+    /// Free from `holders` (lowest priority first) down to [`TRIM_TO`] of `budget` when they
+    /// hold more than it.
+    fn trim(&self, holders: &[&Arc<dyn MemoryHolder>], budget: usize) {
+        let mut total: usize = holders.iter().map(|h| h.bytes()).fold(0, usize::saturating_add);
+        if total <= budget {
+            return;
+        }
+        let target = (budget as f64 * TRIM_TO) as usize;
+        for h in holders {
             if total <= target {
                 break;
             }
@@ -196,11 +283,15 @@ mod tests {
         step: usize,
         priority: u8,
         refills: Mutex<u64>,
+        group: Option<&'static str>,
     }
 
     impl Fake {
         fn new(name: &'static str, bytes: usize, priority: u8) -> Arc<Fake> {
-            Arc::new(Fake { name, bytes: Mutex::new(bytes), step: 10, priority, refills: Mutex::new(0) })
+            Arc::new(Fake { name, bytes: Mutex::new(bytes), step: 10, priority, refills: Mutex::new(0), group: None })
+        }
+        fn in_group(name: &'static str, bytes: usize, priority: u8, group: &'static str) -> Arc<Fake> {
+            Arc::new(Fake { name, bytes: Mutex::new(bytes), step: 10, priority, refills: Mutex::new(0), group: Some(group) })
         }
         fn held(&self) -> usize {
             *self.bytes.lock().unwrap()
@@ -229,6 +320,34 @@ mod tests {
         fn refills(&self) -> u64 {
             *self.refills.lock().unwrap()
         }
+        fn group(&self) -> Option<&'static str> {
+            self.group
+        }
+    }
+
+    /// #3271: holders of a group share its budget and make room for each other (lowest
+    /// priority first) before the common budget is looked at; a holder outside the group is
+    /// left alone while the common budget holds.
+    #[test]
+    fn a_group_shares_its_budget() {
+        let acc = Accountant::new(usize::MAX);
+        let (frames, planes, layers) = (Fake::in_group("frames", 400, 0, FOOTAGE), Fake::in_group("planes", 500, 1, FOOTAGE), Fake::new("layers", 800, 2));
+        let held: Vec<Arc<dyn MemoryHolder>> = vec![holder(&frames), holder(&planes), holder(&layers)];
+        for h in &held {
+            acc.register(h);
+        }
+        acc.set_group_budget(FOOTAGE, 1000);
+        assert_eq!((frames.held(), planes.held(), layers.held()), (400, 500, 800), "within the group's budget");
+        planes.fill(300);
+        acc.balance();
+        // 1200 in the group, down to 900: the frames make room for the planes.
+        assert_eq!((frames.held(), planes.held(), layers.held()), (100, 800, 800));
+        // A larger footage budget: the planes alone may hold more than the old fixed 1 GB.
+        acc.set_group_budget(FOOTAGE, 10 << 30);
+        planes.fill(2 << 30);
+        acc.balance();
+        assert!(planes.held() > 1 << 30, "{}", planes.held());
+        assert_eq!(acc.group_budget(FOOTAGE), Some(10 << 30));
     }
 
     fn holder(f: &Arc<Fake>) -> Arc<dyn MemoryHolder> {
