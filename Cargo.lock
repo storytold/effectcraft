@@ -3844,8 +3844,7 @@ checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
 [[package]]
 name = "linesweeper"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a25df1b0c5432893f41bba817150e323703ee5f6d974f3a6808ac7fd7f046d18"
+source = "git+https://github.com/storytold/craft-libs?rev=058b047760dfe5ba51f6f526faa3b0c833552dfa#058b047760dfe5ba51f6f526faa3b0c833552dfa"
 dependencies = [
  "arrayvec",
  "kurbo",
