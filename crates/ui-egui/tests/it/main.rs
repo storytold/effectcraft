@@ -82,6 +82,8 @@ mod ui_roto_objects;
 mod ui_roto_span_confidence;
 mod ui_script_console;
 mod ui_script_console_keyboard;
+#[cfg(not(target_arch = "wasm32"))]
+mod ui_script_render;
 mod ui_scriptui;
 mod ui_scrolling;
 mod ui_self_drop;
