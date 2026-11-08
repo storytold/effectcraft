@@ -134,8 +134,7 @@ file at once wait for one decode. Once no enabled effect reads the item any more
 go back to the picture's channels alone.
 
 The parameters that pick channels (EXtractoR's Red, Green, Blue and Alpha, Cryptomatte's Layer
-and Layer Name, 3D Channel Extract's 3D Channel, ID Matte's Aux. Channel and Use Coverage,
-IDentifier's Channel Type) can't be animated, as in After Effects, where they have no
+and Layer Name, 3D Channel Extract's 3D Channel, ID Matte's Aux. Channel, IDentifier's Channel Type) can't be animated, as in After Effects, where they have no
 stopwatch either: they take no keyframes and no expression. A document that animated one
 opens with its first value.
 
