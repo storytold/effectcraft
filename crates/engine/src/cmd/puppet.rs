@@ -37,15 +37,19 @@ pub fn puppet_eval(s: &Session, cid: ItemId, lid: LayerId, fx_uid: Uid, t: Tick)
     PuppetSource { project: &s.project, footage: &*s.footage, expr: s.expr.as_deref(), cache: &s.layer_cache }.eval(cid, lid, fx_uid, t)
 }
 
-/// What a Puppet evaluation reads: a project and the footage, expressions and layer cache it
-/// renders with. Built from shared snapshots (`Arc`s), it evaluates off the UI thread too: the
-/// Puppet tools' overlay renders the layer's input at full size, a whole nested composition for
-/// a precomp layer (#2516).
+/// What a Puppet evaluation reads, borrowed: a project and the footage, expressions and layer
+/// cache it renders with. A worker thread borrows it from shared snapshots (`Arc`s) it owns, so it
+/// evaluates off the UI thread too: the Puppet tools' overlay renders the layer's input at full
+/// size, a whole nested composition for a precomp layer (#2516).
 #[derive(Clone, Copy)]
 pub struct PuppetSource<'a> {
+    /// The project whose layer is evaluated.
     pub project: &'a effectcraft_project::Project,
+    /// Where the layer's source pixels come from.
     pub footage: &'a dyn effectcraft_render::FootageSource,
+    /// Evaluates expressions on the layer's properties; `None` without an expression engine.
     pub expr: Option<&'a dyn effectcraft_render::ExprHost>,
+    /// The layer cache the input is looked up in and stored to.
     pub cache: &'a effectcraft_render::LayerCache,
 }
 

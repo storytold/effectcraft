@@ -1007,10 +1007,6 @@ impl<'a> Renderer<'a> {
         Some((buf, key))
     }
 
-    /// A layer's input at the context time: source → masks → its first `effects` effects
-    /// (what Time effects read at neighbouring times), in effect space (see [`effect_bounds`]):
-    /// what effect `effects` sees. Served from / stored in the layer cache under its own key,
-    /// so scrubbing reuses frames rendered for earlier output frames.
     /// Whether [`Self::layer_input`] of `layer` (through its first `effects` effects) is kept in the
     /// layer cache, so asking again for an unchanged input is a lookup. `false` for inputs it
     /// renders every time: precomps (a whole nested composition), adjustment layers, layers whose
@@ -1019,6 +1015,10 @@ impl<'a> Renderer<'a> {
         self.cache.is_some() && cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects).is_some()
     }
 
+    /// A layer's input at the context time: source → masks → its first `effects` effects
+    /// (what Time effects read at neighbouring times), in effect space (see [`effect_bounds`]):
+    /// what effect `effects` sees. Served from / stored in the layer cache under its own key,
+    /// so scrubbing reuses frames rendered for earlier output frames.
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
         let key = self.content_key(ctx, layer, key);

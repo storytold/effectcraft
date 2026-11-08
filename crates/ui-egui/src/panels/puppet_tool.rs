@@ -124,8 +124,9 @@ pub fn overlay(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId, layer: &L
     if slot.job.is_none() {
         let rx = evaluate_off_thread(app, ctx, cid, layer.id, fx.uid, t);
         // Waited for only while there is no overlay to draw: with one, every edit elsewhere would
-        // block the frame for up to the grace.
-        let waited = if slot.shown.is_none() { rx.recv_timeout(OVERLAY_GRACE).ok() } else { rx.try_recv().ok() };
+        // block the frame for up to the grace. An inline result (the web) is taken first, without
+        // the clock `recv_timeout` reads, which the web doesn't have.
+        let waited = rx.try_recv().ok().or_else(|| if slot.shown.is_none() { rx.recv_timeout(OVERLAY_GRACE).ok() } else { None });
         match waited {
             Some(ov) => {
                 slot.shown = Some((key, ov.clone()));
