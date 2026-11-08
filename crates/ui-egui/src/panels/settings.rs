@@ -504,12 +504,12 @@ pub fn human_bytes(b: u64) -> String {
     if u == 0 { format!("{b} bytes") } else { format!("{v:.1} {}", units[u]) }
 }
 
-/// Settings ▸ Roto Brush and Settings ▸ Face Tracking: a task's models (`roto.models`,
+/// Settings ▸ Rotoscope Brush and Settings ▸ Face Tracking: a task's models (`roto.models`,
 /// `face.models`): choose one; download, install from a file or remove the trained ones; who made
 /// them, their licence, size and source.
 fn models_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, acts: &mut Vec<Act>, task: Task) {
     let (prefix, user) = match task {
-        Task::Mask => ("roto", "Roto Brush"),
+        Task::Mask => ("roto", "Rotoscope Brush"),
         Task::Face => ("face", "Face tracking"),
     };
     let Ok(info) = app.session.execute(&format!("{prefix}.models"), json!({})) else { return };

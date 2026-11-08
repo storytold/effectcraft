@@ -106,7 +106,7 @@ fn analyses_render_their_input_on_the_worker_gpu() {
     let (mut s, off) = page();
     let l = s.active_comp().unwrap().layers[0].id;
     s.execute("layer.select", json!({"layers": [l.0]})).unwrap();
-    s.execute("effect.apply", json!({"layers": [l.0], "effect": "Warp Stabilizer"})).unwrap();
+    s.execute("effect.apply", json!({"layers": [l.0], "effect": "Motion Stabilizer"})).unwrap();
     s.execute("warp.analyze", json!({"layer": l.0, "wait": false})).unwrap();
     let (req, _) = off.0.lock().unwrap().pop().expect("the analysis went to the worker");
     let (cpu, _) = run(req.clone(), None);
@@ -117,7 +117,7 @@ fn analyses_render_their_input_on_the_worker_gpu() {
     let failed = |r: &[WorkerReply]| r.iter().find_map(|r| if let WorkerReply::Failed { error } = r { Some(error.clone()) } else { None });
     assert_eq!(group(&cpu).is_some(), group(&gpu).is_some(), "cpu {:?} / gpu {:?}", failed(&cpu), failed(&gpu));
     assert!(group(&gpu).is_some(), "{:?}", failed(&gpu));
-    // The input frames (the effects above Warp Stabilizer) rendered on the device in passes.
+    // The input frames (the effects above Motion Stabilizer) rendered on the device in passes.
     assert!(after.1 - before.1 >= 6, "readbacks {before:?} → {after:?}");
     assert!(after.0 - before.0 >= 12, "passes {before:?} → {after:?}");
     let progress = gpu.iter().filter(|r| matches!(r, WorkerReply::Progress { .. })).count();

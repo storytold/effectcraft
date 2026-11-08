@@ -1,7 +1,7 @@
-//! Warp Stabilizer runtime: the analysis job (`warp.analyze`) and keeping analyses valid.
+//! Motion Stabilizer runtime: the analysis job (`warp.analyze`) and keeping analyses valid.
 //!
 //! The analysis renders the layer's input to the effect (source → masks → the effects above
-//! the Warp Stabilizer, `Renderer::layer_input`) for every frame between the layer's In and Out
+//! the Motion Stabilizer, `Renderer::layer_input`) for every frame between the layer's In and Out
 //! points on a background thread, and feeds the frames to `effectcraft_track::stabilize`'s
 //! analyzer (step 1 of 2, "Analyzing in background"); step 2 ("Stabilizing") derives the
 //! stabilization plan once to validate and cache the result. When the job finishes, the analysis is
@@ -62,7 +62,7 @@ pub struct WarpShared {
     result: Mutex<Option<WarpAnalysis>>,
 }
 
-/// A running (or finished, not yet polled) Warp Stabilizer analysis.
+/// A running (or finished, not yet polled) Motion Stabilizer analysis.
 pub struct WarpJob {
     pub shared: Arc<WarpShared>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -303,11 +303,11 @@ impl Session {
         }
     }
 
-    /// Start analysing Warp Stabilizer `effect` on `layer`. `wait`: block until done (wasm32
+    /// Start analysing Motion Stabilizer `effect` on `layer`. `wait`: block until done (wasm32
     /// always does). Returns the number of frames.
     pub fn start_warp(&mut self, comp: ItemId, layer: LayerId, effect: Uid, wait: bool) -> Result<usize, String> {
         if self.is_warp_analyzing() {
-            return Err("a Warp Stabilizer analysis is already running".into());
+            return Err("a Motion Stabilizer analysis is already running".into());
         }
         self.poll_warp_job();
         self.warp_pending.retain(|x| *x != (comp, layer, effect));
@@ -315,9 +315,9 @@ impl Session {
         let l = c.layer(layer).ok_or("no layer")?;
         let fx = l.effects().ok_or("the layer has no effects")?;
         let index = fx.groups().position(|g| g.uid == effect).ok_or("no such effect")?;
-        let g = fx.groups().nth(index).filter(|g| is_warp(g)).ok_or("not a Warp Stabilizer")?;
+        let g = fx.groups().nth(index).filter(|g| is_warp(g)).ok_or("not a Motion Stabilizer")?;
         if l.switches.adjustment {
-            return Err("Warp Stabilizer needs footage, not an adjustment layer".into());
+            return Err("Motion Stabilizer needs footage, not an adjustment layer".into());
         }
         let times = analysis_times(c, l);
         if times.len() < 2 {
@@ -383,12 +383,12 @@ impl Session {
             (Some(a), None) if !st.cancelled => {
                 let json = a.to_json();
                 let (cid, lid, uid, key) = (job.comp, job.layer, job.effect, job.key.clone());
-                let r = self.edit("Warp Stabilizer Analysis", None, |p, _| {
+                let r = self.edit("Motion Stabilizer Analysis", None, |p, _| {
                     let g = p
                         .comp_mut(cid)
                         .and_then(|c| c.layer_mut(lid))
                         .and_then(|l| l.props.find_group_mut(uid))
-                        .ok_or_else(|| crate::EngineError::Other("the Warp Stabilizer was removed during analysis".into()))?;
+                        .ok_or_else(|| crate::EngineError::Other("the Motion Stabilizer was removed during analysis".into()))?;
                     for (m, v) in [(ANALYSIS, json), (ANALYSIS_KEY, key)] {
                         if let Some(pr) = g.get_mut(m) {
                             pr.value = Value::Str(v);
@@ -397,15 +397,15 @@ impl Session {
                     Ok(())
                 });
                 let msg = match r {
-                    Ok(()) => format!("Warp Stabilizer: analysed {} frame(s) in {:.1} s", a.frames.len(), st.elapsed),
-                    Err(e) => format!("Warp Stabilizer: {e}"),
+                    Ok(()) => format!("Motion Stabilizer: analysed {} frame(s) in {:.1} s", a.frames.len(), st.elapsed),
+                    Err(e) => format!("Motion Stabilizer: {e}"),
                 };
                 self.events.push(Event::Toast { message: msg, error: false });
             }
             _ => {
                 let msg = match &st.error {
-                    Some(e) => format!("Warp Stabilizer analysis failed: {e}"),
-                    None => "Warp Stabilizer analysis cancelled".into(),
+                    Some(e) => format!("Motion Stabilizer analysis failed: {e}"),
+                    None => "Motion Stabilizer analysis cancelled".into(),
                 };
                 self.events.push(Event::Toast { message: msg, error: st.error.is_some() });
                 self.bump();

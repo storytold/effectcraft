@@ -338,11 +338,11 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
 /// The Project Settings dialog's title and fields.
 fn project_settings_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>) {
     let st = &s.project.settings;
-    // The catalogue row is `Mercury GPU Acceleration ({})`, so the value goes through
+    // The catalogue row is `GPU Acceleration ({})`, so the value goes through
     // tr_args: wrapping the assembled string in tr() would look up the backend's name.
     let gpu_label = match &s.accel {
-        Some(a) => tr_args("Mercury GPU Acceleration ({})", &[&a.name()]),
-        None => tr("Mercury GPU Acceleration (no GPU: software)").to_string(),
+        Some(a) => tr_args("GPU Acceleration ({})", &[&a.name()]),
+        None => tr("GPU Acceleration (no GPU: software)").to_string(),
     };
     let depth = match st.bit_depth.label() {
         l if l.starts_with("16") => 1,
@@ -436,7 +436,7 @@ fn project_settings_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>
             Field::choice(
                 "renderer",
                 "Video rendering and effects",
-                &[(gpu_label.as_str(), json!("gpu")), ("Mercury Software Only", json!("software"))],
+                &[(gpu_label.as_str(), json!("gpu")), ("Software Rendering", json!("software"))],
                 usize::from(!st.gpu_acceleration),
             ),
         ],

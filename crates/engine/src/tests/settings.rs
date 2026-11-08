@@ -1221,7 +1221,7 @@ fn render_backend_says_why_it_renders_on_the_cpu() {
     assert_eq!(why(&mut s), json!("no GPU compositor is attached"));
     s.accel_note = Some("headless: renders on the CPU unless started with --gpu".into());
     assert_eq!(why(&mut s), json!("headless: renders on the CPU unless started with --gpu"));
-    assert_eq!(s.execute("render.backend", json!({"backend": "cpu"})).unwrap()["why"], json!("the project's renderer is Mercury Software Only"));
+    assert_eq!(s.execute("render.backend", json!({"backend": "cpu"})).unwrap()["why"], json!("the project's renderer is Software Rendering"));
 }
 
 /// Settings ▸ GPU Information names what the GPU compositor runs on, or why it is off, and the

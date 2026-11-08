@@ -25,7 +25,7 @@ use crate::{EffectSpec, ParamSpec, default_value, group_name, layer_source_id};
 pub const PARAM_ID_ALIASES: &[(&str, &str, &str)] = &[
     // Color Correction: Change to Color's single Tolerance became the Tolerance group's Hue.
     ("ec.color.changetocolor", "tolerance", "toleranceGroup/hue"),
-    // Roto Brush & Refine Edge: propagation controls got their own twirl-down; motion blur and
+    // Rotoscope & Refine Edge: propagation controls got their own twirl-down; motion blur and
     // decontamination settings are nested under Refine Edge Matte.
     ("ec.matte.rotobrush", "rotoBrushMatte/searchRadius", "rotoBrushPropagation/searchRadius"),
     ("ec.matte.rotobrush", "rotoBrushMatte/motionThreshold", "rotoBrushPropagation/motionThreshold"),
@@ -372,7 +372,7 @@ pub fn current_param_id(spec: &EffectSpec, id: &str) -> Option<&'static str> {
 /// centre" sat at the comp's bottom-right corner; they now measure from the bounds' top-left,
 /// as After Effects does. `d` is the bounds' half size: positions the instance holds move by it
 /// so they keep their place in the comp (point parameters with their keyframes, Paint stroke
-/// paths and clone positions, Puppet mesh seeds and pin rest points, Liquify and Roto Brush
+/// paths and clone positions, Puppet mesh seeds and pin rest points, Liquify and Rotoscope Brush
 /// strokes). A point parameter still at its default (`layer_size`) and not animated stays: it
 /// meant the layer centre and now is. Expression controls keep their values (what they mean is
 /// up to the expressions reading them), and expressions are not rewritten.
@@ -438,7 +438,7 @@ enum Data {
     Point,
     /// Liquify's Distortion Mesh text (`distort4::LiquifyStroke` lines).
     Liquify,
-    /// Roto Brush's Strokes JSON ([`effectcraft_track::roto::RotoData`]).
+    /// Rotoscope Brush's Strokes JSON ([`effectcraft_track::roto::RotoData`]).
     Roto,
 }
 
@@ -585,7 +585,7 @@ mod tests {
     fn upgrade_moves_params_into_twirl_down_groups() {
         let spec = find(crate::warp_stab::ID).unwrap();
         let mut next = 1;
-        let mut g = instantiate(spec, &mut Ids(&mut next), "Warp Stabilizer", [100.0, 50.0]);
+        let mut g = instantiate(spec, &mut Ids(&mut next), "Motion Stabilizer", [100.0, 50.0]);
         // Pretend Smoothness was saved at top level with a custom value.
         let mut pr = take_at(&mut g, "stabilization/smoothness").unwrap();
         pr.value = Value::Scalar(12.0);
@@ -791,7 +791,7 @@ not a stroke",
             )
         );
 
-        // Roto Brush strokes.
+        // Rotoscope Brush strokes.
         let (spec, mut roto) = instance(crate::roto::ID, &mut next);
         let data = effectcraft_track::roto::RotoData {
             base: Some(0),

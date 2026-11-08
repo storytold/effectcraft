@@ -129,17 +129,13 @@ or into the Timeline, between layers and at the time you point to.
 
 308 built-in effects across its categories, each with its parameter names, order and
 defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, a full
-color-grading panel…), distort (Warp, Bulge, Turbulent Displace, CC Power Pin…), generate (Fractal Noise,
+color-grading panel…), distort (Warp, Bulge, Turbulent Displace, Perspective Pin…), generate (Fractal Noise,
 Gradient Ramp, Stroke, Write-on, Audio Spectrum…), keying, matte, noise and grain, perspective,
-**simulation** (CC Particle World, CC Rainfall, Shatter, Card Dance, Caustics, Wave World…),
-stylize (Glow, CC Glass…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
+**simulation** (Particle Emitter 3D, Rainfall, Shatter, Card Dance, Caustics, Wave World…),
+stylize (Glow, Glass Relief…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
 **audio** (Reverb, Parametric EQ, Delay, Stereo Mixer…), text, transitions, utility and expression
 controls. All nine **Layer Styles** (Drop Shadow, Inner/Outer Glow, Bevel and Emboss, Satin,
 overlays, Stroke) with Global Light. Preview plays audio in sync, with meters and waveforms.
-
-<p align="center">
-  <img src="docs/images/effectcraft-effects.png" alt="A CC Particle World burst with Glow, and the Effect Controls panel listing the particle system's parameters" width="100%">
-</p>
 
 ## 3D
 
@@ -241,8 +237,8 @@ for production client work. In particular:
   compositions, so please report visual discrepancies or unexpected behaviour.
 - **macOS is the most tested platform.** Linux and Windows users have hit basic interaction
   bugs, which we're fixing first.
-- **The trained models are new.** Roto Brush can use MobileSAM (an optional 40 MB download in
-  Settings ▸ Roto Brush) and face tracking can use Google's MediaPipe Face Landmarker (an optional
+- **The trained models are new.** Rotoscope Brush can use MobileSAM (an optional 40 MB download in
+  Settings ▸ Rotoscope Brush) and face tracking can use Google's MediaPipe Face Landmarker (an optional
   3.8 MB download in Settings ▸ Face Tracking). Both are actively undergoing evaluation and tuning.
 
 EffectCraft is in **alpha**: about 91% of the features tracked in

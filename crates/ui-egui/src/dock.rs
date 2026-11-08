@@ -124,7 +124,7 @@ impl PanelKind {
             PanelKind::EssentialGraphics => "Essential Graphics",
             PanelKind::ScriptPanel(_) => "ScriptUI Panel",
             PanelKind::Viewer(_) => "Composition",
-            PanelKind::LumetriScopes => "Lumetri Scopes",
+            PanelKind::LumetriScopes => "Video Scopes",
             PanelKind::Footage => "Footage",
             PanelKind::MediaBrowser => "Media Browser",
             PanelKind::Metadata => "Metadata",

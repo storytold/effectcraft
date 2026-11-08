@@ -1,9 +1,9 @@
-//! Roto Brush & Refine Edge (applied by the Roto Brush tool; Effect ▸ Matte).
+//! Rotoscope & Refine Edge (applied by the Rotoscope Brush tool; Effect ▸ Matte).
 //!
 //! The instance stores the user's strokes, base frame and segmentation span as JSON in its hidden
 //! **Strokes** parameter ([`RotoData`]); the segmentation itself is *derived* data: each frame's
 //! result is a deterministic function of its chain key ([`RotoData::chain_keys`] seeded with
-//! [`seed`]: what the frames are, the Roto Brush settings and the strokes from the base frame
+//! [`seed`]: what the frames are, the Rotoscope Brush settings and the strokes from the base frame
 //! out to the frame), so it lives in a process-wide content-keyed cache ([`cached`]) that the
 //! engine's propagation job fills at full resolution and rendering fills on demand (reading
 //! neighbouring frames with [`crate::EffectHost::self_at`]). Undo, redo and reopening a project
@@ -12,14 +12,14 @@
 //! parameter ([`FrozenCache`]); they are used while their key still matches, whichever model the
 //! session has (a session without the model that froze them uses them as they are).
 //!
-//! Rendering: binary segmentation → Roto Brush Matte (Shift Edge, Reduce Chatter, Feather,
+//! Rendering: binary segmentation → Rotoscope Brush Matte (Shift Edge, Reduce Chatter, Feather,
 //! Contrast) → Refine Edge matting inside the Refine Edge band (guided filter + closed-form
 //! matting with Higher Quality) → Refine Edge Matte adjustments → matte motion blur →
 //! decontamination of the edge colours. Outside the segmentation span the layer is transparent;
 //! without strokes the effect passes its input through.
 //!
 //! *Version*: 1.0 is the classic graph-cut engine; 2.0 and 3.0 also use the trained model chosen
-//! in Settings ▸ Roto Brush ([`set_model`], an `effectcraft_segment::MaskModel` such as
+//! in Settings ▸ Rotoscope Brush ([`set_model`], an `effectcraft_segment::MaskModel` such as
 //! MobileSAM), falling back to the classic engine when none is installed. The model's id is part
 //! of the chain seed, so choosing another recomputes the mattes. *Quality ▸ Best* segments at a
 //! higher working resolution with more iterations.
@@ -57,8 +57,8 @@ pub const DEFAULT_SPAN: i64 = 20;
 
 /// Display names of the instance's parameter groups.
 pub const GROUPS: &[(&str, &str)] = &[
-    ("rotoBrushPropagation", "Roto Brush Propagation"),
-    ("rotoBrushMatte", "Roto Brush Matte"),
+    ("rotoBrushPropagation", "Rotoscope Brush Propagation"),
+    ("rotoBrushMatte", "Rotoscope Brush Matte"),
     ("refineEdgeMatte", "Refine Edge Matte"),
     ("motionBlur", "Motion Blur"),
     ("decontamination", "Decontamination"),
@@ -70,7 +70,7 @@ pub const QUALITIES: [&str; 2] = ["Standard", "Best"];
 pub fn specs() -> Vec<EffectSpec> {
     vec![EffectSpec {
         id: ID,
-        name: "Roto Brush & Refine Edge",
+        name: "Rotoscope & Refine Edge",
         category: "Matte",
         params: vec![
             p("version", "Version", Value::Enum(2), popup(&VERSIONS)),
@@ -190,7 +190,7 @@ fn model_slot() -> &'static RwLock<Option<Arc<dyn MaskModel>>> {
     M.get_or_init(|| RwLock::new(None))
 }
 
-/// The trained model Roto Brush 2.0 / 3.0 use (Settings ▸ Roto Brush; `None`: the classic
+/// The trained model Rotoscope Brush 2.0 / 3.0 use (Settings ▸ Rotoscope Brush; `None`: the classic
 /// engine for every version).
 pub fn set_model(m: Option<Arc<dyn MaskModel>>) {
     if let Ok(mut slot) = model_slot().write() {
@@ -198,7 +198,7 @@ pub fn set_model(m: Option<Arc<dyn MaskModel>>) {
     }
 }
 
-/// Whether an instance with `params` segments with the model Settings chose: Roto Brush 2.0 and
+/// Whether an instance with `params` segments with the model Settings chose: Rotoscope Brush 2.0 and
 /// 3.0 do, 1.0 is the classic engine.
 pub fn uses_model(params: &Params) -> bool {
     e(params, "version") != 0
@@ -212,7 +212,7 @@ pub fn model_for(params: &Params) -> Option<Arc<dyn MaskModel>> {
     installed_model()
 }
 
-/// The trained model chosen in Settings ▸ Roto Brush, if one is installed (Roto Brush 2.0 / 3.0
+/// The trained model chosen in Settings ▸ Rotoscope Brush, if one is installed (Rotoscope Brush 2.0 / 3.0
 /// and Object Matte segment with it).
 pub fn installed_model() -> Option<Arc<dyn MaskModel>> {
     model_slot().read().ok().and_then(|m| m.clone())
@@ -770,7 +770,7 @@ impl Chain {
                     None if cancel() => return Err("tracking cancelled".into()),
                     None => match frame(f) {
                         Some(img) => Arc::new(rb::segment_with(&img, &strokes, None, &self.opts, self.refine_radius, self.model.as_deref())),
-                        None => return Err(format!("cannot read Roto Brush prompt frame {f}")),
+                        None => return Err(format!("cannot read Rotoscope Brush prompt frame {f}")),
                     },
                 };
                 let p = rb::tracker_prompt_boxed(&strokes, self.opts.scale, &matte);
@@ -936,7 +936,7 @@ fn needs_neighbours(mp: &MatteParams) -> bool {
 
 /// Frozen mattes (Freeze): the final 8-bit alpha and the Refine Edge band of every frame of
 /// the span at full resolution, valid while `key` matches [`frozen_key`] under the session's model or
-/// any other Roto Brush model.
+/// any other Rotoscope Brush model.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FrozenCache {
@@ -2153,10 +2153,10 @@ mod tests {
         let spec = crate::find(ID).unwrap();
         let mut next = 1;
         let mut ids = Ids(&mut next);
-        // The old layout: everything under Roto Brush Matte / Refine Edge Matte.
-        let mut g = ids.group(ID, "Roto Brush & Refine Edge");
+        // The old layout: everything under Rotoscope Brush Matte / Refine Edge Matte.
+        let mut g = ids.group(ID, "Rotoscope & Refine Edge");
         g.kind = effectcraft_project::GroupKind::Effect { effect: ID.into() };
-        let mut rb = ids.group("rotoBrushMatte", "Roto Brush Matte");
+        let mut rb = ids.group("rotoBrushMatte", "Rotoscope Brush Matte");
         rb.children.push(ids.prop("searchRadius", "Search Radius", Value::Scalar(33.0)).into());
         rb.children.push(ids.prop("feather", "Feather", Value::Scalar(2.0)).into());
         let mut re = ids.group("refineEdgeMatte", "Refine Edge Matte");
@@ -2171,7 +2171,7 @@ mod tests {
         assert_eq!(f(&params, "refineEdgeMatte/motionBlur/shutterAngle"), 90.0);
         assert_eq!(f(&params, "refineEdgeMatte/decontamination/decontaminationAmount"), 40.0);
         assert!(g.sub("rotoBrushMatte").unwrap().get("searchRadius").is_none());
-        assert_eq!(g.sub("rotoBrushPropagation").unwrap().name, "Roto Brush Propagation");
+        assert_eq!(g.sub("rotoBrushPropagation").unwrap().name, "Rotoscope Brush Propagation");
         // Parameters the old save lacked get their defaults.
         assert_eq!(f(&params, "rotoBrushPropagation/motionDamping"), 20.0);
     }

@@ -1,5 +1,5 @@
 //! #753: the Layer panel zooms and pans (magnification menu, View ▸ Zoom In / Zoom Out while it
-//! is focused, the wheel, the Zoom and Hand tools), and the Roto Brush explains itself in the
+//! is focused, the wheel, the Zoom and Hand tools), and the Rotoscope Brush explains itself in the
 //! Composition panel (egui_kittest, UI logic only).
 
 use effectcraft_engine::Session;
@@ -126,7 +126,7 @@ fn wheel_zooms_around_the_pointer_and_hand_tool_pans() {
     drag_with(&mut h, egui::PointerButton::Primary, c, c + vec2(60.0, 30.0));
     let moved = rect(&h, "layerPanel.canvas").min - before;
     assert!((moved.x - 60.0).abs() < 1.0 && (moved.y - 30.0).abs() < 1.0, "{moved:?}");
-    // Middle-drag pans with a Roto Brush tool, painting nothing.
+    // Middle-drag pans with a Rotoscope Brush tool, painting nothing.
     h.state_mut().ui.tool = Tool::RotoBrush;
     h.run_steps(2);
     let before = rect(&h, "layerPanel.canvas").min;
@@ -134,7 +134,7 @@ fn wheel_zooms_around_the_pointer_and_hand_tool_pans() {
     let moved = rect(&h, "layerPanel.canvas").min - before;
     assert!((moved.x + 40.0).abs() < 1.0 && (moved.y + 20.0).abs() < 1.0, "{moved:?}");
     let layer = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(box_id(&h))).unwrap().clone();
-    assert!(layer.effects().is_none_or(|fx| fx.groups().count() == 0), "panning adds no Roto Brush effect");
+    assert!(layer.effects().is_none_or(|fx| fx.groups().count() == 0), "panning adds no Rotoscope Brush effect");
 }
 
 #[test]

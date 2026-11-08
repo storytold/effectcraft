@@ -1,5 +1,5 @@
-//! Warp Stabilizer commands (Effect ▸ Distort ▸ Warp Stabilizer's Analyze / Cancel, Animation ▸
-//! Warp Stabilizer VFX, the Tracker panel button) and its status query.
+//! Motion Stabilizer commands (Effect ▸ Distort ▸ Motion Stabilizer's Analyze / Cancel, Animation ▸
+//! Motion Stabilizer, the Tracker panel button) and its status query.
 
 use effectcraft_project::{GroupKind, ItemId, Layer, LayerId, PropGroup, Uid};
 use serde_json::{Value, json};
@@ -10,34 +10,34 @@ use crate::{EngineError, Result, Session, cmd, query};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("track.warpStabilizer", "Warp Stabilizer VFX", ["Animation"], None, "{layer?, wait?}", can_stabilize, warp_apply),
+        cmd!("track.warpStabilizer", "Motion Stabilizer", ["Animation"], None, "{layer?, wait?}", can_stabilize, warp_apply),
         cmd!("warp.analyze", "Analyze", [], None, "{layer?, effect?: uid|name|index, wait?: block until done}", has_comp, warp_analyze),
         cmd!("warp.cancel", "Cancel", [], None, "{}", is_analyzing, |s, _| Ok(json!({"stopped": s.stop_warp()}))),
-        query!("warp.status", "Warp Stabilizer Status", "{layer?, effect?}", warp_status),
+        query!("warp.status", "Motion Stabilizer Status", "{layer?, effect?}", warp_status),
     ]
 }
 
-// ---------------------------------------------------------------- Warp Stabilizer
+// ---------------------------------------------------------------- Motion Stabilizer
 
 fn can_stabilize(s: &Session) -> std::result::Result<(), String> {
     has_comp(s)?;
     let c = s.active_comp().ok_or("no composition is open")?;
     match s.state.selected_layers.first().and_then(|l| c.layer(*l)) {
         Some(l) if l.has_video() && !l.switches.adjustment => Ok(()),
-        Some(_) => Err("Warp Stabilizer needs a footage or composition layer".into()),
+        Some(_) => Err("Motion Stabilizer needs a footage or composition layer".into()),
         None => Err("select a layer to stabilize".into()),
     }
 }
 
 fn is_analyzing(s: &Session) -> std::result::Result<(), String> {
-    if s.is_warp_analyzing() { Ok(()) } else { Err("no Warp Stabilizer analysis is running".into()) }
+    if s.is_warp_analyzing() { Ok(()) } else { Err("no Motion Stabilizer analysis is running".into()) }
 }
 
 fn is_warp(g: &PropGroup) -> bool {
     matches!(&g.kind, GroupKind::Effect { effect } if effect == effectcraft_effects::warp_stab::ID)
 }
 
-/// (comp, layer, effect uid) of a Warp Stabilizer: `layer` / `effect` (uid, name or 1-based
+/// (comp, layer, effect uid) of a Motion Stabilizer: `layer` / `effect` (uid, name or 1-based
 /// index among the layer's effects), else a selected one, else the layer's first.
 fn warp_p(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
     let cid = super::comp_id(s, p)?;
@@ -73,7 +73,7 @@ fn warp_p(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
             break;
         }
     }
-    Err(bad(cmd, "no Warp Stabilizer found (apply Effect ▸ Distort ▸ Warp Stabilizer first)"))
+    Err(bad(cmd, "no Motion Stabilizer found (apply Effect ▸ Distort ▸ Motion Stabilizer first)"))
 }
 
 fn warp_analyze(s: &mut Session, p: &Value) -> Result<Value> {
@@ -87,7 +87,7 @@ fn warp_analyze(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(out)
 }
 
-/// Animation ▸ Warp Stabilizer VFX / the Tracker panel button: apply the effect to the selected
+/// Animation ▸ Motion Stabilizer / the Tracker panel button: apply the effect to the selected
 /// layer and start analysing it.
 fn warp_apply(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "track.warpStabilizer")?;
