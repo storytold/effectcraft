@@ -628,3 +628,72 @@ fn reads_aux_names_the_effects_that_read_channels() {
     }
     assert!(READS_AUX.iter().all(|id| specs().iter().any(|s| s.id == *id)), "every listed effect exists");
 }
+
+/// [`scene`] with more channels: IDs, coverage, normals, UVs, a background, a colour layer and
+/// two more Cryptomatte layers, each with its own values.
+fn rich_scene() -> AuxHost {
+    let mut a = (*scene().0).clone();
+    let n = (a.width * a.height) as usize;
+    let plane = |k: usize| (0..n).map(|i| ((i * 7 + k * 13) % 23) as f32 / 11.0 - 0.5).collect::<Vec<f32>>();
+    let (ha, hc) = (crypto_hash("asset"), crypto_hash("custom"));
+    let ids = |h: u32| (0..n).map(|i| if i % 3 == 0 { crypto_float(h) } else { 0.0 }).collect::<Vec<f32>>();
+    let names = ["MaterialID", "Coverage", "N.X", "N.Y", "N.Z", "UV.U", "UV.V", "BG.R", "BG.G", "BG.B", "diffuse.R", "diffuse.G", "diffuse.B"];
+    for (k, name) in names.iter().enumerate() {
+        a.channels.push((name.to_string(), plane(k)));
+    }
+    a.channels.push(("A.CryptoAsset00.R".into(), ids(ha)));
+    a.channels.push(("A.CryptoAsset00.G".into(), plane(40)));
+    a.channels.push(("zz.Custom00.R".into(), ids(hc)));
+    a.channels.push(("zz.Custom00.G".into(), plane(41)));
+    a.manifests.push(("A.CryptoAsset".into(), vec![("asset".into(), ha)]));
+    AuxHost(Arc::new(a))
+}
+
+/// The parameters [`run_fx`] gives effect `id` with `vals` (on [`img`]).
+fn params_of(id: &str, vals: &[(&str, Value)]) -> crate::Params {
+    let s = crate::find(id).expect("an effect");
+    let mut p = crate::Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [20.0, 10.0]))).collect() };
+    for (k, v) in vals {
+        p.values.insert(k.to_string(), v.clone());
+    }
+    p
+}
+
+/// #3271: each 3D Channel effect, given only the channels it declares ([`aux_needs`], with every
+/// channel name listed), renders bit for bit what it renders with all channels, and reads fewer.
+#[test]
+fn declared_aux_needs_render_as_all_channels() {
+    use effectcraft_raster::channels3d::AuxNeed;
+    let full = rich_scene();
+    let mut names = (*full.0).clone();
+    for (_, p) in &mut names.channels {
+        p.clear();
+    }
+    let s = |v: &str| Value::Str(v.into());
+    let mut cases: Vec<(&str, Vec<(&str, Value)>)> = (0..8).map(|k| ("ec.3d.channelextract", vec![("channel", Value::Enum(k))])).collect();
+    cases.extend([
+        ("ec.3d.depthmatte", vec![("depth", num(300.0))]),
+        ("ec.3d.depthoffield", vec![("focalPlane", num(300.0)), ("maximumRadius", num(4.0))]),
+        ("ec.3d.fog3d", vec![]),
+        ("ec.3d.idmatte", vec![("idSelection", num(1.0))]),
+        ("ec.3d.idmatte", vec![("auxChannel", Value::Enum(1)), ("useCoverage", Value::Bool(true))]),
+        ("ec.3d.identifier", vec![("id", num(2.0))]),
+        ("ec.3d.identifier", vec![("channelType", Value::Enum(1)), ("display", Value::Enum(3))]),
+        ("ec.3d.cryptomatte", vec![("selection", s("left")), ("display", Value::Enum(0))]),
+        ("ec.3d.cryptomatte", vec![("layer", Value::Enum(3)), ("display", Value::Enum(1)), ("selection", s("<*>"))]),
+        ("ec.3d.cryptomatte", vec![("layerName", s("A.CryptoAsset")), ("selection", s("asset"))]),
+        ("ec.3d.extractor", vec![("red", s("diffuse.R")), ("green", s(" N.X ")), ("blue", s("")), ("alpha", s("Coverage"))]),
+    ]);
+    let bits = |i: &Image| i.data.iter().flat_map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+    for (id, vals) in cases {
+        let need = aux_needs(id, &params_of(id, &vals)).map_or(AuxNeed::All, AuxNeed::Lookups);
+        let keep = need.resolve(&names).expect("declared");
+        assert!(!keep.is_empty() && keep.len() < full.0.channels.len(), "{id} {vals:?}: {keep:?}");
+        let mut some = (*full.0).clone();
+        some.channels.retain(|(n, _)| keep.contains(n));
+        some.listed = full.0.names().iter().map(|n| n.to_string()).collect();
+        let (want, got) = (run(id, &vals, &full), run(id, &vals, &AuxHost(Arc::new(some))));
+        assert_eq!(bits(&got), bits(&want), "{id} {vals:?}: {keep:?}");
+    }
+    assert_eq!(aux_needs("ec.blur.gaussian", &crate::Params::default()), None, "not declared: all");
+}
