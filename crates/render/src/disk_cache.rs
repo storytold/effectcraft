@@ -263,10 +263,67 @@ impl LayerPrefetch {
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Job {
-    /// Kind, key, header format byte, payload.
-    Write(Kind, u128, u8, Vec<u8>),
+    /// Kind, key, header format byte, payload (encoded on the writer thread).
+    Write(Kind, u128, u8, Payload),
     /// Delete the frame and layer entries made of these files ([`DiskCache::drop_files`]).
     Drop(Vec<Arc<str>>),
+}
+
+/// What a queued write stores, encoded on the writer thread (#3271): rendering threads hand over
+/// the pixels they made (a layer buffer shared with the RAM cache, a frame moved in) and go on;
+/// converting and compressing them is the writer's work.
+enum Payload {
+    /// Already encoded.
+    Bytes(Vec<u8>),
+    /// A layer buffer and its source files.
+    Layer(Arc<Buf>, EntryFiles),
+    /// An 8-bit or half-float frame (width, height, pixels) and its source files.
+    Frame8(u32, u32, Vec<u8>, EntryFiles),
+    FrameF16(u32, u32, Vec<u16>, EntryFiles),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Payloads encoded on this thread (tests: none on a rendering thread).
+    static ENCODED_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Payloads encoded on this thread so far (tests).
+#[cfg(test)]
+pub(crate) fn encoded_here() -> u64 {
+    ENCODED_HERE.with(std::cell::Cell::get)
+}
+
+impl Payload {
+    /// The entry's payload bytes: its source files, then its pixels, compressed.
+    fn encode(self) -> Vec<u8> {
+        #[cfg(test)]
+        if !matches!(self, Payload::Bytes(_)) {
+            ENCODED_HERE.with(|n| n.set(n.get() + 1));
+        }
+        match self {
+            Payload::Bytes(b) => b,
+            Payload::Layer(buf, files) => with_files(&files, encode_layer(&buf)),
+            Payload::Frame8(w, h, rgba, files) => with_files(&files, encode_frame(w, h, &rgba)),
+            Payload::FrameF16(w, h, rgba, files) => with_files(&files, encode_frame_f16(w, h, &rgba)),
+        }
+    }
+
+    /// The bytes it holds while queued.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn held(&self) -> usize {
+        match self {
+            Payload::Bytes(b) => b.len(),
+            Payload::Layer(buf, _) => buf.img.data.len().saturating_mul(16),
+            Payload::Frame8(_, _, p, _) => p.len(),
+            Payload::FrameF16(_, _, p, _) => p.len().saturating_mul(2),
+        }
+    }
+
+    /// At least the bytes its entry takes uncompressed (the pixels; files and header are small).
+    fn raw(&self) -> u64 {
+        self.held() as u64
+    }
 }
 
 struct Queue {
@@ -326,7 +383,7 @@ impl Queue {
     fn pop(&mut self) -> Option<Job> {
         if let Some(j) = self.frames.pop_front() {
             if let Job::Write(_, _, _, p) = &j {
-                self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
+                self.frame_bytes = self.frame_bytes.saturating_sub(p.held());
             }
             return Some(j);
         }
@@ -771,20 +828,27 @@ impl DiskCache {
 
     /// Queue a write; `false` when it was dropped (a full queue).
     fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
-        self.enqueue_format(kind, key, FORMAT_RGBA8, payload, None)
+        self.enqueue_format(kind, key, FORMAT_RGBA8, Payload::Bytes(payload), None)
     }
 
     /// [`DiskCache::enqueue`] with the entry's header format byte. `made`: the source files of a
     /// frame or layer entry and the drop generation its reads started at
     /// ([`DiskCache::drop_generation`]); refused (`false`) when one of them was dropped since.
-    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Vec<u8>, made: Option<(&EntryFiles, u64)>) -> bool {
+    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Payload, made: Option<(&EntryFiles, u64)>) -> bool {
         let stale = |q: &Queue| made.is_some_and(|(files, since)| q.drops.stale(files.files().iter().map(|f| &f.path), since));
+        // An entry larger uncompressed than the cache may hold isn't worth encoding (#3271).
+        if payload.raw() > self.limit_bytes() {
+            return false;
+        }
         #[cfg(target_arch = "wasm32")]
         {
             if self.queue.0.lock().is_ok_and(|q| stale(&q)) {
                 return false;
             }
-            self.write_format(kind, key, format, &payload);
+            if !matches!(payload, Payload::Bytes(_)) {
+                self.count_encode();
+            }
+            self.write_format(kind, key, format, &payload.encode());
             true
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -795,16 +859,20 @@ impl DiskCache {
                 return false;
             }
             let full = match kind {
-                Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
+                Kind::Frame => q.frame_bytes.saturating_add(payload.held()) > FRAME_QUEUE_BYTES,
                 _ => q.jobs.len() >= QUEUE_LIMIT,
             };
             if full {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
+            // (counted as it is accepted: the writer compresses it)
+            if !matches!(payload, Payload::Bytes(_)) {
+                self.count_encode();
+            }
             if kind == Kind::Frame {
                 q.pending_frames.insert(key);
-                q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
+                q.frame_bytes = q.frame_bytes.saturating_add(payload.held());
                 q.frames.push_back(Job::Write(kind, key, format, payload));
             } else {
                 q.jobs.push_back(Job::Write(kind, key, format, payload));
@@ -1027,12 +1095,11 @@ impl DiskCache {
         if self.contains(Kind::Frame, key) {
             return true;
         }
-        // (no room on the disk: refused before the pixels are compressed)
+        // (no room on the disk: refused before the pixels are copied)
         if !self.accepts_writes() {
             return false;
         }
-        self.count_encode();
-        let payload = with_files(&files, encode_frame_f16(width, height, rgba));
+        let payload = Payload::FrameF16(width, height, rgba.to_vec(), files.clone());
         self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, payload, Some((&files, since)))
     }
 
@@ -1050,6 +1117,17 @@ impl DiskCache {
     /// render started at).
     #[allow(clippy::too_many_arguments)]
     pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
+        // (refused before the pixels are copied)
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 || self.contains(Kind::Frame, key) || !self.accepts_writes() {
+            return self.contains(Kind::Frame, key);
+        }
+        self.put_frame_owned(key, width, height, rgba.to_vec(), files, virtual_id, since)
+    }
+
+    /// [`DiskCache::put_frame`] taking the pixels: they move to the writer thread, which converts
+    /// and compresses them (#3271); the caller goes on at once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame_owned(&self, key: u128, width: u32, height: u32, rgba: Vec<u8>, files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
@@ -1061,8 +1139,7 @@ impl DiskCache {
         if !self.accepts_writes() {
             return false;
         }
-        self.count_encode();
-        let payload = with_files(&files, encode_frame(width, height, rgba));
+        let payload = Payload::Frame8(width, height, rgba, files.clone());
         self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, payload, Some((&files, since)))
     }
 
@@ -1079,12 +1156,20 @@ impl DiskCache {
     /// when one of them was dropped after `since`, the [`DiskCache::drop_generation`] its render
     /// started at.
     pub fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
+        if self.contains(Kind::Layer, key) || !self.accepts_writes() {
+            return;
+        }
+        self.put_layer_shared(key, &Arc::new(buf.clone()), files, since);
+    }
+
+    /// [`DiskCache::put_layer`] of a buffer the RAM cache holds: the writer thread takes a
+    /// reference to it (no copy) and converts and compresses it there (#3271).
+    pub fn put_layer_shared(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
         // (no room on the disk: refused before the buffer is compressed)
         if self.contains(Kind::Layer, key) || !self.accepts_writes() {
             return;
         }
-        self.count_encode();
-        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
+        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, Payload::Layer(buf.clone(), files.clone()), Some((files, since)));
     }
 
     /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
@@ -1192,7 +1277,10 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
         let Some(cache) = dc.upgrade() else { return };
         let written = match job {
             Job::Write(kind, key, format, payload) => {
-                cache.write_format(kind, key, format, &payload);
+                // (written meanwhile by another render: not encoded again)
+                if !cache.contains(kind, key) {
+                    cache.write_format(kind, key, format, &payload.encode());
+                }
                 (kind == Kind::Frame).then_some(key)
             }
             Job::Drop(paths) => {
@@ -1291,9 +1379,9 @@ impl crate::cache::LayerStore for DiskCache {
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
         DiskCache::get_layer(self, key, virtual_id).map(|(b, f)| (Arc::new(b), f))
     }
-    /// Queues a layer write on the disk cache.
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
-        DiskCache::put_layer(self, key, buf, files, since);
+    /// Queues a layer write on the disk cache (encoded on its writer thread).
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
+        DiskCache::put_layer_shared(self, key, buf, files, since);
     }
     /// The current drop generation of the disk cache.
     fn drop_generation(&self) -> u64 {
@@ -1697,6 +1785,31 @@ mod tests {
         dc.flush();
         dc.set_max_bytes(1);
         assert!(dc.keys(Kind::Matte).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271: frame and layer entries are handed to the writer thread and converted and
+    /// compressed there, not on the thread that rendered them; one larger uncompressed than the
+    /// cache may hold is refused before anything is queued.
+    #[test]
+    fn entries_are_encoded_on_the_writer_thread() {
+        let dir = tmpdir("writer-encodes");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let before = encoded_here();
+        dc.put_layer_shared(1, &Arc::new(buf(1, 32, 32)), &EntryFiles::default(), 0);
+        assert!(dc.put_frame_owned(2, 8, 8, vec![3; 8 * 8 * 4], &ReadFiles::default(), None, 0));
+        assert!(dc.put_frame_f16(3, 8, 8, &[0x3c00; 8 * 8 * 4], &ReadFiles::default(), None, 0));
+        assert_eq!(encoded_here(), before, "nothing encoded on the rendering thread");
+        dc.flush();
+        assert_eq!(dc.get_layer(1, None).map(|(b, _)| b.img), Some(buf(1, 32, 32).img));
+        assert_eq!(dc.get_frame(2, None).map(|(f, _)| f.rgba), Some(vec![3; 8 * 8 * 4]));
+        assert!(dc.get_frame_f16(3, None).is_some());
+        let encodes = dc.encodes();
+        dc.set_max_bytes(1000);
+        dc.put_layer_shared(4, &Arc::new(buf(1, 64, 64)), &EntryFiles::default(), 0);
+        dc.flush();
+        assert_eq!(dc.encodes(), encodes, "too large uncompressed: not queued");
+        assert!(!dc.contains(Kind::Layer, 4));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
