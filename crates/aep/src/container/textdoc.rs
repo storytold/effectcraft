@@ -282,7 +282,11 @@ impl<'b> Parser<'b> {
                 Some(if body.starts_with(&[0xfe, 0xff]) {
                     V::Str(match body {
                         Cow::Borrowed(b) => Cow::Borrowed(b.get(2..).unwrap_or(&[])),
-                        Cow::Owned(v) => Cow::Owned(v.get(2..).map(<[u8]>::to_vec).unwrap_or_default()),
+                        Cow::Owned(mut v) => {
+                            let n = v.len().min(2);
+                            v.drain(..n);
+                            Cow::Owned(v)
+                        }
                     })
                 } else {
                     V::Bytes(body)
@@ -1006,16 +1010,17 @@ impl TextDocument {
 impl<'f, 'a> Layer<'f, 'a> {
     /// The Source Text record `LIST btds` (`ADBE Text Document`). It is a direct child of the
     /// `ADBE Text Properties` group, which is a direct child of the layer's root `tdgp`
-    /// (`Layr/tdgp/tdgp/btds`, in every sample), so only that level is searched rather than the
-    /// whole layer.
+    /// (`Layr/tdgp/tdgp/btds` in every sample, and where the exporter writes it), so only that
+    /// level is searched rather than the whole layer.
     fn source_text_record(&self) -> Option<&'f Chunk<'a>> {
         let root = self.chunk.child_list(b"tdgp")?;
         root.children().iter().filter(|g| g.is_list(b"tdgp")).find_map(|g| g.child_list(b"btds"))
     }
 
-    /// The text document of a text layer (`LIST btdk` in the Source Text record `btds`).
+    /// The text document of a text layer: the first `LIST btdk` in the Source Text record `btds`
+    /// (the same documents [`Layer::text_document_count`] counts).
     pub fn text_document(&self) -> Option<TextDocument> {
-        TextDocument::parse(self.source_text_record()?.child_list(b"btdk")?.bytes()?)
+        TextDocument::parse(self.source_text_record()?.find_list(b"btdk")?.bytes()?)
     }
 
     /// The Source Text property record: the `tdbs` in `btds[ADBE Text Document]` (a placeholder
@@ -1075,9 +1080,10 @@ pub enum CueType {
 
 impl<'a> Chunk<'a> {
     /// The marker list `LIST mrst` of a marker holder: a layer (`LIST Layr`) or a composition's
-    /// `SecL` list. A layer's `mrst` is a direct child of its root `tdgp` (`ADBE Marker`), so only
-    /// that place is looked at; most layers have none, and searching their whole property tree
-    /// for it was a large part of an import. Any other holder is searched depth-first.
+    /// `SecL` list. A layer's `mrst` is a direct child of its root `tdgp` (`ADBE Marker`, where
+    /// After Effects and the exporter write it), so only that place is looked at; most layers have
+    /// none, and searching their whole property tree for it was a large part of an import. Any
+    /// other holder is searched depth-first.
     pub(crate) fn marker_list(&self) -> Option<&Chunk<'a>> {
         if self.is_list(b"Layr") {
             return self.child_list(b"tdgp")?.child_list(b"mrst");
@@ -1150,8 +1156,51 @@ impl<'f, 'a> Comp<'f, 'a> {
 /// kept as the reference the differential tests compare with.
 #[cfg(test)]
 mod oracle {
-    use super::{MAX_DEPTH, TextValue};
+    use super::{MAX_DEPTH, MAX_UNDECODED_FIELDS, TextValue};
     use crate::container::bytes::text;
+
+    pub(super) fn same(a: &TextValue, b: &TextValue) -> bool {
+        match (a, b) {
+            (TextValue::Dict(x), TextValue::Dict(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && same(v, v2))),
+            (TextValue::Array(x), TextValue::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q)),
+            _ => match (a.as_f64(), b.as_f64()) {
+                (Some(p), Some(q)) => p == q,
+                _ => a == b,
+            },
+        }
+    }
+
+    pub(super) fn is_neutral(v: &TextValue) -> bool {
+        match v {
+            TextValue::Name(n) => n == "nil",
+            TextValue::Bool(b) => !b,
+            TextValue::Array(a) => a.is_empty(),
+            TextValue::Dict(d) => d.is_empty(),
+            other => other.as_f64() == Some(0.0),
+        }
+    }
+
+    pub(super) fn undecoded_fields(actual: &TextValue, sampled: Option<&TextValue>, decoded: &[&str], neutral: &[(&str, &[i64])], out: &mut Vec<String>) {
+        let TextValue::Dict(pairs) = actual else { return };
+        for (key, value) in pairs {
+            if out.len() >= MAX_UNDECODED_FIELDS {
+                return;
+            }
+            if decoded.contains(&key.as_str()) || out.contains(key) {
+                continue;
+            }
+            if neutral.iter().any(|(slot, values)| slot == key && value.as_i64().is_some_and(|v| values.contains(&v))) {
+                continue;
+            }
+            let differs = match sampled.and_then(|s| s.get(key)) {
+                Some(default) => !same(value, default),
+                None => !is_neutral(value),
+            };
+            if differs {
+                out.push(key.clone());
+            }
+        }
+    }
 
     impl TextValue {
         fn key_text(&self) -> String {
@@ -1535,6 +1584,16 @@ mod tests {
             let body = [b"/k ".to_vec(), b"[ ".repeat(depth), b"]".repeat(depth)].concat();
             assert_eq!(parse_text_dict(&body), oracle::parse_text_dict(&body), "array depth {depth}");
         }
+        // Dictionaries and arrays mixed (`<< /a [ << /a [ ...`), closed, and left open exactly
+        // at the limit.
+        for depth in 60..=68 {
+            let open: Vec<u8> = (0..depth).flat_map(|i| if i % 2 == 0 { &b"<< /a "[..] } else { &b"[ "[..] }).copied().collect();
+            let close: Vec<u8> = (0..depth).rev().flat_map(|i| if i % 2 == 0 { &b" >>"[..] } else { &b" ]"[..] }).copied().collect();
+            for body in [[b"/k ".to_vec(), open.clone(), b"1".to_vec(), close, b" /z 2".to_vec()].concat(), [b"/k ".to_vec(), open, b"1".to_vec()].concat()] {
+                assert_eq!(parse_text_dict(&body), oracle::parse_text_dict(&body), "mixed depth {depth}");
+                let _ = TextDocument::parse(&body);
+            }
+        }
     }
 
     #[test]
@@ -1571,10 +1630,83 @@ mod tests {
         // An escaped string is copied; a number key is written in its canonical form.
         assert!(matches!(pairs.get(5).map(|p| &p.1), Some(V::Bytes(Cow::Owned(b))) if b == b"(esc"));
         assert_eq!(pairs.get(6).map(|p| p.0.as_ref()), Some("7"));
-        // Containers are sized to what they hold.
+        // Containers hold what was read.
         let V::Dict(outer) = parse_dict(b"/0 << /a 1 /b 2 /c 3 /d 4 /e 5 >> /1 [ 1 2 3 4 5 6 7 8 9 ]") else { panic!("a dict") };
-        assert!(matches!(outer.first().map(|p| &p.1), Some(V::Dict(d)) if d.len() == 5 && d.capacity() == 5));
-        assert!(matches!(outer.get(1).map(|p| &p.1), Some(V::Array(a)) if a.len() == 9 && a.capacity() == 9));
+        assert!(matches!(outer.first().map(|p| &p.1), Some(V::Dict(d)) if d.len() == 5 && d.capacity() >= d.len()));
+        assert!(matches!(outer.get(1).map(|p| &p.1), Some(V::Array(a)) if a.len() == 9 && a.capacity() >= a.len()));
+    }
+
+    #[test]
+    fn slot_checks_agree_with_the_owned_ones() {
+        // Slots: defaults, decoded, neutral-listed and unknown ones. Values: each default as
+        // stored (also as `Int` where it is `2.0`), near misses, neutral values and every kind.
+        let slots = ["0", "6", "7", "17", "24", "34", "35", "37", "43", "55", "68", "77", "79", "86", "95", "96", "200", "x"];
+        let values: &[&[u8]] = &[
+            b"2",
+            b"2.0",
+            b"7",
+            b"1",
+            b"0",
+            b"-1",
+            b"0.5",
+            b"1.2",
+            b"36",
+            b"true",
+            b"false",
+            b"/nil",
+            b"/x",
+            b"/SimpleBlender",
+            b"[ ]",
+            b"<< >>",
+            b"[ .8 1 1.33 ]",
+            b"[ 0.8 1.0 ]",
+            b"[ 1 1 1 ]",
+            b"<< /0 .5 >>",
+            b"<< /0 0 /1 0 >>",
+            b"<< /1 0 /0 0 >>",
+            b"<< /99 /SimpleBlender >>",
+            b"<< /99 /SimplePaint /0 << /0 1 /1 [ 1 1 1 0 ] >> >>",
+            b"<< /99 /SimplePaint /0 << /0 1 /1 [ 1 1 1 1 ] >> >>",
+            b"(plain)",
+            b"(\xfe\xff\0a)",
+            b"word",
+            b"/\xff",
+        ];
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let mut listed = 0;
+        for case in 0..20_000 {
+            let mut body = b"/s << ".to_vec();
+            for _ in 0..rng.below(12) {
+                body.push(b'/');
+                body.extend_from_slice(slots.get(rng.below(slots.len())).copied().unwrap_or_default().as_bytes());
+                body.push(b' ');
+                body.extend_from_slice(values.get(rng.below(values.len())).copied().unwrap_or_default());
+                body.push(b' ');
+            }
+            body.extend_from_slice(b">>");
+            let (new, old) = (parse_dict(&body), oracle::parse_text_dict(&body));
+            let (Some(new), Some(old)) = (new.get("s"), old.get("s")) else { panic!("case {case}: a dict") };
+            for (sampled, old_sampled, decoded, neutral) in [
+                (&*STYLE_DEFAULTS, oracle::style_defaults(), DECODED_STYLE_SLOTS, NEUTRAL_STYLE_VALUES),
+                (&*PARAGRAPH_DEFAULTS, oracle::paragraph_defaults(), DECODED_PARAGRAPH_SLOTS, NEUTRAL_PARAGRAPH_VALUES),
+            ] {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                undecoded_fields(new, Some(sampled), decoded, neutral, &mut a);
+                oracle::undecoded_fields(old, Some(&old_sampled), decoded, neutral, &mut b);
+                assert_eq!(a, b, "case {case}: {}", String::from_utf8_lossy(&body));
+                listed += a.len();
+            }
+            // Every pair of values compares and reads as neutral alike.
+            if let (V::Dict(x), TextValue::Dict(y)) = (new, old) {
+                for ((_, p), (_, q)) in x.iter().zip(y) {
+                    assert_eq!(is_neutral(p), oracle::is_neutral(q), "case {case}");
+                    for ((_, r), (_, t)) in x.iter().zip(y) {
+                        assert_eq!(same(p, r), oracle::same(q, t), "case {case}");
+                    }
+                }
+            }
+        }
+        assert!(listed > 10_000, "{listed} slots listed");
     }
 
     #[test]
