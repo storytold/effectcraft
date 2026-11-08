@@ -224,7 +224,7 @@ impl<'a> Renderer<'a> {
             LayerSource::Footage { item } => {
                 let item = ctx.media_item(layer, *item);
                 let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
-                let a = self.footage.aux(item, f, ctx.source_time(layer))?;
+                let a = self.read(|| self.footage.aux(item, f, ctx.source_time(layer)))?;
                 // Aux pixels per layer pixel (the layer is the footage at its nominal size). The
                 // planes are only copied when that changes the scale.
                 let scale = a.width as f64 / f.width as f64;
@@ -349,20 +349,19 @@ impl<'a> Renderer<'a> {
     pub fn adjustment_footprint(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
         // Cached, so an accelerator sees the same buffer (and uploads it once) every frame.
         let key = self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        if let (Some(c), Some(k)) = (self.cache, key)
-            && let Some(b) = c.get(k)
-        {
+        let key = self.mask_gate_key(ctx, layer, key);
+        if let Some((b, _)) = self.cached(key) {
             return Some(b);
         }
-        let mut foot = self.source(ctx, layer)?;
-        let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
-        let foot = Arc::new(foot);
+        let (foot, files) = self.recorded(key, |r| {
+            // (what the masks' expressions read, at shutter times too, goes to the buffer's files)
+            let ctx = &r.with_reads(ctx);
+            let mut foot = r.source(ctx, layer)?;
+            let _ = masks::apply(ctx, layer, &mut foot, r.mask_blur(ctx, layer));
+            Some(foot)
+        });
         // The buffer the cache keeps (another worker's, if it kept one first).
-        let foot = match (self.cache_to_keep(), key) {
-            (Some(c), Some(k)) => c.insert(k, foot),
-            _ => foot,
-        };
-        Some(foot)
+        Some(self.keep(key, Arc::new(foot?), &files).0)
     }
 
     /// Draw one 2D layer into `canvas` on the CPU (any kind: adjustment, wireframe, styled…).

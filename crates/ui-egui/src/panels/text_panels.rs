@@ -66,6 +66,7 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     effectcraft_engine::render::text::source_text(&ectx, layer).map(|d| TextTarget { layer: layer.id.0, doc: d, range: None })
 }
