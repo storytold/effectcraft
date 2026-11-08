@@ -238,6 +238,27 @@ fn a_text_layer_name_follows_its_text_through_export_and_import() {
     assert_eq!((l.name.as_str(), l.name_follows_text), ("Text", Some(true)), "an empty text layer");
 }
 
+/// #3233: a following name cut from a first line longer than 40 characters is written as no name
+/// and comes back as the same cut name, still following; a long name the user gave stays whole.
+#[test]
+fn a_long_first_line_names_a_text_layer_the_same_after_export_and_import() {
+    let line = "A headline that runs past forty characters, to 64";
+    assert!((41..=64).contains(&line.chars().count()));
+    let text = format!("{line}\rSecond");
+    let cut = effectcraft_project::text_layer_name(&text);
+    assert_eq!(cut.chars().count(), 40);
+    for (name, follows, back_name) in [(cut.as_str(), Some(true), cut.as_str()), (line, Some(false), line)] {
+        let (mut p, c) = text_project(vec![TextDoc::plain(&text)]);
+        with_layer(&mut p, c, 0, |l| {
+            l.name = name.into();
+            l.name_follows_text = follows;
+        });
+        let back = reimport(&export_all(&p).bytes);
+        let l = back.comps().flat_map(|(_, c)| c.layers.iter()).find(|l| matches!(l.source, LayerSource::Text)).expect("text layer");
+        assert_eq!((l.name.as_str(), l.name_follows_text), (back_name, follows), "{name:?}");
+    }
+}
+
 #[test]
 fn what_a_text_document_cannot_hold_is_reported() {
     let mut d = TextDoc::plain("x");
