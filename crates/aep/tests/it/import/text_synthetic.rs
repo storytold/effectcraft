@@ -1,5 +1,6 @@
 //! A small committed text project (`tests/fixtures/text-synthetic.aep`), so the text animator
-//! Stroke Opacity and the Source Text expression are checked without the external corpus (#3170).
+//! Stroke Opacity and the Source Text expression are checked without the external corpus, on
+//! import and through an export and a second import (#3170).
 //!
 //! The project was made in After Effects 2026 with the working space set to None: one composition
 //! `C` (64x48, 25 fps, 2 s) with two text layers. `T` holds `Hi` (Arial, 20 px, a blue 2 px
@@ -74,6 +75,24 @@ fn visit(chunks: &mut [Chunk<'_>], f: &mut dyn FnMut(&mut Chunk<'_>)) {
         f(c);
         visit(c.children_mut(), f);
     }
+}
+
+#[test]
+fn stroke_opacity_and_source_text_expressions_survive_export() {
+    let (p, r0) = run(TEXT_SYNTHETIC);
+    let out = effectcraft_aep::export::export(&p, &effectcraft_aep::export::ExportOptions { allow_losses: true }).expect("export");
+    let text: Vec<String> =
+        out.report.losses.iter().filter(|l| l.category == effectcraft_aep::export::LossCategory::TextLayers).flat_map(|l| l.details.clone()).collect();
+    assert!(!text.iter().any(|d| d.contains("Stroke Opacity") || d.contains("Source Text expression")), "{text:?}");
+    assert_eq!(out.report.exported.expressions, 2);
+    let (q, r) = run(&out.bytes);
+    for name in ["T", "Off"] {
+        assert_eq!(source_text(layer(&q, &r, name)), source_text(layer(&p, &r0, name)), "{name}");
+    }
+    let t = layer(&q, &r, "T");
+    assert_eq!(animator(t, "Stroke").prop("properties/strokeOpacity").map(|p| p.value.clone()), Some(Value::Scalar(40.0)));
+    let keys: Vec<_> = animator(t, "Keyed").prop("properties/strokeOpacity").expect("strokeOpacity").keys.iter().map(|k| (k.time, k.value.clone())).collect();
+    assert_eq!(keys, vec![(Tick::ZERO, Value::Scalar(0.0)), (Tick(TICKS_PER_SECOND), Value::Scalar(100.0))]);
 }
 
 #[test]

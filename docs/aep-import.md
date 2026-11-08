@@ -396,7 +396,8 @@ ranges of Lumetri Color among them), are those of the 2026 plug-in in all three 
   layer ids (missing, 0, out of range) reported or neutral.
 - `crates/aep/tests/it/import/text_synthetic.rs` (the committed `tests/fixtures/text-synthetic.aep`,
   no corpus needed): an animator's Stroke Opacity, static and keyed; the Source Text expression,
-  enabled and disabled, and one whose `tdb4` flags are unreadable is reported (#3170).
+  enabled and disabled, also after an export and a second import; and, as a guard, one whose `tdb4`
+  flags are unreadable stays reported (#3170).
 - `crates/aep/tests/it/import/text_anim.rs`: the animators and range selectors of 579-594 and 114
   (every selector setting, every mapped property, 594's keyed Start with its ease), the character
   and paragraph settings of 538-578, 595, 596, and what is reported (548 a line join without a
