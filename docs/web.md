@@ -332,9 +332,13 @@ pixels.
 
 Settings ▸ Disk ▸ Disk Cache works in the browser, backed by the **Origin Private File System**
 (`src/diskcache.rs`): viewer frames are kept under `effectcraft-cache/v1/frames/<32 hex>.ecc`
-between visits, in the desktop cache's format (`disk_cache::frame_entry`: 8-bit premultiplied
-RGBA, LZ4, a checksum), keyed by the same content hash (the comp and everything it uses, frame,
-scale, view, render options).
+between visits, in the desktop cache's format (`disk_cache::frame_entry`: the source files the
+frame read with their size and content hash, then 8-bit premultiplied RGBA, LZ4, a checksum),
+keyed by the same content hash (from memory: the comp, everything it can draw and what its
+expressions can read, frame, scale, view, render options; see
+[architecture.md](architecture.md)). The page reads an entry only while the files it lists are
+unchanged; a frame whose files can't all be named is not stored. Reload Footage has nothing to
+drop here: the file table's identities are content hashes, so a replaced file never matches.
 
 - A render request to a frame worker carries the frame's disk key; the worker posts the frame,
   then writes the entry with a **synchronous access handle** into a temporary file moved into
@@ -352,8 +356,9 @@ scale, view, render options).
   Cache / `edit.purge {what: "disk"}` clears it. `effectcraft.info().diskCache` has the same.
 
 **Layer buffers (M13.30).** Slow layer buffers (≥ 20 ms to render) go to the disk cache too
-(`effectcraft-cache/v1/layers/<32 hex>.ecc`, `disk_cache::layer_entry`, keys salted per project
-and footage as on the desktop). A layer lookup happens in the middle of a synchronous render,
+(`effectcraft-cache/v1/layers/<32 hex>.ecc`, `disk_cache::layer_entry`, keyed as on the desktop:
+`disk_cache::layer_disk_key`; each entry keeps the source files its buffer was made of, with
+the file table's size and content hash, and is used only while they are unchanged). A layer lookup happens in the middle of a synchronous render,
 where the browser's file system can't be read, so it is made synchronous by fetching first:
 
 1. Each frame worker backs its layer cache with a `PrefetchStore` (`effectcraft_render::cache`):

@@ -17,6 +17,7 @@ use color::Region;
 pub mod eval;
 pub mod masks;
 pub mod passes;
+pub mod reads;
 pub mod shapes;
 pub mod styles;
 pub mod text;
@@ -69,6 +70,10 @@ pub struct Renderer<'a> {
     pub opts: RenderOpts,
     /// Processed-layer cache shared across frames (see [`cache`]). `None` renders everything.
     pub cache: Option<&'a LayerCache>,
+    /// Where the source files this render reads are noted (see [`reads`]): the frame's own,
+    /// from the footage source and from the buffers the layer cache serves. `None` records
+    /// nothing for the frame (buffers kept in the layer cache still record theirs).
+    pub reads: Option<&'a reads::ReadLog>,
     /// Optional per-layer timing sink (`frame --bench` / perf readouts).
     pub profile: Option<&'a std::sync::Mutex<Vec<LayerTiming>>>,
     /// GPU backend used when [`RenderOpts::backend`] asks for it.
