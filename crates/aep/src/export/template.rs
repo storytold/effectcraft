@@ -94,6 +94,7 @@ pub(crate) fn shared() -> R<&'static Template> {
     if let Some(t) = SHARED.get() {
         return Ok(t);
     }
+    // A failed build returns here, before `get_or_init`, so it is never kept.
     let t = Template::load()?;
     Ok(SHARED.get_or_init(|| t))
 }

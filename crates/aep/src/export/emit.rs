@@ -930,8 +930,10 @@ mod tests {
         }
     }
 
-    /// Exports running at the same time on several threads, the first of them possibly building
-    /// the shared template, all give the single-threaded bytes.
+    /// Exports running at the same time on several threads all give the single-threaded bytes.
+    /// This checks concurrent exports from a template that is already built: other tests in this
+    /// binary usually fill the shared template first, so the race on the first build is not
+    /// reliably exercised here (the `static OnceLock` makes that race safe by construction).
     #[test]
     fn concurrent_exports_give_the_same_bytes() {
         let plans: Vec<ProjectPlan> = ["", " x", " y", " z"].iter().map(|t| plan_of(&varied(t))).collect();
