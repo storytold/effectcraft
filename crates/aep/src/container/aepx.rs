@@ -473,6 +473,15 @@ fn decode_entities(raw: &[u8], offset: usize, out: &mut Vec<u8>) -> Result<(), A
 
 /// Decodes a `bdata` value (hex digits, two per byte).
 fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
+    decode_hex_at_most(text, offset, MAX_BDATA)
+}
+
+/// The most bytes one `bdata` may decode to: what the 32-bit size field of a chunk can hold (a
+/// larger body could not be written back as an `.aep` either).
+const MAX_BDATA: usize = u32::MAX as usize;
+
+/// [`decode_hex`] with the decoded-size limit as a parameter (so tests can reach it).
+fn decode_hex_at_most(text: &[u8], offset: usize, max: usize) -> Result<Vec<u8>, AepError> {
     if text.len() % 2 == 1 {
         return Err(xml(offset, "bdata has an odd number of hex digits"));
     }
@@ -483,8 +492,18 @@ fn decode_hex(text: &[u8], offset: usize) -> Result<Vec<u8>, AepError> {
         _ => None,
     };
     let (pairs, _) = text.as_chunks::<2>();
-    // Sized once (collecting into `Option<Vec>` has no size hint and regrows step by step).
-    let mut out = Vec::with_capacity(pairs.len());
+    if pairs.len() > max {
+        return Err(AepError::TooLarge);
+    }
+    // Nothing is reserved for a value that does not decode: one cheap pass checks every digit first.
+    // Blocks without an early exit inside, so the check vectorises; it stops at the first bad block.
+    if !text.chunks(4096).all(|block| block.iter().fold(true, |ok, b| ok & b.is_ascii_hexdigit())) {
+        return Err(xml(offset, "bdata holds a character that is not a hex digit"));
+    }
+    // Sized once (collecting into `Option<Vec>` has no size hint and regrows step by step), and
+    // without aborting when the memory is not there.
+    let mut out = Vec::new();
+    out.try_reserve_exact(pairs.len()).map_err(|_| xml(offset, "bdata is too large to hold in memory"))?;
     for [hi, lo] in pairs {
         match (digit(*hi), digit(*lo)) {
             (Some(h), Some(l)) => out.push((h << 4) | l),
@@ -651,6 +670,31 @@ mod tests {
         // Without `&` the value is taken as written.
         let f = read_aepx(doc("<a bdata=\"0aFf\" x=\"y\"/>").as_bytes()).unwrap();
         assert_eq!(f.chunks[0].bytes(), Some(&[0x0a, 0xff][..]));
+    }
+
+    #[test]
+    fn a_large_bdata_with_a_bad_digit_is_refused_before_it_is_sized() {
+        // 10 MB of hex that is bad from the first pair (and once more at the very end).
+        let mut text = b"zz".to_vec();
+        text.extend(std::iter::repeat_n(*b"00", 5_000_000).flatten());
+        assert_eq!(decode_hex(&text, 3), Err(xml(3, "bdata holds a character that is not a hex digit")));
+        let mut late = vec![b'0'; 10_000_000];
+        late.extend_from_slice(b"0g");
+        assert_eq!(decode_hex(&late, 3), Err(xml(3, "bdata holds a character that is not a hex digit")));
+        let x = doc(&format!("<a bdata=\"{}\"/>", std::str::from_utf8(&text).unwrap()));
+        assert!(matches!(read_aepx(x.as_bytes()), Err(AepError::Xml { .. })));
+    }
+
+    #[test]
+    fn bdata_decodes_up_to_the_size_limit_and_not_past_it() {
+        assert_eq!(decode_hex_at_most(b"00ff10", 0, 3), Ok(vec![0x00, 0xff, 0x10]));
+        assert_eq!(decode_hex_at_most(b"00ff10", 0, 2), Err(AepError::TooLarge));
+        assert_eq!(decode_hex_at_most(b"", 0, 0), Ok(Vec::new()));
+        assert_eq!(decode_hex_at_most(b"00", 0, 0), Err(AepError::TooLarge));
+        // The odd-length error still comes first.
+        assert_eq!(decode_hex_at_most(b"001", 0, 0), Err(xml(0, "bdata has an odd number of hex digits")));
+        // The real limit is what a chunk's 32-bit size field holds.
+        assert_eq!(MAX_BDATA as u64, u64::from(u32::MAX));
     }
 
     #[test]
