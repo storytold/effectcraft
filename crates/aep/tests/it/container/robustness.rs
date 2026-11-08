@@ -237,9 +237,11 @@ fn exercise_layer(project: &Project<'_, '_>, comp_size: (u32, u32), layer: &Laye
     if let Some(root) = layer.properties() {
         exercise_group(&root, 0);
     }
+    // One index for the layer's effects: building it walks every layer of the file.
+    let defs = project.effect_definition_index();
     for e in layer.effects() {
-        let _ = (e.match_name().len(), e.name(), e.declared_param_count(), e.has_own_definitions(), project.definition_source(&e));
-        for p in e.params().into_iter().chain(project.effect_params(&e)) {
+        let _ = (e.match_name().len(), e.name(), e.declared_param_count(), e.has_own_definitions(), defs.source(&e));
+        for p in e.params().into_iter().chain(defs.params(&e)) {
             let _ = (p.index, p.kind, p.name.len(), p.items.as_ref().map(Vec::len), p.pard().len(), p.value(), p.stored_value(), p.pard_default());
             let _ = (p.is_default(), p.popup_item_count(), p.popup_selected_index(), p.popup_selected_item(), p.valid_max(), p.is_animated());
             let _ = (p.valid_min(), p.slider_range());

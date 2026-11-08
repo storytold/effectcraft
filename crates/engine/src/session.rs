@@ -10,4 +10,4 @@ mod dispatch;
 mod edit;
 mod render;
 
-pub use edit::{DiskSaltJob, upgrade_effects};
+pub use edit::upgrade_effects;

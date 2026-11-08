@@ -12,6 +12,11 @@
 //! project-level `LIST EfdG` (one `EfDf` per effect type: a `tdmn` with the match name, then a copy
 //! of one instance's `sspc`), see [`Project::effect_params`]. That copy also carries the values of
 //! the instance it was copied from, so values are only ever read from the instance's own `tdgp`.
+//!
+//! Some files have no `EfdG` at all (seen in 17 projects, all from inside After Effects-made
+//! Motion Graphics templates). In those, one instance per effect type kept its full `parT` (which
+//! one is not known) and it is the only place the definitions are written, so the other instances
+//! of that type borrow them from it (#3170).
 
 use std::collections::{HashMap, HashSet};
 
@@ -138,7 +143,11 @@ pub enum DefinitionSource {
     /// The project-level `EfdG/EfDf` copy for the effect's match name (the instance's own `parT`
     /// is empty, 383).
     Project,
-    /// Neither has any: the effect has no readable parameter definitions.
+    /// The own `parT` of another instance of the same match name in the file: the instance's
+    /// own `parT` is empty and the file has no project-level copy of the type (a project without
+    /// `EfdG`, #3170).
+    OtherInstance,
+    /// None of these has any: the effect has no readable parameter definitions.
     Missing,
 }
 
@@ -155,7 +164,8 @@ pub struct EffectParam<'f, 'a> {
     pub name: String,
     /// The popup items (`pdnm`, split at `|`; for a button its label, e.g. `Swap Colors`).
     pub items: Option<Vec<String>>,
-    /// True when the definition is the project-level copy (see [`DefinitionSource::Project`]).
+    /// True when the definition is borrowed: the project-level copy ([`DefinitionSource::Project`])
+    /// or another instance's ([`DefinitionSource::OtherInstance`]).
     pub borrowed_definition: bool,
     pard: &'f [u8],
     stored: Option<Property<'f, 'a>>,
@@ -212,6 +222,22 @@ impl<'f, 'a> Effect<'f, 'a> {
     /// instance of an effect type has an empty `parT` (383).
     pub fn has_own_definitions(&self) -> bool {
         self.chunk.child_list(b"parT").is_some_and(has_pard)
+    }
+
+    /// The match names of the value records in the instance's own `tdgp` (properties only, not
+    /// groups), in file order, each once.
+    pub fn value_record_names(&self) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        self.chunk
+            .child_list(b"tdgp")
+            .and_then(PropGroup::from_chunk)
+            .map(|g| g.entries())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| matches!(e.node, PropNode::Property(_)))
+            .map(|e| e.match_name)
+            .filter(|n| seen.insert(n.clone()))
+            .collect()
     }
 
     /// The parameters in the order of the instance's own `parT`. Empty for an instance whose
@@ -299,8 +325,25 @@ impl<'f, 'a> Project<'f, 'a> {
 
     /// [`Self::effect_definitions`] indexed by match name, for looking up many effects: build it
     /// once per file, not once per effect (a file can hold many definitions and many instances).
+    /// For a type without a project-level copy it also keeps the own `parT` of the first instance
+    /// in the file (items, layers and effects in file order) that has one.
     pub fn effect_definition_index(&self) -> EffectDefinitions<'f, 'a> {
-        EffectDefinitions { by_name: self.effect_definitions().into_iter().collect() }
+        let by_name: HashMap<String, &'f Chunk<'a>> = self.effect_definitions().into_iter().collect();
+        let mut instances: HashMap<String, &'f Chunk<'a>> = HashMap::new();
+        for item in self.all_items() {
+            let Some(comp) = item.comp() else { continue };
+            for layer in comp.layers() {
+                for fx in layer.effects() {
+                    if by_name.contains_key(&fx.match_name) || instances.contains_key(&fx.match_name) {
+                        continue;
+                    }
+                    if let Some(part) = fx.chunk.child_list(b"parT").filter(|p| has_pard(p)) {
+                        instances.insert(fx.match_name, part);
+                    }
+                }
+            }
+        }
+        EffectDefinitions { by_name, instances }
     }
 
     /// Where the parameter definitions of `effect` come from. Builds the index each call: use
@@ -316,10 +359,13 @@ impl<'f, 'a> Project<'f, 'a> {
     }
 }
 
-/// The project-level effect definitions by match name ([`Project::effect_definition_index`]).
+/// The borrowable effect definitions by match name ([`Project::effect_definition_index`]).
 #[derive(Debug, Clone, Default)]
 pub struct EffectDefinitions<'f, 'a> {
+    /// The project-level copies (`EfdG`).
     by_name: HashMap<String, &'f Chunk<'a>>,
+    /// For a type without a project-level copy: the own `parT` of the first instance that has one.
+    instances: HashMap<String, &'f Chunk<'a>>,
 }
 
 impl<'f, 'a> EffectDefinitions<'f, 'a> {
@@ -329,20 +375,23 @@ impl<'f, 'a> EffectDefinitions<'f, 'a> {
             DefinitionSource::Instance
         } else if self.by_name.contains_key(effect.match_name()) {
             DefinitionSource::Project
+        } else if self.instances.contains_key(effect.match_name()) {
+            DefinitionSource::OtherInstance
         } else {
             DefinitionSource::Missing
         }
     }
 
     /// The parameters of `effect`: from its own `parT`, or, when that is empty, from the
-    /// project-level definition of its match name ([`EffectParam::borrowed_definition`]). Values
-    /// always come from the instance's own records (absent = the `pard` default); the project
-    /// copy's values belong to another instance and are never read.
+    /// project-level definition of its match name, else from another instance of it that has
+    /// its own ([`EffectParam::borrowed_definition`]). Values always come from the instance's own
+    /// records (absent = the `pard` default); the values next to borrowed definitions belong to
+    /// another instance and are never read.
     pub fn params(&self, effect: &Effect<'f, 'a>) -> Vec<EffectParam<'f, 'a>> {
         if effect.has_own_definitions() {
             return effect.params();
         }
-        match self.by_name.get(effect.match_name()) {
+        match self.by_name.get(effect.match_name()).or_else(|| self.instances.get(effect.match_name())) {
             Some(part) => effect.params_from(part, true),
             None => Vec::new(),
         }

@@ -197,16 +197,18 @@ pub struct Playback {
     pub restore_max: Option<Option<PanelKind>>,
     /// Audio-only previews: the frame under the audible sample (the current time stays put).
     pub audio_frame: Option<i64>,
-    /// The preview's sound waits for frames: while the frames ahead aren't cached, every frame
-    /// shows as it renders, silently; the sound starts once the rest of the preview (or what
-    /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
-    /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
+    /// The preview's sound waits for frames: a preview whose start gave up on frames that weren't
+    /// cached shows every frame as it renders, silently, and starts the sound once the frames
+    /// ahead are cached while it keeps real time (#208), or the rest of the preview is. Once the
+    /// sound plays it goes on through frames that aren't cached, and the picture drops frames to
+    /// follow it (#2473).
     pub audio_held: bool,
     /// Starting a preview with sound (#947): the playhead stays on the first frame while the
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently
     /// while they rendered and the sound started at the later frame, so the opening was lost.
-    /// A stall later on still falls back to [`Playback::audio_held`].
+    /// Once the sound plays, a stall no longer stops it: the picture drops frames to follow it
+    /// (#2473).
     pub starting: bool,
     /// When the preview started (seconds): [`Playback::starting`] gives up after `STARTUP_LIMIT`.
     pub starting_since: f64,

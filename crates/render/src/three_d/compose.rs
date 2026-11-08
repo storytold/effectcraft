@@ -203,9 +203,11 @@ pub(crate) fn prepare<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, ord
 /// Prepare a layer as planes: one per character for per-character 3D text, else one.
 pub(crate) fn prepare_all<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Vec<Item<'a>> {
     if crate::text::per_char_3d(ctx, layer) {
-        return crate::text::per_char_planes(ctx, layer, r.opts.scale)
+        return crate::text::per_char_planes(&r.with_reads(ctx), layer, r.opts.scale)
             .into_iter()
-            .filter_map(|(buf, m)| prepare_with(r, ctx, layer, order, out, in_run, PlaneInput { buf: r.to_blend(Arc::new(buf), None), local: m }))
+            .filter_map(|(buf, m)| {
+                prepare_with(r, ctx, layer, order, out, in_run, PlaneInput { buf: r.to_blend(Arc::new(buf), None, &Arc::default()), local: m })
+            })
             .collect();
     }
     prepare(r, ctx, layer, order, out, in_run).into_iter().collect()
