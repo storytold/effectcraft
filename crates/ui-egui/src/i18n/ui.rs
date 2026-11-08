@@ -8006,7 +8006,7 @@ const SPANISH: &[(&str, &str)] = &[
 
 /// Georgian (ka): every row of the Chinese catalogs, in the same order (the tests keep them in step).
 const GEORGIAN: &[(&str, &str)] = &[
-    ("Click to sample color", "დააწკაპუნეთ ფერის ნიმუშის ასაღებად"),
+    ("Click to sample color", "დაწკაპეთ ფერის ნიმუშის ასაღებად"),
     ("Appearance Settings…", "იერსახის პარამეტრები…"),
     ("Add to favorites", "რჩეულებში დამატება"),
     ("Remove from favorites", "რჩეულებიდან ამოშლა"),
