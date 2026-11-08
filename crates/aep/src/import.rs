@@ -28,10 +28,12 @@
 mod build;
 mod camera;
 mod effects;
+mod lumetri;
 mod markers;
 mod masks;
 mod placeholder;
 mod props;
+mod puppet;
 mod report;
 mod settings;
 mod shapes;

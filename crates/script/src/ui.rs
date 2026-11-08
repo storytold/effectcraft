@@ -3,7 +3,8 @@
 //!
 //! * **Script files** (native builds) run on a *script-host thread*. The caller's session moves
 //!   to that thread while JavaScript runs and comes back whenever the script stops: at the end,
-//!   or while a modal dialog waits in `show()`. Each [`ScriptUiEvent`] moves the session there
+//!   while a modal dialog waits in `show()`, or while an opted-in frontend waits for rendering.
+//!   Each [`ScriptUiEvent`] moves the session there
 //!   again, runs the handler, and brings it back with the windows' new state. The host ends
 //!   when its last window closes. Only one side holds the session at a time, so nothing runs
 //!   concurrently and every edit is still an ordinary undoable engine command.
@@ -137,6 +138,8 @@ pub(crate) enum ToHost {
     /// script-host threads).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Tick(Session, Instant),
+    /// Resume the suspended native render call, never a callback or scheduled task.
+    ResumeRender(Session),
 }
 
 impl ToHost {
@@ -145,7 +148,7 @@ impl ToHost {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             ToHost::Start(s) => s,
-            ToHost::Event(s, _) | ToHost::Tick(s, _) => s,
+            ToHost::Event(s, _) | ToHost::Tick(s, _) | ToHost::ResumeRender(s) => s,
         }
     }
 }
@@ -159,6 +162,7 @@ pub(crate) struct FromHost {
     done: bool,
     /// When its next scheduled task is due.
     next_due: Option<Instant>,
+    render_wait: bool,
 }
 
 /// The host thread's end of the hand-off.
@@ -177,6 +181,8 @@ struct HostEnd {
     /// [`effectcraft_engine::scriptui::ScriptUi::project_epoch`] when the host last ran.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     epoch: u64,
+    /// Retained across render yields so a later error still names its included source file.
+    source_map: Option<crate::include::Expanded>,
 }
 
 fn hosts() -> &'static std::sync::Mutex<BTreeMap<u32, HostEnd>> {
@@ -195,6 +201,7 @@ enum Wake {
     Event(ScriptUiEvent),
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Tick(Instant),
+    Render,
 }
 
 /// On the host thread: hand the session (with the windows' state and what the script printed)
@@ -206,18 +213,20 @@ fn yield_wait(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool) -
         match yield_wake(out, windows.clone(), done, None)? {
             Wake::Event(ev) => return Some(ev),
             Wake::Tick(_) => out = crate::Outcome { waiting: true, ..Default::default() },
+            Wake::Render => return None,
         }
     }
 }
 
 /// [`yield_wait`] that also wakes for the scheduled tasks due at `next_due`.
 fn yield_wake(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool, next_due: Option<Instant>) -> Option<Wake> {
+    let render_wait = outcome.render_host.is_some();
     let (session, link, name) = ACTIVE.with(|a| {
         let mut a = a.borrow_mut();
         let a = a.as_mut()?;
         Some((std::mem::take(&mut a.session), a.link.take()?, a.name.clone()))
     })?;
-    if link.tx.send(FromHost { session, outcome, windows, name, done, next_due }).is_err() {
+    if link.tx.send(FromHost { session, outcome, windows, name, done, next_due, render_wait }).is_err() {
         return None;
     }
     if done {
@@ -226,6 +235,7 @@ fn yield_wake(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool, n
     let (s, wake) = match link.rx.recv() {
         Ok(ToHost::Event(s, ev)) => (s, Wake::Event(ev)),
         Ok(ToHost::Tick(s, now)) => (s, Wake::Tick(now)),
+        Ok(ToHost::ResumeRender(s)) => (s, Wake::Render),
         _ => return None,
     };
     ACTIVE.with(|a| {
@@ -269,8 +279,9 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
                 }
                 Some(Wake::Tick(now)) => {
                     let (ran, error) = crate::tasks::run_due(&mut ctx, host, now);
-                    out = crate::Outcome { result: json!(ran), output: settle(), error, waiting: false };
+                    out = crate::Outcome { result: json!(ran), output: settle(), error, ..Default::default() };
                 }
+                Some(Wake::Render) => break,
                 None => break,
             }
         }
@@ -283,15 +294,30 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
     {
         let message = if body.is_err() { "the script engine stopped unexpectedly" } else { "the script ended" };
         let out = crate::Outcome { error: Some(ScriptError { message: message.into(), file, ..Default::default() }), ..Default::default() };
-        let _ = link.tx.send(FromHost { session: std::mem::take(&mut a.session), outcome: out, windows: vec![], name, done: true, next_due: None });
+        let _ = link.tx.send(FromHost {
+            session: std::mem::take(&mut a.session),
+            outcome: out,
+            windows: vec![],
+            name,
+            done: true,
+            next_due: None,
+            render_wait: false,
+        });
     }
 }
 
 /// Wait for the host to hand the session back; keep its link while it has windows open.
 fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
     match end.rx.recv() {
-        Ok(FromHost { session: s, outcome, windows, name, done, next_due }) => {
+        Ok(FromHost { session: s, mut outcome, windows, name, done, next_due, render_wait }) => {
             *session = s;
+            session.script_ui.render_host = render_wait.then_some(host);
+            if !render_wait
+                && let Some(map) = &end.source_map
+                && let Some(error) = &mut outcome.error
+            {
+                map.locate(error);
+            }
             publish(session, host, &name, windows);
             if done {
                 session.script_ui.windows.retain(|w| w.host != host);
@@ -324,7 +350,61 @@ pub(crate) fn run_threaded(session: &mut Session, req: &effectcraft_engine::Scri
         *session = msg.into_session();
         return crate::Outcome { error: Some(ScriptError { message: "the script host did not start".into(), ..Default::default() }), ..Default::default() };
     }
-    receive(session, host, HostEnd { tx: to_tx, rx: from_rx, next_due: None, epoch: 0 })
+    receive(session, host, HostEnd { tx: to_tx, rx: from_rx, next_due: None, epoch: 0, source_map: None })
+}
+
+/// Suspend only the JavaScript stack, not the window's event loop (#3289). Keep the output
+/// and open undo groups in `Active`: settling here would split the script's undo transaction.
+pub(crate) fn wait_for_render(ctx: &mut Context, mut result: J) -> Result<J, String> {
+    let host = with_active(|a| Ok(a.host))?;
+    let windows = snapshot(ctx);
+    let out = crate::Outcome { render_host: Some(host), ..Default::default() };
+    if !matches!(yield_wake(out, windows, false, None), Some(Wake::Render)) {
+        return Err("the frontend stopped waiting for the script's render".into());
+    }
+    with_active(|a| {
+        let list = a.session.execute_for_script("renderQueue.list", json!({})).map_err(|e| e.to_string())?;
+        let ids: Vec<J> = result["items"].as_array().into_iter().flatten().map(|i| i["id"].clone()).collect();
+        result["items"] = json!(list["items"].as_array().into_iter().flatten().filter(|i| ids.contains(&i["id"])).collect::<Vec<_>>());
+        result["rendering"] = list["rendering"].clone();
+        Ok(result)
+    })
+}
+
+pub(crate) fn keep_render_source_map(host: u32, map: crate::include::Expanded) {
+    if let Ok(mut h) = hosts().lock()
+        && let Some(end) = h.get_mut(&host)
+    {
+        end.source_map = Some(map);
+    }
+}
+
+/// Called by the native frontend while its normal editing/callback tick is paused. Polling
+/// applies terminal statuses and post-render actions before the suspended JS call returns.
+pub(crate) fn poll_render_wait(session: &mut Session) -> Option<J> {
+    let host = session.script_ui.render_host?;
+    // Only this completion boundary may apply the render's own import/proxy undo steps.
+    session.script_ui.render_host = None;
+    session.poll_render();
+    if session.is_rendering() {
+        session.script_ui.render_host = Some(host);
+        return None;
+    }
+    session.script_ui.render_host = None;
+    let fail = |message: &str| crate::Outcome { error: Some(ScriptError { message: message.into(), ..Default::default() }), ..Default::default() }.to_json();
+    let Some(end) = hosts().lock().ok().and_then(|mut h| h.remove(&host)) else {
+        return Some(fail("the script host stopped while rendering"));
+    };
+    if end.epoch != session.script_ui.project_epoch {
+        return Some(fail("the project changed while the script was rendering"));
+    }
+    if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::ResumeRender(std::mem::take(session))) {
+        *session = msg.into_session();
+        return Some(fail("the script host stopped while rendering"));
+    }
+    let out = receive(session, host, end);
+    // A second render in this invocation keeps the original control reply pending.
+    out.render_host.is_none().then(|| out.to_json())
 }
 
 /// Record the windows a host published (named after the script that made them).
@@ -429,6 +509,9 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
     }
     drop(stale);
     for host in due {
+        if session.script_ui.render_host.is_some() {
+            break;
+        }
         let Some(end) = hosts().lock().ok().and_then(|mut h| h.remove(&host)) else { continue };
         if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Tick(std::mem::take(session), now)) {
             *session = msg.into_session();
@@ -490,7 +573,7 @@ fn tick_inline_host(session: &mut Session, host: u32, name: &str, now: Instant) 
     drop(guard);
     crate::tasks::set_epoch(host, session.script_ui.project_epoch);
     publish(session, host, name, windows);
-    crate::Outcome { result: json!(ran), output, error, waiting: false }
+    crate::Outcome { result: json!(ran), output, error, ..Default::default() }
 }
 
 /// Forget the session's task hosts that have ended (inline ones: that have no tasks left).
