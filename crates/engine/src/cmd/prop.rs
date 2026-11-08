@@ -694,6 +694,19 @@ fn apply_expr(pr: &mut Property, text: &Option<String>, enabled: Option<bool>, d
     }
 }
 
+/// Whether [`apply_expr`] would leave `pr` with an enabled expression it didn't have (a new one,
+/// one switched on, or new text).
+fn adds_expression(pr: &Property, text: &Option<String>, enabled: Option<bool>, def: &str) -> bool {
+    let mut after = pr.clone();
+    apply_expr(&mut after, text, enabled, def);
+    match (&pr.expr, &after.expr) {
+        (_, None) => false,
+        (_, Some(a)) if !a.enabled => false,
+        (Some(b), Some(a)) => !b.enabled || b.text != a.text,
+        (None, Some(_)) => true,
+    }
+}
+
 /// `{layer?, path|prop, ...}` for one property, or (Animation > Add Expression) no `path`/`prop`
 /// for the properties selected in the timeline, all in one undo step.
 fn set_expr(s: &mut Session, p: &Value) -> Result<Value> {
@@ -731,7 +744,9 @@ fn set_expr(s: &mut Session, p: &Value) -> Result<Value> {
         let mut changed_types = vec![];
         for (((cid, lid, uid), def), time) in targets.iter().zip(&defs).zip(&times) {
             let pr = layer_mut(proj, *cid, *lid)?.props.find_mut(*uid).ok_or_else(|| bad(C, "property vanished"))?;
-            if pr.static_only && text.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            // A property that can't be animated takes no expression (one an older document has
+            // may still be disabled or removed).
+            if pr.static_only && adds_expression(pr, &text, enabled, def) {
                 return Err(bad(C, format!("{} can't have an expression", pr.name)));
             }
             apply_expr(pr, &text, enabled, def);
