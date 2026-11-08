@@ -881,23 +881,31 @@ impl TextDocument {
 }
 
 impl<'f, 'a> Layer<'f, 'a> {
-    /// The text document of a text layer (`LIST btdk` below `ADBE Text Properties`).
+    /// The Source Text record `LIST btds` (`ADBE Text Document`). It is a direct child of the
+    /// `ADBE Text Properties` group, which is a direct child of the layer's root `tdgp`
+    /// (`Layr/tdgp/tdgp/btds`, in every sample), so only that level is searched rather than the
+    /// whole layer.
+    fn source_text_record(&self) -> Option<&'f Chunk<'a>> {
+        let root = self.chunk.child_list(b"tdgp")?;
+        root.children().iter().filter(|g| g.is_list(b"tdgp")).find_map(|g| g.child_list(b"btds"))
+    }
+
+    /// The text document of a text layer (`LIST btdk` in the Source Text record `btds`).
     pub fn text_document(&self) -> Option<TextDocument> {
-        TextDocument::parse(self.chunk.find_list(b"btdk")?.bytes()?)
+        TextDocument::parse(self.source_text_record()?.child_list(b"btdk")?.bytes()?)
     }
 
     /// The Source Text property record: the `tdbs` in `btds[ADBE Text Document]` (a placeholder
     /// in every sample: no keys, no expression). Source Text keyframes and expressions were not
     /// sampled; a `list` (keys) or an expression in it marks them.
     pub fn source_text_property(&self) -> Option<Property<'f, 'a>> {
-        let btds = self.chunk.descendants().map(|(_, c)| c).find(|c| c.is_list(b"btds"))?;
-        Property::from_chunk(btds.child_list(b"tdbs")?)
+        Property::from_chunk(self.source_text_record()?.child_list(b"tdbs")?)
     }
 
-    /// The number of text documents (`LIST btdk`) of the layer: 1 in every sample; more would be
-    /// one per Source Text keyframe (not sampled).
+    /// The number of text documents (`LIST btdk`) in the Source Text record: 1 in every sample;
+    /// more would be one per Source Text keyframe (not sampled).
     pub fn text_document_count(&self) -> usize {
-        self.chunk.descendants().filter(|(_, c)| c.is_list(b"btdk")).count()
+        self.source_text_record().map_or(0, |btds| btds.descendants().filter(|(_, c)| c.is_list(b"btdk")).count())
     }
 }
 
@@ -942,10 +950,23 @@ pub enum CueType {
     Other(u32),
 }
 
+impl<'a> Chunk<'a> {
+    /// The marker list `LIST mrst` of a marker holder: a layer (`LIST Layr`) or a composition's
+    /// `SecL` list. A layer's `mrst` is a direct child of its root `tdgp` (`ADBE Marker`), so only
+    /// that place is looked at; most layers have none, and searching their whole property tree
+    /// for it was a large part of an import. Any other holder is searched depth-first.
+    pub(crate) fn marker_list(&self) -> Option<&Chunk<'a>> {
+        if self.is_list(b"Layr") {
+            return self.child_list(b"tdgp")?.child_list(b"mrst");
+        }
+        self.find_list(b"mrst")
+    }
+}
+
 /// Reads the markers below `holder` (a layer or the composition's `SecL` list): the `mrst` list has a
 /// property whose 16-byte records give the times and one `Nmrd` list per marker with the strings.
 fn markers_in(holder: &Chunk<'_>) -> Vec<Marker> {
-    let Some(mrst) = holder.find_list(b"mrst") else { return Vec::new() };
+    let Some(mrst) = holder.marker_list() else { return Vec::new() };
     let Some(prop) = mrst.child_list(b"tdbs").and_then(Property::from_chunk) else { return Vec::new() };
     let Some(keys) = prop.keys() else { return Vec::new() };
     let scale = prop.time_scale().unwrap_or(0);
@@ -1005,6 +1026,44 @@ impl<'f, 'a> Comp<'f, 'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn list(t: &[u8; 4], kids: Vec<Chunk<'static>>) -> Chunk<'static> {
+        Chunk::list(*t, kids)
+    }
+
+    #[test]
+    fn a_layers_marker_list_is_the_one_in_its_root_group() {
+        let marked = |tag: u8| list(b"mrst", vec![Chunk::data(*b"test", vec![tag])]);
+        // The stored place: `Layr/tdgp/mrst`.
+        let layer = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![]), marked(1)])]);
+        assert_eq!(layer.marker_list().and_then(|m| m.child(b"test")).and_then(Chunk::bytes), Some(&[1u8][..]));
+        // A list deeper in the layer is not the layer's marker list (the old depth-first search
+        // found it); a layer without a marker list in its root group has no markers.
+        let deep = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![marked(2)])])]);
+        assert!(deep.marker_list().is_none());
+        assert!(Layer { chunk: &deep }.markers().is_empty());
+        // Any other holder (a composition's `SecL`) is still searched depth-first.
+        let secl = list(b"SecL", vec![list(b"tdgp", vec![list(b"tdgp", vec![marked(3)])])]);
+        assert_eq!(secl.marker_list().and_then(|m| m.child(b"test")).and_then(Chunk::bytes), Some(&[3u8][..]));
+    }
+
+    #[test]
+    fn the_source_text_record_is_found_in_the_text_group() {
+        let doc = b"/1 << /1 [ << /0 << /0 (\xfe\xff\0H\0\r) /6 << /0 [ << /0 << /0 << /6 << /0 0 /1 50 /53 << /0 << /1 [ 1 1 0 0 ] >> >> >> >> >> /1 2 >> ] >> >> >> ] >>";
+        // `btdk` is an opaque list (its body is not a chunk sequence), as the reader makes it.
+        let btdk = || Chunk { id: *b"LIST", body: crate::container::Body::OpaqueList { list_type: *b"btdk", data: doc.to_vec().into() }, pad: None };
+        let btds_real = |n: usize| list(b"btds", std::iter::once(list(b"tdbs", vec![])).chain((0..n).map(|_| btdk())).collect());
+        let layer = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![]), list(b"tdgp", vec![btds_real(2)])])]);
+        let view = Layer { chunk: &layer };
+        assert_eq!(view.text_document().map(|d| d.text), Some("H".to_string()));
+        assert!(view.source_text_property().is_some());
+        assert_eq!(view.text_document_count(), 2);
+        // A record anywhere else in the layer is not its Source Text.
+        let elsewhere = list(b"Layr", vec![list(b"tdgp", vec![list(b"tdgp", vec![list(b"tdgp", vec![btds_real(1)])])])]);
+        let view = Layer { chunk: &elsewhere };
+        assert!(view.text_document().is_none() && view.source_text_property().is_none());
+        assert_eq!(view.text_document_count(), 0);
+    }
 
     #[test]
     fn non_finite_numbers_are_not_numbers() {
