@@ -134,11 +134,13 @@ fn sort_named(v: &mut [Sorted]) {
 }
 
 /// The [`natural_key`] of `name` as one byte string whose plain byte order is the natural order:
-/// segment by segment, a number before text, numbers by value and then by their digits (`1`
-/// before `01`), text by its lowercase string, and a key that is a prefix of the other first.
+/// segment by segment, a number before text, numbers by value and then by their digit strings
+/// byte by byte (`01` before `1`), text by its lowercase string, and a key that is a prefix of
+/// the other first.
 ///
 /// - A number: `0x01`, the count of significant bytes of its value, those bytes big-endian, its
-///   digits, `0x00` (digits are never `0x00`, so a shorter digit string sorts first).
+///   digits, `0x00` (digits are never `0x00`, so a digit string that is a prefix of another, as
+///   `0` of `00`, sorts first).
 /// - Text: `0x02`, its lowercase UTF-8 with each `0x00` written as `0x00 0x01`, then `0x00 0x00`.
 ///
 /// At most 5 bytes per byte of `name` (`NATURAL_BYTES_PER_NAME_BYTE`), so the cached keys stay
