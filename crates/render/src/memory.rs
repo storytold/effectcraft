@@ -173,7 +173,10 @@ impl Accountant {
         &GLOBAL
     }
 
-    /// Set the common budget and free down to it at once.
+    /// Set the common budget and free down to it: right away when no balance is running; when
+    /// one is (on another thread, or this one further up the stack), that balance runs again
+    /// with the new budget once its pass ends, so this may return before the caches are within
+    /// it ([`Accountant::balance`]).
     pub fn set_budget(&self, bytes: usize) {
         self.budget.store(bytes, Ordering::Relaxed);
         self.balance();
