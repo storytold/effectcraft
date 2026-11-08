@@ -39,6 +39,7 @@ impl EffectcraftApp {
             layer_controls: preset.include_layer_controls,
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
+            audio_retry_at: None,
             audio_held: false,
             starting: false,
             starting_since: now,
@@ -51,7 +52,7 @@ impl EffectcraftApp {
                 self.playback.audio_held = audible;
                 self.playback.starting = audible;
             } else {
-                self.start_audio(fr.tick_of(plan.first));
+                self.start_audio(fr.tick_of(plan.first), now);
             }
         }
     }
@@ -65,19 +66,35 @@ impl EffectcraftApp {
     }
 
     /// Start audio preview from comp time `t` when [`Self::audio_plays`] and an output device
-    /// opens.
-    pub(super) fn start_audio(&mut self, t: Tick) {
+    /// opens. On failure the output is opened again on a timer (see `audio::AUDIO_RETRY_S`),
+    /// so a device that recovers — or appears — brings the sound back while playing (#3318).
+    pub(super) fn start_audio(&mut self, t: Tick, now: f64) {
         self.audio = None;
         self.meter.clipped = [false; 2];
-        let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else { return };
-        let Some(c) = self.session.project.comp_arc(cid).filter(|_| self.audio_plays()) else { return };
+        let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else {
+            self.playback.audio_retry_at = None;
+            return;
+        };
+        let Some(c) = self.session.project.comp_arc(cid).filter(|_| self.audio_plays()) else {
+            self.playback.audio_retry_at = None;
+            return;
+        };
         let out = audio::AudioOutput::from_prefs(&self.session.prefs);
-        let Some(dev) = self.hooks.audio_device.as_ref().and_then(|f| f(&out)) else { return };
+        let Some(dev) = self.hooks.audio_device.as_ref().and_then(|f| f(&out)) else {
+            self.playback.audio_retry_at = Some(now + audio::AUDIO_RETRY_S);
+            return;
+        };
         let mix = self.session.prefs.audio.preview_sample_rate;
         let fr = c.frame_rate;
         match audio::AudioPlayback::start(dev, self.render_source(), cid, t, fr.tick_of(pl.start), fr.tick_of(pl.end + 1), pl.looping, mix) {
-            Ok(a) => self.audio = Some(a),
-            Err(e) => log::warn!("audio preview: {e}"),
+            Ok(a) => {
+                self.audio = Some(a);
+                self.playback.audio_retry_at = None;
+            }
+            Err(e) => {
+                log::warn!("audio preview: {e}");
+                self.playback.audio_retry_at = Some(now + audio::AUDIO_RETRY_S);
+            }
         }
     }
 
@@ -110,6 +127,7 @@ impl EffectcraftApp {
         self.audio = None;
         self.playback.caching = false;
         self.playback.starting = false;
+        self.playback.audio_retry_at = None;
         if !was {
             return;
         }
@@ -166,7 +184,7 @@ impl EffectcraftApp {
         self.playback.start_wall = now;
         self.playback.start_frame = pl.first;
         let t = self.session.active_comp().map(|c| c.frame_rate.tick_of(pl.first)).unwrap_or_default();
-        self.start_audio(t);
+        self.start_audio(t, now);
         true
     }
 

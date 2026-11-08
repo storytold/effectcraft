@@ -35,6 +35,11 @@ pub trait AudioDevice: Send {
     /// Start pulling interleaved stereo frames from `feed` (see [`AudioFeed::pull`]).
     fn start(&mut self, feed: Arc<AudioFeed>) -> Result<(), String>;
     fn stop(&mut self);
+    /// The output stream failed since it started (a device that dropped or died): playback
+    /// drops it and re-opens the output on a timer instead of playing silence through it (#3318).
+    fn failed(&self) -> bool {
+        false
+    }
     /// Output latency in sample frames (device buffering), for A/V sync.
     fn latency_frames(&self) -> u64 {
         0
@@ -43,6 +48,10 @@ pub trait AudioDevice: Send {
     /// Audio) move queued samples to the output here.
     fn pump(&mut self) {}
 }
+
+/// How often (s) a preview whose output failed or died re-opens it while playing goes on (see
+/// [`AudioDevice::failed`]): what pause/play proves works does by hand, on a timer (#3318).
+pub const AUDIO_RETRY_S: f64 = 2.0;
 
 /// Opens the default output device (`None` when there is none).
 pub type AudioDeviceFactory = Box<dyn Fn(&AudioOutput) -> Option<Box<dyn AudioDevice>>>;
@@ -258,6 +267,11 @@ impl AudioPlayback {
     /// The comp sample index audible now.
     pub fn clock(&self) -> i64 {
         clock_sample(&self.span, self.feed.consumed(), self.device.latency_frames())
+    }
+
+    /// The output stream failed since it started (see [`AudioDevice::failed`]).
+    pub fn failed(&self) -> bool {
+        self.device.failed()
     }
 
     pub fn finished(&self) -> bool {
@@ -557,6 +571,94 @@ mod tests {
         playback.feed.pull(&mut out);
         assert_eq!(out, [0.5; 8]);
         playback.stop();
+    }
+
+    /// #3318: an output that dies mid-play is dropped (which also ends its error loop) and
+    /// opened again while playing goes on; a refused open is retried on the timer too. Playing
+    /// continues without sound between attempts, and a recovered device brings the sound back.
+    #[test]
+    fn a_failed_output_is_reopened_while_playing() {
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::preview::PreviewShortcut;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+        use effectcraft_engine::{EditorState, Session};
+        use std::sync::atomic::AtomicUsize;
+
+        /// Three devices in a row: the first dies right after starting, the second refuses to
+        /// open, the third is healthy.
+        #[derive(Clone, Copy)]
+        enum Script {
+            Dies,
+            Refuses,
+            Healthy,
+        }
+        struct Scripted(Script);
+        impl AudioDevice for Scripted {
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                match self.0 {
+                    Script::Refuses => Err("device unavailable".into()),
+                    _ => Ok(()),
+                }
+            }
+            fn stop(&mut self) {}
+            fn failed(&self) -> bool {
+                matches!(self.0, Script::Dies)
+            }
+        }
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "song.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(600.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("song.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(4.0));
+        let layer = build::layer(&mut p, &comp, "song.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let session =
+            Session { project: Arc::new(p), state: EditorState { active_comp: Some(cid), open_comps: vec![cid], ..Default::default() }, ..Default::default() };
+        let mut app = crate::EffectcraftApp::new(session);
+        app.use_manual_clock();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        app.hooks.audio_device = Some(Box::new(move |_| {
+            let n = factory_calls.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Scripted(match n {
+                0 => Script::Dies,
+                1 => Script::Refuses,
+                _ => Script::Healthy,
+            })))
+        }));
+
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let tick = |app: &mut crate::EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame| {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.tick(ctx, frame));
+        };
+
+        // Play (the audio-only preview starts sound at once): the first device opens and is
+        // already dead.
+        app.play_with(0.0, PreviewShortcut::AltNumpad0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the first device opened");
+        assert!(app.audio.is_some());
+
+        // The first pass notices the failure, drops the stream and re-opens at once; that open
+        // is refused, which arms the retry timer while the preview keeps playing.
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "the failed stream was dropped and re-opened");
+        assert!(app.audio.is_none(), "the refused open leaves no playback");
+        assert_eq!(app.playback.audio_retry_at, Some(AUDIO_RETRY_S), "the retry is armed");
+        assert!(app.playback.playing, "the preview plays on without sound");
+
+        // When the timer fires, a healthy device is opened and playback follows its clock again.
+        app.clock_mut().advance(2.5);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "the timer opened the output again");
+        let a = app.audio.as_ref().expect("the recovered device plays");
+        assert!(!a.failed(), "the recovered device is healthy");
+        assert_eq!(app.playback.audio_retry_at, None, "a working output clears the retry");
     }
 
     #[test]

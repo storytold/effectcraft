@@ -7,7 +7,7 @@
 //! channels: silence), converting to the device's sample format.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -40,6 +40,8 @@ pub struct CpalOut {
     out: AudioOutput,
     rate: u32,
     latency: Arc<AtomicU64>,
+    /// Set by the stream's error callback: the stream died (see [`AudioDevice::failed`]).
+    failed: Arc<AtomicBool>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -76,7 +78,7 @@ pub fn open(out: &AudioOutput) -> Option<Box<dyn AudioDevice>> {
             .unwrap_or(false)
     };
     let rate = if out.rate > 0 && supports(out.rate) { out.rate } else { cfg.sample_rate().0 };
-    Some(Box::new(CpalOut { out: out.clone(), rate, latency: Arc::new(AtomicU64::new(0)), stop: None, thread: None }))
+    Some(Box::new(CpalOut { out: out.clone(), rate, latency: Arc::new(AtomicU64::new(0)), failed: Arc::new(AtomicBool::new(false)), stop: None, thread: None }))
 }
 
 fn run<T: SizedSample + FromSample<f32>>(
@@ -84,6 +86,7 @@ fn run<T: SizedSample + FromSample<f32>>(
     cfg: &cpal::StreamConfig,
     feed: Arc<AudioFeed>,
     latency: Arc<AtomicU64>,
+    failed: Arc<AtomicBool>,
     map: (usize, usize),
 ) -> Result<cpal::Stream, String> {
     let ch = cfg.channels as usize;
@@ -117,7 +120,10 @@ fn run<T: SizedSample + FromSample<f32>>(
             let dev_lat = ts.playback.duration_since(&ts.callback).map(|d| d.as_secs_f64()).unwrap_or(0.0);
             latency.store((dev_lat * rate) as u64 + frames as u64, Ordering::Relaxed);
         },
-        |e| log::warn!("audio output: {e}"),
+        move |e| {
+            log::warn!("audio output: {e}");
+            failed.store(true, Ordering::Relaxed);
+        },
         None,
     )
     .map_err(|e| e.to_string())
@@ -128,11 +134,17 @@ impl AudioDevice for CpalOut {
         self.rate
     }
 
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
+
     fn start(&mut self, feed: Arc<AudioFeed>) -> Result<(), String> {
         self.stop();
+        self.failed.store(false, Ordering::Relaxed);
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let latency = self.latency.clone();
+        let failed = self.failed.clone();
         let rate = self.rate;
         let name = self.out.device.clone();
         let map = ((self.out.left.max(1) - 1) as usize, (self.out.right.max(1) - 1) as usize);
@@ -162,10 +174,10 @@ impl AudioDevice for CpalOut {
                     };
                 }
                 let build = |cfg: &cpal::StreamConfig| match sup.sample_format() {
-                    cpal::SampleFormat::F32 => run::<f32>(&dev, cfg, feed.clone(), latency.clone(), map),
-                    cpal::SampleFormat::I16 => run::<i16>(&dev, cfg, feed.clone(), latency.clone(), map),
-                    cpal::SampleFormat::U16 => run::<u16>(&dev, cfg, feed.clone(), latency.clone(), map),
-                    cpal::SampleFormat::I32 => run::<i32>(&dev, cfg, feed.clone(), latency.clone(), map),
+                    cpal::SampleFormat::F32 => run::<f32>(&dev, cfg, feed.clone(), latency.clone(), failed.clone(), map),
+                    cpal::SampleFormat::I16 => run::<i16>(&dev, cfg, feed.clone(), latency.clone(), failed.clone(), map),
+                    cpal::SampleFormat::U16 => run::<u16>(&dev, cfg, feed.clone(), latency.clone(), failed.clone(), map),
+                    cpal::SampleFormat::I32 => run::<i32>(&dev, cfg, feed.clone(), latency.clone(), failed.clone(), map),
                     f => Err(format!("unsupported sample format {f:?}")),
                 };
                 let stream = match build(&cfg) {
@@ -188,6 +200,7 @@ impl AudioDevice for CpalOut {
                 }
                 if let Err(e) = stream.play() {
                     log::warn!("audio output: {e}");
+                    failed.store(true, Ordering::Relaxed);
                     return;
                 }
                 let _ = stop_rx.recv();
