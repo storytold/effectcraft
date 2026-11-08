@@ -1,6 +1,6 @@
 //! After Effects project (`.aep`) import: the typed view of [`effectcraft_aep`] mapped into an
-//! EffectCraft [`Project`]. The XML form (`.aepx`) is accepted as well: it is read into the same
-//! chunk tree ([`crate::parse_any`] picks the reader by content).
+//! EffectCraft [`Project`]. The XML form (`.aepx`) is accepted as well: both are read into the same
+//! flat chunk index (an `.aep` in place, an `.aepx` decoded into one buffer first).
 //!
 //! What arrives: the project item tree (folders), project settings (depth, working space, time
 //! display), compositions (size, exact frame rate, duration, work area, background, pixel
@@ -42,6 +42,7 @@ mod time;
 use effectcraft_project::{ItemId, Project, ProjectSettings};
 
 use crate::container::index::{Root, TreeIndex};
+use crate::container::{AepxDrafts, Limits, index_aepx};
 
 pub use effects::supported_effects;
 pub use report::{AeVersionInfo, ImportReport, Imported, LIMITATIONS, Loss, LossCategory, MAX_DETAILS, TESTED_MAJORS, UNKNOWN};
@@ -117,10 +118,11 @@ pub struct ImportResult {
 /// error `project` is unchanged.
 pub fn import(project: &mut Project, bytes: &[u8], options: &ImportOptions<'_>) -> Result<ImportResult, AepImportError> {
     // The importer only reads: an `.aep` is indexed in place (one flat array that borrows the
-    // bytes); an `.aepx` is read into the chunk tree, which the view reads directly.
+    // bytes); an `.aepx` is decoded into one buffer, which the index borrows.
     if crate::is_aepx(bytes) {
-        let file = crate::read_aepx(bytes)?;
-        import_root(project, Root::from(&file), options)
+        let AepxDrafts { buffer, nodes, trailer } = index_aepx(bytes, Limits::default())?;
+        let index = TreeIndex::from_drafts(&buffer, nodes, trailer);
+        import_root(project, Root::from(&index), options)
     } else {
         let index = TreeIndex::parse(bytes)?;
         import_root(project, Root::from(&index), options)
@@ -240,6 +242,49 @@ mod tests {
         for path in paths {
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             both(&bytes, &path.display().to_string());
+        }
+    }
+
+    /// Imports an `.aepx` through the owned tree of the reader this replaced and through the
+    /// index ([`import`]): the same project, report and settings, or the same error.
+    fn both_aepx(bytes: &[u8], name: &str) -> Result<ImportResult, AepImportError> {
+        let exists = |_: &str| true;
+        let options = ImportOptions { allow_losses: true, ..ImportOptions::new(&exists) };
+        let a = crate::container::aepx_reference::read(bytes, Limits::default())
+            .map_err(AepImportError::from)
+            .and_then(|file| import_root(&mut Project::default(), Root::from(&file), &options));
+        let b = import(&mut Project::default(), bytes, &options);
+        assert!(a == b, "{name}: the .aepx import differs through the index");
+        b
+    }
+
+    /// A synthetic `.aepx` imports the same through the index as through the owned tree.
+    #[test]
+    fn a_synthetic_aepx_imports_the_same_through_the_index() {
+        // The comp of the owned-tree test above (`idta` type 4, `cdta` 1/30 s frame duration).
+        let idta = format!("0004{}", "00".repeat(62));
+        let cdta = format!("00000000000000010000001e{}", "00".repeat(188));
+        let x = format!(
+            "<?xml version=\"1.0\"?><AfterEffectsProject><head bdata=\"{}\"/><Fold><Item><idta bdata=\"{idta}\"/><string>Comp</string><cdta bdata=\"{cdta}\"/></Item></Fold><ProjectXMPMetadata>x</ProjectXMPMetadata></AfterEffectsProject>",
+            "00".repeat(20)
+        );
+        let imported = both_aepx(x.as_bytes(), "synthetic").expect("the synthetic project imports");
+        assert_eq!(imported.comps.len(), 1);
+        assert_eq!(both_aepx(b"<AfterEffectsProject/>", "empty").err(), Some(AepImportError::NoProject));
+        assert!(matches!(both_aepx(b"<AfterEffectsProject><a>", "broken"), Err(AepImportError::Container(crate::AepError::Xml { .. }))));
+    }
+
+    /// Every `.aepx` of the fixture directory (skipped without `EFFECTCRAFT_AEP_FIXTURES`).
+    #[test]
+    fn every_fixture_aepx_imports_the_same_through_the_index() {
+        let Some(dir) = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES").filter(|d| !d.is_empty()) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut paths: Vec<std::path::PathBuf> =
+            entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "aepx")).collect();
+        paths.sort();
+        for path in paths {
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let _ = both_aepx(&bytes, &path.display().to_string());
         }
     }
 }
