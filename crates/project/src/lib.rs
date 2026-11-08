@@ -44,7 +44,7 @@ pub use item::NO_LAYER;
 pub use item::{Heard, Item, ItemId, ItemKind, LayerId};
 pub use layer::{
     AutoOrient, FrameBlend, Layer, LayerSource, LightKind, MatteKind, PrimitiveKind, Quality, Sampling, Switches, TrackMatte, is_audio_effect,
-    reads_other_frames,
+    reads_other_frames, text_layer_name,
 };
 pub use layers::Layers;
 pub use reach::{ExprReach, PixelReach, expression_reach};
