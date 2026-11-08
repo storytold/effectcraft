@@ -141,6 +141,9 @@ pub enum Extra {
     Curves,
     /// Mesh Warp's Distortion Mesh (965, 985, `MeshData`).
     MeshWarp,
+    /// Lumetri Color: every parameter goes through its own table, keyed by match name
+    /// (`import/lumetri.rs`, 1200).
+    Lumetri,
     /// EXtractoR's Channel Info (`ExtractorChannels`): the channels by name.
     Extractor,
     /// IDentifier's Channel Info (`identifier_channel_type`): the chosen channel by name.
@@ -538,6 +541,9 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
         extra: Extra::MeshWarp,
     },
+    // Lumetri Color (1200): the parameters are mapped by match name, not by `parT` index
+    // (`import/lumetri.rs`).
+    EffectMap { match_name: "ADBE Lumetri", effect: "ec.color.lumetri", params: &[], extra: Extra::Lumetri },
     // The Cryptomatte plug-in (docs/aep-format.md 3.7): 1 Settings data, 2 Output, 3 Selection
     // Mode, imported by the Cryptomatte step (`Extra::Cryptomatte`).
     EffectMap { match_name: "Cryptomatte", effect: "ec.3d.cryptomatte", params: &[], extra: Extra::Cryptomatte },

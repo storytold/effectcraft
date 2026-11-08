@@ -302,6 +302,7 @@ pub struct EffectcraftApp {
     pub(crate) input_waiters: Vec<Sender<serde_json::Value>>,
     /// Control requests waiting for an offloaded job (`wait: true` in the browser).
     pub(crate) job_waiters: Vec<(control::JobWaiter, Sender<serde_json::Value>)>,
+    pub(crate) script_waiters: Vec<(u32, Sender<serde_json::Value>)>,
     pending_screenshots: Vec<PendingShot>,
     /// Pixels reserved by queued and in-flight screenshot requests.
     shot_bytes: usize,
