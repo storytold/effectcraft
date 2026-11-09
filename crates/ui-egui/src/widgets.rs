@@ -87,12 +87,17 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
                 .lock_focus(true),
         );
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
+        let touched_id = editing_id.with("touched");
+        let touched = r.changed() || ui.data(|d| d.get_temp::<bool>(touched_id)).unwrap_or(false);
         let mut out = None;
         if r.lost_focus() || tab.is_some() {
             if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                out = typed_value(&buf, suffix, value, decimals, range);
+                out = typed_value(&buf, suffix, value, decimals, range, touched);
             }
-            ui.data_mut(|d| d.remove::<String>(editing_id));
+            ui.data_mut(|d| {
+                d.remove::<String>(editing_id);
+                d.remove::<bool>(touched_id);
+            });
             if let Some(back) = tab {
                 r.surrender_focus();
                 let (key, pass) = (tab_order_id(ui), ui.ctx().cumulative_pass_nr());
@@ -100,7 +105,10 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
             }
         } else {
             keep_focus(ui.ctx(), &r, &buf);
-            ui.data_mut(|d| d.insert_temp(editing_id, buf));
+            ui.data_mut(|d| {
+                d.insert_temp(editing_id, buf);
+                d.insert_temp(touched_id, touched);
+            });
         }
         return (er, out, out.is_some());
     }
@@ -140,14 +148,15 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
 }
 
 /// The value a hot-text field commits from its typed `buf`: none when it does not parse or is
-/// the text already displayed for `value` (opening and closing the field must not write, or
+/// the untouched text displayed for `value` (opening and closing the field must not write, or
 /// the range would clamp a legacy out-of-range value and change its animation), else the
-/// number clamped to `range`.
-fn typed_value(buf: &str, suffix: &str, value: f64, decimals: usize, range: (f64, f64)) -> Option<f64> {
+/// number clamped to `range`. A `touched` field commits even an equal value: with several
+/// layers selected the other layers may differ from the displayed (first) one.
+fn typed_value(buf: &str, suffix: &str, value: f64, decimals: usize, range: (f64, f64), touched: bool) -> Option<f64> {
     let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
     let parsed = txt.parse::<f64>().ok().filter(|v| v.is_finite());
-    // The displayed text (value rounded to `decimals`) or any retype of the same number is no edit.
-    if txt == format!("{value:.decimals$}") || parsed == Some(value) {
+    // Untouched, the displayed text (value rounded to `decimals`) or a retype of it is no edit.
+    if !touched && (txt == format!("{value:.decimals$}") || parsed == Some(value)) {
         return None;
     }
     parsed.map(|v| v.clamp(range.0, range.1))
@@ -1125,12 +1134,13 @@ mod tests {
     fn unchanged_hot_text_is_not_committed() {
         let range = (0.0, 1e9);
         for shown in ["-50.0", " -50.0 ", "-50.0px", "-50,0", "-50", "-50.00", "-5e1"] {
-            assert_eq!(typed_value(shown, "px", -50.0, 1, range), None, "{shown:?}");
+            assert_eq!(typed_value(shown, "px", -50.0, 1, range, false), None, "{shown:?}");
         }
-        assert_eq!(typed_value("-50.0%", "%", -50.0, 1, range), None);
-        assert_eq!(typed_value("-20", "", -50.0, 1, range), Some(0.0), "an edit clamps");
-        assert_eq!(typed_value("40", "", -50.0, 1, range), Some(40.0));
-        assert_eq!(typed_value("x", "", -50.0, 1, range), None);
+        assert_eq!(typed_value("-50.0%", "%", -50.0, 1, range, false), None);
+        assert_eq!(typed_value("-50.0", "", -50.0, 1, range, true), Some(0.0), "an explicit equal value commits");
+        assert_eq!(typed_value("-20", "", -50.0, 1, range, true), Some(0.0), "an edit clamps");
+        assert_eq!(typed_value("40", "", -50.0, 1, range, true), Some(40.0));
+        assert_eq!(typed_value("x", "", -50.0, 1, range, true), None);
     }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
