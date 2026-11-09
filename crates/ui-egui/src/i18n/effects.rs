@@ -873,7 +873,7 @@ const JAPANESE_EFFECTS: &[Row] = &[
     ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS不定マップ"),
     ("ec.color.selectivecolor", "Selective Color", "特定色域の選択"),
     ("ec.color.shadowhighlight", "Shadow/Highlight", "シャドウ・ハイライト"),
-    ("ec.color.tint", "Tint", "色かぶり補正"),
+    ("ec.color.tint", "Tint", "着色"),
     ("ec.color.tritone", "Tritone", "トライトーン"),
     ("ec.color.vibrance", "Vibrance", "自然な彩度"),
     ("ec.color.videolimiter", "Video Limiter", "ビデオリミッター"),
@@ -998,7 +998,7 @@ const JAPANESE_EFFECTS: &[Row] = &[
     ("ec.sim.carddance", "Card Dance", "カードダンス"),
     ("ec.sim.caustics", "Caustics", "コースティック"),
     ("ec.sim.ccballaction", "Ball Grid", "球体グリッド"),
-    ("ec.sim.ccbubbles", "Bubbles", "泡"),
+    ("ec.sim.ccbubbles", "Bubbles", "気泡"),
     ("ec.sim.ccdrizzle", "Water Ripples", "水面の波紋"),
     ("ec.sim.cchair", "Surface Fibers", "表面の繊維"),
     ("ec.sim.ccmrmercury", "Liquid Particles", "液体パーティクル"),
@@ -2231,6 +2231,20 @@ mod tests {
                 };
                 assert_eq!(*english, spec.name, "{language} row {id}: the catalog says {english:?}, the registry {:?}", spec.name);
                 assert!(!translated.is_empty(), "{language} row {id}: empty translation");
+            }
+        }
+    }
+
+    /// Two effects that draw one name cannot be told apart in the Effect menu, Effect Controls or
+    /// Effects & Presets, so every catalog names each effect it covers distinctly.
+    #[test]
+    fn display_names_are_unique_in_every_catalog() {
+        for (language, rows) in COMPLETE.iter().chain(PARTIAL) {
+            let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+            for (id, _, translated) in *rows {
+                if let Some(other) = seen.insert(translated, id) {
+                    assert_ne!(other, *id, "{language}: {id} and {other} are both {translated:?}");
+                }
             }
         }
     }
