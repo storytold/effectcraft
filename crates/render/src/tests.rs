@@ -20,6 +20,7 @@ mod mask_feather;
 mod motion_tile;
 mod nested;
 mod paint;
+mod proxy_cache;
 mod remap;
 mod roi;
 mod stretch_limits;

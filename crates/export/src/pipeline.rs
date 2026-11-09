@@ -530,10 +530,21 @@ impl<'a> Cx<'a> {
             self.decide(Choice { renderer: crate::JobRenderer::Gpu, gpu_ms: None, cpu_ms: None, why: "the project's renderer (too few frames to measure)" });
             return vec![];
         }
-        // Small batches (few threads) measure one frame each; a batch too small for even that
-        // (a resumed sequence skipping frames) renders on the GPU and leaves it to the next.
+        // Nothing will be emitted for a skipped batch, so a later batch can still measure.
+        if ks.is_empty() {
+            return vec![];
+        }
+        // A resumed sequence can have only one or two missing frames in its first batch.
+        // Settle before emitting them: measuring a later batch could otherwise switch to the
+        // CPU after GPU pixels have already been written, including across output modules.
         let n = PROBE_FRAMES.min(ks.len().saturating_sub(1) / 2);
         if n == 0 {
+            self.decide(Choice {
+                renderer: crate::JobRenderer::Gpu,
+                gpu_ms: None,
+                cpu_ms: None,
+                why: "the project's renderer (too few pending frames to measure)",
+            });
             return vec![];
         }
         let (Some(&first), Some(gpu_ks), Some(cpu_ks)) = (ks.first(), ks.get(1..1 + n), ks.get(1 + n..ks.len().min(1 + n + PROBE_CPU_FRAMES))) else {
@@ -1196,6 +1207,48 @@ mod tests {
             options: Default::default(),
         };
         assert_eq!(Cx::new(&job).gpu_cap(), None, "no accelerator");
+    }
+
+    /// A resumed sequence can start with one or two missing frames. Once emitted, their
+    /// compositor must also be used by every later batch and the item's other output modules.
+    #[test]
+    fn a_small_first_batch_settles_the_renderer_before_emitting_frames() {
+        if std::env::var_os(RENDERER_ENV).is_some() {
+            return;
+        }
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let accel = NoAccel;
+        for n in [1, 2] {
+            let shared = Mutex::new(None);
+            let job = Job {
+                project: &p,
+                footage: &effectcraft_render::NoFootage,
+                expr: None,
+                accel: Some(&accel),
+                comp: cid,
+                settings: &settings,
+                output: &output,
+                path: "/r/f_[#####].png",
+                sink: None,
+                nested_switches: true,
+                options: crate::JobOptions { renderer: Some(&shared), ..Default::default() },
+            };
+            let cx = Cx::new(&job);
+            let empty = cx.render_frames(Vec::new(), |_, on| on, |_, on| on);
+            assert!(empty.is_empty());
+            assert_eq!(cx.choice(), None, "skipped batches do not choose");
+            let first = cx.render_frames((0..n).collect(), |_, on| on, |_, on| on);
+            assert_eq!(first, vec![crate::JobRenderer::Gpu; n as usize]);
+            assert_eq!(*shared.lock().unwrap(), Some(Backend::Gpu), "settled before any pixels are emitted");
+            let later = cx.render_frames((n..12).collect(), |_, on| on, |_, on| on);
+            assert!(later.iter().all(|on| *on == crate::JobRenderer::Gpu));
+            assert_eq!(Cx::new(&job).backend(), crate::JobRenderer::Gpu, "the next output module follows");
+        }
     }
 
     #[test]
