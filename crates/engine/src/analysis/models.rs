@@ -595,6 +595,46 @@ fn waited(s: &Session, task: Task, cmd: &str) -> Result<()> {
     }
 }
 
+/// [`waited`] for a download: the parameters were valid, so a failed download or load is a
+/// run-time error, not "invalid parameters" (#3051).
+fn download_waited(s: &Session, task: Task, cmd: &str) -> Result<()> {
+    match s.models.status(task).error {
+        Some(e) => Err(EngineError::Other(format!("{cmd}: {e}"))),
+        None => Ok(()),
+    }
+}
+
+/// A file that can be run: on Unix it needs an execute permission bit, so a `curl` that cannot run
+/// does not count.
+fn executable(file: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(file) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// When the model downloads can run: they use the system `curl`, which a headless or minimal
+/// install may not have (#3051). Without it they are not available, and say how to install instead.
+fn curl_available(_: &Session) -> std::result::Result<(), String> {
+    curl_on(std::env::var_os("PATH"))
+}
+
+/// Whether one of `path`'s folders holds a `curl` executable; the reason to show when none does.
+fn curl_on(path: Option<std::ffi::OsString>) -> std::result::Result<(), String> {
+    let name = if cfg!(windows) { "curl.exe" } else { "curl" };
+    if path.is_some_and(|p| std::env::split_paths(&p).any(|dir| executable(&dir.join(name)))) {
+        Ok(())
+    } else {
+        Err("downloading needs curl on PATH; get the weights another way and use Install from File".into())
+    }
+}
+
 fn select(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
     let cmd = format!("{}.model.select", kind(task).prefix);
     let id = str_p(p, "id").ok_or_else(|| bad(&cmd, "missing `id`"))?;
@@ -637,8 +677,17 @@ fn install(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
 }
 
 fn download(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
+    let curl = curl_available(s);
+    download_with(s, p, task, curl)
+}
+
+/// [`download`] with `curl`, the availability check's result. The command's enablement already
+/// checks it, but [`Session::execute`] skips enablement for calls naming an item or a comp, and a
+/// download must not report that it started when it cannot.
+fn download_with(s: &mut Session, p: &Value, task: Task, curl: std::result::Result<(), String>) -> Result<Value> {
     let k = kind(task);
     let cmd = format!("{}.model.download", k.prefix);
+    curl.map_err(|why| EngineError::Disabled(cmd.clone(), why))?;
     let m = model_p(p, &cmd, task)?;
     if m.url.is_empty() {
         return Err(bad(&cmd, format!("{} has no app download available: use Install from File with the SHA-256-verified weights", m.name)));
@@ -668,9 +717,9 @@ fn download(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
         Ok(format!("{}: {} downloaded and verified", k.label, m.name))
     });
     if wait {
-        waited(s, task, &cmd)?;
+        download_waited(s, task, &cmd)?;
         s.apply_model(task, true);
-        waited(s, task, &cmd)?;
+        download_waited(s, task, &cmd)?;
         return Ok(json!({"id": m.id, "installed": true}));
     }
     Ok(json!({"id": m.id, "downloading": true}))
@@ -716,7 +765,7 @@ pub fn specs() -> Vec<CommandSpec> {
             [],
             None,
             "{id, wait?} — the official weights, verified (desktop; uses the system curl)",
-            always,
+            curl_available,
             |s, p| download(s, p, Task::Mask)
         ),
         cmd!("roto.model.remove", "Remove Roto Brush Model", [], None, "{id}", always, |s, p| remove(s, p, Task::Mask)),
@@ -745,7 +794,7 @@ pub fn specs() -> Vec<CommandSpec> {
             [],
             None,
             "{id, wait?} — the official model, verified (desktop; uses the system curl)",
-            always,
+            curl_available,
             |s, p| download(s, p, Task::Face)
         ),
         cmd!("face.model.remove", "Remove Face Tracking Model", [], None, "{id}", always, |s, p| remove(s, p, Task::Face)),
@@ -1006,5 +1055,81 @@ mod availability_tests {
         for wasm in [false, true] {
             assert_eq!(models_for_platform(Task::Face, wasm).map(|m| m.id).collect::<Vec<_>>(), ["mediapipe-face"]);
         }
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    /// A folder on PATH with a `curl` in it makes the downloads available; without one they are
+    /// not, and say what to do instead (#3051).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn downloads_need_curl_on_the_path() {
+        let root = std::env::temp_dir().join(format!("ec-curl-path-{}", std::process::id()));
+        let (with, without) = (root.join("with"), root.join("without"));
+        std::fs::create_dir_all(&with).unwrap();
+        std::fs::create_dir_all(&without).unwrap();
+        let curl = with.join(if cfg!(windows) { "curl.exe" } else { "curl" });
+        std::fs::write(&curl, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = |dirs: &[&Path]| Some(std::env::join_paths(dirs).unwrap());
+        assert!(curl_on(path(&[&without, &with])).is_ok());
+        for missing in [path(&[&without]), None] {
+            let why = curl_on(missing).unwrap_err();
+            assert!(why.contains("curl on PATH") && why.contains("Install from File"), "{why}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `curl` that cannot be run does not make the downloads available.
+    #[cfg(unix)]
+    #[test]
+    fn a_curl_without_execute_permission_does_not_count() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ec-curl-noexec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("curl"), b"").unwrap();
+        std::fs::set_permissions(dir.join("curl"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(curl_on(Some(std::env::join_paths([&dir]).unwrap())).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Without curl a download is refused when it runs, even through a call that skips the
+    /// command's enablement (an `item` parameter), and nothing is started.
+    #[test]
+    fn a_download_without_curl_is_refused_when_it_runs() {
+        let mut session = Session::default();
+        let params = json!({"id": "mobilesam", "item": 1});
+        let error = download_with(&mut session, &params, Task::Mask, Err("downloading needs curl on PATH".into())).unwrap_err();
+        assert!(matches!(error, EngineError::Disabled(..)), "{error:?}");
+        assert!(session.models.status(Task::Mask).busy.is_none(), "no download was started");
+    }
+
+    /// Both download commands use that check, so a headless command list shows them as not runnable.
+    #[test]
+    fn the_download_commands_are_available_only_with_curl() {
+        let check = curl_available as fn(&Session) -> std::result::Result<(), String>;
+        for id in ["roto.model.download", "face.model.download"] {
+            let spec = crate::commands::find(id).unwrap();
+            assert!(std::ptr::fn_addr_eq(spec.enabled, check), "{id} must be enabled only when curl is on PATH");
+        }
+    }
+
+    /// A download that fails is a run-time error: its parameters were valid.
+    #[test]
+    fn a_failed_download_is_not_reported_as_invalid_parameters() {
+        let session = Session::default();
+        let lane = session.models.lane(Task::Mask).clone();
+        spawn(&lane, "Roto Brush", "Downloading".into(), true, None, "mobilesam", |_| Err("downloading needs curl (os error 2)".into()));
+        let error = download_waited(&session, Task::Mask, "roto.model.download").unwrap_err();
+        assert!(matches!(error, EngineError::Other(_)), "{error:?}");
+        assert!(!error.to_string().contains("invalid parameters"), "{error}");
+        assert!(error.to_string().contains("downloading needs curl"), "{error}");
     }
 }
