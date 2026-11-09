@@ -5,7 +5,7 @@
 //! exporter. Paths are compared by name once resolved ([`key`]): made absolute, `.` and `..`
 //! resolved, one separator, a volume's verbatim prefix dropped, and without case where volumes
 //! ignore it. On Windows a drive letter whose root resolves elsewhere (a mapped network drive, a
-//! `subst` drive) stands for that place: one lookup per letter per guard. No file is looked at
+//! `subst` drive) stands for that place where that can matter ([`Drives`]). No file is looked at
 //! (#3328): a link to a source under another name is not recognised, which comparing file
 //! identities did at the cost of opening every footage frame for every check. Checks happen
 //! before dispatch; filesystem changes between the check and the write require exporter-side
@@ -107,11 +107,12 @@ impl Source {
 #[derive(Default)]
 pub(crate) struct Protected {
     files: Vec<(PathBuf, Source)>,
+    /// The files by [`key`], as written.
     by_path: HashMap<String, usize>,
-    /// What each drive letter's root resolves to, by letter (`a`..`z`), looked up once per guard
-    /// ([`drive_root`]): a mapped network drive and its UNC path are one place.
+    /// Which drive letters the files are on, for a mapped network drive and its UNC path being
+    /// one place ([`Drives`]).
     #[cfg(windows)]
-    drives: [std::sync::OnceLock<Option<String>>; 26],
+    drives: Drives,
 }
 
 /// The files the project reads, checked before a command writes to a path it was given
@@ -156,34 +157,11 @@ impl Protected {
     }
 
     fn add(&mut self, path: PathBuf, source: Source) {
-        let key = self.key(&path);
+        let key = key(&path);
+        #[cfg(windows)]
+        self.drives.note(&key);
         self.by_path.entry(key).or_insert(self.files.len());
         self.files.push((path, source));
-    }
-
-    /// The name `path` is compared by ([`key`]), with a drive letter whose root resolves to
-    /// another place (a mapped network drive to `\\server\share`, a `subst` drive to its folder)
-    /// as that place. A root that can't be resolved keeps its letter.
-    fn key(&self, path: &Path) -> String {
-        let plain = key(path);
-        #[cfg(windows)]
-        {
-            let mut chars = plain.chars();
-            // (a drive and its root, `x://…`: a drive-relative `x:foo` is not mapped)
-            let (Some(letter), Some(':'), Some('/'), Some('/')) = (chars.next(), chars.next(), chars.next(), chars.next()) else { return plain };
-            let index = u8::try_from(letter).ok().filter(u8::is_ascii_lowercase).map(|b| usize::from(b - b'a'));
-            let Some(slot) = index.and_then(|i| self.drives.get(i)) else {
-                return plain;
-            };
-            let Some(root) = slot.get_or_init(|| drive_root(letter).map(|r| key(&r))) else { return plain };
-            // (`x:/` is the drive's root, the rest follows it)
-            match plain.get(3..) {
-                Some(rest) => format!("{root}{rest}"),
-                None => plain,
-            }
-        }
-        #[cfg(not(windows))]
-        plain
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -191,9 +169,125 @@ impl Protected {
     }
 
     /// The source at this path, compared by name once resolved ([`key`]): no file is looked at.
+    /// On Windows a drive letter is compared as the place its root resolves to where a path on
+    /// another letter or a UNC path could name the same file ([`Drives`]).
     pub(crate) fn find(&self, path: &Path) -> Option<&Source> {
-        self.by_path.get(&self.key(path)).and_then(|i| self.files.get(*i)).map(|(_, source)| source)
+        let key = key(path);
+        let at = self.by_path.get(&key).copied();
+        #[cfg(windows)]
+        let at = at.or_else(|| self.drives.find(&self.by_path, &key));
+        at.and_then(|i| self.files.get(i)).map(|(_, source)| source)
     }
+}
+
+/// The drive letters of the protected files (#3330). A mapped network drive (`P:` for
+/// `\\server\share`) or a `subst` drive is another name for a place: a path on a letter is
+/// compared as the place its root resolves to ([`drive_root`]). That asks the file system (and
+/// a disconnected drive can take long to answer), so it is done only where it can matter: an
+/// output and protected files that are not all on one letter, or not all UNC paths. Then the
+/// letters' roots come from a process-wide cache ([`resolved_root`]).
+#[cfg(windows)]
+#[derive(Default)]
+struct Drives {
+    /// The letters the files are on.
+    letters: std::collections::BTreeSet<char>,
+    /// A file isn't on a drive letter (a UNC path).
+    other: bool,
+    /// The files by their key with each letter resolved, made once a check needs it.
+    resolved: std::sync::OnceLock<HashMap<String, usize>>,
+}
+
+#[cfg(windows)]
+impl Drives {
+    fn note(&mut self, key: &str) {
+        match drive_letter(key) {
+            Some(letter) => {
+                self.letters.insert(letter);
+            }
+            None => self.other = true,
+        }
+    }
+
+    /// Whether an output with `key` can name a file of a protected path under another root:
+    /// it is on a letter and some file isn't on that letter, or it isn't on a letter and some
+    /// file is.
+    fn matters(&self, key: &str) -> bool {
+        match drive_letter(key) {
+            Some(letter) => self.other || self.letters.iter().any(|l| *l != letter),
+            None => !self.letters.is_empty(),
+        }
+    }
+
+    /// The file an output with `key` names once drive letters are resolved, where that can
+    /// matter.
+    fn find(&self, by_path: &HashMap<String, usize>, key: &str) -> Option<usize> {
+        if !self.matters(key) {
+            return None;
+        }
+        let resolved = self.resolved.get_or_init(|| {
+            // (each letter's root once, not once per file)
+            let roots: HashMap<char, Option<String>> = self.letters.iter().map(|l| (*l, resolved_root(*l))).collect();
+            let mut resolved: HashMap<String, usize> = HashMap::with_capacity(by_path.len());
+            for (k, i) in by_path {
+                let root = drive_letter(k).and_then(|l| roots.get(&l).cloned().flatten());
+                // (two files of one place: the first, as in `by_path`)
+                resolved.entry(with_root(k, root)).and_modify(|j| *j = (*j).min(*i)).or_insert(*i);
+            }
+            resolved
+        });
+        let root = drive_letter(key).and_then(resolved_root);
+        resolved.get(&with_root(key, root)).copied()
+    }
+}
+
+/// The drive letter of `key` when it is a drive and its root (`x://…`; a drive-relative `x:foo`
+/// is not mapped).
+#[cfg(windows)]
+fn drive_letter(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    let (Some(letter), Some(':'), Some('/'), Some('/')) = (chars.next(), chars.next(), chars.next(), chars.next()) else { return None };
+    letter.is_ascii_lowercase().then_some(letter)
+}
+
+/// `key`, on a drive letter, with the drive's root as `root` (the [`key`] of what it resolves
+/// to); as it is without one.
+#[cfg(windows)]
+fn with_root(key: &str, root: Option<String>) -> String {
+    match (root, key.get(3..)) {
+        // (`x:/` is the drive's root, the rest follows it)
+        (Some(root), Some(rest)) => format!("{root}{rest}"),
+        _ => key.to_string(),
+    }
+}
+
+/// How long a drive root looked up stays known ([`resolved_root`]): a disconnected drive is
+/// waited for at most once in this time.
+#[cfg(windows)]
+const ROOT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A drive root looked up: by whom (tests: each test its own), the letter, when, and the
+/// [`key`] of what it resolved to (`None`: it couldn't be).
+#[cfg(windows)]
+type KnownRoot = (u64, char, std::time::Instant, Option<String>);
+
+/// The [`key`] of what drive `letter`'s root resolves to, `None` when it can't be: looked up
+/// at most once per [`ROOT_TTL`] in the process, failures too. The file system is asked
+/// without the cache's lock held.
+#[cfg(windows)]
+fn resolved_root(letter: char) -> Option<String> {
+    static KNOWN: std::sync::Mutex<Vec<KnownRoot>> = std::sync::Mutex::new(Vec::new());
+    let lock = || KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (by, now) = (root_namespace(), root_clock());
+    let fresh = |at: &std::time::Instant| now.saturating_duration_since(*at) < ROOT_TTL;
+    if let Some((.., root)) = lock().iter().find(|(b, l, at, _)| *b == by && *l == letter && fresh(at)) {
+        return root.clone();
+    }
+    let root = drive_root(letter).map(|r| key(&r));
+    let mut known = lock();
+    // (this caller's stale entries go, and this letter's; another's are its own to judge)
+    known.retain(|(b, l, at, _)| *b != by || (*l != letter && fresh(at)));
+    known.push((by, letter, now, root.clone()));
+    root
 }
 
 /// What the root of drive `letter` (`a`..`z`) resolves to, `None` when it can't be (a
@@ -208,6 +302,25 @@ fn drive_root(letter: char) -> Option<PathBuf> {
     std::fs::canonicalize(format!("{letter}:\\")).ok()
 }
 
+/// The cache entries of this caller ([`resolved_root`]): one for the process, one per test.
+#[cfg(windows)]
+fn root_namespace() -> u64 {
+    #[cfg(test)]
+    return ROOT_NAMESPACE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    0
+}
+
+/// Now, for [`resolved_root`] (tests move it on).
+#[cfg(windows)]
+fn root_clock() -> std::time::Instant {
+    let now = std::time::Instant::now();
+    #[cfg(test)]
+    return ROOT_CLOCK_AHEAD.with(|ahead| now.checked_add(ahead.get()).unwrap_or(now));
+    #[cfg(not(test))]
+    now
+}
+
 /// Resolves drive roots in place of the file system on this thread (tests).
 #[cfg(all(windows, test))]
 type DriveHook = Box<dyn FnMut(char) -> Option<PathBuf>>;
@@ -215,6 +328,8 @@ type DriveHook = Box<dyn FnMut(char) -> Option<PathBuf>>;
 #[cfg(all(windows, test))]
 thread_local! {
     static DRIVE_ROOT: std::cell::RefCell<Option<DriveHook>> = const { std::cell::RefCell::new(None) };
+    static ROOT_NAMESPACE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ROOT_CLOCK_AHEAD: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }
 
 /// `path` made absolute, with `.` and `..` resolved by name alone (no file is looked at).
@@ -1086,6 +1201,10 @@ mod tests {
             roots.iter().find(|(l, _)| *l == letter).map(|(_, root)| PathBuf::from(root))
         });
         DRIVE_ROOT.with(|h| *h.borrow_mut() = Some(hook));
+        ROOT_CLOCK_AHEAD.with(|a| a.set(std::time::Duration::ZERO));
+        // (a cache of roots of its own: tests running at once don't see each other's)
+        static NAMESPACES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        ROOT_NAMESPACE.with(|n| n.set(NAMESPACES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         count
     }
 
@@ -1149,6 +1268,58 @@ mod tests {
         }
         assert_eq!(count.get(), 3, "P, Q and R once each");
         DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #3330: no drive root is looked up where it can't matter: footage and output on one
+    /// letter, or all UNC paths (a disconnected drive is never waited for there).
+    #[test]
+    #[cfg(windows)]
+    fn one_letter_or_only_unc_paths_look_up_no_root() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let on_p = guarding(&[r"P:\seq\f_0001.exr", r"P:\seq\f_0002.exr"]);
+        assert!(on_p.find(Path::new(r"P:\renders\out.png")).is_none());
+        assert!(on_p.find(Path::new(r"p:\seq\F_0001.exr")).is_some());
+        let unc = guarding(&[r"\\server\share\seq\f_0001.exr"]);
+        assert!(unc.find(Path::new(r"\\server\share\renders\out.png")).is_none());
+        assert!(unc.find(Path::new(r"\\server\share\seq\f_0001.exr")).is_some());
+        assert_eq!(count.get(), 0);
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #3330: with a UNC path on one side, exactly the letters on the other are looked up.
+    #[test]
+    #[cfg(windows)]
+    fn a_unc_path_on_one_side_looks_up_the_letters_of_the_other() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let letters = guarding(&[r"P:\seq\f_0001.exr", r"Q:\seq\f_0001.exr"]);
+        assert!(letters.find(Path::new(r"\\server\share\seq\f_0001.exr")).is_some());
+        assert_eq!(count.get(), 2, "P and Q");
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let unc = guarding(&[r"\\server\share\seq\f_0001.exr"]);
+        assert!(unc.find(Path::new(r"P:\seq\f_0001.exr")).is_some());
+        assert_eq!(count.get(), 1, "the output's P only");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #3330: a root looked up serves later guards until it is a minute old, a failed lookup too.
+    #[test]
+    #[cfg(windows)]
+    fn drive_roots_are_kept_for_a_minute() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let check = || {
+            let g = guarding(&[r"P:\seq\f_0001.exr", r"Q:\seq\f_0001.exr"]);
+            assert!(g.find(Path::new(r"\\server\share\seq\f_0001.exr")).is_some());
+        };
+        check();
+        assert_eq!(count.get(), 2, "P and Q (which can't be resolved)");
+        ROOT_CLOCK_AHEAD.with(|a| a.set(ROOT_TTL - std::time::Duration::from_secs(1)));
+        check();
+        assert_eq!(count.get(), 2, "a second guard within the minute: from the cache, the failure too");
+        ROOT_CLOCK_AHEAD.with(|a| a.set(ROOT_TTL + std::time::Duration::from_secs(1)));
+        check();
+        assert_eq!(count.get(), 4, "looked up again after it");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+        ROOT_CLOCK_AHEAD.with(|a| a.set(std::time::Duration::ZERO));
     }
 
     /// With a real mapped network drive (any letter whose root resolves to a UNC path): a frame
