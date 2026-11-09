@@ -110,6 +110,67 @@ fn full_screen_blows_the_panel_up_and_leaving_puts_the_view_back() {
     assert_eq!(h.state().ui.viewer.pan, [30.0, 12.0]);
 }
 
+/// A zoom or pan changed in Full Screen isn't dropped on leaving: it goes back to the panel scaled
+/// down by as much as the panel was blown up, also after the window resized in between.
+#[test]
+fn a_view_changed_in_full_screen_is_kept_scaled_back_to_the_panel() {
+    let mut h = harness();
+    h.state_mut().ui.viewer.zoom = Some(0.5);
+    h.state_mut().ui.viewer.pan = [30.0, 12.0];
+    h.run_steps(2);
+    invoke(&mut h, "view.fullScreen");
+    h.run_steps(3);
+    let s = h.state().ui.viewer.zoom.unwrap() / 0.5;
+    assert!(s > 1.0, "{s}");
+    invoke(&mut h, "view.zoomIn");
+    h.state_mut().ui.viewer.pan = [40.0, -20.0];
+    let zoomed = h.state().ui.viewer.zoom.unwrap();
+    assert!(zoomed > 0.5 * s, "{zoomed}");
+    h.run_steps(2);
+    assert_eq!(h.state().ui.viewer.zoom, Some(zoomed), "the change stays while the window does");
+    assert_eq!(h.state().ui.viewer.pan, [40.0, -20.0]);
+    // The window grows by 1.2: the changed view grows with it.
+    h.set_size(vec2(1920.0, 1200.0));
+    h.run_steps(2);
+    let grown = h.state().ui.viewer.zoom.unwrap();
+    assert!((grown - zoomed * 1.2).abs() < 1e-4, "{grown} from {zoomed}");
+    escape(&mut h);
+    h.set_size(vec2(1600.0, 1000.0));
+    h.run_steps(2);
+    let zoom = h.state().ui.viewer.zoom.unwrap();
+    assert!((zoom - zoomed / s).abs() < 1e-4, "{zoom}: {zoomed} scaled back by {s}");
+    let pan = h.state().ui.viewer.pan;
+    assert!((pan[0] - 40.0 / s).abs() < 1e-3 && (pan[1] + 20.0 / s).abs() < 1e-3, "{pan:?} at {s}");
+
+    // Fit chosen in Full Screen is Fit in the panel.
+    invoke(&mut h, "view.fullScreen");
+    h.run_steps(3);
+    invoke(&mut h, "view.fit");
+    h.step();
+    escape(&mut h);
+    h.run_steps(2);
+    assert_eq!(h.state().ui.viewer.zoom, None);
+    assert_eq!(h.state().ui.viewer.pan, [0.0, 0.0]);
+}
+
+/// The menus are hidden, so View ▸ Enter Full Screen says how to leave; a preview that goes full
+/// screen ends the way it always does, with nothing over the video.
+#[test]
+fn entering_full_screen_says_how_to_leave_it() {
+    let hint = "Press Esc to exit Full Screen";
+    let mut h = harness();
+    invoke(&mut h, "view.fullScreen");
+    h.run_steps(2);
+    assert_eq!(h.state().auto.find("toast").map(|e| e.label.as_str()), Some(hint));
+
+    let mut h = harness();
+    h.state_mut().session.execute("playback.settings.set", json!({"shortcut": "spacebar", "fullScreen": true})).unwrap();
+    invoke(&mut h, "playback.toggle");
+    h.run_steps(2);
+    assert!(h.state().full_screen.is_some());
+    assert_ne!(h.state().auto.find("toast").map(|e| e.label.as_str()), Some(hint));
+}
+
 #[test]
 fn escape_leaves_full_screen_but_goes_to_a_dialog_first() {
     let mut h = harness();

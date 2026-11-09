@@ -177,9 +177,20 @@ pub struct FullScreen {
     pub saved_pan: [f32; 2],
     /// The size of the viewer's panel those were set in, once Full Screen shows.
     pub panel: Option<egui::Vec2>,
+    /// The view Full Screen last blew up to: a view that differs from it was changed in Full
+    /// Screen, and goes back to the panel scaled down by as much.
+    pub shown: Option<FullScreenView>,
     pub saved_focus: PanelKind,
     /// A preview's Full Screen option started it, so that preview's end ends it.
     pub from_preview: bool,
+}
+
+/// A viewer zoom and pan Full Screen set, and how many times the panel's size its area is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FullScreenView {
+    pub zoom: Option<f32>,
+    pub pan: [f32; 2],
+    pub scale: f32,
 }
 
 /// The OS window's state around [`FullScreen`], which `frame` reconciles with the window (the

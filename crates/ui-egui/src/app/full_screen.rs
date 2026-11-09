@@ -1,4 +1,4 @@
-use crate::{EffectcraftApp, FullScreen, FullScreenWindow, panels};
+use crate::{EffectcraftApp, FullScreen, FullScreenView, FullScreenWindow, panels};
 use serde_json::json;
 
 /// Windows: whether the OS plays its minimize and maximize animations on the window. Failing leaves
@@ -24,6 +24,45 @@ fn set_window_transitions(frame: &eframe::Frame, on: bool) {
 #[cfg(not(windows))]
 fn set_window_transitions(_frame: &eframe::Frame, _on: bool) {}
 
+/// The toast View ▸ Enter Full Screen shows: the menus are hidden, so this is the way out.
+const EXIT_HINT: &str = "Press Esc to exit Full Screen";
+
+impl FullScreen {
+    /// A viewer view `s` times bigger, so the same part of the comp shows in the same place. The
+    /// pan follows the zoom actually set, or a clamped zoom would show another part of the comp.
+    fn scale_view(zoom: Option<f32>, pan: [f32; 2], s: f32) -> (Option<f32>, [f32; 2]) {
+        let (ratio, zoom) = zoom.map_or((s, None), |z| {
+            let scaled = (z * s).clamp(0.01, 32.0);
+            (scaled / z, Some(scaled))
+        });
+        let ratio = if ratio.is_finite() { ratio } else { s };
+        let moved = pan.map(|p| p * ratio);
+        (zoom, if moved.iter().all(|p| p.is_finite()) { moved } else { pan })
+    }
+
+    /// The panel's view for the view showing now: the one Full Screen blew up, or a view changed in
+    /// Full Screen scaled back down to the panel.
+    pub(crate) fn panel_view(&self, zoom: Option<f32>, pan: [f32; 2]) -> (Option<f32>, [f32; 2]) {
+        match self.shown {
+            // Not blown up yet: the view is the panel's.
+            None => (zoom, pan),
+            Some(v) if v.zoom == zoom && v.pan == pan => (self.saved_zoom, self.saved_pan),
+            Some(v) if v.scale.is_finite() && v.scale > 0.0 => Self::scale_view(zoom, pan, 1.0 / v.scale),
+            Some(_) => (self.saved_zoom, self.saved_pan),
+        }
+    }
+
+    /// The view for a Full Screen area `s` times the panel's, from the panel's view each time, so
+    /// a window that gets there in steps ends the same. A view changed in Full Screen is the
+    /// panel's view now, as it would be on leaving.
+    pub(crate) fn blow_up(&mut self, zoom: Option<f32>, pan: [f32; 2], s: f32) -> (Option<f32>, [f32; 2]) {
+        (self.saved_zoom, self.saved_pan) = self.panel_view(zoom, pan);
+        let (zoom, pan) = Self::scale_view(self.saved_zoom, self.saved_pan, s);
+        self.shown = Some(FullScreenView { zoom, pan, scale: s });
+        (zoom, pan)
+    }
+}
+
 impl EffectcraftApp {
     /// Full Screen needs a video to show: a comp, and no Home screen over the workspace.
     pub(crate) fn full_screen_possible(&self) -> bool {
@@ -38,16 +77,27 @@ impl EffectcraftApp {
         {
             self.ui.status = e.to_string();
         }
-        self.full_screen =
-            Some(FullScreen { saved_zoom: self.ui.viewer.zoom, saved_pan: self.ui.viewer.pan, panel: None, saved_focus: self.ui.focused, from_preview });
+        self.full_screen = Some(FullScreen {
+            saved_zoom: self.ui.viewer.zoom,
+            saved_pan: self.ui.viewer.pan,
+            panel: None,
+            shown: None,
+            saved_focus: self.ui.focused,
+            from_preview,
+        });
         self.ui.focused = panels::viewers::active_panel(self);
+        // Nothing else on screen says how to leave. A preview ends it the way it ends itself, so
+        // only View ▸ Enter Full Screen gets the hint, which fades like any other toast.
+        if !from_preview {
+            self.toast = Some((crate::i18n::tr(EXIT_HINT).to_string(), self.now));
+        }
     }
 
-    /// Back to the workspace; the window follows in [`Self::sync_full_screen`].
+    /// Back to the workspace; the window follows in [`Self::sync_full_screen`]. A zoom or pan
+    /// changed in Full Screen stays, scaled back down to the panel.
     pub(crate) fn exit_full_screen(&mut self) {
         if let Some(f) = self.full_screen.take() {
-            self.ui.viewer.zoom = f.saved_zoom;
-            self.ui.viewer.pan = f.saved_pan;
+            (self.ui.viewer.zoom, self.ui.viewer.pan) = f.panel_view(self.ui.viewer.zoom, self.ui.viewer.pan);
             self.ui.focused = f.saved_focus;
         }
     }
