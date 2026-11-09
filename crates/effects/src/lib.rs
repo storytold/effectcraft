@@ -451,7 +451,9 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
 /// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
 /// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
 /// skips the renderer's cover of the whole layer rectangle (#1205).
-pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace"];
+/// Drop Shadow also pads by its distance and softness on both CPU and GPU: covering the
+/// layer rectangle first only inflates working images on highly scaled text and shapes (#3357).
+pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.dropshadow"];
 
 /// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
 /// of the resampling pyramid used for downscaled layers.
