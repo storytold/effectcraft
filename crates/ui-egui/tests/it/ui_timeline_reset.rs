@@ -7,6 +7,7 @@ use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
 use egui::{Event, Modifiers, PointerButton, pos2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 struct Fx {
@@ -55,6 +56,15 @@ fn num(h: &Harness<'_, EffectcraftApp>, layer: u64, path: &str) -> f64 {
     h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop(path).unwrap().value_at(effectcraft_time::Tick::ZERO).as_f64()
 }
 
+fn value(h: &Harness<'_, EffectcraftApp>, layer: u64, path: &str) -> String {
+    format!("{:?}", h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop(path).unwrap().value_at(effectcraft_time::Tick::ZERO))
+}
+
+fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
+    let r = h.state().auto.find(id).unwrap_or_else(|| panic!("missing {id}")).rect;
+    egui::Rect::from_min_size(pos2(r[0], r[1]), egui::vec2(r[2], r[3]))
+}
+
 fn selected(h: &Harness<'_, EffectcraftApp>) -> Vec<u64> {
     h.state().session.state.selected_layers.iter().map(|l| l.0).collect()
 }
@@ -62,6 +72,8 @@ fn selected(h: &Harness<'_, EffectcraftApp>) -> Vec<u64> {
 #[test]
 fn transform_reset_resets_only_that_layer_and_keeps_the_selection() {
     let (mut h, x) = harness();
+    let hit = rect_of(&h, &format!("timeline.group.{}.reset", x.transform));
+    assert!(hit.width() >= 24.0 && hit.height() >= 18.0, "the click target is at least 24 wide and a full row tall: {hit:?}");
     click_auto(&mut h, &format!("timeline.group.{}.reset", x.transform));
     assert_eq!(num(&h, x.layer, "transform/opacity"), 100.0);
     assert_eq!(num(&h, x.other, "transform/opacity"), 40.0, "other layers are untouched");
@@ -71,12 +83,30 @@ fn transform_reset_resets_only_that_layer_and_keeps_the_selection() {
 }
 
 #[test]
-fn effect_reset_resets_that_effect() {
+fn effect_reset_resets_every_parameter_of_that_effect_as_one_undo_step() {
     let (mut h, x) = harness();
-    assert_eq!(num(&h, x.layer, "effects/#1/blurriness"), 25.0);
+    let paths = ["effects/#1/blurriness", "effects/#1/dimensions", "effects/#1/repeatEdge"];
+    let defaults: Vec<String> = {
+        let s = &mut h.state_mut().session;
+        s.execute("prop.set", json!({"layer": x.layer, "path": "effects/#1/blurriness", "value": 0})).unwrap();
+        let d = paths
+            .iter()
+            .map(|p| format!("{:?}", s.active_comp().unwrap().layer(LayerId(x.layer)).unwrap().props.prop(p).unwrap().value_at(effectcraft_time::Tick::ZERO)))
+            .collect();
+        s.execute("prop.set", json!({"layer": x.layer, "path": "effects/#1/blurriness", "value": 25})).unwrap();
+        s.execute("prop.set", json!({"layer": x.layer, "path": "effects/#1/dimensions", "value": 2})).unwrap();
+        s.execute("prop.set", json!({"layer": x.layer, "path": "effects/#1/repeatEdge", "value": true})).unwrap();
+        d
+    };
+    h.run_steps(3);
+    let edited: Vec<String> = paths.iter().map(|p| value(&h, x.layer, p)).collect();
+    assert!(edited.iter().zip(&defaults).all(|(e, d)| e != d), "every parameter starts away from its default: {edited:?}");
     click_auto(&mut h, &format!("timeline.group.{}.reset", x.effect));
-    assert_eq!(num(&h, x.layer, "effects/#1/blurriness"), 0.0);
+    assert_eq!(paths.iter().map(|p| value(&h, x.layer, p)).collect::<Vec<_>>(), defaults, "every parameter of the effect is reset");
     assert_eq!(num(&h, x.layer, "transform/opacity"), 40.0, "the Transform is untouched");
+    assert_eq!(selected(&h), vec![x.other], "the selection does not change");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(paths.iter().map(|p| value(&h, x.layer, p)).collect::<Vec<_>>(), edited, "one Undo step brings every parameter back");
 }
 
 #[test]
@@ -84,8 +114,13 @@ fn locked_layers_do_not_reset() {
     let (mut h, x) = harness();
     h.state_mut().session.execute("layer.setSwitch", json!({"layers": [x.layer], "switch": "locked", "value": true})).unwrap();
     h.run_steps(3);
+    // The link itself is disabled, not only the command behind it.
+    let link = h.query_by_label("Reset Transform (A)").expect("the Transform reset link is named for screen readers");
+    assert!(link.accesskit_node().is_disabled(), "the link on a locked layer is disabled");
+    let undo_depth = h.state().session.history.undo.len();
     click_auto(&mut h, &format!("timeline.group.{}.reset", x.transform));
     assert_eq!(num(&h, x.layer, "transform/opacity"), 40.0);
+    assert_eq!(h.state().session.history.undo.len(), undo_depth, "nothing was run");
 }
 
 #[test]
@@ -117,6 +152,10 @@ fn a_long_translation_does_not_cover_the_fx_switch() {
     };
     let (reset, fx) = (rect(format!("timeline.group.{}.reset", x.effect)), rect(format!("timeline.group.{}.fx", x.effect)));
     assert!(!reset.intersects(fx), "Reset {reset:?} overlaps fx {fx:?}");
+    // Without the long-label branch the link would start left of the switch; proves Spanish applied.
+    assert!(reset.min.x >= fx.max.x, "the Spanish link moves past the fx switch: Reset {reset:?}, fx {fx:?}");
+    let english = rect_of(&h, &format!("timeline.group.{}.reset", x.transform));
+    assert!(english.min.x < fx.min.x, "the Transform row has no fx switch and keeps the aligned position");
     click_auto(&mut h, &format!("timeline.group.{}.reset", x.effect));
     assert_eq!(num(&h, x.layer, "effects/#1/blurriness"), 0.0, "the moved link still resets");
 }

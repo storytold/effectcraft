@@ -3581,13 +3581,16 @@ fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Row
     // and dropdowns of the rows below it. On an effect row a translation too long to end before
     // the fx switch goes after the switches instead, and it always stays inside the outline (which
     // ends at the graph), whichever columns are hidden.
+    // The click target is at least 24 points wide (the text stays where it is) and as tall as the
+    // row; the row itself is shorter than 24, and a taller target would cover the rows around it.
+    let hit_w = (width + 4.0).max(24.0);
     let fx_left = g.tl.cw.switches + SW * 3.5 - 8.0;
     let mut x = g.tl.cw.switches + 2.0;
-    if matches!(group.kind, GroupKind::Effect { .. }) && x + width + 4.0 > fx_left - 2.0 {
+    if matches!(group.kind, GroupKind::Effect { .. }) && x + hit_w > fx_left - 2.0 {
         x = g.tl.cw.switches + SW * 4.0 + 6.0;
     }
-    let x = x.min(g.tl.graph_x0 - width - 8.0).max(rc.r.min.x);
-    let rect = Rect::from_min_size(pos2(x, rc.r.min.y + 1.0), vec2(width + 4.0, rc.r.height() - 2.0));
+    let x = x.min(g.tl.graph_x0 - hit_w - 4.0).max(rc.r.min.x);
+    let rect = Rect::from_min_size(pos2(x, rc.r.min.y), vec2(hit_w, rc.r.height()));
     let enabled = !layer.switches.locked;
     // Screen readers hear what is reset and on which layer, in the interface language; the link
     // itself only says Reset.
@@ -3596,15 +3599,24 @@ fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Row
         let r = ui.interact(rect, egui::Id::unique(("tl-group-reset", uid)), Sense::click());
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &spoken));
         crate::a11y::role_name(&r, egui::accesskit::Role::Button, &spoken);
-        let color = if enabled { t.accent } else { t.text_dim };
+        // Underlined whenever it can be used, like the value fields below it, so it does not rely
+        // on colour alone; hover brightens it and keyboard focus draws the usual outline.
+        let color = if !enabled {
+            t.text_dim
+        } else if r.hovered() {
+            t.accent_hover
+        } else {
+            t.accent
+        };
         let at = pos2(rect.min.x + 2.0, rect.center().y);
         g.lp.text(at, Align2::LEFT_CENTER, text, font.clone(), color);
-        if enabled && r.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if enabled && (r.hovered() || r.has_focus()) {
+        if enabled {
             let y = rect.center().y + 7.0;
             g.lp.line_segment([pos2(at.x, y), pos2(at.x + width, y)], Stroke::new(1.0, color));
+            if r.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            widgets::focus_outline(ui, &r, &t);
         }
         r
     });
