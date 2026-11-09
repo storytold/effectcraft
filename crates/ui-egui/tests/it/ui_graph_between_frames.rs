@@ -159,12 +159,16 @@ fn transform_box_scaling_puts_keys_between_frames_only_when_allowed() {
         assert_eq!(undo, 1, "one undo step per drag");
         (ticks(&h, id), px_per_s)
     };
-    let (on_frames, _) = run(false);
+    let (on_frames, px_per_s) = run(false);
     assert!(on_frames.iter().all(|t| t % F == 0), "on frames: {on_frames:?}");
     let (between, _) = run(true);
     assert_eq!(between[0], 0, "the first key is the anchor");
     assert!((2 * between[1] - between[2]).abs() <= 1, "the middle key stays halfway, to the tick: {between:?}");
     assert!(between[1] % F != 0 && between[2] % F != 0, "between frames: {between:?}");
+    // The handle follows the pointer from where it was pressed (it sits a few points outside the
+    // last key): the last key moved 0.41 s, give or take a point.
+    let moved = (between[2] - 60 * F) as f64 / (30 * F) as f64;
+    assert!((moved - 0.41).abs() < 1.0 / px_per_s as f64, "moved {moved} s");
     // With frames the same drag rounds the same keys to the nearest frames.
     assert_eq!(on_frames, between.iter().map(|t| (t + F / 2) / F * F).collect::<Vec<_>>());
 }
