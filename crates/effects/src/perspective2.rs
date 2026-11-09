@@ -1,4 +1,4 @@
-//! Perspective effects, batch 2: CC Environment (reflection mapping of an environment layer
+//! Perspective effects, batch 2: Environment Map (reflection mapping of an environment layer
 //! onto the layer's luminance/alpha relief) and 3D Glasses (stereo pairs and anaglyphs from a
 //! left and right view layer).
 
@@ -17,7 +17,7 @@ fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, ren
     EffectSpec { id, name, category: "Perspective", params, render, gpu: false, float: true }
 }
 
-// ---------------------------------------------------------------- CC Environment
+// ---------------------------------------------------------------- Environment Map
 
 /// Environment direction (x right, y down, z towards the viewer) → normalised map coordinates.
 fn env_uv(mapping: u32, r: [f64; 3]) -> (f64, f64) {
@@ -194,7 +194,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.perspective.ccenvironment",
-            "CC Environment",
+            "Environment Map",
             vec![
                 p("environment", "Environment", Value::Layer(None), ParamUi::Layer),
                 p("mapping", "Mapping", Value::Enum(0), popup(&["Spherical", "Probe", "Vertical Cross"])),

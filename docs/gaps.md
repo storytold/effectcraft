@@ -266,6 +266,12 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
   The second means reading another implementation of the format, which AGENTS.md rules out
   unless the clean-room scope allows it.
 - Also in this area: relative footage paths and relinking when a project moves (gap 18).
+- Placed PDF / Illustrator footage of an `.aep` is framed as After Effects places it (the ArtBox
+  clipped to the crop box, `/Rotate` ignored) and drawn to fill the size After Effects stored
+  (#3099), measured with hand-written PDFs named `.ai`. Not yet measured: files saved by
+  Illustrator itself (artboards, bleed, art past the artboard, private data), a CropBox without
+  an ArtBox, `.pdf` names, and EPS files (they keep their bounding box at their own size, not
+  the placed framing).
 - Done when: the decision is recorded and, if approved, a corpus of real-world-shaped projects
   opens with its comps, layers, keyframes, effects and expressions intact.
 

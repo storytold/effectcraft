@@ -1221,7 +1221,35 @@ fn render_backend_says_why_it_renders_on_the_cpu() {
     assert_eq!(why(&mut s), json!("no GPU compositor is attached"));
     s.accel_note = Some("headless: renders on the CPU unless started with --gpu".into());
     assert_eq!(why(&mut s), json!("headless: renders on the CPU unless started with --gpu"));
-    assert_eq!(s.execute("render.backend", json!({"backend": "cpu"})).unwrap()["why"], json!("the project's renderer is Mercury Software Only"));
+    assert_eq!(s.execute("render.backend", json!({"backend": "cpu"})).unwrap()["why"], json!("the project's renderer is Software Rendering"));
+}
+
+/// Display labels are descriptive; machine-readable settings remain the same.
+#[test]
+fn renderer_labels_keep_their_stable_machine_values() {
+    let mut s = Session::default();
+    for (backend, label, gpu) in [("cpu", "Software Rendering", false), ("gpu", "GPU Acceleration", true)] {
+        let status = s.execute("render.backend", json!({"backend": backend})).unwrap();
+        assert_eq!(status["renderer"], json!(label));
+        assert_eq!(status["gpuAcceleration"], json!(gpu));
+        assert_eq!(status["active"], json!("cpu"), "the headless test has no GPU adapter");
+    }
+}
+
+/// The label `render.backend` reports is one it accepts back, so a caller can round-trip the
+/// status instead of guessing the command's own values.
+#[test]
+fn renderer_status_labels_round_trip_through_the_command() {
+    let mut s = Session::default();
+    for (backend, label, gpu) in [("cpu", "Software Rendering", false), ("gpu", "GPU Acceleration", true)] {
+        let reported = s.execute("render.backend", json!({"backend": backend})).unwrap()["renderer"].clone();
+        assert_eq!(reported, json!(label));
+        let parsed = effectcraft_render::Backend::parse(reported.as_str().unwrap()).expect("the reported renderer parses back");
+        assert_eq!(parsed == effectcraft_render::Backend::Cpu, !gpu, "{reported}");
+        let again = s.execute("render.backend", json!({"backend": reported})).unwrap();
+        assert_eq!(again["renderer"], reported);
+        assert_eq!(again["gpuAcceleration"], json!(gpu));
+    }
 }
 
 /// Settings ▸ GPU Information names what the GPU compositor runs on, or why it is off, and the
