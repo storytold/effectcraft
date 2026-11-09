@@ -269,6 +269,16 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             None => Err("select a Render Queue item first".into()),
         };
     }
+    // Duplicate Render Item's shortcut acts on the Render Queue's selected row.
+    if id == "renderQueue.duplicate" && params.as_object().is_some_and(|p| p.is_empty()) {
+        let selected = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(egui::Id::unique("rq-ui"))).and_then(|(_, id)| id);
+        let queue = &app.session.project.render_queue;
+        match selected.filter(|s| queue.iter().any(|i| i.id == *s)) {
+            Some(item) => return run_engine(app, ctx, id, json!({"item": item})),
+            None if queue.len() > 1 => return Err("select a Render Queue item first".into()),
+            None => {}
+        }
+    }
     // Shift+Delete deletes the Project panel's selection without asking; it does nothing in the
     // other panels.
     if id == "project.deleteWithoutConfirmation" {

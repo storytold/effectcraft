@@ -34,7 +34,7 @@ fn menu(h: &mut Harness<'_, EffectcraftApp>, command: &str) {
     let spec = native_menu::build(h.state());
     let id = spec.items().into_iter().find(|i| i.command == command).unwrap().id.clone();
     let ctx = h.ctx.clone();
-    native_menu::activate(h.state_mut(), &ctx, &spec, &id).unwrap();
+    native_menu::activate(h.state_mut(), &ctx, &spec, &id, false).unwrap();
     for _ in 0..3 {
         let mut raw = egui::RawInput::default();
         eframe::App::raw_input_hook(h.state_mut(), &ctx, &mut raw);

@@ -40,8 +40,9 @@ pub struct UiCommand {
 }
 
 /// Scopes that are a state of the app rather than a panel: editing text in the viewer, a paint
-/// tool active, a mask selected, a camera tool active.
-pub const CONTEXT_SCOPES: &[&str] = &["TextEditing", "Paint", "Mask", "Camera"];
+/// tool active, a mask selected, a camera tool active, a viewer panel (Composition, Layer,
+/// Footage) with the keyboard.
+pub const CONTEXT_SCOPES: &[&str] = &["TextEditing", "Paint", "Mask", "Camera", "Viewer"];
 
 /// Engine commands and menu entries whose shortcuts belong to one panel or context (binding key
 /// → scope). Every other one is application-wide; frontend commands state their own.
@@ -214,6 +215,21 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
             path: vec!["File".into(), "Scripts".into(), "Recent Script Files".into()],
             scope: APP_SCOPE.into(),
             defaults: normalize("Cmd+Alt+Shift+D").into_iter().collect(),
+        },
+        &mut out,
+    );
+    // New Folder's chord opens a viewer in a viewer. This is a binding of its own so that New
+    // Viewer's other keys keep working in every panel.
+    let in_viewer = json!({"inViewer": true});
+    push(
+        Bindable {
+            key: binding_key("view.newViewer", &in_viewer),
+            command: "view.newViewer".into(),
+            params: in_viewer,
+            label: "New Viewer (in a Viewer)".into(),
+            path: vec!["View".into()],
+            scope: "Viewer".into(),
+            defaults: normalize("Cmd+Alt+Shift+N").into_iter().collect(),
         },
         &mut out,
     );

@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
 use effectcraft_engine::menus::{MenuNode, menu_bar};
+use effectcraft_engine::shortcuts::binding_key;
 
 /// What macOS performs itself (no command dispatch).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -451,8 +452,8 @@ fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egu
 
 /// Run a native menu item (by id) the way the in-window menu bar does. While a text field has
 /// the keyboard ([`text_field_window`]), Edit ▸ Cut/Copy/Paste/Select All/Undo/Redo edit the
-/// text instead.
-pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu, id: &str) -> Result<Value, String> {
+/// text instead. `key_equivalent`: its key chose the item, not the mouse.
+pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu, id: &str, key_equivalent: bool) -> Result<Value, String> {
     let item = menu.find(id).ok_or_else(|| format!("no native menu item `{id}`"))?;
     let (command, params) = (item.command.clone(), item.params.clone());
     // The menu bar takes Cmd+D and Cmd+R before the window sees them: while a confirmation that
@@ -473,9 +474,17 @@ pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu
         send_to_text_field(app, ctx, window, events);
         return Ok(Value::Null);
     }
-    let params = if params.is_null() { json!({}) } else { params };
-    let (command, params) = crate::menus::menu_choice(app, command, params);
-    let r = crate::menus::invoke(app, ctx, &command, params);
+    // A key equivalent runs what its chord gives the focused panel or context, which can be
+    // another command than this item's (Cmd+Shift+D is Duplicate Render Item in the Render Queue).
+    let chord = item.shortcut.as_deref().filter(|_| key_equivalent && item.accelerator.is_some());
+    let scoped = chord.and_then(|c| crate::menus::key_equivalent_binding(app, c)).filter(|(id, p)| binding_key(id, p) != binding_key(&command, &params));
+    let r = if let Some((id, p)) = scoped {
+        crate::menus::invoke(app, ctx, &id, p)
+    } else {
+        let params = if params.is_null() { json!({}) } else { params };
+        let (command, params) = crate::menus::menu_choice(app, command, params);
+        crate::menus::invoke(app, ctx, &command, params)
+    };
     if let Err(e) = &r {
         app.ui.status = e.clone();
     }
@@ -685,7 +694,7 @@ mod tests {
         app.dialog = Some(crate::Dialog::DeleteItems);
         // Chosen with the mouse, Duplicate still runs.
         ctx.run_ui(Default::default(), |ui| {
-            let _ = activate(&mut app, ui.ctx(), &spec, &dup);
+            let _ = activate(&mut app, ui.ctx(), &spec, &dup, false);
         })
         .textures_delta
         .clear();
@@ -694,7 +703,7 @@ mod tests {
         let mut raw = egui::RawInput::default();
         raw.events.push(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
         ctx.run_ui(raw, |ui| {
-            let _ = activate(&mut app, ui.ctx(), &spec, &dup);
+            let _ = activate(&mut app, ui.ctx(), &spec, &dup, false);
         })
         .textures_delta
         .clear();
@@ -801,7 +810,7 @@ mod tests {
         let choose = |app: &mut EffectcraftApp| {
             let spec = build(app);
             let id = spec.items().into_iter().find(|i| i.command == "window.panel" && i.params["panel"] == "align").unwrap().id.clone();
-            activate(app, &ctx, &spec, &id).unwrap();
+            activate(app, &ctx, &spec, &id, false).unwrap();
         };
         choose(&mut app);
         assert!(crate::dock::WorkspaceExt::is_open(&app.ui.dock, PanelKind::Align));
@@ -816,9 +825,9 @@ mod tests {
         let spec = build(&app);
         let id = spec.items().into_iter().find(|i| i.command == "layer.newNull").unwrap().id.clone();
         let n = app.session.active_comp().unwrap().layers.len();
-        activate(&mut app, &ctx, &spec, &id).unwrap();
+        activate(&mut app, &ctx, &spec, &id, false).unwrap();
         assert_eq!(app.session.active_comp().unwrap().layers.len(), n + 1);
-        assert!(activate(&mut app, &ctx, &spec, "m.999").is_err());
+        assert!(activate(&mut app, &ctx, &spec, "m.999", false).is_err());
         assert!(edits_text("edit.copy") && edits_text("edit.paste"));
         assert!(!edits_text("layer.newNull"));
     }
