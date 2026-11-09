@@ -32,6 +32,7 @@ struct ErrorGate {
 }
 
 impl ErrorGate {
+    /// A fresh gate: nothing reported yet, nothing suppressed, `window_ms` between reports.
     fn new(window_ms: u64) -> Self {
         ErrorGate { window_ms, last: None, suppressed: 0 }
     }
