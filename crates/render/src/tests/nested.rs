@@ -151,3 +151,48 @@ fn a_precomp_used_twice_renders_once_per_frame() {
     r.comp_frame(cid, s(1.0));
     assert_eq!(counting.calls(), 2, "the memo lives for one frame only");
 }
+
+/// Two instances of one precomp, each moving the inner solid through its own Essential Property
+/// override: an override's project is temporary, its render is never memoised, so the right
+/// instance cannot be served the left one's frame (the memo used to key on the project's
+/// address, which a later temporary project can reuse).
+#[test]
+fn overridden_instances_of_a_precomp_do_not_share_a_memo_entry() {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+
+    use crate::{NoFootage, RenderOpts, Renderer};
+
+    let mut p = Project::default();
+    let mut inner = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.1, 0.1], width: 16, height: 32, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &inner, "S", LayerSource::Solid { item: sid }, (16, 32), None);
+    let prop = l.props.prop("transform/position").unwrap().uid;
+    l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([8.0, 16.0, 0.0]);
+    let kind = EgKind::Property { layer: l.id, prop, links: vec![] };
+    inner.layers.push(l);
+    inner.essential = Some(EssentialGraphics { controls: vec![EgControl { id: 1, name: "Pos".into(), kind, as_type: None }], ..Default::default() });
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+
+    let mut outer = Comp::new(64, 32, FrameRate::FPS_30, s(4.0));
+    for (name, cx, px) in [("Left", 16, 8.0), ("Right", 48, 24.0)] {
+        let mut pre = build::layer(&mut p, &outer, name, LayerSource::Comp { item: iid }, (32, 32), None);
+        pre.props.prop_mut("transform/position").unwrap().value = Value::Vec3([cx as f64, 16.0, 0.0]);
+        let mut ids = build::Ids(&mut p.next_id);
+        let control = ids.prop(&essential::match_id(1), "Pos", Value::Vec3([px, 16.0, 0.0]));
+        let mut group = ids.group(essential::GROUP, "Essential Properties");
+        group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
+        group.children.push(control.into());
+        pre.props.children.push(group.into());
+        outer.layers.push(pre);
+    }
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::ZERO);
+    // Left instance: the solid covers inner x 0..16. Right instance: inner x 16..32 (outer
+    // x 48..64). Neither shows the other's position.
+    assert!(img.get(8, 16)[3] > 0.9 && img.get(8, 16)[0] > 0.9, "the left instance keeps the solid left");
+    assert!(img.get(56, 16)[3] > 0.9 && img.get(56, 16)[0] > 0.9, "the right instance moves the solid right");
+    assert!(img.get(40, 16)[3] < 0.1, "the right instance is not served the left one's frame");
+    assert!(img.get(24, 16)[3] < 0.1, "the left instance shows nothing right of its solid");
+}

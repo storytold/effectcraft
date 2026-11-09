@@ -103,16 +103,15 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
     Some((property, media))
 }
 
-/// What makes two nested comp renders interchangeable (the key of [`Renderer::comp_memo`]):
-/// the comp and its frame, the buffer scale, which project reads (Essential Properties
-/// overrides make a different one) and the quality/motion-blur switches the precomp layer
-/// hands down.
+/// What makes two nested comp renders interchangeable (the key of the frame's comp memo): the
+/// comp and its frame, the buffer scale, and the quality/motion-blur switches the precomp layer
+/// hands down. Essential Properties overrides never memoise (their project is temporary), so no
+/// project identity is needed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct CompMemoKey {
     comp: ItemId,
     t: Tick,
     scale: u64,
-    project: usize,
     inherited: Option<(Quality, bool)>,
 }
 
@@ -858,7 +857,11 @@ impl<'a> Renderer<'a> {
                 let base = self.nested_through(layer);
                 let base = Renderer { opts: RenderOpts { scale: bs, ..base.opts }, comp_memo: base.comp_memo.clone(), ..base };
                 let sub = match &tmp {
-                    Some(p) => Renderer { project: p, comp_memo: base.comp_memo.clone(), ..base },
+                    // A temporary project is dropped when the layer's source returns, but a memo
+                    // entry would keep its address alive: a later instance's project could reuse
+                    // it and be served this instance's frame. Overrides render unmemoised, as do
+                    // their descendants.
+                    Some(p) => Renderer { project: p, comp_memo: None, ..base },
                     None => base,
                 };
                 // Frame blending between the nested comp's frames (time-stretched/remapped).
@@ -874,14 +877,13 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 // Repeated instances of the same precomp render the nested comp once per
-                // (comp, time, scale) and share the frame (#2275). Instances that differ key
-                // differently: Essential Properties overrides read another project, and the
-                // quality/motion-blur switches travel with the layer (see [`CompMemoKey`]). The
-                // lock is never held across a render: deeper precomps inside the nested comp
-                // consult the same map.
-                if let Some(memo) = &self.comp_memo {
-                    let key =
-                        CompMemoKey { comp: *item, t: lt, scale: bs.to_bits(), project: sub.project as *const Project as usize, inherited: sub.inherited };
+                // (comp, time, scale) and share the frame (#2275). Instances whose quality or
+                // motion-blur switches differ key differently (see [`CompMemoKey`]); Essential
+                // Properties overrides disable the memo for the instance and its descendants
+                // (their project is temporary). The lock is never held across a render: deeper
+                // precomps inside the nested comp consult the same map.
+                if let Some(memo) = &sub.comp_memo {
+                    let key = CompMemoKey { comp: *item, t: lt, scale: bs.to_bits(), inherited: sub.inherited };
                     if let Some(img) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
                         return Some(Buf { img: (*img).clone(), offset: [0.0; 2], scale: bs });
                     }
