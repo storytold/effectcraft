@@ -10,9 +10,7 @@ English display name remains unique across the registry.
 
 - Renderer: **GPU Acceleration** / **Software Rendering**.
 - Panel: **Video Scopes**.
-- Tracking command: **Motion Stabilizer**; tool and settings: **Rotoscope Brush**.
-- The table below covers the 69 former CC effects plus color grading, the shape matte, keying,
-  rotoscoping and stabilization.
+- The table below covers the 69 former CC effects plus color grading, the shape matte and keying.
 
 ## Compatibility contract
 
@@ -103,23 +101,8 @@ fixtures may still name the external product or effect they actually describe.
 | `ec.color.lumetri` | Lumetri Color | Color Grading |
 | `ec.obsolete.mochashape` | Mocha shape | Tracked Shape Matte |
 | `ec.keying.keylight` | Key Light | Screen Color Key |
-| `ec.matte.rotobrush` | Roto Brush & Refine Edge | Rotoscope & Refine Edge |
-| `ec.distort.warpstabilizer` | Warp Stabilizer | Motion Stabilizer |
 
-## Review and release plan
+`Roto Brush & Refine Edge` and `Warp Stabilizer` keep their current names; renaming them is
+deferred.
 
-1. Review the names and the six existing effect-language catalogs (Japanese, Simplified and
-   Traditional Chinese, French, Swedish and Georgian). Other effect-language catalogs do not
-   exist yet and continue their established English fallback. Menu labels are updated in all
-   13 existing menu languages; renderer and tool labels follow existing panel-language coverage.
-2. Run the effects naming/alias tests, the UI catalog tests, AEP and scripting round-trip tests,
-   then the unchanged shared `cargo xtask ci` gate. Verify both old projects and new instances.
-3. Inspect the Effects & Presets search, Effect Controls, repeated and custom instance names,
-   renderer dropdown, Video Scopes, tracking command and rotoscope tool in the running app.
-4. Recapture the effects screenshot from the actual updated application with licensed demo
-   media. The README no longer embeds the stale `docs/images/effectcraft-effects.png`; the
-   historical image and its attribution remain intact until an authentic replacement is ready.
-5. Mark ready only after CI and runtime review. This change does not authorize a merge or release.
-
-No effect algorithms or formats are changed. Remaining partial localization and the screenshot
-recapture are explicit review items, not claims of completed runtime or legal validation.
+No effect algorithms or formats are changed.
