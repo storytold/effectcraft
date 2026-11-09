@@ -388,6 +388,18 @@ pub type ScriptUiDispatch = fn(&mut Session, &ScriptUiEvent) -> std::result::Res
 /// and updates [`Session::script_ui`]. Frontends call it every frame (see [`ScriptUi::run_tasks`]).
 pub type ScriptTaskRunner = fn(&mut Session) -> Value;
 
+/// Resume a suspended script once its Render Queue worker has finished. `None` means the
+/// script is still rendering; `Some` is its eventual result (or a real modal-dialog yield).
+pub type ScriptRenderPoll = fn(&mut Session) -> Option<Value>;
+
+pub const RENDER_WAIT_MESSAGE: &str = "A script is rendering. Stop the render or wait for it to finish before editing.";
+
+/// These inspections do not run callbacks or collect unrelated background edits. In
+/// particular, `journal: false` is not a read-only guarantee (`engine.batch`, `jobs.wait`).
+pub fn allowed_during_render(command: &str) -> bool {
+    matches!(command, "renderQueue.stop" | "renderQueue.list" | "editor.state" | "app.capabilities" | "command.list" | "scriptui.list" | "scriptui.get")
+}
+
 /// The open script windows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -401,6 +413,16 @@ pub struct ScriptUi {
     /// The scripting engine's scheduled-task runner (set with [`Session::script`]).
     #[serde(skip)]
     pub tasks: Option<ScriptTaskRunner>,
+    /// A frontend that services [`Self::poll_render`] may opt a script invocation into yielding
+    /// during a blocking Render Queue call. Headless and lifecycle scripts remain synchronous.
+    #[serde(skip)]
+    pub yield_renders: bool,
+    /// The script host suspended in a Render Queue call. While set, frontends must not allow
+    /// other edits or script callbacks to interleave with its open undo groups.
+    #[serde(skip)]
+    pub render_host: Option<u32>,
+    #[serde(skip)]
+    pub poll_render: Option<ScriptRenderPoll>,
     /// Bumped whenever the project is closed or replaced (New / Open / Close Project): repeating
     /// tasks of scripts without an open window stop then, except those of Startup scripts.
     #[serde(skip)]

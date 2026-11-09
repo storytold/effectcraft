@@ -2,6 +2,7 @@
 //! of a layer's source.
 
 use crate::container::bytes::{be_f32, be_f64, be_u32, cstr, le_u32, text};
+use crate::container::chunk::Chunk;
 use crate::container::header::Rational;
 use crate::container::typed::{Item, ItemKind, Layer, Project};
 
@@ -159,19 +160,25 @@ fn json_string_at(json: &[u8], mut i: usize) -> Option<String> {
     }
 }
 
-/// The numbering of an image sequence item (353, 603).
+/// The numbering of an image sequence item (353, 603), or its file list when it was imported with
+/// Force alphabetical order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceInfo {
     /// The file name before the frame number (`seq_`, `shot_`): the first `Utf8` after the alias.
+    /// An empty prefix is not stored (`0001.png`): the one `Utf8` is then the suffix.
     pub prefix: String,
     /// The file name after the frame number (`.png`, `.exr`): the second `Utf8` after the alias.
     pub suffix: String,
     /// The first and last frame number (`sspc` `u32` at 172 and 176: 1 and 3 in 353, 101 and 103
-    /// in 603).
+    /// in 603; both `0xFFFFFFFF` for a sequence with a file list).
     pub start: u32,
     pub end: u32,
     /// The digits of the frame number (`sspc` `u32` at 180: 3 for `seq_001`, 4 for `shot_0101`).
     pub digits: u32,
+    /// The file names in order for a sequence imported with Force alphabetical order (`LIST StVc`
+    /// after the alias: `StVS` with the count as a little-endian `u32`, then one `Utf8` per file);
+    /// empty for a numbered sequence. When set, it replaces the numbering.
+    pub files: Vec<String>,
 }
 
 impl SequenceInfo {
@@ -180,6 +187,62 @@ impl SequenceInfo {
         let width = usize::try_from(self.digits.min(16)).unwrap_or(0);
         format!("{}{n:0width$}{}", self.prefix, self.suffix)
     }
+
+    /// The number of files: the listed files, or the frame numbers from start to end (0 when the
+    /// end lies before the start).
+    pub fn frame_count(&self) -> u32 {
+        if self.files.is_empty() {
+            self.end.checked_sub(self.start).map_or(0, |d| d.saturating_add(1))
+        } else {
+            u32::try_from(self.files.len()).unwrap_or(u32::MAX)
+        }
+    }
+
+    /// The name of the `i`-th file (from 0): from the file list, or numbered from `start`; `None`
+    /// past the last file.
+    pub fn nth_file_name(&self, i: u32) -> Option<String> {
+        if self.files.is_empty() {
+            let n = self.start.checked_add(i).filter(|n| *n <= self.end)?;
+            Some(self.file_name(n))
+        } else {
+            self.files.get(usize::try_from(i).ok()?).cloned()
+        }
+    }
+}
+
+/// The file names of a `LIST StVc` (Force alphabetical order): the `Utf8` children in order, at most
+/// as many as the count in `StVS` (little-endian `u32`) says. Empty names count toward that number
+/// and are then skipped. Without a readable count (no `StVS`, or one shorter than 4 bytes) the list
+/// is unreadable (empty). A name that is not a plain file name (holding `/`, `\`, `:` or a control
+/// character such as NUL, or being `.` or `..`) makes the whole list unreadable (empty): the names
+/// are joined to the folder.
+fn sequence_file_list(list: &Chunk<'_>) -> Vec<String> {
+    // After Effects writes the count first (the one sample); a list without a readable count is
+    // not read rather than guessed.
+    let Some(count) = list.child(b"StVS").and_then(|c| c.bytes()).and_then(|b| le_u32(b, 0)).and_then(|n| usize::try_from(n).ok()) else {
+        return Vec::new();
+    };
+    let names: Vec<String> =
+        list.children().iter().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).take(count).map(text).filter(|n| !n.is_empty()).collect();
+    if names.iter().any(|n| n.contains(|c: char| matches!(c, '/' | '\\' | ':') || c.is_control()) || n == "." || n == "..") {
+        return Vec::new();
+    }
+    names
+}
+
+/// The prefix and suffix of a sequence whose naming holds one `Utf8` (`part`): After Effects leaves
+/// out an empty prefix (`0001.png` stores only `.png`). The stored first file name (`opti`) decides:
+/// a name starting with `part` has it as the prefix, one ending with it as the suffix. Without that
+/// evidence, a `part` starting with `.` is the suffix (an extension); anything else is not read.
+fn single_name_part(part: &str, first_file: Option<&str>) -> Option<(String, String)> {
+    if let Some(first) = first_file.filter(|_| !part.is_empty()) {
+        match (first.starts_with(part), first.ends_with(part)) {
+            (true, false) => return Some((part.to_string(), String::new())),
+            (false, true) => return Some((String::new(), part.to_string())),
+            _ => {}
+        }
+    }
+    part.starts_with('.').then(|| (String::new(), part.to_string()))
 }
 
 impl<'f, 'a> Item<'f, 'a> {
@@ -194,10 +257,24 @@ impl<'f, 'a> Item<'f, 'a> {
         let sspc = pin.child(b"sspc")?.bytes()?;
         let kids = pin.children();
         let after = kids.iter().position(|c| c.is_list(b"Als2"))?;
-        let mut names = kids.iter().skip(after + 1).take_while(|c| !c.is(b"opti")).filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).map(text);
-        let prefix = names.next()?;
-        let suffix = names.next()?;
-        Some(SequenceInfo { prefix, suffix, start: be_u32(sspc, 172)?, end: be_u32(sspc, 176)?, digits: be_u32(sspc, 180)? })
+        let naming = || kids.iter().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
+        let (start, end, digits) = (be_u32(sspc, 172)?, be_u32(sspc, 176)?, be_u32(sspc, 180)?);
+        // Force alphabetical order: the file list replaces the numbering.
+        if let Some(list) = naming().find(|c| c.is_list(b"StVc")) {
+            let files = sequence_file_list(list);
+            if files.is_empty() {
+                return None;
+            }
+            return Some(SequenceInfo { prefix: String::new(), suffix: String::new(), start, end, digits, files });
+        }
+        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).map(text).take(2).collect();
+        let (prefix, suffix) = match names.as_slice() {
+            [prefix, suffix] => (prefix.clone(), suffix.clone()),
+            // An empty prefix is not stored (`0001.png` has only `.png`).
+            [one] => single_name_part(one, f.name.as_deref())?,
+            _ => return None,
+        };
+        Some(SequenceInfo { prefix, suffix, start, end, digits, files: Vec::new() })
     }
 
     /// The rate a clip is conformed to (Interpret Footage ▸ Conform to frame rate; `sspc` `u32` at

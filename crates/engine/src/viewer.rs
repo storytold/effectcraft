@@ -1,5 +1,5 @@
 //! Composition viewer maths shared by the frontends and tests: snapping (targets, tolerance and
-//! priority), the Show Channel / Exposure display transforms, and the viewer snapshot.
+//! priority), the display pass (Show Channel, exposure, display colour), and the viewer snapshot.
 //!
 //! Nothing here touches the project; edits go through commands.
 
@@ -14,6 +14,9 @@ use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
+
+mod display_pass;
+pub use display_pass::{DisplayPass, FrameEncoding, PassColor, PassConv, PassCurve, SHADER_EXPONENTS, hdr_step, lut_eval};
 
 // ---------------------------------------------------------------- snapping
 
@@ -500,63 +503,6 @@ fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
-/// 8-bit exposure lookup table: `stops` applied in linear light.
-pub fn exposure_lut(stops: f32) -> [u8; 256] {
-    let k = 2f32.powf(stops);
-    let mut lut = [0u8; 256];
-    for (i, o) in lut.iter_mut().enumerate() {
-        let lin = srgb_to_linear(i as f32 / 255.0) * k;
-        *o = (linear_to_srgb(lin).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    }
-    lut
-}
-
-/// Apply the viewer's channel and exposure to premultiplied 8-bit RGBA pixels in place.
-/// RGB shows the image (exposure only); Red/Green/Blue/Alpha show one channel as an opaque
-/// grayscale image (or tinted in that channel's colour when `colorized`); RGB Straight shows the
-/// unpremultiplied colour, opaque.
-pub fn display_transform(px: &mut [[u8; 4]], channel: Channel, colorized: bool, stops: f32) {
-    let lut = (stops != 0.0).then(|| exposure_lut(stops));
-    let ex = |v: u8| lut.as_ref().map(|l| l[v as usize]).unwrap_or(v);
-    for p in px.iter_mut() {
-        let [r, g, b, a] = *p;
-        *p = match channel {
-            Channel::Rgb => {
-                if lut.is_none() {
-                    continue;
-                }
-                // Exposure on straight colour, re-premultiplied.
-                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                let pm = |c: u8| ((ex(un(c)) as u32 * a as u32 + 127) / 255) as u8;
-                [pm(r), pm(g), pm(b), a]
-            }
-            Channel::Red | Channel::Green | Channel::Blue => {
-                let (i, c) = match channel {
-                    Channel::Red => (0, r),
-                    Channel::Green => (1, g),
-                    _ => (2, b),
-                };
-                let v = ex(c);
-                if colorized {
-                    let mut o = [0, 0, 0, 255];
-                    o[i] = v;
-                    o
-                } else {
-                    [v, v, v, 255]
-                }
-            }
-            Channel::Alpha => {
-                let v = ex(a);
-                [v, v, v, 255]
-            }
-            Channel::RgbStraight => {
-                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                [ex(un(r)), ex(un(g)), ex(un(b)), 255]
-            }
-        };
-    }
-}
-
 // ---------------------------------------------------------------- display colour management
 
 /// View ▸ Simulate Output: the output device a preview imitates.
@@ -999,6 +945,12 @@ impl DisplayColor {
         )
     }
 
+    /// A conversion that is a baked 3D LUT alone, as a LUT-based My Custom RGB profile makes
+    /// (tests of the display pass).
+    pub fn from_lut(lut: Arc<effectcraft_color::icc::Lut3d>) -> DisplayColor {
+        DisplayColor { sim: None, display: None, lut: Some(lut) }
+    }
+
     /// Whether the simulation runs a LUT-based ICC profile (baked into a 3D LUT).
     pub fn is_lut(&self) -> bool {
         self.lut.is_some()
@@ -1097,6 +1049,9 @@ pub struct Snapshot {
     /// Render scale the image was taken at.
     pub scale: f64,
     pub image: Arc<Image>,
+    /// How `image` is encoded: rendered without the HDR step in 32 bpc, so viewer exposure
+    /// reaches its over-range values; the display pass applies the step.
+    pub encoding: FrameEncoding,
 }
 
 #[cfg(test)]

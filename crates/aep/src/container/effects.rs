@@ -12,6 +12,11 @@
 //! project-level `LIST EfdG` (one `EfDf` per effect type: a `tdmn` with the match name, then a copy
 //! of one instance's `sspc`), see [`Project::effect_params`]. That copy also carries the values of
 //! the instance it was copied from, so values are only ever read from the instance's own `tdgp`.
+//!
+//! Some files have no `EfdG` at all (seen in 17 projects, all from inside After Effects-made
+//! Motion Graphics templates). In those, one instance per effect type kept its full `parT` (which
+//! one is not known) and it is the only place the definitions are written, so the other instances
+//! of that type borrow them from it (#3170).
 
 use std::collections::{HashMap, HashSet};
 
@@ -138,7 +143,11 @@ pub enum DefinitionSource {
     /// The project-level `EfdG/EfDf` copy for the effect's match name (the instance's own `parT`
     /// is empty, 383).
     Project,
-    /// Neither has any: the effect has no readable parameter definitions.
+    /// The own `parT` of another instance of the same match name in the file: the instance's
+    /// own `parT` is empty and the file has no project-level copy of the type (a project without
+    /// `EfdG`, #3170).
+    OtherInstance,
+    /// None of these has any: the effect has no readable parameter definitions.
     Missing,
 }
 
@@ -155,7 +164,8 @@ pub struct EffectParam<'f, 'a> {
     pub name: String,
     /// The popup items (`pdnm`, split at `|`; for a button its label, e.g. `Swap Colors`).
     pub items: Option<Vec<String>>,
-    /// True when the definition is the project-level copy (see [`DefinitionSource::Project`]).
+    /// True when the definition is borrowed: the project-level copy ([`DefinitionSource::Project`])
+    /// or another instance's ([`DefinitionSource::OtherInstance`]).
     pub borrowed_definition: bool,
     pard: &'f [u8],
     stored: Option<Property<'f, 'a>>,
@@ -214,6 +224,22 @@ impl<'f, 'a> Effect<'f, 'a> {
         self.chunk.child_list(b"parT").is_some_and(has_pard)
     }
 
+    /// The match names of the value records in the instance's own `tdgp` (properties only, not
+    /// groups), in file order, each once.
+    pub fn value_record_names(&self) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        self.chunk
+            .child_list(b"tdgp")
+            .and_then(PropGroup::from_chunk)
+            .map(|g| g.entries())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| matches!(e.node, PropNode::Property(_)))
+            .map(|e| e.match_name)
+            .filter(|n| seen.insert(n.clone()))
+            .collect()
+    }
+
     /// The parameters in the order of the instance's own `parT`. Empty for an instance whose
     /// `parT` is empty; [`Project::effect_params`] falls back to the project's definitions.
     pub fn params(&self) -> Vec<EffectParam<'f, 'a>> {
@@ -256,6 +282,9 @@ impl<'f, 'a> Effect<'f, 'a> {
                 && let Some(last) = out.last_mut()
                 && let Some(u) = c.children().iter().find(|u| u.is(b"Utf8"))
                 && let Some(b) = u.bytes()
+                // An empty `pdnm` names nothing (EffectCraft's exports write one: the effect
+                // supplies its items).
+                && !b.is_empty()
             {
                 last.items = Some(text(b).split('|').map(str::to_string).collect());
             }
@@ -296,8 +325,25 @@ impl<'f, 'a> Project<'f, 'a> {
 
     /// [`Self::effect_definitions`] indexed by match name, for looking up many effects: build it
     /// once per file, not once per effect (a file can hold many definitions and many instances).
+    /// For a type without a project-level copy it also keeps the own `parT` of the first instance
+    /// in the file (items, layers and effects in file order) that has one.
     pub fn effect_definition_index(&self) -> EffectDefinitions<'f, 'a> {
-        EffectDefinitions { by_name: self.effect_definitions().into_iter().collect() }
+        let by_name: HashMap<String, &'f Chunk<'a>> = self.effect_definitions().into_iter().collect();
+        let mut instances: HashMap<String, &'f Chunk<'a>> = HashMap::new();
+        for item in self.all_items() {
+            let Some(comp) = item.comp() else { continue };
+            for layer in comp.layers() {
+                for fx in layer.effects() {
+                    if by_name.contains_key(&fx.match_name) || instances.contains_key(&fx.match_name) {
+                        continue;
+                    }
+                    if let Some(part) = fx.chunk.child_list(b"parT").filter(|p| has_pard(p)) {
+                        instances.insert(fx.match_name, part);
+                    }
+                }
+            }
+        }
+        EffectDefinitions { by_name, instances }
     }
 
     /// Where the parameter definitions of `effect` come from. Builds the index each call: use
@@ -313,10 +359,13 @@ impl<'f, 'a> Project<'f, 'a> {
     }
 }
 
-/// The project-level effect definitions by match name ([`Project::effect_definition_index`]).
+/// The borrowable effect definitions by match name ([`Project::effect_definition_index`]).
 #[derive(Debug, Clone, Default)]
 pub struct EffectDefinitions<'f, 'a> {
+    /// The project-level copies (`EfdG`).
     by_name: HashMap<String, &'f Chunk<'a>>,
+    /// For a type without a project-level copy: the own `parT` of the first instance that has one.
+    instances: HashMap<String, &'f Chunk<'a>>,
 }
 
 impl<'f, 'a> EffectDefinitions<'f, 'a> {
@@ -326,20 +375,23 @@ impl<'f, 'a> EffectDefinitions<'f, 'a> {
             DefinitionSource::Instance
         } else if self.by_name.contains_key(effect.match_name()) {
             DefinitionSource::Project
+        } else if self.instances.contains_key(effect.match_name()) {
+            DefinitionSource::OtherInstance
         } else {
             DefinitionSource::Missing
         }
     }
 
     /// The parameters of `effect`: from its own `parT`, or, when that is empty, from the
-    /// project-level definition of its match name ([`EffectParam::borrowed_definition`]). Values
-    /// always come from the instance's own records (absent = the `pard` default); the project
-    /// copy's values belong to another instance and are never read.
+    /// project-level definition of its match name, else from another instance of it that has
+    /// its own ([`EffectParam::borrowed_definition`]). Values always come from the instance's own
+    /// records (absent = the `pard` default); the values next to borrowed definitions belong to
+    /// another instance and are never read.
     pub fn params(&self, effect: &Effect<'f, 'a>) -> Vec<EffectParam<'f, 'a>> {
         if effect.has_own_definitions() {
             return effect.params();
         }
-        match self.by_name.get(effect.match_name()) {
+        match self.by_name.get(effect.match_name()).or_else(|| self.instances.get(effect.match_name())) {
             Some(part) => effect.params_from(part, true),
             None => Vec::new(),
         }
@@ -376,10 +428,24 @@ impl<'f, 'a> EffectParam<'f, 'a> {
     /// keyframes; a layer control reads the `tdpi` chunk; a button has no value.
     pub fn stored_value(&self) -> Option<ParamValue> {
         let p = self.stored?;
+        if self.kind != ParamKind::Layer && p.flags() != Some(1) {
+            return None;
+        }
+        self.recorded_value()
+    }
+
+    /// The value in the value record when the record is written (`tdsb` 1) or in the default
+    /// state (`tdsb` 3): what [`EffectParam::stored_value`] reads, also from a default-state
+    /// record. Lumetri Color writes the values of its hidden parameters so (High Dynamic Range,
+    /// HDR Specular, Look: 1200 `lumetri-01-set-all`, `-02-sec-top`, `-06-sec-light`; After
+    /// Effects reads back the recorded values). `None` with keyframes, without a record or for a
+    /// record in any other state (no sample has one; the importer reports it as damaged).
+    pub fn recorded_value(&self) -> Option<ParamValue> {
+        let p = self.stored?;
         if self.kind == ParamKind::Layer {
             return be_u32(p.chunk().child(b"tdpi")?.bytes()?, 0).map(ParamValue::Layer);
         }
-        if p.flags() != Some(1) || p.is_animated() {
+        if !matches!(p.flags(), Some(1 | 3)) || p.is_animated() {
             return None;
         }
         let v = p.static_value()?;
@@ -443,8 +509,9 @@ impl<'f, 'a> EffectParam<'f, 'a> {
 
     /// True when the parameter is at its default: it has no value record (a record exists exactly
     /// when the value differs from the `pard` default; setting a value back to the default removes
-    /// the record again), or the record equals the default. `None` when that cannot be decided
-    /// (unknown parameter type).
+    /// the record again), or the record equals the default. A record in the default state (`tdsb`
+    /// 3) counts with its value ([`EffectParam::recorded_value`]). `None` when that cannot be
+    /// decided (unknown parameter type, keyframes).
     pub fn is_default(&self) -> Option<bool> {
         match (self.stored, self.kind) {
             // A Layer Control always has its record, and a popup selection overwrites the default
@@ -453,7 +520,7 @@ impl<'f, 'a> EffectParam<'f, 'a> {
             (None, _) => Some(true),
             (Some(_), ParamKind::Popup) => Some(false),
             (Some(_), _) => {
-                let stored = self.stored_value()?;
+                let stored = self.recorded_value()?;
                 // A checkbox's default is in `pard` too (on for Repeat Edge Pixels, 412).
                 Some(self.pard_default().is_some_and(|d| d == stored))
             }
@@ -541,10 +608,11 @@ impl<'f, 'a> EffectParam<'f, 'a> {
         self.items.as_ref()?.get(index).map(String::as_str)
     }
 
-    /// The effective value: the stored value when there is one, else the `pard` default (absent =
+    /// The effective value: the value in the record when there is one, also in a record in the
+    /// default state (`tdsb` 3, [`EffectParam::recorded_value`]), else the `pard` default (absent =
     /// default); a checkbox without a record is off.
     pub fn value(&self) -> Option<ParamValue> {
-        self.stored_value().or_else(|| self.pard_default()).or(match self.kind {
+        self.recorded_value().or_else(|| self.pard_default()).or(match self.kind {
             ParamKind::Checkbox if self.stored.is_none() => Some(ParamValue::Bool(false)),
             _ => None,
         })

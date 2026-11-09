@@ -28,8 +28,10 @@ use crate::Gpu;
 
 mod adjust;
 mod adv3d;
+mod bench_share;
 mod deferred;
 mod deferred_jobs;
+mod footage_share;
 mod fx_color;
 mod fx_depth;
 mod fx_distort;
@@ -1247,6 +1249,49 @@ fn readback_staging_stays_bounded_across_sizes() {
     assert!(held <= (256 << 20) + 2 * 1024 * 16 * 376, "staging buffers hold {held} bytes");
 }
 
+/// #3335: a readback copies the mapped rows straight into the image (no zero-filled buffer,
+/// no intermediate byte vector), skipping each row's padding: odd widths, sub-rectangles and
+/// readbacks from several threads at once (each waiting for its own submission) return the
+/// uploaded pixels exactly.
+#[test]
+fn single_copy_readback_returns_the_exact_pixels() {
+    let Some(g) = gpu() else { return };
+    if !g.ctx.can_wait() {
+        return;
+    }
+    let image = |w: u32, h: u32, seed: f32| {
+        let mut img = Image::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = i as f32 * 0.37 + seed;
+            *p = [v, -v, v * 1e-3, 1.0 / (1.0 + v)];
+        }
+        img
+    };
+    // 37 × 16 bytes = 592 per row: padded to 768 in the staging buffer.
+    let src = image(37, 5, 0.5);
+    let up = g.ctx.upload_image(&src).expect("upload");
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let back = e.download(&up).expect("download");
+    assert_eq!((back.width, back.height), (37, 5));
+    assert_eq!(back.data, src.data);
+    let rect = e.read_rect(&up.texture, 3, 1, 5, 2, 16).expect("read_rect");
+    let want: Vec<[f32; 4]> = (1..3).flat_map(|y| (3..8).map(move |x| (x, y))).map(|(x, y)| src.data[src.idx(x, y)]).collect();
+    assert_eq!(rect, bytemuck::cast_slice::<[f32; 4], u8>(&want));
+    // Frames on several threads, each with its own encoder and submission.
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            s.spawn(move || {
+                for k in 0..3 {
+                    let src = image(61 + t, 7 + k, (t * 10 + k) as f32);
+                    let up = g.ctx.upload_image(&src).expect("upload");
+                    let back = crate::context::Enc::new(&g.ctx).download(&up).expect("download");
+                    assert_eq!(back.data, src.data, "thread {t} frame {k}");
+                }
+            });
+        }
+    });
+}
+
 /// A static adjustment layer with a time-dependent effect (Noise) keeps its footprint key
 /// across frames (the footprint is the source through the masks, not the effects), so the GPU
 /// uploads nothing after the first frame; matches the CPU.
@@ -1458,6 +1503,38 @@ fn owned_devices_favour_memory_usage() {
     assert!(matches!(d.memory_hints, wgpu::MemoryHints::MemoryUsage));
     assert_eq!(d.label, Some("effectcraft gpu"));
     assert_eq!(d.required_limits.max_texture_dimension_2d, wgpu::Limits::default().max_texture_dimension_2d);
+}
+
+/// `RenderOpts::skip_hdr_step` (float outputs) skips Project Settings ▸ HDR on the GPU as on the
+/// CPU: both compositors agree, and the frame is the Clip frame with its over-range values.
+#[test]
+fn skipping_the_hdr_step_on_the_gpu_matches_clip() {
+    use effectcraft_project::HdrMode;
+    let Some(g) = gpu() else {
+        // Visible skip (EFFECTCRAFT_REQUIRE_GPU=1 makes a missing adapter fail instead).
+        eprintln!("skipping_the_hdr_step_on_the_gpu_matches_clip: skipped: no GPU adapter");
+        return;
+    };
+    for mode in [HdrMode::Compand, HdrMode::ToneMap] {
+        let mut s = blend_scene(BitDepth::Bpc32, BlendMode::Normal);
+        let mut bright = s.solid([3.0, 1.5, 0.5], 30, 20);
+        bright.blend_mode = BlendMode::Add;
+        s.push(bright);
+        s.p.settings.working_space = Some(ColorSpace::Srgb);
+        s.p.settings.linearize = true;
+        s.p.settings.hdr = mode;
+        let scene = RenderOpts { skip_hdr_step: true, ..opts() };
+        check(&format!("no HDR step {mode:?}"), compare_at(&s, scene, Tick::ZERO), 0.0);
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..scene });
+        r.accel = Some(g);
+        let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");
+        let mut clip = s.p.clone();
+        clip.settings.hdr = HdrMode::Clip;
+        let want = Renderer::new(&clip, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+        let d = diff(&want, &img, tolerance(BitDepth::Bpc32));
+        assert_eq!(d.over, 0, "{mode:?}: max {} at {:?}", d.max, d.worst);
+        assert!(img.data.iter().any(|p| p[3] > 0.0 && p[0] / p[3] > 1.0), "{mode:?}: over-range values survive");
+    }
 }
 
 /// A GPU context of its own with a small pool budget, so other tests (sharing [`gpu`]) neither

@@ -243,6 +243,13 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
             }
             "expressionSelector" => {
                 let Some(prop) = sel.get("amount") else { continue };
+                // Evaluated per character (`textIndex`): the layer's cache key holds the amount
+                // for the first character only, so the buffer must not outlive the session.
+                if prop.has_expression()
+                    && let Some(log) = ctx.reads
+                {
+                    log.mark_unkeyed();
+                }
                 let stat = ctx.v3(layer, sel, "amount", [100.0; 3]);
                 Box::new(move |i, n, prev| {
                     let pv = prev.map(|x| x * 100.0);
@@ -638,11 +645,73 @@ fn align_index(j: Justify) -> u8 {
     }
 }
 
+/// Note the font files `lay` is drawn with in [`EvalCtx::reads`] (#3184), each with its identity
+/// as its bytes were read, so a cache entry of the text is checked against them. What the
+/// files can't vouch for makes the list incomplete: a family that is not installed (installing
+/// it changes the text), a character drawn with a fallback face or with none (another installed
+/// font could take it), a font from memory.
+fn note_fonts(ctx: &EvalCtx, lay: &TextLayout) {
+    note_layout_fonts(ctx, &lay.styles, &lay.layout);
+}
+
+/// A character put in by Character Offset or Character Value (`ch`, in style `st`), outside a
+/// relayout: its outline and advance, with the font it is drawn with noted as [`note_fonts`] does
+/// (the run's face may not have it: a fallback face then draws it).
+fn substituted_glyph(ctx: &EvalCtx, st: &effectcraft_keyframe::CharStyle, ch: char) -> (BezPath, f64) {
+    if ctx.reads.is_some() {
+        // (the layout `char_glyph_style` makes, served from the layout cache there)
+        let lay = effectcraft_text::layout_text(&ch.to_string(), &effectcraft_text::text_style(st), &effectcraft_text::ParagraphStyle::default());
+        note_layout_fonts(ctx, std::slice::from_ref(st), &lay);
+    }
+    char_glyph_style(st, ch)
+}
+
+/// [`note_fonts`] for `layout`, whose glyphs' runs index `styles`.
+fn note_layout_fonts(ctx: &EvalCtx, styles: &[effectcraft_keyframe::CharStyle], layout: &effectcraft_text::Layout) {
+    use crate::reads::{FileStamp, ReadFile};
+    use effectcraft_text::fonts;
+    let Some(log) = ctx.reads else { return };
+    let resolved: Vec<fonts::Resolved> = styles.iter().map(|s| fonts::resolve(&s.font, &s.style)).collect();
+    if resolved.iter().any(|r| r.missing) {
+        log.mark_incomplete();
+    }
+    // Each run's face, glyphs or not: an empty paragraph's face sets its line's metrics (in a
+    // box, the first baseline that places every later line).
+    let mut faces: Vec<fonts::FaceId> = Vec::new();
+    for r in &resolved {
+        if !faces.contains(&r.face) {
+            faces.push(r.face);
+        }
+    }
+    for g in &layout.glyphs {
+        if g.id == 0 || resolved.get(g.run).is_none_or(|r| r.face != g.face) {
+            log.mark_incomplete();
+        }
+        if !faces.contains(&g.face) {
+            faces.push(g.face);
+        }
+    }
+    for id in faces {
+        let face = fonts::face(id);
+        match &face.info.data {
+            fonts::FaceData::Static(_) => {}
+            fonts::FaceData::Shared(_) => log.mark_incomplete(),
+            fonts::FaceData::File(_) => {
+                if let Some((path, meta)) = face.file_read() {
+                    let stamp = meta.map_or(FileStamp::Missing, FileStamp::of_metadata);
+                    log.note(ReadFile::new(path.to_string_lossy().as_ref(), stamp));
+                }
+            }
+        }
+    }
+}
+
 /// Lay out and animate a text layer.
 pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
     let doc = source_text(ctx, layer)?;
     let text = layer.props.sub("text")?;
     let lay = layout_doc(&doc);
+    note_fonts(ctx, &lay);
     let xfs = char_transforms(ctx, layer, text, &lay);
     let three = per_char_3d(ctx, layer);
     let more = text.sub("moreOptions");
@@ -665,6 +734,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         // Same character count: the style runs still line up.
         let d2 = TextDoc { text: chars.into_iter().collect(), ..doc.clone() };
         let l2 = layout_doc(&d2);
+        note_fonts(ctx, &l2);
         let by_char: std::collections::HashMap<usize, CharXf> = lay.glyphs.iter().zip(&xfs).map(|(g, x)| (g.char_index, *x)).collect();
         let x2: Vec<CharXf> = l2.glyphs.iter().map(|g| by_char.get(&g.char_index).copied().unwrap_or_default()).collect();
         subs = vec![None; l2.glyphs.len()];
@@ -789,7 +859,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         // Outline (substituted characters aligned in the original slot).
         let (outline, adv) = match subs[gi] {
             Some(c) => {
-                let (p, a) = char_glyph_style(st, c);
+                let (p, a) = substituted_glyph(ctx, st, c);
                 let dx = match x.char_align {
                     0 => 0.0,
                     2 => g.advance - a,

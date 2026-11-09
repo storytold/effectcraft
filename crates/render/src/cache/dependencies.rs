@@ -156,7 +156,7 @@ impl Dependencies<'_> {
             layer.layer_time(ctx.time).0.hash(self.h);
         }
         match layer.source {
-            LayerSource::Solid { item } | LayerSource::Footage { item } | LayerSource::Comp { item } => {
+            LayerSource::Solid { item } | LayerSource::Footage { item } | LayerSource::Comp { item } | LayerSource::Model { item } => {
                 let item = match layer.source {
                     LayerSource::Footage { .. } => ctx.media_item(layer, item),
                     _ => item,
