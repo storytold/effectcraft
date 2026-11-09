@@ -115,7 +115,7 @@ fn reveal_targets(app: &EffectcraftApp) -> Vec<u64> {
 
 /// The arrow keys nudge the selected layers 1 pixel at the viewer's magnification (`up`,
 /// `down`, `left`, `right`), 10 with Shift (`up10`…), as After Effects does, so zoomed in
-/// they move by fractions of a comp pixel. From any panel except Project, Effects & Presets and Render Queue (which own the
+/// they move by fractions of a comp pixel. From any panel except Project, Effects & Presets, Render Queue and the Flowchart (which own the
 /// arrow keys for its own keyboard navigation, #961); not while typing, with a dialog or
 /// menu open. With mask points selected the arrows move the points instead (#1288).
 fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Value, String> {
@@ -131,7 +131,7 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
         _ => return Err(format!("unknown nudge `{dir}`")),
     };
     let st = &app.session.state;
-    if matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+    if matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue | PanelKind::Flowchart)
         || (st.selected_layers.is_empty() && st.selected_vertices.is_empty())
         || st.text_edit.is_some()
     {
@@ -163,6 +163,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
@@ -184,6 +185,7 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    crate::control::check_script_render(app, id)?;
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -283,6 +285,15 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     // Deleting Project items that compositions use asks first, as in After Effects.
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
+    }
+    // Un-precompose that would change the picture lists why and asks before unpacking anyway.
+    if crate::panels::unprecompose::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "unprecompose"}));
+    }
+    // An After Effects import with a path that loses something asks first (the menu's file
+    // dialog asks in `run_with_picked`).
+    if params.get("path").is_some() && crate::panels::aep_losses::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "aepLosses"}));
     }
     // J / K and Select All Keyframes act on what the Timeline shows (its revealed properties).
     if matches!(id, "time.nextKey" | "time.previousKey" | "keys.selectAll")

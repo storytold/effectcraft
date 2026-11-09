@@ -431,7 +431,12 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         // Below 1 % (or 0) the layer time divides by ~0, and layer.timeStretch refuses it too.
         let sr = f(j, "sr").unwrap_or(1.0);
         l.stretch = if sr.is_finite() && sr.abs() >= 0.01 {
-            sr * 100.0
+            // Past ±9900 % too (#3247): the largest stretch a layer supports, sign kept.
+            let pct = effectcraft_project::limits::stretch(sr * 100.0);
+            if pct.to_bits() != (sr * 100.0).to_bits() {
+                cx.im.warn(format!("{name}: a time stretch of {} % is not supported ({pct} % used)", sr * 100.0));
+            }
+            pct
         } else {
             cx.im.warn(format!("{name}: a time stretch of {} % is not supported (100 % used)", sr * 100.0));
             100.0

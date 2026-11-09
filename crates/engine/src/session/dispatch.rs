@@ -7,6 +7,9 @@ impl Session {
 
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         if let Err(why) = (spec.enabled)(self) {
             // Explicit targets (agents, scripts) don't need a UI selection.
@@ -57,6 +60,9 @@ impl Session {
     /// Whether `id` names a known command whose `enabled` predicate returns `Ok` for this session;
     /// an unknown id or a predicate error reads as disabled.
     pub fn is_enabled(&self, id: &str) -> bool {
+        if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
+            return false;
+        }
         commands::find(id).is_some_and(|c| (c.enabled)(self).is_ok())
     }
 
