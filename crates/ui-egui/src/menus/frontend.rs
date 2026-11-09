@@ -599,6 +599,17 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
 
 /// Commands that need a file or folder path: ask the host's file dialog when `params` lacks one.
 pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    file_dialog_with_presets(app, id, params, crate::panels::effects_presets::presets_dir)
+}
+
+/// [`file_dialog`], with the presets folder that Save Animation Preset starts in from
+/// `presets_dir`, read only when that dialog is shown (tests pass a temporary folder).
+pub(super) fn file_dialog_with_presets(
+    app: &mut EffectcraftApp,
+    id: &str,
+    params: &Value,
+    presets_dir: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<Result<Value, String>> {
     enum Ask {
         Folder,
         Import,
@@ -629,7 +640,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr".into())),
         "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder".into())),
         // Making the default creates the presets folder, so only when a dialog is needed.
-        "anim.savePreset" if !given("path") => ("path", Ask::Save(preset_save_default(crate::panels::effects_presets::presets_dir().as_deref()))),
+        "anim.savePreset" if !given("path") => ("path", Ask::Save(preset_save_default(presets_dir().as_deref()))),
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
         "view.exportGuides" => ("path", Ask::Save("Guides.json".into())),
         "view.importGuides" => ("path", Ask::Open(&["json"])),

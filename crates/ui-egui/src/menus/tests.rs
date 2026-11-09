@@ -736,22 +736,59 @@ fn effect_plugin_install_dialog_router() {
 #[test]
 fn save_preset_dialog_starts_in_the_presets_folder_and_creates_it() {
     use super::frontend::preset_save_default;
-    let root = std::env::temp_dir().join(format!("ec-preset-folder-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = tempfile::tempdir().unwrap();
     // Two levels missing, as on a first run without Documents/EffectCraft.
-    let dir = root.join("EffectCraft").join("Presets");
+    let dir = root.path().join("EffectCraft").join("Presets");
     let default = preset_save_default(Some(&dir));
     assert!(dir.is_dir(), "the presets folder was not created");
     assert_eq!(std::path::Path::new(default.as_ref()), dir.join("Preset.ecpreset"));
-    // An existing folder is used as it is.
-    std::fs::write(dir.join("Mine.ecpreset"), "{}").unwrap();
+    // An existing folder is used as it is, and the presets in it are left alone.
+    std::fs::write(dir.join("Mine.ecpreset"), "{\"mine\": 1}").unwrap();
     assert_eq!(std::path::Path::new(preset_save_default(Some(&dir)).as_ref()), dir.join("Preset.ecpreset"));
-    assert!(dir.join("Mine.ecpreset").is_file(), "an existing preset was touched");
+    assert_eq!(std::fs::read_to_string(dir.join("Mine.ecpreset")).unwrap(), "{\"mine\": 1}", "an existing preset was touched");
+    // A relative `EC_PRESETS_DIR` is the folder under the current one: the dialog gets it whole.
+    // (`.` exists already, so the test creates nothing in the working directory.)
+    let here = std::env::current_dir().unwrap();
+    assert_eq!(std::path::Path::new(preset_save_default(Some(std::path::Path::new("."))).as_ref()), here.join("Preset.ecpreset"));
     // A file in the way, no folder configured, or an empty one: just the name.
-    let blocked = root.join("file");
+    let blocked = root.path().join("file");
     std::fs::write(&blocked, "x").unwrap();
     assert_eq!(preset_save_default(Some(&blocked.join("Presets"))), "Preset.ecpreset");
     assert_eq!(preset_save_default(None), "Preset.ecpreset");
     assert_eq!(preset_save_default(Some(std::path::Path::new(""))), "Preset.ecpreset");
-    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #3347: the command's dialog, blocking or not, starts in the presets folder and creates it; a
+/// command that already names its file (a script, the CLI, MCP) asks nothing and creates nothing.
+#[test]
+fn save_preset_command_asks_in_the_presets_folder_unless_given_a_path() {
+    use super::frontend::file_dialog_with_presets;
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("EffectCraft").join("Presets");
+    let presets = || Some(dir.clone());
+    let default = dir.join("Preset.ecpreset").to_string_lossy().into_owned();
+    // A path given: no dialog, and no folder made for it.
+    let given = json!({"path": root.path().join("Elsewhere.ecpreset").to_string_lossy()});
+    assert!(file_dialog_with_presets(&mut app, "anim.savePreset", &given, presets).is_none(), "a dialog for a given path");
+    assert!(!dir.exists(), "the presets folder was created for a given path");
+    // The blocking dialog gets the folder's default path.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = asked.clone();
+    app.hooks.pick_save_file = Some(Box::new(move |name: &str, ext: &str| {
+        log.lock().unwrap().push(format!("{name} [{ext}]"));
+        None
+    }));
+    assert_eq!(file_dialog_with_presets(&mut app, "anim.savePreset", &json!({}), presets), Some(Ok(Value::Null)));
+    assert_eq!(*asked.lock().unwrap(), [format!("{default} [ecpreset]")]);
+    assert!(dir.is_dir(), "the presets folder was not created");
+    // So does the non-blocking one.
+    std::fs::remove_dir_all(&dir).unwrap();
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    assert_eq!(file_dialog_with_presets(&mut app, "anim.savePreset", &json!({}), presets), Some(Ok(json!({"dialog": "anim.savePreset"}))));
+    assert_eq!(*pending.lock().unwrap(), [crate::FileDialog::Save { default, ext: "ecpreset".into(), project: false }]);
+    assert!(dir.is_dir(), "the presets folder was not created");
 }
