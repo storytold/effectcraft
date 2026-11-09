@@ -94,9 +94,9 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     }
     let t0 = web_time::Instant::now();
     let img = if opts.backend == Backend::Cpu {
-        Renderer { opts, accel: None, ..*r }.comp_frame(comp, t)
+        Renderer { opts, accel: None, comp_memo: r.comp_memo.clone(), ..*r }.comp_frame(comp, t)
     } else {
-        in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame(comp, t)).await.value
+        in_passes(Some(a), |acc| Renderer { opts, accel: acc, comp_memo: r.comp_memo.clone(), ..*r }.comp_frame(comp, t)).await.value
     };
     if let (Some((key, chose)), Some(pick)) = (auto, a.auto_pick()) {
         pick.record(key, chose, t0.elapsed().as_secs_f64() * 1e3);

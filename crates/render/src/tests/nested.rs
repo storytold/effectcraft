@@ -88,3 +88,152 @@ fn a_nested_comp_shows_nothing_past_its_end() {
         assert!(render_frame(&p, cid, s(2.0), 1.0).get(50, 50)[3] < 0.01, "collapse {collapse}: past its end");
     }
 }
+
+/// A video footage source that counts its decoded frames.
+struct Counting {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl crate::FootageSource for Counting {
+    fn frame(&self, _: ItemId, _: &crate::Footage, _: Tick) -> Option<std::sync::Arc<crate::Image>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(std::sync::Arc::new(crate::Image::filled(32, 32, [0.5, 0.5, 0.5, 1.0])))
+    }
+}
+
+/// #2275: the same precomp used twice in a comp renders its nested frame once and shares it
+/// between the instances; the next frame renders it again (the memo is per frame).
+#[test]
+fn a_precomp_used_twice_renders_once_per_frame() {
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::{Footage, RenderOpts, Renderer};
+
+    let counting = Counting { calls: AtomicUsize::new(0) };
+    let mut p = Project::default();
+    let fid = p.add_item(
+        "v.mov",
+        Label::Sandstone,
+        None,
+        ItemKind::Footage(Footage {
+            path: "v.mov".into(),
+            width: 32,
+            height: 32,
+            frame_rate: FrameRate::FPS_30,
+            duration: s(4.0),
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let mut inner = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    let fl = build::layer(&mut p, &inner, "v.mov", LayerSource::Footage { item: fid }, (32, 32), None);
+    inner.layers.push(fl);
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut outer = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    for name in ["A", "B"] {
+        let pre = build::layer(&mut p, &outer, name, LayerSource::Comp { item: iid }, (32, 32), None);
+        outer.layers.push(pre);
+    }
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let r = Renderer::new(&p, &counting, RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::ZERO);
+    assert_eq!(counting.calls(), 1, "two instances of the same precomp decode the nested footage once");
+    assert_eq!(img.width, 32, "the frame is the comp's size");
+
+    // The next frame is not served from the previous frame's memo.
+    r.comp_frame(cid, s(1.0));
+    assert_eq!(counting.calls(), 2, "the memo lives for one frame only");
+}
+
+/// Two instances of one precomp, each moving the inner solid through its own Essential Property
+/// override: an override's project is temporary, its render is never memoised, so the right
+/// instance cannot be served the left one's frame (the memo used to key on the project's
+/// address, which a later temporary project can reuse).
+#[test]
+fn overridden_instances_of_a_precomp_do_not_share_a_memo_entry() {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+
+    use crate::{NoFootage, RenderOpts, Renderer};
+
+    let mut p = Project::default();
+    let mut inner = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.1, 0.1], width: 16, height: 32, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &inner, "S", LayerSource::Solid { item: sid }, (16, 32), None);
+    let prop = l.props.prop("transform/position").unwrap().uid;
+    l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([8.0, 16.0, 0.0]);
+    let kind = EgKind::Property { layer: l.id, prop, links: vec![] };
+    inner.layers.push(l);
+    inner.essential = Some(EssentialGraphics { controls: vec![EgControl { id: 1, name: "Pos".into(), kind, as_type: None }], ..Default::default() });
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+
+    let mut outer = Comp::new(64, 32, FrameRate::FPS_30, s(4.0));
+    for (name, cx, px) in [("Left", 16, 8.0), ("Right", 48, 24.0)] {
+        let mut pre = build::layer(&mut p, &outer, name, LayerSource::Comp { item: iid }, (32, 32), None);
+        pre.props.prop_mut("transform/position").unwrap().value = Value::Vec3([cx as f64, 16.0, 0.0]);
+        let mut ids = build::Ids(&mut p.next_id);
+        let control = ids.prop(&essential::match_id(1), "Pos", Value::Vec3([px, 16.0, 0.0]));
+        let mut group = ids.group(essential::GROUP, "Essential Properties");
+        group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
+        group.children.push(control.into());
+        pre.props.children.push(group.into());
+        outer.layers.push(pre);
+    }
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::ZERO);
+    // Left instance: the solid covers inner x 0..16. Right instance: inner x 16..32 (outer
+    // x 48..64). Neither shows the other's position.
+    assert!(img.get(8, 16)[3] > 0.9 && img.get(8, 16)[0] > 0.9, "the left instance keeps the solid left");
+    assert!(img.get(56, 16)[3] > 0.9 && img.get(56, 16)[0] > 0.9, "the right instance moves the solid right");
+    assert!(img.get(40, 16)[3] < 0.1, "the right instance is not served the left one's frame");
+    assert!(img.get(24, 16)[3] < 0.1, "the left instance shows nothing right of its solid");
+}
+
+/// A comp reached at depth 17 renders the recursion guard's transparent canvas; a direct
+/// (depth-1) instance of the same comp in the same frame must still render its content, so the
+/// guard's output cannot share the shallow instance's memo key (the key carries the depth).
+#[test]
+fn a_precomp_past_the_depth_guard_does_not_poison_a_shallow_instance() {
+    use crate::{NoFootage, RenderOpts, Renderer};
+
+    let mut p = Project::default();
+    // B renders a green solid filling the comp.
+    let mut b = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    let sid = p.add_item("G", Label::Green, None, ItemKind::Solid(Solid { color: [0.1, 0.9, 0.1], width: 32, height: 32, pixel_aspect: 1.0 }));
+    let gl = build::layer(&mut p, &b, "G", LayerSource::Solid { item: sid }, (32, 32), None);
+    b.layers.push(gl);
+    let bid = p.add_item("B", Label::Sandstone, None, ItemKind::Comp(b.into()));
+
+    // A chain of 16 precomp links ending in B: the root's chain layer nests B at depth 17,
+    // the first depth past the recursion guard, which returns a transparent canvas.
+    let mut next = bid;
+    for i in (1..=16).rev() {
+        let mut c = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+        let l = build::layer(&mut p, &c, "L", LayerSource::Comp { item: next }, (32, 32), None);
+        c.layers.push(l);
+        next = p.add_item(&format!("C{i}"), Label::Sandstone, None, ItemKind::Comp(c.into()));
+    }
+
+    let mut outer = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    // Direct first in the vec = drawn last: the deep chain renders (and memoises) before the
+    // direct instance looks the comp up.
+    let direct = build::layer(&mut p, &outer, "Direct", LayerSource::Comp { item: bid }, (32, 32), None);
+    outer.layers.push(direct);
+    let deep = build::layer(&mut p, &outer, "Chain", LayerSource::Comp { item: next }, (32, 32), None);
+    outer.layers.push(deep);
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::ZERO);
+    // The direct instance is the only thing that paints this frame (the chain's tail renders
+    // the guard's transparent canvas): without the depth in the key the frame stays empty.
+    assert!(img.get(16, 16)[3] > 0.9 && img.get(16, 16)[1] > img.get(16, 16)[0], "the direct instance renders B's solid, not the guard's transparent canvas");
+}
