@@ -24,7 +24,7 @@
 //!
 //! ABI 2 modules may also declare `"imports": ["source_at"]` and import `ec.source_at` to read
 //! their own layer's pixels at **any** layer time, with the first `effects` effects of the stack
-//! applied. The host charges each call like a frame and caps a render at 64 calls; the module
+//! applied. The host caps a render at 64 calls, counting every call that reaches it; the module
 //! stays deterministic and sandboxed, and no other import is accepted.
 //!
 //! Modules run in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter (pure Rust,

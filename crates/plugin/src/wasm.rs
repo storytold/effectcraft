@@ -65,17 +65,9 @@ fn source_at_host<'a>(mut caller: Caller<'_, SourceAtStore<'a>>, layer_time: f64
     if end > memory.data_size(&caller) {
         return 2;
     }
-    // Charge the call like a frame: the host renders one, so the sandbox's fuel reflects it.
-    let cost = FUEL_BASE.saturating_add(FUEL_PER_PIXEL.saturating_mul((w as u64).saturating_mul(h as u64)));
-    let Ok(fuel) = caller.get_fuel() else {
-        return 1;
-    };
-    if fuel < cost {
-        return 1;
-    }
-    if caller.set_fuel(fuel - cost).is_err() {
-        return 1;
-    }
+    // Every call that reaches the host counts against the cap, including one that returns
+    // unavailable. The cap, not the module's instruction fuel, bounds the host work.
+    caller.data_mut().calls = calls + 1;
     let host: &'a dyn PluginHost = caller.data().host;
     let Some(image) = host.source_at(layer_time, effects as usize) else {
         return 1;
@@ -93,7 +85,6 @@ fn source_at_host<'a>(mut caller: Caller<'_, SourceAtStore<'a>>, layer_time: f64
     if memory.write(&mut caller, start, &buf).is_err() {
         return 2;
     }
-    caller.data_mut().calls = calls + 1;
     0
 }
 

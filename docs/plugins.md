@@ -255,10 +255,11 @@ its own layer at **any** layer time, not only the two neighbours. `layer_time` i
 `effects` selects how many effects of the stack to apply (0 = source and masks; the host never
 goes past the effect being rendered). The result is written to `dst_ptr` as premultiplied RGBA
 `f32` on the **current frame's** grid, with the same `width × height` and `scale`; `dst_len` must
-be at least `width × height × 16` bytes. The host charges each call like a frame and allows at
-most 64 calls per render; over the cap, a bad buffer, no host or a recursion limit returns 1 or
-2 without changing the frame. The module must declare the import in the manifest, and no other
-import is accepted. `source_at` requires ABI 2 (a module reporting ABI 1 is refused).
+be at least `width × height × 16` bytes. The host allows at most 64 calls per render and counts
+every call that reaches it, including one that returns unavailable. Over the cap, a bad buffer,
+no host or a recursion limit returns 1 or 2 without changing the frame. The module must declare
+the import in the manifest, and no other import is accepted. `source_at` requires ABI 2 (a module
+reporting ABI 1 is refused).
 
 Each call gets a fuel budget proportional to the frame size; a module that loops forever stops
 with an error instead of hanging the app.

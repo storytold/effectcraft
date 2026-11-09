@@ -557,6 +557,68 @@ fn source_at_module_with(manifest: &str) -> String {
     )
 }
 
+/// An ABI 2 module that calls `source_at` 65 times and writes the number of successful calls
+/// (expected 64) into red, so the per-render cap is observable.
+fn source_at_cap_module(id: &str) -> String {
+    let manifest = format!(r#"{{"api":2,"id":"{id}","name":"SourceAtCap {id}","category":"Test Plug-ins","version":"1","imports":["source_at"],"params":[]}}"#);
+    let len = manifest.len();
+    let escaped = manifest.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"(module
+  (import "ec" "source_at" (func $source_at (param f64 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (func (export "ec_api_version") (result i32) i32.const 2)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_render2")
+    (param $px i32) (param $w i32) (param $h i32) (param $params i32) (param $np i32)
+    (param $t f64) (param $scale f64)
+    (param $prev i32) (param $prev_t f64) (param $next i32) (param $next_t f64) (param $flags i32)
+    (result i32)
+    (local $i i32) (local $n i32) (local $rc i32) (local $ok i32)
+    local.get $w
+    local.get $h
+    i32.mul
+    i32.const 16
+    i32.mul
+    local.set $n
+    block $done
+      loop $loop
+        local.get $i
+        i32.const 65
+        i32.ge_u
+        br_if $done
+        local.get $t
+        i32.const 0
+        i32.const 65536
+        local.get $n
+        call $source_at
+        local.set $rc
+        local.get $rc
+        i32.eqz
+        if
+          local.get $ok
+          i32.const 1
+          i32.add
+          local.set $ok
+        end
+        local.get $i
+        i32.const 1
+        i32.add
+        local.set $i
+        br $loop
+      end
+    end
+    local.get $px
+    local.get $ok
+    f32.convert_i32_s
+    f32.store
+    i32.const 0))"#
+    )
+}
+
 /// A host that answers `source_at` for any time: red is the requested layer time, green the
 /// number of effects requested.
 struct SourceAtHost;
@@ -623,6 +685,18 @@ fn source_at_reports_a_short_destination_buffer() {
     let mut frame = effectcraft_effects::plugin::PluginFrame { width: 2, height: 1, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0, 1.0] };
     p.render_v2(&mut frame, &params, 0.5, &host).unwrap();
     assert_eq!(px[0][0], 2.0, "short buffer is rejected with code 2: {px:?}");
+}
+
+#[test]
+fn source_at_caps_a_render_at_64_calls() {
+    load_wasm(source_at_cap_module("org.test.sourceat.cap").as_bytes(), "cap.wat").unwrap();
+    let p = effectcraft_effects::plugin::plugin("org.test.sourceat.cap").unwrap();
+    let params = effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat: &[], texts: &[] };
+    let mut px = vec![[0.0f32; 4]; 2];
+    let host = SourceAtHost;
+    let mut frame = effectcraft_effects::plugin::PluginFrame { width: 2, height: 1, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0, 1.0] };
+    p.render_v2(&mut frame, &params, 0.5, &host).unwrap();
+    assert_eq!(px[0][0], 64.0, "64 calls succeed, call 65 is refused: {px:?}");
 }
 
 #[test]
