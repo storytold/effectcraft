@@ -164,7 +164,13 @@ pub(crate) fn layers_or(s: &Session, p: &Value, fallback: &[LayerId]) -> Result<
     if let Some(v) = p.get("layer").filter(|v| !v.is_null()) {
         return Ok((cid, vec![resolve(v)?]));
     }
-    Ok((cid, fallback.iter().copied().filter(|l| comp.layer(*l).is_some()).collect()))
+    let picked: Vec<LayerId> = fallback.iter().copied().filter(|l| comp.layer(*l).is_some()).collect();
+    if picked.is_empty() {
+        if let Some(first) = comp.layers.first() {
+            return Ok((cid, vec![first.id]));
+        }
+    }
+    Ok((cid, picked))
 }
 
 /// Whether a layer can be picked by the user (Select All, Ctrl+Up/Down, a Timeline click): not
