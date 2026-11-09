@@ -77,6 +77,9 @@ pub struct Form {
     pub command: String,
     pub base: Value,
     pub fields: Vec<Field>,
+    /// The parameters as the form opened (set by [`form`]); OK on an Edit Value form that still
+    /// equals them writes nothing, so a migrated out-of-range value is not clamped or keyed.
+    pub opened: Value,
 }
 
 impl Form {
@@ -113,7 +116,9 @@ impl Form {
 
 /// Open a form dialog.
 pub fn form(app: &mut EffectcraftApp, title: &str, command: &str, base: Value, fields: Vec<Field>) {
-    app.dialog_state.form = Form { title: title.into(), command: command.into(), base, fields };
+    let mut f = Form { title: title.into(), command: command.into(), base, fields, opened: Value::Null };
+    f.opened = f.params();
+    app.dialog_state.form = f;
     app.dialog = Some(Dialog::Form);
 }
 
@@ -989,6 +994,9 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if ok || enter {
         app.dialog = None;
         let params = f.params();
+        if matches!(f.command.as_str(), "prop.set" | "keys.set") && params == f.opened {
+            return;
+        }
         if let Err(e) = app.session.execute(&f.command, params) {
             app.ui.status = e.to_string();
         }
@@ -1061,6 +1069,7 @@ mod tests {
                 Field::num("value[1]", "Y", 20.0),
                 Field::choice("mode", "M", &[("A", json!("a")), ("B", json!("b"))], 1),
             ],
+            ..Default::default()
         };
         assert_eq!(f.params(), json!({"prop": "position", "value": [10.0, 20.0], "mode": "b"}));
     }
@@ -1077,6 +1086,7 @@ mod tests {
             command: "layer.setTransform".into(),
             base: json!({"prop": "position"}),
             fields: vec![Field::num("value[0]", "X", 960.0), Field::num("value[1]", "Y", 540.0)],
+            ..Default::default()
         };
         app.dialog = Some(Dialog::Form);
         let frame = |app: &mut EffectcraftApp, events: Vec<egui::Event>| {

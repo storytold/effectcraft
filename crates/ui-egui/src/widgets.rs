@@ -91,8 +91,8 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
         let touched = r.changed() || ui.data(|d| d.get_temp::<bool>(touched_id)).unwrap_or(false);
         let mut out = None;
         if r.lost_focus() || tab.is_some() {
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                out = typed_value(&buf, suffix, value, decimals, range, touched);
+            if touched && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                out = typed_value(&buf, suffix, range);
             }
             ui.data_mut(|d| {
                 d.remove::<String>(editing_id);
@@ -147,19 +147,12 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
     (rect, out, resp.drag_stopped())
 }
 
-/// The value a hot-text field commits from its typed `buf`: none when it does not parse or is
-/// the untouched text displayed for `value` (opening and closing the field must not write, or
-/// the range would clamp a legacy out-of-range value and change its animation), else the
-/// number clamped to `range`. A `touched` field commits even an equal value: with several
-/// layers selected the other layers may differ from the displayed (first) one.
-fn typed_value(buf: &str, suffix: &str, value: f64, decimals: usize, range: (f64, f64), touched: bool) -> Option<f64> {
+/// The value a touched hot-text field commits from its typed `buf`: none when it does not parse,
+/// else the number clamped to `range`. Equal-to-displayed values still commit: with several layers
+/// selected the others may differ from the displayed (first) one. Untouched fields never get here.
+fn typed_value(buf: &str, suffix: &str, range: (f64, f64)) -> Option<f64> {
     let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
-    let parsed = txt.parse::<f64>().ok().filter(|v| v.is_finite());
-    // Untouched, the displayed text (value rounded to `decimals`) or a retype of it is no edit.
-    if !touched && (txt == format!("{value:.decimals$}") || parsed == Some(value)) {
-        return None;
-    }
-    parsed.map(|v| v.clamp(range.0, range.1))
+    txt.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(range.0, range.1))
 }
 
 /// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
@@ -1128,19 +1121,14 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 mod tests {
     use super::*;
 
-    /// Opening a field on a negative legacy value (a Taper length saved before it was bounded)
-    /// and closing it unedited writes nothing; a changed text still commits, clamped.
+    /// A touched field commits what was typed, clamped, even if equal to the displayed value.
     #[test]
-    fn unchanged_hot_text_is_not_committed() {
+    fn typed_hot_text_commits() {
         let range = (0.0, 1e9);
-        for shown in ["-50.0", " -50.0 ", "-50.0px", "-50,0", "-50", "-50.00", "-5e1"] {
-            assert_eq!(typed_value(shown, "px", -50.0, 1, range, false), None, "{shown:?}");
-        }
-        assert_eq!(typed_value("-50.0%", "%", -50.0, 1, range, false), None);
-        assert_eq!(typed_value("-50.0", "", -50.0, 1, range, true), Some(0.0), "an explicit equal value commits");
-        assert_eq!(typed_value("-20", "", -50.0, 1, range, true), Some(0.0), "an edit clamps");
-        assert_eq!(typed_value("40", "", -50.0, 1, range, true), Some(40.0));
-        assert_eq!(typed_value("x", "", -50.0, 1, range, true), None);
+        assert_eq!(typed_value("-50.0px", "px", range), Some(0.0));
+        assert_eq!(typed_value("4,5%", "%", range), Some(4.5));
+        assert_eq!(typed_value("40", "", range), Some(40.0));
+        assert_eq!(typed_value("x", "", range), None);
     }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.

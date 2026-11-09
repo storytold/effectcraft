@@ -476,7 +476,12 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
         ControlType::Slider | ControlType::Media => {
             let mut x = v.as_f64();
             let r = match p.ui {
-                ParamUi::Slider { slider_min, slider_max, .. } => ui.add(egui::Slider::new(&mut x, slider_min..=slider_max).max_decimals(2)),
+                // Typing may go past the slider range, up to the property's hard range.
+                ParamUi::Slider { min, max, slider_min, slider_max, .. } => {
+                    let r = ui.add(egui::Slider::new(&mut x, slider_min..=slider_max).clamping(egui::SliderClamping::Never).max_decimals(2));
+                    x = x.clamp(min, max);
+                    r
+                }
                 _ => ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut x).speed(0.5).max_decimals(2))),
             };
             if r.changed() {
