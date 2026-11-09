@@ -920,11 +920,11 @@ const JAPANESE: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "エクスプレッションはJavaScriptエンジンを使用します。スクリプトのエラーはファイルと行をスクリプトコンソールに報告します。ステップ実行デバッガーはありません。",
     ),
-    ("Rotoscope Brush", "ロトスコープブラシ"),
+    ("Roto Brush", "ロトブラシ"),
     ("Segmentation Model", "セグメンテーションモデル"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
-        "ロトスコープブラシ2.0と3.0はここで選んだモデルを使用します（バージョン1.0は常に従来のエンジンを使用します）。モデルはオープンソースで、要求したときだけダウンロードされ、公開されているSHA-256と照合されます。",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "ロトブラシ2.0と3.0はここで選んだモデルを使用します（バージョン1.0は常に従来のエンジンを使用します）。モデルはオープンソースで、要求したときだけダウンロードされ、公開されているSHA-256と照合されます。",
     ),
     ("Face Tracking", "フェイストラッキング"),
     ("Face Model", "フェイスモデル"),
@@ -961,7 +961,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Brush Tool", "ブラシツール"),
     ("Clone Stamp Tool", "コピースタンプツール"),
     ("Eraser Tool", "消しゴムツール"),
-    ("Rotoscope Brush Tool", "ロトスコープブラシツール"),
+    ("Roto Brush Tool", "ロトブラシツール"),
     ("Refine Edge Tool", "エッジを調整ツール"),
     ("Object Matte Tool", "オブジェクトマットツール"),
     ("Puppet Position Pin Tool", "パペット位置ピンツール"),
@@ -1173,7 +1173,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("X only", "Xのみ"),
     ("Y only", "Yのみ"),
     ("Track Camera", "カメラをトラッキング"),
-    ("Motion Stabilizer", "モーションスタビライザー"),
+    ("Warp Stabilizer", "ワープスタビライザー"),
     ("Track Motion", "モーションをトラッキング"),
     ("Stabilize Motion", "モーションを安定化"),
     ("Motion Source:", "モーションソース:"),
@@ -2052,10 +2052,10 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "表达式使用 JavaScript 引擎。脚本错误会在脚本控制台中报告其文件和行号；没有单步调试器。",
     ),
-    ("Rotoscope Brush", "转描画笔"),
+    ("Roto Brush", "Roto 笔刷"),
     ("Segmentation Model", "分割模型"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
         "Roto 笔刷 2.0 和 3.0 使用此处选择的模型（1.0 版始终使用经典引擎）。模型均为开源，仅在你请求时下载，并会根据其公布的 SHA-256 进行校验。",
     ),
     ("Face Tracking", "面部跟踪"),
@@ -2093,7 +2093,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Brush Tool", "画笔工具"),
     ("Clone Stamp Tool", "仿制图章工具"),
     ("Eraser Tool", "橡皮擦工具"),
-    ("Rotoscope Brush Tool", "Roto 笔刷工具"),
+    ("Roto Brush Tool", "Roto 笔刷工具"),
     ("Refine Edge Tool", "调整边缘工具"),
     ("Object Matte Tool", "对象遮罩工具"),
     ("Puppet Position Pin Tool", "人偶位置控点工具"),
@@ -2322,7 +2322,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("X only", "仅 X"),
     ("Y only", "仅 Y"),
     ("Track Camera", "跟踪摄像机"),
-    ("Motion Stabilizer", "运动稳定器"),
+    ("Warp Stabilizer", "变形稳定器"),
     ("Track Motion", "跟踪运动"),
     ("Stabilize Motion", "稳定运动"),
     ("Motion Source:", "运动源:"),
@@ -3164,10 +3164,10 @@ const SWEDISH: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "Uttryck använder JavaScript-motorn. Skriptfel rapporterar fil och rad i skriptkonsolen; det finns ingen stegvis felsökare.",
     ),
-    ("Rotoscope Brush", "Rotoskopipensel"),
+    ("Roto Brush", "Rotopensel"),
     ("Segmentation Model", "Segmenteringsmodell"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
         "Rotopensel 2.0 och 3.0 använder modellen som väljs här (version 1.0 använder alltid den klassiska motorn). Modellerna är öppen källkod, laddas bara ned när du ber om det och kontrolleras mot sin publicerade SHA-256.",
     ),
     ("Face Tracking", "Ansiktsspårning"),
@@ -3249,7 +3249,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Brush Tool", "Penselverktyg"),
     ("Clone Stamp Tool", "Klonstämpelverktyg"),
     ("Eraser Tool", "Suddgummiverktyg"),
-    ("Rotoscope Brush Tool", "Rotopenselverktyg"),
+    ("Roto Brush Tool", "Rotopenselverktyg"),
     ("Refine Edge Tool", "Verktyg för kantförfining"),
     ("Object Matte Tool", "Objektmatteverktyg"),
     ("Puppet Position Pin Tool", "Verktyg för positionsnål (docka)"),
@@ -3481,7 +3481,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("X only", "Endast X"),
     ("Y only", "Endast Y"),
     ("Track Camera", "Spåra kamera"),
-    ("Motion Stabilizer", "Rörelsestabilisering"),
+    ("Warp Stabilizer", "Warp Stabilizer"),
     ("Track Motion", "Spåra rörelse"),
     ("Stabilize Motion", "Stabilisera rörelse"),
     ("Motion Source:", "Rörelsekälla:"),
@@ -4381,10 +4381,10 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "運算式使用 JavaScript 引擎。指令碼錯誤會在指令碼主控台中回報其檔案和行號；沒有逐步除錯器。",
     ),
-    ("Rotoscope Brush", "轉描筆刷"),
+    ("Roto Brush", "Roto 筆刷"),
     ("Segmentation Model", "分割模型"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
         "Roto 筆刷 2.0 和 3.0 使用此處選擇的模型（1.0 版一律使用經典引擎）。模型皆為開放原始碼，僅在你要求時下載，並會依其公布的 SHA-256 進行驗證。",
     ),
     ("Face Tracking", "臉部追蹤"),
@@ -4422,7 +4422,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Brush Tool", "筆刷工具"),
     ("Clone Stamp Tool", "仿製圖章工具"),
     ("Eraser Tool", "橡皮擦工具"),
-    ("Rotoscope Brush Tool", "Roto 筆刷工具"),
+    ("Roto Brush Tool", "Roto 筆刷工具"),
     ("Refine Edge Tool", "調整邊緣工具"),
     ("Object Matte Tool", "物件遮色片工具"),
     ("Puppet Position Pin Tool", "人偶位置控點工具"),
@@ -4651,7 +4651,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("X only", "僅 X"),
     ("Y only", "僅 Y"),
     ("Track Camera", "追蹤攝影機"),
-    ("Motion Stabilizer", "動態穩定器"),
+    ("Warp Stabilizer", "彎曲穩定器"),
     ("Track Motion", "追蹤運動"),
     ("Stabilize Motion", "穩定運動"),
     ("Motion Source:", "運動來源:"),
@@ -5355,8 +5355,6 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Per Layer", "На шар"),
     ("Video Scopes", "Відеоскопи"),
     ("GPU Acceleration (no GPU: software)", "Прискорення GPU (без GPU: програмне)"),
-    ("Motion Stabilizer", "Стабілізатор руху"),
-    ("Rotoscope Brush", "Пензель ротоскопії"),
 ];
 
 // Brazilian Portuguese.
@@ -5925,8 +5923,8 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Reset Keyboard Shortcuts", "Redefinir atalhos de teclado"),
     ("Reset Settings", "Redefinir configurações"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
-        "Pincel de rotoscopia 2.0 e 3.0 usam o modelo escolhido aqui (a versão 1.0 sempre usa o mecanismo clássico). Os modelos são de código aberto, baixados somente quando você solicita, e verificados com o SHA-256 publicado.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 e 3.0 usam o modelo escolhido aqui (a versão 1.0 sempre usa o mecanismo clássico). Os modelos são de código aberto, baixados somente quando você solicita, e verificados com o SHA-256 publicado.",
     ),
     ("Safe Margins", "Margens de segurança"),
     ("Save Every", "Salvar a cada"),
@@ -6105,7 +6103,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Project", "Projeto"),
     ("RGB", "RGB"),
     ("Right", "Direita"),
-    ("Rotoscope Brush", "Pincel de rotoscopia"),
+    ("Roto Brush", "Roto Brush"),
     ("Seconds", "Segundos"),
     ("Stop", "Parar"),
     ("Style", "Estilo"),
@@ -6122,7 +6120,6 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("files", "arquivos"),
     ("Video Scopes", "Escopos de vídeo"),
     ("GPU Acceleration (no GPU: software)", "Aceleração de GPU (sem GPU: software)"),
-    ("Motion Stabilizer", "Estabilizador de movimento"),
 ];
 
 /// Polish (pl): original translations covering every row in the Chinese panel catalogs.
@@ -6853,10 +6850,10 @@ const POLISH: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "Wyrażenia używają silnika JavaScript. Błędy skryptów podają plik i wiersz w konsoli skryptów; nie ma debugera krokowego.",
     ),
-    ("Rotoscope Brush", "Pędzel rotoskopii"),
+    ("Roto Brush", "Pędzel Roto"),
     ("Segmentation Model", "Model segmentacji"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
         "Pędzel Roto 2.0 i 3.0 używa wybranego tu modelu (wersja 1.0 zawsze używa klasycznego silnika). Modele są open source, pobierane tylko na Twoje żądanie i sprawdzane z opublikowanym SHA-256.",
     ),
     ("Face Tracking", "Śledzenie twarzy"),
@@ -6882,7 +6879,6 @@ const POLISH: &[(&str, &str)] = &[
     ("Layer Styles", "Style warstwy"),
     ("Video Scopes", "Wskaźniki wideo"),
     ("GPU Acceleration (no GPU: software)", "Akceleracja GPU (bez GPU: programowa)"),
-    ("Motion Stabilizer", "Stabilizator ruchu"),
 ];
 
 /// Czech (cs): original translations covering every row in the Chinese panel catalogs.
@@ -7449,8 +7445,6 @@ const CZECH: &[(&str, &str)] = &[
     ("Per Layer", "Na vrstvu"),
     ("Video Scopes", "Videoskopy"),
     ("GPU Acceleration (no GPU: software)", "Akcelerace GPU (bez GPU: software)"),
-    ("Motion Stabilizer", "Stabilizátor pohybu"),
-    ("Rotoscope Brush", "Rotoskopický štětec"),
 ];
 
 /// Spanish: neutral, tú, sentence case; the same source strings as the Chinese catalogs, in the same
@@ -8023,8 +8017,6 @@ const SPANISH: &[(&str, &str)] = &[
     ("Project", "Proyecto"),
     ("Video Scopes", "Monitores de vídeo"),
     ("GPU Acceleration (no GPU: software)", "Aceleración por GPU (sin GPU: software)"),
-    ("Motion Stabilizer", "Estabilizador de movimiento"),
-    ("Rotoscope Brush", "Pincel de rotoscopia"),
 ];
 
 /// Georgian (ka): every row of the Chinese catalogs, in the same order (the tests keep them in step).
@@ -8766,10 +8758,10 @@ const GEORGIAN: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "ექსპრესიები JavaScript-ის ძრავას იყენებს. სკრიპტის შეცდომები ფაილსა და სტრიქონს სკრიპტის კონსოლში აჩვენებს; ნაბიჯ-ნაბიჯ გამმართველი არ არის.",
     ),
-    ("Rotoscope Brush", "როტოსკოპიის ფუნჯი"),
+    ("Roto Brush", "როტო-ფუნჯი"),
     ("Segmentation Model", "სეგმენტაციის მოდელი"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
         "როტო-ფუნჯი 2.0 და 3.0 აქ არჩეულ მოდელს იყენებს (ვერსია 1.0 ყოველთვის კლასიკურ ძრავას იყენებს). მოდელები ღია კოდისაა, ჩამოიტვირთება მხოლოდ თქვენი მოთხოვნით და მოწმდება გამოქვეყნებული SHA-256-ით.",
     ),
     ("Face Tracking", "სახის ტრეკინგი"),
@@ -8785,7 +8777,6 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Per Layer", "შრიდან შრემდე"),
     ("Track", "ტრეკინგი"),
     ("Video Scopes", "ვიდეოსკოპები"),
-    ("Motion Stabilizer", "მოძრაობის სტაბილიზატორი"),
 ];
 
 /// Georgian rows for interface text no other catalog has yet: strings the panels already send
@@ -9750,11 +9741,11 @@ const FRENCH: &[(&str, &str)] = &[
         "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
         "Les expressions utilisent le moteur JavaScript. Les erreurs de script indiquent leur fichier et leur ligne dans la console de scripts ; il n’existe pas de débogueur pas à pas.",
     ),
-    ("Rotoscope Brush", "Pinceau de rotoscopie"),
+    ("Roto Brush", "Roto Brush"),
     ("Segmentation Model", "Modèle de segmentation"),
     (
-        "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
-        "Pinceau de rotoscopie 2.0 et 3.0 utilisent le modèle choisi ici (la version 1.0 utilise toujours le moteur classique). Les modèles sont open source, ne sont téléchargés que sur votre demande et sont vérifiés d’après leur empreinte SHA-256 publiée.",
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "Roto Brush 2.0 et 3.0 utilisent le modèle choisi ici (la version 1.0 utilise toujours le moteur classique). Les modèles sont open source, ne sont téléchargés que sur votre demande et sont vérifiés d’après leur empreinte SHA-256 publiée.",
     ),
     ("Face Tracking", "Suivi du visage"),
     ("Face Model", "Modèle de visage"),
@@ -9996,7 +9987,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Brush Tool", "Outil Pinceau"),
     ("Clone Stamp Tool", "Outil Tampon de duplication"),
     ("Eraser Tool", "Outil Gomme"),
-    ("Rotoscope Brush Tool", "Outil Pinceau de rotoscopie"),
+    ("Roto Brush Tool", "Outil Pinceau de rotoscopie"),
     ("Refine Edge Tool", "Outil Affinage des contours"),
     ("Object Matte Tool", "Outil Estampe d’objet"),
     ("Puppet Position Pin Tool", "Outil Épingle de position de marionnette"),
@@ -10122,7 +10113,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("X only", "X uniquement"),
     ("Y only", "Y uniquement"),
     ("Track Camera", "Suivi de caméra"),
-    ("Motion Stabilizer", "Stabilisateur de mouvement"),
+    ("Warp Stabilizer", "Stabilisateur de déformation"),
     ("Track Motion", "Suivi du mouvement"),
     ("Stabilize Motion", "Stabiliser le mouvement"),
     ("Motion Source:", "Source du mouvement :"),
@@ -10297,13 +10288,11 @@ mod tests {
     fn renamed_panel_labels_do_not_reintroduce_vendor_names() {
         for language in ["en", "ja", "zh-hans", "zh-hant", "fr", "sv", "ka", "cs", "de", "es", "pl", "pt-br", "ru", "uk"] {
             set_current(language);
-            for source in
-                ["GPU Acceleration ({})", "GPU Acceleration (no GPU: software)", "Software Rendering", "Video Scopes", "Motion Stabilizer", "Rotoscope Brush"]
-            {
+            for source in ["GPU Acceleration ({})", "GPU Acceleration (no GPU: software)", "Software Rendering", "Video Scopes"] {
                 let rendered = tr(source);
                 assert!(!rendered.is_empty(), "{language}: {source}");
                 let label = rendered.to_lowercase();
-                for mark in ["lumetri", "mercury", "mocha", "keylight", "warp stabilizer", "roto brush"] {
+                for mark in ["lumetri", "mercury", "mocha", "keylight"] {
                     assert!(!label.contains(mark), "{language}: {source} -> {rendered}");
                 }
             }

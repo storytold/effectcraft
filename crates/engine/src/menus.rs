@@ -1127,7 +1127,7 @@ Animation
   Add Property to Essential Graphics | essential.addProperty
   Separate Dimensions | prop.separateDimensions
   Track Camera | track.camera
-  Motion Stabilizer | track.warpStabilizer
+  Warp Stabilizer VFX | track.warpStabilizer
   Track Motion | track.motion
   Stabilize Motion | track.stabilize
   Track Mask | track.mask

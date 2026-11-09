@@ -145,7 +145,6 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Magnify | `ec.distort.magnify` | 10 | GPU | 32 | Implemented |
 | Mesh Warp | `ec.distort.meshwarp` | 3 | GPU | 32 | Implemented |
 | Mirror | `ec.distort.mirror` | 2 | GPU | 32 | Implemented |
-| Motion Stabilizer | `ec.distort.warpstabilizer` | 20 |  | 32 | Implemented |
 | Offset | `ec.distort.offset` | 2 | GPU | 32 | Implemented |
 | Optics Compensation | `ec.distort.opticscompensation` | 6 | GPU | 32 | Implemented |
 | Organic Displacement | `ec.distort.ccblobbylize` | 15 | GPU | 32 | Implemented |
@@ -169,6 +168,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Twirl (Legacy) | `ec.distort.twirllegacy` | 3 | GPU | 32 | Implemented |
 | Two-Point Bend | `ec.distort.ccbendit` | 4 | GPU | 32 | Implemented |
 | Warp | `ec.distort.warp` | 5 | GPU | 32 | Implemented |
+| Warp Stabilizer | `ec.distort.warpstabilizer` | 20 |  | 32 | Implemented |
 | Wave Warp | `ec.distort.wavewarp` | 7 | GPU | 32 | Implemented |
 
 ## Expression Controls
@@ -258,7 +258,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Object Matte | `ec.matte.objectmatte` | 13 |  | 32 | Implemented |
 | Refine Hard Matte | `ec.matte.refinehard` | 16 | GPU | 32 | Implemented |
 | Refine Soft Matte | `ec.matte.refinesoft` | 18 | GPU | 32 | Implemented |
-| Rotoscope & Refine Edge | `ec.matte.rotobrush` | 25 |  | 32 | Implemented |
+| Roto Brush & Refine Edge | `ec.matte.rotobrush` | 25 |  | 32 | Implemented |
 | Simple Choker | `ec.matte.simplechoker` | 2 | GPU | 32 | Implemented |
 | Tracked Shape Matte | `ec.obsolete.mochashape` | 6 |  | 32 | Implemented |
 

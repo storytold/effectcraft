@@ -1,10 +1,10 @@
-# Rotoscope Brush with SAM 2
+# Roto Brush with SAM 2
 
-Rotoscope Brush can follow an object through a clip with Meta's **SAM 2.1 Tiny** (Hiera-Tiny, 39M parameters,
+Roto Brush can follow an object through a clip with Meta's **SAM 2.1 Tiny** (Hiera-Tiny, 39M parameters,
 Apache-2.0). It is optional: nothing changes until you install the model and choose it.
 
 ## Using it
-1. Settings ▸ Rotoscope Brush ▸ SAM 2.1 Tiny ▸ **Install from File…** with the published `model.safetensors`
+1. Settings ▸ Roto Brush ▸ SAM 2.1 Tiny ▸ **Install from File…** with the published `model.safetensors`
    (155.9 MB). The file's size and SHA-256 are checked and the licence notice is kept next to it.
    Agents: `roto.model.install {id: "sam2.1-hiera-tiny", path: "model.safetensors"}`.
    SAM 2 has no in-app download until the weights are mirrored under storytold control.
@@ -15,7 +15,7 @@ Apache-2.0). It is optional: nothing changes until you install the model and cho
 3. Paint strokes on the base frame as usual, then **Propagate**. One tracking pass follows the object through the
    whole span in both directions, using SAM 2's streaming memory, so it keeps tracking through occlusion and when the
    object leaves the frame and returns. Each frame's probability map is then refined by the same graph cut as every other
-   Rotoscope Brush frame: your strokes stay hard constraints and edges snap to colour.
+   Roto Brush frame: your strokes stay hard constraints and edges snap to colour.
 4. `roto.status {frame}` reports `source` (`tracker`, `model` for a frame the model segmented on its own, or
    `classical`) and, for tracked frames, `tracker.frames[f]`: `confidence` (0–1, the model's object score times its
    predicted mask quality) and `occluded` (the object is not in the frame: an empty matte). `model` says what Settings
@@ -26,7 +26,7 @@ With SAM 2 chosen but not installed, or failing to load, Propagate refuses with 
 propagation can fall back to classic; its warning is live progress only, as described under [Memory and limits](#memory-and-limits).
 While it is still loading, `wait: true` (agents) loads it first; without `wait` it
 refuses, and the load goes on in the background. Deselecting SAM 2 (choosing Classic) runs Propagate exactly as before,
-and Rotoscope Brush 1.0 never uses a model.
+and Roto Brush 1.0 never uses a model.
 
 Tracked frames are saved in the project with the instance, as Freeze's are, so a saved project renders the same when it
 reopens, in the app or with `effectcraft-cli`, without the model being loaded or chosen there. They apply while the
@@ -36,7 +36,7 @@ model tag and per-object cache keys when rendered or re-saved; the next Propagat
 model (or classic engine). Object Matte saves nothing.
 
 ## Several objects in one instance
-A Rotoscope Brush instance can hold several objects. The **Object N** button in the Layer panel's bar picks the object new
+A Roto Brush instance can hold several objects. The **Object N** button in the Layer panel's bar picks the object new
 strokes belong to (it cycles through the objects that have strokes), and **+** starts a new one. Agents: `roto.options
 {object}` sets the current object, `roto.stroke` takes `object` (0–31; default the current one), `roto.clearStrokes`
 takes `object` to remove one object's strokes, and `roto.status` lists `objects` (`{id, strokes}`) and `currentObject`.
@@ -51,17 +51,17 @@ unchanged (strokes without an object are object 0, and nothing is written for ob
 
 **Seeing and choosing objects.** The Layer panel's boundary view outlines each object in its own colour (object 1 in the
 chosen boundary colour, the others from a palette), and the picker button carries the current object's colour. **Show
-Object** (Rotoscope Brush Matte, a slider: 0 shows all objects together, N shows object N alone) limits the instance's matte to
+Object** (Roto Brush Matte, a slider: 0 shows all objects together, N shows object N alone) limits the instance's matte to
 one object, so an effect after it can treat the pieces separately; an object the instance does not have shows nothing, and
 with one object, or on frames the classic engine made, the setting changes nothing. Each object's matte is kept next to
 the united one, in the session and in the saved tracking (`tracked` stores them only when there are several objects), so
 Show Object renders the same after the project is reopened. Freeze records the Show Object that was set.
 
-This is not several Rotoscope Brush instances sharing a pass: each instance reads the layer after the effects above it, so
+This is not several Roto Brush instances sharing a pass: each instance reads the layer after the effects above it, so
 instances can see different pixels. Objects inside one instance always see the same ones.
 
 ## Sizes
-Four checkpoints are in the registry (Settings ▸ Rotoscope Brush); the size is detected from the file, and each is
+Four checkpoints are in the registry (Settings ▸ Roto Brush); the size is detected from the file, and each is
 pinned to a Hugging Face commit with its SHA-256. All run the same tracker; a bigger backbone costs time and memory.
 
 | Model | File size | GPU encode (RX 7900 GRE) | Agreement with PyTorch |

@@ -28,7 +28,7 @@
 //!     (--gpu: CPU vs GPU ms/frame for every comp at Full and Half)
 //! effectcraft-cli bench --ops [--small] [--layers N] [--comps N] [--footage N]   everyday-operation timings
 //!     on a large generated project (open, save, auto-save, undo/redo, timeline, Project panel)
-//! effectcraft-cli bench --roto [--frames N] [--sam2 model.safetensors] [--mobilesam mobile_sam.pt] [--fixes] [--clip FRAMES --truth MASKS] [--json]   Rotoscope Brush trackers on synthetic clips with known mattes
+//! effectcraft-cli bench --roto [--frames N] [--sam2 model.safetensors] [--mobilesam mobile_sam.pt] [--fixes] [--clip FRAMES --truth MASKS] [--json]   Roto Brush trackers on synthetic clips with known mattes
 //!     (classical engine, MobileSAM and SAM 2.1 (any installed size) when installed; IoU, flicker, re-appearance, seconds per frame)
 //! effectcraft-cli script FILE.jsx [F.ecproj] | --eval CODE    run an After Effects-style script
 //! effectcraft-cli mcp [--autosave | --bridge PORT]            MCP server on stdio
@@ -133,7 +133,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            everyday operations on a large generated project: startup, open,
                                            save, auto-save, edits + undo/redo, timeline, Project panel
   bench --roto [--frames N] [--sam2 FILE] [--mobilesam FILE] [--fixes] [--clip FRAMES_DIR --truth MASKS_DIR] [--json]
-                                           Rotoscope Brush trackers on synthetic clips with known mattes: movement,
+                                           Roto Brush trackers on synthetic clips with known mattes: movement,
                                            lighting change, occlusion, leaving and re-entering the frame
   script FILE.jsx [F.ecproj] | --eval CODE run JavaScript with the After Effects-style object model
                                            (app.project, comps, layers, properties…); prints writeLn
@@ -1044,7 +1044,7 @@ fn bench_weights<T>(
     }
 }
 
-/// `bench --roto`: the Rotoscope Brush's trackers on synthetic clips whose true mattes are known.
+/// `bench --roto`: the Roto Brush's trackers on synthetic clips whose true mattes are known.
 fn bench_roto(args: &Args) -> Result<(), Failure> {
     use effectcraft_segment::{Loaded, MOBILE_SAM, MaskModel};
     use effectcraft_track::roto::bench;

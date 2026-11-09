@@ -1,10 +1,10 @@
-//! Rotoscope & Refine Edge commands: strokes (the Rotoscope Brush and Refine Edge tools in the Layer
+//! Roto Brush & Refine Edge commands: strokes (the Roto Brush and Refine Edge tools in the Layer
 //! panel), propagation, the segmentation span, Freeze / Unfreeze, tool options and status.
 //!
 //! `objectMatte.apply` adds an Object Matte effect (Effect ▸ Matte) from a point / box prompt on
-//! a frame; it segments with the same engine and model as Rotoscope Brush.
+//! a frame; it segments with the same engine and model as Roto Brush.
 //!
-//! `roto.stroke` records a stroke into the layer's Rotoscope & Refine Edge effect (applying the
+//! `roto.stroke` records a stroke into the layer's Roto Brush & Refine Edge effect (applying the
 //! effect on the first stroke, as After Effects does); the first foreground stroke sets the base
 //! frame and a span of 20 frames each side. Strokes on a frozen effect are refused (Unfreeze
 //! first). Every edit is one undo step.
@@ -24,7 +24,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
             "roto.stroke",
-            "Rotoscope Brush Stroke",
+            "Roto Brush Stroke",
             [],
             None,
             "{layer?, kind?: fg|bg|refine|refineErase, points: [[x, y], …] (layer pixels), frame? (layer frame; default current), radius? (layer px; default the tool's diameter / 2), effect?, object? (0–31; default the current object: with a tracker each object is followed on its own and the mattes are united)}",
@@ -33,7 +33,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!(
             "roto.propagate",
-            "Propagate Rotoscope Brush",
+            "Propagate Roto Brush",
             [],
             None,
             "{layer?, effect?, direction?: forward|backward|both, to? (layer frame: extend the span), wait?: block until done}",
@@ -45,17 +45,17 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("roto.unfreeze", "Unfreeze", [], None, "{layer?, effect?}", has_comp, unfreeze),
         cmd!(
             "roto.clearStrokes",
-            "Remove Rotoscope Brush Strokes",
+            "Remove Roto Brush Strokes",
             [],
             None,
             "{layer?, effect?, frame? (only this layer frame), kind?, object? (only this object's strokes)}",
             has_comp,
             clear_strokes
         ),
-        cmd!("roto.cancel", "Stop Rotoscope Brush", [], None, "{}", is_running, |s, _| Ok(json!({"stopped": s.stop_roto()}))),
+        cmd!("roto.cancel", "Stop Roto Brush", [], None, "{}", is_running, |s, _| Ok(json!({"stopped": s.stop_roto()}))),
         cmd!(
             "roto.options",
-            "Rotoscope Brush Options",
+            "Roto Brush Options",
             [],
             None,
             "{diameter?, refineDiameter?, view?: alphaBoundary|alpha|alphaOverlay|none, overlayColor?: [r,g,b], overlayOpacity?, boundaryColor?: [r,g,b], autoPropagate?, object? (the object new strokes belong to, 0–31)}",
@@ -76,7 +76,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Track Object Matte",
             [],
             None,
-            "{layer?, effect?, direction?: forward|backward|both, wait?: block until done} (a background job like Rotoscope Brush propagation; roto.cancel stops it)",
+            "{layer?, effect?, direction?: forward|backward|both, wait?: block until done} (a background job like Roto Brush propagation; roto.cancel stops it)",
             has_comp,
             object_matte_propagate
         ),
@@ -90,7 +90,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         query!(
             "roto.status",
-            "Rotoscope Brush Status",
+            "Roto Brush Status",
             "{layer?, effect?, frame? (layer frame: also report its matte), matte?: include the matte (RLE, base64), compute?: compute the frame if needed, compareTo?: RLE matte to report the IoU against}",
             status
         ),
@@ -98,13 +98,13 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 fn is_running(s: &Session) -> std::result::Result<(), String> {
-    if s.is_roto_running() { Ok(()) } else { Err("no Rotoscope Brush job is running".into()) }
+    if s.is_roto_running() { Ok(()) } else { Err("no Roto Brush job is running".into()) }
 }
 
-/// The Rotoscope Brush instance targeted by `p`: `layer` / `effect` (uid, name or 1-based index),
+/// The Roto Brush instance targeted by `p`: `layer` / `effect` (uid, name or 1-based index),
 /// else a selected one, else the first on the selected (or any) layer.
 pub(crate) fn roto_p(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
-    instance_lookup(s, p, cmd, is_roto)?.ok_or_else(|| bad(cmd, "no Rotoscope & Refine Edge effect found (paint a stroke with the Rotoscope Brush tool first)"))
+    instance_lookup(s, p, cmd, is_roto)?.ok_or_else(|| bad(cmd, "no Roto Brush & Refine Edge effect found (paint a stroke with the Roto Brush tool first)"))
 }
 
 /// The Object Matte instance targeted by `p` (as [`roto_p`]).
@@ -218,7 +218,7 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or_else(|| bad(cmd, "no layer"))?;
     if !layer.has_video() || layer.switches.adjustment || layer.effects().is_none() {
-        return Err(bad(cmd, "the Rotoscope Brush works on footage, solid and composition layers"));
+        return Err(bad(cmd, "the Roto Brush works on footage, solid and composition layers"));
     }
     let frame = frame_p(s, p, cid, layer);
     let limits = rt::frame_limits(comp, layer);
@@ -234,15 +234,15 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(uid) = existing {
         let (_, g) = group(s, cid, lid, uid)?;
         if frozen_of(g) {
-            return Err(bad(cmd, "the Rotoscope Brush is frozen: Unfreeze it to edit strokes"));
+            return Err(bad(cmd, "the Roto Brush is frozen: Unfreeze it to edit strokes"));
         }
     }
     if existing.is_none() && !kind.is_segmentation() {
-        return Err(bad(cmd, "draw a foreground stroke with the Rotoscope Brush tool first"));
+        return Err(bad(cmd, "draw a foreground stroke with the Roto Brush tool first"));
     }
     let object = f_p(p, "object").map_or(s.state.roto.object, |v| v.clamp(0.0, rt::MAX_OBJECT_ID as f64).round() as u32);
     let st = Stroke { kind, frame, radius, points, object };
-    let label = if kind.is_segmentation() { "Rotoscope Brush Stroke" } else { "Refine Edge Stroke" };
+    let label = if kind.is_segmentation() { "Roto Brush Stroke" } else { "Refine Edge Stroke" };
     let (uid, d) = s.edit(label, None, |proj, _| {
         let mut next = proj.next_id;
         let l = layer_mut(proj, cid, lid)?;
@@ -250,7 +250,7 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
         let uid = match existing {
             Some(u) => u,
             None => {
-                let spec = effectcraft_effects::find(fx::ID).ok_or_else(|| EngineError::Other("Rotoscope Brush effect missing".into()))?;
+                let spec = effectcraft_effects::find(fx::ID).ok_or_else(|| EngineError::Other("Roto Brush effect missing".into()))?;
                 let n = fxg.groups().filter(|g| is_roto(g)).count();
                 let name = if n == 0 { spec.name.to_string() } else { format!("{} {}", spec.name, n + 1) };
                 let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), &name, size);
@@ -296,7 +296,7 @@ fn propagate(s: &mut Session, p: &Value) -> Result<Value> {
         d.span[1] = d.span[1].max(to);
         if d.span != before {
             if frozen_of(g) {
-                return Err(bad(cmd, "the Rotoscope Brush is frozen: Unfreeze it to change the span"));
+                return Err(bad(cmd, "the Roto Brush is frozen: Unfreeze it to change the span"));
             }
             write_data(s, "Extend Segmentation Span", cid, lid, uid, &d)?;
         }
@@ -315,7 +315,7 @@ fn span(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = roto_p(s, p, cmd)?;
     let (l, g) = group(s, cid, lid, uid)?;
     if frozen_of(g) {
-        return Err(bad(cmd, "the Rotoscope Brush is frozen: Unfreeze it to change the span"));
+        return Err(bad(cmd, "the Roto Brush is frozen: Unfreeze it to change the span"));
     }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let [lo, hi] = rt::frame_limits(comp, l);
@@ -370,7 +370,7 @@ fn clear_strokes(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = roto_p(s, p, cmd)?;
     let (_, g) = group(s, cid, lid, uid)?;
     if frozen_of(g) {
-        return Err(bad(cmd, "the Rotoscope Brush is frozen: Unfreeze it to edit strokes"));
+        return Err(bad(cmd, "the Roto Brush is frozen: Unfreeze it to edit strokes"));
     }
     let mut d = data_of(g);
     let frame = f_p(p, "frame").map(|f| f.round() as i64);
@@ -400,7 +400,7 @@ fn clear_strokes(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let removed = n0 - d.strokes.len();
     if removed > 0 {
-        write_data(s, "Remove Rotoscope Brush Strokes", cid, lid, uid, &d)?;
+        write_data(s, "Remove Roto Brush Strokes", cid, lid, uid, &d)?;
     }
     Ok(json!({"layer": lid.0, "effect": uid, "removed": removed, "strokes": d.strokes.len(), "base": d.base}))
 }

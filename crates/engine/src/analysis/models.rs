@@ -1,9 +1,9 @@
-//! Trained models (Settings ▸ Rotoscope Brush and Settings ▸ Face Tracking; `roto.model*` and
+//! Trained models (Settings ▸ Roto Brush and Settings ▸ Face Tracking; `roto.model*` and
 //! `face.model*` commands): which models the registry offers (`effectcraft_segment::MODELS`, all
 //! open source), which are installed (in the `models` folder), installing one from a file or
 //! downloading the official weights (verified against the registry's SHA-256 either way, and kept
 //! with a notice naming their authors and licence), choosing one per task, and loading it in the
-//! background: into the Rotoscope Brush effect (`effects::roto::set_model`) or the face tracker
+//! background: into the Roto Brush effect (`effects::roto::set_model`) or the face tracker
 //! ([`Models::face`]).
 //!
 //! Weights are never bundled: the install stays small and nothing is fetched unless asked for.
@@ -85,7 +85,7 @@ impl Models {
 
 type FaceSlot = Arc<Mutex<Option<Arc<dyn FaceModel>>>>;
 
-/// Put a loaded model to use (or drop `task`'s): Rotoscope Brush's lives in the effect, the face
+/// Put a loaded model to use (or drop `task`'s): Roto Brush's lives in the effect, the face
 /// tracker's in `face`.
 fn activate(lane: &Arc<Mutex<Status>>, face: &FaceSlot, task: Task, model: Option<Loaded>) {
     let id = model.as_ref().map(|m| match m {
@@ -148,7 +148,7 @@ struct Kind {
 
 const ROTO: Kind = Kind {
     prefix: "roto",
-    label: "Rotoscope Brush",
+    label: "Roto Brush",
     classic_name: "Classic (graph cut)",
     classic_description: "Built in: colour models and graph cuts, propagated by optical flow. Always available.",
 };
@@ -167,10 +167,10 @@ fn kind(task: Task) -> &'static Kind {
     }
 }
 
-/// How long a Rotoscope Brush model may sit unused before its memory is freed.
+/// How long a Roto Brush model may sit unused before its memory is freed.
 const ROTO_MODEL_IDLE: Duration = Duration::from_secs(600);
 
-/// How long a job that needs the Rotoscope Brush model waits for it to load (or download) before it
+/// How long a job that needs the Roto Brush model waits for it to load (or download) before it
 /// gives up. A worker that never reports back must not hang the command.
 const ROTO_MODEL_WAIT: Duration = Duration::from_secs(600);
 
@@ -253,7 +253,7 @@ impl Session {
         });
     }
 
-    /// The Rotoscope Brush model in use (`None`: the classic engine).
+    /// The Roto Brush model in use (`None`: the classic engine).
     pub fn models_roto_active(&self) -> Option<String> {
         self.models.status(Task::Mask).active
     }
@@ -301,19 +301,19 @@ impl Session {
         }
     }
 
-    /// The Rotoscope Brush model Settings chose, when it is one (not the classic engine).
+    /// The Roto Brush model Settings chose, when it is one (not the classic engine).
     fn roto_model_info(&self) -> Option<&'static ModelInfo> {
         seg::info(self.chosen_model(Task::Mask)).filter(|m| m.task == Task::Mask)
     }
 
-    /// Whether the chosen Rotoscope Brush model is still loading or downloading.
+    /// Whether the chosen Roto Brush model is still loading or downloading.
     pub fn roto_model_loading(&self) -> bool {
         let status = self.models.status(Task::Mask);
         let chosen = self.chosen_model(Task::Mask);
         status.active.as_deref() != Some(chosen) && status.busy.is_some() && status.busy_model == Some(chosen)
     }
 
-    /// The Rotoscope Brush model Settings chose and its state (`roto.status`).
+    /// The Roto Brush model Settings chose and its state (`roto.status`).
     pub fn roto_model(&self) -> Value {
         let st = self.models.status(Task::Mask);
         json!({
@@ -326,11 +326,11 @@ impl Session {
     }
 
     /// What `roto.status` says when the chosen model is not the one in use for this layer (`None`:
-    /// nothing to say). `uses_model`: the layer segments with a model at all (Rotoscope Brush 1.0 does not).
+    /// nothing to say). `uses_model`: the layer segments with a model at all (Roto Brush 1.0 does not).
     pub fn roto_model_notice(&self, uses_model: bool) -> Option<String> {
         let info = self.roto_model_info()?;
         if !uses_model {
-            return Some(format!("{} is selected, but this layer is Rotoscope Brush 1.0: it segments with the classic engine", info.name));
+            return Some(format!("{} is selected, but this layer is Roto Brush 1.0: it segments with the classic engine", info.name));
         }
         let st = self.models.status(Task::Mask);
         if st.active.as_deref() == Some(info.id) {
@@ -356,7 +356,7 @@ impl Session {
         Some(format!("The saved tracking was made with {}; {} is chosen: Propagate again to replace it", name(saved), name(chosen)))
     }
 
-    /// Make sure the Rotoscope Brush model Settings chose is in use before a job that segments with it
+    /// Make sure the Roto Brush model Settings chose is in use before a job that segments with it
     /// starts, so the job never runs on the classic engine without saying so. With `wait`, a load
     /// under way is waited for and one not started is loaded here; without it, a model that is not
     /// ready is refused (and starts loading). A model that is not installed, or failed to load, is
@@ -375,7 +375,7 @@ impl Session {
             if self.models.status(Task::Mask).busy.is_some() {
                 return Err(format!("{} is still downloading: try again when it is ready, or pass wait: true", info.name));
             }
-            return Err(format!("{} is selected for Rotoscope Brush but not installed: install or download it, or choose {}", info.name, ROTO.classic_name));
+            return Err(format!("{} is selected for Roto Brush but not installed: install or download it, or choose {}", info.name, ROTO.classic_name));
         }
         let st = self.models.status(Task::Mask);
         if st.active.as_deref() != Some(info.id) && st.busy.is_none() && st.load_error.is_none() {
@@ -391,7 +391,7 @@ impl Session {
         Err(format!("{} is still loading: try again when it is ready, or pass wait: true", info.name))
     }
 
-    /// Free a Rotoscope Brush model that has been idle for [`ROTO_MODEL_IDLE`] (and is not under a job). The
+    /// Free a Roto Brush model that has been idle for [`ROTO_MODEL_IDLE`] (and is not under a job). The
     /// choice stays: it loads again when a job or a stroke needs it.
     fn unload_idle_roto_model(&mut self) {
         if self.is_roto_running() || self.models.status(Task::Mask).busy.is_some() {
@@ -409,7 +409,7 @@ impl Session {
         }
     }
 
-    /// Start loading the chosen Rotoscope Brush model again if it was unloaded for being idle (before a stroke uses it).
+    /// Start loading the chosen Roto Brush model again if it was unloaded for being idle (before a stroke uses it).
     /// The load runs on the model worker, so the stroke is never blocked on it (the classic engine segments it
     /// meanwhile and `poll_models` installs the model when it arrives), and a model that already failed to load is
     /// not retried on every stroke: choosing it again clears the error.
@@ -691,19 +691,19 @@ fn remove(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        query!("roto.models", "Rotoscope Brush Models", "{}", |s, _| list(s, Task::Mask)),
+        query!("roto.models", "Roto Brush Models", "{}", |s, _| list(s, Task::Mask)),
         cmd!(
             "roto.model.select",
-            "Use Rotoscope Brush Model",
+            "Use Roto Brush Model",
             [],
             None,
-            "{id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large, wait?} (Rotoscope Brush 2.0 / 3.0 use it; wait: loaded before returning)",
+            "{id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large, wait?} (Roto Brush 2.0 / 3.0 use it; wait: loaded before returning)",
             always,
             |s, p| select(s, p, Task::Mask)
         ),
         cmd!(
             "roto.model.install",
-            "Install Rotoscope Brush Model",
+            "Install Roto Brush Model",
             [],
             None,
             "{path: weights file, id?, wait?} — verified against the registry's SHA-256",
@@ -712,14 +712,14 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!(
             "roto.model.download",
-            "Download Rotoscope Brush Model",
+            "Download Roto Brush Model",
             [],
             None,
             "{id, wait?} — the official weights, verified (desktop; uses the system curl)",
             always,
             |s, p| download(s, p, Task::Mask)
         ),
-        cmd!("roto.model.remove", "Remove Rotoscope Brush Model", [], None, "{id}", always, |s, p| remove(s, p, Task::Mask)),
+        cmd!("roto.model.remove", "Remove Roto Brush Model", [], None, "{id}", always, |s, p| remove(s, p, Task::Mask)),
         query!("face.models", "Face Tracking Models", "{}", |s, _| list(s, Task::Face)),
         cmd!(
             "face.model.select",
@@ -801,7 +801,7 @@ mod availability_tests {
     fn stale_model_worker_completions_do_not_poison_the_current_choice() {
         for failure in [false, true] {
             let lane = Arc::new(Mutex::new(Status::default()));
-            spawn(&lane, "Rotoscope Brush", "Loading old choice".into(), true, Some(0), "mobilesam", move |status| {
+            spawn(&lane, "Roto Brush", "Loading old choice".into(), true, Some(0), "mobilesam", move |status| {
                 set(status, |s| s.generation += 1);
                 if failure { Err("old choice failed".into()) } else { Ok("old choice loaded".into()) }
             });
@@ -818,7 +818,7 @@ mod availability_tests {
     fn current_load_and_download_failures_remain_actionable() {
         for generation in [Some(0), None] {
             let lane = Arc::new(Mutex::new(Status::default()));
-            spawn(&lane, "Rotoscope Brush", "Working".into(), true, generation, "mobilesam", move |status| {
+            spawn(&lane, "Roto Brush", "Working".into(), true, generation, "mobilesam", move |status| {
                 if generation.is_none() {
                     set(status, |s| s.generation += 1);
                 }
@@ -828,7 +828,7 @@ mod availability_tests {
             assert!(status.busy.is_none());
             assert_eq!(status.error.as_deref(), Some("current operation failed"));
             assert_eq!(status.load_error.as_deref(), generation.map(|_| "current operation failed"));
-            assert_eq!(status.done, Some(("Rotoscope Brush model: current operation failed".into(), true)));
+            assert_eq!(status.done, Some(("Roto Brush model: current operation failed".into(), true)));
         }
     }
 
@@ -919,7 +919,7 @@ mod availability_tests {
         let mut session = Session { models_dir: Some(dir.clone()), ..Default::default() };
         session.choose_model(Task::Mask, info.id);
         let lane = session.models.lane(Task::Mask).clone();
-        spawn(&lane, "Rotoscope Brush", "Downloading another model".into(), true, None, "sam2.1-hiera-tiny", |_| Err("download failed".into()));
+        spawn(&lane, "Roto Brush", "Downloading another model".into(), true, None, "sam2.1-hiera-tiny", |_| Err("download failed".into()));
         assert_eq!(session.models.status(Task::Mask).error.as_deref(), Some("download failed"));
         assert!(session.models.status(Task::Mask).load_error.is_none());
         let error = session.ensure_roto_model(true).unwrap_err();
@@ -927,7 +927,7 @@ mod availability_tests {
         let failure = session.models.status(Task::Mask).load_error;
         assert!(failure.is_some(), "the synthetic weights were actually loaded and rejected");
         for download_failed in [true, false] {
-            spawn(&lane, "Rotoscope Brush", "Downloading another model".into(), true, None, "sam2.1-hiera-tiny", move |_| {
+            spawn(&lane, "Roto Brush", "Downloading another model".into(), true, None, "sam2.1-hiera-tiny", move |_| {
                 if download_failed { Err("download failed".into()) } else { Ok("downloaded".into()) }
             });
             session.poll_models();
@@ -975,7 +975,7 @@ mod availability_tests {
         session.choose_model(Task::Mask, info.id);
         let generation = session.models.status(Task::Mask).generation;
         let lane = session.models.lane(Task::Mask).clone();
-        spawn(&lane, "Rotoscope Brush", "Loading the previous file".into(), false, Some(generation), info.id, move |status| {
+        spawn(&lane, "Roto Brush", "Loading the previous file".into(), false, Some(generation), info.id, move |status| {
             let started = Instant::now();
             while status.lock().unwrap().generation == generation {
                 if started.elapsed() > Duration::from_secs(3) {

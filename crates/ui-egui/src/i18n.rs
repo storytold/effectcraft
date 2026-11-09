@@ -945,7 +945,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "向基本图形添加属性"),
     ("prop.separateDimensions", "Separate Dimensions", "单独尺寸"),
     ("track.camera", "Track Camera", "跟踪摄像机"),
-    ("track.warpStabilizer", "Motion Stabilizer", "运动稳定器"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "变形稳定器 VFX"),
     ("track.motion", "Track Motion", "跟踪运动"),
     ("track.stabilize", "Stabilize Motion", "稳定运动"),
     ("track.property", "Track this Property", "跟踪此属性"),
@@ -1581,7 +1581,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Lägg till egenskap i Grundläggande grafik"),
     ("prop.separateDimensions", "Separate Dimensions", "Separera dimensioner"),
     ("track.camera", "Track Camera", "Spåra kamera"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Rörelsestabilisering"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
     ("track.motion", "Track Motion", "Spåra rörelse"),
     ("track.stabilize", "Stabilize Motion", "Stabilisera rörelse"),
     ("track.property", "Track this Property", "Spåra den här egenskapen"),
@@ -2227,7 +2227,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "將屬性新增至基本圖形"),
     ("prop.separateDimensions", "Separate Dimensions", "單獨尺寸"),
     ("track.camera", "Track Camera", "追蹤攝影機"),
-    ("track.warpStabilizer", "Motion Stabilizer", "動態穩定器"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "變形穩定器 VFX"),
     ("track.motion", "Track Motion", "追蹤運動"),
     ("track.stabilize", "Stabilize Motion", "穩定運動"),
     ("track.property", "Track this Property", "追蹤此屬性"),
@@ -2866,7 +2866,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "エッセンシャルグラフィックスにプロパティを追加"),
     ("prop.separateDimensions", "Separate Dimensions", "次元を分離"),
     ("track.camera", "Track Camera", "カメラをトラッキング"),
-    ("track.warpStabilizer", "Motion Stabilizer", "モーションスタビライザー"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "ワープスタビライザーVFX"),
     ("track.motion", "Track Motion", "モーションをトラッキング"),
     ("track.stabilize", "Stabilize Motion", "モーションを安定化"),
     ("track.property", "Track this Property", "このプロパティをトラッキング"),
@@ -3508,7 +3508,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Додати властивість до основної графіки"),
     ("prop.separateDimensions", "Separate Dimensions", "Розділити виміри"),
     ("track.camera", "Track Camera", "Відстежувати камеру"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Стабілізатор руху"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Стабілізатор деформації VFX"),
     ("track.motion", "Track Motion", "Відстежувати рух"),
     ("track.stabilize", "Stabilize Motion", "Стабілізувати рух"),
     ("track.property", "Track this Property", "Відстежувати цю властивість"),
@@ -4151,7 +4151,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Añadir propiedad a Gráficos esenciales"),
     ("prop.separateDimensions", "Separate Dimensions", "Separar dimensiones"),
     ("track.camera", "Track Camera", "Seguir cámara"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Estabilizador de movimiento"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Estabilizador de deformación VFX"),
     ("track.motion", "Track Motion", "Seguir movimiento"),
     ("track.stabilize", "Stabilize Motion", "Estabilizar movimiento"),
     ("track.property", "Track this Property", "Seguir esta propiedad"),
@@ -4792,7 +4792,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Adicionar propriedade ao Gráficos essenciais"),
     ("prop.separateDimensions", "Separate Dimensions", "Dimensões separadas"),
     ("track.camera", "Track Camera", "Rastrear câmera"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Estabilizador de movimento"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
     ("track.motion", "Track Motion", "Rastrear movimento"),
     ("track.stabilize", "Stabilize Motion", "Estabilizar movimento"),
     ("track.property", "Track this Property", "Rastrear esta propriedade"),
@@ -5435,7 +5435,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Добавить свойство в основную графику"),
     ("prop.separateDimensions", "Separate Dimensions", "Разделить измерения"),
     ("track.camera", "Track Camera", "Отслеживать камеру"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Стабилизатор движения"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Стабилизатор искажений VFX"),
     ("track.motion", "Track Motion", "Отслеживать движение"),
     ("track.stabilize", "Stabilize Motion", "Стабилизировать движение"),
     ("track.property", "Track this Property", "Отслеживать это свойство"),
@@ -6076,7 +6076,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Ajouter la propriété aux graphiques essentiels"),
     ("prop.separateDimensions", "Separate Dimensions", "Séparer les dimensions"),
     ("track.camera", "Track Camera", "Suivi de caméra"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Stabilisateur de mouvement"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Stabilisateur de déformation VFX"),
     ("track.motion", "Track Motion", "Suivi du mouvement"),
     ("track.stabilize", "Stabilize Motion", "Stabiliser le mouvement"),
     ("track.property", "Track this Property", "Effectuer le suivi de cette propriété"),
@@ -6717,7 +6717,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Eigenschaft zu Essential-Grafik hinzufügen"),
     ("prop.separateDimensions", "Separate Dimensions", "Dimensionen trennen"),
     ("track.camera", "Track Camera", "Kamera verfolgen"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Bewegungsstabilisierung"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp-Stabilisator VFX"),
     ("track.motion", "Track Motion", "Bewegung verfolgen"),
     ("track.stabilize", "Stabilize Motion", "Bewegung stabilisieren"),
     ("track.property", "Track this Property", "Diese Eigenschaft verfolgen"),
@@ -7355,7 +7355,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Dodaj właściwość do Essential Graphics"),
     ("prop.separateDimensions", "Separate Dimensions", "Rozdziel wymiary"),
     ("track.camera", "Track Camera", "Śledź kamerę"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Stabilizator ruchu"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
     ("track.motion", "Track Motion", "Śledź ruch"),
     ("track.stabilize", "Stabilize Motion", "Stabilizuj ruch"),
     ("track.property", "Track this Property", "Śledź tę właściwość"),
@@ -7997,7 +7997,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "Přidat vlastnost do základní grafiky"),
     ("prop.separateDimensions", "Separate Dimensions", "Oddělit rozměry"),
     ("track.camera", "Track Camera", "Sledovat kameru"),
-    ("track.warpStabilizer", "Motion Stabilizer", "Stabilizátor pohybu"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Stabilizátor deformací VFX"),
     ("track.motion", "Track Motion", "Sledovat pohyb"),
     ("track.stabilize", "Stabilize Motion", "Stabilizovat pohyb"),
     ("track.property", "Track this Property", "Sledovat tuto vlastnost"),
@@ -8639,7 +8639,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("essential.addProperty", "Add Property to Essential Graphics", "თვისების დამატება ძირითად გრაფიკაში"),
     ("prop.separateDimensions", "Separate Dimensions", "განზომილებების გაყოფა"),
     ("track.camera", "Track Camera", "კამერის ტრეკინგი"),
-    ("track.warpStabilizer", "Motion Stabilizer", "მოძრაობის სტაბილიზატორი"),
+    ("track.warpStabilizer", "Warp Stabilizer VFX", "Warp Stabilizer VFX"),
     ("track.motion", "Track Motion", "მოძრაობის ტრეკინგი"),
     ("track.stabilize", "Stabilize Motion", "მოძრაობის სტაბილიზაცია"),
     ("track.property", "Track this Property", "ამ თვისების ტრეკინგი"),
@@ -8803,10 +8803,10 @@ mod tests {
     fn renamed_menu_translations_do_not_reintroduce_vendor_names() {
         for code in CATALOG_CODES {
             set_current(code);
-            for (id, source) in [("window.panel", "Video Scopes"), ("track.warpStabilizer", "Motion Stabilizer")] {
+            for (id, source) in [("window.panel", "Video Scopes")] {
                 let rendered = command_label(id, source);
                 let label = rendered.to_lowercase();
-                for mark in ["lumetri", "mercury", "warp stabilizer"] {
+                for mark in ["lumetri", "mercury"] {
                     assert!(!label.contains(mark), "{code}: {id} -> {rendered}");
                 }
             }
@@ -8850,7 +8850,7 @@ mod tests {
         let menu_row = lookup(SIMPLIFIED_CHINESE, "app.settings", "Type...");
         assert_eq!(settings_page_title("Type"), menu_row.trim_end_matches("..."));
         assert_ne!(settings_page_title("Type"), tr("Type"), "the page is about text, the panel row is the kind");
-        assert_eq!(settings_page_title("Rotoscope Brush"), tr("Rotoscope Brush"));
+        assert_eq!(settings_page_title("Roto Brush"), tr("Roto Brush"));
         set_current("en");
         assert_eq!(settings_page_title("Type"), "Type");
     }

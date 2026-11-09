@@ -24,7 +24,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L0 | `av1enc` | AV1 encoder from the AV1 bitstream specification: Main profile 8/10-bit 4:2:0, key + inter frames (quarter-pel motion), deblocking, for MP4 (`av01`) and WebM export |
 | L1 | `raster` | Premultiplied float images, sampling, affine and projective warps, blurs, compositing (parallel with rayon) |
 | L1 | `keyframe` | Animated values, keyframes with temporal ease and spatial Bezier, roving, hold, velocity |
-| L1 | `segment` | Swappable trained models for Rotoscope Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
+| L1 | `segment` | Swappable trained models for Roto Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
 | L1 | `psd` | Photoshop PSD/PSB reader (layers, groups, masks, blend modes, text, layer effects, adjustment layers; 8/16/32-bit; RGB/CMYK/Gray/Lab) and a minimal writer, from Adobe's published format specification |
 | L1 | `path` | Bezier paths, path operators (trim, offset, round corners, zig zag, twist, merge…), stroking, coverage masks |
 | L2 | `project` | The document: items, compositions, layers, the property tree, render queue model, `.ecproj` serde |
@@ -39,7 +39,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `expr` | The expression engine (JavaScript via boa) with the After Effects object model |
 | L3 | `export` | Render queue encoding: H.264, HEVC and AV1 MP4, ProRes, WebM (VP9 + alpha or AV1, Opus), PNG/JPEG/TIFF/EXR/Targa sequences, GIF, WAV/AIFF |
 | L3 | `gpu` | The GPU compositor and GPU effects on wgpu compute shaders (Metal, Vulkan, Direct3D 12, WebGPU), checked against the CPU renderer |
-| L3 | `sam2` | SAM 2.1 image segmentation and video object tracking for Rotoscope Brush, with candle CPU inference and optional wgpu acceleration; native only, empty on wasm32, with user-installed weights |
+| L3 | `sam2` | SAM 2.1 image segmentation and video object tracking for Roto Brush, with candle CPU inference and optional wgpu acceleration; native only, empty on wasm32, with user-installed weights |
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
 | L3 | `aep` | After Effects projects in one crate (like `lottie`): `container` reads and writes the `.aep` container (RIFX `Egg!`) as a lossless chunk tree with a byte-identical round trip, bounded for hostile input, reads the `.aepx` XML form into the same tree, and has a typed view of items, layers, properties, effects, masks, shapes, text, markers, footage, cameras, lights and layer styles, from our own observations of generated files ([aep-format.md](aep-format.md)); `import` maps the typed view into a project (items, settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text, shapes, cameras, lights, mattes, markers, time remapping, layer styles, the effects of a shared table, footage) with a report of everything not imported ([aep-import.md](aep-import.md)); `export` builds every chunk in code (prototypes in the layout After Effects writes, cloned and edited only at verified fields) for the same scope, with a report of everything not exported, verified by opening the output in After Effects ([aep-export.md](aep-export.md)) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
@@ -113,14 +113,14 @@ render wrongly. Schema 2 put effect positions on shape and text layers in effect
 layer, whose effects see the comp below as before) holds as a position by half the comp size,
 so points that were set keep their place in the comp: point parameters with their keyframes, Paint
 stroke paths and clone positions, Puppet mesh seeds, pin rest points and positions, and Liquify
-and Rotoscope Brush strokes. A point parameter still at its default and not animated is left alone:
+and Roto Brush strokes. A point parameter still at its default and not animated is left alone:
 the old default sat at the comp's bottom-right corner, where most effects did nothing, and the
 same value is now the layer centre, as in After Effects. Expression controls (Point Control…)
 keep their values, because their meaning is up to the expressions that read them, and expressions
 are not rewritten, so an expression that computes an effect point on a shape or text layer from
 other values may need `+ [thisComp.width / 2, thisComp.height / 2]`. Effects that use the layer
 bounds (edge pinning, wipes, Offset, generators) now cover the whole comp-sized bounds instead of
-their bottom-right quarter. Tracking data of effects that analyse footage (Motion Stabilizer, 3D
+their bottom-right quarter. Tracking data of effects that analyse footage (Warp Stabilizer, 3D
 Camera Tracker, Tracked Shape Matte) is left as it is: footage has a source rectangle, whose effect space
 did not change.
 
@@ -139,7 +139,7 @@ surrounds. A shape layer's default effect point (the bounds' centre) is therefor
 origin, as in After Effects. The renderer moves the layer buffer into effect space for the whole
 stack (`Buf::rebase`, on the CPU and the GPU alike) and hands effects everything else in it too:
 masks, other layers' pixels for layer parameters (each in its own effect space), the layer's own
-frames at other times (`Renderer::layer_input`, also what Puppet, Rotoscope Brush and the Layer panel
+frames at other times (`Renderer::layer_input`, also what Puppet, Roto Brush and the Layer panel
 read) and the comp camera. Effect point handles, Puppet pins and the Layer panel map effect space
 to the comp with `EvalCtx::effect_to_comp`. Adjustment layers run their effects on the comp below
 as it is.
@@ -241,7 +241,7 @@ frame's float values. The browser keeps 8-bit frames for now (its frame workers 
 
 A persistent **disk cache** (`render::disk_cache`, Settings ▸ Media & Disk Cache) backs both
 the layer cache and the viewer's RAM preview: layer buffers that were slow to render, every
-preview frame and Rotoscope Brush / Object Matte segmentations are written (LZ4, atomic rename,
+preview frame and Roto Brush / Object Matte segmentations are written (LZ4, atomic rename,
 checksummed) and survive restarts. The design (#3184):
 
 - **Keys from memory.** A frame's key is its comp's content key plus frame, scale, view and
@@ -527,7 +527,7 @@ Tracking; `Session::models` hands it to the mask track), `FaceTracker::new_with`
 find the face in the mask and follow it; the model's outline and named points replace the
 classical steps, and chin and jaw still come from the outline so the measurements agree.
 
-**Motion Stabilizer** (`effects::warp_stab`, `engine::warp`): `warp.analyze` renders the layer's
+**Warp Stabilizer** (`effects::warp_stab`, `engine::warp`): `warp.analyze` renders the layer's
 input to the effect (`Renderer::layer_input`: source, masks and the effects above it) for every
 frame on a background thread and stores `effectcraft-track`'s `WarpAnalysis` (per-frame
 translation / similarity / homography fits) as JSON in the effect's hidden Analysis parameter,
@@ -580,14 +580,14 @@ comp space so the first frame's camera is the default comp camera (or so a chose
 the X-Z plane at the origin); `camera.createFromSolve` keys a one-node "3D Tracker Camera" on every
 frame and places text, solids, nulls or a shadow catcher and light on the target plane.
 
-**Rotoscope & Refine Edge** (`effectcraft_track::roto`, `effects::roto`, `engine::roto`):
+**Roto Brush & Refine Edge** (`effectcraft_track::roto`, `effects::roto`, `engine::roto`):
 strokes (foreground, background, Refine Edge) are stored as JSON in the effect's hidden Strokes
 parameter with the base frame and segmentation span. Each frame is segmented by graph cut
 (Boykov–Jolly hard constraints, GrabCut colour mixtures, our own Boykov–Kolmogorov max-flow,
 coarse to fine) and propagated to the next frame by warping the matte with block optical flow and
 re-cutting in a Search Radius band; frames with correction strokes are re-cut with the warped
 matte as a soft prior. With Version 2.0 / 3.0 and a trained model chosen (`effectcraft_segment`,
-Settings ▸ Rotoscope Brush), the model's foreground probability, prompted by the strokes or by the
+Settings ▸ Roto Brush), the model's foreground probability, prompted by the strokes or by the
 warped matte, becomes a strong prior for the same cut (falling back to the classic result when it
 disagrees with the flow); the model's id is part of the chain seed. Refine Edge bands get guided-filter + closed-form matting and
 foreground-colour decontamination. Segmentations are derived data: each frame's chain key (Input

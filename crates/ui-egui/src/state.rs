@@ -122,7 +122,7 @@ impl Tool {
             Tool::Brush => "Brush Tool",
             Tool::Clone => "Clone Stamp Tool",
             Tool::Eraser => "Eraser Tool",
-            Tool::RotoBrush => "Rotoscope Brush Tool",
+            Tool::RotoBrush => "Roto Brush Tool",
             Tool::RefineEdge => "Refine Edge Tool",
             Tool::ObjectMatte => "Object Matte Tool",
             Tool::Puppet => "Puppet Position Pin Tool",
@@ -200,7 +200,7 @@ impl Tool {
             _ => return None,
         })
     }
-    /// Rotoscope Brush / Refine Edge: the stroke kind they paint (`roto.stroke` kind), without and
+    /// Roto Brush / Refine Edge: the stroke kind they paint (`roto.stroke` kind), without and
     /// with Alt/Option.
     pub fn roto_kind(self, alt: bool) -> Option<&'static str> {
         Some(match (self, alt) {

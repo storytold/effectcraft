@@ -54,7 +54,7 @@ device of their own), `?nosw` (don't register the service worker).
 |---|---|
 | frame render thread pool (`ui-egui/src/frames.rs`) | frame workers (below), each with its own WebGPU device: `Frames::pump` hands queued frames to them, most important first (the viewer's frame, then prefetch); frames without effects that the page's GPU compositor can keep on the GPU render on the page. Without workers, queued frames render on the UI thread after each egui frame within 40 ms (24 ms while playing) |
 | Render Queue on a background thread | a Web Worker running a second engine instance with its own WebGPU device (below); progress streams back, the page never waits |
-| tracker / mask tracker / Motion Stabilizer / 3D Camera Tracker / Rotoscope Brush Freeze threads, Content-Aware Fill tasks | the same workers; the analysed property group (or the fill layer) comes back as one undo step |
+| tracker / mask tracker / Warp Stabilizer / 3D Camera Tracker / Roto Brush Freeze threads, Content-Aware Fill tasks | the same workers; the analysed property group (or the fill layer) comes back as one undo step |
 | `rayon` parallel loops (raster, effects, export batches) | rayon's global pool falls back to the calling thread when threads are unavailable: same code, serial |
 | `std::time::Instant` / `SystemTime` (panic on wasm32) | `web-time` (re-exports `std::time` on native) |
 | `std::fs` project reads/writes (`FsServices`) | `files::WebServices`: the virtual file table, persisted (below); saving also downloads the `.ecproj` |
@@ -124,14 +124,14 @@ Stopping a job terminates its worker (a worker can't be interrupted mid-frame): 
 rendered becomes "User Stopped", an analysis writes nothing. Every job shows in Window ▸ Progress
 (`jobs.list`) with its progress and a cancel button (`jobs.cancel`).
 
-**Rotoscope Brush propagation** runs in a job worker too (`WorkerJob::RotoPropagate`): the worker
+**Roto Brush propagation** runs in a job worker too (`WorkerJob::RotoPropagate`): the worker
 streams the segmentations it computes back at most every 250 ms (`WorkerReply::Segs`: each
 `FrameSeg` in a compact binary form, run-length coded planes, base64), the page puts them into its
 segmentation cache and relays them to the frame workers. Stopping it keeps the frames propagated
 so far.
 
 **`wait: true`** (the default of `renderQueue.render` for agents, and an option of the analysis
-and Rotoscope Brush commands) no longer blocks the page: over `window.effectcraft` (the control
+and Roto Brush commands) no longer blocks the page: over `window.effectcraft` (the control
 channel) such a command runs with `wait: false`, and the promise resolves when the job it started
 ends, with what the blocking command returns (final render item statuses, the analysis status)
 or rejects with the job's error (`ui-egui/src/control.rs`, `JobWaiter`). Engine commands executed
@@ -176,10 +176,10 @@ the same futures with `passes::block_on`; they never wait there).
   before (`Exporter::export_async`). As on the desktop, a job renders every frame on the
   project's renderer (the worker's GPU with GPU Acceleration), not on whichever
   compositor measured faster, so runs don't differ by timing.
-- **Analyses** (Motion Stabilizer, 3D Camera Tracker, Track Motion, mask and face tracking, Roto
+- **Analyses** (Warp Stabilizer, 3D Camera Tracker, Track Motion, mask and face tracking, Roto
   Brush freeze and propagation): their work functions are `async`; started with `wait` inside
   a job they are queued and awaited (`offload::run_or_queue`), and each input frame renders in
-  passes with the GPU backend (`offload::job_accel`). Rotoscope Brush's segmentation reads frames
+  passes with the GPU backend (`offload::job_accel`). Roto Brush's segmentation reads frames
   through a callback, so its frame source prefetches the frame and its neighbours in passes
   before each step. On the desktop analyses render their input on the CPU, as before.
 - **Particles and Advanced 3D** read back under keys like effect chains (`crate::deferred`):
@@ -193,7 +193,7 @@ the same futures with `passes::block_on`; they never wait there).
 `effectcraft.info().workers` reports `{running, idle, gpu: {adapter} | {cpu: why}, jobs:
 [{kind, gpu, passes, readbacks, ms}]}` (the last jobs).
 
-**Motion Stabilizer plans off the page (M13.32).** Solving a stabilization plan (Subspace Warp:
+**Warp Stabilizer plans off the page (M13.32).** Solving a stabilization plan (Subspace Warp:
 an eigen-decomposition per frame, then a mesh fit) takes seconds for a long clip, and
 `warp.status` used to solve it on the page the first time it saw the analysis (a ≈ 5 s
 stall). Now the analysis job solves the plan for the analysed settings and sends its summary
@@ -219,7 +219,7 @@ made thread-safe for the browser's rules (no blocking on the page's thread). The
 builds on stable Rust, so concurrency comes from workers that each run their own engine instance
 with their own memory: job workers (renders, analyses), frame workers (viewer frames, each with
 its own GPU device) and the page. What crosses between them is explicit: project diffs, footage
-bytes, frames, Rotoscope Brush segmentations, cache keys. The cost is memory per worker (a project
+bytes, frames, Roto Brush segmentations, cache keys. The cost is memory per worker (a project
 replica, the footage it reads, a layer cache) and serial loops inside one frame (rayon's pool
 falls back to the calling thread). The page is still cross-origin isolated (`--serve` and the
 service worker send COOP / COEP), so a threaded build (`build-std` with `+atomics,+bulk-memory`,
@@ -473,17 +473,17 @@ devices in passes while the page's event loop stays free, the worker's GPU frame
 page's CPU render (`workerFrameCheck`), the storage manager (`storage.info`, `storage.persist`,
 the Settings ▸ Disk widgets), and the disk cache: frames written to the Origin Private File
 System, served from it after a reload without rendering, and cleared with `storage.clear`; and
-the M13.30 ones: a Render Queue job and a Motion Stabilizer analysis on the job worker's own
+the M13.30 ones: a Render Queue job and a Warp Stabilizer analysis on the job worker's own
 WebGPU device (`workers.jobs`: GPU passes and readbacks per job) while the page stays
 responsive, and layer buffers written to the disk cache and served from it after a reload and a
-purge (`layerHits`); M13.32: editing after the Motion Stabilizer analysis (removing it,
+purge (`layerHits`); M13.32: editing after the Warp Stabilizer analysis (removing it,
 pre-composing, a mask) keeps the page's event-loop gaps under 50 ms.
 
 Native unit tests cover the storage model (`apps/effectcraft-web/src/store.rs`: write
 coalescing, file table, `ConfigStore` / `FileOps`, auto-save and crash recovery through the
 browser store) and the worker protocol (`crates/engine/src/offload.rs`: serde round trips of
-every request and reply, a render through an in-process offload; `tests_roto.rs`: Rotoscope Brush
-propagation through an offload streaming segmentations; `tests_mask_warp.rs`: Motion Stabilizer
+every request and reply, a render through an in-process offload; `tests_roto.rs`: Roto Brush
+propagation through an offload streaming segmentations; `tests_mask_warp.rs`: Warp Stabilizer
 plans solved in the job, never by `warp.status` on the page), the frame-worker protocol
 (`crates/engine/src/remote.rs`: diff / patch, a replica following edits renders the same pixels;
 `crates/ui-egui/tests/it/ui_web_offload.rs`: the frame cache through a remote renderer, `wait: true`
@@ -498,7 +498,7 @@ the page's GPU keeps frames without effects, frames stored under their disk keys
 commands), the disk index (`disk_cache.rs`), the store's usage by kind and clearing (`store.rs`),
 `storage.*` (`storage.rs`), and every WGSL float literal fitting f32 (browsers reject the whole
 module otherwise; `tests.rs`). M13.30: job workers on a deferred device
-(`crates/ui-egui/tests/it/ui_web_job_gpu.rs`: a Render Queue job and a Motion Stabilizer analysis
+(`crates/ui-egui/tests/it/ui_web_job_gpu.rs`: a Render Queue job and a Warp Stabilizer analysis
 render their frames in passes on the device, with the CPU worker's pixels / result),
 particles, Advanced 3D and the job pass driver in passes (`crates/gpu/src/tests_deferred_jobs.rs`),
 layer buffers through the disk store and the prefetch plan (`remote.rs`

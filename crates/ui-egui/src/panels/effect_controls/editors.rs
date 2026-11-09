@@ -1,7 +1,7 @@
 use super::common::{Actions, gesture_key};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, Layer, PropGroup, Rect, Sense, Tokens, Value, fw, json, pos2, vec2, widgets};
 
-/// Motion Stabilizer's Analyze / Cancel buttons and analysis status.
+/// Warp Stabilizer's Analyze / Cancel buttons and analysis status.
 pub(super) fn warp_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, g: &PropGroup, r: Rect, actions: &mut Actions) {
     let t = app.tokens;
     let running = app.session.warp_target().is_some_and(|(_, l, u)| l == layer.id && u == g.uid) && app.session.is_warp_analyzing();
@@ -28,7 +28,7 @@ pub(super) fn warp_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui:
     p.text(pos2(r.min.x + 24.0, r.min.y + 38.0), Align2::LEFT_CENTER, status, Tokens::ui(11.5), t.text_dim);
 }
 
-/// Rotoscope & Refine Edge: Freeze / Unfreeze and Propagate buttons and the segmentation status.
+/// Roto Brush & Refine Edge: Freeze / Unfreeze and Propagate buttons and the segmentation status.
 pub(super) fn roto_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, g: &PropGroup, r: Rect, actions: &mut Actions) {
     use effectcraft_engine::effects::roto as fx;
     let t = app.tokens;
@@ -51,7 +51,7 @@ pub(super) fn roto_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui:
     app.auto.add(&format!("effectControls.roto.{}.propagate", g.uid), b2, l2);
     let status = match (app.session.roto_progress(), d.base) {
         (Some(pr), _) if running => pr.banner(),
-        (_, None) => "No strokes: paint with the Rotoscope Brush tool (Alt+W) in the Layer panel".to_string(),
+        (_, None) => "No strokes: paint with the Roto Brush tool (Alt+W) in the Layer panel".to_string(),
         (_, Some(b)) => format!("Base frame {b}, span {}–{}{}", d.span[0], d.span[1], if frozen { " (frozen)" } else { "" }),
     };
     p.text(pos2(r.min.x + 24.0, r.min.y + 38.0), Align2::LEFT_CENTER, status, Tokens::ui(11.5), t.text_dim);

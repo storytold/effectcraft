@@ -115,10 +115,10 @@ fn analyze_glyph(p: &egui::Painter, r: Rect, forward: bool, frame: bool, stop: b
     }
 }
 
-/// The two button rows at `y`: Track Camera / Motion Stabilizer, then Track Motion / Stabilize Motion.
+/// The two button rows at `y`: Track Camera / Warp Stabilizer, then Track Motion / Stabilize Motion.
 fn top_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, x0: f32, y: f32, half: f32, source: Option<LayerId>) {
     let can_track = app.session.active_comp().is_some() && source.is_some();
-    // Track Camera / Motion Stabilizer and Track Motion / Stabilize Motion.
+    // Track Camera / Warp Stabilizer and Track Motion / Stabilize Motion.
     let r1 = Rect::from_min_size(pos2(x0, y), vec2(half, 22.0));
     let r2 = Rect::from_min_size(pos2(x0 + half + 6.0, y), vec2(half, 22.0));
     let src_p = source.map(|l| json!({"layer": l.0})).unwrap_or_else(|| json!({}));
@@ -127,7 +127,7 @@ fn top_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context,
         run(app, ctx, "track.camera", json!({}));
     }
     let can_warp = app.session.is_enabled("track.warpStabilizer") && !app.session.is_warp_analyzing();
-    if button(app, ui, r2, "Motion Stabilizer", can_warp, "tracker.warpStabilizer") {
+    if button(app, ui, r2, "Warp Stabilizer", can_warp, "tracker.warpStabilizer") {
         run(app, ctx, "track.warpStabilizer", json!({}));
     }
     let y = y + 28.0;

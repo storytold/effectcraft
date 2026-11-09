@@ -404,7 +404,7 @@ build real projects through these interfaces; they are worked examples of everyt
 
 ### Effect positions
 
-Effect points, Puppet pins (`puppet.addPin`, `puppet.recordPin`), Paint, Liquify and Rotoscope Brush
+Effect points, Puppet pins (`puppet.addPin`, `puppet.recordPin`), Paint, Liquify and Roto Brush
 strokes, `effect.pickColor` and `effect.pickCryptomatte` are in **effect space**: layer pixels
 from the top-left of the layer's effect bounds. For footage, solids and precomps that is the layer's own pixel grid. Shape
 and text layers have comp-sized bounds centred on their content's origin, so in a `w` × `h` comp
@@ -451,7 +451,7 @@ orientation X/Y/Z, eye openness, eyebrow distance from eye, mouth openness, widt
 those keys on the keyframe clipboard and returns them per frame plus a tab-separated `clipboard`
 text.
 
-Face tracking's trained model works like Rotoscope Brush's (below): `face.models` lists the built-in
+Face tracking's trained model works like Roto Brush's (below): `face.models` lists the built-in
 tracker and MediaPipe Face Landmarker with its authors and licence; `face.model.download {id}` /
 `face.model.install {path, id?}` install it (verified); `face.model.select {id:
 classical|mediapipe-face}` chooses it; `face.model.remove {id}` deletes it. Downloads and loading
@@ -479,9 +479,9 @@ effectcraft-cli exec track.mask '{"layer":"#2","mask":1,"method":"perspective","
 effectcraft-cli exec mask.interpolate '{"layer":"#2","mask":"Mask 1","times":[0,2],"addVertices":10}' clip.ecproj --save --json
 ```
 
-### Motion Stabilizer
+### Warp Stabilizer
 
-Effect ▸ Distort ▸ Motion Stabilizer (`effect.apply {"effect":"Motion Stabilizer"}`), Animation ▸ Warp
+Effect ▸ Distort ▸ Warp Stabilizer (`effect.apply {"effect":"Warp Stabilizer"}`), Animation ▸ Warp
 Stabilizer VFX and the Tracker panel's button (`track.warpStabilizer`, which applies the effect and
 starts analysing) stabilize a layer. `warp.analyze {layer?, effect?, wait?}` analyses every frame
 between the layer's In and Out points in the background ("Analyzing in background (step 1 of 2)",
@@ -545,11 +545,11 @@ effectcraft-cli run shot.ecproj track.camera '{"layer":"#1","wait":true}' \
 effectcraft-cli run shot.ecproj camera.createFromSolve '{"kind":"solid","points":[12,40,77]}' --save
 ```
 
-### Rotoscope & Refine Edge
+### Roto Brush & Refine Edge
 
-The Rotoscope Brush tool (Alt+W cycles Rotoscope Brush / Refine Edge) paints in the Layer panel; agents use
+The Roto Brush tool (Alt+W cycles Roto Brush / Refine Edge) paints in the Layer panel; agents use
 `roto.stroke {layer, kind: fg|bg|refine|refineErase, points: [[x, y], …], frame?, radius?}`
-(effect space, layer frames). The first foreground stroke applies the Rotoscope & Refine Edge
+(effect space, layer frames). The first foreground stroke applies the Roto Brush & Refine Edge
 effect and sets the base frame with a span of 20 frames each side. `roto.propagate {layer,
 direction?: forward|backward|both, to?, wait?}` segments the span (in the background unless
 `wait`); strokes on any other frame correct it and propagation restarts from there.
@@ -564,14 +564,14 @@ state, job progress and, for a frame, the matte's area, centroid, RLE matte and 
 reference. Matte settings are ordinary properties (`effects/#1/rotoBrushMatte/searchRadius`,
 `effects/#1/refineEdgeMatte/decontaminateEdgeColors`, …).
 
-Trained model (Rotoscope Brush 2.0 / 3.0):
+Trained model (Roto Brush 2.0 / 3.0):
 - `roto.models` lists the built-in engine and every registered model, with its authors,
   licence, size, app download URL (empty for install-only models), checkpoint `source` and `sourceFile`,
   SHA-256 and whether it is installed, selected and active.
 - `roto.model.download {id}` fetches and verifies weights when the registry provides an app download URL;
   `roto.model.install {path, id?}` installs a file you already have. SAM 2 is Install from File only until
   a storytold-controlled mirror is available; its size and SHA-256 are verified before installation.
-- `roto.model.select {id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large}` chooses which one Rotoscope Brush uses (SAM 2 also tracks the object through the clip, see [roto-brush-sam2.md](roto-brush-sam2.md); `roto.status` then reports `source` and per-frame `tracker.frames` with `confidence` and `occluded`). Loading runs
+- `roto.model.select {id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large}` chooses which one Roto Brush uses (SAM 2 also tracks the object through the clip, see [roto-brush-sam2.md](roto-brush-sam2.md); `roto.status` then reports `source` and per-frame `tracker.frames` with `confidence` and `occluded`). Loading runs
   in the background. `"wait": true` waits for the requested operation; download/install load the model
   only if it is already selected. They do not activate an unselected model: after installation, use
   `roto.model.select {id, wait:true}` to select and load it. Unrelated model work can return a retryable
@@ -603,13 +603,13 @@ The Object Matte tool (third in the Alt+W slot) works in the Composition viewer:
 or drag a box around it; Shift adds another Object Matte instead of re-prompting the layer's.
 Agents use `objectMatte.apply {layer, point: [x, y], box?: [x0, y0, x1, y1], frame?, track?,
 before?, after?, effect?}` (layer pixels, layer frames; `effect` re-prompts that instance), one
-undo step each. With a trained model installed (Settings ▸ Rotoscope Brush) the box is the model's box
+undo step each. With a trained model installed (Settings ▸ Roto Brush) the box is the model's box
 prompt. `objectMatte.propagate {layer, effect?, direction?, wait?}` tracks the matte over the
 frames around the reference frame in the background (`roto.cancel` stops it; edits to the prompt
 or the layer's frames queue it again), `objectMatte.freeze {wait?}` / `objectMatte.unfreeze`
 store or drop the final mattes, and `objectMatte.status {layer, effect?}` reports the job's
 progress, the frozen state, the tracked frames and which are computed. With the disk cache on (Settings ▸
-Media & Disk Cache), computed Object Matte and Rotoscope Brush segmentations are also kept there, keyed
+Media & Disk Cache), computed Object Matte and Roto Brush segmentations are also kept there, keyed
 by what they are made of, so reopening a project reuses them.
 
 ```sh

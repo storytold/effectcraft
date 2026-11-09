@@ -854,8 +854,6 @@ const ALIASES: &[(&str, &[&str])] = &[
     ("ec.color.lumetri", &["Lumetri Color"]),
     ("ec.obsolete.mochashape", &["Mocha shape", "mocha shape"]),
     ("ec.keying.keylight", keylight::KEYLIGHT_ALIASES),
-    ("ec.matte.rotobrush", &["Roto Brush & Refine Edge"]),
-    ("ec.distort.warpstabilizer", &["Warp Stabilizer"]),
 ];
 
 /// Other names effect `id` answers to (in [`lookup`] and searches).
@@ -905,7 +903,7 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
     g.kind = GroupKind::Effect { effect: spec.id.to_string() };
     for ps in &spec.params {
         let default = default_value(ps, layer_size);
-        // `group/sub/param` ids nest the parameter in twirl-down groups (Motion Stabilizer's
+        // `group/sub/param` ids nest the parameter in twirl-down groups (Warp Stabilizer's
         // Stabilization / Borders / Advanced).
         let (path, leaf) = ps.id.rsplit_once('/').map(|(g, l)| (Some(g), l)).unwrap_or((None, ps.id));
         let mut pr = Property::new(ids.alloc(), leaf, ps.name, default).with_ui(ps.ui.clone());

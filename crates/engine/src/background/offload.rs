@@ -14,12 +14,12 @@
 //! | Job | Worker runs | Reply applied on the UI thread |
 //! |---|---|---|
 //! | Render Queue | the export of every queued item | item status, progress; files arrive through the host |
-//! | Motion Stabilizer analysis | [`Session::start_warp`], then the stabilization plan | the effect's property group (one undo step); the plan's summary ([`WorkerReply::WarpPlan`]) |
-//! | Motion Stabilizer stabilization (settings changed after the analysis) | the plan ([`effectcraft_effects::warp_stab::summary_at`]) | its summary, for `warp.status` |
+//! | Warp Stabilizer analysis | [`Session::start_warp`], then the stabilization plan | the effect's property group (one undo step); the plan's summary ([`WorkerReply::WarpPlan`]) |
+//! | Warp Stabilizer stabilization (settings changed after the analysis) | the plan ([`effectcraft_effects::warp_stab::summary_at`]) | its summary, for `warp.status` |
 //! | Track Motion / Stabilize Motion | the tracker analysis | the tracker group |
 //! | Mask tracking | the mask track | the mask group |
-//! | Rotoscope Brush Freeze | the freeze | the effect group |
-//! | Rotoscope Brush propagation | the propagation | segmentations ([`WorkerReply::Segs`], streamed while it runs) go into the page's segmentation cache |
+//! | Roto Brush Freeze | the freeze | the effect group |
+//! | Roto Brush propagation | the propagation | segmentations ([`WorkerReply::Segs`], streamed while it runs) go into the page's segmentation cache |
 //! | 3D Camera Tracker analysis | [`Session::start_camera`] | the effect's property group |
 //! | Content-Aware Fill | the fill ([`crate::commands::content_fill::FillPlan`]) | its PNG files (to the host's storage), then the fill layer (one undo step) |
 //!
@@ -74,7 +74,7 @@ pub enum WorkerJob {
         layer: LayerId,
         effect: Uid,
     },
-    /// The stabilization plan of an analysed Motion Stabilizer at comp time `time` (its settings
+    /// The stabilization plan of an analysed Warp Stabilizer at comp time `time` (its settings
     /// there): seconds of solving for a long Subspace Warp clip, so not on the page. The
     /// summary comes back as [`WorkerReply::WarpPlan`].
     WarpPlan {
@@ -93,7 +93,7 @@ pub enum WorkerJob {
         layer: LayerId,
         effect: Uid,
     },
-    /// Rotoscope Brush propagation: the segmentations come back as [`WorkerReply::Segs`].
+    /// Roto Brush propagation: the segmentations come back as [`WorkerReply::Segs`].
     RotoPropagate {
         comp: ItemId,
         layer: LayerId,
@@ -189,11 +189,11 @@ impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
             JobKind::Render => "Render",
-            JobKind::Warp => "Motion Stabilizer Analysis",
-            JobKind::WarpPlan => "Motion Stabilizer: Stabilizing",
+            JobKind::Warp => "Warp Stabilizer Analysis",
+            JobKind::WarpPlan => "Warp Stabilizer: Stabilizing",
             JobKind::Camera => "3D Camera Tracker Analysis",
             JobKind::RotoFreeze => "Freeze",
-            JobKind::RotoPropagate => "Rotoscope Brush Propagation",
+            JobKind::RotoPropagate => "Roto Brush Propagation",
             JobKind::Track => "Analyze Track",
             JobKind::MaskTrack => "Track Mask",
             JobKind::ContentFill => "Content-Aware Fill",
@@ -225,13 +225,13 @@ pub enum WorkerReply {
         group: Box<PropGroup>,
         message: String,
     },
-    /// A Motion Stabilizer plan's summary ([`effectcraft_effects::warp_stab::summary_key`]): the
+    /// A Warp Stabilizer plan's summary ([`effectcraft_effects::warp_stab::summary_key`]): the
     /// page keeps it for `warp.status` instead of solving the plan itself.
     WarpPlan {
         key: [u64; 2],
         summary: Box<effectcraft_effects::warp_stab::PlanSummary>,
     },
-    /// Rotoscope Brush segmentations computed so far (propagation), not sent before.
+    /// Roto Brush segmentations computed so far (propagation), not sent before.
     Segs {
         segs: Vec<SegData>,
     },
@@ -248,7 +248,7 @@ pub enum WorkerReply {
     Done,
 }
 
-/// One full-resolution Rotoscope Brush segmentation: its chain key and the base64 of
+/// One full-resolution Roto Brush segmentation: its chain key and the base64 of
 /// [`effectcraft_track::roto::FrameSeg::to_bytes`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SegData {
@@ -261,7 +261,7 @@ impl SegData {
         SegData { key, data: effectcraft_track::roto::rle::base64_encode(&seg.to_bytes()) }
     }
 
-    /// Put the segmentation into this instance's cache (what the Rotoscope Brush effect renders from).
+    /// Put the segmentation into this instance's cache (what the Roto Brush effect renders from).
     pub fn store(&self) -> bool {
         let Some(seg) = effectcraft_track::roto::rle::base64_decode(&self.data).and_then(|b| effectcraft_track::roto::FrameSeg::from_bytes(&b)) else {
             return false;
@@ -493,7 +493,7 @@ async fn run_job(s: &mut Session, job: WorkerJob, post: Post) -> Result<(), Stri
         }
         WorkerJob::Warp { comp, layer, effect } => analysis(s, kind, target, post, |s| s.start_warp(comp, layer, effect, true).map(|_| ())).await,
         WorkerJob::WarpPlan { comp, layer, effect, time } => {
-            let r = warp_plan(s, comp, layer, effect, time).ok_or("the Motion Stabilizer is not analysed")?;
+            let r = warp_plan(s, comp, layer, effect, time).ok_or("the Warp Stabilizer is not analysed")?;
             post(r);
             Ok(())
         }
@@ -576,11 +576,11 @@ async fn fill(s: &mut Session, plan: crate::commands::content_fill::FillPlan, po
     Ok(())
 }
 
-/// Rotoscope Brush propagation in a worker: the segmentations stream back (at most every 250 ms)
+/// Roto Brush propagation in a worker: the segmentations stream back (at most every 250 ms)
 /// as they are computed, so stopping the job keeps what was propagated.
 async fn propagate(s: &mut Session, comp: ItemId, layer: LayerId, effect: Uid, dir: crate::roto::Direction, post: Post) -> Result<(), String> {
     let keys: Vec<u64> =
-        s.roto_keys(comp, layer, effect).map(|k| k.into_iter().map(|(_, k)| k).collect()).ok_or("no Rotoscope Brush strokes or Object Matte prompt")?;
+        s.roto_keys(comp, layer, effect).map(|k| k.into_iter().map(|(_, k)| k).collect()).ok_or("no Roto Brush strokes or Object Matte prompt")?;
     let sent = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let (p, k2, s2) = (post.clone(), keys.clone(), sent.clone());
     let mut last = None::<web_time::Instant>;
@@ -668,7 +668,7 @@ async fn analysis(
     Ok(())
 }
 
-/// The Motion Stabilizer plan summary of (comp, layer, effect) with its settings at comp time `t`
+/// The Warp Stabilizer plan summary of (comp, layer, effect) with its settings at comp time `t`
 /// (computing the plan), as a reply.
 fn warp_plan(s: &Session, comp: ItemId, layer: LayerId, effect: Uid, t: Tick) -> Option<WorkerReply> {
     let c = s.project.comp(comp)?;
@@ -714,7 +714,7 @@ pub struct OffloadedJob {
     pub uid: Uid,
     pub inbox: Arc<Inbox>,
     pub progress: OffloadProgress,
-    /// Segmentations received (Rotoscope Brush propagation).
+    /// Segmentations received (Roto Brush propagation).
     pub segs: u64,
     started: web_time::Instant,
     /// The analysed group as the job started: its result is merged with what changed since
@@ -880,7 +880,7 @@ impl Session {
                 let kept = if segs > 0 { format!(" ({segs} frame(s) kept)") } else { String::new() };
                 self.events.push(Event::Toast { message: format!("{} stopped{kept}", kind.label()), error: false });
             } else if kind == JobKind::RotoPropagate {
-                self.events.push(Event::Toast { message: format!("Rotoscope Brush: propagated {} frame(s) in {:.1} s", segs, p.elapsed), error: false });
+                self.events.push(Event::Toast { message: format!("Roto Brush: propagated {} frame(s) in {:.1} s", segs, p.elapsed), error: false });
             }
             // Rendered frames depend on the result (an analysis' group, the segmentation cache);
             // not on a plan summary (`warp.status` only).

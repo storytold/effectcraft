@@ -1,4 +1,4 @@
-//! Motion Stabilizer (Effect ▸ Distort ▸ Motion Stabilizer).
+//! Warp Stabilizer (Effect ▸ Distort ▸ Warp Stabilizer).
 //!
 //! The analysis (feature tracking and per-frame motion fits) runs as a background job in the
 //! engine (`warp.analyze`) and is stored, as JSON, in the instance's hidden **Analysis**
@@ -61,7 +61,7 @@ pub const FRAMINGS: [&str; 4] = ["Stabilize Only", "Stabilize, Crop", "Stabilize
 pub fn specs() -> Vec<EffectSpec> {
     vec![EffectSpec {
         id: ID,
-        name: "Motion Stabilizer",
+        name: "Warp Stabilizer",
         category: "Distort",
         params: vec![
             p("stabilization/result", "Result", Value::Enum(0), popup(&RESULTS)),

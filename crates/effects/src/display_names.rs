@@ -75,8 +75,6 @@ const RENAMED: &[(&str, &str, &str)] = &[
     ("ec.color.lumetri", "Lumetri Color", "Color Grading"),
     ("ec.obsolete.mochashape", "Mocha shape", "Tracked Shape Matte"),
     ("ec.keying.keylight", "Key Light", "Screen Color Key"),
-    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "Rotoscope & Refine Edge"),
-    ("ec.distort.warpstabilizer", "Warp Stabilizer", "Motion Stabilizer"),
 ];
 
 #[test]
@@ -102,7 +100,7 @@ fn descriptive_display_names_do_not_collide() {
         assert!(names.insert(spec.name.to_lowercase()), "duplicate name {}", spec.name);
         let label = spec.name.to_lowercase();
         assert!(!label.starts_with("cc "), "{}", spec.name);
-        for mark in ["lumetri", "mercury", "mocha", "keylight", "warp stabilizer", "roto brush"] {
+        for mark in ["lumetri", "mercury", "mocha", "keylight"] {
             assert!(!label.contains(mark), "{}", spec.name);
         }
     }

@@ -354,11 +354,11 @@ pub fn pages() -> Vec<Page> {
         },
         Page {
             id: "roto",
-            title: "Rotoscope Brush",
+            title: "Roto Brush",
             items: vec![
                 Section("Segmentation Model"),
                 Note(
-                    "Rotoscope Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+                    "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
                 ),
                 Models(effectcraft_segment::Task::Mask),
             ],

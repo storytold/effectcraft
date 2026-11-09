@@ -1,5 +1,5 @@
 //! Background jobs: one list (Window ▸ Progress, `jobs.list`, `jobs.cancel`) over the render
-//! queue, the analyses (tracker, mask tracker, Motion Stabilizer, 3D Camera Tracker, Rotoscope Brush) and
+//! queue, the analyses (tracker, mask tracker, Warp Stabilizer, 3D Camera Tracker, Roto Brush) and
 //! the generic background tasks started here (Content-Aware Fill, Scene Edit Detection, footage
 //! checks and imports).
 //!
@@ -253,7 +253,7 @@ impl Session {
         if let Some(p) = self.warp_progress()
             && !p.finished
         {
-            out.push(info("warp", "warp", "Motion Stabilizer analysis".into(), p.done, p.total, true, format!("step {}", p.step)));
+            out.push(info("warp", "warp", "Warp Stabilizer analysis".into(), p.done, p.total, true, format!("step {}", p.step)));
         }
         if let Some(p) = self.camera_progress()
             && !p.finished
@@ -263,10 +263,10 @@ impl Session {
         if let Some(p) = self.roto_progress()
             && !p.finished
         {
-            out.push(info("roto", "roto", "Rotoscope Brush propagation".into(), p.done, p.total, true, String::new()));
+            out.push(info("roto", "roto", "Roto Brush propagation".into(), p.done, p.total, true, String::new()));
         }
         if let Some(j) = self.offloaded(crate::offload::JobKind::WarpPlan) {
-            out.push(info("warpPlan", "warp", "Motion Stabilizer: Stabilizing".into(), j.progress.done, j.progress.total, true, String::new()));
+            out.push(info("warpPlan", "warp", "Warp Stabilizer: Stabilizing".into(), j.progress.done, j.progress.total, true, String::new()));
         }
         if let Some(j) = self.offloaded(crate::offload::JobKind::ContentFill) {
             out.push(info("contentFill", "contentFill", "Content-Aware Fill".into(), j.progress.done, j.progress.total, true, String::new()));

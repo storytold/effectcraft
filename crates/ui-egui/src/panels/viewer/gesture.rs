@@ -172,8 +172,8 @@ pub(super) fn vertex_grab_radius(pos: Pos2, handles: impl IntoIterator<Item = Po
     if handles.into_iter().any(|h| h.distance(pos) < HANDLE + 2.0) { HANDLE + 2.0 } else { VERTEX_GRAB }
 }
 
-/// Shown when a Rotoscope Brush tool is used in the Composition panel (#753).
-pub(super) const ROTO_HINT: &str = "The Rotoscope Brush works in the Layer panel. Double-click the layer to open it.";
+/// Shown when a Roto Brush tool is used in the Composition panel (#753).
+pub(super) const ROTO_HINT: &str = "The Roto Brush works in the Layer panel. Double-click the layer to open it.";
 
 /// Region of interest handles on screen: corners (0–3, clockwise from top-left) then edge
 /// midpoints (4 top, 5 right, 6 bottom, 7 left).

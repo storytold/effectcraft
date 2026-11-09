@@ -2828,7 +2828,7 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
     assert_eq!(h.state().viewer_texture_size(), Some([800, 134]), "2400×400 averaged by 3");
 }
 
-/// #509: ⌘/Ctrl-drag in the Layer panel resizes the Rotoscope Brush (as in After Effects) without
+/// #509: ⌘/Ctrl-drag in the Layer panel resizes the Roto Brush (as in After Effects) without
 /// painting, the next stroke uses the new size, and the tool options show the Diameter.
 #[test]
 fn roto_brush_ctrl_drag_resizes_the_brush() {

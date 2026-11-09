@@ -237,8 +237,8 @@ for production client work. In particular:
   compositions, so please report visual discrepancies or unexpected behaviour.
 - **macOS is the most tested platform.** Linux and Windows users have hit basic interaction
   bugs, which we're fixing first.
-- **The trained models are new.** Rotoscope Brush can use MobileSAM (an optional 40 MB download in
-  Settings ▸ Rotoscope Brush) and face tracking can use Google's MediaPipe Face Landmarker (an optional
+- **The trained models are new.** Roto Brush can use MobileSAM (an optional 40 MB download in
+  Settings ▸ Roto Brush) and face tracking can use Google's MediaPipe Face Landmarker (an optional
   3.8 MB download in Settings ▸ Face Tracking). Both are actively undergoing evaluation and tuning.
 
 EffectCraft is in **alpha**: about 91% of the features tracked in

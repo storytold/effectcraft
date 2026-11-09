@@ -1,4 +1,4 @@
-//! Mask tracking, Mask Interpolation and the Motion Stabilizer end to end through the commands, on
+//! Mask tracking, Mask Interpolation and the Warp Stabilizer end to end through the commands, on
 //! synthetic footage generated in-test (a rotating/scaling textured patch, a shaky camera).
 
 use effectcraft_keyframe::{Keyframe, ShapePath, Value as KV};
@@ -229,7 +229,7 @@ fn mask_interpolation_skips_locked_selection_and_rejects_explicit_locked_targets
     assert_eq!(s.state.selected_keys, selection);
 }
 
-// ---------------------------------------------------------------- Motion Stabilizer
+// ---------------------------------------------------------------- Warp Stabilizer
 
 /// Camera offset on frame `f`: a slow pan plus jitter.
 fn cam(f: u32) -> [f64; 2] {
@@ -311,8 +311,8 @@ fn warp_stabilizer_analyzes_and_stabilizes() {
     let (mut s, clip, solid) = setup(shaky);
     s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
     s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
-    // Effect ▸ Distort ▸ Motion Stabilizer, then analyse (blocking).
-    let r = s.execute("effect.apply", json!({"effect": "Motion Stabilizer"})).unwrap();
+    // Effect ▸ Distort ▸ Warp Stabilizer, then analyse (blocking).
+    let r = s.execute("effect.apply", json!({"effect": "Warp Stabilizer"})).unwrap();
     let fx = r["effects"][0].as_u64().unwrap();
     assert!(s.warp_pending.contains(&(s.active_comp_id().unwrap(), clip, fx)), "applying queues an analysis");
     let st = s.execute_checked("warp.status", json!({})).unwrap();
@@ -371,7 +371,7 @@ fn warp_stabilizer_analyzes_and_stabilizes() {
     let back = effectcraft_project::Project::from_json(&s.project.to_json()).unwrap();
     let bg = back.comp(s.active_comp_id().unwrap()).unwrap().layer(clip).unwrap().props.find_group(fx).unwrap().clone();
     assert_eq!(bg, s.active_comp().unwrap().layer(clip).unwrap().props.find_group(fx).unwrap().clone());
-    while s.history.undo.last().is_some_and(|(l, _)| l != "Motion Stabilizer Analysis") {
+    while s.history.undo.last().is_some_and(|(l, _)| l != "Warp Stabilizer Analysis") {
         s.undo();
     }
     assert!(s.undo());
@@ -385,7 +385,7 @@ fn warp_analysis_invalidates_and_cancels() {
     let (mut s, clip, solid) = setup(shaky);
     s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
     s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
-    // Animation ▸ Motion Stabilizer applies and analyses.
+    // Animation ▸ Warp Stabilizer VFX applies and analyses.
     assert!(s.is_enabled("track.warpStabilizer"));
     let r = s.execute_checked("track.warpStabilizer", json!({"wait": true})).unwrap();
     let fx = r["effect"].as_u64().unwrap();
@@ -468,7 +468,7 @@ fn an_edit_made_during_an_offloaded_analysis_survives_its_result() {
     let (mut s, clip, solid) = setup(shaky);
     s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
     s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
-    s.execute("effect.apply", json!({"effect": "Motion Stabilizer"})).unwrap();
+    s.execute("effect.apply", json!({"effect": "Warp Stabilizer"})).unwrap();
     set_param(&mut s, clip, "stabilization/smoothness", json!(37.5));
     let off = std::sync::Arc::new(Deferred::default());
     s.offload = Some(off.clone());
@@ -602,7 +602,7 @@ fn offloaded_disjoint_edit_reports_success_and_keeps_one_undo_step() {
 #[test]
 fn offloaded_conflict_does_not_fail_a_concurrent_analysis() {
     let (mut s, clip, tracker, off) = held_point_track();
-    let effect = s.execute("effect.apply", json!({"effect": "Motion Stabilizer", "layers": [clip.0]})).unwrap()["effects"][0].as_u64().unwrap();
+    let effect = s.execute("effect.apply", json!({"effect": "Warp Stabilizer", "layers": [clip.0]})).unwrap()["effects"][0].as_u64().unwrap();
     s.execute_checked("warp.analyze", json!({"layer": clip.0, "effect": effect})).unwrap();
     assert_eq!(off.kinds(), [crate::offload::JobKind::Track, crate::offload::JobKind::Warp]);
     let center = tracked_center(&s, clip, tracker);
@@ -626,7 +626,7 @@ fn warp_plan_is_solved_in_the_job_not_on_the_page() {
     let (mut s, clip, solid) = setup(shaky);
     s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
     s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
-    s.execute("effect.apply", json!({"effect": "Motion Stabilizer"})).unwrap();
+    s.execute("effect.apply", json!({"effect": "Warp Stabilizer"})).unwrap();
     // Settings no other test uses: the plans of this test are solved nowhere else.
     set_param(&mut s, clip, "stabilization/smoothness", json!(41.25));
     let off = std::sync::Arc::new(Deferred::default());
