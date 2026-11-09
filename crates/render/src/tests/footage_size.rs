@@ -188,6 +188,39 @@ fn a_source_that_reads_whole_frames_keeps_the_layer_cached_under_a_region() {
     }
 }
 
+/// #3301 merge with #3333: under a viewer region of interest, a footage layer read by rows is
+/// never offered as the shared decoded picture (the GPU would upload a part of the frame as the
+/// whole); without a region it is.
+#[test]
+fn a_footage_layer_read_by_rows_is_not_the_shared_picture() {
+    struct Rows;
+    impl FootageSource for Rows {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            Clip { sizes: None }.frame(item, f, t)
+        }
+        fn frame_rows(&self, item: ItemId, f: &Footage, t: Tick, _: Option<(u32, u32)>, _: crate::FloatCurve, _: (i64, i64)) -> Option<Arc<Image>> {
+            Clip { sizes: None }.frame(item, f, t)
+        }
+        fn reads_rows(&self, _: &Footage, _: Tick) -> bool {
+            true
+        }
+    }
+    let (mut p, cid) = project(BitDepth::Bpc32, false);
+    let Some(LayerSource::Footage { item }) = p.comp(cid).map(|c| c.layers[0].source.clone()) else { panic!("footage layer") };
+    if let Some(ItemKind::Footage(f)) = p.item_mut(item).map(|it| &mut it.kind) {
+        f.kind = FootageKind::Still;
+        f.path = "/still.exr".into();
+    }
+    let comp = p.comp(cid).unwrap();
+    let ctx = crate::EvalCtx::new(&p, cid, comp, Tick::ZERO);
+    let whole = Renderer::new(&p, &Rows, RenderOpts::default());
+    assert!(whole.footage_picture(&ctx, &comp.layers[0]).is_some(), "no region: the shared picture");
+    let region = Renderer::new(&p, &Rows, RenderOpts { roi: Some([0.0, 0.0, 96.0, 10.0]), ..Default::default() });
+    let Some(ItemKind::Footage(f)) = p.item(item).map(|it| &it.kind) else { panic!("footage") };
+    assert!(region.footage_rows(&ctx, &comp.layers[0], f).is_some(), "read by rows");
+    assert!(region.footage_picture(&ctx, &comp.layers[0]).is_none(), "a part of the frame is never shared");
+}
+
 /// #3271 review: a render's channel reads (an effect's EXR channels) are called off with the
 /// render like its frame reads: they run under the render's cancel flag (a decode stops between
 /// batches), and once it is set they don't start.

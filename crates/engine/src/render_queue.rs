@@ -47,16 +47,23 @@ pub struct ExportJob<'a> {
 
 /// What the jobs of one Render Queue run keep between them (#3335): a layer cache per
 /// compositor (a buffer an effect made on the GPU is not the CPU's), together at the budget
-/// each job's single cache had before.
+/// each job's single cache had before. Both are in the memory accountant's common budget
+/// (#3301): they give way with the other caches when it is full.
 pub struct RunCaches {
-    pub gpu: effectcraft_render::LayerCache,
-    pub cpu: effectcraft_render::LayerCache,
+    pub gpu: std::sync::Arc<effectcraft_render::LayerCache>,
+    pub cpu: std::sync::Arc<effectcraft_render::LayerCache>,
 }
 
 impl Default for RunCaches {
     fn default() -> Self {
         let half = effectcraft_render::LayerCache::default().budget() / 2;
-        RunCaches { gpu: effectcraft_render::LayerCache::new(half), cpu: effectcraft_render::LayerCache::new(half) }
+        let (gpu, cpu) = (std::sync::Arc::new(effectcraft_render::LayerCache::new(half)), std::sync::Arc::new(effectcraft_render::LayerCache::new(half)));
+        let accountant = effectcraft_render::memory::Accountant::global();
+        for cache in [&gpu, &cpu] {
+            let holder: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = cache.clone();
+            accountant.register(&holder);
+        }
+        RunCaches { gpu, cpu }
     }
 }
 
