@@ -23,7 +23,9 @@ pub mod styles;
 pub mod text;
 pub mod three_d;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use auto::{AutoKey, AutoPick};
@@ -61,6 +63,7 @@ pub use layers::{Placement, StyledLayer};
 pub(crate) use opts::Collapse3d;
 pub use opts::{LayerTiming, RenderOpts};
 use opts::{MAX_THROUGH, Through};
+use pipeline::CompMemoKey;
 pub use pipeline::{Collapsed, MediaOverride, PropertyOverride};
 
 pub struct Renderer<'a> {
@@ -102,6 +105,10 @@ pub struct Renderer<'a> {
     through: [Option<Through<'a>>; MAX_THROUGH],
     /// More collapsed levels than [`MAX_THROUGH`]: their motion is not blurred.
     through_lost: bool,
+    /// This top-level frame's memo of nested comp renders: repeated instances of the same
+    /// precomp render its frame once per (comp, time, scale) and share it (#2275). Armed by
+    /// [`Renderer::comp_frame`] for one frame and cloned into every nested renderer.
+    comp_memo: Option<Arc<Mutex<HashMap<CompMemoKey, Arc<Image>>>>>,
 }
 
 #[cfg(test)]

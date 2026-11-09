@@ -88,3 +88,66 @@ fn a_nested_comp_shows_nothing_past_its_end() {
         assert!(render_frame(&p, cid, s(2.0), 1.0).get(50, 50)[3] < 0.01, "collapse {collapse}: past its end");
     }
 }
+
+/// A video footage source that counts its decoded frames.
+struct Counting {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl crate::FootageSource for Counting {
+    fn frame(&self, _: ItemId, _: &crate::Footage, _: Tick) -> Option<std::sync::Arc<crate::Image>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(std::sync::Arc::new(crate::Image::filled(32, 32, [0.5, 0.5, 0.5, 1.0])))
+    }
+}
+
+/// #2275: the same precomp used twice in a comp renders its nested frame once and shares it
+/// between the instances; the next frame renders it again (the memo is per frame).
+#[test]
+fn a_precomp_used_twice_renders_once_per_frame() {
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::{Footage, RenderOpts, Renderer};
+
+    let counting = Counting { calls: AtomicUsize::new(0) };
+    let mut p = Project::default();
+    let fid = p.add_item(
+        "v.mov",
+        Label::Sandstone,
+        None,
+        ItemKind::Footage(Footage {
+            path: "v.mov".into(),
+            width: 32,
+            height: 32,
+            frame_rate: FrameRate::FPS_30,
+            duration: s(4.0),
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let mut inner = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    let fl = build::layer(&mut p, &inner, "v.mov", LayerSource::Footage { item: fid }, (32, 32), None);
+    inner.layers.push(fl);
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut outer = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    for name in ["A", "B"] {
+        let pre = build::layer(&mut p, &outer, name, LayerSource::Comp { item: iid }, (32, 32), None);
+        outer.layers.push(pre);
+    }
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let r = Renderer::new(&p, &counting, RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::ZERO);
+    assert_eq!(counting.calls(), 1, "two instances of the same precomp decode the nested footage once");
+    assert_eq!(img.width, 32, "the frame is the comp's size");
+
+    // The next frame is not served from the previous frame's memo.
+    r.comp_frame(cid, s(1.0));
+    assert_eq!(counting.calls(), 2, "the memo lives for one frame only");
+}

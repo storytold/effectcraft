@@ -10,6 +10,8 @@ use super::{
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::LayerId;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Coordinate space and stack range shared by CPU and accelerated effect evaluation.
 #[derive(Clone, Copy)]
@@ -101,6 +103,19 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
     Some((property, media))
 }
 
+/// What makes two nested comp renders interchangeable (the key of [`Renderer::comp_memo`]):
+/// the comp and its frame, the buffer scale, which project reads (Essential Properties
+/// overrides make a different one) and the quality/motion-blur switches the precomp layer
+/// hands down.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CompMemoKey {
+    comp: ItemId,
+    t: Tick,
+    scale: u64,
+    project: usize,
+    inherited: Option<(Quality, bool)>,
+}
+
 impl<'a> Renderer<'a> {
     /// A renderer over `project` and `footage` with the given options.
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource, opts: RenderOpts) -> Renderer<'a> {
@@ -123,6 +138,7 @@ impl<'a> Renderer<'a> {
             top: true,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            comp_memo: None,
         }
     }
 
@@ -185,7 +201,7 @@ impl<'a> Renderer<'a> {
         }
         // (the generation before any read: a file dropped while `make` runs makes it stale)
         let log = self.cache.and_then(LayerCache::drop_generation).map_or_else(ReadLog::new, ReadLog::starting_at);
-        let out = make(&Renderer { reads: Some(&log), ..*self });
+        let out = make(&Renderer { reads: Some(&log), comp_memo: self.comp_memo.clone(), ..*self });
         let files = log.into_files();
         if let Some(own) = self.reads {
             own.note_all(&files);
@@ -258,6 +274,7 @@ impl<'a> Renderer<'a> {
             top: false,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            comp_memo: self.comp_memo.clone(),
             ..*self
         }
     }
@@ -283,7 +300,7 @@ impl<'a> Renderer<'a> {
         let s = self.opts.scale;
         let bs = if s < 1.0 && nc.preserve_resolution { 1.0 } else { s };
         let base = self.nested_through(layer);
-        Some((Renderer { opts: RenderOpts { scale: bs, ..base.opts }, ..base }, item, lt, bs))
+        Some((Renderer { opts: RenderOpts { scale: bs, ..base.opts }, comp_memo: base.comp_memo.clone(), ..base }, item, lt, bs))
     }
 
     /// The nested comp of a precomp layer whose transformations collapse into this comp: the
@@ -356,7 +373,17 @@ impl<'a> Renderer<'a> {
             *slot = Some(link);
         }
         Some((
-            Renderer { opts: self.nested_opts(), depth: self.depth + 1, outer, opacity_mul: opacity, collapse3d: Some(c3), through, through_lost, ..*self },
+            Renderer {
+                opts: self.nested_opts(),
+                depth: self.depth + 1,
+                outer,
+                opacity_mul: opacity,
+                collapse3d: Some(c3),
+                through,
+                through_lost,
+                comp_memo: self.comp_memo.clone(),
+                ..*self
+            },
             nctx,
         ))
     }
@@ -466,7 +493,7 @@ impl<'a> Renderer<'a> {
     /// This renderer with another accelerator (or none): the passes of
     /// [`passes::in_passes`] render with the accelerator, its CPU fallback without.
     pub fn with_accel(&self, accel: Option<&'a dyn Accelerator>) -> Renderer<'a> {
-        Renderer { accel, ..*self }
+        Renderer { accel, comp_memo: self.comp_memo.clone(), ..*self }
     }
 
     /// The accelerator to use for this render, if any (see [`Backend`]).
@@ -482,6 +509,11 @@ impl<'a> Renderer<'a> {
     /// Render a composition at comp time `t` (transparent background, comp size × scale).
     /// Top-level frames go to the GPU when [`Self::active_accel`] is set and handles them.
     pub fn comp_frame(&self, comp_id: ItemId, t: Tick) -> Image {
+        // Arm the nested-comp memo for this frame (#2275): every precomp instance in the tree
+        // shares one render per (comp, time, scale). It lives for this frame only.
+        if self.depth == 0 && self.comp_memo.is_none() {
+            return Renderer { comp_memo: Some(Arc::new(Mutex::new(HashMap::new()))), ..*self }.comp_frame(comp_id, t);
+        }
         // Classic 3D runs composite on the GPU too (M12.7), so Auto sends 3D comps there as well;
         // Auto renders each comp on whichever compositor measured faster ([`AutoPick`]).
         if self.depth == 0
@@ -532,7 +564,7 @@ impl<'a> Renderer<'a> {
             && comp.has_3d()
             && (roi_inside(r, comp.width, comp.height) || comp.renderer == effectcraft_project::Renderer::Advanced3D)
         {
-            let full = Renderer { opts: RenderOpts { roi: None, ..self.opts }, ..*self }.comp_frame(comp_id, t);
+            let full = Renderer { opts: RenderOpts { roi: None, ..self.opts }, comp_memo: self.comp_memo.clone(), ..*self }.comp_frame(comp_id, t);
             let (x0, y0) = ((r[0] * s).round() as i64, (r[1] * s).round() as i64);
             let (rw, rh) = (((r[2] * s).round() as u32).max(1), ((r[3] * s).round() as u32).max(1));
             let mut out = Image::new(rw, rh);
@@ -824,9 +856,9 @@ impl<'a> Renderer<'a> {
                 let full = s < 1.0 && self.project.comp(*item).is_some_and(|nc| nc.preserve_resolution);
                 let bs = if full { 1.0 } else { s };
                 let base = self.nested_through(layer);
-                let base = Renderer { opts: RenderOpts { scale: bs, ..base.opts }, ..base };
+                let base = Renderer { opts: RenderOpts { scale: bs, ..base.opts }, comp_memo: base.comp_memo.clone(), ..base };
                 let sub = match &tmp {
-                    Some(p) => Renderer { project: p, ..base },
+                    Some(p) => Renderer { project: p, comp_memo: base.comp_memo.clone(), ..base },
                     None => base,
                 };
                 // Frame blending between the nested comp's frames (time-stretched/remapped).
@@ -840,6 +872,24 @@ impl<'a> Renderer<'a> {
                         let b = sub.comp_frame(*item, nc.frame_rate.tick_of(i + 1));
                         return Some(Buf { img: blend_frames(mode, &a, &b, w as f32), offset: [0.0; 2], scale: bs });
                     }
+                }
+                // Repeated instances of the same precomp render the nested comp once per
+                // (comp, time, scale) and share the frame (#2275). Instances that differ key
+                // differently: Essential Properties overrides read another project, and the
+                // quality/motion-blur switches travel with the layer (see [`CompMemoKey`]). The
+                // lock is never held across a render: deeper precomps inside the nested comp
+                // consult the same map.
+                if let Some(memo) = &self.comp_memo {
+                    let key =
+                        CompMemoKey { comp: *item, t: lt, scale: bs.to_bits(), project: sub.project as *const Project as usize, inherited: sub.inherited };
+                    if let Some(img) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
+                        return Some(Buf { img: (*img).clone(), offset: [0.0; 2], scale: bs });
+                    }
+                    let img = Arc::new(sub.comp_frame(*item, lt));
+                    if let Ok(mut m) = memo.lock() {
+                        m.insert(key, Arc::clone(&img));
+                    }
+                    return Some(Buf { img: (*img).clone(), offset: [0.0; 2], scale: bs });
                 }
                 Some(Buf { img: sub.comp_frame(*item, lt), offset: [0.0; 2], scale: bs })
             }

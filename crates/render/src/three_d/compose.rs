@@ -813,7 +813,7 @@ pub(crate) fn gpu_run(r: &Renderer, ctx: &EvalCtx, run: &[&Layer], out: (u32, u3
         return None;
     }
     // Depth of field is left to the accelerator (its blur runs where the planes are drawn).
-    let rd = Renderer { defer_dof: true, ..*r };
+    let rd = Renderer { defer_dof: true, comp_memo: r.comp_memo.clone(), ..*r };
     let g = gather(&rd, ctx, run, out);
     let planes: Vec<Plane3d> = g
         .items
