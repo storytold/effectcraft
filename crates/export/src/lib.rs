@@ -53,6 +53,7 @@ pub use effectcraft_project::render_queue;
 pub use effectcraft_project::render_queue::StorageQuota;
 pub use out::Sink;
 pub(crate) use pipeline::Cx;
+pub use pipeline::{CACHE_BUDGET, GPU_INFLIGHT_MAX, RENDERER_ENV, auto_gpu_frames, pick_renderer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
@@ -107,6 +108,40 @@ pub struct JobOptions<'a> {
     pub storage: Option<&'a dyn StorageQuota>,
     /// Overflow folders, in order.
     pub overflow: Vec<String>,
+    /// Layer caches shared by the consecutive jobs of a Render Queue run (#3335): the job
+    /// renders through them instead of fresh ones, and leaves the accelerator's pooled working
+    /// textures for the next job (whoever holds the caches calls
+    /// [`effectcraft_render::Accelerator::render_end`] after the last one). `None`: the job
+    /// starts cold and trims the pool when it ends, as a one-off export does.
+    pub caches: Option<JobCaches<'a>>,
+    /// The compositor of the job's frames (`Backend::Gpu` or `Backend::Cpu`; `Auto` counts as unset), shared by the output modules of
+    /// one queue item: when it holds a choice the job renders on it; otherwise the job stores
+    /// the compositor it chose there, so the item's other output modules encode the same
+    /// frames. `None`: the job decides alone.
+    pub renderer: Option<&'a std::sync::Mutex<Option<effectcraft_render::Backend>>>,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
+    /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+    pub gpu_frames: Option<usize>,
+}
+
+/// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,
+/// because a buffer an effect made on the GPU is not the CPU's, and neither may stand in for
+/// the other.
+#[derive(Clone, Copy)]
+pub struct JobCaches<'a> {
+    pub gpu: &'a effectcraft_render::LayerCache,
+    pub cpu: &'a effectcraft_render::LayerCache,
+}
+
+/// The compositor a job's frames render on: the GPU's (GPU Acceleration, with an
+/// accelerator) or the CPU's frame-parallel one (Software Rendering). The whole job renders
+/// on one of them, never a mix: the two differ slightly. A GPU project with an accelerator
+/// measures both on its first frames and renders the job on the faster (#3335); the choice is
+/// in the render log. `EFFECTCRAFT_RQ_RENDERER=gpu|cpu|auto` overrides the measurement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JobRenderer {
+    Gpu,
+    Cpu,
 }
 
 /// Progress after a batch of frames.
@@ -176,7 +211,8 @@ pub fn export(job: &Job, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<
 pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
     let t0 = Instant::now();
     let cx = Cx::new(job);
-    let render = RenderEnd(job.accel);
+    // A job of a Render Queue run leaves the pooled working textures warm for the next one.
+    let render = RenderEnd(job.accel.filter(|_| job.options.caches.is_none()));
     let mut r = export_with(&cx, progress, t0).await;
     drop(render);
     if matches!(r, Err(ExportError::Cancelled)) {
