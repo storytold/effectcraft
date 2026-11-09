@@ -21,6 +21,32 @@
 //! Own feature names are descriptive. The renamed effects use original translations in every
 //! existing effect catalog; legacy vendor names remain search aliases in the effects crate.
 //! External format tokens and stored instance names are not localized or rewritten.
+//!
+//! The rows of the effects this cleanup did not rename keep the provenance they had. A language
+//! decides for itself which names stay English: After Effects' Japanese interface leaves the `CC`
+//! series in English and gives the `VR` and `OCIO` sets a Japanese tail (`VR ブラー`,
+//! `OCIO CDL 変換`), while its Simplified Chinese one translates them. Repeating the English name
+//! is therefore a language-level choice, not a missing row.
+//!
+//! The Simplified Chinese names of unchanged effects come from the installed After Effects 2026
+//! (26.5.0.89) Simplified Chinese interface, its 21 category folder names included (the `CC` names
+//! came from Adobe's Chinese *documentation*, which names 68 of the 69); `Cryptomatte`,
+//! `EXtractoR`, `IDentifier`, `Key Light` and `Unmult` stay in English as brand names, and
+//! `Face Measurements` / `Face Track Points` are EffectCraft's own effects, so their wording is
+//! ours.
+//!
+//! The Traditional Chinese names for Taiwan are written from the meaning of the English ones, with
+//! the terms Taiwan's creative software uses (`圖層`, `遮罩`, `筆刷`, `雜訊`, `發光`, `漸層`); they
+//! are not converted from the Simplified table. Brand and coined names (`Cryptomatte`,
+//! `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Colorama`, `Minimax`, `Vegas`) stay in
+//! English, and the `VR` and `OCIO` sets keep their prefix in Chinese word order.
+//!
+//! The French names are written from the meaning of the English ones, with the vocabulary of the
+//! French menus; they come from no other application's interface. Brand and coined names
+//! (`Cryptomatte`, `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Colorama`, `Minimax`,
+//! `Tritone`, `Vibrance`, `Vegas`) stay in English; a series tag that prefixes a descriptive name
+//! (`VR`, `OCIO`, `PS`, `HDR`) stays and follows the French word order (`Flou VR`,
+//! `Transformation CDL OCIO`).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -457,8 +483,13 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.vr.sharpen", "VR Sharpen", "VR 锐化"),
     ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球面到平面"),
 ];
-/// Traditional Chinese (`zh-hant`): effect names keyed by stable ID. Descriptive replacements are translated
-/// from their meaning; external compatibility names remain aliases in the effects crate.
+/// Traditional Chinese (`zh-hant`): one row per effect in the registry, ids from
+/// [`SIMPLIFIED_CHINESE`]. Written from the meaning of the English names with the vocabulary
+/// Taiwan's creative software uses (圖層, 遮罩, 筆刷, 雜訊, 發光, 漸層), not converted from the
+/// Simplified table. Brand and coined names (`Cryptomatte`, `EXtractoR`, `IDentifier`, `Key Light`,
+/// `Unmult`, `Colorama`, `Minimax`, `Vegas`) stay in English; the `VR` and `OCIO` sets keep their
+/// prefix in Chinese word order. The effects this cleanup renamed are translated from their new
+/// descriptive names.
 const TRADITIONAL_CHINESE: &[Row] = &[
     ("ec.3d.channelextract", "3D Channel Extract", "3D 通道擷取"),
     ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
@@ -770,8 +801,20 @@ const TRADITIONAL_CHINESE: &[Row] = &[
     ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球體轉平面"),
 ];
 
-/// Japanese (`ja`): effect names keyed by stable ID. Descriptive replacements are translated
-/// from their meaning; external compatibility names remain aliases in the effects crate.
+/// Japanese (`ja`): reserved for the Japanese data point on #821, so both languages share this
+/// one catalog instead of inventing a second mechanism. A translator fills one row per effect,
+/// ids from [`SIMPLIFIED_CHINESE`]; the names Adobe's Japanese interface leaves in English
+/// (`Cryptomatte`, `EXtractoR`, `IDentifier` and `Key Light`) repeat that English name here rather
+/// than being left out; the `VR` and `OCIO` sets take a Japanese tail instead, and `Unmult` keeps
+/// its English name in both catalogs. An effect with no row draws its English name anyway, which
+/// is what `Twirl (Legacy)` and the two EffectCraft-only effects would do without their rows.
+///
+/// The rows of the effects this cleanup did not rename come from AE 2026's Japanese interface
+/// where it was read directly (its Effect menu and its Effects & Presets panel) and from Adobe's
+/// own Japanese help where the panel was not to hand. A published glossary is used to cross-check,
+/// never as the only source: it normalises the typography (half-width parentheses where AE draws
+/// full-width) and still carries CS6-era names for the `CC` series. The renamed effects are
+/// translated from their new descriptive names.
 const JAPANESE_EFFECTS: &[Row] = &[
     // Effects this application adds itself have no interface to read a name from, so they follow
     // the Chinese catalog's choice to translate them (顔の測定, 顔のトラッキングポイント) rather than
@@ -1138,8 +1181,11 @@ const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
     ("Utility", "ユーティリティ"),
 ];
 
-/// Georgian (`ka`): effect names keyed by stable ID. Descriptive replacements are translated
-/// from their meaning; external compatibility names remain aliases in the effects crate.
+/// Georgian (`ka`): one row per effect, ids from [`SIMPLIFIED_CHINESE`]. Written from the meaning
+/// of the English names, with the terms the Georgian menus and panels use (FilmCraft's Georgian
+/// for the effects the two apps share). The brand names (`Cryptomatte`, `EXtractoR`, `IDentifier`,
+/// `Key Light`, `Unmult`) stay in English; `VR` and `OCIO` keep their prefix. The renamed effects
+/// are translated from their new descriptive names.
 const GEORGIAN: &[Row] = &[
     ("ec.3d.channelextract", "3D Channel Extract", "3D არხის ამოღება"),
     ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
@@ -1478,8 +1524,8 @@ const GEORGIAN_CATEGORIES: &[(&str, &str)] = &[
 
 /// French (`fr`): one row per effect, ids from [`SIMPLIFIED_CHINESE`]. Written from the meaning of the
 /// English names, with the terms the French menus use (calque, estampe for a matte, incrustation for
-/// keying). The `CC` series and the brand names stay in English, `VR`, `OCIO`, `PS` and `HDR` keep
-/// their tag after the translated name.
+/// keying). The brand names stay in English, `VR`, `OCIO`, `PS` and `HDR` keep their tag after the
+/// translated name.
 const FRENCH: &[Row] = &[
     ("ec.3d.channelextract", "3D Channel Extract", "Extraction de canal 3D"),
     ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
