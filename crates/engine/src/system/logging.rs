@@ -214,8 +214,14 @@ fn rotate(dir: &Path) -> std::io::Result<(PathBuf, File)> {
         }
     }
     let path = numbered(dir, 0);
-    let file = File::create(&path)?;
+    let file = create_session_file(&path)?;
     Ok((path, file))
+}
+
+// Another process may create the current log after our rotation. Never truncate its
+// file: its writer and crash reporter may already hold the same inode open.
+fn create_session_file(path: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// Rotate the session logs in `dir` (the `Logs` folder, see [`log_dir`]) and write records to
@@ -426,6 +432,20 @@ mod tests {
         // preserved) instead of collapsing to the epoch (reviewer rule from the sibling PRs).
         assert_eq!(timestamp(10_000_000_000_000_000), "318857-05-20T17:46:40.000Z");
         assert_eq!(timestamp(u64::MAX), "584556019-04-03T14:25:51.615Z");
+    }
+
+    #[test]
+    fn concurrent_session_creation_does_not_truncate_the_winner() {
+        let dir = temp_dir("concurrent-create");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SESSION_LOG);
+        let mut winner = create_session_file(&path).unwrap();
+        winner.write_all(b"crash-report session 1-2\nwinner content\n").unwrap();
+        assert_eq!(create_session_file(&path).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        winner.write_all(b"still the same session\n").unwrap();
+        assert_eq!(read(&path), "crash-report session 1-2\nwinner content\nstill the same session\n");
+        drop(winner);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Each launch keeps the previous runs' logs, so the log of a run that crashed survives.

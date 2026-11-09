@@ -182,7 +182,7 @@ fn clean_exit(input: &mut impl Read) -> io::Result<bool> {
 }
 
 enum SessionLog {
-    Captured(File),
+    Captured { file: File, marker: String },
     Unavailable(String),
 }
 
@@ -201,7 +201,7 @@ impl SessionLog {
             Ok(file)
         })();
         match opened {
-            Ok(file) => Self::Captured(file),
+            Ok(file) => Self::Captured { file, marker: format!("{}\n", session_marker(id)) },
             Err(e) => Self::Unavailable(e.to_string()),
         }
     }
@@ -209,7 +209,15 @@ impl SessionLog {
     fn write_tail(&mut self, report: &mut File) -> io::Result<()> {
         match self {
             Self::Unavailable(reason) => writeln!(report, "Recent log unavailable: {reason}"),
-            Self::Captured(file) => {
+            Self::Captured { file, marker } => {
+                // An older concurrent launcher may have truncated the captured file.
+                // Recheck its identity before copying any content into this report.
+                file.seek(SeekFrom::Start(0))?;
+                let mut header = [0u8; HEADER_BYTES];
+                let prefix = header.get_mut(..marker.len()).ok_or_else(|| io::Error::other("session marker too long"))?;
+                if file.read_exact(prefix).is_err() || prefix != marker.as_bytes() {
+                    return writeln!(report, "Recent log unavailable: session identity changed");
+                }
                 let size = file.metadata()?.len();
                 file.seek(SeekFrom::Start(size.saturating_sub(LOG_BYTES as u64)))?;
                 writeln!(report, "\nRecorded session log tail (last {LOG_BYTES} bytes at most; logging filters/size caps may omit later events):")?;
@@ -347,6 +355,21 @@ mod tests {
             assert!(text.contains("Recent log unavailable"));
             assert!(!text.contains("private other session"));
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn captured_log_rejects_a_session_overwritten_after_open() {
+        let dir = folder();
+        let path = dir.join("log");
+        std::fs::write(&path, "crash-report session 1-2\noriginal session\n").unwrap();
+        let mut log = SessionLog::open(Some(&path), "1-2");
+        std::fs::write(&path, "crash-report session 3-4\nprivate other session\n").unwrap();
+        let report = write_report(&dir, "1-2", &mut log, None).unwrap();
+        let text = std::fs::read_to_string(report).unwrap();
+        assert!(text.contains("Recent log unavailable"));
+        assert!(!text.contains("private other session"));
+        assert!(!text.contains("session 3-4"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
