@@ -238,6 +238,7 @@ fn abi2_plugin_layers_key_on_layer_time() {
         version: "1".into(),
         author: String::new(),
         description: String::new(),
+        imports: Vec::new(),
         params: vec![],
     };
 

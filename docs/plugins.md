@@ -164,7 +164,7 @@ There are two ways to write one:
 |---|---|---|
 | What | a `.wasm` (or `.wat`) module | a type implementing `effectcraft_effects::plugin::EffectPlugin` |
 | Loaded by | Effect ▸ Install Effect Plug-in… (copied into the `Plug-ins` folder next to the settings and loaded on every start-up), Effect ▸ Load Effect Plug-in… / `effect.plugins.load {path \| folder}` (loads in this session only), the `Plug-ins` folder next to the settings at start-up, or `effect.plugins.install {path \| folder}` | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
-| Sandbox | yes: no imports (no files, clock or network), fuel-limited, at most 1 GiB of memory, deterministic floats | none (it is your code) |
+| Sandbox | yes: no imports except the optional `ec.source_at` (no files, clock or network), fuel-limited, at most 1 GiB of memory, deterministic floats | none (it is your code) |
 | Platforms | desktop and CLI (the wasmi interpreter, crate feature `effectcraft-plugin/wasm`); not the web build | everywhere |
 
 `effect.plugins.list` lists what is loaded: `{api, wasm, plugins: [{id, name, category, version,
@@ -179,7 +179,8 @@ author, source, params}]}`.
   checkbox (0 / 1) and popup (0-based index) take one value, point two (already in **buffer
   pixels**), colour four (RGBA 0–1).
 * **Time** is layer time in seconds. A WebAssembly module written for ABI 2 also gets the
-  layer's neighbouring frames at other times (see [WebAssembly ABI](#webassembly-abi)).
+  layer's neighbouring frames at other times, and can opt into `ec.source_at` to sample its
+  own layer at any time (see [WebAssembly ABI](#webassembly-abi)).
 * Rendering must be **deterministic** and may run on several threads at once (a WebAssembly
   plug-in gets one instance per thread).
 * A failed render (an error code, a trap, running out of fuel) leaves the frame unchanged.
@@ -208,6 +209,9 @@ Every plug-in describes itself with a JSON manifest:
 
 * `id`: stable, reverse-domain; letters, digits, `.`, `_`, `-`. `ec.` is reserved for built-ins.
   Ids must be unique (a second plug-in with a taken id is refused).
+* `imports` (optional): WebAssembly host imports the module uses. The only accepted value is
+  `"source_at"`; the module must import exactly what it declares. Omit it for a module with no
+  imports.
 * `category`: one of the Effects & Presets categories (`Blur & Sharpen`, `Stylize`, …) or a new
   one, which appears after the built-in categories.
 * Parameter types: `slider` (`default`, `min`, `max`, optional `sliderMin`, `sliderMax`,
@@ -219,16 +223,17 @@ Every plug-in describes itself with a JSON manifest:
 
 ### WebAssembly ABI
 
-A module with **no imports** exports:
+A module with no imports — or only the optional `ec.source_at` host import — exports:
 
-| export | signature | |
+| export / import | signature | |
 |---|---|---|
 | `memory` | memory | linear memory shared with the host |
-| `ec_api_version` | `() -> i32` | `1` for ABI 1, `2` for ABI 2 (neighbouring frames) |
+| `ec_api_version` | `() -> i32` | `1` for ABI 1, `2` for ABI 2 (neighbouring frames, optional `source_at`) |
 | `ec_manifest_ptr`, `ec_manifest_len` | `() -> i32` | the UTF-8 JSON manifest in memory |
 | `ec_alloc` | `(bytes: i32) -> i32` | a buffer of at least `bytes` bytes, 8-byte aligned; it may reuse the previous one |
 | `ec_render` (ABI 1) | `(pixels: i32, width: i32, height: i32, params: i32, nparams: i32, time: f64, scale: f64) -> i32` | process the pixels in place; return 0 on success |
 | `ec_render2` (ABI 2) | `ec_render`'s arguments, then `prev: i32, prev_time: f64, next: i32, next_time: f64, flags: i32` | the same, with the neighbouring frames; return 0 on success |
+| `ec.source_at` (ABI 2, optional import) | `(layer_time: f64, effects: i32, dst_ptr: i32, dst_len: i32) -> i32` | write the effect's input at `layer_time` into memory; 0 = ok, 1 = unavailable, 2 = bad buffer |
 
 For each frame the host calls `ec_alloc` once for a buffer holding the parameters (`nparams`
 little-endian `f64`s) followed by the pixels (`width × height × 4` little-endian `f32`s,
@@ -244,6 +249,16 @@ when absent). The ABI version is the module's `ec_api_version` and is independen
 manifest's `api` (the native plug-in API): a module can use ABI 2 while its manifest says
 `"api": 1`. Because an ABI 2 module reads other times, its layer is keyed on the layer time in
 the render cache; ABI 1 modules keep the time-independent key.
+
+An ABI 2 module that declares `"imports": ["source_at"]` and imports `ec.source_at` can sample
+its own layer at **any** layer time, not only the two neighbours. `layer_time` is in seconds;
+`effects` selects how many effects of the stack to apply (0 = source and masks; the host never
+goes past the effect being rendered). The result is written to `dst_ptr` as premultiplied RGBA
+`f32` on the **current frame's** grid, with the same `width × height` and `scale`; `dst_len` must
+be at least `width × height × 16` bytes. The host charges each call like a frame and allows at
+most 64 calls per render; over the cap, a bad buffer, no host or a recursion limit returns 1 or
+2 without changing the frame. The module must declare the import in the manifest, and no other
+import is accepted. `source_at` requires ABI 2 (a module reporting ABI 1 is refused).
 
 Each call gets a fuel budget proportional to the frame size; a module that loops forever stops
 with an error instead of hanging the app.

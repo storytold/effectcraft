@@ -486,3 +486,165 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
 }
+
+/// An ABI 2 module that imports `ec.source_at`, asks for the layer one second later (with no
+/// effects), and copies the returned buffer over its own frame. Its manifest declares the import.
+fn source_at_module(id: &str) -> String {
+    let manifest = format!(r#"{{"api":2,"id":"{id}","name":"SourceAt {id}","category":"Test Plug-ins","version":"1","imports":["source_at"],"params":[]}}"#);
+    source_at_module_with(&manifest)
+}
+
+/// The same module with a caller-supplied manifest (so a test can omit or change `imports`).
+fn source_at_module_with(manifest: &str) -> String {
+    let len = manifest.len();
+    let escaped = manifest.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"(module
+  (import "ec" "source_at" (func $source_at (param f64 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (func (export "ec_api_version") (result i32) i32.const 2)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_render2")
+    (param $px i32) (param $w i32) (param $h i32) (param $params i32) (param $np i32)
+    (param $t f64) (param $scale f64)
+    (param $prev i32) (param $prev_t f64) (param $next i32) (param $next_t f64) (param $flags i32)
+    (result i32)
+    (local $i i32) (local $n i32) (local $rc i32)
+    local.get $w
+    local.get $h
+    i32.mul
+    i32.const 16
+    i32.mul
+    local.set $n
+    local.get $t
+    f64.const 1
+    f64.add
+    i32.const 0
+    i32.const 65536
+    local.get $n
+    call $source_at
+    local.set $rc
+    local.get $rc
+    if
+      local.get $rc
+      return
+    end
+    block $done
+      loop $copy
+        local.get $i
+        local.get $n
+        i32.ge_u
+        br_if $done
+        local.get $px
+        local.get $i
+        i32.add
+        local.get $i
+        i32.const 65536
+        i32.add
+        i32.load8_u
+        i32.store8
+        local.get $i
+        i32.const 1
+        i32.add
+        local.set $i
+        br $copy
+      end
+    end
+    i32.const 0))"#
+    )
+}
+
+/// A host that answers `source_at` for any time: red is the requested layer time, green the
+/// number of effects requested.
+struct SourceAtHost;
+
+impl effectcraft_effects::plugin::PluginHost for SourceAtHost {
+    fn input_at(&self, _layer_time: f64) -> Option<effectcraft_effects::plugin::PluginImage> {
+        None
+    }
+
+    fn source_at(&self, layer_time: f64, effects: usize) -> Option<effectcraft_effects::plugin::PluginImage> {
+        Some(effectcraft_effects::plugin::PluginImage {
+            width: 2,
+            height: 1,
+            pixels: vec![[layer_time as f32, effects as f32, 0.0, 1.0]; 2],
+            origin: [0.0; 2],
+            scale: 1.0,
+        })
+    }
+
+    fn layer_input(&self, _param_id: &str, _layer_time: f64) -> Option<effectcraft_effects::plugin::PluginImage> {
+        None
+    }
+
+    fn params_at(&self, _layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        None
+    }
+
+    fn frame_rate(&self) -> f64 {
+        4.0
+    }
+
+    fn time(&self) -> f64 {
+        0.5
+    }
+}
+
+#[test]
+fn abi_v2_source_at_reads_arbitrary_layer_times() {
+    load_wasm(source_at_module("org.test.sourceat").as_bytes(), "sourceat.wat").unwrap();
+    let p = effectcraft_effects::plugin::plugin("org.test.sourceat").unwrap();
+    let params = effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat: &[], texts: &[] };
+    let mut px = vec![[0.0f32; 4]; 2];
+    let host = SourceAtHost;
+    let mut frame = effectcraft_effects::plugin::PluginFrame { width: 2, height: 1, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0, 1.0] };
+    p.render_v2(&mut frame, &params, 0.5, &host).unwrap();
+    assert!((px[0][0] - 1.5).abs() < 1e-6, "source_at got t+1: {px:?}");
+    assert!((px[0][1] - 0.0).abs() < 1e-6, "zero effects requested: {px:?}");
+    assert_eq!(px[0][3], 1.0);
+}
+
+#[test]
+fn source_at_reports_a_short_destination_buffer() {
+    // Ask for the layer one second later but claim the destination holds zero bytes. The host
+    // returns 2; the module writes that code into red and renders normally.
+    let bad = source_at_module("org.test.sourceat.badbuffer").replace("    local.get $n\n    call $source_at", "    i32.const 0\n    call $source_at").replace(
+        "    local.get $rc\n    if\n      local.get $rc\n      return\n    end",
+        "    local.get $px\n    local.get $rc\n    f32.convert_i32_s\n    f32.store\n    i32.const 0\n    return",
+    );
+    load_wasm(bad.as_bytes(), "badbuffer.wat").unwrap();
+    let p = effectcraft_effects::plugin::plugin("org.test.sourceat.badbuffer").unwrap();
+    let params = effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat: &[], texts: &[] };
+    let mut px = vec![[0.0f32; 4]; 2];
+    let host = SourceAtHost;
+    let mut frame = effectcraft_effects::plugin::PluginFrame { width: 2, height: 1, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0, 1.0] };
+    p.render_v2(&mut frame, &params, 0.5, &host).unwrap();
+    assert_eq!(px[0][0], 2.0, "short buffer is rejected with code 2: {px:?}");
+}
+
+#[test]
+fn source_at_must_be_declared_and_needs_abi_2() {
+    // The module imports source_at but the manifest does not declare it.
+    let undeclared =
+        source_at_module_with(r#"{"api":2,"id":"org.test.sourceat.undeclared","name":"SourceAt","category":"Test Plug-ins","version":"1","params":[]}"#);
+    assert!(load_err(load_wasm(undeclared.as_bytes(), "undeclared.wat")).contains("does not list it"));
+    // The manifest declares it but the module does not import it.
+    let unimported = module_with(
+        r#"{"api":2,"id":"org.test.sourceat.unimported","name":"SourceAt","category":"Test Plug-ins","version":"1","imports":["source_at"],"params":[]}"#,
+        "",
+    );
+    assert!(load_err(load_wasm(unimported.as_bytes(), "unimported.wat")).contains("does not import"));
+    // The import is not free: source_at is an ABI 2 feature.
+    let v1 = source_at_module("org.test.sourceat.v1")
+        .replace("(func (export \"ec_api_version\") (result i32) i32.const 2)", "(func (export \"ec_api_version\") (result i32) i32.const 1)");
+    assert!(load_err(load_wasm(v1.as_bytes(), "v1.wat")).contains("needs WebAssembly ABI 2"));
+    // Unknown imports are still refused, and the manifest cannot smuggle one in.
+    let unknown = source_at_module("org.test.sourceat.unknown").replace("(import \"ec\" \"source_at\"", "(import \"env\" \"now\"");
+    assert!(load_err(load_wasm(unknown.as_bytes(), "unknown.wat")).contains("import"));
+    let bad_manifest =
+        module_with(r#"{"api":2,"id":"org.test.sourceat.bad","name":"Bad","category":"Test Plug-ins","version":"1","imports":["now"],"params":[]}"#, "");
+    assert!(load_err(load_wasm(bad_manifest.as_bytes(), "bad.wat")).contains("unknown import"));
+}
