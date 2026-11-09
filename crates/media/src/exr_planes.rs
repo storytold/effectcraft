@@ -910,7 +910,8 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     })?;
     let index = flight.state().index.clone();
     if opened.stamp != index.stamp {
-        // The file changed since it was indexed.
+        // The file changed since it was indexed (the next index check sees its new identity).
+        source.opened_as(opened.stamp);
         let fresh = exr_index::build(&mut *opened.reader, opened.len, opened.stamp).map_err(|_| Refused::Unreadable)?;
         exr_index::keep(path, Arc::new(fresh));
         return Err(Refused::Changed);
