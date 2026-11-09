@@ -171,6 +171,9 @@ pub struct Session {
     pub crypto_probe: Arc<std::sync::Mutex<commands::CryptoProbeSlot>>,
     /// The persistent disk cache (Settings ▸ Media & Disk Cache), when enabled.
     pub disk_cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>,
+    /// Files File ▸ Reload Footage reloaded while the disk cache was off: their entries are
+    /// dropped when it is switched on ([`Session::configure_disk_cache`]), before it is used.
+    pub pending_disk_drops: std::collections::BTreeSet<String>,
     /// Settings (Preferences).
     pub prefs: prefs::Prefs,
     /// Bumped whenever settings change (frontends re-apply theme, labels…).
@@ -254,8 +257,6 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
-    /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
-    pub disk_salt: Option<(u64, u64)>,
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
@@ -350,6 +351,7 @@ impl Default for Session {
             layer_cache: Arc::new(LayerCache::default()),
             crypto_probe: Default::default(),
             disk_cache: None,
+            pending_disk_drops: Default::default(),
             prefs: prefs::Prefs::default(),
             prefs_revision: 0,
             config: None,
@@ -385,7 +387,6 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
-            disk_salt: None,
             aux_footage: None,
             script_calls: ScriptCalls::default(),
         }

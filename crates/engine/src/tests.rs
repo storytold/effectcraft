@@ -11,6 +11,7 @@ mod color_view;
 mod crypto_pick;
 mod delete_keys;
 mod disk_cache;
+mod display_pass;
 mod effects;
 mod essential;
 mod essential_more;

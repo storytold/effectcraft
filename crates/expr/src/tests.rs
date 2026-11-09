@@ -586,6 +586,12 @@ fn angles_and_look_at() {
     assert_close!(f.num("degreesToRadians(90)", 0.0), std::f64::consts::FRAC_PI_2);
     let o = f.ev(f.a, "transform/orientation", "lookAt([0, 0, 0], [100, 0, 100])", 0.0).unwrap().as_vec3();
     assert!(close(o[1], 45.0) && close(o[0], 0.0), "{o:?}");
+    // After Effects 2026 read-backs of lookAt(position, …) on a layer at [960, 540, 0].
+    for (at, want) in [([1500.0, 200.0, 300.0], [48.5763, 49.9802, 319.0442]), ([500.0, 900.0, -400.0], [221.9872, 319.4766, 210.3184])] {
+        let e = format!("lookAt([960, 540, 0], [{}, {}, {}])", at[0], at[1], at[2]);
+        let o = f.ev(f.a, "transform/orientation", &e, 0.0).unwrap().as_vec3();
+        assert!((0..3).all(|i| (o[i] - want[i]).abs() < 1e-3), "{e}: {o:?}");
+    }
 }
 
 // ---- interpolation ----------------------------------------------------------------------------
@@ -1326,6 +1332,7 @@ fn source_dimensions_follow_media_replacement() {
         footage: None,
         property_overrides: &[],
         media_overrides: &[media],
+        reads: None,
     };
     assert_eq!(ctx.value(l, l.props.prop(ROT).unwrap()), Value::Scalar(130.0));
 }
@@ -1548,6 +1555,7 @@ fn text_expression_selector_values() {
             footage: None,
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         };
         let doc = effectcraft_render::text::source_text(&ctx, l).unwrap();
         let lay = effectcraft_text::layout_doc(&doc);
@@ -1598,6 +1606,43 @@ fn sample_image_reads_rendered_pixels() {
     // The result has four values; outside the layer it's transparent.
     assert_close!(f.num("thisComp.layer(\"B\").sampleImage([20, 20]).length", 0.0), 4.0);
     assert_close!(f.num(&code("thisComp.layer(\"B\").sampleImage([-50, -50])"), 0.0), 0.0);
+}
+
+/// The footage `sampleImage` renders is a file the evaluating render read (#3184): it is noted in
+/// the render's log, also when the sampled buffer comes from the per-thread cache.
+#[test]
+fn sample_image_notes_the_files_it_reads() {
+    use effectcraft_render::reads::{FileStamp, ReadFile, ReadLog};
+    /// A grey picture of any footage, noting `/clip.png` for every read.
+    struct Clip;
+    impl effectcraft_render::FootageSource for Clip {
+        fn frame(&self, _: ItemId, f: &effectcraft_project::Footage, _: Tick) -> Option<std::sync::Arc<effectcraft_render::Image>> {
+            let mut img = effectcraft_render::Image::new(f.width, f.height);
+            img.data.fill([0.5, 0.5, 0.5, 1.0]);
+            Some(std::sync::Arc::new(img))
+        }
+        fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+            f();
+            reads.note(ReadFile::new("/clip.png", FileStamp::Native { len: 3, modified: Some(1) }));
+        }
+    }
+    let mut p = Project::default();
+    let comp = Comp::new(20, 20, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    let footage =
+        effectcraft_project::Footage { path: "/clip.png".into(), width: 8, height: 8, has_video: true, frame_rate: FrameRate::FPS_30, ..Default::default() };
+    let item = p.add_item("Clip", Label::Aqua, None, ItemKind::Footage(footage));
+    let layer = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item }, (8, 8), None);
+    let cid = p.add_item("C", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+    let c = p.comp(cid).unwrap();
+    for pass in ["rendered", "cached"] {
+        let log = ReadLog::new();
+        let ctx = EvalCtx { footage: Some(&Clip), reads: Some(&log), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+        let px = crate::sample::sample_image(ctx, cid, &layer, [4.0, 4.0], [0.5, 0.5], false, 0.0).unwrap();
+        assert!((px[0] - 0.5).abs() < 1e-3 && px[3] > 0.99, "{pass}: {px:?}");
+        let files = log.into_files();
+        assert_eq!(files.files().iter().map(|f| &*f.path).collect::<Vec<_>>(), ["/clip.png"], "{pass}");
+        assert!(files.is_complete(), "{pass}");
+    }
 }
 
 /// A huge sample point saturates the pixel coordinates; it must not overflow the loop bounds.

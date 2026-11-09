@@ -319,3 +319,80 @@ fn color_stabilizer_matches_the_reference_frame() {
     let b = run_fx("ec.color.colorstabilizer", &vals2, lifted, 0.0, env);
     assert!((b.img.get(5, 20)[0] - reference.get(5, 20)[0]).abs() < 0.01);
 }
+
+/// After Effects 2026's 320 × 180 test card from our importer samples (2026-11-05): a black to
+/// white ramp across, six 40 px colour squares at y 45 and a white 30 px square moving from
+/// x 20 to 300 at y 130 over 2 s.
+fn stabilizer_card(t: f64) -> Image {
+    let mut img = Image::new(320, 180);
+    let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0], [1.0, 0.0, 1.0]];
+    let mover = 20.0 + 140.0 * t;
+    for y in 0..180 {
+        for x in 0..320 {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let mut c = [(cx / 320.0) as f32; 3];
+            for (i, col) in cols.iter().enumerate() {
+                if (cx - (30.0 + 52.0 * i as f64)).abs() < 20.0 && (cy - 45.0).abs() < 20.0 {
+                    c = col.map(|v| v as f32);
+                }
+            }
+            if (cx - mover).abs() < 15.0 && (cy - 130.0).abs() < 15.0 {
+                c = [1.0; 3];
+            }
+            img.set(x, y, [c[0], c[1], c[2], 1.0]);
+        }
+    }
+    img
+}
+
+/// The sample's keyframed points: Black Point (64, 90) → (151, 99) and Mid Point (160, 90) →
+/// (188, 122) over the first second, White Point at (256, 90), Stabilize Levels.
+struct KeyedCard;
+impl EffectHost for KeyedCard {
+    fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+        None
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+        Some(Buf { img: stabilizer_card(t), offset: [0.0; 2], scale: 1.0 })
+    }
+    fn params_at(&self, t: f64) -> Option<crate::Params> {
+        let mut p = crate::Params { values: Default::default() };
+        let k = t.clamp(0.0, 1.0);
+        let lerp = |a: [f64; 2], b: [f64; 2]| Value::Vec2([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]);
+        p.values.insert("blackPoint".into(), lerp([64.0, 90.0], [151.0, 99.0]));
+        p.values.insert("midPoint".into(), lerp([160.0, 90.0], [188.0, 122.0]));
+        p.values.insert("whitePoint".into(), Value::Vec2([256.0, 90.0]));
+        Some(p)
+    }
+}
+
+/// #3125: with keyframed sample points After Effects samples the reference frame where the
+/// points were at the reference time, so a static card is corrected. Its render at 0.5 s (Black
+/// Point at (107.5, 94.5)) is a Levels map of the ramp: `out = a + b·v` with b 1.2935..1.2965
+/// and a −0.2365..−0.2350 (fitted on our 26-level export). EffectCraft sampled both frames at
+/// the current points and left the card unchanged.
+#[test]
+fn color_stabilizer_samples_the_reference_at_the_points_reference_positions() {
+    let host = KeyedCard;
+    let env = EffectEnv { host: Some(&host), ..Default::default() };
+    let p = host.params_at(0.5).unwrap();
+    let mut vals: Vec<(&str, Value)> = ["blackPoint", "midPoint", "whitePoint"].iter().map(|id| (*id, p.values[*id].clone())).collect();
+    vals.push(("stabilize", Value::Enum(1)));
+    vals.push(("sampleSize", num(3.0)));
+    vals.push(("referenceFrame", num(0.0)));
+    let out = run_fx("ec.color.colorstabilizer", &vals, stabilizer_card(0.5), 0.5, env);
+    // The ramp row between the squares: fit out = a + b·v from two far-apart pixels.
+    let v = |x: i64| (x as f64 + 0.5) / 320.0;
+    let o = |x: i64| out.img.get(x, 90)[0] as f64;
+    let b = (o(240) - o(80)) / (v(240) - v(80));
+    let a = o(80) - b * v(80);
+    assert!((b - 1.295).abs() < 0.005, "slope {b}");
+    assert!((a + 0.2357).abs() < 0.005, "offset {a}");
+    // Every ramp pixel of that row follows the line (no clamping in 32 bpc).
+    for x in (0..320).step_by(7) {
+        assert!((o(x) - (a + b * v(x))).abs() < 1e-3, "x {x}");
+    }
+}
