@@ -4,10 +4,12 @@
 //! overwriting ordinary outputs or opens a second confirmation flow. Those belong to the
 //! exporter. Paths are compared by name once resolved ([`key`]): made absolute, `.` and `..`
 //! resolved, one separator, a volume's verbatim prefix dropped, and without case where volumes
-//! ignore it. No file is looked at (#3328): a link to a source under another name is not
-//! recognised, which comparing file identities did at the cost of opening every footage frame
-//! for every check. Checks happen before dispatch; filesystem changes between the check and the
-//! write require exporter-side revalidation.
+//! ignore it. On Windows a drive letter whose root resolves elsewhere (a mapped network drive, a
+//! `subst` drive) stands for that place: one lookup per letter per guard. No file is looked at
+//! (#3328): a link to a source under another name is not recognised, which comparing file
+//! identities did at the cost of opening every footage frame for every check. Checks happen
+//! before dispatch; filesystem changes between the check and the write require exporter-side
+//! revalidation.
 //!
 //! The commands that write to a path they are given (Save Frame As, Export Lottie, Save a Copy,
 //! Collect Files, Export Timeline…) never replace one of those files either, with no flag:
@@ -106,6 +108,10 @@ impl Source {
 pub(crate) struct Protected {
     files: Vec<(PathBuf, Source)>,
     by_path: HashMap<String, usize>,
+    /// What each drive letter's root resolves to, by letter (`a`..`z`), looked up once per guard
+    /// ([`drive_root`]): a mapped network drive and its UNC path are one place.
+    #[cfg(windows)]
+    drives: [std::sync::OnceLock<Option<String>>; 26],
 }
 
 /// The files the project reads, checked before a command writes to a path it was given
@@ -150,8 +156,34 @@ impl Protected {
     }
 
     fn add(&mut self, path: PathBuf, source: Source) {
-        self.by_path.entry(key(&path)).or_insert(self.files.len());
+        let key = self.key(&path);
+        self.by_path.entry(key).or_insert(self.files.len());
         self.files.push((path, source));
+    }
+
+    /// The name `path` is compared by ([`key`]), with a drive letter whose root resolves to
+    /// another place (a mapped network drive to `\\server\share`, a `subst` drive to its folder)
+    /// as that place. A root that can't be resolved keeps its letter.
+    fn key(&self, path: &Path) -> String {
+        let plain = key(path);
+        #[cfg(windows)]
+        {
+            let mut chars = plain.chars();
+            // (a drive and its root, `x://…`: a drive-relative `x:foo` is not mapped)
+            let (Some(letter), Some(':'), Some('/'), Some('/')) = (chars.next(), chars.next(), chars.next(), chars.next()) else { return plain };
+            let index = u8::try_from(letter).ok().filter(u8::is_ascii_lowercase).map(|b| usize::from(b - b'a'));
+            let Some(slot) = index.and_then(|i| self.drives.get(i)) else {
+                return plain;
+            };
+            let Some(root) = slot.get_or_init(|| drive_root(letter).map(|r| key(&r))) else { return plain };
+            // (`x:/` is the drive's root, the rest follows it)
+            match plain.get(3..) {
+                Some(rest) => format!("{root}{rest}"),
+                None => plain,
+            }
+        }
+        #[cfg(not(windows))]
+        plain
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -160,8 +192,29 @@ impl Protected {
 
     /// The source at this path, compared by name once resolved ([`key`]): no file is looked at.
     pub(crate) fn find(&self, path: &Path) -> Option<&Source> {
-        self.by_path.get(&key(path)).and_then(|i| self.files.get(*i)).map(|(_, source)| source)
+        self.by_path.get(&self.key(path)).and_then(|i| self.files.get(*i)).map(|(_, source)| source)
     }
+}
+
+/// What the root of drive `letter` (`a`..`z`) resolves to, `None` when it can't be (a
+/// disconnected drive): a mapped network drive's `\\?\UNC\server\share\`, a `subst` drive's
+/// folder, a local drive itself.
+#[cfg(windows)]
+fn drive_root(letter: char) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = DRIVE_ROOT.with(|hook| hook.borrow_mut().as_mut().map(|h| h(letter))) {
+        return root;
+    }
+    std::fs::canonicalize(format!("{letter}:\\")).ok()
+}
+
+/// Resolves drive roots in place of the file system on this thread (tests).
+#[cfg(all(windows, test))]
+type DriveHook = Box<dyn FnMut(char) -> Option<PathBuf>>;
+
+#[cfg(all(windows, test))]
+thread_local! {
+    static DRIVE_ROOT: std::cell::RefCell<Option<DriveHook>> = const { std::cell::RefCell::new(None) };
 }
 
 /// `path` made absolute, with `.` and `..` resolved by name alone (no file is looked at).
@@ -1019,5 +1072,99 @@ mod tests {
         assert!(first.is_ok() && second.is_ok());
         assert!(took < std::time::Duration::from_millis(10), "{took:?}");
         assert!(guard.refuse(&share.join("f_06500.exr").to_string_lossy()).is_err());
+    }
+
+    /// Resolve drive roots on this thread with `roots` (letter, root; a letter not listed can't
+    /// be resolved), counting the lookups.
+    #[cfg(windows)]
+    fn drive_roots(roots: &[(char, &'static str)]) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let roots: Vec<(char, &'static str)> = roots.to_vec();
+        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = count.clone();
+        let hook: DriveHook = Box::new(move |letter| {
+            counted.set(counted.get() + 1);
+            roots.iter().find(|(l, _)| *l == letter).map(|(_, root)| PathBuf::from(root))
+        });
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = Some(hook));
+        count
+    }
+
+    #[cfg(windows)]
+    fn guarding(paths: &[&str]) -> Protected {
+        let mut protected = Protected::default();
+        for path in paths {
+            protected.add(PathBuf::from(path), Source::Footage("plates".into()));
+        }
+        protected
+    }
+
+    /// #3330: a mapped network drive and its UNC path are one place, both ways; a `subst` drive
+    /// is its folder.
+    #[test]
+    #[cfg(windows)]
+    fn a_mapped_drive_and_its_unc_path_are_one_place() {
+        drive_roots(&[('p', r"\\?\UNC\server\share\"), ('s', r"\\?\C:\work\")]);
+        let by_letter = guarding(&[r"P:\seq\f_0001.exr"]);
+        assert!(by_letter.find(Path::new(r"\\server\share\seq\f_0001.exr")).is_some(), "footage by letter, output by UNC");
+        assert!(by_letter.find(Path::new(r"\\SERVER\Share\seq\F_0001.EXR")).is_some(), "in another case");
+        assert!(by_letter.find(Path::new(r"\\?\UNC\server\share\seq\f_0001.exr")).is_some(), "verbatim");
+        assert!(by_letter.find(Path::new(r"\\server\share\seq\f_0002.exr")).is_none());
+        assert!(guarding(&[r"P:\..\seq\f_0001.exr"]).find(Path::new(r"\\server\share\seq\f_0001.exr")).is_some(), "`..` stops at the root");
+        let guard = OutputGuard(guarding(&[r"P:\seq\f_0001.exr"]));
+        assert!(guard.refuse(r"\\server\share\seq\f_0001.exr").is_err(), "refused by the guard");
+        assert!(by_letter.find(Path::new(r"\\server\other\seq\f_0001.exr")).is_none(), "another share");
+        let by_unc = guarding(&[r"\\server\share\seq\f_0001.exr"]);
+        assert!(by_unc.find(Path::new(r"p:\seq\f_0001.exr")).is_some(), "footage by UNC, output by letter");
+        let in_subst = guarding(&[r"C:\work\seq\f_0001.exr"]);
+        assert!(in_subst.find(Path::new(r"S:\seq\f_0001.exr")).is_some(), "a subst drive is its folder");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A local drive keeps its letter, and so does one whose root can't be resolved (a
+    /// disconnected drive): the check never fails because of it.
+    #[test]
+    #[cfg(windows)]
+    fn a_local_or_unresolved_drive_keeps_its_letter() {
+        drive_roots(&[('c', r"\\?\C:\")]);
+        let local = guarding(&[r"C:\plates\f_0001.exr"]);
+        assert!(local.find(Path::new(r"c:\plates\f_0001.exr")).is_some());
+        assert!(local.find(Path::new(r"\\server\share\plates\f_0001.exr")).is_none());
+        let unresolved = guarding(&[r"Q:\plates\f_0001.exr"]);
+        assert!(unresolved.find(Path::new(r"Q:\plates\f_0001.exr")).is_some(), "the letter still matches");
+        assert!(unresolved.find(Path::new(r"\\server\share\plates\f_0001.exr")).is_none());
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A guard resolves each drive letter once, not once per path.
+    #[test]
+    #[cfg(windows)]
+    fn each_drive_letter_is_resolved_once_per_guard() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let mut paths: Vec<String> = (0..1000).map(|i| format!(r"P:\seq\f_{i:04}.exr")).collect();
+        paths.extend((0..500).map(|i| format!(r"Q:\other\f_{i:04}.exr")));
+        let protected = guarding(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+        for _ in 0..3 {
+            assert!(protected.find(Path::new(r"R:\render.png")).is_none());
+            assert!(protected.find(Path::new(r"\\server\share\seq\f_0500.exr")).is_some());
+        }
+        assert_eq!(count.get(), 3, "P, Q and R once each");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// With a real mapped network drive (any letter whose root resolves to a UNC path): a frame
+    /// by letter is refused under its UNC path. Ignored: it needs such a drive (run it with
+    /// `--ignored` where there is one).
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn a_real_mapped_drive_is_its_unc_path() {
+        let Some((letter, root)) = ('d'..='z').find_map(|l| drive_root(l).filter(|r| r.to_string_lossy().starts_with(r"\\?\UNC\")).map(|r| (l, r))) else {
+            eprintln!("skipped: no mapped network drive here");
+            return;
+        };
+        let unc = format!(r"\\{}", root.to_string_lossy().trim_start_matches(r"\\?\UNC\"));
+        let protected = guarding(&[&format!(r"{letter}:\effectcraft-3330\f_0001.exr")]);
+        let output = format!(r"{}\effectcraft-3330\f_0001.exr", unc.trim_end_matches('\\'));
+        assert!(protected.find(Path::new(&output)).is_some(), "{letter}: is {unc}: {output}");
     }
 }

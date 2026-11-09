@@ -119,7 +119,9 @@ are checked too. No render parameter overrides this protection.
 Checks compare paths by name once resolved: made absolute, `.` and `..` resolved, either
 separator, a Windows verbatim prefix (`\\?\`) as the plain path, and without case on Windows and
 macOS. No file is opened, so a check costs the same for a sequence of thousands of frames on a
-network share. A link or hard link to a source under another name is not recognised, nor
+network share. On Windows a mapped network drive and its UNC path (`P:\` and `\\server\share\`)
+are one place, and so are a `subst` drive and its folder: each drive letter's root is looked up
+once per guard (one command's checks). A link or hard link to a source under another name is not recognised, nor
 another Unicode normalization of its name on macOS.
 
 Default output names move aside when they would replace a protected file. This also applies to
