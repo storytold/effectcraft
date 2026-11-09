@@ -489,8 +489,9 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s_contrast = sec("correction/contrast", 0.0) / 100.0;
     let s_sharpen = sec("correction/sharpen", 0.0) / 100.0;
     let s_sat = sec("correction/saturation", 100.0) / 100.0;
-    let s_hue = (sec("correction/hueShift", 0.0) / 360.0).rem_euclid(1.0);
-    let s_hue = if s_hue.is_finite() { s_hue } else { 0.0 };
+    // Wrap in f64: as f32, a large angle loses the fraction of a turn it adds.
+    let hue_deg = pr.get("hslSecondary/correction/hueShift").map(Value::as_f64).unwrap_or(0.0);
+    let s_hue = if hue_deg.is_finite() { ((hue_deg.rem_euclid(360.0) / 360.0) as f32).rem_euclid(1.0) } else { 0.0 };
     let s_wheel = pr.get("hslSecondary/correction/correctionWheel").map(|v| tint_offset(v.as_color())).unwrap_or([0.0; 3]);
     let show_mask = pr.b("hslSecondary/key/showMask");
     let sec_active =
@@ -1089,9 +1090,12 @@ mod tests {
             run("ec.color.lumetri", &vals, img)
         };
         // The keyed red turns 120° to green with its saturation and lightness; the rest stays.
-        let out = shifted(120.0, img.clone());
-        assert!(close_px(out.get(0, 0), [0.1, 0.8, 0.1, 1.0], 1e-4), "{:?}", out.get(0, 0));
-        assert!(close_px(out.get(1, 0), img.get(1, 0), 1e-5) && close_px(out.get(2, 0), img.get(2, 0), 1e-5));
+        // Whole turns on top of it, however many, change nothing.
+        for deg in [120.0, 3_600_000_120.0, -3_600_000_240.0] {
+            let out = shifted(deg, img.clone());
+            assert!(close_px(out.get(0, 0), [0.1, 0.8, 0.1, 1.0], 1e-4), "{deg}: {:?}", out.get(0, 0));
+            assert!(close_px(out.get(1, 0), img.get(1, 0), 1e-5) && close_px(out.get(2, 0), img.get(2, 0), 1e-5));
+        }
         // A whole turn, either way, changes nothing.
         for deg in [360.0, -360.0] {
             assert!(close_px(shifted(deg, img.clone()).get(0, 0), img.get(0, 0), 1e-5), "{deg}");
