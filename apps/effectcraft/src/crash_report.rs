@@ -60,6 +60,32 @@ fn finish_child(child: &mut Child, grace: Duration) -> io::Result<()> {
     Err(io::Error::other("crash reporter termination could not be confirmed"))
 }
 
+/// Shared ownership lets macOS finish in on_exit, while main retains the startup-error path.
+#[derive(Clone, Default)]
+pub struct Shutdown(std::sync::Arc<std::sync::Mutex<Option<Reporter>>>);
+
+impl Shutdown {
+    /// Install the one reporter created for this desktop launch.
+    pub fn install(&self, reporter: Reporter) -> io::Result<()> {
+        let mut slot = self.0.lock().map_err(|_| io::Error::other("crash reporter ownership was poisoned"))?;
+        *slot = Some(reporter);
+        Ok(())
+    }
+
+    /// Consume the reporter exactly once, after the applicable platform teardown boundary.
+    pub fn finish(&self) -> io::Result<()> {
+        let reporter = self.0.lock().map_err(|_| io::Error::other("crash reporter ownership was poisoned"))?.take();
+        reporter.map_or(Ok(()), Reporter::finish)
+    }
+}
+
+/// A panic during teardown must leave the reporter armed. macOS terminates after this hook
+/// without returning to main; other platforms pass None and finish after run_native returns.
+pub fn after_teardown(reporter: Option<&Shutdown>, teardown: impl FnOnce()) -> io::Result<()> {
+    teardown();
+    reporter.map_or(Ok(()), Shutdown::finish)
+}
+
 /// Each process/run has its own report, including simultaneous launches.
 pub fn run_id() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -364,6 +390,51 @@ mod tests {
     }
 
     #[test]
+    fn accepted_native_close_finishes_before_process_termination() {
+        let dir = folder();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name("aborting_parent"), "--ignored", "--nocapture"])
+            .env(ROLE, "native-close")
+            .env("EC_REPORT_DIR", &dir)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        wait_file(&dir.join("ready-8-1"));
+        assert!(!dir.join("crash-8-1.txt").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_teardown_panic_does_not_mark_the_reporter_clean() {
+        let dir = folder();
+        let reporter = Shutdown::default();
+        reporter.install(helper(&dir, "8-2")).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let _ = after_teardown(Some(&reporter), || panic!("simulated teardown failure"));
+        });
+        assert!(result.is_err());
+        drop(reporter);
+        wait_file(&dir.join("ready-8-2"));
+        assert!(dir.join("crash-8-2.txt").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn platforms_returning_to_main_keep_the_reporter_armed_until_then() {
+        let dir = folder();
+        let reporter = Shutdown::default();
+        reporter.install(helper(&dir, "8-3")).unwrap();
+        after_teardown(None, || {}).unwrap();
+        assert!(reporter.0.lock().unwrap().is_some());
+        reporter.clone().finish().unwrap();
+        reporter.finish().unwrap();
+        wait_file(&dir.join("ready-8-3"));
+        assert!(!dir.join("crash-8-3.txt").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn an_aborting_parent_leaves_one_diagnostic_report() {
         let dir = folder();
         let status = Command::new(std::env::current_exe().unwrap())
@@ -475,8 +546,15 @@ mod tests {
     #[test]
     #[ignore]
     fn aborting_parent() {
-        assert_eq!(std::env::var(ROLE).unwrap(), "abort");
+        let role = std::env::var(ROLE).unwrap();
         let dir = PathBuf::from(std::env::var_os("EC_REPORT_DIR").unwrap());
+        if role == "native-close" {
+            let reporter = Shutdown::default();
+            reporter.install(helper(&dir, "8-1")).unwrap();
+            after_teardown(Some(&reporter.clone()), || {}).unwrap();
+            std::process::exit(0); // Models macOS not returning from its native event loop.
+        }
+        assert_eq!(role, "abort");
         let _reporter = helper(&dir, "4-1");
         std::process::abort();
     }

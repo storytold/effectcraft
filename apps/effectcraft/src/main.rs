@@ -187,19 +187,17 @@ fn main() -> eframe::Result {
     }) {
         return Ok(());
     }
-    let mut reporter = None;
-    let result = run_desktop(&mut reporter);
+    let reporter = crash_report::Shutdown::default();
+    let result = run_desktop(&reporter);
     // run_desktop has dropped the app and handled any startup error with its existing dialog.
     // An unwinding panic or abort never reaches this marker.
-    if let Some(reporter) = reporter
-        && let Err(error) = reporter.finish()
-    {
+    if let Err(error) = reporter.finish() {
         log::warn!("could not mark crash reporter clean: {error}");
     }
     result
 }
 
-fn run_desktop(reporter: &mut Option<crash_report::Reporter>) -> eframe::Result {
+fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
     if let Some(result) = craft_update::self_update::finish(&effectcraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
@@ -235,7 +233,11 @@ fn run_desktop(reporter: &mut Option<crash_report::Reporter>) -> eframe::Result 
     }
     let logs = effectcraft_engine::logging::log_dir(effectcraft_host::config_dir().as_deref());
     match crash_report::start(&run_id, effectcraft_engine::logging::session_file().as_deref(), &logs.join("Crash Reports"), control_port.is_none()) {
-        Ok(started) => *reporter = Some(started),
+        Ok(started) => {
+            if let Err(error) = reporter.install(started) {
+                log::warn!("crash reporter could not be retained: {error}");
+            }
+        }
         Err(error) => log::warn!("crash reporter could not start: {error}"),
     }
     // The font menus list the installed fonts: read their names while the window opens.
@@ -272,6 +274,7 @@ fn run_desktop(reporter: &mut Option<crash_report::Reporter>) -> eframe::Result 
     let apple_events = apple_events::AppleEvents::install();
     #[cfg(target_os = "macos")]
     let apple_events = &apple_events;
+    let desktop_reporter = reporter.clone();
     let result = eframe::run_native(
         "EffectCraft",
         options,
@@ -425,6 +428,7 @@ fn run_desktop(reporter: &mut Option<crash_report::Reporter>) -> eframe::Result 
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
                 launch,
                 drawn: false,
+                reporter: desktop_reporter,
             }))
         }),
     );
@@ -518,6 +522,7 @@ struct Desktop {
     launch: launch_guard::Launch,
     /// The first frame was drawn (logged once).
     drawn: bool,
+    reporter: crash_report::Shutdown,
 }
 
 impl eframe::App for Desktop {
@@ -552,15 +557,20 @@ impl eframe::App for Desktop {
     }
 
     fn on_exit(&mut self) {
-        // On macOS the app quits through `-[NSApplication terminate:]`, and the process ends
-        // before `eframe::run_native` returns (#341).
-        log::info!("the window is closing");
-        self.launch.exited();
-        self.window.save(self.app.session.config.as_deref());
-        self.app.on_exit();
-        effectcraft_host::stop_helpers();
-        // Scripts in Scripts/Shutdown run with the project closed.
-        let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
+        // macOS terminates after this hook without returning from run_native (#341).
+        // Other platforms keep the reporter armed until main sees complete event-loop teardown.
+        let reporter = cfg!(target_os = "macos").then(|| self.reporter.clone());
+        if let Err(error) = crash_report::after_teardown(reporter.as_ref(), || {
+            log::info!("the window is closing");
+            self.launch.exited();
+            self.window.save(self.app.session.config.as_deref());
+            self.app.on_exit();
+            effectcraft_host::stop_helpers();
+            // Scripts in Scripts/Shutdown run with the project closed.
+            let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
+        }) {
+            log::warn!("could not mark crash reporter clean after teardown: {error}");
+        }
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

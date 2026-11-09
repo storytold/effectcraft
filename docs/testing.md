@@ -117,7 +117,10 @@ missing coverage, empty results and wall-time-only measurements cannot pass the 
 
 The desktop starts a separate, lightweight reporter before loading fonts, projects or the GPU.
 A normal exit (including a handled startup error) sends a clean marker only after desktop
-teardown. An abort or other unexpected process termination closes the pipe without that marker.
+teardown. macOS finishes at the end of its successful exit hook because its native event loop
+terminates without returning to main; other platforms finish after the event loop returns.
+A teardown panic leaves reporting armed. An abort or other unexpected process termination
+closes the pipe without that marker.
 The helper saves a local report under the session log folder's `Crash Reports` directory and
 shows a native error dialog. Control-server launches save the report without a modal dialog.
 Reports contain version/platform and at most the last 64 KiB of the matching session's log.
