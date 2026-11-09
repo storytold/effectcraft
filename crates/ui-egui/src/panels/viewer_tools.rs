@@ -287,8 +287,19 @@ pub(crate) fn guide_color(app: &EffectcraftApp) -> Color32 {
 
 /// The title/action safe lines and the centre cross: the Grids & Guides grid colour at `alpha`.
 pub(crate) fn safe_color(app: &EffectcraftApp, alpha: u8) -> Color32 {
-    let [r, g, b] = super::viewer::hex_rgb(&app.session.prefs.grids.grid_color).unwrap_or([120, 160, 255]);
+    safe_rgba(&app.session.prefs.grids.grid_color, alpha)
+}
+
+fn safe_rgba(hex: &str, alpha: u8) -> Color32 {
+    let [r, g, b] = super::viewer::hex_rgb(hex).unwrap_or([120, 160, 255]);
     Color32::from_rgba_unmultiplied(r, g, b, alpha)
+}
+
+/// The action-safe and title-safe rect scales from Preferences ▸ Grids & Guides, shared by
+/// every pane that draws the safe margins.
+pub(crate) fn safe_scales(app: &EffectcraftApp) -> [f32; 2] {
+    let g = &app.session.prefs.grids;
+    [1.0 - g.action_safe as f32 / 100.0, 1.0 - g.title_safe as f32 / 100.0]
 }
 
 /// The guide under a screen point (visible, unlocked guides only): (index, vertical).
@@ -943,6 +954,12 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_colour_uses_the_grid_colour_with_fallback_and_alpha() {
+        assert_eq!(safe_rgba("#102030", 77), Color32::from_rgba_unmultiplied(0x10, 0x20, 0x30, 77));
+        assert_eq!(safe_rgba("nope", 200), Color32::from_rgba_unmultiplied(120, 160, 255, 200));
+    }
 
     #[test]
     fn bar_labels_match_after_effects() {
