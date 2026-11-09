@@ -570,7 +570,7 @@ fn a_transfer_bound_gpu_job_renders_on_the_cpu() {
     for (i, f) in frames.iter().enumerate() {
         assert_eq!(f.get_pixel(10, 44).0, [255, 0, 0, 255], "frame {i} is not the CPU's");
     }
-    assert!(log.contains("Renderer: Mercury Software Only (measured on the first frames: GPU "), "{log}");
+    assert!(log.contains("Renderer: Software Rendering (measured on the first frames: GPU "), "{log}");
     // The queue item's next output module follows the first one's choice without measuring.
     let shared = Mutex::new(None);
     let opts = || JobOptions { renderer: Some(&shared), ..Default::default() };
@@ -581,7 +581,7 @@ fn a_transfer_bound_gpu_job_renders_on_the_cpu() {
     let (frames, log) = run_pooled(&p, cid, &s, "/r/c_[#####].png", opts(), &again);
     assert_eq!(again.frames.load(Ordering::SeqCst), 0);
     assert!(frames.iter().all(|f| f.get_pixel(10, 44).0 == [255, 0, 0, 255]));
-    assert!(log.contains("Renderer: Mercury Software Only (as the queue item's first output module)"), "{log}");
+    assert!(log.contains("Renderer: Software Rendering (as the queue item's first output module)"), "{log}");
 }
 
 #[test]
@@ -610,7 +610,7 @@ fn a_gpu_job_that_measures_no_faster_on_the_cpu_stays_on_the_gpu() {
     assert_eq!(frames.len(), 15);
     assert_eq!(fast.frames.load(Ordering::SeqCst), 15, "every kept frame, warm-up and measured ones included, is the GPU's");
     assert!(frames.iter().all(|f| f.pixels().all(|px| px.0 == [0, 255, 0, 255])));
-    assert!(log.contains("Renderer: Mercury GPU Acceleration (measured on the first frames: GPU "), "{log}");
+    assert!(log.contains("Renderer: GPU Acceleration (measured on the first frames: GPU "), "{log}");
 }
 
 #[test]
@@ -625,7 +625,7 @@ fn gpu_cpu_and_measured_jobs_write_the_same_frames() {
     let echo = TimedAccel::new(5, false);
     p.settings.gpu_acceleration = false;
     let (cpu, log) = run_pooled(&p, cid, &s, "/i/a_[#####].png", JobOptions::default(), &echo);
-    assert!(log.contains("Renderer: Mercury Software Only (the project's renderer)"), "{log}");
+    assert!(log.contains("Renderer: Software Rendering (the project's renderer)"), "{log}");
     p.settings.gpu_acceleration = true;
     let gpu_slot = Mutex::new(Some(effectcraft_render::Backend::Gpu));
     let (gpu, _) = run_pooled(&p, cid, &s, "/i/b_[#####].png", JobOptions { renderer: Some(&gpu_slot), ..Default::default() }, &echo);

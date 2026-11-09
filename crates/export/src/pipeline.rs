@@ -76,7 +76,7 @@ pub(crate) fn resolve_gpu_frames(env: Option<&str>, pref: Option<usize>, measure
 }
 
 /// Overrides the Render Queue's measured choice of compositor for GPU projects with an
-/// accelerator (#3335): `gpu` (no measurement, the GPU), `cpu` (Mercury Software Only) or
+/// accelerator (#3335): `gpu` (no measurement, the GPU), `cpu` (Software Rendering) or
 /// `auto` (measure, the default).
 pub const RENDERER_ENV: &str = "EFFECTCRAFT_RQ_RENDERER";
 
@@ -347,7 +347,7 @@ impl<'a> Cx<'a> {
         cx
     }
 
-    /// The project's compositor: the GPU's for Mercury GPU Acceleration with an accelerator.
+    /// The project's compositor: the GPU's for GPU Acceleration with an accelerator.
     fn project_renderer(&self) -> crate::JobRenderer {
         if self.project.settings.gpu_acceleration && self.job.accel.is_some() { crate::JobRenderer::Gpu } else { crate::JobRenderer::Cpu }
     }
@@ -902,8 +902,8 @@ impl<'a> Cx<'a> {
 /// The render log's account of a job's compositor: which, why, and what was measured.
 pub(crate) fn describe_choice(c: &Choice) -> String {
     let name = match c.renderer {
-        crate::JobRenderer::Gpu => "Mercury GPU Acceleration",
-        crate::JobRenderer::Cpu => "Mercury Software Only",
+        crate::JobRenderer::Gpu => "GPU Acceleration",
+        crate::JobRenderer::Cpu => "Software Rendering",
     };
     let ms = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |v| format!("{v:.1} ms/frame"));
     if c.gpu_ms.is_none() && c.cpu_ms.is_none() {
@@ -1229,7 +1229,7 @@ mod tests {
         assert_eq!(cx.backend(), crate::JobRenderer::Cpu);
         assert_eq!(cx.gpu_cap(), None);
         assert_eq!(cx.renderer().active_accel().map(|a| a.name()), None, "CPU frames don't use the accelerator");
-        assert_eq!(describe_choice(&cx.choice().unwrap()), "Mercury Software Only (measured on the first frames: GPU 117.0 ms/frame, CPU 68.0 ms/frame)");
+        assert_eq!(describe_choice(&cx.choice().unwrap()), "Software Rendering (measured on the first frames: GPU 117.0 ms/frame, CPU 68.0 ms/frame)");
     }
 
     #[test]

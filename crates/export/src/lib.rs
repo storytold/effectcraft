@@ -133,8 +133,8 @@ pub struct JobCaches<'a> {
     pub cpu: &'a effectcraft_render::LayerCache,
 }
 
-/// The compositor a job's frames render on: the GPU's (Mercury GPU Acceleration, with an
-/// accelerator) or the CPU's frame-parallel one (Mercury Software Only). The whole job renders
+/// The compositor a job's frames render on: the GPU's (GPU Acceleration, with an
+/// accelerator) or the CPU's frame-parallel one (Software Rendering). The whole job renders
 /// on one of them, never a mix: the two differ slightly. A GPU project with an accelerator
 /// measures both on its first frames and renders the job on the faster (#3335); the choice is
 /// in the render log. `EFFECTCRAFT_RQ_RENDERER=gpu|cpu|auto` overrides the measurement.

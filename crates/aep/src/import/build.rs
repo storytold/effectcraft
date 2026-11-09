@@ -285,6 +285,8 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         cx.col.missing_footage.push(shown);
     }
     let kind = if sequence.is_empty() { footage_kind(&path, f.native_frame_rate, f.audio_sample_rate.is_some()) } else { FootageKind::Sequence };
+    // A placed PDF / Illustrator file keeps After Effects' framing and size (#3099).
+    let placed_page = kind == FootageKind::Still && is_placed_page_path(&path);
     let mut footage = Footage {
         path,
         kind,
@@ -295,6 +297,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         // footage), and only then.
         has_audio: kind == FootageKind::Audio || (kind == FootageKind::Video && f.audio_sample_rate.is_some()),
         missing: !present,
+        placed_page,
         sequence,
         ..Footage::default()
     };
@@ -325,6 +328,14 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     if let Some(i) = aep_id {
         cx.sources.insert(i, Source { item: id, name, kind: SourceKind::Footage, width: f.width, height: f.height });
     }
+}
+
+/// Whether `path` names a file whose page is framed as After Effects places it
+/// ([`Footage::placed_page`]): an Illustrator or PDF file, by its extension. EPS files keep
+/// their bounding box at their own size: how After Effects sizes them was not measured (#3099).
+fn is_placed_page_path(path: &str) -> bool {
+    let ext = path.rsplit(['/', '\\']).next().and_then(|name| name.rsplit_once('.')).map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(ext.as_deref(), Some("pdf" | "ai"))
 }
 
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
@@ -453,11 +464,13 @@ fn camera_light_orient(auto_oriented: bool, light: Option<LightKind>) -> AutoOri
 }
 
 /// The unit a layer's anchor is stored in.
-fn anchor_unit(camera_or_light: bool, text_or_shape: bool, size: (u32, u32)) -> AnchorUnit {
+fn anchor_unit(camera_or_light: bool, text_or_shape: bool, null: bool, size: (u32, u32)) -> AnchorUnit {
     if camera_or_light {
         AnchorUnit::PointOfInterest
     } else if text_or_shape {
         AnchorUnit::Pixels
+    } else if null {
+        AnchorUnit::Null(size.0, size.1)
     } else {
         AnchorUnit::Source(size.0, size.1)
     }
@@ -582,7 +595,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         import_layer_styles(&layer, &mut l, &comp.global_light, &mut Ids(&mut project.next_id), &tm, &what, &mut cx.col);
         // Text and shape layers store their anchor in pixels (385, 462); cameras and lights their
         // point of interest.
-        let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, size);
+        let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, is_null, size);
         if let Some(tr) = l.props.sub_mut("transform") {
             import_transform(&layer, &name, comp_size, anchor, &tm, tr, &mut cx.col);
         }
@@ -905,6 +918,18 @@ fn resolve_parents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3099: an `.ai` or `.pdf` from an `.aep` is a placed page; an EPS (not measured in After
+    /// Effects) and other files are not.
+    #[test]
+    fn only_illustrator_and_pdf_files_are_placed_pages() {
+        for path in [r"C:\fixture\x\logo.ai", "/work/Logo.AI", "art.pdf", r"C:\a.b\page.PDF"] {
+            assert!(is_placed_page_path(path), "{path}");
+        }
+        for path in [r"C:\fixture\x\still.eps", "a.epsf", "a.epsi", "still.png", r"C:\dir.ai\file", "ai", ""] {
+            assert!(!is_placed_page_path(path), "{path}");
+        }
+    }
 
     #[test]
     fn unlisted_extensions_follow_what_the_file_stores() {

@@ -329,7 +329,7 @@ fn card_dance_comp_camera_matches_the_default_view() {
     assert!(img.get(10, 50)[3] < 0.01);
 }
 
-/// A black 2D solid with CC Particle World, under a camera layer panned right by `pan` px.
+/// A black 2D solid with Particle Emitter 3D, under a camera layer panned right by `pan` px.
 fn particle_world_scene(pan: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut l = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
@@ -359,7 +359,7 @@ fn particles_x(img: &crate::Image) -> f32 {
     sx / m
 }
 
-/// #397: CC Particle World on a 2D layer is seen through the comp's camera layer, and the layer
+/// #397: Particle Emitter 3D on a 2D layer is seen through the comp's camera layer, and the layer
 /// cache notices the camera moving.
 #[test]
 fn particle_world_follows_the_comp_camera() {
@@ -374,7 +374,7 @@ fn particle_world_follows_the_comp_camera() {
     assert!(b < a - 20.0, "panning the camera right moves the particles left: {a} -> {b}");
 }
 
-/// A black solid with CC Particle World whose Birth Rate is 3 until layer time `cut`, then 0 a
+/// A black solid with Particle Emitter 3D whose Birth Rate is 3 until layer time `cut`, then 0 a
 /// frame later (`None`: 3 throughout); the layer starts at comp time `start`, stretched `stretch` %.
 fn burst_scene(cut: Option<f64>, start: f64, stretch: f64) -> (Project, ItemId) {
     burst_scene_keys(cut, start, stretch, false)
@@ -624,7 +624,7 @@ fn a_text_expression_selector_is_not_served_from_the_disk_cache() {
 
 /// A Birth Rate expression reading another layer: changing that layer changes the history but
 /// not the current rate (0) nor this layer's properties, which is all the layer cache key sees.
-/// CC Particle World layers with expressions therefore aren't layer cached.
+/// Particle Emitter 3D layers with expressions therefore aren't layer cached.
 #[test]
 fn particle_world_with_a_birth_rate_expression_is_not_served_from_the_layer_cache() {
     let scene = |opacity: f64| {
@@ -657,8 +657,8 @@ fn particle_world_with_a_birth_rate_expression_is_not_served_from_the_layer_cach
     assert!(light(&b) > 1.0 && light(&b) < light(&a), "fewer births: {} vs {}", light(&b), light(&a));
 }
 
-/// A grey solid (CC Mr. Mercury shades its blobs from it) with effect `id` (CC Particle Systems
-/// II, CC Mr. Mercury): Birth Rate `rate`,
+/// A grey solid (Liquid Particles shades its blobs from it) with effect `id` (CC Particle Systems
+/// II, Liquid Particles): Birth Rate `rate`,
 /// or keyed 3 until 0.5 s and 0 a frame later (`None`); Longevity 1 s.
 fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
@@ -677,7 +677,7 @@ fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
     (p, cid)
 }
 
-/// #1373 for CC Particle Systems II and CC Mr. Mercury through the renderer: a keyed burst
+/// #1373 for Particle Emitter 2D and Liquid Particles through the renderer: a keyed burst
 /// draws as the constant rate during it, still draws after the rate drops to 0 (unlike a rate
 /// of 0 throughout), and draws as nothing born once Longevity has run out.
 #[test]
@@ -1057,6 +1057,27 @@ fn comp_frame_ends_the_frame_when_the_render_panics() {
     assert_eq!(a.ends.load(Ordering::SeqCst), 1);
 }
 
+/// The renderer labels Project Settings ▸ Video Rendering and Effects draws parse back as the
+/// backend they name (in any case), and the older spellings still work.
+#[test]
+fn renderer_labels_parse_back_and_keep_the_older_spellings() {
+    use crate::Backend;
+    for (label, backend) in [
+        ("GPU Acceleration", Backend::Gpu),
+        ("gpu acceleration", Backend::Gpu),
+        ("Mercury GPU Acceleration", Backend::Gpu),
+        ("gpu", Backend::Gpu),
+        ("Software Rendering", Backend::Cpu),
+        ("software rendering", Backend::Cpu),
+        ("Mercury Software Only", Backend::Cpu),
+        ("cpu", Backend::Cpu),
+        ("Auto", Backend::Auto),
+    ] {
+        assert_eq!(Backend::parse(label), Some(backend), "{label}");
+    }
+    assert_eq!(Backend::parse("Vulkan"), None);
+}
+
 #[test]
 fn auto_backend_sends_2d_and_3d_comps_to_the_gpu() {
     let (mut p, cid, comp) = setup();
@@ -1223,11 +1244,11 @@ fn effects_on_text_reach_past_the_text_bounds() {
     }
     assert!(
         painted > 50 && hi.saturating_sub(lo) > 100,
-        "CC Tiler tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
+        "Scaled Tiles tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
     );
 }
 
-/// #658: CC Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
+/// #658: Directional Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
 /// the painted rectangle used to fall off its edge, so the liquid trail never appeared.
 #[test]
 fn cc_smear_trails_text_past_its_bounds() {
@@ -1246,7 +1267,7 @@ fn cc_smear_trails_text_past_its_bounds() {
     );
     p.comp_mut(cid).unwrap().layers = vec![l].into();
     let smeared = right(&render_frame(&p, cid, Tick::ZERO, 1.0));
-    assert!(plain > 40 && smeared > plain + 25, "CC Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
+    assert!(plain > 40 && smeared > plain + 25, "Directional Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
 }
 
 /// A layer parameter pointing at a shape layer sees all of it (in its effect space), and the
@@ -1502,7 +1523,7 @@ fn solo_excludes_other_layers_outside_the_soloed_layers_range() {
     assert_eq!(second.get(100, 50), [0.0, 0.0, 1.0, 1.0], "only B inside its range");
 }
 
-/// #1252: a layer blended with a CC Particle World layer, under a camera panned by `pan` px.
+/// #1252: a layer blended with a Particle Emitter 3D layer, under a camera panned by `pan` px.
 fn scene_reader_dependency(pan: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut source = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);

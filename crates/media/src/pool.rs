@@ -42,14 +42,16 @@ fn colour_bars(w: u32, h: u32) -> Image {
 struct Key {
     path: Arc<str>,
     frame: i64,
-    /// The alpha interpretation (bits 0–1) and how float values are encoded (bits 2–3: sRGB,
-    /// as stored, a 2.4 power curve): they change the decoded pixels.
+    /// The alpha interpretation (bits 0–1), how float values are encoded (bits 2–3: sRGB, as
+    /// stored, a 2.4 power curve) and a placed PDF / Illustrator page's framing (bit 4,
+    /// [`Footage::placed_page`]): they change the decoded pixels.
     interp: u8,
     matte: [u32; 3],
     /// A movie frame made at this size for a reduced-resolution render ((0, 0): as decoded).
     size: (u32, u32),
     /// A still at a reduced `size`: the footage's nominal size, which decides whether it is
-    /// resampled (see `Inner::still_at_size`); (0, 0) otherwise.
+    /// resampled (see `Inner::still_at_size`); also at its own size for a placed PDF /
+    /// Illustrator page, which is drawn to fill it ([`Footage::placed_page`]); (0, 0) otherwise.
     nominal: (u32, u32),
 }
 
@@ -756,6 +758,8 @@ impl Inner {
         ((d.0 as i128 * rate.num as i128 + den / 2) / den) as i64
     }
 
+    /// Where the frame of `footage` at `t` comes from (file, frame or media time) and its cache
+    /// key, at the footage's own size.
     fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Loc {
         let alpha = match footage.alpha {
             AlphaMode::Straight => 0,
@@ -768,7 +772,8 @@ impl Inner {
                 FloatCurve::Srgb => 0,
                 FloatCurve::Linear => 1,
                 FloatCurve::Gamma24 => 2,
-            } << 2);
+            } << 2)
+            | (u8::from(footage.placed_page) << 4);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
         let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0) };
         match footage.kind {
@@ -817,6 +822,11 @@ impl Inner {
             if !movie {
                 loc.key.nominal = (footage.width, footage.height);
             }
+        }
+        // A placed PDF / Illustrator page is drawn to fill the footage's size (`layered::decode`,
+        // #3099): two items of one file stored at different sizes have different pixels.
+        if footage.placed_page && !movie {
+            loc.key.nominal = (footage.width, footage.height);
         }
         let mut c = lock(&self.cache);
         // sequential playback of a movie: read the next frame ahead
@@ -1041,7 +1051,7 @@ impl FootageSource for MediaPool {
             return None;
         }
         let bytes = self.inner.read(&footage.path).ok()?;
-        crate::layered::rasterize_vector(&footage.path, &bytes, footage.layer.as_ref(), footage.page, scale).map(Arc::new)
+        crate::layered::rasterize_vector(&footage.path, &bytes, footage, scale).map(Arc::new)
     }
 
     fn set_aux_footage(&self, paths: &[String]) {
