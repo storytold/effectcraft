@@ -134,11 +134,7 @@ impl MemoryHolder for Holder {
         let c = lock();
         let e = c.entries.get(oldest(&c)?)?;
         // (a plane of channels that are gone is worth nothing)
-        Some(if e.gone() {
-            Candidate { used: 0, bytes: e.plane.bytes(), cost_us: 0 }
-        } else {
-            Candidate { used: e.used, bytes: e.plane.bytes(), cost_us: e.cost_us }
-        })
+        Some(if e.gone() { Candidate::new(0, e.plane.bytes(), 0) } else { Candidate::new(e.used, e.plane.bytes(), e.cost_us) })
     }
     fn drop_oldest(&self) -> usize {
         let mut c = lock();
