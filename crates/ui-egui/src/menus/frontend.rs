@@ -626,7 +626,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd".into())),
         "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr".into())),
         "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder".into())),
-        "anim.savePreset" => ("path", Ask::Save("Preset.ecpreset".into())),
+        "anim.savePreset" => ("path", Ask::Save(preset_save_default(crate::panels::effects_presets::presets_dir().as_deref()))),
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
         "view.exportGuides" => ("path", Ask::Save("Guides.json".into())),
         "view.importGuides" => ("path", Ask::Open(&["json"])),
@@ -725,6 +725,24 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     };
     let Some(v) = picked else { return Some(Ok(Value::Null)) };
     Some(run_with_picked(app, id, key, params, v))
+}
+
+/// Where Animation ▸ Save Animation Preset's dialog starts: in `dir`, the presets folder that
+/// Effects & Presets lists, created first when it is missing, so the dialog opens there and the
+/// saved preset shows up in the panel (#3347). Without a usable folder (none configured, the web,
+/// or it cannot be created) the dialog gets only the file name, as before.
+pub(super) fn preset_save_default(dir: Option<&std::path::Path>) -> std::borrow::Cow<'static, str> {
+    const NAME: &str = "Preset.ecpreset";
+    let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty() && !cfg!(target_arch = "wasm32")) else { return NAME.into() };
+    // A relative `EC_PRESETS_DIR` names the same folder the panel scans and the dialog opens.
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => dir.join(NAME).to_string_lossy().into_owned().into(),
+        Err(e) => {
+            log::warn!("cannot create the presets folder {}: {e}", dir.display());
+            NAME.into()
+        }
+    }
 }
 
 /// The dialog's answer as the command's `key` parameter (`None`: cancelled).

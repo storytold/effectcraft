@@ -730,3 +730,28 @@ fn effect_plugin_install_dialog_router() {
     assert!(r.is_err(), "{r:?}");
     assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline folder");
 }
+
+/// #3347: Save Animation Preset's dialog starts in the presets folder, which is created when it
+/// is missing; without a usable folder it gets only the file name, as before.
+#[test]
+fn save_preset_dialog_starts_in_the_presets_folder_and_creates_it() {
+    use super::frontend::preset_save_default;
+    let root = std::env::temp_dir().join(format!("ec-preset-folder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // Two levels missing, as on a first run without Documents/EffectCraft.
+    let dir = root.join("EffectCraft").join("Presets");
+    let default = preset_save_default(Some(&dir));
+    assert!(dir.is_dir(), "the presets folder was not created");
+    assert_eq!(std::path::Path::new(default.as_ref()), dir.join("Preset.ecpreset"));
+    // An existing folder is used as it is.
+    std::fs::write(dir.join("Mine.ecpreset"), "{}").unwrap();
+    assert_eq!(std::path::Path::new(preset_save_default(Some(&dir)).as_ref()), dir.join("Preset.ecpreset"));
+    assert!(dir.join("Mine.ecpreset").is_file(), "an existing preset was touched");
+    // A file in the way, no folder configured, or an empty one: just the name.
+    let blocked = root.join("file");
+    std::fs::write(&blocked, "x").unwrap();
+    assert_eq!(preset_save_default(Some(&blocked.join("Presets"))), "Preset.ecpreset");
+    assert_eq!(preset_save_default(None), "Preset.ecpreset");
+    assert_eq!(preset_save_default(Some(std::path::Path::new(""))), "Preset.ecpreset");
+    let _ = std::fs::remove_dir_all(&root);
+}
