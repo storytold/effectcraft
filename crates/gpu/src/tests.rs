@@ -996,6 +996,49 @@ fn within_memory_returns_the_work_when_there_is_room() {
     assert_eq!((img.width, img.height), (64, 32));
 }
 
+/// A timeout can retire a context without any device error scope reporting a failure.
+/// Queued jobs keep that context alive, so CPU fallback must not wait for its last owner
+/// to drop before releasing cached uploads and working textures (#3357).
+fn retired_attempt_releases_kept_resources(retire_before: bool) {
+    hold_gpu_lock();
+    let made = Gpu::try_headless();
+    let Some(g) = require_gpu("retired memory attempt", made.as_ref()) else { return };
+    let buf = Arc::new(effectcraft_effects::Buf { img: Image::new(16, 16), offset: [0.0; 2], scale: 1.0 });
+    drop(g.ctx.upload_buf(&buf).expect("a small cached upload"));
+    drop(crate::context::Enc::new(&g.ctx).image(32, 16));
+    assert_eq!(g.ctx.upload_entries(), 1);
+    assert!(g.ctx.pool_retained_bytes() > 0);
+    // An earlier frame can return a lease after retirement; it must not refill the pool.
+    let earlier = crate::context::Enc::new(&g.ctx).image(48, 16);
+    let retire = g.ctx.device_failure_notifier();
+    if retire_before {
+        retire("synthetic readback retirement".into());
+    }
+    let called = std::cell::Cell::new(false);
+    let result = g.within_memory(|| {
+        called.set(true);
+        let out = crate::context::Enc::new(&g.ctx).image(64, 16);
+        retire("synthetic readback retirement".into());
+        out
+    });
+    assert!(matches!(result, Err(crate::FrameError::Retired(_))));
+    assert_eq!(called.get(), !retire_before);
+    assert_eq!(g.ctx.upload_entries(), 0, "CPU fallback must not retain uploaded layers");
+    assert_eq!(g.ctx.pool_retained_bytes(), 0, "CPU fallback must not retain working textures");
+    drop(earlier);
+    assert_eq!(g.ctx.pool_retained_bytes(), 0, "late leases cannot refill a retired pool");
+}
+
+#[test]
+fn within_memory_releases_caches_when_already_retired() {
+    retired_attempt_releases_kept_resources(true);
+}
+
+#[test]
+fn within_memory_releases_caches_when_retired_during_work() {
+    retired_attempt_releases_kept_resources(false);
+}
+
 /// A texture the device rejected (deliberately too wide), made outside any frame under a scope
 /// of its own: the view a frame then makes of it is the reported validation error.
 fn rejected_texture(g: &Gpu) -> wgpu::Texture {
