@@ -689,7 +689,9 @@ fn reads_other_times(layer: &Layer, effects: Option<usize>) -> bool {
             fx.groups().take(effects.unwrap_or(usize::MAX)).any(|g| {
                 g.enabled
                     && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect }
-                        if effect.starts_with("ec.time.") || effectcraft_effects::reads_param_history(effect))
+                        if effect.starts_with("ec.time.")
+                            || effectcraft_effects::reads_param_history(effect)
+                            || (!effect.starts_with("ec.") && effectcraft_effects::plugin::reads_other_times(effect)))
             })
         })
 }
