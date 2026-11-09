@@ -43,6 +43,7 @@ struct Pending {
 }
 
 impl Pending {
+    /// A typed export by name, reporting a missing or mistyped export like [`missing`].
     fn func<P: WasmParams, R: WasmResults>(&self, name: &str) -> Result<TypedFunc<P, R>, String> {
         self.instance.get_typed_func::<P, R>(&self.store, name).map_err(|_| missing(name))
     }
@@ -58,10 +59,12 @@ impl Pending {
     }
 }
 
+/// The error for a missing or mistyped export.
 fn missing(name: &str) -> String {
     format!("the module exports no `{name}` (or with the wrong signature)")
 }
 
+/// The error for an ABI this build does not implement.
 fn unsupported(v: i32) -> String {
     format!("the module implements WebAssembly ABI {v}, this build implements ABI {MIN_WASM_API_VERSION} to {WASM_API_VERSION}")
 }
@@ -74,10 +77,12 @@ fn abi_of(v: i32) -> Result<u32, String> {
     }
 }
 
+/// The error for a wasmi or trap failure.
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// Instantiate `module` in a fresh, limited store and read its memory and allocator.
 fn begin(engine: &Engine, module: &Module) -> Result<Pending, String> {
     let mut store = Store::new(engine, StoreLimitsBuilder::new().memory_size(MAX_MEMORY).instances(1).build());
     store.limiter(|l| l);
@@ -89,6 +94,7 @@ fn begin(engine: &Engine, module: &Module) -> Result<Pending, String> {
     Ok(Pending { store, instance, memory, alloc })
 }
 
+/// Instantiate `module` and select the render export for `abi`.
 fn instantiate(engine: &Engine, module: &Module, abi: u32) -> Result<Inst, String> {
     begin(engine, module)?.finish(abi)
 }
@@ -106,6 +112,7 @@ pub struct WasmPlugin {
 }
 
 impl WasmPlugin {
+    /// Load `bytes` and its manifest; errors on imports, a bad manifest or a missing export.
     pub fn new(bytes: &[u8], source: &str) -> Result<WasmPlugin, String> {
         let mut config = Config::default();
         config.consume_fuel(true);
@@ -133,6 +140,7 @@ impl WasmPlugin {
         Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
     }
 
+    /// An idle instance, or a fresh one when the pool is empty.
     fn take(&self) -> Result<Inst, String> {
         if let Some(i) = self.pool.lock().ok().and_then(|mut p| p.pop()) {
             return Ok(i);
@@ -140,6 +148,7 @@ impl WasmPlugin {
         instantiate(&self.engine, &self.module, self.abi)
     }
 
+    /// Return a working instance to the pool.
     fn give_back(&self, inst: Inst) {
         if let Ok(mut p) = self.pool.lock() {
             p.push(inst);
@@ -264,6 +273,7 @@ impl WasmPlugin {
     }
 }
 
+/// Append pixels to the little-endian buffer the module reads.
 fn push_pixels(buf: &mut Vec<u8>, px: &[[f32; 4]]) {
     for p in px {
         for c in p {
@@ -280,6 +290,7 @@ fn push_neighbour(buf: &mut Vec<u8>, neighbour: Option<&(f64, Vec<[f32; 4]>)>, f
     }
 }
 
+/// Read the little-endian pixels the module wrote back.
 fn read_pixels(bytes: &[u8], pixels: &mut [[f32; 4]]) {
     for (px, b) in pixels.iter_mut().zip(bytes.as_chunks::<16>().0.iter()) {
         for (c, v) in px.iter_mut().zip(b.as_chunks::<4>().0.iter()) {
@@ -296,9 +307,10 @@ fn neighbour_times(time: f64, fps: f64) -> (f64, f64) {
     }
     let step = 1.0 / fps;
     let at = time * fps;
-    let before = at.floor();
-    let after = at.ceil();
-    if after - before < 1e-9 { (time - step, time + step) } else { (before / fps, after / fps) }
+    // Frame times are not exact in floating point: at NTSC rates `time * fps` often lands a few
+    // ulps above or below an integer. Treat a near-integer as a frame boundary, so the current
+    // frame is never handed back as its own neighbour.
+    if (at - at.round()).abs() < 1e-6 { (time - step, time + step) } else { (at.floor() / fps, at.ceil() / fps) }
 }
 
 impl EffectPlugin for WasmPlugin {
@@ -328,5 +340,24 @@ impl EffectPlugin for WasmPlugin {
         let prev = prev.as_ref().map(|img| (prev_time, img));
         let next = next.as_ref().map(|img| (next_time, img));
         self.render_v2(frame, params, time, prev, next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::neighbour_times;
+
+    /// NTSC frame times do not multiply back exactly; every frame boundary must still get the
+    /// frames either side of it, never the frame itself.
+    #[test]
+    fn frame_boundaries_get_their_neighbours_at_ntsc_rates() {
+        let fps = 24000.0 / 1001.0;
+        for n in 0..2400 {
+            // 24000/1001 fps at 254 016 000 000 ticks/s, as `Tick` stores it.
+            let time = (n * 10_594_584_000_i64) as f64 / 254_016_000_000.0;
+            let (prev, next) = neighbour_times(time, fps);
+            assert!((prev - (time - 1.0 / fps)).abs() < 1e-9, "frame {n}: prev {prev}, current {time}");
+            assert!((next - (time + 1.0 / fps)).abs() < 1e-9, "frame {n}: next {next}, current {time}");
+        }
     }
 }
