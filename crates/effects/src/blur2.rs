@@ -1,6 +1,6 @@
 //! Blur & Sharpen, batch 2: edge-preserving blurs (Bilateral, Smart), per-channel and map-driven
 //! blurs (Channel, Compound, CC Vector), bokeh (Camera Lens Blur), radial streaks and small
-//! utilities (Reduce Interlace Flicker, CC Cross Blur).
+//! utilities (Reduce Interlace Flicker, Cross Blur).
 
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
@@ -507,9 +507,9 @@ fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CC Radial Fast Blur
+// Fast Radial Blur
 
-/// Transparent pixels CC Radial Fast Blur adds on every side of a `w` × `h` buffer with Center
+/// Transparent pixels Fast Radial Blur adds on every side of a `w` × `h` buffer with Center
 /// at `c` (buffer pixels) and smear `s`: content `r` from Center streaks out to `r / (1 − s)`,
 /// so the farthest corner reaches `d · s / (1 − s)` past itself (at most 4096, as the other
 /// growing effects). Shared with the GPU path so both grow the same way.
@@ -562,7 +562,7 @@ fn radial_fast_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CC Vector Blur
+// Vector Blur
 
 fn vector_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let amount = ctx.params.f("amount").max(0.0) * b.scale;
@@ -616,7 +616,7 @@ fn vector_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Reduce Interlace Flicker / CC Cross Blur
+// Reduce Interlace Flicker / Cross Blur
 
 fn reduce_flicker(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = ctx.params.f("softness").max(0.0) * b.scale;
@@ -735,7 +735,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.blur.ccradialfast",
-            "CC Radial Fast Blur",
+            "Fast Radial Blur",
             vec![
                 p("center", "Center", Value::Vec2([0.5, 0.5]), ParamUi::Point),
                 p("amount", "Amount", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
@@ -745,7 +745,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.blur.ccvector",
-            "CC Vector Blur",
+            "Vector Blur",
             vec![
                 p("type", "Type", Value::Enum(0), popup(&["Natural", "Constant Length", "Perpendicular", "Direction Center", "Direction Fading"])),
                 p("amount", "Amount", num(10.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
@@ -765,7 +765,7 @@ pub fn specs() -> Vec<EffectSpec> {
         },
         spec(
             "ec.blur.cccross",
-            "CC Cross Blur",
+            "Cross Blur",
             vec![
                 p("radiusX", "Radius X", num(10.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
                 p("radiusY", "Radius Y", num(10.0), slider(0.0, 500.0, 0.0, 100.0, 1)),

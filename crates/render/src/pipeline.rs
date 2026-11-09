@@ -19,6 +19,24 @@ pub(crate) struct EffectStack {
     pub origin: [f64; 2],
 }
 
+/// A footage layer's source as the decoded picture itself (see [`Renderer::footage_picture`]):
+/// its buffer in layer space is `img` at offset `[0, 0]` and `scale`; in effect space (what
+/// [`Renderer::layer_input`] gives) at `effect_offset`.
+#[derive(Clone, Debug)]
+pub struct FootagePicture {
+    pub img: Arc<Image>,
+    pub scale: f64,
+    pub effect_offset: [f64; 2],
+}
+
+/// How a decoded footage frame becomes a layer buffer ([`Renderer::footage_buf`]).
+enum FootageLayout {
+    /// Its own pixels, at this buffer scale.
+    Native { scale: f64 },
+    /// Resampled to `width`×`height` at this buffer scale.
+    Resample { width: u32, height: u32, scale: f64 },
+}
+
 /// A property value an Essential Properties override gives a layer of a collapsed precomp.
 #[derive(Clone, Debug)]
 pub struct PropertyOverride {
@@ -861,12 +879,7 @@ impl<'a> Renderer<'a> {
                         return Some(buf);
                     }
                 }
-                let lt = ctx.source_time(layer);
-                // The proxy is decoded instead, at its own size, and fills the footage's frame.
-                let proxy = self.proxy_for(item);
-                let pf = proxy.unwrap_or(f);
-                let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
-                let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
+                let (img, pf) = self.footage_picture_of(ctx, layer, item, f)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
             // (the font files go to this render's log, which `ctx` may not carry: see
@@ -898,19 +911,87 @@ impl<'a> Renderer<'a> {
     /// A decoded frame of `f` as a layer buffer covering `w`×`h` layer pixels (the footage's
     /// nominal size; proxies are scaled up to it), converted from its colour profile.
     fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32) -> Buf {
-        let s = self.opts.scale;
-        let k = if img.width > 0 { w.max(1) as f64 / img.width as f64 } else { 1.0 };
-        // Keep native pixels when downsampling is small; resample otherwise.
-        let mut buf = match self.reduced_size(w, h) {
-            // The source resampled it already (`FootageSource::frame_at_size`).
-            Some(size) if (img.width, img.height) == size => Buf { img: img.clone(), offset: [0.0; 2], scale: s },
-            Some((rw, rh)) if k <= 1.0 + 1e-9 => Buf { img: effectcraft_raster::resample(img, rw, rh), offset: [0.0; 2], scale: s },
-            _ => Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 / k },
+        let mut buf = match self.footage_layout(img, w, h) {
+            FootageLayout::Native { scale } => Buf { img: img.clone(), offset: [0.0; 2], scale },
+            FootageLayout::Resample { width, height, scale } => Buf { img: effectcraft_raster::resample(img, width, height), offset: [0.0; 2], scale },
         };
         if let Some(c) = self.pipe.media_in(f) {
             color::convert(&mut buf.img, &c);
         }
         buf
+    }
+
+    /// How [`Renderer::footage_buf`] lays out a decoded frame `img` of footage `w`×`h` layer
+    /// pixels: its own pixels, or resampled.
+    fn footage_layout(&self, img: &Image, w: u32, h: u32) -> FootageLayout {
+        let s = self.opts.scale;
+        let k = if img.width > 0 { w.max(1) as f64 / img.width as f64 } else { 1.0 };
+        // Keep native pixels when downsampling is small; resample otherwise.
+        match self.reduced_size(w, h) {
+            // The source resampled it already (`FootageSource::frame_at_size`).
+            Some(size) if (img.width, img.height) == size => FootageLayout::Native { scale: s },
+            Some((width, height)) if k <= 1.0 + 1e-9 => FootageLayout::Resample { width, height, scale: s },
+            _ => FootageLayout::Native { scale: 1.0 / k },
+        }
+    }
+
+    /// A footage layer's decoded frame at the context time (the proxy's when one is used) and
+    /// the footage it was decoded from: what [`Renderer::source`] makes the layer's buffer of.
+    fn footage_picture_of(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &'a Footage) -> Option<(Arc<Image>, &'a Footage)> {
+        let lt = ctx.source_time(layer);
+        // The proxy is decoded instead, at its own size, and fills the footage's frame.
+        let proxy = self.proxy_for(item);
+        let pf = proxy.unwrap_or(f);
+        let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
+        let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
+        Some((img, pf))
+    }
+
+    /// The decoded footage picture a layer's masked source is, bit for bit, with no copy: a
+    /// footage layer (not continuously rasterised vector footage) without masks whose frame
+    /// needs no colour conversion, no resampling and no quantisation (32 bpc). The buffer
+    /// [`Renderer::layer_input`] gives for no effects is this picture at `effect_offset` and
+    /// `scale`.
+    /// Layers showing the same frame get the same `Arc` (the footage source's cached frame), so
+    /// an accelerator uploads it once and shares the texture. `None`: the layer's buffer is
+    /// made the usual way (any of the above applies, or the frame is missing), and also when the
+    /// frame is made per call rather than served by the footage source (frame blending,
+    /// separate fields, Invert Alpha, Interpret As Linear Light, Cineon conversion: a new
+    /// picture each time, nothing to share) or when the layer cache already holds the layer's
+    /// buffer (served from memory as before, without asking the footage source).
+    pub fn footage_picture(&self, ctx: &EvalCtx, layer: &Layer) -> Option<FootagePicture> {
+        let LayerSource::Footage { item } = &layer.source else { return None };
+        if self.pipe.levels.is_some() || layer.masks().is_some_and(|m| !m.children.is_empty()) || frame_blend_mode(ctx, layer) != FrameBlend::Off {
+            return None;
+        }
+        let item = ctx.media_item(layer, *item);
+        let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
+        if !f.has_video || (layer.switches.collapse && is_vector_footage(f)) {
+            return None;
+        }
+        let pf = self.proxy_for(item).unwrap_or(f);
+        if self.pipe.media_in(pf).is_some()
+            || pf.fields != effectcraft_project::FieldOrder::Off
+            || pf.invert_alpha
+            || pf.linear_light_applies()
+            || pf.cineon_applies()
+        {
+            return None;
+        }
+        if let Some(cache) = self.cache {
+            let (scale, draft, blur) = (self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer));
+            let content = self.content_key(ctx, layer, cache::layer_key(ctx, layer, scale, draft, blur));
+            let input = self.content_key(ctx, layer, cache::input_key(ctx, layer, scale, draft, blur, 0));
+            if [content, input].into_iter().flatten().any(|k| cache.holds(k)) {
+                return None;
+            }
+        }
+        let (img, _) = self.footage_picture_of(ctx, layer, item, f)?;
+        let FootageLayout::Native { scale } = self.footage_layout(&img, f.width, f.height) else { return None };
+        // `layer_input`'s rebase into effect space (`Buf::rebase` of a buffer at the origin).
+        let mut at = Buf { img: Image { width: 0, height: 0, data: Vec::new() }, offset: [0.0; 2], scale };
+        at.rebase(ctx.effect_bounds(layer).1);
+        Some(FootagePicture { img, scale, effect_offset: at.offset })
     }
 
     /// The size of `w` × `h` layer pixels in this render when it is reduced enough that footage

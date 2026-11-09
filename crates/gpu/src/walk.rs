@@ -241,6 +241,9 @@ fn draw_layer_on(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas
     if let Some(done) = draw_resident_fx(e, r, ctx, layer, canvas, opacity) {
         return done;
     }
+    if let Some(done) = draw_picture(e, r, ctx, layer, canvas, opacity) {
+        return done;
+    }
     let Some(st) = r.styled_layer(ctx, layer) else { return Some(()) };
     if st.plain {
         return composite_layer(e, r, ctx, layer, &st.body, canvas, opacity);
@@ -286,14 +289,28 @@ fn draw_resident_fx(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, can
     {
         return None;
     }
-    let input = r.layer_input(ctx, layer, 0)?;
-    if input.img.is_empty() {
-        return Some(Some(()));
-    }
-    let Some(src) = e.g.upload_buf(&input) else { return Some(None) };
+    // The decoded footage picture itself when it is the layer's input (uploaded once per frame
+    // and shared with every layer that shows it), else the cached input buffer.
+    let (src, offset, scale) = match picture(r, ctx, layer) {
+        Some(p) => {
+            if p.img.is_empty() {
+                return Some(Some(()));
+            }
+            let Some(src) = e.g.upload_picture(&p.img) else { return Some(None) };
+            (src, p.effect_offset, p.scale)
+        }
+        None => {
+            let input = r.layer_input(ctx, layer, 0)?;
+            if input.img.is_empty() {
+                return Some(Some(()));
+            }
+            let Some(src) = e.g.upload_buf(&input) else { return Some(None) };
+            (src, input.offset, input.scale)
+        }
+    };
     let pipe = r.pipe();
     // `layer_input` is in effect space: run the stack there, then back to layer space.
-    let mut fx = crate::effects::GpuFx::new(e, src, input.offset, input.scale, pipe.levels);
+    let mut fx = crate::effects::GpuFx::new(e, src, offset, scale, pipe.levels);
     let origin = r.run_layer_effects_on(ctx, layer, &mut fx);
     let Some((mut img, mut offset, scale)) = fx.finish() else { return Some(None) };
     offset = [offset[0] - origin[0] * scale, offset[1] - origin[1] * scale];
@@ -306,6 +323,52 @@ fn draw_resident_fx(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, can
     // The placement only reads the buffer's size, offset and scale.
     let shape = Buf { img: Image { width: img.width, height: img.height, data: Vec::new() }, offset, scale };
     Some(place_src(e, r, ctx, layer, &shape, img, canvas, layer.blend_mode, opacity, pipe.levels).map(|c| *canvas = c))
+}
+
+/// Shared footage pictures ([`picture`]); tests turn it off to compare.
+pub(crate) static SHARED_PICTURES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The layer's source as the decoded footage picture (`Renderer::footage_picture`), unless
+/// sharing is off or per-layer timings are being recorded (those time the layer-cache path).
+fn picture(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_render::FootagePicture> {
+    if !SHARED_PICTURES.load(std::sync::atomic::Ordering::Relaxed) || r.profile.is_some() {
+        return None;
+    }
+    r.footage_picture(ctx, layer)
+}
+
+/// A footage layer without effects or layer styles whose source is the decoded picture as it
+/// is (`Renderer::footage_picture`) and needs no conversion to the blending space: placed
+/// straight from the picture's texture, uploaded once per frame and shared by every layer that
+/// shows the same frame, instead of from a copy per layer in the layer cache, uploaded per
+/// layer. The pixels are the same: the layer-cache buffer is that picture, copied. `None`: not
+/// this kind of layer; `Some(None)`: the GPU failed.
+fn draw_picture(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage, opacity: f32) -> Option<Option<()>> {
+    if (layer.switches.effects && layer.effects().is_some_and(|f| !f.children.is_empty())) || styles::active(ctx, layer) || r.pipe().to_blend().is_some() {
+        return None;
+    }
+    let p = picture(r, ctx, layer)?;
+    if p.img.is_empty() {
+        return Some(Some(()));
+    }
+    let Some(src) = e.g.upload_picture(&p.img) else { return Some(None) };
+    // The placement only reads the buffer's size, offset and scale.
+    let shape = Buf { img: Image { width: p.img.width, height: p.img.height, data: Vec::new() }, offset: [0.0; 2], scale: p.scale };
+    Some(composite_src(e, r, ctx, layer, &shape, src, canvas, opacity))
+}
+
+/// [`composite_layer`] of a GPU image `src` shaped like `shape`.
+#[allow(clippy::too_many_arguments)]
+fn composite_src(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, shape: &Buf, src: GpuImage, canvas: &mut GpuImage, opacity: f32) -> Option<()> {
+    if opacity <= 0.0 {
+        return Some(());
+    }
+    if r.track_matte(ctx, layer).is_none() && !layer.preserve_transparency {
+        *canvas = place_src(e, r, ctx, layer, shape, src, canvas, layer.blend_mode, opacity, r.pipe().levels)?;
+        return Some(());
+    }
+    let iso = place_src(e, r, ctx, layer, shape, src, &e.zeros(canvas.width, canvas.height), BlendMode::Normal, 1.0, None)?;
+    composite_iso(e, r, ctx, layer, iso, canvas, opacity)
 }
 
 /// A 2D precomp layer, its nested comp rendered resident on the GPU (`walk::render` one level
