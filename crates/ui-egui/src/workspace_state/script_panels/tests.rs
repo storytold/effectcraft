@@ -305,3 +305,16 @@ fn a_panel_opened_past_a_gone_anchor_at_launch_leaves_no_queued_event() {
         assert_eq!(ui.focused, PanelKind::Project);
     }
 }
+
+#[test]
+fn restoring_drops_only_the_open_events_of_panels_already_placed() {
+    use effectcraft_engine::Event;
+    let open = |window: Value| Event::Frontend { command: "window.scriptPanel".into(), params: serde_json::json!({"window": window}) };
+    let mut ui = ui_with(docked(tabs(&[PanelKind::Composition, script(DETACHED)], 0)), &[(DETACHED, "A.jsx")]);
+    let mut session = Session { script_ui: windows(&[(7, WindowKind::Panel, "A.jsx"), (8, WindowKind::Panel, "B.jsx")]), ..Default::default() };
+    let zoom = Event::Frontend { command: "view.zoomIn".into(), params: serde_json::json!({"window": 7}) };
+    session.events = vec![open(7.into()), open(8.into()), open(Value::Null), zoom.clone(), Event::PurgeCaches];
+    restore(&mut ui, &mut session);
+    assert!(ui.dock.is_open(script(7)), "{:?}", ui.dock);
+    assert_eq!(session.events, [open(8.into()), open(Value::Null), zoom, Event::PurgeCaches]);
+}
