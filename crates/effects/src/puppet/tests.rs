@@ -940,3 +940,156 @@ fn stopping_once_the_rounds_settle_changes_nothing_visible() {
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------
+// The refinement parameter, the pins' edge cases and smoothing.
+
+#[test]
+fn mesh_rotation_refinement_maps_to_solver_rounds() {
+    let fx = puppet_fx(&[]);
+    assert_eq!(default_rounds(), 40);
+    for (refinement, rounds) in
+        [(0.0, 0), (-5.0, 0), (1.0, 2), (37.4, 75), (100.0, 200), (150.0, 200), (f64::NAN, 0), (f64::INFINITY, 200), (f64::NEG_INFINITY, 0)]
+    {
+        assert_eq!(refinement_rounds(&with_refinement(&fx, refinement)), rounds, "refinement {refinement}");
+    }
+}
+
+/// Where the point at `l` in triangle `t` lands.
+fn through(d: &[[f64; 2]], t: [usize; 3], l: [f64; 3]) -> [f64; 2] {
+    [l[0] * d[t[0]][0] + l[1] * d[t[1]][0] + l[2] * d[t[2]][0], l[0] * d[t[0]][1] + l[1] * d[t[1]][1] + l[2] * d[t[2]][1]]
+}
+
+/// Edges of a mesh with the triangles on each side.
+fn sides(m: &Mesh) -> HashMap<(usize, usize), Vec<usize>> {
+    let mut e: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (k, t) in m.tris.iter().enumerate() {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            e.entry((a.min(b), a.max(b))).or_default().push(k);
+        }
+    }
+    e
+}
+
+#[test]
+fn a_pin_on_a_vertex_holds_that_vertex() {
+    let m = rect_mesh(100.0, 40.0, 200.0);
+    let v = nearest(&m.verts, [50.0, 20.0]).unwrap();
+    assert!(held_point(&m, m.verts[v]).is_none());
+    let to = [m.verts[v][0] + 7.0, m.verts[v][1] - 11.0];
+    let d = solve(&m, &[pin(PinKind::Position, [0.0, 20.0], [0.0, 20.0]), pin(PinKind::Position, m.verts[v], to)], default_rounds());
+    assert_eq!(d[v], to);
+}
+
+#[test]
+fn a_pin_on_a_shared_edge_holds_the_same_point_from_either_side() {
+    let m = rect_mesh(100.0, 40.0, 200.0);
+    let rest = |i: usize| m.verts[i];
+    let mid = |(a, b): (usize, usize)| [(rest(a)[0] + rest(b)[0]) / 2.0, (rest(a)[1] + rest(b)[1]) / 2.0];
+    // The inner edge nearest the middle.
+    let ((a, b), tk) = sides(&m)
+        .into_iter()
+        .filter(|(_, k)| k.len() == 2)
+        .min_by(|x, y| {
+            let off = |e: (usize, usize)| (mid(e)[0] - 50.0).hypot(mid(e)[1] - 20.0);
+            off(x.0).total_cmp(&off(y.0))
+        })
+        .unwrap();
+    let at = mid((a, b));
+    let (t, l) = held_point(&m, at).unwrap();
+    // One of the two triangles, with no weight on its third corner.
+    assert!(tk.iter().any(|k| m.tris[*k] == t));
+    for (i, w) in t.iter().zip(l) {
+        if *i != a && *i != b {
+            assert!(w.abs() < 1e-9, "{l:?}");
+        }
+    }
+    let to = [at[0] + 9.0, at[1] + 6.0];
+    let d = solve(&m, &[pin(PinKind::Position, [0.0, 20.0], [0.0, 20.0]), pin(PinKind::Position, at, to)], default_rounds());
+    for k in tk {
+        let t = m.tris[k];
+        let p = through(&d, t, t.map(|i| if i == a || i == b { 0.5 } else { 0.0 }));
+        assert!((p[0] - to[0]).hypot(p[1] - to[1]) < 0.05, "through triangle {k}: {p:?} vs {to:?}");
+    }
+}
+
+#[test]
+fn a_pin_just_off_the_outline_holds_a_point_and_one_further_off_its_nearest_vertex() {
+    let m = rect_mesh(100.0, 40.0, 200.0);
+    // An outline edge along the top, y = 0, away from the corners.
+    let (a, b) = sides(&m)
+        .into_iter()
+        .filter(|(e, k)| k.len() == 1 && m.verts[e.0][1] == 0.0 && m.verts[e.1][1] == 0.0 && m.verts[e.0][0].min(m.verts[e.1][0]) > 20.0)
+        .map(|(e, _)| e)
+        .min_by(|x, y| m.verts[x.0][0].total_cmp(&m.verts[y.0][0]))
+        .unwrap();
+    let x = (m.verts[a][0] + m.verts[b][0]) / 2.0;
+    // Round-off out of the mesh still holds the point on the outline.
+    let (t, l) = held_point(&m, [x, -1e-12]).unwrap();
+    assert!(t.contains(&a) && t.contains(&b) && l.iter().all(|w| *w >= -1e-9), "{t:?} {l:?}");
+    // Further out, nothing is under the pin: it holds its nearest vertex at the same offset.
+    let off = [x, -0.01];
+    assert!(locate(&m, off).is_none() && held_point(&m, off).is_none());
+    let v = nearest(&m.verts, off).unwrap();
+    let to = [off[0] + 5.0, off[1] - 8.0];
+    let d = solve(&m, &[pin(PinKind::Position, [0.0, 20.0], [0.0, 20.0]), pin(PinKind::Position, off, to)], default_rounds());
+    let want = [to[0] + m.verts[v][0] - off[0], to[1] + m.verts[v][1] - off[1]];
+    assert!((d[v][0] - want[0]).abs() < 1e-9 && (d[v][1] - want[1]).abs() < 1e-9, "{:?} vs {want:?}", d[v]);
+}
+
+#[test]
+fn a_bend_pin_alone_keeps_its_vertex_in_place() {
+    // Nothing held: the Bend pin's own vertex stays put and the mesh turns about it.
+    let m = rect_mesh(100.0, 40.0, 200.0);
+    let mut bend = pin(PinKind::Bend, [50.0, 20.0], [50.0, 20.0]);
+    bend.rotation = 30.0;
+    let d = solve(&m, &[bend], default_rounds());
+    let v = nearest(&m.verts, [50.0, 20.0]).unwrap();
+    assert_eq!(d[v], m.verts[v]);
+    // The edges at the pin turn its way.
+    let turned: Vec<f64> = sides(&m)
+        .into_keys()
+        .filter(|(a, b)| *a == v || *b == v)
+        .map(|(a, b)| {
+            let j = if a == v { b } else { a };
+            let (r, e) = ([m.verts[j][0] - m.verts[v][0], m.verts[j][1] - m.verts[v][1]], [d[j][0] - d[v][0], d[j][1] - d[v][1]]);
+            (r[0] * e[1] - r[1] * e[0]).atan2(r[0] * e[0] + r[1] * e[1]).to_degrees()
+        })
+        .collect();
+    assert!(turned.iter().all(|a| *a > 10.0 && *a < 30.0), "{turned:?}");
+}
+
+#[test]
+fn smoothing_falls_back_to_the_solve_when_it_cannot_split() {
+    let m = rect_mesh(100.0, 40.0, 200.0);
+    let d = solve(&m, &[pin(PinKind::Position, [0.0, 20.0], [0.0, 20.0]), pin(PinKind::Position, [100.0, 20.0], [80.0, 50.0])], default_rounds());
+    // Vertices that don't match the mesh: drawn as they are.
+    let short = &d[..d.len() - 1];
+    let sm = smooth_mesh(&m, short, 1.0);
+    assert_eq!((&sm.rest, &sm.deformed[..], &sm.tris), (&m.verts, short, &m.tris));
+    assert_eq!(sm.parent, (0..m.tris.len()).collect::<Vec<_>>());
+    // A buffer so small that no split is worth it.
+    let sm = smooth_mesh(&m, &d, 1e-6);
+    assert_eq!((&sm.deformed, &sm.tris), (&d, &m.tris));
+}
+
+#[test]
+fn every_small_triangle_lies_in_the_triangle_it_came_from() {
+    let m = traced_solid();
+    let d = solve(&m, &three_pins([1000.0, -60.0]), default_rounds());
+    let sm = smooth_mesh(&m, &d, 1.0);
+    assert!(sm.tris.len() > m.tris.len());
+    assert_eq!(sm.parent.len(), sm.tris.len());
+    let v = &m.verts;
+    let mut count = vec![0usize; m.tris.len()];
+    for (t, k) in sm.tris.iter().zip(&sm.parent) {
+        let p = m.tris[*k];
+        for i in t {
+            let l = bary(v[p[0]], v[p[1]], v[p[2]], sm.rest[*i]).unwrap();
+            assert!(l.iter().all(|x| *x >= -1e-9), "corner {i} of a piece of triangle {k}: {l:?}");
+        }
+        count[*k] += 1;
+    }
+    // Every triangle split the same way.
+    assert!(count.iter().all(|c| *c == count[0]), "{:?}", &count[..8]);
+}
