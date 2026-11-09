@@ -18,6 +18,9 @@ pub(crate) struct Runtime {
     pub(crate) manual_window_open: bool,
     #[cfg(target_arch = "wasm32")]
     pub(crate) status_message: Option<String>,
+    /// How many times `on_exit` called [`Runtime::exiting`].
+    #[cfg(test)]
+    exits: u32,
 }
 
 impl Default for Runtime {
@@ -32,6 +35,21 @@ impl Default for Runtime {
             manual_window_open: false,
             #[cfg(target_arch = "wasm32")]
             status_message: None,
+            #[cfg(test)]
+            exits: 0,
+        }
+    }
+}
+
+impl Runtime {
+    /// Starts the helper of an update that waits for the app to exit. `on_exit` calls it: on
+    /// macOS the process ends before the app is dropped. Later calls do nothing.
+    pub(crate) fn exiting(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.updater.start_pending_update();
+        #[cfg(test)]
+        {
+            self.exits += 1;
         }
     }
 }
@@ -124,5 +142,18 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
             app.updates_rt.manual_window_open = false;
             app.updates_rt.status_message = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::App as _;
+
+    #[test]
+    fn on_exit_calls_the_update_exit_hook_once() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.on_exit();
+        assert_eq!(app.updates_rt.exits, 1);
     }
 }
