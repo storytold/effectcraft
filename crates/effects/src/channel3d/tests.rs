@@ -348,6 +348,60 @@ fn cryptomatte_selects_by_name_and_wildcard() {
     assert_eq!(selection_hashes(&hex, None), vec![crypto_hash("left")]);
 }
 
+/// Layer Name picks a Cryptomatte layer named in full (`Crypto_Material`, which the Layer popup's
+/// CryptoMaterial does not match); empty or missing it falls back to the Layer popup.
+#[test]
+fn cryptomatte_layer_name_picks_the_named_layer() {
+    let base = scene();
+    let mut a = (*base.0).clone();
+    // A second layer with the IDs swapped: left is on the right half there.
+    let swap = |name: &str| a.channels.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap();
+    let (r, g) = (swap("CryptoObject00.R"), swap("CryptoObject00.G"));
+    let w = 20;
+    let r2: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
+    a.channels.push(("Crypto_Material00.R".into(), r2));
+    a.channels.push(("Crypto_Material00.G".into(), g));
+    let h = AuxHost(Arc::new(a));
+    let sel = format!("<{:08x}>", crypto_hash("left"));
+    let matte = |vals: &[(&str, Value)]| {
+        let mut v = vec![("selection", Value::Str(sel.clone())), ("matteOnly", Value::Bool(true))];
+        v.extend(vals.iter().cloned());
+        let m = run("ec.3d.cryptomatte", &v, &h);
+        (m.get(2, 5)[0], m.get(17, 5)[0])
+    };
+    assert_eq!(matte(&[("layerName", Value::Str("Crypto_Material".into()))]), (0.0, 1.0), "the named layer");
+    assert_eq!(matte(&[]), (1.0, 0.0), "the Layer popup's CryptoObject");
+    assert_eq!(matte(&[("layerName", Value::Str("Crypto_Name".into()))]), (1.0, 0.0), "a missing name falls back to the popup");
+}
+
+/// Layers whose names differ only in case are different layers: `layerName` "crypto_a" mattes
+/// from crypto_a's own IDs, not from the earlier `Crypto_A`.
+#[test]
+fn cryptomatte_layer_name_is_case_sensitive() {
+    let base = scene();
+    let mut a = (*base.0).clone();
+    let (r, g) = (
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.R").unwrap().1.clone(),
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.G").unwrap().1.clone(),
+    );
+    let w = 20;
+    let flipped: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
+    // `Crypto_A` first, with left/right as in the base scene; `crypto_a` has them swapped.
+    a.channels.push(("Crypto_A00.R".into(), r));
+    a.channels.push(("Crypto_A00.G".into(), g.clone()));
+    a.channels.push(("crypto_a00.r".into(), flipped));
+    a.channels.push(("crypto_a00.g".into(), g));
+    let h = AuxHost(Arc::new(a));
+    let sel = format!("<{:08x}>", crypto_hash("left"));
+    let matte = |name: &str| {
+        let v = [("selection", Value::Str(sel.clone())), ("matteOnly", Value::Bool(true)), ("layerName", Value::Str(name.into()))];
+        let m = run("ec.3d.cryptomatte", &v, &h);
+        (m.get(2, 5)[0], m.get(17, 5)[0])
+    };
+    assert_eq!(matte("Crypto_A"), (1.0, 0.0));
+    assert_eq!(matte("crypto_a"), (0.0, 1.0));
+}
+
 /// #473: a name with a comma in it (Blender allows `Green, Glossy`) is selected when it is
 /// quoted or its comma escaped, instead of being cut into two names that match nothing.
 #[test]
@@ -401,6 +455,38 @@ fn extractor_maps_named_channels() {
     // Without aux: the layer's own channels can be swapped.
     let s = run_fx("ec.3d.extractor", &[("red", Value::Str("A".into()))], Image::filled(2, 2, [0.2, 0.3, 0.4, 1.0]), 0.0, EffectEnv::default());
     assert_eq!(s.img.get(0, 0), [1.0, 0.3, 0.4, 1.0]);
+}
+
+/// `(copy)` (After Effects' EXtractoR choice, imported from .aep) is the effect input's own
+/// channel as earlier effects left it, never the OpenEXR's plane of the same name: here the input
+/// buffer differs from the footage's R, G, B and A planes, as after an earlier effect.
+#[test]
+fn extractor_copy_reads_the_current_input_not_the_footage_plane() {
+    let (w, h) = (4usize, 3usize);
+    let mut a = AuxChannels::new(w as u32, h as u32, 1.0);
+    // The file's own planes (what the footage held before any effect) and a depth channel.
+    a.channels = ["R", "G", "B", "A"].iter().map(|n| (n.to_string(), vec![0.9; w * h])).collect();
+    a.channels.push(("Z".into(), vec![0.7; w * h]));
+    let host = AuxHost(Arc::new(a));
+    let env = || EffectEnv { host: Some(&host), ..Default::default() };
+    // The input after an earlier effect: straight (0.2, 0.3, 0.4) at alpha 0.5, premultiplied.
+    let input = Image::filled(w as u32, h as u32, [0.1, 0.15, 0.2, 0.5]);
+    let copy = || Value::Str(EXTRACTOR_COPY.into());
+    // All four `(copy)`: the input unchanged.
+    let all = [("red", copy()), ("green", copy()), ("blue", copy()), ("alpha", copy())];
+    let o = run_fx("ec.3d.extractor", &all, input.clone(), 0.0, env()).img;
+    assert_eq!(o.data, input.data);
+    // Mixed with a named channel (no pass-through): red from Z, green and alpha copied, blue the
+    // footage's B plane.
+    let vals = [("red", Value::Str("Z".into())), ("green", copy()), ("blue", Value::Str("B".into())), ("alpha", copy())];
+    let px = run_fx("ec.3d.extractor", &vals, input.clone(), 0.0, env()).img.get(1, 1);
+    let want = [0.7 * 0.5, 0.3 * 0.5, 0.9 * 0.5, 0.5];
+    for (c, (got, want)) in px.iter().zip(want).enumerate() {
+        assert!((got - want).abs() < 1e-6, "channel {c}: {got} != {want} ({px:?})");
+    }
+    // `A` by name is the footage's alpha plane (0.9), not the input's alpha (0.5).
+    let named = [("alpha", Value::Str("A".into())), ("red", Value::Str("Z".into()))];
+    assert!((run_fx("ec.3d.extractor", &named, input, 0.0, env()).img.get(1, 1)[3] - 0.9).abs() < 1e-6);
 }
 
 #[test]

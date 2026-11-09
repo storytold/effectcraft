@@ -517,6 +517,67 @@ fn column_at(cw: &Cols, x: f32) -> Option<&'static str> {
     spans.into_iter().find(|(_, on, a, b)| *on && x >= *a && x < *b).map(|s| s.0)
 }
 
+/// The column headers that show an icon or a symbol instead of a name, and what hovering one
+/// says: (column, key, short name, explanation), in the order the header draws them. Over a layer
+/// switch the key is that switch's name, and the row's switch shows the same text
+/// ([`switch_tip`]).
+pub const HEADER_TIPS: [(&str, &str, &str, &str); 15] = [
+    ("av", "video", "Video", "Video: shows or hides the layer's picture in the composition"),
+    ("av", "audio", "Audio", "Audio: turns the layer's sound on or off"),
+    ("av", "solo", "Solo", "Solo: while any layer is soloed, only the soloed layers render"),
+    ("av", "lock", "Lock", "Lock: keeps the layer from being selected or changed"),
+    ("label", "label", "Label", "Label: the layer's color label; click a layer's swatch to pick another"),
+    ("num", "num", "#", "Layer number: the layer's place in the stack, counted from the top"),
+    ("switches", "shy", "Shy", "Shy: the layer leaves the Timeline while Hide Shy Layers is on"),
+    (
+        "switches",
+        "collapse",
+        "Collapse Transformations / Continuously Rasterize",
+        "Collapse Transformations / Continuously Rasterize: a precomposition's layers render straight into this composition; a vector layer is redrawn sharp at every scale",
+    ),
+    ("switches", "quality", "Quality and Sampling", "Quality and Sampling: Draft renders faster; Best renders with subpixel accuracy and smooth sampling"),
+    ("switches", "fx", "Effect", "Effect: turns the layer's effects on or off"),
+    ("switches", "frameBlend", "Frame Blending", "Frame Blending: smooths footage whose speed or frame rate differs from the composition's"),
+    ("switches", "motionBlur", "Motion Blur", "Motion Blur: blurs the layer along its movement while the composition's Motion Blur is on"),
+    ("switches", "adjustment", "Adjustment Layer", "Adjustment Layer: the layer's effects apply to every layer below it"),
+    ("switches", "threeD", "3D Layer", "3D Layer: the layer moves and turns in depth and reacts to cameras and lights"),
+    (
+        "modes",
+        "preserveTransparency",
+        "Preserve Transparency",
+        "Preserve Transparency: the layer shows only over the layers below it, and only as opaque as they are",
+    ),
+];
+
+/// The hover text of the layer switch (or the header over it) named `key`.
+fn switch_tip(key: &str) -> Option<&'static str> {
+    HEADER_TIPS.iter().find(|t| t.1 == key).map(|t| t.3)
+}
+
+/// Where each shown entry of [`HEADER_TIPS`] sits in the column header row `ch`: (column, key,
+/// rect), over the icon the header draws there. Hidden columns give none.
+fn header_tip_rects(cw: &Cols, ch: Rect) -> Vec<(&'static str, &'static str, Rect)> {
+    let v = cw.vis;
+    let mut out = Vec::new();
+    for (col, key, _, _) in HEADER_TIPS {
+        // The icon's place among its column's icons.
+        let i = HEADER_TIPS.iter().filter(|t| t.0 == col).position(|t| t.1 == key).unwrap_or(0) as f32;
+        let span = match col {
+            "av" => v.av.then_some((cw.av + 1.0 + 18.0 * i, 18.0)),
+            "label" => v.label.then_some((cw.label, LABEL_W)),
+            "num" => v.num.then_some((cw.num, NUM_W)),
+            "switches" => v.switches.then_some((cw.switches + SW * i, SW)),
+            // The `T` over the rows' Preserve Transparency boxes.
+            "modes" => v.modes.then_some((cw.mode + 72.0, 18.0)),
+            _ => None,
+        };
+        if let Some((x, w)) = span {
+            out.push((col, key, Rect::from_min_max(pos2(x, ch.min.y), pos2(x + w, ch.max.y))));
+        }
+    }
+    out
+}
+
 /// Snap a time to the nearest candidate within `tolerance` (all seconds); Shift-dragging the
 /// current-time indicator snaps to keyframes, layer in/out points, markers and the work area.
 pub fn snap_time(candidates: &[f64], t: f64, tolerance: f64) -> f64 {
@@ -1514,6 +1575,11 @@ fn layer_switch(
 ) {
     let SwitchSpec { row, br, icon, on, id, layer, name, others } = *spec;
     let resp = widgets::icon_toggle(ui, br, icon, on, t, id, Sense::click_and_drag());
+    // What the switch does, as its column header says.
+    let resp = match switch_tip(name) {
+        Some(tip) => resp.on_hover_text(tr(tip)),
+        None => resp,
+    };
     // Alt-click on an A/V feature sets the layer apart: the other layers go off (or locked),
     // and come back on the next Alt-click. With several layers selected, the whole selection is
     // set apart.
@@ -1916,6 +1982,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let mut rw = begin_rows(app, ui, tl);
     let g = &mut rw;
@@ -2653,6 +2720,23 @@ fn column_header_interact(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut T
     let hdr_rect = Rect::from_min_max(ch.min, pos2(graph_x0 - 1.0, ch.max.y));
     let hresp = ui.interact(hdr_rect, egui::Id::unique("tl-colhdr"), Sense::click());
     app.auto.add("timeline.header", hdr_rect, "Columns (right-click)");
+    // The icon-only headers say what they are on hover. Hover-only, on top of the header: its
+    // clicks and right-click menu still go to the header.
+    for (col, key, r) in header_tip_rects(cw, ch) {
+        let r = r.intersect(hdr_rect);
+        let Some((_, _, name, tip)) = HEADER_TIPS.iter().find(|t| t.1 == key) else { continue };
+        if !r.is_positive() {
+            continue;
+        }
+        // The node first: the hover text becomes its accessible description only on an existing node.
+        let resp = ui.interact(r, egui::Id::unique(("tl-colhdr-tip", key)), Sense::hover());
+        crate::a11y::role_name(&resp, egui::accesskit::Role::ColumnHeader, tr(name));
+        let _ = resp.on_hover_text(tr(tip));
+        // `label` and `#` are a column each: `timeline.header.label` / `.num` already name them.
+        if col != key {
+            app.auto.add(&format!("timeline.header.{col}.{key}"), r, name);
+        }
+    }
     for (id, label) in COLUMNS {
         if let Some(x0) = match id {
             "av" => vis.av.then_some((cw.av, AV_W)),
@@ -3102,7 +3186,12 @@ fn layer_mode_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: 
     }
     let tr = Rect::from_center_size(pos2(cw.mode + 76.0 + 6.0, cy), vec2(14.0, 14.0));
     app.auto.add(&format!("timeline.layer.{}.preserveTransparency", layer.id.0), tr, "Preserve Transparency");
-    if widgets::checkbox(ui, tr, layer.preserve_transparency, &t, egui::Id::unique(("pt", layer.id.0))).changed() {
+    let pt = widgets::checkbox(ui, tr, layer.preserve_transparency, &t, egui::Id::unique(("pt", layer.id.0)));
+    let pt = match switch_tip("preserveTransparency") {
+        Some(tip) => pt.on_hover_text(crate::i18n::tr(tip)),
+        None => pt,
+    };
+    if pt.changed() {
         // The click gives the selection the state the clicked row toggles to,
         // whatever the first selected layer's value (as the switches do).
         actions.push((

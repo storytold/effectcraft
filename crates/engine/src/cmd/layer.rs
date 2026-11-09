@@ -31,7 +31,7 @@ use replace::{has_replace_source, replace_source};
 pub(crate) use select::select_only;
 use select::{select, select_next, select_prev, select_step};
 use switches::{blend, rename, set_comment, set_switch, track_matte};
-use timing::{arrange, move_frames, precompose, slip, timing};
+use timing::{arrange, move_frames, precompose, slip, timing, unprecompose};
 use transform::{has_layer_settings, layer_settings, transform_op};
 pub(crate) use transform::{offset_position, transform_default, update_position};
 
@@ -49,7 +49,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text",
             ["Layer", "New"],
             Some("Cmd+Alt+Shift+T"),
-            "{text?, name? (layer name; default the text), position? [x,y], box? [x,y,w,h] (paragraph text, comp space), vertical?, edit? (start editing), font?, style?, size?, fill?, stroke?, applyFill?, applyStroke?, strokeWidth?, tracking?, leading?, baselineShift?, hScale?, vScale?, tsume?, fauxBold?, fauxItalic?, allCaps?, smallCaps?, baseline?, superscript?, subscript?, kerning?, ligatures?, justify?, indentLeft?, indentRight?, indentFirst?, spaceBefore?, spaceAfter?, direction?, composer?, hangingPunctuation?, strokeOverFill?, lineJoin?} (attributes as layer.setText)",
+            "{text?, name? (layer name; default the text, which the name then follows; a given name stays), position? [x,y], box? [x,y,w,h] (paragraph text, comp space), vertical?, edit? (start editing), font?, style?, size?, fill?, stroke?, applyFill?, applyStroke?, strokeWidth?, tracking?, leading?, baselineShift?, hScale?, vScale?, tsume?, fauxBold?, fauxItalic?, allCaps?, smallCaps?, baseline?, superscript?, subscript?, kerning?, ligatures?, justify?, indentLeft?, indentRight?, indentFirst?, spaceBefore?, spaceAfter?, direction?, composer?, hangingPunctuation?, strokeOverFill?, lineJoin?} (attributes as layer.setText)",
             has_comp,
             new_text
         ),
@@ -70,7 +70,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Layer Settings...",
             ["Layer"],
             Some("Cmd+Shift+Y"),
-            "{layer?, name?, color?, width?, height?, pixelAspect?, affectAll?: bool (default true; false gives this layer its own copy of a solid other layers use)} → {layer, solid?}",
+            "{layer?, name? (an empty name makes a text layer's name follow its text again), color?, width?, height?, pixelAspect?, affectAll?: bool (default true; false gives this layer its own copy of a solid other layers use)} → {layer, solid?}",
             has_layer_settings,
             layer_settings
         ),
@@ -114,7 +114,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_layers,
             set_switch
         ),
-        cmd!("layer.rename", "Rename", [], Some("Enter"), "{layer?, name}", has_layers, rename),
+        cmd!(
+            "layer.rename",
+            "Rename",
+            [],
+            Some("Enter"),
+            "{layer?, name} — a text layer's name follows its text until renamed; an empty name follows it again",
+            has_layers,
+            rename
+        ),
         cmd!("layer.setComment", "Layer Comment", [], None, "{layers?, comment}", has_layers, set_comment),
         cmd!("layer.setBlendMode", "Blending Mode", [], None, "{layers?, mode?: Normal|Multiply|Screen|…, step?: ±1}", has_layers, blend),
         cmd!(
@@ -178,6 +186,15 @@ pub fn specs() -> Vec<CommandSpec> {
             precompose
         ),
         cmd!(
+            "layer.unprecompose",
+            "Un-precompose",
+            ["Layer"],
+            None,
+            "{layer?, force?, dryRun?} → {layers, warnings}: expands the selected pre-comp layer into its composition's layers (copies, in order, with timing and position carried over). A locked pre-comp layer is refused, changing nothing. What would change the picture (the pre-comp layer has a parent, matte, effects, masks, layer styles, a non-default Scale/Rotation/Opacity, an animated transform, time remap/stretch, a blending mode, Video/Audio off, Solo/Guide on, is 3D/collapsing/adjustment, is used by another layer or named in another layer's expression; or the nested comp has cameras, lights, adjustment, 3D, collapsing, soloed or blend-mode / Preserve Transparency layers, preserves another frame rate, has another motion-blur shutter, or has Position expressions the move can't reach) is an error listing the reasons, changing nothing, unless `force`: then it unpacks anyway in one undo step, drops what the pre-comp layer carried, removes other layers' parent/matte/property links to it and lists the reasons as `warnings`. `dryRun` returns {dryRun, warnings} and changes nothing",
+            has_layers,
+            unprecompose
+        ),
+        cmd!(
             "layer.addMask",
             "New Mask",
             ["Layer", "Mask"],
@@ -201,7 +218,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Text",
             [],
             None,
-            "{layer?, range?: [start, end] (characters; default all), text?, font?, style?, size?, fill?, stroke?, applyFill?, applyStroke?, strokeWidth?, tracking?, leading?: px|\"auto\", baselineShift? px, hScale? %, vScale? %, tsume? %, fauxBold?, fauxItalic?, allCaps?, smallCaps?, baseline?: normal|superscript|subscript, superscript?, subscript?, kerning?: metrics|optical|number, ligatures?, discretionaryLigatures? (OpenType), contextualAlternates?, stylisticAlternates?, stylisticSets?: [1–20], ss01?, ss02?, ss03?, ss04?, ss05?, ss06?, ss07?, ss08?, ss09?, ss10?, ss11?, ss12?, ss13?, ss14?, ss15?, ss16?, ss17?, ss18?, ss19?, ss20?, swash?, titling?, ordinals?, fractions?, allSmallCaps?, figureStyle?: default|lining|oldStyle, figureWidth?: default|proportional|tabular, figures?, variations?: {tag: value} (variable font axes; null resets), justify?: left|center|right|justifyLeft|justifyCenter|justifyRight|justifyAll, indentLeft?, indentRight?, indentFirst?, spaceBefore?, spaceAfter?, direction?: ltr|rtl, composer?: everyLine|singleLine, hangingPunctuation?, strokeOverFill?, lineJoin?: miter|round|bevel, box?: [x,y,w,h]|null (layer space), vertical?}",
+            "{layer?, range?: [start, end] (characters; default all), text? (also renames a text layer whose name still follows its text), font?, style?, size?, fill?, stroke?, applyFill?, applyStroke?, strokeWidth?, tracking?, leading?: px|\"auto\", baselineShift? px, hScale? %, vScale? %, tsume? %, fauxBold?, fauxItalic?, allCaps?, smallCaps?, baseline?: normal|superscript|subscript, superscript?, subscript?, kerning?: metrics|optical|number, ligatures?, discretionaryLigatures? (OpenType), contextualAlternates?, stylisticAlternates?, stylisticSets?: [1–20], ss01?, ss02?, ss03?, ss04?, ss05?, ss06?, ss07?, ss08?, ss09?, ss10?, ss11?, ss12?, ss13?, ss14?, ss15?, ss16?, ss17?, ss18?, ss19?, ss20?, swash?, titling?, ordinals?, fractions?, allSmallCaps?, figureStyle?: default|lining|oldStyle, figureWidth?: default|proportional|tabular, figures?, variations?: {tag: value} (variable font axes; null resets), justify?: left|center|right|justifyLeft|justifyCenter|justifyRight|justifyAll, indentLeft?, indentRight?, indentFirst?, spaceBefore?, spaceAfter?, direction?: ltr|rtl, composer?: everyLine|singleLine, hangingPunctuation?, strokeOverFill?, lineJoin?: miter|round|bevel, box?: [x,y,w,h]|null (layer space), vertical?}",
             has_layers,
             set_text
         ),

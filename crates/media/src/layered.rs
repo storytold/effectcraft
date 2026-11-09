@@ -14,19 +14,20 @@ fn is_svg(path: &str, bytes: &[u8]) -> bool {
 }
 
 /// The vector document of an SVG / PDF / AI / EPS file (`None` for other formats): page
-/// `page` of a PDF, restricted to the footage's layer when it names one.
+/// `page` of a PDF framed as `framing` says, restricted to the footage's layer when it names one.
 pub fn vector_doc(
     path: &str,
     bytes: &[u8],
     layer: Option<&effectcraft_project::SourceLayer>,
     page: u32,
+    framing: effectcraft_pdf::Framing,
 ) -> Option<std::result::Result<effectcraft_svg::Doc, String>> {
     if is_svg(path, bytes) {
         return Some(effectcraft_svg::parse(bytes).map_err(|e| format!("{path}: {e}")));
     }
     effectcraft_pdf::sniff(bytes)?;
     Some(
-        effectcraft_pdf::parse_page(bytes, page as usize)
+        effectcraft_pdf::parse_page_framed(bytes, page as usize, framing)
             .map(|d| match layer {
                 Some(l) => effectcraft_pdf::layer_doc_with_sizes(&d, l.index as usize, l.layer_size).0,
                 None => d,
@@ -111,14 +112,14 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
         return Ok(Some(straight_to_image(px.width, px.height, &px.data, op)));
     }
     if is_svg(path, bytes) || is_pdf_like(path, bytes) {
-        let doc = vector_doc(path, bytes, footage.layer.as_ref(), footage.page).unwrap_or(Err(String::new())).map_err(MediaError::Decode)?;
-        let (w, h) = doc.pixel_size();
+        let doc = footage_doc(path, bytes, footage).unwrap_or(Err(String::new())).map_err(MediaError::Decode)?;
+        let ((w, h), to_image) = fit(&doc, footage, 1.0);
         // A declared size up to 30000² would be a 14 GB allocation that aborts the app (#2136):
         // past what Continuously Rasterize can draw, the footage reports an error instead.
         if u64::from(w) * u64::from(h) > u64::from(MAX_VECTOR_SIDE) * u64::from(MAX_VECTOR_SIDE) {
             return Err(MediaError::Decode(format!("{path}: {w}×{h} pixels is larger than vector footage can be drawn ({MAX_VECTOR_SIDE}×{MAX_VECTOR_SIDE})")));
         }
-        let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
+        let img = effectcraft_svg::rasterize_with(&doc, w, h, to_image);
         // The rasteriser produces premultiplied pixels already.
         let _ = op;
         return Ok(Some(img));
@@ -129,12 +130,29 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
 /// The largest side vector footage is drawn at, decoded or continuously rasterised.
 const MAX_VECTOR_SIDE: u32 = 16384;
 
-/// A vector file rasterised at `scale` × its pixel size (Continuously Rasterize).
-pub(crate) fn rasterize_vector(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::SourceLayer>, page: u32, scale: f64) -> Option<Image> {
-    let doc = vector_doc(path, bytes, layer, page)?.ok()?;
-    let (w, h) = doc.pixel_size();
-    let (sw, sh) = (((w as f64 * scale).ceil() as u32).clamp(1, MAX_VECTOR_SIDE), ((h as f64 * scale).ceil() as u32).clamp(1, MAX_VECTOR_SIDE));
-    Some(effectcraft_svg::rasterize(&doc, sw, sh, scale))
+/// The vector footage `footage` (of the file `path` with these `bytes`) rasterised at `scale` ×
+/// its size as [`effectcraft_render::vector_fit`] draws it (Continuously Rasterize).
+pub(crate) fn rasterize_vector(path: &str, bytes: &[u8], footage: &Footage, scale: f64) -> Option<Image> {
+    let doc = footage_doc(path, bytes, footage)?.ok()?;
+    let ((sw, sh), to_image) = fit(&doc, footage, scale);
+    Some(effectcraft_svg::rasterize_with(&doc, sw.clamp(1, MAX_VECTOR_SIDE), sh.clamp(1, MAX_VECTOR_SIDE), to_image))
+}
+
+/// The page framing of vector footage: as After Effects places it for footage from an After
+/// Effects project ([`Footage::placed_page`]), as a PDF viewer shows it otherwise.
+fn framing(footage: &Footage) -> effectcraft_pdf::Framing {
+    if footage.placed_page { effectcraft_pdf::Framing::Placed } else { effectcraft_pdf::Framing::Viewer }
+}
+
+/// [`vector_doc`] of `footage`'s page, layer and framing.
+fn footage_doc(path: &str, bytes: &[u8], footage: &Footage) -> Option<std::result::Result<effectcraft_svg::Doc, String>> {
+    vector_doc(path, bytes, footage.layer.as_ref(), footage.page, framing(footage))
+}
+
+/// The image size and document → image mapping of `doc` drawn for `footage` at `scale`.
+fn fit(doc: &effectcraft_svg::Doc, footage: &Footage, scale: f64) -> ((u32, u32), effectcraft_svg::Affine) {
+    let (size, [sx, sy]) = effectcraft_render::vector_fit(footage, [doc.width, doc.height], doc.pixel_size(), scale);
+    (size, effectcraft_svg::Affine::scale_non_uniform(sx, sy))
 }
 
 #[cfg(test)]
@@ -153,5 +171,66 @@ mod tests {
         let footage = probe("small.svg", small).unwrap().unwrap();
         let img = decode("small.svg", small, &footage, AlphaOp::new(footage.alpha, footage.premul_color)).unwrap().unwrap();
         assert_eq!((img.width, img.height), (40, 20));
+    }
+
+    /// A 200 × 100 pt page: red left half, blue right half.
+    fn halves_pdf() -> Vec<u8> {
+        effectcraft_pdf::write::pdf(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>".into(), None),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), None),
+                (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>".into(), None),
+                (4, "<< >>".into(), Some(b"1 0 0 rg 0 0 100 100 re f 0 0 1 rg 100 0 100 100 re f".to_vec())),
+            ],
+            1,
+        )
+    }
+
+    /// An opaque red pixel.
+    fn is_red(p: [f32; 4]) -> bool {
+        p[3] > 0.99 && p[0] > 0.9 && p[2] < 0.1
+    }
+
+    /// An opaque blue pixel.
+    fn is_blue(p: [f32; 4]) -> bool {
+        p[3] > 0.99 && p[2] > 0.9 && p[0] < 0.1
+    }
+
+    /// #3099: an After Effects project keeps the size After Effects measured for a placed .ai or
+    /// PDF, which can differ from this reader's page size. A placed page fills that size (the
+    /// layer's anchor and masks are measured against it), decoded and continuously rasterised;
+    /// other footage is drawn at the page's own size as before, whatever size it says.
+    #[test]
+    fn placed_vector_footage_fills_the_footage_size() {
+        let pdf = halves_pdf();
+        let mut footage = probe("art.ai", &pdf).unwrap().unwrap();
+        assert_eq!((footage.width, footage.height), (200, 100));
+        assert!(!footage.placed_page);
+        let op = AlphaOp::new(footage.alpha, footage.premul_color);
+        let own = decode("art.ai", &pdf, &footage, op).unwrap().unwrap();
+        assert_eq!((own.width, own.height), (200, 100));
+        assert!(is_red(own.get(50, 50)) && is_blue(own.get(150, 50)));
+
+        (footage.width, footage.height) = (100, 80);
+        let unplaced = decode("art.ai", &pdf, &footage, op).unwrap().unwrap();
+        assert!(unplaced == own, "not placed: drawn as before");
+        assert_eq!(rasterize_vector("art.ai", &pdf, &footage, 0.5).map(|i| (i.width, i.height)), Some((100, 50)));
+
+        footage.placed_page = true;
+        let img = decode("art.ai", &pdf, &footage, op).unwrap().unwrap();
+        assert_eq!((img.width, img.height), (100, 80));
+        for (x, y) in [(25, 3), (25, 76)] {
+            assert!(is_red(img.get(x, y)), "red at ({x}, {y}): {:?}", img.get(x, y));
+        }
+        for (x, y) in [(75, 3), (75, 76)] {
+            assert!(is_blue(img.get(x, y)), "blue at ({x}, {y}): {:?}", img.get(x, y));
+        }
+
+        let sharp = rasterize_vector("art.ai", &pdf, &footage, 2.0).unwrap();
+        assert_eq!((sharp.width, sharp.height), (200, 160));
+        assert!(is_red(sharp.get(50, 155)) && is_blue(sharp.get(150, 155)));
+        // Placed at the page's own size: 1:1.
+        (footage.width, footage.height) = (200, 100);
+        assert!(decode("art.ai", &pdf, &footage, op).unwrap().unwrap() == own, "placed at its own size: 1:1");
     }
 }

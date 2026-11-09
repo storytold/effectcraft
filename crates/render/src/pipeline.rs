@@ -3,6 +3,7 @@ use super::footage::{FootageSource, is_vector_footage};
 use super::frames::{blend_frames, cineon_frame, content_bounds, field_frame, frame_blend_mode, frame_position, frame_size, interpret_pixels, roi_inside};
 use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
+use super::reads::{ReadFiles, ReadLog};
 use super::{
     Arc, AutoKey, AutoPick, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image, ItemId,
     ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d, vec2,
@@ -101,6 +102,7 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
 }
 
 impl<'a> Renderer<'a> {
+    /// A renderer over `project` and `footage` with the given options.
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource, opts: RenderOpts) -> Renderer<'a> {
         Renderer {
             project,
@@ -108,6 +110,7 @@ impl<'a> Renderer<'a> {
             expr: None,
             opts,
             cache: None,
+            reads: None,
             profile: None,
             accel: None,
             depth: 0,
@@ -129,6 +132,67 @@ impl<'a> Renderer<'a> {
         self.cache.filter(|_| !self.footage.called_off())
     }
 
+    /// `read`, a read of this render's footage source, with the files it uses noted in
+    /// [`Renderer::reads`] (see [`FootageSource::recording`]).
+    pub(crate) fn read<R>(&self, read: impl FnOnce() -> Option<R>) -> Option<R> {
+        let Some(log) = self.reads else { return read() };
+        let (mut read, mut out) = (Some(read), None);
+        self.footage.recording(log, &mut || out = read.take().and_then(|f| f()));
+        out
+    }
+
+    /// `ctx` noting what it reads (fonts, `sampleImage`) in this render's [`Renderer::reads`]:
+    /// a context made by an outer render carries that render's log, not the one of the buffer
+    /// [`Renderer::recorded`] makes.
+    pub(crate) fn with_reads<'c>(&'c self, ctx: &EvalCtx<'c>) -> EvalCtx<'c> {
+        EvalCtx { reads: self.reads, ..*ctx }
+    }
+
+    /// The buffer the layer cache keeps under `key`, with the files it was made of noted in
+    /// [`Renderer::reads`].
+    pub(crate) fn cached(&self, key: Option<u64>) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
+        let (buf, files) = self.cache?.get(key?)?;
+        if let Some(log) = self.reads {
+            log.note_all(&files);
+        }
+        Some((buf, files))
+    }
+
+    /// Keep `buf`, made of `files`, under `key` (see [`Renderer::recorded`]): the buffer the cache
+    /// keeps (another worker's, if it kept one first), or `buf` when nothing is kept, with the
+    /// files that buffer was made of. Another worker's files are noted in [`Renderer::reads`]
+    /// too: its pixels are the ones this render uses (a file that changed between the two reads
+    /// then has two identities, and the list is incomplete).
+    pub(crate) fn keep(&self, key: Option<u64>, buf: Arc<Buf>, files: &Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
+        let (Some(c), Some(k)) = (self.cache_to_keep(), key) else { return (buf, files.clone()) };
+        let (kept, kept_files) = c.insert(k, buf, files.clone());
+        if !Arc::ptr_eq(&kept_files, files)
+            && let Some(log) = self.reads
+        {
+            log.note_all(&kept_files);
+        }
+        (kept, kept_files)
+    }
+
+    /// Run `make`, which makes a buffer to keep under `key` in the layer cache, on this renderer
+    /// with its reads noted apart: what `make` returns and the files it read (from the footage
+    /// source, or the files of cached buffers it used), which go to [`Renderer::reads`] too. A
+    /// cached buffer then reports the files it was made of whichever render uses it. Without a
+    /// cache or a key, `make` runs on this renderer as it is (no files: nothing is kept).
+    pub(crate) fn recorded<T>(&self, key: Option<u64>, make: impl FnOnce(&Renderer<'_>) -> T) -> (T, Arc<ReadFiles>) {
+        if key.is_none() || self.cache.is_none() {
+            return (make(self), Arc::default());
+        }
+        // (the generation before any read: a file dropped while `make` runs makes it stale)
+        let log = self.cache.and_then(LayerCache::drop_generation).map_or_else(ReadLog::new, ReadLog::starting_at);
+        let out = make(&Renderer { reads: Some(&log), ..*self });
+        let files = log.into_files();
+        if let Some(own) = self.reads {
+            own.note_all(&files);
+        }
+        (out, Arc::new(files))
+    }
+
     /// A layer's Quality switch, limited by the precomp layers above it when
     /// [`RenderOpts::nested_switches`] is on.
     pub fn quality(&self, layer: &Layer) -> Quality {
@@ -141,6 +205,24 @@ impl<'a> Renderer<'a> {
             Some((q, _)) if rank(q) > rank(layer.switches.quality) => q,
             _ => layer.switches.quality,
         }
+    }
+
+    /// What this renderer passes down to the layers it draws beyond their own switches
+    /// ([`RenderOpts::nested_switches`], the switches inherited from the precomp layers above,
+    /// motion blur on): part of the cache key of a buffer that reads other layers.
+    pub(crate) fn nested_look(&self) -> u64 {
+        let inherited = match self.inherited {
+            None => 0,
+            Some((q, mb)) => {
+                let q = match q {
+                    Quality::Best => 0,
+                    Quality::Draft => 1,
+                    Quality::Wireframe => 2,
+                };
+                1 + q * 2 + u64::from(mb)
+            }
+        };
+        0x6e65_7374_0000_0000 | inherited << 2 | u64::from(self.opts.nested_switches) << 1 | u64::from(self.opts.motion_blur)
     }
 
     /// A layer's Motion Blur switch, limited by the precomp layers above it.
@@ -366,8 +448,19 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// The evaluation context of `comp` at `t`, carrying this renderer's expressions, footage and read log.
     pub(crate) fn ctx(&self, comp_id: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
-        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage), property_overrides: &[], media_overrides: &[] }
+        EvalCtx {
+            project: self.project,
+            comp_id,
+            comp,
+            time: t,
+            expr: self.expr,
+            footage: Some(self.footage),
+            property_overrides: &[],
+            media_overrides: &[],
+            reads: self.reads,
+        }
     }
 
     /// This renderer with another accelerator (or none): the passes of
@@ -760,7 +853,7 @@ impl<'a> Renderer<'a> {
                 // Continuously rasterised vector footage: drawn at the on-screen scale.
                 if layer.switches.collapse && is_vector_footage(f) {
                     let k = self.raster_scale(ctx, layer);
-                    if let Some(img) = self.footage.vector_frame(item, f, k) {
+                    if let Some(img) = self.read(|| self.footage.vector_frame(item, f, k)) {
                         let mut buf = Buf { img: (*img).clone(), offset: [0.0; 2], scale: k };
                         if let Some(c) = self.pipe.media_in(f) {
                             color::convert(&mut buf.img, &c);
@@ -776,7 +869,20 @@ impl<'a> Renderer<'a> {
                 let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
-            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
+            // (the font files go to this render's log, which `ctx` may not carry: see
+            // [`Renderer::with_reads`])
+            LayerSource::Text => {
+                // An Expression Selector evaluates per character: its results at other characters
+                // than the first are not in the layer's cache key (an amount reading a footage
+                // item's size by name, `textIndex == 1 ? 0 : footage("ref.png").width`), so the
+                // buffer is kept in memory only, never on disk (the frame's key covers them).
+                if cache::per_character_expressions(layer)
+                    && let Some(log) = self.reads
+                {
+                    log.mark_unkeyed();
+                }
+                Some(self.authored(text::render(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer))))
+            }
             LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
             _ => None,
         }
@@ -831,7 +937,7 @@ impl<'a> Renderer<'a> {
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
             let i = field_rate.frame_at(t).max(0);
-            let img = cineon_frame(self.footage.frame_with(item, f, f.frame_rate.tick_of(i / 2), None, self.pipe.float_curve(f))?, f);
+            let img = cineon_frame(self.read(|| self.footage.frame_with(item, f, f.frame_rate.tick_of(i / 2), None, self.pipe.float_curve(f)))?, f);
             let dominant_upper = f.fields == effectcraft_project::FieldOrder::UpperFirst;
             // Upper field = even lines (0, 2, …).
             let parity = if (i % 2 == 0) == dominant_upper { 0 } else { 1 };
@@ -844,6 +950,8 @@ impl<'a> Renderer<'a> {
         if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
+    /// The footage frame at source time `t` after frame blending: the average of the source frames one comp frame spans, else a blend of the two neighbouring frames, else the plain frame.
+    /// Log scans are converted first, and blended frames are cached.
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
@@ -855,6 +963,9 @@ impl<'a> Renderer<'a> {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float).hash(&mut h);
+                    // Every file of a sequence: the key must tell two projects apart whose items
+                    // share an id and a first frame (on disk, no project-wide salt does, #3184).
+                    f.sequence.hash(&mut h);
                     (f.alpha as u8).hash(&mut h);
                     if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
                         f.premul_color.map(f32::to_bits).hash(&mut h);
@@ -865,24 +976,22 @@ impl<'a> Renderer<'a> {
                     }
                     h.finish()
                 });
-                if let (Some(c), Some(k)) = (self.cache, key)
-                    && let Some(b) = c.get(k)
-                {
+                if let Some((b, _)) = self.cached(key) {
                     return Some(Arc::new(b.img.clone()));
                 }
                 // Log scans are converted before they blend: the conversion is not linear.
-                let a = self.footage.frame_with(item, f, f.frame_rate.tick_of(i), None, float).map(|a| cineon_frame(a, f));
-                let b = self.footage.frame_with(item, f, f.frame_rate.tick_of(i + 1), None, float).map(|b| cineon_frame(b, f));
+                let ((a, b), files) = self.recorded(key, |r| {
+                    let frame = |i| r.read(|| r.footage.frame_with(item, f, f.frame_rate.tick_of(i), None, float)).map(|a| cineon_frame(a, f));
+                    (frame(i), frame(i + 1))
+                });
                 if let (Some(a), Some(b)) = (a, b) {
                     let img = blend_frames(mode, &a, &b, w as f32);
-                    if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-                        c.insert(k, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }));
-                    }
+                    let _kept = self.keep(key, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }), &files);
                     return Some(Arc::new(img));
                 }
             }
         }
-        self.footage.frame_with(item, f, t, size, float).map(|img| cineon_frame(img, f))
+        self.read(|| self.footage.frame_with(item, f, t, size, float)).map(|img| cineon_frame(img, f))
     }
 
     /// Source → masks, clamped/quantised to the project depth.
@@ -902,52 +1011,41 @@ impl<'a> Renderer<'a> {
     /// Fully processed layer buffer (source → masks → effects → layer styles, flattened).
     /// Served from the layer cache when the layer's content key matches.
     pub fn layer_buf(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
-        self.layer_buf_keyed(ctx, layer).map(|(b, _)| b)
+        self.layer_buf_keyed(ctx, layer).map(|(b, _, _)| b)
     }
 
     /// [`Self::layer_buf`] in the blending space (linear with Blend Colors Using 1.0 Gamma).
     pub fn blend_layer_buf(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
-        let (b, k) = self.layer_buf_keyed(ctx, layer)?;
-        Some(self.to_blend(b, k))
+        let (b, k, files) = self.layer_buf_keyed(ctx, layer)?;
+        Some(self.to_blend(b, k, &files))
     }
 
-    /// A buffer converted to the blending space (cached under a key derived from `key`).
-    pub(crate) fn to_blend(&self, b: Arc<Buf>, key: Option<u64>) -> Arc<Buf> {
+    /// A buffer converted to the blending space (cached under a key derived from `key`, with
+    /// `files`, the source files `b` was made of).
+    pub(crate) fn to_blend(&self, b: Arc<Buf>, key: Option<u64>, files: &Arc<ReadFiles>) -> Arc<Buf> {
         let Some(c) = self.pipe.to_blend() else { return b };
         let key = key.map(|k| cache::derive(k, 0x1ea7));
-        if let (Some(cache), Some(k)) = (self.cache, key)
-            && let Some(x) = cache.get(k)
-        {
+        if let Some((x, _)) = self.cached(key) {
             return x;
         }
         let mut nb = (*b).clone();
         color::convert(&mut nb.img, &c);
-        let nb = Arc::new(nb);
-        // The buffer the cache keeps (another worker's, if it kept one first).
-        match (self.cache_to_keep(), key) {
-            (Some(cache), Some(k)) => cache.insert(k, nb),
-            _ => nb,
-        }
+        self.keep(key, Arc::new(nb), files).0
     }
 
-    fn layer_buf_keyed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<(Arc<Buf>, Option<u64>)> {
+    /// The flattened layer buffer, its cache key and the source files it was made of.
+    fn layer_buf_keyed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<(Arc<Buf>, Option<u64>, Arc<ReadFiles>)> {
         let st = self.styled(ctx, layer, None)?;
         if st.passes.is_empty() {
-            return Some((st.body, st.key));
+            return Some((st.body, st.key, st.files));
         }
         let key = st.key.map(|k| cache::derive(k, 0xf1a7));
-        if let (Some(c), Some(k)) = (self.cache, key)
-            && let Some(b) = c.get(k)
-        {
-            return Some((b, key));
+        if let Some((b, files)) = self.cached(key) {
+            return Some((b, key, files));
         }
         let flat = Arc::new(styles::Styled { passes: st.passes.iter().map(|(b, m)| ((**b).clone(), *m)).collect(), body: (*st.body).clone() }.flatten());
-        // The buffer the cache keeps (another worker's, if it kept one first).
-        let flat = match (self.cache_to_keep(), key) {
-            (Some(c), Some(k)) => c.insert(k, flat),
-            _ => flat,
-        };
-        Some((flat, key))
+        let (flat, files) = self.keep(key, flat, &st.files);
+        Some((flat, key, files))
     }
 
     /// A layer's source pixels at the context time, before masks, effects and the transform
@@ -983,28 +1081,32 @@ impl<'a> Renderer<'a> {
 
     /// Layer pixels after source → masks → effects (no layer styles).
     pub fn content_buf(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
-        self.content_buf_timed(ctx, layer, None).map(|(b, _)| b)
+        self.content_buf_timed(ctx, layer, None).map(|(b, _, _)| b)
     }
 
-    pub(crate) fn content_buf_timed(&self, ctx: &EvalCtx, layer: &Layer, mut timing: Option<&mut LayerTiming>) -> Option<(Arc<Buf>, Option<u64>)> {
+    /// [`Self::content_buf`], its cache key and the source files it was made of.
+    pub(crate) fn content_buf_timed(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        mut timing: Option<&mut LayerTiming>,
+    ) -> Option<(Arc<Buf>, Option<u64>, Arc<ReadFiles>)> {
         let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
         let key = self.content_key(ctx, layer, key);
-        if let (Some(c), Some(k)) = (self.cache, key)
-            && let Some(b) = c.get(k)
-        {
+        if let Some((b, files)) = self.cached(key) {
             if let Some(t) = timing.as_deref_mut() {
                 t.cached = true;
             }
-            return Some((b, key));
+            return Some((b, key, files));
         }
-        let buf = self.masked_source(ctx, layer)?;
-        let buf = Arc::new(self.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)));
-        // The buffer the cache keeps (another worker's, if it kept one first).
-        let buf = match (self.cache_to_keep(), key) {
-            (Some(c), Some(k)) => c.insert(k, buf),
-            _ => buf,
-        };
-        Some((buf, key))
+        let (buf, files) = self.recorded(key, |r| {
+            // (what expressions read while it is made, at shutter times too, goes to its files)
+            let ctx = &r.with_reads(ctx);
+            let buf = r.masked_source(ctx, layer)?;
+            Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)))
+        });
+        let (buf, files) = self.keep(key, Arc::new(buf?), &files);
+        Some((buf, key, files))
     }
 
     /// A layer's input at the context time: source → masks → its first `effects` effects
@@ -1014,23 +1116,19 @@ impl<'a> Renderer<'a> {
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
         let key = self.content_key(ctx, layer, key);
-        if let (Some(c), Some(k)) = (self.cache, key)
-            && let Some(b) = c.get(k)
-        {
+        if let Some((b, _)) = self.cached(key) {
             return Some(b);
         }
-        let mut buf = self.masked_source(ctx, layer)?;
-        let origin = ctx.effect_bounds(layer).1;
-        buf.rebase(origin);
-        if effects > 0 {
-            buf = self.effect_space_stack(ctx, layer, buf, EffectStack { adjustment: false, limit: effects, origin }, None);
-        }
-        let buf = Arc::new(buf);
-        // The buffer the cache keeps (another worker's, if it kept one first).
-        let buf = match (self.cache_to_keep(), key) {
-            (Some(c), Some(k)) => c.insert(k, buf),
-            _ => buf,
-        };
-        Some(buf)
+        let (buf, files) = self.recorded(key, |r| {
+            let ctx = &r.with_reads(ctx);
+            let mut buf = r.masked_source(ctx, layer)?;
+            let origin = ctx.effect_bounds(layer).1;
+            buf.rebase(origin);
+            if effects > 0 {
+                buf = r.effect_space_stack(ctx, layer, buf, EffectStack { adjustment: false, limit: effects, origin }, None);
+            }
+            Some(buf)
+        });
+        Some(self.keep(key, Arc::new(buf?), &files).0)
     }
 }

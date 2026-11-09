@@ -35,6 +35,7 @@ mod footage;
 mod item;
 mod layer;
 mod layers;
+mod reach;
 mod settings;
 
 pub use comp::{Comp, Guide, Renderer, Resolution};
@@ -43,9 +44,10 @@ pub use item::NO_LAYER;
 pub use item::{Heard, Item, ItemId, ItemKind, LayerId};
 pub use layer::{
     AutoOrient, FrameBlend, Layer, LayerSource, LightKind, MatteKind, PrimitiveKind, Quality, Sampling, Switches, TrackMatte, is_audio_effect,
-    reads_other_frames,
+    reads_other_frames, text_layer_name,
 };
 pub use layers::Layers;
+pub use reach::{ExprReach, PixelReach, expression_reach};
 pub use settings::{
     APP_VERSION, BitDepth, ColorEngine, CuePoint, HdrMode, Marker, ProjectError, ProjectSettings, SCHEMA_EFFECT_SPACE, SCHEMA_VERSION, SavedView,
     TimeDisplayStyle, is_newer_version, saved_by, saved_view,

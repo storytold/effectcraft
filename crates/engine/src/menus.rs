@@ -1018,6 +1018,7 @@ Layer
     Duplicate and Assign Material | material.duplicateAssign
   Auto-trace... | layer.autoTrace
   Pre-compose... | layer.precompose
+  Un-precompose | layer.unprecompose
   Scene Edit Detection... | layer.sceneEditDetection
 Effect
   Effect Controls | window.panel {"panel":"effectControls"} | F3, Cmd+Shift+T
@@ -1262,7 +1263,7 @@ Window
   Essential Graphics | window.panel {"panel":"essentialGraphics"}
   Info | window.panel {"panel":"info"} | Cmd+2
   Learn | help.inAppTutorials
-  Lumetri Scopes | window.panel {"panel":"lumetriScopes"}
+  Video Scopes | window.panel {"panel":"lumetriScopes"}
   Mask Interpolation | window.panel {"panel":"maskInterpolation"}
   Media Browser | window.panel {"panel":"mediaBrowser"}
   Metadata | window.panel {"panel":"metadata"}

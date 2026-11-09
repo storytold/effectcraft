@@ -817,7 +817,7 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
     let cam_light = matches!(src, LayerSrc::Camera(_) | LayerSrc::Light(_));
     let is_shape = matches!(src, LayerSrc::Shape(_));
     let mut props = Vec::new();
-    let at = PropAt { comp, comp_name, layer: &layer.name, source: source_size, text: is_text || cam_light || is_shape };
+    let at = PropAt { comp, comp_name, layer: &layer.name, source: source_size, text: is_text || cam_light || is_shape, null: matches!(src, LayerSrc::Null) };
     if let Some(tr) = layer.transform() {
         for kind in PropKind::ALL {
             // A camera's or light's point of interest is After Effects' Anchor Point.
@@ -1047,9 +1047,10 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     let props = plan_transform(layer, &src, comp, source_size, cp, comp_name, col);
     let remap = remap_prop.filter(|_| remapped).map(|p| plan_remap(p, comp, cp, &layer.name, comp_name, col));
     let mut name = cut_name(&layer.name, 255, &what("layer"), col);
-    // A text layer named after its text stores no name (110, 113: After Effects shows the text).
+    // A text layer named after its text stores no name (110, 113: After Effects shows the text):
+    // the layer's own rule decides (#3233).
     if let LayerSrc::Text(tp) = &src
-        && tp.text.split('\r').next().is_some_and(|first| first.chars().take(64).collect::<String>() == name)
+        && layer.name_follows_text(&effectcraft_project::text_layer_name(&tp.text))
     {
         name.clear();
     }
@@ -1171,16 +1172,21 @@ struct PropAt<'a> {
     source: (u32, u32),
     /// The anchor is stored in pixels (text, camera, light and shape layers).
     text: bool,
+    /// A null layer: an Anchor Point that is not written is its top-left corner (#3099).
+    null: bool,
 }
 
+/// What is written for transform property `p` (`kind`) of a layer: its value or keys in the
+/// stored unit and its expression; `None` when it is at After Effects' default and has neither.
 fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, cp: &CompPlan, col: &mut Collector) -> Option<PropPlan> {
-    let PropAt { comp, comp_name, layer, source, text } = at;
+    let PropAt { comp, comp_name, layer, source, text, null } = at;
     // A text layer's anchor is stored in pixels, with the origin as its default (385).
     let (sw, sh) = if text { (1.0, 1.0) } else { (f64::from(source.0.max(1)), f64::from(source.1.max(1))) };
     let what = format!("{comp_name}: '{layer}' {}", label.unwrap_or(kind.match_name()));
     let dims = kind.dims();
     let default: Vec<f64> = match kind {
-        PropKind::Anchor if text => vec![0.0, 0.0, 0.0],
+        // After Effects 2026 reads a null's absent Anchor Point as `[0, 0]` (#3099).
+        PropKind::Anchor if text || null => vec![0.0, 0.0, 0.0],
         PropKind::Anchor => vec![0.5, 0.5, 0.0],
         PropKind::Position => vec![f64::from(comp.width) / 2.0, f64::from(comp.height) / 2.0, 0.0],
         PropKind::Scale => vec![1.0, 1.0, 1.0],
@@ -1318,7 +1324,7 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
 /// back disabled).
 fn plan_remap(p: &Property, comp: &Comp, cp: &CompPlan, layer: &str, comp_name: &str, col: &mut Collector) -> PropPlan {
     // Rotation has the same layout (one component, stored as is, not spatial).
-    let at = PropAt { comp, comp_name, layer, source: (1, 1), text: false };
+    let at = PropAt { comp, comp_name, layer, source: (1, 1), text: false, null: false };
     let planned = plan_prop(PropKind::Rotation, Some("Time Remap"), p, at, cp, col);
     col.exported.time_remaps += 1;
     let mut plan = planned.unwrap_or_else(|| PropPlan { kind: PropKind::Rotation, value: vec![0.0], keys: Vec::new(), expr: None });

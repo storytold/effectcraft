@@ -29,7 +29,13 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   the app's existing object model. References retain object and generation numbers. A bounded
   compatibility repair recovers referenced objects from object streams when damaged xrefs omit
   them; every recovery or unresolved reference is reported in `Doc::skipped` (up to 64 messages).
-  The existing page tree preserves inherited resources, MediaBox / CropBox and `/Rotate`.
+  The existing page tree preserves inherited resources, MediaBox / CropBox and `/Rotate`. A page
+  is its CropBox (else MediaBox), turned by `/Rotate` (`Framing::Viewer`, the default). Footage
+  from an After Effects project is framed as After Effects places a PDF or `.ai`
+  (`Framing::Placed`, `parse_page_framed`): the page's own ArtBox clipped to the CropBox (else
+  MediaBox) when it has one, else the CropBox, else the MediaBox, with `/Rotate` ignored
+  (measured in After Effects 2026 with own files, #3099). Not measured: a CropBox without an
+  ArtBox, files saved by Illustrator itself, `.pdf` names.
   Content/image filters remain app-owned: Flate (with PNG predictors), LZW, ASCIIHex, ASCII85,
   RunLength and CCITTFax. Encrypted files remain refused; `page_count` returns zero when the
   reader refuses a document.

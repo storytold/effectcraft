@@ -206,6 +206,8 @@ fn new_comp(h: &CompHeader, renderer: Option<AepRenderer>, map: &TimeMap, name: 
     comp
 }
 
+/// Adds one footage item to the project under the given parent.
+/// Unreadable footage is recorded as a loss, solids and null placeholders are handled separately, and file and sequence footage is linked to its files.
 fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_>, name: String, label: Label, parent: ItemId, null_only: &HashSet<u32>) {
     let Some(f) = item.footage() else {
         cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': data unreadable, not imported"));
@@ -240,31 +242,42 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     }
     let mut path = f.path.clone().unwrap_or_default();
     // An image sequence's alias is its folder; its files are named by the stored numbering
-    // (353, 603). The first file stands for the sequence, as in EffectCraft.
+    // (353, 603), or listed one by one when imported with Force alphabetical order. The first
+    // file stands for the sequence, as in EffectCraft.
     let mut sequence = Vec::new();
-    if let Some(seq) = item.sequence_info().filter(|s| !path.is_empty() && s.end >= s.start) {
-        let frames = (seq.end - seq.start).saturating_add(1);
+    if let Some(seq) = item.sequence_info().filter(|s| !path.is_empty() && s.frame_count() > 0) {
+        let frames = seq.frame_count();
         let sep = if path.contains('\\') { '\\' } else { '/' };
         let folder = path.trim_end_matches(['\\', '/']).to_string();
-        // One name is the folder, a separator and the file name; the number is as wide as the stored
-        // digits or as the largest number, whichever is longer (an upper bound for every frame).
-        let name_bytes = (folder.len() + 1 + seq.prefix.len() + seq.suffix.len() + usize::try_from(seq.digits.min(16)).unwrap_or(16).max(10)) as u64;
-        let bytes = name_bytes.saturating_mul(u64::from(frames));
+        // One name is the folder, a separator and the file name. A numbered name is as wide as the
+        // stored digits or as the largest number, whichever is longer (an upper bound for every
+        // frame); listed names are counted as they are.
+        let len = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let file_bytes = if seq.files.is_empty() {
+            len(seq.prefix.len().saturating_add(seq.suffix.len()).saturating_add(usize::try_from(seq.digits.min(16)).unwrap_or(16).max(10)))
+                .saturating_mul(u64::from(frames))
+        } else {
+            seq.files.iter().fold(0u64, |sum, n| sum.saturating_add(len(n.len())))
+        };
+        let bytes = len(folder.len().saturating_add(1)).saturating_mul(u64::from(frames)).saturating_add(file_bytes);
         if frames > MAX_SEQUENCE_FRAMES || frames > cx.sequence_budget || bytes > cx.sequence_bytes {
             // Not expanded: the item keeps its first file (a still standing for the sequence).
             cx.col.lose(
                 LossCategory::DamagedData,
                 format!("footage '{name}': a sequence of {frames} frames is longer than the import expands; only its first file is linked"),
             );
-            path = format!("{folder}{sep}{}", seq.file_name(seq.start));
+            path = format!("{folder}{sep}{}", seq.nth_file_name(0).unwrap_or_default());
         } else {
             cx.sequence_budget -= frames;
             cx.sequence_bytes -= bytes;
-            sequence = (seq.start..=seq.end).map(|n| format!("{folder}{sep}{}", seq.file_name(n))).collect();
+            sequence = (0..frames).filter_map(|i| seq.nth_file_name(i)).map(|n| format!("{folder}{sep}{n}")).collect();
         }
         if let Some(first) = sequence.first() {
             path = first.clone();
         }
+    } else if f.is_sequence && !path.is_empty() {
+        // The alias is a folder, but the file names could not be read: the item links the folder.
+        cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': image sequence naming not read, linked to its folder"));
     }
     let present = !path.is_empty() && (cx.options.exists)(&path);
     if !present {
@@ -272,6 +285,8 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         cx.col.missing_footage.push(shown);
     }
     let kind = if sequence.is_empty() { footage_kind(&path, f.native_frame_rate, f.audio_sample_rate.is_some()) } else { FootageKind::Sequence };
+    // A placed PDF / Illustrator file keeps After Effects' framing and size (#3099).
+    let placed_page = kind == FootageKind::Still && is_placed_page_path(&path);
     let mut footage = Footage {
         path,
         kind,
@@ -282,6 +297,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         // footage), and only then.
         has_audio: kind == FootageKind::Audio || (kind == FootageKind::Video && f.audio_sample_rate.is_some()),
         missing: !present,
+        placed_page,
         sequence,
         ..Footage::default()
     };
@@ -314,10 +330,23 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     }
 }
 
+/// Whether `path` names a file whose page is framed as After Effects places it
+/// ([`Footage::placed_page`]): an Illustrator or PDF file, by its extension. EPS files keep
+/// their bounding box at their own size: how After Effects sizes them was not measured (#3099).
+fn is_placed_page_path(path: &str) -> bool {
+    let ext = path.rsplit(['/', '\\']).next().and_then(|name| name.rsplit_once('.')).map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(ext.as_deref(), Some("pdf" | "ai"))
+}
+
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
 /// sequence the name with the frame range (`shot_[0101-0103].exr`).
 fn default_footage_name(item: &AepItem<'_, '_>, f: &crate::Footage) -> Option<String> {
     if let Some(s) = item.sequence_info() {
+        // A listed sequence (Force alphabetical order) has no numbering: its first file names it.
+        // Assumption: what After Effects shows for such an item without a stored name was not sampled.
+        if let Some(first) = s.files.first() {
+            return Some(first.clone());
+        }
         let w = usize::try_from(s.digits.min(16)).unwrap_or(0);
         return Some(format!("{}[{:0w$}-{:0w$}]{}", s.prefix, s.start, s.end, s.suffix));
     }
@@ -435,11 +464,13 @@ fn camera_light_orient(auto_oriented: bool, light: Option<LightKind>) -> AutoOri
 }
 
 /// The unit a layer's anchor is stored in.
-fn anchor_unit(camera_or_light: bool, text_or_shape: bool, size: (u32, u32)) -> AnchorUnit {
+fn anchor_unit(camera_or_light: bool, text_or_shape: bool, null: bool, size: (u32, u32)) -> AnchorUnit {
     if camera_or_light {
         AnchorUnit::PointOfInterest
     } else if text_or_shape {
         AnchorUnit::Pixels
+    } else if null {
+        AnchorUnit::Null(size.0, size.1)
     } else {
         AnchorUnit::Source(size.0, size.1)
     }
@@ -479,7 +510,12 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
                 .map(|d| crate::import::text::first_paragraph(&d.raw_text))
                 .filter(|t| !t.trim().is_empty())
         };
-        let name = aep_name.clone().or_else(|| src.as_ref().map(|s| s.name.clone())).or_else(text_name).unwrap_or_else(|| "Layer".to_string());
+        let name = aep_name
+            .clone()
+            .or_else(|| src.as_ref().map(|s| s.name.clone()))
+            .or_else(text_name)
+            // An empty text layer without a name is named as a new one is (#3233).
+            .unwrap_or_else(|| if h.layer_type == LayerType::Text { "Text" } else { "Layer" }.to_string());
         let skip = |cx: &mut Ctx<'_>, skipped: &mut HashMap<u32, String>, category: LossCategory, what: &str| {
             cx.col.lose(category, format!("{comp_name}: {what} '{name}'"));
             skipped.insert(h.id, what.to_string());
@@ -537,6 +573,10 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         };
         let mut l: Layer = build::layer(project, &comp, &name, source.clone(), size, None);
         l.name = name.clone();
+        // A text layer without a stored name follows its text; a stored name is the user's (#3233).
+        if is_text {
+            l.name_follows_text = Some(aep_name.is_none());
+        }
         l.label = Label::ALL.get(usize::from(h.label)).copied().unwrap_or(Label::None);
         apply_timing(&mut l, &h, &tm, &name, &mut cx.col);
         apply_switches(&mut l, &h);
@@ -555,7 +595,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         import_layer_styles(&layer, &mut l, &comp.global_light, &mut Ids(&mut project.next_id), &tm, &what, &mut cx.col);
         // Text and shape layers store their anchor in pixels (385, 462); cameras and lights their
         // point of interest.
-        let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, size);
+        let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, is_null, size);
         if let Some(tr) = l.props.sub_mut("transform") {
             import_transform(&layer, &name, comp_size, anchor, &tm, tr, &mut cx.col);
         }
@@ -681,7 +721,14 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &
         col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch is zero or unreadable, 100 % is used"));
         Rational { num: 1, den: 1 }
     });
-    l.stretch = stretch.to_f64().map_or(100.0, |r| r * 100.0);
+    let stored = stretch.to_f64().map_or(100.0, |r| r * 100.0);
+    // A ratio such as 1/2^31 (5e-8 %) or 2^31/1 is outside what After Effects allows (±1 % to
+    // ±9900 %); taken as stored, the layer and audio time would divide by ~0 (#3247). The in and
+    // out points keep the comp times the file stores.
+    l.stretch = effectcraft_project::limits::stretch(stored);
+    if l.stretch.to_bits() != stored.to_bits() {
+        col.lose(LossCategory::DamagedData, format!("layer '{name}': the time stretch of {stored:e} % is outside ±1 % to ±9900 %, {} % is used", l.stretch));
+    }
     // A stored time with a zero denominator (or a sum that overflows) has no value; it is read as 0
     // and reported, so the layer's timing never changes silently.
     let unreadable: Vec<&str> = [("start", h.start), ("in point", h.in_relative), ("out point", h.out_relative)]
@@ -871,6 +918,18 @@ fn resolve_parents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3099: an `.ai` or `.pdf` from an `.aep` is a placed page; an EPS (not measured in After
+    /// Effects) and other files are not.
+    #[test]
+    fn only_illustrator_and_pdf_files_are_placed_pages() {
+        for path in [r"C:\fixture\x\logo.ai", "/work/Logo.AI", "art.pdf", r"C:\a.b\page.PDF"] {
+            assert!(is_placed_page_path(path), "{path}");
+        }
+        for path in [r"C:\fixture\x\still.eps", "a.epsf", "a.epsi", "still.png", r"C:\dir.ai\file", "ai", ""] {
+            assert!(!is_placed_page_path(path), "{path}");
+        }
+    }
 
     #[test]
     fn unlisted_extensions_follow_what_the_file_stores() {

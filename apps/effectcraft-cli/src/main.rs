@@ -35,8 +35,8 @@
 //!
 //! Project:  --project F.ecproj (or a positional *.ecproj) | --demo | --empty   (default: demo; mcp: empty)
 //! Saving:   --save (back to --project) | --save-as F.ecproj
-//! GPU:      --gpu renders on the GPU compositor (Mercury GPU Acceleration) when an adapter exists;
-//!           the default is the CPU (Mercury Software Only)
+//! GPU:      --gpu renders on the GPU compositor (GPU Acceleration) when an adapter exists;
+//!           the default is the CPU (Software Rendering)
 //! Bridge:   --bridge PORT drives a running `effectcraft --control PORT` instead of a headless session
 //! Output:   --json for one compact JSON document on stdout (errors: {"error": …}, exit 1)
 //! ```
@@ -466,7 +466,7 @@ fn backend(args: &Args, default_demo: bool) -> Result<Backend, Failure> {
 }
 
 /// A wired session; `--gpu` attaches the GPU compositor (renders then follow the project's
-/// renderer setting, Mercury GPU Acceleration by default).
+/// renderer setting, GPU Acceleration by default).
 fn session(args: &Args) -> Result<effectcraft_engine::Session, Failure> {
     let mut s = effectcraft_host::session();
     if args.flag("--autosave") {
@@ -1443,7 +1443,7 @@ fn adv3d_bench_comp(p: &mut effectcraft_engine::project::Project) -> Option<Item
 /// `bench --gpu`: CPU vs GPU ms/frame for every comp (or `--comp`) at Full and Half. "cold"
 /// renders everything (no layer cache); "warm" reuses the layer cache (playback / scrubbing of
 /// unchanged layers: compositing cost); "viewer" is the GPU display path without readback;
-/// "auto" is Backend::Auto (Mercury GPU Acceleration) choosing per comp from measured times,
+/// "auto" is Backend::Auto (GPU Acceleration) choosing per comp from measured times,
 /// warm; "up/dn MB" are the GPU's uploads / readbacks per warm GPU frame.
 fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
     use effectcraft_render::Backend;

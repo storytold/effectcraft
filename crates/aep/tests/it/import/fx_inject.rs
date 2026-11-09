@@ -103,18 +103,18 @@ pub fn tdmn(name: &str) -> Chunk<'static> {
 }
 
 /// A UTF-8 string chunk (`Utf8`).
-fn utf8(s: &str) -> Chunk<'static> {
+pub fn utf8(s: &str) -> Chunk<'static> {
     Chunk::data(*b"Utf8", s.as_bytes().to_vec())
 }
 
 /// A chunk whose body is chunks without being a `LIST` (`pdnm`, `fnam`: `NESTED_IDS`).
-fn nested(id: [u8; 4], children: Vec<Chunk<'static>>) -> Chunk<'static> {
+pub fn nested(id: [u8; 4], children: Vec<Chunk<'static>>) -> Chunk<'static> {
     Chunk { id, body: Body::Chunks(children), pad: None }
 }
 
 /// A static value record holding `v`, after the one After Effects wrote for Glow's A & B Midpoint
 /// (its header; without the expression).
-fn record(template: &Chunk<'_>, v: f64) -> Chunk<'static> {
+pub fn record(template: &Chunk<'_>, v: f64) -> Chunk<'static> {
     let mut kids = Vec::new();
     for c in template.children() {
         match &c.body {
@@ -131,7 +131,7 @@ fn record(template: &Chunk<'_>, v: f64) -> Chunk<'static> {
 }
 
 /// A keyframed value record: `record`'s header with a key list of linear one-component keys.
-fn keyed_record(template: &Chunk<'_>, keys: &[(i32, f64)]) -> Chunk<'static> {
+pub fn keyed_record(template: &Chunk<'_>, keys: &[(i32, f64)]) -> Chunk<'static> {
     let Body::List { children, .. } = record(template, keys.first().map_or(0.0, |k| k.1)).body else { unreachable!("record builds a LIST") };
     let mut children = children;
     let mut lhd3 = vec![0u8; 52];
@@ -229,39 +229,51 @@ fn find_glow_template(chunks: &[Chunk<'_>]) -> Option<Chunk<'static>> {
     None
 }
 
-/// Replaces every Glow (`ADBE Glo2` with its `sspc`) below `chunks` with `fx`; the number replaced.
-fn replace_glow(chunks: &mut [Chunk<'_>], fx: &Fx, template: &Chunk<'_>) -> usize {
+/// Replaces every Glow (`ADBE Glo2` with its `sspc`) below `chunks` with the effect `match_name`
+/// and its `sspc`; the number replaced.
+fn replace_glow(chunks: &mut [Chunk<'_>], match_name: &str, sspc: &Chunk<'static>) -> usize {
     let mut n = 0;
     for ch in chunks {
         let kids = ch.children_mut();
         if let Some(at) = kids.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.starts_with(b"ADBE Glo2\0")))
             && kids.get(at + 1).is_some_and(|k| k.is_list(b"sspc"))
         {
-            kids[at] = tdmn(fx.match_name);
-            kids[at + 1] = sspc(fx, template);
+            kids[at] = tdmn(match_name);
+            kids[at + 1] = sspc.clone();
             n += 1;
         }
-        n += replace_glow(kids, fx, template);
+        n += replace_glow(kids, match_name, sspc);
     }
     n
 }
 
-/// `synthetic.aep` with `fx` in place of the Glow effect.
-pub fn bytes_with(fx: &Fx) -> Vec<u8> {
+/// `synthetic.aep` with the effect `match_name` in place of the Glow effect; `make` builds its
+/// `sspc` from the Glow's value record (the template of every record).
+pub fn bytes_with_effect(match_name: &str, make: impl Fn(&Chunk<'_>) -> Chunk<'static>) -> Vec<u8> {
     let file = parse(SYNTHETIC).unwrap();
     let template = find_glow_template(&file.chunks).expect("Glow's A & B Midpoint record");
+    let sspc = make(&template);
     let mut file = parse(SYNTHETIC).unwrap();
-    assert_eq!(replace_glow(&mut file.chunks, fx, &template), 2, "the Glow effect and its shared definitions");
+    assert_eq!(replace_glow(&mut file.chunks, match_name, &sspc), 2, "the Glow effect and its shared definitions");
     write(&file).unwrap()
+}
+
+/// `synthetic.aep` with `fx` in place of the Glow effect.
+pub fn bytes_with(fx: &Fx) -> Vec<u8> {
+    bytes_with_effect(fx.match_name, |t| sspc(fx, t))
 }
 
 /// Imports `synthetic.aep` with `fx` in place of its Glow: the EffectCraft effect `effect` (if
 /// imported) and the result.
 pub fn run(fx: &Fx, effect: &str) -> (Option<PropGroup>, ImportResult) {
-    let bytes = bytes_with(fx);
+    import_bytes(&bytes_with(fx), effect)
+}
+
+/// Imports `bytes`: the first EffectCraft effect `effect` (if imported) and the result.
+pub fn import_bytes(bytes: &[u8], effect: &str) -> (Option<PropGroup>, ImportResult) {
     let mut project = Project::default();
     let none = |_: &str| false;
-    let r = import(&mut project, &bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).unwrap();
+    let r = import(&mut project, bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).unwrap();
     let g = project
         .comps()
         .flat_map(|(_, c)| c.layers.iter())
