@@ -188,9 +188,11 @@ impl Drop for Adopting {
     }
 }
 
-/// The copies `folder` holds from an earlier session, by source; temporaries and copies without
-/// a record are deleted (only the localizer's own files: other files in the folder are left
-/// alone, and those of `busy`, the copy being made now). Runs without the localizer's lock.
+/// The copies `folder` holds from an earlier session, by source; temporaries, records without
+/// their copy and copies without a record are deleted (a copy renamed into place whose record
+/// was never written, #3301 review: nothing else would ever delete it, and the size limit
+/// didn't count it). Only the localizer's own files: other files in the folder are left alone,
+/// and those of `busy`, the copy being made now. Runs without the localizer's lock.
 fn adopt(folder: &Path, busy: Option<&str>) -> Vec<(PathBuf, Copy)> {
     #[cfg(test)]
     {
@@ -202,6 +204,7 @@ fn adopt(folder: &Path, busy: Option<&str>) -> Vec<(PathBuf, Copy)> {
     let mut found = vec![];
     let Ok(dir) = std::fs::read_dir(folder) else { return found };
     let mut records = vec![];
+    let mut copies = vec![];
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if !ours(&name) || busy.is_some_and(|b| name.starts_with(b)) {
@@ -211,7 +214,13 @@ fn adopt(folder: &Path, busy: Option<&str>) -> Vec<(PathBuf, Copy)> {
             let _ = std::fs::remove_file(e.path());
         } else if name.ends_with(".src") {
             records.push(e.path());
+        } else if e.file_type().is_ok_and(|t| t.is_file()) {
+            copies.push(e.path());
         }
+    }
+    let recorded: std::collections::HashSet<PathBuf> = records.iter().map(|r| r.with_extension("")).collect();
+    for copy in copies.iter().filter(|c| !recorded.contains(*c)) {
+        let _ = std::fs::remove_file(copy);
     }
     for rec in records {
         let local = rec.with_extension("");
@@ -461,8 +470,11 @@ fn worker() {
     }
 }
 
-/// Copy `original` into `folder`: under a temporary name, then renamed when complete, with its
-/// record beside it; its modification time set to the source's. The copy, its size and the
+/// Copy `original` into `folder`: under a temporary name; then an earlier copy of it removed,
+/// its record written beside the final name, and the temporary renamed when complete (a crash
+/// in between leaves a record without its copy or a temporary, both deleted when the folder is
+/// adopted; never a copy without a record, nor old bytes beside a new record); its
+/// modification time set to the source's. The copy, its size and the
 /// source's identity, or `None` (larger than `room`, unreadable, or changed while it was
 /// copied).
 #[cfg(not(target_arch = "wasm32"))]
@@ -495,8 +507,17 @@ fn copy_file(original: &Path, folder: &Path, room: u64) -> Option<(PathBuf, u64,
     let after = std::fs::metadata(original).ok().map(|m| FileStamp::of_metadata(&m));
     let text = record(original, &before, meta.len());
     match (copied, text) {
-        (Ok(n), Some(text)) if n == meta.len() && after.as_ref() == Some(&before) && std::fs::rename(&tmp, &local).is_ok() => {
-            if std::fs::write(record_path(&local), text).is_err() {
+        (Ok(n), Some(text)) if n == meta.len() && after.as_ref() == Some(&before) => {
+            // An earlier copy of the source goes first (its record too): a new record must never
+            // sit beside old bytes. One that can't be deleted (open elsewhere) stays, with its
+            // own record, and this copy is given up.
+            if local.exists() && std::fs::remove_file(&local).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                return None;
+            }
+            let _ = std::fs::remove_file(record_path(&local));
+            if std::fs::write(record_path(&local), text).is_err() || std::fs::rename(&tmp, &local).is_err() {
+                let _ = std::fs::remove_file(&tmp);
                 remove_copy(&local);
                 return None;
             }
@@ -687,5 +708,33 @@ mod tests {
         let s = wait_for(|s| s.files == 1 && s.copying.is_none());
         assert_eq!((s.files, s.bytes), (1, 1500), "copied once, counted once: {s:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #3301 review: a copy renamed into place whose record was never written (a crash in
+    /// between) is deleted when the folder is adopted: nothing else would delete it, and the
+    /// size limit didn't count it. Other files in the folder and the copy being made stay.
+    #[test]
+    fn a_copy_without_its_record_is_deleted_when_adopted() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let folder = std::env::temp_dir().join(format!("ec-3301-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let orphan = folder.join("0123456789abcdef_plate.exr");
+        let busy = folder.join("fedcba9876543210_busy.exr");
+        let other = folder.join("notes.txt");
+        for f in [&orphan, &busy, &other] {
+            std::fs::write(f, b"pixels").unwrap();
+        }
+        // A crash between writing a copy's record and renaming its temporary into place: both go.
+        let mid = folder.join("abcdef0123456789_mid.exr");
+        let (mid_rec, mid_part) = (record_path(&mid), folder.join("abcdef0123456789_mid.exr.part"));
+        std::fs::write(&mid_rec, "/share/mid.exr\n6\n-\n6\n").unwrap();
+        std::fs::write(&mid_part, b"pixels").unwrap();
+        assert!(adopt(&folder, Some("fedcba9876543210_busy")).is_empty());
+        assert!(!mid_rec.exists() && !mid_part.exists(), "a record without its copy and a temporary go");
+        assert!(!orphan.exists(), "the copy without a record went");
+        assert!(busy.exists(), "the copy being made stays");
+        assert!(other.exists(), "not the localizer's: left alone");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

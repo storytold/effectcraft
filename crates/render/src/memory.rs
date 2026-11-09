@@ -8,7 +8,8 @@
 //!
 //! An item's value is what it would cost to make again per byte ([`Candidate::cost_us`], the
 //! measured render or decode time where known, else a typical one: [`DEFAULT_LAYER_US_PER_MB`]
-//! and its neighbours), decayed by the time since it was last used ([`HALF_LIFE_US`]):
+//! and its neighbours), decayed slowly by the time since it was last used (by the logarithm of
+//! the seconds unused, so a costly frame unused for minutes still outlives a cheap one):
 //! [`value`]. A copy of data another cache holds (a queued disk write) costs nothing to make
 //! again. Each holder offers the item it would drop next (its least recently used one,
 //! [`MemoryHolder::oldest`]); the accountant drops the least valuable of those, asks that holder
@@ -27,10 +28,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 
 /// The share of the budget the accountant frees down to once it is over (hysteresis).
 pub const TRIM_TO: f64 = 0.9;
-
-/// An item unused this long is worth half as much as one just used ([`value`]), a quarter at
-/// three times this, and so on (`1 / (1 + age / HALF_LIFE_US)`).
-pub const HALF_LIFE_US: u64 = 30_000_000;
 
 /// While a holder thrashes, its items are worth this many times more ([`value`]).
 pub const THRASH_BOOST: f64 = 4.0;
@@ -79,7 +76,7 @@ const GROWTH_PART: usize = 16;
 const THRASH_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The item a holder would drop next ([`MemoryHolder::oldest`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Candidate {
     /// When it was last used ([`tick`]).
     pub used: u64,
@@ -87,15 +84,53 @@ pub struct Candidate {
     pub bytes: usize,
     /// What making it again costs, in microseconds (0: a copy of data another cache holds).
     pub cost_us: u64,
+    /// About to be used: a frame a playing RAM preview shows next. Kept over the budget by up to
+    /// [`preview_overage`] while other items can go instead, never past the hard limit.
+    pub protected: bool,
 }
 
-/// What an item is worth keeping at `now` ([`tick`]): its cost to make again per byte, halved
-/// after [`HALF_LIFE_US`] unused, [`THRASH_BOOST`] times more while its holder thrashes.
+impl Candidate {
+    /// An item that is not [`Candidate::protected`].
+    pub fn new(used: u64, bytes: usize, cost_us: u64) -> Candidate {
+        Candidate { used, bytes, cost_us, protected: false }
+    }
+}
+
+/// How far protected items (frames a playing preview shows next) may keep the caches over a
+/// budget of `budget` bytes while other items can go instead: a tenth of it, at most 1 GB.
+pub fn preview_overage(budget: usize) -> usize {
+    (budget / 10).min(1 << 30)
+}
+
+/// How often the process's memory is read at most ([`Accountant::set_process_memory`]), in
+/// [`tick`]'s units (microseconds).
+const PROCESS_READ_EVERY: u64 = 250_000;
+
+/// The process's memory as the accountant watches it ([`Accountant::set_process_memory`]).
+struct ProcessWatch {
+    /// Reads the memory the process uses now, in bytes (`None`: unknown).
+    read: Option<fn() -> Option<u64>>,
+    /// Above this the caches are trimmed by what is over, even when they are within their
+    /// budget (memory nobody accounts for: GPU staging, effect buffers, the allocator's
+    /// fragmentation)…
+    purge_at: u64,
+    /// …and above this also the protected items go ([`Candidate::protected`]).
+    hard_at: u64,
+    /// When it was last read ([`tick`]'s units).
+    read_at: Option<u64>,
+    /// What the caches freed for it since it was last under its purge limit: freed memory often
+    /// stays in the reading (the allocator keeps it), so it counts as freed; the caches give way
+    /// again only for memory that grew beyond that, and are never emptied for one reading.
+    credited: u64,
+}
+
+/// What an item is worth keeping at `now` ([`tick`]): its cost to make again per byte, divided
+/// by `ln(seconds unused + 1) + 1` (a slow decay: about a fifth after a minute unused, a
+/// seventh after ten), [`THRASH_BOOST`] times more while its holder thrashes.
 pub fn value(c: &Candidate, now: u64, thrashing: bool) -> f64 {
     let per_byte = c.cost_us as f64 / c.bytes.max(1) as f64;
-    let age = now.saturating_sub(c.used) as f64;
-    let half = HALF_LIFE_US as f64;
-    let v = per_byte * half / (half + age);
+    let age_s = now.saturating_sub(c.used) as f64 / 1e6;
+    let v = per_byte / ((age_s + 1.0).ln() + 1.0);
     if thrashing { v * THRASH_BOOST } else { v }
 }
 
@@ -140,6 +175,8 @@ pub struct Accountant {
     requested: AtomicBool,
     /// The clock items' ages are measured with ([`tick`]; tests give their own).
     clock: fn() -> u64,
+    /// The process's memory, read and checked by each balance.
+    process: Mutex<ProcessWatch>,
 }
 
 impl Default for Accountant {
@@ -164,7 +201,48 @@ impl Accountant {
             balancing: Mutex::new(None),
             requested: AtomicBool::new(false),
             clock,
+            process: Mutex::new(ProcessWatch { read: None, purge_at: u64::MAX, hard_at: u64::MAX, read_at: None, credited: 0 }),
         }
+    }
+
+    /// Watch the process's memory with `read` (the bytes it uses now): a balance (at most every
+    /// 250 ms) trims the caches by what it is over `purge_at`, even while they are within their
+    /// budget, and above `hard_at` also the frames a playing preview shows next.
+    pub fn set_process_memory(&self, read: fn() -> Option<u64>, purge_at: u64, hard_at: u64) {
+        {
+            let mut p = self.process.lock().unwrap_or_else(PoisonError::into_inner);
+            p.read = Some(read);
+            p.purge_at = purge_at;
+            p.hard_at = hard_at.max(purge_at);
+        }
+        self.balance();
+    }
+
+    /// What a balance at `now` must free beyond the budget for the process's memory, and whether
+    /// it is past the hard limit (a reading at most every [`PROCESS_READ_EVERY`]). What the caches
+    /// already freed for it counts as freed ([`ProcessWatch::credited`]).
+    fn process_excess(&self, now: u64) -> (u64, bool) {
+        let mut p = self.process.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(read) = p.read else { return (0, false) };
+        if p.read_at.is_some_and(|at| now.saturating_sub(at) < PROCESS_READ_EVERY) {
+            return (0, false);
+        }
+        p.read_at = Some(now);
+        let Some(used) = read() else { return (0, false) };
+        if used <= p.purge_at {
+            p.credited = 0;
+            return (0, false);
+        }
+        let used = used.saturating_sub(p.credited);
+        // (down to the trim line under the purge limit, as for the budget)
+        let line = (p.purge_at as f64 * TRIM_TO) as u64;
+        (used.saturating_sub(line), used > p.hard_at)
+    }
+
+    /// The caches freed `bytes` for the process's memory.
+    fn credit(&self, bytes: usize) {
+        let mut p = self.process.lock().unwrap_or_else(PoisonError::into_inner);
+        p.credited = p.credited.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
     }
 
     /// The process's accountant.
@@ -173,7 +251,10 @@ impl Accountant {
         &GLOBAL
     }
 
-    /// Set the common budget and free down to it at once.
+    /// Set the common budget and free down to it: right away when no balance is running; when
+    /// one is (on another thread, or this one further up the stack), that balance runs again
+    /// with the new budget once its pass ends, so this may return before the caches are within
+    /// it ([`Accountant::balance`]).
     pub fn set_budget(&self, bytes: usize) {
         self.budget.store(bytes, Ordering::Relaxed);
         self.balance();
@@ -279,27 +360,44 @@ impl Accountant {
     }
 
     /// One pass of [`Accountant::balance`] with the budget in force now.
+    ///
+    /// Over the budget the caches are freed down to [`TRIM_TO`] of it; with the process's memory
+    /// over its purge limit ([`Accountant::set_process_memory`]) also by what that is over.
+    /// Protected items ([`Candidate::protected`]) go last, and only while the caches are more than
+    /// [`preview_overage`] over the target (or the process is past its hard limit).
     fn balance_once(&self) {
         let budget = self.budget();
         if budget == usize::MAX {
             return;
         }
         self.grown.store(0, Ordering::Relaxed);
+        let now = (self.clock)();
+        let (excess, hard) = self.process_excess(now);
         let holders = self.alive();
         let mut total: usize = holders.iter().map(|(h, _)| h.bytes()).fold(0, usize::saturating_add);
-        if total <= budget {
+        let excess = usize::try_from(excess).unwrap_or(usize::MAX);
+        if total <= budget && excess == 0 {
             return;
         }
-        let target = (budget as f64 * TRIM_TO) as usize;
-        let now = (self.clock)();
+        let held = total;
+        let trimmed = if total > budget { (budget as f64 * TRIM_TO) as usize } else { total };
+        // (the caches can free at most what they hold)
+        let target = trimmed.min(total.saturating_sub(excess.min(total)));
+        let overage = if hard { 0 } else { preview_overage(budget) };
         // Each holder's next item (`None`: it has nothing more it may drop).
         let mut next: Vec<Option<Candidate>> = holders.iter().map(|(h, _)| h.oldest()).collect();
         while total > target {
+            // (protected items only once nothing else can go, or past the overage)
+            let any_unprotected = next.iter().flatten().any(|c| !c.protected);
+            let protected_ok = !any_unprotected && total > target.saturating_add(overage);
             let pick = next
                 .iter()
                 .enumerate()
                 .filter_map(|(i, c)| {
                     let c = (*c)?;
+                    if c.protected && !protected_ok {
+                        return None;
+                    }
                     let thrashing = holders.get(i).is_some_and(|(_, t)| *t);
                     Some((i, value(&c, now, thrashing), c.used))
                 })
@@ -312,6 +410,11 @@ impl Accountant {
             }
             total = total.saturating_sub(freed);
             self.freed.fetch_add(freed, Ordering::Relaxed);
+        }
+        if excess > 0 {
+            // (what went beyond the budget's own trim was freed for the process's memory)
+            let for_budget = held.saturating_sub(trimmed.max(target));
+            self.credit(held.saturating_sub(total).saturating_sub(for_budget).min(excess));
         }
     }
 }
@@ -329,7 +432,7 @@ mod tests {
 
     impl Fake {
         fn new(name: &'static str, items: &[(u64, usize, u64)]) -> Arc<Fake> {
-            let items = items.iter().map(|&(used, bytes, cost_us)| Candidate { used, bytes, cost_us }).collect();
+            let items = items.iter().map(|&(used, bytes, cost_us)| Candidate::new(used, bytes, cost_us)).collect();
             Arc::new(Fake { name, items: Mutex::new(items), refills: Mutex::new(0) })
         }
         fn held(&self) -> usize {
@@ -339,7 +442,7 @@ mod tests {
             self.items.lock().unwrap().len()
         }
         fn push(&self, used: u64, bytes: usize, cost_us: u64) {
-            self.items.lock().unwrap().push_back(Candidate { used, bytes, cost_us });
+            self.items.lock().unwrap().push_back(Candidate::new(used, bytes, cost_us));
         }
     }
 
@@ -406,10 +509,16 @@ mod tests {
     /// one unused for long enough goes before a costlier one used just now.
     #[test]
     fn value_falls_with_time_unused() {
-        let c = |used, cost_us| Candidate { used, bytes: 100, cost_us };
+        let c = |used, cost_us| Candidate::new(used, 100, cost_us);
         assert!(value(&c(0, 1000), at_100s(), false) < value(&c(99 * S, 1000), at_100s(), false));
-        let half = value(&c(at_100s() - HALF_LIFE_US, 1000), at_100s(), false);
-        assert!((half - 5.0).abs() < 1e-9, "{half}");
+        let fresh = value(&c(at_100s(), 1000), at_100s(), false);
+        assert!((fresh - 10.0).abs() < 1e-9, "{fresh}");
+        let a_second = value(&c(at_100s() - S, 1000), at_100s(), false);
+        assert!((a_second - 10.0 / (2f64.ln() + 1.0)).abs() < 1e-9, "{a_second}");
+        // #3301: the decay is slow: unused for ten minutes, an item keeps more than a tenth of its
+        // value (it kept under a twentieth when it halved every 30 s).
+        let ten_minutes = value(&c(0, 1000), 600 * S, false);
+        assert!(ten_minutes > fresh / 10.0, "{ten_minutes}");
         assert!(value(&c(0, 2000), at_100s(), false) < value(&c(at_100s(), 1000), at_100s(), false));
         assert_eq!(value(&c(at_100s(), 0), at_100s(), false), 0.0, "a copy is worth nothing");
         assert_eq!(value(&c(0, 1000), at_100s(), true), THRASH_BOOST * value(&c(0, 1000), at_100s(), false));
@@ -631,5 +740,95 @@ mod tests {
         acc.requested.store(true, Ordering::SeqCst);
         acc.note_growth(1);
         assert!(frames.held() <= 900, "{}", frames.held());
+    }
+
+    static PROCESS_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PROCESS_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100_000_000);
+    fn process_now() -> Option<u64> {
+        Some(PROCESS_NOW.load(Ordering::SeqCst))
+    }
+    fn process_clock() -> u64 {
+        PROCESS_CLOCK.load(Ordering::SeqCst)
+    }
+    /// (the process-memory tests share the statics above: one at a time)
+    static PROCESS_SERIAL: Mutex<()> = Mutex::new(());
+
+    /// #3301: memory nobody accounts for (GPU staging, effect buffers, fragmentation): with the
+    /// caches within their budget but the process over its purge limit, the caches give way by
+    /// what it is over, least valuable first; a reading that stays high (freed memory not shown
+    /// yet) doesn't empty them; over the hard limit the protected items go too.
+    #[test]
+    fn the_process_memory_over_its_limit_trims_the_caches() {
+        let _serial = PROCESS_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let frames = Fake::new("frames", &[]);
+        for i in 0..10 {
+            frames.push(i * S, 100, 1_000);
+        }
+        let acc = Accountant::with_clock(10_000, process_clock);
+        let held: Arc<dyn MemoryHolder> = frames.clone();
+        acc.register(&held);
+        // Under its purge limit (2000): nothing goes.
+        PROCESS_NOW.store(1_500, Ordering::SeqCst);
+        acc.set_process_memory(process_now, 2_000, 3_000);
+        assert_eq!(frames.held(), 1000, "within the budget and the limit");
+        // 2500 measured, down to the trim line under the limit (1800): 700 go.
+        PROCESS_CLOCK.fetch_add(PROCESS_READ_EVERY, Ordering::SeqCst);
+        PROCESS_NOW.store(2_500, Ordering::SeqCst);
+        acc.balance();
+        assert_eq!(frames.held(), 300, "the caches gave way for the process");
+        // The reading stays high (the memory not handed back yet), for a minute: what was freed
+        // counts, the caches are not drained.
+        for _ in 0..240 {
+            PROCESS_CLOCK.fetch_add(PROCESS_READ_EVERY, Ordering::SeqCst);
+            acc.balance();
+        }
+        assert_eq!(frames.held(), 300, "the same reading doesn't drain the caches");
+        // Read at most every 250 ms: a higher reading within that waits.
+        PROCESS_NOW.store(2_600, Ordering::SeqCst);
+        acc.balance();
+        assert_eq!(frames.held(), 300);
+        // 100 more than last time: the caches give way by that.
+        PROCESS_CLOCK.fetch_add(PROCESS_READ_EVERY, Ordering::SeqCst);
+        acc.balance();
+        assert_eq!(frames.held(), 200, "grown by 100: 100 more go");
+        // Under the limit again, then over: counted afresh.
+        PROCESS_CLOCK.fetch_add(PROCESS_READ_EVERY, Ordering::SeqCst);
+        PROCESS_NOW.store(1_000, Ordering::SeqCst);
+        acc.balance();
+        PROCESS_CLOCK.fetch_add(PROCESS_READ_EVERY, Ordering::SeqCst);
+        PROCESS_NOW.store(2_050, Ordering::SeqCst);
+        acc.balance();
+        // (250 over the trim line, with nothing counted as freed: the 200 held go)
+        assert_eq!(frames.held(), 0, "counted afresh");
+    }
+
+    /// #3301: frames a playing preview shows next (protected) keep the caches over the budget by
+    /// at most a tenth of it while other items can go instead, and go once nothing else can or
+    /// past that overage; past the process's hard limit no overage is allowed.
+    #[test]
+    fn protected_items_go_last_and_only_a_bounded_way_over() {
+        let _serial = PROCESS_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let preview = Fake::new("preview", &[]);
+        for i in 0..4 {
+            preview.items.lock().unwrap().push_back(Candidate { used: i * S, bytes: 100, cost_us: 1, protected: true });
+        }
+        let footage = Fake::new("footage", &[(99 * S, 300, 1_000_000)]);
+        let acc = Accountant::with_clock(usize::MAX, process_clock);
+        let held: Vec<Arc<dyn MemoryHolder>> = vec![holder(&preview), holder(&footage)];
+        for h in &held {
+            acc.register(h);
+        }
+        // 700 held, budget 500 (target 450, overage 50): the footage goes though worth more.
+        acc.set_budget(500);
+        assert_eq!((preview.held(), footage.held()), (400, 0));
+        // Budget 300 (target 270, overage 30): nothing else left, the preview frames go down to
+        // the overage over the target.
+        acc.set_budget(300);
+        assert_eq!(preview.held(), 300, "over the target by at most the overage");
+        // Past the process's hard limit: no overage.
+        PROCESS_CLOCK.fetch_add(PROCESS_READ_EVERY, Ordering::SeqCst);
+        PROCESS_NOW.store(10_000, Ordering::SeqCst);
+        acc.set_process_memory(process_now, 1_000, 2_000);
+        assert!(preview.held() <= 200, "{}", preview.held());
     }
 }

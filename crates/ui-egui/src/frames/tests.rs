@@ -2233,6 +2233,56 @@ fn a_keyframe_edit_reaches_only_the_keys_around_it() {
     }
 }
 
+/// A key edit of an effect parameter re-renders only around the keys it changed, as a Transform
+/// key edit does (#3324): Exposure keyed at frames 30, 60 and 90, its middle key changed. Write-on
+/// reads its Brush Position at every earlier time (a dab per Brush Spacing since the layer's
+/// start), so its middle key edit reaches every frame after it. Every frame kept renders as
+/// before.
+#[test]
+fn an_effect_key_edit_reaches_only_the_frames_that_read_it() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{LayerId, Value};
+    use effectcraft_engine::render::render_frame;
+    use serde_json::{Value as Json, json};
+    let v2 = |x: f64, y: f64| (json!([x, y]), Value::Vec2([x, y]));
+    let edits = [
+        ("Exposure", "master/exposure", [json!(0.0), json!(1.0), json!(0.0)], Value::Scalar(3.0)),
+        ("Write-on", "brushPosition", [v2(2.0, 2.0).0, v2(14.0, 14.0).0, v2(2.0, 14.0).0], v2(14.0, 2.0).1),
+    ];
+    for (effect, param, values, mid) in edits {
+        let mut s = Session::default();
+        let cid =
+            ItemId(s.execute("comp.new", json!({"name": "A", "width": 16, "height": 16, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
+        let l = s.execute("layer.newSolid", json!({"color": "#808080", "width": 16, "height": 16})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("effect.apply", json!({"layers": [l], "effect": effect})).unwrap();
+        let path = format!("effects/#1/{param}");
+        let fr = s.project.comp(cid).unwrap().frame_rate;
+        for (f, v) in [30, 60, 90].into_iter().zip(values) {
+            let add: Json = json!({"layer": l, "path": path, "time": fr.tick_of(f).seconds(), "value": v});
+            s.execute("prop.addKey", add).unwrap();
+        }
+        let p0 = s.project.clone();
+        let f = Frames::default();
+        let k = |content: u64, frame: i64| FrameKey { content, comp: cid.0, ..key(0, frame, 0) };
+        let id0 = f.content_of(&p0, 1, cid);
+        (0..120).for_each(|i| insert(&f, k(id0, i)));
+        let mut p1 = p0.clone();
+        Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().props.prop_mut(&path).unwrap().keys[1].value = mid;
+        let kept = f.cached_frames(&k(f.content_of(&p1, 2, cid), 0));
+        let same = |i: i64| render_frame(&p0, cid, fr.tick_of(i), 1.0).data == render_frame(&p1, cid, fr.tick_of(i), 1.0).data;
+        assert!(!same(60), "{effect}: the edit shows");
+        assert!(![45, 60, 75].iter().any(|i| kept.contains(i)), "{effect}: {kept:?}");
+        if effect == "Exposure" {
+            assert!((0..=27).chain(93..120).all(|i| kept.contains(&i)), "{effect}: the frames outside the keys stay: {kept:?}");
+        } else {
+            assert!(!same(110) && !kept.contains(&110), "{effect}: the stroke drawn by frame 110 passes the edited key: {kept:?}");
+        }
+        for i in kept {
+            assert!(same(i), "{effect}: kept frame {i} renders differently after the edit");
+        }
+    }
+}
+
 /// Music's Audio Levels keep every frame, in RAM and on disk, while the project's expressions
 /// can't read audio (a wiggle); an expression naming the music's Audio Levels re-renders its layer.
 #[test]
@@ -2719,6 +2769,8 @@ mod frame_files {
 
     fn session(p: &Arc<Project>, dir: &Path) -> Session {
         let disk = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        // (every frame is written, however quick to render: not decided by this machine's speed)
+        disk.set_read_us_per_mb(0);
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let mut frames = Frames::default();
         let calls = hook_calls.clone();
@@ -3000,9 +3052,9 @@ fn the_accountant_trims_only_frames_in_ram() {
     assert_eq!(memory.bytes(), 16);
 }
 
-/// #3298 review: preview frames compete with the other caches by value. A frame a playing
-/// preview shows next counts as just used, and a frame rendered quickly (from cached layers)
-/// still costs a typical render: an old, cheap footage frame goes before it.
+/// #3301: frames a playing preview shows next are protected: other caches give way first, even
+/// for items worth more, until the caches are more than the bounded overage over; past it the
+/// preview frames go too. A frame rendered quickly still costs a typical render.
 #[test]
 fn preview_frames_ahead_of_the_playhead_outlive_old_footage() {
     use effectcraft_engine::render::memory::{self, Accountant, Candidate, MemoryHolder};
@@ -3027,26 +3079,26 @@ fn preview_frames_ahead_of_the_playhead_outlive_old_footage() {
         let mut c = frames.cache.lock().unwrap();
         for i in 10..12 {
             c.insert_took(key(1, i, 0), img(), None, None, Some(std::time::Duration::from_micros(100)));
-            // (as old as the footage frame below)
-            c.map.get_mut(&key(1, i, 0)).unwrap().used = 0;
         }
     }
     let preview: Arc<dyn MemoryHolder> = Arc::new(PreviewMemory(frames.cache.clone()));
-    // Stopped: the oldest frame is offered as it is, with at least a typical render's cost.
+    // Stopped: the oldest frame is offered unprotected, with at least a typical render's cost.
     let offered = preview.oldest().unwrap();
-    assert_eq!(offered.used, 0);
+    assert!(!offered.protected);
     assert_eq!(offered.cost_us, memory::default_cost(16, memory::DEFAULT_PREVIEW_US_PER_MB));
-    // Playing from frame 10: the frames ahead count as just used.
+    // Playing from frame 10: the frames ahead are protected.
     frames.set_playhead(Some(playhead(10, false)));
-    let before = memory::tick();
-    assert!(preview.oldest().unwrap().used >= before);
-    // An old footage frame that cost less per byte goes first.
-    let footage = Arc::new(Footage(Mutex::new(vec![Candidate { used: 0, bytes: 16, cost_us: 6_000 }])));
+    assert!(preview.oldest().unwrap().protected);
+    // A footage frame worth far more per byte, used just now, still goes first.
+    let footage = Arc::new(Footage(Mutex::new(vec![Candidate::new(memory::tick(), 16, 1_000_000)])));
     let footage_holder: Arc<dyn MemoryHolder> = footage.clone();
-    let acc = Accountant::new(40);
+    let acc = Accountant::new(1000);
     acc.register(&preview);
     acc.register(&footage_holder);
-    acc.balance();
+    acc.set_budget(40);
     assert_eq!(footage.bytes(), 0, "the footage frame went");
-    assert_eq!(preview.bytes(), 32, "the preview frames stay");
+    assert_eq!(preview.bytes(), 32, "the preview frames stay, a bounded way over");
+    // Far over the budget, past the overage: the preview frames go too.
+    acc.set_budget(10);
+    assert!(preview.bytes() < 32, "{}", preview.bytes());
 }

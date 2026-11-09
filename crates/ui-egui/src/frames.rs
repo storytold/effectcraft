@@ -378,19 +378,21 @@ impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
         self.0.lock().map(|c| c.bytes.saturating_sub(c.gpu_bytes)).unwrap_or(0)
     }
     // (only frames in RAM: dropping a GPU frame frees no RAM, and loses a viewer frame)
-    /// A frame a playing preview shows next counts as just used: it is about to be (#3298
-    /// review: one rendered from cached layers costs little, and older footage outlived it, so
-    /// the preview played into live renders). A frame costs at least a typical render
-    /// ([`effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB`]): a quick one still stands for a whole comp.
+    /// A frame a playing preview shows next is protected: the accountant lets it keep the caches
+    /// over the budget by a bounded amount while other items can go instead (#3301: one rendered
+    /// from cached layers costs little, and older footage outlived it, so the preview played into
+    /// live renders). A frame costs at least a typical render
+    /// ([`effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB`]): a quick one still
+    /// stands for a whole comp.
     fn oldest(&self) -> Option<effectcraft_engine::render::memory::Candidate> {
+        use effectcraft_engine::render::memory::{Candidate, DEFAULT_PREVIEW_US_PER_MB, default_cost};
         let c = self.0.lock().ok()?;
         let k = c.order.get(c.cpu_victim()?)?;
         let f = c.map.get(k)?;
         let bytes = f.img.bytes();
-        let ahead = c.playhead.as_ref().is_some_and(|p| p.ahead(k).is_some());
-        let used = if ahead { effectcraft_engine::render::memory::tick() } else { f.used };
-        let cost_us = f.cost_us.max(effectcraft_engine::render::memory::default_cost(bytes, effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB));
-        Some(effectcraft_engine::render::memory::Candidate { used, bytes, cost_us })
+        let protected = c.playhead.as_ref().is_some_and(|p| p.ahead(k).is_some());
+        let cost_us = f.cost_us.max(default_cost(bytes, DEFAULT_PREVIEW_US_PER_MB));
+        Some(Candidate { used: f.used, bytes, cost_us, protected })
     }
     fn drop_oldest(&self) -> usize {
         let Ok(mut c) = self.0.lock() else { return 0 };
@@ -1171,6 +1173,10 @@ impl Frames {
                     // (only with the generation its render started at, for this cache: a frame
                     // made of a file Reload Footage dropped since holds the pixels from before)
                     let since = c.since.as_ref().and_then(|s| s.for_cache(&dc)).filter(|s| !dc.dropped_since(files, *s))?;
+                    // (only a frame that costs more to render again than to read back, #3301)
+                    if !dc.pays_off(c.img.bytes(), c.cost_us) {
+                        return None;
+                    }
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
                     let tries = written.1.get(&dk).copied().unwrap_or(0);
                     (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk))
@@ -1763,8 +1769,11 @@ impl Worker {
         // and compression. Persistence still runs on this worker, using the same snapshot.
         let since = disk.as_ref().map(|(dc, _, since)| DiskSince::of(dc, *since));
         self.finish(&job, ci.clone(), Some(files.clone()), since, t0);
+        let took_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
         if !disk_hit
             && let Some((dc, k, since)) = &disk
+            // (only a frame that costs more to render again than to read back, #3301)
+            && dc.pays_off(ci.bytes(), took_us)
             && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref(), *since)
             && let Some(ctx) = &self.ctx
         {

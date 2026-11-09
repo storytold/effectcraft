@@ -53,9 +53,11 @@ Commands (CLI, MCP, control channel):
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
   Adaptive Resolution drops to while you drag; a playing preview keeps the viewer's resolution)
-- `previews.cacheFramesWhenIdle`: Cache Frames When Idle (Composition ▸ Preview): after a second
-  without input or edits, the viewer renders the work area into the RAM preview in the
-  background, from the current time on, until it is cached or the budget is full
+- `previews.cacheFramesWhenIdle`: Cache Frames When Idle (Composition ▸ Preview), on by default:
+  after a second without input or edits, the viewer renders the work area into the RAM preview
+  in the background, from the current time on, until it is cached or the budget is full. Any
+  input, edit, playback or a frame the viewer waits for stops it at once (it starts again after
+  the next quiet second). A saved setting of off stays off
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
 - `appearance.appearanceMode`: Appearance Mode (`auto` / `dark` / `light`). `auto` (Sync with System) follows the operating system's light or dark appearance while the app runs: on Linux the desktop app reads the XDG desktop portal (`org.freedesktop.appearance` `color-scheme`) once and then listens for its `SettingChanged` signal on a worker thread, repainting only when the value changes (nothing polls); `gsettings` runs at most once at start-up, by absolute path, when the portal gives no answer. Elsewhere it uses what the window system reports. With no answer it shows the dark theme. New installs stay `dark`; Sync with System is opt-in. The Tools bar's appearance button (a monitor, sun or moon) cycles Sync with System, Light and Dark (`view.theme.toggle`, Next Appearance Mode).
 - `appearance.darkTheme`: Dark Theme (`dark` / `darker`), shown in dark appearance
@@ -171,10 +173,22 @@ Commands (CLI, MCP, control channel):
   hold more than the budget together, the memory accountant frees the least valuable data first,
   whichever cache holds it, down to 90 % of the budget. An item's value is what it would cost to
   make again (its measured render or decode time; when not measured, a typical 4 ms per MB for a
-  layer, 8 ms for a preview frame, 2 ms for footage frames and planes) per byte, halved after
-  30 s unused, a quarter after 90 s, and so on; a copy of data another cache holds (a queued disk write) is worth
-  nothing, and a cache that had to make again what it let go of shortly before is protected for
-  a while. In the browser the layer cache also stays within 512 MB and the footage frames within
+  layer, 8 ms for a preview frame, 2 ms for footage frames and planes) per byte, divided by
+  `ln(seconds unused + 1) + 1`: a slow decay (about a fifth after a minute unused, a seventh after
+  ten), so a costly frame unused for minutes still outlives a cheap one; a copy of data another
+  cache holds (a queued disk write) is worth nothing, and a cache that had to make again what it
+  let go of shortly before is protected for a while. The frames a playing RAM preview shows next
+  go last: they may keep the caches over the budget by a tenth of it (at most 1 GB) while other
+  items can go instead. Besides the bytes the caches count, the process's measured memory is
+  watched (its resident size, read with each balance and at most every 250 ms): above 95 % of the
+  installed RAM left after the reserve the caches give way by what it is over even within their
+  budget (memory nobody counts: GPU staging, effect buffers, the allocator's fragmentation), at
+  most once per reading unless it grows; above all of it also the preview frames that would
+  play next. A frame or plane set is written to the disk cache only when making it again costs
+  more than reading it back (the measured read rate, 10 ms per MB until reads are measured); a
+  RAM eviction keeps the disk copy, and the disk cache drops its oldest entries first. At most
+  256 movie and audio files are kept open, the least recently used closed beyond that (image
+  sequences, OpenEXR included, keep no file open between decodes). In the browser the layer cache also stays within 512 MB and the footage frames within
   256 MB (see [web.md](web.md)). The Memory & CPU page shows what EffectCraft may use, of the
   installed RAM. Settings saved before this (version 4 and earlier) had Layer Cache, Footage
   Frame Cache and Preview (RAM) Cache budgets (`memory.layerCacheMb`, `memory.mediaCacheMb`,

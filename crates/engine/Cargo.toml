@@ -43,6 +43,7 @@ exr = { workspace = true }
 
 # Native file identity and SAM 2 inference; browsers keep the built-in engines.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memory-stats = { workspace = true }
 same-file = { workspace = true }
 tempfile = { workspace = true }
 effectcraft-sam2 = { workspace = true }

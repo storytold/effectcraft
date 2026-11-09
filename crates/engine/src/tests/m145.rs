@@ -263,6 +263,17 @@ fn a_low_memory_episode_toasts_once_and_reapplies_the_budget() {
     assert_eq!(toasts(&mut s), 1);
 }
 
+/// #3321: Cache Frames When Idle is on by default; a saved "off" stays off.
+#[test]
+fn cache_frames_when_idle_is_on_by_default() {
+    use crate::prefs::Prefs;
+    assert!(Prefs::default().previews.cache_frames_when_idle);
+    assert!(Prefs::from_json(r#"{"version": 5, "previews": {"fastPreviews": true}}"#).previews.cache_frames_when_idle, "not saved: on");
+    let off = Prefs::from_json(r#"{"version": 5, "previews": {"cacheFramesWhenIdle": false}}"#);
+    assert!(!off.previews.cache_frames_when_idle, "saved off: off");
+    assert!(!Prefs::from_json(&off.to_json()).previews.cache_frames_when_idle, "and after the next save");
+}
+
 /// #3298: settings saved with the three cache budgets (version 4, or a later file that still
 /// has them) keep RAM Reserved for Other Applications and lose the budgets: they are not kept
 /// as unknown keys and written back.

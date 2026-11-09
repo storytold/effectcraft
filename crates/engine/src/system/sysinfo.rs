@@ -152,6 +152,20 @@ pub fn parse_freebsd_sysctl(text: &str) -> Option<SysMemory> {
     Some(SysMemory { total, available: free.saturating_mul(page).min(total) })
 }
 
+/// The physical memory this process uses now (its resident set, the working set on Windows), in
+/// bytes; `None` where it can't be read (the browser). Cheap: the memory accountant reads it
+/// with each balance (at most every 250 ms).
+pub fn process_memory() -> Option<u64> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        memory_stats::memory_stats().and_then(|m| u64::try_from(m.physical_mem).ok())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+}
+
 /// Total and available physical memory, when the system reports them.
 pub fn memory() -> Option<SysMemory> {
     #[cfg(target_os = "linux")]
