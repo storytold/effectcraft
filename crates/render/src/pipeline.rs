@@ -670,12 +670,19 @@ impl<'a> Renderer<'a> {
         // get the cover: they move content past the painted bounds without growing the buffer.
         let video = || {
             fx.groups().filter(|g| g.enabled).filter_map(|g| match &g.kind {
-                GroupKind::Effect { effect } => effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)),
+                GroupKind::Effect { effect } => {
+                    effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)).map(|s| (g, s))
+                }
                 _ => None,
             })
         };
+        // An effect that is a no-op at its current values (VR Chromatic Aberrations at zero)
+        // doesn't force the cover either (#1913).
+        let skips = |(g, s): (&effectcraft_project::PropGroup, &effectcraft_effects::EffectSpec)| {
+            s.skips_cover() || (s.skips_cover_when_idle() && s.skips_cover_at(&self.effect_params(ctx, layer, g)))
+        };
         if !adjustment && video().next().is_some() {
-            if video().all(|s| s.skips_cover()) {
+            if video().all(skips) {
                 target.align(layer_size);
             } else {
                 target.cover(layer_size);

@@ -784,6 +784,13 @@ fn roughen_edges(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let kind = ctx.params.e("edgeType");
     let ec = ctx.params.color("edgeColor");
     let border = ctx.params.f("border") * b.scale;
+    if border > 0.05 {
+        // As the CPU's: transparent room for the border's alpha blur, up to the layer's edge
+        // (#1205), before the offset is read.
+        let sides =
+            effectcraft_effects::cover_pad_sides(ctx, [b.img.width, b.img.height], b.offset, b.scale, effectcraft_effects::alpha_blur_reach(border * 0.5));
+        b.pad_sides(e, sides)?;
+    }
     let sharp = ctx.params.f("edgeSharpness").max(0.01) as f32;
     let infl = ctx.params.f("fractalInfluence") as f32;
     let scale = (ctx.params.f("scale") * b.scale * 0.1).max(0.5) as f32;

@@ -60,6 +60,26 @@ pub(crate) fn cpu_inflight(var: Option<&str>) -> Option<usize> {
     }
 }
 
+/// Sets the render's layer cache budget in MiB (#1812, #1913). Unset, a render keeps the
+/// default 1 GiB, which a 1080p comp with several large static plates outgrows: every layer buffer
+/// the least-recently-used rule evicts is rendered (and, on the GPU, uploaded) again each frame.
+pub(crate) const LAYER_CACHE_ENV: &str = "EFFECTCRAFT_LAYER_CACHE_MB";
+
+/// The layer cache budget in bytes from the `EFFECTCRAFT_LAYER_CACHE_MB` value: the number of MiB
+/// (at least 64), or `None` (the default budget) when unset, blank, not a number or too large
+/// (including more bytes than a `usize` holds, as on 32-bit targets).
+pub(crate) fn layer_cache_budget(var: Option<&str>) -> Option<usize> {
+    let v = var?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    let bytes = v.parse::<usize>().ok().filter(|mb| (64..=(1 << 20)).contains(mb)).and_then(|mb| mb.checked_mul(1 << 20));
+    if bytes.is_none() {
+        log::warn!(target: "effectcraft_export", "{LAYER_CACHE_ENV}={v:?} is not a number of MiB between 64 and 1048576 that fits this target: using the default layer cache");
+    }
+    bytes
+}
+
 /// The frames-in-flight caps of a batch: `gpu` (#879) for the GPU's memory, `cpu` (#1615) for
 /// the process's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -222,7 +242,7 @@ impl<'a> Cx<'a> {
         // layer and effect quantises at it), not just the finished frame (#2022).
         project.settings.bit_depth = job.settings.color_depth.resolve(project.settings.bit_depth);
         let frame_times = (job.options.log == RenderLog::PlusPerFrameInfo).then(|| Mutex::new(Vec::new()));
-        let cache = LayerCache::default();
+        let cache = layer_cache_budget(std::env::var(LAYER_CACHE_ENV).ok().as_deref()).map_or_else(LayerCache::default, LayerCache::new);
         // With deferred readbacks, buffers computed from a missed pass's placeholders are not kept.
         cache.set_gate(job.accel.and_then(|a| a.miss_gate()));
         Cx { job, project, cache, frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]) }
@@ -867,6 +887,16 @@ mod tests {
         assert_eq!(cpu_inflight(Some(" 4 ")), Some(4));
         for bad in ["0", "", "  ", "-2", "three", "2.5", "99999999999999999999999"] {
             assert_eq!(cpu_inflight(Some(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn layer_cache_budget_is_the_default_unless_a_sensible_number_of_mib() {
+        assert_eq!(layer_cache_budget(None), None);
+        assert_eq!(layer_cache_budget(Some("8192")), 8192usize.checked_mul(1 << 20));
+        assert_eq!(layer_cache_budget(Some(" 64 ")), Some(64 << 20));
+        for bad in ["", "  ", "0", "63", "-1", "4GB", "1.5", "1048577", "99999999999999999999999"] {
+            assert_eq!(layer_cache_budget(Some(bad)), None, "{bad:?}");
         }
     }
 
