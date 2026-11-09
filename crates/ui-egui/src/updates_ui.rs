@@ -18,9 +18,12 @@ pub(crate) struct Runtime {
     pub(crate) manual_window_open: bool,
     #[cfg(target_arch = "wasm32")]
     pub(crate) status_message: Option<String>,
-    /// How many times `on_exit` called [`Runtime::exiting`].
+    /// How many times the app called [`Runtime::exiting`].
     #[cfg(test)]
     exits: u32,
+    /// How many compositions the project held when the app last called [`Runtime::exiting`].
+    #[cfg(test)]
+    comps_at_exit: Option<usize>,
 }
 
 impl Default for Runtime {
@@ -37,13 +40,14 @@ impl Default for Runtime {
             status_message: None,
             #[cfg(test)]
             exits: 0,
+            #[cfg(test)]
+            comps_at_exit: None,
         }
     }
 }
 
 impl Runtime {
-    /// Starts the helper of an update that waits for the app to exit. `on_exit` calls it: on
-    /// macOS the process ends before the app is dropped. Later calls do nothing.
+    /// Starts the helper of an update that waits for the app to exit. Later calls do nothing.
     pub(crate) fn exiting(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         self.updater.start_pending_update();
@@ -59,6 +63,18 @@ impl EffectcraftApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_startup_update_check(&mut self, on: bool) {
         self.updates_rt.startup_check = on;
+    }
+
+    /// Runs the scripts in `Scripts/Shutdown` with the project closed, then starts the helper of
+    /// an update that waits for the app to exit. The desktop app calls this at the end of its
+    /// `on_exit`: on macOS the process ends before the app is dropped.
+    pub fn run_shutdown_scripts_and_start_update(&mut self) {
+        let _ = self.session.execute("file.runShutdownScripts", serde_json::json!({}));
+        #[cfg(test)]
+        {
+            self.updates_rt.comps_at_exit = Some(self.session.project.comps().count());
+        }
+        self.updates_rt.exiting();
     }
 }
 
@@ -151,9 +167,13 @@ mod tests {
     use eframe::App as _;
 
     #[test]
-    fn on_exit_calls_the_update_exit_hook_once() {
+    fn the_update_exit_hook_runs_once_after_the_shutdown_scripts() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", serde_json::json!({"name": "Main", "width": 64, "height": 64})).unwrap();
         app.on_exit();
+        assert_eq!(app.updates_rt.exits, 0);
+        app.run_shutdown_scripts_and_start_update();
         assert_eq!(app.updates_rt.exits, 1);
+        assert_eq!(app.updates_rt.comps_at_exit, Some(0));
     }
 }

@@ -532,8 +532,7 @@ impl eframe::App for Desktop {
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
         effectcraft_host::stop_helpers();
-        // Scripts in Scripts/Shutdown run with the project closed.
-        let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
+        self.app.run_shutdown_scripts_and_start_update();
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

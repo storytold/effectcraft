@@ -150,7 +150,6 @@ impl eframe::App for EffectcraftApp {
         if self.device_lost_close != Some(true) {
             self.session.end_recovery();
         }
-        self.updates_rt.exiting();
     }
 
     /// Feed pending synthetic input into `raw_input` only once fonts are ready (so a non-drawing pass never consumes
