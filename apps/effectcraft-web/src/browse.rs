@@ -52,7 +52,7 @@ struct State {
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(Mutex::default);
 
 fn state() -> std::sync::MutexGuard<'static, State> {
-    STATE.lock().unwrap_or_else(|e| e.into_inner())
+    STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The web app's Media Browser.

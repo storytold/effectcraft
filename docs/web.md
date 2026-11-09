@@ -174,7 +174,7 @@ the same futures with `passes::block_on`; they never wait there).
 - **Render Queue**: `effectcraft_export::export_async` renders each frame in passes (frames
   with deferred readbacks render one by one instead of in parallel batches) and encodes as
   before (`Exporter::export_async`). As on the desktop, a job renders every frame on the
-  project's renderer (the worker's GPU with Mercury GPU Acceleration), not on whichever
+  project's renderer (the worker's GPU with GPU Acceleration), not on whichever
   compositor measured faster, so runs don't differ by timing.
 - **Analyses** (Warp Stabilizer, 3D Camera Tracker, Track Motion, mask and face tracking, Roto
   Brush freeze and propagation): their work functions are `async`; started with `wait` inside
@@ -241,6 +241,25 @@ Window ▸ Media Browser browses a virtual tree (`src/browse.rs`):
   asks again.
 
 `mediaBrowser.list` reports the places and these actions; `mediaBrowser.action {action}` runs one.
+
+### Startup project
+
+By default the page opens the last visit's project, and the demo project on a first visit. A
+`startup` key in `effectcraft-config.json` (next to `index.html`) changes that:
+
+```json
+{"startup":"empty"}
+```
+
+| Value | On load |
+|---|---|
+| `"last"` (or no key) | the last visit's project; the demo project on a first visit |
+| `"empty"` | the last visit's project; a blank project on a first visit, never the demo |
+| `"demo"` | the demo project, whatever the last visit left; the session is not saved, so the last visit's project stays as it was |
+
+The `?empty` and `?demo` URL flags still win. A missing, invalid or non-JSON file, or an unknown
+value, is the default. The file is fetched once per page load; serve it with
+`Cache-Control: no-cache` (the service worker never caches it).
 
 ### Audio
 
@@ -313,9 +332,13 @@ pixels.
 
 Settings ▸ Disk ▸ Disk Cache works in the browser, backed by the **Origin Private File System**
 (`src/diskcache.rs`): viewer frames are kept under `effectcraft-cache/v1/frames/<32 hex>.ecc`
-between visits, in the desktop cache's format (`disk_cache::frame_entry`: 8-bit premultiplied
-RGBA, LZ4, a checksum), keyed by the same content hash (the comp and everything it uses, frame,
-scale, view, render options).
+between visits, in the desktop cache's format (`disk_cache::frame_entry`: the source files the
+frame read with their size and content hash, then 8-bit premultiplied RGBA, LZ4, a checksum),
+keyed by the same content hash (from memory: the comp, everything it can draw and what its
+expressions can read, frame, scale, view, render options; see
+[architecture.md](architecture.md)). The page reads an entry only while the files it lists are
+unchanged; a frame whose files can't all be named is not stored. Reload Footage has nothing to
+drop here: the file table's identities are content hashes, so a replaced file never matches.
 
 - A render request to a frame worker carries the frame's disk key; the worker posts the frame,
   then writes the entry with a **synchronous access handle** into a temporary file moved into
@@ -333,8 +356,9 @@ scale, view, render options).
   Cache / `edit.purge {what: "disk"}` clears it. `effectcraft.info().diskCache` has the same.
 
 **Layer buffers (M13.30).** Slow layer buffers (≥ 20 ms to render) go to the disk cache too
-(`effectcraft-cache/v1/layers/<32 hex>.ecc`, `disk_cache::layer_entry`, keys salted per project
-and footage as on the desktop). A layer lookup happens in the middle of a synchronous render,
+(`effectcraft-cache/v1/layers/<32 hex>.ecc`, `disk_cache::layer_entry`, keyed as on the desktop:
+`disk_cache::layer_disk_key`; each entry keeps the source files its buffer was made of, with
+the file table's size and content hash, and is used only while they are unchanged). A layer lookup happens in the middle of a synchronous render,
 where the browser's file system can't be read, so it is made synchronous by fetching first:
 
 1. Each frame worker backs its layer cache with a `PrefetchStore` (`effectcraft_render::cache`):
@@ -462,19 +486,19 @@ every request and reply, a render through an in-process offload; `tests_roto.rs`
 propagation through an offload streaming segmentations; `tests_mask_warp.rs`: Warp Stabilizer
 plans solved in the job, never by `warp.status` on the page), the frame-worker protocol
 (`crates/engine/src/remote.rs`: diff / patch, a replica following edits renders the same pixels;
-`crates/ui-egui/tests/ui_web_offload.rs`: the frame cache through a remote renderer, `wait: true`
+`crates/ui-egui/tests/it/ui_web_offload.rs`: the frame cache through a remote renderer, `wait: true`
 deferred until the offloaded job ends) and the Media Browser's virtual tree (`media_browser.rs`,
 `tests_panels.rs`). M13.24: deferred readbacks on a real device (`crates/gpu/src/tests_deferred.rs`:
 whole-frame GPU and CPU-composited frames in passes match the CPU, placeholders never reach the
 layer cache; `deferred.rs`: keys, late readbacks of an older frame dropped), the frame server's
 passes and Auto timing (`remote.rs`, a deferred stand-in accelerator), the browser's routing and
-disk cache (`crates/ui-egui/tests/ui_web_gpu_storage.rs`: a GPU frame worker renders effect frames,
+disk cache (`crates/ui-egui/tests/it/ui_web_gpu_storage.rs`: a GPU frame worker renders effect frames,
 the page's GPU keeps frames without effects, frames stored under their disk keys come back after a
 "reload" without rendering, the blue cache bar sees them; the storage manager's widgets and
 commands), the disk index (`disk_cache.rs`), the store's usage by kind and clearing (`store.rs`),
 `storage.*` (`storage.rs`), and every WGSL float literal fitting f32 (browsers reject the whole
 module otherwise; `tests.rs`). M13.30: job workers on a deferred device
-(`crates/ui-egui/tests/ui_web_job_gpu.rs`: a Render Queue job and a Warp Stabilizer analysis
+(`crates/ui-egui/tests/it/ui_web_job_gpu.rs`: a Render Queue job and a Warp Stabilizer analysis
 render their frames in passes on the device, with the CPU worker's pixels / result),
 particles, Advanced 3D and the job pass driver in passes (`crates/gpu/src/tests_deferred_jobs.rs`),
 layer buffers through the disk store and the prefetch plan (`remote.rs`

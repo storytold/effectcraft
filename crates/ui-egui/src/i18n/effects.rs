@@ -14,21 +14,39 @@
 //!   the id is stable, so a translation never becomes an orphan.
 //!
 //! Each row repeats the registry's English name so that a rename upstream fails
-//! [`tests::every_effect_has_a_row`] instead of silently pointing a translation at another
-//! effect.
+//! `tests::every_row_names_a_registry_effect` instead of silently pointing a translation at
+//! another effect. An effect with no row draws the registry's English name; the
+//! `missing_translations_report` test (run by `cargo xtask ci`) lists those per language.
 //!
-//! A language decides for itself which names stay English: After Effects' Japanese interface
-//! leaves the `CC` series, the `VR` set and the `OCIO` set in English, while its Simplified
-//! Chinese one translates them (the `CC` names come from Adobe's Chinese *documentation*, which
-//! names 68 of the 69). Repeating the English name is therefore a language-level choice, not a
-//! missing row: [`tests::only_the_brand_names_stay_in_english`] pins *Simplified Chinese's* five
-//! brand names and is deliberately not shared by the other languages.
+//! Own feature names are descriptive. The renamed effects use original translations in every
+//! existing effect catalog; legacy vendor names remain search aliases in the effects crate.
+//! External format tokens and stored instance names are not localized or rewritten.
 //!
-//! The Simplified Chinese names come from the installed After Effects 2026 (26.5.0.89)
-//! Simplified Chinese interface, its 21 category folder names included; `Cryptomatte`,
+//! The rows of the effects this cleanup did not rename keep the provenance they had. A language
+//! decides for itself which names stay English: After Effects' Japanese interface leaves the `CC`
+//! series in English and gives the `VR` and `OCIO` sets a Japanese tail (`VR ブラー`,
+//! `OCIO CDL 変換`), while its Simplified Chinese one translates them. Repeating the English name
+//! is therefore a language-level choice, not a missing row.
+//!
+//! The Simplified Chinese names of unchanged effects come from the installed After Effects 2026
+//! (26.5.0.89) Simplified Chinese interface, its 21 category folder names included (the `CC` names
+//! came from Adobe's Chinese *documentation*, which names 68 of the 69); `Cryptomatte`,
 //! `EXtractoR`, `IDentifier`, `Key Light` and `Unmult` stay in English as brand names, and
 //! `Face Measurements` / `Face Track Points` are EffectCraft's own effects, so their wording is
 //! ours.
+//!
+//! The Traditional Chinese names for Taiwan are written from the meaning of the English ones, with
+//! the terms Taiwan's creative software uses (`圖層`, `遮罩`, `筆刷`, `雜訊`, `發光`, `漸層`); they
+//! are not converted from the Simplified table. Brand and coined names (`Cryptomatte`,
+//! `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Colorama`, `Minimax`, `Vegas`) stay in
+//! English, and the `VR` and `OCIO` sets keep their prefix in Chinese word order.
+//!
+//! The French names are written from the meaning of the English ones, with the vocabulary of the
+//! French menus; they come from no other application's interface. Brand and coined names
+//! (`Cryptomatte`, `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Colorama`, `Minimax`,
+//! `Tritone`, `Vibrance`, `Vegas`) stay in English; a series tag that prefixes a descriptive name
+//! (`VR`, `OCIO`, `PS`, `HDR`) stays and follows the French word order (`Flou VR`,
+//! `Transformation CDL OCIO`).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -63,19 +81,25 @@ impl Catalog {
 ///
 /// **Adding a language** is two tables and one arm: write its rows (one per effect, ids from
 /// [`SIMPLIFIED_CHINESE`]) and its category labels, name them in the `static` below and in this
-/// `match`. Nothing else changes — not the lookups, not one panel. `zh-hant` and `ja` are listed
-/// with empty tables, so a translator fills rows in without touching this function, and until
-/// then those languages draw the registry's English name.
+/// `match`. Nothing else changes — not the lookups, not one panel. `zh-hant` now covers every
+/// effect and category; `ja` ships a table that a translator fills in without touching this
+/// function. An effect with no row draws the registry's English name until its row arrives.
 fn catalog(language: &str) -> Option<&'static Catalog> {
     static SIMPLIFIED: Catalog = Catalog { rows: SIMPLIFIED_CHINESE, categories: SIMPLIFIED_CHINESE_CATEGORIES, index: OnceLock::new() };
     static TRADITIONAL: Catalog = Catalog { rows: TRADITIONAL_CHINESE, categories: TRADITIONAL_CHINESE_CATEGORIES, index: OnceLock::new() };
     static JAPANESE: Catalog = Catalog { rows: JAPANESE_EFFECTS, categories: JAPANESE_CATEGORIES, index: OnceLock::new() };
+    static GEORGIAN_CATALOG: Catalog = Catalog { rows: GEORGIAN, categories: GEORGIAN_CATEGORIES, index: OnceLock::new() };
+    static SWEDISH_CATALOG: Catalog = Catalog { rows: SWEDISH, categories: SWEDISH_CATEGORIES, index: OnceLock::new() };
+    static FRENCH_CATALOG: Catalog = Catalog { rows: FRENCH, categories: FRENCH_CATEGORIES, index: OnceLock::new() };
     match language {
         "zh-hans" => Some(&SIMPLIFIED),
         "zh-hant" => Some(&TRADITIONAL),
         // Japanese: the slot the Japanese data point on #821 asked for, so both languages share
         // this one catalog instead of inventing a second mechanism.
         "ja" => Some(&JAPANESE),
+        "ka" => Some(&GEORGIAN_CATALOG),
+        "sv" => Some(&SWEDISH_CATALOG),
+        "fr" => Some(&FRENCH_CATALOG),
         _ => None,
     }
 }
@@ -85,22 +109,38 @@ pub(crate) fn name(id: &str, english: &str) -> String {
     catalog(current()).and_then(|c| c.row(id)).map_or_else(|| english.to_string(), |(_, translated)| translated.to_string())
 }
 
+/// The characters of `language`'s effect names and category labels, so the interface's font probe
+/// registers a face for each of them as it does for the panel catalog's.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn characters(language: &str) -> impl Iterator<Item = char> {
+    catalog(language).into_iter().flat_map(|c| c.rows.iter().map(|(_, _, t)| *t).chain(c.categories.iter().map(|(_, t)| *t))).flat_map(str::chars)
+}
+
+/// The number of effect-name rows `language` translates, for the row-count report; 0 when it has
+/// no catalog or when it is English.
+#[cfg(test)]
+pub(super) fn translated_rows(language: &str) -> usize {
+    catalog(language).map_or(0, |c| c.rows.len())
+}
+
 /// The name to draw for an effect group the property tree stores as `stored`: the catalog name,
 /// plus the instance index the engine appends to a repeat (`Gaussian Blur 2` → `高斯模糊 2`).
 ///
-/// A name that is neither the registry's nor the registry's plus an index was typed by the user
-/// (Effect Controls ▸ Rename), so it stays verbatim — as does the whole string in a language
-/// with no row.
+/// Current and legacy default names (including numeric instance suffixes) draw the current
+/// name. Other names were supplied by the user and stay verbatim. Stored data is never changed.
 pub(crate) fn group(id: &str, stored: &str) -> String {
-    let Some((english, translated)) = catalog(current()).and_then(|c| c.row(id)) else { return stored.to_string() };
-    if stored == english {
-        return translated.to_string();
-    }
-    if let Some(index) = stored.strip_prefix(english).and_then(|rest| rest.strip_prefix(' '))
-        && !index.is_empty()
-        && index.bytes().all(|b| b.is_ascii_digit())
-    {
-        return format!("{translated} {index}");
+    let Some(spec) = effectcraft_engine::effects::find(id) else { return stored.to_string() };
+    let translated = name(id, spec.name);
+    for source in std::iter::once(spec.name).chain(effectcraft_engine::effects::aliases(id).iter().copied()) {
+        if stored == source {
+            return translated;
+        }
+        if let Some(index) = stored.strip_prefix(source).and_then(|rest| rest.strip_prefix(' '))
+            && !index.is_empty()
+            && index.bytes().all(|b| b.is_ascii_digit())
+        {
+            return format!("{translated} {index}");
+        }
     }
     stored.to_string()
 }
@@ -115,7 +155,21 @@ pub(crate) fn category(source: &str) -> String {
 /// `query` (lowercase)? Both names match, so a translated interface can be searched either way.
 pub(crate) fn matches(id: &str, english: &str, query: &str) -> bool {
     english.to_lowercase().contains(query)
+        || effectcraft_engine::effects::find(id).is_some_and(|spec| effectcraft_engine::effects::name_matches(spec, query))
         || catalog(current()).and_then(|c| c.row(id)).is_some_and(|(_, translated)| translated.to_lowercase().contains(query))
+}
+
+/// The registry's effect names and categories `language` has no row for, for the missing-strings
+/// report.
+#[cfg(test)]
+pub(super) fn missing(language: &str) -> Vec<String> {
+    let table = catalog(language);
+    let effects = effectcraft_engine::effects::registry().iter().filter(|spec| table.and_then(|c| c.row(spec.id)).is_none()).map(|spec| spec.name.to_string());
+    let categories = effectcraft_engine::effects::categories()
+        .into_iter()
+        .filter(|source| table.and_then(|c| c.category(source)).is_none())
+        .map(|source| format!("{source} (category)"));
+    effects.chain(categories).collect()
 }
 
 /// Simplified Chinese (`zh-hans`): one row per effect in the registry.
@@ -128,6 +182,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.3d.fog3d", "Fog 3D", "雾 3D"),
     ("ec.3d.identifier", "IDentifier", "IDentifier"),
     ("ec.3d.idmatte", "ID Matte", "ID 遮罩"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D 图层实例"),
     ("ec.audio.backwards", "Backwards", "倒放"),
     ("ec.audio.basstreble", "Bass & Treble", "低音和高音"),
     ("ec.audio.compressor", "Compressor", "压缩程序"),
@@ -144,10 +199,10 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.blur.bilateral", "Bilateral Blur", "双向模糊"),
     ("ec.blur.cameralens", "Camera Lens Blur", "摄像机镜头模糊"),
     ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "摄像机抖动去模糊"),
-    ("ec.blur.cccross", "CC Cross Blur", "CC 交叉模糊"),
-    ("ec.blur.ccradial", "CC Radial Blur", "CC 径向模糊"),
-    ("ec.blur.ccradialfast", "CC Radial Fast Blur", "CC 径向快速模糊"),
-    ("ec.blur.ccvector", "CC Vector Blur", "CC 矢量模糊"),
+    ("ec.blur.cccross", "Cross Blur", "十字模糊"),
+    ("ec.blur.ccradial", "Variable Radial Blur", "可变径向模糊"),
+    ("ec.blur.ccradialfast", "Fast Radial Blur", "快速径向模糊"),
+    ("ec.blur.ccvector", "Vector Blur", "矢量模糊"),
     ("ec.blur.channel", "Channel Blur", "通道模糊"),
     ("ec.blur.compound", "Compound Blur", "复合模糊"),
     ("ec.blur.directional", "Directional Blur", "定向模糊"),
@@ -161,7 +216,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.channel.arithmetic", "Arithmetic", "算术"),
     ("ec.channel.blend", "Blend", "混合"),
     ("ec.channel.calculations", "Calculations", "计算"),
-    ("ec.channel.cccomposite", "CC Composite", "CC 合成"),
+    ("ec.channel.cccomposite", "Source Composite", "源图合成"),
     ("ec.channel.combiner", "Channel Combiner", "通道合成器"),
     ("ec.channel.compoundarithmetic", "Compound Arithmetic", "复合运算"),
     ("ec.channel.invert", "Invert", "反转"),
@@ -177,10 +232,10 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.color.blackwhite", "Black & White", "黑色和白色"),
     ("ec.color.brightnesscontrast", "Brightness & Contrast", "亮度和对比度"),
     ("ec.color.broadcast", "Broadcast Colors", "广播颜色"),
-    ("ec.color.cccolorneutralizer", "CC Color Neutralizer", "CC 颜色中和器"),
-    ("ec.color.cccoloroffset", "CC Color Offset", "CC 颜色偏移"),
-    ("ec.color.cckernel", "CC Kernel", "CC 内核"),
-    ("ec.color.cctoner", "CC Toner", "CC 调色器"),
+    ("ec.color.cccolorneutralizer", "Color Neutralizer", "色偏校正"),
+    ("ec.color.cccoloroffset", "Channel Offset", "通道偏移"),
+    ("ec.color.cckernel", "Convolution Kernel", "卷积核"),
+    ("ec.color.cctoner", "Multi-Tone Tint", "多色调着色"),
     ("ec.color.changecolor", "Change Color", "更改颜色"),
     ("ec.color.changetocolor", "Change to Color", "更改为颜色"),
     ("ec.color.channelmixer", "Channel Mixer", "通道混合器"),
@@ -197,7 +252,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.color.leavecolor", "Leave Color", "保留颜色"),
     ("ec.color.levels", "Levels", "色阶"),
     ("ec.color.levelsic", "Levels (Individual Controls)", "色阶 (单独控件)"),
-    ("ec.color.lumetri", "Lumetri Color", "Lumetri 颜色"),
+    ("ec.color.lumetri", "Color Grading", "色彩分级"),
     ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL 变换"),
     ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO 颜色空间变换"),
     ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO 显示变换"),
@@ -222,20 +277,20 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.control.stereo3d", "Stereo 3D Controls", "立体 3D 控制"),
     ("ec.distort.bezierwarp", "Bezier Warp", "贝塞尔曲线变形"),
     ("ec.distort.bulge", "Bulge", "凸出"),
-    ("ec.distort.ccbender", "CC Bender", "CC 弯曲器"),
-    ("ec.distort.ccbendit", "CC Bend It", "CC 弯曲"),
-    ("ec.distort.ccblobbylize", "CC Blobbylize", "CC 融化"),
-    ("ec.distort.ccflomotion", "CC Flo Motion", "CC 流动运动"),
-    ("ec.distort.ccgriddler", "CC Griddler", "CC 网格生成器"),
-    ("ec.distort.cclens", "CC Lens", "CC 镜头"),
-    ("ec.distort.ccpageturn", "CC Page Turn", "CC 翻页"),
-    ("ec.distort.ccpowerpin", "CC Power Pin", "CC 强力边角定位"),
-    ("ec.distort.ccripplepulse", "CC Ripple Pulse", "CC 波纹脉冲"),
-    ("ec.distort.ccslant", "CC Slant", "CC 倾斜"),
-    ("ec.distort.ccsmear", "CC Smear", "CC 漩涡条纹"),
-    ("ec.distort.ccsplit", "CC Split", "CC 拆分"),
-    ("ec.distort.ccsplit2", "CC Split 2", "CC 拆分 2"),
-    ("ec.distort.cctiler", "CC Tiler", "CC 拼贴器"),
+    ("ec.distort.ccbender", "Flexible Bend", "柔性弯曲"),
+    ("ec.distort.ccbendit", "Two-Point Bend", "两点弯曲"),
+    ("ec.distort.ccblobbylize", "Organic Displacement", "有机置换"),
+    ("ec.distort.ccflomotion", "Dual Lens Warp", "双镜头变形"),
+    ("ec.distort.ccgriddler", "Tile Grid", "平铺网格"),
+    ("ec.distort.cclens", "Lens Distortion", "镜头畸变"),
+    ("ec.distort.ccpageturn", "Page Curl", "页面卷曲"),
+    ("ec.distort.ccpowerpin", "Perspective Pin", "透视定位"),
+    ("ec.distort.ccripplepulse", "Pulsed Ripple", "脉冲涟漪"),
+    ("ec.distort.ccslant", "Slant", "倾斜"),
+    ("ec.distort.ccsmear", "Directional Smear", "定向涂抹"),
+    ("ec.distort.ccsplit", "Split Warp", "分割变形"),
+    ("ec.distort.ccsplit2", "Dual Split Warp", "双重分割变形"),
+    ("ec.distort.cctiler", "Scaled Tiles", "缩放平铺"),
     ("ec.distort.cornerpin", "Corner Pin", "边角定位"),
     ("ec.distort.displacementmap", "Displacement Map", "置换图"),
     ("ec.distort.liquify", "Liquify", "液化"),
@@ -263,11 +318,11 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.generate.audiospectrum", "Audio Spectrum", "音频频谱"),
     ("ec.generate.audiowaveform", "Audio Waveform", "音频波形"),
     ("ec.generate.beam", "Beam", "光束"),
-    ("ec.generate.ccgluegun", "CC Glue Gun", "CC 胶水枪"),
-    ("ec.generate.cclightburst", "CC Light Burst 2.5", "CC 光束放射 2.5"),
-    ("ec.generate.cclightrays", "CC Light Rays", "CC 光线"),
-    ("ec.generate.cclightsweep", "CC Light Sweep", "CC 光线扫描"),
-    ("ec.generate.ccthreads", "CC Threads", "CC 编织条"),
+    ("ec.generate.ccgluegun", "Paint Beads", "颜料珠"),
+    ("ec.generate.cclightburst", "Radial Light Burst", "径向光芒"),
+    ("ec.generate.cclightrays", "Light Rays", "光线"),
+    ("ec.generate.cclightsweep", "Light Sweep", "扫光"),
+    ("ec.generate.ccthreads", "Woven Threads", "编织线"),
     ("ec.generate.cellpattern", "Cell Pattern", "单元格图案"),
     ("ec.generate.checkerboard", "Checkerboard", "棋盘"),
     ("ec.generate.circle", "Circle", "圆形"),
@@ -286,7 +341,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.generate.vegas", "Vegas", "勾画"),
     ("ec.generate.writeon", "Write-on", "写入"),
     ("ec.key.advancedspill", "Advanced Spill Suppressor", "高级溢出抑制器"),
-    ("ec.key.ccsimplewireremoval", "CC Simple Wire Removal", "CC 简单丝线移除"),
+    ("ec.key.ccsimplewireremoval", "Line Removal", "线条移除"),
     ("ec.key.colordifference", "Color Difference Key", "颜色差值键"),
     ("ec.key.colorkey", "Color Key", "颜色键"),
     ("ec.key.colorrange", "Color Range", "颜色范围"),
@@ -299,7 +354,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.key.screen", "Screen Key", "屏幕键"),
     ("ec.key.spill", "Spill Suppressor", "溢出抑制"),
     ("ec.key.unmult", "Unmult", "Unmult"),
-    ("ec.keying.keylight", "Key Light", "Key Light"),
+    ("ec.keying.keylight", "Screen Color Key", "屏幕色键"),
     ("ec.matte.mattechoker", "Matte Choker", "遮罩阻塞工具"),
     ("ec.matte.objectmatte", "Object Matte", "对象遮罩"),
     ("ec.matte.refinehard", "Refine Hard Matte", "调整实边遮罩"),
@@ -323,50 +378,50 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.obsolete.basictext", "Basic Text", "基本文字"),
     ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "高斯模糊 (旧版)"),
     ("ec.obsolete.lightning", "Lightning", "闪电"),
-    ("ec.obsolete.mochashape", "Mocha shape", "Mocha 形状"),
+    ("ec.obsolete.mochashape", "Tracked Shape Matte", "跟踪形状遮罩"),
     ("ec.obsolete.pathtext", "Path Text", "路径文本"),
     ("ec.paint.paint", "Paint", "绘画"),
     ("ec.perspective.3dglasses", "3D Glasses", "3D 眼镜"),
     ("ec.perspective.bevelalpha", "Bevel Alpha", "斜面 Alpha"),
     ("ec.perspective.beveledges", "Bevel Edges", "边缘斜面"),
     ("ec.perspective.cameratracker", "3D Camera Tracker", "3D 摄像机跟踪器"),
-    ("ec.perspective.cccylinder", "CC Cylinder", "CC 圆柱体"),
-    ("ec.perspective.ccenvironment", "CC Environment", "CC 环境"),
-    ("ec.perspective.ccsphere", "CC Sphere", "CC 球体"),
-    ("ec.perspective.ccspotlight", "CC Spotlight", "CC 聚光"),
+    ("ec.perspective.cccylinder", "Cylinder Wrap", "圆柱包裹"),
+    ("ec.perspective.ccenvironment", "Environment Map", "环境映射"),
+    ("ec.perspective.ccsphere", "Sphere Wrap", "球面包裹"),
+    ("ec.perspective.ccspotlight", "Surface Spotlight", "表面聚光灯"),
     ("ec.perspective.dropshadow", "Drop Shadow", "投影"),
     ("ec.perspective.radialshadow", "Radial Shadow", "径向阴影"),
     ("ec.sim.carddance", "Card Dance", "卡片动画"),
     ("ec.sim.caustics", "Caustics", "焦散"),
-    ("ec.sim.ccballaction", "CC Ball Action", "CC 球动作"),
-    ("ec.sim.ccbubbles", "CC Bubbles", "CC 气泡"),
-    ("ec.sim.ccdrizzle", "CC Drizzle", "CC 细雨波纹"),
-    ("ec.sim.cchair", "CC Hair", "CC 毛发"),
-    ("ec.sim.ccmrmercury", "CC Mr. Mercury", "CC 水银流体"),
-    ("ec.sim.ccparticlesystems2", "CC Particle Systems II", "CC 粒子系统 II"),
-    ("ec.sim.ccparticleworld", "CC Particle World", "CC 粒子世界"),
-    ("ec.sim.ccpixelpolly", "CC Pixel Polly", "CC 像素多边形"),
-    ("ec.sim.ccrainfall", "CC Rainfall", "CC 降雨"),
-    ("ec.sim.ccscatterize", "CC Scatterize", "CC 散射"),
-    ("ec.sim.ccsnowfall", "CC Snowfall", "CC 降雪"),
-    ("ec.sim.ccstarburst", "CC Star Burst", "CC 星爆"),
+    ("ec.sim.ccballaction", "Ball Grid", "球体网格"),
+    ("ec.sim.ccbubbles", "Bubbles", "气泡"),
+    ("ec.sim.ccdrizzle", "Water Ripples", "水面涟漪"),
+    ("ec.sim.cchair", "Surface Fibers", "表面纤维"),
+    ("ec.sim.ccmrmercury", "Liquid Particles", "液体粒子"),
+    ("ec.sim.ccparticlesystems2", "Particle Emitter 2D", "二维粒子发射器"),
+    ("ec.sim.ccparticleworld", "Particle Emitter 3D", "三维粒子发射器"),
+    ("ec.sim.ccpixelpolly", "Pixel Shatter", "像素破碎"),
+    ("ec.sim.ccrainfall", "Rainfall", "降雨"),
+    ("ec.sim.ccscatterize", "Pixel Scatter", "像素散射"),
+    ("ec.sim.ccsnowfall", "Snowfall", "降雪"),
+    ("ec.sim.ccstarburst", "Starfield", "星空"),
     ("ec.sim.foam", "Foam", "泡沫"),
     ("ec.sim.particleplayground", "Particle Playground", "粒子运动场"),
     ("ec.sim.shatter", "Shatter", "碎片"),
     ("ec.sim.waveworld", "Wave World", "波形环境"),
     ("ec.stylize.brushstrokes", "Brush Strokes", "画笔描边"),
     ("ec.stylize.cartoon", "Cartoon", "卡通"),
-    ("ec.stylize.ccblockload", "CC Block Load", "CC 块加载"),
-    ("ec.stylize.ccburnfilm", "CC Burn Film", "CC 烧毁胶片"),
-    ("ec.stylize.ccglass", "CC Glass", "CC 玻璃"),
-    ("ec.stylize.cchextile", "CC HexTile", "CC 六边形拼贴"),
-    ("ec.stylize.cckaleida", "CC Kaleida", "CC 万花筒"),
-    ("ec.stylize.ccmrsmoothie", "CC Mr. Smoothie", "CC 像素溶解"),
-    ("ec.stylize.ccplastic", "CC Plastic", "CC 塑料"),
-    ("ec.stylize.ccrepetile", "CC RepeTile", "CC 重复拼贴"),
-    ("ec.stylize.ccthreshold", "CC Threshold", "CC 阈值"),
-    ("ec.stylize.ccthresholdrgb", "CC Threshold RGB", "CC 阈值 RGB"),
-    ("ec.stylize.ccvignette", "CC Vignette", "CC 暗角"),
+    ("ec.stylize.ccblockload", "Block Reveal", "块状显现"),
+    ("ec.stylize.ccburnfilm", "Film Burn", "胶片灼烧"),
+    ("ec.stylize.ccglass", "Glass Relief", "玻璃浮雕"),
+    ("ec.stylize.cchextile", "Hexagonal Tiles", "六边形平铺"),
+    ("ec.stylize.cckaleida", "Kaleidoscope", "万花筒"),
+    ("ec.stylize.ccmrsmoothie", "Palette Map", "调色板映射"),
+    ("ec.stylize.ccplastic", "Plastic Shading", "塑料着色"),
+    ("ec.stylize.ccrepetile", "Edge Tile Repeat", "边缘平铺重复"),
+    ("ec.stylize.ccthreshold", "Channel Threshold", "通道阈值"),
+    ("ec.stylize.ccthresholdrgb", "RGB Threshold", "RGB 阈值"),
+    ("ec.stylize.ccvignette", "Vignette", "晕影"),
     ("ec.stylize.coloremboss", "Color Emboss", "彩色浮雕"),
     ("ec.stylize.emboss", "Emboss", "浮雕"),
     ("ec.stylize.findedges", "Find Edges", "查找边缘"),
@@ -381,8 +436,8 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.stylize.threshold", "Threshold", "阈值"),
     ("ec.text.numbers", "Numbers", "编号"),
     ("ec.text.timecode", "Timecode", "时间码"),
-    ("ec.time.ccforcemotionblur", "CC Force Motion Blur", "CC 强制运动模糊"),
-    ("ec.time.ccwidetime", "CC Wide Time", "CC 宽泛时间"),
+    ("ec.time.ccforcemotionblur", "Temporal Motion Blur", "时间运动模糊"),
+    ("ec.time.ccwidetime", "Temporal Blend", "时间混合"),
     ("ec.time.echo", "Echo", "残影"),
     ("ec.time.pixelmotionblur", "Pixel Motion Blur", "像素运动模糊"),
     ("ec.time.posterizetime", "Posterize Time", "抽帧"),
@@ -391,23 +446,23 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.time.timewarp", "Timewarp", "时间扭曲"),
     ("ec.transition.blockdissolve", "Block Dissolve", "块溶解"),
     ("ec.transition.cardwipe", "Card Wipe", "卡片擦除"),
-    ("ec.transition.ccglasswipe", "CC Glass Wipe", "CC 玻璃擦除"),
-    ("ec.transition.ccgridwipe", "CC Grid Wipe", "CC 网格擦除"),
-    ("ec.transition.ccimagewipe", "CC Image Wipe", "CC 图像擦除"),
-    ("ec.transition.ccjaws", "CC Jaws", "CC 锯齿"),
-    ("ec.transition.cclightwipe", "CC Light Wipe", "CC 光线擦除"),
-    ("ec.transition.cclinesweep", "CC Line Sweep", "CC 线条扫掠"),
-    ("ec.transition.ccradialscalewipe", "CC Radial ScaleWipe", "CC 径向缩放擦除"),
-    ("ec.transition.ccscalewipe", "CC Scale Wipe", "CC 缩放擦除"),
-    ("ec.transition.cctwister", "CC Twister", "CC 扭曲器"),
-    ("ec.transition.ccwarpomatic", "CC WarpoMatic", "CC 自动扭曲"),
+    ("ec.transition.ccglasswipe", "Glass Wipe", "玻璃擦除"),
+    ("ec.transition.ccgridwipe", "Grid Wipe", "网格擦除"),
+    ("ec.transition.ccimagewipe", "Luminance Image Wipe", "亮度图像擦除"),
+    ("ec.transition.ccjaws", "Serrated Wipe", "锯齿擦除"),
+    ("ec.transition.cclightwipe", "Light Wipe", "光线擦除"),
+    ("ec.transition.cclinesweep", "Line Sweep", "线条扫过"),
+    ("ec.transition.ccradialscalewipe", "Radial Scale Wipe", "径向缩放擦除"),
+    ("ec.transition.ccscalewipe", "Scale Wipe", "缩放擦除"),
+    ("ec.transition.cctwister", "Twist Wipe", "扭转擦除"),
+    ("ec.transition.ccwarpomatic", "Warp Dissolve", "变形溶解"),
     ("ec.transition.gradientwipe", "Gradient Wipe", "渐变擦除"),
     ("ec.transition.iriswipe", "Iris Wipe", "光圈擦除"),
     ("ec.transition.linearwipe", "Linear Wipe", "线性擦除"),
     ("ec.transition.radialwipe", "Radial Wipe", "径向擦除"),
     ("ec.transition.venetian", "Venetian Blinds", "百叶窗"),
     ("ec.utility.applylut", "Apply Color LUT", "应用颜色 LUT"),
-    ("ec.utility.ccoverbrights", "CC Overbrights", "CC 高光溢出"),
+    ("ec.utility.ccoverbrights", "Out-of-Range Display", "超出范围显示"),
     ("ec.utility.cineon", "Cineon Converter", "Cineon 转换器"),
     ("ec.utility.colorprofileconverter", "Color Profile Converter", "颜色配置文件转换器"),
     ("ec.utility.facemeasurements", "Face Measurements", "面部测量"),
@@ -428,43 +483,678 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.vr.sharpen", "VR Sharpen", "VR 锐化"),
     ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球面到平面"),
 ];
-/// Traditional Chinese (`zh-hant`): no rows yet. A translator fills one row per effect, ids from
-/// [`SIMPLIFIED_CHINESE`]; a row may repeat the English name, which is what the language draws
-/// for that effect.
-const TRADITIONAL_CHINESE: &[Row] = &[];
+/// Traditional Chinese (`zh-hant`): one row per effect in the registry, ids from
+/// [`SIMPLIFIED_CHINESE`]. Written from the meaning of the English names with the vocabulary
+/// Taiwan's creative software uses (圖層, 遮罩, 筆刷, 雜訊, 發光, 漸層), not converted from the
+/// Simplified table. Brand and coined names (`Cryptomatte`, `EXtractoR`, `IDentifier`, `Key Light`,
+/// `Unmult`, `Colorama`, `Minimax`, `Vegas`) stay in English; the `VR` and `OCIO` sets keep their
+/// prefix in Chinese word order. The effects this cleanup renamed are translated from their new
+/// descriptive names.
+const TRADITIONAL_CHINESE: &[Row] = &[
+    ("ec.3d.channelextract", "3D Channel Extract", "3D 通道擷取"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "深度遮罩"),
+    ("ec.3d.depthoffield", "Depth of Field", "景深"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "3D 霧"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "ID 遮罩"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D 圖層實體"),
+    ("ec.audio.backwards", "Backwards", "倒轉"),
+    ("ec.audio.basstreble", "Bass & Treble", "低音與高音"),
+    ("ec.audio.compressor", "Compressor", "壓縮器"),
+    ("ec.audio.delay", "Delay", "延遲"),
+    ("ec.audio.distortion", "Distortion", "失真"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "鑲邊與合聲"),
+    ("ec.audio.gate", "Gate", "雜訊閘"),
+    ("ec.audio.highlowpass", "High-Low Pass", "高通/低通"),
+    ("ec.audio.modulator", "Modulator", "調變器"),
+    ("ec.audio.parametriceq", "Parametric EQ", "參數等化器"),
+    ("ec.audio.reverb", "Reverb", "殘響"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "立體聲混音器"),
+    ("ec.audio.tone", "Tone", "音調"),
+    ("ec.blur.bilateral", "Bilateral Blur", "雙邊模糊"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "相機鏡頭模糊"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "相機晃動去模糊"),
+    ("ec.blur.cccross", "Cross Blur", "十字模糊"),
+    ("ec.blur.ccradial", "Variable Radial Blur", "可變放射狀模糊"),
+    ("ec.blur.ccradialfast", "Fast Radial Blur", "快速放射狀模糊"),
+    ("ec.blur.ccvector", "Vector Blur", "向量模糊"),
+    ("ec.blur.channel", "Channel Blur", "通道模糊"),
+    ("ec.blur.compound", "Compound Blur", "複合模糊"),
+    ("ec.blur.directional", "Directional Blur", "方向模糊"),
+    ("ec.blur.fastbox", "Fast Box Blur", "快速方框模糊"),
+    ("ec.blur.gaussian", "Gaussian Blur", "高斯模糊"),
+    ("ec.blur.radial", "Radial Blur", "徑向模糊"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "減少交錯閃爍"),
+    ("ec.blur.sharpen", "Sharpen", "銳利化"),
+    ("ec.blur.smart", "Smart Blur", "智慧型模糊"),
+    ("ec.blur.unsharp", "Unsharp Mask", "遮色片銳利化"),
+    ("ec.channel.arithmetic", "Arithmetic", "算術"),
+    ("ec.channel.blend", "Blend", "混合"),
+    ("ec.channel.calculations", "Calculations", "運算"),
+    ("ec.channel.cccomposite", "Source Composite", "來源影像合成"),
+    ("ec.channel.combiner", "Channel Combiner", "通道合成器"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "複合算術"),
+    ("ec.channel.invert", "Invert", "反轉"),
+    ("ec.channel.minimax", "Minimax", "Minimax"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "移除色彩殘邊"),
+    ("ec.channel.setchannels", "Set Channels", "設定通道"),
+    ("ec.channel.setmatte", "Set Matte", "設定遮罩"),
+    ("ec.channel.shiftchannels", "Shift Channels", "轉移通道"),
+    ("ec.channel.solidcomposite", "Solid Composite", "實色合成"),
+    ("ec.color.autocolor", "Auto Color", "自動色彩"),
+    ("ec.color.autocontrast", "Auto Contrast", "自動對比"),
+    ("ec.color.autolevels", "Auto Levels", "自動色階"),
+    ("ec.color.blackwhite", "Black & White", "黑白"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "亮度與對比"),
+    ("ec.color.broadcast", "Broadcast Colors", "廣播色彩"),
+    ("ec.color.cccolorneutralizer", "Color Neutralizer", "色偏校正"),
+    ("ec.color.cccoloroffset", "Channel Offset", "色版偏移"),
+    ("ec.color.cckernel", "Convolution Kernel", "卷積核心"),
+    ("ec.color.cctoner", "Multi-Tone Tint", "多色調著色"),
+    ("ec.color.changecolor", "Change Color", "變更色彩"),
+    ("ec.color.changetocolor", "Change to Color", "變更為色彩"),
+    ("ec.color.channelmixer", "Channel Mixer", "通道混合器"),
+    ("ec.color.colorama", "Colorama", "Colorama"),
+    ("ec.color.colorbalance", "Color Balance", "色彩平衡"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "色彩平衡（HLS）"),
+    ("ec.color.colorlink", "Color Link", "色彩連結"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "色彩穩定器"),
+    ("ec.color.curves", "Curves", "曲線"),
+    ("ec.color.equalize", "Equalize", "等化"),
+    ("ec.color.exposure", "Exposure", "曝光"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "伽瑪/基準/增益"),
+    ("ec.color.huesaturation", "Hue/Saturation", "色相/飽和度"),
+    ("ec.color.leavecolor", "Leave Color", "保留色彩"),
+    ("ec.color.levels", "Levels", "色階"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "色階（個別控制項）"),
+    ("ec.color.lumetri", "Color Grading", "色彩分級"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL 轉換"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO 色彩空間轉換"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO 顯示轉換"),
+    ("ec.color.ociofile", "OCIO File Transform", "OCIO 檔案轉換"),
+    ("ec.color.ociolook", "OCIO Look Transform", "OCIO 外觀轉換"),
+    ("ec.color.photofilter", "Photo Filter", "相片濾鏡"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS 任意映射"),
+    ("ec.color.selectivecolor", "Selective Color", "選擇性色彩"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "陰影/亮部"),
+    ("ec.color.tint", "Tint", "染色"),
+    ("ec.color.tritone", "Tritone", "三色調"),
+    ("ec.color.vibrance", "Vibrance", "自然飽和度"),
+    ("ec.color.videolimiter", "Video Limiter", "視訊限制器"),
+    ("ec.control.angle", "Angle Control", "角度控制"),
+    ("ec.control.checkbox", "Checkbox Control", "核取方塊控制"),
+    ("ec.control.color", "Color Control", "色彩控制"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "下拉式選單控制"),
+    ("ec.control.layer", "Layer Control", "圖層控制"),
+    ("ec.control.point", "Point Control", "點控制"),
+    ("ec.control.point3d", "3D Point Control", "3D 點控制"),
+    ("ec.control.slider", "Slider Control", "滑桿控制"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "立體 3D 控制"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "貝茲彎曲"),
+    ("ec.distort.bulge", "Bulge", "凸出"),
+    ("ec.distort.ccbender", "Flexible Bend", "柔性彎曲"),
+    ("ec.distort.ccbendit", "Two-Point Bend", "兩點彎曲"),
+    ("ec.distort.ccblobbylize", "Organic Displacement", "有機置換"),
+    ("ec.distort.ccflomotion", "Dual Lens Warp", "雙鏡頭變形"),
+    ("ec.distort.ccgriddler", "Tile Grid", "拼貼網格"),
+    ("ec.distort.cclens", "Lens Distortion", "鏡頭畸變"),
+    ("ec.distort.ccpageturn", "Page Curl", "頁面捲曲"),
+    ("ec.distort.ccpowerpin", "Perspective Pin", "透視定位"),
+    ("ec.distort.ccripplepulse", "Pulsed Ripple", "脈衝漣漪"),
+    ("ec.distort.ccslant", "Slant", "傾斜"),
+    ("ec.distort.ccsmear", "Directional Smear", "定向塗抹"),
+    ("ec.distort.ccsplit", "Split Warp", "分割變形"),
+    ("ec.distort.ccsplit2", "Dual Split Warp", "雙重分割變形"),
+    ("ec.distort.cctiler", "Scaled Tiles", "縮放平鋪"),
+    ("ec.distort.cornerpin", "Corner Pin", "邊角釘選"),
+    ("ec.distort.displacementmap", "Displacement Map", "位移映射"),
+    ("ec.distort.liquify", "Liquify", "液化"),
+    ("ec.distort.magnify", "Magnify", "放大"),
+    ("ec.distort.meshwarp", "Mesh Warp", "網格彎曲"),
+    ("ec.distort.mirror", "Mirror", "鏡像"),
+    ("ec.distort.offset", "Offset", "位移"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "光學補償"),
+    ("ec.distort.polar", "Polar Coordinates", "極座標"),
+    ("ec.distort.puppet", "Puppet", "木偶"),
+    ("ec.distort.reshape", "Reshape", "重塑"),
+    ("ec.distort.ripple", "Ripple", "漣漪"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "滾動快門修正"),
+    ("ec.distort.smear", "Smear", "塗抹"),
+    ("ec.distort.spherize", "Spherize", "球面化"),
+    ("ec.distort.transform", "Transform", "變形"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "擾流位移"),
+    ("ec.distort.twirl", "Twirl", "扭轉"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "扭轉（舊版）"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "保留細節放大"),
+    ("ec.distort.warp", "Warp", "彎曲"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "彎曲穩定器"),
+    ("ec.distort.wavewarp", "Wave Warp", "波浪彎曲"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "進階閃電"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "音訊頻譜"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "音訊波形"),
+    ("ec.generate.beam", "Beam", "光束"),
+    ("ec.generate.ccgluegun", "Paint Beads", "顏料珠"),
+    ("ec.generate.cclightburst", "Radial Light Burst", "放射狀光芒"),
+    ("ec.generate.cclightrays", "Light Rays", "光線"),
+    ("ec.generate.cclightsweep", "Light Sweep", "掃光"),
+    ("ec.generate.ccthreads", "Woven Threads", "編織線"),
+    ("ec.generate.cellpattern", "Cell Pattern", "細胞圖樣"),
+    ("ec.generate.checkerboard", "Checkerboard", "棋盤格"),
+    ("ec.generate.circle", "Circle", "圓形"),
+    ("ec.generate.ellipse", "Ellipse", "橢圓"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "滴管填色"),
+    ("ec.generate.fill", "Fill", "填色"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "四色漸層"),
+    ("ec.generate.fractal", "Fractal", "碎形"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "漸層色帶"),
+    ("ec.generate.grid", "Grid", "格線"),
+    ("ec.generate.lensflare", "Lens Flare", "鏡頭光暈"),
+    ("ec.generate.paintbucket", "Paint Bucket", "油漆桶"),
+    ("ec.generate.radiowaves", "Radio Waves", "無線電波"),
+    ("ec.generate.scribble", "Scribble", "塗鴉"),
+    ("ec.generate.stroke", "Stroke", "筆畫"),
+    ("ec.generate.vegas", "Vegas", "Vegas"),
+    ("ec.generate.writeon", "Write-on", "書寫"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "進階溢色抑制"),
+    ("ec.key.ccsimplewireremoval", "Line Removal", "線條移除"),
+    ("ec.key.colordifference", "Color Difference Key", "色彩差異去背"),
+    ("ec.key.colorkey", "Color Key", "色彩去背"),
+    ("ec.key.colorrange", "Color Range", "色彩範圍"),
+    ("ec.key.differencematte", "Difference Matte", "差異遮罩"),
+    ("ec.key.extract", "Extract", "擷取"),
+    ("ec.key.innerouter", "Inner/Outer Key", "內/外去背"),
+    ("ec.key.keycleaner", "Key Cleaner", "去背淨化"),
+    ("ec.key.linearcolor", "Linear Color Key", "線性色彩去背"),
+    ("ec.key.luma", "Luma Key", "亮度去背"),
+    ("ec.key.screen", "Screen Key", "螢幕去背"),
+    ("ec.key.spill", "Spill Suppressor", "溢色抑制"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.keying.keylight", "Screen Color Key", "螢幕色鍵"),
+    ("ec.matte.mattechoker", "Matte Choker", "遮罩收縮器"),
+    ("ec.matte.objectmatte", "Object Matte", "物件遮罩"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "調整硬邊遮罩"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "調整柔邊遮罩"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "Roto 筆刷與邊緣調整"),
+    ("ec.matte.simplechoker", "Simple Choker", "簡單收縮器"),
+    ("ec.noise.addgrain", "Add Grain", "新增顆粒"),
+    ("ec.noise.curlnoise", "Curl Noise", "捲曲雜訊"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "汙點與刮痕"),
+    ("ec.noise.fractal", "Fractal Noise", "碎形雜訊"),
+    ("ec.noise.matchgrain", "Match Grain", "符合顆粒"),
+    ("ec.noise.median", "Median", "中值"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "中值（舊版）"),
+    ("ec.noise.noise", "Noise", "雜訊"),
+    ("ec.noise.noisealpha", "Noise Alpha", "雜訊 Alpha"),
+    ("ec.noise.noisehls", "Noise HLS", "雜訊 HLS"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "雜訊 HLS 自動"),
+    ("ec.noise.removegrain", "Remove Grain", "移除顆粒"),
+    ("ec.noise.turbulent", "Turbulent Noise", "擾流雜訊"),
+    ("ec.obsolete.basic3d", "Basic 3D", "基礎 3D"),
+    ("ec.obsolete.basictext", "Basic Text", "基礎文字"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "高斯模糊（舊版）"),
+    ("ec.obsolete.lightning", "Lightning", "閃電"),
+    ("ec.obsolete.mochashape", "Tracked Shape Matte", "追蹤形狀遮罩"),
+    ("ec.obsolete.pathtext", "Path Text", "路徑文字"),
+    ("ec.paint.paint", "Paint", "繪畫"),
+    ("ec.perspective.3dglasses", "3D Glasses", "3D 眼鏡"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "Alpha 斜角"),
+    ("ec.perspective.beveledges", "Bevel Edges", "邊緣斜角"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "3D 攝影機追蹤"),
+    ("ec.perspective.cccylinder", "Cylinder Wrap", "圓柱包覆"),
+    ("ec.perspective.ccenvironment", "Environment Map", "環境貼圖"),
+    ("ec.perspective.ccsphere", "Sphere Wrap", "球面包覆"),
+    ("ec.perspective.ccspotlight", "Surface Spotlight", "表面聚光燈"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "陰影"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "徑向陰影"),
+    ("ec.sim.carddance", "Card Dance", "卡片舞蹈"),
+    ("ec.sim.caustics", "Caustics", "焦散"),
+    ("ec.sim.ccballaction", "Ball Grid", "球體網格"),
+    ("ec.sim.ccbubbles", "Bubbles", "氣泡"),
+    ("ec.sim.ccdrizzle", "Water Ripples", "水面漣漪"),
+    ("ec.sim.cchair", "Surface Fibers", "表面纖維"),
+    ("ec.sim.ccmrmercury", "Liquid Particles", "液體粒子"),
+    ("ec.sim.ccparticlesystems2", "Particle Emitter 2D", "二維粒子發射器"),
+    ("ec.sim.ccparticleworld", "Particle Emitter 3D", "三維粒子發射器"),
+    ("ec.sim.ccpixelpolly", "Pixel Shatter", "像素破碎"),
+    ("ec.sim.ccrainfall", "Rainfall", "降雨"),
+    ("ec.sim.ccscatterize", "Pixel Scatter", "像素散射"),
+    ("ec.sim.ccsnowfall", "Snowfall", "降雪"),
+    ("ec.sim.ccstarburst", "Starfield", "星空"),
+    ("ec.sim.foam", "Foam", "泡沫"),
+    ("ec.sim.particleplayground", "Particle Playground", "粒子遊樂場"),
+    ("ec.sim.shatter", "Shatter", "粉碎"),
+    ("ec.sim.waveworld", "Wave World", "波浪世界"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "筆觸"),
+    ("ec.stylize.cartoon", "Cartoon", "卡通"),
+    ("ec.stylize.ccblockload", "Block Reveal", "區塊顯現"),
+    ("ec.stylize.ccburnfilm", "Film Burn", "膠片灼燒"),
+    ("ec.stylize.ccglass", "Glass Relief", "玻璃浮雕"),
+    ("ec.stylize.cchextile", "Hexagonal Tiles", "六角形拼貼"),
+    ("ec.stylize.cckaleida", "Kaleidoscope", "萬花筒"),
+    ("ec.stylize.ccmrsmoothie", "Palette Map", "調色盤對應"),
+    ("ec.stylize.ccplastic", "Plastic Shading", "塑膠著色"),
+    ("ec.stylize.ccrepetile", "Edge Tile Repeat", "邊緣拼貼重複"),
+    ("ec.stylize.ccthreshold", "Channel Threshold", "色版臨界值"),
+    ("ec.stylize.ccthresholdrgb", "RGB Threshold", "RGB 臨界值"),
+    ("ec.stylize.ccvignette", "Vignette", "暗角"),
+    ("ec.stylize.coloremboss", "Color Emboss", "彩色浮雕"),
+    ("ec.stylize.emboss", "Emboss", "浮雕"),
+    ("ec.stylize.findedges", "Find Edges", "尋找邊緣"),
+    ("ec.stylize.glow", "Glow", "發光"),
+    ("ec.stylize.mosaic", "Mosaic", "馬賽克"),
+    ("ec.stylize.motiontile", "Motion Tile", "動態並排"),
+    ("ec.stylize.posterize", "Posterize", "色調分離"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "粗糙邊緣"),
+    ("ec.stylize.scatter", "Scatter", "散佈"),
+    ("ec.stylize.strobe", "Strobe Light", "頻閃光"),
+    ("ec.stylize.texturize", "Texturize", "材質化"),
+    ("ec.stylize.threshold", "Threshold", "臨界值"),
+    ("ec.text.numbers", "Numbers", "數字"),
+    ("ec.text.timecode", "Timecode", "時間碼"),
+    ("ec.time.ccforcemotionblur", "Temporal Motion Blur", "時間動態模糊"),
+    ("ec.time.ccwidetime", "Temporal Blend", "時間混合"),
+    ("ec.time.echo", "Echo", "回音"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "像素動態模糊"),
+    ("ec.time.posterizetime", "Posterize Time", "色調分離時間"),
+    ("ec.time.timedifference", "Time Difference", "時間差異"),
+    ("ec.time.timedisplacement", "Time Displacement", "時間位移"),
+    ("ec.time.timewarp", "Timewarp", "時間扭曲"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "區塊溶解"),
+    ("ec.transition.cardwipe", "Card Wipe", "卡片擦拭"),
+    ("ec.transition.ccglasswipe", "Glass Wipe", "玻璃擦拭"),
+    ("ec.transition.ccgridwipe", "Grid Wipe", "網格擦拭"),
+    ("ec.transition.ccimagewipe", "Luminance Image Wipe", "亮度影像擦拭"),
+    ("ec.transition.ccjaws", "Serrated Wipe", "鋸齒擦拭"),
+    ("ec.transition.cclightwipe", "Light Wipe", "光線擦拭"),
+    ("ec.transition.cclinesweep", "Line Sweep", "線條掃過"),
+    ("ec.transition.ccradialscalewipe", "Radial Scale Wipe", "放射狀縮放擦拭"),
+    ("ec.transition.ccscalewipe", "Scale Wipe", "縮放擦拭"),
+    ("ec.transition.cctwister", "Twist Wipe", "扭轉擦拭"),
+    ("ec.transition.ccwarpomatic", "Warp Dissolve", "變形溶解"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "漸層擦拭"),
+    ("ec.transition.iriswipe", "Iris Wipe", "光圈擦拭"),
+    ("ec.transition.linearwipe", "Linear Wipe", "線性擦拭"),
+    ("ec.transition.radialwipe", "Radial Wipe", "徑向擦拭"),
+    ("ec.transition.venetian", "Venetian Blinds", "百葉窗"),
+    ("ec.utility.applylut", "Apply Color LUT", "套用色彩 LUT"),
+    ("ec.utility.ccoverbrights", "Out-of-Range Display", "超出範圍顯示"),
+    ("ec.utility.cineon", "Cineon Converter", "Cineon 轉換器"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "色彩設定檔轉換器"),
+    ("ec.utility.facemeasurements", "Face Measurements", "臉部測量"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "臉部追蹤點"),
+    ("ec.utility.growbounds", "Grow Bounds", "擴展範圍"),
+    ("ec.utility.hdrcompander", "HDR Compander", "HDR 壓縮擴展器"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "HDR 亮部壓縮"),
+    ("ec.vr.blur", "VR Blur", "VR 模糊"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "VR 色差"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "VR 色彩漸層"),
+    ("ec.vr.converter", "VR Converter", "VR 轉換器"),
+    ("ec.vr.denoise", "VR De-Noise", "VR 降噪"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "VR 數位故障"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "VR 碎形雜訊"),
+    ("ec.vr.glow", "VR Glow", "VR 發光"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "VR 平面轉球體"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "VR 旋轉球體"),
+    ("ec.vr.sharpen", "VR Sharpen", "VR 銳利化"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球體轉平面"),
+];
 
 /// Japanese (`ja`): reserved for the Japanese data point on #821, so both languages share this
 /// one catalog instead of inventing a second mechanism. A translator fills one row per effect,
-/// ids from [`SIMPLIFIED_CHINESE`]; the names Adobe's Japanese interface leaves in English (the
-/// `CC` series, the `VR` set, the `OCIO` set, `Cryptomatte`, `EXtractoR`, `IDentifier`,
-/// `Key Light`, `Unmult`, `Twirl (Legacy)` and the two EffectCraft-only effects) repeat that
-/// English name here rather than being left out.
+/// ids from [`SIMPLIFIED_CHINESE`]; the names Adobe's Japanese interface leaves in English
+/// (`Cryptomatte`, `EXtractoR`, `IDentifier` and `Key Light`) repeat that English name here rather
+/// than being left out; the `VR` and `OCIO` sets take a Japanese tail instead, and `Unmult` keeps
+/// its English name in both catalogs. An effect with no row draws its English name anyway, which
+/// is what `Twirl (Legacy)` and the two EffectCraft-only effects would do without their rows.
 ///
-/// The rows below were read from the installed After Effects 2026 (26.5) Japanese interface
-/// (its generated Effect menu and its Effects & Presets panel).
+/// The rows of the effects this cleanup did not rename come from AE 2026's Japanese interface
+/// where it was read directly (its Effect menu and its Effects & Presets panel) and from Adobe's
+/// own Japanese help where the panel was not to hand. A published glossary is used to cross-check,
+/// never as the only source: it normalises the typography (half-width parentheses where AE draws
+/// full-width) and still carries CS6-era names for the `CC` series. The renamed effects are
+/// translated from their new descriptive names.
 const JAPANESE_EFFECTS: &[Row] = &[
+    // Effects this application adds itself have no interface to read a name from, so they follow
+    // the Chinese catalog's choice to translate them (顔の測定, 顔のトラッキングポイント) rather than
+    // staying English. Unmult stays English: that is what the interface it comes from shows.
+    ("ec.3d.instance3d", "3D Layer Instance", "3Dレイヤーインスタンス"),
+    ("ec.color.broadcast", "Broadcast Colors", "ブロードキャストカラー"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "ステレオ3Dコントロール"),
+    ("ec.distort.puppet", "Puppet", "パペット"),
+    ("ec.key.screen", "Screen Key", "スクリーンキー"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.matte.objectmatte", "Object Matte", "オブジェクトマット"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "ロトブラシとエッジの調整"),
+    ("ec.paint.paint", "Paint", "ペイント"),
+    ("ec.utility.facemeasurements", "Face Measurements", "顔の測定"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "顔のトラッキングポイント"),
+    ("ec.3d.channelextract", "3D Channel Extract", "3Dチャンネル抽出"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "デプスマット"),
+    ("ec.3d.depthoffield", "Depth of Field", "被写界深度"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "フォグ3D"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "IDマット"),
+    ("ec.audio.backwards", "Backwards", "リバース"),
+    ("ec.audio.basstreble", "Bass & Treble", "バス&トレブル"),
+    ("ec.audio.compressor", "Compressor", "コンプレッサー"),
+    ("ec.audio.delay", "Delay", "ディレイ"),
+    ("ec.audio.distortion", "Distortion", "歪み"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "フランジ&コーラス"),
+    ("ec.audio.gate", "Gate", "ゲート"),
+    ("ec.audio.highlowpass", "High-Low Pass", "ハイパス／ローパス"),
+    ("ec.audio.modulator", "Modulator", "モジュレーター"),
+    ("ec.audio.parametriceq", "Parametric EQ", "パラメトリックEQ"),
+    ("ec.audio.reverb", "Reverb", "リバーブ"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "ステレオミキサー"),
+    ("ec.audio.tone", "Tone", "トーン"),
     ("ec.blur.bilateral", "Bilateral Blur", "ブラー（バイラテラル）"),
     ("ec.blur.cameralens", "Camera Lens Blur", "ブラー（カメラレンズ）"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "カメラぶれ除去"),
+    ("ec.blur.cccross", "Cross Blur", "十字ぼかし"),
+    ("ec.blur.ccradial", "Variable Radial Blur", "可変放射状ぼかし"),
+    ("ec.blur.ccradialfast", "Fast Radial Blur", "高速放射状ぼかし"),
+    ("ec.blur.ccvector", "Vector Blur", "ベクトルぼかし"),
     ("ec.blur.channel", "Channel Blur", "ブラー（チャンネル）"),
     ("ec.blur.compound", "Compound Blur", "ブラー（合成）"),
     ("ec.blur.directional", "Directional Blur", "ブラー（方向）"),
     ("ec.blur.fastbox", "Fast Box Blur", "高速ボックスブラー"),
     ("ec.blur.gaussian", "Gaussian Blur", "ブラー（ガウス）"),
     ("ec.blur.radial", "Radial Blur", "ブラー（放射状）"),
-    ("ec.color.lumetri", "Lumetri Color", "Lumetri カラー"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "インターレースのちらつき削減"),
+    ("ec.blur.sharpen", "Sharpen", "シャープ"),
+    ("ec.blur.smart", "Smart Blur", "ブラー（詳細）"),
+    ("ec.blur.unsharp", "Unsharp Mask", "アンシャープマスク"),
+    ("ec.channel.arithmetic", "Arithmetic", "アリスマチック"),
+    ("ec.channel.blend", "Blend", "ブレンド"),
+    ("ec.channel.calculations", "Calculations", "計算"),
+    ("ec.channel.cccomposite", "Source Composite", "元画像合成"),
+    ("ec.channel.combiner", "Channel Combiner", "チャンネルコンバイナー"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "合成アリスマチック"),
+    ("ec.channel.invert", "Invert", "反転"),
+    ("ec.channel.minimax", "Minimax", "最大／最小"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "カラーマット削除"),
+    ("ec.channel.setchannels", "Set Channels", "チャンネル設定"),
+    ("ec.channel.setmatte", "Set Matte", "マット設定"),
+    ("ec.channel.shiftchannels", "Shift Channels", "チャンネルシフト"),
+    ("ec.channel.solidcomposite", "Solid Composite", "単色合成"),
+    ("ec.color.autocolor", "Auto Color", "自動カラー補正"),
+    ("ec.color.autocontrast", "Auto Contrast", "自動コントラスト"),
+    ("ec.color.autolevels", "Auto Levels", "自動レベル補正"),
+    ("ec.color.blackwhite", "Black & White", "白黒"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "輝度&コントラスト"),
+    ("ec.color.cccolorneutralizer", "Color Neutralizer", "色かぶり補正"),
+    ("ec.color.cccoloroffset", "Channel Offset", "チャンネルオフセット"),
+    ("ec.color.cckernel", "Convolution Kernel", "畳み込みカーネル"),
+    ("ec.color.cctoner", "Multi-Tone Tint", "多色調ティント"),
+    ("ec.color.changecolor", "Change Color", "色を変更"),
+    ("ec.color.changetocolor", "Change to Color", "他のカラーへ変更"),
+    ("ec.color.channelmixer", "Channel Mixer", "チャンネルミキサー"),
+    ("ec.color.colorama", "Colorama", "コロラマ"),
+    ("ec.color.colorbalance", "Color Balance", "カラーバランス"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "カラーバランス（HLS）"),
+    ("ec.color.colorlink", "Color Link", "カラーリンク"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "カラースタビライザー"),
+    ("ec.color.curves", "Curves", "トーンカーブ"),
+    ("ec.color.equalize", "Equalize", "平均化（イコライズ）"),
+    ("ec.color.exposure", "Exposure", "露光量"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "ガンマ／ペデスタル／ゲイン"),
+    ("ec.color.huesaturation", "Hue/Saturation", "色相／彩度"),
+    ("ec.color.leavecolor", "Leave Color", "色抜き"),
+    ("ec.color.levels", "Levels", "レベル補正"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "レベル（個々の制御）"),
+    ("ec.color.lumetri", "Color Grading", "カラーグレーディング"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL 変換"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO 色空間変換"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO 表示変換"),
+    ("ec.color.ociofile", "OCIO File Transform", "OCIO ファイル変換"),
+    ("ec.color.ociolook", "OCIO Look Transform", "OCIO Look トランスフォーム"),
+    ("ec.color.photofilter", "Photo Filter", "レンズフィルター"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS不定マップ"),
+    ("ec.color.selectivecolor", "Selective Color", "特定色域の選択"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "シャドウ・ハイライト"),
+    ("ec.color.tint", "Tint", "着色"),
+    ("ec.color.tritone", "Tritone", "トライトーン"),
+    ("ec.color.vibrance", "Vibrance", "自然な彩度"),
+    ("ec.color.videolimiter", "Video Limiter", "ビデオリミッター"),
+    ("ec.control.angle", "Angle Control", "角度制御"),
+    ("ec.control.checkbox", "Checkbox Control", "チェックボックス制御"),
+    ("ec.control.color", "Color Control", "カラー制御"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "ドロップダウンメニュー制御"),
+    ("ec.control.layer", "Layer Control", "レイヤー制御"),
+    ("ec.control.point", "Point Control", "ポイント制御"),
+    ("ec.control.point3d", "3D Point Control", "3D ポイント制御"),
+    ("ec.control.slider", "Slider Control", "スライダー制御"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "ベジェワープ"),
+    ("ec.distort.bulge", "Bulge", "バルジ"),
+    ("ec.distort.ccbender", "Flexible Bend", "柔軟ベンド"),
+    ("ec.distort.ccbendit", "Two-Point Bend", "2点ベンド"),
+    ("ec.distort.ccblobbylize", "Organic Displacement", "有機変位"),
+    ("ec.distort.ccflomotion", "Dual Lens Warp", "ダブルレンズ変形"),
+    ("ec.distort.ccgriddler", "Tile Grid", "タイルグリッド"),
+    ("ec.distort.cclens", "Lens Distortion", "レンズ歪み"),
+    ("ec.distort.ccpageturn", "Page Curl", "ページカール"),
+    ("ec.distort.ccpowerpin", "Perspective Pin", "遠近ピン"),
+    ("ec.distort.ccripplepulse", "Pulsed Ripple", "パルス波紋"),
+    ("ec.distort.ccslant", "Slant", "傾斜"),
+    ("ec.distort.ccsmear", "Directional Smear", "方向性にじみ"),
+    ("ec.distort.ccsplit", "Split Warp", "分割変形"),
+    ("ec.distort.ccsplit2", "Dual Split Warp", "二重分割変形"),
+    ("ec.distort.cctiler", "Scaled Tiles", "スケールタイル"),
+    ("ec.distort.cornerpin", "Corner Pin", "コーナーピン"),
+    ("ec.distort.displacementmap", "Displacement Map", "ディスプレイスメントマップ"),
+    ("ec.distort.liquify", "Liquify", "ゆがみ"),
+    ("ec.distort.magnify", "Magnify", "ズーム"),
+    ("ec.distort.meshwarp", "Mesh Warp", "メッシュワープ"),
+    ("ec.distort.mirror", "Mirror", "ミラー"),
+    ("ec.distort.offset", "Offset", "オフセット"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "レンズ補正"),
+    ("ec.distort.polar", "Polar Coordinates", "極座標"),
+    ("ec.distort.reshape", "Reshape", "リシェープ"),
+    ("ec.distort.ripple", "Ripple", "波紋"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "ローリングシャッターの修復"),
+    ("ec.distort.smear", "Smear", "にじみ"),
+    ("ec.distort.spherize", "Spherize", "球面"),
+    ("ec.distort.transform", "Transform", "トランスフォーム"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "タービュレントディスプレイス"),
+    ("ec.distort.twirl", "Twirl", "回転"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "Twirl (Legacy)"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "アップスケール（詳細を保持）"),
+    ("ec.distort.warp", "Warp", "ワープ"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "ワープスタビライザー"),
+    ("ec.distort.wavewarp", "Wave Warp", "波形ワープ"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "稲妻(高度)"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "オーディオスペクトラム"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "オーディオウェーブフォーム"),
+    ("ec.generate.beam", "Beam", "レーザー"),
+    ("ec.generate.ccgluegun", "Paint Beads", "絵の具の粒"),
+    ("ec.generate.cclightburst", "Radial Light Burst", "放射状の光"),
+    ("ec.generate.cclightrays", "Light Rays", "光線"),
+    ("ec.generate.cclightsweep", "Light Sweep", "光のスイープ"),
+    ("ec.generate.ccthreads", "Woven Threads", "織り糸"),
+    ("ec.generate.cellpattern", "Cell Pattern", "セルパターン"),
+    ("ec.generate.checkerboard", "Checkerboard", "チェッカーボード"),
+    ("ec.generate.circle", "Circle", "円"),
+    ("ec.generate.ellipse", "Ellipse", "楕円"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "スポイト塗り"),
+    ("ec.generate.fill", "Fill", "塗り"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "4色グラデーション"),
+    ("ec.generate.fractal", "Fractal", "フラクタル"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "グラデーション"),
+    ("ec.generate.grid", "Grid", "グリッド"),
+    ("ec.generate.lensflare", "Lens Flare", "レンズフレア"),
+    ("ec.generate.paintbucket", "Paint Bucket", "塗りつぶし"),
+    ("ec.generate.radiowaves", "Radio Waves", "電波"),
+    ("ec.generate.scribble", "Scribble", "落書き"),
+    ("ec.generate.stroke", "Stroke", "線"),
+    ("ec.generate.vegas", "Vegas", "ベガス"),
+    ("ec.generate.writeon", "Write-on", "ブラシアニメーション"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "Advanced Spill Suppressor"),
+    ("ec.key.ccsimplewireremoval", "Line Removal", "ライン除去"),
+    ("ec.key.colordifference", "Color Difference Key", "カラー差キー"),
     ("ec.key.colorkey", "Color Key", "カラーキー"),
+    ("ec.key.colorrange", "Color Range", "色範囲"),
+    ("ec.key.differencematte", "Difference Matte", "異なるマット"),
+    ("ec.key.extract", "Extract", "抽出"),
+    ("ec.key.innerouter", "Inner/Outer Key", "インナー／アウターキー"),
+    ("ec.key.keycleaner", "Key Cleaner", "Key Cleaner"),
+    ("ec.key.linearcolor", "Linear Color Key", "リニアカラーキー"),
     ("ec.key.luma", "Luma Key", "ルミナンスキー"),
     ("ec.key.spill", "Spill Suppressor", "スピルサプレッション"),
-    ("ec.obsolete.basic3d", "Basic 3D", "基本 3D"),
+    ("ec.keying.keylight", "Screen Color Key", "スクリーンカラーキー"),
+    ("ec.matte.mattechoker", "Matte Choker", "マットチョーク"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "ハードマットを調整"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "ソフトマットを調整"),
+    ("ec.matte.simplechoker", "Simple Choker", "チョーク"),
+    ("ec.noise.addgrain", "Add Grain", "グレイン（追加）"),
+    ("ec.noise.curlnoise", "Curl Noise", "カールノイズ"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "ダスト&スクラッチ"),
+    ("ec.noise.fractal", "Fractal Noise", "フラクタルノイズ"),
+    ("ec.noise.matchgrain", "Match Grain", "グレイン（マッチ）"),
+    ("ec.noise.median", "Median", "ミディアン"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "ミディアン（レガシー）"),
+    ("ec.noise.noise", "Noise", "ノイズ"),
+    ("ec.noise.noisealpha", "Noise Alpha", "ノイズアルファ"),
+    ("ec.noise.noisehls", "Noise HLS", "ノイズHLS"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "ノイズHLSオート"),
+    ("ec.noise.removegrain", "Remove Grain", "グレイン（除去）"),
+    ("ec.noise.turbulent", "Turbulent Noise", "タービュレントノイズ"),
+    ("ec.obsolete.basic3d", "Basic 3D", "基本3D"),
     ("ec.obsolete.basictext", "Basic Text", "基本テキスト"),
     ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "ブラー（ガウス）（レガシー）"),
     ("ec.obsolete.lightning", "Lightning", "稲妻"),
+    ("ec.obsolete.mochashape", "Tracked Shape Matte", "トラッキングシェイプマット"),
     ("ec.obsolete.pathtext", "Path Text", "パステキスト"),
+    ("ec.perspective.3dglasses", "3D Glasses", "3Dメガネ"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "ベベルアルファ"),
+    ("ec.perspective.beveledges", "Bevel Edges", "ベベルエッジ"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "3D カメラトラッカー"),
+    ("ec.perspective.cccylinder", "Cylinder Wrap", "円筒ラップ"),
+    ("ec.perspective.ccenvironment", "Environment Map", "環境マップ"),
+    ("ec.perspective.ccsphere", "Sphere Wrap", "球面ラップ"),
+    ("ec.perspective.ccspotlight", "Surface Spotlight", "表面スポットライト"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "ドロップシャドウ"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "放射状シャドウ"),
+    ("ec.sim.carddance", "Card Dance", "カードダンス"),
+    ("ec.sim.caustics", "Caustics", "コースティック"),
+    ("ec.sim.ccballaction", "Ball Grid", "球体グリッド"),
+    ("ec.sim.ccbubbles", "Bubbles", "気泡"),
+    ("ec.sim.ccdrizzle", "Water Ripples", "水面の波紋"),
+    ("ec.sim.cchair", "Surface Fibers", "表面の繊維"),
+    ("ec.sim.ccmrmercury", "Liquid Particles", "液体パーティクル"),
+    ("ec.sim.ccparticlesystems2", "Particle Emitter 2D", "2Dパーティクルエミッター"),
+    ("ec.sim.ccparticleworld", "Particle Emitter 3D", "3Dパーティクルエミッター"),
+    ("ec.sim.ccpixelpolly", "Pixel Shatter", "ピクセル破砕"),
+    ("ec.sim.ccrainfall", "Rainfall", "雨"),
+    ("ec.sim.ccscatterize", "Pixel Scatter", "ピクセル散乱"),
+    ("ec.sim.ccsnowfall", "Snowfall", "雪"),
+    ("ec.sim.ccstarburst", "Starfield", "星空"),
+    ("ec.sim.foam", "Foam", "泡"),
+    ("ec.sim.particleplayground", "Particle Playground", "パーティクルプレイグラウンド"),
+    ("ec.sim.shatter", "Shatter", "シャター"),
+    ("ec.sim.waveworld", "Wave World", "ウェーブワールド"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "ブラシストローク"),
+    ("ec.stylize.cartoon", "Cartoon", "カートゥーン"),
+    ("ec.stylize.ccblockload", "Block Reveal", "ブロック表示"),
+    ("ec.stylize.ccburnfilm", "Film Burn", "フィルム焼け"),
+    ("ec.stylize.ccglass", "Glass Relief", "ガラスレリーフ"),
+    ("ec.stylize.cchextile", "Hexagonal Tiles", "六角形タイル"),
+    ("ec.stylize.cckaleida", "Kaleidoscope", "万華鏡"),
+    ("ec.stylize.ccmrsmoothie", "Palette Map", "パレットマップ"),
+    ("ec.stylize.ccplastic", "Plastic Shading", "プラスチックシェーディング"),
+    ("ec.stylize.ccrepetile", "Edge Tile Repeat", "エッジタイル反復"),
+    ("ec.stylize.ccthreshold", "Channel Threshold", "チャンネルしきい値"),
+    ("ec.stylize.ccthresholdrgb", "RGB Threshold", "RGBしきい値"),
+    ("ec.stylize.ccvignette", "Vignette", "ビネット"),
+    ("ec.stylize.coloremboss", "Color Emboss", "カラーエンボス"),
+    ("ec.stylize.emboss", "Emboss", "エンボス"),
+    ("ec.stylize.findedges", "Find Edges", "輪郭検出"),
+    ("ec.stylize.glow", "Glow", "グロー"),
+    ("ec.stylize.mosaic", "Mosaic", "モザイク"),
+    ("ec.stylize.motiontile", "Motion Tile", "モーションタイル"),
+    ("ec.stylize.posterize", "Posterize", "ポスタリゼーション"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "ラフエッジ"),
+    ("ec.stylize.scatter", "Scatter", "拡散"),
+    ("ec.stylize.strobe", "Strobe Light", "ストロボ"),
+    ("ec.stylize.texturize", "Texturize", "テクスチャ"),
+    ("ec.stylize.threshold", "Threshold", "しきい値"),
+    ("ec.text.numbers", "Numbers", "番号"),
+    ("ec.text.timecode", "Timecode", "タイムコード"),
+    ("ec.time.ccforcemotionblur", "Temporal Motion Blur", "時間方向モーションブラー"),
+    ("ec.time.ccwidetime", "Temporal Blend", "時間ブレンド"),
+    ("ec.time.echo", "Echo", "エコー"),
     ("ec.time.pixelmotionblur", "Pixel Motion Blur", "ピクセルモーションブラー"),
+    ("ec.time.posterizetime", "Posterize Time", "ポスタリゼーション時間"),
+    ("ec.time.timedifference", "Time Difference", "時間差"),
+    ("ec.time.timedisplacement", "Time Displacement", "時間置き換え"),
+    ("ec.time.timewarp", "Timewarp", "タイムワープ"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "ブロックディゾルブ"),
+    ("ec.transition.cardwipe", "Card Wipe", "カードワイプ"),
+    ("ec.transition.ccglasswipe", "Glass Wipe", "ガラスワイプ"),
+    ("ec.transition.ccgridwipe", "Grid Wipe", "グリッドワイプ"),
+    ("ec.transition.ccimagewipe", "Luminance Image Wipe", "輝度画像ワイプ"),
+    ("ec.transition.ccjaws", "Serrated Wipe", "鋸歯状ワイプ"),
+    ("ec.transition.cclightwipe", "Light Wipe", "ライトワイプ"),
+    ("ec.transition.cclinesweep", "Line Sweep", "ラインスイープ"),
+    ("ec.transition.ccradialscalewipe", "Radial Scale Wipe", "放射状スケールワイプ"),
+    ("ec.transition.ccscalewipe", "Scale Wipe", "スケールワイプ"),
+    ("ec.transition.cctwister", "Twist Wipe", "ツイストワイプ"),
+    ("ec.transition.ccwarpomatic", "Warp Dissolve", "変形ディゾルブ"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "グラデーションワイプ"),
+    ("ec.transition.iriswipe", "Iris Wipe", "アイリスワイプ"),
+    ("ec.transition.linearwipe", "Linear Wipe", "リニアワイプ"),
+    ("ec.transition.radialwipe", "Radial Wipe", "放射状ワイプ"),
+    ("ec.transition.venetian", "Venetian Blinds", "ブラインド"),
+    ("ec.utility.applylut", "Apply Color LUT", "カラー LUT を適用"),
+    ("ec.utility.ccoverbrights", "Out-of-Range Display", "範囲外表示"),
+    ("ec.utility.cineon", "Cineon Converter", "Cineon コンバーター"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "カラープロファイルコンバーター"),
+    ("ec.utility.growbounds", "Grow Bounds", "範囲拡張"),
+    ("ec.utility.hdrcompander", "HDR Compander", "HDR コンパンダー"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "HDR ハイライト圧縮"),
+    ("ec.vr.blur", "VR Blur", "VR ブラー"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "VR 色収差"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "VR カラーグラデーション"),
+    ("ec.vr.converter", "VR Converter", "VR コンバーター"),
+    ("ec.vr.denoise", "VR De-Noise", "VR ノイズ除去"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "VR デジタルグリッチ"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "VR フラクタルノイズ"),
+    ("ec.vr.glow", "VR Glow", "VR グロー"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "VR 平面として投影"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "VR 回転（球）"),
+    ("ec.vr.sharpen", "VR Sharpen", "VR シャープ"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR 球体から平面"),
 ];
 
-/// Traditional Chinese (`zh-hant`) category labels, keyed by the registry's English category.
-const TRADITIONAL_CHINESE_CATEGORIES: &[(&str, &str)] = &[];
+/// The 21 category folder names in Traditional Chinese, written from the English source with the
+/// vocabulary Taiwan's creative software uses; the labels stay distinct so the Effect menu shows
+/// one folder per category.
+const TRADITIONAL_CHINESE_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "3D 通道"),
+    ("Audio", "音訊"),
+    ("Blur & Sharpen", "模糊與銳利化"),
+    ("Channel", "通道"),
+    ("Color Correction", "色彩校正"),
+    ("Distort", "扭曲"),
+    ("Expression Controls", "表示式控制"),
+    ("Generate", "產生"),
+    ("Immersive Video", "沉浸式影片"),
+    ("Keying", "去背"),
+    ("Matte", "遮罩"),
+    ("Noise & Grain", "雜訊與顆粒"),
+    ("Obsolete", "過時"),
+    ("Paint", "繪畫"),
+    ("Perspective", "透視"),
+    ("Simulation", "模擬"),
+    ("Stylize", "風格化"),
+    ("Text", "文字"),
+    ("Time", "時間"),
+    ("Transition", "轉場"),
+    ("Utility", "公用程式"),
+];
 
 /// Japanese (`ja`) category labels, keyed by the registry's English category.
 const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
@@ -475,12 +1165,13 @@ const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
     ("Color Correction", "カラー補正"),
     ("Distort", "ディストーション"),
     ("Expression Controls", "式制御"),
+    ("Generate", "描画"),
     ("Immersive Video", "イマーシブビデオ"),
     ("Keying", "キーイング"),
     ("Matte", "マット"),
     ("Noise & Grain", "ノイズ＆グレイン"),
     ("Obsolete", "旧バージョン"),
-    ("Paint", "描画"),
+    ("Paint", "ペイント"),
     ("Perspective", "遠近"),
     ("Simulation", "シミュレーション"),
     ("Stylize", "スタイライズ"),
@@ -488,6 +1179,687 @@ const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
     ("Time", "時間"),
     ("Transition", "トランジション"),
     ("Utility", "ユーティリティ"),
+];
+
+/// Georgian (`ka`): one row per effect, ids from [`SIMPLIFIED_CHINESE`]. Written from the meaning
+/// of the English names, with the terms the Georgian menus and panels use (FilmCraft's Georgian
+/// for the effects the two apps share). The brand names (`Cryptomatte`, `EXtractoR`, `IDentifier`,
+/// `Key Light`, `Unmult`) stay in English; `VR` and `OCIO` keep their prefix. The renamed effects
+/// are translated from their new descriptive names.
+const GEORGIAN: &[Row] = &[
+    ("ec.3d.channelextract", "3D Channel Extract", "3D არხის ამოღება"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "სიღრმის მატი"),
+    ("ec.3d.depthoffield", "Depth of Field", "ველის სიღრმე"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "3D ნისლი"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "ID მატი"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D Layer Instance"),
+    ("ec.audio.backwards", "Backwards", "უკუღმა"),
+    ("ec.audio.basstreble", "Bass & Treble", "ბასი და ტრებლი"),
+    ("ec.audio.compressor", "Compressor", "კომპრესორი"),
+    ("ec.audio.delay", "Delay", "დაყოვნება"),
+    ("ec.audio.distortion", "Distortion", "დამახინჯება"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "ფლენჯერი და ქორუსი"),
+    ("ec.audio.gate", "Gate", "გეიტი"),
+    ("ec.audio.highlowpass", "High-Low Pass", "მაღალი/დაბალი სიხშირეების ფილტრი"),
+    ("ec.audio.modulator", "Modulator", "მოდულატორი"),
+    ("ec.audio.parametriceq", "Parametric EQ", "პარამეტრული ეკვალაიზერი"),
+    ("ec.audio.reverb", "Reverb", "რევერბი"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "სტერეომიქშერი"),
+    ("ec.audio.tone", "Tone", "ტონი"),
+    ("ec.blur.bilateral", "Bilateral Blur", "ბილატერალური გაბუნდოვნება"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "კამერის ობიექტივის გაბუნდოვნება"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "კამერის რყევით გაბუნდოვნების მოცილება"),
+    ("ec.blur.cccross", "Cross Blur", "ჯვარედინი დაბინდვა"),
+    ("ec.blur.ccradial", "Variable Radial Blur", "ცვლადი რადიალური დაბინდვა"),
+    ("ec.blur.ccradialfast", "Fast Radial Blur", "სწრაფი რადიალური დაბინდვა"),
+    ("ec.blur.ccvector", "Vector Blur", "ვექტორული დაბინდვა"),
+    ("ec.blur.channel", "Channel Blur", "არხის გაბუნდოვნება"),
+    ("ec.blur.compound", "Compound Blur", "შედგენილი გაბუნდოვნება"),
+    ("ec.blur.directional", "Directional Blur", "მიმართული გაბუნდოვნება"),
+    ("ec.blur.fastbox", "Fast Box Blur", "სწრაფი ბლოკური გაბუნდოვნება"),
+    ("ec.blur.gaussian", "Gaussian Blur", "გაუსის გაბუნდოვნება"),
+    ("ec.blur.radial", "Radial Blur", "რადიალური გაბუნდოვნება"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "ნახევარკადრული ციმციმის შემცირება"),
+    ("ec.blur.sharpen", "Sharpen", "სიმკვეთრე"),
+    ("ec.blur.smart", "Smart Blur", "ჭკვიანი გაბუნდოვნება"),
+    ("ec.blur.unsharp", "Unsharp Mask", "არამკვეთრი ნიღაბი"),
+    ("ec.channel.arithmetic", "Arithmetic", "არითმეტიკა"),
+    ("ec.channel.blend", "Blend", "შერევა"),
+    ("ec.channel.calculations", "Calculations", "გამოთვლები"),
+    ("ec.channel.cccomposite", "Source Composite", "წყაროს კომპოზიცია"),
+    ("ec.channel.combiner", "Channel Combiner", "არხების გამაერთიანებელი"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "შედგენილი არითმეტიკა"),
+    ("ec.channel.invert", "Invert", "ინვერსია"),
+    ("ec.channel.minimax", "Minimax", "მინიმაქსი"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "ფერადი მატინგის მოცილება"),
+    ("ec.channel.setchannels", "Set Channels", "არხების დაყენება"),
+    ("ec.channel.setmatte", "Set Matte", "მატის დაყენება"),
+    ("ec.channel.shiftchannels", "Shift Channels", "არხების გადანაცვლება"),
+    ("ec.channel.solidcomposite", "Solid Composite", "სოლიდთან კომპოზიტი"),
+    ("ec.color.autocolor", "Auto Color", "ავტოფერი"),
+    ("ec.color.autocontrast", "Auto Contrast", "ავტოკონტრასტი"),
+    ("ec.color.autolevels", "Auto Levels", "ავტოდონეები"),
+    ("ec.color.blackwhite", "Black & White", "შავ-თეთრი"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "სიკაშკაშე და კონტრასტი"),
+    ("ec.color.broadcast", "Broadcast Colors", "სამაუწყებლო ფერები"),
+    ("ec.color.cccolorneutralizer", "Color Neutralizer", "ფერის ნეიტრალიზაცია"),
+    ("ec.color.cccoloroffset", "Channel Offset", "არხების წანაცვლება"),
+    ("ec.color.cckernel", "Convolution Kernel", "კონვოლუციის ბირთვი"),
+    ("ec.color.cctoner", "Multi-Tone Tint", "მრავალტონიანი შეფერილობა"),
+    ("ec.color.changecolor", "Change Color", "ფერის შეცვლა"),
+    ("ec.color.changetocolor", "Change to Color", "ფერად შეცვლა"),
+    ("ec.color.channelmixer", "Channel Mixer", "არხების მიქშერი"),
+    ("ec.color.colorama", "Colorama", "კოლორამა"),
+    ("ec.color.colorbalance", "Color Balance", "ფერთა ბალანსი"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "ფერთა ბალანსი (HLS)"),
+    ("ec.color.colorlink", "Color Link", "ფერის ბმა"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "ფერის სტაბილიზატორი"),
+    ("ec.color.curves", "Curves", "მრუდები"),
+    ("ec.color.equalize", "Equalize", "გათანაბრება"),
+    ("ec.color.exposure", "Exposure", "ექსპოზიცია"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "გამა/საფეხური/გაძლიერება"),
+    ("ec.color.huesaturation", "Hue/Saturation", "ფერის ტონი/გაჯერება"),
+    ("ec.color.leavecolor", "Leave Color", "ფერის დატოვება"),
+    ("ec.color.levels", "Levels", "დონეები"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "დონეები (ცალკეული მართვა)"),
+    ("ec.color.lumetri", "Color Grading", "ფერთა კორექცია"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL გარდაქმნა"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO ფერთა სივრცის გარდაქმნა"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO ეკრანის გარდაქმნა"),
+    ("ec.color.ociofile", "OCIO File Transform", "OCIO ფაილის გარდაქმნა"),
+    ("ec.color.ociolook", "OCIO Look Transform", "OCIO ვიზუალური სტილის გარდაქმნა"),
+    ("ec.color.photofilter", "Photo Filter", "ფოტოფილტრი"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS ნებისმიერი რუკა"),
+    ("ec.color.selectivecolor", "Selective Color", "შერჩევითი ფერი"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "ჩრდილები/ღია ტონები"),
+    ("ec.color.tint", "Tint", "ტონირება"),
+    ("ec.color.tritone", "Tritone", "სამტონიანი"),
+    ("ec.color.vibrance", "Vibrance", "სიხალასე"),
+    ("ec.color.videolimiter", "Video Limiter", "ვიდეოლიმიტერი"),
+    ("ec.control.angle", "Angle Control", "კუთხის მართვა"),
+    ("ec.control.checkbox", "Checkbox Control", "მოსანიშნი ველის მართვა"),
+    ("ec.control.color", "Color Control", "ფერის მართვა"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "ჩამოსაშლელი მენიუს მართვა"),
+    ("ec.control.layer", "Layer Control", "შრის მართვა"),
+    ("ec.control.point", "Point Control", "წერტილის მართვა"),
+    ("ec.control.point3d", "3D Point Control", "3D წერტილის მართვა"),
+    ("ec.control.slider", "Slider Control", "სლაიდერის მართვა"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "სტერეო 3D მართვა"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "ბეზიეს დეფორმაცია"),
+    ("ec.distort.bulge", "Bulge", "გამობერილობა"),
+    ("ec.distort.ccbender", "Flexible Bend", "მოქნილი მოღუნვა"),
+    ("ec.distort.ccbendit", "Two-Point Bend", "ორწერტილიანი მოღუნვა"),
+    ("ec.distort.ccblobbylize", "Organic Displacement", "ორგანული გადაადგილება"),
+    ("ec.distort.ccflomotion", "Dual Lens Warp", "ორმაგი ლინზით დეფორმაცია"),
+    ("ec.distort.ccgriddler", "Tile Grid", "ფილების ბადე"),
+    ("ec.distort.cclens", "Lens Distortion", "ლინზის დამახინჯება"),
+    ("ec.distort.ccpageturn", "Page Curl", "გვერდის დახვევა"),
+    ("ec.distort.ccpowerpin", "Perspective Pin", "პერსპექტიული დამაგრება"),
+    ("ec.distort.ccripplepulse", "Pulsed Ripple", "პულსური ტალღა"),
+    ("ec.distort.ccslant", "Slant", "დახრა"),
+    ("ec.distort.ccsmear", "Directional Smear", "მიმართულებითი გაწელვა"),
+    ("ec.distort.ccsplit", "Split Warp", "გაყოფილი დეფორმაცია"),
+    ("ec.distort.ccsplit2", "Dual Split Warp", "ორმაგად გაყოფილი დეფორმაცია"),
+    ("ec.distort.cctiler", "Scaled Tiles", "მასშტაბირებული ფილები"),
+    ("ec.distort.cornerpin", "Corner Pin", "კუთხეების მიმაგრება"),
+    ("ec.distort.displacementmap", "Displacement Map", "წანაცვლების რუკა"),
+    ("ec.distort.liquify", "Liquify", "გათხევადება"),
+    ("ec.distort.magnify", "Magnify", "გადიდება"),
+    ("ec.distort.meshwarp", "Mesh Warp", "ბადისებრი დეფორმაცია"),
+    ("ec.distort.mirror", "Mirror", "სარკე"),
+    ("ec.distort.offset", "Offset", "წანაცვლება"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "ოპტიკის კომპენსაცია"),
+    ("ec.distort.polar", "Polar Coordinates", "პოლარული კოორდინატები"),
+    ("ec.distort.puppet", "Puppet", "მარიონეტი"),
+    ("ec.distort.reshape", "Reshape", "ფორმის შეცვლა"),
+    ("ec.distort.ripple", "Ripple", "ტალღა"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "მცოცავი ჩამკეტის გასწორება"),
+    ("ec.distort.smear", "Smear", "გადღაბნა"),
+    ("ec.distort.spherize", "Spherize", "სფერიზება"),
+    ("ec.distort.transform", "Transform", "გარდაქმნა"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "ტურბულენტური წანაცვლება"),
+    ("ec.distort.twirl", "Twirl", "გრიგალი"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "გრიგალი (მოძველებული)"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "გადიდება დეტალების შენარჩუნებით"),
+    ("ec.distort.warp", "Warp", "დეფორმაცია"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "დეფორმაციის სტაბილიზატორი"),
+    ("ec.distort.wavewarp", "Wave Warp", "ტალღური დეფორმაცია"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "გაფართოებული ელვა"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "აუდიოს სპექტრი"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "აუდიოს ტალღის ფორმა"),
+    ("ec.generate.beam", "Beam", "სხივი"),
+    ("ec.generate.ccgluegun", "Paint Beads", "საღებავის მარცვლები"),
+    ("ec.generate.cclightburst", "Radial Light Burst", "რადიალური ნათება"),
+    ("ec.generate.cclightrays", "Light Rays", "სინათლის სხივები"),
+    ("ec.generate.cclightsweep", "Light Sweep", "სინათლის გავლა"),
+    ("ec.generate.ccthreads", "Woven Threads", "ნაქსოვი ძაფები"),
+    ("ec.generate.cellpattern", "Cell Pattern", "უჯრედების პატერნი"),
+    ("ec.generate.checkerboard", "Checkerboard", "ჭადრაკის დაფა"),
+    ("ec.generate.circle", "Circle", "წრე"),
+    ("ec.generate.ellipse", "Ellipse", "ელიფსი"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "პიპეტით შევსება"),
+    ("ec.generate.fill", "Fill", "შევსება"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "4-ფერიანი გრადიენტი"),
+    ("ec.generate.fractal", "Fractal", "ფრაქტალი"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "გრადიენტული გადასვლა"),
+    ("ec.generate.grid", "Grid", "ბადე"),
+    ("ec.generate.lensflare", "Lens Flare", "ობიექტივის ანარეკლი"),
+    ("ec.generate.paintbucket", "Paint Bucket", "საღებავის ვედრო"),
+    ("ec.generate.radiowaves", "Radio Waves", "რადიოტალღები"),
+    ("ec.generate.scribble", "Scribble", "ჯღაბნა"),
+    ("ec.generate.stroke", "Stroke", "კონტური"),
+    ("ec.generate.vegas", "Vegas", "ვეგასი"),
+    ("ec.generate.writeon", "Write-on", "თანდათანობითი წერა"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "ფერის გადაღვრის გაფართოებული ჩამხშობი"),
+    ("ec.key.ccsimplewireremoval", "Line Removal", "ხაზის მოცილება"),
+    ("ec.key.colordifference", "Color Difference Key", "ფერთა სხვაობის გასაღები"),
+    ("ec.key.colorkey", "Color Key", "ფერის გასაღები"),
+    ("ec.key.colorrange", "Color Range", "ფერების დიაპაზონი"),
+    ("ec.key.differencematte", "Difference Matte", "სხვაობის მატი"),
+    ("ec.key.extract", "Extract", "ამოღება"),
+    ("ec.key.innerouter", "Inner/Outer Key", "შიდა/გარე გასაღები"),
+    ("ec.key.keycleaner", "Key Cleaner", "გასაღების გამწმენდი"),
+    ("ec.key.linearcolor", "Linear Color Key", "წრფივი ფერის გასაღები"),
+    ("ec.key.luma", "Luma Key", "სიკაშკაშის გასაღები"),
+    ("ec.key.screen", "Screen Key", "ეკრანის გასაღები"),
+    ("ec.key.spill", "Spill Suppressor", "ფერის გადაღვრის ჩამხშობი"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.keying.keylight", "Screen Color Key", "ეკრანის ფერის გამოყოფა"),
+    ("ec.matte.mattechoker", "Matte Choker", "მატის შემკუმშველი"),
+    ("ec.matte.objectmatte", "Object Matte", "ობიექტის მატი"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "მკვეთრი მატის დახვეწა"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "რბილი მატის დახვეწა"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "როტო-ფუნჯი და კიდის დახვეწა"),
+    ("ec.matte.simplechoker", "Simple Choker", "მარტივი შემკუმშველი"),
+    ("ec.noise.addgrain", "Add Grain", "მარცვლოვნების დამატება"),
+    ("ec.noise.curlnoise", "Curl Noise", "გრიგალური ხმაური"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "მტვერი და ნაკაწრები"),
+    ("ec.noise.fractal", "Fractal Noise", "ფრაქტალური ხმაური"),
+    ("ec.noise.matchgrain", "Match Grain", "მარცვლოვნების მისადაგება"),
+    ("ec.noise.median", "Median", "მედიანა"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "მედიანა (მოძველებული)"),
+    ("ec.noise.noise", "Noise", "ხმაური"),
+    ("ec.noise.noisealpha", "Noise Alpha", "ალფა-ხმაური"),
+    ("ec.noise.noisehls", "Noise HLS", "HLS ხმაური"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "HLS ხმაური (ავტომატური)"),
+    ("ec.noise.removegrain", "Remove Grain", "მარცვლოვნების მოცილება"),
+    ("ec.noise.turbulent", "Turbulent Noise", "ტურბულენტური ხმაური"),
+    ("ec.obsolete.basic3d", "Basic 3D", "საბაზო 3D"),
+    ("ec.obsolete.basictext", "Basic Text", "საბაზო ტექსტი"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "გაუსის გაბუნდოვნება (მოძველებული)"),
+    ("ec.obsolete.lightning", "Lightning", "ელვა"),
+    ("ec.obsolete.mochashape", "Tracked Shape Matte", "თვალთვალის ფორმის ნიღაბი"),
+    ("ec.obsolete.pathtext", "Path Text", "ტექსტი ტრაექტორიაზე"),
+    ("ec.paint.paint", "Paint", "ხატვა"),
+    ("ec.perspective.3dglasses", "3D Glasses", "3D სათვალე"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "ალფას ფასკა"),
+    ("ec.perspective.beveledges", "Bevel Edges", "კიდეების ფასკა"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "3D კამერის ტრეკერი"),
+    ("ec.perspective.cccylinder", "Cylinder Wrap", "ცილინდრზე შემოხვევა"),
+    ("ec.perspective.ccenvironment", "Environment Map", "გარემოს რუკა"),
+    ("ec.perspective.ccsphere", "Sphere Wrap", "სფეროზე შემოხვევა"),
+    ("ec.perspective.ccspotlight", "Surface Spotlight", "ზედაპირის პროჟექტორი"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "ჩრდილი"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "რადიალური ჩრდილი"),
+    ("ec.sim.carddance", "Card Dance", "მოცეკვავე ბარათები"),
+    ("ec.sim.caustics", "Caustics", "კაუსტიკა"),
+    ("ec.sim.ccballaction", "Ball Grid", "ბურთულების ბადე"),
+    ("ec.sim.ccbubbles", "Bubbles", "ბუშტები"),
+    ("ec.sim.ccdrizzle", "Water Ripples", "წყლის ტალღები"),
+    ("ec.sim.cchair", "Surface Fibers", "ზედაპირის ბოჭკოები"),
+    ("ec.sim.ccmrmercury", "Liquid Particles", "თხევადი ნაწილაკები"),
+    ("ec.sim.ccparticlesystems2", "Particle Emitter 2D", "ნაწილაკების 2D წყარო"),
+    ("ec.sim.ccparticleworld", "Particle Emitter 3D", "ნაწილაკების 3D წყარო"),
+    ("ec.sim.ccpixelpolly", "Pixel Shatter", "პიქსელების დაშლა"),
+    ("ec.sim.ccrainfall", "Rainfall", "წვიმა"),
+    ("ec.sim.ccscatterize", "Pixel Scatter", "პიქსელების გაფანტვა"),
+    ("ec.sim.ccsnowfall", "Snowfall", "თოვა"),
+    ("ec.sim.ccstarburst", "Starfield", "ვარსკვლავების ველი"),
+    ("ec.sim.foam", "Foam", "ქაფი"),
+    ("ec.sim.particleplayground", "Particle Playground", "ნაწილაკების სიმულაცია"),
+    ("ec.sim.shatter", "Shatter", "დამსხვრევა"),
+    ("ec.sim.waveworld", "Wave World", "ტალღების სამყარო"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "ფუნჯის შტრიხები"),
+    ("ec.stylize.cartoon", "Cartoon", "მულტფილმის სტილი"),
+    ("ec.stylize.ccblockload", "Block Reveal", "ბლოკებით გამოჩენა"),
+    ("ec.stylize.ccburnfilm", "Film Burn", "ფირის დაწვა"),
+    ("ec.stylize.ccglass", "Glass Relief", "მინის რელიეფი"),
+    ("ec.stylize.cchextile", "Hexagonal Tiles", "ექვსკუთხა ფილები"),
+    ("ec.stylize.cckaleida", "Kaleidoscope", "კალეიდოსკოპი"),
+    ("ec.stylize.ccmrsmoothie", "Palette Map", "პალიტრის რუკა"),
+    ("ec.stylize.ccplastic", "Plastic Shading", "პლასტმასის დაჩრდილვა"),
+    ("ec.stylize.ccrepetile", "Edge Tile Repeat", "კიდეების განმეორება"),
+    ("ec.stylize.ccthreshold", "Channel Threshold", "არხის ზღვარი"),
+    ("ec.stylize.ccthresholdrgb", "RGB Threshold", "RGB ზღვარი"),
+    ("ec.stylize.ccvignette", "Vignette", "ვინიეტირება"),
+    ("ec.stylize.coloremboss", "Color Emboss", "ფერადი რელიეფი"),
+    ("ec.stylize.emboss", "Emboss", "რელიეფი"),
+    ("ec.stylize.findedges", "Find Edges", "კიდეების პოვნა"),
+    ("ec.stylize.glow", "Glow", "ნათება"),
+    ("ec.stylize.mosaic", "Mosaic", "მოზაიკა"),
+    ("ec.stylize.motiontile", "Motion Tile", "მოძრავი ფილები"),
+    ("ec.stylize.posterize", "Posterize", "პოსტერიზაცია"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "კიდეების დაუხეშება"),
+    ("ec.stylize.scatter", "Scatter", "გაბნევა"),
+    ("ec.stylize.strobe", "Strobe Light", "სტრობოსკოპი"),
+    ("ec.stylize.texturize", "Texturize", "ტექსტურირება"),
+    ("ec.stylize.threshold", "Threshold", "ზღვარი"),
+    ("ec.text.numbers", "Numbers", "რიცხვები"),
+    ("ec.text.timecode", "Timecode", "თაიმკოდი"),
+    ("ec.time.ccforcemotionblur", "Temporal Motion Blur", "დროითი მოძრაობის დაბინდვა"),
+    ("ec.time.ccwidetime", "Temporal Blend", "დროითი შერევა"),
+    ("ec.time.echo", "Echo", "ექო"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "პიქსელების მოძრაობის გაბუნდოვნება"),
+    ("ec.time.posterizetime", "Posterize Time", "დროის პოსტერიზაცია"),
+    ("ec.time.timedifference", "Time Difference", "დროითი სხვაობა"),
+    ("ec.time.timedisplacement", "Time Displacement", "დროითი წანაცვლება"),
+    ("ec.time.timewarp", "Timewarp", "Timewarp"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "ბლოკური გადადნობა"),
+    ("ec.transition.cardwipe", "Card Wipe", "ბარათებით წმენდა"),
+    ("ec.transition.ccglasswipe", "Glass Wipe", "მინის გადასვლა"),
+    ("ec.transition.ccgridwipe", "Grid Wipe", "ბადის გადასვლა"),
+    ("ec.transition.ccimagewipe", "Luminance Image Wipe", "სიკაშკაშის გამოსახულებით გადასვლა"),
+    ("ec.transition.ccjaws", "Serrated Wipe", "დაკბილული გადასვლა"),
+    ("ec.transition.cclightwipe", "Light Wipe", "სინათლის გადასვლა"),
+    ("ec.transition.cclinesweep", "Line Sweep", "ხაზების გავლა"),
+    ("ec.transition.ccradialscalewipe", "Radial Scale Wipe", "რადიალური მასშტაბის გადასვლა"),
+    ("ec.transition.ccscalewipe", "Scale Wipe", "მასშტაბის გადასვლა"),
+    ("ec.transition.cctwister", "Twist Wipe", "მოგრეხილი გადასვლა"),
+    ("ec.transition.ccwarpomatic", "Warp Dissolve", "დეფორმაციით გადასვლა"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "გრადიენტული წმენდა"),
+    ("ec.transition.iriswipe", "Iris Wipe", "დიაფრაგმული წმენდა"),
+    ("ec.transition.linearwipe", "Linear Wipe", "წრფივი წმენდა"),
+    ("ec.transition.radialwipe", "Radial Wipe", "რადიალური წმენდა"),
+    ("ec.transition.venetian", "Venetian Blinds", "ჟალუზი"),
+    ("ec.utility.applylut", "Apply Color LUT", "ფერის LUT-ის გამოყენება"),
+    ("ec.utility.ccoverbrights", "Out-of-Range Display", "დიაპაზონის გარეთ ჩვენება"),
+    ("ec.utility.cineon", "Cineon Converter", "Cineon-ის გარდამქმნელი"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "ფერის პროფილის გარდამქმნელი"),
+    ("ec.utility.facemeasurements", "Face Measurements", "სახის გაზომვები"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "სახის ტრეკინგის წერტილები"),
+    ("ec.utility.growbounds", "Grow Bounds", "საზღვრების გაზრდა"),
+    ("ec.utility.hdrcompander", "HDR Compander", "HDR კომპანდერი"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "HDR ღია ტონების შეკუმშვა"),
+    ("ec.vr.blur", "VR Blur", "VR გაბუნდოვნება"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "VR ქრომატული აბერაციები"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "VR ფერადი გრადიენტები"),
+    ("ec.vr.converter", "VR Converter", "VR გარდამქმნელი"),
+    ("ec.vr.denoise", "VR De-Noise", "VR ხმაურის მოცილება"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "VR ციფრული ხარვეზი"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "VR ფრაქტალური ხმაური"),
+    ("ec.vr.glow", "VR Glow", "VR ნათება"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "VR სიბრტყიდან სფეროზე"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "VR სფეროს შემობრუნება"),
+    ("ec.vr.sharpen", "VR Sharpen", "VR სიმკვეთრე"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR სფეროდან სიბრტყეზე"),
+];
+
+/// Georgian (`ka`) category labels, keyed by the registry's English category.
+const GEORGIAN_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "3D არხი"),
+    ("Audio", "აუდიო"),
+    ("Blur & Sharpen", "გაბუნდოვნება და სიმკვეთრე"),
+    ("Channel", "არხი"),
+    ("Color Correction", "ფერის კორექცია"),
+    ("Distort", "დამახინჯება"),
+    ("Expression Controls", "ექსპრესიის მართვა"),
+    ("Generate", "გენერაცია"),
+    ("Immersive Video", "იმერსიული ვიდეო"),
+    ("Keying", "კეიინგი"),
+    ("Matte", "მატი"),
+    ("Noise & Grain", "ხმაური და მარცვლოვნება"),
+    ("Obsolete", "მოძველებული"),
+    ("Paint", "ხატვა"),
+    ("Perspective", "პერსპექტივა"),
+    ("Simulation", "სიმულაცია"),
+    ("Stylize", "სტილიზაცია"),
+    ("Text", "ტექსტი"),
+    ("Time", "დრო"),
+    ("Transition", "გადასვლა"),
+    ("Utility", "დამხმარე"),
+];
+
+/// French (`fr`): one row per effect, ids from [`SIMPLIFIED_CHINESE`]. Written from the meaning of the
+/// English names, with the terms the French menus use (calque, estampe for a matte, incrustation for
+/// keying). The brand names stay in English, `VR`, `OCIO`, `PS` and `HDR` keep their tag after the
+/// translated name.
+const FRENCH: &[Row] = &[
+    ("ec.3d.channelextract", "3D Channel Extract", "Extraction de canal 3D"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "Estampe de profondeur"),
+    ("ec.3d.depthoffield", "Depth of Field", "Profondeur de champ"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "Brouillard 3D"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "Estampe par ID"),
+    ("ec.audio.backwards", "Backwards", "À l’envers"),
+    ("ec.audio.basstreble", "Bass & Treble", "Graves et aigus"),
+    ("ec.audio.compressor", "Compressor", "Compresseur"),
+    ("ec.audio.delay", "Delay", "Retard"),
+    ("ec.audio.distortion", "Distortion", "Distorsion"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "Flanger et chorus"),
+    ("ec.audio.gate", "Gate", "Porte de bruit"),
+    ("ec.audio.highlowpass", "High-Low Pass", "Passe-haut/passe-bas"),
+    ("ec.audio.modulator", "Modulator", "Modulateur"),
+    ("ec.audio.parametriceq", "Parametric EQ", "Égaliseur paramétrique"),
+    ("ec.audio.reverb", "Reverb", "Réverbération"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "Mixeur stéréo"),
+    ("ec.audio.tone", "Tone", "Tonalité"),
+    ("ec.blur.bilateral", "Bilateral Blur", "Flou bilatéral"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "Flou de l’objectif de la caméra"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "Correction du flou de bougé de caméra"),
+    ("ec.blur.cccross", "Cross Blur", "Flou croisé"),
+    ("ec.blur.ccradial", "Variable Radial Blur", "Flou radial variable"),
+    ("ec.blur.ccradialfast", "Fast Radial Blur", "Flou radial rapide"),
+    ("ec.blur.ccvector", "Vector Blur", "Flou vectoriel"),
+    ("ec.blur.channel", "Channel Blur", "Flou de canal"),
+    ("ec.blur.compound", "Compound Blur", "Flou composé"),
+    ("ec.blur.directional", "Directional Blur", "Flou directionnel"),
+    ("ec.blur.fastbox", "Fast Box Blur", "Flou rectangulaire rapide"),
+    ("ec.blur.gaussian", "Gaussian Blur", "Flou gaussien"),
+    ("ec.blur.radial", "Radial Blur", "Flou radial"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "Réduction du scintillement d’entrelacement"),
+    ("ec.blur.sharpen", "Sharpen", "Accentuation"),
+    ("ec.blur.smart", "Smart Blur", "Flou intelligent"),
+    ("ec.blur.unsharp", "Unsharp Mask", "Masque flou"),
+    ("ec.channel.arithmetic", "Arithmetic", "Arithmétique"),
+    ("ec.channel.blend", "Blend", "Fusion"),
+    ("ec.channel.calculations", "Calculations", "Calculs"),
+    ("ec.channel.cccomposite", "Source Composite", "Composition de la source"),
+    ("ec.channel.combiner", "Channel Combiner", "Combinateur de canaux"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "Arithmétique composée"),
+    ("ec.channel.invert", "Invert", "Inversion"),
+    ("ec.channel.minimax", "Minimax", "Minimax"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "Suppression du fond de couleur"),
+    ("ec.channel.setchannels", "Set Channels", "Définir les canaux"),
+    ("ec.channel.setmatte", "Set Matte", "Définir l’estampe"),
+    ("ec.channel.shiftchannels", "Shift Channels", "Décaler les canaux"),
+    ("ec.channel.solidcomposite", "Solid Composite", "Composite avec solide"),
+    ("ec.color.autocolor", "Auto Color", "Couleur automatique"),
+    ("ec.color.autocontrast", "Auto Contrast", "Contraste automatique"),
+    ("ec.color.autolevels", "Auto Levels", "Niveaux automatiques"),
+    ("ec.color.blackwhite", "Black & White", "Noir et blanc"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "Luminosité et contraste"),
+    ("ec.color.broadcast", "Broadcast Colors", "Couleurs de diffusion"),
+    ("ec.color.cccolorneutralizer", "Color Neutralizer", "Neutralisation des couleurs"),
+    ("ec.color.cccoloroffset", "Channel Offset", "Décalage des canaux"),
+    ("ec.color.cckernel", "Convolution Kernel", "Noyau de convolution"),
+    ("ec.color.cctoner", "Multi-Tone Tint", "Teinte multiton"),
+    ("ec.color.changecolor", "Change Color", "Changer la couleur"),
+    ("ec.color.changetocolor", "Change to Color", "Changer en couleur"),
+    ("ec.color.channelmixer", "Channel Mixer", "Mélangeur de canaux"),
+    ("ec.color.colorama", "Colorama", "Colorama"),
+    ("ec.color.colorbalance", "Color Balance", "Balance des couleurs"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "Balance des couleurs (TLS)"),
+    ("ec.color.colorlink", "Color Link", "Lien de couleur"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "Stabilisateur de couleur"),
+    ("ec.color.curves", "Curves", "Courbes"),
+    ("ec.color.equalize", "Equalize", "Égalisation"),
+    ("ec.color.exposure", "Exposure", "Exposition"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "Gamma/Piédestal/Gain"),
+    ("ec.color.huesaturation", "Hue/Saturation", "Teinte/Saturation"),
+    ("ec.color.leavecolor", "Leave Color", "Conserver la couleur"),
+    ("ec.color.levels", "Levels", "Niveaux"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "Niveaux (contrôles individuels)"),
+    ("ec.color.lumetri", "Color Grading", "Étalonnage des couleurs"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "Transformation CDL OCIO"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "Transformation d’espace colorimétrique OCIO"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "Transformation d’affichage OCIO"),
+    ("ec.color.ociofile", "OCIO File Transform", "Transformation de fichier OCIO"),
+    ("ec.color.ociolook", "OCIO Look Transform", "Transformation de look OCIO"),
+    ("ec.color.photofilter", "Photo Filter", "Filtre photo"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "Carte arbitraire PS"),
+    ("ec.color.selectivecolor", "Selective Color", "Couleur sélective"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "Ombres/Hautes lumières"),
+    ("ec.color.tint", "Tint", "Coloration"),
+    ("ec.color.tritone", "Tritone", "Tritone"),
+    ("ec.color.vibrance", "Vibrance", "Vibrance"),
+    ("ec.color.videolimiter", "Video Limiter", "Limiteur vidéo"),
+    ("ec.control.angle", "Angle Control", "Contrôle d’angle"),
+    ("ec.control.checkbox", "Checkbox Control", "Contrôle de case à cocher"),
+    ("ec.control.color", "Color Control", "Contrôle de couleur"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "Contrôle de menu déroulant"),
+    ("ec.control.layer", "Layer Control", "Contrôle de calque"),
+    ("ec.control.point", "Point Control", "Contrôle de point"),
+    ("ec.control.point3d", "3D Point Control", "Contrôle de point 3D"),
+    ("ec.control.slider", "Slider Control", "Contrôle de curseur"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "Contrôles stéréo 3D"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "Déformation Bézier"),
+    ("ec.distort.bulge", "Bulge", "Renflement"),
+    ("ec.distort.ccbender", "Flexible Bend", "Courbure souple"),
+    ("ec.distort.ccbendit", "Two-Point Bend", "Courbure à deux points"),
+    ("ec.distort.ccblobbylize", "Organic Displacement", "Déplacement organique"),
+    ("ec.distort.ccflomotion", "Dual Lens Warp", "Déformation à deux lentilles"),
+    ("ec.distort.ccgriddler", "Tile Grid", "Grille de tuiles"),
+    ("ec.distort.cclens", "Lens Distortion", "Distorsion de lentille"),
+    ("ec.distort.ccpageturn", "Page Curl", "Page enroulée"),
+    ("ec.distort.ccpowerpin", "Perspective Pin", "Épinglage en perspective"),
+    ("ec.distort.ccripplepulse", "Pulsed Ripple", "Ondulation pulsée"),
+    ("ec.distort.ccslant", "Slant", "Inclinaison"),
+    ("ec.distort.ccsmear", "Directional Smear", "Étalement directionnel"),
+    ("ec.distort.ccsplit", "Split Warp", "Déformation divisée"),
+    ("ec.distort.ccsplit2", "Dual Split Warp", "Déformation à double division"),
+    ("ec.distort.cctiler", "Scaled Tiles", "Tuiles mises à l’échelle"),
+    ("ec.distort.cornerpin", "Corner Pin", "Épinglage d’angles"),
+    ("ec.distort.displacementmap", "Displacement Map", "Carte de déplacement"),
+    ("ec.distort.liquify", "Liquify", "Liquéfier"),
+    ("ec.distort.magnify", "Magnify", "Loupe"),
+    ("ec.distort.meshwarp", "Mesh Warp", "Déformation par maillage"),
+    ("ec.distort.mirror", "Mirror", "Miroir"),
+    ("ec.distort.offset", "Offset", "Décalage"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "Compensation optique"),
+    ("ec.distort.polar", "Polar Coordinates", "Coordonnées polaires"),
+    ("ec.distort.puppet", "Puppet", "Marionnette"),
+    ("ec.distort.reshape", "Reshape", "Remodeler"),
+    ("ec.distort.ripple", "Ripple", "Ondulation"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "Correction de l’obturateur roulant"),
+    ("ec.distort.smear", "Smear", "Étalement"),
+    ("ec.distort.spherize", "Spherize", "Sphérisation"),
+    ("ec.distort.transform", "Transform", "Transformation"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "Déplacement turbulent"),
+    ("ec.distort.twirl", "Twirl", "Tourbillon"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "Tourbillon (hérité)"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "Agrandissement avec préservation des détails"),
+    ("ec.distort.warp", "Warp", "Déformation"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "Stabilisateur de déformation"),
+    ("ec.distort.wavewarp", "Wave Warp", "Déformation en vague"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "Foudre avancée"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "Spectre audio"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "Forme d’onde audio"),
+    ("ec.generate.beam", "Beam", "Faisceau"),
+    ("ec.generate.ccgluegun", "Paint Beads", "Perles de peinture"),
+    ("ec.generate.cclightburst", "Radial Light Burst", "Éclat lumineux radial"),
+    ("ec.generate.cclightrays", "Light Rays", "Rayons lumineux"),
+    ("ec.generate.cclightsweep", "Light Sweep", "Balayage lumineux"),
+    ("ec.generate.ccthreads", "Woven Threads", "Fils tissés"),
+    ("ec.generate.cellpattern", "Cell Pattern", "Motif cellulaire"),
+    ("ec.generate.checkerboard", "Checkerboard", "Damier"),
+    ("ec.generate.circle", "Circle", "Cercle"),
+    ("ec.generate.ellipse", "Ellipse", "Ellipse"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "Remplissage par pipette"),
+    ("ec.generate.fill", "Fill", "Remplissage"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "Dégradé à 4 couleurs"),
+    ("ec.generate.fractal", "Fractal", "Fractale"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "Rampe de dégradé"),
+    ("ec.generate.grid", "Grid", "Grille"),
+    ("ec.generate.lensflare", "Lens Flare", "Reflet d’objectif"),
+    ("ec.generate.paintbucket", "Paint Bucket", "Pot de peinture"),
+    ("ec.generate.radiowaves", "Radio Waves", "Ondes radio"),
+    ("ec.generate.scribble", "Scribble", "Gribouillis"),
+    ("ec.generate.stroke", "Stroke", "Contour"),
+    ("ec.generate.vegas", "Vegas", "Vegas"),
+    ("ec.generate.writeon", "Write-on", "Écriture progressive"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "Suppresseur de débordement avancé"),
+    ("ec.key.ccsimplewireremoval", "Line Removal", "Suppression de ligne"),
+    ("ec.key.colordifference", "Color Difference Key", "Incrustation par différence de couleur"),
+    ("ec.key.colorkey", "Color Key", "Incrustation couleur"),
+    ("ec.key.colorrange", "Color Range", "Plage de couleurs"),
+    ("ec.key.differencematte", "Difference Matte", "Estampe de différence"),
+    ("ec.key.extract", "Extract", "Extraction"),
+    ("ec.key.innerouter", "Inner/Outer Key", "Incrustation intérieure/extérieure"),
+    ("ec.key.keycleaner", "Key Cleaner", "Nettoyeur d’incrustation"),
+    ("ec.key.linearcolor", "Linear Color Key", "Incrustation couleur linéaire"),
+    ("ec.key.luma", "Luma Key", "Incrustation de luminance"),
+    ("ec.key.screen", "Screen Key", "Incrustation d’écran"),
+    ("ec.key.spill", "Spill Suppressor", "Suppresseur de débordement"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.keying.keylight", "Screen Color Key", "Incrustation par couleur d’écran"),
+    ("ec.matte.mattechoker", "Matte Choker", "Réducteur d’estampe"),
+    ("ec.matte.objectmatte", "Object Matte", "Estampe d’objet"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "Affiner l’estampe nette"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "Affiner l’estampe douce"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "Roto Brush et affinage des bords"),
+    ("ec.matte.simplechoker", "Simple Choker", "Réducteur simple"),
+    ("ec.noise.addgrain", "Add Grain", "Ajouter du grain"),
+    ("ec.noise.curlnoise", "Curl Noise", "Bruit curl"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "Poussières et rayures"),
+    ("ec.noise.fractal", "Fractal Noise", "Bruit fractal"),
+    ("ec.noise.matchgrain", "Match Grain", "Assortir le grain"),
+    ("ec.noise.median", "Median", "Médian"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "Médian (hérité)"),
+    ("ec.noise.noise", "Noise", "Bruit"),
+    ("ec.noise.noisealpha", "Noise Alpha", "Bruit alpha"),
+    ("ec.noise.noisehls", "Noise HLS", "Bruit TLS"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "Bruit TLS automatique"),
+    ("ec.noise.removegrain", "Remove Grain", "Supprimer le grain"),
+    ("ec.noise.turbulent", "Turbulent Noise", "Bruit turbulent"),
+    ("ec.obsolete.basic3d", "Basic 3D", "3D de base"),
+    ("ec.obsolete.basictext", "Basic Text", "Texte de base"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "Flou gaussien (hérité)"),
+    ("ec.obsolete.lightning", "Lightning", "Foudre"),
+    ("ec.obsolete.mochashape", "Tracked Shape Matte", "Cache de forme suivie"),
+    ("ec.obsolete.pathtext", "Path Text", "Texte sur tracé"),
+    ("ec.paint.paint", "Paint", "Peinture"),
+    ("ec.perspective.3dglasses", "3D Glasses", "Lunettes 3D"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "Biseau alpha"),
+    ("ec.perspective.beveledges", "Bevel Edges", "Biseau des bords"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "Suivi de caméra 3D"),
+    ("ec.perspective.cccylinder", "Cylinder Wrap", "Enroulement cylindrique"),
+    ("ec.perspective.ccenvironment", "Environment Map", "Carte d’environnement"),
+    ("ec.perspective.ccsphere", "Sphere Wrap", "Enroulement sphérique"),
+    ("ec.perspective.ccspotlight", "Surface Spotlight", "Projecteur de surface"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "Ombre portée"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "Ombre radiale"),
+    ("ec.sim.carddance", "Card Dance", "Danse de cartes"),
+    ("ec.sim.caustics", "Caustics", "Caustiques"),
+    ("ec.sim.ccballaction", "Ball Grid", "Grille de sphères"),
+    ("ec.sim.ccbubbles", "Bubbles", "Bulles"),
+    ("ec.sim.ccdrizzle", "Water Ripples", "Ondulations de l’eau"),
+    ("ec.sim.cchair", "Surface Fibers", "Fibres de surface"),
+    ("ec.sim.ccmrmercury", "Liquid Particles", "Particules liquides"),
+    ("ec.sim.ccparticlesystems2", "Particle Emitter 2D", "Émetteur de particules 2D"),
+    ("ec.sim.ccparticleworld", "Particle Emitter 3D", "Émetteur de particules 3D"),
+    ("ec.sim.ccpixelpolly", "Pixel Shatter", "Éclatement des pixels"),
+    ("ec.sim.ccrainfall", "Rainfall", "Pluie"),
+    ("ec.sim.ccscatterize", "Pixel Scatter", "Dispersion des pixels"),
+    ("ec.sim.ccsnowfall", "Snowfall", "Neige"),
+    ("ec.sim.ccstarburst", "Starfield", "Champ d’étoiles"),
+    ("ec.sim.foam", "Foam", "Mousse"),
+    ("ec.sim.particleplayground", "Particle Playground", "Terrain de jeu de particules"),
+    ("ec.sim.shatter", "Shatter", "Éclatement"),
+    ("ec.sim.waveworld", "Wave World", "Monde des vagues"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "Coups de pinceau"),
+    ("ec.stylize.cartoon", "Cartoon", "Dessin animé"),
+    ("ec.stylize.ccblockload", "Block Reveal", "Révélation par blocs"),
+    ("ec.stylize.ccburnfilm", "Film Burn", "Brûlure de pellicule"),
+    ("ec.stylize.ccglass", "Glass Relief", "Relief de verre"),
+    ("ec.stylize.cchextile", "Hexagonal Tiles", "Tuiles hexagonales"),
+    ("ec.stylize.cckaleida", "Kaleidoscope", "Kaléidoscope"),
+    ("ec.stylize.ccmrsmoothie", "Palette Map", "Palettmappning"),
+    ("ec.stylize.ccplastic", "Plastic Shading", "Ombrage plastique"),
+    ("ec.stylize.ccrepetile", "Edge Tile Repeat", "Répétition des tuiles aux bords"),
+    ("ec.stylize.ccthreshold", "Channel Threshold", "Seuil de canal"),
+    ("ec.stylize.ccthresholdrgb", "RGB Threshold", "Seuil RVB"),
+    ("ec.stylize.ccvignette", "Vignette", "Vignettage"),
+    ("ec.stylize.coloremboss", "Color Emboss", "Estampage couleur"),
+    ("ec.stylize.emboss", "Emboss", "Estampage"),
+    ("ec.stylize.findedges", "Find Edges", "Détection des contours"),
+    ("ec.stylize.glow", "Glow", "Lueur"),
+    ("ec.stylize.mosaic", "Mosaic", "Mosaïque"),
+    ("ec.stylize.motiontile", "Motion Tile", "Mosaïque de mouvement"),
+    ("ec.stylize.posterize", "Posterize", "Postérisation"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "Bords irréguliers"),
+    ("ec.stylize.scatter", "Scatter", "Dispersion"),
+    ("ec.stylize.strobe", "Strobe Light", "Lumière stroboscopique"),
+    ("ec.stylize.texturize", "Texturize", "Texturisation"),
+    ("ec.stylize.threshold", "Threshold", "Seuil"),
+    ("ec.text.numbers", "Numbers", "Nombres"),
+    ("ec.text.timecode", "Timecode", "Timecode"),
+    ("ec.time.ccforcemotionblur", "Temporal Motion Blur", "Flou de mouvement temporel"),
+    ("ec.time.ccwidetime", "Temporal Blend", "Fusion temporelle"),
+    ("ec.time.echo", "Echo", "Écho"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "Flou de mouvement des pixels"),
+    ("ec.time.posterizetime", "Posterize Time", "Postérisation temporelle"),
+    ("ec.time.timedifference", "Time Difference", "Différence temporelle"),
+    ("ec.time.timedisplacement", "Time Displacement", "Déplacement temporel"),
+    ("ec.time.timewarp", "Timewarp", "Déformation temporelle"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "Fondu par blocs"),
+    ("ec.transition.cardwipe", "Card Wipe", "Volet de cartes"),
+    ("ec.transition.ccglasswipe", "Glass Wipe", "Volet de verre"),
+    ("ec.transition.ccgridwipe", "Grid Wipe", "Volet en grille"),
+    ("ec.transition.ccimagewipe", "Luminance Image Wipe", "Volet par luminance d’image"),
+    ("ec.transition.ccjaws", "Serrated Wipe", "Volet dentelé"),
+    ("ec.transition.cclightwipe", "Light Wipe", "Volet lumineux"),
+    ("ec.transition.cclinesweep", "Line Sweep", "Balayage de lignes"),
+    ("ec.transition.ccradialscalewipe", "Radial Scale Wipe", "Volet d’échelle radial"),
+    ("ec.transition.ccscalewipe", "Scale Wipe", "Volet d’échelle"),
+    ("ec.transition.cctwister", "Twist Wipe", "Volet torsadé"),
+    ("ec.transition.ccwarpomatic", "Warp Dissolve", "Fondu déformant"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "Volet en dégradé"),
+    ("ec.transition.iriswipe", "Iris Wipe", "Volet en iris"),
+    ("ec.transition.linearwipe", "Linear Wipe", "Volet linéaire"),
+    ("ec.transition.radialwipe", "Radial Wipe", "Volet radial"),
+    ("ec.transition.venetian", "Venetian Blinds", "Stores vénitiens"),
+    ("ec.utility.applylut", "Apply Color LUT", "Appliquer une LUT de couleur"),
+    ("ec.utility.ccoverbrights", "Out-of-Range Display", "Affichage hors plage"),
+    ("ec.utility.cineon", "Cineon Converter", "Convertisseur Cineon"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "Convertisseur de profil colorimétrique"),
+    ("ec.utility.facemeasurements", "Face Measurements", "Mesures du visage"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "Points de suivi du visage"),
+    ("ec.utility.growbounds", "Grow Bounds", "Extension des limites"),
+    ("ec.utility.hdrcompander", "HDR Compander", "Compandeur HDR"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "Compression des hautes lumières HDR"),
+    ("ec.vr.blur", "VR Blur", "Flou VR"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "Aberrations chromatiques VR"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "Dégradés de couleur VR"),
+    ("ec.vr.converter", "VR Converter", "Convertisseur VR"),
+    ("ec.vr.denoise", "VR De-Noise", "Réduction du bruit VR"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "Glitch numérique VR"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "Bruit fractal VR"),
+    ("ec.vr.glow", "VR Glow", "Lueur VR"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "Plan vers sphère VR"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "Rotation de sphère VR"),
+    ("ec.vr.sharpen", "VR Sharpen", "Accentuation VR"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "Sphère vers plan VR"),
+    ("ec.3d.instance3d", "3D Layer Instance", "Instance de calque 3D"),
+];
+
+/// French (`fr`) category labels, keyed by the registry's English category.
+const FRENCH_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "Canal 3D"),
+    ("Audio", "Audio"),
+    ("Blur & Sharpen", "Flou et netteté"),
+    ("Channel", "Canal"),
+    ("Color Correction", "Correction colorimétrique"),
+    ("Distort", "Déformation"),
+    ("Expression Controls", "Contrôles d’expression"),
+    ("Generate", "Génération"),
+    ("Immersive Video", "Vidéo immersive"),
+    ("Keying", "Incrustation"),
+    ("Matte", "Estampe"),
+    ("Noise & Grain", "Bruit et grain"),
+    ("Obsolete", "Obsolète"),
+    ("Paint", "Peinture"),
+    ("Perspective", "Perspective"),
+    ("Simulation", "Simulation"),
+    ("Stylize", "Stylisation"),
+    ("Text", "Texte"),
+    ("Time", "Temps"),
+    ("Transition", "Transition"),
+    ("Utility", "Utilitaire"),
 ];
 
 /// The 21 category folder names the generated Effect menu and Effects & Presets draw, in
@@ -518,63 +1890,436 @@ const SIMPLIFIED_CHINESE_CATEGORIES: &[(&str, &str)] = &[
     ("Utility", "实用工具"),
 ];
 
+/// Swedish (`sv`), written from the English source.
+const SWEDISH: &[Row] = &[
+    ("ec.3d.channelextract", "3D Channel Extract", "Extrahera 3D-kanal"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "Djupmatte"),
+    ("ec.3d.depthoffield", "Depth of Field", "Skärpedjup"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "3D-dimma"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "ID-matte"),
+    ("ec.audio.backwards", "Backwards", "Baklänges"),
+    ("ec.audio.basstreble", "Bass & Treble", "Bas och diskant"),
+    ("ec.audio.compressor", "Compressor", "Kompressor"),
+    ("ec.audio.delay", "Delay", "Delay"),
+    ("ec.audio.distortion", "Distortion", "Distorsion"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "Flanger och chorus"),
+    ("ec.audio.gate", "Gate", "Gate"),
+    ("ec.audio.highlowpass", "High-Low Pass", "Hög-/lågpass"),
+    ("ec.audio.modulator", "Modulator", "Modulator"),
+    ("ec.audio.parametriceq", "Parametric EQ", "Parametrisk EQ"),
+    ("ec.audio.reverb", "Reverb", "Reverb"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "Stereomixer"),
+    ("ec.audio.tone", "Tone", "Ton"),
+    ("ec.blur.bilateral", "Bilateral Blur", "Bilateral oskärpa"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "Kameralinsoskärpa"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "Ta bort oskärpa från kameraskakning"),
+    ("ec.blur.cccross", "Cross Blur", "Korsoskärpa"),
+    ("ec.blur.ccradial", "Variable Radial Blur", "Variabel radiell oskärpa"),
+    ("ec.blur.ccradialfast", "Fast Radial Blur", "Snabb radiell oskärpa"),
+    ("ec.blur.ccvector", "Vector Blur", "Vektoroskärpa"),
+    ("ec.blur.channel", "Channel Blur", "Kanaloskärpa"),
+    ("ec.blur.compound", "Compound Blur", "Sammansatt oskärpa"),
+    ("ec.blur.directional", "Directional Blur", "Riktad oskärpa"),
+    ("ec.blur.fastbox", "Fast Box Blur", "Snabb rutoskärpa"),
+    ("ec.blur.gaussian", "Gaussian Blur", "Gaussisk oskärpa"),
+    ("ec.blur.radial", "Radial Blur", "Radiell oskärpa"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "Minska flimmer från sammanflätning"),
+    ("ec.blur.sharpen", "Sharpen", "Skärpa"),
+    ("ec.blur.smart", "Smart Blur", "Smart oskärpa"),
+    ("ec.blur.unsharp", "Unsharp Mask", "Oskarp mask"),
+    ("ec.channel.arithmetic", "Arithmetic", "Aritmetik"),
+    ("ec.channel.blend", "Blend", "Blanda"),
+    ("ec.channel.calculations", "Calculations", "Beräkningar"),
+    ("ec.channel.cccomposite", "Source Composite", "Källkomposition"),
+    ("ec.channel.combiner", "Channel Combiner", "Kanalkombinerare"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "Sammansatt aritmetik"),
+    ("ec.channel.invert", "Invert", "Invertera"),
+    ("ec.channel.minimax", "Minimax", "Minimax"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "Ta bort färgkantbehandling"),
+    ("ec.channel.setchannels", "Set Channels", "Ange kanaler"),
+    ("ec.channel.setmatte", "Set Matte", "Ange matte"),
+    ("ec.channel.shiftchannels", "Shift Channels", "Flytta kanaler"),
+    ("ec.channel.solidcomposite", "Solid Composite", "Enfärgad komposit"),
+    ("ec.color.autocolor", "Auto Color", "Autofärg"),
+    ("ec.color.autocontrast", "Auto Contrast", "Autokontrast"),
+    ("ec.color.autolevels", "Auto Levels", "Autonivåer"),
+    ("ec.color.blackwhite", "Black & White", "Svartvitt"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "Ljusstyrka och kontrast"),
+    ("ec.color.broadcast", "Broadcast Colors", "Broadcast-färger"),
+    ("ec.color.cccolorneutralizer", "Color Neutralizer", "Färgneutralisering"),
+    ("ec.color.cccoloroffset", "Channel Offset", "Kanalförskjutning"),
+    ("ec.color.cckernel", "Convolution Kernel", "Faltningskärna"),
+    ("ec.color.cctoner", "Multi-Tone Tint", "Flertonsfärgning"),
+    ("ec.color.changecolor", "Change Color", "Ändra färg"),
+    ("ec.color.changetocolor", "Change to Color", "Ändra till färg"),
+    ("ec.color.channelmixer", "Channel Mixer", "Kanalmixer"),
+    ("ec.color.colorama", "Colorama", "Colorama"),
+    ("ec.color.colorbalance", "Color Balance", "Färgbalans"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "Färgbalans (HLS)"),
+    ("ec.color.colorlink", "Color Link", "Färglänk"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "Färgstabiliserare"),
+    ("ec.color.curves", "Curves", "Kurvor"),
+    ("ec.color.equalize", "Equalize", "Utjämna"),
+    ("ec.color.exposure", "Exposure", "Exponering"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "Gamma/svartnivå/förstärkning"),
+    ("ec.color.huesaturation", "Hue/Saturation", "Nyans/mättnad"),
+    ("ec.color.leavecolor", "Leave Color", "Behåll färg"),
+    ("ec.color.levels", "Levels", "Nivåer"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "Nivåer (individuella kontroller)"),
+    ("ec.color.lumetri", "Color Grading", "Färggradering"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL-transformering"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO färgrymdstransformering"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO visningstransformering"),
+    ("ec.color.ociofile", "OCIO File Transform", "OCIO filtransformering"),
+    ("ec.color.ociolook", "OCIO Look Transform", "OCIO look-transformering"),
+    ("ec.color.photofilter", "Photo Filter", "Fotofilter"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS godtycklig mappning"),
+    ("ec.color.selectivecolor", "Selective Color", "Selektiv färg"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "Skugga/högdager"),
+    ("ec.color.tint", "Tint", "Färgton"),
+    ("ec.color.tritone", "Tritone", "Tretoning"),
+    ("ec.color.vibrance", "Vibrance", "Lyster"),
+    ("ec.color.videolimiter", "Video Limiter", "Videobegränsare"),
+    ("ec.control.angle", "Angle Control", "Vinkelkontroll"),
+    ("ec.control.checkbox", "Checkbox Control", "Kryssrutekontroll"),
+    ("ec.control.color", "Color Control", "Färgkontroll"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "Kontroll för listmeny"),
+    ("ec.control.layer", "Layer Control", "Lagerkontroll"),
+    ("ec.control.point", "Point Control", "Punktkontroll"),
+    ("ec.control.point3d", "3D Point Control", "3D-punktkontroll"),
+    ("ec.control.slider", "Slider Control", "Skjutreglagekontroll"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "Stereo 3D-kontroller"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "Bezierförvrängning"),
+    ("ec.distort.bulge", "Bulge", "Utbuktning"),
+    ("ec.distort.ccbender", "Flexible Bend", "Flexibel böjning"),
+    ("ec.distort.ccbendit", "Two-Point Bend", "Tvåpunktsböjning"),
+    ("ec.distort.ccblobbylize", "Organic Displacement", "Organisk förskjutning"),
+    ("ec.distort.ccflomotion", "Dual Lens Warp", "Dubbel linsförvrängning"),
+    ("ec.distort.ccgriddler", "Tile Grid", "Plattnät"),
+    ("ec.distort.cclens", "Lens Distortion", "Linsförvrängning"),
+    ("ec.distort.ccpageturn", "Page Curl", "Sidkrullning"),
+    ("ec.distort.ccpowerpin", "Perspective Pin", "Perspektivnålar"),
+    ("ec.distort.ccripplepulse", "Pulsed Ripple", "Pulserande krusning"),
+    ("ec.distort.ccslant", "Slant", "Lutning"),
+    ("ec.distort.ccsmear", "Directional Smear", "Riktningssmetning"),
+    ("ec.distort.ccsplit", "Split Warp", "Delad förvrängning"),
+    ("ec.distort.ccsplit2", "Dual Split Warp", "Dubbeldelad förvrängning"),
+    ("ec.distort.cctiler", "Scaled Tiles", "Skalade plattor"),
+    ("ec.distort.cornerpin", "Corner Pin", "Hörnförankring"),
+    ("ec.distort.displacementmap", "Displacement Map", "Förskjutningskarta"),
+    ("ec.distort.liquify", "Liquify", "Gör flytande"),
+    ("ec.distort.magnify", "Magnify", "Förstora"),
+    ("ec.distort.meshwarp", "Mesh Warp", "Nätförvrängning"),
+    ("ec.distort.mirror", "Mirror", "Spegel"),
+    ("ec.distort.offset", "Offset", "Förskjutning"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "Optikkompensation"),
+    ("ec.distort.polar", "Polar Coordinates", "Polära koordinater"),
+    ("ec.distort.puppet", "Puppet", "Docka"),
+    ("ec.distort.reshape", "Reshape", "Omforma"),
+    ("ec.distort.ripple", "Ripple", "Krusning"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "Reparera rullande slutare"),
+    ("ec.distort.smear", "Smear", "Utsmetning"),
+    ("ec.distort.spherize", "Spherize", "Sfärisera"),
+    ("ec.distort.transform", "Transform", "Transformera"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "Turbulent förskjutning"),
+    ("ec.distort.twirl", "Twirl", "Virvel"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "Virvel (äldre)"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "Detaljbevarande uppskalning"),
+    ("ec.distort.warp", "Warp", "Förvräng"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "Warp Stabilizer"),
+    ("ec.distort.wavewarp", "Wave Warp", "Vågförvrängning"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "Avancerad blixt"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "Ljudspektrum"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "Ljudvågform"),
+    ("ec.generate.beam", "Beam", "Stråle"),
+    ("ec.generate.ccgluegun", "Paint Beads", "Färgpärlor"),
+    ("ec.generate.cclightburst", "Radial Light Burst", "Radiellt ljusutbrott"),
+    ("ec.generate.cclightrays", "Light Rays", "Ljusstrålar"),
+    ("ec.generate.cclightsweep", "Light Sweep", "Ljussvep"),
+    ("ec.generate.ccthreads", "Woven Threads", "Vävda trådar"),
+    ("ec.generate.cellpattern", "Cell Pattern", "Cellmönster"),
+    ("ec.generate.checkerboard", "Checkerboard", "Schackbräde"),
+    ("ec.generate.circle", "Circle", "Cirkel"),
+    ("ec.generate.ellipse", "Ellipse", "Ellips"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "Pipettfyllning"),
+    ("ec.generate.fill", "Fill", "Fyllning"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "Fyrfärgsgradient"),
+    ("ec.generate.fractal", "Fractal", "Fraktal"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "Gradientramp"),
+    ("ec.generate.grid", "Grid", "Rutnät"),
+    ("ec.generate.lensflare", "Lens Flare", "Linsreflex"),
+    ("ec.generate.paintbucket", "Paint Bucket", "Färghink"),
+    ("ec.generate.radiowaves", "Radio Waves", "Radiovågor"),
+    ("ec.generate.scribble", "Scribble", "Klotter"),
+    ("ec.generate.stroke", "Stroke", "Kontur"),
+    ("ec.generate.vegas", "Vegas", "Vegas"),
+    ("ec.generate.writeon", "Write-on", "Framskrivning"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "Avancerad spilldämpning"),
+    ("ec.key.ccsimplewireremoval", "Line Removal", "Linjeborttagning"),
+    ("ec.key.colordifference", "Color Difference Key", "Färgdifferensnyckel"),
+    ("ec.key.colorkey", "Color Key", "Färgnyckel"),
+    ("ec.key.colorrange", "Color Range", "Färgomfång"),
+    ("ec.key.differencematte", "Difference Matte", "Differensmatte"),
+    ("ec.key.extract", "Extract", "Extrahera"),
+    ("ec.key.innerouter", "Inner/Outer Key", "Inre/yttre nyckel"),
+    ("ec.key.keycleaner", "Key Cleaner", "Nyckelrensare"),
+    ("ec.key.linearcolor", "Linear Color Key", "Linjär färgnyckel"),
+    ("ec.key.luma", "Luma Key", "Lumanyckel"),
+    ("ec.key.screen", "Screen Key", "Skärmnyckel"),
+    ("ec.key.spill", "Spill Suppressor", "Spilldämpning"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.keying.keylight", "Screen Color Key", "Skärmfärgsnyckling"),
+    ("ec.matte.mattechoker", "Matte Choker", "Mattekrympning"),
+    ("ec.matte.objectmatte", "Object Matte", "Objektmatte"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "Förfina hård matte"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "Förfina mjuk matte"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "Rotopensel och förfina kant"),
+    ("ec.matte.simplechoker", "Simple Choker", "Enkel krympning"),
+    ("ec.noise.addgrain", "Add Grain", "Lägg till korn"),
+    ("ec.noise.curlnoise", "Curl Noise", "Curl-brus"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "Damm och repor"),
+    ("ec.noise.fractal", "Fractal Noise", "Fraktalbrus"),
+    ("ec.noise.matchgrain", "Match Grain", "Matcha korn"),
+    ("ec.noise.median", "Median", "Median"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "Median (äldre)"),
+    ("ec.noise.noise", "Noise", "Brus"),
+    ("ec.noise.noisealpha", "Noise Alpha", "Alfabrus"),
+    ("ec.noise.noisehls", "Noise HLS", "HLS-brus"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "HLS-brus auto"),
+    ("ec.noise.removegrain", "Remove Grain", "Ta bort korn"),
+    ("ec.noise.turbulent", "Turbulent Noise", "Turbulent brus"),
+    ("ec.obsolete.basic3d", "Basic 3D", "Grundläggande 3D"),
+    ("ec.obsolete.basictext", "Basic Text", "Grundläggande text"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "Gaussisk oskärpa (äldre)"),
+    ("ec.obsolete.lightning", "Lightning", "Blixt"),
+    ("ec.obsolete.mochashape", "Tracked Shape Matte", "Spårad formmask"),
+    ("ec.obsolete.pathtext", "Path Text", "Text längs bana"),
+    ("ec.paint.paint", "Paint", "Måla"),
+    ("ec.perspective.3dglasses", "3D Glasses", "3D-glasögon"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "Alfafasning"),
+    ("ec.perspective.beveledges", "Bevel Edges", "Fasade kanter"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "3D-kameraspårning"),
+    ("ec.perspective.cccylinder", "Cylinder Wrap", "Cylinderomslag"),
+    ("ec.perspective.ccenvironment", "Environment Map", "Miljökarta"),
+    ("ec.perspective.ccsphere", "Sphere Wrap", "Sfäromslag"),
+    ("ec.perspective.ccspotlight", "Surface Spotlight", "Ytstrålkastare"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "Slagskugga"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "Radiell skugga"),
+    ("ec.sim.carddance", "Card Dance", "Kortdans"),
+    ("ec.sim.caustics", "Caustics", "Kaustik"),
+    ("ec.sim.ccballaction", "Ball Grid", "Kulnät"),
+    ("ec.sim.ccbubbles", "Bubbles", "Bubblor"),
+    ("ec.sim.ccdrizzle", "Water Ripples", "Vattenkrusningar"),
+    ("ec.sim.cchair", "Surface Fibers", "Ytfibrer"),
+    ("ec.sim.ccmrmercury", "Liquid Particles", "Vätskepartiklar"),
+    ("ec.sim.ccparticlesystems2", "Particle Emitter 2D", "Partikelsändare 2D"),
+    ("ec.sim.ccparticleworld", "Particle Emitter 3D", "Partikelsändare 3D"),
+    ("ec.sim.ccpixelpolly", "Pixel Shatter", "Pixelsplittring"),
+    ("ec.sim.ccrainfall", "Rainfall", "Regn"),
+    ("ec.sim.ccscatterize", "Pixel Scatter", "Pixelspridning"),
+    ("ec.sim.ccsnowfall", "Snowfall", "Snöfall"),
+    ("ec.sim.ccstarburst", "Starfield", "Stjärnfält"),
+    ("ec.sim.foam", "Foam", "Skum"),
+    ("ec.sim.particleplayground", "Particle Playground", "Partikellekplats"),
+    ("ec.sim.shatter", "Shatter", "Krossa"),
+    ("ec.sim.waveworld", "Wave World", "Vågvärld"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "Penseldrag"),
+    ("ec.stylize.cartoon", "Cartoon", "Tecknat"),
+    ("ec.stylize.ccblockload", "Block Reveal", "Blockframträdande"),
+    ("ec.stylize.ccburnfilm", "Film Burn", "Filmbränning"),
+    ("ec.stylize.ccglass", "Glass Relief", "Glasrelief"),
+    ("ec.stylize.cchextile", "Hexagonal Tiles", "Sexkantiga plattor"),
+    ("ec.stylize.cckaleida", "Kaleidoscope", "Kalejdoskop"),
+    ("ec.stylize.ccmrsmoothie", "Palette Map", "Mappage de palette"),
+    ("ec.stylize.ccplastic", "Plastic Shading", "Plastskuggning"),
+    ("ec.stylize.ccrepetile", "Edge Tile Repeat", "Kantupprepning"),
+    ("ec.stylize.ccthreshold", "Channel Threshold", "Kanaltröskel"),
+    ("ec.stylize.ccthresholdrgb", "RGB Threshold", "RGB-tröskel"),
+    ("ec.stylize.ccvignette", "Vignette", "Vinjettering"),
+    ("ec.stylize.coloremboss", "Color Emboss", "Färgrelief"),
+    ("ec.stylize.emboss", "Emboss", "Relief"),
+    ("ec.stylize.findedges", "Find Edges", "Hitta kanter"),
+    ("ec.stylize.glow", "Glow", "Glöd"),
+    ("ec.stylize.mosaic", "Mosaic", "Mosaik"),
+    ("ec.stylize.motiontile", "Motion Tile", "Rörlig sida vid sida"),
+    ("ec.stylize.posterize", "Posterize", "Posterisera"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "Ojämna kanter"),
+    ("ec.stylize.scatter", "Scatter", "Spridning"),
+    ("ec.stylize.strobe", "Strobe Light", "Stroboskopljus"),
+    ("ec.stylize.texturize", "Texturize", "Texturera"),
+    ("ec.stylize.threshold", "Threshold", "Tröskel"),
+    ("ec.text.numbers", "Numbers", "Siffror"),
+    ("ec.text.timecode", "Timecode", "Tidskod"),
+    ("ec.time.ccforcemotionblur", "Temporal Motion Blur", "Tidsbaserad rörelseoskärpa"),
+    ("ec.time.ccwidetime", "Temporal Blend", "Tidsblandning"),
+    ("ec.time.echo", "Echo", "Eko"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "Pixelrörelseoskärpa"),
+    ("ec.time.posterizetime", "Posterize Time", "Posterisera tid"),
+    ("ec.time.timedifference", "Time Difference", "Tidsdifferens"),
+    ("ec.time.timedisplacement", "Time Displacement", "Tidsförskjutning"),
+    ("ec.time.timewarp", "Timewarp", "Tidsförvrängning"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "Blockövertoning"),
+    ("ec.transition.cardwipe", "Card Wipe", "Kortridå"),
+    ("ec.transition.ccglasswipe", "Glass Wipe", "Glasövergång"),
+    ("ec.transition.ccgridwipe", "Grid Wipe", "Rutnätsövergång"),
+    ("ec.transition.ccimagewipe", "Luminance Image Wipe", "Luminansbildsövergång"),
+    ("ec.transition.ccjaws", "Serrated Wipe", "Tandad övergång"),
+    ("ec.transition.cclightwipe", "Light Wipe", "Ljusövergång"),
+    ("ec.transition.cclinesweep", "Line Sweep", "Linjesvep"),
+    ("ec.transition.ccradialscalewipe", "Radial Scale Wipe", "Radiell skalövergång"),
+    ("ec.transition.ccscalewipe", "Scale Wipe", "Skalövergång"),
+    ("ec.transition.cctwister", "Twist Wipe", "Vridövergång"),
+    ("ec.transition.ccwarpomatic", "Warp Dissolve", "Förvrängningsupplösning"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "Gradientridå"),
+    ("ec.transition.iriswipe", "Iris Wipe", "Irisridå"),
+    ("ec.transition.linearwipe", "Linear Wipe", "Linjär ridå"),
+    ("ec.transition.radialwipe", "Radial Wipe", "Radiell ridå"),
+    ("ec.transition.venetian", "Venetian Blinds", "Persienner"),
+    ("ec.utility.applylut", "Apply Color LUT", "Använd färg-LUT"),
+    ("ec.utility.ccoverbrights", "Out-of-Range Display", "Visa utanför intervallet"),
+    ("ec.utility.cineon", "Cineon Converter", "Cineon-konverterare"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "Färgprofilkonverterare"),
+    ("ec.utility.facemeasurements", "Face Measurements", "Ansiktsmått"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "Ansiktsspårningspunkter"),
+    ("ec.utility.growbounds", "Grow Bounds", "Väx gränser"),
+    ("ec.utility.hdrcompander", "HDR Compander", "HDR-kompander"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "HDR-högdagerkomprimering"),
+    ("ec.vr.blur", "VR Blur", "VR-oskärpa"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "VR-kromatiska aberrationer"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "VR-färggradienter"),
+    ("ec.vr.converter", "VR Converter", "VR-konverterare"),
+    ("ec.vr.denoise", "VR De-Noise", "VR-brusreducering"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "VR-digitala störningar"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "VR-fraktalbrus"),
+    ("ec.vr.glow", "VR Glow", "VR-glöd"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "VR-plan till sfär"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "VR-rotera sfär"),
+    ("ec.vr.sharpen", "VR Sharpen", "VR-skärpa"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR-sfär till plan"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D-lagerinstans"),
+];
+
+/// Swedish (`sv`), written from the English source.
+const SWEDISH_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "3D-kanal"),
+    ("Audio", "Ljud"),
+    ("Blur & Sharpen", "Oskärpa och skärpa"),
+    ("Channel", "Kanal"),
+    ("Color Correction", "Färgkorrigering"),
+    ("Distort", "Förvräng"),
+    ("Expression Controls", "Uttryckskontroller"),
+    ("Generate", "Generera"),
+    ("Immersive Video", "Immersiv video"),
+    ("Keying", "Keying"),
+    ("Matte", "Matte"),
+    ("Noise & Grain", "Brus och korn"),
+    ("Obsolete", "Föråldrade"),
+    ("Paint", "Måla"),
+    ("Perspective", "Perspektiv"),
+    ("Simulation", "Simulering"),
+    ("Stylize", "Stilisera"),
+    ("Text", "Text"),
+    ("Time", "Tid"),
+    ("Transition", "Övergång"),
+    ("Utility", "Verktyg"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::i18n::set_current;
     use effectcraft_engine::effects;
 
-    /// Every effect in the registry has a row, and that row still carries the registry's English
-    /// name. A new effect, a rename or a removal fails here rather than drawing an English name
-    /// in a Chinese interface, or attaching a translation to a different effect.
     #[test]
-    fn every_effect_has_a_row() {
+    fn legacy_effect_names_draw_current_labels_without_changing_custom_names() {
+        for language in ["en", "ja", "zh-hans", "zh-hant", "fr", "sv", "ka", "cs", "de", "es", "pl", "pt-br", "ru", "uk"] {
+            set_current(language);
+            for spec in effects::registry() {
+                let translated = name(spec.id, spec.name);
+                for alias in effects::aliases(spec.id) {
+                    assert_eq!(group(spec.id, alias), translated, "{language}: {alias}");
+                    assert!(matches(spec.id, alias, &spec.name.to_lowercase()), "{language}: search current name of {alias}");
+                    assert!(matches(spec.id, spec.name, &alias.to_lowercase()), "{language}: search legacy name {alias}");
+                    assert_eq!(group(spec.id, &format!("{alias} 2")), format!("{translated} 2"));
+                    let custom = format!("{alias} custom");
+                    assert_eq!(group(spec.id, &custom), custom);
+                }
+            }
+        }
+        set_current("en");
+    }
+
+    #[test]
+    fn localized_effect_names_do_not_reintroduce_legacy_branding() {
+        for (language, rows) in COMPLETE.iter().chain(PARTIAL) {
+            for (_, _, translated) in *rows {
+                let label = translated.to_lowercase();
+                assert!(!label.starts_with("cc "), "{language}: {translated}");
+                for mark in ["lumetri", "mercury", "mocha", "keylight"] {
+                    assert!(!label.contains(mark), "{language}: {translated}");
+                }
+            }
+        }
+    }
+
+    /// Every row names an effect in the registry and still carries its English name, so a rename
+    /// or a removal fails here rather than attaching a translation to a different effect.
+    #[test]
+    fn every_row_names_a_registry_effect() {
         let registry = effects::registry();
-        assert_eq!(SIMPLIFIED_CHINESE.len(), registry.len(), "the catalog has {} rows for {} effects", SIMPLIFIED_CHINESE.len(), registry.len());
-        for spec in registry {
-            let Some((_, english, translated)) = SIMPLIFIED_CHINESE.iter().find(|(id, _, _)| *id == spec.id) else {
-                panic!("no catalog row for {} ({})", spec.id, spec.name);
-            };
-            assert_eq!(*english, spec.name, "{}: the catalog says {english:?}, the registry {:?}", spec.id, spec.name);
-            assert!(!translated.is_empty(), "{}: empty translation", spec.id);
+        for (language, rows) in COMPLETE {
+            for (id, english, translated) in *rows {
+                let Some(spec) = registry.iter().find(|spec| spec.id == *id) else {
+                    panic!("{language} row {id} ({english}) is not an effect in the registry");
+                };
+                assert_eq!(*english, spec.name, "{language} row {id}: the catalog says {english:?}, the registry {:?}", spec.name);
+                assert!(!translated.is_empty(), "{language} row {id}: empty translation");
+            }
+        }
+    }
+
+    /// Two effects that draw one name cannot be told apart in the Effect menu, Effect Controls or
+    /// Effects & Presets, so every catalog names each effect it covers distinctly.
+    #[test]
+    fn display_names_are_unique_in_every_catalog() {
+        for (language, rows) in COMPLETE.iter().chain(PARTIAL) {
+            let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+            for (id, _, translated) in *rows {
+                if let Some(other) = seen.insert(translated, id) {
+                    assert_ne!(other, *id, "{language}: {id} and {other} are both {translated:?}");
+                }
+            }
         }
     }
 
     /// Rows are keyed by id, so a repeated id would shadow a translation.
     #[test]
     fn ids_are_unique() {
-        let mut ids: Vec<&str> = SIMPLIFIED_CHINESE.iter().map(|(id, _, _)| *id).collect();
-        let listed = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(listed, ids.len(), "an effect id is listed twice");
-    }
-
-    /// The five names Adobe's Simplified Chinese interface leaves in English as brand names, and
-    /// the only zh-hans rows that may repeat their English name. Deliberately not shared: another
-    /// language keeps different names in English (Japanese leaves the whole `CC`, `VR` and `OCIO`
-    /// sets in English), so this is zh-hans's own choice, not an invariant of the tables.
-    #[test]
-    fn only_the_brand_names_stay_in_english() {
-        const BRANDS: [&str; 5] = ["ec.3d.cryptomatte", "ec.3d.extractor", "ec.3d.identifier", "ec.keying.keylight", "ec.key.unmult"];
-        for (id, english, translated) in SIMPLIFIED_CHINESE {
-            assert_eq!(english == translated, BRANDS.contains(id), "{id}: {english:?} is drawn as {translated:?}");
+        for (language, rows) in COMPLETE.iter().chain(PARTIAL) {
+            let mut ids: Vec<&str> = rows.iter().map(|(id, _, _)| *id).collect();
+            let listed = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(listed, ids.len(), "{language} lists an effect id twice");
         }
     }
 
-    /// The languages that have no rows yet, with the table a translator fills in for each. A new
-    /// language is added here and to [`catalog`]; the test then guards its rows as they arrive.
-    const PENDING: &[(&str, &[Row])] = &[("zh-hant", TRADITIONAL_CHINESE)];
+    /// The languages whose tables are complete: one row per effect in the registry and one row
+    /// per category when they were written. A new effect without a row draws its English name (as
+    /// in every language), so it does not block other work; the rows are guarded like [`PARTIAL`]'s.
+    const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE)];
 
-    /// The languages whose tables are being filled in: guarded like [`PENDING`] row by row.
-    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS)];
+    /// The languages whose tables are being filled in: guarded row by row.
+    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN), ("sv", SWEDISH), ("fr", FRENCH)];
 
-    /// A pending language may lag Simplified Chinese but may not invent ids or disagree about
-    /// which effect an id names: a translator fills these tables row by row. While they are
-    /// empty the test is a no-op, which is why the slot ships before the data does.
+    /// A partial language may lag Simplified Chinese but may not invent ids or disagree about
+    /// which effect an id names: a translator fills these tables row by row.
     #[test]
-    fn a_pending_language_only_uses_known_ids() {
-        for (language, rows) in PENDING.iter().chain(PARTIAL) {
+    fn a_partial_language_only_uses_known_ids() {
+        for (language, rows) in PARTIAL {
             let mut ids: Vec<&str> = vec![];
             for (id, english, translated) in *rows {
                 let Some((_, hans_english, _)) = SIMPLIFIED_CHINESE.iter().find(|(hans_id, _, _)| hans_id == id) else {
@@ -591,16 +2336,19 @@ mod tests {
         }
     }
 
-    /// Every category the registry and its plug-ins report has a Simplified Chinese row, and
-    /// every row of every language names a category that exists — else the generated Effect menu
-    /// and Effects & Presets would draw a label no folder has.
+    /// Every category row of every language names a category that exists, else the generated
+    /// Effect menu and Effects & Presets would carry a label no folder has.
     #[test]
-    fn every_category_has_a_row() {
+    fn every_category_row_names_a_category() {
         let categories = effects::categories();
-        for category in &categories {
-            assert!(SIMPLIFIED_CHINESE_CATEGORIES.iter().any(|(english, _)| english == category), "no catalog row for category {category}");
-        }
-        for (language, rows) in [("zh-hans", SIMPLIFIED_CHINESE_CATEGORIES), ("zh-hant", TRADITIONAL_CHINESE_CATEGORIES), ("ja", JAPANESE_CATEGORIES)] {
+        for (language, rows) in [
+            ("zh-hans", SIMPLIFIED_CHINESE_CATEGORIES),
+            ("zh-hant", TRADITIONAL_CHINESE_CATEGORIES),
+            ("ja", JAPANESE_CATEGORIES),
+            ("ka", GEORGIAN_CATEGORIES),
+            ("sv", SWEDISH_CATEGORIES),
+            ("fr", FRENCH_CATEGORIES),
+        ] {
             for (english, translated) in rows {
                 assert!(categories.contains(english), "{language} lists {english}, which is not a category");
                 assert!(!translated.is_empty(), "empty {language} translation for {english}");
@@ -613,48 +2361,61 @@ mod tests {
     #[test]
     fn group_names_keep_the_instance_index_and_user_renames() {
         set_current("zh-hans");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur"), "高斯模糊");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "高斯模糊 2");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 12"), "高斯模糊 12");
+        let translated = name("ec.blur.gaussian", "Gaussian Blur");
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur"), translated);
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), format!("{translated} 2"));
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 12"), format!("{translated} 12"));
         assert_eq!(group("ec.blur.gaussian", "My Blur"), "My Blur", "a rename is not a row");
         assert_eq!(group("ec.blur.gaussian", "Gaussian Blur X"), "Gaussian Blur X");
         assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2x"), "Gaussian Blur 2x");
-        assert_eq!(group("ec.blur.gaussian", "高斯模糊"), "高斯模糊", "an already translated name stays");
+        assert_eq!(group("ec.blur.gaussian", &translated), translated, "an already translated name stays");
         set_current("en");
     }
 
-    /// English, and a language with no catalog or no row for this effect, draws the registry's
-    /// name rather than an empty label.
-    ///
-    /// The pending languages are also checked to still be row-less and to have an arm in
-    /// [`catalog`]: an arm with no table would leave a translator's rows dead, and the day a
-    /// pending language gets rows this fails so its slot moves out of [`PENDING`], where the
-    /// coverage for it lives.
+    /// English, and a language with no catalog or no row for an effect, draws the registry's
+    /// name rather than an empty label; a language with a row draws the row. Every table in
+    /// [`COMPLETE`] and [`PARTIAL`] has an arm in [`catalog`]: an arm-less table's rows would be dead.
     #[test]
     fn languages_without_rows_draw_the_registry_name() {
+        for (language, _) in COMPLETE.iter().chain(PARTIAL) {
+            assert!(catalog(language).is_some(), "{language} has a table but no arm in `catalog`: its rows would be dead");
+        }
+        let tables = COMPLETE.iter().chain(PARTIAL).map(|(language, rows)| (*language, *rows));
+        for (language, rows) in [("en", &[][..]), ("uk", &[][..]), ("cs", &[][..])].into_iter().chain(tables) {
+            set_current(language);
+            let expected = rows.iter().find(|(id, _, _)| *id == "ec.blur.gaussian").map_or("Gaussian Blur", |(_, _, translated)| *translated);
+            assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), expected, "{language}");
+            assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), format!("{expected} 2"), "{language}");
+            assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery", "{language}");
+            assert_eq!(category("Not A Category"), "Not A Category", "{language}");
+        }
         for language in ["en", "uk", "cs"] {
             set_current(language);
-            assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "Gaussian Blur", "{language}");
-            assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "Gaussian Blur 2", "{language}");
             assert_eq!(category("Blur & Sharpen"), "Blur & Sharpen", "{language}");
         }
-        for (language, rows) in PENDING {
-            assert!(catalog(language).is_some(), "{language} has a table but no arm in `catalog`: its rows would be dead");
-            assert!(rows.is_empty(), "{language} has rows now: move it out of PENDING and cover it here");
-            set_current(language);
-            assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "Gaussian Blur", "{language}");
-            assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "Gaussian Blur 2", "{language}");
-            assert_eq!(category("Blur & Sharpen"), "Blur & Sharpen", "{language}");
+        set_current("en");
+    }
+
+    /// Every Swedish row names an effect the registry has, by the registry's English name; an
+    /// effect without a row draws its English name, so a new effect does not block other work.
+    /// Names and categories draw in Swedish and search finds either name.
+    #[test]
+    fn swedish_rows_match_the_registry() {
+        let registry = effects::registry();
+        for (id, english, translated) in SWEDISH {
+            let Some(spec) = registry.iter().find(|spec| spec.id == *id) else {
+                panic!("Swedish row {id} is not an effect in the registry");
+            };
+            assert_eq!(*english, spec.name, "{id}: the Swedish catalog says {english:?}, the registry {:?}", spec.name);
+            assert!(!translated.is_empty(), "{id}: empty Swedish translation");
         }
-        set_current("zh-hans");
-        assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "高斯模糊");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "高斯模糊 2");
-        assert_eq!(category("Blur & Sharpen"), "模糊和锐化");
-        assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery");
-        assert_eq!(category("Not A Category"), "Not A Category");
-        set_current("ja");
-        assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "ブラー（ガウス）");
-        assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery", "a row a partial table lacks draws the registry name");
+        set_current("sv");
+        assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "Gaussisk oskärpa");
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "Gaussisk oskärpa 2");
+        assert_eq!(group("ec.blur.gaussian", "My Blur"), "My Blur");
+        assert_eq!(category("Blur & Sharpen"), "Oskärpa och skärpa");
+        assert!(matches("ec.blur.gaussian", "Gaussian Blur", "gaussisk"));
+        assert!(matches("ec.blur.gaussian", "Gaussian Blur", "blur"));
         set_current("en");
     }
 
@@ -665,38 +2426,51 @@ mod tests {
         set_current("zh-hans");
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "blur"));
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "gaussian"));
-        assert!(matches("ec.blur.gaussian", "Gaussian Blur", "高斯"));
+        assert!(matches("ec.blur.gaussian", "Gaussian Blur", &name("ec.blur.gaussian", "Gaussian Blur").to_lowercase()));
         assert!(!matches("ec.blur.gaussian", "Gaussian Blur", "sharpen"));
         set_current("en");
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "blur"));
         assert!(!matches("ec.blur.gaussian", "Gaussian Blur", "高斯"));
     }
+}
 
-    /// The drawing sites ask this catalog instead of the registry's English name (#821). Like the
-    /// panel catalog's literal scan this is a heuristic: it pins the expressions that used to draw
-    /// the English name, so a revert fails here.
+#[cfg(test)]
+mod category_name_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Two categories drawing the same Japanese name would make the Effect menu show one name twice and
+    /// leave the user unable to tell them apart. `描画` was both `Generate` and `Paint` before #2583.
     #[test]
-    fn the_drawing_sites_ask_the_catalog() {
-        /// A file that must ask the catalog.
-        const ASKS: &[(&str, &str, &str)] = &[
-            ("i18n.rs", include_str!("../i18n.rs"), "effects::name("),
-            ("i18n.rs", include_str!("../i18n.rs"), "effects::category("),
-            ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs"), "effects::name("),
-            ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs"), "effects::category("),
-            ("panels/effect_controls.rs", include_str!("../panels/effect_controls.rs"), "effects::group("),
-            ("panels/timeline.rs", include_str!("../panels/timeline.rs"), "effects::group("),
-        ];
-        /// An expression that drew the registry's English name and must be gone.
-        const RAW: &[(&str, &str, &str)] = &[
-            ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs"), "pos2(r.min.x + 56.0 + indent, r.center().y), e.name, query, &t)"),
-            ("panels/effect_controls.rs", include_str!("../panels/effect_controls.rs"), "Align2::LEFT_CENTER, &g.name,"),
-            ("panels/timeline.rs", include_str!("../panels/timeline.rs"), "Align2::LEFT_CENTER, name,"),
-        ];
-        for (path, source, call) in ASKS {
-            assert!(source.contains(call), "{path} does not ask the effect-name catalog (`{call}`)");
+    fn no_two_categories_share_a_japanese_name() {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (english, japanese) in JAPANESE_CATEGORIES {
+            if let Some(other) = seen.insert(japanese, english) {
+                panic!("`{english}` and `{other}` both draw as `{japanese}`");
+            }
         }
-        for (path, source, raw) in RAW {
-            assert!(!source.contains(raw), "{path} draws the registry's English name again: `{raw}`");
+    }
+
+    /// The interface's font probe sees the effect names and category labels, not only the panel
+    /// catalog: `鑲` appears only in Flange & Chorus (`鑲邊與合聲`), and a sparse Han face missing
+    /// it would otherwise draw a box.
+    #[test]
+    fn the_font_probe_sees_effect_and_category_characters() {
+        let chars = crate::i18n::catalog_characters("zh-hant");
+        assert!(chars.contains(&'鑲'), "an effect name's character is probed");
+        let (_, label) = TRADITIONAL_CHINESE_CATEGORIES.first().copied().unwrap_or_default();
+        assert!(label.chars().all(|ch| chars.contains(&ch)), "{label}: a category label's characters are probed");
+    }
+
+    /// The same for Traditional Chinese: one repeated label would hide a category behind another
+    /// in the Effect menu.
+    #[test]
+    fn no_two_categories_share_a_traditional_chinese_name() {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (english, traditional) in TRADITIONAL_CHINESE_CATEGORIES {
+            if let Some(other) = seen.insert(traditional, english) {
+                panic!("`{english}` and `{other}` both draw as `{traditional}`");
+            }
         }
     }
 }

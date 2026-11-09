@@ -18,6 +18,8 @@
 // segment on that side. So a selected pair gets the whole curve, and a single key works too.
 // Roving keys are skipped: they pass speed straight through (their sides stay linear), so an ease
 // set on them wouldn't play.
+// The built-in Linear preset uses Linear interpolation, including on unused endpoint sides
+// so a fully linear key has a diamond icon; the other presets use Bezier.
 //
 // User presets are kept with app.settings (section "Ease Presets", key "userPresets") as JSON:
 // {"version": 1, "presets": [{"name": …, "curve": {"outInfluence", "outSpeed", "inInfluence",
@@ -29,6 +31,7 @@
   var MAX_NAME = 64;
   var MIN_INFLUENCE = 0.1;
   var MAX_SPEED = 100;
+  var LINEAR = KeyframeInterpolationType.LINEAR;
   var BEZIER = KeyframeInterpolationType.BEZIER;
   var HOLD = KeyframeInterpolationType.HOLD;
 
@@ -178,16 +181,16 @@
 
   // Ease one side of key `k` with `eases`, leaving its other side as it plays (auto-Bezier and
   // linear sides keep their shape; a continuous key stops being continuous, its sides now differ).
-  function easeSide(p, k, out, eases) {
+  function easeSide(p, k, out, eases, interpolation) {
     var inType = p.keyInInterpolationType(k), outType = p.keyOutInterpolationType(k);
     var inEase = p.keyInTemporalEase(k), outEase = p.keyOutTemporalEase(k);
     if (p.keyTemporalContinuous(k)) p.setTemporalContinuousAtKey(k, false);
     if (out) {
       p.setTemporalEaseAtKey(k, inEase, eases);
-      p.setInterpolationTypeAtKey(k, inType, BEZIER);
+      p.setInterpolationTypeAtKey(k, inType, interpolation);
     } else {
       p.setTemporalEaseAtKey(k, eases, outEase);
-      p.setInterpolationTypeAtKey(k, BEZIER, outType);
+      p.setInterpolationTypeAtKey(k, interpolation, outType);
     }
   }
 
@@ -201,7 +204,7 @@
   // Ease the sides `mode` names ("In", "Out" or "In-Out") of every selected keyframe with `c`, in
   // one undo step: a side with a neighbouring key, scaled to the segment on that side. Returns
   // {eased, roving}: the number of keyframes eased, and of selected roving keyframes skipped.
-  function applyCurve(c, mode) {
+  function applyCurve(c, mode, interpolation) {
     var keyed = selectedKeyed(), sides = [], keys = 0, roving = 0;
     var doIn = mode !== "Out", doOut = mode !== "In";
     // Every side and its eases first: the segments are measured before any key changes.
@@ -214,16 +217,16 @@
           continue;
         }
         var s = doIn && k > 1 ? slopes(p, k - 1) : null;
-        if (s) sides.push({ prop: p, key: k, out: false, eases: eases(s, c.inSpeed, c.inInfluence) });
+        if (s || (doIn && interpolation === LINEAR)) sides.push({ prop: p, key: k, out: false, eases: s ? eases(s, c.inSpeed, c.inInfluence) : p.keyInTemporalEase(k) });
         s = doOut && k < p.numKeys ? slopes(p, k) : null;
-        if (s) sides.push({ prop: p, key: k, out: true, eases: eases(s, c.outSpeed, c.outInfluence) });
+        if (s || (doOut && interpolation === LINEAR)) sides.push({ prop: p, key: k, out: true, eases: s ? eases(s, c.outSpeed, c.outInfluence) : p.keyOutTemporalEase(k) });
         if (sides.length > before) keys++;
       }
     }
     if (!sides.length) return { eased: 0, roving: roving };
     app.beginUndoGroup("Apply Ease Preset");
     try {
-      for (var e = 0; e < sides.length; e++) easeSide(sides[e].prop, sides[e].key, sides[e].out, sides[e].eases);
+      for (var e = 0; e < sides.length; e++) easeSide(sides[e].prop, sides[e].key, sides[e].out, sides[e].eases, interpolation);
     } finally {
       app.endUndoGroup();
     }
@@ -384,7 +387,10 @@
 
   function apply(c, what) {
     var m = mode.selection ? mode.selection.text : "In-Out";
-    var r = applyCurve(c, m), n = r.eased;
+    // Linear is an interpolation type too, so its keys get diamond icons. Edited speeds
+    // make a custom Bezier curve even while Linear remains selected in the list.
+    var interpolation = list.selection && list.selection.text === "Linear" && c.outSpeed === 1 && c.inSpeed === 1 ? LINEAR : BEZIER;
+    var r = applyCurve(c, m, interpolation), n = r.eased;
     var side = m === "In" ? "before it" : m === "Out" ? "after it" : "next to it";
     var skipped = r.roving > 0 ? "skipped " + r.roving + " roving keyframe(s); turn off Roving to ease them" : "";
     if (n > 0) status.text = "Eased " + n + " keyframe(s) (" + m + ") with " + what + (skipped ? "; " + skipped : "");

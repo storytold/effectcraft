@@ -61,6 +61,12 @@ fn file_name(p: &str) -> String {
     std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
 }
 
+/// The labels of a recent-files list: `names[i]`, or the whole of `full[i]` when another entry
+/// has the same name, so entries for two files named `Tool.jsx` tell them apart.
+fn distinct_labels(names: Vec<String>, full: &[String]) -> Vec<String> {
+    names.iter().zip(full).map(|(n, f)| if names.iter().filter(|m| *m == n).count() > 1 { f.clone() } else { n.clone() }).collect()
+}
+
 fn dyn_entry(label: String, command: &str, params: Value) -> MenuEntry {
     MenuEntry { label, command: command.into(), params, shortcut: None, alt_shortcuts: vec![] }
 }
@@ -72,26 +78,35 @@ fn holder_of(s: &Session, keys: &str) -> Option<String> {
 }
 
 /// The entries of a `@dynamic:<name>` node, and the disabled placeholder shown when there are
-/// none: `recentProjects`, `recentFootage`, `recentPresets`, `history` (undo steps, newest
+/// none: `recentProjects`, `recentFootage`, `recentPresets`, `recentScripts` (File ▸ Scripts ▸
+/// Recent Script Files), `history` (undo steps, newest
 /// first), `view3dShortcuts`, `workspaceShortcuts`, `savedWorkspaces` (Window ▸ Workspace) and
 /// `openViewers` (open compositions other than the active one), `scripts` (File ▸ Scripts) and
-/// `scriptPanels` (ScriptUI panels).
+/// `scriptPanels` (ScriptUI panels; a script in a subfolder is labelled `Folder/File.jsx` here,
+/// and [`dynamic_nodes`] puts it in the folder's submenu).
 pub fn dynamic(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuEntry>, Option<&'static str>) {
     use serde_json::json;
     let indexed = |list: &[String], cmd: &str, stem: bool| -> Vec<MenuEntry> {
-        list.iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let n =
-                    if stem { std::path::Path::new(p).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone()) } else { file_name(p) };
-                dyn_entry(n, cmd, json!({"index": i}))
-            })
-            .collect()
+        let names = list
+            .iter()
+            .map(
+                |p| if stem { std::path::Path::new(p).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone()) } else { file_name(p) },
+            )
+            .collect();
+        distinct_labels(names, list).into_iter().enumerate().map(|(i, n)| dyn_entry(n, cmd, json!({"index": i}))).collect()
     };
     match name {
         "recentProjects" => (indexed(&s.prefs.recent_projects, "file.openRecent", false), Some("No Recent Projects")),
         "recentFootage" => (indexed(&s.prefs.recent_footage, "file.importRecent", false), Some("No Recent Footage")),
         "recentPresets" => (indexed(&s.prefs.recent_presets, "anim.applyRecentPreset", true), Some("No Recent Presets")),
+        "recentScripts" => {
+            let full: Vec<String> = s.prefs.recent_scripts.iter().map(|r| r.text().to_string()).collect();
+            let names = full.iter().map(|p| file_name(p)).collect();
+            (
+                distinct_labels(names, &full).into_iter().enumerate().map(|(i, n)| dyn_entry(n, "file.runScript", json!({"recent": i}))).collect(),
+                Some("No Recent Script Files"),
+            )
+        }
         "history" => (
             s.history.undo.iter().rev().enumerate().map(|(i, (l, _))| dyn_entry(format!("Undo {l}"), "edit.history", json!({"steps": i + 1}))).collect(),
             Some("No History"),
@@ -151,6 +166,31 @@ pub fn dynamic(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuEntry>, Option<
         }
         _ => (vec![], None),
     }
+}
+
+/// [`dynamic`] as menu nodes, which is what frontends draw: scripts and panels in a subfolder
+/// (`Motion Kit/Animate.jsx`) go into a submenu named after the folder (`Motion Kit ▸
+/// Animate.jsx`), placed where the folder sorts among the other entries.
+pub fn dynamic_nodes(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuNode>, Option<&'static str>) {
+    let (entries, empty) = dynamic(s, name, cx);
+    let scripts = matches!(name, "scripts" | "scriptPanels");
+    let mut out: Vec<MenuNode> = vec![];
+    for mut e in entries {
+        let Some((folder, file)) = e.label.split_once('/').filter(|_| scripts).map(|(d, f)| (d.to_string(), f.to_string())) else {
+            out.push(MenuNode::Item(e));
+            continue;
+        };
+        e.label = file;
+        let open = out.iter_mut().find_map(|n| match n {
+            MenuNode::Submenu { label, children } if *label == folder => Some(children),
+            _ => None,
+        });
+        match open {
+            Some(children) => children.push(MenuNode::Item(e)),
+            None => out.push(MenuNode::Submenu { label: folder, children: vec![MenuNode::Item(e)] }),
+        }
+    }
+    (out, empty)
 }
 
 /// Display label of a submenu (the "Assign Shortcut to …" submenus name the current view or
@@ -541,6 +581,7 @@ File
     EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
+    After Effects Project... | file.importAep
     Lottie... | file.importLottie
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
@@ -551,6 +592,7 @@ File
   Export
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
+    After Effects Project... | file.exportAep
     Lottie JSON... | file.exportLottie
     Essential Graphics Template... | essential.exportTemplate
   ---
@@ -576,6 +618,8 @@ File
     Install Script File... | file.installScript
     Install ScriptUI Panel... | file.installScriptUIPanel
     Run Script File... | file.runScript
+    Recent Script Files
+      @dynamic:recentScripts
   ---
   Create Proxy
     Still... | file.createProxy {"kind":"still"}
@@ -733,6 +777,7 @@ Layer
     Shape Layer | layer.newShape
     Adjustment Layer | layer.newAdjustment
     Content-Aware Fill Layer... | layer.newContentAwareFill
+    3D Primitive... | layer.newPrimitive
     Cube | layer.new3dPrimitive {"kind":"cube"}
     Sphere | layer.new3dPrimitive {"kind":"sphere"}
     Plane | layer.new3dPrimitive {"kind":"plane"}
@@ -817,6 +862,16 @@ Layer
     Flip Vertical | layer.transform {"op":"flipV"}
     Center In View | layer.transform {"op":"center"} | Cmd+Home
     Center Anchor Point in Layer Content | layer.centerAnchor
+    Quick Set Anchor
+      Top Left | layer.quickSetAnchor {"point":"topLeft"}
+      Top | layer.quickSetAnchor {"point":"top"}
+      Top Right | layer.quickSetAnchor {"point":"topRight"}
+      Left | layer.quickSetAnchor {"point":"left"}
+      Center | layer.quickSetAnchor {"point":"center"}
+      Right | layer.quickSetAnchor {"point":"right"}
+      Bottom Left | layer.quickSetAnchor {"point":"bottomLeft"}
+      Bottom | layer.quickSetAnchor {"point":"bottom"}
+      Bottom Right | layer.quickSetAnchor {"point":"bottomRight"}
     Fit to Comp | layer.transform {"op":"fit"} | Cmd+Alt+F
     Fit to Comp Width | layer.transform {"op":"fitWidth"} | Cmd+Alt+Shift+H
     Fit to Comp Height | layer.transform {"op":"fitHeight"} | Cmd+Alt+Shift+G
@@ -963,6 +1018,7 @@ Layer
     Duplicate and Assign Material | material.duplicateAssign
   Auto-trace... | layer.autoTrace
   Pre-compose... | layer.precompose
+  Un-precompose | layer.unprecompose
   Scene Edit Detection... | layer.sceneEditDetection
 Effect
   Effect Controls | window.panel {"panel":"effectControls"} | F3, Cmd+Shift+T
@@ -971,6 +1027,11 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Install Effect Plug-in... | effect.plugins.install
+  Install Effect Plug-in Bundle (Folder)... | effect.plugins.install {"bundle": true}
+  Load Plug-ins Through Helper... | effect.helpers.load
+  Scan for Effect Helpers | effect.helpers.scan
+  Plug-in Library... | prefs.open {"page":"library"}
   ---
   @effects
 Animation
@@ -993,6 +1054,8 @@ Animation
   ---
   Add Keyframe | anim.addKeyframe
   Toggle Hold Keyframe | keys.toggleHold
+  Mute Keyframes | keys.setMuted
+  Unmute Keyframes | keys.setMuted {"muted":false}
   Keyframe Interpolation... | keys.interpolation
   Keyframe Velocity... | keys.velocity
   Keyframe Assistant
@@ -1200,7 +1263,7 @@ Window
   Essential Graphics | window.panel {"panel":"essentialGraphics"}
   Info | window.panel {"panel":"info"} | Cmd+2
   Learn | help.inAppTutorials
-  Lumetri Scopes | window.panel {"panel":"lumetriScopes"}
+  Video Scopes | window.panel {"panel":"lumetriScopes"}
   Mask Interpolation | window.panel {"panel":"maskInterpolation"}
   Media Browser | window.panel {"panel":"mediaBrowser"}
   Metadata | window.panel {"panel":"metadata"}

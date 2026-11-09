@@ -1,9 +1,28 @@
 # Attribution
 
-Every non-code asset in EffectCraft, with its author, source and licence. Each file listed here also has
+Every non-code asset in EffectCraft, with its author, source and licence. Each repository file listed here also has
 a `<file>.attribution` sidecar with full details. The rules are in [AGENTS.md](AGENTS.md) §1: no Adobe
 iconography, images or other Adobe assets; open licences only; every asset attributed.
 `cargo xtask assets` checks that this index and the sidecars cover every asset in the repository.
+The complete licence texts and copyright notices for the bundled fonts, including the fonts embedded
+by the pinned egui dependency, are reproduced in [`NOTICE`](NOTICE), which every package ships; the
+`assets/fonts/OFL-*.txt` files are the upstream copies kept beside the fonts.
+
+## Bundled dependency fonts
+
+These fonts are embedded by the pinned egui dependency (epaint_default_fonts 0.37 at
+`6d518fc799681571963842f95b55a6b68431b15a`); no font file is added to this repository.
+egui-icons is always embedded, `default_fonts` adds Ubuntu Light and Hack, and
+`monochrome_emoji_fonts` adds Noto Emoji and emoji-icon-font. The complete copyright notices
+and licence texts are in [`NOTICE`](NOTICE).
+
+| Asset | Author | Source | Licence |
+|---|---|---|---|
+| `epaint_default_fonts/fonts/egui-icons.ttf` | John Slegers (emoji-icon-font) | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/egui-icons.txt; original https://github.com/jslegers/emoji-icon-font | MIT (complete copyright and permission text in `NOTICE`) |
+| `epaint_default_fonts/fonts/emoji-icon-font.ttf` | John Slegers | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/emoji-icon-font-mit-license.txt; original https://github.com/jslegers/emoji-icon-font | MIT (complete copyright and permission text in `NOTICE`) |
+| `epaint_default_fonts/fonts/NotoEmoji-Regular.ttf` | Google Inc. (The Noto Project Authors) | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/OFL.txt | OFL-1.1 (complete text in `NOTICE`) |
+| `epaint_default_fonts/fonts/Ubuntu-Light.ttf` | Canonical Ltd. and Dalton Maag | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/UFL.txt | Ubuntu Font Licence 1.0 (complete text in `NOTICE`) |
+| `epaint_default_fonts/fonts/Hack-Regular.ttf` | Source Foundry Authors; Bitstream Inc. | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/Hack-Regular.txt; original https://github.com/source-foundry/Hack | MIT AND Bitstream-Vera (complete texts in `NOTICE`) |
 
 ## Asset files
 
@@ -15,6 +34,7 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 | `assets/fonts/Inter-Bold.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
 | `assets/fonts/Inter-Italic.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
 | `assets/fonts/NotoSerif-Regular.ttf` | The Noto Project Authors | https://github.com/notofonts/latin-greek-cyrillic | OFL-1.1 (`assets/fonts/OFL-NotoSerif.txt`) |
+| `assets/fonts/NotoSansSymbols2-Regular.ttf` | The Noto Project Authors | https://github.com/notofonts/symbols | OFL-1.1 (`assets/fonts/OFL-NotoSansSymbols2.txt`) |
 | `assets/fonts/JetBrainsMono-Regular.ttf` | The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono | OFL-1.1 (`assets/fonts/OFL-JetBrainsMono.txt`) |
 | `apps/effectcraft-web/web/favicon.svg` | EffectCraft contributors | Original work: web app icon, a copy of `assets/app-icon/effectcraft-small.svg` (the unicorn app icon) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `packaging/macos/dmg/background.svg` | @XusBadia | Original work: macOS DMG Finder window background, derived from the EffectCraft app icon (`assets/app-icon/effectcraft.svg`); rendered to a TIFF by `packaging/macos/package.sh` at package time | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) |
@@ -44,6 +64,8 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 | `crates/model/tests/fixtures/cube.obj` | EffectCraft contributors | Original work: Wavefront OBJ test fixture (unit cube, two materials) | MIT OR Apache-2.0 |
 | `crates/model/tests/fixtures/cube.mtl` | EffectCraft contributors | Original work: MTL test fixture (materials of cube.obj) | MIT OR Apache-2.0 |
 
+Two small After Effects test projects of `crates/aep` are in this repository: `crates/aep/tests/fixtures/synthetic.aep` (original work, made with After Effects 2026 from own data, working space None, the embedded colour profile removed; MIT OR Apache-2.0, with its `.attribution` sidecar) and `crates/aep/tests/fixtures/ai-mask-3099.aep` (original work, made with After Effects 2026 from four hand-written one-page PDFs named `.ai`, footage paths and host name neutralised, the embedded colour profiles replaced by stubs made with `crates/aep/examples/stubicc.rs`; MIT OR Apache-2.0, with its `.attribution` sidecar). The other After Effects test projects of `crates/aep` are not in this repository. They are original work of an EffectCraft contributor, generated with After Effects 2026 as own test data (MIT OR Apache-2.0, each file with its `.attribution` sidecar); they are in [storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus) with their sidecars, fetched by `cargo xtask aep-corpus` (commit-pinned, SHA-256-verified), and the tests read them only from the folder named by `EFFECTCRAFT_AEP_FIXTURES` (opt-in). Their embedded colour profiles are replaced by stubs made with `crates/aep/examples/stubicc.rs` (a header and a description, no colour data), so no vendor profile data is in them.
+
 ## Screenshots
 
 Screenshots of EffectCraft itself, rendered headlessly, showing only procedurally generated demo content.
@@ -69,13 +91,15 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
   `crates/engine/presets/transitions.json` (sidecar `.attribution`).
 - Backgrounds animation presets (23: drifting gradients, fog, cloud and smoke, plasma and magma, cells and crystals, scrolling grids
   and checks, pulse rings, bokeh, light sweep): `crates/engine/presets/backgrounds.json` (sidecar `.attribution`).
+- Behaviors animation presets (22: wiggle, shake, float, orbit, bounce, drift, pendulum, spin, pulse, heartbeat, blink, strobe, flicker):
+  `crates/engine/presets/behaviors.json` (sidecar `.attribution`).
 - Sample scripts (File ▸ Scripts) and ScriptUI panel: `crates/engine/scripts/Rename Layers.jsx`,
   `crates/engine/scripts/Sort Layers by In Point.jsx`, `crates/engine/scripts/Create Null at Selected Layers.jsx`,
   `crates/engine/scripts/Render Queue Batch.jsx`, `crates/engine/scripts/ScriptUI Panels/Layer Tools.jsx`
   (sidecars `.attribution`).
 - Bundled extension (ScriptUI panel) with its twelve built-in ease presets:
   `extensions/scriptui-panels/Ease Presets.jsx` (sidecar `.attribution`).
-- Example effect plug-in: `examples/plugins/posterize-bands` (plug-in API v1, WebAssembly).
+- Example effect plug-in: `examples/plugins/posterize-bands` (WebAssembly ABI 1).
 
 ## Trained models (optional downloads, not bundled)
 

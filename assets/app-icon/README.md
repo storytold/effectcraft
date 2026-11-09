@@ -15,9 +15,8 @@ full-bleed colour field, tight head-and-shoulders crop, the body running off the
 | Paper | `#efe9dc` | the figure |
 | Ink | `#0b0b0c` | line work and contour |
 
-**Provenance:** the project owner drew it in ArtCraft (a 2880 px engraving-style image, kept in
-craftrules at `assets/app-icons/effectcraft/source.png`). It was vectorised with craftrules
-`assets/logo-options/_tools/vectorize_tile.py`, which keys out the field and traces the ink with potrace.
+**Provenance:** the project owner drew it in ArtCraft (a 2880 px engraving-style image). It was
+vectorised with potrace, which keys out the field and traces the ink.
 Licence: see [LICENSE.txt](LICENSE.txt) (MIT OR Apache-2.0, like the repo).
 
 ## Files
@@ -37,6 +36,5 @@ App ID: `ai.storyteller.effectcraft` (Wayland app ID, `packaging/linux/ai.storyt
 
 ## Regenerate
 
-Copy a new `icon-master.svg` / `icon.svg` from craftrules `assets/app-icons/effectcraft/` over
-`effectcraft.svg` / `effectcraft-small.svg`, then run `packaging/icons.sh` (needs `resvg`; `iconutil`
+After replacing `effectcraft.svg` / `effectcraft-small.svg`, run `packaging/icons.sh` (needs `resvg`; `iconutil`
 on macOS for the `.icns`). Copy `effectcraft-small.svg` to `apps/effectcraft-web/web/favicon.svg` too.

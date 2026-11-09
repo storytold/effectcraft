@@ -4,6 +4,11 @@ use super::*;
 
 use crate::write::pdf;
 
+mod groups;
+mod import;
+mod reader;
+mod shading;
+
 const CONTENT: &str = "/OC /MC0 BDC\n0 1 0 rg 0 0 200 100 re f\nEMC\n\
 /OC /MC1 BDC\nq 10 10 80 80 re W n\n1 0 0 rg 0 0 50 100 re f\nQ\n\
 /Pattern cs /P0 scn 100 0 100 50 re f\n\
@@ -105,6 +110,86 @@ fn pdf_forms_rotation_cmyk_and_alpha() {
     let dark = img.get(5, 5);
     assert!((dark[0] - 0.5).abs() < 0.02 && dark[3] > 0.99, "{dark:?}");
     assert_eq!(img.get(30, 30)[3], 0.0, "form clipped to its bounding box");
+}
+
+/// A one-page PDF with a MediaBox [0 0 420 220], `pages` added to the /Pages node and `page` to
+/// the page: grey over the media box, a blue 20 × 10 marker at PDF (64, 54).
+fn boxes_pdf(pages: &str, page: &str) -> Vec<u8> {
+    let content = "0.5 g 0 0 420 220 re f 0 0 1 rg 64 54 20 10 re f";
+    pdf(
+        &[
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
+            (2, format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {pages} >>"), None),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 220] {page} /Contents 4 0 R >>"), None),
+            (4, "<< >>".to_string(), Some(content.as_bytes().to_vec())),
+        ],
+        1,
+    )
+}
+
+/// The first page of `bytes` framed as After Effects places it.
+fn placed(bytes: &[u8]) -> Doc {
+    parse_page_framed(bytes, 0, Framing::Placed).unwrap()
+}
+
+/// #3099: After Effects 2026 places a .ai or PDF as footage by the page's ArtBox and shows only
+/// that region (a page with MediaBox 420 × 220, CropBox 410 × 210, TrimBox 380 × 180 and ArtBox
+/// [60 50 300.6 170.4] imports as 241 × 121). `Framing::Placed` frames it so; the viewer framing
+/// (the default, used by File ▸ Import) stays the CropBox.
+#[test]
+fn placed_framing_is_the_art_box() {
+    let bytes = boxes_pdf("/CropBox [5 5 415 215]", "/TrimBox [20 20 400 200] /ArtBox [60 50 300.6 170.4]");
+    let doc = placed(&bytes);
+    assert!((doc.width - 240.6).abs() < 1e-9 && (doc.height - 120.4).abs() < 1e-9, "{} × {}", doc.width, doc.height);
+    assert_eq!(doc.pixel_size(), (241, 121));
+    // The art box's top-left corner is the document's origin: the marker (PDF x 64..84, y 54..64)
+    // is at x 4..24, y 106.4..116.4 from the top.
+    let (w, h) = doc.pixel_size();
+    let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
+    let marker = img.get(10, 110);
+    assert!(marker[2] > 0.99 && marker[0] < 0.01, "{marker:?}");
+    assert!(img.get(30, 110)[2] < 0.6, "{:?}", img.get(30, 110));
+    let viewer = parse(&bytes).unwrap();
+    assert_eq!((viewer.width, viewer.height), (410.0, 210.0), "the viewer framing is unchanged");
+}
+
+/// The ArtBox is clipped to the crop box (ISO 32000-1 §14.11.2); one that keeps no area there,
+/// a degenerate or unreadable one, or one on the /Pages node (not inherited, table 30) leaves the
+/// crop box (else the media box).
+#[test]
+fn placed_framing_clips_the_art_box_and_falls_back() {
+    let size = |pages: &str, page: &str| {
+        let d = placed(&boxes_pdf(pages, page));
+        (d.width, d.height)
+    };
+    let crop = "/CropBox [5 5 415 215]";
+    assert_eq!(size(crop, "/ArtBox [-100 -100 1000 1000]"), (410.0, 210.0), "larger than the page");
+    assert_eq!(size(crop, "/ArtBox [300 100 900 900]"), (115.0, 115.0), "partly outside");
+    let (w, h) = size(crop, "/ArtBox [300.6 170.4 60 50]");
+    assert!((w - 240.6).abs() < 1e-9 && (h - 120.4).abs() < 1e-9, "corners in any order: {w} × {h}");
+    // Finite corners whose span is not.
+    let big = format!("1{}", "0".repeat(308));
+    let unreadable = [format!("/ArtBox [-{big} 50 {big} 170]")];
+    for page in ["/ArtBox [500 300 600 400]", "/ArtBox [60 50 60 170]", "/ArtBox [60 50 300]"].map(String::from).iter().chain(&unreadable) {
+        assert_eq!(size(crop, page), (410.0, 210.0), "{page}");
+    }
+    assert_eq!(size("/ArtBox [60 50 300 170]", ""), (420.0, 220.0), "an ArtBox on /Pages is not inherited");
+    // A crop box that is not a box leaves the media box.
+    assert_eq!(size("", &format!("/CropBox [-{big} 5 {big} 215]")), (420.0, 220.0));
+}
+
+/// After Effects ignores /Rotate on placed footage (a page [100 50 400 150] with /Rotate 90
+/// imports as 300 × 100, drawn unturned); the viewer framing turns it.
+#[test]
+fn placed_framing_ignores_rotate() {
+    let bytes = boxes_pdf("", "/Rotate 90");
+    let doc = placed(&bytes);
+    assert_eq!((doc.width, doc.height), (420.0, 220.0));
+    // Unturned: the marker at PDF (64..84, 54..64) is at x 64..84, y 156..166 from the top.
+    let img = effectcraft_svg::rasterize(&doc, 420, 220, 1.0);
+    assert!(img.get(70, 160)[2] > 0.99, "{:?}", img.get(70, 160));
+    let viewer = parse(&bytes).unwrap();
+    assert_eq!((viewer.width, viewer.height), (220.0, 420.0));
 }
 
 const EPS: &str = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n%%EndComments\n\
@@ -1089,4 +1174,48 @@ fn retained_layers_preserve_artwork_beyond_the_bounds_depth_limit() {
     let (cropped, offset) = layer_doc_with_sizes(&doc, 0, true);
     assert_eq!(cropped.pixel_size(), (120, 80), "unknown bounds keep the full page");
     assert_eq!(offset, [0.0, 0.0]);
+}
+
+#[test]
+fn cid_width_entries_at_the_top_of_the_cid_range_do_not_overflow() {
+    // A first CID of u32::MAX (larger values saturate to it) used to overflow `first + k` and `first + 65535`:
+    // a panic in debug builds; in release builds the list wrapped round to CID 0 and the range was dropped.
+    let load = |entry: &str| {
+        let type0 = "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [13 0 R] >>";
+        let desc = format!("<< /Type /Font /Subtype /CIDFontType2 {entry} >>");
+        let file = object::File::parse(&page_pdf("", "/Font << /F1 10 0 R >>", vec![(10, type0.into(), None), (13, desc, None)])).unwrap();
+        let d = file.objects.get(&(10, 0)).and_then(object::Obj::dict).unwrap();
+        font::Font::load(&file, d, &mut vec![])
+    };
+    let max = u32::MAX;
+    // c [w1 w2 ...]
+    let f = load("/W [4294967295 [500 600 700]]");
+    assert_eq!((f.width(max), f.width(0)), (0.5, 1.0));
+    // cfirst clast w
+    assert_eq!(load("/W [4294967295 4294967295 400]").width(max), 0.4);
+    // c [w1y vx vy ...]
+    let f = load("/W2 [4294967295 [1 2 3 4 5 6]]");
+    assert_eq!((f.vmetrics(max), f.vmetrics(0)), ((0.001, 0.002, 0.003), (-1.0, 0.5, 0.88)));
+    // cfirst clast w1y vx vy
+    assert_eq!(load("/W2 [4294967295 4294967295 1 2 3]").vmetrics(max), (0.001, 0.002, 0.003));
+}
+
+#[test]
+fn cmap_entries_at_the_top_of_the_code_range_do_not_overflow() {
+    // A bfrange array starting at code 0xFFFFFFFF and a cidrange mapping onto CID u32::MAX used to overflow
+    // `lo + k` and `c + (code - lo)`: a panic in debug builds, a wrap round to code / CID 0 in release builds.
+    let to_unicode = "beginbfrange <FFFFFFFF> <FFFFFFFF> [<0041> <0042>] endbfrange";
+    let encoding = "begincodespacerange <0000> <FFFF> endcodespacerange begincidrange <0000> <FFFF> 4294967295 endcidrange";
+    let objs: Objs = vec![
+        (10, "<< /Type /Font /Subtype /Type0 /Encoding 15 0 R /ToUnicode 14 0 R /DescendantFonts [13 0 R] >>".into(), None),
+        (13, "<< /Type /Font /Subtype /CIDFontType2 /W [0 [700 800] 4294967295 [500]] >>".into(), None),
+        (14, "<< >>".into(), Some(to_unicode.as_bytes().to_vec())),
+        (15, "<< /Type /CMap >>".into(), Some(encoding.as_bytes().to_vec())),
+    ];
+    let file = object::File::parse(&page_pdf("", "/Font << /F1 10 0 R >>", objs)).unwrap();
+    let d = file.objects.get(&(10, 0)).and_then(object::Obj::dict).unwrap();
+    let f = font::Font::load(&file, d, &mut vec![]);
+    assert_eq!((f.unicode(0xFFFF_FFFF), f.unicode(0)), ("A".to_string(), String::new()));
+    // Code 0 is CID u32::MAX; code 2 would be past it, so it falls back to CID 0 like an unmapped code.
+    assert_eq!((f.width(0), f.width(2)), (0.5, 0.7));
 }

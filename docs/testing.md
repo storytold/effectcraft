@@ -2,8 +2,35 @@
 
 ```sh
 cargo test --workspace     # everything
-cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, wasm
+cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, layers, assets, wasm
 ```
+
+The After Effects test projects of `crates/aep` are not in the repository; without them the
+`crates/aep`, engine and ui-egui tests that need one print `SKIPPED: fixture <name> missing` and
+pass. They live in [storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus).
+`cargo xtask aep-corpus` fetches them at the commit pinned in `crates/aep/tests/fixtures/corpus.lock`,
+checks every file against the SHA-256 listed there (any mismatch fails and installs nothing) and
+installs them in `corpus/aep`. Point `EFFECTCRAFT_AEP_FIXTURES` at that folder to run those tests
+too, and set `EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1` as well to make a missing project fail its test
+instead of skipping (a corpus run that must not pass by skipping):
+
+```sh
+cargo xtask aep-corpus
+EFFECTCRAFT_AEP_FIXTURES=corpus/aep EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1 cargo test -p effectcraft-aep
+```
+
+The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
+interactively — local variables, parameters, column breakpoints — build with the `dev-full`
+profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUTING.md`).
+
+`cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus
+`cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
+runs `missing_translations_report` with `--nocapture`, which prints the interface strings each
+language has no translation for. Those strings show in English; the report always passes.
+
+Each crate with several integration-test files has one test binary, `tests/it/main.rs`, whose
+modules are the files in `tests/it/`. Run one file with `cargo test -p <crate> --test it <module>::`
+or `cargo nextest run -p <crate> -E 'binary(it) and test(/^<module>::/)'`.
 
 ## What the tests cover
 
@@ -16,7 +43,7 @@ cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, was
 - **Effects** (`crates/effects`): each effect has a determinism test and at least one behaviour
   test (identity at neutral settings, known pixel results, or simulations giving the same frame
   whether you seek straight to it or play up to it). A registry-wide test checks that effects
-  which read the clock are declared time-dependent. `crates/effects/tests/sim_golden.rs` pins
+  which read the clock are declared time-dependent. `crates/effects/tests/it/sim_golden.rs` pins
   exact pixel hashes of the simulation effects the GPU shares plans with (CC Rainfall … Card
   Wipe) at several settings, times, bit depths and resolutions, so any change to their CPU output
   fails (re-pin with `SIM_GOLDEN_PRINT=1` after an intended change; pinned for aarch64 macOS,

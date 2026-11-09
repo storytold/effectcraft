@@ -275,27 +275,70 @@ pub fn transform_shutter(ctx: &EffectCtx) -> Option<(f64, f64, u32)> {
     (angle > 0.0).then_some((angle, phase, n.clamp(2, 64)))
 }
 
-fn transform_matrix(pr: &crate::Params, b: &Buf) -> Mat3 {
-    let anchor = b.to_px(pr.v2("anchor"));
-    let pos = b.to_px(pr.v2("position"));
+/// The Transform effect's matrix in buffer pixels (`to_px` maps layer pixels into the buffer),
+/// as After Effects 2026 draws it (cases 723, 819, 820): `position + K · R · S · (p − anchor)`
+/// with the skew `K = rot(−axis) · shearY(tan skew) · rot(axis)` applied after the rotation.
+pub fn transform_matrix_px(pr: &crate::Params, to_px: impl Fn([f64; 2]) -> (f64, f64)) -> Mat3 {
+    let anchor = to_px(pr.v2("anchor"));
+    let pos = to_px(pr.v2("position"));
     let sh = pr.f("scaleHeight");
     let sw = if pr.b("uniform") { sh } else { pr.f("scaleWidth") };
+    let axis = pr.f("skewAxis");
+    let k = pr.f("skew").clamp(-85.0, 85.0).to_radians().tan();
+    let k = if k.is_finite() { k } else { 0.0 };
+    let skew = Mat3::rotate_deg(-axis) * Mat3([[1.0, 0.0, 0.0], [k, 1.0, 0.0], [0.0, 0.0, 1.0]]) * Mat3::rotate_deg(axis);
     Mat3::translate(vec2(pos.0, pos.1))
+        * skew
         * Mat3::rotate_deg(pr.f("rotation"))
-        * Mat3::skew_deg(pr.f("skew"), pr.f("skewAxis"))
         * Mat3::scale(vec2(sw / 100.0, sh / 100.0))
         * Mat3::translate(vec2(-anchor.0, -anchor.1))
 }
 
+fn transform_matrix(pr: &crate::Params, b: &Buf) -> Mat3 {
+    transform_matrix_px(pr, |p| b.to_px(p))
+}
+
+/// The transparent margins (left, top, right, bottom) a `w` x `h` buffer needs so its warp by
+/// any of `ms` stays on it: After Effects draws Transform's result outside the layer's bounds
+/// (case 723). Each side grows by its own overshoot; the grown buffer is capped at 16 384 px a
+/// side and 16 Mpx in all (the margins shrink in proportion), so a layer moved far away costs
+/// a bounded allocation.
+pub fn transform_grow(ms: &[Mat3], w: u32, h: u32) -> [u32; 4] {
+    const SIDE: f64 = 16_384.0;
+    const AREA: f64 = 16_777_216.0;
+    let (wf, hf) = (w as f64, h as f64);
+    let mut m = [0.0f64; 4];
+    for mat in ms {
+        for (x, y) in [(0.0, 0.0), (wf, 0.0), (0.0, hf), (wf, hf)] {
+            let q = mat.apply(vec2(x, y));
+            if q.x.is_finite() && q.y.is_finite() {
+                m = [m[0].max(-q.x), m[1].max(-q.y), m[2].max(q.x - wf), m[3].max(q.y - hf)];
+            }
+        }
+    }
+    let m = m.map(|v| v.ceil().max(0.0));
+    let fit = |len: f64, a: f64, b: f64| -> f64 {
+        let room = (SIDE - len).max(0.0);
+        if a + b > room && a + b > 0.0 { room / (a + b) } else { 1.0 }
+    };
+    let kx = fit(wf, m[0], m[2]);
+    let ky = fit(hf, m[1], m[3]);
+    let area = |k: f64| (wf + (m[0] + m[2]) * kx * k) * (hf + (m[1] + m[3]) * ky * k);
+    let k = if area(1.0) > AREA && area(1.0) > wf * hf {
+        // Shrink both margins by the same factor until the area fits.
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if area(mid) > AREA { hi = mid } else { lo = mid }
+        }
+        lo
+    } else {
+        1.0
+    };
+    [m[0] * kx * k, m[1] * ky * k, m[2] * kx * k, m[3] * ky * k].map(|v| v.floor().clamp(0.0, SIDE) as u32)
+}
+
 fn transform(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let anchor = b.to_px(ctx.params.v2("anchor"));
-    let pos = b.to_px(ctx.params.v2("position"));
-    let uniform = ctx.params.b("uniform");
-    let sh = ctx.params.f("scaleHeight");
-    let sw = if uniform { sh } else { ctx.params.f("scaleWidth") };
-    let skew = ctx.params.f("skew");
-    let skew_axis = ctx.params.f("skewAxis");
-    let rot = ctx.params.f("rotation");
     let opacity = ctx.params.f("opacity") as f32 / 100.0;
     let sampling = if ctx.params.e("sampling") == 1 { effectcraft_raster::Sampling::Bicubic } else { effectcraft_raster::Sampling::Bilinear };
     // Motion blur: the transform at Samples instants across the shutter, averaged (the
@@ -304,33 +347,35 @@ fn transform(ctx: &EffectCtx, mut b: Buf) -> Buf {
         && let Some(host) = ctx.env.host
     {
         let fd = 1.0 / ctx.fps();
-        let mut acc = Image::new(b.img.width, b.img.height);
-        let mut count = 0.0f32;
-        for k in 0..n {
-            let t = ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd;
-            let Some(pr) = host.params_at(t) else { continue };
-            let mut one = Image::new(b.img.width, b.img.height);
-            let op = pr.f("opacity") as f32 / 100.0;
-            effectcraft_raster::composite_warp(
-                &mut one,
-                &b.img,
-                &transform_matrix(&pr, &b),
-                &effectcraft_raster::WarpOpts { opacity: op, sampling, ..Default::default() },
-            );
-            acc.data.iter_mut().zip(&one.data).for_each(|(a, o)| (0..4).for_each(|c| a[c] += o[c]));
-            count += 1.0;
-        }
-        if count > 0.0 {
+        let samples: Vec<crate::Params> = (0..n).filter_map(|k| host.params_at(ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd)).collect();
+        if !samples.is_empty() {
+            if !ctx.adjustment {
+                let ms: Vec<Mat3> = samples.iter().map(|pr| transform_matrix(pr, &b)).collect();
+                b.pad_sides(transform_grow(&ms, b.img.width, b.img.height));
+            }
+            let mut acc = Image::new(b.img.width, b.img.height);
+            for pr in &samples {
+                let mut one = Image::new(b.img.width, b.img.height);
+                let op = pr.f("opacity") as f32 / 100.0;
+                effectcraft_raster::composite_warp(
+                    &mut one,
+                    &b.img,
+                    &transform_matrix(pr, &b),
+                    &effectcraft_raster::WarpOpts { opacity: op, sampling, ..Default::default() },
+                );
+                acc.data.iter_mut().zip(&one.data).for_each(|(a, o)| (0..4).for_each(|c| a[c] += o[c]));
+            }
+            let count = samples.len() as f32;
             acc.data.iter_mut().for_each(|p| p.iter_mut().for_each(|v| *v /= count));
             b.img = acc;
             return b;
         }
     }
-    let m = Mat3::translate(vec2(pos.0, pos.1))
-        * Mat3::rotate_deg(rot)
-        * Mat3::skew_deg(skew, skew_axis)
-        * Mat3::scale(vec2(sw / 100.0, sh / 100.0))
-        * Mat3::translate(vec2(-anchor.0, -anchor.1));
+    if !ctx.adjustment {
+        let m = transform_matrix(ctx.params, &b);
+        b.pad_sides(transform_grow(&[m], b.img.width, b.img.height));
+    }
+    let m = transform_matrix(ctx.params, &b);
     let mut out = Image::new(b.img.width, b.img.height);
     effectcraft_raster::composite_warp(&mut out, &b.img, &m, &effectcraft_raster::WarpOpts { opacity, sampling, ..Default::default() });
     b.img = out;
@@ -339,6 +384,18 @@ fn transform(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 fn corner_pin(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (w, h) = (b.layer_w(ctx), b.layer_h(ctx));
+    // The warped layer is drawn wherever the corners are, so grow the buffer to hold the quad;
+    // an adjustment layer keeps the size of the comp below it.
+    if !ctx.adjustment {
+        let pts = ["ul", "ur", "lr", "ll"].map(|k| {
+            let p = b.to_px(ctx.params.v2(k));
+            [p.0, p.1]
+        });
+        let (lo, hi) = crate::quad_bounds(&pts);
+        if let Some(sides) = crate::grow_sides(lo, hi, b.img.width, b.img.height) {
+            b.pad_sides(sides);
+        }
+    }
     let q = ["ul", "ur", "lr", "ll"].map(|k| {
         let p = b.to_px(ctx.params.v2(k));
         vec2(p.0, p.1)
@@ -497,6 +554,74 @@ mod tests {
         crate::apply(s, &ctx, Buf { img: im, offset: [0.0, 0.0], scale: 1.0 })
     }
 
+    #[test]
+    fn corner_pin_draws_outside_the_layer_rectangle() {
+        // A 20×10 layer pinned to a quad that lies entirely right of and below it.
+        let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        let set = [("ul", Value::Vec2([40.0, 30.0])), ("ur", Value::Vec2([60.0, 30.0])), ("lr", Value::Vec2([60.0, 40.0])), ("ll", Value::Vec2([40.0, 40.0]))];
+        let o = run("ec.distort.cornerpin", &set, im);
+        assert!(o.img.width >= 60 && o.img.height >= 40, "{}x{}", o.img.width, o.img.height);
+        let (cx, cy) = (o.offset[0] as i64 + 50, o.offset[1] as i64 + 35);
+        assert!(o.img.get(cx, cy)[0] > 0.9);
+    }
+
+    #[test]
+    fn corner_pin_keeps_the_size_on_an_adjustment_layer() {
+        let s = crate::find("ec.distort.cornerpin").unwrap();
+        let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [20.0, 10.0]))).collect() };
+        params.values.insert("lr".to_string(), Value::Vec2([400.0, 300.0]));
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [20.0, 10.0], seed: 3, adjustment: true, env: Default::default() };
+        let o = crate::apply(s, &ctx, Buf { img: im, offset: [0.0, 0.0], scale: 1.0 });
+        assert_eq!((o.img.width, o.img.height, o.offset), (20, 10, [0.0, 0.0]));
+    }
+
+    #[test]
+    fn corner_pin_with_a_far_pin_grows_to_it() {
+        let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        let o = run("ec.distort.cornerpin", &[("lr", Value::Vec2([1500.0, 1000.0]))], im);
+        assert!(o.img.width >= 1500 && o.img.height >= 1000, "{}x{}", o.img.width, o.img.height);
+    }
+
+    #[test]
+    fn corner_pin_with_a_non_finite_pin_returns_a_buffer_without_panicking() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for corner in ["ul", "ur", "lr", "ll"] {
+                let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+                let o = run("ec.distort.cornerpin", &[(corner, Value::Vec2([bad, 5.0]))], im);
+                assert!(
+                    o.img.width >= 1 && o.img.height >= 1 && o.img.width <= 16384 && o.img.height <= 16384,
+                    "{corner} {bad}: {}x{}",
+                    o.img.width,
+                    o.img.height
+                );
+                assert!(o.offset.iter().all(|v| v.is_finite()), "{corner} {bad}: offset {:?}", o.offset);
+            }
+        }
+    }
+
+    #[test]
+    fn corner_pin_growth_is_continuous_as_a_pin_moves_far_away() {
+        let mut last: Option<u64> = None;
+        for k in 0..60 {
+            let far = 100.0 * 1.4_f64.powi(k);
+            let im = crate::util::gen_image(20, 10, |_, _| [1.0, 0.0, 0.0, 1.0]);
+            let o = run("ec.distort.cornerpin", &[("lr", Value::Vec2([far, far]))], im);
+            let size = (o.img.width, o.img.height);
+            assert!(size.0 >= 20 && size.1 >= 10 && u64::from(size.0) * u64::from(size.1) <= 1 << 24, "pin {far}: {size:?}");
+            let area = u64::from(size.0) * u64::from(size.1);
+            if let Some(prev) = last {
+                // The shared cut factor may trade width for height as the pin direction changes,
+                // but the buffer as a whole does not shrink (beyond whole-pixel flooring at the budget)
+                // as the pin moves further away.
+                assert!(area * 10_000 >= prev * 9_999, "pin {far}: the buffer shrank from {prev} to {area} pixels ({size:?})");
+            }
+            let opaque = (0..o.img.height as i64).any(|y| (0..o.img.width as i64).any(|x| o.img.get(x, y)[3] > 0.0));
+            assert!(opaque, "pin {far}: the pinned layer vanished");
+            last = Some(area);
+        }
+    }
+
     fn differs(a: Px4, b: Px4) -> bool {
         (0..4).any(|i| (a[i] - b[i]).abs() > 1e-4)
     }
@@ -574,6 +699,144 @@ mod tests {
             let mid = 15;
             assert!((0..40).any(|x| differs(o.img.get(x + pad, mid + pad), im.get(x, mid))), "pin {edge_row}: the middle of the layer must still distort");
         }
+    }
+
+    /// After Effects 2026 (cases 723, 819, 820): a grey 960 × 540 solid centred in a 1920 × 1080
+    /// comp with Transform. The skew applies after the rotation, and the result is drawn outside
+    /// the layer's bounds. Points are comp pixels sampled from AE's renders (at least 3 px from
+    /// an edge; true = the solid covers it), half where the old order and clipping differed.
+    #[test]
+    fn transform_matches_after_effects() {
+        let solid = Image::filled(960, 540, [0.5, 0.5, 0.5, 1.0]);
+        let p2 = |x: f64, y: f64| Value::Vec2([x, y]);
+        let cases: [(&str, Vec<(&str, Value)>, &[(u32, u32, bool)]); 3] = [
+            (
+                "723",
+                vec![
+                    ("anchor", p2(400.0, 200.0)),
+                    ("position", p2(500.0, 300.0)),
+                    ("uniform", Value::Bool(false)),
+                    ("scaleHeight", num(80.0)),
+                    ("scaleWidth", num(120.0)),
+                    ("skew", num(10.0)),
+                    ("skewAxis", num(20.0)),
+                    ("rotation", num(30.0)),
+                ],
+                &[
+                    (1465, 954, true),
+                    (1127, 821, true),
+                    (1378, 846, true),
+                    (1416, 878, true),
+                    (1486, 850, true),
+                    (492, 467, true),
+                    (706, 239, true),
+                    (1402, 1021, true),
+                    (518, 440, true),
+                    (1218, 882, true),
+                    (454, 448, true),
+                    (1473, 920, true),
+                    (1048, 654, true),
+                    (1050, 486, true),
+                    (1060, 736, true),
+                    (932, 804, true),
+                    (1074, 562, true),
+                    (653, 591, true),
+                    (1353, 466, false),
+                    (88, 1021, false),
+                    (1855, 886, false),
+                    (1796, 401, false),
+                    (497, 913, false),
+                    (1445, 515, false),
+                ],
+            ),
+            (
+                "819",
+                vec![("skew", num(15.0)), ("skewAxis", num(60.0))],
+                &[
+                    (465, 367, true),
+                    (554, 793, false),
+                    (481, 529, true),
+                    (1451, 599, true),
+                    (428, 575, true),
+                    (432, 600, true),
+                    (463, 444, true),
+                    (759, 803, false),
+                    (445, 684, true),
+                    (1411, 757, true),
+                    (915, 784, false),
+                    (480, 737, true),
+                    (758, 620, true),
+                    (975, 705, true),
+                    (1289, 376, true),
+                    (575, 420, true),
+                    (1015, 507, true),
+                    (1377, 448, true),
+                    (1679, 171, false),
+                    (194, 435, false),
+                    (413, 159, false),
+                    (327, 741, false),
+                    (1824, 138, false),
+                    (1093, 29, false),
+                ],
+            ),
+            (
+                "820",
+                vec![
+                    ("skew", num(15.0)),
+                    ("skewAxis", num(60.0)),
+                    ("rotation", num(-25.0)),
+                    ("uniform", Value::Bool(false)),
+                    ("scaleWidth", num(130.0)),
+                    ("scaleHeight", num(70.0)),
+                    ("anchor", p2(100.0, 50.0)),
+                ],
+                &[
+                    (1674, 566, true),
+                    (1425, 317, false),
+                    (1788, 278, true),
+                    (1530, 390, true),
+                    (1531, 652, true),
+                    (1589, 545, true),
+                    (1890, 441, true),
+                    (1724, 400, true),
+                    (1657, 511, true),
+                    (1895, 261, true),
+                    (1697, 344, true),
+                    (933, 840, true),
+                    (1413, 467, true),
+                    (1295, 691, true),
+                    (1353, 548, true),
+                    (1293, 548, true),
+                    (1103, 551, true),
+                    (973, 758, true),
+                    (446, 484, false),
+                    (1009, 420, false),
+                    (144, 761, false),
+                    (1812, 111, false),
+                    (1241, 10, false),
+                    (900, 854, false),
+                ],
+            ),
+        ];
+        for (case, set, pts) in cases {
+            let o = run("ec.distort.transform", &set, solid.clone());
+            for &(x, y, inside) in pts {
+                // Comp pixel → layer pixel (the solid's top-left sits at 480, 270) → buffer.
+                let (bx, by) = o.to_px([x as f64 + 0.5 - 480.0, y as f64 + 0.5 - 270.0]);
+                let a = if bx >= 0.0 && by >= 0.0 && bx < o.img.width as f64 && by < o.img.height as f64 { o.img.get(bx as i64, by as i64)[3] } else { 0.0 };
+                assert_eq!(a > 0.5, inside, "case {case}: comp pixel ({x}, {y}) alpha {a}");
+            }
+        }
+        // A huge scale stays within the buffer cap.
+        let o = run("ec.distort.transform", &[("scaleHeight", num(100_000.0))], Image::filled(8, 8, [1.0; 4]));
+        assert!(o.img.width <= 16_384 && o.img.height <= 16_384);
+        // A layer moved far right grows the buffer on that side only, within 16 Mpx.
+        let o = run("ec.distort.transform", &[("position", p2(960.0 + 2000.0, 540.0))], Image::filled(1920, 1080, [1.0; 4]));
+        assert_eq!((o.offset[0], o.img.height), (0.0, 1080), "only the right side grows");
+        assert!(o.img.width >= 1920 + 2000 && o.img.width as u64 * o.img.height as u64 <= 16_777_216, "{} x {}", o.img.width, o.img.height);
+        assert!(o.img.get(2000 + 960, 540)[3] > 0.99 && o.img.get(10, 540)[3] < 0.01);
+        let o = run("ec.distort.transform", &[("position", p2(40_000.0, 30_000.0))], Image::filled(1920, 1080, [1.0; 4]));
+        assert!(o.img.width as u64 * o.img.height as u64 <= 16_777_216, "{} x {}", o.img.width, o.img.height);
     }
 
     #[test]
