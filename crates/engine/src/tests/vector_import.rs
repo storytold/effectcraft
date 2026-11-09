@@ -7,6 +7,7 @@ use effectcraft_psd::write::*;
 use effectcraft_psd::{DValue, Descriptor, Rect};
 use serde_json::json;
 
+use super::import_probe::ProbeGate;
 use crate::Session;
 use crate::render::RenderOpts;
 
@@ -173,6 +174,183 @@ fn psd_imported_as_composition_with_new_comp_is_the_new_comp() {
     assert_eq!(s.state.active_comp, Some(cid));
     let roots = s.project.items.values().filter(|i| matches!(i.kind, ItemKind::Comp(_)) && i.name.starts_with("newcomp")).count();
     assert_eq!(roots, 1, "no wrapper comp");
+}
+
+struct Movie;
+impl crate::Importer for Movie {
+    /// Supply deterministic movie settings without decoding external media.
+    fn probe(&self, path: &str) -> Result<effectcraft_project::Footage, String> {
+        Ok(effectcraft_project::Footage {
+            path: path.into(),
+            kind: effectcraft_project::FootageKind::Video,
+            width: 640,
+            height: 360,
+            has_video: true,
+            frame_rate: effectcraft_time::FrameRate::FPS_25,
+            duration: effectcraft_time::Tick::from_seconds_f64(3.0),
+            ..Default::default()
+        })
+    }
+}
+
+/// The three prepared-addition branches, each paired with synthetic movie footage.
+#[derive(Clone, Copy, Debug)]
+enum MixedSource {
+    Photoshop,
+    Vector,
+    Project,
+}
+
+impl MixedSource {
+    /// Generate a small original fixture and the expected total composition count after import.
+    fn fixture(self, name: &str) -> (String, usize) {
+        match self {
+            Self::Photoshop => {
+                let path = tmp(&format!("{name}.psd"));
+                std::fs::write(&path, sample_psd()).unwrap();
+                (path, 3) // PSD root, PSD group and movie comp.
+            }
+            Self::Vector => {
+                let path = tmp(&format!("{name}.eps"));
+                std::fs::write(&path, b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 120 80\n%%EndComments\n1 0 0 setrgbcolor\nnewpath 0 0 moveto 120 0 lineto 120 80 lineto 0 80 lineto closepath fill\nshowpage\n").unwrap();
+                (path, 2) // Vector root and movie comp.
+            }
+            Self::Project => {
+                let path = tmp(&format!("{name}.ecproj"));
+                let mut source = Session::default();
+                source.execute("comp.new", json!({"name": "Library", "width": 120, "height": 80, "duration": 2})).unwrap();
+                source.execute("layer.newNull", json!({"name": "Rig"})).unwrap();
+                source.execute("file.saveAs", json!({"path": path})).unwrap();
+                (path, 2) // Imported project comp and movie comp.
+            }
+        }
+    }
+}
+
+/// Verify complete mixed-import Undo/Redo for each prepared kind and bounded history.
+/// A gated background probe stays running until the intervening edit has been made.
+fn mixed_import_undo(source: MixedSource, background: bool) {
+    for import_as in ["composition", "compositionLayerSizes"] {
+        let (path, comps) = source.fixture(&format!("mixed-{source:?}-{background}-{import_as}"));
+        for levels in [1, 32] {
+            let mut s = Session { importer: Some(std::sync::Arc::new(Movie)), ..Default::default() };
+            let gate = background.then(ProbeGate::default);
+            if let Some(gate) = &gate {
+                s.importer = Some(gate.wrap(std::sync::Arc::new(Movie)));
+            }
+            s.prefs.general.undo_levels = levels;
+            s.execute("file.importPlaceholder", json!({"name": "Before import"})).unwrap();
+            let mut before = serde_json::to_value(&s.project).unwrap();
+            let result = s
+                .execute_checked("file.import", json!({"paths": [path, "clip.mov"], "importAs": import_as, "newComp": true, "background": background}))
+                .unwrap();
+            if let Some(gate) = &gate {
+                gate.wait_started();
+                assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "prepared additions wait for the probe");
+                assert!(!s.poll_jobs(), "a running probe has no result to apply");
+                s.execute("file.importPlaceholder", json!({"name": "During probe"})).unwrap();
+                before = serde_json::to_value(&s.project).unwrap();
+                gate.release();
+            }
+            s.wait_jobs();
+            let result = if background {
+                let job = s.job_log.last().unwrap();
+                assert_eq!(job.status, "done");
+                let count = if matches!(source, MixedSource::Project) { "Imported 1 item" } else { "Imported 2 items" };
+                assert_eq!(job.message, count);
+                job.result.clone()
+            } else {
+                result
+            };
+            assert_eq!(result["errors"], json!([]), "{result}");
+            if matches!(source, MixedSource::Project) {
+                assert_eq!(result["projects"].as_array().unwrap().len(), 1);
+                assert!(s.project.items.values().any(|item| item.name == "Library" && matches!(item.kind, ItemKind::Comp(_))));
+            } else {
+                assert_eq!(result["comps"].as_array().unwrap().len(), 1);
+            }
+            let c = s.active_comp().unwrap();
+            assert_eq!(c.layers.len(), 1, "the prepared import keeps its own comp");
+            assert_eq!(c.layers[0].name, "clip.mov");
+            assert_eq!(s.project.comps().count(), comps);
+            let after = serde_json::to_value(&s.project).unwrap();
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "one undo removes every imported item");
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(serde_json::to_value(&s.project).unwrap(), after, "one redo restores the complete import");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn mixed_psd_and_footage_import_undo_together() {
+    mixed_import_undo(MixedSource::Photoshop, false);
+}
+
+#[test]
+fn mixed_background_import_undo_preserves_intervening_edit() {
+    mixed_import_undo(MixedSource::Photoshop, true);
+}
+
+#[test]
+fn mixed_vector_and_footage_import_undo_together() {
+    mixed_import_undo(MixedSource::Vector, false);
+}
+
+#[test]
+fn mixed_background_vector_import_undo_preserves_intervening_edit() {
+    mixed_import_undo(MixedSource::Vector, true);
+}
+
+#[test]
+fn mixed_project_and_footage_import_undo_together() {
+    mixed_import_undo(MixedSource::Project, false);
+}
+
+#[test]
+fn mixed_background_project_import_undo_preserves_intervening_edit() {
+    mixed_import_undo(MixedSource::Project, true);
+}
+
+/// Cancel while the probe is blocked, before it can finish, for every prepared-addition kind.
+fn cancel_mixed_import(source: MixedSource) {
+    for import_as in ["composition", "compositionLayerSizes"] {
+        let (path, _) = source.fixture(&format!("mixed-cancel-{source:?}-{import_as}"));
+        let mut s = Session::default();
+        let gate = ProbeGate::default();
+        s.importer = Some(gate.wrap(std::sync::Arc::new(Movie)));
+        s.execute("file.importPlaceholder", json!({"name": "Before import"})).unwrap();
+        let before = serde_json::to_value(&s.project).unwrap();
+        let undo = s.history.undo.len();
+        let job = s.execute_checked("file.import", json!({"paths": [path, "clip.mov"], "importAs": import_as, "newComp": true, "background": true})).unwrap();
+        gate.wait_started();
+        assert!(!s.poll_jobs());
+        assert_eq!(s.execute("jobs.cancel", json!({"job": job["job"]})).unwrap()["cancelled"], true);
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+        assert_eq!(s.history.undo.len(), undo);
+        gate.release();
+        s.wait_jobs();
+        assert_eq!(s.job_log.last().unwrap().status, "cancelled");
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+        assert_eq!(s.history.undo.len(), undo);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn cancelling_a_mixed_background_import_leaves_no_prepared_items() {
+    cancel_mixed_import(MixedSource::Photoshop);
+}
+
+#[test]
+fn cancelling_a_mixed_vector_import_leaves_no_prepared_items() {
+    cancel_mixed_import(MixedSource::Vector);
+}
+
+#[test]
+fn cancelling_a_mixed_project_import_leaves_no_prepared_items() {
+    cancel_mixed_import(MixedSource::Project);
 }
 
 /// A Photoshop file imported as a composition and dropped on the Timeline (`addToComp`) adds
