@@ -452,3 +452,38 @@ fn half_precision_weights_give_the_same_product_to_half_precision() {
     assert_close(&got, &want, 2e-3 * (k as f32).sqrt(), "f16 vs f32 weights");
     assert!(got != want, "the weights really were rounded to half precision");
 }
+
+/// The instance reads wgpu's environment variables, as the render context's does (#2900): with
+/// `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1` wgpu lists Mesa's Dozen, the only Vulkan driver on WSL2. Run in a
+/// child process, which has them set.
+#[test]
+fn the_instance_reads_the_wgpu_environment() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_SAM2_WGPU_ENV_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "gpu::tests::the_instance_reads_the_wgpu_environment", "--nocapture"])
+            .env(CHILD, "1")
+            .env("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER", "1")
+            .env("WGPU_BACKEND", "vulkan")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        return;
+    }
+    let desc = instance_descriptor();
+    assert!(desc.flags.contains(wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER), "{:?}", desc.flags);
+    assert_eq!(desc.backends, wgpu::Backends::VULKAN);
+}
+
+/// An adapter without compute shaders (a GL one, here) is refused before a device is made on it, with one error
+/// instead of a validation error per kernel; so is a software one.
+#[test]
+fn adapters_without_compute_shaders_are_refused() {
+    use wgpu::{Backend, DeviceType, DownlevelFlags};
+    assert_eq!(refusal("GPU", Backend::Vulkan, DeviceType::DiscreteGpu, DownlevelFlags::all()), None);
+    let gl = refusal("GPU", Backend::Gl, DeviceType::Other, DownlevelFlags::all() - DownlevelFlags::COMPUTE_SHADERS);
+    assert_eq!(gl.as_deref(), Some("the GPU adapter GPU (Gl) has no compute shaders"));
+    let software = refusal("llvmpipe", Backend::Vulkan, DeviceType::Cpu, DownlevelFlags::all());
+    assert_eq!(software.as_deref(), Some("only a software adapter (llvmpipe) is available"));
+}

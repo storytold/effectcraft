@@ -27,10 +27,13 @@ mod pcraft;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
+mod reads;
 mod stream;
 mod wav_markers;
 mod webp_anim;
 
+/// Video decoder counters (time in decoders, samples decoded, seeks, cache hits), for benchmarks.
+pub use filmcraft_codecs::{GopStats, gop_stats};
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
 
@@ -85,7 +88,15 @@ pub fn is_importable(path: &std::path::Path) -> bool {
 /// A whole file's bytes, refusing anything that isn't a regular file: a project can name
 /// `/dev/zero` or a FIFO as footage, and reading those never ends (#2134).
 pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    read_regular_file_stamped(path).map(|(bytes, _)| bytes)
+}
+
+/// [`read_regular_file`] with the file's identity, from the metadata of the open file (no
+/// second look at the path).
+pub(crate) fn read_regular_file_stamped(path: &std::path::Path) -> std::io::Result<(Vec<u8>, effectcraft_render::reads::FileStamp)> {
     use std::io::Read;
+    #[cfg(test)]
+    count_open(path);
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
@@ -108,7 +119,22 @@ pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u
     } else {
         file.read_to_end(&mut bytes)?;
     }
-    Ok(bytes)
+    Ok((bytes, effectcraft_render::reads::FileStamp::of_metadata(&meta)))
+}
+
+#[cfg(test)]
+static OPENS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Count an open of a file (tests: which files a render touched on disk).
+#[cfg(test)]
+pub(crate) fn count_open(path: &std::path::Path) {
+    OPENS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(path.to_path_buf());
+}
+
+/// How many times files under `dir` were opened so far (tests).
+#[cfg(test)]
+pub(crate) fn opens_under(dir: &std::path::Path) -> usize {
+    OPENS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|p| p.starts_with(dir)).count()
 }
 
 pub(crate) fn ext_of(path: &std::path::Path) -> String {

@@ -1417,3 +1417,107 @@ fn duplicate_of_an_empty_type_tool_layer_ends_the_edit_and_copies_it() {
     assert_eq!(layer_count(&s), before + 1, "the empty layer is kept, as text.endEdit keeps it, and copied");
     assert_eq!(s.state.selected_layers, vec![LayerId(copy)], "and the copy is selected");
 }
+
+fn layer_name(s: &Session, t: u64) -> String {
+    s.active_comp().unwrap().layer(effectcraft_project::LayerId(t)).unwrap().name.clone()
+}
+
+/// Replace the text with `text` in the on-canvas editor (everything selected, typed, committed).
+fn retype(s: &mut Session, t: u64, text: &str) {
+    begin_edit(s, t);
+    s.execute("text.insert", json!({"text": text})).unwrap();
+    s.execute("text.endEdit", json!({})).unwrap();
+}
+
+/// #3233: a text layer's name follows its Source Text, edited on canvas or by `layer.setText`,
+/// until the user renames it (After Effects). A user name stays, even one that starts with
+/// "Text", and so does a copy's; renaming to an empty name follows the text again.
+#[test]
+fn a_text_layer_name_follows_its_text_until_renamed() {
+    let (mut s, t) = session("Hello");
+    assert_eq!(layer_name(&s, t), "Hello");
+    retype(&mut s, t, "World");
+    assert_eq!(layer_name(&s, t), "World", "a new text layer follows its text");
+    s.execute("layer.setText", json!({"layer": t, "text": "Again"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Again");
+    s.execute("layer.rename", json!({"layer": t, "name": "Text Title"})).unwrap();
+    s.execute("layer.setText", json!({"layer": t, "text": "Changed"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Text Title", "layer.setText keeps the user's name");
+    retype(&mut s, t, "Typed");
+    assert_eq!(layer_name(&s, t), "Text Title", "typing keeps the user's name");
+    s.execute("layer.select", json!({"layers": [t]})).unwrap();
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    let copy_name = layer_name(&s, copy);
+    s.execute("layer.setText", json!({"layer": copy, "text": "Copied"})).unwrap();
+    assert_eq!(layer_name(&s, copy), copy_name, "a copy keeps the user's name too");
+    // Renaming to an empty name: the name is the text's again, and follows it.
+    s.execute("layer.rename", json!({"layer": t, "name": ""})).unwrap();
+    assert_eq!(layer_name(&s, t), "Typed", "an empty name shows the text");
+    retype(&mut s, t, "Followed");
+    assert_eq!(layer_name(&s, t), "Followed", "and follows it again");
+    // Committing the unchanged name (Enter, Enter) does not stop the following.
+    s.execute("layer.rename", json!({"layer": t, "name": "Followed"})).unwrap();
+    s.execute("layer.setText", json!({"layer": t, "text": "Still"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Still");
+    // A name given in Layer Settings is the user's too. The UI offers Layer Settings only for
+    // solids, nulls, cameras and lights (as After Effects does); this guards the command, which
+    // agents can call on any layer.
+    s.execute("layer.settings", json!({"layer": t, "name": "Settings Name"})).unwrap();
+    s.execute("layer.setText", json!({"layer": t, "text": "Later"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Settings Name", "Layer Settings names it for good");
+    // An empty Layer Settings name follows the text again, as `layer.rename` does.
+    s.execute("layer.settings", json!({"layer": t, "name": ""})).unwrap();
+    assert_eq!(layer_name(&s, t), "Later", "an empty Layer Settings name shows the text");
+    s.execute("layer.setText", json!({"layer": t, "text": "Follows"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Follows", "and follows it again");
+    // A layer given a name when it is made does not follow.
+    let named = s.execute("layer.newText", json!({"text": "Body", "name": "Caption"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setText", json!({"layer": named, "text": "Other"})).unwrap();
+    assert_eq!(layer_name(&s, named), "Caption");
+}
+
+/// #3233: After Effects breaks paragraphs with a bare carriage return; the name is the first
+/// paragraph, without the break, and an older layer named after it counts as following.
+#[test]
+fn a_text_layer_name_ends_at_a_bare_carriage_return() {
+    let (mut s, t) = session("A\rB");
+    assert_eq!(layer_name(&s, t), "A");
+    s.execute("layer.setText", json!({"layer": t, "text": "C\rD"})).unwrap();
+    assert_eq!(layer_name(&s, t), "C");
+    retype(&mut s, t, "E\rF");
+    assert_eq!(layer_name(&s, t), "E");
+    let cid = s.active_comp_id().unwrap();
+    let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap();
+    l.name = "Para1".into();
+    l.name_follows_text = None;
+    l.props.prop_mut("text/sourceText").unwrap().value = effectcraft_keyframe::Value::Text(Box::new(TextDoc::plain("Para1\rPara2")));
+    s.execute("layer.setText", json!({"layer": t, "text": "Next\rLine"})).unwrap();
+    assert_eq!(layer_name(&s, t), "Next", "an older layer named after its first paragraph follows");
+}
+
+/// #3233: projects saved before the state was recorded load without it; there a name that is
+/// the text's, empty, or the default "Text"/"Text 2"… follows the text, any other name stays.
+#[test]
+fn older_text_layers_without_the_name_state_follow_as_before() {
+    let (mut s, t) = session("Hello");
+    let mut v = serde_json::to_value(s.active_comp().unwrap().layer(effectcraft_project::LayerId(t)).unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("name_follows_text");
+    let old: effectcraft_project::Layer = serde_json::from_value(v).unwrap();
+    assert_eq!(old.name_follows_text, None, "an older project has no state");
+    for (name, follows) in [("Hello", true), ("", true), ("Text", true), ("Text 3", true), ("Text Title", false), ("Text 3b", false), ("Title", false)] {
+        let l = effectcraft_project::Layer { name: name.into(), ..old.clone() };
+        assert_eq!(l.name_follows_text("Hello"), follows, "{name:?}");
+    }
+    let legacy = |s: &mut Session, name: &str| {
+        let cid = s.active_comp_id().unwrap();
+        let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap();
+        l.name = name.into();
+        l.name_follows_text = None;
+    };
+    legacy(&mut s, "Hello");
+    s.execute("layer.setText", json!({"layer": t, "text": "World"})).unwrap();
+    assert_eq!(layer_name(&s, t), "World", "a name equal to the text follows it");
+    legacy(&mut s, "Title");
+    retype(&mut s, t, "Typed");
+    assert_eq!(layer_name(&s, t), "Title", "another name stays");
+}

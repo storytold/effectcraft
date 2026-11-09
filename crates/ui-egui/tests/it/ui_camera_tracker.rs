@@ -202,6 +202,33 @@ fn blender_export_button_opens_python_dialog_and_writes_scene() {
     assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 1, "export does not create a camera in the source project");
 }
 
+/// A solve with unsolved (interpolated) frames says so in Effect Controls, with the count, on a
+/// line of its own that pushes the Export button down.
+#[test]
+fn effect_controls_show_how_many_frames_a_partial_solve_solved() {
+    let (a, plate, uid) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| a);
+    h.state_mut().show_panel(PanelKind::EffectControls);
+    h.run_steps(4);
+    let line = format!("effectControls.cameraTracker.{uid}.partialSolve");
+    let export = format!("effectControls.cameraTracker.{uid}.exportBlender");
+    assert!(!ids(&h).contains(&line), "a full solve has no partial-solve line");
+    let before = rect(&h, &export);
+
+    let g = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(plate)).unwrap().props.find_group(uid).unwrap();
+    let mut solve = ct::solve(&effectcraft_engine::camera_track::static_params(g)).unwrap().as_ref().clone();
+    for f in solve.frames.iter_mut().skip(24) {
+        f.solved = false;
+    }
+    let s = &mut h.state_mut().session;
+    s.execute("prop.set", json!({"layer": plate, "path": "effects/#1/solve", "value": solve.to_json()})).unwrap();
+    s.camera_pending.clear();
+    h.run_steps(4);
+    let e = h.state().auto.find(&line).expect("the partial-solve line is drawn");
+    assert_eq!(e.label, "Partial solve: 24 of 60 frames solved");
+    assert!((rect(&h, &export).min.y - before.min.y - 18.0).abs() < 0.5, "the Export button moves down one line");
+}
+
 /// Drag with `button` from `from` to `to` in steps, then release.
 fn drag_with(h: &mut Harness<'_, EffectcraftApp>, button: egui::PointerButton, from: egui::Pos2, to: egui::Pos2) {
     h.input_mut().events.push(egui::Event::PointerMoved(from));
