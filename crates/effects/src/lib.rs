@@ -23,6 +23,8 @@ mod color3;
 mod color_fx;
 pub mod controls;
 pub mod crypto_select;
+#[cfg(test)]
+mod display_names;
 mod distort;
 mod distort2;
 mod distort3;
@@ -36,6 +38,7 @@ mod keying;
 mod keying2;
 pub mod keylight;
 mod matte;
+
 pub mod migrate;
 mod misc;
 pub mod mocha_shape;
@@ -560,7 +563,7 @@ pub trait EffectHost: Sync {
     }
     /// Parameter `id` (a [`flatten_params`] id such as `birthRate`) of effect `effect_index` in
     /// the layer's stack (the running effect's [`EffectEnv::effect_index`]) at another **layer
-    /// time**: CC Particle World samples its Birth Rate at every step it simulates (#1373).
+    /// time**: Particle Emitter 3D samples its Birth Rate at every step it simulates (#1373).
     /// `None` when unavailable.
     fn param_at(&self, _effect_index: usize, _id: &str, _layer_time: f64) -> Option<Value> {
         None
@@ -776,8 +779,82 @@ pub fn categories() -> Vec<&'static str> {
     v
 }
 
-/// After Effects' third-party display names of effects we register under a generic name.
-const ALIASES: &[(&str, &[&str])] = &[("ec.keying.keylight", keylight::KEYLIGHT_ALIASES)];
+/// Legacy display names accepted for saved scripts and searches. Never display these as
+/// native feature names; stable effect IDs and external format match names stay unchanged.
+const ALIASES: &[(&str, &[&str])] = &[
+    ("ec.sim.ccballaction", &["CC Ball Action"]),
+    ("ec.distort.ccbendit", &["CC Bend It"]),
+    ("ec.distort.ccbender", &["CC Bender"]),
+    ("ec.distort.ccblobbylize", &["CC Blobbylize"]),
+    ("ec.stylize.ccblockload", &["CC Block Load"]),
+    ("ec.sim.ccbubbles", &["CC Bubbles"]),
+    ("ec.stylize.ccburnfilm", &["CC Burn Film"]),
+    ("ec.color.cccolorneutralizer", &["CC Color Neutralizer"]),
+    ("ec.color.cccoloroffset", &["CC Color Offset"]),
+    ("ec.channel.cccomposite", &["CC Composite"]),
+    ("ec.blur.cccross", &["CC Cross Blur"]),
+    ("ec.perspective.cccylinder", &["CC Cylinder"]),
+    ("ec.sim.ccdrizzle", &["CC Drizzle"]),
+    ("ec.perspective.ccenvironment", &["CC Environment"]),
+    ("ec.distort.ccflomotion", &["CC Flo Motion"]),
+    ("ec.time.ccforcemotionblur", &["CC Force Motion Blur"]),
+    ("ec.stylize.ccglass", &["CC Glass"]),
+    ("ec.transition.ccglasswipe", &["CC Glass Wipe"]),
+    ("ec.generate.ccgluegun", &["CC Glue Gun"]),
+    ("ec.transition.ccgridwipe", &["CC Grid Wipe"]),
+    ("ec.distort.ccgriddler", &["CC Griddler"]),
+    ("ec.sim.cchair", &["CC Hair"]),
+    ("ec.stylize.cchextile", &["CC HexTile"]),
+    ("ec.transition.ccimagewipe", &["CC Image Wipe"]),
+    ("ec.transition.ccjaws", &["CC Jaws"]),
+    ("ec.stylize.cckaleida", &["CC Kaleida"]),
+    ("ec.color.cckernel", &["CC Kernel"]),
+    ("ec.distort.cclens", &["CC Lens"]),
+    ("ec.generate.cclightburst", &["CC Light Burst 2.5"]),
+    ("ec.generate.cclightrays", &["CC Light Rays"]),
+    ("ec.generate.cclightsweep", &["CC Light Sweep"]),
+    ("ec.transition.cclightwipe", &["CC Light Wipe"]),
+    ("ec.transition.cclinesweep", &["CC Line Sweep"]),
+    ("ec.sim.ccmrmercury", &["CC Mr. Mercury"]),
+    ("ec.stylize.ccmrsmoothie", &["CC Mr. Smoothie"]),
+    ("ec.utility.ccoverbrights", &["CC Overbrights"]),
+    ("ec.distort.ccpageturn", &["CC Page Turn"]),
+    ("ec.sim.ccparticlesystems2", &["CC Particle Systems II"]),
+    ("ec.sim.ccparticleworld", &["CC Particle World"]),
+    ("ec.sim.ccpixelpolly", &["CC Pixel Polly"]),
+    ("ec.stylize.ccplastic", &["CC Plastic"]),
+    ("ec.distort.ccpowerpin", &["CC Power Pin"]),
+    ("ec.blur.ccradial", &["CC Radial Blur"]),
+    ("ec.blur.ccradialfast", &["CC Radial Fast Blur"]),
+    ("ec.transition.ccradialscalewipe", &["CC Radial ScaleWipe"]),
+    ("ec.sim.ccrainfall", &["CC Rainfall"]),
+    ("ec.stylize.ccrepetile", &["CC RepeTile"]),
+    ("ec.distort.ccripplepulse", &["CC Ripple Pulse"]),
+    ("ec.transition.ccscalewipe", &["CC Scale Wipe"]),
+    ("ec.sim.ccscatterize", &["CC Scatterize"]),
+    ("ec.key.ccsimplewireremoval", &["CC Simple Wire Removal"]),
+    ("ec.distort.ccslant", &["CC Slant"]),
+    ("ec.distort.ccsmear", &["CC Smear"]),
+    ("ec.sim.ccsnowfall", &["CC Snowfall"]),
+    ("ec.perspective.ccsphere", &["CC Sphere"]),
+    ("ec.distort.ccsplit", &["CC Split"]),
+    ("ec.distort.ccsplit2", &["CC Split 2"]),
+    ("ec.perspective.ccspotlight", &["CC Spotlight"]),
+    ("ec.sim.ccstarburst", &["CC Star Burst"]),
+    ("ec.generate.ccthreads", &["CC Threads"]),
+    ("ec.stylize.ccthreshold", &["CC Threshold"]),
+    ("ec.stylize.ccthresholdrgb", &["CC Threshold RGB"]),
+    ("ec.distort.cctiler", &["CC Tiler"]),
+    ("ec.color.cctoner", &["CC Toner"]),
+    ("ec.transition.cctwister", &["CC Twister"]),
+    ("ec.blur.ccvector", &["CC Vector Blur"]),
+    ("ec.stylize.ccvignette", &["CC Vignette"]),
+    ("ec.transition.ccwarpomatic", &["CC WarpoMatic"]),
+    ("ec.time.ccwidetime", &["CC Wide Time"]),
+    ("ec.color.lumetri", &["Lumetri Color"]),
+    ("ec.obsolete.mochashape", &["Mocha shape", "mocha shape"]),
+    ("ec.keying.keylight", keylight::KEYLIGHT_ALIASES),
+];
 
 /// Other names effect `id` answers to (in [`lookup`] and searches).
 pub fn aliases(id: &str) -> &'static [&'static str] {
@@ -861,7 +938,7 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
 /// effects without their own table.
 pub const PARAM_GROUPS: &[(&str, &str)] = &[
     // Color Correction: Exposure, Levels (Individual Controls), Change to Color, Colorama,
-    // Shadow/Highlight, Lumetri Color.
+    // Shadow/Highlight, Color Grading.
     ("master", "Master"),
     ("rgb", "RGB"),
     ("red", "Red"),
@@ -990,7 +1067,7 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("particleExploder", "Particle Exploder"),
     ("affects", "Affects"),
     ("options", "Options"),
-    // Keying, Matte, Obsolete (Key Light's groups are in `keylight::GROUPS`).
+    // Keying, Matte, Obsolete (Screen Color Key's groups are in `keylight::GROUPS`).
     ("ultraSettings", "Ultra Settings"),
     ("additionalForeground", "Additional Foreground"),
     ("additionalBackground", "Additional Background"),
@@ -1075,7 +1152,7 @@ fn nested_group<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&
 }
 
 /// Effects the GPU compositor (`effectcraft-gpu`) implements with the CPU effect's semantics
-/// (Mercury GPU Acceleration; the Effects & Presets GPU badge). Expression controls are
+/// (GPU Acceleration; the Effects & Presets GPU badge). Expression controls are
 /// pass-throughs and count as GPU effects too.
 pub const GPU_EFFECTS: &[&str] = &[
     "ec.blur.gaussian",
@@ -1495,7 +1572,7 @@ mod tests {
         assert_eq!(grow_sides(lo, hi, 20, 10), Some([0, 0, 30, 20]));
     }
 
-    /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
+    /// #2261: a 20 × 20 layer with Fast Radial Blur's Center far away grows to at most 16 Mpx;
     /// big layers may still grow to four times their area, and small pads are untouched.
     #[test]
     fn padded_buffers_stay_within_the_budget() {

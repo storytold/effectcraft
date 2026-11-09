@@ -365,7 +365,7 @@ pub fn specs() -> Vec<EffectSpec> {
         spec("ec.utility.growbounds", "Grow Bounds", vec![p("pixels", "Pixels", num(0.0), slider(0.0, 4000.0, 0.0, 500.0, 0))], grow_bounds),
         spec(
             "ec.utility.ccoverbrights",
-            "CC Overbrights",
+            "Out-of-Range Display",
             vec![
                 p("channel", "Channel", Value::Enum(0), popup(&["Max RGB", "Red", "Green", "Blue", "Alpha", "Luminance"])),
                 p("highlightColor", "Highlight Color", col(1.0, 0.0, 0.0), ParamUi::Color),

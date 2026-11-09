@@ -1,6 +1,6 @@
-//! Blur & Sharpen: CC Radial Blur and Camera-Shake Deblur.
+//! Blur & Sharpen: Variable Radial Blur and Camera-Shake Deblur.
 //!
-//! * **CC Radial Blur** — zoom (straight, fading, centred both ways) and rotational (plain or
+//! * **Variable Radial Blur** — zoom (straight, fading, centred both ways) and rotational (plain or
 //!   fading) blurs around a centre point, sampled along the ray / arc through each pixel with a
 //!   sample count set by Quality.
 //! * **Camera-Shake Deblur** — frame-based restoration in the spirit of published video deblurring
@@ -22,7 +22,7 @@ fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, ren
     EffectSpec { id, name, category: "Blur & Sharpen", params, render, gpu: false, float: true }
 }
 
-// ---------------------------------------------------------------- CC Radial Blur
+// ---------------------------------------------------------------- Variable Radial Blur
 
 pub const RADIAL_TYPES: [&str; 5] = ["Straight Zoom", "Fading Zoom", "Centered", "Rotate", "Rotate Fading"];
 
@@ -246,7 +246,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.blur.ccradial",
-            "CC Radial Blur",
+            "Variable Radial Blur",
             vec![
                 p("type", "Type", Value::Enum(1), popup(&RADIAL_TYPES)),
                 p("amount", "Amount", num(10.0), slider(-100.0, 100.0, -100.0, 100.0, 1)),

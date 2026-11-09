@@ -13,7 +13,7 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
 fn drag_to(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
-    egui::DragAndDrop::set_payload(&h.ctx, DragPayload::Effect("CC Bend It".into()));
+    egui::DragAndDrop::set_payload(&h.ctx, DragPayload::Effect("Two-Point Bend".into()));
     h.run_steps(2);
 }
 
