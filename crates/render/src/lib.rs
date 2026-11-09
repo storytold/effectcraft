@@ -46,7 +46,7 @@ mod layers;
 mod opts;
 mod pipeline;
 
-pub use accel::{Accelerator, Backend, FxStep, FxTarget};
+pub use accel::{Accelerator, Backend, FrameMemory, FxStep, FxTarget};
 pub use footage::{CancellableFootage, FloatCurve, FootageSource, NoFootage, is_vector_footage, missing_item_problem};
 pub use frames::{
     adaptive_samples, blend_frames, cineon_frame, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path,

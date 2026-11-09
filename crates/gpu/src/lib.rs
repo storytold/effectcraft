@@ -433,6 +433,11 @@ impl Accelerator for Gpu {
         Some(&self.auto)
     }
 
+    fn frame_memory(&self) -> Option<effectcraft_render::FrameMemory> {
+        self.ctx.check_health().ok()?;
+        self.ctx.frame_memory()
+    }
+
     fn render_end(&self) {
         let (hits, misses) = self.ctx.pool_stats();
         let pct = hits.saturating_mul(100) / hits.saturating_add(misses).max(1);

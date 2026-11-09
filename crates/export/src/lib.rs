@@ -53,7 +53,7 @@ pub use effectcraft_project::render_queue;
 pub use effectcraft_project::render_queue::StorageQuota;
 pub use out::Sink;
 pub(crate) use pipeline::Cx;
-pub use pipeline::{CACHE_BUDGET, RENDERER_ENV, pick_renderer};
+pub use pipeline::{CACHE_BUDGET, GPU_INFLIGHT_MAX, RENDERER_ENV, auto_gpu_frames, pick_renderer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
@@ -119,6 +119,9 @@ pub struct JobOptions<'a> {
     /// the compositor it chose there, so the item's other output modules encode the same
     /// frames. `None`: the job decides alone.
     pub renderer: Option<&'a std::sync::Mutex<Option<effectcraft_render::Backend>>>,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
+    /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+    pub gpu_frames: Option<usize>,
 }
 
 /// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,

@@ -1135,6 +1135,24 @@ impl GpuContext {
         }
     }
 
+    /// The memory budget (the memory cap: a conservative share of the device, see `memcap`),
+    /// the allocator's peak, one frame's share of it and what the upload cache may still add.
+    /// `None` where any is unknown: no allocator report (Metal, WebGPU, GL) or the cap is off.
+    pub fn frame_memory(&self) -> Option<effectcraft_render::FrameMemory> {
+        let budget = self.memcap.cap();
+        let now = self.allocated_bytes();
+        self.memcap.note(now);
+        // The allocator's peak (sampled while frames render) holds a frame's working textures
+        // at their most; what is gone again after the frame (and at least what the pool keeps
+        // for the next) is one frame's share. Frames that had to wait for memory: no room.
+        let peak = self.memcap.peak();
+        let frame = if self.memcap.pressed() { budget } else { peak.saturating_sub(now).max(self.pool_retained_bytes() as u64) };
+        // The upload cache may still fill up to its budget.
+        let uploads = self.uploads.lock().map(|u| u.bytes).unwrap_or(0);
+        let reserve = self.upload_budget().saturating_sub(uploads) as u64;
+        (budget > 0 && peak > 0 && frame > 0).then_some(effectcraft_render::FrameMemory { budget, peak, frame, reserve })
+    }
+
     /// Bytes held by wgpu's device allocator (`0` on backends that do not report).
     pub(crate) fn allocated_bytes(&self) -> u64 {
         self.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
@@ -2133,6 +2151,7 @@ impl<'g> Enc<'g> {
             return;
         }
         let allocated = self.g.allocated_bytes();
+        self.g.memcap.note(allocated);
         if allocated <= self.g.memcap.cap() {
             let _ = self.g.memcap.should_wait(allocated, 0);
             return;

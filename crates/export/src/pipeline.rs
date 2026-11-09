@@ -13,28 +13,66 @@ use web_time::Instant;
 
 use crate::{Job, RenderQuality, out};
 
-/// GPU frames rendered at once by default: one, as the export scheduler's single GPU worker
-/// renders image sequences (#898: frames in flight beyond one only with asynchronous YUV
-/// readback). Measured on the #879 project at 1080p on an 8 GB card: 6.3 GB peak with one,
-/// 7.0 to 7.8 GB with two, and the whole card with three, where main fell back to the CPU.
-/// Not sized from free VRAM: the GPU backend reports no free or total device memory on every
-/// platform, so a portable estimate is not available here.
+/// GPU frames rendered at once until a frame has measured the device memory, and whenever it
+/// can't be measured (#898, #879: measured on the #879 project at 1080p on an 8 GB card, 6.3 GB
+/// peak with one frame, 7.0 to 7.8 GB with two, the whole card with three).
 pub(crate) const GPU_INFLIGHT_DEFAULT: usize = 1;
-/// Overrides [`GPU_INFLIGHT_DEFAULT`]: a whole number of frames, at least 1.
+/// The most GPU frames Auto renders at once (#3335: four and more measured no faster).
+pub const GPU_INFLIGHT_MAX: usize = 3;
+/// Overrides Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: a whole number of frames,
+/// at least 1.
 pub(crate) const GPU_INFLIGHT_ENV: &str = "EFFECTCRAFT_GPU_INFLIGHT";
 
 /// GPU frames in flight from the `EFFECTCRAFT_GPU_INFLIGHT` value: a positive whole number, or
-/// the default (with a warning when a value was given) when it is 0, negative, not a number or
-/// too large.
-pub(crate) fn gpu_inflight(var: Option<&str>) -> usize {
-    let Some(v) = var else { return GPU_INFLIGHT_DEFAULT };
+/// `None` (with a warning when a value was given) when it is unset, 0, negative, not a number
+/// or too large.
+pub(crate) fn gpu_inflight_env(var: Option<&str>) -> Option<usize> {
+    let v = var?;
     match v.trim().parse::<usize>() {
-        Ok(n) if n >= 1 => n,
+        Ok(n) if n >= 1 => Some(n),
         _ => {
-            log::warn!(target: "effectcraft_export", "{GPU_INFLIGHT_ENV}={v:?} is not a whole number of frames of at least 1: using {GPU_INFLIGHT_DEFAULT}");
-            GPU_INFLIGHT_DEFAULT
+            log::warn!(target: "effectcraft_export", "{GPU_INFLIGHT_ENV}={v:?} is not a whole number of frames of at least 1: ignored");
+            None
         }
     }
+}
+
+/// Auto's GPU frames in flight from the device memory after a frame (#3335): as many more
+/// frames as the budget has room for beyond the allocator's peak (which holds one frame's
+/// working memory) and what the caches may still grow by, 1 to [`GPU_INFLIGHT_MAX`]. Unknown
+/// memory: 1.
+pub fn auto_gpu_frames(m: Option<effectcraft_render::FrameMemory>) -> usize {
+    let Some(m) = m.filter(|m| m.budget > 0 && m.frame > 0 && m.peak > 0) else { return GPU_INFLIGHT_DEFAULT };
+    let more = m.budget.saturating_sub(m.peak).saturating_sub(m.reserve) / m.frame;
+    usize::try_from(more.saturating_add(1)).unwrap_or(GPU_INFLIGHT_MAX).clamp(1, GPU_INFLIGHT_MAX)
+}
+
+/// The GPU frames a job renders at once and why (for the render log): the environment's
+/// override, else the setting (`pref`, `None` = Auto), else Auto from `measured` (`None`: no
+/// GPU frame has rendered yet, so nothing is settled).
+pub(crate) fn resolve_gpu_frames(env: Option<&str>, pref: Option<usize>, measured: Option<Option<effectcraft_render::FrameMemory>>) -> Option<(usize, String)> {
+    if let Some(n) = gpu_inflight_env(env) {
+        return Some((n, format!("set by {GPU_INFLIGHT_ENV}")));
+    }
+    if let Some(n) = pref.filter(|n| *n >= 1) {
+        return Some((n, "Settings".into()));
+    }
+    let m = measured?;
+    let n = auto_gpu_frames(m);
+    let mib = |b: u64| b >> 20;
+    Some((
+        n,
+        match m {
+            Some(m) => format!(
+                "Auto: {} MiB per frame, {} MiB peak and {} MiB cache reserve in a {} MiB budget",
+                mib(m.frame),
+                mib(m.peak),
+                mib(m.reserve),
+                mib(m.budget)
+            ),
+            None => "Auto: the GPU's memory is not known".into(),
+        },
+    ))
 }
 
 /// Overrides the Render Queue's measured choice of compositor for GPU projects with an
@@ -211,6 +249,10 @@ pub(crate) struct Cx<'a> {
     caches: Caches<'a>,
     /// The compositor the job renders on, once chosen ([`Cx::backend`]).
     choice: Mutex<Option<Choice>>,
+    /// GPU frames rendered at once and why, once settled ([`Cx::gpu_inflight`]).
+    gpu_frames: Mutex<Option<(usize, String)>>,
+    /// A frame has rendered on the GPU compositor: its memory can be measured.
+    gpu_rendered: std::sync::atomic::AtomicBool,
     /// (output frame, seconds) of every rendered frame (Plus Per Frame Info logs).
     pub frame_times: Option<Mutex<Vec<(u64, f64)>>>,
     /// Files written to an overflow folder.
@@ -288,7 +330,17 @@ impl<'a> Cx<'a> {
         for r in [crate::JobRenderer::Gpu, crate::JobRenderer::Cpu] {
             caches.of(r).set_gate(job.accel.and_then(|a| a.miss_gate()));
         }
-        let cx = Cx { job, project, caches, choice: Mutex::new(None), frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]) };
+        let cx = Cx {
+            job,
+            project,
+            caches,
+            choice: Mutex::new(None),
+            gpu_frames: Mutex::new(None),
+            gpu_rendered: Default::default(),
+            frame_times,
+            overflowed: Mutex::new(vec![]),
+            written: Mutex::new(vec![]),
+        };
         if let Some(c) = cx.fixed_choice(std::env::var(RENDERER_ENV).ok().as_deref()) {
             cx.decide(c);
         }
@@ -489,8 +541,13 @@ impl<'a> Cx<'a> {
         };
         let logged = || self.frame_times.as_ref().map_or(0, |ft| ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len());
         let cpu_cap = self.inflight().cpu;
-        let timed = |on: crate::JobRenderer, frames: &[u64], caps: Inflight| {
+        let timed = |on: crate::JobRenderer, frames: &[u64]| {
             let warm = render(first, on);
+            // The GPU's frames in flight settle with its warm-up frame (Auto measures it).
+            let caps = match on {
+                crate::JobRenderer::Gpu => Inflight { gpu: Some(self.gpu_inflight()), cpu: cpu_cap },
+                crate::JobRenderer::Cpu => Inflight { gpu: None, cpu: cpu_cap },
+            };
             let t0 = Instant::now();
             let gpu_live = || on == crate::JobRenderer::Cpu || self.job.accel.is_some_and(|a| a.available());
             let items = map_frames_while(frames.to_vec(), caps, gpu_live, |k| render(k, on), |k, i| (k, i));
@@ -498,9 +555,9 @@ impl<'a> Cx<'a> {
             (std::iter::once((first, warm)).chain(items).collect::<Vec<_>>(), ms)
         };
         let log0 = logged();
-        let (gpu, gpu_ms) = timed(crate::JobRenderer::Gpu, gpu_ks, Inflight { gpu: Some(self.gpu_inflight()), cpu: cpu_cap });
+        let (gpu, gpu_ms) = timed(crate::JobRenderer::Gpu, gpu_ks);
         let log1 = logged();
-        let (cpu, cpu_ms) = timed(crate::JobRenderer::Cpu, cpu_ks, Inflight { gpu: None, cpu: cpu_cap });
+        let (cpu, cpu_ms) = timed(crate::JobRenderer::Cpu, cpu_ks);
         // A GPU that stopped meanwhile rendered its frames on the CPU: it is no choice.
         let gpu_ms = self.job.accel.is_some_and(|a| a.available()).then_some(gpu_ms);
         let renderer = pick_renderer(gpu_ms, Some(cpu_ms));
@@ -571,9 +628,23 @@ impl<'a> Cx<'a> {
         (self.job.accel.is_some() && self.backend() == crate::JobRenderer::Gpu).then(|| self.gpu_inflight())
     }
 
-    /// GPU frames in flight ([`GPU_INFLIGHT_ENV`] or [`GPU_INFLIGHT_DEFAULT`]).
+    /// GPU frames in flight ([`resolve_gpu_frames`]): [`GPU_INFLIGHT_DEFAULT`] until settled,
+    /// which Auto is after the job's first GPU frame.
     fn gpu_inflight(&self) -> usize {
-        gpu_inflight(std::env::var(GPU_INFLIGHT_ENV).ok().as_deref())
+        if let Some((n, _)) = &*self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            return *n;
+        }
+        // Measured outside the lock (the allocator report walks every allocation).
+        let measured = self.gpu_rendered.load(std::sync::atomic::Ordering::Relaxed).then(|| self.job.accel.and_then(|a| a.frame_memory()));
+        let Some((n, why)) = resolve_gpu_frames(std::env::var(GPU_INFLIGHT_ENV).ok().as_deref(), self.job.options.gpu_frames, measured) else {
+            return GPU_INFLIGHT_DEFAULT;
+        };
+        let mut slot = self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.get_or_insert_with(|| {
+            log::info!(target: "effectcraft_export", "{}: {n} GPU frame(s) at once ({why})", self.job.options.label);
+            (n, why)
+        })
+        .0
     }
 
     /// The GPU and CPU frames-in-flight caps every frame loop shares (#1615).
@@ -599,6 +670,7 @@ impl<'a> Cx<'a> {
 
     async fn frame_async_on(&self, comp: &Comp, i: u64, on: crate::JobRenderer) -> Image {
         let t0 = Instant::now();
+        let gpu = on == crate::JobRenderer::Gpu && self.job.accel.is_some();
         let img = match self.job.settings.sample(comp, i) {
             FrameSample::Progressive(t) => self.render_at(t, on).await,
             FrameSample::Fields { first, second, upper_first } => {
@@ -606,6 +678,9 @@ impl<'a> Cx<'a> {
                 if second == first { a } else { interleave(&a, &self.render_at(second, on).await, upper_first) }
             }
         };
+        if gpu {
+            self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let img = self.crop_resize(img);
         if let Some(ft) = &self.frame_times {
             ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((i, t0.elapsed().as_secs_f64()));
@@ -644,6 +719,7 @@ impl<'a> Cx<'a> {
         }
         // A frame rendered off `passes::comp_frame` ends here; on a `None` the fallback renders and ends it.
         a.frame_end();
+        self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(ft) = &self.frame_times {
             ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
         }
@@ -786,6 +862,11 @@ impl<'a> Cx<'a> {
         }
         if let Some(c) = self.choice() {
             s.push_str(&format!("Renderer: {}\n", describe_choice(&c)));
+        }
+        if self.backend() == crate::JobRenderer::Gpu
+            && let Some((n, why)) = &*self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            s.push_str(&format!("GPU frames rendered at once: {n} ({why})\n"));
         }
         let over = self.overflowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !over.is_empty() {
@@ -1249,12 +1330,117 @@ mod tests {
     }
 
     #[test]
-    fn gpu_inflight_override_is_a_positive_number_or_the_default() {
-        assert_eq!(gpu_inflight(None), GPU_INFLIGHT_DEFAULT);
-        assert_eq!(gpu_inflight(Some("3")), 3);
-        assert_eq!(gpu_inflight(Some(" 5 ")), 5);
+    fn gpu_inflight_override_is_a_positive_number_or_ignored() {
+        assert_eq!(gpu_inflight_env(None), None);
+        assert_eq!(gpu_inflight_env(Some("3")), Some(3));
+        assert_eq!(gpu_inflight_env(Some(" 5 ")), Some(5));
         for bad in ["0", "", "-2", "three", "2.5", "99999999999999999999999"] {
-            assert_eq!(gpu_inflight(Some(bad)), GPU_INFLIGHT_DEFAULT, "{bad:?}");
+            assert_eq!(gpu_inflight_env(Some(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn auto_gpu_frames_follow_the_memory_budget() {
+        // #3335: Auto renders as many GPU frames at once as the budget has room for, 1 to 3.
+        use effectcraft_render::FrameMemory;
+        const GIB: u64 = 1 << 30;
+        let m = |budget: u64, peak: u64, frame: u64, reserve: u64| Some(FrameMemory { budget, peak, frame, reserve });
+        // Unknown memory (no allocator report, no budget): one frame.
+        assert_eq!(auto_gpu_frames(None), 1);
+        assert_eq!(auto_gpu_frames(m(0, GIB, GIB / 2, 0)), 1);
+        assert_eq!(auto_gpu_frames(m(3 * GIB, 0, GIB / 2, 0)), 1);
+        assert_eq!(auto_gpu_frames(m(3 * GIB, GIB, 0, 0)), 1);
+        // #879 on an 8 GB card: one frame peaked at 6.3 GB, over the 3 GiB budget: one.
+        assert_eq!(auto_gpu_frames(m(3 * GIB, 63 * GIB / 10, 5 * GIB, 0)), 1);
+        // Frames that had to wait for memory report the whole budget per frame: one.
+        assert_eq!(auto_gpu_frames(m(3 * GIB, GIB, 3 * GIB, 0)), 1);
+        // Room for half a frame more, or room the upload cache may still take: one.
+        assert_eq!(auto_gpu_frames(m(2 * GIB, 3 * GIB / 2, GIB, 0)), 1);
+        assert_eq!(auto_gpu_frames(m(3 * GIB, GIB, GIB / 2, 3 * GIB / 2)), 2);
+        assert_eq!(auto_gpu_frames(m(3 * GIB, GIB, GIB / 2, 2 * GIB)), 1);
+        // Room for one more frame: two; ample room: three, never more.
+        assert_eq!(auto_gpu_frames(m(3 * GIB, 2 * GIB, GIB, 0)), 2);
+        assert_eq!(auto_gpu_frames(m(3 * GIB, GIB / 2, GIB / 4, 0)), 3);
+        assert_eq!(auto_gpu_frames(m(u64::MAX, 1, 1, 0)), 3);
+    }
+
+    #[test]
+    fn gpu_frames_come_from_the_environment_the_setting_or_auto() {
+        use effectcraft_render::FrameMemory;
+        let ample = Some(Some(FrameMemory { budget: 3 << 30, peak: 1 << 29, frame: 1 << 28, reserve: 1 << 28 }));
+        let n = |env, pref, measured| resolve_gpu_frames(env, pref, measured).map(|(n, _)| n);
+        // Auto: unsettled until a GPU frame rendered, then measured.
+        assert_eq!(n(None, None, None), None);
+        assert_eq!(n(None, None, Some(None)), Some(1));
+        assert_eq!(n(None, None, ample), Some(3));
+        // The setting's 1, 2 or 3, without measuring.
+        for k in 1..=3 {
+            assert_eq!(n(None, Some(k), None), Some(k));
+            assert_eq!(n(None, Some(k), ample), Some(k));
+        }
+        // The environment overrides both; a bad value is ignored.
+        assert_eq!(n(Some("2"), Some(1), None), Some(2));
+        assert_eq!(n(Some("4"), None, ample), Some(4));
+        assert_eq!(n(Some("zero"), Some(1), None), Some(1));
+        let (_, why) = resolve_gpu_frames(None, None, ample).unwrap();
+        assert_eq!(why, "Auto: 256 MiB per frame, 512 MiB peak and 256 MiB cache reserve in a 3072 MiB budget");
+    }
+
+    /// An accelerator reporting `memory` once asked (renders nothing itself).
+    struct MemAccel(effectcraft_render::FrameMemory);
+    impl effectcraft_render::Accelerator for MemAccel {
+        fn name(&self) -> String {
+            "mem".into()
+        }
+        fn comp_frame(&self, _r: &Renderer, _comp: effectcraft_project::ItemId, _t: Tick) -> Option<Image> {
+            None
+        }
+        fn supports_effect(&self, _id: &str) -> bool {
+            false
+        }
+        fn effects(&self, _chain: &[effectcraft_render::FxStep], _buf: &effectcraft_effects::Buf, _levels: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+        fn frame_memory(&self) -> Option<effectcraft_render::FrameMemory> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn auto_gpu_frames_settle_after_the_first_gpu_frame() {
+        // #3335: one GPU frame at a time until a frame measured the memory, then Auto's count
+        // for the rest of the job; the setting skips the measurement.
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        if std::env::var_os(GPU_INFLIGHT_ENV).is_some() || std::env::var_os(RENDERER_ENV).is_some() {
+            return;
+        }
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let accel = MemAccel(effectcraft_render::FrameMemory { budget: 3 << 30, peak: 1 << 29, frame: 1 << 28, reserve: 0 });
+        for (pref, want) in [(None, 3), (Some(2), 2), (Some(1), 1)] {
+            let job = Job {
+                project: &p,
+                footage: &effectcraft_render::NoFootage,
+                expr: None,
+                accel: Some(&accel),
+                comp: cid,
+                settings: &settings,
+                output: &output,
+                path: "/c/f_[#####].png",
+                sink: None,
+                nested_switches: true,
+                options: crate::JobOptions { gpu_frames: pref, ..Default::default() },
+            };
+            let cx = Cx::new(&job);
+            if pref.is_none() {
+                assert_eq!(cx.gpu_cap(), Some(1), "before any GPU frame");
+            }
+            let c = cx.comp().unwrap();
+            cx.frame_on(c, 0, crate::JobRenderer::Gpu);
+            assert_eq!(cx.gpu_cap(), Some(want), "setting {pref:?}");
         }
     }
 

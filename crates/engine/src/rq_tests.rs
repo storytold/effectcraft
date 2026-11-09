@@ -306,3 +306,34 @@ fn a_queue_run_keeps_its_jobs_warm() {
     assert_eq!(jobs[0].1, jobs[1].1, "an item's output modules share one choice");
     assert_eq!(ends.0.load(Ordering::SeqCst), 1, "the pool is trimmed once, after the run");
 }
+
+#[test]
+fn the_gpu_frames_setting_reaches_every_render_queue_job() {
+    // #3335: Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once is Auto (`None`) or 1–3.
+    struct Seen(Mutex<Vec<Option<usize>>>);
+    impl Exporter for Seen {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            self.0.lock().unwrap().push(job.gpu_frames);
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Seen(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    assert_eq!(s.prefs.memory.gpu_frames_in_flight, "auto");
+    let pages = crate::settings::prefs::pages_json();
+    assert!(pages.to_string().contains("memory.gpuFramesInFlight"), "the Memory & CPU page lists it");
+    for (value, want) in [("auto", None), ("1", Some(1)), ("2", Some(2)), ("3", Some(3))] {
+        s.execute("prefs.set", json!({"key": "memory.gpuFramesInFlight", "value": value})).unwrap();
+        assert_eq!(s.prefs.memory.gpu_frames(), want, "{value}");
+        s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out(&format!("rq/frames_{value}.mp4"))})).unwrap();
+        s.execute("renderQueue.render", json!({})).unwrap();
+        assert_eq!(ex.0.lock().unwrap().last().copied(), Some(want), "{value}");
+    }
+    // A hand-edited settings file's nonsense is Auto.
+    s.prefs.memory.gpu_frames_in_flight = "9".into();
+    assert_eq!(s.prefs.memory.gpu_frames(), None);
+}

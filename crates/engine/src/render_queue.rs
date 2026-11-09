@@ -41,6 +41,8 @@ pub struct ExportJob<'a> {
     /// The compositor the queue item's output modules render on (#3335): the first module
     /// chooses (measuring a GPU project's first frames) and stores it here, the others follow.
     pub renderer: Option<&'a Mutex<Option<effectcraft_render::Backend>>>,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, `None` for Auto.
+    pub gpu_frames: Option<usize>,
 }
 
 /// What the jobs of one Render Queue run keep between them (#3335): a layer cache per
@@ -246,6 +248,8 @@ struct Work {
     items: Vec<Vec<(RenderQueueItem, String)>>,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     nested_switches: bool,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once.
+    gpu_frames: Option<usize>,
 }
 
 /// Where a relative render output goes when there is no default folder and the project is unsaved:
@@ -341,6 +345,7 @@ pub(crate) async fn run_items(
         storage: s.storage_quota.clone(),
         items,
         nested_switches: s.prefs.general.switches_affect_nested_comps,
+        gpu_frames: s.prefs.memory.gpu_frames(),
     };
     run_work(work, shared, notify).await;
 }
@@ -389,6 +394,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 nested_switches: w.nested_switches,
                 caches: Some(&caches),
                 renderer: Some(&renderer),
+                gpu_frames: w.gpu_frames,
             };
             let rr = w
                 .exporter
@@ -649,6 +655,7 @@ impl Session {
             storage: self.storage_quota.clone(),
             items,
             nested_switches: self.prefs.general.switches_affect_nested_comps,
+            gpu_frames: self.prefs.memory.gpu_frames(),
         };
         let shared = Arc::new(JobShared::default());
         if wait {

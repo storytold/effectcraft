@@ -866,6 +866,7 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
 
         caches: None,
         renderer: None,
+        gpu_frames: s.prefs.memory.gpu_frames(),
     };
     let r = exporter.export(&job, &mut |_, _| true).map_err(EngineError::Other)?;
     s.toast(format!("Saved preview to {}", r.path));

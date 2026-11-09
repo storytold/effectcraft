@@ -148,6 +148,7 @@ fn prerender(
 
         caches: None,
         renderer: None,
+        gpu_frames: None,
     };
     let r = exporter.export(&job, progress)?;
     Ok(Prerendered { path: r.path, width: comp.width, height: comp.height, frame_rate: comp.frame_rate, duration: end - start })

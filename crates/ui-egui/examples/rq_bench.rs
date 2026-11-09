@@ -121,7 +121,7 @@ fn main() {
     for d in &dirs {
         std::fs::create_dir_all(d).expect("output folder");
         let path = d.join(format!("f_[####].{format}"));
-        run(&mut s, "renderQueue.add", json!({"comp": "Shot", "format": format, "output": path.to_string_lossy()}));
+        run(&mut s, "renderQueue.add", json!({"comp": "Shot", "format": format, "output": path.to_string_lossy(), "log": "plusSettings"}));
     }
     let t0 = std::time::Instant::now();
     run(&mut s, "renderQueue.render", json!({"wait": true}));
@@ -136,6 +136,14 @@ fn main() {
         let secs = item.render_time.unwrap_or(f64::NAN);
         let (n, h) = hash_dir(d);
         println!("  item {}: {:?}, {:.1} ms/frame, {n} files, hash {h:016x}", i + 1, item.status, secs * 1000.0 / frames as f64);
+        // The render log's account of the compositor and the GPU frames in flight.
+        let logs =
+            std::fs::read_dir(d).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(".txt")).collect::<Vec<_>>());
+        for log in logs.unwrap_or_default() {
+            for line in std::fs::read_to_string(log).unwrap_or_default().lines().filter(|l| l.starts_with("Renderer:") || l.starts_with("GPU frames")) {
+                println!("    {line}");
+            }
+        }
     }
     println!("  queue: {total:.2} s");
 }
