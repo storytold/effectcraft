@@ -123,6 +123,30 @@ mod tests {
         assert!(col.finish().losses.is_empty());
     }
 
+    /// Two keys at different times that round to the same time unit are merged too: the first
+    /// one is kept, and both the rounding and the merge are reported.
+    #[test]
+    fn keys_that_round_to_the_same_time_are_merged() {
+        use effectcraft_keyframe::Value;
+        use effectcraft_time::Tick;
+        let tb = TimeBase { frame_duration: 1024, timescale: 25600 };
+        // One tick is far below one unit (1/25600 s): it rounds to unit 0, where the first key is.
+        let keys = [Keyframe::new(Tick(0), Value::Scalar(1.0)), Keyframe::new(Tick(1), Value::Scalar(2.0))];
+        let mut col = Collector::default();
+        let timed = timed_keys(&keys, &tb, "L", "key", &mut col);
+        let got: Vec<(i64, f64)> = timed.iter().map(|(u, k)| (*u, if let Value::Scalar(v) = k.value { v } else { f64::NAN })).collect();
+        assert_eq!(got, [(0, 1.0)]);
+        let report = col.finish();
+        let lines: Vec<(LossCategory, &str)> = report.losses.iter().flat_map(|l| l.details.iter().map(move |d| (l.category, d.as_str()))).collect();
+        assert_eq!(
+            lines,
+            [
+                (LossCategory::ApproximatedKeyframes, "L: keys at the same time were merged"),
+                (LossCategory::RoundedTimes, "L: key at 0.0000 s moved to the time base"),
+            ]
+        );
+    }
+
     /// A key list is filled and replaces the value.
     #[test]
     fn a_key_list_is_filled_and_replaces_the_value() {
