@@ -42,9 +42,12 @@ pub(crate) fn gpu_inflight(var: Option<&str>) -> usize {
 /// `auto` (measure, the default).
 pub const RENDERER_ENV: &str = "EFFECTCRAFT_RQ_RENDERER";
 
-/// Frames each compositor renders, timed, when a job measures which is faster (after one
+/// Frames the GPU renders, timed, when a job measures which compositor is faster (after one
 /// untimed warm-up frame each: layer cache misses, uploads, kernel builds).
 const PROBE_FRAMES: usize = 2;
+/// Frames the CPU renders at once, timed, in that measurement: its throughput comes from
+/// rendering several frames in parallel, which two frames understate.
+const PROBE_CPU_FRAMES: usize = 8;
 /// Jobs shorter than this render on the project's compositor without measuring: the frames
 /// the slower one renders for the measurement would cost more than they could save.
 const PROBE_MIN_JOB: u64 = 12;
@@ -460,9 +463,10 @@ impl<'a> Cx<'a> {
     /// Choose the job's compositor by timing both on the first frames of `ks` (#3335), as the
     /// viewer's Auto does per comp: frame 0 warms each up (layer cache misses, uploads, kernel
     /// builds) untimed, then the GPU renders the next [`PROBE_FRAMES`] under its in-flight cap
-    /// and the CPU the [`PROBE_FRAMES`] after them in parallel. The CPU renders more frames at
-    /// once in the job than here, so the measurement leans towards the GPU, as the margin of
-    /// [`pick_renderer`] does: the CPU is chosen only when clearly faster. Returns
+    /// and the CPU up to [`PROBE_CPU_FRAMES`] after them in parallel (its throughput). The CPU
+    /// may render more frames at once in the job than here, so the measurement leans towards
+    /// the GPU, as the margin of [`pick_renderer`] does: the CPU is chosen only when clearly
+    /// faster. Returns
     /// the frames the faster one rendered (the slower one's are rendered again); empty when
     /// the choice was made already or is made without measuring (a short job).
     fn probe<I: Send>(&self, ks: &[u64], render: &(impl Fn(u64, crate::JobRenderer) -> I + Sync + Send)) -> Vec<(u64, I)> {
@@ -480,7 +484,9 @@ impl<'a> Cx<'a> {
         if n == 0 {
             return vec![];
         }
-        let (Some(&first), Some(gpu_ks), Some(cpu_ks)) = (ks.first(), ks.get(1..1 + n), ks.get(1 + n..1 + 2 * n)) else { return vec![] };
+        let (Some(&first), Some(gpu_ks), Some(cpu_ks)) = (ks.first(), ks.get(1..1 + n), ks.get(1 + n..ks.len().min(1 + n + PROBE_CPU_FRAMES))) else {
+            return vec![];
+        };
         let logged = || self.frame_times.as_ref().map_or(0, |ft| ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len());
         let cpu_cap = self.inflight().cpu;
         let timed = |on: crate::JobRenderer, frames: &[u64], caps: Inflight| {
