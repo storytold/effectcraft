@@ -6,8 +6,9 @@ File ▸ Import ▸ Adobe After Effects Project… (`file.importAep`) reads an `
 and adds its items to the open project, in a folder named after the file (as After Effects does when it imports a project).
 An `.aep` or `.aepx` picked with File ▸ Import ▸ File… or dropped on the window goes the same way:
 the app asks about its losses as this entry does. Agents calling `file.import` with one get it
-imported through `file.importAep`; a file with losses is refused there (no `allowLosses`), and the
-error names this entry.
+imported through `file.importAep`. `file.import` passes neither `allowLosses` nor `dryRun`, so a
+file with losses is refused, and the error names this entry; call `file.importAep` directly with
+`allowLosses: true` (or `dryRun: true`) to import it anyway (or to see the report).
 It is deliberately narrow: what it brings over is exact and tested, everything else is **reported**
 and never dropped silently. Wider coverage grows with the reader's verified field layouts
 ([aep-format.md](aep-format.md)); this page lists what exists today.
