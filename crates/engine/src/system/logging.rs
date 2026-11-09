@@ -221,9 +221,18 @@ fn rotate(dir: &Path) -> std::io::Result<(PathBuf, File)> {
 /// Rotate the session logs in `dir` (the `Logs` folder, see [`log_dir`]) and write records to
 /// a fresh `effectcraft.log` there, first the ones logged so far; returns its path.
 pub fn attach_session_log(dir: &Path) -> Result<PathBuf, String> {
+    attach_session_log_with_header(dir, "")
+}
+
+/// Open a session log with a bounded, unfiltered identity header before buffered records.
+/// A crash reporter can then recognize this run even with logging disabled or verbose startup.
+pub fn attach_session_log_with_header(dir: &Path, header: &str) -> Result<PathBuf, String> {
+    if header.len() > 1024 {
+        return Err("session log header exceeds 1024 bytes".into());
+    }
     let (path, file) = rotate(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut sink = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-    sink.attach(file);
+    sink.attach_with_header(file, header);
     sink.path = Some(path.clone());
     Ok(path)
 }
@@ -264,8 +273,14 @@ impl Sink {
     }
 
     /// Start writing to `file`, first the lines kept so far.
+    #[cfg(test)]
     fn attach(&mut self, file: File) {
+        self.attach_with_header(file, "");
+    }
+
+    fn attach_with_header(&mut self, file: File, header: &str) {
         self.file = Some(file);
+        self.append(header);
         for line in std::mem::take(&mut self.pending) {
             self.append(&line);
         }
@@ -332,6 +347,22 @@ pub fn recent() -> Vec<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn identity_header_precedes_buffered_records_independent_of_log_filter() {
+        let dir = temp_dir("identity-header");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session");
+        let mut sink = Sink::new(MAX_FILE_BYTES);
+        sink.write(&"earlier startup record".repeat(1000));
+        sink.attach_with_header(File::create(&path).unwrap(), "crash-report session 1-2\n");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("crash-report session 1-2\n"));
+        assert!(text.contains("earlier startup record"));
+        assert!(attach_session_log_with_header(&dir, &"x".repeat(1025)).is_err());
+        drop(sink);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// `RUST_LOG` picks what start-up prints to stderr (#234).
     #[test]
