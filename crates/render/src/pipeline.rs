@@ -500,6 +500,22 @@ impl<'a> Renderer<'a> {
     /// Render a composition at comp time `t` (transparent background, comp size × scale).
     /// Top-level frames go to the GPU when [`Self::active_accel`] is set and handles them.
     pub fn comp_frame(&self, comp_id: ItemId, t: Tick) -> Image {
+        self.comp_frame_with(comp_id, t, false, |a| Ok::<_, std::convert::Infallible>(a.comp_frame(self, comp_id, t))).unwrap_or_else(|never| match never {})
+    }
+
+    /// Render a frame, validating the accelerated attempt before starting any CPU fallback.
+    /// The caller's scope must run only the accelerator, not this whole method: a GPU fault
+    /// must release failed resources before a potentially large CPU render (#3357).
+    /// A scope error returns immediately; the caller can then retry with a fresh CPU renderer
+    /// without accelerator-produced cache entries. Healthy declines and Auto timing retain
+    /// the same behavior as [`Self::comp_frame`]. Its fallback disables acceleration for
+    /// effects too: GPU work must never escape the supplied error scope.
+    pub fn comp_frame_scoped<E>(&self, comp_id: ItemId, t: Tick, scope: impl FnOnce(&dyn Accelerator) -> Result<Option<Image>, E>) -> Result<Image, E> {
+        self.comp_frame_with(comp_id, t, true, scope)
+    }
+
+    fn comp_frame_with<E>(&self, comp_id: ItemId, t: Tick, scoped: bool, scope: impl FnOnce(&dyn Accelerator) -> Result<Option<Image>, E>) -> Result<Image, E> {
+        let cpu = if scoped { self.with_accel(None) } else { self.with_accel(self.accel) };
         // Classic 3D runs composite on the GPU too (M12.7), so Auto sends 3D comps there as well;
         // Auto renders each comp on whichever compositor measured faster ([`AutoPick`]).
         if self.depth == 0
@@ -508,24 +524,24 @@ impl<'a> Renderer<'a> {
             let auto = self.frame_auto(a, comp_id, false);
             if auto.is_none_or(|(p, key)| p.choose(key)) {
                 let t0 = web_time::Instant::now();
-                if let Some(img) = a.comp_frame(self, comp_id, t) {
+                if let Some(img) = scope(a)? {
                     if let Some((p, key)) = auto {
                         p.record(key, true, t0.elapsed().as_secs_f64() * 1e3);
                     }
-                    return img;
+                    return Ok(img);
                 }
                 if let Some((p, key)) = auto {
                     p.declined(key);
                 }
             }
             let t0 = web_time::Instant::now();
-            let img = self.comp_frame_cpu(comp_id, t);
+            let img = cpu.comp_frame_cpu(comp_id, t);
             if let Some((p, key)) = auto {
                 p.record(key, false, t0.elapsed().as_secs_f64() * 1e3);
             }
-            return img;
+            return Ok(img);
         }
-        self.comp_frame_cpu(comp_id, t)
+        Ok(cpu.comp_frame_cpu(comp_id, t))
     }
 
     /// The Auto timing history and key for a top-level frame of `comp` (`None` unless the
