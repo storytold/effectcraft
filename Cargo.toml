@@ -149,12 +149,12 @@ sys-locale = "0.3"
 # Craft Link and the plug-in host. These crates are in craft-libs pull requests that are still open
 # (craft-command, craft-ipc, craft-plugin-abi, craft-plugin-host, craft-plugin-ui). They share one rev.
 # Move it to the merged commit.
-craft-command = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
-craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
+craft-command = { git = "https://github.com/storytold/craft-libs", rev = "3d8c2c50b73446d2739675aca78a43b974c27a9f", version = "=0.1.0" }
+craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "3d8c2c50b73446d2739675aca78a43b974c27a9f", version = "=0.1.0" }
 # The plug-in host lifecycle is native only.
-craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0", default-features = false }
-craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
-craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "d6ed9c725c678cb3f43b2f8ba83eda10ee11c323", version = "=0.1.0" }
+craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "3d8c2c50b73446d2739675aca78a43b974c27a9f", version = "=0.1.0", default-features = false }
+craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "3d8c2c50b73446d2739675aca78a43b974c27a9f", version = "=0.1.0" }
+craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "3d8c2c50b73446d2739675aca78a43b974c27a9f", version = "=0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
