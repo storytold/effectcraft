@@ -488,7 +488,7 @@ impl<'a> Renderer<'a> {
             || styles::active(ctx, layer)
             || ctx.comp.layers.iter().any(|l| matches!(l.source, LayerSource::Light { .. }))
             || self.is_adv3d(ctx)
-            || (matches!(layer.source, LayerSource::Text) && text::per_char_3d(ctx, layer))
+            || (matches!(layer.source, LayerSource::Text) && (text::per_char_3d(ctx, layer) || text::animator_blur(ctx, layer)))
         {
             return None;
         }

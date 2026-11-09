@@ -332,3 +332,29 @@ fn fine_clip_cells_have_distinct_cache_keys() {
     assert_ne!(key(a), key(kurbo::Rect::ZERO));
     assert_ne!(key(b), key(kurbo::Rect::ZERO));
 }
+
+/// Text animator Blur reads beyond the fixed anti-aliasing padding of a clipped window.
+#[test]
+fn animated_text_blur_keeps_offscreen_glyph_pixels_while_panning() {
+    let (mut p, cid) = scene(|p, c| text3(p, c, [W as f64 / 2.0, H as f64 / 2.0, -zoom() + 40.0], 0.0));
+    let mut next = p.next_id;
+    let mut ids = Ids(&mut next);
+    let props = build::text_anim_props(&mut ids, "blur", false);
+    let mut animator = build::text_animator(&mut ids, "Blur", props);
+    animator.prop_mut("properties/blur").unwrap().value = Value::Vec2([40.0, 40.0]);
+    p.next_id = next;
+    p.comp_mut(cid).unwrap().layers[0].props.group_mut("text/animators").unwrap().children.push(animator.into());
+    let opts = RenderOpts { scale: 0.125, ..Default::default() };
+    let cache = crate::LayerCache::default();
+    for dx in [-10.0, 0.0, 10.0] {
+        set(&mut p.comp_mut(cid).unwrap().layers[0], "transform/position", Value::Vec3([W as f64 / 2.0 + dx, H as f64 / 2.0, -zoom() + 40.0]));
+        let mut r = Renderer::new(&p, &NoFootage, opts);
+        r.cache = Some(&cache);
+        let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
+        let layer = &p.comp(cid).unwrap().layers[0];
+        assert!(r.raster_clip(&ctx, layer).is_none(), "animator blur needs off-window pixels");
+        let mut whole = Renderer::new(&p, &NoFootage, opts);
+        whole.whole_raster = true;
+        assert_eq!(r.comp_frame(cid, Tick::ZERO).data, whole.comp_frame(cid, Tick::ZERO).data);
+    }
+}

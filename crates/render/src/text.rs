@@ -509,6 +509,16 @@ pub fn per_char_3d(ctx: &EvalCtx, layer: &Layer) -> bool {
     layer.is_3d() && layer.props.sub("text").is_some_and(|t| ctx.b(layer, t, "perChar3d"))
 }
 
+/// Animator blur can read glyph pixels beyond a viewport raster window. Conservatively
+/// keep the whole raster even when the current selector happens to select no characters.
+pub(crate) fn animator_blur(ctx: &EvalCtx, layer: &Layer) -> bool {
+    layer.props.group("text/animators").is_some_and(|anims| {
+        anims.groups().filter(|anim| anim.enabled).any(|anim| {
+            anim.sub("properties").and_then(|props| props.get("blur")).is_some_and(|blur| ctx.value(layer, blur).as_vec2().iter().any(|value| *value != 0.0))
+        })
+    })
+}
+
 /// One drawn character.
 #[derive(Clone, Debug)]
 pub struct PlacedGlyph {
