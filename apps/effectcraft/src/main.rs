@@ -747,4 +747,23 @@ mod tests {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         assert!(app.hooks.file_dialog_async.is_none() && asked.is_none(), "the blocking dialog pumps its own messages here");
     }
+
+    /// `on_exit` runs the shutdown scripts, which close the project, and starts a waiting update.
+    /// `Desktop`'s macOS fields need a running event loop.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn on_exit_runs_the_shutdown_scripts_and_starts_a_waiting_update() {
+        let mut app = effectcraft_ui_egui::EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", serde_json::json!({"name": "Main", "width": 64, "height": 64})).unwrap();
+        let mut desktop = super::Desktop {
+            app,
+            file_dialogs: None,
+            window: super::window::Tracker::new(None, None, false),
+            launch: super::launch_guard::Launch::default(),
+            drawn: false,
+        };
+        eframe::App::on_exit(&mut desktop);
+        assert_eq!(desktop.app.session.project.comps().count(), 0);
+        assert!(desktop.app.pending_update_start_called());
+    }
 }
