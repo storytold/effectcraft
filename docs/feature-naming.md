@@ -65,8 +65,8 @@ fixtures may still name the external product or effect they actually describe.
 | `ec.transition.cclightwipe` | CC Light Wipe | Light Wipe |
 | `ec.transition.cclinesweep` | CC Line Sweep | Line Sweep |
 | `ec.sim.ccmrmercury` | CC Mr. Mercury | Liquid Particles |
-| `ec.stylize.ccmrsmoothie` | CC Mr. Smoothie | Color Flow |
-| `ec.utility.ccoverbrights` | CC Overbrights | Highlight Recovery |
+| `ec.stylize.ccmrsmoothie` | CC Mr. Smoothie | Palette Map |
+| `ec.utility.ccoverbrights` | CC Overbrights | Out-of-Range Display |
 | `ec.distort.ccpageturn` | CC Page Turn | Page Curl |
 | `ec.sim.ccparticlesystems2` | CC Particle Systems II | Particle Emitter 2D |
 | `ec.sim.ccparticleworld` | CC Particle World | Particle Emitter 3D |
@@ -93,7 +93,7 @@ fixtures may still name the external product or effect they actually describe.
 | `ec.generate.ccthreads` | CC Threads | Woven Threads |
 | `ec.stylize.ccthreshold` | CC Threshold | Channel Threshold |
 | `ec.stylize.ccthresholdrgb` | CC Threshold RGB | RGB Threshold |
-| `ec.distort.cctiler` | CC Tiler | Offset Tiles |
+| `ec.distort.cctiler` | CC Tiler | Scaled Tiles |
 | `ec.color.cctoner` | CC Toner | Multi-Tone Tint |
 | `ec.transition.cctwister` | CC Twister | Twist Wipe |
 | `ec.blur.ccvector` | CC Vector Blur | Vector Blur |

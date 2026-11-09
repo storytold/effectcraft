@@ -1223,7 +1223,7 @@ fn effects_on_text_reach_past_the_text_bounds() {
     }
     assert!(
         painted > 50 && hi.saturating_sub(lo) > 100,
-        "Offset Tiles tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
+        "Scaled Tiles tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
     );
 }
 

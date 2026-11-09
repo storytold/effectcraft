@@ -1,4 +1,4 @@
-//! Stylize effects, batch 3: Block Reveal, Film Burn, Glass Relief, Hexagonal Tiles, Color Flow
+//! Stylize effects, batch 3: Block Reveal, Film Burn, Glass Relief, Hexagonal Tiles, Palette Map
 //! and Plastic Shading.
 //!
 //! Written from the public descriptions of what these effects do (progressive block loading,
@@ -418,7 +418,7 @@ fn hextile(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ Color Flow
+// ------------------------------------------------------------------ Palette Map
 
 const SMOOTHIE_PROPS: [&str; 8] = ["Red", "Green", "Blue", "Alpha", "Luminance", "Lightness", "Hue", "Saturation"];
 
@@ -553,7 +553,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccmrsmoothie",
-            "Color Flow",
+            "Palette Map",
             vec![
                 p("flowLayer", "Flow Layer", Value::Layer(None), ParamUi::Layer),
                 p("property", "Property", Value::Enum(4), popup(&SMOOTHIE_PROPS)),

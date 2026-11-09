@@ -1,5 +1,5 @@
 //! Distort effects, batch 2: Turbulent Displace, Displacement Map (self as map), Optics
-//! Compensation, Magnify, Mesh Warp, Bezier Warp, Two-Point Bend, Lens Distortion, Page Curl, Offset Tiles,
+//! Compensation, Magnify, Mesh Warp, Bezier Warp, Two-Point Bend, Lens Distortion, Page Curl, Scaled Tiles,
 //! Tile Grid.
 //!
 //! Mesh Warp and Bezier Warp share a grid rasteriser: a (nx+1)×(ny+1) grid of destination points
@@ -679,7 +679,7 @@ fn page_turn(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- Offset Tiles / Tile Grid
+// ---------------------------------------------------------------- Scaled Tiles / Tile Grid
 
 fn cc_tiler(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = (ctx.params.f("scale") / 100.0).max(0.001);
@@ -864,7 +864,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.cctiler",
-            "Offset Tiles",
+            "Scaled Tiles",
             vec![
                 p("scale", "Scale", num(50.0), slider(1.0, 10000.0, 1.0, 200.0, 1)),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),

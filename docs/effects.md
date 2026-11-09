@@ -147,7 +147,6 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Mirror | `ec.distort.mirror` | 2 | GPU | 32 | Implemented |
 | Motion Stabilizer | `ec.distort.warpstabilizer` | 20 |  | 32 | Implemented |
 | Offset | `ec.distort.offset` | 2 | GPU | 32 | Implemented |
-| Offset Tiles | `ec.distort.cctiler` | 3 | GPU | 32 | Implemented |
 | Optics Compensation | `ec.distort.opticscompensation` | 6 | GPU | 32 | Implemented |
 | Organic Displacement | `ec.distort.ccblobbylize` | 15 | GPU | 32 | Implemented |
 | Page Curl | `ec.distort.ccpageturn` | 7 | GPU | 32 | Implemented |
@@ -158,6 +157,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Reshape | `ec.distort.reshape` | 6 | GPU | 32 | Implemented |
 | Ripple | `ec.distort.ripple` | 7 | GPU | 32 | Implemented |
 | Rolling Shutter Repair | `ec.distort.rollingshutterrepair` | 5 |  | 32 | Implemented |
+| Scaled Tiles | `ec.distort.cctiler` | 3 | GPU | 32 | Implemented |
 | Slant | `ec.distort.ccslant` | 4 | GPU | 32 | Implemented |
 | Smear | `ec.distort.smear` | 8 | GPU | 32 | Implemented |
 | Spherize | `ec.distort.spherize` | 2 | GPU | 32 | Implemented |
@@ -347,7 +347,6 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Cartoon | `ec.stylize.cartoon` | 12 | GPU | 32 | Implemented |
 | Channel Threshold | `ec.stylize.ccthreshold` | 4 | GPU | 32 | Implemented |
 | Color Emboss | `ec.stylize.coloremboss` | 4 | GPU | 32 | Implemented |
-| Color Flow | `ec.stylize.ccmrsmoothie` | 7 | GPU | 32 | Implemented |
 | Edge Tile Repeat | `ec.stylize.ccrepetile` | 5 | GPU | 32 | Implemented |
 | Emboss | `ec.stylize.emboss` | 4 | GPU | 32 | Implemented |
 | Film Burn | `ec.stylize.ccburnfilm` | 3 | GPU | 32 | Implemented |
@@ -358,6 +357,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Kaleidoscope | `ec.stylize.cckaleida` | 4 | GPU | 32 | Implemented |
 | Mosaic | `ec.stylize.mosaic` | 3 | GPU | 32 | Implemented |
 | Motion Tile | `ec.stylize.motiontile` | 8 | GPU | 32 | Implemented |
+| Palette Map | `ec.stylize.ccmrsmoothie` | 7 | GPU | 32 | Implemented |
 | Plastic Shading | `ec.stylize.ccplastic` | 18 | GPU | 32 | Implemented |
 | Posterize | `ec.stylize.posterize` | 1 | GPU | 32 | Implemented |
 | RGB Threshold | `ec.stylize.ccthresholdrgb` | 7 | GPU | 32 | Implemented |
@@ -422,5 +422,5 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Grow Bounds | `ec.utility.growbounds` | 1 | GPU | 32 | Implemented |
 | HDR Compander | `ec.utility.hdrcompander` | 3 | GPU | 32 | Implemented |
 | HDR Highlight Compression | `ec.utility.hdrcompression` | 1 | GPU | 32 | Implemented |
-| Highlight Recovery | `ec.utility.ccoverbrights` | 2 | GPU | 32 | Implemented |
+| Out-of-Range Display | `ec.utility.ccoverbrights` | 2 | GPU | 32 | Implemented |
 
