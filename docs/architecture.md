@@ -414,7 +414,8 @@ tests, device errors are logged rather than fatal. A viewer frame that runs out 
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
 the RAM preview keeps half as many GPU frames from then on. However many frame threads the viewer
 runs, at most two of them start GPU render attempts at once. Shared-pool workers use the CPU
-when both slots are busy rather than blocking Rayon helpers; other render threads wait, so
+when both slots are busy rather than blocking Rayon helpers; dedicated single-thread preview
+lanes wait for admission and remain on the GPU, so
 working-texture pressure is bounded by concurrent attempts rather than the thread count (#3028).
 A single large frame or retained frames can still exceed the available video memory. The same guard catches a frame's
 validation errors (an invalid texture, often left by a failed allocation): that frame renders on

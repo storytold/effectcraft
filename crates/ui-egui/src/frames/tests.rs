@@ -3237,6 +3237,42 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
     assert!(worker.gpu_ready());
     assert!(gpu.context().check_health().is_ok());
 
+    // The real dedicated-lane drain waits, then caches a GPU frame instead of silently
+    // switching a healthy preview to CPU rendering while the other lanes are busy.
+    frames.queue.lock().unwrap().jobs.push(Job {
+        key: job.key,
+        src: job.src.clone(),
+        comp,
+        t: job.t,
+        opts: RenderOpts { backend: Backend::Gpu, ..job.opts },
+        urgent: false,
+        background: true,
+        seq: 1,
+        cancel: Arc::default(),
+    });
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (early, finished) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                started.send(()).unwrap();
+                worker.drain(Some(0));
+                tx.send(()).unwrap();
+            })
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let early = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop((first, second));
+        let finished = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
+        (early, finished)
+    });
+    assert!(early.is_err(), "preview lane must wait for an available GPU permit");
+    assert_eq!(finished, Ok(()));
+    assert!(frames.cache.lock().unwrap().map.get(&job.key).unwrap().img.is_gpu());
+
     // A retirement found inside the scope releases the permit before the fresh CPU retry.
     gpu.context().device_failure_notifier()("synthetic worker retirement".into());
     let before = admissions();
@@ -3287,4 +3323,46 @@ fn gpu_render_slots_never_block_rayon_helpers() {
     });
     assert_eq!(declined, Ok(true), "Rayon helpers must not wait on GPU permits");
     assert_eq!(*slots.busy.lock().unwrap(), 0);
+}
+
+/// Dedicated preview lanes have one protected thread and can wait without creating the
+/// shared-pool helper dependency cycle. They must keep rendering on a healthy GPU.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
+    let slots = GpuRenderSlots::new();
+    let first = slots.acquire(2);
+    let second = slots.acquire(2);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (early, admitted) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                let _drain = Draining::enter(Some(0)).unwrap();
+                assert!(Draining::enter(None).is_none(), "a lane cannot start a nested drain");
+                assert!(DRAINING_LANE.get(), "nested rejection must not clear the lane marker");
+                started.send(()).unwrap();
+                tx.send(slots.for_render(2).is_some()).unwrap();
+            });
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let early = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop((first, second));
+        let admitted = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
+        (early, admitted)
+    });
+    assert!(early.is_err(), "busy dedicated lane must wait instead of falling back to CPU");
+    assert_eq!(admitted, Ok(true));
+    pool.install(|| {
+        assert!(!DRAINING.get());
+        assert!(!DRAINING_LANE.get());
+        let panic = std::panic::catch_unwind(|| {
+            let _drain = Draining::enter(Some(0)).unwrap();
+            panic!("synthetic lane failure");
+        });
+        assert!(panic.is_err());
+        assert!(!DRAINING.get());
+        assert!(!DRAINING_LANE.get());
+    });
 }

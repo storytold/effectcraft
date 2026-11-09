@@ -101,6 +101,12 @@ impl GpuRenderSlots {
     /// A Rayon helper may be executing a nested frame while an admitted render waits for
     /// its work. Blocking that helper on a permit would deadlock the render (#3028).
     fn for_render(&self, max: usize) -> Option<GpuRenderSlot<'_>> {
+        // Dedicated preview pools have one thread, protected from nested drains. They cannot
+        // be helpers of another admitted frame, so waiting preserves GPU preview throughput.
+        #[cfg(not(target_arch = "wasm32"))]
+        if DRAINING_LANE.get() {
+            return Some(self.acquire(max));
+        }
         if rayon::current_thread_index().is_some() { self.try_acquire(max) } else { Some(self.acquire(max)) }
     }
 
@@ -1686,6 +1692,8 @@ struct Worker {
 thread_local! {
     /// This pool thread is inside [`Worker::drain`] (rendering a frame).
     static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Only the single thread of a dedicated preview lane may wait for GPU admission.
+    static DRAINING_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Clears [`DRAINING`] when the drain ends, even by a panic.
@@ -1693,8 +1701,20 @@ thread_local! {
 struct Draining;
 
 #[cfg(not(target_arch = "wasm32"))]
+impl Draining {
+    fn enter(lane: Option<usize>) -> Option<Self> {
+        if DRAINING.replace(true) {
+            return None;
+        }
+        DRAINING_LANE.set(lane.is_some());
+        Some(Self)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Draining {
     fn drop(&mut self) {
+        DRAINING_LANE.set(false);
         DRAINING.set(false);
     }
 }
@@ -1723,11 +1743,7 @@ impl Worker {
     /// `lane`: the lane this runs on (see [`Queue::idle_lanes`]), `None` on the pool.
     #[cfg(not(target_arch = "wasm32"))]
     fn drain(&self, lane: Option<usize>) {
-        if DRAINING.get() {
-            return;
-        }
-        DRAINING.set(true);
-        let _reset = Draining;
+        let Some(_reset) = Draining::enter(lane) else { return };
         while self.run_next(lane) {}
     }
 
