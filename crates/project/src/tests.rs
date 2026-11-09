@@ -423,6 +423,8 @@ fn upgrading_a_legacy_taper_bounds_its_lengths() {
         p.ui = crate::ParamUi::Pixels;
         p.value = crate::Value::Scalar(v);
     }
+    let keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(-5.0)), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Scalar(70.0))];
+    taper.get_mut("endLength").unwrap().keys = keys.clone();
     taper.get_mut("startLength").unwrap().expr = Some(crate::Expression { text: "time * 10".into(), enabled: true });
     let mut contents = crate::PropGroup::new(Ids(&mut next).alloc(), "contents", "Contents").with(stroke);
 
@@ -435,6 +437,7 @@ fn upgrading_a_legacy_taper_bounds_its_lengths() {
     assert_eq!(taper.get("startLength").unwrap().value.as_f64(), 40.0);
     assert_eq!(taper.get("endLength").unwrap().value.as_f64(), -50.0, "the saved value is left alone");
     assert_eq!(taper.get("startLength").unwrap().expr.as_ref().map(|e| e.text.as_str()), Some("time * 10"));
+    assert_eq!(taper.get("endLength").unwrap().keys, keys, "keyframes are left alone");
     assert!(!build::upgrade_shape_contents(&mut Ids(&mut next), &mut contents), "idempotent");
 }
 

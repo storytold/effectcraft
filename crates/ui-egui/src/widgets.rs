@@ -145,10 +145,12 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
 /// number clamped to `range`.
 fn typed_value(buf: &str, suffix: &str, value: f64, decimals: usize, range: (f64, f64)) -> Option<f64> {
     let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
-    if txt == format!("{value:.decimals$}") {
+    let parsed = txt.parse::<f64>().ok().filter(|v| v.is_finite());
+    // The displayed text (value rounded to `decimals`) or any retype of the same number is no edit.
+    if txt == format!("{value:.decimals$}") || parsed == Some(value) {
         return None;
     }
-    txt.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(range.0, range.1))
+    parsed.map(|v| v.clamp(range.0, range.1))
 }
 
 /// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
@@ -1122,7 +1124,7 @@ mod tests {
     #[test]
     fn unchanged_hot_text_is_not_committed() {
         let range = (0.0, 1e9);
-        for shown in ["-50.0", " -50.0 ", "-50.0px", "-50,0"] {
+        for shown in ["-50.0", " -50.0 ", "-50.0px", "-50,0", "-50", "-50.00", "-5e1"] {
             assert_eq!(typed_value(shown, "px", -50.0, 1, range), None, "{shown:?}");
         }
         assert_eq!(typed_value("-50.0%", "%", -50.0, 1, range), None);
