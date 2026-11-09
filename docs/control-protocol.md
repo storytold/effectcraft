@@ -193,7 +193,8 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 `shape.toolOptions` (the Tools bar's Tool Creates Shape / Mask and Fill and Stroke Options),
 `mask.insertVertex`, `mask.convertVertex`, `mask.deleteVertices`, `path.freeTransform` (masks and
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
-Editor transform box, timeline Alt-drag scaling).
+Editor key drags and transform box, timeline Alt-drag scaling; moves go by whole frames and scales
+land on frames unless `betweenFrames` is true).
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).

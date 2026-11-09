@@ -18,10 +18,18 @@ fn v3(v: Option<&Value>) -> Option<[f64; 3]> {
 
 /// Transform the selected keys: times scale about `timeAnchor` (comp seconds, default the first
 /// selected key) by `timeScale` and move by `timeOffset`; values scale about `valueAnchor` by
-/// `valueScale` and move by `valueOffset` (every dimension, or only `dim`). Times land on frames.
-/// With `fromStart` (drags), each step of one merged gesture gives the whole transform since the
-/// drag started and applies to the keys as they were then: keys squeezed onto one frame on the
-/// way, or rounded steps, are never lost; only the final position counts.
+/// `valueScale` and move by `valueOffset` (every dimension, or only `dim`). Times are worked out
+/// in comp time, to the tick, at the comp's frame rate (29.97 and other non-integer rates included):
+/// - `betweenFrames` true (Graph Editor ▸ Allow Keyframes Between Frames): keys keep the exact
+///   time the transform gives them.
+/// - Otherwise (the default) a move goes by whole frames, the offset rounded to the nearest frame:
+///   keys on frames stay on frames and keys between frames (Quick Offset, scripts) keep their
+///   place within the frame. A scale puts every key it moves on the nearest frame.
+///
+/// A transform that leaves times alone (values only) never moves a key in time. With `fromStart`
+/// (drags), each step of one merged gesture gives the whole transform since the drag started and
+/// applies to the keys as they were then: keys squeezed onto one frame on the way, or rounded
+/// steps, are never lost; only the final position counts.
 fn transform(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
     let merge = merge_p(p);
@@ -55,9 +63,26 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
     // Default time anchor: the earliest selected key (comp time).
     let first = sel.iter().filter_map(|k| comp.layer(k.layer).map(|l| l.comp_time(k.time))).min().unwrap_or(Tick::ZERO);
     let ta = f_p(p, "timeAnchor").map(Tick::from_seconds_f64).unwrap_or(first);
+    let between = b_p(p, "betweenFrames").unwrap_or(false);
+    let off = Tick::from_seconds_f64(toff);
+    // A move with frames: whole frames, counted from the frame each key is in, so a key on a frame
+    // lands exactly on another at any rate.
+    let frames = fr.frame_at(fr.snap_nearest(off));
     let map_t = |ct: Tick| -> Tick {
-        let x = ta.seconds() + (ct.seconds() - ta.seconds()) * ts + toff;
-        fr.snap_nearest(Tick::from_seconds_f64(x.max(0.0)))
+        let t = if ts == 1.0 {
+            // In ticks, so every key moves by exactly the same amount.
+            if between {
+                ct + off
+            } else {
+                let f = fr.frame_at(ct);
+                ct + (fr.tick_of(f.saturating_add(frames)) - fr.tick_of(f))
+            }
+        } else {
+            let scaled = Tick::from_seconds_f64((ct - ta).seconds() * ts);
+            let t = ta + scaled + off;
+            if between { t } else { fr.snap_nearest(t.clamp(Tick::ZERO, Tick::MAX)) }
+        };
+        t.clamp(Tick::ZERO, Tick::MAX)
     };
     let touch_values = vs != 1.0 || voff != 0.0;
     s.edit("Transform Keyframes", merge, |proj, st| {
@@ -160,7 +185,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Transform Keyframes",
             [],
             None,
-            "{timeScale?, timeAnchor? (comp s), timeOffset? (s), valueScale?, valueAnchor?, valueOffset?, dim? | dims?: [d…], merge?, fromStart?: bool (with merge: values are the whole transform since the drag started)}",
+            "{timeScale?, timeAnchor? (comp s), timeOffset? (s), valueScale?, valueAnchor?, valueOffset?, dim? | dims?: [d…], betweenFrames?: bool (keep the exact times; default: moves go by whole frames, scales land on frames), merge?, fromStart?: bool (with merge: values are the whole transform since the drag started)}",
             has_keys,
             transform
         ),
