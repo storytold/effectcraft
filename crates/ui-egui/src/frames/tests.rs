@@ -3123,3 +3123,246 @@ mod frame_files {
         assert_eq!(healed.hits(), (1, 0), "the rewritten entry is used");
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_renders_in_flight_stay_within_the_cap() {
+    use std::sync::atomic::AtomicUsize;
+    let slots = GpuRenderSlots::new();
+    let now = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..16 {
+            s.spawn(|| {
+                let _slot = slots.acquire(2);
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                now.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    assert!(peak.load(Ordering::SeqCst) <= 2);
+    assert_eq!(*slots.busy.lock().unwrap_or_else(PoisonError::into_inner), 0);
+}
+
+/// #3028: exercise the actual worker routes, not only the admission counter. The Auto CPU
+/// compositor still has a live accelerator for its layer effects.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
+    use effectcraft_engine::render::{Accelerator, Backend};
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("GPU worker route test skipped: no adapter");
+        return;
+    };
+    let (frames, mut src, key, _, _, _) = disk_fixture(&[]);
+    let mut session = effectcraft_engine::Session::default();
+    session.execute("comp.new", serde_json::json!({"width": 16, "height": 16, "duration": 1})).unwrap();
+    let comp = session.active_comp_id().unwrap();
+    let solid = session.execute("layer.newSolid", serde_json::json!({"color": "#ff0000"})).unwrap()["layer"].clone();
+    session.execute("effect.apply", serde_json::json!({"layers": [solid], "effect": "Gaussian Blur"})).unwrap();
+    src.project = session.project;
+    src.gpu = Some(gpu.clone());
+    src.gpu_display = true;
+    let mut job = Job {
+        key,
+        src,
+        comp,
+        t: Tick::ZERO,
+        opts: RenderOpts { backend: Backend::Gpu, ..Default::default() },
+        urgent: true,
+        background: false,
+        seq: 0,
+        cancel: Arc::default(),
+    };
+    let worker = frames.worker();
+    let admissions = || GPU_RENDER_SLOTS.entered.load(Ordering::SeqCst);
+    // This path is called on the UI thread by dispatch_remote: a full GPU must decline
+    // immediately so the frame can go to the remote worker and the window keeps painting.
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let declined = std::thread::scope(|scope| {
+        scope.spawn(|| tx.send(worker.render_gpu(&job).is_none()).unwrap());
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop((first, second));
+        result
+    });
+    assert_eq!(declined, Ok(true), "UI display must not wait for GPU admission");
+    let before = admissions();
+    assert!(worker.render_gpu(&job).is_some(), "direct display path renders");
+    assert!(admissions() > before, "direct display bypassed GPU admission");
+
+    let before = admissions();
+    assert!(worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert!(admissions() > before, "worker display bypassed GPU admission");
+
+    job.src.gpu_display = false;
+    job.src.layer_cache.clear();
+    let before = admissions();
+    assert!(!worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert!(admissions() > before, "readback bypassed GPU admission");
+
+    job.src.gpu_display = true;
+    job.src.layer_cache.clear();
+    job.opts.backend = Backend::Auto;
+    let renderer = Renderer::new(&job.src.project, job.src.footage.as_ref(), job.opts);
+    let (pick, key) = renderer.frame_auto(&gpu, comp, true).unwrap();
+    pick.declined(key); // Select CPU compositing while retaining GPU-capable layer effects.
+    let before = admissions();
+    assert!(!worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert!(admissions() > before, "Auto CPU effects bypassed GPU admission");
+
+    let before = admissions();
+    assert!(!worker.render_job(&job, false, &ReadLog::new()).is_gpu());
+    assert_eq!(admissions(), before, "CPU retry must not hold a GPU slot");
+    assert_eq!(*GPU_RENDER_SLOTS.busy.lock().unwrap(), 0);
+
+    // Saturation in the shared Rayon pool is contention, not a GPU fault. It must finish
+    // through the fresh CPU route without admitting GPU effects or retiring the device.
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let before = admissions();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cpu = std::thread::scope(|scope| {
+        scope.spawn(|| pool.install(|| tx.send(!worker.render_job(&job, true, &ReadLog::new()).is_gpu()).unwrap()));
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop((first, second));
+        result
+    });
+    assert_eq!(cpu, Ok(true), "busy pool worker must complete on the CPU");
+    assert_eq!(admissions(), before);
+    assert!(worker.gpu_ready());
+    assert!(gpu.context().check_health().is_ok());
+
+    // The real dedicated-lane drain waits, then caches a GPU frame instead of silently
+    // switching a healthy preview to CPU rendering while the other lanes are busy.
+    frames.queue.lock().unwrap().jobs.push(Job {
+        key: job.key,
+        src: job.src.clone(),
+        comp,
+        t: job.t,
+        opts: RenderOpts { backend: Backend::Gpu, ..job.opts },
+        urgent: false,
+        background: true,
+        seq: 1,
+        cancel: Arc::default(),
+    });
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (early, finished) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                started.send(()).unwrap();
+                worker.drain(Some(0));
+                tx.send(()).unwrap();
+            })
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let early = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop((first, second));
+        let finished = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
+        (early, finished)
+    });
+    assert!(early.is_err(), "preview lane must wait for an available GPU permit");
+    assert_eq!(finished, Ok(()));
+    assert!(frames.cache.lock().unwrap().map.get(&job.key).unwrap().img.is_gpu());
+
+    // A retirement found inside the scope releases the permit before the fresh CPU retry.
+    gpu.context().device_failure_notifier()("synthetic worker retirement".into());
+    let before = admissions();
+    assert!(!worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert_eq!(admissions(), before + 1, "failed GPU attempt must retry without a second admission");
+    assert_eq!(*GPU_RENDER_SLOTS.busy.lock().unwrap(), 0);
+    gpu.frame_end();
+}
+
+/// Early returns and unwinding release admission even before another render starts.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_render_slots_return_after_failure_and_unwind() {
+    let slots = GpuRenderSlots::new();
+    let failed = || -> Result<(), ()> {
+        let _slot = slots.acquire(2);
+        Err(())
+    };
+    assert!(failed().is_err());
+    assert_eq!(*slots.busy.lock().unwrap(), 0);
+    let result = std::panic::catch_unwind(|| {
+        let _slot = slots.acquire(2);
+        panic!("synthetic render panic");
+    });
+    assert!(result.is_err());
+    assert_eq!(*slots.busy.lock().unwrap(), 0);
+}
+
+/// A Rayon helper must decline a full gate rather than wait for a render that can itself be
+/// waiting for that helper. Release the permits on timeout so a regression fails, not hangs.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_render_slots_never_block_rayon_helpers() {
+    let slots = GpuRenderSlots::new();
+    let first = slots.acquire(2);
+    let second = slots.acquire(2);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let declined = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                rayon::join(|| {}, || tx.send(slots.for_render(2).is_none()).unwrap());
+            });
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop((first, second));
+        result
+    });
+    assert_eq!(declined, Ok(true), "Rayon helpers must not wait on GPU permits");
+    assert_eq!(*slots.busy.lock().unwrap(), 0);
+}
+
+/// Dedicated preview lanes have one protected thread and can wait without creating the
+/// shared-pool helper dependency cycle. They must keep rendering on a healthy GPU.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
+    let slots = GpuRenderSlots::new();
+    let first = slots.acquire(2);
+    let second = slots.acquire(2);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (early, admitted) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                let _drain = Draining::enter(Some(0)).unwrap();
+                assert!(Draining::enter(None).is_none(), "a lane cannot start a nested drain");
+                assert!(DRAINING_LANE.get(), "nested rejection must not clear the lane marker");
+                started.send(()).unwrap();
+                tx.send(slots.for_render(2).is_some()).unwrap();
+            });
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let early = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop((first, second));
+        let admitted = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
+        (early, admitted)
+    });
+    assert!(early.is_err(), "busy dedicated lane must wait instead of falling back to CPU");
+    assert_eq!(admitted, Ok(true));
+    pool.install(|| {
+        assert!(!DRAINING.get());
+        assert!(!DRAINING_LANE.get());
+        let panic = std::panic::catch_unwind(|| {
+            let _drain = Draining::enter(Some(0)).unwrap();
+            panic!("synthetic lane failure");
+        });
+        assert!(panic.is_err());
+        assert!(!DRAINING.get());
+        assert!(!DRAINING_LANE.get());
+    });
+}
