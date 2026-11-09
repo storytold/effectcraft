@@ -190,7 +190,7 @@ fn moving(label: &str, pos: Keys, poi: Keys, text_pos: Keys, text_rot: &[(f64, f
     set(&mut cam, "cameraOptions/zoom", Value::Scalar(zoom()));
     keyed(&mut cam, "transform/position", pos);
     keyed(&mut cam, "transform/poi", poi);
-    p.comp_mut(cid).unwrap().layers = vec![cam, text];
+    p.comp_mut(cid).unwrap().layers = vec![cam, text].into();
     let cache = crate::LayerCache::default();
     let (mut exact, mut near, mut capped) = (0, 0, 0);
     for f in 0..30 {
@@ -286,7 +286,7 @@ fn layer_space_reads_get_the_whole_layer() {
     p.next_id = next;
     g.prop_mut("takeMatteFromLayer").unwrap().value = Value::Layer(Some(text_id.0));
     solid.props.sub_mut("effects").unwrap().children.push(g.into());
-    p.comp_mut(cid).unwrap().layers = vec![text, solid];
+    p.comp_mut(cid).unwrap().layers = vec![text, solid].into();
     assert_eq!(frame(&p, cid, false).data, frame(&p, cid, true).data, "Set Matte from the text");
     let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
     let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
@@ -320,4 +320,15 @@ fn layer_panel_input_reads_the_whole_layer_behind_the_camera() {
     let expected = whole.layer_input(&ctx, layer, 0).unwrap();
     assert!(expected.img.data.iter().any(|pixel| pixel[3] > 0.5));
     assert_eq!(r.layer_input(&ctx, layer, 0).unwrap().img, expected.img);
+}
+
+#[test]
+fn fine_clip_cells_have_distinct_cache_keys() {
+    let a = kurbo::Rect::new(0.0, 0.0, 1.0 / 128.0, 1.0 / 128.0);
+    let b = kurbo::Rect::new(1.0 / 128.0, 0.0, 2.0 / 128.0, 1.0 / 128.0);
+    let key = |clip| crate::pipeline::raster_clip_key(42, clip);
+    // All three clips rounded to identical coordinates in the old 1/16-unit key.
+    assert_ne!(key(a), key(b));
+    assert_ne!(key(a), key(kurbo::Rect::ZERO));
+    assert_ne!(key(b), key(kurbo::Rect::ZERO));
 }

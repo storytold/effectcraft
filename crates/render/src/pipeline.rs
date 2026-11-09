@@ -499,7 +499,7 @@ impl<'a> Renderer<'a> {
     pub(crate) fn clipped_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
         let k = key?;
         Some(match self.raster_clip(ctx, layer) {
-            Some(c) => [c.x0, c.y0, c.x1, c.y1].iter().fold(cache::derive(k, 0xc11b), |d, v| cache::derive(d, (v * 16.0).round() as i64 as u64)),
+            Some(c) => raster_clip_key(k, c),
             None => k,
         })
     }
@@ -1208,4 +1208,10 @@ impl<'a> Renderer<'a> {
         });
         Some(self.keep(key, Arc::new(buf?), &files).0)
     }
+}
+
+/// Snap cells can be finer than 1/16 unit: preserve every coordinate bit so visible
+/// clips cannot collide with another cell or the empty behind-camera raster.
+pub(crate) fn raster_clip_key(key: u64, clip: kurbo::Rect) -> u64 {
+    [clip.x0, clip.y0, clip.x1, clip.y1].iter().fold(cache::derive(key, 0xc11b), |key, coordinate| cache::derive(key, coordinate.to_bits()))
 }
