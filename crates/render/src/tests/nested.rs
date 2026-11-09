@@ -196,3 +196,44 @@ fn overridden_instances_of_a_precomp_do_not_share_a_memo_entry() {
     assert!(img.get(40, 16)[3] < 0.1, "the right instance is not served the left one's frame");
     assert!(img.get(24, 16)[3] < 0.1, "the left instance shows nothing right of its solid");
 }
+
+/// A comp reached at depth 17 renders the recursion guard's transparent canvas; a direct
+/// (depth-1) instance of the same comp in the same frame must still render its content, so the
+/// guard's output cannot share the shallow instance's memo key (the key carries the depth).
+#[test]
+fn a_precomp_past_the_depth_guard_does_not_poison_a_shallow_instance() {
+    use crate::{NoFootage, RenderOpts, Renderer};
+
+    let mut p = Project::default();
+    // B renders a green solid filling the comp.
+    let mut b = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    let sid = p.add_item("G", Label::Green, None, ItemKind::Solid(Solid { color: [0.1, 0.9, 0.1], width: 32, height: 32, pixel_aspect: 1.0 }));
+    let gl = build::layer(&mut p, &b, "G", LayerSource::Solid { item: sid }, (32, 32), None);
+    b.layers.push(gl);
+    let bid = p.add_item("B", Label::Sandstone, None, ItemKind::Comp(b.into()));
+
+    // A chain of 16 precomp links ending in B: the root's chain layer nests B at depth 17,
+    // the first depth past the recursion guard, which returns a transparent canvas.
+    let mut next = bid;
+    for i in (1..=16).rev() {
+        let mut c = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+        let l = build::layer(&mut p, &c, "L", LayerSource::Comp { item: next }, (32, 32), None);
+        c.layers.push(l);
+        next = p.add_item(&format!("C{i}"), Label::Sandstone, None, ItemKind::Comp(c.into()));
+    }
+
+    let mut outer = Comp::new(32, 32, FrameRate::FPS_30, s(4.0));
+    // Direct first in the vec = drawn last: the deep chain renders (and memoises) before the
+    // direct instance looks the comp up.
+    let direct = build::layer(&mut p, &outer, "Direct", LayerSource::Comp { item: bid }, (32, 32), None);
+    outer.layers.push(direct);
+    let deep = build::layer(&mut p, &outer, "Chain", LayerSource::Comp { item: next }, (32, 32), None);
+    outer.layers.push(deep);
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::ZERO);
+    // The direct instance is the only thing that paints this frame (the chain's tail renders
+    // the guard's transparent canvas): without the depth in the key the frame stays empty.
+    assert!(img.get(16, 16)[3] > 0.9 && img.get(16, 16)[1] > img.get(16, 16)[0], "the direct instance renders B's solid, not the guard's transparent canvas");
+}

@@ -104,14 +104,17 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
 }
 
 /// What makes two nested comp renders interchangeable (the key of the frame's comp memo): the
-/// comp and its frame, the buffer scale, and the quality/motion-blur switches the precomp layer
-/// hands down. Essential Properties overrides never memoise (their project is temporary), so no
-/// project identity is needed.
+/// comp and its frame, the buffer scale, the nesting depth the frame renders at, and the
+/// quality/motion-blur switches the precomp layer hands down. Depth separates a render that hit
+/// the recursion guard (a transparent canvas past the depth limit) from a shallower instance of
+/// the same comp. Essential Properties overrides never memoise (their project is temporary), so
+/// no project identity is needed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct CompMemoKey {
     comp: ItemId,
     t: Tick,
     scale: u64,
+    depth: usize,
     inherited: Option<(Quality, bool)>,
 }
 
@@ -877,13 +880,16 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 // Repeated instances of the same precomp render the nested comp once per
-                // (comp, time, scale) and share the frame (#2275). Instances whose quality or
-                // motion-blur switches differ key differently (see [`CompMemoKey`]); Essential
-                // Properties overrides disable the memo for the instance and its descendants
-                // (their project is temporary). The lock is never held across a render: deeper
-                // precomps inside the nested comp consult the same map.
+                // (comp, time, scale, depth) and share the frame (#2275). Depth is part of the
+                // key: a branch nested past the depth limit renders a transparent canvas, and a
+                // shallower instance of the same comp must still render its content. Instances
+                // whose quality or motion-blur switches differ key differently (see
+                // [`CompMemoKey`]); Essential Properties overrides disable the memo for the
+                // instance and its descendants (their project is temporary). The lock is never
+                // held across a render: deeper precomps inside the nested comp consult the same
+                // map.
                 if let Some(memo) = &sub.comp_memo {
-                    let key = CompMemoKey { comp: *item, t: lt, scale: bs.to_bits(), inherited: sub.inherited };
+                    let key = CompMemoKey { comp: *item, t: lt, scale: bs.to_bits(), depth: sub.depth, inherited: sub.inherited };
                     if let Some(img) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
                         return Some(Buf { img: (*img).clone(), offset: [0.0; 2], scale: bs });
                     }
