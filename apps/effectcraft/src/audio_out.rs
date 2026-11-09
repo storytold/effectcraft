@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -20,6 +20,47 @@ use effectcraft_ui_egui::audio::{AudioDevice, AudioFeed, AudioOutput};
 /// multi-hundred-millisecond default buffer that plays as silence at the start of preview (#554).
 fn preferred_buffer_frames(rate: u32) -> u32 {
     (rate / 100).clamp(256, 2048)
+}
+
+/// Gate for stream-error logging: admits at most one error per `window_ms` and counts the ones
+/// it suppressed, so a backend whose poll loop keeps failing (alsa's POLLERR) cannot flood the
+/// log from a single stream.
+struct ErrorGate {
+    window_ms: u64,
+    last: Option<u64>,
+    suppressed: u64,
+}
+
+impl ErrorGate {
+    fn new(window_ms: u64) -> Self {
+        ErrorGate { window_ms, last: None, suppressed: 0 }
+    }
+
+    /// Admit an error at monotonic `now_ms`: `Some(n)` logs it after `n` suppressed ones;
+    /// `None` suppresses it.
+    fn admit(&mut self, now_ms: u64) -> Option<u64> {
+        let due = self.last.is_none_or(|last| now_ms.saturating_sub(last) >= self.window_ms);
+        if due {
+            let suppressed = self.suppressed;
+            self.last = Some(now_ms);
+            self.suppressed = 0;
+            Some(suppressed)
+        } else {
+            self.suppressed += 1;
+            None
+        }
+    }
+}
+
+/// The stream's error callback: report the failure through the gate (see [`ErrorGate`]).
+fn on_stream_error(gate: &mut ErrorGate, origin: &Instant, e: impl std::fmt::Display) {
+    if let Some(suppressed) = gate.admit(origin.elapsed().as_millis() as u64) {
+        if suppressed > 0 {
+            log::warn!("audio output: {e} (and {suppressed} more since the last report)");
+        } else {
+            log::warn!("audio output: {e}");
+        }
+    }
 }
 
 /// Wait until the feeder has mixed a block, or until preview is stopped. Starting the stream
@@ -91,6 +132,8 @@ fn run<T: SizedSample + FromSample<f32>>(
     let (left, right) = if map.0 < ch && map.1 < ch { map } else { (0, 1) };
     let rate = cfg.sample_rate.0 as f64;
     let mut stereo: Vec<f32> = Vec::new();
+    let mut gate = ErrorGate::new(1000);
+    let gate_origin = Instant::now();
     dev.build_output_stream(
         cfg,
         move |out: &mut [T], info: &cpal::OutputCallbackInfo| {
@@ -117,7 +160,7 @@ fn run<T: SizedSample + FromSample<f32>>(
             let dev_lat = ts.playback.duration_since(&ts.callback).map(|d| d.as_secs_f64()).unwrap_or(0.0);
             latency.store((dev_lat * rate) as u64 + frames as u64, Ordering::Relaxed);
         },
-        |e| log::warn!("audio output: {e}"),
+        move |e| on_stream_error(&mut gate, &gate_origin, e),
         None,
     )
     .map_err(|e| e.to_string())
@@ -250,5 +293,22 @@ mod tests {
         let h = std::thread::spawn(move || wait_to_play(&feed, &rx));
         tx.send(()).unwrap();
         assert!(!h.join().unwrap());
+    }
+
+    /// #3317: a failing backend's poll loop calls the error callback far faster than any log
+    /// should grow: the gate admits one per window and counts the suppressed ones, so the next
+    /// report says how many were swallowed.
+    #[test]
+    fn the_error_gate_admits_one_per_window_and_counts_the_rest() {
+        let mut gate = ErrorGate::new(1000);
+        assert_eq!(gate.admit(0), Some(0), "the first error is always reported");
+        assert_eq!(gate.admit(1), None);
+        assert_eq!(gate.admit(999), None);
+        assert_eq!(gate.admit(999), None, "suppression counts, not throttles");
+        assert_eq!(gate.admit(1000), Some(3), "the next report carries the suppressed count");
+        assert_eq!(gate.admit(1500), None);
+        assert_eq!(gate.admit(2500), Some(1), "the window is measured from the last report");
+        // A clock that stalls (a suspended device) does not make old errors flood back.
+        assert_eq!(gate.admit(2500), None);
     }
 }
