@@ -1540,8 +1540,18 @@ fn cryptomatte_at_half_resolution_is_the_full_resolution_matte_box_filtered() {
 /// (forget) reads it again.
 #[test]
 fn a_warm_frame_checks_its_file_at_most_once() {
+    /// Removes the folder when dropped, also when an assertion fails.
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let dir = std::env::temp_dir().join(format!("ec-3334-stamps-{}", std::process::id()));
+    // (a run that stopped before its cleanup left the folder: start from an empty one)
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let _cleanup = TempDir(dir.clone());
     let file = dir.join("crypto_0001.exr");
     std::fs::write(&file, crypto_edges((8, 8))).unwrap();
     let f = crate::probe(&file).unwrap();
@@ -1565,5 +1575,4 @@ fn a_warm_frame_checks_its_file_at_most_once() {
     std::fs::write(&file, crypto_edges((8, 9))).unwrap();
     let again = pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap();
     assert_eq!(again.height, 9, "the new file");
-    let _ = std::fs::remove_dir_all(&dir);
 }
