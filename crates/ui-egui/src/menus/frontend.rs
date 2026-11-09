@@ -616,6 +616,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Untitled Project".into());
         path.with_file_name(format!("{stem}{suffix}.{ext}")).to_string_lossy().into_owned().into()
     };
+    // The command already names its file or folder: no dialog.
+    let given = |key: &str| ["path", "paths", "steps", "preset"].into_iter().chain([key]).any(|k| params.get(k).is_some());
     let (key, ask) = match id {
         "file.import" | "file.importMultiple" => ("paths", Ask::Import),
         "file.open" => ("path", Ask::OpenProject),
@@ -626,7 +628,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd".into())),
         "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr".into())),
         "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder".into())),
-        "anim.savePreset" => ("path", Ask::Save(preset_save_default(crate::panels::effects_presets::presets_dir().as_deref()))),
+        // Making the default creates the presets folder, so only when a dialog is needed.
+        "anim.savePreset" if !given("path") => ("path", Ask::Save(preset_save_default(crate::panels::effects_presets::presets_dir().as_deref()))),
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
         "view.exportGuides" => ("path", Ask::Save("Guides.json".into())),
         "view.importGuides" => ("path", Ask::Open(&["json"])),
@@ -658,12 +661,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.setProxy" => ("path", Ask::OpenFootage(&["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"])),
         _ => return None,
     };
-    if params.get(key).is_some()
-        || params.get("path").is_some()
-        || params.get("paths").is_some()
-        || params.get("steps").is_some()
-        || params.get("preset").is_some()
-    {
+    if given(key) {
         return None;
     }
     // Importable files besides movies.
