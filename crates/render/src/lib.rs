@@ -102,6 +102,8 @@ pub struct Renderer<'a> {
     through: [Option<Through<'a>>; MAX_THROUGH],
     /// More collapsed levels than [`MAX_THROUGH`]: their motion is not blurred.
     through_lost: bool,
+    /// Layer-space consumers must not use the viewport raster optimization.
+    pub(crate) whole_raster: bool,
 }
 
 #[cfg(test)]
