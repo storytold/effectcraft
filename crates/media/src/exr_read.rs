@@ -49,13 +49,95 @@ pub(crate) struct Opened {
     pub(crate) stamp: FileStamp,
 }
 
+/// How long a file's identity, once read, stands for it ([`recent_stamp`], #3334): every request
+/// for a file's channels checked it, one or two `fs::metadata` calls each (1–7 ms on a network
+/// share), several per frame. A file rewritten in place is seen at most this late; Reload Footage
+/// forgets it at once ([`forget_stamp`]).
+pub(crate) const STAMP_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// At most this many files' identities are remembered (the oldest checks go first).
+#[cfg(not(target_arch = "wasm32"))]
+const STAMPS_KEPT: usize = 4096;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Stamps = std::collections::HashMap<std::path::PathBuf, (FileStamp, std::time::Instant)>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stamps() -> std::sync::MutexGuard<'static, Stamps> {
+    static STAMPS: std::sync::OnceLock<std::sync::Mutex<Stamps>> = std::sync::OnceLock::new();
+    STAMPS.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`recent_stamp`] in the browser: no clock there (and no files, only registered bytes).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn recent_stamp(path: &std::path::Path) -> std::io::Result<FileStamp> {
+    std::fs::metadata(path).map(|m| FileStamp::of_metadata(&m))
+}
+
+/// The identity of the file at `path` (size and modification time): as read within the last
+/// [`STAMP_TTL`], else read now. A file that can't be read is asked again every time.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn recent_stamp(path: &std::path::Path) -> std::io::Result<FileStamp> {
+    let now = std::time::Instant::now();
+    if let Some((stamp, at)) = stamps().get(path)
+        && now.saturating_duration_since(*at) < STAMP_TTL
+    {
+        return Ok(*stamp);
+    }
+    #[cfg(test)]
+    crate::count_stamp(path);
+    let stamp = std::fs::metadata(path).map(|m| FileStamp::of_metadata(&m))?;
+    note_stamp(path, stamp, now);
+    Ok(stamp)
+}
+
+/// Remember `stamp` as the identity of the file at `path` read at `at` (a file just opened).
+#[cfg(not(target_arch = "wasm32"))]
+fn note_stamp(path: &std::path::Path, stamp: FileStamp, at: std::time::Instant) {
+    let mut s = stamps();
+    if s.len() >= STAMPS_KEPT && !s.contains_key(path) {
+        s.retain(|_, (_, t)| at.saturating_duration_since(*t) < STAMP_TTL);
+        if s.len() >= STAMPS_KEPT {
+            s.clear();
+        }
+    }
+    s.insert(path.to_path_buf(), (stamp, at));
+}
+
+/// Forget the identity read of the file at `path` (Reload Footage: the next request reads it).
+pub(crate) fn forget_stamp(path: &std::path::Path) {
+    #[cfg(not(target_arch = "wasm32"))]
+    stamps().remove(path);
+    #[cfg(target_arch = "wasm32")]
+    let _ = path;
+}
+
+/// Whether the identity of the file at `path` is remembered (tests).
+#[cfg(test)]
+pub(crate) fn stamp_kept(path: &std::path::Path) -> bool {
+    stamps().contains_key(path)
+}
+
 impl ExrSource {
-    /// Its identity now (a file's size and modification time), without opening it.
+    /// Its identity (a file's size and modification time), without opening it: a file's as read
+    /// within the last [`STAMP_TTL`] ([`recent_stamp`]); a localized file's as it was when its
+    /// verified copy was chosen (moments ago: [`recent_stamp`] too).
     pub(crate) fn stamp(&self) -> std::io::Result<FileStamp> {
         match self {
             ExrSource::Bytes(_) => Ok(FileStamp::Virtual),
-            ExrSource::File(path) | ExrSource::Localized { original: path, .. } => std::fs::metadata(path).map(|m| FileStamp::of_metadata(&m)),
+            ExrSource::File(path) => recent_stamp(path),
+            ExrSource::Localized { stamp, .. } => Ok(*stamp),
         }
+    }
+
+    /// The file was just opened and found to be `stamp`: later checks within [`STAMP_TTL`] use it.
+    pub(crate) fn opened_as(&self, stamp: FileStamp) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let ExrSource::File(path) = self {
+            note_stamp(path, stamp, std::time::Instant::now());
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = stamp;
     }
 
     /// Open it: a file only when it is a regular file (a project can name `/dev/zero` or a FIFO,

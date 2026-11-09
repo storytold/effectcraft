@@ -28,6 +28,7 @@ use crate::Gpu;
 
 mod adjust;
 mod adv3d;
+mod crypto_bench;
 mod deferred;
 mod deferred_jobs;
 mod fx_color;

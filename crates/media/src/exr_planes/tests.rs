@@ -1431,3 +1431,137 @@ fn a_failed_picture_leaves_the_other_channels_readable() {
     let rest = store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other).expect("the other channels");
     assert!(rest.aux.get("Z").is_some());
 }
+
+/// A two-rank Cryptomatte file of `size` with a picture: "cube" and "sphere" meet along a
+/// diagonal whose pixels hold both IDs (rank 00 the nearer, 55-75 %, rank 01 the other one with
+/// the rest), IDs and coverage stored as 32-bit floats.
+fn crypto_edges(size: (usize, usize)) -> Vec<u8> {
+    use effectcraft_raster::channels3d::{crypto_float, crypto_hash};
+    let (w, h) = size;
+    let (cube, sphere) = (crypto_float(crypto_hash("cube")), crypto_float(crypto_hash("sphere")));
+    let mut ch: Vec<Vec<f32>> = vec![vec![0.0; w * h]; 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let d = x as f64 + 0.7 * y as f64 - w as f64 * 0.6;
+            let edge = d.abs() < 1.5;
+            let (first, second) = if d < 0.0 { (cube, sphere) } else { (sphere, cube) };
+            let c = if edge { 0.55 + 0.1 * ((x * 3 + y) % 3) as f32 } else { 1.0 };
+            ch[0][i] = first;
+            ch[1][i] = c;
+            ch[2][i] = if edge { second } else { 0.0 };
+            ch[3][i] = if edge { 1.0 - c } else { 0.0 };
+        }
+    }
+    let mut list: Vec<AnyChannel<FlatSamples>> = ["CryptoObject00.R", "CryptoObject00.G", "CryptoObject00.B", "CryptoObject00.A"]
+        .iter()
+        .zip(ch)
+        .map(|(n, v)| AnyChannel::new(*n, FlatSamples::F32(v)))
+        .collect();
+    for c in ["R", "G", "B", "A"] {
+        list.push(AnyChannel::new(c, FlatSamples::F16(vec![f16::from_f32(0.5); w * h])));
+    }
+    let encoding = Encoding { compression: Compression::ZIP1, blocks: Blocks::ScanLines, line_order: LineOrder::Increasing };
+    write(vec![Layer::new(size, LayerAttributes::default(), encoding, AnyChannels::sort(list.into()))], size)
+}
+
+/// The effects' view of a footage layer's channels (tests).
+struct ChannelsHost(Arc<AuxChannels>);
+
+impl effectcraft_effects::EffectHost for ChannelsHost {
+    fn layer(&self, _: u64, _: bool) -> Option<effectcraft_effects::LayerPixels> {
+        None
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn aux(&self) -> Option<Arc<AuxChannels>> {
+        Some(self.0.clone())
+    }
+}
+
+/// #3334, on an OpenEXR written here and read through the pool: Cryptomatte at half resolution
+/// is the full-resolution output box-filtered down (2 × 2 pixels averaged, bit for bit), along
+/// edges where two IDs share a pixel; the channels the effect reads are the same set for every
+/// request of the frame (the GPU keeps its matte by them).
+#[test]
+fn cryptomatte_at_half_resolution_is_the_full_resolution_matte_box_filtered() {
+    let size = (23usize, 17usize);
+    let file = Temp::new("crypto-half", &crypto_edges(size));
+    let f = crate::probe(&file.0).unwrap();
+    let pool = crate::MediaPool::new();
+    let need = AuxNeed::All;
+    let aux = pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap();
+    assert!(Arc::ptr_eq(&aux, &pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap()), "the same channels for the frame");
+    assert_eq!(aux.crypto_rank_planes("CryptoObject").len(), 2);
+    let host = ChannelsHost(aux);
+    let spec = effectcraft_effects::find("ec.3d.cryptomatte").unwrap();
+    let layer = [size.0 as f64, size.1 as f64];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, layer))).collect() };
+    params.values.insert("selection".into(), effectcraft_project::Value::Str("cube".into()));
+    params.values.insert("matteOnly".into(), effectcraft_project::Value::Bool(true));
+    let run = |k: u32| {
+        let ctx = effectcraft_effects::EffectCtx {
+            params: &params,
+            time: 0.0,
+            layer_size: layer,
+            seed: 0,
+            adjustment: false,
+            env: effectcraft_effects::EffectEnv { host: Some(&host), ..Default::default() },
+        };
+        let (w, h) = ((size.0 as u32).div_ceil(k), (size.1 as u32).div_ceil(k));
+        (spec.render)(&ctx, effectcraft_effects::Buf { img: Image::filled(w, h, [1.0; 4]), offset: [0.0; 2], scale: 1.0 / k as f64 }).img
+    };
+    let (full, half) = (run(1), run(2));
+    let mut partial = 0;
+    for y in 0..half.height {
+        for x in 0..half.width {
+            let mut sum = 0.0f64;
+            for sy in y * 2..y * 2 + 2 {
+                for sx in x * 2..x * 2 + 2 {
+                    if sx < full.width && sy < full.height {
+                        sum += full.get(sx as i64, sy as i64)[0] as f64;
+                    }
+                }
+            }
+            let m = (sum / 4.0) as f32;
+            assert_eq!(half.get(x as i64, y as i64), [m, m, m, 1.0], "pixel {x}, {y}");
+            partial += usize::from(m > 0.0 && m < 1.0);
+        }
+    }
+    assert!(partial > 4, "edges: {partial}");
+}
+
+/// #3334: a warm frame checks its file's identity on disk at most once: repeated requests for
+/// the channels within the stamp's lifetime use the identity read before, and Reload Footage
+/// (forget) reads it again.
+#[test]
+fn a_warm_frame_checks_its_file_at_most_once() {
+    let dir = std::env::temp_dir().join(format!("ec-3334-stamps-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("crypto_0001.exr");
+    std::fs::write(&file, crypto_edges((8, 8))).unwrap();
+    let f = crate::probe(&file).unwrap();
+    let pool = crate::MediaPool::new();
+    let need = AuxNeed::All;
+    pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap();
+    let started = std::time::Instant::now();
+    let before = crate::stamp_checks_under(&dir);
+    for _ in 0..8 {
+        pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap();
+        pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
+    }
+    let checks = crate::stamp_checks_under(&dir) - before;
+    // (a slow machine may cross the stamp's lifetime once meanwhile)
+    let lifetimes = (started.elapsed().as_secs_f64() / crate::exr_read::STAMP_TTL.as_secs_f64()).ceil() as usize;
+    assert!(checks <= lifetimes.max(1), "{checks} identity checks for 16 requests");
+    assert!(crate::exr_read::stamp_kept(&file));
+    // Reload Footage: the identity read goes with the index; the file is read again at once.
+    pool.forget(&f.path);
+    assert!(!crate::exr_read::stamp_kept(&file), "forgotten");
+    std::fs::write(&file, crypto_edges((8, 9))).unwrap();
+    let again = pool.aux_for(ItemId(1), &f, Tick::ZERO, &need).unwrap();
+    assert_eq!(again.height, 9, "the new file");
+    let _ = std::fs::remove_dir_all(&dir);
+}

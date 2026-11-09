@@ -223,29 +223,184 @@ fn crypto_aux_image_is_bit_exact_on_edge_values() {
     }
 }
 
-/// Without the ID colours the matte (A) is bit-identical and the RGB is 0, on the edge values.
+/// #3334: at render scale 1 the matte plane is the per-pixel reduction's matte bit for bit, and
+/// the Colors plane is the Colors display's pixel made from it, on the edge values.
 #[test]
-fn crypto_aux_image_without_colors_keeps_the_matte() {
+fn the_source_resolution_planes_are_the_per_pixel_reduction() {
     let a = edge_aux(true);
     let sel = edge_selection();
     let full = crypto_aux_image(&a, "CryptoObject", &sel);
-    let matte = crypto_aux_image_with(&a, "CryptoObject", &sel, CryptoAux::MatteOnly);
-    for (f, m) in full.data.iter().zip(&matte.data) {
-        assert_eq!(f[3].to_bits(), m[3].to_bits());
-        assert_eq!(m[..3], [0.0; 3]);
+    let matte = crypto_plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 1.0);
+    let colors = crypto_plane(&a, "CryptoObject", &sel, CryptoOutput::Colors, 1.0);
+    assert_eq!((matte.width, matte.height, matte.scale), (a.width, a.height, a.scale));
+    assert_eq!(matte.data.len(), 12, "one value per aux pixel");
+    for (i, f) in full.data.iter().enumerate() {
+        assert_eq!(f[3].to_bits(), matte.data[i].to_bits(), "matte {i}");
+        let want = crypto_colors_px([f[0], f[1], f[2]], f[3]);
+        assert_eq!(want.map(f32::to_bits), [0, 1, 2, 3].map(|c| colors.data[i * 4 + c].to_bits()), "colors {i}");
     }
 }
 
 /// Only the Colors display without Matte Only reads the ID colours.
 #[test]
-fn crypto_aux_for_display_reads_colors_only_for_the_colors_display() {
-    assert_eq!(CryptoAux::for_display(0, false), CryptoAux::ColorsAndMatte);
-    assert_eq!(CryptoAux::for_display(0, true), CryptoAux::MatteOnly);
+fn crypto_output_reads_colors_only_for_the_colors_display() {
+    assert_eq!(CryptoOutput::for_display(0, false), CryptoOutput::Colors);
+    assert_eq!(CryptoOutput::for_display(0, true), CryptoOutput::Matte);
     for display in [1, 2, 3, u32::MAX] {
         for matte_only in [false, true] {
-            assert_eq!(CryptoAux::for_display(display, matte_only), CryptoAux::MatteOnly, "display {display}");
+            assert_eq!(CryptoOutput::for_display(display, matte_only), CryptoOutput::Matte, "display {display}");
         }
     }
+}
+
+/// A 9×7 two-rank Cryptomatte layer (`aux_scale` aux pixels per layer pixel) whose objects
+/// share their edge pixels: on rank 00 "cube" (60 %) or "sphere", on rank 01 the other one
+/// (the remaining coverage) along the edges, so a pixel there belongs to two IDs.
+fn shared_edges(aux_scale: f64) -> AuxChannels {
+    let (lw, lh) = (9usize, 7usize);
+    let (w, h) = ((lw as f64 * aux_scale) as usize, (lh as f64 * aux_scale) as usize);
+    let (cube, sphere) = (crypto_float(crypto_hash("cube")), crypto_float(crypto_hash("sphere")));
+    let mut a = AuxChannels::new(w as u32, h as u32, aux_scale);
+    let mut ch: Vec<Vec<f32>> = vec![vec![0.0; w * h]; 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let (lx, ly) = (x as f64 / aux_scale, y as f64 / aux_scale);
+            let d = lx + 0.6 * ly - 6.0;
+            let edge = d.abs() < 1.5;
+            let (first, second) = if d < 0.0 { (cube, sphere) } else { (sphere, cube) };
+            let c = if edge { 0.6 + 0.1 * ((x + y) % 3) as f32 } else { 1.0 };
+            ch[0][i] = first;
+            ch[1][i] = c;
+            ch[2][i] = if edge { second } else { 0.0 };
+            ch[3][i] = if edge { 1.0 - c } else { 0.0 };
+        }
+    }
+    a.channels = ["00.R", "00.G", "00.B", "00.A"].iter().zip(ch).map(|(n, v)| (format!("CryptoObject{n}"), v)).collect();
+    a.manifests = vec![("CryptoObject".into(), vec![("cube".into(), crypto_hash("cube")), ("sphere".into(), crypto_hash("sphere"))])];
+    a
+}
+
+/// Run the Cryptomatte effect on a buffer of the 9×7 layer at render scale 1 / `k` over `a`.
+fn crypto_run(a: &AuxChannels, vals: &[(&str, Value)], k: u32) -> Image {
+    let host = AuxHost(Arc::new(a.clone()));
+    let (w, h, scale) = (9u32.div_ceil(k), 7u32.div_ceil(k), 1.0 / k as f64);
+    let spec = crate::find("ec.3d.cryptomatte").unwrap();
+    let mut params = crate::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), crate::default_value(ps, [9.0, 7.0]))).collect() };
+    for (k, v) in vals {
+        params.values.insert(k.to_string(), v.clone());
+    }
+    let ctx = EffectCtx {
+        params: &params,
+        time: 0.0,
+        layer_size: [9.0, 7.0],
+        seed: 0,
+        adjustment: false,
+        env: EffectEnv { host: Some(&host), ..Default::default() },
+    };
+    (spec.render)(&ctx, Buf { img: Image::filled(w, h, [0.8, 0.6, 0.4, 1.0]), offset: [0.0; 2], scale }).img
+}
+
+/// The full-resolution output box-filtered by `k`, summed in the plane's order (rows, then
+/// columns), the pixels past the layer's edge 0. Alpha is 1: the outputs compared (Colors, and
+/// Matte Only with the matte in RGB) are opaque.
+fn boxed(full: &Image, k: u32) -> Image {
+    let (w, h) = (full.width.div_ceil(k), full.height.div_ceil(k));
+    let mut out = Image::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let mut px = [0.0f32; 4];
+            for (c, o) in px.iter_mut().enumerate() {
+                let mut sum = 0.0f64;
+                for sy in y * k..y * k + k {
+                    for sx in x * k..x * k + k {
+                        let v = if sx < full.width && sy < full.height { full.get(sx as i64, sy as i64)[c] } else { 0.0 };
+                        sum += v as f64;
+                    }
+                }
+                *o = (sum / (k * k) as f64) as f32;
+            }
+            px[3] = 1.0;
+            out.set(x, y, px);
+        }
+    }
+    out
+}
+
+/// #3334: below render scale 1 the output is the full-resolution output box-filtered down, bit
+/// for bit, at half and third resolution, for the matte (Matte Only) and the Colors display, on
+/// edges where two IDs share a pixel and with the aux at 1× and 2× the layer's resolution.
+#[test]
+fn reduced_resolution_is_the_full_resolution_output_box_filtered() {
+    for aux_scale in [1.0, 2.0] {
+        let a = shared_edges(aux_scale);
+        for vals in [
+            vec![("selection", Value::Str("cube".into())), ("matteOnly", Value::Bool(true))],
+            vec![("selection", Value::Str("cube, sphere".into())), ("matteOnly", Value::Bool(true))],
+            vec![("selection", Value::Str("sphere".into())), ("display", Value::Enum(0)), ("matteOnly", Value::Bool(false))],
+        ] {
+            let full = crypto_run(&a, &vals, 1);
+            for k in [2u32, 3] {
+                let got = crypto_run(&a, &vals, k);
+                let want = boxed(&full, k);
+                assert_eq!((got.width, got.height), (want.width, want.height));
+                for (i, (g, w)) in got.data.iter().zip(&want.data).enumerate() {
+                    assert_eq!(g.map(f32::to_bits), w.map(f32::to_bits), "aux {aux_scale} {vals:?} 1/{k}: pixel {i}: {g:?} vs {w:?}");
+                }
+            }
+        }
+        // The edges hold partial coverage: a filtered pixel there is neither 0 nor 1.
+        let half = crypto_run(&a, &[("selection", Value::Str("cube".into())), ("matteOnly", Value::Bool(true))], 2);
+        assert!(half.data.iter().any(|p| p[0] > 0.05 && p[0] < 0.95), "{:?}", half.data);
+    }
+}
+
+/// #3334: the ID channels never go through a resampler. The selection is the ID an
+/// interpolation of the two IDs would make where they meet (their values' mean: a 2 × 2 box or
+/// a bilinear sample half way between them; and their bits' midpoint): no pixel of the layer
+/// has it, so its matte is 0 at every render scale, in the effect and in the plane the GPU
+/// uploads. (That the planes are the per-pixel reduction is
+/// `the_source_resolution_planes_are_the_per_pixel_reduction`.)
+#[test]
+fn ids_are_never_resampled() {
+    let (cube, sphere) = (crypto_float(crypto_hash("cube")), crypto_float(crypto_hash("sphere")));
+    let mid_bits = ((cube.to_bits() as u64 + sphere.to_bits() as u64) / 2) as u32;
+    let mean = (cube + sphere) * 0.5;
+    for made in [mid_bits, mean.to_bits()] {
+        assert!(made != cube.to_bits() && made != sphere.to_bits());
+        for aux_scale in [1.0, 2.0] {
+            let a = shared_edges(aux_scale);
+            for k in [1u32, 2, 3, 4] {
+                let sel = Value::Str(format!("<{made:08x}>"));
+                let out = crypto_run(&a, &[("selection", sel), ("matteOnly", Value::Bool(true))], k);
+                assert!(out.data.iter().all(|p| p[0] == 0.0), "aux {aux_scale} 1/{k}: an ID no pixel has was selected");
+                // (and the plane the GPU uploads: the matte alone)
+                let plane = crypto_plane(&a, "CryptoObject", &[made], CryptoOutput::Matte, 1.0 / k as f64);
+                assert!(plane.data.iter().all(|m| *m == 0.0));
+            }
+        }
+    }
+}
+
+/// #3334: a hostile render scale or aux scale never allocates a huge plane or panics.
+#[test]
+fn box_filter_survives_hostile_scales() {
+    let a = shared_edges(1.0);
+    for s in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-12, 1.0, 4.0] {
+        let p = crypto_plane(&a, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, s);
+        assert!(p.data.len() <= 9 * 7, "scale {s}: {}", p.data.len());
+    }
+    let mut tiny = shared_edges(1.0);
+    tiny.scale = 1e-9;
+    let p = crypto_plane(&tiny, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, 0.5);
+    assert_eq!(p.data.len(), 9 * 7, "too large a layer: left unscaled");
+    // A layer claiming 1000 × its file's size at a tiny render scale: few output pixels, but the
+    // filter would visit 6.3e7 layer pixels; left unscaled, at once.
+    tiny.scale = 1e-3;
+    let t = std::time::Instant::now();
+    let p = crypto_plane(&tiny, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, 1e-3);
+    assert_eq!(p.data.len(), 9 * 7);
+    assert!(t.elapsed() < std::time::Duration::from_secs(1));
 }
 
 /// The CPU effect on a 20×10 layer over the 6×2 edge aux: pixels inside the aux area match

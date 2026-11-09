@@ -13,7 +13,9 @@
 //! 3D layer's render.
 //!
 //! Aux pixels are looked up nearest-neighbour (IDs must not be interpolated) at each buffer
-//! pixel's layer position, so render scale and layer padding are respected.
+//! pixel's layer position, so render scale and layer padding are respected. Cryptomatte makes its
+//! finished matte from the unscaled channels first and box-filters only that below render scale 1
+//! ([`crypto_plane`]).
 
 use std::sync::Arc;
 
@@ -550,43 +552,222 @@ fn crypto_colors(planes: &RankPlanes, i: usize, memo: &mut IdColorMemo) -> [f32;
 }
 
 /// Per aux pixel of Cryptomatte layer `layer`: the coverage-weighted ID colours (RGB) and the
-/// selection's coverage (A), computed in parallel with the rank planes resolved once. The GPU
-/// effect uploads this image and samples it per layer pixel.
+/// selection's coverage (A), computed in parallel with the rank planes resolved once: the
+/// per-pixel reduction the effect's planes ([`crypto_plane`]) are made of.
 pub fn crypto_aux_image(a: &AuxChannels, layer: &str, sel: &[u32]) -> Image {
-    crypto_aux_image_with(a, layer, sel, CryptoAux::ColorsAndMatte)
-}
-
-/// What [`crypto_aux_image_with`] computes per aux pixel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CryptoAux {
-    /// The coverage-weighted ID colours (RGB) and the selection's coverage (A).
-    ColorsAndMatte,
-    /// Only the selection's coverage (A); the RGB stays 0.
-    MatteOnly,
-}
-
-impl CryptoAux {
-    /// What the Cryptomatte effect reads for `display` and Matte Only: the ID colours are only
-    /// read by the Colors display (0) without Matte Only; Matte, Preview and Matte Only need the
-    /// matte alone.
-    pub fn for_display(display: u32, matte_only: bool) -> Self {
-        if display == 0 && !matte_only { Self::ColorsAndMatte } else { Self::MatteOnly }
-    }
-}
-
-/// [`crypto_aux_image`]; with [`CryptoAux::MatteOnly`] the RGB stays 0 and only the matte (A) is
-/// computed, for the displays that never read the ID colours.
-pub fn crypto_aux_image_with(a: &AuxChannels, layer: &str, sel: &[u32], what: CryptoAux) -> Image {
     let planes = a.crypto_rank_planes(layer);
     let mut img = Image::new(a.width, a.height);
     img.data.par_iter_mut().enumerate().for_each_init(IdColorMemo::default, |memo, (i, px)| {
-        let c = match what {
-            CryptoAux::ColorsAndMatte => crypto_colors(&planes, i, memo),
-            CryptoAux::MatteOnly => [0.0; 3],
-        };
+        let c = crypto_colors(&planes, i, memo);
         *px = [c[0], c[1], c[2], crypto_matte(&planes, sel, i)];
     });
     img
+}
+
+/// The Colors display's pixel for coverage-weighted ID colours `c` and matte `m`: the colours,
+/// the selection brighter, over alpha 1. The CPU effect and [`crypto_plane`] both make it here.
+#[inline]
+fn crypto_colors_px(c: [f32; 3], m: f32) -> Px {
+    let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
+    [c[0], c[1], c[2], 1.0]
+}
+
+/// What a finished Cryptomatte plane ([`crypto_plane`]) holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CryptoOutput {
+    /// The selection's coverage, one value per pixel: what Matte, Preview and Matte Only read.
+    Matte,
+    /// The Colors display's finished pixel (RGBA, alpha 1).
+    Colors,
+}
+
+impl CryptoOutput {
+    /// What the Cryptomatte effect reads for `display` and Matte Only: the ID colours only for
+    /// the Colors display (0) without Matte Only; Matte, Preview and Matte Only need the matte
+    /// alone.
+    pub fn for_display(display: u32, matte_only: bool) -> Self {
+        if display == 0 && !matte_only { Self::Colors } else { Self::Matte }
+    }
+
+    /// Values per pixel.
+    pub fn channels(self) -> usize {
+        match self {
+            Self::Matte => 1,
+            Self::Colors => 4,
+        }
+    }
+}
+
+/// A finished Cryptomatte output (#3334): the matte, or the Colors display's pixels, made from
+/// the unscaled ID and coverage channels at source resolution and only then, below render
+/// scale 1, box-filtered down. ID and coverage channels are never resampled: interpolating
+/// hashed IDs makes IDs that don't exist, and picking one rank's pixel loses coverage at edges.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CryptoPlane {
+    pub width: u32,
+    pub height: u32,
+    /// Plane pixels per layer pixel (as [`AuxChannels::scale`]).
+    pub scale: f64,
+    pub output: CryptoOutput,
+    /// [`CryptoOutput::channels`] values per pixel, row by row.
+    pub data: Vec<f32>,
+}
+
+impl CryptoPlane {
+    /// The plane pixel at layer point (`lx`, `ly`), with [`AuxChannels::index_at`]'s arithmetic.
+    pub fn index_at(&self, lx: f64, ly: f64) -> Option<usize> {
+        let x = (lx * self.scale).floor();
+        let y = (ly * self.scale).floor();
+        if x < 0.0 || y < 0.0 || x >= self.width as f64 || y >= self.height as f64 {
+            return None;
+        }
+        Some(y as usize * self.width as usize + x as usize)
+    }
+
+    /// The bytes its values take.
+    pub fn bytes(&self) -> usize {
+        self.data.len().saturating_mul(std::mem::size_of::<f32>())
+    }
+
+    /// The effect's pixel for buffer pixel `px` over plane pixel `k` (`None`: outside the aux
+    /// image, where the matte is 0 and Colors shows black).
+    fn shade(&self, px: Px, k: Option<usize>, display: u32, matte_only: bool, in_alpha: bool) -> Px {
+        match self.output {
+            CryptoOutput::Colors => {
+                let at = k.and_then(|k| k.checked_mul(4)).and_then(|i| self.data.get(i..i.saturating_add(4)));
+                at.and_then(|c| <[f32; 4]>::try_from(c).ok()).unwrap_or([0.0, 0.0, 0.0, 1.0])
+            }
+            CryptoOutput::Matte => {
+                let m = k.and_then(|k| self.data.get(k)).copied().unwrap_or(0.0);
+                crypto_matte_px(px, m, display, matte_only, in_alpha)
+            }
+        }
+    }
+}
+
+/// The effect's pixel for buffer pixel `px` and matte `m` in the displays that read the matte
+/// alone (Matte, Preview, and every display with Matte Only).
+#[inline]
+fn crypto_matte_px(px: Px, m: f32, display: u32, matte_only: bool, in_alpha: bool) -> Px {
+    if matte_only {
+        return matte_only_px(m, in_alpha);
+    }
+    match display {
+        // Matte: the layer keyed by the selection (each pixel only reads itself, so no copy).
+        1 => px.map(|v| v * m),
+        // Preview: the layer with the selection tinted.
+        _ => [px[0] * (1.0 - 0.5 * m) + 0.5 * m * px[3], px[1] * (1.0 - 0.5 * m) + 0.5 * m * px[3], px[2] * (1.0 - 0.5 * m), px[3]],
+    }
+}
+
+/// The render scale a Cryptomatte plane is box-filtered to ([`crypto_plane`]): `None` at render
+/// scale 1 and above, where the plane stays at source resolution and is looked up
+/// nearest-neighbour, as every 3D Channel effect looks up its channels.
+pub fn crypto_box_scale(render_scale: f64) -> Option<f64> {
+    (render_scale.is_finite() && render_scale > 0.0 && render_scale < 1.0 - 1e-9).then_some(render_scale)
+}
+
+/// The most pixels a box-filtered plane may have (a footage item claiming a far larger size
+/// than its file would otherwise allocate a huge one); beyond it the plane stays unscaled.
+const MAX_BOX_PIXELS: usize = 1 << 27;
+
+/// Cryptomatte layer `layer`'s output for selection `sel` (hashes) at `render_scale` (#3334):
+/// [`CryptoPlane`]. The matte (or the Colors pixel) is made per aux pixel from every rank's ID
+/// and coverage; below render scale 1 the finished plane is box-filtered to the render's pixel
+/// grid (coverage is linear, so the filtered matte is exactly the coverage of the larger pixel;
+/// the Colors pixels are coloured first and filtered after).
+pub fn crypto_plane(a: &AuxChannels, layer: &str, sel: &[u32], output: CryptoOutput, render_scale: f64) -> CryptoPlane {
+    let src = crypto_source_plane(a, layer, sel, output);
+    match crypto_box_scale(render_scale) {
+        Some(s) => crypto_box(src, s),
+        None => src,
+    }
+}
+
+/// [`crypto_plane`] at source resolution: one value (or pixel) per aux pixel.
+fn crypto_source_plane(a: &AuxChannels, layer: &str, sel: &[u32], output: CryptoOutput) -> CryptoPlane {
+    let planes = a.crypto_rank_planes(layer);
+    let n = (a.width as usize).saturating_mul(a.height as usize);
+    let data = match output {
+        CryptoOutput::Matte => (0..n).into_par_iter().map(|i| crypto_matte(&planes, sel, i)).collect(),
+        CryptoOutput::Colors => {
+            let mut d = vec![0.0f32; n.saturating_mul(4)];
+            d.par_chunks_mut(4).enumerate().for_each_init(IdColorMemo::default, |memo, (i, px)| {
+                let c = crypto_colors_px(crypto_colors(&planes, i, memo), crypto_matte(&planes, sel, i));
+                px.copy_from_slice(&c);
+            });
+            d
+        }
+    };
+    CryptoPlane { width: a.width, height: a.height, scale: a.scale, output, data }
+}
+
+/// For each output pixel of one axis of a box filter by `k` layer pixels: the source pixels it
+/// covers and how much of each (layer pixel `x` reads source pixel `⌊(x + ½) · src_scale⌋`, the
+/// pixel render scale 1 shows there).
+fn box_axis(layer_len: usize, src_len: usize, src_scale: f64, k: f64, out_len: usize) -> Vec<Vec<(usize, f64)>> {
+    (0..out_len)
+        .map(|j| {
+            let (x0, x1) = (j as f64 * k, (j as f64 + 1.0) * k);
+            let last = (x1.ceil() as usize).min(layer_len);
+            (x0.floor() as usize..last)
+                .filter_map(|x| {
+                    let w = x1.min(x as f64 + 1.0) - x0.max(x as f64);
+                    let s = ((x as f64 + 0.5) * src_scale).floor();
+                    (w > 0.0 && s >= 0.0 && s < src_len as f64).then_some((s as usize, w))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `src` (at source resolution) box-filtered to render scale `s`: each pixel of the result is
+/// the mean of the render-scale-1 pixels it covers (the layer's pixels outside the aux image
+/// count as 0, as the effect shows them; the Colors display's alpha is 1 everywhere).
+fn crypto_box(src: CryptoPlane, s: f64) -> CryptoPlane {
+    if !(src.scale.is_finite() && src.scale > 0.0) {
+        return src;
+    }
+    // (layer pixels per output pixel; a whole number when it is one within rounding, so a
+    // third resolution averages exactly three by three pixels)
+    let k = 1.0 / s;
+    let k = if (k - k.round()).abs() < 1e-9 * k { k.round() } else { k };
+    let (lw, lh) = ((src.width as f64 / src.scale).ceil(), (src.height as f64 / src.scale).ceil());
+    let (dw, dh) = ((lw / k * (1.0 - 1e-12)).ceil(), (lh / k * (1.0 - 1e-12)).ceil());
+    let limit = (src.width as usize).saturating_mul(src.height as usize).saturating_mul(4).min(MAX_BOX_PIXELS);
+    let fits = |v: f64| v.is_finite() && v >= 0.0 && v <= MAX_BOX_PIXELS as f64;
+    // (the filter visits every layer pixel: bounded by the source's size too)
+    if !(fits(lw) && fits(lh) && fits(dw) && fits(dh)) || (dw * dh) as usize > limit || (lw * lh) as usize > limit {
+        return src;
+    }
+    let (lw, lh, dw, dh) = (lw as usize, lh as usize, dw as usize, dh as usize);
+    let ch = src.output.channels();
+    let xs = box_axis(lw, src.width as usize, src.scale, k, dw);
+    let ys = box_axis(lh, src.height as usize, src.scale, k, dh);
+    let (sw, area) = (src.width as usize, k * k);
+    let mut data = vec![0.0f32; dw * dh * ch];
+    data.par_chunks_mut((dw * ch).max(1)).zip(ys.par_iter()).for_each(|(row, ty)| {
+        for (dx, tx) in xs.iter().enumerate() {
+            for c in 0..ch {
+                let mut sum = 0.0f64;
+                for &(sy, wy) in ty {
+                    for &(sx, wx) in tx {
+                        let v = src.data.get((sy * sw + sx) * ch + c).copied().unwrap_or(0.0);
+                        sum += wy * wx * v as f64;
+                    }
+                }
+                if let Some(o) = row.get_mut(dx * ch + c) {
+                    *o = (sum / area) as f32;
+                }
+            }
+        }
+    });
+    if src.output == CryptoOutput::Colors {
+        for px in data.as_chunks_mut::<4>().0 {
+            px[3] = 1.0;
+        }
+    }
+    CryptoPlane { width: dw as u32, height: dh as u32, scale: s, output: src.output, data }
 }
 
 /// The hidden switch that keeps Matte Only as projects saved before #3127 render it: the matte in
@@ -606,34 +787,42 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(layer) = crypto_layer_named(&a, ctx.params.s("layerName"), ctx.params.e("layer") as usize) else { return b };
     let manifest = a.manifest(&layer);
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
-    let idx = index_map(&b, &a);
     let display = ctx.params.e("display");
     let matte_only = ctx.params.b("matteOnly");
     let in_alpha = ctx.params.b(MATTE_ONLY_IN_ALPHA);
+    // Below render scale 1: the finished matte (or Colors pixels) box-filtered down (#3334),
+    // looked up per buffer pixel; the ID channels are never resampled.
+    if crypto_box_scale(b.scale).is_some() {
+        let plane = crypto_plane(&a, &layer, &sel, CryptoOutput::for_display(display, matte_only), b.scale);
+        let idx = crypto_index_map(&b, &plane);
+        b.img.data.par_iter_mut().zip(idx.par_iter()).for_each(|(px, &k)| *px = plane.shade(*px, k, display, matte_only, in_alpha));
+        return b;
+    }
+    let idx = index_map(&b, &a);
     let planes = a.crypto_rank_planes(&layer);
     b.img.data.par_iter_mut().zip(idx.par_iter()).for_each_init(IdColorMemo::default, |memo, (px, &k)| {
         let m = k.map_or(0.0, |k| crypto_matte(&planes, &sel, k));
-        if matte_only {
-            *px = matte_only_px(m, in_alpha);
-            return;
-        }
-        *px = match display {
+        *px = if display == 0 && !matte_only {
             // Colors: coverage-weighted ID colours (the spec's preview), selection brighter.
-            0 => {
-                let c = k.map_or([0.0; 3], |k| crypto_colors(&planes, k, memo));
-                let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
-                [c[0], c[1], c[2], 1.0]
-            }
-            // Matte: the layer keyed by the selection (each pixel only reads itself, so no copy).
-            1 => px.map(|v| v * m),
-            // Preview: the layer with the selection tinted.
-            _ => {
-                let s = *px;
-                [s[0] * (1.0 - 0.5 * m) + 0.5 * m * s[3], s[1] * (1.0 - 0.5 * m) + 0.5 * m * s[3], s[2] * (1.0 - 0.5 * m), s[3]]
-            }
+            crypto_colors_px(k.map_or([0.0; 3], |k| crypto_colors(&planes, k, memo)), m)
+        } else {
+            crypto_matte_px(*px, m, display, matte_only, in_alpha)
         };
     });
     b
+}
+
+/// The [`CryptoPlane`] pixel for each buffer pixel (None outside the aux image), looked up as
+/// [`index_map`] looks up the aux.
+fn crypto_index_map(b: &Buf, plane: &CryptoPlane) -> Vec<Option<usize>> {
+    let (w, h) = (b.img.width as usize, b.img.height as usize);
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let [x, y] = aux_point(b.scale, b.offset, [(i % w) as f64 + 0.5, (i / w) as f64 + 0.5]);
+            plane.index_at(x, y)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- EXtractoR

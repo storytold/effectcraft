@@ -126,6 +126,21 @@ pub(crate) fn opens_under(dir: &std::path::Path) -> usize {
     OPENS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|p| p.starts_with(dir)).count()
 }
 
+#[cfg(test)]
+static STAMP_CHECKS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Count a check of a file's identity on disk (tests, #3334).
+#[cfg(test)]
+pub(crate) fn count_stamp(path: &std::path::Path) {
+    STAMP_CHECKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(path.to_path_buf());
+}
+
+/// How many times the identity of files under `dir` was checked on disk so far (tests).
+#[cfg(test)]
+pub(crate) fn stamp_checks_under(dir: &std::path::Path) -> usize {
+    STAMP_CHECKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|p| p.starts_with(dir)).count()
+}
+
 pub(crate) fn ext_of(path: &std::path::Path) -> String {
     path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase()
 }

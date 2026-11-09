@@ -421,8 +421,9 @@ pub(crate) fn keep(path: &str, index: Arc<ExrIndex>) {
 }
 
 /// The index of the file at `path` (read from `source` the first time; kept until
-/// [`forget`]). A file whose identity changed since (size, modification time) is indexed again;
-/// a read checks it again on the file it opens.
+/// [`forget`]). A file whose identity changed since (size, modification time; checked at most
+/// once per [`crate::exr_read::STAMP_TTL`], #3334) is indexed again; a read checks it again on
+/// the file it opens.
 pub(crate) fn get(path: &str, source: &ExrSource) -> Result<Arc<ExrIndex>, IndexError> {
     get_opened(path, source).map(|(ix, _)| ix)
 }
@@ -445,6 +446,8 @@ pub(crate) fn get_opened(path: &str, source: &ExrSource) -> Result<(Arc<ExrIndex
         log::debug!("media: {path}: {e}");
         IndexError::Io
     })?;
+    // (the identity just read: the next checks within the stamp's lifetime use it)
+    source.opened_as(opened.stamp);
     let ix = Arc::new(build(&mut *opened.reader, opened.len, opened.stamp)?);
     keep(path, ix.clone());
     Ok((ix, Some(opened)))
@@ -456,8 +459,9 @@ pub(crate) fn cached(path: &str) -> Option<Arc<ExrIndex>> {
     lock().map.get(path).cloned()
 }
 
-/// Drop the index of `path` (the file changed on disk).
+/// Drop the index of `path` (the file changed on disk), and the identity last read of it.
 pub(crate) fn forget(path: &str) {
+    crate::exr_read::forget_stamp(std::path::Path::new(path));
     let mut ix = lock();
     if let Some(gone) = ix.map.remove(path) {
         ix.bytes = ix.bytes.saturating_sub(gone.bytes());

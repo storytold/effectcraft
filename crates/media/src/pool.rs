@@ -997,11 +997,11 @@ impl Inner {
         // copy once that is complete and the file unchanged (#3271).
         if crate::localize::is_network(&file) && crate::localize::status().is_some() {
             crate::localize::request(&file);
-            if let Ok(meta) = std::fs::metadata(&file) {
-                let stamp = FileStamp::of_metadata(&meta);
-                if let Some(copy) = crate::localize::local_copy(&file, &stamp) {
-                    return ExrSource::Localized { original: file, copy, stamp };
-                }
+            // (the identity as read within the last moment: one check per file and frame, #3334)
+            if let Ok(stamp) = crate::exr_read::recent_stamp(&file)
+                && let Some(copy) = crate::localize::local_copy(&file, &stamp)
+            {
+                return ExrSource::Localized { original: file, copy, stamp };
             }
         }
         ExrSource::File(file)
