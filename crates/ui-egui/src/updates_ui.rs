@@ -9,7 +9,7 @@ use craft_update::updater::{Action, Status, Updater};
 
 pub(crate) struct Runtime {
     #[cfg(not(target_arch = "wasm32"))]
-    updater: Updater,
+    pub(crate) updater: Updater,
     /// The desktop app turns the check at start on; tests and the web build leave it off.
     #[cfg(not(target_arch = "wasm32"))]
     startup_check: bool,
@@ -42,6 +42,26 @@ impl EffectcraftApp {
     pub fn set_startup_update_check(&mut self, on: bool) {
         self.updates_rt.startup_check = on;
     }
+}
+
+/// Restart to Update. With unsaved changes the result dialog closes and the window is asked to
+/// close, so the unsaved-changes prompt opens. Cancel there leaves the update ready. An open
+/// startup prompt keeps its own Restart to Update and save-first note, so the window stays open.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn restart_to_update(rt: &mut Runtime, ctx: &egui::Context, clean: bool) {
+    if clean {
+        rt.updater.restart_to_update();
+        return;
+    }
+    rt.manual_window_open = false;
+    rt.updater.dismiss_status();
+    if rt.updater.prompt_open() {
+        return;
+    }
+    // Without a prompt this only takes the close a finished installation queued, so a save after
+    // Cancel does not close the app.
+    let _ = rt.updater.show_if(ctx, true);
+    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 }
 
 pub(crate) fn check(app: &mut EffectcraftApp) {
@@ -91,7 +111,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
                     rt.updater.dismiss_status();
                 }
                 CheckResultResponse::CheckAgain => rt.updater.check_now(ctx),
-                CheckResultResponse::RestartToUpdate => rt.updater.restart_to_update(),
+                CheckResultResponse::RestartToUpdate => restart_to_update(rt, ctx, clean),
             }
             // A check that found a release leaves the status idle and the startup prompt takes over.
             if matches!(rt.updater.status(), Status::Idle) && !rt.check_requested {
