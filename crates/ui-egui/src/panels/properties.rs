@@ -79,6 +79,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
     let rect = scroll.content;

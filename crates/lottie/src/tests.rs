@@ -521,6 +521,21 @@ fn zero_time_stretch_is_not_imported() {
 }
 
 #[test]
+fn a_time_stretch_past_9900_percent_is_held_to_it() {
+    // `sr` 1e300 was imported as 1e302 % (#3247); the sign of a reversed layer is kept.
+    for (sr, want) in [(1e300, 9900.0), (-1e300, -9900.0), (99.0, 9900.0)] {
+        let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [],
+            "layers": [{"ty": 1, "ind": 1, "sc": "#ff0000", "sw": 20, "sh": 20, "sr": sr, "ip": 0, "op": 30, "st": 0, "ks": {}}]});
+        let mut q = Project::default();
+        let imp = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap();
+        let l = &q.comp(imp.comp).unwrap().layers[0];
+        assert_eq!(l.stretch, want, "sr {sr}");
+        let warned = imp.warnings.iter().any(|w| w.contains("time stretch"));
+        assert_eq!(warned, sr != 99.0, "sr {sr}: {:?}", imp.warnings);
+    }
+}
+
+#[test]
 fn embedded_glyphs_are_reported_when_dropped() {
     let glyph = |ch: &str, fam: &str| json!({"ch": ch, "size": 100, "style": "Regular", "w": 60, "fFamily": fam, "data": {"shapes": []}});
     let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [], "layers": [],

@@ -308,6 +308,82 @@ impl MeshData {
     }
 }
 
+/// EXtractoR's Channel Info data (`EXtractoR-0013`, 688 bytes, the plug-in's own little-endian
+/// layout; read from the instances of the importer block of 2026-11-05: the defaults and a preset
+/// of our own that reads `Z` into Red, Green and Blue): a `u32` 1 and 28 bytes, then four records
+/// of 164 bytes (Red, Green, Blue, Alpha), each a kind in byte 0 (1 a channel of the footage by
+/// name, 2 the input's own channel: `(copy)`; bytes 1..4 are not always zero, `0x32` at 3 in one
+/// definition's default, so only byte 0 is read) and the channel name from byte 35,
+/// NUL-terminated. The other bytes are not read (they differ between instances with the same
+/// channels; the `u32` at 4 of a chosen channel looks like its position in the footage's sorted
+/// channel list, 13 of 14 for `Z`, where the defaults hold 0). Only the name is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractorChannels {
+    /// Per output channel (red, green, blue, alpha): the kind and the name.
+    pub channels: [(u32, String); 4],
+}
+
+impl ExtractorChannels {
+    /// The data's length.
+    pub const LEN: usize = 688;
+    const RECORD: usize = 164;
+
+    /// `None` when the data does not have this layout.
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() != Self::LEN || data.get(..4)? != 1u32.to_le_bytes() {
+            return None;
+        }
+        let mut channels: [(u32, String); 4] = Default::default();
+        for (k, slot) in channels.iter_mut().enumerate() {
+            let at = 32usize.checked_add(k.checked_mul(Self::RECORD)?)?;
+            let rec = data.get(at..at.checked_add(Self::RECORD)?)?;
+            let kind = u32::from(*rec.first()?);
+            let name = rec.get(35..)?;
+            let end = name.iter().position(|b| *b == 0)?;
+            let name = std::str::from_utf8(name.get(..end)?).ok()?;
+            *slot = (kind, name.to_string());
+        }
+        Some(Self { channels })
+    }
+
+    /// The channels of a fresh EXtractoR: Red, Green and Blue from the channels of those names,
+    /// Alpha copied from the input.
+    pub fn is_default(&self) -> bool {
+        let want = [(1, "R"), (1, "G"), (1, "B"), (2, "(copy)")];
+        self.channels.iter().zip(want).all(|((k, n), (wk, wn))| *k == wk && n == wn)
+    }
+
+    /// Per output channel (red, green, blue, alpha) the channel it reads, `Err` with the
+    /// position of the first record of another kind or without a name: a named channel by its
+    /// name, `(copy)` as EffectCraft's [`EXTRACTOR_COPY`](effectcraft_effects::EXTRACTOR_COPY),
+    /// the effect input's own channel of the same position. It is not `R`, `G`, `B` or `A`:
+    /// EffectCraft's EXtractoR reads those from an OpenEXR footage's channels of that name, the
+    /// file's own, which loses what an earlier effect did to the channel.
+    pub fn sources(&self) -> Result<[String; 4], usize> {
+        let mut out: [String; 4] = Default::default();
+        for (k, ((kind, name), slot)) in self.channels.iter().zip(out.iter_mut()).enumerate() {
+            *slot = match (kind, name.trim()) {
+                (1, n) if !n.is_empty() => n.to_string(),
+                (2, _) => effectcraft_effects::EXTRACTOR_COPY.to_string(),
+                _ => return Err(k),
+            };
+        }
+        Ok(out)
+    }
+}
+
+/// IDentifier's Channel Info data (`IDentifier-0005`, 148 bytes): the chosen channel's name,
+/// NUL-terminated from byte 19, or `Object ID` when none is chosen (importer blocks 1300 and 1310
+/// of 2026-11-05: `objectId` in a preset of our own that chose that UINT channel, `Object ID` in
+/// every other instance). The bytes around it differ between instances with the same settings
+/// and are not read (a chosen channel has 15 at byte 4, which looks like its position in the
+/// EXR's sorted channel list, as for EXtractoR).
+pub fn identifier_channel_type(data: &[u8]) -> Option<&str> {
+    let s = data.get(19..)?;
+    let end = s.iter().position(|b| *b == 0)?;
+    std::str::from_utf8(s.get(..end)?).ok()
+}
+
 /// The Cryptomatte plug-in's Settings data (`Cryptomatte-0001`, the plug-in's own layout,
 /// little-endian; read from 88 instances of one project and from our own sample 1400, fresh
 /// instances and two presets that pick a layer and an object, docs/aep-format.md 3.7): the magic

@@ -10290,6 +10290,7 @@ mod tests {
         ("panels/comp_settings.rs", include_str!("../panels/comp_settings.rs")),
         ("panels/content_fill_panel.rs", include_str!("../panels/content_fill_panel.rs")),
         ("panels/delete_items.rs", include_str!("../panels/delete_items.rs")),
+        ("panels/unprecompose.rs", include_str!("../panels/unprecompose.rs")),
         ("panels/gradient_editor.rs", include_str!("../panels/gradient_editor.rs")),
         ("panels/dialogs.rs", include_str!("../panels/dialogs.rs")),
         ("panels/dialogs_3d.rs", include_str!("../panels/dialogs_3d.rs")),

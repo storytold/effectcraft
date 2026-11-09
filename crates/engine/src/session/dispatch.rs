@@ -28,6 +28,9 @@ impl Session {
     /// Run a command by id for `origin`, which the gates see on the `Call`. A plug-in's `cmd.execute`
     /// passes `Origin::Plugin`.
     pub fn execute_as(&mut self, id: &str, params: Value, origin: craft_command::Origin) -> Result<Value> {
+        if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         let Some(cmd) = self.registry.resolve(id) else {
             return Err(EngineError::UnknownCommand(id.to_string()));
         };
@@ -259,6 +262,9 @@ impl Session {
     /// Whether `id` names a known command whose `enabled` predicate returns `Ok` for this session;
     /// an unknown id or a predicate error reads as disabled.
     pub fn is_enabled(&self, id: &str) -> bool {
+        if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
+            return false;
+        }
         self.registry.resolve(id).is_some_and(|cmd| self.command_enabled(&cmd).is_ok())
     }
 

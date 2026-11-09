@@ -175,8 +175,7 @@ fn restored_original_and_active_proxy_render_new_pixels_through_media_and_disk_c
         let cache = effectcraft_render::disk_cache::DiskCache::open(dir.join("cache"), 1 << 20).unwrap();
         cache.set_min_layer_ms(0);
         s.disk_cache = Some(cache.clone());
-        let salt = s.refresh_disk_salt(true).unwrap();
-        s.layer_cache.set_disk(Some((cache.clone(), salt)));
+        s.layer_cache.set_disk(Some(cache.clone()));
         let before = s.render(comp, Tick::ZERO, RenderOpts::default());
         assert_eq!(before.data[8 * 16 + 8], if proxy { [0.0, 1.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0, 1.0] });
         cache.flush();

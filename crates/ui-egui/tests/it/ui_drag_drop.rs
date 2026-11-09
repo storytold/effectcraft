@@ -667,8 +667,8 @@ fn new_composition_from_footage_makes_a_comp_of_the_picked_file() {
 }
 
 /// #297: a folder of frames dropped on the window arrives as one image sequence, and Interpret
-/// Footage shows its frames and Start Timecode (missing frames always show colour bars, as in
-/// After Effects: there is no Missing Frames choice). #431: dropped files import as stills, one
+/// Footage shows its frames and Start Timecode (a missing frame always holds the previous one:
+/// there is no Missing Frames choice). #431: dropped files import as stills, one
 /// item each, as in After Effects.
 #[test]
 fn a_dropped_folder_imports_as_one_sequence_with_sequence_interpretation() {

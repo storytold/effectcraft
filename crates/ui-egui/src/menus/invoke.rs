@@ -163,6 +163,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
@@ -184,6 +185,7 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    crate::control::check_script_render(app, id)?;
     // Engine ids are gated inside `Session::execute`, including commands that emit `Event::Frontend`.
     // This gate is only for ids execute does not resolve.
     if app.session.registry.resolve(id).is_none() {
@@ -306,6 +308,10 @@ fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: 
     // Deleting Project items that compositions use asks first, as in After Effects.
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
+    }
+    // Un-precompose that would change the picture lists why and asks before unpacking anyway.
+    if crate::panels::unprecompose::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "unprecompose"}));
     }
     // An After Effects import with a path that loses something asks first (the menu's file
     // dialog asks in `run_with_picked`).
