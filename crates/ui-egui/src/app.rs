@@ -68,6 +68,7 @@ impl EffectcraftApp {
             forwarded: ForwardedInput::default(),
             input_waiters: vec![],
             job_waiters: vec![],
+            script_waiters: vec![],
             pending_screenshots: vec![],
             shot_bytes: 0,
             last_activity: (0.0, 0),

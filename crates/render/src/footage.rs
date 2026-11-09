@@ -1,4 +1,5 @@
 use super::{Arc, AtomicBool, Footage, Image, ItemId, ItemKind, Ordering, Tick};
+use crate::reads::ReadLog;
 
 /// How a [`FootageSource`] hands over float footage (OpenEXR, float TIFF), whose values are
 /// linear light: encoded with a curve, as the compositor takes footage, or as stored. Other
@@ -75,8 +76,9 @@ pub trait FootageSource: Send + Sync {
     fn cache_budget(&self) -> Option<usize> {
         None
     }
-    /// Vector footage (SVG) rasterised at `scale` × its pixel size, for Continuously Rasterize.
-    /// `None` when the footage is not vector or cannot be read.
+    /// Vector footage (SVG, PDF, Illustrator, EPS: [`is_vector_footage`]) rasterised at `scale` ×
+    /// its size as [`vector_fit`] draws it, for Continuously Rasterize. `None` when the footage
+    /// is not vector or cannot be read.
     fn vector_frame(&self, _item: ItemId, _footage: &Footage, _scale: f64) -> Option<Arc<Image>> {
         None
     }
@@ -91,6 +93,15 @@ pub trait FootageSource: Send + Sync {
     /// exist, so what was made from them must not be kept.
     fn called_off(&self) -> bool {
         false
+    }
+    /// Run `f`, which reads from this source on this thread, noting in `reads` every source file
+    /// those reads use, with its identity as read (see [`crate::reads`]): the file a frame was
+    /// decoded from, also when it comes from the source's own memory cache (without reading the
+    /// file again). Sources that can't tell which files they read keep the default, which marks
+    /// `reads` incomplete.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        reads.mark_incomplete();
+        f()
     }
     /// Why `footage` shows no picture although its file is there: a read of it failed because
     /// no decoder handles its codec, profile, chroma format or bit depth, or the stream is damaged
@@ -194,6 +205,10 @@ impl FootageSource for CancellableFootage<'_> {
     fn called_off(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.inner.called_off()
     }
+    /// Runs `f` with the inner source, collecting the files it reads into `reads`.
+    fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+        self.inner.recording(reads, f)
+    }
     fn problem(&self, footage: &Footage) -> Option<String> {
         self.inner.problem(footage)
     }
@@ -202,16 +217,43 @@ impl FootageSource for CancellableFootage<'_> {
     }
 }
 
-/// Footage that can be rasterised at any scale (SVG).
+/// Footage that can be rasterised at any scale: SVG, PDF, Illustrator and EPS files, and a
+/// placed page of an After Effects project (its codec is not stored there).
 pub fn is_vector_footage(f: &Footage) -> bool {
-    matches!(f.codec.as_str(), "SVG" | "PDF" | "AI" | "EPS")
+    matches!(f.codec.as_str(), "SVG" | "PDF" | "AI" | "EPS") || f.placed_page
+}
+
+/// How vector footage `f` is drawn at `scale` × its size: the image size, and the x and y scale
+/// from document pixels (`doc` = the document's width and height, `own` = its pixel size, the
+/// size rounded up) to image pixels.
+///
+/// Footage from an After Effects project ([`Footage::placed_page`]) fills its stored size, which
+/// can round or measure the page differently: the layer's anchor and masks are measured against
+/// that size, and the renderer resamples a reduced-resolution frame to it, so drawn at its own
+/// size the art was scaled by the width ratio alone at full resolution (off against the masks)
+/// and stretched to the stored aspect below 3/4 resolution (#3099). Other footage is drawn 1:1 at
+/// the document's own size, as it always was.
+pub fn vector_fit(f: &Footage, doc: [f64; 2], own: (u32, u32), scale: f64) -> ((u32, u32), [f64; 2]) {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let side = |px: u32| (f64::from(px) * scale).ceil().clamp(1.0, f64::from(u32::MAX)) as u32;
+    let size = (f.width, f.height);
+    let fills = f.placed_page && size != own && size.0 > 0 && size.1 > 0 && doc.iter().all(|d| d.is_finite() && *d > 0.0);
+    if !fills {
+        return ((side(own.0), side(own.1)), [scale, scale]);
+    }
+    ((side(size.0), side(size.1)), [scale * f64::from(size.0) / doc[0], scale * f64::from(size.1) / doc[1]])
 }
 
 /// No footage available (renders footage layers as transparent).
 pub struct NoFootage;
 
 impl FootageSource for NoFootage {
+    /// Always `None`: there is no footage.
     fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
         None
+    }
+    /// Reads no files.
+    fn recording(&self, _: &ReadLog, f: &mut dyn FnMut()) {
+        f()
     }
 }

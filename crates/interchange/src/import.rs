@@ -522,11 +522,31 @@ impl Importer<'_> {
         // ---- timing
         let start = tick_in(ti.start);
         let dur = tick_in(ti.duration);
-        let speed = if ti.speed.abs() < 1e-9 { 1.0 } else { ti.speed.abs() };
+        // A zero, tiny (below 1e-9) or non-finite speed plays at 100 %. Otherwise the layer's
+        // stretch (100 / speed) is held to the range the app supports (±1 % to ±9900 %): a speed
+        // of 1e300 or 1e-300 from a damaged file made the layer and audio time divide by ~0
+        // (#3247). The speed follows the stretch so the start time below matches it.
+        let raw = ti.speed.abs();
+        let (speed, stretch) = if !raw.is_finite() || raw < 1e-9 {
+            // A speed of exactly 0 keeps its old silent 100 %; a tiny or non-finite one is named.
+            if !raw.is_finite() || raw > 0.0 {
+                self.warn(format!("clip \"{}\": a speed of {} is not supported (100 % used)", ti.name, ti.speed));
+            }
+            (1.0, 100.0)
+        } else {
+            let stretch = effectcraft_project::limits::stretch(100.0 / raw);
+            if stretch.to_bits() == (100.0 / raw).to_bits() {
+                (raw, stretch)
+            } else {
+                let speed = 100.0 / stretch;
+                self.warn(format!("clip \"{}\": a speed of {:e} % is outside what a layer supports ({} % used)", ti.name, raw * 100.0, speed * 100.0));
+                (speed, stretch)
+            }
+        };
         let reverse = ti.reverse || ti.speed < 0.0;
         let src_in = tick_in(ti.source_in);
         let span = Tick((dur.0 as f64 * speed).round() as i64);
-        l.stretch = if reverse { -100.0 / speed } else { 100.0 / speed };
+        l.stretch = if reverse { -stretch } else { stretch };
         l.start_time =
             if reverse { start + Tick(((src_in + span).0 as f64 / speed).round() as i64) } else { start - Tick((src_in.0 as f64 / speed).round() as i64) };
         l.in_point = start;

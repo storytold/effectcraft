@@ -26,10 +26,11 @@ pub(crate) const MAX_TEXT_CHARS: usize = 1 << 20;
 /// U+0003 (END OF TEXT): After Effects' other paragraph break besides `\r`.
 const ETX: char = '\u{3}';
 
-/// The first paragraph of a stored text, at most 64 characters: the name After Effects shows for
-/// a text layer without a name of its own (U+0003 ends a paragraph like `\r`).
+/// The name of a text layer without a name of its own: its first paragraph, cut as EffectCraft
+/// cuts a following name ([`effectcraft_project::text_layer_name`]), so a following name that
+/// export writes as no name comes back unchanged (#3233). U+0003 ends a paragraph like `\r`.
 pub(crate) fn first_paragraph(raw: &str) -> String {
-    raw.split(['\r', ETX]).next().unwrap_or_default().chars().take(64).collect()
+    effectcraft_project::text_layer_name(raw.split(ETX).next().unwrap_or_default())
 }
 
 /// The Source Text value of `doc`, with what cannot be mapped reported for the layer `what`.

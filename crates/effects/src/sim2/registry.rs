@@ -81,7 +81,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.sim.ccballaction",
-            "CC Ball Action",
+            "Ball Grid",
             // After Effects' order and defaults since 24.2 (#3197). Scatter Motion is treated as
             // the renamed Instability State (an assumption, `migrate::PARAM_ID_ALIASES`). The
             // Shading range is not published; -100..100 is an assumption.
@@ -103,7 +103,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.sim.ccpixelpolly",
-            "CC Pixel Polly",
+            "Pixel Shatter",
             vec![
                 p("force", "Force", num(100.0), slider(-1000.0, 1000.0, -300.0, 300.0, 1)),
                 p("gravity", "Gravity", num(1.0), slider(-20.0, 20.0, -5.0, 5.0, 2)),
@@ -120,7 +120,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.sim.ccscatterize",
-            "CC Scatterize",
+            "Pixel Scatter",
             vec![
                 p("scatter", "Scatter", num(0.0), slider(0.0, 1000.0, 0.0, 200.0, 1)),
                 p("rightTwist", "Right Twist", num(0.0), ParamUi::Angle),

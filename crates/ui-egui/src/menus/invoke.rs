@@ -163,6 +163,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
@@ -184,6 +185,7 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    crate::control::check_script_render(app, id)?;
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }

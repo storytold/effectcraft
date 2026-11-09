@@ -310,6 +310,7 @@ pub fn pages() -> Vec<Page> {
                 s("memory.mediaCacheMb", "Footage Frame Cache", Kind::Int(64, 1 << 20, "MB"), true),
                 s("memory.previewCacheMb", "Preview (RAM) Cache", Kind::Int(64, 1 << 20, "MB"), true),
                 s("memory.reduceCacheWhenLow", "Reduce Cache Size When System Is Low on Memory", B, true),
+                s("memory.gpuFramesInFlight", "GPU Frames Rendered at Once", Kind::Choice(&[("Auto", "auto"), ("1", "1"), ("2", "2"), ("3", "3")]), true),
             ],
         },
         Page {

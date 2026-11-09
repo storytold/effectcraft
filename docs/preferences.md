@@ -82,6 +82,14 @@ Commands (CLI, MCP, control channel):
 - `memory.layerCacheMb`: Layer Cache (in the browser at most 512 MB, see [web.md](web.md))
 - `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB)
 - `memory.previewCacheMb`: Preview (RAM) Cache
+- `memory.gpuFramesInFlight`: GPU Frames Rendered at Once (`auto`, `1`, `2`, `3`): how many
+  frames the Render Queue renders on the GPU at once. Auto measures the GPU memory after the
+  job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
+  conservative 3 GiB on a discrete card, less when its memory is known, 2 GiB on an integrated
+  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
+  renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
+  cap turned off) and once frames have had to wait for memory. The render log names the count.
+  `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles
@@ -142,7 +150,12 @@ Commands (CLI, MCP, control channel):
   it supports it)
 - `disk.diskCacheEnabled`, `disk.diskCacheMaxGb`, `disk.diskCacheFolder`: the persistent disk
   cache of processed layers and frames (in the browser: frames in the Origin Private File System,
-  at most half the origin's quota; the folder setting does not apply there). The Disk page also
+  at most half the origin's quota; the folder setting does not apply there). On the desktop the
+  cache never fills its disk: it leaves 5% of the disk free, at least 2 GB and at most 10 GB, and
+  is smaller than `disk.diskCacheMaxGb` when free space requires it. The Disk page shows the limit
+  in effect in MB under Maximum Disk Cache Size, with a note naming the space kept free when free
+  disk space lowers it (with less than 64 MB of room nothing is written, and frames and layers
+  are not compressed for it). The Disk page also
   shows **Browser Storage** in the web app: usage and quota, persistent storage, Clear buttons
   (`storage.info` / `storage.persist` / `storage.clear`, see [web.md](web.md))
 - `disk.mediaCacheFolder`: audio waveform summaries kept between sessions (`Peaks/`)
