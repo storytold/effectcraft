@@ -34,9 +34,11 @@
 //! Triangle weights stiffen regions (Starch); edge-vector targets implement Bend/Advanced pin
 //! rotation and scale. Both systems are symmetric positive definite (a tiny regulariser towards
 //! the initial guess keeps under-constrained meshes well-posed). The matrices don't change
-//! between rounds, so each is factored once (banded Cholesky in reverse Cuthill-McKee order) and
-//! a round is two back-substitutions; if a factor can't be built, Jacobi-preconditioned conjugate
-//! gradients solve the same system.
+//! between rounds, so each is factored once (banded Cholesky in reverse Cuthill-McKee order;
+//! stiffened weights refactor into the same storage, in the same order) and a round is two
+//! back-substitutions; if a factor can't be built, or would be too large ([`MAX_FACTOR`]),
+//! Jacobi-preconditioned conjugate gradients solve the same system. The rounds stop early once
+//! one moves nothing visibly ([`SETTLED`]).
 
 use std::collections::BTreeMap;
 
@@ -180,6 +182,8 @@ fn solve(a: &Sparse, b: &[f64], x: &mut [f64], free: &[bool]) {
 struct Factor {
     /// Factor row → unknown.
     idx: Vec<usize>,
+    /// Unknown → factor row (`usize::MAX` for fixed unknowns).
+    pos: Vec<usize>,
     /// Half bandwidth.
     p: usize,
     /// Row `i` holds `L[i][i - p ..= i]`.
@@ -188,12 +192,15 @@ struct Factor {
     fixed: Vec<(usize, usize, f64)>,
 }
 
-/// Largest factor kept in memory, in values.
-const MAX_FACTOR: usize = 40_000_000;
+/// Largest factor kept in memory, in values (64 MB). The densest mesh the Puppet tool builds (a
+/// target of 20,000 triangles) needs about 4.7 million, for the similarity step; past this the
+/// solve uses conjugate gradients instead.
+const MAX_FACTOR: usize = 8_000_000;
 
 impl Factor {
-    /// `None` when the band would be too large or the matrix isn't numerically positive definite.
-    fn new(a: &Sparse, free: &[bool]) -> Option<Factor> {
+    /// `None` when the band would be larger than `max_values` or the matrix isn't numerically
+    /// positive definite.
+    fn new(a: &Sparse, free: &[bool], max_values: usize) -> Option<Factor> {
         let n = a.rows.len();
         let degree = |i: usize| a.rows[i].keys().filter(|j| free[**j]).count();
         let mut seen = vec![false; n];
@@ -231,31 +238,49 @@ impl Factor {
                 }
             }
         }
-        let w = p + 1;
-        if m.checked_mul(w)? > MAX_FACTOR {
+        let len = m.checked_mul(p + 1)?;
+        if len > max_values {
             return None;
         }
-        let mut l = vec![0.0; m * w];
-        let mut fixed = vec![];
-        for (k, &i) in idx.iter().enumerate() {
-            for (&j, &v) in &a.rows[i] {
-                if !free[j] {
-                    fixed.push((k, j, v));
-                } else if pos[j] <= k {
-                    l[k * w + pos[j] + p - k] = v;
+        let mut f = Factor { idx, pos, p, l: vec![0.0; len], fixed: vec![] };
+        f.factor(a, free).then_some(f)
+    }
+
+    /// Factor `a` into this factor's storage, in its order. `a` must couple no unknowns further
+    /// apart than the band the order was made for (any matrix with the same sparsity does). False
+    /// when it does, or when it isn't numerically positive definite.
+    fn factor(&mut self, a: &Sparse, free: &[bool]) -> bool {
+        let (m, p, w) = (self.idx.len(), self.p, self.p + 1);
+        let l = &mut self.l;
+        l.fill(0.0);
+        self.fixed.clear();
+        for (k, &i) in self.idx.iter().enumerate() {
+            let Some(row) = a.rows.get(i) else { return false };
+            for (&j, &v) in row {
+                if !free.get(j).copied().unwrap_or(false) {
+                    self.fixed.push((k, j, v));
+                    continue;
                 }
+                let Some(&pj) = self.pos.get(j) else { return false };
+                if pj > k {
+                    continue;
+                }
+                // Row k, column pj: offset pj + p - k, in the band only if k - pj <= p.
+                let Some(slot) = (pj + p).checked_sub(k).and_then(|o| l.get_mut(k * w + o)) else { return false };
+                *slot = v;
             }
         }
         for i in 0..m {
             let lo = i.saturating_sub(p);
             for j in lo..=i {
+                // L[i][j] less the sum over k in lo..j of L[i][k] L[j][k], k rising.
                 let mut s = l[i * w + j + p - i];
-                for k in j.saturating_sub(p).max(lo)..j {
-                    s -= l[i * w + k + p - i] * l[j * w + k + p - j];
+                for (u, v) in l[i * w + lo + p - i..i * w + j + p - i].iter().zip(&l[j * w + lo + p - j..j * w + p]) {
+                    s -= u * v;
                 }
                 if i == j {
                     if s <= 0.0 || !s.is_finite() {
-                        return None;
+                        return false;
                     }
                     l[i * w + p] = s.sqrt();
                 } else {
@@ -263,7 +288,7 @@ impl Factor {
                 }
             }
         }
-        Some(Factor { idx, p, l, fixed })
+        true
     }
 
     fn solve(&self, b: &[f64], x: &mut [f64]) {
@@ -273,9 +298,10 @@ impl Factor {
             y[k] -= v * x[j];
         }
         for i in 0..m {
+            let lo = i.saturating_sub(p);
             let mut s = y[i];
-            for k in i.saturating_sub(p)..i {
-                s -= self.l[i * w + k + p - i] * y[k];
+            for (u, v) in self.l[i * w + lo + p - i..i * w + p].iter().zip(&y[lo..i]) {
+                s -= u * v;
             }
             y[i] = s / self.l[i * w + p];
         }
@@ -297,12 +323,22 @@ struct System {
     a: Sparse,
     free: Vec<bool>,
     factor: Option<Factor>,
+    max_factor: usize,
 }
 
 impl System {
-    fn new(a: Sparse, free: Vec<bool>) -> System {
-        let factor = Factor::new(&a, &free);
-        System { a, free, factor }
+    fn new(a: Sparse, free: Vec<bool>, max_factor: usize) -> System {
+        let factor = Factor::new(&a, &free, max_factor);
+        System { a, free, factor, max_factor }
+    }
+
+    /// The system for `a`, a matrix with the same sparsity: refactored in place, in the same order.
+    fn update(&mut self, a: Sparse) {
+        let refactored = self.factor.as_mut().is_some_and(|f| f.factor(&a, &self.free));
+        if !refactored {
+            self.factor = Factor::new(&a, &self.free, self.max_factor);
+        }
+        self.a = a;
     }
 
     fn solve(&self, b: &[f64], x: &mut [f64]) {
@@ -359,6 +395,21 @@ const BARRIER_ROUNDS: usize = 3;
 /// Stiffness of a point held inside a triangle, against the mesh's own (Laplacian and bending).
 const POINT_STIFFNESS: f64 = 1e5;
 
+/// A refinement round that moves no vertex further than this (layer pixels) ends the refinement.
+/// On the stress tests, running the rounds left would move no vertex a ten-thousandth of a pixel.
+const SETTLED: f64 = 1e-4;
+
+/// Bounds on the solve's work.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    /// Largest factor, in values, before conjugate gradients take over (see [`MAX_FACTOR`]).
+    pub(crate) max_factor: usize,
+    /// See [`SETTLED`]; 0 runs every round.
+    pub(crate) settled: f64,
+}
+
+pub(crate) const LIMITS: Limits = Limits { max_factor: MAX_FACTOR, settled: SETTLED };
+
 fn point_at(p: &[[f64; 2]], q: &PointTarget) -> [f64; 2] {
     let [a, b, c] = q.verts;
     let [l0, l1, l2] = q.bary;
@@ -366,9 +417,13 @@ fn point_at(p: &[[f64; 2]], q: &PointTarget) -> [f64; 2] {
 }
 
 /// Deform a mesh: `rest` vertices, CCW `tris` with per-triangle `weights` (1 = normal,
-/// larger = stiffer), constraints, and `refine` extra rigid-fit iterations. Returns the
-/// deformed vertex positions.
+/// larger = stiffer), constraints, and up to `refine` extra rigid-fit iterations (fewer once a
+/// round moves nothing visibly, see [`SETTLED`]). Returns the deformed vertex positions.
 pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handles, refine: usize) -> Vec<[f64; 2]> {
+    deform_with(rest, tris, weights, h, refine, LIMITS)
+}
+
+pub(crate) fn deform_with(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handles, refine: usize, limits: Limits) -> Vec<[f64; 2]> {
     let n = rest.len();
     if n == 0 {
         return vec![];
@@ -473,7 +528,7 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
         x[2 * i + 1] = p[1];
     }
     let free2: Vec<bool> = (0..2 * n).map(|k| !fixed[k / 2]).collect();
-    System::new(a, free2).solve(&b, &mut x);
+    System::new(a, free2, limits.max_factor).solve(&b, &mut x);
     let mut cur: Vec<[f64; 2]> = (0..n).map(|i| [x[2 * i], x[2 * i + 1]]).collect();
 
     // ---- Step 2: fit rotations, then match edge vectors (x and y separately).
@@ -508,7 +563,7 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
                 l.add(j, i, -c);
             }
         }
-        System::new(l, free.clone())
+        l
     };
     let round = |system: &System, tw: &[f64], cur: &[[f64; 2]]| -> Vec<[f64; 2]> {
         let mut bx = vec![0.0; n];
@@ -546,9 +601,14 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
         (0..n).map(|i| [xs[i], ys[i]]).collect()
     };
     let mut tw: Vec<f64> = (0..tris.len()).map(w).collect();
-    let system = assemble(&tw);
+    let mut system = System::new(assemble(&tw), free, limits.max_factor);
     for _ in 0..=refine {
-        cur = round(&system, &tw, &cur);
+        let next = round(&system, &tw, &cur);
+        let step = next.iter().zip(&cur).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+        cur = next;
+        if step < limits.settled {
+            break;
+        }
     }
     // Triangles close to collapse or far from their area get stiffer, and the strain moves on to
     // their neighbours.
@@ -566,7 +626,7 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
         if !active {
             break;
         }
-        let system = assemble(&tw);
+        system.update(assemble(&tw));
         for _ in 0..BARRIER_ROUNDS {
             cur = round(&system, &tw, &cur);
         }
@@ -819,7 +879,7 @@ mod tests {
         let (mut x, mut y) = (vec![0.0; n], vec![0.0; n]);
         x[7] = 3.0;
         y[7] = 3.0;
-        let f = Factor::new(&a, &free).unwrap();
+        let f = Factor::new(&a, &free, MAX_FACTOR).unwrap();
         f.solve(&b, &mut x);
         solve(&a, &b, &mut y, &free);
         assert_eq!(x[7], 3.0);
@@ -835,10 +895,61 @@ mod tests {
         a.add(1, 1, 1.0);
         a.add(0, 1, -1.0);
         a.add(1, 0, -1.0);
-        let s = System::new(a, vec![true, true]);
+        let s = System::new(a, vec![true, true], MAX_FACTOR);
         assert!(s.factor.is_none());
         let mut x = vec![1.0, 1.0];
         s.solve(&[0.0, 0.0], &mut x);
         assert!(x.iter().all(|v| v.is_finite()));
+    }
+
+    /// Springs between unknowns `k` apart along a path of `n`, with stiffness `s(i)`, and a little
+    /// to the ground so nothing is loose.
+    fn springs(n: usize, k: usize, s: impl Fn(usize) -> f64) -> Sparse {
+        let mut a = Sparse::new(n);
+        for i in 0..n {
+            a.add(i, i, 0.01);
+        }
+        for i in 0..n - k {
+            a.add(i, i, s(i));
+            a.add(i + k, i + k, s(i));
+            a.add(i, i + k, -s(i));
+            a.add(i + k, i, -s(i));
+        }
+        a
+    }
+
+    fn solved(s: &System, n: usize) -> Vec<f64> {
+        let b: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).sin()).collect();
+        let mut x = vec![0.0; n];
+        x[3] = 2.0;
+        s.solve(&b, &mut x);
+        x
+    }
+
+    #[test]
+    fn a_factor_over_the_limit_hands_over_to_conjugate_gradients() {
+        let n = 60;
+        let free: Vec<bool> = (0..n).map(|i| i != 3).collect();
+        let factored = System::new(springs(n, 1, |_| 2.0), free.clone(), MAX_FACTOR);
+        assert!(factored.factor.is_some());
+        let capped = System::new(springs(n, 1, |_| 2.0), free, 10);
+        assert!(capped.factor.is_none());
+        for (p, q) in solved(&factored, n).iter().zip(&solved(&capped, n)) {
+            assert!((p - q).abs() < 1e-8, "{p} vs {q}");
+        }
+    }
+
+    #[test]
+    fn a_refactored_system_solves_as_a_new_one_does() {
+        let n = 60;
+        let free: Vec<bool> = (0..n).map(|i| i != 3).collect();
+        let stiffer = |i: usize| 1.0 + (i % 7) as f64;
+        let mut s = System::new(springs(n, 1, |_| 2.0), free.clone(), MAX_FACTOR);
+        // The same sparsity with new values: refactored in its storage, to the same numbers.
+        s.update(springs(n, 1, stiffer));
+        assert_eq!(solved(&s, n), solved(&System::new(springs(n, 1, stiffer), free.clone(), MAX_FACTOR), n));
+        // Couplings past the band it was ordered for: ordered and factored afresh.
+        s.update(springs(n, 9, stiffer));
+        assert_eq!(solved(&s, n), solved(&System::new(springs(n, 9, stiffer), free, MAX_FACTOR), n));
     }
 }

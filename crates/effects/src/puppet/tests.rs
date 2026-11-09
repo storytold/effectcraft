@@ -858,3 +858,85 @@ fn material_ahead_of_a_push_bulges_sideways() {
         assert!(tall > 1.35, "{triangles} triangles: height {tall}");
     }
 }
+
+// ------------------------------------------------------------------------------------------
+// The solver's limits, and one solve for drawing and the overlay.
+
+fn with_refinement(fx: &PropGroup, refinement: f64) -> Params {
+    let mut fx = fx.clone();
+    fx.get_mut("refinement").unwrap().value = Value::Scalar(refinement);
+    flatten_params(&fx, &mut |p| p.value.clone())
+}
+
+#[test]
+fn drawing_and_the_overlay_show_the_same_solve() {
+    let img = test_image();
+    let fx = puppet_fx(&[(PinKind::Position, [14.0, 30.0], [14.0, 30.0]), (PinKind::Position, [50.0, 30.0], [45.0, 8.0])]);
+    for refinement in [0.0, 2.5, 20.0] {
+        let params = with_refinement(&fx, refinement);
+        let buf = Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 };
+        let shown = overlay(&buf, &params);
+        assert_eq!(shown.len(), 1);
+        let (_, mesh, def, pins) = &shown[0];
+        let rounds = refinement_rounds(&params);
+        assert_eq!(*def, solve(mesh, pins, rounds), "refinement {refinement}");
+        // Asked again, the solve isn't made again.
+        assert!(Arc::ptr_eq(&solve_shared(mesh, pins, rounds), &solve_shared(mesh, pins, rounds)));
+        // The drawing covers what the overlay's mesh covers, smoothed as it's drawn, and nothing
+        // else: pixels with the mesh all round them, over the opaque image, are opaque; pixels with
+        // none of it near are empty. (The mesh reaches a little past the image's alpha.)
+        let sm = smooth_mesh(mesh, def, 1.0);
+        let drawn = Mesh { verts: sm.rest, tris: sm.tris, outline: vec![] };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [64.0, 64.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+        let out = crate::apply(crate::find(ID).unwrap(), &ctx, buf);
+        let (mut inside, mut outside) = (0, 0);
+        for y in -10..74 {
+            for x in -10..74 {
+                let around = [-2.0, 0.0, 2.0].into_iter().flat_map(|dy| [-2.0, 0.0, 2.0].map(|dx| [x as f64 + 0.5 + dx, y as f64 + 0.5 + dy]));
+                let over: Vec<bool> = around.map(|p| contains(&drawn, &sm.deformed, p)).collect();
+                let a = at(&out, x, y)[3];
+                let src = unmap(&drawn, &sm.deformed, [x as f64 + 0.5, y as f64 + 0.5]);
+                if over.iter().all(|o| *o) && (14.0..50.0).contains(&src[0]) && (18.0..46.0).contains(&src[1]) {
+                    assert!(a > 0.99, "refinement {refinement}: ({x},{y}) alpha {a} inside the mesh");
+                    inside += 1;
+                } else if over.iter().all(|o| !*o) {
+                    assert!(a < 1e-3, "refinement {refinement}: ({x},{y}) alpha {a} away from the mesh");
+                    outside += 1;
+                }
+            }
+        }
+        assert!(inside > 500 && outside > 500, "{inside} inside, {outside} outside");
+    }
+}
+
+#[test]
+fn conjugate_gradients_land_where_the_factor_does() {
+    // A factor too large to keep hands the solve to conjugate gradients, which must agree.
+    let m = traced_solid();
+    let pins = three_pins([1000.0, -60.0]);
+    let cg = solve_with(&m, &pins, default_rounds(), arap::Limits { max_factor: 0, ..arap::LIMITS });
+    let factored = solve(&m, &pins, default_rounds());
+    let off = cg.iter().zip(&factored).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+    assert!(off < 1e-3, "{off} px apart");
+}
+
+#[test]
+fn stopping_once_the_rounds_settle_changes_nothing_visible() {
+    let m = traced_solid();
+    let (s, s_pins, _) = s_curve(350.0);
+    let cases = [
+        (&m, three_pins([1000.0, -60.0])),
+        (&m, three_pins([1500.0, 360.0])),
+        (&m, three_pins([1083.0, 357.0])),
+        (&m, three_pins([1080.0, 360.0])),
+        (&s, s_pins),
+    ];
+    for (mesh, pins) in &cases {
+        for rounds in [default_rounds(), 200] {
+            let all = solve_with(mesh, pins, rounds, arap::Limits { settled: 0.0, ..arap::LIMITS });
+            let early = solve(mesh, pins, rounds);
+            let off = all.iter().zip(&early).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+            assert!(off < 0.01, "{rounds} rounds, pins at {:?}: {off} px apart", pins.iter().map(|p| p.position).collect::<Vec<_>>());
+        }
+    }
+}

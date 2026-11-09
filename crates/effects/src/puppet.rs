@@ -9,9 +9,12 @@
 //!                               In Front, Extent; hidden pin type and rest position)
 //! ```
 //!
-//! Each frame the mesh is built from the effect's input alpha (see [`mesh`]; cached by content),
-//! pins are attached to their nearest mesh vertices at rest, the as-rigid-as-possible solver
-//! ([`arap`]) moves the vertices, and the input is texture-mapped through the deformed mesh, split
+//! Each frame the mesh is built from the effect's input alpha (see [`mesh`]; cached by content).
+//! A moving pin holds the very point under it at rest, a point inside a triangle of the mesh (see
+//! [`held_point`]); a pin on a vertex holds that vertex, and one off the mesh its nearest vertex at
+//! the same offset. Advanced and Bend pins also turn and scale the edges at their nearest vertex.
+//! The as-rigid-as-possible solver ([`arap`]) moves the vertices (one solve, cached, serves both
+//! drawing and the overlay), and the input is texture-mapped through the deformed mesh, split
 //! finer along a smooth interpolation of the solve (bilinear sampling, averaged where the mesh
 //! squeezes the image; 16 coverage samples per pixel for the outline; Overlap pins' In Front
 //! deciding which triangles draw on top).
@@ -324,6 +327,35 @@ fn refinement_rounds(params: &Params) -> usize {
 
 /// Solve the deformation of `mesh` for `pins` (layer space). Returns deformed vertices.
 pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
+    solve_with(mesh, pins, refine, arap::LIMITS)
+}
+
+/// Solves made lately: (mesh, pins, rounds, deformed vertices). Drawing a frame and its overlay
+/// (the Puppet tools, `puppet.info`, adding a pin) ask for the same one.
+type Solved = (Arc<Mesh>, Vec<Pin>, usize, Arc<Vec<[f64; 2]>>);
+static SOLVES: Mutex<Vec<Solved>> = Mutex::new(Vec::new());
+const SOLVES_KEPT: usize = 8;
+
+/// [`solve`], made once for the same mesh, pins and rounds.
+pub fn solve_shared(mesh: &Arc<Mesh>, pins: &[Pin], refine: usize) -> Arc<Vec<[f64; 2]>> {
+    let same = |s: &Solved| (Arc::ptr_eq(&s.0, mesh) || *s.0 == **mesh) && s.1 == pins && s.2 == refine;
+    if let Ok(c) = SOLVES.lock()
+        && let Some(s) = c.iter().find(|s| same(s))
+    {
+        return s.3.clone();
+    }
+    let def = Arc::new(solve(mesh, pins, refine));
+    if let Ok(mut c) = SOLVES.lock() {
+        c.retain(|s| !same(s));
+        c.push((mesh.clone(), pins.to_vec(), refine, def.clone()));
+        if c.len() > SOLVES_KEPT {
+            c.remove(0);
+        }
+    }
+    def
+}
+
+fn solve_with(mesh: &Mesh, pins: &[Pin], refine: usize, limits: arap::Limits) -> Vec<[f64; 2]> {
     let mut h = arap::Handles::default();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; mesh.verts.len()];
     for t in &mesh.tris {
@@ -367,7 +399,7 @@ pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
         h.fixed.push((e.i, mesh.verts[e.i]));
     }
     let w = starch_weights(mesh, pins);
-    arap::deform(&mesh.verts, &mesh.tris, &w, &h, refine)
+    arap::deform_with(&mesh.verts, &mesh.tris, &w, &h, refine, limits)
 }
 
 /// Per-triangle depth from Overlap pins (higher draws in front).
@@ -451,7 +483,7 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
         if mesh.tris.is_empty() {
             continue;
         }
-        let def = solve(&mesh, &m.pins, refine);
+        let def = solve_shared(&mesh, &m.pins, refine);
         let dep = depths(&mesh, &m.pins);
         // Sheets of one mesh that come to overlap stack by how far they were moved, so the sheet
         // dragged over the rest stays whole instead of interleaving by triangle number.
@@ -852,7 +884,7 @@ pub fn overlay(buf: &Buf, params: &Params) -> Vec<(u64, Arc<Mesh>, Vec<[f64; 2]>
         .into_iter()
         .map(|m| {
             let mesh = mesh_for(buf, &m);
-            let def = solve(&mesh, &m.pins, refine);
+            let def = solve_shared(&mesh, &m.pins, refine).to_vec();
             (m.uid, mesh, def, m.pins)
         })
         .collect()
