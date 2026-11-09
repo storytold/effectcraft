@@ -84,6 +84,7 @@ mod memcap;
 mod ops;
 mod particles;
 mod readback;
+mod upload;
 mod walk;
 mod yuv;
 
@@ -432,6 +433,11 @@ impl Accelerator for Gpu {
         Some(&self.auto)
     }
 
+    fn frame_memory(&self) -> Option<effectcraft_render::FrameMemory> {
+        self.ctx.check_health().ok()?;
+        self.ctx.frame_memory()
+    }
+
     fn render_end(&self) {
         let (hits, misses) = self.ctx.pool_stats();
         let pct = hits.saturating_mul(100) / hits.saturating_add(misses).max(1);
@@ -439,6 +445,7 @@ impl Accelerator for Gpu {
             target: "effectcraft_gpu",
             "gpu pool: {hits} working textures reused, {misses} allocated ({pct}% reuse) so far"
         );
+        self.ctx.trim_uploads();
         self.ctx.trim_pool();
     }
 

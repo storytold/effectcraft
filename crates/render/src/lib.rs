@@ -47,7 +47,7 @@ mod layers;
 mod opts;
 mod pipeline;
 
-pub use accel::{Accelerator, Backend, FxStep, FxTarget};
+pub use accel::{Accelerator, Backend, FrameMemory, FxStep, FxTarget};
 pub use footage::{
     CancellableFootage, FloatCurve, FootageSource, LocalizeConfig, LocalizeReport, NoFootage, is_vector_footage, missing_item_problem, vector_fit,
 };
@@ -64,7 +64,7 @@ pub use layers::{Placement, StyledLayer};
 pub(crate) use opts::Collapse3d;
 pub use opts::{LayerTiming, RenderOpts};
 use opts::{MAX_THROUGH, Through};
-pub use pipeline::{Collapsed, MediaOverride, PropertyOverride};
+pub use pipeline::{Collapsed, FootagePicture, MediaOverride, PropertyOverride};
 
 pub struct Renderer<'a> {
     pub project: &'a Project,

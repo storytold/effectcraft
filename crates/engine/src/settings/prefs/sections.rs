@@ -206,7 +206,23 @@ page!(Memory {
     /// (see [`crate::prefs::Prefs::memory_budget`]).
     ram_reserved_gb: u32 = 6,
     reduce_cache_when_low: bool = true,
+    /// GPU Frames Rendered at Once (Render Queue): `auto` (from the GPU memory a frame
+    /// measured, 1 to 3) or `1`, `2`, `3`. `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+    gpu_frames_in_flight: String = "auto".into(),
 });
+
+impl Memory {
+    /// [`Memory::gpu_frames_in_flight`] as a count: 1 to 3, or `None` for Auto (and anything
+    /// else, as a hand-edited settings file may hold).
+    pub fn gpu_frames(&self) -> Option<usize> {
+        match self.gpu_frames_in_flight.trim() {
+            "1" => Some(1),
+            "2" => Some(2),
+            "3" => Some(3),
+            _ => None,
+        }
+    }
+}
 
 page!(Video {
     enable_output: bool = false,
