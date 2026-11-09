@@ -1185,6 +1185,8 @@ mod tests {
         let first = guard.refuse(&output_text);
         let second = guard.refuse(&output_text);
         let _ = std::fs::remove_file(&output);
+        // Outside Windows `Protected::find` touches no file system at all (no drive roots to
+        // resolve), so only the Windows run can count lookups; elsewhere the checks must just pass.
         assert!(first.is_ok() && second.is_ok());
         assert!(guard.refuse(&share.join("f_06500.exr").to_string_lossy()).is_err());
         #[cfg(windows)]
