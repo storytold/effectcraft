@@ -1926,7 +1926,7 @@ impl Worker {
         }
         if let Some(g) = gpu {
             // The GPU composites and the frame is read back.
-            return match g.within_memory(|| r.comp_frame(job.comp, job.t)) {
+            return match r.comp_frame_scoped(job.comp, job.t, |a| g.within_memory(|| a.comp_frame(&r, job.comp, job.t))) {
                 Ok(img) => {
                     self.gpu_succeeded();
                     cpu_frame(&img, &job.src.project, &job.opts)

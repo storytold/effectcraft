@@ -14,12 +14,13 @@ struct MockAccel {
     handle: bool,
     calls: AtomicUsize,
     pick: AutoPick,
+    effect_calls: AtomicUsize,
 }
 
 impl MockAccel {
     /// Construct a renderer stand-in without making assumptions about scheduling or speed.
     fn new(handle: bool) -> MockAccel {
-        MockAccel { handle, calls: Default::default(), pick: Default::default() }
+        MockAccel { handle, calls: Default::default(), pick: Default::default(), effect_calls: Default::default() }
     }
     /// Number of full-frame requests dispatched to this accelerator.
     fn calls(&self) -> usize {
@@ -42,6 +43,7 @@ impl Accelerator for MockAccel {
         })
     }
     fn supports_effect(&self, _id: &str) -> bool {
+        self.effect_calls.fetch_add(1, Ordering::SeqCst);
         false
     }
     fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
@@ -159,4 +161,88 @@ fn auto_pick_follows_changing_costs() {
     // Keys are separate per comp, scale and path.
     assert!(pick.stats(AutoKey::new(ItemId(7), 1.0, true)).is_none());
     assert!(pick.stats(AutoKey::new(ItemId(7), 0.5, false)).is_none());
+}
+
+/// Counts actual CPU source reads and rejects any CPU fallback inside a GPU error scope.
+struct ScopedFootage {
+    in_scope: std::sync::atomic::AtomicBool,
+    reads: AtomicUsize,
+}
+impl crate::FootageSource for ScopedFootage {
+    fn frame(&self, _: ItemId, f: &effectcraft_project::Footage, _: Tick) -> Option<std::sync::Arc<crate::Image>> {
+        assert!(!self.in_scope.load(Ordering::SeqCst), "CPU fallback ran before GPU validation/cleanup");
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Some(std::sync::Arc::new(crate::Image::filled(f.width, f.height, [1.0, 0.0, 0.0, 1.0])))
+    }
+}
+
+fn scoped_project() -> (Project, ItemId) {
+    let (mut p, cid) = project();
+    let comp = p.comp(cid).unwrap().clone();
+    let footage = effectcraft_project::Footage {
+        path: "synthetic.png".into(),
+        kind: effectcraft_project::FootageKind::Still,
+        width: 50,
+        height: 50,
+        has_video: true,
+        duration: Tick::from_seconds_f64(2.0),
+        ..Default::default()
+    };
+    let item = p.add_item("Source", Label::Red, None, ItemKind::Footage(footage));
+    let mut layer = build::layer(&mut p, &comp, "Source", LayerSource::Footage { item }, (50, 50), None);
+    super::add_effect_200(&mut p, &mut layer, "ec.blur.gaussian", &[]);
+    p.comp_mut(cid).unwrap().layers = vec![layer].into();
+    (p, cid)
+}
+
+/// #3357: a declined GPU frame must not allocate a CPU frame only to discard it when the
+/// enclosing GPU scope reports a fault. The caller retries on a fresh CPU renderer once.
+#[test]
+fn failed_gpu_scope_returns_before_cpu_fallback() {
+    let (p, cid) = scoped_project();
+    for handled in [false, true] {
+        let a = MockAccel::new(handled);
+        let src = ScopedFootage { in_scope: false.into(), reads: 0.into() };
+        let mut r = Renderer::new(&p, &src, RenderOpts { backend: Backend::Gpu, ..Default::default() });
+        r.accel = Some(&a);
+        let result = r.comp_frame_scoped(cid, Tick::ZERO, |a| {
+            src.in_scope.store(true, Ordering::SeqCst);
+            let frame = a.comp_frame(&r, cid, Tick::ZERO);
+            drop(frame);
+            src.in_scope.store(false, Ordering::SeqCst);
+            Err::<Option<crate::Image>, _>("device retired")
+        });
+        assert_eq!(result.unwrap_err(), "device retired");
+        assert_eq!(src.reads.load(Ordering::SeqCst), 0);
+        let frame = r.with_accel(None).comp_frame(cid, Tick::ZERO);
+        assert!(frame.get(100, 50)[3] > 0.99);
+        assert_eq!(src.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(a.calls(), 1);
+    }
+}
+
+/// A healthy decline closes its scope before CPU work, and still records Auto timings.
+#[test]
+fn healthy_gpu_decline_renders_cpu_once_outside_scope() {
+    let (p, cid) = scoped_project();
+    let a = MockAccel::new(false);
+    let src = ScopedFootage { in_scope: false.into(), reads: 0.into() };
+    let mut r = Renderer::new(&p, &src, RenderOpts { backend: Backend::Auto, ..Default::default() });
+    r.accel = Some(&a);
+    let frame = r
+        .comp_frame_scoped(cid, Tick::ZERO, |a| {
+            src.in_scope.store(true, Ordering::SeqCst);
+            let frame = a.comp_frame(&r, cid, Tick::ZERO);
+            src.in_scope.store(false, Ordering::SeqCst);
+            Ok::<_, ()>(frame)
+        })
+        .unwrap();
+    assert!(frame.get(100, 50)[3] > 0.99);
+    assert_eq!(src.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(a.calls(), 1);
+    assert_eq!(a.pick.stats(AutoKey::new(cid, 1.0, false)).unwrap().cpu_frames, 1);
+    // Auto's next frame stays on CPU, without entering a GPU scope at all.
+    r.comp_frame_scoped(cid, Tick::ZERO, |_| -> Result<Option<crate::Image>, ()> { panic!("Auto CPU choice must not enter GPU error scopes") }).unwrap();
+    assert_eq!(src.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(a.effect_calls.load(Ordering::SeqCst), 0, "CPU effects must not use the GPU outside its scope");
 }
