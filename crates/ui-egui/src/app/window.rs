@@ -71,7 +71,8 @@ impl EffectcraftApp {
     }
 
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
-    /// give it the focus: Window ▸ `<panel>`.
+    /// give it the focus: Window ▸ `<panel>`. A ScriptUI panel whose script window isn't open stays
+    /// closed, and the status bar says so.
     pub fn show_panel(&mut self, p: PanelKind) {
         // A saved place outlives its script's window, and an empty tab shows nothing.
         if let PanelKind::ScriptPanel(id) = p
