@@ -1163,12 +1163,15 @@ mod tests {
         assert_ne!(key(Path::new(r"\\server\share\a\b.exr")), key(Path::new(r"\\server\other\a\b.exr")));
     }
 
-    /// #3328: checking an existing output against 13,000 protected frames looks at no file. The
-    /// frames are on a network share that doesn't exist: looking at them takes seconds, two
-    /// checks with one guard take well under 10 ms.
+    /// #3328: checking an existing output against 13,000 protected frames looks at no frame.
+    /// The guard's only question to the file system is a drive's root ([`drive_root`], Windows):
+    /// counted here, it is asked once, for the output's drive (the frames are on a UNC share),
+    /// over both checks of one guard. Comparing identities opened every frame for every check.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn thirteen_thousand_protected_frames_are_checked_without_looking_at_a_file() {
+        #[cfg(windows)]
+        let lookups = drive_roots(&[]);
         let share = if cfg!(windows) { PathBuf::from(r"\\effectcraft-3328.invalid\share\seq") } else { PathBuf::from("/effectcraft-3328.invalid/share/seq") };
         let mut protected = Protected::default();
         for i in 0..13_000 {
@@ -1179,14 +1182,16 @@ mod tests {
         let output = std::env::temp_dir().join(format!("effectcraft-guard-13000-{}.png", std::process::id()));
         std::fs::write(&output, b"an older render").unwrap();
         let output_text = output.to_string_lossy().into_owned();
-        let started = std::time::Instant::now();
         let first = guard.refuse(&output_text);
         let second = guard.refuse(&output_text);
-        let took = started.elapsed();
         let _ = std::fs::remove_file(&output);
         assert!(first.is_ok() && second.is_ok());
-        assert!(took < std::time::Duration::from_millis(10), "{took:?}");
         assert!(guard.refuse(&share.join("f_06500.exr").to_string_lossy()).is_err());
+        #[cfg(windows)]
+        {
+            assert_eq!(lookups.get(), 1, "the output drive's root, once; no frame");
+            DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+        }
     }
 
     /// Resolve drive roots on this thread with `roots` (letter, root; a letter not listed can't
