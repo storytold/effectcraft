@@ -44,14 +44,16 @@ fn colour_bars(w: u32, h: u32) -> Image {
 struct Key {
     path: Arc<str>,
     frame: i64,
-    /// The alpha interpretation (bits 0–1) and how float values are encoded (bits 2–3: sRGB,
-    /// as stored, a 2.4 power curve): they change the decoded pixels.
+    /// The alpha interpretation (bits 0–1), how float values are encoded (bits 2–3: sRGB, as
+    /// stored, a 2.4 power curve) and a placed PDF / Illustrator page's framing (bit 4,
+    /// [`Footage::placed_page`]): they change the decoded pixels.
     interp: u8,
     matte: [u32; 3],
     /// A movie frame made at this size for a reduced-resolution render ((0, 0): as decoded).
     size: (u32, u32),
     /// A still at a reduced `size`: the footage's nominal size, which decides whether it is
-    /// resampled (see `Inner::sized_still`); (0, 0) otherwise.
+    /// resampled (see `Inner::sized_still`); also at its own size for a placed PDF /
+    /// Illustrator page, which is drawn to fill it ([`Footage::placed_page`]); (0, 0) otherwise.
     nominal: (u32, u32),
     /// An OpenEXR frame of which only these rows are read (a region of interest, #3271; the other
     /// rows are empty); `None`: all of it.
@@ -1141,6 +1143,8 @@ impl Inner {
         ((d.0 as i128 * rate.num as i128 + den / 2) / den) as i64
     }
 
+    /// Where the frame of `footage` at `t` comes from (file, frame or media time) and its cache
+    /// key, at the footage's own size.
     fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Loc {
         let alpha = match footage.alpha {
             AlphaMode::Straight => 0,
@@ -1153,7 +1157,8 @@ impl Inner {
                 FloatCurve::Srgb => 0,
                 FloatCurve::Linear => 1,
                 FloatCurve::Gamma24 => 2,
-            } << 2);
+            } << 2)
+            | (u8::from(footage.placed_page) << 4);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
         let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0), rows: None };
         match footage.kind {
@@ -1231,15 +1236,25 @@ impl Inner {
                 loc.key.nominal = (footage.width, footage.height);
             }
         }
+        // A placed PDF / Illustrator page is drawn to fill the footage's size (`layered::decode`,
+        // #3099): two items of one file stored at different sizes have different pixels.
+        if footage.placed_page && !movie {
+            loc.key.nominal = (footage.width, footage.height);
+        }
         // Some rows of an OpenEXR frame (a region of interest, #3271): the whole frame when the
         // cache has it, else those rows read for this request alone (not kept: a frame cache
         // entry of a few rows would hold a whole frame's memory).
         if loc.key.rows.is_some() {
             return self.frame_rows_of(&loc, footage);
         }
-        // What is decoded: a movie frame at its size, a still whole (its key has no size).
-        let source =
-            Loc { key: if movie { loc.key.clone() } else { Key { size: (0, 0), nominal: (0, 0), ..loc.key.clone() } }, media_t: loc.media_t, float: loc.float };
+        // What is decoded: a movie frame at its size, a still whole (its key has no size; a
+        // placed page keeps the footage's size, which it is drawn to fill).
+        let whole_nominal = if footage.placed_page { (footage.width, footage.height) } else { (0, 0) };
+        let source = Loc {
+            key: if movie { loc.key.clone() } else { Key { size: (0, 0), nominal: whole_nominal, ..loc.key.clone() } },
+            media_t: loc.media_t,
+            float: loc.float,
+        };
         let as_asked = source.key == loc.key;
         // The picture asked for, made of the decoded one.
         let shape = |whole: Arc<Image>| if movie { whole } else { Self::sized_still(whole, &loc, footage) };
@@ -1718,7 +1733,7 @@ impl FootageSource for MediaPool {
             return None;
         }
         let bytes = self.inner.read(&footage.path).ok()?;
-        crate::layered::rasterize_vector(&footage.path, &bytes, footage.layer.as_ref(), footage.page, scale).map(Arc::new)
+        crate::layered::rasterize_vector(&footage.path, &bytes, footage, scale).map(Arc::new)
     }
 
     fn set_aux_footage(&self, paths: &[String]) {

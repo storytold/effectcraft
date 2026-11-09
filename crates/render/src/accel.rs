@@ -21,10 +21,13 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// The backend `s` names, whatever case it is written in: the project's own values (`cpu`,
+    /// `gpu`, `auto`), the labels Project Settings ▸ Video Rendering and Effects draws
+    /// (`GPU Acceleration`, `Software Rendering`) and the older After Effects wording.
     pub fn parse(s: &str) -> Option<Backend> {
         match s.to_ascii_lowercase().as_str() {
-            "cpu" | "software" | "mercury software only" => Some(Backend::Cpu),
-            "gpu" | "mercury gpu acceleration" => Some(Backend::Gpu),
+            "cpu" | "software" | "mercury software only" | "software rendering" => Some(Backend::Cpu),
+            "gpu" | "mercury gpu acceleration" | "gpu acceleration" => Some(Backend::Gpu),
             "auto" => Some(Backend::Auto),
             _ => None,
         }

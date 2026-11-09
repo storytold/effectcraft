@@ -29,6 +29,7 @@ single-case files some cases are merged from, and the contributor's own animatio
 | `scrub.py` | fixture hygiene of a saved `.aep`: footage alias paths replaced by neutral ones of the same length (`C:\fixtures\...`), host name `HOST000...`, neutral ascend counts, the XMP packet replaced by the base project's |
 | `layers-comps-scrub-aepx.py` | the same XMP swap for the `.aepx` of the pair |
 | `patch-text.py` | the byte edits of the text cases 732 and 733 (see below) |
+| `ai-mask-3099.py`, `ai-mask-3099.jsx` | the committed `../ai-mask-3099.aep` (#3099): the `.py` writes four one-page PDFs named `.ai` with distinct page boxes, the `.jsx` (ExtendScript, run once through an After Effects MCP server's script call in an empty untitled project) imports them, builds composition `ai-mask` and returns After Effects' read-back that `../../it/import/ai_mask.rs` compares against |
 
 ## Run order (per file)
 
