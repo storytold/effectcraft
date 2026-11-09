@@ -1236,6 +1236,22 @@ fn renderer_labels_keep_their_stable_machine_values() {
     }
 }
 
+/// The label `render.backend` reports is one it accepts back, so a caller can round-trip the
+/// status instead of guessing the command's own values.
+#[test]
+fn renderer_status_labels_round_trip_through_the_command() {
+    let mut s = Session::default();
+    for (backend, label, gpu) in [("cpu", "Software Rendering", false), ("gpu", "GPU Acceleration", true)] {
+        let reported = s.execute("render.backend", json!({"backend": backend})).unwrap()["renderer"].clone();
+        assert_eq!(reported, json!(label));
+        let parsed = effectcraft_render::Backend::parse(reported.as_str().unwrap()).expect("the reported renderer parses back");
+        assert_eq!(parsed == effectcraft_render::Backend::Cpu, !gpu, "{reported}");
+        let again = s.execute("render.backend", json!({"backend": reported})).unwrap();
+        assert_eq!(again["renderer"], reported);
+        assert_eq!(again["gpuAcceleration"], json!(gpu));
+    }
+}
+
 /// Settings ▸ GPU Information names what the GPU compositor runs on, or why it is off, and the
 /// adapter the window got, so a card the compositor couldn't use doesn't look undetected (#596).
 #[test]

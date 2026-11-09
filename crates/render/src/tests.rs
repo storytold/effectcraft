@@ -1057,6 +1057,27 @@ fn comp_frame_ends_the_frame_when_the_render_panics() {
     assert_eq!(a.ends.load(Ordering::SeqCst), 1);
 }
 
+/// The renderer labels Project Settings ▸ Video Rendering and Effects draws parse back as the
+/// backend they name (in any case), and the older spellings still work.
+#[test]
+fn renderer_labels_parse_back_and_keep_the_older_spellings() {
+    use crate::Backend;
+    for (label, backend) in [
+        ("GPU Acceleration", Backend::Gpu),
+        ("gpu acceleration", Backend::Gpu),
+        ("Mercury GPU Acceleration", Backend::Gpu),
+        ("gpu", Backend::Gpu),
+        ("Software Rendering", Backend::Cpu),
+        ("software rendering", Backend::Cpu),
+        ("Mercury Software Only", Backend::Cpu),
+        ("cpu", Backend::Cpu),
+        ("Auto", Backend::Auto),
+    ] {
+        assert_eq!(Backend::parse(label), Some(backend), "{label}");
+    }
+    assert_eq!(Backend::parse("Vulkan"), None);
+}
+
 #[test]
 fn auto_backend_sends_2d_and_3d_comps_to_the_gpu() {
     let (mut p, cid, comp) = setup();
