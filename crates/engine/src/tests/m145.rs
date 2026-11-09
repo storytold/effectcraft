@@ -263,15 +263,23 @@ fn a_low_memory_episode_toasts_once_and_reapplies_the_budget() {
     assert_eq!(toasts(&mut s), 1);
 }
 
-/// #3321: Cache Frames When Idle is on by default; a saved "off" stays off.
+/// #3321: Cache Frames When Idle is on by default. Settings saved before held the old default
+/// (off) and turn it on once; off saved after that is the user's choice and stays.
 #[test]
 fn cache_frames_when_idle_is_on_by_default() {
     use crate::prefs::Prefs;
     assert!(Prefs::default().previews.cache_frames_when_idle);
-    assert!(Prefs::from_json(r#"{"version": 5, "previews": {"fastPreviews": true}}"#).previews.cache_frames_when_idle, "not saved: on");
-    let off = Prefs::from_json(r#"{"version": 5, "previews": {"cacheFramesWhenIdle": false}}"#);
+    assert!(Prefs::from_json(r#"{"version": 6, "previews": {"fastPreviews": true}}"#).previews.cache_frames_when_idle, "not saved: on");
+    // An old file with the old default: on, once.
+    let old = Prefs::from_json(r#"{"version": 5, "previews": {"cacheFramesWhenIdle": false}}"#);
+    assert!(old.previews.cache_frames_when_idle, "the old default becomes the new one");
+    assert!(Prefs::from_json(r#"{"version": 4, "previews": {"cacheFramesWhenIdle": true}}"#).previews.cache_frames_when_idle, "on stays on");
+    // Turned off after the migration: stays off, also after the next save.
+    let off = Prefs::from_json(r#"{"version": 6, "previews": {"cacheFramesWhenIdle": false}}"#);
     assert!(!off.previews.cache_frames_when_idle, "saved off: off");
-    assert!(!Prefs::from_json(&off.to_json()).previews.cache_frames_when_idle, "and after the next save");
+    let mut p = old;
+    p.previews.cache_frames_when_idle = false;
+    assert!(!Prefs::from_json(&p.to_json()).previews.cache_frames_when_idle, "and after the next save");
 }
 
 /// #3298: settings saved with the three cache budgets (version 4, or a later file that still

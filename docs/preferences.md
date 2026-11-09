@@ -57,7 +57,8 @@ Commands (CLI, MCP, control channel):
   after a second without input or edits, the viewer renders the work area into the RAM preview
   in the background, from the current time on, until it is cached or the budget is full. Any
   input, edit, playback or a frame the viewer waits for stops it at once (it starts again after
-  the next quiet second). A saved setting of off stays off
+  the next quiet second). Settings saved by an older version hold the old default (off) and are
+  switched on once when read; off saved after that stays off
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
 - `appearance.appearanceMode`: Appearance Mode (`auto` / `dark` / `light`). `auto` (Sync with System) follows the operating system's light or dark appearance while the app runs: on Linux the desktop app reads the XDG desktop portal (`org.freedesktop.appearance` `color-scheme`) once and then listens for its `SettingChanged` signal on a worker thread, repainting only when the value changes (nothing polls); `gsettings` runs at most once at start-up, by absolute path, when the portal gives no answer. Elsewhere it uses what the window system reports. With no answer it shows the dark theme. New installs stay `dark`; Sync with System is opt-in. The Tools bar's appearance button (a monitor, sun or moon) cycles Sync with System, Light and Dark (`view.theme.toggle`, Next Appearance Mode).
 - `appearance.darkTheme`: Dark Theme (`dark` / `darker`), shown in dark appearance

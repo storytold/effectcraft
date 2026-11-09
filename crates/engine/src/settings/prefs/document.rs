@@ -14,6 +14,10 @@ use super::{Appearance, General, Map, PREFS_VERSION, Prefs, Startup, Value, json
 /// - version 4 and earlier had the Layer Cache, Footage Frame Cache and Preview (RAM) Cache
 ///   budgets (`memory.layerCacheMb` / `mediaCacheMb` / `previewCacheMb`); they are dropped: the
 ///   caches share one budget (#3298).
+/// - version 5 and earlier saved Cache Frames When Idle off, the default then (every save kept
+///   it); it becomes the new default, on, once (#3321). Off saved later is the user's choice.
+///   (Released builds wrote version 4; version 5 came only from pre-release builds of #3301,
+///   nearly all of them with the default still off. A file without a version predates both.)
 pub fn migrate(mut v: Value) -> Value {
     let Some(obj) = v.as_object_mut() else { return json!({}) };
     let version = obj.get("version").and_then(Value::as_u64).unwrap_or(0);
@@ -60,6 +64,12 @@ pub fn migrate(mut v: Value) -> Value {
         for key in ["layerCacheMb", "mediaCacheMb", "previewCacheMb"] {
             m.remove(key);
         }
+    }
+    if version < 6
+        && let Some(p) = obj.get_mut("previews").and_then(Value::as_object_mut)
+        && p.get("cacheFramesWhenIdle") == Some(&json!(false))
+    {
+        p.insert("cacheFramesWhenIdle".into(), json!(true));
     }
     // Settings saved before appearance modes had one theme: keep showing it, as a fixed Dark or
     // Light mode, instead of switching established users to Auto.
