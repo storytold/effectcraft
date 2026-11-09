@@ -56,6 +56,7 @@
 mod adv3d;
 mod bokeh;
 mod classic3d;
+mod command_budget;
 mod context;
 pub mod deferred;
 mod effects;

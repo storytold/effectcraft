@@ -732,6 +732,9 @@ pub struct GpuContext {
     /// `Device::maintain` when two callers poll the same device at once). Shared by every
     /// context on the same device.
     poll_lock: Arc<Mutex<()>>,
+    /// Command buffers between finish and submit (#2746). Shared by every context on the same
+    /// device, as the limit is the device's.
+    command_budget: Arc<crate::command_budget::CommandBudget>,
     memcap: crate::memcap::MemCap,
 }
 
@@ -1043,6 +1046,7 @@ impl GpuContext {
             deferred: None,
             readbacks,
             poll_lock: Default::default(),
+            command_budget: Default::default(),
             memcap,
         })
     }
@@ -1595,6 +1599,7 @@ impl GpuContext {
             software: self.software,
             yuv: std::sync::OnceLock::new(),
             poll_lock: self.poll_lock.clone(),
+            command_budget: self.command_budget.clone(),
             memcap: self.memcap.fresh(),
         }
     }
@@ -2136,6 +2141,9 @@ impl<'g> Enc<'g> {
     /// Submit recorded work.
     pub fn submit(&mut self) {
         if let Some((enc, id)) = self.enc.take() {
+            // Finishing creates the batch's command buffers: wait for room on the device, or
+            // the workers' batches together pass Metal's limit and the device is lost (#2746).
+            let _share = self.g.command_budget.take(self.pending);
             self.last_submit = Some(self.g.queue.submit([enc.finish()]));
             if let Ok(mut p) = self.g.pool.lock() {
                 p.close(id);
