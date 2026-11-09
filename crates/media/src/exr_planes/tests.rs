@@ -957,6 +957,8 @@ fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
     let file = dir.join("crypto_0001.exr");
     std::fs::write(&file, multipart()).unwrap();
     let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+    // (every decode is written, however quick: not decided by this machine's speed)
+    dc.set_read_us_per_mb(0);
     // (only this test's files use it)
     use_disk_for(&dir.to_string_lossy());
     set_disk_cache(Some(&dc));

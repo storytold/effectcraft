@@ -53,6 +53,11 @@ const MAGIC: &[u8; 4] = b"ECDC";
 /// Pending layer and matte writes before new ones are dropped.
 #[cfg(not(target_arch = "wasm32"))]
 const QUEUE_LIMIT: usize = 64;
+/// What reading a megabyte of a disk cache entry back is assumed to take until reads are
+/// measured, in microseconds: 10 ms (100 MB/s, a slow disk or a network share), so a quick frame
+/// is not written on a guess ([`DiskCache::pays_off`]).
+pub const DEFAULT_READ_US_PER_MB: u64 = 10_000;
+
 /// Pending frame bytes before new frames are dropped. Frames have their own lane, written
 /// before layer buffers: a burst of large layer writes used to fill the shared queue and drop
 /// frames, so a fully cached comp came back with gaps in its blue bar.
@@ -524,6 +529,9 @@ pub struct DiskCache {
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
     min_layer_ms: AtomicU64,
+    /// What reading a megabyte of an entry takes, in microseconds ([`DiskCache::pays_off`]):
+    /// [`DEFAULT_READ_US_PER_MB`] until reads are measured, then their running average.
+    read_us_per_mb: AtomicU64,
     /// Files whose entries are being deleted ([`DiskCache::drop_files`]), each with the number
     /// of drops of it pending: until then an entry made of one is a miss.
     dropping: Mutex<HashMap<Arc<str>, u32>>,
@@ -636,6 +644,7 @@ impl DiskCache {
                 Condvar::new(),
             )),
             min_layer_ms: AtomicU64::new(30),
+            read_us_per_mb: AtomicU64::new(DEFAULT_READ_US_PER_MB),
             dropping: Mutex::new(HashMap::new()),
             #[cfg(test)]
             head_bytes: AtomicU64::new(0),
@@ -771,6 +780,38 @@ impl DiskCache {
         self.min_layer_ms.load(Ordering::Relaxed)
     }
 
+    /// What reading `bytes` of an entry back is expected to take, in microseconds (the measured
+    /// read rate, [`DiskCache::note_read`]).
+    pub fn read_us(&self, bytes: usize) -> u64 {
+        let rate = u128::from(self.read_us_per_mb.load(Ordering::Relaxed));
+        u64::try_from(u128::try_from(bytes).unwrap_or(u128::MAX).saturating_mul(rate) >> 20).unwrap_or(u64::MAX)
+    }
+
+    /// Set the read rate assumed until reads are measured (microseconds per MB; tests that need
+    /// every write give 0: everything pays off).
+    pub fn set_read_us_per_mb(&self, us: u64) {
+        self.read_us_per_mb.store(us, Ordering::Relaxed);
+    }
+
+    /// Whether a frame or plane set of `bytes` that took `make_us` microseconds to make is worth
+    /// a disk write: only when making it again costs more than reading it back (#3301). A RAM
+    /// eviction keeps the disk copy either way.
+    pub fn pays_off(&self, bytes: usize, make_us: u64) -> bool {
+        let read = self.read_us(bytes);
+        read == 0 || make_us > read
+    }
+
+    /// Note a read of `bytes` that took `took_us` (reads of under 64 KB are too short to time):
+    /// the read rate becomes a running average (7/8 the old rate, 1/8 this read's).
+    fn note_read(&self, bytes: usize, took_us: u64) {
+        if bytes < 64 << 10 {
+            return;
+        }
+        let rate = u64::try_from(u128::from(took_us).saturating_mul(1 << 20) / u128::try_from(bytes).unwrap_or(1).max(1)).unwrap_or(u64::MAX);
+        let old = self.read_us_per_mb.load(Ordering::Relaxed);
+        self.read_us_per_mb.store(old.saturating_mul(7).saturating_add(rate) / 8, Ordering::Relaxed);
+    }
+
     pub fn contains(&self, kind: Kind, key: u128) -> bool {
         self.index.lock().is_ok_and(|g| g.contains(kind, key))
     }
@@ -851,8 +892,12 @@ impl DiskCache {
             return None;
         }
         let path = self.path(kind, key);
+        let t0 = web_time::Instant::now();
         let data = std::fs::read(&path).ok();
         let ok = data.as_deref().and_then(|d| Some((*d.get(5)?, verify(d, kind)?.to_vec())));
+        if let Some((_, payload)) = &ok {
+            self.note_read(payload.len(), u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX));
+        }
         if ok.is_none() {
             // Gone (another process evicted it) or damaged: forget it.
             if data.is_some() {
@@ -1553,7 +1598,7 @@ impl crate::memory::MemoryHolder for DiskCache {
     fn oldest(&self) -> Option<crate::memory::Candidate> {
         let q = self.queue.0.lock().ok()?;
         let (_, bytes) = q.newest_unique()?;
-        Some(crate::memory::Candidate { used: 0, bytes, cost_us: 0 })
+        Some(crate::memory::Candidate { used: 0, bytes, cost_us: 0, protected: false })
     }
     fn drop_oldest(&self) -> usize {
         let Ok(mut q) = self.queue.0.lock() else { return 0 };
@@ -2938,6 +2983,31 @@ mod tests {
         dc.flush();
         assert!(dc.made_of_dropped(&files, &drops));
         assert!(!dc.made_of_dropped(&files, &dc.drops_now()), "read after the drop: used");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3301: a frame or plane set is written only when making it again costs more than
+    /// reading it back: a cheap one is not written, an expensive one is; the read rate follows
+    /// the reads measured.
+    #[test]
+    fn only_items_dearer_to_make_than_to_read_are_written() {
+        let dir = tmpdir("pays-off");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let eight_mb = 8 << 20;
+        // Until a read is measured: 10 ms per MB, 80 ms for 8 MB.
+        assert_eq!(dc.read_us(eight_mb), 8 * DEFAULT_READ_US_PER_MB);
+        assert!(!dc.pays_off(eight_mb, 1_000), "rendered in 1 ms: not written");
+        assert!(dc.pays_off(eight_mb, 200_000), "rendered in 200 ms: written");
+        // Reads measured at 1 ms per MB: a 20 ms frame of 8 MB is now worth writing.
+        assert!(!dc.pays_off(eight_mb, 20_000));
+        for _ in 0..40 {
+            dc.note_read(1 << 20, 1_000);
+        }
+        assert!(dc.pays_off(eight_mb, 20_000), "{}", dc.read_us(eight_mb));
+        // Tiny reads are not timed.
+        dc.note_read(100, 1_000_000);
+        assert!(dc.pays_off(eight_mb, 20_000));
+        drop(dc);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

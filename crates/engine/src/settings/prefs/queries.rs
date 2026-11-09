@@ -29,6 +29,17 @@ impl Prefs {
         }
     }
 
+    /// The limits on the process's measured memory (bytes): above the first the caches give way
+    /// by what it is over, above the second also the frames a playing preview shows next
+    /// ([`PROCESS_PURGE_PERCENT`] of the installed RAM left after the reserve, and all of it).
+    /// `None` while the installed RAM is unknown.
+    pub fn process_limits(&self, mem: Option<crate::sysinfo::SysMemory>) -> Option<(u64, u64)> {
+        let total = mem.map(|m| m.total).filter(|t| *t > 0)?;
+        let room = total.saturating_sub(u64::from(self.memory.ram_reserved_gb) << 30).max(MIN_MEMORY_BUDGET);
+        let purge = u64::try_from(u128::from(room) * u128::from(PROCESS_PURGE_PERCENT) / 100).unwrap_or(room);
+        Some((purge, room))
+    }
+
     /// The memory EffectCraft's caches share (Settings ▸ Memory & CPU): the layer cache, the
     /// footage frames, the decoded OpenEXR planes and the RAM preview frames together, kept within
     /// it by the memory accountant (`effectcraft_render::memory::Accountant`), which decides
@@ -160,6 +171,12 @@ pub const WEB_LAYER_CACHE: u64 = 512 << 20;
 
 /// The most the footage frame cache holds in the browser (see [`WEB_LAYER_CACHE`]).
 pub const WEB_MEDIA_CACHE: u64 = 256 << 20;
+
+/// Above this part (percent) of the installed RAM left after **RAM Reserved for Other
+/// Applications**, the process's measured memory makes the caches give way even within their
+/// budget ([`Prefs::process_limits`]): above the caches' budget plus most of the room left for
+/// the app's own working memory.
+pub const PROCESS_PURGE_PERCENT: u64 = 95;
 
 /// The part (percent) of the installed RAM left after **RAM Reserved for Other Applications**
 /// that EffectCraft's caches share ([`Prefs::memory_budget`]). The rest is headroom for

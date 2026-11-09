@@ -412,6 +412,40 @@ enum Waited {
     No,
 }
 
+/// At most this many movie/audio files are kept open ([`Sources`]): the least recently used one
+/// nobody is using is closed beyond it (it opens again when asked for; a project that cycles
+/// through more files than this opens them again each time).
+/// Still images and image sequences keep no file open (an OpenEXR file is opened for one decode).
+const MAX_OPEN_SOURCES: usize = 256;
+
+/// The opened movie/audio sources by path, with when each was last asked for.
+#[derive(Default)]
+struct Sources {
+    map: HashMap<Arc<str>, (SourceSlot, u64)>,
+    clock: u64,
+}
+
+impl Sources {
+    /// The slot of `path` (new when there is none), as just used; the least recently used slot
+    /// beyond [`MAX_OPEN_SOURCES`] is dropped.
+    fn slot(&mut self, path: &Arc<str>) -> SourceSlot {
+        self.clock = self.clock.wrapping_add(1);
+        let clock = self.clock;
+        let slot = {
+            let e = self.map.entry(path.clone()).or_insert_with(|| (SourceSlot::default(), clock));
+            e.1 = clock;
+            e.0.clone()
+        };
+        // (only a slot nobody is using or opening: an open in progress isn't started twice)
+        if self.map.len() > MAX_OPEN_SOURCES
+            && let Some(oldest) = self.map.iter().filter(|(_, (s, _))| Arc::strong_count(s) == 1).min_by_key(|(_, (_, used))| *used).map(|(p, _)| p.clone())
+        {
+            self.map.remove(&oldest);
+        }
+        slot
+    }
+}
+
 /// A movie/audio source by path ([`Opened`]), opened by the first caller while the others wait
 /// for it (`None`: failed to open; not retried until `forget`), with the file's identity as
 /// opened.
@@ -448,8 +482,8 @@ fn channel_order(src: &SharedSource, header: Option<&[u8]>, file: Option<&dyn fi
 type GifSlot = Arc<OnceLock<(std::result::Result<Arc<Anim>, String>, ReadFile)>>;
 
 struct Inner {
-    /// Opened movie/audio sources by path.
-    sources: Mutex<HashMap<Arc<str>, SourceSlot>>,
+    /// Opened movie/audio sources by path, at most [`MAX_OPEN_SOURCES`].
+    sources: Mutex<Sources>,
     /// Files opened into `sources` (see [`PoolStats::opened`]).
     opened: AtomicU64,
     /// In-memory files registered with `add_bytes` (web builds, tests).
@@ -717,13 +751,13 @@ impl MediaPool {
     /// Drop every cached frame and decoder.
     pub fn clear(&self) {
         self.clear_frames();
-        lock(&self.inner.sources).clear();
+        lock(&self.inner.sources).map.clear();
         lock(&self.inner.problems).clear();
     }
 
     /// Forget a file (after it changed on disk, or to retry a file that failed to open).
     pub fn forget(&self, path: &str) {
-        lock(&self.inner.sources).remove(path);
+        lock(&self.inner.sources).map.remove(path);
         lock(&self.inner.models).remove(path);
         lock(&self.inner.gifs).remove(path);
         lock(&self.inner.problems).remove(path);
@@ -1027,7 +1061,7 @@ impl Inner {
     /// each decoded a long FLAC in full at once (#408).
     /// Each call notes the file as read (see [`crate::reads`]), with its identity as opened.
     fn opened(&self, path: &Arc<str>) -> Option<Opened> {
-        let slot = lock(&self.sources).entry(path.clone()).or_default().clone();
+        let slot = lock(&self.sources).slot(path);
         let (opened, file) = slot.get_or_init(|| self.open(path));
         reads::note(file.clone());
         opened.clone()
@@ -1578,8 +1612,9 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
     fn oldest(&self) -> Option<effectcraft_render::memory::Candidate> {
         use effectcraft_render::memory::Candidate;
         let c = lock(&self.cache);
-        let frame = c.lru.oldest().and_then(|(k, _)| c.lru.map.get(k)).map(|e| Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us });
-        let still = c.recent.front().map(|r| Candidate { used: r.used, bytes: r.bytes.max(1), cost_us: 0 });
+        let frame =
+            c.lru.oldest().and_then(|(k, _)| c.lru.map.get(k)).map(|e| Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false });
+        let still = c.recent.front().map(|r| Candidate { used: r.used, bytes: r.bytes.max(1), cost_us: 0, protected: false });
         match (frame, still) {
             (Some(f), Some(s)) => Some(if s.used < f.used { s } else { f }),
             (f, s) => f.or(s),
@@ -2426,5 +2461,23 @@ mod tests {
         assert!(c.forgotten.len() <= MAX_FORGOTTEN);
         assert!(c.stale("/b.exr", at), "older than the remembered paths: stale");
         assert!(!c.stale("/b.exr", c.generation));
+    }
+
+    /// #3301: open movie/audio files are capped: beyond [`MAX_OPEN_SOURCES`] the least recently
+    /// asked for is closed (a project of thousands of clips kept every one open).
+    #[test]
+    fn open_sources_are_capped_least_recently_used_first() {
+        let mut s = Sources::default();
+        let path = |i: usize| -> Arc<str> { format!("/clips/{i}.mov").into() };
+        let first = s.slot(&path(0));
+        for i in 1..MAX_OPEN_SOURCES + 40 {
+            s.slot(&path(i));
+            // (the first clip is asked for again and again: it stays)
+            s.slot(&path(0));
+        }
+        assert_eq!(s.map.len(), MAX_OPEN_SOURCES);
+        assert!(s.map.contains_key(&path(0)), "used lately: kept");
+        assert!(!s.map.contains_key(&path(1)), "the least recently used went");
+        assert!(Arc::ptr_eq(&first, &s.slot(&path(0))), "a kept slot is the same slot");
     }
 }

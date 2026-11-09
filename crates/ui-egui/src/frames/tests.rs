@@ -2769,6 +2769,8 @@ mod frame_files {
 
     fn session(p: &Arc<Project>, dir: &Path) -> Session {
         let disk = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        // (every frame is written, however quick to render: not decided by this machine's speed)
+        disk.set_read_us_per_mb(0);
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let mut frames = Frames::default();
         let calls = hook_calls.clone();
@@ -3050,9 +3052,9 @@ fn the_accountant_trims_only_frames_in_ram() {
     assert_eq!(memory.bytes(), 16);
 }
 
-/// #3298 review: preview frames compete with the other caches by value. A frame a playing
-/// preview shows next counts as just used, and a frame rendered quickly (from cached layers)
-/// still costs a typical render: an old, cheap footage frame goes before it.
+/// #3301: frames a playing preview shows next are protected: other caches give way first, even
+/// for items worth more, until the caches are more than the bounded overage over; past it the
+/// preview frames go too. A frame rendered quickly still costs a typical render.
 #[test]
 fn preview_frames_ahead_of_the_playhead_outlive_old_footage() {
     use effectcraft_engine::render::memory::{self, Accountant, Candidate, MemoryHolder};
@@ -3077,26 +3079,26 @@ fn preview_frames_ahead_of_the_playhead_outlive_old_footage() {
         let mut c = frames.cache.lock().unwrap();
         for i in 10..12 {
             c.insert_took(key(1, i, 0), img(), None, None, Some(std::time::Duration::from_micros(100)));
-            // (as old as the footage frame below)
-            c.map.get_mut(&key(1, i, 0)).unwrap().used = 0;
         }
     }
     let preview: Arc<dyn MemoryHolder> = Arc::new(PreviewMemory(frames.cache.clone()));
-    // Stopped: the oldest frame is offered as it is, with at least a typical render's cost.
+    // Stopped: the oldest frame is offered unprotected, with at least a typical render's cost.
     let offered = preview.oldest().unwrap();
-    assert_eq!(offered.used, 0);
+    assert!(!offered.protected);
     assert_eq!(offered.cost_us, memory::default_cost(16, memory::DEFAULT_PREVIEW_US_PER_MB));
-    // Playing from frame 10: the frames ahead count as just used.
+    // Playing from frame 10: the frames ahead are protected.
     frames.set_playhead(Some(playhead(10, false)));
-    let before = memory::tick();
-    assert!(preview.oldest().unwrap().used >= before);
-    // An old footage frame that cost less per byte goes first.
-    let footage = Arc::new(Footage(Mutex::new(vec![Candidate { used: 0, bytes: 16, cost_us: 6_000 }])));
+    assert!(preview.oldest().unwrap().protected);
+    // A footage frame worth far more per byte, used just now, still goes first.
+    let footage = Arc::new(Footage(Mutex::new(vec![Candidate::new(memory::tick(), 16, 1_000_000)])));
     let footage_holder: Arc<dyn MemoryHolder> = footage.clone();
-    let acc = Accountant::new(40);
+    let acc = Accountant::new(1000);
     acc.register(&preview);
     acc.register(&footage_holder);
-    acc.balance();
+    acc.set_budget(40);
     assert_eq!(footage.bytes(), 0, "the footage frame went");
-    assert_eq!(preview.bytes(), 32, "the preview frames stay");
+    assert_eq!(preview.bytes(), 32, "the preview frames stay, a bounded way over");
+    // Far over the budget, past the overage: the preview frames go too.
+    acc.set_budget(10);
+    assert!(preview.bytes() < 32, "{}", preview.bytes());
 }

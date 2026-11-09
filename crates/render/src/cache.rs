@@ -1046,7 +1046,7 @@ impl crate::memory::MemoryHolder for LayerCache {
     fn oldest(&self) -> Option<crate::memory::Candidate> {
         let g = self.inner.lock().ok()?;
         let e = g.map.get(&g.oldest_key()?)?;
-        Some(crate::memory::Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us })
+        Some(crate::memory::Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false })
     }
     fn drop_oldest(&self) -> usize {
         let Ok(mut g) = self.inner.lock() else { return 0 };

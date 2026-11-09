@@ -724,7 +724,7 @@ impl PlaneStore {
         let e = st.entries.get(Self::oldest_droppable(&st, None, false)?)?;
         let cost_us =
             if e.cost_us > 0 { e.cost_us } else { effectcraft_render::memory::default_cost(e.bytes, effectcraft_render::memory::DEFAULT_PLANE_US_PER_MB) };
-        Some(effectcraft_render::memory::Candidate { used: e.used, bytes: e.bytes, cost_us })
+        Some(effectcraft_render::memory::Candidate { used: e.used, bytes: e.bytes, cost_us, protected: false })
     }
 
     /// Drop [`PlaneStore::oldest_candidate`]; the bytes freed.
@@ -958,12 +958,15 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     };
     let to_read: Vec<usize> = missing.iter().zip(&kept).filter(|(_, k)| k.is_none()).map(|(id, _)| *id).collect();
     let from_disk = to_read.is_empty();
+    // (what reading the planes took: their cost, against reading them back from the disk cache)
+    let read_from = effectcraft_render::memory::tick();
     let (read, stats) = if to_read.is_empty() {
         (Ok(vec![]), Default::default())
     } else {
         let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(to_read.clone()) };
         read_planes(&mut *opened.reader, &index, &request)
     };
+    let read_took = effectcraft_render::memory::tick().saturating_sub(read_from);
     #[cfg(test)]
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), DecodeRecord { channels: names.clone(), stats: stats.clone(), from_disk }));
     #[cfg(not(test))]
@@ -1023,7 +1026,12 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
                     Some((key(name), name.clone(), plane.clone()))
                 })
                 .collect();
-            d.put_planes(w as u32, h as u32, planes, &entry, since);
+            // (only planes that cost more to decode again than to read back, #3301)
+            let bytes = planes.iter().map(|(_, _, p)| p.len().saturating_mul(std::mem::size_of::<f32>())).fold(0, usize::saturating_add);
+            let took_us = read_took;
+            if d.pays_off(bytes, took_us) {
+                d.put_planes(w as u32, h as u32, planes, &entry, since);
+            }
         }
     }
     Ok(batch)

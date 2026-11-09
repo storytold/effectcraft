@@ -28,8 +28,8 @@ pub use choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, THEMES
 pub use dialog::{Item, Kind, Page, pages, pages_json, todo_keys};
 pub use document::{migrate, page_id, section_key};
 pub use queries::{
-    CacheCaps, FALLBACK_MEMORY_BUDGET, MEMORY_HEADROOM_PERCENT, MIN_MEMORY_BUDGET, MemoryBudget, WEB_LAYER_CACHE, WEB_MEDIA_CACHE, WEB_MEMORY_BUDGET,
-    WEB_PREVIEW_CACHE, mask_color,
+    CacheCaps, FALLBACK_MEMORY_BUDGET, MEMORY_HEADROOM_PERCENT, MIN_MEMORY_BUDGET, MemoryBudget, PROCESS_PURGE_PERCENT, WEB_LAYER_CACHE, WEB_MEDIA_CACHE,
+    WEB_MEMORY_BUDGET, WEB_PREVIEW_CACHE, mask_color,
 };
 pub use recent::{MAX_RECENT_SCRIPTS, RecentScript};
 pub use sections::{

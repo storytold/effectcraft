@@ -122,6 +122,13 @@ impl Session {
         let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
         accountant.register(&layers);
         accountant.set_budget(b.bytes);
+        // The process's measured memory as well (#3301: memory nobody accounts for, such as GPU
+        // staging, effect buffers and the allocator's fragmentation): over the purge limit the
+        // caches give way by what it is over, over the hard limit also the frames a playing
+        // preview shows next.
+        if let Some((purge_at, hard_at)) = self.prefs.process_limits(self.sys_memory) {
+            accountant.set_process_memory(crate::sysinfo::process_memory, purge_at, hard_at);
+        }
     }
 
     /// The memory the caches share for the last memory reading ([`Prefs::memory_budget`]), kept
@@ -150,6 +157,9 @@ impl Session {
         self.sys_memory = reading.or(self.sys_memory);
         self.memory_low = self.sys_memory.is_some_and(|m| m.still_low(self.memory_low));
         let after = self.memory_budget();
+        // (the process's memory is checked with each balance; a reading now and then also
+        // when the caches don't grow)
+        effectcraft_render::memory::Accountant::global().balance();
         if after != before {
             self.apply_cache_budgets();
             // Frontends re-apply their preview cache budget.
