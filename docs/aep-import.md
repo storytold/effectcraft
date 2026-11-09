@@ -135,7 +135,15 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
   text does not have; the runs are cut to the text. A range style splits `Hello` into runs of 1,
   2 and 2 characters (248, 340).
 - **Null objects.** The hidden placeholder solid of a null object is not an item (null layers
-  have no source item here).
+  have no source item here). A null's Anchor Point that is not stored is its top-left corner
+  `[0, 0]`, not the centre, as After Effects 2026 reads it back (#3099).
+- **Placed Illustrator and PDF files** (`.ai`, `.pdf`; `Footage::placed_page`): the page is
+  framed as After Effects places it (the ArtBox clipped to the crop box, `/Rotate` ignored) and
+  drawn to fill the stored footage size, which masks and anchors are measured against (#3099).
+  Create Shapes from Vector Layer on such a layer adds a hidden `<layer> Frame` shape layer, the
+  Alpha track matte of every layer it makes, so they show only the frame, as the footage does.
+  EPS files keep their bounding box at their own size: how After Effects sizes them is not
+  measured.
 - **Track mattes.** The mode and the matte layer's id are in the target layer's header
   (aep-format.md 3.1). The matte layer can be any layer of the composition (407: below its
   target); it keeps its stored video switch (After Effects switches it off when the matte is set,
