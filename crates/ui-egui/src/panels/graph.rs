@@ -581,7 +581,12 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 // Graph Editor ▸ Snap: to the current time and other keys.
                 let others: Vec<f64> = all_key_times.iter().filter(|(u, i, _)| !(*u == uid && *i == k.idx)).map(|x| x.2).collect();
                 let t = if time_ok { super::graph_tools::snap_time(app, tm, (g.t + (tm.t(pt.x) - tm.t(g.press.x))).max(0.0), &others) } else { g.t };
-                let mut params = json!({"timeOffset": t - g.t, "merge": "graph-key", "fromStart": true});
+                let mut params = json!({
+                    "timeOffset": t - g.t,
+                    "merge": "graph-key",
+                    "fromStart": true,
+                    "betweenFrames": app.ui.timeline.graph_between_frames,
+                });
                 if value_ok && !speed && c.editable {
                     params["valueOffset"] = json!(vmap(pt.y) - vmap(g.press.y));
                     params["dim"] = json!(d);
@@ -678,6 +683,22 @@ fn button_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, co
         BarBtn { label: "Transform Box", on: tbox, id: "transformBox", tip: "Show Transform Box when multiple keys are selected" },
     ) {
         app.ui.timeline.graph_transform_box = !tbox;
+    }
+    let between = app.ui.timeline.graph_between_frames;
+    if text_button(
+        app,
+        ui,
+        p,
+        &mut buttons,
+        y,
+        BarBtn {
+            label: "Between Frames",
+            on: between,
+            id: "betweenFrames",
+            tip: "Allow Keyframes Between Frames (key drags and the transform box don't round keys to frames)",
+        },
+    ) {
+        app.ui.timeline.graph_between_frames = !between;
     }
     buttons.x += 6.0;
     let pos_sel = app.session.state.selected_props.iter().find_map(|(l, u)| super::timeline::is_position(comp.layer(*l)?, *u).then_some(l.0));

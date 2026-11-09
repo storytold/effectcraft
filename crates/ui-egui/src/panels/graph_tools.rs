@@ -59,7 +59,8 @@ fn handle_points(r: Rect) -> [Pos2; 8] {
 /// The transform box for two or more selected keys. Call before the keys are drawn (its inside
 /// sits below them) with `handles = false`, and after them with `handles = true` (the handles sit
 /// on top). Dragging a corner scales time and value about the opposite corner, an edge one axis,
-/// the inside moves the keys; times land on frames.
+/// the inside moves the keys. Moves go by whole frames and scales put keys on frames, unless
+/// Allow Keyframes Between Frames is on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transform_box(
     app: &mut EffectcraftApp,
@@ -175,6 +176,7 @@ pub(crate) fn transform_box(
         dims.dedup();
         params["dims"] = json!(dims);
         if params.as_object().is_some_and(|m| m.len() > 2) {
+            params["betweenFrames"] = json!(app.ui.timeline.graph_between_frames);
             actions.push(("keys.transform".into(), params));
         }
         ctx.data_mut(|d| d.insert_temp(box_id(), st));
@@ -306,7 +308,18 @@ pub(crate) fn alt_scale_update(app: &EffectcraftApp, ctx: &egui::Context, comp: 
     if span.abs() < 1e-9 || want.abs() < 1e-9 || want.signum() != span.signum() {
         return;
     }
-    actions.push(("keys.transform".into(), json!({"timeScale": want / span, "timeAnchor": st.anchor, "merge": "key-alt-scale", "fromStart": true})));
+    // The dragged key lands on a frame (Timeline drags move by frames); the keys between follow
+    // the scale onto subframes when Allow Keyframes Between Frames is on.
+    actions.push((
+        "keys.transform".into(),
+        json!({
+            "timeScale": want / span,
+            "timeAnchor": st.anchor,
+            "merge": "key-alt-scale",
+            "fromStart": true,
+            "betweenFrames": app.ui.timeline.graph_between_frames,
+        }),
+    ));
 }
 
 /// An Alt-drag group scale is in progress (the plain key move stands aside).

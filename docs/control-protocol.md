@@ -174,7 +174,8 @@ revolutions are `timeline.prop.<uid>.revolutions`, `effectControls.prop.<uid>.re
 label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an error; label `whole`, or
 `cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area) and
 `viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
-`timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
+`timeline.graph.snap`, `timeline.graph.reference` and `timeline.graph.betweenFrames` (Allow
+Keyframes Between Frames). Use `ui.elements` to see what is on screen.
 
 Viewer state that agents drive headless too: `view.snapping`, `view.snappingOptions
 {edgesExtended?, collapsedFeatures?, toggle?}` (the Tools bar's Snapping options,
