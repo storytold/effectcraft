@@ -4,7 +4,7 @@
 
 Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
-tracker; After Effects' from its documentation (GPU Acceleration, Multi-Frame Rendering,
+tracker; After Effects' from its documentation (Mercury GPU Acceleration, Multi-Frame Rendering,
 hardware-accelerated decode and encode, Mercury Transmit) and its bundle.
 
 **Overall ≈ 40%** (estimated). The GPU compositor and 280 GPU effects are a real strength and run
@@ -26,7 +26,7 @@ monitors are missing, and two GPU start-up failures are open.
 | Multiple monitors | panels and windows across screens | panels move into their own native windows on any screen (Move Panel to New Window; desktop builds) | same | same (#486) | — | gap 20 |
 | Touch / trackpad gestures | pinch zoom in viewers | Composition and Layer viewers: two-finger scroll pans, pinch zooms around the pointer (Alt + scroll and the mouse wheel zoom too); Timeline pinch zooms time | two-finger scroll pans once it moves diagonally (a pixel-precise wheel keeps zooming); pinch arrives as Ctrl + scroll and zooms | same | same | No rotate or swipe gestures; tested in `ui_viewer_trackpad.rs` (UI logic, not on hardware) |
 | Audio hardware | Core Audio / ASIO / WASAPI, device choice, latency | cpal output; preview sound late after a start offset (#504 open; #554 closed) | cpal | cpal (ALSA) | Web Audio | No input or device latency settings |
-| Machine learning acceleration | Apple Neural Engine / GPU for Object Matte, Rotoscope Brush 3 | CPU inference (pure Rust, rayon) | CPU | CPU | CPU | No GPU inference for MobileSAM or MediaPipe |
+| Machine learning acceleration | Apple Neural Engine / GPU for Object Matte, Roto Brush 3 | CPU inference (pure Rust, rayon) | CPU | CPU | CPU | No GPU inference for MobileSAM or MediaPipe |
 | Memory management | RAM reserve, disk cache | RAM Reserved, Reduce Cache When Low on Memory, disk cache | same | same | OPFS disk cache | good |
 
 ## Estimate
