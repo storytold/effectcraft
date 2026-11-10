@@ -636,6 +636,10 @@ impl<'a> Interp<'a> {
                 let bc = f.get(&sm, "BC").map(|b| f.nums(b)).unwrap_or_default();
                 let gcs = f.get_dict(&gd, "Group").and_then(|gr| f.get(gr, "CS")).map(|c| color_space(f, c, Some(res))).unwrap_or(Cs::Rgb);
                 let backdrop = if bc.is_empty() { [0.0; 3] } else { gcs.to_rgb(&bc) };
+                // The mask it replaces closes first: its groups don't enclose the new one.
+                if let Some(d) = self.gs.mask_depth {
+                    self.close_to(d);
+                }
                 let inner = self.b.nested(2);
                 let saved_b = std::mem::replace(&mut self.b, inner);
                 let ctm = self.gs.ctm;
@@ -648,9 +652,6 @@ impl<'a> Interp<'a> {
                 let (nodes, _, sk) = mask_b.finish();
                 for s in sk {
                     self.b.skip(&s);
-                }
-                if let Some(d) = self.gs.mask_depth {
-                    self.close_to(d);
                 }
                 let mut content = Group::new("Soft Mask");
                 content.children = nodes;
@@ -750,6 +751,11 @@ impl<'a> Interp<'a> {
     /// Draw a tiling pattern's cells over `area` (page space; the caller clips).
     fn tile(&mut self, t: &Tiling, area: kurbo::Rect, depth: usize) {
         if depth > 8 {
+            return;
+        }
+        // The `Pattern` and `Tile` wrappers must fit under the open groups too.
+        if !self.b.has_room(2) {
+            self.b.skip("group nesting limit");
             return;
         }
         // The cell, drawn once in pattern space.

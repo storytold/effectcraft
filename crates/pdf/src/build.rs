@@ -48,6 +48,11 @@ impl Builder {
         self.stack.len()
     }
 
+    /// `wrap` more groups fit under the open ones within [`MAX_DEPTH`].
+    pub fn has_room(&self, wrap: usize) -> bool {
+        self.base.saturating_add(self.stack.len()).saturating_add(wrap) <= MAX_DEPTH
+    }
+
     pub fn skip(&mut self, what: &str) {
         if !self.skipped.iter().any(|s| s == what) {
             self.skipped.push(what.to_string());
