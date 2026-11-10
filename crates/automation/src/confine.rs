@@ -223,7 +223,13 @@ impl Confinement {
         let sep = ['/', '\\'];
         let Some((dir_tail, rest)) = after.split_once(sep) else { return Ok(()) };
         let (parent, prefix) = before.rsplit_once(sep).unwrap_or(("", &before));
-        let Ok(entries) = std::fs::read_dir(if parent.is_empty() { Path::new("/") } else { Path::new(parent) }) else { return Ok(()) };
+        // A parent that doesn't exist has no numbered folders; one that can't be listed might.
+        let scan = if parent.is_empty() { Path::new("/") } else { Path::new(parent) };
+        let entries = match std::fs::read_dir(scan) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::BadArgs(format!("cannot render to `{output}`: its numbered folders in `{}` can't be checked: {e}", scan.display()))),
+        };
         let mut seen = 0;
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -890,6 +896,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(unix)]
     #[test]
     fn numbered_render_folders_with_links_out_of_the_write_roots_are_refused() {
         let base = std::env::temp_dir().join(format!("ec-confine-seq-dir-{}", std::process::id()));
