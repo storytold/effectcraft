@@ -83,11 +83,11 @@ pub(crate) fn import_effects<'f, 'a>(
         }
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
         let Some(map) = EFFECTS.iter().find(|m| m.match_name == fx.match_name()) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
+            col.lose_unmapped_effect(fx.match_name(), format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
             continue;
         };
         let Some(spec) = effectcraft_effects::find(map.effect) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
+            col.lose_unmapped_effect(fx.match_name(), format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
             continue;
         };
         if defs.source(&fx) == DefinitionSource::Missing {
