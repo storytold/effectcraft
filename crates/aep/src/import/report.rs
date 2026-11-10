@@ -298,9 +298,8 @@ impl Collector {
             seen.1 = seen.1.saturating_add(1);
         } else if self.unmapped_effects.len() < MAX_UNMAPPED_EFFECTS {
             self.unmapped_effects.insert(match_name.to_string(), (detail, 1));
-        } else if loss.details.len() < MAX_DETAILS {
-            loss.details.push(detail);
         }
+        // (Past the limit an effect is only counted: its name is not worth a line of its own.)
     }
 
     pub fn finish(mut self) -> ImportReport {
@@ -356,5 +355,19 @@ mod tests {
         // One instance stays the single line it was.
         assert_eq!(named("(Pseudo/)"), ["C: 'D' has the effect 'Dropdown' (Pseudo/)"]);
         assert!(effects.details.len() <= MAX_DETAILS + 2, "the examples stay bounded");
+    }
+
+    /// A file with more than [`MAX_UNMAPPED_EFFECTS`] different unmapped effects names that many
+    /// and counts the rest, whatever room the example lines have.
+    #[test]
+    fn at_most_the_limit_of_unmapped_effects_are_named() {
+        let mut col = Collector::default();
+        for i in 0..=MAX_UNMAPPED_EFFECTS {
+            col.lose_unmapped_effect(&format!("Effect {i}"), format!("C: 'L' has the effect 'Effect {i}' (Effect {i})"));
+        }
+        let report = col.finish();
+        let effects = report.losses.iter().find(|l| l.category == LossCategory::Effects).unwrap();
+        assert_eq!(effects.count, MAX_UNMAPPED_EFFECTS + 1, "every instance is counted");
+        assert_eq!(effects.details.len(), MAX_UNMAPPED_EFFECTS, "{} lines", effects.details.len());
     }
 }
