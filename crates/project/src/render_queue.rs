@@ -1713,14 +1713,19 @@ pub fn numbered_template(template: &str, n: u32) -> String {
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
+    let mut s: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
     // At most a file name's worth (255 UTF-8 bytes, whole characters only): a template repeating
-    // a long name token must not expand to gigabytes.
-    let mut s = String::new();
-    for c in name.chars() {
-        if s.len() + c.len_utf8() > 255 {
-            break;
+    // a long name token must not expand to gigabytes. A cut name ends in a hash of the whole
+    // name so long names that share a prefix stay distinct.
+    if s.len() > 255 {
+        // shortcut: 64-bit FNV-1a, not collision-resistant against crafted names; use a real hash if names become untrusted keys.
+        let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let mut end = 255 - 17;
+        while !s.is_char_boundary(end) {
+            end -= 1;
         }
-        s.push(if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c });
+        s.truncate(end);
+        s.push_str(&format!("-{hash:016x}"));
     }
     // `.` and `..` would name the folder itself or its parent when the token is a path component.
     if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
@@ -1749,10 +1754,16 @@ mod tests {
 
     #[test]
     fn sanitize_limits_the_name_in_bytes() {
-        // 255 two-byte characters: 127 fit (254 bytes); the 128th would pass the limit.
+        // 255 two-byte characters are cut to whole characters plus a 17-byte hash suffix.
         let s = sanitize(&"é".repeat(255));
-        assert_eq!(s.len(), 254);
-        assert!(s.chars().all(|c| c == 'é'));
+        assert!(s.len() <= 255 && s.len() > 235, "{}", s.len());
+        assert!(s.starts_with("éé") && s.is_char_boundary(s.len() - 17));
+        // Names that share their first 255 bytes stay distinct, and a name that fits is untouched.
+        let (a, b) = (sanitize(&format!("{}A", "界".repeat(85))), sanitize(&format!("{}B", "界".repeat(85))));
+        assert_ne!(a, b);
+        assert!(a.len() <= 255 && b.len() <= 255);
+        assert_eq!(sanitize(&"n".repeat(255)), "n".repeat(255));
+        assert_eq!(sanitize(&"é".repeat(127)), "é".repeat(127));
     }
 
     #[test]
