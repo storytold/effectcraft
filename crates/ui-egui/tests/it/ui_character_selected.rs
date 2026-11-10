@@ -190,3 +190,21 @@ fn character_changes_stay_on_the_edited_layer_while_editing() {
     assert!(doc(&h, a).style_at(0).faux_bold);
     assert!(!doc(&h, b).style_at(0).faux_bold);
 }
+
+/// While a layer below the first selected one is edited, Properties' text rows change that
+/// layer's selected characters, as the Character panel does, not the first layer's whole text.
+#[test]
+fn properties_text_changes_reach_the_edited_layer_below_the_first_selected() {
+    let (mut h, a, b) = two_text_layers(false);
+    let s = &mut h.state_mut().session;
+    s.execute("text.edit", json!({"layer": b, "select": [0, 1]})).unwrap();
+    s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
+    h.state_mut().show_panel(PanelKind::Properties);
+    h.run_steps(4);
+    assert!(h.state().session.state.text_edit.as_ref().is_some_and(|e| e.layer == LayerId(b)));
+    let from = center(&h, "properties.text.size");
+    drag(&mut h, from, from + vec2(40.0, 0.0));
+    assert!(doc(&h, b).style_at(0).size > 60.0, "the edited character changes");
+    assert_eq!(doc(&h, b).style_at(1).size, 60.0, "the rest of the edited layer stays");
+    assert_eq!(doc(&h, a).size, 60.0, "the first selected layer stays");
+}
