@@ -1,4 +1,4 @@
-//! File ▸ Import ▸ After Effects Project… through the command registry, with the synthetic
+//! File ▸ Import ▸ Adobe After Effects Project… through the command registry, with the synthetic
 //! fixtures of `effectcraft-aep`.
 
 use serde_json::json;
@@ -147,11 +147,96 @@ fn bad_input_is_an_error_not_a_crash() {
     assert!(s.project.items.is_empty());
 }
 
+/// File ▸ Import: After Effects' own entries in its order, the project imports together where
+/// After Effects has Adobe Premiere Pro Project… (alphabetical, named in full), then a separator
+/// and the formats only EffectCraft imports, alphabetical (#3103).
+#[test]
+fn the_import_menu_groups_the_project_imports() {
+    use crate::menus::MenuNode;
+    let file = crate::menus::menu_bar().iter().find_map(|n| match n {
+        MenuNode::Submenu { label, children } if label == "File" => Some(children),
+        _ => None,
+    });
+    let import = file.into_iter().flatten().find_map(|n| match n {
+        MenuNode::Submenu { label, children } if label == "Import" => Some(children),
+        _ => None,
+    });
+    let labels: Vec<&str> = import
+        .into_iter()
+        .flatten()
+        .map(|n| match n {
+            MenuNode::Item(e) => e.label.as_str(),
+            MenuNode::Separator => "---",
+            MenuNode::Submenu { label, .. } => label.as_str(),
+            MenuNode::Dynamic { .. } => "@dynamic",
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "File...",
+            "Multiple Files...",
+            "Adobe After Effects Project...",
+            "Adobe Premiere Pro Project...",
+            "EffectCraft Project...",
+            "Vanishing Point (.vpe)...",
+            "Placeholder...",
+            "Solid...",
+            "---",
+            "Essential Graphics Template...",
+            "Lottie...",
+        ]
+    );
+}
+
+/// `file.import` takes After Effects projects as After Effects' File… does, for scripts and
+/// agents: one without losses imports as `file.importAep` does; one with losses is refused and
+/// changes nothing, naming the menu entry that lists the losses; a file that is not one says why.
+#[test]
+fn file_import_takes_after_effects_projects() {
+    assert!(crate::cmd::is_aep_path("/a/Intro.aep") && crate::cmd::is_aep_path("/a/Intro.AEPX"));
+    assert!(!crate::cmd::is_aep_path("/a/Intro.ecproj") && !crate::cmd::is_aep_path("/a/aep") && !crate::cmd::is_aep_path("/a/clip.aep.mp4"));
+    let dir = std::env::temp_dir().join(format!("ec-file-import-aep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let message = |r: crate::Result<serde_json::Value>| match r {
+        Ok(v) => v["errors"].to_string(),
+        Err(e) => e.to_string(),
+    };
+
+    let intro = dir.join("Intro.aep").to_string_lossy().to_string();
+    let mut source = Session::default();
+    source.execute("comp.new", json!({"name": "Intro", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
+    source.execute("file.exportAep", json!({"path": intro, "allowLosses": true})).unwrap();
+    let mut s = Session::default();
+    let r = s.execute("file.import", json!({"paths": [intro]})).unwrap();
+    assert_eq!(r["projects"].as_array().map(Vec::len), Some(1), "{r}");
+    let folder = s.project.items.values().find(|i| i.name == "Intro.aep").map(|i| i.id);
+    assert!(folder.is_some(), "the project's folder");
+    assert!(s.project.items.values().any(|i| i.name == "Intro" && i.parent == folder), "its composition in the folder");
+
+    let lossy = concat!(env!("CARGO_MANIFEST_DIR"), "/../aep/tests/fixtures/synthetic.aep");
+    let mut s = Session::default();
+    let refused = message(s.execute("file.import", json!({"paths": [lossy]})));
+    assert!(refused.contains("synthetic.aep") && refused.contains("File ▸ Import ▸ Adobe After Effects Project… lists them"), "{refused}");
+    assert!(refused.contains("`file.importAep` with `allowLosses`"), "and the command that takes the consent: {refused}");
+    assert!(s.project.items.is_empty(), "nothing imported");
+
+    let junk = dir.join("Junk.AEPX");
+    std::fs::write(&junk, b"not a project").unwrap();
+    let mut s = Session::default();
+    let error = message(s.execute("file.import", json!({"paths": [junk.to_string_lossy()]})));
+    assert!(error.contains("Junk.AEPX"), "{error}");
+    assert!(s.project.items.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// File ▸ Import ▸ Adobe After Effects Project… is in the menu under that label.
 #[test]
 fn aep_menu_entry_exists() {
     let entries = crate::menus::entries();
     let find = |cmd: &str| entries.iter().find(|(_, e)| e.command == cmd).map(|(p, e)| (p.join(" > "), e.label.clone()));
-    assert_eq!(find("file.importAep"), Some(("File > Import".into(), "After Effects Project...".into())));
+    assert_eq!(find("file.importAep"), Some(("File > Import".into(), "Adobe After Effects Project...".into())));
 }
 
 #[test]

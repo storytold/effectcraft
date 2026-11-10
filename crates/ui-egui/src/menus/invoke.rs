@@ -183,6 +183,12 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
     m.get("comp")?.as_u64().map(effectcraft_engine::project::ItemId)
 }
 
+/// Whether [`invoke`]'s result says the command waits on a dialog (a guard or a form deferred it
+/// until the user answers, `{"dialog": …}`).
+pub fn waits_on_dialog(result: &Value) -> bool {
+    result.get("dialog").is_some()
+}
+
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     crate::control::check_script_render(app, id)?;
