@@ -16,10 +16,32 @@ struct Marquee {
     rows: Arc<Vec<Row>>,
     graph_on: bool,
     layout: (Rect, f32, f32),
+    anchor: Anchor,
+    dragging: bool,
+}
+
+/// The pressed corner in content coordinates: a time (or an outline x) and a scroll-free y.
+#[derive(Clone, Copy)]
+pub(super) struct Anchor {
     time: f64,
     y: f32,
     outline_x: Option<f32>,
-    dragging: bool,
+}
+
+/// The timeline layout a marquee is projected through.
+#[derive(Clone, Copy)]
+pub(super) struct View {
+    pub tm: TMap,
+    /// Screen y of the first row at scroll 0.
+    pub top: f32,
+    pub graph_x0: f32,
+    pub graph_on: bool,
+}
+
+impl View {
+    fn of(g: &Rw) -> Self {
+        Self { tm: g.tl.tm, top: g.tl.rows_rect.min.y, graph_x0: g.tl.graph_x0, graph_on: g.graph_on }
+    }
 }
 
 fn id() -> Id {
@@ -65,9 +87,7 @@ pub(super) fn prepare(app: &EffectcraftApp, ui: &egui::Ui, g: &Rw) {
                         rows: g.tl.rows.clone(),
                         graph_on: g.graph_on,
                         layout: (g.tl.rect, g.tl.rh, g.tl.graph_x0),
-                        time: g.tl.tm.t(p.x.max(g.tl.graph_x0)),
-                        y: p.y - g.tl.rows_rect.min.y + app.ui.timeline.scroll_y,
-                        outline_x: (p.x < g.tl.graph_x0).then_some(p.x),
+                        anchor: Anchor::press(&View::of(g), app.ui.timeline.scroll_y, p),
                         dragging: false,
                     },
                 );
@@ -98,19 +118,21 @@ pub(super) struct SelectionBox {
     pub outline: bool,
 }
 
-impl Marquee {
+impl Anchor {
+    /// Anchor a press at screen point `p` with the rows scrolled by `scroll`.
+    pub(super) fn press(v: &View, scroll: f32, p: Pos2) -> Self {
+        Self { time: v.tm.t(p.x.max(v.graph_x0)), y: p.y - v.top + scroll, outline_x: (p.x < v.graph_x0).then_some(p.x) }
+    }
+
     /// Reproject the content anchor without clipping the logical selection bounds.
-    fn selection(&self, g: &Rw, scroll: f32, pointer: Pos2) -> (Rect, SelectionBox) {
-        let tm = g.tl.tm;
-        let anchor = pos2(self.outline_x.unwrap_or_else(|| tm.x(self.time)), g.tl.rows_rect.min.y + self.y - scroll);
+    pub(super) fn selection(&self, v: &View, scroll: f32, pointer: Pos2) -> (Rect, SelectionBox) {
+        let tm = v.tm;
+        let anchor = pos2(self.outline_x.unwrap_or_else(|| tm.x(self.time)), v.top + self.y - scroll);
         let paint = Rect::from_two_pos(anchor, pointer);
-        let graph = self.outline_x.is_none() || pointer.x >= g.tl.graph_x0;
-        let keys = if graph && !g.graph_on {
-            Rect::from_two_pos(pos2(tm.x(self.time), anchor.y), pos2(pointer.x.max(g.tl.graph_x0), pointer.y))
-        } else {
-            Rect::NOTHING
-        };
-        (paint, SelectionBox { keys, outline: self.outline_x.is_some() || pointer.x < g.tl.graph_x0 })
+        let graph = self.outline_x.is_none() || pointer.x >= v.graph_x0;
+        let keys =
+            if graph && !v.graph_on { Rect::from_two_pos(pos2(tm.x(self.time), anchor.y), pos2(pointer.x.max(v.graph_x0), pointer.y)) } else { Rect::NOTHING };
+        (paint, SelectionBox { keys, outline: self.outline_x.is_some() || pointer.x < v.graph_x0 })
     }
 }
 
@@ -151,7 +173,7 @@ pub(super) fn finish(app: &EffectcraftApp, ui: &egui::Ui, g: &mut Rw) {
         return;
     }
     let Some(pointer) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    let (paint, selection) = drag.selection(g, app.ui.timeline.scroll_y, pointer);
+    let (paint, selection) = drag.anchor.selection(&View::of(g), app.ui.timeline.scroll_y, pointer);
     if dropped {
         ctx.data_mut(|d| d.remove::<Marquee>(id()));
         let (layers, keys) = targets(&g.tl.comp, &g.tl.rows, &g.tl.tm, g.tl.rows_rect.min.y - app.ui.timeline.scroll_y, g.tl.rh, paint, &selection);

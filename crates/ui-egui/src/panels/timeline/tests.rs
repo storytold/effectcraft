@@ -960,25 +960,32 @@ fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
     }
     // Rows are 20 pt and 400 pt wide: the outline is left of x 200, a key at 0 s sits at x 205.
     let tm = TMap { x0: 205.0, start: 0.0, pps: 100.0 };
-    let go = |br: Rect| {
-        let keys = if br.max.x < 200.0 { Rect::NOTHING } else { Rect::from_min_max(pos2(br.min.x.max(200.0), br.min.y), br.max) };
-        marquee::targets(comp, &rows, &tm, 0.0, 20.0, br, &marquee::SelectionBox { keys, outline: br.min.x < 200.0 })
+    let view = marquee::View { tm, top: 0.0, graph_x0: 200.0, graph_on: false };
+    // Press at `from` with the rows scrolled by `s0`, release at `to` scrolled by `s1`.
+    let drag = |from: Pos2, s0: f32, to: Pos2, s1: f32| {
+        let (paint, sel) = marquee::Anchor::press(&view, s0, from).selection(&view, s1, to);
+        marquee::targets(comp, &rows, &tm, -s1, 20.0, paint, &sel)
     };
+    let go = |from: Pos2, to: Pos2| drag(from, 0.0, to, 0.0);
     let keyed = |ks: &[effectcraft_engine::KeyRef]| ks.iter().map(|k| k.layer.0).collect::<Vec<_>>();
     // From the outline across the boundary: layer A's row (y 0..20) and B's row, and their keys.
-    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 65.0)));
+    let (ls, ks) = go(pos2(10.0, 5.0), pos2(260.0, 65.0));
     assert_eq!(ls, [layers[0], layers[1]]);
     assert_eq!(keyed(&ks), [layers[0], layers[1]]);
-    // The same box dragged the other way is the same rectangle: the same rows, the same keys.
-    let (ls, ks) = go(Rect::from_two_pos(pos2(260.0, 65.0), pos2(10.0, 5.0)));
+    // The same box dragged the other way: the same rows, the same keys.
+    let (ls, ks) = go(pos2(260.0, 65.0), pos2(10.0, 5.0));
     assert_eq!((ls, keyed(&ks)), (vec![layers[0], layers[1]], vec![layers[0], layers[1]]));
     // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
-    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(150.0, 65.0)));
+    let (ls, ks) = go(pos2(10.0, 5.0), pos2(150.0, 65.0));
     assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
     // Kept inside the time graph: keys only, no rows (a marquee over empty track area).
-    let (ls, ks) = go(Rect::from_min_max(pos2(204.0, 5.0), pos2(260.0, 65.0)));
+    let (ls, ks) = go(pos2(204.0, 5.0), pos2(260.0, 65.0));
     assert_eq!((ls.len(), keyed(&ks)), (0, vec![layers[0], layers[1]]));
     // A locked layer is not selected as a row (the engine drops its keys in keys.select).
-    let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
+    let (ls, _) = go(pos2(10.0, 5.0), pos2(260.0, 119.0));
+    assert_eq!(ls, [layers[0], layers[1]]);
+    // Scrolled 20 pt mid-drag: the pressed corner stays on layer A's row (#2859), so A is still
+    // selected; a screen-fixed anchor would start the box below A and select only B.
+    let (ls, _) = drag(pos2(10.0, 5.0), 0.0, pos2(260.0, 45.0), 20.0);
     assert_eq!(ls, [layers[0], layers[1]]);
 }
