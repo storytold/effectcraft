@@ -404,12 +404,26 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     let mut comps = vec![];
     let mut items = vec![];
     let mut errors = vec![];
-    // EffectCraft projects import as projects, as After Effects imports an .aep.
-    let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    // EffectCraft projects import as projects, as After Effects imports an .aep; so do After
+    // Effects projects, refused when parts of them cannot come over. The app asks about those
+    // before it gets here (`panels::aep_losses`); a script or agent gets the refusal.
+    let (project_paths, paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    let (aep_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::is_aep_path(x));
     let mut projects = vec![];
     for path in project_paths {
         match s.execute("file.importProject", json!({"path": path})) {
             Ok(r) => projects.push(r),
+            Err(e) => errors.push(format!("{path}: {e}")),
+        }
+    }
+    for path in aep_paths {
+        match s.execute("file.importAep", json!({"path": path})) {
+            Ok(r) => projects.push(r),
+            // `file.import` has no `allowLosses`: point at the entry that lists the losses, and at
+            // the command that takes the consent.
+            Err(EngineError::Refused { losses, .. }) => errors.push(format!(
+                "{path}: {losses}; File ▸ Import ▸ Adobe After Effects Project… lists them and can import the rest (`file.importAep` with `allowLosses`)"
+            )),
             Err(e) => errors.push(format!("{path}: {e}")),
         }
     }
@@ -719,8 +733,8 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.project.settings).unwrap_or_default())
 }
 
-/// Video Rendering and Effects: report or set the renderer (Mercury GPU Acceleration when a GPU
-/// adapter exists, else Mercury Software Only).
+/// Video Rendering and Effects: report or set the renderer (GPU Acceleration when a GPU
+/// adapter exists, else Software Rendering).
 fn render_backend(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(b) = p.get("backend").or_else(|| p.get("renderer")) {
         let gpu = match b {
@@ -748,14 +762,14 @@ pub fn backend_status(s: &Session) -> Value {
     let gpu = s.project.settings.gpu_acceleration;
     // Why it renders on the CPU (#262).
     let why = if !gpu {
-        Some("the project's renderer is Mercury Software Only".to_string())
+        Some("the project's renderer is Software Rendering".to_string())
     } else if adapter.is_none() {
         Some(s.accel_note.clone().unwrap_or_else(|| "no GPU compositor is attached".into()))
     } else {
         None
     };
     json!({
-        "renderer": if gpu { "Mercury GPU Acceleration" } else { "Mercury Software Only" },
+        "renderer": if gpu { "GPU Acceleration" } else { "Software Rendering" },
         "gpuAcceleration": gpu,
         "adapter": adapter,
         "active": if gpu && adapter.is_some() { "gpu" } else { "cpu" },

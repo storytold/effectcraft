@@ -322,6 +322,10 @@ build real projects through these interfaces; they are worked examples of everyt
   then `keys.velocity {"outSpeed":0,"outInfluence":33.33}`.
 * **Gradients**: `set_property {"path":"contents/gfill/colors","value":["#0080ff","#ffff00"]}` or
   `{"colors":[[0,"#0080ff"],[1,[1,1,0]]],"opacities":[[0,1],[1,0.5]]}`.
+* **Projects**: `file.import` takes `.ecproj` / `.ecprojx` and After Effects projects (`.aep`, `.aepx`)
+  too, each into a folder named after it (`projects` in the result). An After Effects project that
+  would lose parts is refused (an `errors` entry, nothing imported): `file.importAep {"path": …,
+  "dryRun": true}` lists the losses, `"allowLosses": true` imports the rest.
 * **Image sequences**: `file.import {"paths":["/r/shot_0001.png"], "sequence": true}` imports the
   file's whole numbered run as one item (several picked frames: that range; a folder: each run in
   it, also without `sequence`). Without `"sequence": true` a picked or dropped numbered file imports
@@ -713,6 +717,11 @@ in the Plug-in Library: [publishing-plugins.md](publishing-plugins.md).
   step (separated X/Y/Z Position; Orientation and X/Y/Z Rotation on 3D layers).
 * Rename a layer with Enter (or double-click a name): the whole name is selected, Enter or a
   click elsewhere commits, Escape cancels; `layer.rename {layer, name}` does it directly.
+  A text layer's name follows its text until it is renamed; renaming it to an empty name makes
+  it follow the text again (After Effects). `layer.setText` and typing on canvas rename a text
+  layer whose name still follows its text; `layer.newText {name}` and a name set by
+  `layer.settings` or a script's `layer.name = …` (which runs `layer.rename`) stay, and an empty
+  `layer.settings` name follows the text again too.
 * Ctrl/Cmd-click on the current-time display (Timeline or Composition panel) toggles the Time
   Display Style between Timecode and Frames: `file.projectSettings {"timeDisplay": "frames"}`.
 * `prop.pickWhip {layer, prop, target: {layer, prop, dimension?}}` links a property as its

@@ -22,7 +22,9 @@ use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
-#[derive(Clone, Debug)]
+mod marquee;
+
+#[derive(Clone, Debug, PartialEq)]
 enum RowKind {
     Layer,
     Group {
@@ -328,7 +330,7 @@ fn focus_expression(ctx: &egui::Context, prop: u64, select: [usize; 2]) {
     ctx.data_mut(|d| d.insert_temp(expr_focus_id(), ExprFocus { prop, select, pass }));
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Row {
     layer: LayerId,
     depth: usize,
@@ -1440,46 +1442,6 @@ fn key_drag_id() -> egui::Id {
     egui::Id::unique("tl-key-drag")
 }
 
-/// A Timeline box in progress, which selects as it moves (#2858): the comp, the selection when it
-/// began (Shift keeps it, Escape puts it back) and what was last selected for: the layers and keys
-/// touched, Shift and Cmd/Ctrl. It runs again only when one of those changes.
-#[derive(Clone, Debug)]
-struct KeyMarquee {
-    comp: ItemId,
-    keys: Vec<effectcraft_engine::KeyRef>,
-    props: Vec<(LayerId, u64)>,
-    layers: Vec<LayerId>,
-    vertices: Vec<effectcraft_engine::VertexRef>,
-    applied: Option<(Vec<u64>, Vec<effectcraft_engine::KeyRef>, bool, bool)>,
-}
-
-impl KeyMarquee {
-    fn begin(app: &EffectcraftApp, comp: ItemId) -> Self {
-        let st = &app.session.state;
-        KeyMarquee {
-            comp,
-            keys: st.selected_keys.clone(),
-            props: st.selected_props.clone(),
-            layers: st.selected_layers.clone(),
-            vertices: st.selected_vertices.clone(),
-            applied: None,
-        }
-    }
-
-    /// Back to the selection from when the box began.
-    fn restore(&self, app: &mut EffectcraftApp) {
-        let st = &mut app.session.state;
-        st.selected_keys.clone_from(&self.keys);
-        st.selected_props.clone_from(&self.props);
-        st.selected_layers.clone_from(&self.layers);
-        st.selected_vertices.clone_from(&self.vertices);
-    }
-}
-
-fn key_marquee_id() -> egui::Id {
-    egui::Id::unique("tl-key-marquee")
-}
-
 /// A Quick Offset drag of selected layer bars (Ctrl/Cmd+Alt, #1012): the bar it started on, where
 /// the pointer started, how many layers it staggers and how many frames the last one has moved.
 #[derive(Clone, Copy, Debug)]
@@ -2009,8 +1971,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     g.max_scroll = (total_h - g.rows_rect.height() + g.rh).max(0.0);
     g.rows = rows;
     reveal_scroll(app, g);
-    wheel_zoom_scroll(app, ui, g);
-    pick_whip_edge_scroll(app, g);
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
     let ectx = EvalCtx {
@@ -2022,9 +1982,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let mut rw = begin_rows(app, ui, tl);
     let g = &mut rw;
+    marquee::prepare(app, ui, g);
+    wheel_zoom_scroll(app, ui, &g.tl);
+    pick_whip_edge_scroll(app, &g.tl);
+    marquee::scroll(app, g);
     draw_rows(app, ui, g, &ectx);
     ui.set_clip_rect(g.full_clip);
     background_menus(app, ui, g);
@@ -2036,7 +2001,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     group_reorder_drag(ui, g);
     quick_offset_follow(g);
     key_drag_follow(app, g);
-    box_select(app, g);
+    marquee::finish(app, ui, g);
     current_time_indicator(app, g);
     let footer = footer_bar(app, ui, g);
     footer_zoom(app, ui, g, footer);
@@ -4499,7 +4464,7 @@ fn background_menus(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw) {
     }
 }
 
-/// Click on the empty outline (its drag is the Timeline's one box, [`box_select`]).
+/// Click on the empty outline (its drag is the Timeline's one box, [`marquee`]).
 fn outline_marquee(ui: &mut egui::Ui, g: &mut Rw) {
     let actions = &mut g.tl.actions;
     let outline_empty = g.outline_empty.clone();
@@ -4617,7 +4582,7 @@ fn alt_scale_and_graph(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, 
     // below the last row) deselects the layers and their keys and properties, as in After
 }
 
-/// Click on empty track area (its drag is the Timeline's one box, [`box_select`]).
+/// Click on empty track area (its drag is the Timeline's one box, [`marquee`]).
 fn graph_empty_area(ui: &mut egui::Ui, g: &mut Rw) {
     let actions = &mut g.tl.actions;
     let empty = g.empty.clone();
@@ -4834,93 +4799,6 @@ fn keys_in_box(comp: &Comp, rows: &[Row], tm: &TMap, top: f32, rh: f32, br: Rect
         }
     }
     keys
-}
-
-/// What a box over the Timeline selects: the layer rows it crosses (locked layers stay out) and
-/// the keys whose markers it touches. A box that reaches the outline (started on either side)
-/// selects the rows it crosses; one kept inside the time graph selects keys only, as before.
-/// Keys exist only in the time graph, so the box is cut at its left edge (`graph_x0`; a key
-/// scrolled out under the outline isn't touched).
-/// `graph_on`: the Graph Editor shows no key markers here.
-#[allow(clippy::too_many_arguments)]
-fn box_targets(
-    comp: &Comp,
-    rows: &[Row],
-    hit_rows: &[(Rect, Row)],
-    tm: &TMap,
-    top: f32,
-    rh: f32,
-    graph_x0: f32,
-    graph_on: bool,
-    br: Rect,
-) -> (Vec<u64>, Vec<effectcraft_engine::KeyRef>) {
-    let layers = hit_rows
-        .iter()
-        .filter(|(r, row)| br.min.x < graph_x0 && matches!(row.kind, RowKind::Layer) && r.intersects(br))
-        .filter(|(_, row)| comp.layer(row.layer).is_some_and(|l| !l.switches.locked))
-        .map(|(_, row)| row.layer.0)
-        .collect();
-    let in_graph = Rect::from_min_max(pos2(br.min.x.max(graph_x0), br.min.y), pos2(br.max.x, br.max.y));
-    let keys = if graph_on || in_graph.width() < 0.0 { vec![] } else { keys_in_box(comp, rows, tm, top, rh, in_graph) };
-    (layers, keys)
-}
-
-/// The Timeline's one selection box, from the empty outline or the empty time graph: it spans both
-/// columns as it is dragged (the pointer may cross the boundary either way) and on release selects
-/// the layer rows it crosses and the keys inside it, as in After Effects.
-fn box_select(app: &mut EffectcraftApp, g: &mut Rw) {
-    let t = g.tl.t;
-    let tm = g.tl.tm;
-    let rows_rect = g.tl.rows_rect;
-    let rh = g.tl.rh;
-    let graph_x0 = g.tl.graph_x0;
-    let graph_on = g.graph_on;
-    let ctx = g.tl.ctx.clone();
-    let comp = g.tl.comp.clone();
-    let cid = g.tl.cid;
-    let rows = g.tl.rows.clone();
-    let origin = [&g.outline_empty, &g.empty].into_iter().find(|r| r.dragged() || r.drag_stopped()).cloned();
-    let (released, escape, mods) = ctx.input(|i| (i.pointer.any_released(), i.key_pressed(egui::Key::Escape), i.modifiers));
-    let km = ctx.data(|d| d.get_temp::<KeyMarquee>(key_marquee_id())).filter(|k| k.comp == cid);
-    let Some(origin) = origin.filter(|o| o.dragged()) else {
-        // The release keeps what the box showed; Escape, or a drag that ends some other way, puts
-        // back the selection from before it.
-        ctx.data_mut(|d| d.remove::<KeyMarquee>(key_marquee_id()));
-        if let Some(km) = km
-            && (escape || !released)
-        {
-            km.restore(app);
-            ctx.request_repaint();
-        }
-        return;
-    };
-    let start = ctx.input(|i| i.pointer.press_origin());
-    let Some(br) =
-        start.zip(origin.interact_pointer_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()))).map(|(a, b)| Rect::from_two_pos(a, b).intersect(rows_rect))
-    else {
-        return;
-    };
-    let bp = g.tl.p.with_clip_rect(rows_rect);
-    bp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
-    bp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
-    let mut km = km.unwrap_or_else(|| KeyMarquee::begin(app, cid));
-    let (layers, touched) = box_targets(&comp, &rows, &g.hit_rows, &tm, rows_rect.min.y - app.ui.timeline.scroll_y, rh, graph_x0, graph_on, br);
-    let applied = (layers, touched, mods.shift, mods.command);
-    if km.applied.as_ref() != Some(&applied) {
-        km.restore(app);
-        let (layers, touched) = (&applied.0, &applied.1);
-        let add = mods.shift || mods.command;
-        let keys: Vec<serde_json::Value> = touched.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
-        let actions = &mut g.tl.actions;
-        // A box that catches nothing leaves nothing selected (layers included), unless it adds.
-        actions.push(("layer.select".into(), json!({"layers": layers, "add": add})));
-        if !keys.is_empty() {
-            actions.push(("keys.select".into(), json!({"keys": keys, "add": true, "selectProperties": true})));
-        }
-        km.applied = Some(applied);
-        ctx.request_repaint();
-    }
-    ctx.data_mut(|d| d.insert_temp(key_marquee_id(), km));
 }
 
 fn current_time_indicator(app: &mut EffectcraftApp, g: &Rw) {

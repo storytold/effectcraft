@@ -73,6 +73,8 @@ struct PathInfo {
     span: (f64, f64),
 }
 
+/// Reads a mask or shape path at the current time and returns its comp-space vertices, value, expression reference and layer name.
+/// Errors when the property is missing, is not a path or has no vertices.
 fn info(s: &Session, cid: ItemId, lid: LayerId, uid: Uid, cmd: &str) -> Result<PathInfo> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
@@ -87,6 +89,7 @@ fn info(s: &Session, cid: ItemId, lid: LayerId, uid: Uid, cmd: &str) -> Result<P
         footage: Some(s.footage.as_ref()),
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let KV::Path(path) = ctx.value(layer, pr) else { return Err(bad(cmd, "that property is not a path")) };
     if path.vertices.is_empty() {
@@ -165,6 +168,7 @@ fn pin_targets(s: &Session, p: &Value, cmd: &str) -> Result<Option<(ItemId, Vec<
         footage: Some(s.footage.as_ref()),
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let mut out = vec![];
     for (_, lid, uid) in pins {

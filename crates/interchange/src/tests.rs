@@ -314,6 +314,24 @@ fn imports_fcp7_xml_fcpxml_and_otio() {
     }
 }
 
+/// A clip speed past what a layer's stretch supports (±1 % to ±9900 %) is held to it and named.
+/// Before, a speed of 1e6 gave a stretch of 1e-4 % and the layer and audio time divided by ~0
+/// (#3247).
+#[test]
+fn an_extreme_clip_speed_is_held_to_the_stretch_range() {
+    for (speed, stretch) in [(1e6, 1.0), (1e-6, 9900.0)] {
+        let (mut doc, main) = edit();
+        doc.sequence_mut(main).unwrap().video_tracks[1].items[0].speed = speed;
+        let (bytes, _) = fc::export(&doc, main, fc::Format::Otio, &Default::default()).unwrap();
+        let (p, r) = import_doc(&bytes, "Main.otio", &mut probe);
+        let main_comp = r.comps.iter().copied().find(|c| p.item(*c).unwrap().name == "Main").expect("Main comp");
+        let c = p.comp(main_comp).unwrap();
+        let stretched: Vec<f64> = c.layers.iter().map(|l| l.stretch).filter(|s| (s - 100.0).abs() > 1e-9).collect();
+        assert_eq!(stretched, [stretch], "speed {speed}");
+        assert!(r.warnings.iter().any(|w| w.contains("speed") && w.contains("outside")), "speed {speed}: {:?}", r.warnings);
+    }
+}
+
 #[test]
 fn imports_aaf_and_omf() {
     let (doc, main) = edit();
