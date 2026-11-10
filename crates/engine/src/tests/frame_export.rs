@@ -230,3 +230,156 @@ fn save_frame_as_queued_respects_frame_default_template() {
     s.execute_checked("renderQueue.setTemplateDefault", json!({"kind": "outputModule", "slot": "still", "name": "JPEG Sequence"})).unwrap();
     assert!(s.execute_checked("comp.saveFrameAs", json!({"queue": true})).is_ok());
 }
+
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// A 32×32 comp in a managed project (sRGB working space, linearized): a full-frame over-range
+/// solid under a 16×16 in-range Multiply solid at 50%.
+fn hdr_frame(bit_depth: u64, hdr: &str) -> Session {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 32, "height": 32, "frameRate": 24, "duration": 1})).unwrap();
+    s.execute("file.projectSettings", json!({"bitDepth": bit_depth, "workingSpace": "srgb", "linearize": true, "hdr": hdr})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "Bright", "color": [4.0, 2.0, 0.5]})).unwrap();
+    let box_ = s.execute("layer.newSolid", json!({"name": "Box", "color": [0.85, 0.9, 0.2], "width": 16, "height": 16})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setBlendMode", json!({"layers": [box_], "mode": "Multiply"})).unwrap();
+    s.execute("prop.set", json!({"layer": box_, "path": "transform/opacity", "value": 50})).unwrap();
+    s
+}
+
+/// Photoshop Layers keeps the HDR step (it is a display-referred output): its bytes for each bit
+/// depth × HDR mode.
+#[test]
+fn photoshop_layers_bytes_are_unchanged() {
+    let dir = out_dir("frame-psd-golden");
+    let mut got = vec![];
+    for depth in [8, 16, 32] {
+        for hdr in ["clip", "compand", "toneMap"] {
+            let mut s = hdr_frame(depth, hdr);
+            let path = dir.join(format!("{depth}-{hdr}.psd")).to_string_lossy().to_string();
+            s.execute("comp.saveFrameAsPsd", json!({"path": path})).unwrap();
+            got.push(fnv(&std::fs::read(&path).unwrap()));
+        }
+    }
+    // The hashes before ProEXR skipped the HDR step.
+    let want: [u64; 9] = [
+        0x3b921d4d9fc3119f,
+        0x1886d026edf36a7f,
+        0x6b564aa7fb50139f,
+        0xabd585992079fc9f,
+        0x88ca38726eaa557f,
+        0xa3636606d7a4927f,
+        0x7385ed211e9815ff,
+        0x7385ed211e9815ff,
+        0xfb59fa3f3bdfac3f,
+    ];
+    assert_eq!(got, want);
+}
+
+/// Every sample of a ProEXR file, channels in name order.
+fn proexr_samples(path: &str) -> Vec<(String, Vec<f32>)> {
+    use exr::prelude::*;
+    let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_file(path).unwrap();
+    let mut out: Vec<(String, Vec<f32>)> = img.layer_data[0]
+        .channel_data
+        .list
+        .iter()
+        .map(|c| match &c.sample_data {
+            FlatSamples::F32(v) => (c.name.to_string(), v.clone()),
+            o => panic!("{o:?}"),
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// ProEXR decodes with the output space's own curve. A Rec. 709 output has the sRGB working
+/// space's primaries but another curve, so the composite and the isolated layer must hold the
+/// solid's light (its sRGB working value decoded), not the sRGB decode of its Rec. 709 encoding.
+#[test]
+fn proexr_decodes_a_non_srgb_output_curve() {
+    let dir = out_dir("frame-exr-rec709");
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 32, "height": 32, "frameRate": 24, "duration": 1})).unwrap();
+    s.execute("file.projectSettings", json!({"bitDepth": 32, "workingSpace": "srgb", "linearize": true, "outputSpace": "rec709"})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "Warm", "color": [0.8, 0.5, 0.2]})).unwrap();
+    let path = dir.join("rec709.exr").to_string_lossy().to_string();
+    s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+    let got = proexr_samples(&path);
+    let at = |n: &str| got.iter().find(|c| c.0 == n).unwrap_or_else(|| panic!("no {n}")).1[0];
+    let lin = effectcraft_color::srgb_to_linear;
+    for (n, want) in [("R", lin(0.8)), ("G", lin(0.5)), ("B", lin(0.2)), ("Warm.R", lin(0.8)), ("Warm.B", lin(0.2))] {
+        assert!((at(n) - want).abs() <= 1e-3 * want, "{n}: {} vs {want}", at(n));
+    }
+}
+
+/// ProEXR samples in Clip mode (sRGB output) for each bit depth.
+#[test]
+fn proexr_clip_samples_are_unchanged() {
+    let dir = out_dir("frame-exr-clip-golden");
+    let mut got = vec![];
+    for depth in [8, 16, 32] {
+        let mut s = hdr_frame(depth, "clip");
+        let path = dir.join(format!("{depth}.exr")).to_string_lossy().to_string();
+        s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+        let bytes: Vec<u8> =
+            proexr_samples(&path).iter().flat_map(|(n, v)| n.bytes().chain(v.iter().flat_map(|x| x.to_bits().to_le_bytes())).collect::<Vec<u8>>()).collect();
+        got.push(fnv(&bytes));
+    }
+    // The hashes before ProEXR skipped the HDR step.
+    let want: [u64; 3] = [0x4b9ecc87e6db7d03, 0xe06a35d302e71503, 0x694ca552f3efc903];
+    assert_eq!(got, want);
+}
+
+/// ProEXR ignores compand and tone mapping: the composite and every isolated layer hold the Clip
+/// mode's samples, and over-range values stay.
+#[test]
+fn proexr_layers_are_not_tone_mapped() {
+    let dir = out_dir("frame-exr-hdr");
+    let samples = |depth: u64, hdr: &str| {
+        let mut s = hdr_frame(depth, hdr);
+        let path = dir.join(format!("{depth}-{hdr}.exr")).to_string_lossy().to_string();
+        s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+        proexr_samples(&path)
+    };
+    for depth in [8, 16, 32] {
+        let clip = samples(depth, "clip");
+        assert!(clip.iter().any(|(n, _)| n == "Bright.R") && clip.iter().any(|(n, _)| n == "Box.R"), "{:?}", clip.iter().map(|c| &c.0).collect::<Vec<_>>());
+        for hdr in ["compand", "toneMap"] {
+            assert!(samples(depth, hdr) == clip, "{depth} bpc {hdr}");
+        }
+    }
+    let tone = samples(32, "toneMap");
+    let at = |n: &str| tone.iter().find(|c| c.0 == n).unwrap().1[0];
+    // The solid's colour is sRGB-encoded in the working space (4.0 is about 25.3 in linear light).
+    let lin = effectcraft_color::srgb_to_linear;
+    for (n, want) in [("Bright.R", lin(4.0)), ("Bright.G", lin(2.0)), ("Bright.B", lin(0.5)), ("R", lin(4.0))] {
+        assert!((at(n) - want).abs() <= 1e-4 * want, "{n}: {} vs {want}", at(n));
+    }
+}
+
+/// The `chromaticities` attribute of the ProEXR file `path`: red, green, blue, white (CIE xy).
+fn proexr_chromaticities(s: &mut Session, name: &str) -> Option<[[f32; 2]; 4]> {
+    let path = out_dir(name).join("frame.exr").to_string_lossy().to_string();
+    s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::BufReader::new(std::fs::File::open(&path).unwrap()), false).unwrap();
+    meta.headers[0].shared_attributes.chromaticities.map(|c| [c.red, c.green, c.blue, c.white].map(|v| [v.0, v.1]))
+}
+
+/// ProEXR names the primaries and white of the output space (default: Rec. 709 / sRGB).
+#[test]
+fn proexr_writes_the_output_spaces_chromaticities() {
+    let d65 = [0.3127, 0.3290];
+    let mut s = frame();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-default"), Some([[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], d65]));
+    s.execute("file.projectSettings", json!({"workingSpace": "srgb", "outputSpace": "p3"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-p3"), Some([[0.680, 0.320], [0.265, 0.690], [0.150, 0.060], d65]));
+    s.execute("file.projectSettings", json!({"outputSpace": "rec2020"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-2020"), Some([[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], d65]));
+    s.execute("file.projectSettings", json!({"outputSpace": "rec2100pq"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-pq"), Some([[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], d65]));
+    // Unmanaged: the output space is ignored, the Working Gamma's curve (Rec. 709 primaries) decodes.
+    s.execute("file.projectSettings", json!({"workingSpace": "none", "outputSpace": "p3"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-unmanaged"), Some([[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], d65]));
+}

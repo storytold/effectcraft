@@ -4,6 +4,7 @@ use super::{
     layer_mut, layer_p, merge_p, str_p,
 };
 
+/// Add a tool-shaped mask in one document edit, then request its Timeline controls separately.
 pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.addMask")?;
     let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).ok_or(EngineError::NoComp)?.clone();
@@ -16,8 +17,17 @@ pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         None => (if w > 0.0 { w / 2.0 } else { 0.0 }, h / 2.0, w * 0.6, h * 0.6),
     };
     // The shape tools' masks: rectangle, ellipse, rounded rectangle, polygon or star.
-    let path = crate::cmd::shape_tool::mask_path(shape, [cx, cy], [rw, rh])
+    let radius = match p.get("roundness").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => {
+            Some(v.as_f64().filter(|r| r.is_finite() && *r >= 0.0).ok_or_else(|| bad("layer.addMask", "`roundness` is a corner radius in pixels, 0 or more"))?)
+        }
+    };
+    let path = crate::cmd::shape_tool::mask_path_rounded(shape, [cx, cy], [rw, rh], radius)
         .ok_or_else(|| bad("layer.addMask", format!("unknown shape `{shape}`; one of rect, ellipse, rounded, polygon, star")))?;
+    if radius.is_some() && !matches!(shape, "rounded" | "roundedRect") {
+        return Err(bad("layer.addMask", "`roundness` only applies to shapes `rounded` and `roundedRect`"));
+    }
     let mode = str_p(p, "mode").and_then(MaskMode::from_name).unwrap_or(MaskMode::Add);
     let cycle = s.prefs.appearance.cycle_mask_colors;
     let uid = s.edit("New Mask", None, |proj, _| {
@@ -31,6 +41,10 @@ pub(super) fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         proj.next_id = next;
         Ok(uid)
     })?;
+    s.events.push(crate::Event::Frontend {
+        command: "timeline.revealMask".into(),
+        params: json!({"comp": cid.0, "layer": lid.0, "mask": uid, "projectEpoch": s.script_ui.project_epoch}),
+    });
     Ok(json!({"mask": uid}))
 }
 
@@ -174,8 +188,8 @@ fn set_text_layers(s: &Session, p: &Value) -> Result<(ItemId, Vec<LayerId>)> {
 /// recognised character attributes are also staged in the pending insertion style without
 /// changing existing characters. Paragraph/document attributes still apply through the edit;
 /// the session is bumped whenever this branch runs. Document changes use [`Session::edit`],
-/// merged by `merge_p`. With `text` given, a layer whose name is empty or starts with `Text`
-/// takes the new first line (up to 40 characters) when that line is non-empty. Replies `null`.
+/// merged by `merge_p`. With `text` given, a layer whose name still follows its text is renamed
+/// after the new text (#3233). Replies `null`.
 /// With no layer to change it does nothing: the panels stay quiet over a locked selection.
 pub(super) fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lids) = set_text_layers(s, p)?;
@@ -220,14 +234,14 @@ pub(super) fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
                 KV::Str(t) => TextDoc::plain(&t),
                 _ => TextDoc::default(),
             };
+            let before = effectcraft_project::text_layer_name(&doc.text);
             apply_text_params("layer.setText", p, &mut doc, range.clone())?;
             pr.set_value_at(lt, KV::Text(Box::new(doc.clone())));
-            if let Some(first) = doc.text.lines().next()
-                && str_p(p, "text").is_some()
-                && !first.is_empty()
-                && (l.name.starts_with("Text") || l.name.is_empty())
-            {
-                l.name = first.chars().take(40).collect();
+            // Text layers are named after their text until renamed (#3233).
+            let after = effectcraft_project::text_layer_name(&doc.text);
+            if str_p(p, "text").is_some() && !after.is_empty() && l.name_follows_text(&before) {
+                l.name = after;
+                l.name_follows_text = Some(true);
             }
         }
         Ok(())

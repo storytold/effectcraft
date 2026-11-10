@@ -187,8 +187,10 @@ pub(super) fn new_text(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let edit = b_p(p, "edit").unwrap_or(false);
     let id = s.edit("New Text Layer", None, |proj, st| {
-        let name: String = layer_name.clone().unwrap_or_else(|| doc.text.lines().next().unwrap_or("").chars().take(40).collect());
+        let name: String = layer_name.clone().unwrap_or_else(|| effectcraft_project::text_layer_name(&doc.text));
         let mut l = build::layer(proj, &comp, if name.is_empty() { "Text" } else { &name }, LayerSource::Text, (comp.width, comp.height), None);
+        // Named after its text, the name follows the text until renamed; a given name does not.
+        l.name_follows_text = Some(layer_name.as_deref().is_none_or(str::is_empty));
         if let Some(pr) = l.props.prop_mut("text/sourceText") {
             pr.value = KV::Text(Box::new(doc.clone()));
         }

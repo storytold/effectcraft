@@ -52,11 +52,28 @@ pub struct EncoderConfig {
     pub keyint: u32,
     /// BT.709 limited range is signalled unless this is set.
     pub full_range: bool,
+    /// The colour description of `color_config` (ITU-T H.273 code points); BT.709 by default.
+    pub color_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coefficients: u8,
 }
 
 impl EncoderConfig {
     pub fn new(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Self {
-        EncoderConfig { width, height, fps_num, fps_den, bit_depth: 8, level_idx: None, rate: RateControl::ConstantQ(100), keyint: 60, full_range: false }
+        EncoderConfig {
+            width,
+            height,
+            fps_num,
+            fps_den,
+            bit_depth: 8,
+            level_idx: None,
+            rate: RateControl::ConstantQ(100),
+            keyint: 60,
+            full_range: false,
+            color_primaries: 1,
+            transfer_characteristics: 1,
+            matrix_coefficients: 1,
+        }
     }
 }
 
@@ -364,9 +381,9 @@ impl Encoder {
         w.f(1, (c.bit_depth > 8) as u32); // high_bitdepth
         w.f(1, 0); // mono_chrome
         w.f(1, 1); // color_description_present_flag
-        w.f(8, 1); // color_primaries: BT.709
-        w.f(8, 1); // transfer_characteristics: BT.709
-        w.f(8, 1); // matrix_coefficients: BT.709
+        w.f(8, c.color_primaries as u32); // color_primaries
+        w.f(8, c.transfer_characteristics as u32); // transfer_characteristics
+        w.f(8, c.matrix_coefficients as u32); // matrix_coefficients
         w.f(1, c.full_range as u32); // color_range
         w.f(2, 0); // chroma_sample_position: unknown
         w.f(1, 0); // separate_uv_delta_q

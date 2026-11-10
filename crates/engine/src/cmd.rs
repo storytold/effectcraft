@@ -1,6 +1,7 @@
 //! The command registry. Ids follow After Effects' menu structure; every menu item, panel button,
 //! shortcut and viewer/timeline gesture maps to one of these.
 
+mod aep;
 mod align;
 mod align_data;
 mod anim;
@@ -18,8 +19,8 @@ pub mod content_fill;
 mod create;
 mod edit;
 mod effect;
-pub use effect::CryptoProbeJob;
-pub(crate) use effect::{CryptoProbeSlot, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe};
+pub use effect::{CryptoCoverage, CryptoProbeJob, PLUGINS_DIR};
+pub(crate) use effect::{CryptoProbeSlot, crypto_coverage, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe};
 pub mod essential;
 pub mod expr_tools;
 mod file;
@@ -160,6 +161,7 @@ mod params;
 mod schema;
 
 use super::commands;
+pub use aep::is_aep_path;
 pub use enabled::always;
 pub(crate) use enabled::{has_comp, has_keys, has_layers, has_project_selection, not_yet, not_yet_run};
 pub use params::match_path_of;
@@ -175,6 +177,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         let mut v = Vec::new();
         v.extend(file::specs());
         v.extend(crate::models::specs());
+        v.extend(crate::library::specs());
         v.extend(edit::specs());
         v.extend(comp::specs());
         v.extend(layer::specs());
@@ -217,6 +220,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(relink::specs());
         v.extend(relink_moved::specs());
         v.extend(lottie::specs());
+        v.extend(aep::specs());
         v.extend(import_project::specs());
         v.extend(timeline::specs());
         v.extend(comp_more::specs());

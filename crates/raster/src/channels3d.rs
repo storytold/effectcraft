@@ -127,12 +127,7 @@ impl AuxChannels {
     pub fn crypto_rank_planes(&self, layer: &str) -> Vec<(&[f32], &[f32])> {
         let mut out = vec![];
         for k in 0.. {
-            let (r, g, b, a) = (
-                self.get(&format!("{layer}{k:02}.R")),
-                self.get(&format!("{layer}{k:02}.G")),
-                self.get(&format!("{layer}{k:02}.B")),
-                self.get(&format!("{layer}{k:02}.A")),
-            );
+            let (r, g, b, a) = (self.rank(layer, k, 'R'), self.rank(layer, k, 'G'), self.rank(layer, k, 'B'), self.rank(layer, k, 'A'));
             let (Some(r), Some(g)) = (r, g) else { break };
             out.push((r, g));
             if let (Some(b), Some(a)) = (b, a) {
@@ -140,6 +135,13 @@ impl AuxChannels {
             }
         }
         out
+    }
+
+    /// The plane `{layer}{k:02}.{comp}`: the layer name matches case-sensitively (layers
+    /// `Crypto_A` and `crypto_a` are different layers), the component letter either case.
+    fn rank(&self, layer: &str, k: usize, comp: char) -> Option<&[f32]> {
+        let tail = format!("{k:02}.{comp}");
+        self.channels.iter().find(|(n, _)| n.strip_prefix(layer).is_some_and(|rest| rest.eq_ignore_ascii_case(&tail))).map(|(_, v)| v.as_slice())
     }
 
     /// Rank pairs (id, coverage) of Cryptomatte layer `layer` at aux pixel index `i`. For a
@@ -153,6 +155,20 @@ impl AuxChannels {
     pub fn resolve_crypto_layer(&self, want: &str) -> Option<String> {
         let layers = self.crypto_layers();
         layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).or(layers.first()).cloned()
+    }
+
+    /// [`AuxChannels::resolve_crypto_layer`] with a layer named in full first: the layer called
+    /// exactly `name` when it is not empty and the footage has it (`Crypto_Material`, a name an
+    /// imported After Effects project carries), else the layer for `want`.
+    /// The name as given is tried first (EXR channel names may carry spaces), then trimmed.
+    pub fn resolve_crypto_layer_named(&self, name: &str, want: &str) -> Option<String> {
+        let layers = self.crypto_layers();
+        for name in [name, name.trim()] {
+            if !name.is_empty() && layers.iter().any(|l| l == name) {
+                return Some(name.to_string());
+            }
+        }
+        self.resolve_crypto_layer(want)
     }
 
     /// The ID (its hash, `f32::to_bits`) with the most coverage at aux pixel `i` of Cryptomatte
@@ -256,6 +272,19 @@ mod tests {
         let at = |i| a.crypto_id_at(&l, i);
         assert_eq!([at(0), at(1), at(2), at(3), at(9)], [Some(crypto_hash("y")), Some(crypto_hash("x")), None, Some(crypto_hash("x")), None]);
         assert_eq!(AuxChannels::new(1, 1, 1.0).resolve_crypto_layer("CryptoObject"), None);
+        // A layer named in full wins; an empty or missing name falls back to `want`.
+        assert_eq!(a.resolve_crypto_layer_named("Other", "CryptoObject").as_deref(), Some("Other"));
+        assert_eq!(a.resolve_crypto_layer_named(" Other ", "CryptoObject").as_deref(), Some("Other"));
+        assert_eq!(a.resolve_crypto_layer_named("", "CryptoObject").as_deref(), Some("ViewLayer.CryptoObject"));
+        assert_eq!(a.resolve_crypto_layer_named("Crypto_Name", "CryptoObject").as_deref(), Some("ViewLayer.CryptoObject"));
+        assert_eq!(AuxChannels::new(1, 1, 1.0).resolve_crypto_layer_named("Other", "CryptoObject"), None);
+        // A layer whose name ends in a space is matched as named, before the trimmed name.
+        let mut b = AuxChannels::new(1, 1, 1.0);
+        for l in ["Mat", "Mat "] {
+            b.channels.push((format!("{l}00.R"), vec![0.0]));
+        }
+        assert_eq!(b.resolve_crypto_layer_named("Mat ", "CryptoObject").as_deref(), Some("Mat "));
+        assert_eq!(b.resolve_crypto_layer_named(" Mat", "CryptoObject").as_deref(), Some("Mat"));
     }
 
     #[test]
@@ -320,5 +349,23 @@ mod tests {
             assert_eq!(from_planes, a.crypto_ranks("CryptoMaterial", i));
         }
         assert!(a.crypto_rank_planes("CryptoObject").is_empty());
+    }
+
+    /// Layers whose names differ only in case stay separate: `Crypto_A` and `crypto_a` each read
+    /// their own ranks (lowercase component letters still match), and picking agrees.
+    #[test]
+    fn crypto_layers_differing_in_case_read_their_own_planes() {
+        let mut a = AuxChannels::new(1, 1, 1.0);
+        let f = |n: &str| crypto_float(crypto_hash(n));
+        for (n, v) in [("Crypto_A00.R", f("upper")), ("Crypto_A00.G", 1.0), ("crypto_a00.r", f("lower")), ("crypto_a00.g", 1.0)] {
+            a.channels.push((n.into(), vec![v]));
+        }
+        assert_eq!(a.crypto_layers(), vec!["Crypto_A".to_string(), "crypto_a".to_string()]);
+        assert_eq!(a.resolve_crypto_layer_named("crypto_a", "CryptoObject").as_deref(), Some("crypto_a"));
+        assert_eq!(a.crypto_rank_planes("crypto_a")[0].0, &[f("lower")][..]);
+        assert_eq!(a.crypto_rank_planes("Crypto_A")[0].0, &[f("upper")][..]);
+        assert_eq!(a.crypto_id_at("crypto_a", 0), Some(crypto_hash("lower")));
+        assert_eq!(a.crypto_id_at("Crypto_A", 0), Some(crypto_hash("upper")));
+        assert!(a.crypto_rank_planes("CRYPTO_A").is_empty());
     }
 }

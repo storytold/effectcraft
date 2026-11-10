@@ -27,7 +27,9 @@ pub(crate) fn path_value(v: &Value) -> Json {
     }
 }
 
-pub(crate) fn to_path(j: &Json) -> Option<Value> {
+/// A Lottie path. `closed` is used when the path has no `c`: Bodymovin 3.x and early 4.x keep the
+/// flag outside the path, as `cl` on a mask and `closed` on an `sh` item.
+pub(crate) fn to_path(j: &Json, closed: bool) -> Option<Value> {
     let o = match j {
         Json::Array(a) => a.first()?,
         o => o,
@@ -48,7 +50,7 @@ pub(crate) fn to_path(j: &Json) -> Option<Value> {
         in_tangents: fit(pts("i")),
         out_tangents: fit(pts("o")),
         vertices,
-        closed: o.get("c").and_then(Json::as_bool).unwrap_or(false),
+        closed: o.get("c").and_then(Json::as_bool).unwrap_or(closed),
         feather: Vec::new(),
     }))
 }
@@ -493,7 +495,8 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
             "sh" => {
                 let mut g = build::shape_path(ids, ShapePath::default());
                 dir(&mut g);
-                set(im, &mut g, "path", j.get("ks"), &to_path);
+                let closed = j.get("closed").and_then(Json::as_bool).unwrap_or(false);
+                set(im, &mut g, "path", j.get("ks"), &|v| to_path(v, closed));
                 g
             }
             "fl" => {
