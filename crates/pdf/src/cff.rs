@@ -538,16 +538,31 @@ impl Cff {
 
     /// A glyph's outline in glyph space (`font_matrix` maps it to text space) and its advance.
     pub fn outline(&self, gid: u16) -> Option<(BezPath, f64)> {
-        self.outline_depth(gid, 0)
+        self.outline_depth(gid, 0, &mut { MAX_GLYPH_OPS })
     }
 
-    fn outline_depth(&self, gid: u16, depth: usize) -> Option<(BezPath, f64)> {
+    /// `ops` is the glyph's instruction budget, shared by the base glyph and its seac components.
+    fn outline_depth(&self, gid: u16, depth: usize, ops: &mut usize) -> Option<(BezPath, f64)> {
         let r = self.charstrings.get(gid as usize)?.clone();
         let fd = self.fdselect.get(gid as usize).copied().unwrap_or(0) as usize;
         let fd = fd.min(self.lsubrs.len() - 1);
-        let mut st =
-            T2 { cff: self, fd, path: BezPath::new(), x: 0.0, y: 0.0, stack: vec![], stems: 0, width: None, open: false, done: false, depth: 0, seac: None };
+        let mut st = T2 {
+            cff: self,
+            fd,
+            path: BezPath::new(),
+            x: 0.0,
+            y: 0.0,
+            stack: vec![],
+            stems: 0,
+            width: None,
+            open: false,
+            done: false,
+            depth: 0,
+            ops: *ops,
+            seac: None,
+        };
         st.run(&self.data[r]);
+        *ops = st.ops;
         if st.open {
             st.path.close_path();
         }
@@ -563,10 +578,10 @@ impl Cff {
             && depth < 2
         {
             let find = |code: u8| crate::encoding::Base::Standard.name(code).and_then(|n| self.gid_by_name(&n));
-            if let Some((bp, _)) = find(b).and_then(|g| self.outline_depth(g, depth + 1)) {
+            if let Some((bp, _)) = find(b).and_then(|g| self.outline_depth(g, depth + 1, ops)) {
                 path.extend(bp);
             }
-            if let Some((ap, _)) = find(a).and_then(|g| self.outline_depth(g, depth + 1)) {
+            if let Some((ap, _)) = find(a).and_then(|g| self.outline_depth(g, depth + 1, ops)) {
                 path.extend(kurbo::Affine::translate((adx, ady)) * ap);
             }
         }
@@ -646,8 +661,15 @@ struct T2<'a> {
     open: bool,
     done: bool,
     depth: usize,
+    /// Instructions this glyph may still run, across its subroutine calls.
+    ops: usize,
     seac: Option<(f64, f64, u8, u8)>,
 }
+
+/// The most charstring instructions one glyph runs: subroutines that branch (two calls each,
+/// ten levels deep) would otherwise multiply a small font into unbounded work and geometry.
+/// A real glyph runs a few hundred.
+pub(crate) const MAX_GLYPH_OPS: usize = 100_000;
 
 impl T2<'_> {
     fn move_to(&mut self, dx: f64, dy: f64) {
@@ -698,6 +720,11 @@ impl T2<'_> {
         }
         let mut i = 0;
         while i < cs.len() && !self.done {
+            let Some(left) = self.ops.checked_sub(1) else {
+                self.done = true;
+                return;
+            };
+            self.ops = left;
             let b0 = cs[i];
             i += 1;
             match b0 {
@@ -958,6 +985,12 @@ impl T2<'_> {
 /// named by custom strings.
 #[cfg(test)]
 pub(crate) fn write_test_cff(glyphs: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    write_test_cff_with_gsubrs(glyphs, &[])
+}
+
+/// [`write_test_cff`] with global subroutines.
+#[cfg(test)]
+pub(crate) fn write_test_cff_with_gsubrs(glyphs: &[(&str, Vec<u8>)], gsubrs: &[Vec<u8>]) -> Vec<u8> {
     fn idx(items: &[Vec<u8>]) -> Vec<u8> {
         let mut out = (items.len() as u16).to_be_bytes().to_vec();
         if items.is_empty() {
@@ -983,7 +1016,7 @@ pub(crate) fn write_test_cff(glyphs: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let names = idx(&[b"Test".to_vec()]);
     let strings: Vec<Vec<u8>> = glyphs.iter().skip(1).map(|(n, _)| n.as_bytes().to_vec()).collect();
     let strings_idx = idx(&strings);
-    let gsubrs = idx(&[]);
+    let gsubrs = idx(gsubrs);
     let cs = idx(&glyphs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>());
     // charset format 0: SIDs of glyphs 1.. (custom strings from 391).
     let mut charset = vec![0u8];
@@ -1088,6 +1121,43 @@ mod tests {
         let cff = Cff::parse(&font).unwrap();
         let (p, _) = cff.outline(cff.gid_by_name("A").unwrap()).unwrap();
         assert!(p.elements().is_empty());
+    }
+
+    /// A global subroutine that calls itself ten times: 10^10 calls within the depth limit of
+    /// ten. The glyph stops at its instruction budget instead.
+    #[test]
+    fn branching_subroutines_stop_at_the_instruction_budget() {
+        // `-107 callgsubr` (bias 107) is subroutine 0.
+        let call = [32u8, 29];
+        let mut subr = call.repeat(10);
+        subr.push(11);
+        let mut cs = call.to_vec();
+        cs.push(14);
+        let font = write_test_cff_with_gsubrs(&[(".notdef", vec![14]), ("A", cs)], &[subr]);
+        let cff = Cff::parse(&font).unwrap();
+        let (p, _) = cff.outline(cff.gid_by_name("A").unwrap()).unwrap();
+        assert!(p.elements().is_empty());
+    }
+
+    /// The instruction budget is one per glyph: a seac whose base glyph spends all of it leaves
+    /// nothing for the accent, instead of each component getting a fresh budget.
+    #[test]
+    fn seac_components_share_the_instruction_budget() {
+        let call = [32u8, 29];
+        let mut subr = call.repeat(10);
+        subr.push(11);
+        // A square, then the branching subroutine that exhausts the budget.
+        let mut a = vec![139 + 100, 139 + 100, 139 - 100, 6];
+        a.extend(call);
+        a.push(14);
+        // `adx ady bchar achar endchar` with both components 'A' (standard code 65).
+        let seac = vec![139 + 10, 139 + 20, 139 + 65, 139 + 65, 14];
+        let font = write_test_cff_with_gsubrs(&[(".notdef", vec![14]), ("A", a), ("Aacute", seac)], &[subr]);
+        let cff = Cff::parse(&font).unwrap();
+        let (alone, _) = cff.outline(cff.gid_by_name("A").unwrap()).unwrap();
+        let (both, _) = cff.outline(cff.gid_by_name("Aacute").unwrap()).unwrap();
+        assert!(!alone.elements().is_empty());
+        assert_eq!(both.elements().len(), alone.elements().len(), "the accent gets no budget after the base spent it");
     }
 
     /// A CFF whose top DICT points its Private DICT at offsets near `usize::MAX`: `size` and `off`

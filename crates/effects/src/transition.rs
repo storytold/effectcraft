@@ -1,5 +1,5 @@
 //! Transition effects (batch 2): Block Dissolve, Gradient Wipe (gradient layer or self), Iris Wipe, Card
-//! Wipe (3D cards with camera, lighting and jitter), CC Grid Wipe, CC Radial ScaleWipe, CC Scale Wipe and CC Light Wipe.
+//! Wipe (3D cards with camera, lighting and jitter), Grid Wipe, Radial Scale Wipe, Scale Wipe and Light Wipe.
 //!
 //! Every transition is the identity at 0 % completion. Angles are clockwise from "up".
 
@@ -314,53 +314,86 @@ pub(crate) fn card_wipe_plan(ctx: &EffectCtx, b: &Buf) -> Option<PiecePlan> {
     Some(PiecePlan { pieces, front: PieceTex::Layer, back })
 }
 
+/// Double-precision grid geometry, shared with the GPU mask upload. A tiny
+/// rounding error at a tile boundary can otherwise flip a fully opaque pixel.
+pub struct GridWipe {
+    c: (f64, f64),
+    s: f64,
+    co: f64,
+    cs: f64,
+    maxd: f64,
+    shape: u32,
+    reverse: bool,
+    done: f64,
+    border: f64,
+}
+
+impl GridWipe {
+    /// Construct from buffer geometry; no pixel data is accessed.
+    pub fn new(ctx: &EffectCtx, b: &Buf) -> Self {
+        let done = completion(ctx);
+        let c = b.to_px(ctx.params.v2("center"));
+        let rot = ctx.params.f("rotation").to_radians();
+        let border = ctx.params.f("border").max(0.0) * b.scale;
+        let tiles = ctx.params.f("tiles").round().clamp(1.0, 500.0);
+        let shape = ctx.params.e("shape");
+        let reverse = ctx.params.b("reverse");
+        let (_, _, w, _) = layer_rect(ctx, b);
+        let cs = (w / tiles).max(1.0);
+        let (s, co) = rot.sin_cos();
+        let metric = |dx: f64, dy: f64| match shape {
+            0 => dx.abs(),
+            2 => dx.abs().max(dy.abs()),
+            _ => dx.hypot(dy),
+        };
+        let maxd = max_corner_dist(b, c, |dx, dy| {
+            let (qx, qy) = (dx * co + dy * s, -dx * s + dy * co);
+            metric(qx, qy)
+        });
+        GridWipe { c, s, co, cs, maxd, shape, reverse, done, border }
+    }
+
+    /// Alpha multiplier at a buffer pixel centre.
+    pub fn coverage(&self, x: u32, y: u32) -> f32 {
+        let Self { c, s, co, cs, maxd, shape, reverse, done, border } = *self;
+        let metric = |dx: f64, dy: f64| match shape {
+            0 => dx.abs(),
+            2 => dx.abs().max(dy.abs()),
+            _ => dx.hypot(dy),
+        };
+        let spread = 0.25;
+        let (dx, dy) = (x as f64 + 0.5 - c.0, y as f64 + 0.5 - c.1);
+        let (qx, qy) = (dx * co + dy * s, -dx * s + dy * co);
+        let (cx, cy) = (((qx / cs).floor() + 0.5) * cs, ((qy / cs).floor() + 0.5) * cs);
+        let mut o = (metric(cx, cy) / maxd).clamp(0.0, 1.0);
+        if reverse {
+            o = 1.0 - o;
+        }
+        let p = ((done * (1.0 + spread) - o) / spread).clamp(0.0, 1.0);
+        if p <= 0.0 {
+            return 1.0;
+        }
+        let half = cs * 0.5 * (1.0 - p);
+        let m = (qx - cx).abs().max((qy - cy).abs());
+        let k = if border > 0.0 {
+            ((half - m) / border + 0.5).clamp(0.0, 1.0)
+        } else if m < half {
+            1.0
+        } else {
+            0.0
+        };
+        k as f32
+    }
+}
+
 fn grid_wipe(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let done = completion(ctx);
-    if done <= 0.0 {
+    if completion(ctx) <= 0.0 {
         return b;
     }
-    let c = b.to_px(ctx.params.v2("center"));
-    let rot = ctx.params.f("rotation").to_radians();
-    let border = ctx.params.f("border").max(0.0) * b.scale;
-    let tiles = ctx.params.f("tiles").round().clamp(1.0, 500.0);
-    let shape = ctx.params.e("shape");
-    let reverse = ctx.params.b("reverse");
-    let (_, _, w, _) = layer_rect(ctx, &b);
-    let cs = (w / tiles).max(1.0);
-    let (s, co) = rot.sin_cos();
-    let metric = |dx: f64, dy: f64| match shape {
-        0 => dx.abs(),
-        2 => dx.abs().max(dy.abs()),
-        _ => dx.hypot(dy),
-    };
-    let maxd = max_corner_dist(&b, c, |dx, dy| {
-        let (qx, qy) = (dx * co + dy * s, -dx * s + dy * co);
-        metric(qx, qy)
-    });
-    let spread = 0.25;
+    let grid = GridWipe::new(ctx, &b);
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
-            let (dx, dy) = (x as f64 + 0.5 - c.0, y as f64 + 0.5 - c.1);
-            let (qx, qy) = (dx * co + dy * s, -dx * s + dy * co);
-            let (cx, cy) = (((qx / cs).floor() + 0.5) * cs, ((qy / cs).floor() + 0.5) * cs);
-            let mut o = (metric(cx, cy) / maxd).clamp(0.0, 1.0);
-            if reverse {
-                o = 1.0 - o;
-            }
-            let p = ((done * (1.0 + spread) - o) / spread).clamp(0.0, 1.0);
-            if p <= 0.0 {
-                continue;
-            }
-            let half = cs * 0.5 * (1.0 - p);
-            let m = (qx - cx).abs().max((qy - cy).abs());
-            let k = if border > 0.0 {
-                ((half - m) / border + 0.5).clamp(0.0, 1.0)
-            } else if m < half {
-                1.0
-            } else {
-                0.0
-            };
-            scale_px(px, k as f32);
+            scale_px(px, grid.coverage(x as u32, y as u32));
         }
     });
     b
@@ -562,7 +595,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccgridwipe",
-            "CC Grid Wipe",
+            "Grid Wipe",
             vec![
                 cc_done(),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -576,13 +609,13 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccradialscalewipe",
-            "CC Radial ScaleWipe",
+            "Radial Scale Wipe",
             vec![cc_done(), p("center", "Center", pt(0.5, 0.5), ParamUi::Point), p("reverse", "Reverse Transition", Value::Bool(false), ParamUi::Checkbox)],
             radial_scale_wipe,
         ),
         spec(
             "ec.transition.ccscalewipe",
-            "CC Scale Wipe",
+            "Scale Wipe",
             vec![
                 p("stretch", "Stretch", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 2)),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -592,7 +625,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.cclightwipe",
-            "CC Light Wipe",
+            "Light Wipe",
             vec![
                 cc_done(),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),

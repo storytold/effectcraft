@@ -299,3 +299,76 @@ fn project_panel_columns_scroll_horizontally() {
     assert!(rect(&h, "project.sort.comment").min.x < x0 - 20.0);
     assert_eq!(rect(&h, "project.sort.name").min.x, name0, "Name stays frozen");
 }
+
+/// Hovering an icon-only Timeline column header explains it, and the header's own right-click
+/// column menu still opens under the icon.
+#[test]
+fn timeline_header_icons_explain_themselves_on_hover() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(1400.0);
+    // English whatever the system language: the menu item checked below is translated.
+    h.state_mut().session.prefs.general.language = "en".into();
+    h.run_steps(3);
+    for (id, tip) in [
+        ("timeline.header.av.solo", "Solo: while any layer is soloed, only the soloed layers render"),
+        ("timeline.header.av.video", "Video: shows or hides the layer's picture in the composition"),
+        ("timeline.header.switches.shy", "Shy: the layer leaves the Timeline while Hide Shy Layers is on"),
+        ("timeline.header.switches.threeD", "3D Layer: the layer moves and turns in depth and reacts to cameras and lights"),
+    ] {
+        // The tooltip is a node of its own, next to any the widget's accessible text makes.
+        let before = h.query_all_by_label(tip).count();
+        let at = rect(&h, id).center();
+        h.event(Event::PointerMoved(at));
+        h.run_steps(60);
+        assert!(h.query_all_by_label(tip).count() > before, "{id}: hovering shows {tip:?}");
+        h.event(Event::PointerMoved(pos2(5.0, 5.0)));
+        h.run_steps(5);
+    }
+    // The header's accessible node carries the text as its description (screen readers).
+    {
+        use egui_kittest::kittest::NodeT;
+        let tip = "Solo: while any layer is soloed, only the soloed layers render";
+        let described = h.query_all_by_label("Solo").any(|n| n.accesskit_node().description().as_deref() == Some(tip));
+        assert!(described, "the Solo header's node describes it");
+    }
+    // A layer's own switch shows the same text.
+    let lid = h.state().session.active_comp().unwrap().layers[0].id.0;
+    let lock = "Lock: keeps the layer from being selected or changed";
+    let before = h.query_all_by_label(lock).count();
+    let at = rect(&h, &format!("timeline.layer.{lid}.lock")).center();
+    h.event(Event::PointerMoved(at));
+    h.run_steps(60);
+    assert!(h.query_all_by_label(lock).count() > before, "the layer's Lock switch shows its text");
+    // Right-click on an icon still opens the header's column menu.
+    let at = rect(&h, "timeline.header.av.solo").center();
+    h.event(Event::PointerMoved(at));
+    h.step();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(3);
+    assert!(h.query_by_label("Hide This").is_some(), "the column menu opens under a header icon");
+}
+
+/// The Project panel's Name column edge drags to resize the column, and a double-click on the
+/// edge fits the names again.
+#[test]
+fn project_name_column_edge_resizes_and_fits_again() {
+    let mut h = harness(1400.0);
+    h.state_mut().ui.start_screen = false;
+    h.run_steps(3);
+    let before = rect(&h, "project.nameColumn.edge").center();
+    drag(&mut h, before, before + vec2(80.0, 0.0));
+    assert!(h.state().ui.project_name_w.is_some());
+    let edge = rect(&h, "project.nameColumn.edge").center();
+    assert!((edge.x - (before.x + 80.0)).abs() < 2.0, "{edge:?} after dragging from {before:?}");
+    h.input_mut().events.push(Event::PointerMoved(edge));
+    for _ in 0..2 {
+        h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().ui.project_name_w, None);
+    assert!((rect(&h, "project.nameColumn.edge").center().x - before.x).abs() < 1.0);
+}

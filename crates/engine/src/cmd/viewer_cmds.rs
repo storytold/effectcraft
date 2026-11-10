@@ -159,9 +159,14 @@ fn take_snapshot(s: &mut Session, p: &Value) -> Result<Value> {
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let t = s.time_of(cid);
     let scale = f_p(p, "scale").unwrap_or(1.0).clamp(0.05, 1.0);
-    let img = s.render(cid, t, RenderOpts { scale, guides: true, view: s.view_camera(cid).filter(|_| comp.has_3d()), ..Default::default() });
+    // 32 bpc: without the HDR step, so viewer exposure reaches the over-range values (the
+    // display pass applies the step, as for viewer frames).
+    let skip_hdr_step = s.project.settings.bit_depth.levels().is_none();
+    let opts = RenderOpts { scale, guides: true, view: s.view_camera(cid).filter(|_| comp.has_3d()), skip_hdr_step, ..Default::default() };
+    let img = s.render(cid, t, opts);
     let (w, h) = (img.width, img.height);
-    s.snapshot = Some(Snapshot { comp: cid, time: t, scale, image: std::sync::Arc::new(img) });
+    let encoding = crate::viewer::FrameEncoding::of(&s.project.settings, skip_hdr_step);
+    s.snapshot = Some(Snapshot { comp: cid, time: t, scale, image: std::sync::Arc::new(img), encoding });
     s.events.push(crate::Event::ProjectChanged { revision: s.revision });
     Ok(json!({"width": w, "height": h, "time": t.seconds()}))
 }
@@ -298,15 +303,17 @@ fn new_path(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layer": lid.0, "group": group, "path": path_uid}))
 }
 
-/// Snapshot image as straight 8-bit RGBA rows (for frontends / `--out`).
+/// Snapshot image as straight 8-bit RGBA rows (for frontends / `--out`), with the HDR step a
+/// 32 bpc snapshot was taken without.
 pub fn snapshot_rgba8(s: &Session) -> Option<(u32, u32, Vec<u8>)> {
     let snap = s.snapshot.as_ref()?;
     let img = &snap.image;
     let mut out = Vec::with_capacity(img.data.len() * 4);
     for p in &img.data {
         let a = p[3].clamp(0.0, 1.0);
-        let un = |c: f32| if a > 0.0 { (c / a).clamp(0.0, 1.0) } else { 0.0 };
-        out.extend([un(p[0]), un(p[1]), un(p[2]), a].map(|v| (v * 255.0 + 0.5) as u8));
+        let un = |c: f32| if a > 0.0 { c / a } else { 0.0 };
+        let c = snap.encoding.finish([un(p[0]), un(p[1]), un(p[2])]).map(|v| v.clamp(0.0, 1.0));
+        out.extend([c[0], c[1], c[2], a].map(|v| (v * 255.0 + 0.5) as u8));
     }
     Some((img.width, img.height, out))
 }

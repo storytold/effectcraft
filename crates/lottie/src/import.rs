@@ -141,6 +141,17 @@ pub fn import(
             cx.fonts.push((n, fam, st));
         }
     }
+    // Glyph outlines embedded for players without the fonts. Text is set in installed fonts.
+    if let Some(chars) = doc.get("chars").and_then(Json::as_array).filter(|c| !c.is_empty()) {
+        let mut fams: Vec<&str> = vec![];
+        for fam in chars.iter().filter_map(|c| s(c, "fFamily")).filter(|f| !f.trim().is_empty()) {
+            if !fams.contains(&fam) {
+                fams.push(fam);
+            }
+        }
+        let of = if fams.is_empty() { String::new() } else { format!(" of {}", fams.join(", ")) };
+        cx.im.warn(format!("embedded glyphs (`chars`){of} are not imported; text uses the installed fonts"));
+    }
     let (w, h) = (w.round().max(1.0) as u32, h.round().max(1.0) as u32);
     let duration = tb.tick(op);
     // Pass 1: asset items (precomps empty for now, images stored).
@@ -315,7 +326,8 @@ fn masks(im: &Im, ids: &mut Ids, list: &[Json], g: &mut PropGroup) {
                 import_prop(im, j, p, conv);
             }
         };
-        set("pt", "path", &shapes::to_path);
+        let closed = m.get("cl").and_then(Json::as_bool).unwrap_or(false);
+        set("pt", "path", &|v| shapes::to_path(v, closed));
         set("o", "opacity", &anim::to_scalar);
         set("x", "expansion", &anim::to_scalar);
         set("f", "feather", &anim::to_vec2);
@@ -429,7 +441,12 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         // Below 1 % (or 0) the layer time divides by ~0, and layer.timeStretch refuses it too.
         let sr = f(j, "sr").unwrap_or(1.0);
         l.stretch = if sr.is_finite() && sr.abs() >= 0.01 {
-            sr * 100.0
+            // Past ±9900 % too (#3247): the largest stretch a layer supports, sign kept.
+            let pct = effectcraft_project::limits::stretch(sr * 100.0);
+            if pct.to_bits() != (sr * 100.0).to_bits() {
+                cx.im.warn(format!("{name}: a time stretch of {} % is not supported ({pct} % used)", sr * 100.0));
+            }
+            pct
         } else {
             cx.im.warn(format!("{name}: a time stretch of {} % is not supported (100 % used)", sr * 100.0));
             100.0

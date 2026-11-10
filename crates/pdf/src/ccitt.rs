@@ -401,8 +401,10 @@ fn mode(r: &mut Reader) -> Option<Mode> {
 /// (index parity: even indices start black runs), and the one after it.
 fn b1b2(refl: &[usize], a0: i64, white: bool, columns: usize) -> (usize, usize) {
     let want = if white { 0 } else { 1 };
-    let mut i = 0;
-    while i < refl.len() && (refl[i] as i64 <= a0 || i % 2 != want) {
+    // The changing elements are in order, so the first past `a0` is found by bisection (a scan
+    // from the start made every row quadratic in its transitions).
+    let mut i = refl.partition_point(|&c| c as i64 <= a0);
+    if i % 2 != want {
         i += 1;
     }
     let b1 = refl.get(i).copied().unwrap_or(columns);
@@ -802,6 +804,26 @@ pub(crate) mod tests {
         for k in [-1, 0, 2] {
             let _ = decode(&garbage, &Params { k, columns: 64, rows: 20, ..Params::default() }, 1 << 20);
             let _ = decode(&garbage, &Params { k, columns: 1, rows: 0, ..Params::default() }, 1 << 20);
+        }
+    }
+
+    /// `b1b2` by bisection agrees with the scan it replaced, for every position and colour
+    /// over a dense reference row.
+    #[test]
+    fn b1b2_by_bisection_matches_the_scan() {
+        let scan = |refl: &[usize], a0: i64, white: bool, columns: usize| {
+            let want = if white { 0 } else { 1 };
+            let mut i = 0;
+            while i < refl.len() && (refl[i] as i64 <= a0 || i % 2 != want) {
+                i += 1;
+            }
+            (refl.get(i).copied().unwrap_or(columns), refl.get(i + 1).copied().unwrap_or(columns))
+        };
+        let refl: Vec<usize> = (0..64).map(|i| i * 3 / 2).collect();
+        for a0 in -1..100 {
+            for white in [true, false] {
+                assert_eq!(b1b2(&refl, a0, white, 100), scan(&refl, a0, white, 100), "a0 {a0} white {white}");
+            }
         }
     }
 }
