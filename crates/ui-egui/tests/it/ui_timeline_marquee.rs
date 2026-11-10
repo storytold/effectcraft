@@ -127,6 +127,7 @@ fn a_box_dragged_across_the_outline_and_the_graph_selects_rows_and_keys() {
     assert_eq!(selected(&h), (both.clone(), both), "graph → outline");
 }
 
+/// Thirty expanded layers force row virtualization and leave room for wheel and edge scrolling.
 fn rows_harness() -> (Harness<'static, EffectcraftApp>, Vec<u64>) {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Rows", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
@@ -145,6 +146,7 @@ fn rows_harness() -> (Harness<'static, EffectcraftApp>, Vec<u64>) {
     (h, ids)
 }
 
+/// The originally enclosed key stays in the box when wheel scrolling takes its row offscreen.
 #[test]
 fn scrolling_rows_during_a_marquee_keeps_offscreen_keys_in_the_box() {
     let (mut h, ids) = rows_harness();
@@ -202,6 +204,7 @@ fn times(h: &Harness<'_, EffectcraftApp>) -> Vec<f64> {
     h.state().session.state.selected_keys.iter().map(|k| k.time.seconds()).collect()
 }
 
+/// Panning time retains hidden keys while both painting and row selection respect the graph boundary.
 #[test]
 fn horizontal_scroll_keeps_hidden_keys_without_selecting_outline_layers() {
     let (mut h, id) = harness_for(20.0);
@@ -224,6 +227,7 @@ fn horizontal_scroll_keeps_hidden_keys_without_selecting_outline_layers() {
     assert_eq!(h.state().session.state.selected_layers, [LayerId(id)]);
 }
 
+/// Returning the viewport shrinks the box again without editing the document or its history.
 #[test]
 fn shrinking_after_scrolling_removes_keys_again_and_selection_does_not_edit_the_project() {
     let (mut h, id) = harness_for(20.0);
@@ -245,6 +249,7 @@ fn shrinking_after_scrolling_removes_keys_again_and_selection_does_not_edit_the_
     assert_eq!(h.state().session.history.undo.len(), undo);
 }
 
+/// Invalidated gestures leave the prior selection intact even if the pointer keeps moving.
 #[test]
 fn cancellation_preserves_selection_and_does_not_restart_until_a_new_press() {
     for cancel in ["escape", "ownership", "focus", "layout", "resize", "edit", "comp"] {
@@ -283,6 +288,7 @@ fn cancellation_preserves_selection_and_does_not_restart_until_a_new_press() {
     }
 }
 
+/// A release-frame pointer move takes effect, modifiers add, and locked keys remain excluded.
 #[test]
 fn release_uses_the_release_position_and_additive_modifiers_and_excludes_locked_keys() {
     for modifiers in [Modifiers::NONE, Modifiers::SHIFT, Modifiers::COMMAND] {
@@ -305,6 +311,7 @@ fn release_uses_the_release_position_and_additive_modifiers_and_excludes_locked_
     }
 }
 
+/// Cross-column selection uses logical headers, including those no longer rendered after scrolling.
 #[test]
 fn crossing_into_the_outline_after_scrolling_selects_offscreen_layer_rows() {
     let (mut h, ids) = rows_harness();
@@ -320,6 +327,7 @@ fn crossing_into_the_outline_after_scrolling_selects_offscreen_layer_rows() {
     assert!(selected.len() > 5, "all intervening rows are selected");
 }
 
+/// Edge scrolling continues without pointer motion and stops as soon as the gesture is cancelled.
 #[test]
 fn a_stationary_pointer_at_either_edge_scrolls_only_until_release_or_cancel() {
     let (mut h, ids) = rows_harness();
@@ -345,6 +353,7 @@ fn a_stationary_pointer_at_either_edge_scrolls_only_until_release_or_cancel() {
     assert!(times(&h).is_empty(), "cancelled box selects nothing");
 }
 
+/// Batched wheel events cannot move the press anchor or make release query stale row positions.
 #[test]
 fn wheel_on_press_captures_the_old_anchor_and_wheel_on_release_uses_the_new_rows() {
     for scroll_on_press in [true, false] {

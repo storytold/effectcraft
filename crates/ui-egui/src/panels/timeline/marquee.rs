@@ -99,6 +99,7 @@ pub(super) struct SelectionBox {
 }
 
 impl Marquee {
+    /// Reproject the content anchor without clipping the logical selection bounds.
     fn selection(&self, g: &Rw, scroll: f32, pointer: Pos2) -> (Rect, SelectionBox) {
         let tm = g.tl.tm;
         let anchor = pos2(self.outline_x.unwrap_or_else(|| tm.x(self.time)), g.tl.rows_rect.min.y + self.y - scroll);
@@ -140,6 +141,7 @@ pub(super) fn targets(
     (layers, keys_in_box(comp, rows, tm, top, rh, selection.keys))
 }
 
+/// Commit an owned primary release; otherwise paint without changing selection.
 pub(super) fn finish(app: &EffectcraftApp, ui: &egui::Ui, g: &mut Rw) {
     let ctx = &g.tl.ctx;
     let Some(drag) = ctx.data(|d| d.get_temp::<Marquee>(id())) else { return };
