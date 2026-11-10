@@ -1431,18 +1431,24 @@ mod tests {
         let mut params = params_with(&d);
         let fc =
             FrozenCache { key: frozen_key(&params, [100.0, 80.0], 25.0), size: [10, 8], frames: BTreeMap::from([(5, freeze_frame(&[1.0; 80], &[0; 80]))]) };
-        params.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
         let host = Seq;
-        let ctx = EffectCtx {
-            params: &params,
-            time: 5.0 / 25.0 + 0.001,
-            layer_size: [100.0, 80.0],
-            seed: 1,
-            adjustment: false,
-            env: EffectEnv { host: Some(&host), frame_rate: 25.0, ..Default::default() },
+        let render = |params: &Params| {
+            let ctx = EffectCtx {
+                params,
+                time: 5.0 / 25.0 + 0.001,
+                layer_size: [100.0, 80.0],
+                seed: 1,
+                adjustment: false,
+                env: EffectEnv { host: Some(&host), frame_rate: 25.0, ..Default::default() },
+            };
+            crate::apply(&specs()[0], &ctx, Buf { img: frame(5.0 / 25.0 + 0.001), offset: [0.0; 2], scale: 1.0 }).img
         };
-        let out = crate::apply(&specs()[0], &ctx, Buf { img: frame(5.0 / 25.0 + 0.001), offset: [0.0; 2], scale: 1.0 }).img;
+        let computed = render(&params);
+        params.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        let out = render(&params);
         assert!(out.data[(40 * 100 + 50) as usize][3] > 0.5, "the disk is missing from the output");
+        // The cache's all-opaque matte would leave the background opaque too; the fallback must match a render with no cache.
+        assert!(out.data == computed.data, "the mismatched frozen cache was used");
     }
 
     #[test]
