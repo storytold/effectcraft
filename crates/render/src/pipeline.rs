@@ -19,6 +19,24 @@ pub(crate) struct EffectStack {
     pub origin: [f64; 2],
 }
 
+/// A footage layer's source as the decoded picture itself (see [`Renderer::footage_picture`]):
+/// its buffer in layer space is `img` at offset `[0, 0]` and `scale`; in effect space (what
+/// [`Renderer::layer_input`] gives) at `effect_offset`.
+#[derive(Clone, Debug)]
+pub struct FootagePicture {
+    pub img: Arc<Image>,
+    pub scale: f64,
+    pub effect_offset: [f64; 2],
+}
+
+/// How a decoded footage frame becomes a layer buffer ([`Renderer::footage_buf`]).
+enum FootageLayout {
+    /// Its own pixels, at this buffer scale.
+    Native { scale: f64 },
+    /// Resampled to `width`×`height` at this buffer scale.
+    Resample { width: u32, height: u32, scale: f64 },
+}
+
 /// A property value an Essential Properties override gives a layer of a collapsed precomp.
 #[derive(Clone, Debug)]
 pub struct PropertyOverride {
@@ -123,6 +141,7 @@ impl<'a> Renderer<'a> {
             top: true,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            whole_raster: false,
         }
     }
 
@@ -258,6 +277,8 @@ impl<'a> Renderer<'a> {
             top: false,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            // Effects and nested renders need whole layer-space pixels.
+            whole_raster: true,
             ..*self
         }
     }
@@ -398,8 +419,9 @@ impl<'a> Renderer<'a> {
         }
         let (scale, draft, blur) = (self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer));
         let prev = ctx.time - ctx.comp.frame_rate.frame_duration();
-        let now = cache::layer_key(ctx, layer, scale, draft, blur);
-        now.is_some() && now == cache::layer_key(&ctx.at(prev), layer, scale, draft, blur)
+        let before = ctx.at(prev);
+        let now = self.clipped_key(ctx, layer, cache::layer_key(ctx, layer, scale, draft, blur));
+        now.is_some() && now == self.clipped_key(&before, layer, cache::layer_key(&before, layer, scale, draft, blur))
     }
 
     /// Rasterisation scale of a layer's source: the output scale, or — for text and shape layers,
@@ -433,12 +455,71 @@ impl<'a> Renderer<'a> {
         // a whole number maps the unit vectors to lengths a hair over 1, which must stay 1 (#390:
         // rounded up to 2^¼, unscaled text was drawn larger and resampled, softer).
         let mut k = 2f64.powf((k.log2() * 4.0 - 1e-6).ceil() / 4.0).clamp(1.0 / 16.0, 64.0);
-        // Keep the buffer within about 16 million pixels.
+        // Keep the buffer within about 16 million pixels (of the part the output shows, when
+        // only that is rasterised: see `raster_clip`).
         if let Some(b) = content_bounds(ctx, layer) {
+            let b = match self.raster_clip(ctx, layer) {
+                Some(c) => {
+                    let r = kurbo::Rect::new(b[0], b[1], b[2], b[3]).intersect(c);
+                    [r.x0, r.y0, r.x1, r.y1]
+                }
+                None => b,
+            };
             let area = ((b[2] - b[0]) * (b[3] - b[1])).max(1.0) * s * s;
             k = k.min((16.0e6 / area).sqrt().max(1.0));
         }
         s * k
+    }
+
+    /// The layer-space part of a 3D text or shape layer the output shows, when only that part
+    /// needs rasterising (#1388: text close to the camera was rasterised whole at up to 16
+    /// million pixels, a quarter gigabyte per frame worker, though the frame showed a fraction
+    /// of it; behind the camera it was rasterised and not drawn). `None` rasterises it whole:
+    /// whenever pixels outside the frame can matter — effects, layer styles, masks, motion blur,
+    /// depth of field, lights (shadows and transmission), Advanced 3D, per-character 3D, a
+    /// collapsed 2D transform — or the visible part can't be bounded (see
+    /// [`three_d::compose::visible_clip`]).
+    pub(crate) fn raster_clip(&self, ctx: &EvalCtx, layer: &Layer) -> Option<kurbo::Rect> {
+        if self.whole_raster || !layer.is_3d() || !matches!(layer.source, LayerSource::Text | LayerSource::Shape) || self.outer.is_some() {
+            return None;
+        }
+        if (layer.switches.effects && layer.effects().is_some_and(|fx| !fx.children.is_empty()))
+            || layer.masks().is_some_and(|m| !m.children.is_empty())
+            || styles::active(ctx, layer)
+            || ctx.comp.layers.iter().any(|l| matches!(l.source, LayerSource::Light { .. }))
+            || self.is_adv3d(ctx)
+            || (matches!(layer.source, LayerSource::Text) && (text::per_char_3d(ctx, layer) || text::animator_blur(ctx, layer)))
+        {
+            return None;
+        }
+        let v = three_d::compose::visible_clip(self, ctx, layer)?;
+        if v.area() <= 0.0 {
+            // Behind the camera.
+            return Some(v);
+        }
+        let b = content_bounds(ctx, layer).map(|b| kurbo::Rect::new(b[0], b[1], b[2], b[3]))?;
+        if v.x0 <= b.x0 && v.y0 <= b.y0 && v.x1 >= b.x1 && v.y1 >= b.y1 {
+            return None;
+        }
+        // Whole cells of a layer-space grid whose cell is about a quarter of the part that shows,
+        // rounded down to a power of two: a moving camera keeps one raster (and its cache entry)
+        // while that part stays within the same cells, and a dolly changes the grid only at each
+        // doubling. The cells cover at most about 2.25 times the part that shows. Worth it only
+        // when it leaves out at least half of the content.
+        let c = 2f64.powf(((v.width().max(v.height()) / 4.0).max(1e-6)).log2().floor());
+        let snap = |v: f64, up: bool| if up { (v / c).ceil() * c } else { (v / c).floor() * c };
+        // (Not cut to the content bounds: a stroke or a glyph's padding reaches past them.)
+        let cells = kurbo::Rect::new(snap(v.x0, false), snap(v.y0, false), snap(v.x1, true), snap(v.y1, true));
+        (cells.is_finite() && cells.intersect(b).area() <= b.area() * 0.5).then_some(cells)
+    }
+
+    /// A layer content cache key that also names the part rasterised ([`Self::raster_clip`]).
+    pub(crate) fn clipped_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
+        let k = key?;
+        Some(match self.raster_clip(ctx, layer) {
+            Some(c) => raster_clip_key(k, c),
+            None => k,
+        })
     }
 
     /// Draw a Wireframe-quality layer: its bounds as a one-pixel outline.
@@ -482,6 +563,22 @@ impl<'a> Renderer<'a> {
     /// Render a composition at comp time `t` (transparent background, comp size × scale).
     /// Top-level frames go to the GPU when [`Self::active_accel`] is set and handles them.
     pub fn comp_frame(&self, comp_id: ItemId, t: Tick) -> Image {
+        self.comp_frame_with(comp_id, t, false, |a| Ok::<_, std::convert::Infallible>(a.comp_frame(self, comp_id, t))).unwrap_or_else(|never| match never {})
+    }
+
+    /// Render a frame, validating the accelerated attempt before starting any CPU fallback.
+    /// The caller's scope must run only the accelerator, not this whole method: a GPU fault
+    /// must release failed resources before a potentially large CPU render (#3357).
+    /// A scope error returns immediately; the caller can then retry with a fresh CPU renderer
+    /// without accelerator-produced cache entries. Healthy declines and Auto timing retain
+    /// the same behavior as [`Self::comp_frame`]. Its fallback disables acceleration for
+    /// effects too: GPU work must never escape the supplied error scope.
+    pub fn comp_frame_scoped<E>(&self, comp_id: ItemId, t: Tick, scope: impl FnOnce(&dyn Accelerator) -> Result<Option<Image>, E>) -> Result<Image, E> {
+        self.comp_frame_with(comp_id, t, true, scope)
+    }
+
+    fn comp_frame_with<E>(&self, comp_id: ItemId, t: Tick, scoped: bool, scope: impl FnOnce(&dyn Accelerator) -> Result<Option<Image>, E>) -> Result<Image, E> {
+        let cpu = if scoped { self.with_accel(None) } else { self.with_accel(self.accel) };
         // Classic 3D runs composite on the GPU too (M12.7), so Auto sends 3D comps there as well;
         // Auto renders each comp on whichever compositor measured faster ([`AutoPick`]).
         if self.depth == 0
@@ -490,24 +587,24 @@ impl<'a> Renderer<'a> {
             let auto = self.frame_auto(a, comp_id, false);
             if auto.is_none_or(|(p, key)| p.choose(key)) {
                 let t0 = web_time::Instant::now();
-                if let Some(img) = a.comp_frame(self, comp_id, t) {
+                if let Some(img) = scope(a)? {
                     if let Some((p, key)) = auto {
                         p.record(key, true, t0.elapsed().as_secs_f64() * 1e3);
                     }
-                    return img;
+                    return Ok(img);
                 }
                 if let Some((p, key)) = auto {
                     p.declined(key);
                 }
             }
             let t0 = web_time::Instant::now();
-            let img = self.comp_frame_cpu(comp_id, t);
+            let img = cpu.comp_frame_cpu(comp_id, t);
             if let Some((p, key)) = auto {
                 p.record(key, false, t0.elapsed().as_secs_f64() * 1e3);
             }
-            return img;
+            return Ok(img);
         }
-        self.comp_frame_cpu(comp_id, t)
+        Ok(cpu.comp_frame_cpu(comp_id, t))
     }
 
     /// The Auto timing history and key for a top-level frame of `comp` (`None` unless the
@@ -861,12 +958,7 @@ impl<'a> Renderer<'a> {
                         return Some(buf);
                     }
                 }
-                let lt = ctx.source_time(layer);
-                // The proxy is decoded instead, at its own size, and fills the footage's frame.
-                let proxy = self.proxy_for(item);
-                let pf = proxy.unwrap_or(f);
-                let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
-                let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
+                let (img, pf) = self.footage_picture_of(ctx, layer, item, f)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
             // (the font files go to this render's log, which `ctx` may not carry: see
@@ -881,9 +973,12 @@ impl<'a> Renderer<'a> {
                 {
                     log.mark_unkeyed();
                 }
-                Some(self.authored(text::render(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer))))
+                Some(self.authored(text::render_in(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer), self.raster_clip(ctx, layer))))
             }
-            LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
+            LayerSource::Shape => layer
+                .props
+                .sub("contents")
+                .map(|c| self.authored(shapes::render_in(ctx, layer, c, self.raster_scale(ctx, layer), self.raster_clip(ctx, layer)))),
             _ => None,
         }
     }
@@ -898,19 +993,87 @@ impl<'a> Renderer<'a> {
     /// A decoded frame of `f` as a layer buffer covering `w`×`h` layer pixels (the footage's
     /// nominal size; proxies are scaled up to it), converted from its colour profile.
     fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32) -> Buf {
-        let s = self.opts.scale;
-        let k = if img.width > 0 { w.max(1) as f64 / img.width as f64 } else { 1.0 };
-        // Keep native pixels when downsampling is small; resample otherwise.
-        let mut buf = match self.reduced_size(w, h) {
-            // The source resampled it already (`FootageSource::frame_at_size`).
-            Some(size) if (img.width, img.height) == size => Buf { img: img.clone(), offset: [0.0; 2], scale: s },
-            Some((rw, rh)) if k <= 1.0 + 1e-9 => Buf { img: effectcraft_raster::resample(img, rw, rh), offset: [0.0; 2], scale: s },
-            _ => Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 / k },
+        let mut buf = match self.footage_layout(img, w, h) {
+            FootageLayout::Native { scale } => Buf { img: img.clone(), offset: [0.0; 2], scale },
+            FootageLayout::Resample { width, height, scale } => Buf { img: effectcraft_raster::resample(img, width, height), offset: [0.0; 2], scale },
         };
         if let Some(c) = self.pipe.media_in(f) {
             color::convert(&mut buf.img, &c);
         }
         buf
+    }
+
+    /// How [`Renderer::footage_buf`] lays out a decoded frame `img` of footage `w`×`h` layer
+    /// pixels: its own pixels, or resampled.
+    fn footage_layout(&self, img: &Image, w: u32, h: u32) -> FootageLayout {
+        let s = self.opts.scale;
+        let k = if img.width > 0 { w.max(1) as f64 / img.width as f64 } else { 1.0 };
+        // Keep native pixels when downsampling is small; resample otherwise.
+        match self.reduced_size(w, h) {
+            // The source resampled it already (`FootageSource::frame_at_size`).
+            Some(size) if (img.width, img.height) == size => FootageLayout::Native { scale: s },
+            Some((width, height)) if k <= 1.0 + 1e-9 => FootageLayout::Resample { width, height, scale: s },
+            _ => FootageLayout::Native { scale: 1.0 / k },
+        }
+    }
+
+    /// A footage layer's decoded frame at the context time (the proxy's when one is used) and
+    /// the footage it was decoded from: what [`Renderer::source`] makes the layer's buffer of.
+    fn footage_picture_of(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &'a Footage) -> Option<(Arc<Image>, &'a Footage)> {
+        let lt = ctx.source_time(layer);
+        // The proxy is decoded instead, at its own size, and fills the footage's frame.
+        let proxy = self.proxy_for(item);
+        let pf = proxy.unwrap_or(f);
+        let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
+        let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
+        Some((img, pf))
+    }
+
+    /// The decoded footage picture a layer's masked source is, bit for bit, with no copy: a
+    /// footage layer (not continuously rasterised vector footage) without masks whose frame
+    /// needs no colour conversion, no resampling and no quantisation (32 bpc). The buffer
+    /// [`Renderer::layer_input`] gives for no effects is this picture at `effect_offset` and
+    /// `scale`.
+    /// Layers showing the same frame get the same `Arc` (the footage source's cached frame), so
+    /// an accelerator uploads it once and shares the texture. `None`: the layer's buffer is
+    /// made the usual way (any of the above applies, or the frame is missing), and also when the
+    /// frame is made per call rather than served by the footage source (frame blending,
+    /// separate fields, Invert Alpha, Interpret As Linear Light, Cineon conversion: a new
+    /// picture each time, nothing to share) or when the layer cache already holds the layer's
+    /// buffer (served from memory as before, without asking the footage source).
+    pub fn footage_picture(&self, ctx: &EvalCtx, layer: &Layer) -> Option<FootagePicture> {
+        let LayerSource::Footage { item } = &layer.source else { return None };
+        if self.pipe.levels.is_some() || layer.masks().is_some_and(|m| !m.children.is_empty()) || frame_blend_mode(ctx, layer) != FrameBlend::Off {
+            return None;
+        }
+        let item = ctx.media_item(layer, *item);
+        let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
+        if !f.has_video || (layer.switches.collapse && is_vector_footage(f)) {
+            return None;
+        }
+        let pf = self.proxy_for(item).unwrap_or(f);
+        if self.pipe.media_in(pf).is_some()
+            || pf.fields != effectcraft_project::FieldOrder::Off
+            || pf.invert_alpha
+            || pf.linear_light_applies()
+            || pf.cineon_applies()
+        {
+            return None;
+        }
+        if let Some(cache) = self.cache {
+            let (scale, draft, blur) = (self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer));
+            let content = self.content_key(ctx, layer, cache::layer_key(ctx, layer, scale, draft, blur));
+            let input = self.content_key(ctx, layer, cache::input_key(ctx, layer, scale, draft, blur, 0));
+            if [content, input].into_iter().flatten().any(|k| cache.holds(k)) {
+                return None;
+            }
+        }
+        let (img, _) = self.footage_picture_of(ctx, layer, item, f)?;
+        let FootageLayout::Native { scale } = self.footage_layout(&img, f.width, f.height) else { return None };
+        // `layer_input`'s rebase into effect space (`Buf::rebase` of a buffer at the origin).
+        let mut at = Buf { img: Image { width: 0, height: 0, data: Vec::new() }, offset: [0.0; 2], scale };
+        at.rebase(ctx.effect_bounds(layer).1);
+        Some(FootagePicture { img, scale, effect_offset: at.offset })
     }
 
     /// The size of `w` × `h` layer pixels in this render when it is reduced enough that footage
@@ -1052,7 +1215,13 @@ impl<'a> Renderer<'a> {
     /// (what the motion tracker analyses, like After Effects' Layer panel). `None` for layers
     /// without pixels.
     pub fn layer_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
-        self.source(ctx, layer)
+        Renderer { whole_raster: true, ..*self }.source(ctx, layer)
+    }
+
+    /// Layer-space pixels after masks and effects, including content outside the viewport.
+    /// Expression sampleImage reads this rather than the frame-oriented clipped buffer.
+    pub fn layer_content(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
+        Renderer { whole_raster: true, ..*self }.content_buf(ctx, layer)
     }
 
     /// A 3D model or primitive layer rendered on its own, through the comp's camera: what an
@@ -1092,7 +1261,7 @@ impl<'a> Renderer<'a> {
         mut timing: Option<&mut LayerTiming>,
     ) -> Option<(Arc<Buf>, Option<u64>, Arc<ReadFiles>)> {
         let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        let key = self.content_key(ctx, layer, key);
+        let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let Some((b, files)) = self.cached(key) {
             if let Some(t) = timing.as_deref_mut() {
                 t.cached = true;
@@ -1114,8 +1283,13 @@ impl<'a> Renderer<'a> {
     /// what effect `effects` sees. Served from / stored in the layer cache under its own key,
     /// so scrubbing reuses frames rendered for earlier output frames.
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
+        // The Layer panel, analysis tools and effect inputs read the whole layer, not the viewport.
+        Renderer { whole_raster: true, ..*self }.whole_layer_input(ctx, layer, effects)
+    }
+
+    fn whole_layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
-        let key = self.content_key(ctx, layer, key);
+        let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let Some((b, _)) = self.cached(key) {
             return Some(b);
         }
@@ -1131,4 +1305,10 @@ impl<'a> Renderer<'a> {
         });
         Some(self.keep(key, Arc::new(buf?), &files).0)
     }
+}
+
+/// Snap cells can be finer than 1/16 unit: preserve every coordinate bit so visible
+/// clips cannot collide with another cell or the empty behind-camera raster.
+pub(crate) fn raster_clip_key(key: u64, clip: kurbo::Rect) -> u64 {
+    [clip.x0, clip.y0, clip.x1, clip.y1].iter().fold(cache::derive(key, 0xc11b), |key, coordinate| cache::derive(key, coordinate.to_bits()))
 }

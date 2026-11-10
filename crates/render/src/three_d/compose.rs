@@ -185,6 +185,52 @@ pub(crate) fn view_size(r: &Renderer, ctx: &EvalCtx) -> (f64, f64) {
     (c.width as f64, c.height as f64)
 }
 
+/// The layer-space rectangle of a 3D layer that this render's output can show: the output frame
+/// (padded by two pixels) projected back onto the layer's plane, the way [`geo`] draws it. `None`
+/// when that can't be bounded: an orthographic camera, depth of field (its blur reads past the
+/// frame), motion blur (each sub-sample sees another part), or a frame corner whose ray misses the
+/// plane in front of the camera (a plane seen towards its horizon). An empty rectangle when the
+/// whole content is behind the camera.
+pub(crate) fn visible_clip(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> Option<kurbo::Rect> {
+    let cam = camera_for(r, ctx);
+    if cam.ortho || cam.dof.is_some() || mb_samples(r, ctx, layer) > 1 {
+        return None;
+    }
+    let comp = view_size(r, ctx);
+    let s = r.opts.scale;
+    let outer = r.collapse3d.map_or(Mat4::IDENTITY, |c| c.world);
+    let world = outer * ctx.world_matrix(layer);
+    let (off, w, h) = match r.roi_offset() {
+        Some((x, y, w, h)) => ((x, y), w as f64, h as f64),
+        None => ((0.0, 0.0), (comp.0 * s).round(), (comp.1 * s).round()),
+    };
+    let proj = Mat4::translate(vec3(-off.0, -off.1, 0.0)) * Mat4::scale(vec3(s, s, 1.0)) * cam.projection(comp.0, comp.1);
+    let hinv = (proj * world).plane_to_mat3().inverse()?;
+    let cv = cam.view * world;
+    let depth = |u: f64, v: f64| cv.0[2][0] * u + cv.0[2][1] * v + cv.0[2][3];
+    if let Some(b) = crate::content_bounds(ctx, layer)
+        && [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])].iter().all(|&(u, v)| depth(u, v) < NEAR)
+    {
+        return Some(kurbo::Rect::ZERO);
+    }
+    const PAD: f64 = 2.0;
+    let mut rect: Option<kurbo::Rect> = None;
+    for (sx, sy) in [(-PAD, -PAD), (w + PAD, -PAD), (w + PAD, h + PAD), (-PAD, h + PAD)] {
+        let m = &hinv.0;
+        let qz = m[2][0] * sx + m[2][1] * sy + m[2][2];
+        if qz <= 1e-300 {
+            return None;
+        }
+        let (u, v) = ((m[0][0] * sx + m[0][1] * sy + m[0][2]) / qz, (m[1][0] * sx + m[1][1] * sy + m[1][2]) / qz);
+        if !u.is_finite() || !v.is_finite() || depth(u, v) < NEAR {
+            return None;
+        }
+        let p = kurbo::Rect::new(u, v, u, v);
+        rect = Some(rect.map_or(p, |r| r.union(p)));
+    }
+    rect
+}
+
 /// Number of motion-blur sub-samples for a layer.
 fn mb_samples(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> usize {
     if r.opts.motion_blur && ctx.comp.enable_motion_blur && r.layer_motion_blur(layer) {
