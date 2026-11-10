@@ -216,10 +216,16 @@ pub(crate) fn shape_group(ids: &mut Ids, kind: &str, size: [f64; 2], paint: &Sha
 /// of every one of the five kinds, so a caller that only wants to draw it (the viewer's
 /// drag ghost) cannot drift from what `shape.newShape` / `layer.addMask` commit.
 pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2]) -> Option<ShapePath> {
+    mask_path_rounded(kind, centre, size, None)
+}
+
+/// [`mask_path`] with the rounded rectangle's corner radius (layer pixels) given; `None` keeps
+/// the tool's default. Other kinds ignore it.
+pub fn mask_path_rounded(kind: &str, centre: [f64; 2], size: [f64; 2], radius: Option<f64>) -> Option<ShapePath> {
     let bez = match kind {
         "rect" | "rectangle" => return Some(ShapePath::rect(centre, size[0], size[1])),
         "ellipse" => return Some(ShapePath::ellipse(centre, size[0], size[1])),
-        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, roundness()),
+        "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, radius.unwrap_or_else(roundness)),
         k => {
             let (star, points, outer, inner) = polystar_of(k, size)?;
             effectcraft_path::polystar(effectcraft_path::Polystar {

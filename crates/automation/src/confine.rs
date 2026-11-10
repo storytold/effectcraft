@@ -11,7 +11,7 @@
 //! folder. In a headless session the footage and other files a project or an imported file names
 //! are read only inside the roots ([`ConfinedFootage`], [`ConfinedServices`]). Commands that run
 //! code or open other applications (scripts, ScriptUI panels and the events that reach them,
-//! Execute File, Reveal in Finder…) are refused while confined, as is granting scripts the file
+//! Execute File, effect helpers, Reveal in Finder…) are refused while confined, as is granting scripts the file
 //! and network access the user withheld.
 
 use std::path::{Component, Path, PathBuf};
@@ -46,6 +46,10 @@ const REFUSED: &[&str] = &[
     "file.installScript",
     "file.installScriptUIPanel",
     "file.uninstallScript",
+    // Copies a plug-in (and a bundle's ScriptUI panels) from a user-chosen path into the folders
+    // the app loads code from: an agent must not plant code that runs on every start, and its
+    // sources are checked no better than `file.installScript`'s.
+    "effect.plugins.install",
     // A ScriptUI panel's script runs when the panel opens, when an event reaches one of its
     // controls, and when one of its `app.scheduleTask` tasks comes due.
     "window.scriptPanel",
@@ -56,10 +60,19 @@ const REFUSED: &[&str] = &[
     "scriptui.mouse",
     "scriptui.close",
     "file.executeFile",
+    "effect.helpers.scan",
+    "effect.helpers.load",
     "file.revealInFinder",
     "layer.openSource",
     "help.revealLogFile",
     "file.autoSave",
+    // The Plug-in Library downloads code, installs it to load at start-up and reads `file://` catalogs.
+    "library.refresh",
+    "library.install",
+    "library.update",
+    "library.uninstall",
+    "library.loadInstalled",
+    "library.preview",
 ];
 
 /// Commands that read files named by these parameters.
@@ -70,6 +83,7 @@ const READS: &[(&str, &[&str])] = &[
     ("file.importMultiple", &["paths"]),
     ("file.importRecent", &["path"]),
     ("file.importLottie", &["path"]),
+    ("file.importAep", &["path"]),
     ("file.importTimeline", &["path"]),
     ("file.replaceFootage", &["path"]),
     ("file.relinkFootage", &["folder"]),
@@ -117,6 +131,7 @@ const WRITES: &[(&str, &[&str])] = &[
     // This query checks a proposed write destination, so it follows write confinement.
     ("file.checkOutput", &["path"]),
     ("file.exportLottie", &["path"]),
+    ("file.exportAep", &["path"]),
     ("comp.saveFrameAs", &["path"]),
     ("comp.saveFrameAsPsd", &["path"]),
     ("comp.saveFrameAsExr", &["path"]),
@@ -331,29 +346,60 @@ impl ConfinedFootage {
     fn inside(&self, f: &Footage) -> bool {
         std::iter::once(&f.path).chain(&f.sequence).filter(|p| !p.is_empty()).all(|p| self.confinement.check(p, Access::Read).is_ok())
     }
+
+    /// [`Self::inside`] for a read: a refused one is counted on this thread, so the render
+    /// [`recording`](FootageSource::recording) it can't list what it made without the footage.
+    fn readable(&self, f: &Footage) -> bool {
+        let inside = self.inside(f);
+        if !inside {
+            let _ = REFUSED_READS.try_with(|n| n.set(n.get().wrapping_add(1)));
+        }
+        inside
+    }
+}
+
+thread_local! {
+    /// Footage reads refused on this thread (see [`ConfinedFootage::readable`]).
+    static REFUSED_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of reads this thread has refused for lying outside the allowed roots.
+fn refused_reads() -> u64 {
+    REFUSED_READS.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 impl FootageSource for ConfinedFootage {
+    /// The frame from the inner source, or `None` when the footage lies outside the allowed roots.
     fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame(item, footage, t)).flatten()
+        self.readable(footage).then(|| self.inner.frame(item, footage, t)).flatten()
     }
+    /// The frame scaled to `width` by `height`, or `None` when the footage lies outside the allowed roots.
     fn frame_at_size(&self, item: ItemId, footage: &Footage, t: Tick, width: u32, height: u32) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
+        self.readable(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
     }
+    /// The frame with an explicit size and float curve, or `None` when the footage lies outside the allowed roots.
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
+        self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
     }
+    /// The footage audio from the inner source, or `None` when the footage lies outside the allowed roots.
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        self.inside(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
+        self.readable(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
     }
+    /// The auxiliary channels of the footage frame, or `None` when the footage lies outside the allowed roots.
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
-        self.inside(footage).then(|| self.inner.aux(item, footage, t)).flatten()
+        self.readable(footage).then(|| self.inner.aux(item, footage, t)).flatten()
     }
+    /// Forwards the auxiliary footage paths to the inner source.
+    fn set_aux_footage(&self, paths: &[String]) {
+        self.inner.set_aux_footage(paths)
+    }
+    /// The 3D model for the footage, or `None` when the footage lies outside the allowed roots.
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
-        self.inside(footage).then(|| self.inner.model(item, footage)).flatten()
+        self.readable(footage).then(|| self.inner.model(item, footage)).flatten()
     }
+    /// The rasterised vector footage at `scale`, or `None` when the footage lies outside the allowed roots.
     fn vector_frame(&self, item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
+        self.readable(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
     }
     /// Says why footage outside the roots shows nothing, so the agent can act on it.
     fn problem(&self, footage: &Footage) -> Option<String> {
@@ -374,14 +420,28 @@ impl FootageSource for ConfinedFootage {
     fn set_conform_folder(&self, folder: Option<PathBuf>) {
         self.inner.set_conform_folder(folder)
     }
+    /// The inner source's cache budget.
     fn cache_budget(&self) -> Option<usize> {
         self.inner.cache_budget()
     }
+    /// Runs `f` under the inner source's cancel flag.
     fn cancellable(&self, cancel: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
         self.inner.cancellable(cancel, f)
     }
+    /// Whether the inner source has been called off.
     fn called_off(&self) -> bool {
         self.inner.called_off()
+    }
+    /// The files read inside the roots, as the inner source notes them. Footage outside reads
+    /// nothing, and what is made without it can't be listed by its files: a refused read makes
+    /// the list incomplete, so it never outlives the session in a disk cache (another session
+    /// with other roots would read the footage).
+    fn recording(&self, reads: &effectcraft_engine::render::reads::ReadLog, f: &mut dyn FnMut()) {
+        let refused = refused_reads();
+        self.inner.recording(reads, f);
+        if refused_reads() != refused {
+            reads.mark_incomplete();
+        }
     }
 }
 
@@ -575,6 +635,55 @@ mod tests {
         }
     }
 
+    /// Footage outside the roots shows nothing: a render that asked for it can't be listed by its
+    /// files (#3184), or a disk cache would keep the empty picture for a session with other
+    /// roots. Reads inside the roots record as the inner source tells.
+    #[test]
+    fn a_refused_footage_read_makes_the_render_unlisted() {
+        use effectcraft_engine::render::reads::{FileStamp, ReadFile, ReadLog};
+        /// Reads every file, noting it.
+        struct Noting;
+        impl FootageSource for Noting {
+            /// Returns a 1x1 frame and notes the footage path it was asked for.
+            fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+                NOTED.with(|n| n.borrow_mut().push(f.path.clone()));
+                Some(Arc::new(Image::new(1, 1)))
+            }
+            /// Runs `f`, then reports every path noted meanwhile to `reads` as a file with a missing stamp.
+            fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+                f();
+                for p in NOTED.with(|n| std::mem::take(&mut *n.borrow_mut())) {
+                    reads.note(ReadFile::new(p, FileStamp::Missing));
+                }
+            }
+        }
+        thread_local! {
+            static NOTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        // (a fresh directory, removed when the test ends, panicking or not)
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let (inside, outside) = (base.join("in"), base.join("elsewhere"));
+        for d in [&inside, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&inside), &[]).unwrap();
+        let src = ConfinedFootage::new(Arc::new(Noting), c);
+        let footage = |d: &std::path::Path| Footage { path: d.join("a.png").to_string_lossy().into_owned(), ..Default::default() };
+        let read = |f: &Footage| {
+            let log = ReadLog::new();
+            let mut got = None;
+            src.recording(&log, &mut || got = src.frame(ItemId(1), f, Tick::ZERO));
+            (got.is_some(), log.into_files())
+        };
+        let (shown, files) = read(&footage(&inside));
+        assert!(shown && files.is_complete() && files.len() == 1, "inside the roots: {files:?}");
+        let (shown, files) = read(&footage(&outside));
+        assert!(!shown && !files.is_complete(), "outside the roots: {files:?}");
+        // The next render on the thread is not affected.
+        assert!(read(&footage(&inside)).1.is_complete());
+    }
+
     #[test]
     fn relative_and_outside_paths_of_newly_listed_commands_are_refused() {
         let base = std::env::temp_dir().join(format!("ec-confine-1243-{}", std::process::id()));
@@ -616,6 +725,27 @@ mod tests {
         assert!(c.check_command("templates.create", &create(p(&write, "new.ecproj"))).is_ok());
         assert!(c.check_command("file.createProxy", &serde_json::json!({"output": "[compName]_proxy"})).is_ok(), "a template name");
         assert!(c.check_command("file.createProxy", &serde_json::json!({"output": p(&outside, "proxy.mov")})).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Installing a plug-in plants code the app runs at every start, so confinement refuses it
+    /// even when the file is inside a read root (like `file.installScript`).
+    #[test]
+    fn installing_plugins_is_refused_while_confined() {
+        let base = std::env::temp_dir().join(format!("ec-confine-plugins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let read = base.join("in");
+        std::fs::create_dir_all(&read).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&read), &[]).unwrap();
+        let inside = read.join("a.wasm").to_string_lossy().into_owned();
+        for params in [
+            serde_json::json!({"path": inside}),
+            serde_json::json!({"folder": read.to_string_lossy()}),
+            serde_json::json!({"path": "a.wasm"}),
+            serde_json::json!({"bundle": true}),
+        ] {
+            assert!(c.check_command("effect.plugins.install", &params).is_err(), "{params}");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }

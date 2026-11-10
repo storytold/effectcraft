@@ -1,6 +1,6 @@
-//! Distort: CC Flo Motion, Liquify and Rolling Shutter Repair.
+//! Distort: Dual Lens Warp, Liquify and Rolling Shutter Repair.
 //!
-//! * **CC Flo Motion** — two knots that pull the image toward themselves (positive amount) or
+//! * **Dual Lens Warp** — two knots that pull the image toward themselves (positive amount) or
 //!   push it away (negative), with a falloff exponent, optional tiling and supersampled
 //!   antialiasing.
 //! * **Liquify** — brush strokes build a displacement mesh (a grid of layer-space offsets). The
@@ -32,7 +32,7 @@ fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, ren
     EffectSpec { id, name, category: "Distort", params, render, gpu: false, float: true }
 }
 
-// ---------------------------------------------------------------- CC Flo Motion
+// ---------------------------------------------------------------- Dual Lens Warp
 
 fn flo_motion(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let knots = [(ctx.params.v2("knot1"), ctx.params.f("amount1") / 100.0), (ctx.params.v2("knot2"), ctx.params.f("amount2") / 100.0)];
@@ -560,7 +560,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.distort.ccflomotion",
-            "CC Flo Motion",
+            "Dual Lens Warp",
             vec![
                 p("knot1", "Knot 1", Value::Vec2([0.25, 0.5]), ParamUi::Point),
                 p("amount1", "Amount 1", num(50.0), slider(-400.0, 100.0, -100.0, 100.0, 1)),

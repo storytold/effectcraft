@@ -205,7 +205,7 @@ fn step(h: &mut Harness<'_, EffectcraftApp>) {
 /// Starting a preview with sound before its frames are cached (#947): the playhead holds the
 /// first frame while the frames ahead render, then sound and picture start together from it (the
 /// sound used to start at a later frame, losing the opening). A frame that isn't cached later on
-/// still stops the sound rather than being skipped (#103).
+/// no longer stops the sound (#2473).
 #[test]
 fn preview_with_audio_holds_the_first_frame_and_sounds_from_it() {
     let fake = Fake::default();
@@ -237,11 +237,12 @@ fn preview_with_audio_holds_the_first_frame_and_sounds_from_it() {
     assert!(h.state().audio.is_some() && fake.0.lock().unwrap().0.is_some(), "the sound started once the frames ahead were cached");
     assert_eq!(audio_frame(&h, cid), Some(0), "from the first frame, not a later one");
     assert!(!h.state().playback.starting);
-    // A frame that isn't cached stops the sound rather than being skipped.
+    // A frame that isn't cached keeps the sound playing; the picture waits for frames (#2473).
     gate.discard(&mut h);
     h.state().frames.clear();
     h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing);
+    assert!(h.state().audio.is_some() && !h.state().playback.audio_held && h.state().playback.playing, "the sound plays on");
+    assert!(h.state().playback.waiting, "the picture waits for its frame");
 }
 
 /// A long (30 s) preview sounds once the frames ahead of its first frame are cached, not the
@@ -267,6 +268,57 @@ fn preview_with_audio_sounds_without_caching_the_work_area() {
     assert_eq!(audio_frame(&h, cid), Some(0), "from the first frame");
     let cached = h.state().frames.cached_frames(&h.state().shown_series(cid)).len();
     assert!((1..900).contains(&cached), "it started with {cached} of the 900 frames cached, not the whole work area");
+}
+
+/// A preview whose rendering falls behind its sound keeps the sound playing (#2473, #3260): the
+/// picture shows the latest frame rendered up to the sound, dropping the others, and frames are
+/// rendered ahead of the sound rather than of the picture. Stopping the sound at every frame that
+/// wasn't cached chopped it into bursts.
+#[test]
+fn a_preview_behind_its_sound_drops_frames_and_keeps_the_sound() {
+    let fake = Fake::default();
+    let (mut app, cid) = setup_long(true, &fake, 30.0);
+    let gate = GatedFrames::default();
+    let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
+    app.frames.set_remote(Some(renderer));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
+    h.state_mut().use_manual_clock();
+    h.run_steps(2);
+    gate.discard(&mut h);
+    let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
+    let now = h.state().now();
+    h.state_mut().play(now);
+    gate.render(&mut h, cid, &(0..ahead).collect::<Vec<_>>());
+    step(&mut h);
+    assert!(h.state().audio.is_some(), "the sound started");
+    let feed = fake.0.lock().unwrap().0.clone().expect("the output has the preview's feed");
+
+    // Frames 0..ahead and `behind` are cached; the sound plays on to `sound`, which isn't.
+    let (behind, sound) = (ahead + 2, ahead + 4);
+    gate.render(&mut h, cid, &[behind]);
+    // 48 kHz at 30 fps: 1600 samples a frame. Halfway into `sound`.
+    let samples = sound as u64 * 1600 + 800;
+    for _ in 0..10_000 {
+        if feed.consumed() >= samples {
+            break;
+        }
+        pull(&feed, (samples - feed.consumed()).min(1600) as usize);
+    }
+    assert!(feed.consumed() >= samples, "the device took the sound up to frame {sound}");
+    step(&mut h);
+    assert!(h.state().audio.is_some() && !h.state().playback.audio_held, "the sound plays on");
+    assert_eq!(frame(&h, cid), behind, "the picture shows the latest frame rendered up to the sound");
+    assert!(h.state().playback.waiting);
+    while h.state().frames.dispatch_remote() != 0 {}
+    let requested: Vec<i64> = gate.pending.lock().unwrap().iter().map(|p| p.0).collect();
+    assert!(requested.contains(&sound), "frames are rendered from the sound's frame on: {requested:?}");
+    assert!(!requested.contains(&ahead), "not the frames the picture dropped: {requested:?}");
+
+    // The sound's frame renders: the picture catches up with it.
+    gate.render(&mut h, cid, &[sound]);
+    step(&mut h);
+    assert_eq!(frame(&h, cid), sound, "the picture is back on the sound's frame");
+    assert!(!h.state().playback.waiting && h.state().audio.is_some());
 }
 
 /// Pull `frames` stereo frames from the output, waiting for the feeder thread to mix them.
@@ -584,7 +636,7 @@ impl AudioDevice for Playing {
 }
 
 /// Once started, the sound's clock moves the picture on from the first frame, and a frame that
-/// isn't cached still stops the sound rather than being skipped.
+/// isn't cached doesn't stop the sound (#2473).
 #[test]
 fn a_started_preview_follows_its_sound() {
     let fake = Fake::default();
@@ -607,7 +659,7 @@ fn a_started_preview_follows_its_sound() {
     h.state().frames.set_budget(0);
     h.state().frames.clear();
     step(&mut h);
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing, "a stall stops the sound");
+    assert!(h.state().audio.is_some() && !h.state().playback.audio_held && h.state().playback.playing, "a stall doesn't stop the sound");
     *device.0.lock().unwrap() = true;
 }
 
@@ -686,4 +738,48 @@ fn adding_markers_does_not_stop_the_sound() {
         assert!(app.playback.playing && app.audio.is_some() && !app.playback.audio_held, "marker {beat}: still playing with sound");
     }
     assert_eq!(h.state().session.project.comp(cid).unwrap().markers.len(), 6);
+}
+
+/// #2104: unmuting a preview that started silent opens sound at the moving preview position,
+/// both with video and with Video off (where the timeline deliberately stays still).
+#[test]
+fn unmuting_a_silent_preview_starts_audio_at_its_current_frame() {
+    for video in [false, true] {
+        let fake = Fake::default();
+        let (mut app, cid) = setup(true, &fake);
+        let layer = app.session.project.comp(cid).unwrap().layers[0].id.0;
+        app.session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
+        let gate = GatedFrames::default();
+        app.frames.set_remote(Some(Arc::new(gate.clone())));
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
+        h.state_mut().use_manual_clock();
+        h.run_steps(2);
+        gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
+        let now = h.state().now();
+        let shortcut = if video { h.state().session.prefs.preview.current } else { effectcraft_engine::preview::PreviewShortcut::AltNumpad0 };
+        h.state_mut().play_with(now, shortcut);
+        for _ in 0..6 {
+            step(&mut h);
+        }
+        assert!(h.state().audio.is_none(), "muted playback has no output");
+        let current = if video { frame(&h, cid) } else { h.state().playback.audio_frame.unwrap() };
+        assert!(current > 0, "the silent preview advanced");
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": true})).unwrap();
+        gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
+        h.step();
+        assert_eq!(audio_frame(&h, cid), Some(current), "unmute starts at the moving preview frame, video={video}");
+        if !video {
+            assert_eq!(frame(&h, cid), 0, "audio-only preview leaves the timeline stationary");
+        }
+        let feed = fake.0.lock().unwrap().0.clone().expect("unmute opened the output");
+        assert!(pull(&feed, 256).iter().any(|v| v.abs() > 0.01), "the unmuted tone reaches the output");
+        // Mute and unmute again without stopping: edits reach the existing feed too.
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
+        h.step();
+        assert!(pull(&feed, 256).iter().all(|v| *v == 0.0), "mute silences the current output");
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": true})).unwrap();
+        h.step();
+        assert!(pull(&feed, 256).iter().any(|v| v.abs() > 0.01), "a second unmute reaches the same output");
+        h.state_mut().stop();
+    }
 }

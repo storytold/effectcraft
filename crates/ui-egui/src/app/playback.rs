@@ -58,7 +58,7 @@ impl EffectcraftApp {
     }
 
     /// The preview includes audio at the comp's frame rate and the comp has something audible.
-    fn audio_plays(&self) -> bool {
+    pub(super) fn audio_plays(&self) -> bool {
         let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else { return false };
         let Some(c) = self.session.project.comp(cid) else { return false };
         // A preview at another frame rate plays slower or faster than real time: silent.

@@ -297,6 +297,7 @@ impl<'a> Resolver<'a> {
         }
         self.comp(c)?.layer(LayerId(l))
     }
+    /// The evaluation context for comp `c` at time `t` seconds, or `None` when the comp does not exist.
     fn ctx_at(&self, c: u64, t: f64) -> Option<EvalCtx<'a>> {
         let comp = self.comp(c)?;
         let same_comp = c == self.ctx.comp_id.0;
@@ -309,6 +310,7 @@ impl<'a> Resolver<'a> {
             footage: self.ctx.footage,
             property_overrides: if same_comp { self.ctx.property_overrides } else { &[] },
             media_overrides: if same_comp { self.ctx.media_overrides } else { &[] },
+            reads: self.ctx.reads,
         })
     }
     fn prop(&self, c: u64, l: u64, path: &str) -> Option<(&'a Layer, &'a Property)> {

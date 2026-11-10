@@ -376,30 +376,20 @@ fn convert_yuv<T: Sample>(img: &mut Image, source: YuvSource<'_, T>, k: &Yuv, op
 pub(crate) fn dynamic_to_image(img: &image::DynamicImage, op: AlphaOp) -> Image {
     use image::DynamicImage as D;
     let (w, h) = (img.width(), img.height());
+    if let D::ImageRgb32F(_) | D::ImageRgba32F(_) = img {
+        let px = img.to_rgba32f();
+        let raw = px.as_raw();
+        return float_to_image(w, h, op, |i| {
+            let s = &raw[i * 4..i * 4 + 4];
+            [s[0], s[1], s[2], s[3]]
+        });
+    }
     let mut out = Image::new(w, h);
     let wu = w as usize;
     if wu == 0 || h == 0 {
         return out;
     }
     match img {
-        D::ImageRgb32F(_) | D::ImageRgba32F(_) => {
-            let px = img.to_rgba32f();
-            let raw = px.as_raw();
-            let premul = op.mode == AlphaMode::Premultiplied;
-            out.data.par_chunks_mut(wu).enumerate().for_each(|(y, row)| {
-                for (x, o) in row.iter_mut().enumerate() {
-                    let s = &raw[(y * wu + x) * 4..(y * wu + x) * 4 + 4];
-                    let a = s[3];
-                    let c = if premul {
-                        let inv = if a > 0.0 { 1.0 / a } else { 0.0 };
-                        [op.float(s[0] * inv) * a, op.float(s[1] * inv) * a, op.float(s[2] * inv) * a]
-                    } else {
-                        [op.float(s[0]), op.float(s[1]), op.float(s[2])]
-                    };
-                    *o = op.apply(c, a.clamp(0.0, 1.0));
-                }
-            });
-        }
         D::ImageLuma16(_) | D::ImageLumaA16(_) | D::ImageRgb16(_) | D::ImageRgba16(_) => {
             let px = img.to_rgba16();
             let raw = px.as_raw();
@@ -422,6 +412,32 @@ pub(crate) fn dynamic_to_image(img: &image::DynamicImage, op: AlphaOp) -> Image 
             });
         }
     }
+    out
+}
+
+/// Float RGBA (linear light, alpha straight or premultiplied as the footage says), `px(i)` for
+/// pixel `i` in rows, to an [`Image`]: how [`dynamic_to_image`] converts float stills, also used
+/// for OpenEXR pictures made from decoded channel planes without an interleaved copy (#474).
+pub(crate) fn float_to_image(w: u32, h: u32, op: AlphaOp, px: impl Fn(usize) -> [f32; 4] + Sync) -> Image {
+    let mut out = Image::new(w, h);
+    let wu = w as usize;
+    if wu == 0 || h == 0 {
+        return out;
+    }
+    let premul = op.mode == AlphaMode::Premultiplied;
+    out.data.par_chunks_mut(wu).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            let s = px(y * wu + x);
+            let a = s[3];
+            let c = if premul {
+                let inv = if a > 0.0 { 1.0 / a } else { 0.0 };
+                [op.float(s[0] * inv) * a, op.float(s[1] * inv) * a, op.float(s[2] * inv) * a]
+            } else {
+                [op.float(s[0]), op.float(s[1]), op.float(s[2])]
+            };
+            *o = op.apply(c, a.clamp(0.0, 1.0));
+        }
+    });
     out
 }
 

@@ -88,9 +88,11 @@ impl AudioFeed {
                 pk[i & 1] = pk[i & 1].max(s.abs());
             }
             real = n;
+            // Queue removal and the clock advance are one handoff: an edit must not restart
+            // behind samples already handed to the device.
+            self.consumed.fetch_add((real / 2) as u64, Ordering::Relaxed);
         }
         out[real..].iter_mut().for_each(|o| *o = 0.0);
-        self.consumed.fetch_add((real / 2) as u64, Ordering::Relaxed);
         for (c, v) in pk.into_iter().enumerate() {
             // Rust 1.99 renamed `fetch_update` to `try_update`; keep the old name while the
             // workspace supports Rust 1.95 (`rust-version`).
@@ -104,6 +106,14 @@ impl AudioFeed {
         if let Ok(mut q) = self.queue.lock() {
             q.clear();
         }
+    }
+
+    /// Discard an old mix and snapshot the first unconsumed frame under the same queue lock
+    /// as [`Self::pull`], so a concurrent device callback cannot leave the cursor behind.
+    fn discard_pending(&self) -> Option<u64> {
+        let mut q = self.queue.lock().ok()?;
+        q.clear();
+        Some(self.consumed())
     }
 
     pub fn push(&self, samples: &[f32]) {
@@ -278,11 +288,14 @@ impl AudioPlayback {
     /// already mixed up to the end of a non-looping span).
     pub fn set_project(&mut self, project: Arc<Project>) {
         let Ok(mut s) = self.state.lock() else { return };
+        let Some(consumed) = self.feed.discard_pending() else { return };
         s.src.project = project;
-        s.generation += 1;
-        self.feed.clear();
+        s.generation = s.generation.wrapping_add(1);
         self.feed.finished.store(false, Ordering::Relaxed);
-        s.cursor = clock_sample(&self.span, self.feed.consumed(), 0);
+        // The display clock clamps to the last *audible* sample. A finished non-looping
+        // feeder must instead stay at the exclusive end, never replay that last sample.
+        let next = i128::from(self.span.start) + i128::from(consumed);
+        s.cursor = if !self.span.looping && next >= i128::from(self.span.wb) { self.span.wb } else { clock_sample(&self.span, consumed, 0) };
     }
 
     /// Follow an edited `project`: mixing continues from it, and the queued sound is dropped only
@@ -323,7 +336,7 @@ impl Drop for AudioPlayback {
 
 /// Whether `new` sounds different from `old` for `comp`: a layer's timing, source, Audio / Solo /
 /// Effects switch, Audio Levels or effects, or the same for a nested comp. Other edits (video
-/// properties, names, labels) do not change the mix.
+/// properties, names, labels) do not change the mix unless an audio expression can read them.
 fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
     fn comps_differ(old: &Project, new: &Project, comp: ItemId, depth: usize) -> bool {
         let (Some(a), Some(b)) = (old.comp(comp), new.comp(comp)) else { return old.comp(comp).is_some() != new.comp(comp).is_some() };
@@ -343,6 +356,8 @@ fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
                     || x.switches.effects != y.switches.effects
                     || x.props.sub("audio") != y.props.sub("audio")
                     || audio_effects(x) != audio_effects(y)
+                    || audio_has_expression(x)
+                    || audio_has_expression(y)
                     || match &x.source {
                         LayerSource::Footage { item } => footage_differs(old, new, *item),
                         LayerSource::Comp { item } => comps_differ(old, new, *item, depth + 1),
@@ -355,6 +370,13 @@ fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
     fn audio_effects(l: &Layer) -> Vec<&PropGroup> {
         let is_audio = |g: &&PropGroup| matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_engine::effects::audio_fx::is_audio_effect(effect));
         l.effects().into_iter().flat_map(|fx| fx.groups()).filter(is_audio).collect()
+    }
+    /// Audio expressions can read any property in any comp (including video-only effects and
+    /// names). Without a complete dependency graph, keeping the old mix would be stale.
+    fn audio_has_expression(l: &Layer) -> bool {
+        l.switches.audio
+            && (l.props.sub("audio").and_then(|g| g.get("levels")).is_some_and(|p| p.has_expression())
+                || (l.switches.effects && audio_effects(l).iter().any(|g| g.enabled && g.props().any(|p| p.has_expression()))))
     }
     /// The footage item's audio availability changed (relinked, missing, no audio).
     fn footage_differs(old: &Project, new: &Project, item: ItemId) -> bool {
@@ -813,3 +835,7 @@ mod tests {
         assert!(m.peak_db[0] < -10.0, "{}", m.peak_db[0]);
     }
 }
+
+#[cfg(test)]
+#[path = "audio/live_tests.rs"]
+mod live_tests;

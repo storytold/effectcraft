@@ -2,7 +2,21 @@
 
 ```sh
 cargo test --workspace     # everything
-cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, wasm
+cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, lock-patches, layers, assets, wasm
+```
+
+The After Effects test projects of `crates/aep` are not in the repository; without them the
+`crates/aep`, engine and ui-egui tests that need one print `SKIPPED: fixture <name> missing` and
+pass. They live in [storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus).
+`cargo xtask aep-corpus` fetches them at the commit pinned in `crates/aep/tests/fixtures/corpus.lock`,
+checks every file against the SHA-256 listed there (any mismatch fails and installs nothing) and
+installs them in `corpus/aep`. Point `EFFECTCRAFT_AEP_FIXTURES` at that folder to run those tests
+too, and set `EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1` as well to make a missing project fail its test
+instead of skipping (a corpus run that must not pass by skipping):
+
+```sh
+cargo xtask aep-corpus
+EFFECTCRAFT_AEP_FIXTURES=corpus/aep EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1 cargo test -p effectcraft-aep
 ```
 
 The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
@@ -98,3 +112,27 @@ and line instead of being discarded. `--fail-over PCT` requires the same run key
 successful latest runs, and at least one comparable resource metric per run. Failed latest runs,
 missing coverage, empty results and wall-time-only measurements cannot pass the gate. Omit
 `--fail-over` for an exploratory partial comparison; failed latest runs remain visible.
+
+## Unexpected desktop exit diagnostics
+
+The desktop starts a separate, lightweight reporter before loading fonts, projects or the GPU.
+A normal exit (including a handled startup error) sends a clean marker only after desktop
+teardown. macOS finishes at the end of its successful exit hook because its native event loop
+terminates without returning to main; other platforms finish after the event loop returns.
+A teardown panic leaves reporting armed. An abort or other unexpected process termination
+closes the pipe without that marker.
+The helper saves a local report under the session log folder's `Crash Reports` directory and
+shows a native error dialog. Control-server launches save the report without a modal dialog.
+Reports contain version/platform and at most the last 64 KiB of the matching session's log.
+Logging filters and the session file size cap can omit later events from that tail.
+They are never uploaded automatically. Review logs for private project paths before sharing.
+
+Run `cargo test -p effectcraft crash_report::tests` for bounded protocol, normal shutdown,
+actual subprocess abort, unrelated child handles, concurrent sessions, missing log/helper,
+log rotation and report-write failure coverage. The three ignored tests are subprocess entry
+points launched by these tests, not manual tests.
+
+This is diagnosis, not memory recovery: a pipe closing does not prove an out-of-memory failure
+or provide the process's exit code. System-wide exhaustion, killing the whole process tree,
+or an unavailable native dialog service can also prevent the helper from reporting. Existing
+auto-save recovery remains responsible for restoring previously saved work.
