@@ -215,7 +215,7 @@ fn preview_with_audio_holds_the_first_frame_and_sounds_from_it() {
     let gate = GatedFrames::default();
     let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
     app.frames.set_remote(Some(renderer));
-    let ahead = (app.frames.parallelism() * 2).max(4) as i64;
+    let ahead = (app.frames.lanes() * 2).max(4) as i64;
     app.session.execute("comp.settings", json!({"comp": cid.0, "duration": (4 * ahead) as f64 / 30.0})).unwrap();
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
     h.state_mut().use_manual_clock();
@@ -258,7 +258,7 @@ fn preview_with_audio_sounds_without_caching_the_work_area() {
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);
-    let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
+    let ahead = (h.state().frames.lanes() * 2).max(4) as i64;
     let now = h.state().now();
     h.state_mut().play(now);
     let frames: Vec<i64> = (0..ahead).collect();
@@ -439,7 +439,7 @@ fn until_started(h: &mut Harness<'_, EffectcraftApp>) -> bool {
 fn startup_finishes_at_any_ram_preview_budget() {
     let probe = Fake::default();
     let (app, _) = setup(true, &probe);
-    let ahead = (app.frames.parallelism() * 2).max(4) as i64;
+    let ahead = (app.frames.lanes() * 2).max(4) as i64;
     // A 64×36 frame is 9216 bytes; `fit` frames fit in (fit + ½) frames' worth / 0.9.
     let mut fits = vec![2, 3, 4, ahead - 1, ahead, ahead + 1];
     fits.sort();
@@ -505,7 +505,7 @@ fn extended_viewer(fake: &Fake) -> (Harness<'static, EffectcraftApp>, ItemId, [u
 fn startup_finishes_when_extended_viewer_frames_are_larger() {
     let fake = Fake::default();
     let (mut h, cid, size) = extended_viewer(&fake);
-    let ahead = (h.state().frames.parallelism() * 2).max(4);
+    let ahead = (h.state().frames.lanes() * 2).max(4);
     let (comp_bytes, real_bytes) = (160 * 120 * 4, size[0] * size[1] * 4);
     // Room for `ahead` comp-sized frames (and a half), which is fewer real ones.
     let budget = ((ahead as f64 + 0.5) * comp_bytes as f64 / 0.9) as usize;

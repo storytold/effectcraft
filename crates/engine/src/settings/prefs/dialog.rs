@@ -170,6 +170,7 @@ pub fn pages() -> Vec<Page> {
             title: "Previews",
             items: vec![
                 s("previews.adaptiveResolutionLimit", "Adaptive Resolution Limit", Kind::Choice(ON_OFF_RES), true),
+                s("previews.adaptivePlayback", "Lower Resolution When Playback Can't Keep Up", B, true),
                 s("previews.showInternalWireframes", "Show Internal Wireframes", B, true),
                 s("previews.cacheFramesWhenIdle", "Cache Frames When Idle", B, true),
                 s("previews.fastPreviews", "Fast Previews (Draft 3D, Faster Effects)", B, true),

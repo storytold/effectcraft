@@ -388,6 +388,10 @@ impl FootageSource for ConfinedFootage {
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
     }
+    /// The frame as 8-bit levels, or `None` when the footage lies outside the allowed roots.
+    fn frame8(&self, item: ItemId, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<effectcraft_engine::render::disk_cache::Frame8>> {
+        self.readable(footage).then(|| self.inner.frame8(item, footage, t, float)).flatten()
+    }
     /// The footage audio from the inner source, or `None` when the footage lies outside the allowed roots.
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
         self.readable(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
