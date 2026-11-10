@@ -13,7 +13,7 @@ use effectcraft_svg::{
 use kurbo::{Point, Shape as _};
 
 use crate::build::{Builder, MAX_PATH};
-use crate::color::{Cs, Func, color_space, text_string};
+use crate::color::{Cs, Func, color_space, names_resource, text_string};
 use crate::font::Font;
 use crate::object::{Dict, File, Lexer, Obj, decode_stream};
 
@@ -1087,10 +1087,9 @@ impl<'a> Interp<'a> {
             Fill::Color(c) => *c,
             _ => [0.0; 3],
         };
-        // A named colour space other than a device one is looked up in `res`, which differs
-        // between placements, so those images are decoded each time.
-        let named_space =
-            self.file.get(d, "ColorSpace").and_then(Obj::name).is_some_and(|n| !matches!(n, "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "G" | "RGB" | "CMYK"));
+        // A named colour space other than a device one, even inside an array, is looked up in
+        // `res`, which differs between placements, so those images are decoded each time.
+        let named_space = self.file.get(d, "ColorSpace").is_some_and(|c| names_resource(self.file, c, 0));
         let cache_key = key.filter(|_| !named_space).map(|k| (k, fill.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)));
         let decoded = match cache_key.as_ref().and_then(|k| self.images.get(k)) {
             Some(img) => img.clone(),
