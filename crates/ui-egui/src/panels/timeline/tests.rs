@@ -432,6 +432,23 @@ fn cti_snaps_to_the_nearest_candidate() {
     let comp = app.session.active_comp().unwrap().clone();
     let c = snap_candidates(&comp, &build_rows(&app, &comp));
     assert!(c.contains(&comp.duration.seconds()) && c.contains(&0.0));
+    // A dragged layer's own ends are no targets; moved, neither are its markers and keys (#1828).
+    let rows = build_rows(&app, &comp);
+    let l = comp.layers.first().unwrap().id.0;
+    assert_eq!(snap_targets(&comp, &rows, &[l], false).len(), c.len() - 2);
+    assert!(snap_targets(&comp, &rows, &[l], true).len() <= c.len() - 2);
+}
+
+/// Shift snaps a bar drag's nearest end to a target within 8 px of the pointer; farther away, or
+/// without Shift, the bar moves by the whole frames the pointer covered (#1828).
+#[test]
+fn bar_drags_snap_their_ends_with_shift() {
+    let (pps, fd, ends) = (100.0, 0.1, [2.0, 6.0]);
+    assert_eq!(bar_drag_frames(95.0, pps, fd, &ends, &[3.0], true), 10, "5 px short of 2 → 3 s snaps");
+    assert_eq!(bar_drag_frames(95.0, pps, fd, &ends, &[3.0], false), 9, "no snap without Shift");
+    assert_eq!(bar_drag_frames(88.0, pps, fd, &ends, &[3.0], true), 8, "12 px away lets go");
+    assert_eq!(bar_drag_frames(104.0, pps, fd, &ends, &[3.0, 7.06], true), 11, "the target nearest the pointer wins");
+    assert_eq!(bar_drag_frames(5.0, 0.0, 0.0, &ends, &[0.0], true), i64::MAX, "zero zoom saturates, no panic");
 }
 
 /// Every string drawn by one frame of `draw`.
