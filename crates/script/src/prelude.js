@@ -867,6 +867,8 @@ Property.prototype.property = function () { return null; };
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
     }
+    // A string parameter (a LUT or look file, a text field) takes the text, or a File's path (#3395).
+    if (info.type === "string") return __str(v);
     if (info.type === "enum") return __num(v) - 1;
     if (info.type === "bool") return typeof v === "boolean" ? v : __num(v) !== 0;
     if (info.type === "color") {
