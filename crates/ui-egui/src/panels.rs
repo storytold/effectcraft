@@ -1,5 +1,6 @@
 //! Panel bodies.
 
+pub mod aep_losses;
 pub mod anim_tools;
 pub mod camera_tracker_ui;
 pub mod comp_settings;
@@ -55,6 +56,7 @@ pub mod text_panels;
 pub mod text_range_handles;
 pub mod timeline;
 pub mod tracker;
+pub mod unprecompose;
 pub mod unsaved;
 pub mod viewer;
 pub mod viewer_drop;
