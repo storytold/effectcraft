@@ -161,7 +161,11 @@ fn merge_paints(proj: &mut Project, cid: ItemId, lid: LayerId, group_uid: Option
     // below it counts those with no paint yet, and what's below the merge, a Repeater say, doesn't
     // reach what it takes in)
     target.children.truncate(at);
-    let merge = build::shape_simple_op(ids, "merge").ok_or_else(|| bad("layer.addShapeItem", "unknown kind `merge`"))?;
+    let mut merge = build::shape_simple_op(ids, "merge").ok_or_else(|| bad("layer.addShapeItem", "unknown kind `merge`"))?;
+    // Mode Add, as the inserted merge has, so the bounds match what it renders.
+    if let Some(mode) = merge.get_mut("mode") {
+        mode.value = KV::Enum(1);
+    }
     target.children.push(merge.into());
     target.children.push(build::shape_fill(ids, [1.0; 4]).into());
     let comp = proj.comp(cid).ok_or(EngineError::NoComp)?;
