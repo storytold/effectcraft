@@ -20,6 +20,14 @@ fn fxt_rem360(x: f32) -> f32 {
 }
 
 // Levels (Individual Controls) channel `i` (data: 5 × (ib, iw, g, ob, ow, identity)).
+// color_fx::levels_gamma: unclipped values below 0 mirror the curve.
+fn fxt_gamma(t: f32, g: f32) -> f32 {
+    if (t >= 0.0) {
+        return powz(t, 1.0 / g);
+    }
+    return -powz(-t, 1.0 / g);
+}
+
 fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     let o = i * 6u;
     if (data[o + 5u] != 0.0) {
@@ -32,7 +40,7 @@ fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     if (clip_w) {
         t = min(t, 1.0);
     }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * powz(max(t, 0.0), 1.0 / max(data[o + 2u], 0.01));
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, max(data[o + 2u], 0.01));
 }
 
 // color_fx::level (data offset o: ib, iw, g, ob, ow, clip black, clip white).
@@ -44,8 +52,7 @@ fn fxt_level(o: u32, v: f32) -> f32 {
     if (data[o + 6u] != 0.0) {
         t = min(t, 1.0);
     }
-    t = powz(max(t, 0.0), 1.0 / data[o + 2u]);
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * t;
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, data[o + 2u]);
 }
 
 fn fxt_level_ident(o: u32) -> bool {
@@ -122,16 +129,17 @@ fn fxt_knee(v: f32, start: f32, limit: f32) -> f32 {
     return start + r * (1.0 - exp(-(v - start) / r));
 }
 
-// PS Arbitrary Map lookup (map in data, n entries; f[0].x = phase offset in entries).
+// PS Arbitrary Map: CPU-rounded interval starts, values and slopes in data.
 fn fxt_lookup(v: f32, n: u32) -> f32 {
-    let nf = f32(n);
-    var x = clamp(v, 0.0, 1.0) * (nf - 1.0) + P.f[0].x;
-    x = x - nf * floor(x / nf);
-    let fl = floor(x);
-    let i0 = u32(fl) % n;
-    let i1 = select(i0, i0 + 1u, i0 + 1u < n);
-    let t = x - fl;
-    return data[i0] + (data[i1] - data[i0]) * t;
+    let x = clamp(v, 0.0, 1.0);
+    var lo = 0u;
+    var hi = n;
+    while (lo + 1u < hi) {
+        let mid = lo + (hi - lo) / 2u;
+        if (x < data[mid * 3u]) { hi = mid; } else { lo = mid; }
+    }
+    let i = lo * 3u;
+    return data[i + 1u] + (x - data[i]) * data[i + 2u];
 }
 
 fn fxt_eq_look(table: u32, n: u32, v: f32) -> f32 {
@@ -177,7 +185,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let aa = max(a, 0.0);
                 var nc: vec3<f32>;
                 for (var i = 0u; i < 3u; i++) {
-                    nc[i] = fxt_lv(i + 1u, fxt_lv(0u, c[i], cb, cw), cb, cw);
+                    nc[i] = fxt_lv(0u, fxt_lv(i + 1u, c[i], cb, cw), cb, cw);
                 }
                 let na = clamp(clamp(fxt_lv(4u, aa, cb, cw), 0.0, 1.0), 0.0, 1.0);
                 o = vec4<f32>(nc * na, na);
@@ -440,7 +448,11 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 12u: {
             let n = u0.z;
             let aa = max(a, 0.0);
-            let r = vec3<f32>(fxt_lookup(c.x, n), fxt_lookup(c.y, n), fxt_lookup(c.z, n));
+            var straight = vec3<f32>(0.0);
+            if (a > 1e-6) {
+                straight = vec3<f32>(unit_div(px.x, a), unit_div(px.y, a), unit_div(px.z, a));
+            }
+            let r = vec3<f32>(fxt_lookup(straight.x, n), fxt_lookup(straight.y, n), fxt_lookup(straight.z, n));
             var na = aa;
             if (u0.y != 0u) {
                 na = fxt_lookup(aa, n);

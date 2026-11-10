@@ -154,8 +154,9 @@ pub fn rel_paths(line: &str) -> Vec<String> {
 
 /// Repo paths outside `pkg_dir` that a source file at `file` (both repo-relative) points at.
 /// A literal may be relative to the file (`include_bytes!`) or to the manifest dir
-/// (`CARGO_MANIFEST_DIR`), so both are tried and only existing paths are kept.
-pub fn inputs_of(file: &str, pkg_dir: &str, text: &str, exists: &dyn Fn(&str) -> bool) -> BTreeSet<String> {
+/// (`CARGO_MANIFEST_DIR`), so both are tried. Keep existing paths and paths containing a change,
+/// including deleted files and directories that no longer exist in the working tree.
+pub fn inputs_of(file: &str, pkg_dir: &str, text: &str, known_input: &dyn Fn(&str) -> bool) -> BTreeSet<String> {
     let file_dir = file.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     let mut out = BTreeSet::new();
     for line in text.lines().filter(|l| l.contains("../")) {
@@ -166,7 +167,7 @@ pub fn inputs_of(file: &str, pkg_dir: &str, text: &str, exists: &dyn Fn(&str) ->
         for rel in rel_paths(line) {
             for base in [file_dir, pkg_dir] {
                 let Some(p) = join_rel(base, &rel) else { continue };
-                if p.is_empty() || p == "target" || p.starts_with("target/") || under(&p, pkg_dir) || !exists(&p) {
+                if p.is_empty() || p == "target" || p.starts_with("target/") || under(&p, pkg_dir) || !known_input(&p) {
                     continue;
                 }
                 out.insert(p);
@@ -198,7 +199,7 @@ fn rel_to(root: &Path, p: &Path) -> String {
 }
 
 /// Workspace packages (xtask excluded) with their path dependencies and outside inputs.
-pub fn packages(root: &Path, md: &Value) -> Vec<Pkg> {
+pub fn packages(root: &Path, md: &Value, changed: &[String]) -> Vec<Pkg> {
     let ws = md["workspace_root"].as_str().map(Path::new).unwrap_or(root);
     let names: BTreeSet<&str> = md["packages"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
     let mut pkgs = vec![];
@@ -217,11 +218,11 @@ pub fn packages(root: &Path, md: &Value) -> Vec<Pkg> {
         let rel = rel_to(ws, dir);
         let mut files = vec![];
         rs_files(dir, &mut files, 0);
-        let exists = |p: &str| ws.join(p).exists();
+        let known_input = |p: &str| ws.join(p).exists() || changed.iter().any(|f| under(f, p));
         let mut inputs = BTreeSet::new();
         for f in files {
             if let Ok(text) = std::fs::read_to_string(&f) {
-                inputs.extend(inputs_of(&rel_to(ws, &f), &rel, &text, &exists));
+                inputs.extend(inputs_of(&rel_to(ws, &f), &rel, &text, &known_input));
             }
         }
         pkgs.push(Pkg { name: name.to_string(), dir: rel, deps, has_lib, inputs: inputs.into_iter().collect() });
@@ -234,7 +235,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     if !out.status.success() {
         return Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    String::from_utf8(out.stdout).map_err(|e| format!("git {}: output is not UTF-8; cannot safely map changed paths: {e}", args.join(" ")))
 }
 
 /// The base commit: `--base REV` or the merge-base of HEAD with `main` (or `origin/main`).
@@ -253,9 +254,10 @@ fn base(root: &Path, rev: Option<&str>) -> Result<(String, String), String> {
 
 /// Committed since `base`, staged, unstaged and untracked files (repo-relative, sorted).
 fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, String> {
-    let diff = git(root, &["diff", "--name-only", "--no-renames", base])?;
-    let untracked = git(root, &["ls-files", "--others", "--exclude-standard"])?;
-    let set: BTreeSet<String> = diff.lines().chain(untracked.lines()).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+    let diff = git(root, &["diff", "--name-only", "--no-renames", "-z", base, "--"])?;
+    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    // Git otherwise C-quotes Unicode, tabs and newlines. Whitespace is part of the filename.
+    let set: BTreeSet<String> = diff.split('\0').chain(untracked.split('\0')).filter(|p| !p.is_empty()).map(str::to_string).collect();
     Ok(set.into_iter().collect())
 }
 
@@ -275,7 +277,7 @@ fn first_few(files: &[String]) -> String {
 struct Step {
     label: String,
     cmd: Option<Command>,
-    check: Option<fn() -> Result<(), String>>,
+    check: Option<Box<dyn Fn() -> Result<(), String>>>,
 }
 
 fn cargo(args: &[&str], pkgs: &[&String], tail: &[&str]) -> Command {
@@ -292,35 +294,18 @@ fn steps(plan: &Plan, pkgs: &[Pkg], nextest: bool) -> Vec<Step> {
     let mut v = vec![Step { label: "fmt".into(), cmd: Some(cargo(&["fmt", "--check"], &[], &[])), check: None }];
     let aff: Vec<&String> = plan.affected.iter().collect();
     if !aff.is_empty() {
+        v.push(Step { label: "audio backend".into(), cmd: None, check: Some(Box::new(crate::audio_backend)) });
         let n = aff.len();
-        v.push(Step {
-            label: format!("clippy ({n})"),
-            cmd: Some(cargo(&["clippy", "--all-targets", "--release"], &aff, &["--", "-D", "warnings"])),
-            check: None,
-        });
-        if nextest {
-            v.push(Step {
-                label: format!("nextest ({n})"),
-                cmd: Some(cargo(&["nextest", "run", "--release", "--no-tests=pass", "--no-fail-fast"], &aff, &[])),
-                check: None,
-            });
-            // Same package set as nextest (bin-only packages are skipped by cargo), so features
-            // unify the same way and the dependency builds are reused instead of rebuilt.
-            let libs = aff.iter().filter(|a| pkgs.iter().any(|p| p.name == ***a && p.has_lib)).count();
-            if libs > 0 {
-                v.push(Step {
-                    label: format!("doctests ({libs})"),
-                    cmd: Some(cargo(&["test", "--release", "--doc", "--no-fail-fast"], &aff, &[])),
-                    check: None,
-                });
-            }
-        } else {
-            v.push(Step { label: format!("test ({n})"), cmd: Some(cargo(&["test", "--release", "--no-fail-fast"], &aff, &[])), check: None });
-        }
+        v.push(Step { label: format!("clippy ({n})"), cmd: Some(cargo(&["clippy", "--all-targets"], &aff, &["--", "-D", "warnings"])), check: None });
+        let doctests = aff.iter().any(|a| pkgs.iter().any(|p| p.name.as_str() == a.as_str() && p.has_lib));
+        let selected: Vec<String> = aff.iter().map(|p| p.to_string()).collect();
+        v.push(Step { label: format!("tests ({n})"), cmd: None, check: Some(Box::new(move || crate::tests_for(&selected, nextest, doctests))) });
     }
-    v.push(Step { label: "layers".into(), cmd: None, check: Some(crate::layers) });
+    v.push(Step { label: "pdf-deps".into(), cmd: None, check: Some(Box::new(|| crate::pdf_deps::run(&crate::root()))) });
+    v.push(Step { label: "lock-patches".into(), cmd: None, check: Some(Box::new(|| crate::lock_patches::run(&crate::root()))) });
+    v.push(Step { label: "layers".into(), cmd: None, check: Some(Box::new(crate::layers)) });
     if plan.assets {
-        v.push(Step { label: "assets".into(), cmd: None, check: Some(crate::assets) });
+        v.push(Step { label: "assets".into(), cmd: None, check: Some(Box::new(crate::assets)) });
     }
     let wasm: Vec<&String> = aff.iter().copied().filter(|a| crate::layer_of(a).is_some_and(|l| l <= 4) || crate::WEB_CRATES.contains(&a.as_str())).collect();
     if !wasm.is_empty() {
@@ -352,7 +337,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let (sha, why) = base(root, rev)?;
     let files = changed_files(root, &sha)?;
     let md = crate::metadata()?;
-    let pkgs = packages(root, &md);
+    let pkgs = packages(root, &md, &files);
     let plan = plan(&files, &pkgs);
     let short_sha = sha.get(..9).unwrap_or(&sha);
     println!("ci --affected: base {short_sha} ({why}), {} changed file(s)", files.len());
@@ -379,6 +364,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let mut times = vec![];
+    let mut failed = vec![];
     for mut s in steps {
         let t = Instant::now();
         let r = match (s.cmd.as_mut(), s.check) {
@@ -386,14 +372,14 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             (None, Some(f)) => f(),
             (None, None) => Ok(()),
         };
-        times.push((s.label, t.elapsed(), r.is_ok()));
-        if let Err(e) = r {
-            summary(&times);
-            return Err(e);
+        if let Err(e) = &r {
+            eprintln!("ci --affected: {} failed: {e}", s.label);
+            failed.push(s.label.clone());
         }
+        times.push((s.label, t.elapsed(), r.is_ok()));
     }
     summary(&times);
-    Ok(())
+    if failed.is_empty() { Ok(()) } else { Err(format!("ci --affected failed: {}", failed.join(", "))) }
 }
 
 #[cfg(test)]
@@ -548,6 +534,127 @@ let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out");
         assert_eq!(got, set(&["crates/svg/tests/fixtures/a.svg"]));
     }
 
+    fn committed_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]).unwrap();
+        git(root, &["config", "core.quotepath", "true"]).unwrap();
+        std::fs::write(root.join("README.md"), "fixture\n").unwrap();
+        commit_fixture(root);
+        dir
+    }
+
+    fn commit_fixture(root: &Path) {
+        git(root, &["add", "--all"]).unwrap();
+        git(root, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--no-verify", "-qm", "fixture"])
+            .unwrap();
+    }
+
+    #[test]
+    fn changed_files_preserve_unicode_in_tracked_and_untracked_paths() {
+        let dir = committed_repo();
+        let root = dir.path();
+        let tracked = "crates/time/src/caf\u{e9}.rs";
+        let untracked = "crates/time/src/\u{65b0}\u{898f}.rs";
+        std::fs::create_dir_all(root.join("crates/time/src")).unwrap();
+        std::fs::write(root.join(tracked), "before").unwrap();
+        commit_fixture(root);
+        std::fs::write(root.join(tracked), "after").unwrap();
+        std::fs::write(root.join(untracked), "new").unwrap();
+        let changed = changed_files(root, "HEAD").unwrap();
+        assert_eq!(changed, files(&[tracked, untracked]));
+        assert_eq!(plan(&changed, &ws()).direct, set(&["effectcraft-time"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_files_preserve_whitespace_quotes_and_backslashes() {
+        let dir = committed_repo();
+        let root = dir.path();
+        let tracked = " tracked\t\"\\name\n ";
+        let untracked = " untracked\t\"\\name\n ";
+        std::fs::write(root.join(tracked), "before").unwrap();
+        commit_fixture(root);
+        std::fs::write(root.join(tracked), "after").unwrap();
+        std::fs::write(root.join(untracked), "new").unwrap();
+        assert_eq!(changed_files(root, "HEAD").unwrap(), files(&[tracked, untracked]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_files_reject_non_utf8_instead_of_silently_omitting_it() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = committed_repo();
+        std::fs::write(dir.path().join(std::ffi::OsString::from_vec(b"invalid-\xff.rs".to_vec())), "new").unwrap();
+        assert!(changed_files(dir.path(), "HEAD").unwrap_err().contains("not UTF-8"));
+    }
+
+    #[test]
+    fn deleted_and_renamed_shared_inputs_still_select_their_readers() {
+        for rename in [false, true] {
+            let dir = committed_repo();
+            let root = dir.path();
+            std::fs::create_dir_all(root.join("crates/engine/src")).unwrap();
+            std::fs::create_dir_all(root.join("docs/fixtures")).unwrap();
+            std::fs::write(root.join("docs/preferences.md"), "preferences").unwrap();
+            std::fs::write(root.join("docs/fixtures/example.json"), "{}").unwrap();
+            std::fs::write(
+                root.join("crates/engine/src/lib.rs"),
+                r#"
+const PREFS: &str = include_str!("../../../docs/preferences.md");
+fn fixture(n: &str) -> String { format!("{}/../../docs/fixtures/{n}", env!("CARGO_MANIFEST_DIR")) }
+"#,
+            )
+            .unwrap();
+            commit_fixture(root);
+            if rename {
+                std::fs::rename(root.join("docs/preferences.md"), root.join("docs/renamed.md")).unwrap();
+                std::fs::rename(root.join("docs/fixtures"), root.join("docs/moved")).unwrap();
+            } else {
+                std::fs::remove_file(root.join("docs/preferences.md")).unwrap();
+                std::fs::remove_dir_all(root.join("docs/fixtures")).unwrap();
+            }
+            let changed = changed_files(root, "HEAD").unwrap();
+            let md = serde_json::json!({
+                "workspace_root": root,
+                "packages": [{
+                    "name": "effectcraft-engine",
+                    "manifest_path": root.join("crates/engine/Cargo.toml"),
+                    "targets": [{"kind": ["lib"], "doctest": true}],
+                    "dependencies": []
+                }]
+            });
+            let pkgs = packages(root, &md, &changed);
+            let engine = pkgs.first().unwrap();
+            assert!(engine.inputs.contains(&"docs/preferences.md".into()));
+            assert!(engine.inputs.contains(&"docs/fixtures".into()));
+            for deleted in ["docs/preferences.md", "docs/fixtures/example.json"] {
+                assert!(changed.contains(&deleted.to_string()));
+                assert_eq!(plan(&files(&[deleted]), &pkgs).direct, set(&["effectcraft-engine"]));
+            }
+        }
+    }
+
+    #[test]
+    fn test_runner_keeps_dev_profile_target_selection_and_gpu_isolation() {
+        for packages in [vec![], files(&["effectcraft-gpu", "effectcraft-ui-egui"])] {
+            for nextest in [false, true] {
+                let command = crate::test_command(&packages, nextest);
+                let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                assert!(!args.iter().any(|a| a == "--release" || a == "--profile"));
+                for target in ["--lib", "--bins", "--tests", "--no-fail-fast"] {
+                    assert!(args.iter().any(|a| a == target));
+                }
+                assert_eq!(args.iter().any(|a| a == "--workspace"), packages.is_empty());
+                for package in &packages {
+                    assert!(args.windows(2).any(|w| w[0] == "-p" && w[1] == *package));
+                }
+                assert_eq!(args.windows(2).any(|w| w == ["-E", "not package(effectcraft-gpu)"]), nextest);
+                assert_eq!(args.iter().any(|a| a == "--no-tests=pass"), nextest && !packages.is_empty());
+            }
+        }
+    }
+
     fn labels(s: &[Step]) -> Vec<String> {
         s.iter().map(|s| s.label.clone()).collect()
     }
@@ -559,17 +666,18 @@ let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out");
             cli.has_lib = false;
         }
         // docs only: cheap checks
-        assert_eq!(labels(&steps(&plan(&files(&["docs/gaps.md"]), &p), &p, true)), ["fmt", "layers"]);
+        assert_eq!(labels(&steps(&plan(&files(&["docs/gaps.md"]), &p), &p, true)), ["fmt", "pdf-deps", "lock-patches", "layers"]);
         // ui-egui (L5, a web crate) and its two app dependents; cli has no doctests
         let s = steps(&plan(&files(&["crates/ui-egui/src/dock.rs"]), &p), &p, true);
-        assert_eq!(labels(&s), ["fmt", "clippy (3)", "nextest (3)", "doctests (2)", "layers", "wasm (1)"]);
+        assert_eq!(labels(&s), ["fmt", "audio backend", "clippy (3)", "tests (3)", "pdf-deps", "lock-patches", "layers", "wasm (1)"]);
         let args = |i: usize| s.get(i).and_then(|s| s.cmd.as_ref()).map(|c| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
-        let clippy = args(1).unwrap_or_default();
+        let clippy = args(2).unwrap_or_default();
+        assert!(!clippy.iter().any(|a| a == "--release" || a == "--profile"));
         assert!(clippy.windows(2).any(|w| w == ["-p", "effectcraft-ui-egui"]));
         assert!(clippy.ends_with(&["--".into(), "-D".into(), "warnings".into()]));
-        assert!(args(5).unwrap_or_default().windows(2).any(|w| w == ["-p", "effectcraft-ui-egui"]));
+        assert!(args(7).unwrap_or_default().windows(2).any(|w| w == ["-p", "effectcraft-ui-egui"]));
         // without nextest: one cargo test step; an asset change adds the assets check
         let s = steps(&plan(&files(&["assets/fonts/A.ttf"]), &p), &p, false);
-        assert!(labels(&s).contains(&"test (7)".to_string()) && labels(&s).contains(&"assets".to_string()));
+        assert!(labels(&s).contains(&"tests (7)".to_string()) && labels(&s).contains(&"assets".to_string()));
     }
 }

@@ -82,69 +82,6 @@ fn fxn_median(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, vec4<f32>(data[level.x], data[level.y], data[level.z], data[level.w]));
 }
 
-// The same median for large radii, as the CPU computes it: a sliding 512-bin histogram per
-// channel (Huang). One invocation per row segment of u[0].y pixels: it fills the histogram for
-// the segment's first window, then slides right one column at a time (remove the column
-// leaving, add the one entering) and moves each channel's median by the counts below it.
-// u[0] = (r, segment length); dispatched over (rows, segments) with 64 × 1 workgroups.
-// data = the 512 CPU-rounded level / 511 values.
-@compute @workgroup_size(64, 1)
-fn fxn_median_huang(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = out_dims();
-    let y = i32(gid.x);
-    let seg = i32(P.u[0].y);
-    let x0 = i32(gid.y) * seg;
-    if (y >= dims.y || x0 >= dims.x) {
-        return;
-    }
-    let x1 = min(x0 + seg, dims.x);
-    let r = i32(P.u[0].x);
-    let half = u32((2 * r + 1) * (2 * r + 1) / 2);
-    var hist: array<u32, 2048>;
-    for (var dy = -r; dy <= r; dy++) {
-        for (var dx = -r; dx <= r; dx++) {
-            let v = vec4<u32>(tex_get_clamped(src, x0 + dx, y + dy));
-            hist[v.x] += 1u;
-            hist[512u + v.y] += 1u;
-            hist[1024u + v.z] += 1u;
-            hist[1536u + v.w] += 1u;
-        }
-    }
-    // Per channel: the median level and the count of values below it.
-    var med = vec4<u32>(0u);
-    var lt = vec4<u32>(0u);
-    for (var x = x0; x < x1; x++) {
-        if (x > x0) {
-            for (var dy = -r; dy <= r; dy++) {
-                let o = vec4<u32>(tex_get_clamped(src, x - 1 - r, y + dy));
-                let n = vec4<u32>(tex_get_clamped(src, x + r, y + dy));
-                for (var c = 0u; c < 4u; c++) {
-                    hist[c * 512u + o[c]] -= 1u;
-                    if (o[c] < med[c]) {
-                        lt[c] -= 1u;
-                    }
-                    hist[c * 512u + n[c]] += 1u;
-                    if (n[c] < med[c]) {
-                        lt[c] += 1u;
-                    }
-                }
-            }
-        }
-        for (var c = 0u; c < 4u; c++) {
-            let base = c * 512u;
-            while (lt[c] > half) {
-                med[c] -= 1u;
-                lt[c] -= hist[base + med[c]];
-            }
-            while (lt[c] + hist[base + med[c]] <= half) {
-                lt[c] += hist[base + med[c]];
-                med[c] += 1u;
-            }
-        }
-        textureStore(out, vec2<i32>(x, y), vec4<f32>(data[med.x], data[med.y], data[med.z], data[med.w]));
-    }
-}
-
 // noise::median_px.
 fn fxn_median_px(o: vec4<f32>, m: vec4<f32>, on_alpha: bool) -> vec4<f32> {
     if (on_alpha) {
@@ -470,11 +407,13 @@ fn fxn_echo(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 3u: {
             acc = acc + q - acc * q;
         }
+        // Composite In Back: each echo over what is there (time_fx.rs echo).
         case 4u: {
-            acc += q * (1.0 - acc.w);
-        }
-        case 5u: {
             acc = q + acc * (1.0 - q.w);
+        }
+        // Composite In Front: each echo behind what is there.
+        case 5u: {
+            acc += q * (1.0 - acc.w);
         }
         default: {
             acc += q;
@@ -483,7 +422,7 @@ fn fxn_echo(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, acc);
 }
 
-// Echo's finish. u[0].x = operator; f[0].x = number of frames.
+// Echo's finish. u[0].x = operator. Blend sums like Add (time_fx.rs echo), so nothing divides.
 @compute @workgroup_size(16, 16)
 fn fxn_echo_fin(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = fxn_pixel(gid);
@@ -492,9 +431,6 @@ fn fxn_echo_fin(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let op = P.u[0].x;
     var acc = textureLoad(src, p, 0);
-    if (op == 6u) {
-        acc = acc / P.f[0].x;
-    }
     if (op == 2u && acc.x == FXN_MAX) {
         acc = vec4<f32>(0.0);
     }
@@ -538,7 +474,7 @@ fn fxn_typed_noise(x: f32, y: f32, z: f32, seed: u32, nt: u32) -> f32 {
     let z0 = floor(z);
     let tx = x - x0;
     let ty = y - y0;
-    let fz = fade(z - z0);
+    let fz = z - z0;
     let a = fxn_slice(i32(x0), i32(y0), i32(z0), tx, ty, seed, nt);
     let b = fxn_slice(i32(x0), i32(y0), i32(z0) + 1, tx, ty, seed, nt);
     return a + (b - a) * fz;

@@ -85,6 +85,7 @@ fn project(s: &Session) -> J {
         "workingSpace": p.settings.working_space.map(|w| format!("{w:?}")).unwrap_or_default(),
         "workingGamma": if p.settings.working_gamma_24() { 2.4 } else { 2.2 },
         "timeDisplayFrames": p.settings.time_display == effectcraft_project::TimeDisplayStyle::Frames,
+        "displayStartFrame": p.settings.frame_start,
         "renderQueue": p.render_queue.len(),
         "revision": s.revision,
     })
@@ -450,6 +451,9 @@ fn find_child<'a>(l: &'a Layer, g: &'a PropGroup, k: &str, depth: u8) -> Option<
     g.children
         .iter()
         .find(|n| chain_of(n) == k)
+        .or_else(|| matchnames::current_name(k).and_then(|m| g.children.iter().find(|n| chain_of(n) == m)))
+        // Match names that changed only in case (`ADBE Ellipse` is now `ADBE ELLIPSE`, #3113).
+        .or_else(|| g.children.iter().find(|n| chain_of(n).eq_ignore_ascii_case(k)))
         .or_else(|| g.children.iter().find(|n| n.name() == k))
         .or_else(|| g.children.iter().find(|n| n.match_id() == k))
         .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(k)))
@@ -742,36 +746,12 @@ fn resolve_add(s: &Session, a: &J) -> R {
 /// A text animator property (`layer.addTextAnimatorProperty` key) from an After Effects match
 /// name or a display name.
 fn text_animator_property(name: &str) -> Option<&'static str> {
-    const AE: &[(&str, &str)] = &[
-        ("ADBE Text Anchor Point 3D", "anchor"),
-        ("ADBE Text Position 3D", "position"),
-        ("ADBE Text Scale 3D", "scale"),
-        ("ADBE Text Skew", "skew"),
-        ("ADBE Text Rotation", "rotation"),
-        ("ADBE Text Opacity", "opacity"),
-        ("ADBE Text Fill Color", "fillColor"),
-        ("ADBE Text Fill Hue", "fillHue"),
-        ("ADBE Text Fill Saturation", "fillSaturation"),
-        ("ADBE Text Fill Brightness", "fillBrightness"),
-        ("ADBE Text Fill Opacity", "fillOpacity"),
-        ("ADBE Text Stroke Color", "strokeColor"),
-        ("ADBE Text Stroke Hue", "strokeHue"),
-        ("ADBE Text Stroke Saturation", "strokeSaturation"),
-        ("ADBE Text Stroke Brightness", "strokeBrightness"),
-        ("ADBE Text Stroke Opacity", "strokeOpacity"),
-        ("ADBE Text Stroke Width", "strokeWidth"),
-        ("ADBE Text Tracking Amount", "tracking"),
-        ("ADBE Text Line Anchor", "lineAnchor"),
-        ("ADBE Text Line Spacing", "lineSpacing"),
-        ("ADBE Text Character Offset", "characterOffset"),
-        ("ADBE Text Character Replace", "characterValue"),
-        ("ADBE Text Blur", "blur"),
-    ];
-    if let Some((_, k)) = AE.iter().find(|(m, _)| m.eq_ignore_ascii_case(name)) {
+    let table = matchnames::TEXT_ANIMATOR_PROPERTIES;
+    if let Some((k, _)) = table.iter().find(|(_, m)| m.eq_ignore_ascii_case(name)) {
         return Some(k);
     }
     let n = loose(name);
-    AE.iter().map(|(_, k)| *k).find(|k| loose(k) == n || (n == "anchorpoint" && *k == "anchor") || (n == "trackingamount" && *k == "tracking"))
+    table.iter().map(|(k, _)| *k).find(|k| loose(k) == n || (n == "anchorpoint" && *k == "anchor") || (n == "trackingamount" && *k == "tracking"))
 }
 
 /// `app.findMenuCommandId(name)`: 1-based index of the command whose label matches (menu items

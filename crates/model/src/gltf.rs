@@ -11,7 +11,7 @@
 //! `KHR_lights_punctual` lights (directional, point, spot). Sparse accessors and morph targets
 //! are ignored.
 
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
 use serde_json::Value;
 
@@ -39,13 +39,15 @@ pub fn split_glb(b: &[u8]) -> Result<(&[u8], Option<&[u8]>)> {
     while o + 8 <= total {
         let len = u32_at(o).unwrap_or(0) as usize;
         let ty = u32_at(o + 4).unwrap_or(0);
-        let data = b.get(o + 8..o + 8 + len).ok_or_else(|| perr("GLB chunk runs past the end of the file"))?;
+        let past_end = || perr("GLB chunk runs past the end of the file");
+        let end = (o + 8).checked_add(len).ok_or_else(past_end)?;
+        let data = b.get(o + 8..end).ok_or_else(past_end)?;
         match ty {
             CHUNK_JSON if json.is_none() => json = Some(data),
             CHUNK_BIN if bin.is_none() => bin = Some(data),
             _ => {}
         }
-        o += 8 + len;
+        o = end;
     }
     Ok((json.ok_or_else(|| perr("GLB without a JSON chunk"))?, bin))
 }
@@ -85,6 +87,8 @@ pub fn uri_decode(s: &str) -> String {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
             && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
         {
             out.push(v);
@@ -110,13 +114,46 @@ fn load_uri(uri: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<
 struct Doc<'a> {
     j: &'a Value,
     buffers: Vec<Vec<u8>>,
+    /// Zero components that buffer-less accessors may still allocate, across the whole file:
+    /// nothing backs them, so many references to one capped accessor must not multiply (#2139).
+    zero_left: Cell<usize>,
+    /// Components every accessor read may still allocate, across the whole file: each primitive
+    /// that references an accessor keeps its own copy, so references must not multiply memory.
+    read_left: Cell<usize>,
+    /// The budget `read_left` started from, for the error message.
+    read_cap: usize,
 }
 
 fn arr<'v>(v: &'v Value, k: &str) -> &'v [Value] {
     v.get(k).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
 }
+/// A non-negative integer field; one too large for `usize` counts as absent (#1235).
 fn idx(v: &Value, k: &str) -> Option<usize> {
-    v.get(k).and_then(Value::as_u64).map(|x| x as usize)
+    v.get(k).and_then(Value::as_u64).and_then(|x| usize::try_from(x).ok())
+}
+/// Node indices in an array field (out-of-range ones are dropped).
+fn indices(v: &Value, k: &str) -> Vec<usize> {
+    arr(v, k).iter().filter_map(Value::as_u64).filter_map(|c| usize::try_from(c).ok()).collect()
+}
+
+/// The most components accessors without a buffer view (all zeros) may have, together: nothing
+/// in the file backs their counts, so they are capped instead of checked against a buffer
+/// (#1235, #2139).
+const MAX_ZERO_COMPONENTS: usize = 1 << 24;
+
+/// The most components all accessor reads in one file may allocate together (about 1 GiB as
+/// `f32`/`u32`). Each primitive keeps its own copy of what it reads, so an accessor referenced
+/// N times costs N times; this bounds that by a fixed amount rather than by buffer size, because
+/// real assets legitimately share one vertex buffer across many primitives. A 10M-triangle scan
+/// (5M vertices with position, normal, UV and tangent, 30M indices) reads about 90M.
+const MAX_READ_COMPONENTS: usize = 1 << 28;
+
+/// Where an accessor's elements lie in its buffer: `count` elements of `elem` bytes, `stride`
+/// apart from `base`, all checked to be inside `buf`.
+struct Span<'b> {
+    buf: &'b [u8],
+    base: usize,
+    stride: usize,
 }
 fn num(v: &Value, k: &str, d: f64) -> f64 {
     v.get(k).and_then(Value::as_f64).unwrap_or(d)
@@ -131,7 +168,67 @@ fn nums<const N: usize>(v: &Value, k: &str, d: [f64; N]) -> [f64; N] {
     out
 }
 
+/// Bytes of component `c` of element `i`, with checked offsets (the span was validated, but
+/// nothing derived from the file is indexed unchecked).
+fn component(buf: &[u8], base: usize, stride: usize, i: usize, c: usize, csize: usize) -> Result<&[u8]> {
+    let o = i.checked_mul(stride).and_then(|o| o.checked_add(base)).and_then(|o| o.checked_add(c.checked_mul(csize)?));
+    o.and_then(|o| buf.get(o..o.checked_add(csize)?)).ok_or_else(|| perr("accessor reads past its buffer"))
+}
+
 impl Doc<'_> {
+    /// Charge `total` components to the file's read budget before allocating them.
+    fn charge(&self, total: usize) -> Result<()> {
+        let left = self.read_left.get();
+        let Some(rest) = left.checked_sub(total) else {
+            let cap = self.read_cap;
+            return Err(perr(format!("accessor reads need more than {cap} components in total ({total} requested, {left} left)")));
+        };
+        self.read_left.set(rest);
+        Ok(())
+    }
+
+    /// Charge `count` items of `per` components each.
+    fn charge_each(&self, count: usize, per: usize) -> Result<()> {
+        self.charge(count.checked_mul(per).ok_or_else(|| perr("primitive is too large"))?)
+    }
+
+    /// The accessor's element count and total components (`count * n`), checked; and its span in
+    /// the buffer, validated before anything is allocated from the count. `None` for an
+    /// accessor without a buffer view, whose components are all zero.
+    fn layout(&self, acc: &Value, n: usize, csize: usize) -> Result<(usize, usize, Option<Span<'_>>)> {
+        let count = match acc.get("count") {
+            None => 0,
+            Some(c) => c.as_u64().and_then(|c| usize::try_from(c).ok()).ok_or_else(|| perr("accessor count is not a valid size"))?,
+        };
+        let total = count.checked_mul(n).ok_or_else(|| perr("accessor count is too large"))?;
+        let Some(bv) = idx(acc, "bufferView") else {
+            let left = self.zero_left.get();
+            let Some(rest) = left.checked_sub(total) else {
+                return Err(perr(format!("accessors without a bufferView have more than {MAX_ZERO_COMPONENTS} components ({total} requested, {left} left)")));
+            };
+            self.zero_left.set(rest);
+            self.charge(total)?;
+            return Ok((count, total, None));
+        };
+        let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
+        let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
+        let past = || perr("accessor reads past its buffer");
+        let base = idx(view, "byteOffset").unwrap_or(0).checked_add(idx(acc, "byteOffset").unwrap_or(0)).ok_or_else(past)?;
+        let elem = csize.checked_mul(n).ok_or_else(past)?;
+        let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(elem);
+        if stride < elem {
+            return Err(perr(format!("bufferView byteStride {stride} is smaller than its {elem}-byte elements")));
+        }
+        if count > 0 {
+            let end = (count - 1).checked_mul(stride).and_then(|o| o.checked_add(base)).and_then(|o| o.checked_add(elem)).ok_or_else(past)?;
+            if end > buf.len() {
+                return Err(past());
+            }
+        }
+        self.charge(total)?;
+        Ok((count, total, Some(Span { buf, base, stride })))
+    }
+
     /// An accessor as `f32` rows of `n` components (normalised integers mapped to 0..1 / -1..1).
     fn floats(&self, a: usize) -> Result<(Vec<f32>, usize)> {
         let acc = arr(self.j, "accessors").get(a).ok_or_else(|| perr(format!("no accessor {a}")))?;
@@ -145,7 +242,6 @@ impl Doc<'_> {
             "MAT4" => 16,
             t => return Err(perr(format!("accessor type `{t}`"))),
         };
-        let count = idx(acc, "count").unwrap_or(0);
         let ct = idx(acc, "componentType").unwrap_or(5126);
         let norm = acc.get("normalized").and_then(Value::as_bool).unwrap_or(false);
         let csize = match ct {
@@ -154,21 +250,16 @@ impl Doc<'_> {
             5125 | 5126 => 4,
             _ => return Err(perr(format!("componentType {ct}"))),
         };
-        let mut out = vec![0.0f32; count * n];
-        let Some(bv) = idx(acc, "bufferView") else {
+        let (count, total, span) = self.layout(acc, n, csize)?;
+        let mut out = vec![0.0f32; total];
+        let Some(Span { buf, base, stride }) = span else {
             // No buffer view: all zeros (sparse substitution is not supported).
             return Ok((out, n));
         };
-        let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
-        let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
-        let base = idx(view, "byteOffset").unwrap_or(0) + idx(acc, "byteOffset").unwrap_or(0);
-        let elem = csize * n;
         // Matrices of 1/2-byte components pad columns to 4 bytes; ignored (rare).
-        let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(elem);
         for i in 0..count {
             for c in 0..n {
-                let o = base + i * stride + c * csize;
-                let s = buf.get(o..o + csize).ok_or_else(|| perr("accessor reads past its buffer"))?;
+                let s = component(buf, base, stride, i, c, csize)?;
                 out[i * n + c] = match ct {
                     5126 => f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
                     5125 => u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f32,
@@ -207,22 +298,17 @@ impl Doc<'_> {
             "VEC2" => 2,
             _ => 1,
         };
-        let count = idx(acc, "count").unwrap_or(0);
         let csize = match ct {
             5120 | 5121 => 1,
             5122 | 5123 => 2,
             _ => 4,
         };
-        let Some(bv) = idx(acc, "bufferView") else { return Ok(vec![0; count * n]) };
-        let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
-        let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
-        let base = idx(view, "byteOffset").unwrap_or(0) + idx(acc, "byteOffset").unwrap_or(0);
-        let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(csize * n);
-        let mut out = Vec::with_capacity(count * n);
+        let (count, total, span) = self.layout(acc, n, csize)?;
+        let Some(Span { buf, base, stride }) = span else { return Ok(vec![0; total]) };
+        let mut out = Vec::with_capacity(total);
         for i in 0..count {
             for c in 0..n {
-                let o = base + i * stride + c * csize;
-                let s = buf.get(o..o + csize).ok_or_else(|| perr("accessor reads past its buffer"))?;
+                let s = component(buf, base, stride, i, c, csize)?;
                 out.push(match csize {
                     1 => s[0] as u32,
                     2 => u16::from_le_bytes([s[0], s[1]]) as u32,
@@ -236,6 +322,11 @@ impl Doc<'_> {
 
 /// Parse a `.gltf` (JSON) or `.glb` file.
 pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Model> {
+    parse_with_budget(bytes, resolve, MAX_READ_COMPONENTS)
+}
+
+/// [`parse`] with a read budget of `read_budget` accessor components for the whole file.
+pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, read_budget: usize) -> Result<Model> {
     let (json, bin) = if bytes.starts_with(b"glTF") { split_glb(bytes)? } else { (bytes, None) };
     let j: Value = serde_json::from_slice(json).map_err(|e| perr(format!("glTF JSON: {e}")))?;
     let ver = j.get("asset").and_then(|a| a.get("version")).and_then(Value::as_str).unwrap_or("");
@@ -257,7 +348,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         };
         buffers.push(data);
     }
-    let d = Doc { j: &j, buffers };
+    let d = Doc { j: &j, buffers, zero_left: Cell::new(MAX_ZERO_COMPONENTS), read_left: Cell::new(read_budget), read_cap: read_budget };
 
     // Images → textures (decoded once per image; samplers set the wrap modes).
     let mut images: Vec<Option<Arc<Texture>>> = vec![];
@@ -268,7 +359,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             arr(&j, "bufferViews").get(bv).and_then(|v| {
                 let b = d.buffers.get(idx(v, "buffer").unwrap_or(0))?;
                 let o = idx(v, "byteOffset").unwrap_or(0);
-                b.get(o..o + idx(v, "byteLength").unwrap_or(0)).map(<[u8]>::to_vec)
+                b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
             })
         } else {
             None
@@ -366,13 +457,13 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             skin: idx(n, "skin"),
             camera: idx(n, "camera"),
             light: n.get("extensions").and_then(|e| e.get("KHR_lights_punctual")).and_then(|e| idx(e, "light")),
-            children: arr(n, "children").iter().filter_map(Value::as_u64).map(|c| c as usize).collect(),
+            children: indices(n, "children"),
         });
     }
 
     let scene = idx(&j, "scene").unwrap_or(0);
     let roots: Vec<usize> = match arr(&j, "scenes").get(scene) {
-        Some(s) => arr(s, "nodes").iter().filter_map(Value::as_u64).map(|c| c as usize).collect(),
+        Some(s) => indices(s, "nodes"),
         None => {
             // No scene: every node that is nobody's child.
             let mut child = vec![false; nodes.len()];
@@ -389,7 +480,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
 
     let mut skins = vec![];
     for s in arr(&j, "skins") {
-        let joints: Vec<usize> = arr(s, "joints").iter().filter_map(Value::as_u64).map(|c| c as usize).collect();
+        let joints: Vec<usize> = indices(s, "joints");
         let inverse_bind = match idx(s, "inverseBindMatrices") {
             Some(a) => {
                 let (f, _) = d.floats(a)?;
@@ -524,7 +615,11 @@ fn primitive(d: &Doc, p: &Value, materials: &[Material]) -> Result<Option<Primit
     };
     let raw: Vec<u32> = match idx(p, "indices") {
         Some(a) => d.ints(a)?,
-        None => (0..n as u32).collect(),
+        None => {
+            // Generated indices are allocated like a read, once per referencing primitive.
+            d.charge(n)?;
+            (0..n as u32).collect()
+        }
     };
     if raw.iter().any(|&i| i as usize >= n) {
         return Err(perr("index out of range"));
@@ -544,11 +639,19 @@ fn primitive(d: &Doc, p: &Value, materials: &[Material]) -> Result<Option<Primit
         }
         _ => indices.extend(raw.as_chunks::<3>().0.iter().flatten()),
     }
+    // The triangle list is kept besides the raw indices (a strip or fan of k indices becomes
+    // 3(k-2)), so it is charged like a read.
+    d.charge(indices.len())?;
     if normals.len() != n {
         normals.clear();
     }
     let material = idx(p, "material").filter(|&m| m < materials.len());
     let skinned = joints.len() == n && weights.len() == n;
+    if normals.is_empty() {
+        // Flat normals unshare every vertex: position and normal, plus UVs and joints/weights.
+        let per = 6 + if uvs.len() == n { 2 } else { 0 } + if skinned { 8 } else { 0 };
+        d.charge_each(indices.len(), per)?;
+    }
     let mut prim = Primitive {
         positions,
         normals,
@@ -565,7 +668,20 @@ fn primitive(d: &Doc, p: &Value, materials: &[Material]) -> Result<Option<Primit
     }
     let needs_tangents = material.is_some_and(|m| materials[m].normal_tex.is_some());
     if needs_tangents && prim.tangents.is_empty() {
+        d.charge_each(prim.positions.len(), 4)?;
         prim.compute_tangents();
     }
     Ok(Some(prim))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uri_decode;
+
+    #[test]
+    fn uri_decode_rejects_signed_hex_pair() {
+        assert_eq!(uri_decode("a%+1b"), "a%+1b");
+        assert_eq!(uri_decode("a%-1b"), "a%-1b");
+        assert_eq!(uri_decode("a%41b"), "aAb");
+    }
 }

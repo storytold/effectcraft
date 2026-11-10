@@ -1,5 +1,5 @@
-//! Color Correction effects, batch 3: Change Color, Video Limiter, CC Color Neutralizer,
-//! PS Arbitrary Map and Lumetri Color (Basic Correction, Creative, Curves, Color Wheels,
+//! Color Correction effects, batch 3: Change Color, Video Limiter, Color Neutralizer,
+//! PS Arbitrary Map and Color Grading (Basic Correction, Creative, Curves, Color Wheels,
 //! Vignette).
 
 use effectcraft_color::{hsl_to_rgb, luminance, rgb_to_hsl};
@@ -154,7 +154,7 @@ fn video_limiter(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Color Neutralizer
+// ---------------------------------------------------------------- Color Neutralizer
 
 fn color_neutralizer(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pairs = [("shadowsUnbalance", "shadowsBalance"), ("midtonesUnbalance", "midtonesBalance"), ("highlightsUnbalance", "highlightsBalance")];
@@ -225,7 +225,7 @@ fn arbitrary_map(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- Lumetri Color
+// ---------------------------------------------------------------- Color Grading
 
 /// Smooth tone-curve adjustment: offsets for shadows/midtones/highlights (each -1..1), with the
 /// end points fixed.
@@ -301,7 +301,8 @@ impl OffsetCurve {
         }
         let n = ext.len();
         // Tangents: the mean of the neighbouring slopes, flat at local extrema and next to flat
-        // segments so the curve never overshoots its points.
+        // segments, and at most three times either slope (Fritsch-Carlson) so the curve never
+        // overshoots its points, even beside a short steep segment.
         let slope = |k: usize| (ext[k + 1].1 - ext[k].1) / (ext[k + 1].0 - ext[k].0).max(1e-6);
         let m: Vec<f32> = (0..n)
             .map(|k| {
@@ -309,7 +310,12 @@ impl OffsetCurve {
                     return 0.0;
                 }
                 let (a, b) = (slope(k - 1), slope(k));
-                if a * b <= 0.0 { 0.0 } else { (a + b) * 0.5 }
+                if a * b <= 0.0 {
+                    0.0
+                } else {
+                    let lim = 3.0 * a.abs().min(b.abs());
+                    ((a + b) * 0.5).clamp(-lim, lim)
+                }
             })
             .collect();
         let eval = |x: f32| -> f32 {
@@ -425,7 +431,7 @@ impl HslKey {
     }
 }
 
-/// Lumetri Color: Basic Correction (input LUT, white balance, HDR range, tone, saturation),
+/// Color Grading: Basic Correction (input LUT, white balance, HDR range, tone, saturation),
 /// Creative (look, adjustments), Curves (tone sliders, RGB curves, hue/saturation curves),
 /// Color Wheels, HSL Secondary (key, refine, correction), Vignette, in that order.
 fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -699,32 +705,37 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 pub fn specs() -> Vec<EffectSpec> {
     let grey = || col(0.5, 0.5, 0.5);
+    // After Effects' valid ranges (a value past the slider's drag range is still kept: .aep
+    // import, 1200), the slider over the range After Effects' slider covers.
+    let wb = || slider(-300.0, 300.0, -100.0, 100.0, 1);
+    let tone = || slider(-150.0, 150.0, -100.0, 100.0, 1);
+    let sat = || slider(0.0, 300.0, 0.0, 200.0, 1);
     let mut lum = vec![
         p("highDynamicRange", "High Dynamic Range", Value::Bool(false), ParamUi::Checkbox),
         p("basicCorrection/inputLut", "Input LUT", Value::Enum(0), popup(&["None", "Custom"])),
         // A .cube file path (or the file's text) for Input LUT = Custom.
         p("basicCorrection/inputLutFile", "Input LUT File", Value::Str(String::new()), ParamUi::Text),
-        p("basicCorrection/whiteBalance/temperature", "Temperature", num(0.0), bipolar()),
-        p("basicCorrection/whiteBalance/tint", "Tint", num(0.0), bipolar()),
-        p("basicCorrection/tone/exposure", "Exposure", num(0.0), slider(-5.0, 5.0, -5.0, 5.0, 2)),
-        p("basicCorrection/tone/contrast", "Contrast", num(0.0), bipolar()),
-        p("basicCorrection/tone/highlights", "Highlights", num(0.0), bipolar()),
-        p("basicCorrection/tone/shadows", "Shadows", num(0.0), bipolar()),
-        p("basicCorrection/tone/whites", "Whites", num(0.0), bipolar()),
-        p("basicCorrection/tone/blacks", "Blacks", num(0.0), bipolar()),
+        p("basicCorrection/whiteBalance/temperature", "Temperature", num(0.0), wb()),
+        p("basicCorrection/whiteBalance/tint", "Tint", num(0.0), wb()),
+        p("basicCorrection/tone/exposure", "Exposure", num(0.0), slider(-7.0, 7.0, -5.0, 5.0, 2)),
+        p("basicCorrection/tone/contrast", "Contrast", num(0.0), tone()),
+        p("basicCorrection/tone/highlights", "Highlights", num(0.0), tone()),
+        p("basicCorrection/tone/shadows", "Shadows", num(0.0), tone()),
+        p("basicCorrection/tone/whites", "Whites", num(0.0), tone()),
+        p("basicCorrection/tone/blacks", "Blacks", num(0.0), tone()),
         p("basicCorrection/tone/hdrWhite", "HDR White", num(100.0), slider(100.0, 10000.0, 100.0, 4000.0, 0)),
-        p("basicCorrection/tone/hdrSpecular", "HDR Specular", num(0.0), bipolar()),
-        p("basicCorrection/saturation", "Saturation", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
+        p("basicCorrection/tone/hdrSpecular", "HDR Specular", num(0.0), tone()),
+        p("basicCorrection/saturation", "Saturation", num(100.0), sat()),
         p("creative/look", "Look", Value::Enum(0), popup(&LUMETRI_LOOKS)),
         p("creative/lookFile", "Look File", Value::Str(String::new()), ParamUi::Text),
         p("creative/lookIntensity", "Intensity", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
-        p("creative/adjustments/fadedFilm", "Faded Film", num(0.0), pct()),
+        p("creative/adjustments/fadedFilm", "Faded Film", num(0.0), slider(0.0, 150.0, 0.0, 100.0, 1)),
         p("creative/adjustments/sharpen", "Sharpen", num(0.0), bipolar()),
         p("creative/adjustments/vibrance", "Vibrance", num(0.0), bipolar()),
-        p("creative/adjustments/creativeSaturation", "Saturation", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
+        p("creative/adjustments/creativeSaturation", "Saturation", num(100.0), sat()),
         p("creative/adjustments/shadowTint", "Shadow Tint", grey(), ParamUi::Color),
         p("creative/adjustments/highlightTint", "Highlight Tint", grey(), ParamUi::Color),
-        p("creative/adjustments/tintBalance", "Tint Balance", num(0.0), bipolar()),
+        p("creative/adjustments/tintBalance", "Tint Balance", num(0.0), tone()),
     ];
     const CURVES: [(&str, &str); 12] = [
         ("curves/curveMasterShadows", "RGB Curve Shadows"),
@@ -780,13 +791,13 @@ pub fn specs() -> Vec<EffectSpec> {
         p("hslSecondary/key/maskStyle", "Mask Style", Value::Enum(0), popup(&HSL_MASK_STYLES)),
         p("hslSecondary/key/invertMask", "Invert Mask", Value::Bool(false), ParamUi::Checkbox),
         p("hslSecondary/refine/denoise", "Denoise", num(0.0), pct()),
-        p("hslSecondary/refine/blur", "Blur", num(0.0), pct()),
+        p("hslSecondary/refine/blur", "Blur", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
         p("hslSecondary/correction/correctionWheel", "Correction", grey(), ParamUi::Color),
-        p("hslSecondary/correction/temperature", "Temperature", num(0.0), bipolar()),
-        p("hslSecondary/correction/tint", "Tint", num(0.0), bipolar()),
-        p("hslSecondary/correction/contrast", "Contrast", num(0.0), bipolar()),
+        p("hslSecondary/correction/temperature", "Temperature", num(0.0), wb()),
+        p("hslSecondary/correction/tint", "Tint", num(0.0), wb()),
+        p("hslSecondary/correction/contrast", "Contrast", num(0.0), tone()),
         p("hslSecondary/correction/sharpen", "Sharpen", num(0.0), bipolar()),
-        p("hslSecondary/correction/saturation", "Saturation", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
+        p("hslSecondary/correction/saturation", "Saturation", num(100.0), sat()),
         p("vignette/vignetteAmount", "Amount", num(0.0), slider(-5.0, 5.0, -5.0, 5.0, 2)),
         p("vignette/vignetteMidpoint", "Midpoint", num(50.0), pct()),
         p("vignette/vignetteRoundness", "Roundness", num(0.0), bipolar()),
@@ -823,7 +834,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.color.cccolorneutralizer",
-            "CC Color Neutralizer",
+            "Color Neutralizer",
             vec![
                 p("shadowsUnbalance", "Shadows Unbalance", col(0.0, 0.0, 0.0), ParamUi::Color),
                 p("shadowsBalance", "Shadows Balance", col(0.0, 0.0, 0.0), ParamUi::Color),
@@ -849,7 +860,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             arbitrary_map,
         ),
-        spec("ec.color.lumetri", "Lumetri Color", lum, lumetri),
+        spec("ec.color.lumetri", "Color Grading", lum, lumetri),
     ]
 }
 
@@ -986,6 +997,28 @@ mod tests {
             let out = run("ec.color.lumetri", &[(&format!("curves/hueSaturationCurves/{id}"), s("0,0 1,0"))], img.clone());
             let p = out.get(0, 0);
             assert!((p[0] - p[1]).abs() < 1e-3 && (p[1] - p[2]).abs() < 1e-3, "{id}: {p:?}");
+        }
+    }
+
+    #[test]
+    fn hue_saturation_curve_stays_between_its_points() {
+        // #1656: a point dragged to the bottom right next to another one. The steep short
+        // segment used to pull the long one beside it far outside the box (|offset| > 0.5).
+        // The third pair sits across the hue wrap (0.98 and 0.005 are neighbours).
+        let cases = [("0.3,0.4 0.31,0 0.7,0.6", true), ("0.1,0.3 0.3,0.5 0.31,1 0.7,0.5", false), ("0.5,0.6 0.98,0.4 0.005,0", true)];
+        for (pts, periodic) in cases {
+            let c = OffsetCurve::parse(pts, periodic).unwrap();
+            for i in 0..=1000 {
+                let x = i as f32 / 1000.0;
+                let v = c.at(x);
+                assert!((-0.5..=0.5).contains(&v), "{pts} at {x}: {v}");
+            }
+            for p in parse_points(pts) {
+                assert!((c.at(p.0) - (p.1 - 0.5)).abs() < 0.02, "{pts}: passes through {p:?}");
+            }
+            if periodic {
+                assert!((c.at(0.0) - c.at(1.0)).abs() < 1e-4, "{pts}: no seam at the wrap");
+            }
         }
     }
 

@@ -19,6 +19,7 @@ mod image;
 mod object;
 mod page;
 mod ps;
+mod read;
 mod shading;
 mod type1;
 pub mod write;
@@ -33,6 +34,7 @@ pub enum Error {
     NoPages,
     PageOutOfRange(usize),
     NoBoundingBox,
+    Read(String),
 }
 
 impl std::fmt::Display for Error {
@@ -41,8 +43,9 @@ impl std::fmt::Display for Error {
             Error::NotVector => write!(f, "not a PDF, Illustrator or EPS file"),
             Error::Encrypted => write!(f, "encrypted PDF files are not supported"),
             Error::NoPages => write!(f, "the PDF has no pages"),
-            Error::PageOutOfRange(n) => write!(f, "the PDF has no page {}", n + 1),
+            Error::PageOutOfRange(n) => write!(f, "the PDF has no page {}", n.saturating_add(1)),
             Error::NoBoundingBox => write!(f, "the EPS file has no %%BoundingBox"),
+            Error::Read(message) => f.write_str(message),
         }
     }
 }
@@ -89,8 +92,25 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
 
 /// Parse page `index` of a PDF (EPS files have one page).
 pub fn parse_page(bytes: &[u8], index: usize) -> Result<Doc, Error> {
+    parse_page_framed(bytes, index, Framing::Viewer)
+}
+
+/// Which region of a PDF page becomes the document, and whether `/Rotate` turns it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Framing {
+    /// As a PDF viewer shows the page: its CropBox (else MediaBox), turned by `/Rotate`.
+    #[default]
+    Viewer,
+    /// As After Effects places a PDF or `.ai` as footage: the page's ArtBox clipped to the
+    /// CropBox (else MediaBox) when it has one, else the CropBox, else the MediaBox, with
+    /// `/Rotate` ignored (measured in After Effects 2026 with own files, #3099).
+    Placed,
+}
+
+/// [`parse_page`] with the page framed as `framing` says (EPS files are their bounding box).
+pub fn parse_page_framed(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     match sniff(bytes) {
-        Some(Format::Pdf) => parse_pdf(bytes, index),
+        Some(Format::Pdf) => parse_pdf(bytes, index, framing),
         Some(Format::Eps) => parse_eps(bytes),
         None => Err(Error::NotVector),
     }
@@ -99,7 +119,7 @@ pub fn parse_page(bytes: &[u8], index: usize) -> Result<Doc, Error> {
 /// Number of pages (1 for EPS).
 pub fn page_count(bytes: &[u8]) -> usize {
     match sniff(bytes) {
-        Some(Format::Pdf) => page::pages(&object::File::parse(bytes)).len(),
+        Some(Format::Pdf) => object::File::parse(bytes).map(|file| page::pages(&file).len()).unwrap_or(0),
         Some(Format::Eps) => 1,
         None => 0,
     }
@@ -139,20 +159,22 @@ fn finish(nodes: Vec<Node>, flags: Vec<bool>, skipped: Vec<String>, width: f64, 
     Doc { width, height, root, skipped }
 }
 
-fn parse_pdf(bytes: &[u8], index: usize) -> Result<Doc, Error> {
-    let file = object::File::parse(bytes);
-    if file.encrypted() {
-        return Err(Error::Encrypted);
-    }
+/// Page `index` of a PDF framed as `framing` says, as a document in points (y down).
+fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
+    let file = object::File::parse(bytes)?;
     let pages = page::pages(&file);
     if pages.is_empty() {
         return Err(Error::NoPages);
     }
     let pg = pages.get(index).ok_or(Error::PageOutOfRange(index))?;
-    let [x0, y0, x1, y1] = pg.bbox;
+    let (frame, rotate) = match framing {
+        Framing::Viewer => (pg.bbox, pg.rotate),
+        Framing::Placed => (pg.art.unwrap_or(pg.bbox), 0),
+    };
+    let [x0, y0, x1, y1] = frame;
     let (w, h) = (x1 - x0, y1 - y0);
     // Default user space (y up) → document pixels (y down), with the page's /Rotate.
-    let (to_doc, dw, dh) = match pg.rotate {
+    let (to_doc, dw, dh) = match rotate {
         90 => (Affine::new([0.0, 1.0, 1.0, 0.0, -y0, -x0]), h, w),
         180 => (Affine::new([-1.0, 0.0, 0.0, 1.0, x1, -y0]), w, h),
         270 => (Affine::new([0.0, -1.0, -1.0, 0.0, y1, x1]), h, w),
@@ -160,6 +182,7 @@ fn parse_pdf(bytes: &[u8], index: usize) -> Result<Doc, Error> {
     };
     let content = page::page_content(&file, pg);
     let mut it = page::Interp::new(&file, pg.bbox);
+    it.b.skipped.extend(file.repairs.iter().cloned());
     it.run(&content, &pg.resources, Affine::IDENTITY, 0);
     let (nodes, flags, skipped) = it.b.finish();
     Ok(finish(nodes, flags, skipped, dw.max(1.0), dh.max(1.0), to_doc))
@@ -194,11 +217,26 @@ pub fn layer_doc(doc: &Doc, index: usize) -> Doc {
     d
 }
 
+/// One layer, optionally cropped to its artwork, and its original document-space top-left.
+pub fn layer_doc_with_sizes(doc: &Doc, index: usize, retain: bool) -> (Doc, [f64; 2]) {
+    let mut d = layer_doc(doc, index);
+    if !retain {
+        return (d, [0.0, 0.0]);
+    }
+    let page = kurbo::Rect::new(0.0, 0.0, doc.width, doc.height);
+    let bounds = d.artwork_bounds().map(|b| b.intersect(page)).filter(|b| b.width() > 0.0 && b.height() > 0.0);
+    let (x, y, w, h) = match bounds {
+        Some(b) => {
+            let (x, y) = (b.x0.floor(), b.y0.floor());
+            (x, y, b.x1.ceil() - x, b.y1.ceil() - y)
+        }
+        None => (0.0, 0.0, 1.0, 1.0),
+    };
+    d.width = w;
+    d.height = h;
+    d.root.transform = Affine::translate((-x, -y)) * d.root.transform;
+    (d, [x, y])
+}
+
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_groups;
-#[cfg(test)]
-mod tests_import;
-#[cfg(test)]
-mod tests_shading;

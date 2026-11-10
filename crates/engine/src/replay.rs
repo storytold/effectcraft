@@ -3,7 +3,7 @@
 //! The session's command journal ([`Session::journal`]) becomes a JSON-lines script
 //! (`journal.export`, `help.exportRepro`, and automatically when the last-resort guard catches a
 //! panic, see [`after_command`]); `effectcraft-cli replay script.jsonl` runs one headless and
-//! `crates/host/tests/repros.rs` runs every `tests/repros/*.jsonl` as a regression test.
+//! `crates/host/tests/it/repros.rs` runs every `tests/repros/*.jsonl` as a regression test.
 //!
 //! Format (one JSON object per line; blank lines and lines starting with `//` or `#` are
 //! comments):
@@ -174,7 +174,7 @@ fn skipped_in_export(id: &str) -> bool {
 }
 
 /// The journal as a replay script: a start line, then the steps since the project was last
-/// replaced (`file.newProject` / `file.open` / `file.openDemoProject`). `crash` (the failing
+/// replaced (`file.newProject` / `file.open` / `file.openDemoProject`; successful Revert records a resolved `file.open`). `crash` (the failing
 /// command and its error) marks a crash repro, which tolerates errors on replay.
 pub fn export(s: &Session, crash: Option<Value>) -> String {
     let from = s.journal.iter().rposition(|(id, _)| PROJECT_STARTS.contains(&id.as_str())).unwrap_or(0);
@@ -275,27 +275,9 @@ fn parse_line(text: &str, first: bool, allow_errors: &mut bool) -> Option<Step> 
         *allow_errors = o.get("allow_errors").and_then(Value::as_bool).unwrap_or(false);
         parse_start(st).map(Step::Start)
     } else if let Some(c) = o.get("command") {
-        let Some(id) = c.as_str().filter(|s| !s.is_empty()) else { return Some(Step::Invalid("`command` must be a command id".into())) };
-        let expect_error = match o.get("expect_error") {
-            None | Some(Value::Null | Value::Bool(false)) => Ok(None),
-            Some(Value::Bool(true)) => Ok(Some(None)),
-            Some(Value::String(s)) => Ok(Some(Some(s.clone()))),
-            Some(_) => Err("`expect_error` must be true or a text the error contains".to_string()),
-        };
-        match (params_of(o.get("params")), expect_error) {
-            (Ok(params), Ok(expect_error)) => Ok(Step::Command { id: id.to_string(), params, expect_error }),
-            (Err(m), _) | (_, Err(m)) => Err(m),
-        }
+        parse_command(c, o)
     } else if let Some(e) = o.get("expect") {
-        let query = e.get("query").and_then(Value::as_str).filter(|s| !s.is_empty());
-        let pointer = e.get("pointer").map(|p| p.as_str().map(str::to_string).ok_or("`pointer` must be a JSON pointer such as /value"));
-        match (query, pointer.transpose()) {
-            (None, _) => Err("`expect` needs a `query` command id".to_string()),
-            (_, Err(m)) => Err(m.to_string()),
-            (Some(q), Ok(pointer)) => {
-                params_of(e.get("params")).map(|params| Step::Expect { query: q.to_string(), params, pointer, equals: e.get("equals").cloned() })
-            }
-        }
+        parse_expect(e)
     } else if o.get("expect_no_error").and_then(Value::as_bool) == Some(true) {
         Ok(Step::ExpectNoError)
     } else if o.len() == 1 && o.contains_key("comment") {
@@ -304,6 +286,25 @@ fn parse_line(text: &str, first: bool, allow_errors: &mut bool) -> Option<Step> 
         Err("expected a `start`, `command`, `expect` or `expect_no_error` line".to_string())
     };
     Some(step.unwrap_or_else(Step::Invalid))
+}
+
+/// Parse one command and its optional expected error without executing it.
+fn parse_command(c: &Value, o: &Map<String, Value>) -> std::result::Result<Step, String> {
+    let id = c.as_str().filter(|s| !s.is_empty()).ok_or("`command` must be a command id")?;
+    let expect_error = match o.get("expect_error") {
+        None | Some(Value::Null | Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.clone())),
+        Some(_) => return Err("`expect_error` must be true or a text the error contains".into()),
+    };
+    Ok(Step::Command { id: id.to_string(), params: params_of(o.get("params"))?, expect_error })
+}
+
+/// Parse a query assertion, retaining the distinction between no expected value and JSON null.
+fn parse_expect(e: &Value) -> std::result::Result<Step, String> {
+    let query = e.get("query").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or("`expect` needs a `query` command id")?;
+    let pointer = e.get("pointer").map(|p| p.as_str().map(str::to_string).ok_or("`pointer` must be a JSON pointer such as /value")).transpose()?;
+    Ok(Step::Expect { query: query.to_string(), params: params_of(e.get("params"))?, pointer, equals: e.get("equals").cloned() })
 }
 
 // ---------- running ----------
@@ -411,6 +412,86 @@ fn start_step(s: &mut Session, start: &Start, base: Option<&Path>) -> (String, R
     }
 }
 
+/// Compare a query result and produce a bounded explanation when it fails.
+fn expectation_error(r: Result<Value>, panicked: bool, pointer: Option<&str>, equals: Option<&Value>) -> Option<String> {
+    let value = match r {
+        Ok(v) => v,
+        Err(e) => return Some(cut(&format!("{}{e}", if panicked { "panicked: " } else { "" }))),
+    };
+    let got = match pointer {
+        Some(p) => value.pointer(p),
+        None => Some(&value),
+    };
+    match (got, equals) {
+        (None, _) => Some(cut(&format!("no value at {} in {value}", pointer.unwrap_or("")))),
+        (Some(got), Some(want)) if !approx_eq(got, want) => Some(cut(&format!("expected {want}, got {got}"))),
+        _ => None,
+    }
+}
+
+/// Execute one parsed line and remember whether the last command failed for `expect_no_error`.
+fn run_step(s: &mut Session, line: usize, step: Step, opts: &Options, allow_errors: bool, last_command_failed: &mut Option<bool>) -> StepReport {
+    let mut sr = StepReport { line, kind: "command", command: None, ok: true, error: None, panicked: false };
+    match step {
+        Step::Invalid(m) => {
+            sr.kind = "invalid";
+            sr.ok = false;
+            sr.error = Some(m);
+        }
+        Step::Start(start) => {
+            sr.kind = "start";
+            let (id, r, panicked) = start_step(s, &start, opts.base_dir.as_deref());
+            sr.command = Some(id);
+            sr.panicked = panicked;
+            sr.ok = !panicked;
+            if let Err(e) = r {
+                sr.ok = false;
+                sr.error = Some(cut(&e.to_string()));
+            }
+        }
+        Step::Command { id, params, expect_error } => {
+            let (r, panicked) = exec(s, &id, params);
+            sr.command = Some(id);
+            sr.panicked = panicked;
+            *last_command_failed = Some(r.is_err());
+            let err = r.err().map(|e| e.to_string());
+            let (ok, error) = match (err, expect_error) {
+                (e, _) if panicked => (false, Some(format!("panicked: {}", e.unwrap_or_else(|| "a step failed with an internal error".into())))),
+                (None, None) => (true, None),
+                (None, Some(_)) => (false, Some("expected an error, but the command succeeded".into())),
+                (Some(e), Some(Some(want))) if !e.contains(want.as_str()) => (false, Some(format!("expected an error containing {want:?}, got: {e}"))),
+                (Some(_), Some(_)) => (true, None),
+                (Some(e), None) => (allow_errors, Some(e)),
+            };
+            sr.ok = ok;
+            sr.error = error.as_deref().map(cut);
+        }
+        Step::Expect { query, params, pointer, equals } => {
+            sr.kind = "expect";
+            let (r, panicked) = exec(s, &query, params);
+            sr.command = Some(query);
+            sr.panicked = panicked;
+            sr.error = expectation_error(r, panicked, pointer.as_deref(), equals.as_ref());
+            sr.ok = sr.error.is_none() && !panicked;
+        }
+        Step::ExpectNoError => {
+            sr.kind = "expect_no_error";
+            match last_command_failed {
+                Some(false) => {}
+                Some(true) => {
+                    sr.ok = false;
+                    sr.error = Some("the previous command failed".into());
+                }
+                None => {
+                    sr.ok = false;
+                    sr.error = Some("no command before this line".into());
+                }
+            }
+        }
+    }
+    sr
+}
+
 /// Run a replay script against `s`. Never panics: malformed lines are failed steps.
 pub fn run(s: &mut Session, script: &str, opts: &Options) -> Report {
     let _replaying = Replaying::enter();
@@ -448,84 +529,7 @@ pub fn run(s: &mut Session, script: &str, opts: &Options) -> Report {
             report.skipped += 1;
             continue;
         }
-        let mut sr = StepReport { line, kind: "command", command: None, ok: true, error: None, panicked: false };
-        match step {
-            Step::Invalid(m) => {
-                sr.kind = "invalid";
-                sr.ok = false;
-                sr.error = Some(m);
-            }
-            Step::Start(start) => {
-                sr.kind = "start";
-                let (id, r, panicked) = start_step(s, &start, opts.base_dir.as_deref());
-                sr.command = Some(id);
-                sr.panicked = panicked;
-                if let Err(e) = r {
-                    sr.ok = false;
-                    sr.error = Some(cut(&e.to_string()));
-                }
-            }
-            Step::Command { id, params, expect_error } => {
-                let (r, panicked) = exec(s, &id, params);
-                sr.command = Some(id);
-                sr.panicked = panicked;
-                last_command_failed = Some(r.is_err());
-                let err = r.err().map(|e| e.to_string());
-                let (ok, error) = match (err, expect_error) {
-                    (e, _) if panicked => (false, Some(format!("panicked: {}", e.unwrap_or_else(|| "a step failed with an internal error".into())))),
-                    (None, None) => (true, None),
-                    (None, Some(_)) => (false, Some("expected an error, but the command succeeded".into())),
-                    (Some(e), Some(Some(want))) if !e.contains(want.as_str()) => (false, Some(format!("expected an error containing {want:?}, got: {e}"))),
-                    (Some(_), Some(_)) => (true, None),
-                    (Some(e), None) => (allow_errors, Some(e)),
-                };
-                sr.ok = ok;
-                sr.error = error.as_deref().map(cut);
-            }
-            Step::Expect { query, params, pointer, equals } => {
-                sr.kind = "expect";
-                let (r, panicked) = exec(s, &query, params);
-                sr.command = Some(query);
-                sr.panicked = panicked;
-                match r {
-                    Err(e) => {
-                        sr.ok = false;
-                        sr.error = Some(cut(&format!("{}{e}", if panicked { "panicked: " } else { "" })));
-                    }
-                    Ok(v) => {
-                        let got = match &pointer {
-                            Some(p) => v.pointer(p),
-                            None => Some(&v),
-                        };
-                        match (got, &equals) {
-                            (None, _) => {
-                                sr.ok = false;
-                                sr.error = Some(cut(&format!("no value at {} in {v}", pointer.as_deref().unwrap_or(""))));
-                            }
-                            (Some(g), Some(want)) if !approx_eq(g, want) => {
-                                sr.ok = false;
-                                sr.error = Some(cut(&format!("expected {want}, got {g}")));
-                            }
-                            _ => sr.ok = !panicked,
-                        }
-                    }
-                }
-            }
-            Step::ExpectNoError => {
-                sr.kind = "expect_no_error";
-                match last_command_failed {
-                    Some(false) => {}
-                    Some(true) => {
-                        sr.ok = false;
-                        sr.error = Some("the previous command failed".into());
-                    }
-                    None => {
-                        sr.ok = false;
-                        sr.error = Some("no command before this line".into());
-                    }
-                }
-            }
-        }
+        let sr = run_step(s, line, step, opts, allow_errors, &mut last_command_failed);
         if sr.ok {
             report.steps.push(sr);
         } else {
@@ -689,5 +693,35 @@ mod tests {
         s.execute("file.runScript", json!({"steps": [{"command": "layer.newNull"}]})).unwrap();
         let ids: Vec<&str> = s.journal.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["comp.new", "layer.newNull", "layer.newNull", "file.runScript"]);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod revert_tests {
+    use super::{Options, export, run};
+    use crate::Session;
+    use serde_json::json;
+
+    /// Saving is omitted, so a successful Revert must keep the file it read as an open boundary.
+    #[test]
+    fn save_as_then_revert_exports_a_replayable_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved.ecproj");
+        let mut s = Session::new();
+        s.execute("comp.new", json!({"name": "Saved"})).unwrap();
+        s.execute("file.saveAs", json!({"path": path})).unwrap();
+        s.execute("layer.newNull", json!({})).unwrap();
+        s.execute("file.revert", json!({})).unwrap();
+        s.execute("layer.newNull", json!({"name": "After Revert"})).unwrap();
+        let script = export(&s, None);
+        assert!(!script.contains("file.save") && !script.contains("file.revert"), "{script}");
+        assert!(script.lines().nth(1).unwrap().contains("file.open"), "{script}");
+        let saved = std::fs::read(&path).unwrap();
+        let mut again = Session::new();
+        let report = run(&mut again, &script, &Options::default());
+        assert!(report.ok, "{report:?}");
+        assert_eq!(again.path, s.path);
+        assert_eq!(again.active_comp().unwrap().layers.len(), s.active_comp().unwrap().layers.len());
+        assert_eq!(saved, std::fs::read(path).unwrap(), "replay must not rewrite the saved project");
     }
 }
