@@ -733,24 +733,19 @@ fn small_blurs_fall_back_to_the_cpu() {
 
 /// Horizontal GPU box passes used to restart the running sum every 256 px; the CPU keeps one sum
 /// per row, so images wider than 256 disagreed in f32 rounding. Width 320 forces that path.
-/// Exact on llvmpipe (CI lavapipe), which fails without the fix; other adapters (Metal measured
-/// ~1e-6 either way) only get a 2e-6 sanity bound and do not catch the regression. Metal still
-/// differs by ~1e-6 with matching blocks.
+/// Exact on llvmpipe (CI lavapipe), which fails without the fix; other adapters use the usual
+/// Bpc32 tolerance because a tighter bound can fail on unmeasured hardware and does not catch
+/// the regression (Metal still differs by ~1e-6 with or without the fix).
 #[test]
 fn box_blur_horizontal_rows_match_cpu_beyond_256() {
     let Some(g) = gpu() else { return };
     let img = pattern(11, 320, 48);
     let up = g.ctx.upload_image(&img).expect("upload");
-    let tol = if on_llvmpipe() { 0.0 } else { 2e-6 };
+    let tol = if on_llvmpipe() { 0.0 } else { tolerance(BitDepth::Bpc32) };
     let check_case = |name: &str, want: Image, got: Image| {
         assert_eq!((got.width, got.height), (want.width, want.height), "{name}: size");
-        let mut max_abs = 0.0f32;
-        for (a, b) in want.data.iter().zip(&got.data) {
-            for c in 0..4 {
-                max_abs = max_abs.max((a[c] - b[c]).abs());
-            }
-        }
-        assert!(max_abs <= tol, "{name}: max abs channel diff {max_abs} exceeds {tol} on {}", g.ctx.name);
+        let d = diff(&want, &got, tol);
+        assert_eq!(d.over, 0, "{name}: max {} at {:?} on {}", d.max, d.worst, g.ctx.name);
     };
     for (name, r) in [("box r5×3", 5usize), ("box r25×3", 25)] {
         let mut e = crate::context::Enc::new(&g.ctx);
