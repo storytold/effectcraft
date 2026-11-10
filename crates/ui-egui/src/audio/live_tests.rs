@@ -1,6 +1,6 @@
 //! #2104: exercise the real mixer and queue without relying on thread timing or an audio device.
 
-use super::{AudioDevice, AudioFeed, AudioPlayback, Feeder, PlaySpan, feed_block};
+use super::{AudioDevice, AudioFeed, AudioPlayback, Feeder, PlaySpan, PreviewRate, feed_block};
 use crate::frames::RenderSource;
 use effectcraft_engine::color::Label;
 use effectcraft_engine::keyframe::Value;
@@ -62,12 +62,13 @@ fn playback(footage: Arc<dyn FootageSource>) -> AudioPlayback {
         mix: 48000,
         rate: 48000,
         span: PlaySpan { start: 24, wa: 16, wb: 64, looping: false },
+        timeline: PreviewRate::new(48000, 1.0, Tick::ZERO).unwrap(),
     }
 }
 
 /// Run exactly one production feeder block, without a background refill racing assertions.
 fn mix(p: &AudioPlayback) {
-    feed_block(&p.state, p.comp, &p.feed, &p.span, p.rate, p.mix);
+    feed_block(&p.state, p.comp, &p.feed, &p.span, p.timeline, p.mix);
 }
 
 /// Copy the active project and apply a layer edit through the same snapshot boundary as the UI.
@@ -133,7 +134,7 @@ fn a_block_in_flight_cannot_publish_after_a_mute() {
     let (resume, gate) = mpsc::channel();
     let mut p = playback(Arc::new(Gated { entered, resume: Mutex::new(gate) }));
     let (state, feed, span, comp, rate) = (p.state.clone(), p.feed.clone(), p.span, p.comp, p.rate);
-    let worker = std::thread::spawn(move || feed_block(&state, comp, &feed, &span, rate, rate));
+    let worker = std::thread::spawn(move || feed_block(&state, comp, &feed, &span, PreviewRate::new(rate, 1.0, Tick::ZERO).unwrap(), rate));
     waiting.recv_timeout(Duration::from_secs(10)).unwrap();
     // The edit completes while the mixer is blocked, without waiting on its work.
     p.follow_project(edit(&p, |l| l.switches.audio = false));

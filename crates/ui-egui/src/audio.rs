@@ -10,7 +10,7 @@
 //! **A/V sync:** while audio plays, the audio clock drives playback. The clock is the number of
 //! sample frames the device has actually consumed (underruns do not advance it) minus the
 //! device's output latency, mapped through the work-area loop ([`clock_sample`]); the viewer
-//! shows the comp frame at that sample ([`frame_of_sample`]), dropping video frames rather
+//! shows the comp frame at that time ([`AudioPlayback::clock_time`]), dropping video frames rather
 //! than drifting.
 //!
 //! The feed also tracks per-channel peaks for the Audio panel's VU meters ([`Meter`]).
@@ -27,6 +27,9 @@ use effectcraft_engine::project::{GroupKind, ItemId, ItemKind, Layer, LayerSourc
 use effectcraft_engine::time::{FrameRate, Tick};
 
 use crate::frames::RenderSource;
+
+mod preview_rate;
+use preview_rate::PreviewRate;
 
 /// An audio output (implemented by the native app with cpal).
 pub trait AudioDevice: Send {
@@ -141,7 +144,7 @@ impl AudioFeed {
     }
 }
 
-/// What a preview plays, in comp sample indices at the device rate.
+/// What a preview plays, in output sample coordinates on its playback timeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaySpan {
     pub start: i64,
@@ -159,15 +162,23 @@ impl PlaySpan {
     }
 }
 
-/// The comp sample index audible now: `consumed` frames played by the device minus its
+/// The output sample coordinate audible now: `consumed` frames played by the device minus its
 /// `latency`, from the span start, wrapped into the work area when looping (clamped at its end
 /// otherwise).
 pub fn clock_sample(span: &PlaySpan, consumed: u64, latency: u64) -> i64 {
-    let s = span.start + consumed.saturating_sub(latency) as i64;
-    if s < span.wb {
-        return s;
+    // Slow previews can span more output samples than fit in a signed difference. Keep the
+    // elapsed count and loop width wide until the result is back inside the span.
+    let s = i128::from(span.start) + i128::from(consumed.saturating_sub(latency));
+    if s < i128::from(span.wb) {
+        return s as i64;
     }
-    if span.looping { span.wa + (s - span.wb).rem_euclid((span.wb - span.wa).max(1)) } else { span.wb - 1 }
+    if span.looping {
+        let width = (i128::from(span.wb) - i128::from(span.wa)).max(1);
+        let wrapped = i128::from(span.wa) + (s - i128::from(span.wb)).rem_euclid(width);
+        wrapped.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    } else {
+        span.wb.saturating_sub(1)
+    }
 }
 
 /// Comp time of sample index `s` at `rate` Hz.
@@ -196,12 +207,13 @@ pub struct AudioPlayback {
     mix: u32,
     pub rate: u32,
     pub span: PlaySpan,
+    timeline: PreviewRate,
 }
 
 /// The mixer's position and its view of the project.
 struct Feeder {
     src: RenderSource,
-    /// The next comp sample index to mix.
+    /// The next output sample index to mix (mapped to composition time by the preview rate).
     cursor: i64,
     /// Bumped when the project changes: a block mixed from an older project is dropped.
     generation: u64,
@@ -219,7 +231,7 @@ impl AudioPlayback {
     /// at (resampled to the device's rate when they differ; 0 = the device's rate).
     #[allow(clippy::too_many_arguments)]
     pub fn start(
-        mut device: Box<dyn AudioDevice>,
+        device: Box<dyn AudioDevice>,
         src: RenderSource,
         comp: ItemId,
         start: Tick,
@@ -228,15 +240,33 @@ impl AudioPlayback {
         looping: bool,
         mix_rate: u32,
     ) -> Result<AudioPlayback, String> {
+        Self::start_at_speed(device, src, comp, start, wa, wb, looping, mix_rate, 1.0)
+    }
+
+    /// Start at a preview speed relative to composition time. Both the sound (including pitch)
+    /// and its composition clock follow this speed; the physical device rate stays unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_at_speed(
+        mut device: Box<dyn AudioDevice>,
+        src: RenderSource,
+        comp: ItemId,
+        start: Tick,
+        wa: Tick,
+        wb: Tick,
+        looping: bool,
+        mix_rate: u32,
+        speed: f64,
+    ) -> Result<AudioPlayback, String> {
         let rate = device.sample_rate().max(8000);
         let mix = if mix_rate == 0 { rate } else { mix_rate.clamp(8000, 192_000) };
-        let span = PlaySpan::new(start, wa, wb, looping, rate);
+        let timeline = PreviewRate::new(rate, speed, start)?;
+        let span = timeline.span(start, wa, wb, looping);
         let feed = Arc::new(AudioFeed::default());
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(Feeder { src, cursor: span.start, generation: 0 }));
         if cfg!(target_arch = "wasm32") {
             // The device takes samples only in `pump`, which fills the queue first.
-            let mut p = AudioPlayback { feed: feed.clone(), device, stop, thread: None, state, comp, mix, rate, span };
+            let mut p = AudioPlayback { feed: feed.clone(), device, stop, thread: None, state, comp, mix, rate, span, timeline };
             p.device.start(feed)?;
             p.pump();
             return Ok(p);
@@ -253,7 +283,7 @@ impl AudioPlayback {
                     let target = queue_target(rate);
                     while !stop.load(Ordering::Relaxed) {
                         if feed.queued_frames() < target && !feed.finished.load(Ordering::Relaxed) {
-                            feed_block(&state, comp, &feed, &span, rate, mix);
+                            feed_block(&state, comp, &feed, &span, timeline, mix);
                         } else {
                             std::thread::sleep(std::time::Duration::from_millis(4));
                         }
@@ -262,7 +292,7 @@ impl AudioPlayback {
                 .map_err(|e| e.to_string())?
         };
         device.start(feed.clone())?;
-        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), state, comp, mix, rate, span })
+        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), state, comp, mix, rate, span, timeline })
     }
 
     /// Every UI frame while playing: on wasm32 mix ahead into the feed (what the feeder thread
@@ -271,7 +301,7 @@ impl AudioPlayback {
         if cfg!(target_arch = "wasm32") {
             let target = queue_target(self.rate);
             while self.feed.queued_frames() < target && !self.feed.finished.load(Ordering::Relaxed) {
-                feed_block(&self.state, self.comp, &self.feed, &self.span, self.rate, self.mix);
+                feed_block(&self.state, self.comp, &self.feed, &self.span, self.timeline, self.mix);
             }
         }
         self.device.pump();
@@ -310,9 +340,15 @@ impl AudioPlayback {
         }
     }
 
-    /// The comp sample index audible now.
+    /// The comp sample index audible now, expressed at the device's rate.
     pub fn clock(&self) -> i64 {
-        clock_sample(&self.span, self.feed.consumed(), self.device.latency_frames())
+        let sample = clock_sample(&self.span, self.feed.consumed(), self.device.latency_frames());
+        if self.timeline.normal() { sample } else { self.timeline.time(sample).to_units_floor(i64::from(self.rate)) }
+    }
+
+    /// Composition time under the audible output sample, including preview speed and latency.
+    pub fn clock_time(&self) -> Tick {
+        self.timeline.time(clock_sample(&self.span, self.feed.consumed(), self.device.latency_frames()))
     }
 
     pub fn finished(&self) -> bool {
@@ -399,7 +435,7 @@ fn audio_changed_inner(old: &Project, new: &Project, comp: ItemId, seen: &mut Ha
 /// Mix one block at the feeder's cursor into the feed and move the cursor on (wrapping or
 /// finishing at the work-area end). The block is mixed without holding the lock, so a project
 /// change never waits for a slow mix; a block mixed from the old project is dropped.
-fn feed_block(state: &Mutex<Feeder>, comp: ItemId, feed: &AudioFeed, span: &PlaySpan, rate: u32, mix: u32) {
+fn feed_block(state: &Mutex<Feeder>, comp: ItemId, feed: &AudioFeed, span: &PlaySpan, timeline: PreviewRate, mix: u32) {
     let Ok((src, mut cursor, generation)) = state.lock().map(|s| (s.src.clone(), s.cursor, s.generation)) else {
         // Poisoned: nothing more can be mixed.
         feed.finished.store(true, Ordering::Relaxed);
@@ -410,8 +446,14 @@ fn feed_block(state: &Mutex<Feeder>, comp: ItemId, feed: &AudioFeed, span: &Play
         cursor = span.wa;
     }
     if cursor < span.wb {
-        let n = ((span.wb - cursor) as usize).min(BLOCK);
-        block = Some(mix_block(&src, comp, sample_time(cursor, rate), n, rate, mix));
+        let n = span.wb.saturating_sub(cursor).clamp(0, BLOCK as i64) as usize;
+        block = Some(if timeline.normal() {
+            mix_block(&src, comp, timeline.time(cursor), n, timeline.rate(), mix)
+        } else {
+            timeline.mix(cursor, n, mix, |t, frames| {
+                effectcraft_engine::render::audio::mix_comp(&src.project, src.footage.as_ref(), src.expr.as_deref(), comp, t, frames, mix)
+            })
+        });
         cursor += n as i64;
     }
     let Ok(mut s) = state.lock() else { return };
@@ -585,6 +627,13 @@ mod tests {
         assert_eq!(clock_sample(&span, 48000 - 4800 + 100, 0), 100);
         let once = PlaySpan { looping: false, ..span };
         assert_eq!(clock_sample(&once, 100_000, 0), 47999);
+    }
+
+    #[test]
+    fn slow_preview_clocks_do_not_overflow_a_wide_output_span() {
+        let span = PlaySpan { start: 0, wa: i64::MIN, wb: i64::MAX, looping: true };
+        assert_eq!(clock_sample(&span, u64::MAX, 0), 0);
+        assert_eq!(clock_sample(&PlaySpan { looping: false, ..span }, u64::MAX, 0), i64::MAX - 1);
     }
 
     #[test]

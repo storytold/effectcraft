@@ -1,4 +1,4 @@
-use super::{EffectcraftApp, FrameKey, FrameWindow, ItemId, PlaybackPass, audio, frames};
+use super::{EffectcraftApp, FrameKey, FrameWindow, ItemId, PlaybackPass, frames};
 
 /// Seconds without a project change before paused prefetch resumes (see
 /// [`EffectcraftApp::editing`]).
@@ -321,7 +321,7 @@ impl EffectcraftApp {
             return true;
         }
         let snap = |f: i64| wa + (f - wa).div_euclid(step) * step;
-        let target = snap(audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb));
+        let target = snap(fr.frame_at(a.clock_time()).clamp(wa, wb));
         if !video {
             self.playback.audio_frame = Some(target);
         } else if self.frames.is_cached(&FrameKey { frame: target, ..series }) {
@@ -350,7 +350,7 @@ impl EffectcraftApp {
     fn sound_frame(&self, fr: effectcraft_engine::time::FrameRate, wa: i64, wb: i64, step: i64) -> Option<i64> {
         let a = self.audio.as_ref()?;
         let step = step.max(1);
-        Some(wa + (audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb) - wa).div_euclid(step) * step)
+        Some(wa + (fr.frame_at(a.clock_time()).clamp(wa, wb) - wa).div_euclid(step) * step)
     }
 
     /// The last cached frame after the current one and before `target`, in play order: what a
