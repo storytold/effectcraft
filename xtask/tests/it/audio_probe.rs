@@ -22,7 +22,11 @@ impl FakeTools {
         // by another user) is never trusted for the tools put on the child's PATH.
         let base = (0u32..)
             .map(|n| std::env::temp_dir().join(format!("effectcraft-xtask-audio-{tag}-{}-{n}", std::process::id())))
-            .find(|b| std::fs::create_dir(b).is_ok())
+            .find_map(|b| match std::fs::create_dir(&b) {
+                Ok(()) => Some(b),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => panic!("create scratch dir {}: {e}", b.display()),
+            })
             .expect("create a new scratch dir");
         #[cfg(unix)]
         {
