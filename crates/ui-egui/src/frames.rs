@@ -101,8 +101,12 @@ impl GpuRenderSlots {
     /// A Rayon helper may be executing a nested frame while an admitted render waits for
     /// its work. Blocking that helper on a permit would deadlock the render (#3028).
     fn for_render(&self, max: usize) -> Option<GpuRenderSlot<'_>> {
-        // Dedicated preview pools have one thread, protected from nested drains. They cannot
-        // be helpers of another admitted frame, so waiting preserves GPU preview throughput.
+        // Only a lane's drain thread waits: it renders one frame at a time, protected from
+        // nested drains, and a lane runs one drain at a time (it is idle again, and can be
+        // started anew, only once its drain found no job, so no frame of the lane is still
+        // running). The lane's other threads ([`LANE_WIDTH`]) only help with that frame's
+        // parallel work and are Rayon helpers here: they never wait. So no thread waits while
+        // an admitted frame waits for it, and waiting keeps the GPU preview's throughput.
         #[cfg(not(target_arch = "wasm32"))]
         if DRAINING_LANE.get() {
             return Some(self.acquire(max));
@@ -1720,7 +1724,7 @@ struct Worker {
 thread_local! {
     /// This pool thread is inside [`Worker::drain`] (rendering a frame).
     static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Only the single thread of a dedicated preview lane may wait for GPU admission.
+    /// Only a lane's drain thread may wait for GPU admission (see [`GpuRenderSlots::for_render`]).
     static DRAINING_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
