@@ -203,6 +203,8 @@ pub struct Playback {
     /// sound plays it goes on through frames that aren't cached, and the picture drops frames to
     /// follow it (#2473).
     pub audio_held: bool,
+    /// The project last checked for a silent preview that became audible (#2104).
+    pub silent_project: Option<Arc<effectcraft_engine::project::Project>>,
     /// Starting a preview with sound (#947): the playhead stays on the first frame while the
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently

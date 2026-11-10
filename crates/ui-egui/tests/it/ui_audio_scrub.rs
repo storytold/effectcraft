@@ -739,3 +739,206 @@ fn adding_markers_does_not_stop_the_sound() {
     }
     assert_eq!(h.state().session.project.comp(cid).unwrap().markers.len(), 6);
 }
+
+/// #2104: unmuting a preview that started silent opens sound at the moving preview position,
+/// both with video and with Video off (where the timeline deliberately stays still).
+#[test]
+fn unmuting_a_silent_preview_starts_audio_at_its_current_frame() {
+    for video in [false, true] {
+        let fake = Fake::default();
+        let (mut app, cid) = setup(true, &fake);
+        let layer = app.session.project.comp(cid).unwrap().layers[0].id.0;
+        app.session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
+        let gate = GatedFrames::default();
+        app.frames.set_remote(Some(Arc::new(gate.clone())));
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
+        h.state_mut().use_manual_clock();
+        h.run_steps(2);
+        gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
+        let now = h.state().now();
+        let shortcut = if video { h.state().session.prefs.preview.current } else { effectcraft_engine::preview::PreviewShortcut::AltNumpad0 };
+        h.state_mut().play_with(now, shortcut);
+        for _ in 0..6 {
+            step(&mut h);
+        }
+        assert!(h.state().audio.is_none(), "muted playback has no output");
+        let current = if video { frame(&h, cid) } else { h.state().playback.audio_frame.unwrap() };
+        assert!(current > 0, "the silent preview advanced");
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": true})).unwrap();
+        gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
+        h.step();
+        assert_eq!(audio_frame(&h, cid), Some(current), "unmute starts at the moving preview frame, video={video}");
+        if !video {
+            assert_eq!(frame(&h, cid), 0, "audio-only preview leaves the timeline stationary");
+        }
+        let feed = fake.0.lock().unwrap().0.clone().expect("unmute opened the output");
+        assert!(pull(&feed, 256).iter().any(|v| v.abs() > 0.01), "the unmuted tone reaches the output");
+        // Mute and unmute again without stopping: edits reach the existing feed too.
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
+        h.step();
+        assert!(pull(&feed, 256).iter().all(|v| *v == 0.0), "mute silences the current output");
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": true})).unwrap();
+        h.step();
+        assert!(pull(&feed, 256).iter().any(|v| v.abs() > 0.01), "a second unmute reaches the same output");
+        h.state_mut().stop();
+    }
+}
+
+/// Pull only queued frames: underruns are deliberately excluded so the test measures the
+/// feeder's composition mapping, not how quickly a loaded test host schedules its thread.
+fn take_preview_samples(app: &EffectcraftApp, frames: usize) -> Vec<f32> {
+    let audio = app.audio.as_ref().expect("preview audio opened");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut samples = Vec::with_capacity(frames * 2);
+    while samples.len() < frames * 2 {
+        let n = audio.feed.queued_frames().min(frames - samples.len() / 2);
+        if n == 0 {
+            assert!(!audio.finished(), "the preview ended before the requested samples");
+            assert!(std::time::Instant::now() < deadline, "audio feeder timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        let mut block = vec![0.0; n * 2];
+        audio.feed.pull(&mut block);
+        samples.extend(block);
+    }
+    samples
+}
+
+#[test]
+fn preview_rate_audio_sounds_at_the_selected_speed_and_finishes_at_the_end() {
+    use effectcraft_engine::preview::{PlayFrom, PreviewRange};
+    for (comp_fps, preview_fps, duration_frames) in [(60.0, 30.0, 96_000), (30.0, 60.0, 24_000)] {
+        let fake = Fake::default();
+        let (mut app, cid) = setup_long(true, &fake, 1.0);
+        app.session.execute("comp.settings", json!({"comp": cid.0, "frameRate": comp_fps})).unwrap();
+        let p = &mut app.session.prefs.preview.spacebar;
+        p.include_video = false;
+        p.frame_rate = Some(preview_fps);
+        p.loop_ = false;
+        p.range = PreviewRange::EntireDuration;
+        p.play_from = PlayFrom::RangeStart;
+        app.play(0.0);
+        assert!(app.audio.is_some(), "a frame-rate override must not mute the preview");
+        let samples = take_preview_samples(&app, 12_000);
+        assert!(samples.iter().any(|v| v.abs() > 0.01));
+        let audio = app.audio.as_ref().unwrap();
+        assert_eq!(audio.rate, 48_000, "the physical output rate is unchanged");
+        assert!((audio.clock_time().seconds() - 0.25 * preview_fps / comp_fps).abs() < 1e-9);
+        take_preview_samples(&app, duration_frames - 12_000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !app.audio.as_ref().unwrap().finished() {
+            assert!(std::time::Instant::now() < deadline, "one-shot audio did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(app.audio.as_ref().unwrap().clock_time().seconds() < 1.0);
+        app.stop();
+    }
+}
+
+#[test]
+fn preview_rate_audio_resamples_the_sound_instead_of_only_changing_the_clock() {
+    use effectcraft_engine::preview::{PlayFrom, PreviewRange};
+    let render = |preview_fps, frames| {
+        let fake = Fake::default();
+        let (mut app, _) = setup(true, &fake);
+        let p = &mut app.session.prefs.preview.spacebar;
+        p.include_video = false;
+        p.frame_rate = Some(preview_fps);
+        p.range = PreviewRange::EntireDuration;
+        p.play_from = PlayFrom::RangeStart;
+        app.session.prefs.audio.preview_sample_rate = 48_000;
+        app.play(0.0);
+        let samples = take_preview_samples(&app, frames);
+        app.stop();
+        samples
+    };
+    let normal = render(30.0, 2048);
+    let slow = render(15.0, 4096);
+    for (original, slowed) in normal.as_chunks::<2>().0.iter().zip(slow.as_chunks::<4>().0) {
+        assert!((original[0] - slowed[0]).abs() < 1e-5);
+        assert!((original[1] - slowed[1]).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn preview_rate_audio_drives_video_at_half_speed_and_loops() {
+    let fake = Fake::default();
+    let (mut app, cid) = setup_long(true, &fake, 1.0);
+    app.session.execute("comp.settings", json!({"comp": cid.0, "frameRate": 60})).unwrap();
+    app.session.prefs.preview.spacebar.frame_rate = Some(30.0);
+    app.session.prefs.preview.spacebar.loop_ = true;
+    let gate = GatedFrames::default();
+    app.frames.set_remote(Some(Arc::new(gate.clone())));
+    let ahead = (app.frames.parallelism() * 2).max(4) as i64;
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| app);
+    h.state_mut().use_manual_clock();
+    h.run_steps(2);
+    gate.discard(&mut h);
+    h.state_mut().play(0.0);
+    assert!(h.state().playback.starting, "mismatched-rate audio waits with the first picture");
+    let frames: Vec<i64> = (0..ahead.min(60)).collect();
+    gate.render(&mut h, cid, &frames);
+    step(&mut h);
+    assert!(h.state().audio.is_some());
+    take_preview_samples(h.state(), 4800);
+    step(&mut h);
+    assert_eq!(frame(&h, cid), 3, "0.1 output seconds is 0.05 composition seconds");
+    take_preview_samples(h.state(), 96_000 - 4800);
+    step(&mut h);
+    assert_eq!(frame(&h, cid), 0, "the audio and picture wrap together");
+    assert!(!h.state().audio.as_ref().unwrap().finished());
+    h.state_mut().stop();
+}
+
+#[test]
+fn preview_rate_audio_keeps_the_include_audio_switch_and_skip_independent() {
+    let fake = Fake::default();
+    let (mut app, _) = setup(true, &fake);
+    app.session.prefs.preview.spacebar.include_audio = false;
+    app.session.prefs.preview.spacebar.frame_rate = Some(60.0);
+    app.play(0.0);
+    assert!(app.audio.is_none() && !app.playback.audio_held && !app.playback.starting);
+    app.stop();
+    let p = &mut app.session.prefs.preview.spacebar;
+    p.include_audio = true;
+    p.include_video = false;
+    p.skip = 2;
+    app.play(0.0);
+    take_preview_samples(&app, 12_000);
+    assert_eq!(app.audio.as_ref().unwrap().clock_time(), Tick::from_seconds_f64(0.5), "Skip drops pictures, not audio or time");
+    app.stop();
+}
+
+/// Live edits keep the consumed output cursor at either speed, including a nonzero start.
+#[test]
+fn preview_rate_audio_keeps_its_position_through_live_mute_and_unmute() {
+    use effectcraft_engine::preview::{PlayFrom, PreviewRange};
+    for preview_fps in [15.0, 60.0] {
+        let fake = Fake::default();
+        let (mut app, cid) = setup(true, &fake);
+        let comp = app.session.project.comp(cid).unwrap();
+        let layer = comp.layers[0].id.0;
+        let start = comp.frame_rate.tick_of(17);
+        app.session.set_time(start);
+        let p = &mut app.session.prefs.preview.spacebar;
+        p.include_video = false;
+        p.frame_rate = Some(preview_fps);
+        p.range = PreviewRange::EntireDuration;
+        p.play_from = PlayFrom::CurrentTime;
+        app.play(0.0);
+        assert_eq!(app.audio.as_ref().unwrap().clock_time(), start);
+        for (edit, audible) in [(None, true), (Some(false), false), (Some(true), true)] {
+            if let Some(value) = edit {
+                app.session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": value})).unwrap();
+                app.audio.as_mut().unwrap().follow_project(app.session.project.clone());
+            }
+            let before = app.audio.as_ref().unwrap().clock_time();
+            let samples = take_preview_samples(&app, 2400);
+            assert_eq!(samples.iter().any(|v| v.abs() > 0.01), audible);
+            let elapsed = (app.audio.as_ref().unwrap().clock_time() - before).seconds();
+            assert!((elapsed - 0.05 * preview_fps / 30.0).abs() < 1e-9, "live edit changed the preview cursor");
+        }
+        app.stop();
+    }
+}
