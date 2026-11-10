@@ -2370,7 +2370,7 @@ fn command_clicking_a_group_twirl_opens_its_whole_tree() {
     // twirls open with it, and closed again with it.
     let mut h = harness();
     let id = layer_id(&h, "Box");
-    h.state_mut().session.execute("effect.apply", json!({"effect": "Lumetri Color", "layers": [id]})).unwrap();
+    h.state_mut().session.execute("effect.apply", json!({"effect": "Color Grading", "layers": [id]})).unwrap();
     fn walk(g: &effectcraft_engine::project::PropGroup, out: &mut Vec<u64>) {
         for sg in g.groups() {
             out.push(sg.uid);

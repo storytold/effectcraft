@@ -638,6 +638,51 @@ fn menu_items_cover_the_tree() {
     assert!(effectcraft_engine::menus::entries().len() > 500);
 }
 
+/// A command run from the menu that opens a composition (File ▸ Import ▸ After Effects
+/// Project… after Import Anyway, a new composition) leaves the Home screen: it stayed over the
+/// imported project, which looked as if nothing was imported. A command that opens none keeps it.
+#[test]
+fn a_menu_command_that_opens_a_composition_leaves_the_home_screen() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "project.summary", json!({})).unwrap();
+    assert!(app.ui.start_screen);
+    assert!(run_engine(&mut app, &ctx, "file.importAep", json!({"path": "/no/such/file.aep", "allowLosses": true})).is_err());
+    assert!(app.ui.start_screen);
+    run_engine(&mut app, &ctx, "comp.new", json!({"name": "Opened", "width": 64, "height": 36, "duration": 1})).unwrap();
+    assert!(!app.ui.start_screen);
+    // Asked for again (Home button, Help ▸ In-App Tutorials) it stays while the comp is open.
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    assert!(app.ui.start_screen);
+}
+
+/// Opening a project leaves the Home screen also when its composition has the id of the one open
+/// before (the project changed, the id did not), from the menu and from a file dialog's answer.
+#[test]
+fn opening_a_project_leaves_the_home_screen_whatever_its_composition_id() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "Saved", "width": 64, "height": 36, "duration": 1})).unwrap();
+    let dir = std::env::temp_dir().join(format!("ec-home-open-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Home.ecproj").to_string_lossy().to_string();
+    app.session.execute("file.saveAs", json!({"path": path})).unwrap();
+    let comp = app.session.active_comp_id();
+    // File ▸ Open with the path given (the menu path, `run_engine`).
+    app.ui.start_screen = true;
+    run_engine(&mut app, &ctx, "file.open", json!({"path": path})).unwrap();
+    assert_eq!(app.session.active_comp_id(), comp, "the same composition id");
+    assert!(!app.ui.start_screen, "File ▸ Open leaves the Home screen");
+    // The path picked in a file dialog (`run_with_picked`).
+    app.ui.start_screen = true;
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.open".into(), key: "path", params: json!({}), paths: vec![path.clone()] });
+    assert_eq!(app.session.active_comp_id(), comp);
+    assert!(!app.ui.start_screen, "a picked project leaves the Home screen");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A successful command that reports per-item problems (`errors`) shows a compact, readable
 /// report in the status line: `file: error; …`, first three and a count, never raw JSON.
 #[test]
@@ -684,4 +729,127 @@ fn effect_plugin_install_dialog_router() {
     let r = invoke(&mut app, &ctx, "effect.plugins.install", json!({"folder": "some/where"}));
     assert!(r.is_err(), "{r:?}");
     assert!(pending.lock().unwrap().is_empty(), "no dialog for an inline folder");
+}
+
+/// File ▸ Import ▸ File… in the non-blocking dialog (macOS, Linux) offers After Effects projects
+/// next to footage, and a picked one imports as File ▸ Import ▸ Adobe After Effects Project… does: its
+/// folder, its composition open.
+#[test]
+fn import_file_dialog_offers_and_imports_after_effects_projects() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("ec-import-aep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let aep = dir.join("Intro.aep").to_string_lossy().to_string();
+    let mut source = effectcraft_engine::Session::default();
+    source.execute("comp.new", json!({"name": "Intro", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
+    source.execute("file.exportAep", json!({"path": aep, "allowLosses": true})).unwrap();
+
+    let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    invoke(&mut app, &ctx, "file.import", json!({})).unwrap();
+    let Some(crate::FileDialog::Open { exts, many }) = pending.lock().unwrap().pop() else { panic!("an Open dialog was shown") };
+    assert!(many && exts.iter().any(|e| e == "aep") && exts.iter().any(|e| e == "aepx"), "{exts:?}");
+    assert!(exts.iter().any(|e| e == "png"), "footage too");
+
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: vec![aep] });
+    let comp = app.session.project.item(app.session.active_comp_id().expect("a composition is open")).unwrap();
+    assert_eq!(comp.name, "Intro");
+    assert_eq!(app.session.project.item(comp.parent.expect("in a folder")).unwrap().name, "Intro.aep");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Footage with unlabeled alpha asks how to interpret it (Interpret Unlabeled Alpha As: Ask
+/// User), but not over a dialog that already waits (the After Effects losses prompt of the same
+/// drop, which a background import can finish behind): that dialog stays, and a note says where
+/// to choose the interpretation.
+#[test]
+fn the_unlabeled_alpha_question_does_not_replace_an_open_dialog() {
+    use effectcraft_engine::project::{Footage, FootageKind, ItemKind};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let footage = Footage { path: "/m/matte.tga".into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() };
+    let item = std::sync::Arc::make_mut(&mut app.session.project).add_item("matte.tga", Default::default(), None, ItemKind::Footage(footage)).0;
+    app.dialog = Some(crate::Dialog::AepLosses);
+    super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": item, "reason": "unlabeledAlpha"})).unwrap();
+    assert_eq!(app.dialog, Some(crate::Dialog::AepLosses), "the waiting dialog stays");
+    assert!(app.ui.status.contains("Interpret Footage"), "{}", app.ui.status);
+    assert!(app.session.state.project_selection.is_empty(), "the selection is left alone");
+
+    app.dialog = None;
+    super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": item, "reason": "unlabeledAlpha"})).unwrap();
+    assert_eq!(app.dialog, Some(crate::Dialog::Form), "with no dialog open it asks");
+}
+
+/// File ▸ Import ▸ File… and Multiple Files… offer projects next to footage; File ▸ Replace
+/// Footage offers footage only.
+#[test]
+fn only_the_import_dialogs_offer_projects() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    let projects = ["aep", "aepx", "ecproj", "ecprojx"];
+    for (id, offered) in [("file.import", true), ("file.importMultiple", true), ("file.replaceFootage", false)] {
+        assert!(super::frontend::file_dialog(&mut app, id, &json!({})).is_some(), "{id} asks for a file");
+        let Some(crate::FileDialog::Open { exts, .. }) = pending.lock().unwrap().pop() else { panic!("{id}: an Open dialog") };
+        assert!(exts.iter().any(|e| e == "png"), "{id} offers footage");
+        assert_eq!(projects.iter().all(|p| exts.iter().any(|e| e == p)), offered, "{id}: {exts:?}");
+        assert!(offered || !projects.iter().any(|p| exts.iter().any(|e| e == p)), "{id} offers no project: {exts:?}");
+    }
+}
+
+/// Picked After Effects projects that cannot be imported keep their errors next to the other
+/// files': a broken `.aep` and a broken `.ecproj` are both named in the status line.
+#[test]
+fn picked_projects_report_every_error() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let dir = std::env::temp_dir().join(format!("ec-picked-errors-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let aep = dir.join("broken.aep");
+    let ecproj = dir.join("broken.ecproj");
+    std::fs::write(&aep, b"not an aep").unwrap();
+    std::fs::write(&ecproj, b"not a project").unwrap();
+    let paths = vec![aep.to_string_lossy().to_string(), ecproj.to_string_lossy().to_string()];
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: paths.clone() });
+    let status = &app.ui.status;
+    assert!(status.contains("broken.aep") && status.contains("broken.ecproj"), "{status}");
+    assert!(!status.contains('"'), "messages, not quoted JSON: {status}");
+    assert!(app.dialog.is_none() && app.session.project.items.is_empty());
+
+    // The blocking dialog (Windows), whose callers drop the result: the status line still has both.
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    app.hooks.pick_files = Some(Box::new(move |_: &[&str]| paths.clone()));
+    let _ = invoke(&mut app, &ctx, "file.import", json!({}));
+    let status = &app.ui.status;
+    assert!(status.contains("broken.aep") && status.contains("broken.ecproj"), "{status}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A picked After Effects project with parts that cannot come over asks first; one picked with
+/// it waits for the answer.
+#[test]
+fn a_picked_project_with_losses_asks_and_the_next_waits() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let dir = std::env::temp_dir().join(format!("ec-picked-losses-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lossy = dir.join("Synthetic.aep");
+    std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../aep/tests/fixtures/synthetic.aep"), &lossy).unwrap();
+    let intro = dir.join("Intro.aep").to_string_lossy().to_string();
+    let mut source = effectcraft_engine::Session::default();
+    source.execute("comp.new", json!({"name": "Intro", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
+    source.execute("file.exportAep", json!({"path": intro, "allowLosses": true})).unwrap();
+    let paths = vec![lossy.to_string_lossy().to_string(), intro.clone()];
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths });
+    assert_eq!(app.dialog, Some(crate::Dialog::AepLosses));
+    assert_eq!(app.dialog_state.aep_losses.queue, [intro]);
+    assert!(app.session.project.items.is_empty(), "nothing imported before the answer");
+    let _ = std::fs::remove_dir_all(&dir);
 }

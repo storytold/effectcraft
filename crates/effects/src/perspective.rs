@@ -1,5 +1,5 @@
-//! Perspective effects (batch 2): Bevel Alpha, Bevel Edges, Radial Shadow, CC Cylinder,
-//! CC Sphere and CC Spotlight.
+//! Perspective effects (batch 2): Bevel Alpha, Bevel Edges, Radial Shadow, Cylinder Wrap,
+//! Sphere Wrap and Surface Spotlight.
 //!
 //! Angles follow the convention used by Drop Shadow: measured clockwise from "up", so a light
 //! angle `a` sits in the direction `(sin a, -cos a)` (y grows downwards). 3D vectors use x right,
@@ -158,7 +158,7 @@ fn radial_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Phong-style shading shared by CC Cylinder and CC Sphere.
+/// Phong-style shading shared by Cylinder Wrap and Sphere Wrap.
 struct Shading {
     l: [f64; 3],
     color: [f32; 4],
@@ -451,11 +451,11 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             radial_shadow,
         ),
-        spec("ec.perspective.cccylinder", "CC Cylinder", cyl, cylinder),
-        spec("ec.perspective.ccsphere", "CC Sphere", sph, sphere),
+        spec("ec.perspective.cccylinder", "Cylinder Wrap", cyl, cylinder),
+        spec("ec.perspective.ccsphere", "Sphere Wrap", sph, sphere),
         spec(
             "ec.perspective.ccspotlight",
-            "CC Spotlight",
+            "Surface Spotlight",
             vec![
                 p("from", "From", pt(0.3, 0.2), ParamUi::Point),
                 p("to", "To", pt(0.5, 0.5), ParamUi::Point),

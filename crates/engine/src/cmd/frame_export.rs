@@ -160,7 +160,8 @@ pub fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
     // The composite and every layer without the HDR step, decoded with the output space's
     // curve (linear light in the output space's primaries).
     let (full, layers) = isolate(s, cid, t, scale, true)?;
-    let dec = effectcraft_render::color::Pipe::of(&s.project.settings).output_linear();
+    let pipe = effectcraft_render::color::Pipe::of(&s.project.settings);
+    let dec = pipe.output_linear();
     let (w, h) = (full.width as usize, full.height as usize);
     let planes = |img: &effectcraft_raster::Image| -> [Vec<f32>; 4] {
         let mut out: [Vec<f32>; 4] = Default::default();
@@ -192,7 +193,11 @@ pub fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
     }
     let layer = Layer::new((w, h), LayerAttributes::default(), Encoding::SMALL_LOSSLESS, AnyChannels::sort(channels.into()));
     let mut buf = std::io::Cursor::new(Vec::new());
-    Image::from_layer(layer).write().to_buffered(&mut buf).map_err(|e| EngineError::Other(format!("EXR encoding failed: {e}")))?;
+    let mut image = Image::from_layer(layer);
+    // The primaries and white the values are in (the output space's), for Nuke, AE and Blender.
+    let [red, green, blue, white] = pipe.output_linear_space().exr_chromaticities().map(|[x, y]| Vec2(x, y));
+    image.attributes.chromaticities = Some(exr::meta::attribute::Chromaticities { red, green, blue, white });
+    image.write().to_buffered(&mut buf).map_err(|e| EngineError::Other(format!("EXR encoding failed: {e}")))?;
     Ok((buf.into_inner(), names, full.width, full.height))
 }
 

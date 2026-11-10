@@ -84,6 +84,7 @@ mod memcap;
 mod ops;
 mod particles;
 mod readback;
+mod upload;
 mod walk;
 mod yuv;
 
@@ -300,7 +301,12 @@ impl Gpu {
     /// Browser callers use the host/owned-device failure bridge and bounded readbacks instead
     /// of blocking their event loop on an error-scope future.
     pub fn within_memory<T>(&self, f: impl FnOnce() -> T) -> Result<T, FrameError> {
-        self.ctx.check_health().map_err(FrameError::Retired)?;
+        if let Err(error) = self.ctx.check_health() {
+            // Queued jobs may still own this context after the UI detached it. Release its
+            // working caches before CPU fallback adds host-memory pressure (#3357).
+            self.ctx.discard_kept();
+            return Err(FrameError::Retired(error));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let oom = self.ctx.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
@@ -314,7 +320,7 @@ impl Gpu {
             // The allocation failure first: a validation error is often its consequence.
             let errors: Vec<String> = [oom, internal, validation].into_iter().flatten().map(|e| e.to_string()).collect();
             if errors.is_empty() {
-                return self.ctx.check_health().map(|()| out).map_err(FrameError::Retired);
+                return self.finish_memory_attempt(out);
             }
             // Its textures go back to the pool when dropped: drop them before emptying it.
             drop(out);
@@ -325,7 +331,21 @@ impl Gpu {
         #[cfg(target_arch = "wasm32")]
         {
             let out = f();
-            self.ctx.check_health().map(|()| out).map_err(FrameError::Retired)
+            self.finish_memory_attempt(out)
+        }
+    }
+
+    /// Retirement without a scoped error (for example, a readback timeout) must release
+    /// the same retained resources as a rejected allocation before the caller retries.
+    fn finish_memory_attempt<T>(&self, out: T) -> Result<T, FrameError> {
+        match self.ctx.check_health() {
+            Ok(()) => Ok(out),
+            Err(error) => {
+                // Dropping the result can return leased textures to the pool.
+                drop(out);
+                self.ctx.discard_kept();
+                Err(FrameError::Retired(error))
+            }
         }
     }
 
@@ -432,6 +452,11 @@ impl Accelerator for Gpu {
         Some(&self.auto)
     }
 
+    fn frame_memory(&self) -> Option<effectcraft_render::FrameMemory> {
+        self.ctx.check_health().ok()?;
+        self.ctx.frame_memory()
+    }
+
     fn render_end(&self) {
         let (hits, misses) = self.ctx.pool_stats();
         let pct = hits.saturating_mul(100) / hits.saturating_add(misses).max(1);
@@ -439,6 +464,7 @@ impl Accelerator for Gpu {
             target: "effectcraft_gpu",
             "gpu pool: {hits} working textures reused, {misses} allocated ({pct}% reuse) so far"
         );
+        self.ctx.trim_uploads();
         self.ctx.trim_pool();
     }
 

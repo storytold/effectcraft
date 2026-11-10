@@ -1184,7 +1184,7 @@ dependencies = [
 [[package]]
 name = "craft-update"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=c5a1cbfb5f9049f9270955caffb5bee5997aebf7#c5a1cbfb5f9049f9270955caffb5bee5997aebf7"
+source = "git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d#1b34eba41e62138fc2438d2734523b302840b45d"
 dependencies = [
  "chrono",
  "dunce",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "cpal",
  "craft-update",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-aep"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-color",
  "effectcraft-effects",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-automation"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-host",
@@ -1468,19 +1468,20 @@ dependencies = [
  "effectcraft-script",
  "image",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "effectcraft-av1enc"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "filmcraft-av1",
 ]
 
 [[package]]
 name = "effectcraft-cli"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "cpu-time",
  "effectcraft-automation",
@@ -1499,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-color"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "proptest",
  "serde",
@@ -1507,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-effects"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "chrono",
  "effectcraft-color",
@@ -1525,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-engine"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "chrono",
  "craft-docpath",
@@ -1564,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-export"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-av1enc",
  "effectcraft-color",
@@ -1595,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-expr"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "boa_engine",
  "effectcraft-color",
@@ -1612,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-geom"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "proptest",
  "serde",
@@ -1620,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-gpu"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "bytemuck",
  "effectcraft-color",
@@ -1643,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-helper-host"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "bytemuck",
  "effectcraft-effects",
@@ -1654,14 +1655,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-hevcenc"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "filmcraft-hevc",
 ]
 
 [[package]]
 name = "effectcraft-host"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-export",
@@ -1688,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-interchange"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-color",
  "effectcraft-keyframe",
@@ -1707,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-keyframe"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-color",
  "effectcraft-geom",
@@ -1719,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-lottie"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "craft-docpath",
  "effectcraft-color",
@@ -1737,10 +1738,11 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-media"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "craft-docpath",
  "effectcraft-color",
+ "effectcraft-effects",
  "effectcraft-model",
  "effectcraft-pdf",
  "effectcraft-project",
@@ -1769,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-model"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-geom",
  "image",
@@ -1782,14 +1784,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-opusenc"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "filmcraft-opus",
 ]
 
 [[package]]
 name = "effectcraft-path"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-geom",
  "effectcraft-keyframe",
@@ -1801,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-pdf"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "craft-pdf",
  "effectcraft-raster",
@@ -1817,7 +1819,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-plugin"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-effects",
  "effectcraft-keyframe",
@@ -1829,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-project"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "craft-ecproj-format",
  "effectcraft-color",
@@ -1843,14 +1845,14 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-psd"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "miniz_oxide 0.9.1",
 ]
 
 [[package]]
 name = "effectcraft-raster"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-color",
  "effectcraft-geom",
@@ -1860,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-render"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-color",
  "effectcraft-effects",
@@ -1877,12 +1879,13 @@ dependencies = [
  "lz4_flex",
  "rayon",
  "serde",
+ "tempfile",
  "web-time",
 ]
 
 [[package]]
 name = "effectcraft-sam2"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "bytemuck",
  "candle-core",
@@ -1897,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-script"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "boa_engine",
  "effectcraft-engine",
@@ -1915,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-segment"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "miniz_oxide 0.9.1",
  "ndarray",
@@ -1924,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-svg"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-geom",
  "effectcraft-path",
@@ -1936,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-text"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-keyframe",
  "harfrust",
@@ -1948,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-time"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "proptest",
  "serde",
@@ -1956,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-track"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-raster",
  "effectcraft-segment",
@@ -1968,8 +1971,9 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-ui-egui"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
+ "bytemuck",
  "chrono",
  "craft-quit",
  "craft-ui",
@@ -1992,6 +1996,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "exr",
+ "half",
  "image",
  "kurbo",
  "log",
@@ -2000,17 +2005,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "tempfile",
  "toml",
  "web-time",
 ]
 
 [[package]]
 name = "effectcraft-vp9enc"
-version = "0.21.0"
+version = "0.23.1"
 
 [[package]]
 name = "effectcraft-web"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "effectcraft-engine",
  "effectcraft-export",
@@ -7705,7 +7711,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "chrono",
  "pkg-config",
@@ -7953,7 +7959,6 @@ dependencies = [
  "nix",
  "typed-path 0.13.0",
  "windows-sys 0.61.2",
- "zopfli",
 ]
 
 [[package]]
@@ -7967,18 +7972,6 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zopfli"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf7fc5d30c28483d93805c4a5e12b05bbb52407fa67c5f8bd552374cd01fb11"
-dependencies = [
- "bumpalo",
- "crc32fast",
- "log",
- "simd-adler32",
-]
 
 [[package]]
 name = "zune-core"
