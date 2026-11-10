@@ -166,6 +166,9 @@ pub fn gaussian_is_exact(sigma_x: f64, sigma_y: f64) -> bool {
     sigma_x.max(sigma_y) < EXACT_SIGMA_BELOW
 }
 
+/// Pixels per tile of [`gauss_pass`]'s vertical pass.
+const TILE: usize = 128;
+
 /// One separable pass of a sampled Gaussian (radius 3 sigma) along x or y.
 fn gauss_pass(img: &Image, sigma: f64, vertical: bool, repeat: bool) -> Image {
     // Below 1e-3 the kernel is the identity in f64; tiny sigmas would also make 2σ² underflow to 0 (NaN taps).
@@ -176,20 +179,65 @@ fn gauss_pass(img: &Image, sigma: f64, vertical: bool, repeat: bool) -> Image {
     let mut k: Vec<f64> = (-r..=r).map(|i| (-((i * i) as f64) / (2.0 * sigma * sigma)).exp()).collect();
     let total: f64 = k.iter().sum();
     k.iter_mut().for_each(|v| *v /= total);
-    let w = img.width as usize;
+    let (w, h) = (img.width as usize, img.height as usize);
     let mut out = Image::new(img.width, img.height);
-    out.rows_mut().for_each(|(y, row)| {
-        for x in 0..w {
-            let mut acc = [0.0f64; 4];
-            for (i, wt) in k.iter().enumerate() {
-                let d = i as i64 - r;
-                let (sx, sy) = if vertical { (x as i64, y as i64 + d) } else { (x as i64 + d, y as i64) };
-                let p = if repeat { img.get_clamped(sx, sy) } else { img.get(sx, sy) };
-                for c in 0..4 {
-                    acc[c] += p[c] as f64 * wt;
+    // Every output pixel adds its taps in kernel order, in f64, as a per-pixel loop would: the
+    // result is the same to the bit. Taps outside a transparent edge are skipped (adding `+0.0`
+    // leaves a sum that started at `+0.0` unchanged).
+    if vertical {
+        // Row by row: each output row adds whole input rows (contiguous, vectorises), instead of
+        // walking a column per pixel (a strided read per tap).
+        out.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            // 128 pixels at a time: the f64 sums (4 KB) stay in L1 across the taps.
+            for (t, out_tile) in row.chunks_mut(TILE).enumerate() {
+                let x0 = t * TILE;
+                let mut acc = [[0.0f64; 4]; TILE];
+                for (i, &wt) in k.iter().enumerate() {
+                    let sy = y as i64 + i as i64 - r;
+                    let sy = if repeat {
+                        sy.clamp(0, h as i64 - 1)
+                    } else if sy < 0 || sy >= h as i64 {
+                        continue;
+                    } else {
+                        sy
+                    };
+                    let start = sy as usize * w + x0;
+                    let Some(src) = img.data.get(start..start + out_tile.len()) else { continue };
+                    for (a, p) in acc.iter_mut().zip(src) {
+                        for c in 0..4 {
+                            a[c] += p[c] as f64 * wt;
+                        }
+                    }
+                }
+                for (o, a) in out_tile.iter_mut().zip(acc.iter()) {
+                    *o = a.map(|v| v as f32);
                 }
             }
-            row[x] = acc.map(|v| v as f32);
+        });
+        return out;
+    }
+    let n = k.len();
+    out.data.par_chunks_mut(w).zip(img.data.par_chunks(w)).for_each(|(row, src)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            let mut acc = [0.0f64; 4];
+            // Inside the row: the taps are one slice (no per-tap edge checks).
+            if let Some(taps) = x.checked_sub(r as usize).and_then(|x0| src.get(x0..x0 + n)) {
+                for (p, wt) in taps.iter().zip(&k) {
+                    for c in 0..4 {
+                        acc[c] += p[c] as f64 * wt;
+                    }
+                }
+            } else {
+                for (i, wt) in k.iter().enumerate() {
+                    let sx = x as i64 + i as i64 - r;
+                    let at = if repeat { Some(sx.clamp(0, w as i64 - 1)) } else { Some(sx) };
+                    let Some(p) = at.and_then(|i| usize::try_from(i).ok()).and_then(|i| src.get(i)) else { continue };
+                    for c in 0..4 {
+                        acc[c] += p[c] as f64 * wt;
+                    }
+                }
+            }
+            *o = acc.map(|v| v as f32);
         }
     });
     out
@@ -263,6 +311,54 @@ pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sampled Gaussian pass as it was (one pixel at a time, bounds-checked taps): the
+    /// row-wise passes must match it to the bit.
+    fn gauss_pass_per_pixel(img: &Image, sigma: f64, vertical: bool, repeat: bool) -> Image {
+        let r = (sigma * 3.0).ceil() as i64;
+        let mut k: Vec<f64> = (-r..=r).map(|i| (-((i * i) as f64) / (2.0 * sigma * sigma)).exp()).collect();
+        let total: f64 = k.iter().sum();
+        k.iter_mut().for_each(|v| *v /= total);
+        let mut out = Image::new(img.width, img.height);
+        for y in 0..img.height as i64 {
+            for x in 0..img.width as i64 {
+                let mut acc = [0.0f64; 4];
+                for (i, wt) in k.iter().enumerate() {
+                    let d = i as i64 - r;
+                    let (sx, sy) = if vertical { (x, y + d) } else { (x + d, y) };
+                    let p = if repeat { img.get_clamped(sx, sy) } else { img.get(sx, sy) };
+                    for c in 0..4 {
+                        acc[c] += p[c] as f64 * wt;
+                    }
+                }
+                out.set(x as u32, y as u32, acc.map(|v| v as f32));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gauss_pass_is_bit_identical_to_the_per_pixel_kernel() {
+        // Sizes narrower and shorter than the kernel too (every tap near an edge), one wider
+        // than three tiles (tiles past the first, and a partial last one), with negative, zero
+        // and HDR values.
+        for (w, h) in [(37, 23), (3, 2), (1, 9), (64, 1), (300, 5)] {
+            let mut img = Image::new(w, h);
+            for (i, p) in img.data.iter_mut().enumerate() {
+                let v = ((i * 7919) % 101) as f32 / 37.0 - 0.6;
+                *p = [v, -v * 0.5, if i % 5 == 0 { 0.0 } else { v * 3.0 }, (v + 0.6).min(1.0)];
+            }
+            for sigma in [0.4, 1.3, 2.9] {
+                for vertical in [false, true] {
+                    for repeat in [false, true] {
+                        let (a, b) = (gauss_pass(&img, sigma, vertical, repeat), gauss_pass_per_pixel(&img, sigma, vertical, repeat));
+                        let bits = |i: &Image| i.data.iter().flat_map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+                        assert!(bits(&a) == bits(&b), "{w}×{h} sigma {sigma} vertical {vertical} repeat {repeat}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn gaussian_preserves_mass() {

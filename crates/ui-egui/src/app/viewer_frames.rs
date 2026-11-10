@@ -98,6 +98,13 @@ impl EffectcraftApp {
         // play back, and frames cached by a preview stay on screen when it stops.
         let res = self.viewer_res();
         let full = res.scale(zoom, ppp);
+        // A preview that couldn't keep up stepped down (`step_down`).
+        if self.playback.playing
+            && res.is_auto()
+            && let Some((s, _)) = self.playback.adaptive
+        {
+            return full.min(s);
+        }
         // Fast Previews ▸ Adaptive Resolution / Fast Draft: lower resolution while dragging.
         let (_, k) = self.session.state.viewer.fast_previews.render(self.ui.viewer.interacting || self.ui.viewer.property_interacting);
         if k < 1.0 && res.is_auto() {

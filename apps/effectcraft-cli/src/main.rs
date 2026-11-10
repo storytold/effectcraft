@@ -31,6 +31,7 @@
 //! effectcraft-cli bench --roto [--frames N] [--sam2 model.safetensors] [--mobilesam mobile_sam.pt] [--fixes] [--clip FRAMES --truth MASKS] [--json]   Roto Brush trackers on synthetic clips with known mattes
 //!     (classical engine, MobileSAM and SAM 2.1 (any installed size) when installed; IoU, flicker, re-appearance, seconds per frame)
 //! effectcraft-cli script FILE.jsx [F.ecproj] | --eval CODE    run an After Effects-style script
+//! effectcraft-cli replay SCRIPT.jsonl [--keep-going]        replay a repro script (docs/agents.md)
 //! effectcraft-cli mcp [--autosave | --bridge PORT]            MCP server on stdio
 //!
 //! Project:  --project F.ecproj (or a positional *.ecproj) | --demo | --empty   (default: demo; mcp: empty)
@@ -97,7 +98,7 @@ fn stdout_broken() -> bool {
     STDOUT_FAILED.get().is_some_and(|k| *k != std::io::ErrorKind::BrokenPipe)
 }
 
-const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|set|render-frame|render|script|mcp> [args] [--json]
+const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|set|render-frame|render|script|replay|mcp> [args] [--json]
   info                                     project + engine summary
   commands [--filter TEXT] [--enabled]     list engine commands
   exec <command-id> [--params JSON]        run one engine command (exec --list: list them, as `commands`)
@@ -138,6 +139,9 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   script FILE.jsx [F.ecproj] | --eval CODE run JavaScript with the After Effects-style object model
                                            (app.project, comps, layers, properties…); prints writeLn
                                            output and the result; errors exit 1 with file:line:col
+  replay SCRIPT.jsonl [--keep-going]       replay a repro script headless (journal.export, crash repros):
+                                           per-step ok/error and the first failure; exits 1 when a step
+                                           fails, an expectation is not met or a command panics
   mcp [--autosave | --bridge PORT]         MCP server (JSON-RPC over stdio); --autosave preserves unsaved headless work
       [--automation-read-root DIR] [--automation-write-root DIR]
                                            confine the agent's file access: reads under a read or write root,
@@ -222,6 +226,7 @@ const FLAGS: &[&str] = &[
     "--small",
     "--adv3d",
     "--autosave",
+    "--keep-going",
     "--progress",
 ];
 
@@ -552,6 +557,59 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
     Ok(())
 }
 
+/// `replay SCRIPT.jsonl`: run a repro script against a headless session (its start line picks
+/// the project) and report every step. Exits 1 when the replay fails.
+fn replay_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
+    use effectcraft_engine::replay;
+    let Some(file) = args.pos.first() else { return usage_err("replay needs a .jsonl script") };
+    if args.opt("--bridge").is_some() || args.project.is_some() || args.flag("--demo") || args.flag("--empty") {
+        return usage_err("replay runs headless from the script's start line ({\"start\": \"new\" | \"demo\" | {\"project\": path}})");
+    }
+    use std::io::Read;
+    let path = std::path::Path::new(file);
+    let input = std::fs::File::open(path).map_err(|e| Failure::Error(format!("cannot read {file}: {e}")))?;
+    // Bound the read itself: metadata can be stale or describe a pipe rather than its contents.
+    let mut script = String::new();
+    input.take(replay::MAX_SCRIPT_BYTES as u64 + 1).read_to_string(&mut script).map_err(|e| Failure::Error(format!("cannot read {file}: {e}")))?;
+    if script.len() > replay::MAX_SCRIPT_BYTES {
+        return Err(Failure::Error(format!("{file} is larger than {} MB", replay::MAX_SCRIPT_BYTES >> 20)));
+    }
+    let mut s = session(args)?;
+    let opts = replay::Options { keep_going: args.flag("--keep-going"), base_dir: path.parent().map(std::path::Path::to_path_buf) };
+    let report = replay::run(&mut s, &script, &opts);
+    if json_out {
+        emit(&serde_json::to_value(&report).unwrap_or_else(|e| json!({"error": e.to_string()})), true);
+    } else {
+        for st in &report.steps {
+            let what = st.command.as_deref().unwrap_or(st.kind);
+            match (&st.error, st.ok) {
+                (None, _) => say!("line {:>4}  ok    {what}", st.line),
+                (Some(e), true) => say!("line {:>4}  ok    {what} (tolerated error: {e})", st.line),
+                (Some(e), false) => say!("line {:>4}  FAIL  {what}: {e}", st.line),
+            }
+        }
+    }
+    let Some(first) = &report.first_failure else {
+        if !json_out {
+            say!("replay ok: {} steps", report.steps.len());
+        }
+        return Ok(());
+    };
+    let msg = format!(
+        "failed at line {} ({}){}: {}{}",
+        first.line,
+        first.command.as_deref().unwrap_or(first.kind),
+        if report.panicked { ", a command panicked" } else { "" },
+        first.error.as_deref().unwrap_or(""),
+        if report.skipped > 0 { format!(" ({} later steps not run)", report.skipped) } else { String::new() }
+    );
+    if json_out {
+        note!("effectcraft-cli replay: {msg}");
+        std::process::exit(1);
+    }
+    Err(Failure::Error(msg))
+}
+
 /// Print a result: compact JSON with `--json`, else pretty JSON.
 fn emit(v: &Value, json_out: bool) {
     if json_out {
@@ -614,6 +672,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
         "commands" => list_commands_cmd(args, json_out)?,
         "exec" if args.flag("--list") => list_commands_cmd(args, json_out)?,
         "script" => script_cmd(args, json_out)?,
+        "replay" => replay_cmd(args, json_out)?,
         "exec" => {
             let Some(id) = args.pos.first().cloned() else { return usage_err("exec needs a command id") };
             let params = match (args.opt("--params"), args.pos.get(1).map(String::as_str)) {
