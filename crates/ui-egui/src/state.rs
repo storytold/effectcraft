@@ -806,7 +806,6 @@ impl Default for UiState {
             home_learn: false,
             home_templates: false,
             align_to_selection: false,
-            // (the setting's default, #3321; the settings set it when they load)
             cache_when_idle: true,
             tracker_source: None,
             layer_panel: None,

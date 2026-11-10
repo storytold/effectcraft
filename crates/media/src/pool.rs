@@ -8,13 +8,14 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemId};
 use effectcraft_raster::channels3d::AuxNeed;
 use effectcraft_raster::{Image, Px};
+use effectcraft_render::disk_cache::Frame8;
 use effectcraft_render::reads::{FileStamp, ReadFile, ReadFiles, ReadLog};
 use effectcraft_render::{FloatCurve, FootageSource};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 use filmcraft_media::{FrameRequest, SharedSource};
 use image::metadata::Orientation;
 
-use crate::convert::{AlphaOp, dynamic_to_image, frame_to_image_in, frame_to_image_scaled, turned};
+use crate::convert::{AlphaOp, dynamic_to_image, frame_to_image_in, frame_to_image_scaled, frame_to_rgba8, turned};
 use crate::downmix::Order;
 use crate::gif_anim::{self, Anim};
 use crate::reads;
@@ -58,10 +59,36 @@ struct Key {
     /// An OpenEXR frame of which only these rows are read (a region of interest, #3271; the other
     /// rows are empty); `None`: all of it.
     rows: Option<(i64, i64)>,
+    /// Kept as 8-bit levels ([`FootageSource::frame8`]), not float.
+    q8: bool,
+}
+
+/// A cached frame's pixels: float, or the 8-bit levels an 8 bpc render quantises it to.
+#[derive(Clone)]
+enum Pixels {
+    F32(Arc<Image>),
+    Q8(Arc<Frame8>),
+}
+
+impl Pixels {
+    fn bytes(&self) -> usize {
+        match self {
+            Pixels::F32(img) => img.data.len() * std::mem::size_of::<Px>(),
+            Pixels::Q8(f) => f.rgba.len(),
+        }
+    }
+
+    /// The float picture (`None` for 8-bit levels).
+    fn f32(self) -> Option<Arc<Image>> {
+        match self {
+            Pixels::F32(img) => Some(img),
+            Pixels::Q8(_) => None,
+        }
+    }
 }
 
 struct Entry {
-    img: Arc<Image>,
+    img: Pixels,
     /// The files the frame was decoded from (see [`crate::reads`]).
     files: Arc<ReadFiles>,
     stamp: u64,
@@ -121,8 +148,8 @@ struct Lru {
 }
 
 impl Lru {
-    /// The cached image and its read files for `k`, marking the entry as most recently used.
-    fn get(&mut self, k: &Key) -> Option<(Arc<Image>, Arc<ReadFiles>)> {
+    /// The cached frame and its read files for `k`, marking the entry as most recently used.
+    fn get(&mut self, k: &Key) -> Option<(Pixels, Arc<ReadFiles>)> {
         let e = self.map.get_mut(k)?;
         self.order.remove(&e.stamp);
         self.clock += 1;
@@ -131,14 +158,14 @@ impl Lru {
         self.order.insert(e.stamp, k.clone());
         Some((e.img.clone(), e.files.clone()))
     }
-    /// Stores an image with its read files under `k` and evicts the least recently used entries until the cache fits `budget` bytes.
-    fn insert(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize) {
+    /// Stores a frame with its read files under `k` and evicts the least recently used entries until the cache fits `budget` bytes.
+    fn insert(&mut self, k: Key, img: Pixels, files: Arc<ReadFiles>, budget: usize) {
         self.insert_took(k, img, files, budget, None);
     }
     /// [`Lru::insert`] with what decoding the frame took in microseconds (`None`: not timed, a
     /// typical cost).
-    fn insert_took(&mut self, k: Key, img: Arc<Image>, files: Arc<ReadFiles>, budget: usize, took: Option<u64>) {
-        let bytes = img.data.len() * std::mem::size_of::<Px>() + 64;
+    fn insert_took(&mut self, k: Key, img: Pixels, files: Arc<ReadFiles>, budget: usize, took: Option<u64>) {
+        let bytes = img.bytes() + 64;
         let cost_us = took.map_or_else(|| effectcraft_render::memory::default_cost(bytes, effectcraft_render::memory::DEFAULT_FRAME_US_PER_MB), |t| t.max(1));
         self.clock += 1;
         let used = effectcraft_render::memory::tick();
@@ -162,8 +189,10 @@ impl Lru {
             let Some((_, k)) = self.order.pop_first() else { break };
             if let Some(e) = self.map.remove(&k) {
                 self.bytes -= e.bytes;
+                // ponytail: float buffers only; add 8-bit spares if their allocation shows up in a profile
                 if self.spare.len() < MAX_SPARE
-                    && let Ok(img) = Arc::try_unwrap(e.img)
+                    && let Pixels::F32(img) = e.img
+                    && let Ok(img) = Arc::try_unwrap(img)
                 {
                     self.spare.push(img.data);
                 }
@@ -255,6 +284,8 @@ struct CacheState {
     stale_before: u64,
     /// Last frame index requested per movie (sequential-playback detection).
     last: HashMap<Arc<str>, i64>,
+    /// Movies whose frames can't be kept as 8-bit levels (more bits, or shown turned).
+    wide: HashSet<Arc<str>>,
 }
 
 /// A whole still in [`CacheState::recent`].
@@ -342,7 +373,7 @@ impl CacheState {
 
 /// What a decode ended with: the picture (or why not) and the files it read (see
 /// [`crate::reads`]; also on failure, so a frame that failed names the files to watch).
-type Outcome = (Result<Arc<Image>>, Arc<ReadFiles>);
+type Outcome = (Result<Pixels>, Arc<ReadFiles>);
 
 /// A decode in progress ([`CacheState::inflight`]): its outcome once it ends, for the requests
 /// waiting on it.
@@ -624,9 +655,16 @@ impl Drop for Owner<'_> {
         {
             if self.as_asked {
                 let took = effectcraft_render::memory::tick().saturating_sub(self.started);
-                c.lru.insert_took(self.key.clone(), img.clone(), files.clone(), budget, Some(took));
-            } else {
-                c.keep_recent(self.key.clone(), img.clone(), files.clone(), budget);
+                let mut key = self.key.clone();
+                // (asked as 8-bit levels but not 8-bit: kept as the float frame it is, which the
+                // renderer asks for next)
+                if key.q8 && matches!(img, Pixels::F32(_)) {
+                    c.wide.insert(key.path.clone());
+                    key.q8 = false;
+                }
+                c.lru.insert_took(key, img.clone(), files.clone(), budget, Some(took));
+            } else if let Pixels::F32(whole) = img {
+                c.keep_recent(self.key.clone(), whole.clone(), files.clone(), budget);
             }
         }
         let grown = c.held_bytes().saturating_sub(had);
@@ -690,9 +728,9 @@ impl MediaPool {
     /// Keep a frame of `width` by `height` as the frame of `path` (tests of the footage budget).
     #[cfg(test)]
     pub(crate) fn keep_test_frame(&self, path: &str, width: u32, height: u32) {
-        let key = Key { path: path.into(), frame: 0, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None };
+        let key = Key { path: path.into(), frame: 0, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None, q8: false };
         let budget = self.inner.budget();
-        lock(&self.inner.cache).lru.insert(key, Arc::new(Image::new(width, height)), Arc::default(), budget);
+        lock(&self.inner.cache).lru.insert(key, Pixels::F32(Arc::new(Image::new(width, height))), Arc::default(), budget);
     }
 
     /// The paths of the frames [`MediaPool::keep_test_frame`] kept that are still cached.
@@ -771,6 +809,7 @@ impl MediaPool {
         c.recent.retain(|r| &*r.key.path != path);
         c.forgot(path);
         c.last.remove(path);
+        c.wide.remove(path);
         drop(c);
         crate::exr_planes::forget(path);
     }
@@ -784,6 +823,21 @@ impl MediaPool {
     /// Decode (or fetch from cache) the frame of `footage` at source time `t`.
     pub fn frame_at(&self, footage: &Footage, t: Tick) -> Result<Arc<Image>> {
         Inner::frame_at(&self.inner, footage, t, true, None, FloatCurve::Srgb)
+    }
+
+    /// [`FootageSource::frame8`]: `None` (the renderer then asks for the float frame) for
+    /// anything but an 8-bit movie frame shown as decoded, and on errors.
+    fn frame8_of(&self, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<Frame8>> {
+        if footage.missing || footage.kind != FootageKind::Video || gif_anim::is_animated(footage) {
+            return None;
+        }
+        if lock(&self.inner.cache).wide.contains(footage.path.as_str()) {
+            return None;
+        }
+        match Inner::frame_px(&self.inner, footage, t, true, None, float, true, None) {
+            Ok(Pixels::Q8(f)) => Some(f),
+            _ => None,
+        }
     }
 
     /// [`FootageSource::frame`] / [`FootageSource::frame_at_size`]: `None` (logged) on errors.
@@ -1160,7 +1214,7 @@ impl Inner {
             } << 2)
             | (u8::from(footage.placed_page) << 4);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
-        let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0), rows: None };
+        let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0), rows: None, q8: false };
         match footage.kind {
             FootageKind::Sequence if !footage.sequence.is_empty() => {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
@@ -1223,10 +1277,31 @@ impl Inner {
         float: FloatCurve,
         rows: Option<(i64, i64)>,
     ) -> Result<Arc<Image>> {
+        match Self::frame_px(self, footage, t, playback, size, float, false, rows)? {
+            Pixels::F32(img) => Ok(img),
+            // (a float request's key never holds 8-bit levels)
+            Pixels::Q8(_) => Err(MediaError::Decode(format!("{}: 8-bit frame for a float request", footage.path))),
+        }
+    }
+
+    /// [`Self::frame_at`], kept as 8-bit levels when `q8` is set and the frame has 8 bits (a
+    /// float frame under the float key otherwise, and the movie is remembered as `wide`).
+    #[allow(clippy::too_many_arguments)]
+    fn frame_px(
+        self: &Arc<Self>,
+        footage: &Footage,
+        t: Tick,
+        playback: bool,
+        size: Option<(u32, u32)>,
+        float: FloatCurve,
+        q8: bool,
+        rows: Option<(i64, i64)>,
+    ) -> Result<Pixels> {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
         }
         let mut loc = Self::locate(footage, t, float);
+        loc.key.q8 = q8;
         let movie = loc.media_t.is_some();
         loc.key.rows = rows.filter(|_| self.reads_rows(footage, t));
         // A still asked for at its own size is the unsized frame (one decode, one entry).
@@ -1245,7 +1320,7 @@ impl Inner {
         // cache has it, else those rows read for this request alone (not kept: a frame cache
         // entry of a few rows would hold a whole frame's memory).
         if loc.key.rows.is_some() {
-            return self.frame_rows_of(&loc, footage);
+            return self.frame_rows_of(&loc, footage).map(Pixels::F32);
         }
         // What is decoded: a movie frame at its size, a still whole (its key has no size; a
         // placed page keeps the footage's size, which it is drawn to fill).
@@ -1257,7 +1332,10 @@ impl Inner {
         };
         let as_asked = source.key == loc.key;
         // The picture asked for, made of the decoded one.
-        let shape = |whole: Arc<Image>| if movie { whole } else { Self::sized_still(whole, &loc, footage) };
+        let shape = |whole: Pixels| match whole {
+            Pixels::F32(img) if !movie => Pixels::F32(Self::sized_still(img, &loc, footage)),
+            whole => whole,
+        };
         let mut c = lock(&self.cache);
         let generation = c.generation;
         // sequential playback of a movie: read the next frame ahead
@@ -1276,7 +1354,7 @@ impl Inner {
             }
             // A still decoded already for another size: resampled from its whole picture.
             if !movie {
-                let whole = c.lru.get(&source.key).or_else(|| c.recent(&source.key));
+                let whole = c.lru.get(&source.key).or_else(|| c.recent(&source.key).map(|(img, files)| (Pixels::F32(img), files)));
                 if let Some((whole, files)) = whole {
                     drop(c);
                     self.hits.fetch_add(1, Ordering::Relaxed);
@@ -1304,7 +1382,7 @@ impl Inner {
                 Waited::Got((Err(MediaError::Cancelled), _)) | Waited::No => {
                     let (img, files) = self.run_decode(&source, footage);
                     reads::note_all(&files);
-                    return Ok(shape(Arc::new(img?)));
+                    return Ok(shape(img?));
                 }
                 Waited::Got((Err(e), files)) => {
                     reads::note_all(&files);
@@ -1321,7 +1399,7 @@ impl Inner {
         let mut owner =
             Owner { inner: self, started: effectcraft_render::memory::tick(), key: source.key.clone(), flight, as_asked, generation, outcome: None };
         let (decoded, files) = self.run_decode(&source, footage);
-        let (decoded, files) = (decoded.map(Arc::new), Arc::new(files));
+        let files = Arc::new(files);
         reads::note_all(&files);
         owner.outcome = Some((decoded.clone(), files.clone()));
         // (keeps the picture and hands it to the waiting requests)
@@ -1336,13 +1414,13 @@ impl Inner {
         let whole = Key { rows: None, ..loc.key.clone() };
         let still = Key { size: (0, 0), nominal: (0, 0), ..whole.clone() };
         let mut c = lock(&self.cache);
-        if let Some((img, files)) = c.lru.get(&whole) {
+        if let Some((img, files)) = c.lru.get(&whole).and_then(|(p, f)| Some((p.f32()?, f))) {
             drop(c);
             self.hits.fetch_add(1, Ordering::Relaxed);
             reads::note_all(&files);
             return Ok(img);
         }
-        if let Some((img, files)) = c.lru.get(&still).or_else(|| c.recent(&still)) {
+        if let Some((img, files)) = c.lru.get(&still).and_then(|(p, f)| Some((p.f32()?, f))).or_else(|| c.recent(&still)) {
             drop(c);
             self.hits.fetch_add(1, Ordering::Relaxed);
             reads::note_all(&files);
@@ -1353,12 +1431,15 @@ impl Inner {
         let source = Loc { key: Key { size: (0, 0), nominal: (0, 0), ..loc.key.clone() }, media_t: None, float: loc.float };
         let (img, files) = self.run_decode(&source, footage);
         reads::note_all(&files);
-        Ok(Self::sized_still(Arc::new(img?), loc, footage))
+        match img? {
+            Pixels::F32(img) => Ok(Self::sized_still(img, loc, footage)),
+            Pixels::Q8(_) => Err(MediaError::Decode(format!("{}: 8-bit frame for a still", loc.key.path))),
+        }
     }
 
     /// Keep `img`, made of `files`, in the frame cache as `key` (unless its file was forgotten
     /// since `generation`, see [`CacheState::stale`]), and return it.
-    fn keep(&self, key: &Key, img: Arc<Image>, files: Arc<ReadFiles>, generation: u64) -> Arc<Image> {
+    fn keep(&self, key: &Key, img: Pixels, files: Arc<ReadFiles>, generation: u64) -> Pixels {
         let mut c = lock(&self.cache);
         let had = c.held_bytes();
         if !c.stale(&key.path, generation) {
@@ -1424,24 +1505,25 @@ impl Inner {
             let next_t = t + footage.frame_rate.frame_duration();
             let mut next = Self::locate(footage, next_t, float);
             next.key.size = loc.key.size;
+            next.key.q8 = loc.key.q8;
             if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains_key(&next.key) {
-                self.prefetch(footage, next_t, size, float);
+                self.prefetch(footage, next_t, size, float, loc.key.q8);
             }
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn prefetch(self: &Arc<Self>, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) {
+    fn prefetch(self: &Arc<Self>, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, q8: bool) {
         let (me, f) = (self.clone(), footage.clone());
         self.prefetched.fetch_add(1, Ordering::Relaxed);
         // A plain thread, not a rayon job: it waits for the decode.
         std::thread::spawn(move || {
-            let _ = me.frame_at(&f, t, false, size, float);
+            let _ = me.frame_px(&f, t, false, size, float, q8, None);
         });
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn prefetch(self: &Arc<Self>, _footage: &Footage, _t: Tick, _size: Option<(u32, u32)>, _float: FloatCurve) {}
+    fn prefetch(self: &Arc<Self>, _footage: &Footage, _t: Tick, _size: Option<(u32, u32)>, _float: FloatCurve, _q8: bool) {}
 
     /// A still (image file or sequence frame) at `loc.key.size` when one is set, made of its
     /// whole decoded picture `img`: resampled as the renderer would ([`FootageSource::frame_at_size`]),
@@ -1463,7 +1545,7 @@ impl Inner {
     /// ([`decode_threads`]) and block until it is done; on this thread where there are none
     /// (wasm32) or this is one of them. With the files the decode read (see [`crate::reads`]):
     /// collected on the thread that decodes, not noted anywhere (the caller notes them).
-    fn run_decode(self: &Arc<Self>, loc: &Loc, footage: &Footage) -> (Result<Image>, ReadFiles) {
+    fn run_decode(self: &Arc<Self>, loc: &Loc, footage: &Footage) -> (Result<Pixels>, ReadFiles) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(threads) = decode_threads()
             && threads.current_thread_index().is_none()
@@ -1502,18 +1584,18 @@ impl Inner {
     }
 
     /// Decode the picture `loc` names: a still whole, a movie frame at its size.
-    fn decode_source(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
+    fn decode_source(&self, loc: &Loc, footage: &Footage) -> Result<Pixels> {
         self.decodes.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         {
             // (not holding the lock while it runs)
             let gate = lock(&self.gate).clone();
             if let Some(answer) = gate.and_then(|g| g()) {
-                return answer;
+                return answer.map(|img| Pixels::F32(Arc::new(img)));
             }
         }
         match loc.media_t {
-            None => self.decode_still(loc, footage),
+            None => self.decode_still(loc, footage).map(|img| Pixels::F32(Arc::new(img))),
             Some(_) => self.decode_media(loc, footage),
         }
     }
@@ -1576,15 +1658,16 @@ impl Inner {
         }
     }
 
-    fn decode_media(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
+    fn decode_media(&self, loc: &Loc, footage: &Footage) -> Result<Pixels> {
         let op = AlphaOp::of(footage, loc.float);
         let path = &loc.key.path;
+        let f32 = |img| Pixels::F32(Arc::new(img));
         match loc.media_t {
-            None => self.decode_still(loc, footage),
+            None => self.decode_still(loc, footage).map(f32),
             Some(mt) if gif_anim::is_animated(footage) => {
                 let anim = self.gif(path)?;
                 let frame = anim.frame_at(Tick(mt.0)).ok_or_else(|| MediaError::Decode(format!("{path}: no frames")))?;
-                Ok(dynamic_to_image(frame, op))
+                Ok(f32(dynamic_to_image(frame, op)))
             }
             Some(mt) => {
                 let Opened { src, turn, .. } = self.opened(path).ok_or_else(|| MediaError::Io(format!("{path}: cannot open")))?;
@@ -1602,10 +1685,16 @@ impl Inner {
                     && (vf.width, vf.height) == side((footage.width, footage.height))
                     && let Some(img) = frame_to_image_scaled(&vf, w, h)
                 {
-                    return Ok(turned(img, turn));
+                    return Ok(f32(turned(img, turn)));
+                }
+                if loc.key.q8
+                    && turn == Orientation::NoTransforms
+                    && let Some(f) = frame_to_rgba8(&vf, op)
+                {
+                    return Ok(Pixels::Q8(Arc::new(f)));
                 }
                 let buf = lock(&self.cache).lru.take_spare(vf.width as usize * vf.height as usize);
-                Ok(turned(frame_to_image_in(&vf, op, buf), turn))
+                Ok(f32(turned(frame_to_image_in(&vf, op, buf), turn)))
             }
         }
     }
@@ -1719,6 +1808,9 @@ impl FootageSource for MediaPool {
     /// [`Inner::frame_at_rows`]).
     fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
         !footage.missing && self.inner.reads_rows(footage, t)
+    }
+    fn frame8(&self, _item: ItemId, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<Frame8>> {
+        self.frame8_of(footage, t, float)
     }
 
     fn problem(&self, footage: &Footage) -> Option<String> {
@@ -1983,8 +2075,8 @@ mod tests {
     #[test]
     fn lru_respects_budget_and_recycles() {
         let mut c = Lru::default();
-        let img = || Arc::new(Image::new(16, 16)); // 4 KiB + overhead
-        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None };
+        let img = || Pixels::F32(Arc::new(Image::new(16, 16))); // 4 KiB + overhead
+        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None, q8: false };
         let budget = 3 * (4096 + 64);
         for i in 0..10 {
             c.insert(k(i), img(), Arc::default(), budget);
@@ -1998,6 +2090,18 @@ mod tests {
         assert_eq!(c.spare.len(), MAX_SPARE);
         assert_eq!(c.take_spare(256).len(), 256);
         assert!(c.take_spare(17).is_empty());
+    }
+
+    /// A frame kept as 8-bit levels is its own entry beside the float one, counted at 4 bytes
+    /// a pixel.
+    #[test]
+    fn lru_keeps_8_bit_frames_apart_at_a_quarter_of_the_bytes() {
+        let mut c = Lru::default();
+        let k = |q8| Key { path: "a".into(), frame: 0, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None, q8 };
+        c.insert(k(false), Pixels::F32(Arc::new(Image::new(16, 16))), Arc::default(), usize::MAX);
+        c.insert(k(true), Pixels::Q8(Arc::new(Frame8 { width: 16, height: 16, rgba: vec![0; 16 * 16 * 4] })), Arc::default(), usize::MAX);
+        assert!(matches!(c.get(&k(false)), Some((Pixels::F32(_), _))) && matches!(c.get(&k(true)), Some((Pixels::Q8(_), _))));
+        assert_eq!(c.bytes, (16 * 16 * 16 + 64) + (16 * 16 * 4 + 64));
     }
 
     /// #482: an OpenEXR file with HTJ2K compression (which the decoder lacks) says so on import
@@ -2352,7 +2456,7 @@ mod tests {
     /// the frame cache has moved on.
     #[test]
     fn recent_whole_stills_are_capped_and_expire() {
-        let key = |i| Key { path: "/s.exr".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None };
+        let key = |i| Key { path: "/s.exr".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None, q8: false };
         let mut c = CacheState::default();
         // 64 KiB each (64 × 64 pixels of 16 bytes), a budget of 512 KiB: room for 4.
         for i in 0..6 {

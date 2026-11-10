@@ -437,7 +437,8 @@ pub trait LayerStore: Send + Sync {
     /// mid-render). An entry whose files changed, or damaged, is a miss and is dropped, so the
     /// buffer rendered again replaces it. `virtual_id` names files served from memory.
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)>;
-    /// Keep a buffer that was slow to render, with the source files it was made of. `since`: the
+    /// Keep a buffer that was slow to render, with the source files it was made of (shared, so
+    /// a store can encode it off the render thread). `since`: the
     /// [`LayerStore::drop_generation`] when its render started (a buffer made of a file dropped
     /// after that is refused).
     fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64);

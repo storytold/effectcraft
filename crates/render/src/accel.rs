@@ -404,7 +404,7 @@ impl<'a> Renderer<'a> {
         let key = self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
         // (a footage layer read in part is never kept under a whole layer's key, #3271)
         let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
-        let key = self.mask_gate_key(ctx, layer, key);
+        let key = self.mask_gate_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let Some((b, _)) = self.cached(key) {
             return Some(b);
         }

@@ -419,6 +419,18 @@ struct Queue {
     drops: Drops,
 }
 
+impl Queue {
+    /// No room for a `kind` write of `len` bytes. A layer bigger than the whole budget is still
+    /// taken when nothing else is queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn full(&self, kind: Kind, len: usize) -> bool {
+        match kind {
+            Kind::Frame => self.frame_bytes.saturating_add(len) > FRAME_QUEUE_BYTES,
+            _ => self.jobs.len() >= QUEUE_LIMIT || (self.job_bytes > 0 && self.job_bytes.saturating_add(len) > JOB_QUEUE_BYTES),
+        }
+    }
+}
+
 /// Files dropped from the cache files beyond this are not remembered one by one: everything made
 /// before the drop that forgot them is refused instead.
 const MAX_DROPPED_PATHS: usize = 1 << 16;
@@ -860,6 +872,7 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.job_bytes = 0;
             q.frames.clear();
             q.pending_frames.clear();
         }
@@ -1010,11 +1023,7 @@ impl DiskCache {
             if stale(&q) {
                 return false;
             }
-            let full = match kind {
-                Kind::Frame => q.frame_bytes.saturating_add(payload.held()) > FRAME_QUEUE_BYTES,
-                _ => q.jobs.len() >= QUEUE_LIMIT || q.job_bytes.saturating_add(payload.held()) > JOB_QUEUE_BYTES,
-            };
-            if full {
+            if q.full(kind, payload.held()) {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
@@ -1301,7 +1310,7 @@ impl DiskCache {
         if self.contains(Kind::Frame, key) {
             return true;
         }
-        // (no room on the disk: refused before the pixels are compressed)
+        // (no room on the disk: refused before the pixels are queued and compressed)
         if !self.accepts_writes() {
             return false;
         }
@@ -2293,7 +2302,7 @@ mod tests {
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         assert!(dc.get_layer(42, None).is_none());
         let b = buf(1, 33, 17);
-        dc.put_layer(42, &b, &EntryFiles::default(), 0);
+        dc.put_layer(42, &Arc::new(b.clone()), &EntryFiles::default(), 0);
         dc.flush();
         let (back, files) = dc.get_layer(42, None).unwrap();
         assert!(files.is_empty() && files.is_complete());
@@ -2302,10 +2311,14 @@ mod tests {
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
         assert!(dc.put_frame(7, 20, 10, &rgba, &ReadFiles::default(), None, 0));
         assert!(!dc.put_frame(8, 2, 2, &[0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
+        // Handed over and compressed on the writer thread: the same pixels come back.
+        assert!(dc.put_frame_owned(9, 20, 10, rgba.clone(), &ReadFiles::default(), None, 0));
+        assert!(!dc.put_frame_owned(10, 2, 2, vec![0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
         dc.flush();
         assert_eq!(dc.get_frame(7, None).map(|f| f.0).unwrap().rgba, rgba);
+        assert_eq!(dc.get_frame(9, None).map(|f| f.0).unwrap().rgba, rgba);
         let st = dc.stats();
-        assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
+        assert_eq!((st.entries, st.hits, st.misses, st.writes), (3, 3, 1, 3));
         // Wrong kind is a miss.
         assert!(dc.get_frame(42, None).map(|f| f.0).is_none());
     }
@@ -2360,6 +2373,36 @@ mod tests {
         assert_ne!(comp_content_key(&p, cid), key, "the expression reads the model's name");
     }
 
+    /// Layer jobs hold float buffers until they are compressed: the queue holds at most
+    /// [`JOB_QUEUE_BYTES`] of them (64 at 4K held ~8.5 GB), and a single bigger one only alone.
+    #[test]
+    fn layer_writes_queue_within_a_byte_budget() {
+        let mut q = Queue {
+            frames: Default::default(),
+            frame_bytes: 0,
+            jobs: Default::default(),
+            job_bytes: 0,
+            busy: true,
+            pending_frames: Default::default(),
+            drops: Drops::default(),
+        };
+        let layer = JOB_QUEUE_BYTES / 4 + 1;
+        for _ in 0..3 {
+            assert!(!q.full(Kind::Layer, layer));
+            q.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Lz4(vec![])));
+            q.job_bytes += layer;
+        }
+        assert!(q.full(Kind::Layer, layer), "a fourth would pass the budget");
+        assert!(!q.full(Kind::Frame, 1024), "frames have their own budget");
+        let mut empty = Queue { jobs: Default::default(), job_bytes: 0, ..q };
+        assert!(!empty.full(Kind::Layer, 2 * JOB_QUEUE_BYTES), "a single big layer, alone");
+        // Taking a job gives its bytes back.
+        empty.job_bytes = 3;
+        empty.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Lz4(vec![0; 3])));
+        assert!(empty.pop().is_some());
+        assert_eq!(empty.job_bytes, 0);
+    }
+
     /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
     /// on disk afterwards (the blue bar came back with gaps).
     #[test]
@@ -2367,7 +2410,7 @@ mod tests {
         let dir = tmpdir("burst");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         for k in 0..300 {
-            dc.put_layer(10_000 + k, &buf(1, 64, 64), &EntryFiles::default(), 0);
+            dc.put_layer(10_000 + k, &Arc::new(buf(1, 64, 64)), &EntryFiles::default(), 0);
         }
         let rgba = vec![7u8; 32 * 32 * 4];
         for k in 0..300 {
@@ -2537,7 +2580,7 @@ mod tests {
         let rgba = vec![7u8; 16 * 16 * 4];
         assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
         assert!(!dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0), "refused");
-        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
         dc.flush();
         assert_eq!(dc.encodes(), 0, "nothing compressed");
         assert_eq!(dc.stats().entries, 0);
@@ -2547,7 +2590,7 @@ mod tests {
         assert_eq!(dc.stats().limit_bytes, 32 << 20);
         assert!(!dc.accepts_writes());
         assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
-        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
         assert_eq!(dc.encodes(), 0, "nothing compressed");
         // A small limit the setting asks for (not free space) is used.
         dc.set_disk_space(None);
@@ -2558,7 +2601,7 @@ mod tests {
         dc.set_disk_space(Some((4096 * GB, 500 * GB)));
         assert!(dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0));
         assert!(dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0));
-        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
         dc.flush();
         assert_eq!(dc.encodes(), 3);
         assert_eq!(dc.stats().entries, 3);
@@ -2663,11 +2706,11 @@ mod tests {
         assert!(dc.get_frame(k, Some(&two)).is_none() && !dc.contains(Kind::Frame, k), "replaced: a miss, deleted");
         // A layer buffer made of it.
         let lk = layer_disk_key(7);
-        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
+        dc.put_layer(lk, &Arc::new(buf(1, 4, 4)), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
         dc.flush();
         assert!(dc.get_layer(lk, Some(&one)).is_some_and(|(b, f)| b.img == buf(1, 4, 4).img && f == files && f.is_complete()));
         assert!(dc.get_layer(lk, None).is_none() && !dc.contains(Kind::Layer, lk), "no identity: a miss, deleted");
-        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
+        dc.put_layer(lk, &Arc::new(buf(1, 4, 4)), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
         dc.flush();
         assert!(dc.get_layer(lk, Some(&two)).is_none() && !dc.contains(Kind::Layer, lk), "replaced: a miss, deleted");
         // The browser's sealed layer entries carry the same list.
@@ -2911,7 +2954,7 @@ mod tests {
         assert!(dc.dropped_since(&read(&[&a]), before) && !dc.dropped_since(&read(&[&b]), before));
         assert!(!dc.put_frame(1, 1, 1, &[1; 4], &read(&[&a, &b]), None, before), "a frame from before the drop");
         assert!(!dc.put_frame_f16(2, 1, 1, &[1; 4], &read(&[&a]), None, before));
-        dc.put_layer(3, &buf(3, 2, 2), &EntryFiles::of(&read(&[&a]), None).unwrap(), before);
+        dc.put_layer(3, &Arc::new(buf(3, 2, 2)), &EntryFiles::of(&read(&[&a]), None).unwrap(), before);
         assert!(dc.put_frame(4, 1, 1, &[4; 4], &read(&[&b]), None, before), "b.png wasn't dropped");
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 1) && !dc.contains(Kind::Frame, 2) && !dc.contains(Kind::Layer, 3));
@@ -2921,7 +2964,7 @@ mod tests {
         let after = dc.drop_generation();
         assert!(after > before && !dc.dropped_since(&read(&[&a]), after));
         assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None, after));
-        dc.put_layer(6, &buf(6, 2, 2), &EntryFiles::of(&read(&[&a]), None).unwrap(), after);
+        dc.put_layer(6, &Arc::new(buf(6, 2, 2)), &EntryFiles::of(&read(&[&a]), None).unwrap(), after);
         dc.flush();
         assert_eq!(dc.get_frame(5, None).map(|f| f.0.rgba), Some(vec![5; 4]));
         assert!(dc.get_layer(6, None).is_some());
