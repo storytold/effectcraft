@@ -159,11 +159,33 @@ fn keys_of_two_puppet_pins_paste_together() {
     let pos = |s: &Session, pin: u64| layer(s, id).props.find_group(pin).unwrap().get("position").unwrap().clone();
     let keys: Vec<_> = [a, b].iter().map(|&pin| json!({"layer": id, "prop": pos(&s, pin).uid, "time": 0})).collect();
     s.execute("keys.select", json!({"keys": keys})).unwrap();
+    let before = [pos(&s, a).keys[0].clone(), pos(&s, b).keys[0].clone()];
     s.execute("keys.copy", json!({})).unwrap();
-    s.set_time(Tick::from_seconds_f64(1.0));
+    let one_second = Tick::from_seconds_f64(1.0);
+    s.set_time(one_second);
     s.execute("keys.paste", json!({})).unwrap();
-    assert_eq!(pos(&s, a).keys.len(), 2);
-    assert_eq!(pos(&s, b).keys.len(), 2);
+    for (pin, orig) in [a, b].into_iter().zip(&before) {
+        let p = pos(&s, pin);
+        assert_eq!(p.keys.len(), 2);
+        assert_eq!(p.keys.iter().find(|k| k.time == Tick::ZERO).map(|k| &k.value), Some(&orig.value));
+        assert_eq!(p.keys.iter().find(|k| k.time == one_second).map(|k| &k.value), Some(&orig.value));
+    }
+}
+
+#[test]
+fn keys_of_one_puppet_pin_paste_back() {
+    let (mut s, id) = setup();
+    let a = s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap()["pin"].as_u64().unwrap();
+    let pos = |s: &Session| layer(s, id).props.find_group(a).unwrap().get("position").unwrap().clone();
+    s.execute("keys.select", json!({"keys": [{"layer": id, "prop": pos(&s).uid, "time": 0}]})).unwrap();
+    let orig = pos(&s).keys[0].clone();
+    s.execute("keys.copy", json!({})).unwrap();
+    let one_second = Tick::from_seconds_f64(1.0);
+    s.set_time(one_second);
+    s.execute("keys.paste", json!({})).unwrap();
+    let p = pos(&s);
+    assert_eq!(p.keys.len(), 2);
+    assert_eq!(p.keys.iter().find(|k| k.time == one_second).map(|k| &k.value), Some(&orig.value));
 }
 
 #[test]
