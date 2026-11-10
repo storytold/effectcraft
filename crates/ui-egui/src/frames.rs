@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
@@ -54,6 +54,92 @@ const GPU_BUDGET: usize = 1 << 30;
 const MIN_GPU_BUDGET: usize = 64 << 20;
 const GPU_PRESSURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 const GPU_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// GPU frames that render at once, however many frame threads there are. Each one holds its own
+/// working textures, so 16 at once ran an RTX 3090 out of video memory (#3028).
+const MAX_GPU_RENDERS: usize = 2;
+
+/// Counts the GPU renders in flight; the rest of the frame threads wait their turn.
+struct GpuRenderSlots {
+    #[cfg(test)]
+    entered: std::sync::atomic::AtomicUsize,
+    busy: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// One GPU render slot, given back on drop.
+struct GpuRenderSlot<'a>(&'a GpuRenderSlots);
+
+static GPU_RENDER_SLOTS: GpuRenderSlots = GpuRenderSlots::new();
+
+impl GpuRenderSlots {
+    const fn new() -> Self {
+        Self {
+            #[cfg(test)]
+            entered: std::sync::atomic::AtomicUsize::new(0),
+            busy: Mutex::new(0),
+            freed: Condvar::new(),
+        }
+    }
+
+    /// The UI-thread display path must hand a frame to the remote worker instead of waiting
+    /// behind preview lanes. Never block the window to enforce the native memory cap.
+    fn try_acquire(&self, max: usize) -> Option<GpuRenderSlot<'_>> {
+        let mut busy = match self.busy.try_lock() {
+            Ok(busy) => busy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if !cfg!(target_arch = "wasm32") && *busy >= max {
+            return None;
+        }
+        *busy += 1;
+        #[cfg(test)]
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        Some(GpuRenderSlot(self))
+    }
+
+    /// A Rayon helper may be executing a nested frame while an admitted render waits for
+    /// its work. Blocking that helper on a permit would deadlock the render (#3028).
+    fn for_render(&self, max: usize) -> Option<GpuRenderSlot<'_>> {
+        // Dedicated preview pools have one thread, protected from nested drains. They cannot
+        // be helpers of another admitted frame, so waiting preserves GPU preview throughput.
+        #[cfg(not(target_arch = "wasm32"))]
+        if DRAINING_LANE.get() {
+            return Some(self.acquire(max));
+        }
+        if rayon::current_thread_index().is_some() { self.try_acquire(max) } else { Some(self.acquire(max)) }
+    }
+
+    /// Wait until fewer than `max` renders are in flight, then take a slot. The browser has no
+    /// threads to wait on: it never blocks.
+    fn acquire(&self, max: usize) -> GpuRenderSlot<'_> {
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        while !cfg!(target_arch = "wasm32") && *busy >= max {
+            busy = self.freed.wait(busy).unwrap_or_else(PoisonError::into_inner);
+        }
+        *busy += 1;
+        #[cfg(test)]
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        GpuRenderSlot(self)
+    }
+}
+
+impl Drop for GpuRenderSlot<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.0.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        *busy = busy.saturating_sub(1);
+        self.0.freed.notify_one();
+    }
+}
+
+/// The window's frame gaps that adapt [`Queue::gpu_limit`] while a preview plays: a longer one
+/// is a stall, shorter ones for a while are smooth.
+const UI_STALL: std::time::Duration = std::time::Duration::from_millis(100);
+const UI_SMOOTH: std::time::Duration = std::time::Duration::from_millis(50);
+/// How long the window must stay smooth before one more lane composites on the GPU, and before it
+/// tries again a limit that stalled.
+const GPU_LANE_STEP: std::time::Duration = std::time::Duration::from_millis(500);
+const GPU_LANE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 mod f16;
 pub use f16::{F16_PIXEL_BYTES, F16Frame};
@@ -639,7 +725,7 @@ impl Default for Frames {
             })
             .collect();
         #[cfg(not(target_arch = "wasm32"))]
-        let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), ..Default::default() };
+        let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), gpu_limit: 1, ..Default::default() };
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         Frames {
@@ -1282,6 +1368,8 @@ impl Frames {
         #[cfg(not(target_arch = "wasm32"))]
         let moved = q.playhead.is_some() != playhead.is_some();
         q.playhead = playhead;
+        // (called once per frame of the window while a preview plays)
+        let more_gpu = q.ui_frame(playhead.map(|_| web_time::Instant::now()));
         if let Some(p) = playhead
             && let Ok(mut inf) = self.inflight.lock()
         {
@@ -1293,6 +1381,13 @@ impl Frames {
                 !gone
             });
         }
+        // A lane more may composite: one that stopped at the limit starts again.
+        #[cfg(not(target_arch = "wasm32"))]
+        if more_gpu && !moved {
+            self.start_lanes(&mut q, 1);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = more_gpu;
         #[cfg(not(target_arch = "wasm32"))]
         if moved {
             self.start_lanes(&mut q, usize::MAX);
@@ -1597,6 +1692,8 @@ struct Worker {
 thread_local! {
     /// This pool thread is inside [`Worker::drain`] (rendering a frame).
     static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Only the single thread of a dedicated preview lane may wait for GPU admission.
+    static DRAINING_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Clears [`DRAINING`] when the drain ends, even by a panic.
@@ -1604,9 +1701,32 @@ thread_local! {
 struct Draining;
 
 #[cfg(not(target_arch = "wasm32"))]
+impl Draining {
+    fn enter(lane: Option<usize>) -> Option<Self> {
+        if DRAINING.replace(true) {
+            return None;
+        }
+        DRAINING_LANE.set(lane.is_some());
+        Some(Self)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Draining {
     fn drop(&mut self) {
+        DRAINING_LANE.set(false);
         DRAINING.set(false);
+    }
+}
+
+/// A lane's hold on one of the [`Queue::gpu_limit`] GPU slots (see [`Queue::gpu_lanes`]), given back when dropped,
+/// even by a panic.
+struct GpuSlot<'a>(&'a Mutex<Queue>);
+
+impl Drop for GpuSlot<'_> {
+    fn drop(&mut self) {
+        let mut q = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        q.gpu_lanes = q.gpu_lanes.saturating_sub(1);
     }
 }
 
@@ -1623,11 +1743,7 @@ impl Worker {
     /// `lane`: the lane this runs on (see [`Queue::idle_lanes`]), `None` on the pool.
     #[cfg(not(target_arch = "wasm32"))]
     fn drain(&self, lane: Option<usize>) {
-        if DRAINING.get() {
-            return;
-        }
-        DRAINING.set(true);
-        let _reset = Draining;
+        let Some(_reset) = Draining::enter(lane) else { return };
         while self.run_next(lane) {}
     }
 
@@ -1636,19 +1752,25 @@ impl Worker {
     /// idle again.
     fn run_next(&self, lane: Option<usize>) -> bool {
         let Worker { queue, content_keys, .. } = self;
-        let job = {
+        // (asked before the queue's lock: it takes the cache's)
+        let gpu = lane.is_some() && self.gpu_ready();
+        let (job, mut slot) = {
             let Ok(mut q) = queue.lock() else { return false };
-            let Some(i) = q.next(lane.is_some()) else {
+            let Some(i) = q.next(lane.is_some(), gpu) else {
                 q.idle_lanes.extend(lane);
                 return false;
             };
             let job = q.jobs.swap_remove(i);
+            let slot = (gpu && q.gpu_job(&job)).then(|| {
+                q.gpu_lanes += 1;
+                GpuSlot(queue)
+            });
             q.running.insert(job.key);
             if job.urgent {
                 q.urgent_running += 1;
                 q.urgent_cancels.push((job.key, job.cancel.clone()));
             }
-            job
+            (job, slot)
         };
         let t0 = web_time::Instant::now();
         // (the drop generation before the frame reads anything: File ▸ Reload Footage meanwhile
@@ -1657,6 +1779,10 @@ impl Worker {
             job.src.disk.as_ref().map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts)), dc.drop_generation()));
         let from_disk = disk.as_ref().and_then(|(dc, k, _)| self.disk_frame(dc, *k, &job));
         let disk_hit = from_disk.is_some();
+        if disk_hit {
+            // Nothing for the GPU to do: another lane may composite meanwhile.
+            slot = None;
+        }
         // `files`: the source files the frame was made of (see `render::reads`).
         let (ci, files) = match from_disk {
             Some(hit) => hit,
@@ -1683,6 +1809,8 @@ impl Worker {
         // and compression. Persistence still runs on this worker, using the same snapshot.
         let since = disk.as_ref().map(|(dc, _, since)| DiskSince::of(dc, *since));
         self.finish(&job, ci.clone(), Some(files.clone()), since, t0);
+        // The GPU's part is done; storing it on disk is the CPU's.
+        drop(slot);
         if !disk_hit
             && let Some((dc, k, since)) = &disk
             && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref(), *since)
@@ -1812,7 +1940,10 @@ impl Worker {
         r.reads = Some(&files);
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
-        let f = g.within_memory(|| g.render_display(&r, job.comp, job.t));
+        let f = {
+            let _slot = GPU_RENDER_SLOTS.try_acquire(MAX_GPU_RENDERS)?;
+            g.within_memory(|| g.render_display(&r, job.comp, job.t))
+        };
         effectcraft_engine::render::Accelerator::frame_end(g);
         match f {
             Ok(f) => {
@@ -1853,7 +1984,7 @@ impl Worker {
             let auto = if cfg!(target_arch = "wasm32") { None } else { r.frame_auto(a, job.comp, true) };
             if auto.is_none_or(|(p, key)| p.choose(key)) {
                 let t0 = web_time::Instant::now();
-                match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
+                match gpu_attempt(g, || g.render_display(&r, job.comp, job.t)) {
                     Ok(Some(f)) => {
                         self.gpu_succeeded();
                         if let Some((p, key)) = auto {
@@ -1872,13 +2003,21 @@ impl Worker {
                         }
                     }
                     Err(e) => {
-                        self.gpu_attempt_failed(g, &e);
+                        self.gpu_attempt_rejected(g, &e);
                         return self.render_job(job, false, files);
                     }
                 }
             }
             let t0 = web_time::Instant::now();
-            let img = cpu_frame(&r.comp_frame_cpu(job.comp, job.t), &job.src.project, &job.opts);
+            // CPU compositing in Auto can still run GPU layer effects. Keep those inside the
+            // same admission and error scope as a GPU-composited frame (#3028).
+            let img = match gpu_attempt(g, || r.comp_frame_cpu(job.comp, job.t)) {
+                Ok(img) => cpu_frame(&img, &job.src.project, &job.opts),
+                Err(e) => {
+                    self.gpu_attempt_rejected(g, &e);
+                    return self.render_job(job, false, files);
+                }
+            };
             if let Some((p, key)) = auto {
                 p.record(key, false, t0.elapsed().as_secs_f64() * 1000.0);
             }
@@ -1886,19 +2025,37 @@ impl Worker {
         }
         if let Some(g) = gpu {
             // The GPU composites and the frame is read back.
-            return match g.within_memory(|| r.comp_frame(job.comp, job.t)) {
+            return match r.comp_frame_scoped(job.comp, job.t, |a| gpu_attempt(g, || a.comp_frame(&r, job.comp, job.t))) {
                 Ok(img) => {
                     self.gpu_succeeded();
                     cpu_frame(&img, &job.src.project, &job.opts)
                 }
                 Err(e) => {
-                    self.gpu_attempt_failed(g, &e);
+                    self.gpu_attempt_rejected(g, &e);
                     self.render_job(job, false, files)
                 }
             };
         }
         cpu_frame(&r.comp_frame(job.comp, job.t), &job.src.project, &job.opts)
     }
+    /// Busy shared-pool workers retry on the CPU without treating contention as a GPU fault.
+    fn gpu_attempt_rejected(&self, gpu: &Gpu, error: &GpuAttemptError) {
+        if let GpuAttemptError::Failed(error) = error {
+            self.gpu_attempt_failed(gpu, error);
+        }
+    }
+}
+
+enum GpuAttemptError {
+    Busy,
+    Failed(FrameError),
+}
+
+/// Bound all preview GPU attempts, including effects in an Auto CPU composite. The permit
+/// ends before the caller retries on the CPU, so failed frames cannot block GPU admissions.
+fn gpu_attempt<T>(gpu: &Gpu, render: impl FnOnce() -> T) -> Result<T, GpuAttemptError> {
+    let _slot = GPU_RENDER_SLOTS.for_render(MAX_GPU_RENDERS).ok_or(GpuAttemptError::Busy)?;
+    gpu.within_memory(render).map_err(GpuAttemptError::Failed)
 }
 
 /// Who asked for a frame (see [`Frames::request_with`]).
@@ -1951,6 +2108,24 @@ struct Queue {
     /// caching left the same gaps, and held up the viewer's frame when it shared a piece.
     lanes: usize,
     idle_lanes: Vec<usize>,
+    /// Lanes compositing a frame on the GPU, at most [`Queue::gpu_limit`]. The GPU is the
+    /// viewer's device: each lane records, submits and reads back a whole frame on it, and the
+    /// window can't draw until that work is done. With a lane per core on a GPU that can't keep
+    /// up, the window froze for hundreds of milliseconds at a time while a preview played, and
+    /// the preview jumped ahead when it came back (#3345). The other lanes go on with the frames
+    /// that don't need the GPU (the disk cache's, or all of them while the GPU is out of memory
+    /// or retired); the pool and the viewer's frame are not counted.
+    gpu_lanes: usize,
+    /// How many lanes may composite on the GPU at a time (at least 1, see [`Queue::ui_frame`]).
+    gpu_limit: usize,
+    /// The limit that last stalled the window: tried again only after [`GPU_LANE_RETRY`].
+    gpu_stalled_at: usize,
+    /// While a preview plays: the window's last frame, and since when it has been smooth.
+    ui_last: Option<web_time::Instant>,
+    ui_smooth_since: Option<web_time::Instant>,
+    /// Tests: as if there were a GPU compositor (no adapter is there).
+    #[cfg(test)]
+    fake_gpu: bool,
 }
 
 impl Queue {
@@ -1959,9 +2134,63 @@ impl Queue {
         self.lanes > 0 && !j.urgent && (j.background || self.playhead.is_some())
     }
 
-    /// The job a lane (`lane`) or the pool renders next: the [`Queue::best`] of its own.
-    fn next(&self, lane: bool) -> Option<usize> {
-        self.best_of(|j| self.on_lane(j) == lane)
+    /// The job a lane (`lane`) or the pool renders next: the [`Queue::best`] of its own. `gpu`:
+    /// the GPU composites (a lane's frames), so a lane takes no GPU frame while
+    /// [`Queue::gpu_limit`] lanes are compositing.
+    fn next(&self, lane: bool, gpu: bool) -> Option<usize> {
+        let gpu_full = gpu && self.gpu_lanes >= self.gpu_limit.max(1);
+        self.best_of(|j| self.on_lane(j) == lane && !(gpu_full && self.gpu_job(j)))
+    }
+
+    /// The window drew a frame at `now` (`None`: no preview plays). A window that stalls with
+    /// lanes compositing gets fewer of them: the GPU can't keep up with them and the window. One
+    /// that stays smooth while every allowed lane composites gets one more, up to all of them: a
+    /// GPU that keeps up renders the preview on every lane. A limit that stalled is tried again
+    /// only after a longer smooth spell, so the window doesn't stall over and over. `true` when
+    /// one more lane may composite.
+    fn ui_frame(&mut self, now: Option<web_time::Instant>) -> bool {
+        let Some(now) = now else {
+            self.ui_last = None;
+            return false;
+        };
+        let limit = self.gpu_limit.max(1);
+        let gap = self.ui_last.map(|last| now.saturating_duration_since(last));
+        self.ui_last = Some(now);
+        let Some(gap) = gap else {
+            self.ui_smooth_since = Some(now);
+            return false;
+        };
+        if gap > UI_STALL && self.gpu_lanes > 0 {
+            self.gpu_stalled_at = limit;
+            self.gpu_limit = (limit / 2).max(1);
+            self.ui_smooth_since = Some(now);
+        } else if gap > UI_SMOOTH {
+            self.ui_smooth_since = Some(now);
+        } else {
+            let since = *self.ui_smooth_since.get_or_insert(now);
+            let wait = if limit + 1 >= self.gpu_stalled_at && self.gpu_stalled_at > 0 { GPU_LANE_RETRY } else { GPU_LANE_STEP };
+            if self.gpu_lanes >= limit && limit < self.lanes && now.saturating_duration_since(since) >= wait {
+                self.gpu_limit = limit + 1;
+                self.ui_smooth_since = Some(now);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether `j` is composited on the GPU when the GPU is ready: there is a GPU compositor and
+    /// the frame's renderer uses it (as `Renderer::active_accel` decides: Software Only keeps
+    /// every frame on the CPU).
+    fn gpu_job(&self, j: &Job) -> bool {
+        let adapter = j.src.gpu.is_some();
+        #[cfg(test)]
+        let adapter = adapter || self.fake_gpu;
+        adapter
+            && match j.opts.backend {
+                effectcraft_engine::render::Backend::Cpu => false,
+                effectcraft_engine::render::Backend::Gpu => true,
+                effectcraft_engine::render::Backend::Auto => j.src.project.settings.gpu_acceleration,
+            }
     }
 
     /// The job that matters most: urgent first (newest), then, while a preview plays, the

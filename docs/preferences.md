@@ -82,6 +82,14 @@ Commands (CLI, MCP, control channel):
 - `memory.layerCacheMb`: Layer Cache (in the browser at most 512 MB, see [web.md](web.md))
 - `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB)
 - `memory.previewCacheMb`: Preview (RAM) Cache
+- `memory.gpuFramesInFlight`: GPU Frames Rendered at Once (`auto`, `1`, `2`, `3`): how many
+  frames the Render Queue renders on the GPU at once. Auto measures the GPU memory after the
+  job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
+  conservative 3 GiB on a discrete card, less when its memory is known, 2 GiB on an integrated
+  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
+  renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
+  cap turned off) and once frames have had to wait for memory. The render log names the count.
+  `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles

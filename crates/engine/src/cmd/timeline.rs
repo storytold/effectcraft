@@ -145,6 +145,10 @@ fn prerender(
         storage: None,
         label: format!("Pre-render {}", l.name),
         nested_switches: cx.nested_switches,
+
+        caches: None,
+        renderer: None,
+        gpu_frames: None,
     };
     let r = exporter.export(&job, progress)?;
     Ok(Prerendered { path: r.path, width: comp.width, height: comp.height, frame_rate: comp.frame_rate, duration: end - start })

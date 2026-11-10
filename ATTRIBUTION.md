@@ -99,7 +99,7 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
   (sidecars `.attribution`).
 - Bundled extension (ScriptUI panel) with its twelve built-in ease presets:
   `extensions/scriptui-panels/Ease Presets.jsx` (sidecar `.attribution`).
-- Example effect plug-in: `examples/plugins/posterize-bands` (plug-in API v1, WebAssembly).
+- Example effect plug-in: `examples/plugins/posterize-bands` (WebAssembly ABI 1).
 
 ## Trained models (optional downloads, not bundled)
 
