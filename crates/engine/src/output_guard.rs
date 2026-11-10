@@ -199,12 +199,22 @@ struct Drives {
 
 #[cfg(windows)]
 impl Drives {
-    fn note(&mut self, key: &str) {
+    /// Whether the key changed what the files are on (a letter or a UNC path new to them).
+    fn note(&mut self, key: &str) -> bool {
         match drive_letter(key) {
-            Some(letter) => {
-                self.letters.insert(letter);
-            }
-            None => self.other = true,
+            Some(letter) => self.letters.insert(letter),
+            None => !std::mem::replace(&mut self.other, true),
+        }
+    }
+
+    /// [`Drives::note`] for file number `at`, in a set that grows (queued outputs): what is
+    /// resolved already stays valid unless the key brings a new letter or the first UNC path.
+    fn note_at(&mut self, key: &str, at: usize) {
+        if self.note(key) {
+            self.resolved = std::sync::OnceLock::new();
+        } else if let Some(resolved) = self.resolved.get_mut() {
+            let root = drive_letter(key).and_then(resolved_root);
+            resolved.entry(with_root(key, root)).or_insert(at);
         }
     }
 
@@ -497,6 +507,10 @@ struct Writes {
     path_bytes: usize,
     /// The first output to write a file, by name.
     files: HashMap<String, usize>,
+    /// Which drive letters the files are on: a mapped network drive and its UNC path name one
+    /// file ([`Drives`]), as for the files the project reads.
+    #[cfg(windows)]
+    drives: Drives,
 }
 
 /// The common range whose formatted numbers agree. Once the number (including a minus sign)
@@ -524,8 +538,11 @@ impl Writes {
     fn clash(&self, later: &Write) -> Option<Clash<'_>> {
         match &later.target {
             Target::File { key } => {
-                if let Some(at) = self.files.get(key) {
-                    return Some(Clash { earlier: self.all.get(*at)?, files: 1, first: 0 });
+                let at = self.files.get(key).copied();
+                #[cfg(windows)]
+                let at = at.or_else(|| self.drives.find(&self.files, key));
+                if let Some(at) = at {
+                    return Some(Clash { earlier: self.all.get(at)?, files: 1, first: 0 });
                 }
                 self.all.iter().find_map(|earlier| {
                     let Target::Frames { first, end, .. } = earlier.target else { return None };
@@ -564,6 +581,8 @@ impl Writes {
         let at = self.all.len();
         match &write.target {
             Target::File { key } => {
+                #[cfg(windows)]
+                self.drives.note_at(key, at);
                 self.files.entry(key.clone()).or_insert(at);
             }
             Target::Frames { .. } => {}
@@ -1327,6 +1346,64 @@ mod tests {
         assert_eq!(count.get(), 4, "looked up again after it");
         DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
         ROOT_CLOCK_AHEAD.with(|a| a.set(std::time::Duration::ZERO));
+    }
+
+    /// #3328: two queued movies naming one file, once by a mapped drive and once by its UNC path,
+    /// collide, whichever is queued first; other places and letters don't.
+    #[test]
+    #[cfg(windows)]
+    fn queued_outputs_collide_under_drive_and_unc_spellings() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\"), ('q', r"\\?\UNC\server\other\")]);
+        let by_letter = job_of([movie(1, r"P:\out\a.mp4")]);
+        assert_eq!(clash(&by_letter, &movie(9, r"\\server\share\out\a.mp4")), Some((1, 1, 0)), "UNC after the letter");
+        assert_eq!(clash(&by_letter, &movie(9, r"\\SERVER\Share\out\A.MP4")), Some((1, 1, 0)), "in another case");
+        assert_eq!(clash(&by_letter, &movie(9, r"\\?\UNC\server\share\out\a.mp4")), Some((1, 1, 0)), "verbatim");
+        assert_eq!(clash(&by_letter, &movie(9, r"\\server\share\out\b.mp4")), None, "another file");
+        assert_eq!(clash(&by_letter, &movie(9, r"\\server\other\out\a.mp4")), None, "another share");
+        assert_eq!(clash(&by_letter, &movie(9, r"Q:\out\a.mp4")), None, "another letter, another share");
+        let by_unc = job_of([movie(1, r"\\server\share\out\a.mp4")]);
+        assert_eq!(clash(&by_unc, &movie(9, r"p:\out\a.mp4")), Some((1, 1, 0)), "the letter after the UNC path");
+        assert_eq!(clash(&by_unc, &movie(9, r"p:\out\b.mp4")), None);
+        // Outputs that arrive after the first lookups still meet the earlier ones.
+        let mut grown = job_of([movie(1, r"P:\out\a.mp4")]);
+        assert_eq!(clash(&grown, &movie(9, r"P:\out\a.mp4")), Some((1, 1, 0)));
+        assert_eq!(clash(&grown, &movie(9, r"\\server\share\out\a.mp4")), Some((1, 1, 0)));
+        grown.push(movie(2, r"\\server\share\out\c.mp4")).unwrap();
+        grown.push(movie(3, r"Q:\out\d.mp4")).unwrap();
+        assert_eq!(clash(&grown, &movie(9, r"P:\out\c.mp4")), Some((2, 1, 0)));
+        assert_eq!(clash(&grown, &movie(9, r"\\server\other\out\d.mp4")), Some((3, 1, 0)));
+        assert!(count.get() <= 2, "only the letters P and Q are looked up");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #3328: the same through the queue a render is refused from.
+    #[test]
+    #[cfg(windows)]
+    fn a_queue_with_a_drive_and_a_unc_spelling_of_one_output_is_refused() {
+        drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "Main", "width": 16, "height": 16})).unwrap();
+        for path in [r"P:\out\shared.mp4", r"\\server\share\out\shared.mp4"] {
+            s.execute("renderQueue.add", json!({"format": "h264", "output": path})).unwrap();
+        }
+        let (outputs, _) = s.queued_outputs(&effectcraft_project::render_queue::OutputFormat::ALL);
+        assert_eq!(s.duplicate_outputs(&outputs, &[]).unwrap().len(), 1);
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// Queued movies on one letter, or all on UNC paths, look up no drive root.
+    #[test]
+    #[cfg(windows)]
+    fn queued_outputs_on_one_letter_look_up_no_root() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let job = job_of([movie(1, r"P:\out\a.mp4"), movie(2, r"p:\out\b.mp4")]);
+        assert_eq!(clash(&job, &movie(9, r"p:\OUT\a.mp4")), Some((1, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"P:\out\c.mp4")), None);
+        let unc = job_of([movie(1, r"\\server\share\a.mp4")]);
+        assert_eq!(clash(&unc, &movie(9, r"\\server\share\a.mp4")), Some((1, 1, 0)));
+        assert_eq!(clash(&unc, &movie(9, r"\\server\share\b.mp4")), None);
+        assert_eq!(count.get(), 0);
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
     }
 
     /// With a real mapped network drive (any letter whose root resolves to a UNC path): a frame
