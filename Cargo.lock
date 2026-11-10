@@ -1827,6 +1827,7 @@ dependencies = [
  "effectcraft-keyframe",
  "effectcraft-project",
  "effectcraft-raster",
+ "log",
  "serde_json",
  "wasmi",
 ]

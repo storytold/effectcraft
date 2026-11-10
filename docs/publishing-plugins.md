@@ -14,10 +14,12 @@ If you only want to use plug-ins, skip to [For users](#for-users).
 * It runs in a **sandbox**. The module may not import anything: no files, no clock, no network,
   no random numbers. Each render gets a fuel budget, and memory is capped at 1 GiB. A plug-in that
   loops forever or traps stops with an error; it can't crash the app.
-* It implements **plug-in API version 1**: a JSON manifest and five exports (`memory`,
-  `ec_api_version`, `ec_manifest_ptr` / `ec_manifest_len`, `ec_alloc`, `ec_render`). The
-  [ABI](plugins.md#webassembly-abi-v1) and the [contract](plugins.md#the-contract) (premultiplied
-  RGBA `f32` pixels, processed in place, deterministic) are in plugins.md.
+* It implements a **WebAssembly ABI** from 1 to 3: a JSON manifest and five exports (`memory`,
+  `ec_api_version`, `ec_manifest_ptr` / `ec_manifest_len`, `ec_alloc`, `ec_render`), with
+  `ec_render2` to read the neighbouring frames (ABI 2) and an optional `ec_pad` to draw past the
+  layer's edges (ABI 3). The [ABI](plugins.md#webassembly-abi) and the
+  [contract](plugins.md#the-contract) (premultiplied RGBA `f32` pixels, processed in place,
+  deterministic) are in plugins.md.
 * Any language that compiles to WebAssembly without imports works. This guide uses Rust, because
   the example is in Rust.
 * The Plug-in Library is in the desktop app and the CLI. The web build has no plug-ins.
@@ -191,7 +193,7 @@ Release fields (one per entry in `versions`):
 | Field | Required | What it is |
 |---|---|---|
 | `version` | yes | Dotted numbers only, at most 32 characters: `1.0.0`, `1.2`. No `v` and no suffixes such as `-beta`. |
-| `api` | yes | The plug-in API the module implements: `1`. |
+| `api` | yes | The WebAssembly ABI the module implements (its `ec_api_version`): `1`, `2` or `3`. |
 | `minApp` | no | The oldest EffectCraft version the release needs (`0.17.0`). Leave it out if any version with this API works. |
 | `url` | yes | The release asset's `https://` URL on GitHub. |
 | `sha256` | yes | The file's SHA-256, 64 hex digits. |

@@ -1,6 +1,7 @@
-//! The wasmi-backed [`EffectPlugin`] (WebAssembly ABI v1 and v2, see the crate docs).
+//! The wasmi-backed [`EffectPlugin`] (WebAssembly ABI v1 to v3, see the crate docs).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
@@ -20,6 +21,8 @@ const MAX_MANIFEST: i32 = 1 << 20;
 type RenderFn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64), i32>;
 /// ABI 2: the same call plus the previous and next frame buffers and their layer times.
 type Render2Fn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64, i32, f64, i32, f64, i32), i32>;
+/// ABI 3's optional `ec_pad(params, nparams, time, scale) -> i32`.
+type PadFn = TypedFunc<(i32, i32, f64, f64), i32>;
 
 enum Renderer {
     V1(RenderFn),
@@ -32,6 +35,8 @@ struct Inst {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     render: Renderer,
+    /// ABI 3's `ec_pad`, when the module exports it.
+    pad: Option<PadFn>,
 }
 
 /// An instance whose ABI version (and so its render export) is not selected yet.
@@ -48,14 +53,33 @@ impl Pending {
         self.instance.get_typed_func::<P, R>(&self.store, name).map_err(|_| missing(name))
     }
 
-    /// Select the render export for `abi`.
+    /// Whether the module exports `name`, of any kind or signature.
+    fn exports(&self, name: &str) -> bool {
+        self.instance.get_export(&self.store, name).is_some()
+    }
+
+    /// Select the render export for `abi`, and ABI 3's `ec_pad`.
     fn finish(self, abi: u32) -> Result<Inst, String> {
         let render = match abi {
             1 => Renderer::V1(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render").map_err(|_| missing("ec_render"))?),
             2 => Renderer::V2(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render2").map_err(|_| missing("ec_render2"))?),
+            // ABI 3 renders with either export, so padding alone doesn't cost the neighbouring
+            // frames; `ec_render2` wins when the module has both.
+            3 if self.exports("ec_render2") => Renderer::V2(self.func("ec_render2")?),
+            3 => Renderer::V1(self.func("ec_render").map_err(|_| "an ABI 3 module exports `ec_render` or `ec_render2` (with its signature)".to_string())?),
             v => return Err(unsupported(v as i32)),
         };
-        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render })
+        // `ec_pad` belongs to ABI 3: an older module's export of that name is never called. An ABI
+        // 3 module that exports it with another signature is refused, rather than rendered unpadded.
+        let pad = if abi >= 3 && self.exports("ec_pad") {
+            Some(
+                self.func::<(i32, i32, f64, f64), i32>("ec_pad")
+                    .map_err(|_| "`ec_pad` must be a function `(params: i32, nparams: i32, time: f64, scale: f64) -> i32`".to_string())?,
+            )
+        } else {
+            None
+        };
+        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render, pad })
     }
 }
 
@@ -105,6 +129,13 @@ pub struct WasmPlugin {
     source: String,
     /// The WebAssembly ABI the module implements (`ec_api_version`).
     abi: u32,
+    /// The module renders with `ec_render2` and so reads the neighbouring frames (ABI 2, and ABI
+    /// 3 modules that export it).
+    neighbours: bool,
+    /// The module exports ABI 3's `ec_pad`: it is asked for padding before each render.
+    pads: bool,
+    /// A failed `ec_pad` call has been logged (once per plug-in, not on every frame).
+    pad_warned: AtomicBool,
     engine: Engine,
     module: Module,
     /// Idle instances.
@@ -137,7 +168,39 @@ impl WasmPlugin {
             return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
         }
         let inst = pending.finish(abi)?;
-        Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
+        let neighbours = matches!(inst.render, Renderer::V2(_));
+        let pads = inst.pad.is_some();
+        Ok(WasmPlugin {
+            manifest,
+            source: source.to_string(),
+            abi,
+            neighbours,
+            pads,
+            pad_warned: AtomicBool::new(false),
+            engine,
+            module,
+            pool: Mutex::new(vec![inst]),
+        })
+    }
+
+    /// ABI 3: ask `ec_pad` for the padding, passing the parameters in an `ec_alloc` buffer as for
+    /// the render export. The call gets the base fuel budget.
+    fn pad(&self, params: &PluginParams, time: f64, scale: f64) -> Result<u32, String> {
+        let bytes = params.flat.len() * 8;
+        let len = i32::try_from(bytes).map_err(|_| "too many parameters for a 32-bit plug-in".to_string())?;
+        let mut inst = self.take()?;
+        let pad = inst.pad.ok_or_else(|| missing("ec_pad"))?;
+        inst.store.set_fuel(FUEL_BASE).map_err(err)?;
+        let base = inst.alloc.call(&mut inst.store, len).map_err(err)? as u32 as usize;
+        let mut buf: Vec<u8> = Vec::with_capacity(bytes);
+        for v in params.flat {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
+        let r = pad.call(&mut inst.store, (base as i32, params.flat.len() as i32, time, scale)).map_err(|e| format!("ec_pad trapped: {e}"))?;
+        // As after a render, only an instance whose call finished goes back to the pool.
+        self.give_back(inst);
+        u32::try_from(r).map_err(|_| format!("ec_pad returned {r}"))
     }
 
     /// An idle instance, or a fresh one when the pool is empty.
@@ -323,15 +386,30 @@ impl EffectPlugin for WasmPlugin {
     }
 
     fn reads_other_times(&self) -> bool {
-        self.abi >= 2
+        self.neighbours
+    }
+
+    /// ABI 3: what `ec_pad` asks for. A module without `ec_pad` gets no padding, and so does a call
+    /// that traps, runs out of fuel or returns a negative number: that frame renders unpadded, as
+    /// for an older module, and the first failure is logged. The host caps the padding (4096).
+    fn padding(&self, params: &PluginParams, time: f64, scale: f64, _layer_size: [f64; 2], _instance_key: u64) -> u32 {
+        if !self.pads {
+            return 0;
+        }
+        self.pad(params, time, scale).unwrap_or_else(|e| {
+            if !self.pad_warned.swap(true, Ordering::Relaxed) {
+                log::warn!("plug-in `{}` (WebAssembly ABI {}): {e}; rendering without padding", self.manifest.id, self.abi);
+            }
+            0
+        })
     }
 
     fn render(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
-        if self.abi == 1 { self.render_v1(frame, params, time) } else { self.render_v2(frame, params, time, None, None) }
+        if self.neighbours { self.render_v2(frame, params, time, None, None) } else { self.render_v1(frame, params, time) }
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {
-        if self.abi == 1 {
+        if !self.neighbours {
             return self.render_v1(frame, params, time);
         }
         let (prev_time, next_time) = neighbour_times(time, host.frame_rate());
