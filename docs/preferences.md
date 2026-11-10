@@ -53,7 +53,9 @@ Commands (CLI, MCP, control channel):
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
   Adaptive Resolution drops to while you drag, and the lowest a playing preview steps down to)
-- `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. On by default. A
+- `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. Off by default (without it a first play renders
+  at the viewer's resolution at the rate frames arrive, and a looping preview plays its later loops
+  from the cache in real time, as in After Effects; with it the play stays lowered). A
   preview at Resolution Auto that plays under 80 % of its frame rate (frames render slower than
   that, so it plays them at the rate they arrive rather than freezing between them) steps
   down a resolution (half the scale after two seconds, a quarter two seconds later if still slow,

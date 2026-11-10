@@ -322,7 +322,7 @@ fn cache_frames_when_idle_survives_an_inverted_work_area() {
 
 /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at Auto that
 /// stalls for two seconds steps down to half its scale, two more to a quarter; an explicit Resolution and
-/// the pref turned off keep the scale, and stopping goes back to the viewer's.
+/// the pref turned off (its default) keep the scale, and stopping goes back to the viewer's.
 #[test]
 fn playback_that_cannot_keep_up_steps_down_a_resolution() {
     let stall = |h: &mut Harness<'_, EffectcraftApp>, secs: f64| {
@@ -338,6 +338,8 @@ fn playback_that_cannot_keep_up_steps_down_a_resolution() {
         assert!(h.state().playback.playing);
     };
     let mut h = harness();
+    assert!(!h.state().session.prefs.previews.adaptive_playback, "off by default");
+    h.state_mut().session.prefs.previews.adaptive_playback = true;
     // No room in the RAM preview: frames never stay cached and every pass stalls, as with a comp
     // too heavy to render in real time.
     h.state().frames.set_budget(0);
