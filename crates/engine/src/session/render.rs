@@ -36,6 +36,13 @@ impl Session {
         commands::crypto_probe_job(self, p)
     }
 
+    /// The coverage of Cryptomatte ID `hash` (as `effect.cryptomatteAt` reports it, parsed) over
+    /// the layer of params `p`, at most `max_side` samples on the long side, from the kept probe:
+    /// `None` until [`Session::crypto_probe_job`] has built it.
+    pub fn crypto_coverage(&self, p: &Value, hash: u32, max_side: usize) -> Option<commands::CryptoCoverage> {
+        commands::crypto_coverage(self, p, hash, max_side)
+    }
+
     /// Let go of the kept Cryptomatte probe (and its aux channels), and cancel a build in
     /// flight: the eyedropper was disarmed. Edits, footage changes and Open / New do it too.
     pub fn drop_crypto_probe(&self) {
@@ -137,4 +144,43 @@ impl Session {
         self.layer_cache.clear();
         self.drop_crypto_probe();
     }
+
+    /// Tell the footage source which files effects read the channels of ([`aux_footage`]), so
+    /// it can decode their pictures and channels at once from the first frame (#474). Called with
+    /// every project change ([`Session::bump`]); the set is only sent when it changed, or after
+    /// [`Session::replace_project`] cleared what was sent.
+    pub(crate) fn refresh_aux_footage(&mut self) {
+        let paths = aux_footage(&self.project);
+        if self.aux_footage.as_ref() != Some(&paths) {
+            self.footage.set_aux_footage(&paths);
+            self.aux_footage = Some(paths);
+        }
+    }
+}
+
+/// The files (each footage item's [`effectcraft_project::Footage::path`], sorted, once each) of
+/// the footage layers that have an enabled effect reading their channels
+/// ([`effectcraft_effects::reads_aux`]), with the layer's Effects switch on. Several items can
+/// use one file: it stays in while any of them is read.
+pub(crate) fn aux_footage(project: &effectcraft_project::Project) -> Vec<String> {
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource};
+    let mut paths: Vec<String> = project
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .filter(|l| l.switches.effects)
+        .filter(|l| {
+            l.effects()
+                .is_some_and(|fx| fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::reads_aux(effect))))
+        })
+        .filter_map(|l| match &l.source {
+            LayerSource::Footage { item } => match &project.item(*item)?.kind {
+                ItemKind::Footage(f) if !f.path.is_empty() => Some(f.path.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
 }

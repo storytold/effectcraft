@@ -123,6 +123,7 @@ pub(crate) fn scene(p: &Project, cid: ItemId) -> Scene {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().rev().filter(|l| l.is_3d() && l.has_video()).collect();
     adv::scene_of(&r, &ctx, &run, (ctx.comp.width, ctx.comp.height))
@@ -315,6 +316,7 @@ pub(crate) fn run_of(p: &Project, cid: ItemId) -> (EvalCtx<'_>, Vec<&effectcraft
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().rev().filter(|l| l.is_3d() && l.has_video()).collect();
     (ctx, run)

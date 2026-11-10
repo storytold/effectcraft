@@ -19,14 +19,41 @@ fn mux_err(e: impl std::fmt::Display) -> ExportError {
     ExportError::Io(e.to_string())
 }
 
-/// Tag a video [`SampleEntry`] with the BT.709 limited-range `colr` (nclx) box every video
-/// encoder here outputs (`rgba_to_yuv420`, `rgba_to_yuv_10` and `rgba_to_yuv420_bits` all use
-/// the 0.2126/0.7152/0.0722 luma and a 16–235 luma range). Without it a re-import falls back to
-/// the container's resolution-based `default_matrix` — BT.601 below 1024×577 — and shifts the
+/// What a render's frames are, as ITU-T H.273 code points, for the `colr` box and the encoders'
+/// own colour description. The matrix is BT.709, the one every encoder here converts with
+/// (`rgba_to_yuv420`, `rgba_to_yuv_10` and `rgba_to_yuv420_bits` all use the 0.2126/0.7152/0.0722
+/// luma). Primaries and transfer follow the render path (`Pipe::output`): only a working space
+/// converts to the output space, so unmanaged frames pass through. sRGB output keeps transfer 1
+/// rather than 13 (#340), and an alpha matte is not in the output space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Codes {
+    pub(crate) primaries: u8,
+    pub(crate) transfer: u8,
+    pub(crate) matrix: u8,
+}
+
+pub(crate) fn output_codes(settings: &ProjectSettings, channels: Channels) -> Codes {
+    use effectcraft_project::ColorSpace as Space;
+    let output = settings.working_space.and(settings.output_space).filter(|_| channels != Channels::Alpha);
+    let (primaries, transfer) = match output {
+        None | Some(Space::Srgb | Space::Rec709) => (1, 1),
+        Some(Space::Rec2020) => (9, 1),
+        Some(Space::DisplayP3) => (12, 13),
+        Some(Space::Rec2100Pq) => (9, 16),
+        Some(Space::Rec2100Hlg) => (9, 18),
+        // H.273 has no code for the ACES primaries: unspecified, in linear light.
+        Some(Space::AcesCg | Space::Aces2065) => (2, 8),
+    };
+    Codes { primaries, transfer, matrix: 1 }
+}
+
+/// Tag a video [`SampleEntry`] with the limited-range (16–235 luma, as every encoder here
+/// writes) `colr` (nclx) box for `c` (#2879). Without it a re-import falls back to the
+/// container's resolution-based `default_matrix` — BT.601 below 1024×577 — and shifts the
 /// colours (pure red came back as [232,0,1]).
-pub(crate) fn tag_bt709_limited(entry: &mut SampleEntry) {
+pub(crate) fn tag_nclx_limited(entry: &mut SampleEntry, c: Codes) {
     if let Some(v) = entry.video.as_mut() {
-        v.color = Some(ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false });
+        v.color = Some(ColorInfo::Nclx { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.into(), full_range: false });
     }
 }
 
@@ -94,21 +121,23 @@ struct H264 {
     w: u32,
     h: u32,
     rate: FrameRate,
+    codes: Codes,
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
 }
 
 impl H264 {
-    fn new(w: u32, h: u32, rate: FrameRate, kbps: u32) -> Result<H264> {
+    fn new(w: u32, h: u32, rate: FrameRate, kbps: u32, codes: Codes) -> Result<H264> {
         let mut cfg = filmcraft_h264enc::EncoderConfig::new(w, h, rate.num as u32, rate.den as u32);
         cfg.format = filmcraft_h264enc::PacketFormat::LengthPrefixed;
         cfg.aud = false;
         cfg.keyint = (rate.as_f64() * 2.0).round().max(1.0) as u32;
         let kbps = kbps.max(100);
         cfg.rate = filmcraft_h264enc::RateControl::Vbr { target_kbps: kbps, max_kbps: kbps * 3 / 2 };
+        cfg.color = filmcraft_h264enc::ColorConfig { primaries: codes.primaries, transfer: codes.transfer, matrix: codes.matrix, full_range: false };
         let enc = filmcraft_h264enc::Encoder::new(cfg).map_err(enc)?;
-        Ok(H264 { enc, w, h, rate, y: vec![], u: vec![], v: vec![] })
+        Ok(H264 { enc, w, h, rate, codes, y: vec![], u: vec![], v: vec![] })
     }
     fn packets(&self, ps: Vec<filmcraft_h264enc::Packet>) -> Vec<Packet> {
         ps.into_iter().map(|p| Packet { data: p.data, key: p.keyframe, cto: (p.pts - p.dts) as i32 }).collect()
@@ -122,7 +151,7 @@ impl VideoEncoder for H264 {
             filmcraft_isobmff::AvcConfig::new(vec![sps], vec![pps], 4)
         });
         let mut entry = SampleEntry::avc(cfg, self.w as u16, self.h as u16);
-        tag_bt709_limited(&mut entry);
+        tag_nclx_limited(&mut entry, self.codes);
         entry
     }
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>> {
@@ -167,25 +196,10 @@ struct ProRes {
     colr: ColorInfo,
 }
 
-/// The `colr` atom of a ProRes render: what its frames are, in H.273 code points. MOV uses
-/// QuickTime's `nclc`, which has no range flag; ProRes frames are limited range. The matrix is the
-/// one [`rgba_to_yuv_10`] always uses. Primaries and transfer follow the render path
-/// (`Pipe::output`): only a working space converts to the output space, so unmanaged frames pass
-/// through. sRGB output keeps transfer 1 rather than 13 (#340), and an alpha matte is not in the
-/// output space.
-fn prores_colr(settings: &ProjectSettings, channels: Channels) -> ColorInfo {
-    use effectcraft_project::ColorSpace as Space;
-    let output = settings.working_space.and(settings.output_space).filter(|_| channels != Channels::Alpha);
-    let (primaries, transfer) = match output {
-        None | Some(Space::Srgb | Space::Rec709) => (1, 1),
-        Some(Space::Rec2020) => (9, 1),
-        Some(Space::DisplayP3) => (12, 13),
-        Some(Space::Rec2100Pq) => (9, 16),
-        Some(Space::Rec2100Hlg) => (9, 18),
-        // H.273 has no code for the ACES primaries: unspecified, in linear light.
-        Some(Space::AcesCg | Space::Aces2065) => (2, 8),
-    };
-    ColorInfo::Nclc { primaries, transfer, matrix: 1 }
+/// The `colr` atom of a ProRes render ([`output_codes`]). MOV uses QuickTime's `nclc`, which has
+/// no range flag; ProRes frames are limited range.
+fn prores_colr(c: Codes) -> ColorInfo {
+    ColorInfo::Nclc { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.into() }
 }
 
 fn prores_profile(p: ProResProfile) -> filmcraft_prores::Profile {
@@ -328,15 +342,13 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         Channels::Rgba if !matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) => Channels::Rgb,
         c => c,
     };
+    let codes = output_codes(&job.project.settings, channels);
     let mut venc: Box<dyn VideoEncoder> = match fmt {
-        OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps)?),
-        OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output)?),
-        OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output)?),
+        OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps, codes)?),
+        OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output, codes)?),
+        OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output, codes)?),
         OutputFormat::Uncompressed => Box::new(crate::uncompressed::Raw::new(w, h, channels == Channels::Rgba)?),
-        _ => {
-            let colr = prores_colr(&job.project.settings, channels);
-            Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, colr))
-        }
+        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, prores_colr(codes))),
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();

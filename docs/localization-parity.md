@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-30 · **Change:** minor (Polish (`pl`): menus 630, panels 695; recounted at this tree after #1774: Japanese 1,923 of ≈ 4,200 interface strings (46%, with 297 effect names), Simplified Chinese 1,935 (46%, with 307 effect names), Traditional Chinese 1,581 (38%, its panel catalog 951 rows after #2244); overall ≈ 24%; previously: minor, the panel/dialog catalogs grow by 303 rows in Japanese, Simplified Chinese and Traditional Chinese: panel tabs, form and dialog labels, context menus, tracker/graph/text-panel labels, credits and File-panel footers; previously: minor, catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-11-03 · **Change:** Traditional Chinese (`zh-hant`) effect names are complete: 308 names and 21 categories (#2037). Previously: minor (Polish (`pl`): menus 630, panels 695; recounted at this tree after #1774: Japanese 1,923 of ≈ 4,200 interface strings (46%, with 297 effect names), Simplified Chinese 1,935 (46%, with 307 effect names), Traditional Chinese 1,581 (38%, its panel catalog 951 rows after #2244); overall ≈ 24%; previously: minor, the panel/dialog catalogs grow by 303 rows in Japanese, Simplified Chinese and Traditional Chinese: panel tabs, form and dialog labels, context menus, tracker/graph/text-panel labels, credits and File-panel footers; previously: minor, catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
 
 How much of EffectCraft's interface is translated, language by language, compared with After
 Effects. [gaps.md](gaps.md) gap 16 and workstream G9 hold the work;
@@ -29,18 +29,19 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   the Simplified Chinese catalog's 694 rows, plus 191 for panels converted to the catalog since
   (885 in all). Swedish (added later) also has one.
 - **Effect names:** `crates/ui-egui/src/i18n/effects.rs`, keyed by **effect id**, in Simplified
-  Chinese (307 rows, one per effect in the registry), Japanese (297 of the 307 ids), Georgian
-  (307 rows, plus its 21 categories) and Swedish (307 rows, plus its 21 categories). The registry's
+  Chinese (308 rows, one per effect in the registry), Traditional Chinese (308 rows, plus its 21
+  categories), Japanese (297 of the 308 ids), Georgian (308 rows, plus its 21 categories) and
+  Swedish (308 rows, plus its 21 categories). The registry's
   English name stays the effect's identity: `effect.list`, `effect.apply {"effect": …}`, scripts
   and expressions match on it, and the property tree stores it as the effect group's name. Only
   the drawing — the Effect menu, Effect Controls, the Timeline and Effects & Presets — goes
   through the catalog, so a project file is identical whichever interface language opens it.
   A repeat (`Gaussian Blur 2`) keeps the index the engine appends, and a group the user renamed
   in Effect Controls stays verbatim. Adding a language there is two tables and one arm, and no
-  panel changes: Traditional Chinese has its table in place and empty, and Japanese fills 297 of
-  the 307 ids, so the rest draw English until a translator completes them. Each language decides
-  for itself which names stay English — Adobe's Japanese interface leaves the `CC`, `VR` and
-  `OCIO` sets in English while its Chinese one translates them — so a row repeating the English
+  panel changes: Traditional Chinese now covers all 308 ids and 21 categories, and Japanese fills
+  297 of the 308 ids, so the rest draw English until a translator completes them. Each language
+  decides for itself which names stay English — Adobe's Japanese interface leaves the `CC`, `VR`
+  and `OCIO` sets in English while its Chinese one translates them — so a row repeating the English
   name is a choice, not a missing row.
 - **Missing strings:** a string with no row in the interface language shows in English, and no
   test, build or release fails on a missing translation. The `missing_translations_report` test
@@ -68,7 +69,7 @@ and recounted again at this tree after #1774 by counting catalog rows (`const` t
 `crates/ui-egui/src/i18n.rs`, `i18n/ui.rs` and `i18n/effects.rs`: 630 menu rows, 998
 panel/dialog sources in Simplified Chinese, 951 in Traditional Chinese and 996 in Japanese). The
 denominator, **≈ 4,200 user-visible strings**, is a rounded estimate: the 630 fixed menu entries,
-the 998 panel/dialog sources, 307 effect names, ≈ 1,650 distinct effect parameter names and
+the 998 panel/dialog sources, 308 effect names, ≈ 1,650 distinct effect parameter names and
 ≈ 620 other unwrapped interface strings (Home screen literals, engine-built tooltips, error and
 status messages). It counts distinct strings, not catalog rows; engine messages are only partly
 counted, so the true percentages are slightly lower.
@@ -76,14 +77,14 @@ counted, so the true percentages are slightly lower.
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | To `full` |
 |---|---|---|---|---|---|---|---|
 | English | `en` | ≈ 4,200 (100%, source) | All; docs in English | — | yes | full | — |
-| Simplified Chinese | `zh-hans` | 1,935 (≈ 46%): menus 630 rows, panels 998, effect names 307 | Panels and dialogs partly; no help, effect names translated and their parameter names not; Home screen literals unwrapped (#574, closed) | System CJK fallback; Han follows the UI language; CJK text in comps renders wrongly (#453); IME in text layers | no | partial | 6–9 h + review |
+| Simplified Chinese | `zh-hans` | 1,936 (≈ 46%): menus 630 rows, panels 998, effect names 308 | Panels and dialogs partly; no help, effect names translated and their parameter names not; Home screen literals unwrapped (#574, closed) | System CJK fallback; Han follows the UI language; CJK text in comps renders wrongly (#453); IME in text layers | no | partial | 6–9 h + review |
 | Spanish | `es` | 1,142 (≈ 29%): menus 629 rows, panels 513 | Menus only; the panel catalog from #996 | Latin, fine | no | partial | 9–12 h + review |
 | Hindi | `hi` | 0 | — | UI: Devanagari fallback font but no shaping; text layers shape Devanagari | no | none (After Effects: none) | 9–13 h + shaping in the UI |
 | Arabic | `ar` | 0 | — | UI: Arabic fallback font but no shaping and no RTL layout; text layers: bidi + shaping | no | none (After Effects: none) | 9–13 h + 15–25 h RTL UI |
 | French | `fr` | 2,124 (≈ 51%): menus 632 rows, panels 1,184, effect names 308 | Panels and dialogs at the source list of the other panel catalogs; effect names and their 21 categories; no help; machine-translated from the English, not yet native-speaker proofread | Latin, fine | no | partial | 2–4 h + review |
 | Portuguese (Brazil) | `pt-br` | 1,324 (≈ 34%): menus 629 rows, panels 695 | Panels and dialogs at the Chinese catalogs' source list; the six keys main added after that count are translated too; AI-assisted, not yet native-speaker proofread | Latin, fine | no | partial | independent native review |
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
-| Japanese | `ja` | 1,923 (≈ 46%): menus 630 rows, panels 996, effect names 297 | Panels and dialogs partly; no help, effect names translated for 297 of the 307 ids and their parameter names not; Home screen literals unwrapped (#574, closed) | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
+| Japanese | `ja` | 1,923 (≈ 46%): menus 630 rows, panels 996, effect names 297 | Panels and dialogs partly; no help, effect names translated for 297 of the 308 ids and their parameter names not; Home screen literals unwrapped (#574, closed) | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
 | German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations) | Latin, fine | no | menus only | 7–10 h + review |
 | Korean | `ko` | 0 | — | Hangul fallback probe added (#599, closed); not checked on macOS here | no | none | 9–13 h + review |
 | Vietnamese | `vi` | 0 | — | Latin with stacked diacritics; untested | no | none (After Effects: none) | 8–12 h + review |
@@ -92,18 +93,18 @@ Other languages EffectCraft ships (6):
 
 | Language | Code | UI strings translated | Status | To `full` |
 |---|---|---|---|---|
-| Traditional Chinese | `zh-hant` | 1,581 (≈ 38%): menus 630 rows, panels 951 | partial | 6–9 h + review |
+| Traditional Chinese | `zh-hant` | 1,889 (≈ 45%): menus 630 rows, panels 951, effect names 308 (+ 21 categories, not counted, as for the other languages) | partial; effect names complete, parameter names and engine text still in English | 3–5 h + review |
 | Ukrainian | `uk` | 1,153 (≈ 29%): menus 629 rows, panels 524 | partial | 6–9 h + review |
 | Polish | `pl` | 1,325 (≈ 34%): menus 630 rows, panels 695 | partial; unwrapped UI, effects and engine text still in English; AI-drafted, native review welcome | Remaining strings + native review |
 | Czech | `cs` | 1,147 (≈ 29%): menus 629 rows, panels 518 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
-| Georgian | `ka` | 1,514 (≈ 39%): menus 629 rows, panels 885 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 307 + 21 categories; native-speaker reviewed | partial | 5–8 h |
-| Swedish | `sv` | menus 630 rows, panels 723, effect names 307 and categories 21; added after the measurement above | Settings, Edit menu and Match System (`sv-*` locales) offer it; parameter and engine text still in English; not yet native-speaker reviewed | Remaining strings + native review |
+| Georgian | `ka` | 1,822 (≈ 43%): menus 629 rows, panels 885 (the Simplified Chinese catalog's 694 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 308 + 21 categories; native-speaker reviewed | partial | 5–8 h |
+| Swedish | `sv` | menus 630 rows, panels 723, effect names 308 and categories 21; added after the measurement above | Settings, Edit menu and Match System (`sv-*` locales) offer it; parameter and engine text still in English; not yet native-speaker reviewed | Remaining strings + native review |
 
 Russian (`ru`) has a menu catalog (630 rows, ≈ 15%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
-**Overall: ≈ 24%**, the average coverage of After Effects' 10 non-English languages
-(Simplified Chinese 46%, Traditional Chinese 38%, Japanese 46%, Brazilian Portuguese 34%,
-Spanish 29%, French, German and Russian 16%, Korean and Italian 0%; 241 / 10, was ≈ 21% on
+**Overall: ≈ 25%**, the average coverage of After Effects' 10 non-English languages
+(Simplified Chinese 46%, Traditional Chinese 45%, Japanese 46%, Brazilian Portuguese 34%,
+Spanish 29%, French, German and Russian 16%, Korean and Italian 0%; 248 / 10, was ≈ 24% before #2037's effect names and ≈ 21% on
 22 October; Ukrainian (≈ 29%) and Czech (≈ 29%) are EffectCraft-only and stay out of that
 average). This is the localization row in [target-app-parity.md](target-app-parity.md#by-dimension).
 
@@ -119,6 +120,7 @@ can give; only Georgian, contributed by a native speaker (#1843), has had it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-03 | minor | Traditional Chinese (`zh-hant`): effect names complete — 308 names and 21 categories (#2037); the menu and panel catalogs stay at 630 and 951 rows |
 | 2026-10-30 | minor | Recounted on the merged tree after #1774: Japanese 1,923 (46%, 297 effect names), Simplified Chinese 1,935 (46%, 307 effect names), Traditional Chinese 1,581 (38%, 951 panel rows after #2244's prune); overall ≈ 24% |
 | 2026-10-22 | minor | Panel/dialog second step: 300 more catalog rows in Japanese, Simplified Chinese and Traditional Chinese, plus the three rows the review found missing (Basic, Advanced and Play/Stop) — panel tabs, form and dialog labels, panel context menus, the tracker and graph controls, text-panel options, File-panel footers and credits; the panel tables are now 996 Japanese and 998 Simplified Chinese rows, all drawn through `tr`/`tr_args`, with the tests keeping the three catalogs listing the same sources; the 30 October recount above carries the share |
 | 2026-10-18 | minor | Brazilian Portuguese completes its panel catalog (278 new rows, 417 → 695, the Chinese catalogs' source list); the doc recount closes the drift the batch merges left in every language's panel count; AI-assisted, not yet native-speaker proofread |
