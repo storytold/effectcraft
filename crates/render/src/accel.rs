@@ -34,6 +34,22 @@ impl Backend {
     }
 }
 
+/// An accelerator's device memory, to size how many frames an export renders on it at once
+/// (see [`Accelerator::frame_memory`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameMemory {
+    /// Bytes the accelerator may use (a conservative share of the device, not its free memory).
+    pub budget: u64,
+    /// The most its allocator has held while frames rendered (one frame's working memory
+    /// included).
+    pub peak: u64,
+    /// Bytes of that peak one frame needed (what it released again), or the whole budget once
+    /// frames have had to wait for memory.
+    pub frame: u64,
+    /// Bytes long-lived caches (uploaded layers) may still grow by.
+    pub reserve: u64,
+}
+
 /// One effect of a GPU effect chain (see [`Accelerator::effects`]).
 pub struct FxStep<'x> {
     pub spec: &'static effectcraft_effects::EffectSpec,
@@ -92,6 +108,12 @@ pub trait Accelerator: Send + Sync {
     /// Timing history [`Backend::Auto`] uses to send each comp's top-level frames to the
     /// faster compositor. `None` = Auto always tries the accelerator first.
     fn auto_pick(&self) -> Option<&AutoPick> {
+        None
+    }
+    /// The device memory budget and use, after at least one frame rendered: what an export
+    /// sizes its frames in flight by. `None` where it isn't known (no allocator report, no
+    /// budget): the export then renders one frame at a time.
+    fn frame_memory(&self) -> Option<FrameMemory> {
         None
     }
     /// Whether the accelerator can still render frames. `false` once it has stopped for good
@@ -352,7 +374,7 @@ impl<'a> Renderer<'a> {
     pub fn adjustment_footprint(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
         // Cached, so an accelerator sees the same buffer (and uploads it once) every frame.
         let key = self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        let key = self.mask_gate_key(ctx, layer, key);
+        let key = self.mask_gate_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let Some((b, _)) = self.cached(key) {
             return Some(b);
         }
