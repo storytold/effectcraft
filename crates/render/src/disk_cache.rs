@@ -58,6 +58,10 @@ const QUEUE_LIMIT: usize = 64;
 /// frames, so a fully cached comp came back with gaps in its blue bar.
 #[cfg(not(target_arch = "wasm32"))]
 const FRAME_QUEUE_BYTES: usize = 1 << 30;
+/// Pending layer and matte bytes before new ones are dropped: a layer job holds its float
+/// buffer until the writer compresses it (64 of them at 4K were ~8.5 GB).
+#[cfg(not(target_arch = "wasm32"))]
+const LAYER_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -304,8 +308,10 @@ struct Queue {
     frames: std::collections::VecDeque<Job>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     frame_bytes: usize,
-    /// Layer and matte writes.
+    /// Layer and matte writes, and their payload bytes.
     jobs: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    job_bytes: usize,
     busy: bool,
     /// Keys of frames queued or being written.
     pending_frames: std::collections::HashSet<u128>,
@@ -360,7 +366,21 @@ impl Queue {
             }
             return Some(j);
         }
-        self.jobs.pop_front()
+        let j = self.jobs.pop_front()?;
+        if let Job::Write(_, _, _, p) = &j {
+            self.job_bytes = self.job_bytes.saturating_sub(p.len());
+        }
+        Some(j)
+    }
+
+    /// No room for a `kind` write of `len` bytes. A layer bigger than the whole budget is still
+    /// taken when nothing else is queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn full(&self, kind: Kind, len: usize) -> bool {
+        match kind {
+            Kind::Frame => self.frame_bytes.saturating_add(len) > FRAME_QUEUE_BYTES,
+            _ => self.jobs.len() >= QUEUE_LIMIT || (self.job_bytes > 0 && self.job_bytes.saturating_add(len) > LAYER_QUEUE_BYTES),
+        }
     }
     fn is_empty(&self) -> bool {
         self.frames.is_empty() && self.jobs.is_empty()
@@ -492,6 +512,7 @@ impl DiskCache {
                     frames: Default::default(),
                     frame_bytes: 0,
                     jobs: Default::default(),
+                    job_bytes: 0,
                     busy: cfg!(not(target_arch = "wasm32")),
                     pending_frames: Default::default(),
                     drops: Drops::default(),
@@ -680,6 +701,7 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.job_bytes = 0;
             q.frames.clear();
             q.pending_frames.clear();
         }
@@ -824,11 +846,7 @@ impl DiskCache {
             if stale(&q) {
                 return false;
             }
-            let full = match kind {
-                Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
-                _ => q.jobs.len() >= QUEUE_LIMIT,
-            };
-            if full {
+            if q.full(kind, payload.len()) {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
@@ -837,6 +855,7 @@ impl DiskCache {
                 q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
                 q.frames.push_back(Job::Write(kind, key, format, payload));
             } else {
+                q.job_bytes = q.job_bytes.saturating_add(payload.len());
                 q.jobs.push_back(Job::Write(kind, key, format, payload));
             }
             cv.notify_all();
@@ -1822,6 +1841,36 @@ mod tests {
         let key = comp_content_key(&p, cid);
         p.item_mut(model).unwrap().name = "table.glb".into();
         assert_ne!(comp_content_key(&p, cid), key, "the expression reads the model's name");
+    }
+
+    /// Layer jobs hold float buffers until they are compressed: the queue holds at most
+    /// [`LAYER_QUEUE_BYTES`] of them (64 at 4K held ~8.5 GB), and a single bigger one only alone.
+    #[test]
+    fn layer_writes_queue_within_a_byte_budget() {
+        let mut q = Queue {
+            frames: Default::default(),
+            frame_bytes: 0,
+            jobs: Default::default(),
+            job_bytes: 0,
+            busy: true,
+            pending_frames: Default::default(),
+            drops: Drops::default(),
+        };
+        let layer = LAYER_QUEUE_BYTES / 4 + 1;
+        for _ in 0..3 {
+            assert!(!q.full(Kind::Layer, layer));
+            q.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Encoded(vec![])));
+            q.job_bytes += layer;
+        }
+        assert!(q.full(Kind::Layer, layer), "a fourth would pass the budget");
+        assert!(!q.full(Kind::Frame, 1024), "frames have their own budget");
+        let mut empty = Queue { jobs: Default::default(), job_bytes: 0, ..q };
+        assert!(!empty.full(Kind::Layer, 2 * LAYER_QUEUE_BYTES), "a single big layer, alone");
+        // Taking a job gives its bytes back.
+        empty.job_bytes = 3;
+        empty.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Encoded(vec![0; 3])));
+        assert!(empty.pop().is_some());
+        assert_eq!(empty.job_bytes, 0);
     }
 
     /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
