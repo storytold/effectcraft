@@ -739,3 +739,47 @@ fn adding_markers_does_not_stop_the_sound() {
     }
     assert_eq!(h.state().session.project.comp(cid).unwrap().markers.len(), 6);
 }
+
+/// #2104: unmuting a preview that started silent opens sound at the moving preview position,
+/// both with video and with Video off (where the timeline deliberately stays still).
+#[test]
+fn unmuting_a_silent_preview_starts_audio_at_its_current_frame() {
+    for video in [false, true] {
+        let fake = Fake::default();
+        let (mut app, cid) = setup(true, &fake);
+        let layer = app.session.project.comp(cid).unwrap().layers[0].id.0;
+        app.session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
+        let gate = GatedFrames::default();
+        app.frames.set_remote(Some(Arc::new(gate.clone())));
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
+        h.state_mut().use_manual_clock();
+        h.run_steps(2);
+        gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
+        let now = h.state().now();
+        let shortcut = if video { h.state().session.prefs.preview.current } else { effectcraft_engine::preview::PreviewShortcut::AltNumpad0 };
+        h.state_mut().play_with(now, shortcut);
+        for _ in 0..6 {
+            step(&mut h);
+        }
+        assert!(h.state().audio.is_none(), "muted playback has no output");
+        let current = if video { frame(&h, cid) } else { h.state().playback.audio_frame.unwrap() };
+        assert!(current > 0, "the silent preview advanced");
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": true})).unwrap();
+        gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
+        h.step();
+        assert_eq!(audio_frame(&h, cid), Some(current), "unmute starts at the moving preview frame, video={video}");
+        if !video {
+            assert_eq!(frame(&h, cid), 0, "audio-only preview leaves the timeline stationary");
+        }
+        let feed = fake.0.lock().unwrap().0.clone().expect("unmute opened the output");
+        assert!(pull(&feed, 256).iter().any(|v| v.abs() > 0.01), "the unmuted tone reaches the output");
+        // Mute and unmute again without stopping: edits reach the existing feed too.
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
+        h.step();
+        assert!(pull(&feed, 256).iter().all(|v| *v == 0.0), "mute silences the current output");
+        h.state_mut().session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": true})).unwrap();
+        h.step();
+        assert!(pull(&feed, 256).iter().any(|v| v.abs() > 0.01), "a second unmute reaches the same output");
+        h.state_mut().stop();
+    }
+}
