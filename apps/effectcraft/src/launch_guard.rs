@@ -42,15 +42,21 @@ fn acquire_guard(dir: &Path) -> Option<File> {
             return None;
         }
     }
-    // Older versions lock the marker itself. Do not disturb an older live launch.
-    if let Ok(marker) = File::open(dir.join(MARKER)) {
-        match marker.try_lock() {
+    // Older versions lock the marker itself. Probe only the lock: Windows also prevents
+    // reads through another handle while it is held. An unreadable marker is not a stale one.
+    match File::open(dir.join(MARKER)) {
+        Ok(marker) => match marker.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => return None,
             Err(e) => {
                 log::warn!("launch marker lock unavailable: {e}");
                 return None;
             }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!("launch marker unavailable: {e}");
+            return None;
         }
     }
     Some(file)
@@ -392,14 +398,40 @@ mod tests {
         assert!(b.notice.is_none());
         b.exited();
         opengl_failed(Some(&dir));
-        assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), b"old-owner");
         assert_eq!(std::fs::read(dir.join(PREFS_FILE)).unwrap(), before);
+        // Windows locks forbid reading through another handle. Inspect the contents only after
+        // releasing the old owner's lock, but before recovery can truncate the marker.
         drop(old);
+        assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), b"old-owner");
         let mut recovered = Launch::begin(Some(&dir), false);
         if cfg!(not(target_os = "macos")) {
             assert_eq!(recovered.backends, Some(Backends::GL));
         }
         recovered.exited();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Windows sharing violation is not evidence that a marker is stale or absent.
+    #[cfg(windows)]
+    #[test]
+    fn an_unopenable_marker_leaves_settings_and_marker_alone() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = fresh_dir("marker-unopenable");
+        std::fs::write(dir.join(MARKER), b"old-owner").unwrap();
+        std::fs::write(dir.join(PREFS_FILE), Prefs::default().to_json()).unwrap();
+        let old = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(dir.join(MARKER)).unwrap();
+        let before = std::fs::read(dir.join(PREFS_FILE)).unwrap();
+        let mut launch = Launch::begin(Some(&dir), false);
+        assert!(launch.lock.is_none());
+        assert!(launch.marker.is_none());
+        assert!(launch.backends.is_none());
+        assert!(launch.notice.is_none());
+        launch.exited();
+        opengl_failed(Some(&dir));
+        assert_eq!(std::fs::read(dir.join(PREFS_FILE)).unwrap(), before);
+        drop(old);
+        assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), b"old-owner");
         let _ = std::fs::remove_dir_all(dir);
     }
 
