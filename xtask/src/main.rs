@@ -484,19 +484,19 @@ fn audio_backend() -> Result<(), String> {
 /// Each run goes ahead when an earlier one fails; the error names every run that failed.
 fn tests() -> Result<(), String> {
     let nextest = Command::new(env!("CARGO")).args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success());
-    tests_for(&[], nextest, true)
+    tests_for(&[], nextest, true, true)
 }
 
 /// Keep the full and affected gates on the same test runner, including GPU isolation and the
 /// translation report. An empty package list selects the whole workspace.
-fn tests_for(packages: &[String], nextest: bool, doctests: bool) -> Result<(), String> {
+fn tests_for(packages: &[String], nextest: bool, has_lib: bool, doctests: bool) -> Result<(), String> {
     let cargo = env!("CARGO");
     let selection = test_selection(packages);
     let includes = |name: &str| packages.is_empty() || packages.iter().any(|p| p == name);
     if !nextest {
         println!("cargo-nextest not found, running cargo test (install: cargo install cargo-nextest --locked)");
     }
-    let mut runs = vec![run(&mut test_command(packages, nextest))];
+    let mut runs = vec![run(&mut test_command(packages, nextest, has_lib))];
     if nextest && includes("effectcraft-gpu") {
         // GPU tests share one device, so reuse the selected build in one libtest process.
         runs.push(lib_test_binary("effectcraft-gpu", &selection).and_then(|mut c| run(&mut c)));
@@ -513,7 +513,9 @@ fn tests_for(packages: &[String], nextest: bool, doctests: bool) -> Result<(), S
     if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
 }
 
-fn test_command(packages: &[String], nextest: bool) -> Command {
+/// Select library tests only when the selected packages contain a library; bin-only package
+/// sets otherwise fail before running any tests. The full workspace always has library targets.
+fn test_command(packages: &[String], nextest: bool, has_lib: bool) -> Command {
     let mut c = Command::new(env!("CARGO"));
     if nextest {
         c.args(["nextest", "run"]);
@@ -524,7 +526,11 @@ fn test_command(packages: &[String], nextest: bool) -> Command {
     } else {
         c.arg("test");
     }
-    c.args(test_selection(packages)).args(["--lib", "--bins", "--tests", "--no-fail-fast"]);
+    c.args(test_selection(packages));
+    if packages.is_empty() || has_lib {
+        c.arg("--lib");
+    }
+    c.args(["--bins", "--tests", "--no-fail-fast"]);
     if nextest {
         c.args(["-E", "not package(effectcraft-gpu)"]);
     }

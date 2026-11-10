@@ -451,6 +451,5 @@ fn socket_edge_cases() {
         "net.jsx",
     );
     assert_eq!(o.result, json!(0), "{:?}", o.error);
-    // Doesn't hang; generous so a loaded machine doesn't flake it.
-    assert!(t.elapsed().as_secs_f64() < 30.0, "{:?}", t.elapsed());
+    assert!(t.elapsed().as_secs_f64() < 5.0);
 }

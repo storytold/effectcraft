@@ -1079,13 +1079,11 @@ fn open_recent_increment_and_revert() {
 fn memory_tick_never_waits_for_the_system() {
     let mut s = Session::default();
     let t0 = std::time::Instant::now();
-    for _ in 0..8 {
-        s.memory_tick();
-    }
+    s.memory_tick();
+    s.memory_tick();
     // Reading the system's memory starts PowerShell on Windows (about a second): the UI thread
-    // only takes the last reading. Eight blocking ticks would take ~8 s; the bound is loose so a
-    // loaded machine doesn't flake it.
-    assert!(t0.elapsed() < std::time::Duration::from_secs(4), "{:?}", t0.elapsed());
+    // only takes the last reading.
+    assert!(t0.elapsed() < std::time::Duration::from_millis(200), "{:?}", t0.elapsed());
     if crate::sysinfo::memory().is_some() {
         let mut got = None;
         for _ in 0..200 {

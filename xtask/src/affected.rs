@@ -26,8 +26,10 @@ pub struct Pkg {
     pub dir: String,
     /// Workspace (path) dependencies: (package name, is a dev-dependency).
     pub deps: Vec<(String, bool)>,
-    /// Has a library target with doctests (`cargo test --doc` runs for it).
+    /// Has a library target (`--lib` is valid even when doctests are disabled).
     pub has_lib: bool,
+    /// Has a library target with doctests (`cargo test --doc` runs for it).
+    pub has_doctests: bool,
     /// Repo paths outside `dir` that the sources read (files or directories).
     pub inputs: Vec<String>,
 }
@@ -213,8 +215,10 @@ pub fn packages(root: &Path, md: &Value, changed: &[String]) -> Vec<Pkg> {
             .filter(|d| !d["path"].is_null())
             .filter_map(|d| d["name"].as_str().filter(|n| names.contains(n)).map(|n| (n.to_string(), d["kind"] == "dev")))
             .collect();
-        let lib_kind = |k: &Value| ["lib", "rlib", "dylib", "proc-macro"].iter().any(|l| k == *l);
-        let has_lib = p["targets"].as_array().into_iter().flatten().any(|t| t["doctest"] != false && t["kind"].as_array().into_iter().flatten().any(lib_kind));
+        let lib_kind = |k: &Value| ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"].iter().any(|l| k == *l);
+        let libs: Vec<&Value> = p["targets"].as_array().into_iter().flatten().filter(|t| t["kind"].as_array().into_iter().flatten().any(lib_kind)).collect();
+        let has_lib = !libs.is_empty();
+        let has_doctests = libs.iter().any(|t| t["doctest"] != false);
         let rel = rel_to(ws, dir);
         let mut files = vec![];
         rs_files(dir, &mut files, 0);
@@ -225,7 +229,7 @@ pub fn packages(root: &Path, md: &Value, changed: &[String]) -> Vec<Pkg> {
                 inputs.extend(inputs_of(&rel_to(ws, &f), &rel, &text, &known_input));
             }
         }
-        pkgs.push(Pkg { name: name.to_string(), dir: rel, deps, has_lib, inputs: inputs.into_iter().collect() });
+        pkgs.push(Pkg { name: name.to_string(), dir: rel, deps, has_lib, has_doctests, inputs: inputs.into_iter().collect() });
     }
     pkgs
 }
@@ -290,6 +294,11 @@ fn cargo(args: &[&str], pkgs: &[&String], tail: &[&str]) -> Command {
     c
 }
 
+/// Library tests and doctests are independent: a library can opt out of doctests.
+fn test_targets(plan: &Plan, pkgs: &[Pkg]) -> (bool, bool) {
+    pkgs.iter().filter(|p| plan.affected.contains(&p.name)).fold((false, false), |(lib, docs), p| (lib || p.has_lib, docs || p.has_doctests))
+}
+
 fn steps(plan: &Plan, pkgs: &[Pkg], nextest: bool) -> Vec<Step> {
     let mut v = vec![Step { label: "fmt".into(), cmd: Some(cargo(&["fmt", "--check"], &[], &[])), check: None }];
     let aff: Vec<&String> = plan.affected.iter().collect();
@@ -297,9 +306,9 @@ fn steps(plan: &Plan, pkgs: &[Pkg], nextest: bool) -> Vec<Step> {
         v.push(Step { label: "audio backend".into(), cmd: None, check: Some(Box::new(crate::audio_backend)) });
         let n = aff.len();
         v.push(Step { label: format!("clippy ({n})"), cmd: Some(cargo(&["clippy", "--all-targets"], &aff, &["--", "-D", "warnings"])), check: None });
-        let doctests = aff.iter().any(|a| pkgs.iter().any(|p| p.name.as_str() == a.as_str() && p.has_lib));
+        let (has_lib, doctests) = test_targets(plan, pkgs);
         let selected: Vec<String> = aff.iter().map(|p| p.to_string()).collect();
-        v.push(Step { label: format!("tests ({n})"), cmd: None, check: Some(Box::new(move || crate::tests_for(&selected, nextest, doctests))) });
+        v.push(Step { label: format!("tests ({n})"), cmd: None, check: Some(Box::new(move || crate::tests_for(&selected, nextest, has_lib, doctests))) });
     }
     v.push(Step { label: "pdf-deps".into(), cmd: None, check: Some(Box::new(|| crate::pdf_deps::run(&crate::root()))) });
     v.push(Step { label: "lock-patches".into(), cmd: None, check: Some(Box::new(|| crate::lock_patches::run(&crate::root()))) });
@@ -392,6 +401,7 @@ mod tests {
             dir: dir.into(),
             deps: deps.iter().map(|(d, dev)| (d.to_string(), *dev)).collect(),
             has_lib: true,
+            has_doctests: true,
             inputs: inputs.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -639,7 +649,7 @@ fn fixture(n: &str) -> String { format!("{}/../../docs/fixtures/{n}", env!("CARG
     fn test_runner_keeps_dev_profile_target_selection_and_gpu_isolation() {
         for packages in [vec![], files(&["effectcraft-gpu", "effectcraft-ui-egui"])] {
             for nextest in [false, true] {
-                let command = crate::test_command(&packages, nextest);
+                let command = crate::test_command(&packages, nextest, true);
                 let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
                 assert!(!args.iter().any(|a| a == "--release" || a == "--profile"));
                 for target in ["--lib", "--bins", "--tests", "--no-fail-fast"] {
@@ -655,6 +665,65 @@ fn fixture(n: &str) -> String { format!("{}/../../docs/fixtures/{n}", env!("CARG
         }
     }
 
+    #[test]
+    fn full_workspace_test_commands_keep_library_tests() {
+        for nextest in [false, true] {
+            let command = crate::test_command(&[], nextest, false);
+            assert!(command.get_args().any(|a| a == "--workspace"));
+            assert!(command.get_args().any(|a| a == "--lib"));
+        }
+    }
+
+    #[test]
+    fn bin_only_and_doctest_disabled_packages_select_the_right_test_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let md = serde_json::json!({
+            "workspace_root": root,
+            "packages": [
+                {
+                    "name": "effectcraft-cli",
+                    "manifest_path": root.join("apps/effectcraft-cli/Cargo.toml"),
+                    "targets": [{"kind": ["bin"], "doctest": false}],
+                    "dependencies": []
+                },
+                {
+                    "name": "effectcraft-time",
+                    "manifest_path": root.join("crates/time/Cargo.toml"),
+                    "targets": [{"kind": ["lib"], "doctest": false}],
+                    "dependencies": []
+                },
+                {
+                    "name": "effectcraft-color",
+                    "manifest_path": root.join("crates/color/Cargo.toml"),
+                    "targets": [{"kind": ["lib"], "doctest": true}],
+                    "dependencies": []
+                }
+            ]
+        });
+        let pkgs = packages(root, &md, &[]);
+        for (name, changed, want_lib, want_doctests) in [
+            ("effectcraft-cli", "apps/effectcraft-cli/src/main.rs", false, false),
+            ("effectcraft-time", "crates/time/src/lib.rs", true, false),
+            ("effectcraft-color", "crates/color/src/lib.rs", true, true),
+        ] {
+            let plan = plan(&files(&[changed]), &pkgs);
+            assert_eq!(plan.affected, set(&[name]));
+            let (has_lib, doctests) = test_targets(&plan, &pkgs);
+            assert_eq!((has_lib, doctests), (want_lib, want_doctests));
+            let selected = plan.affected.into_iter().collect::<Vec<_>>();
+            for nextest in [false, true] {
+                let command = crate::test_command(&selected, nextest, has_lib);
+                let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                assert_eq!(args.iter().any(|a| a == "--lib"), want_lib);
+                assert!(args.windows(2).any(|w| w == ["-p", name]));
+                for target in ["--bins", "--tests", "--no-fail-fast"] {
+                    assert!(args.iter().any(|a| a == target));
+                }
+            }
+        }
+    }
+
     fn labels(s: &[Step]) -> Vec<String> {
         s.iter().map(|s| s.label.clone()).collect()
     }
@@ -664,6 +733,7 @@ fn fixture(n: &str) -> String { format!("{}/../../docs/fixtures/{n}", env!("CARG
         let mut p = ws();
         if let Some(cli) = p.iter_mut().find(|p| p.name == "effectcraft-cli") {
             cli.has_lib = false;
+            cli.has_doctests = false;
         }
         // docs only: cheap checks
         assert_eq!(labels(&steps(&plan(&files(&["docs/gaps.md"]), &p), &p, true)), ["fmt", "pdf-deps", "lock-patches", "layers"]);

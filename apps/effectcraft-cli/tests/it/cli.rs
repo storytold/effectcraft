@@ -1249,3 +1249,13 @@ fn replay_reports_steps_and_the_first_failure() {
     // The start line picks the project.
     assert_eq!(bin().args(["replay", bad.to_str().unwrap(), "--demo"]).output().unwrap().status.code(), Some(2));
 }
+
+/// Text editors can prefix an exported JSON-lines repro with a UTF-8 BOM.
+#[test]
+fn replay_accepts_a_utf8_bom() {
+    let path = tmp("bom-repro.jsonl");
+    std::fs::write(&path, "\u{feff}{\"command\":\"comp.new\"}\n").unwrap();
+    let (code, report) = run_json(&["replay", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["ok"], true);
+}

@@ -145,8 +145,7 @@ fn opengl_adapters_get_cpu_compositing_at_once() {
     let t = std::time::Instant::now();
     let error = crate::Gpu::new(&adapter, device, queue).err().expect("no GPU compositor on OpenGL");
     assert!(error.contains("(Gl)"), "{error}");
-    // Generous bound (the failure mode took tens of seconds) so a loaded machine doesn't flake it.
-    assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
 }
 
 /// #613: FXC (DirectX 12's default shader compiler) builds Classic 3D, so the compositor starts

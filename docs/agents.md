@@ -918,6 +918,10 @@ effectcraft-cli replay crash.jsonl --json     # {ok, panicked, steps, first_fail
 effectcraft-cli replay crash.jsonl --keep-going
 ```
 
+Replaying a repro runs its commands with your privileges and file access, including commands
+that write files or run scripts. Read repros from untrusted sources before running them, or use
+a disposable environment.
+
 It exits with status 1 when a step fails, an expectation is not met or a command panics, and
 stops at the first failure unless `--keep-going`. Steps that work on the user's files (`file.open`
 of their project, imports) need those files; replace them with a `start` project or generated

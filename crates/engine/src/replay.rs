@@ -67,6 +67,7 @@ pub struct Nesting {
 }
 
 impl Nesting {
+    /// Record nesting so commands dispatched by a script are not exported twice.
     pub fn enter(journaled: bool) -> Nesting {
         let outer = DEPTH.with(Cell::get);
         DEPTH.with(|d| d.set((outer.0.saturating_add(1), outer.1.saturating_add(u32::from(journaled)))));
@@ -76,6 +77,7 @@ impl Nesting {
     pub fn inside_journaled(&self) -> bool {
         self.outer.1 > 0
     }
+    /// Whether this command is responsible for capturing a nested panic.
     pub fn outermost(&self) -> bool {
         self.outer.0 == 0
     }
@@ -105,6 +107,7 @@ pub fn after_command(s: &Session, id: &str, params: &Value, nesting: &Nesting, c
     }
 }
 
+/// Wall-clock seconds used only to label exported repros.
 fn unix_secs() -> u64 {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -120,6 +123,7 @@ fn store_path(store: &dyn crate::config::ConfigStore, name: &str) -> String {
     store.dir().map(|d| d.join(name).display().to_string()).unwrap_or_else(|| name.to_string())
 }
 
+/// Persist the failing command with its preceding journal and prune older crash repros.
 fn save_crash_repro(s: &Session, id: &str, params: &Value, error: &str) -> Option<String> {
     let store = s.config.clone()?;
     let mut text = export(s, Some(json!({"command": id, "error": cut(error)})));
@@ -159,6 +163,7 @@ pub fn save_repro(s: &Session, path: Option<&str>) -> Result<(String, usize)> {
 
 // ---------- export ----------
 
+/// Serialize one command without including an empty parameter object.
 fn command_line(id: &str, params: &Value) -> String {
     let mut o = Map::new();
     o.insert("command".into(), json!(id));
@@ -245,6 +250,7 @@ fn params_of(v: Option<&Value>) -> std::result::Result<Value, String> {
     }
 }
 
+/// Decode the supported initial project states.
 fn parse_start(v: &Value) -> std::result::Result<Start, String> {
     match v {
         Value::String(s) if s == "new" => Ok(Start::New),
@@ -380,6 +386,7 @@ fn approx_eq(a: &Value, b: &Value) -> bool {
 struct Replaying(bool);
 
 impl Replaying {
+    /// Suppress automatic crash exports for the duration of a replay.
     fn enter() -> Replaying {
         Replaying(REPLAYING.with(|r| r.replace(true)))
     }
@@ -391,6 +398,7 @@ impl Drop for Replaying {
     }
 }
 
+/// Create or open the initial project and retain whether its command panicked.
 fn start_step(s: &mut Session, start: &Start, base: Option<&Path>) -> (String, Result<Value>, bool) {
     match start {
         Start::New => {
@@ -509,6 +517,8 @@ pub fn run(s: &mut Session, script: &str, opts: &Options) -> Report {
         fail(&mut report, StepReport { line: 0, kind: "invalid", command: None, ok: false, error: Some(msg), panicked: false });
         return report;
     }
+    // Hand-edited UTF-8 scripts may start with a BOM, especially on Windows.
+    let script = script.strip_prefix('\u{feff}').unwrap_or(script);
     let mut allow_errors = false;
     let mut steps: Vec<(usize, Step)> = vec![];
     for (i, line) in script.lines().enumerate().take(MAX_LINES) {
@@ -578,6 +588,17 @@ mod tests {
         // Tolerated errors.
         let r = replay("{\"start\": \"new\", \"allow_errors\": true}\n{\"command\": \"no.such.command\"}\n{\"expect_no_error\": true}");
         assert!(!r.ok && r.first_failure.as_ref().map(|f| f.kind) == Some("expect_no_error"), "{r:?}");
+    }
+
+    /// A UTF-8 BOM belongs to the text file, not the first JSON step.
+    #[test]
+    fn utf8_bom_preserves_explicit_and_implicit_start_lines() {
+        for body in ["{\"start\":\"new\"}\n{\"command\":\"comp.new\"}", "{\"command\":\"comp.new\"}"] {
+            let script = format!("\u{feff}{body}");
+            let report = replay(&script);
+            assert!(report.ok, "{report:?}");
+            assert_eq!(report.steps.last().unwrap().line, body.lines().count());
+        }
     }
 
     #[test]
