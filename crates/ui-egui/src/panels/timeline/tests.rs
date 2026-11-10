@@ -432,11 +432,22 @@ fn cti_snaps_to_the_nearest_candidate() {
     let comp = app.session.active_comp().unwrap().clone();
     let c = snap_candidates(&comp, &build_rows(&app, &comp));
     assert!(c.contains(&comp.duration.seconds()) && c.contains(&0.0));
-    // A dragged layer's own ends are no targets; moved, neither are its markers and keys (#1828).
+}
+
+/// A dragged layer's own In / Out points are no snap targets; moved, neither are its markers
+/// (#1828).
+#[test]
+fn bar_drags_dont_snap_to_their_own_layer() {
+    let mut app = app();
+    let bx = app.session.active_comp().unwrap().layers.iter().find(|l| l.name == "Box").unwrap().id.0;
+    app.session.execute("layer.addMarker", json!({"layers": [bx], "time": 1.0})).unwrap();
+    let comp = app.session.active_comp().unwrap().clone();
     let rows = build_rows(&app, &comp);
-    let l = comp.layers.first().unwrap().id.0;
-    assert_eq!(snap_targets(&comp, &rows, &[l], false).len(), c.len() - 2);
-    assert!(snap_targets(&comp, &rows, &[l], true).len() <= c.len() - 2);
+    let all = snap_targets(&comp, &rows, &[], false);
+    let trimmed = snap_targets(&comp, &rows, &[bx], false);
+    let moved = snap_targets(&comp, &rows, &[bx], true);
+    assert_eq!(trimmed.len(), all.len() - 2, "trimming drops only the layer's In and Out");
+    assert!(trimmed.contains(&1.0) && !moved.contains(&1.0), "moving drops the layer's marker: {moved:?}");
 }
 
 /// Shift snaps a bar drag's nearest end to a target within 8 px of the pointer; farther away, or

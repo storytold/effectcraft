@@ -3526,11 +3526,15 @@ fn layer_bar_drag(g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
         }
         let id = egui::Id::unique(("bar-drag", layer.id.0, kind));
         if resp.dragged() {
-            // Moving or trimming a selected layer acts on the whole selection as it was when the
-            // drag started (a Shift-drag adds the layer to it); each layer trims from its own
-            // in/out point.
+            let shift = ctx.input(|i| i.modifiers.shift);
+            // Moving or trimming a selected layer acts on the whole selection as it is when the
+            // drag starts; each layer trims from its own in/out point. A Shift-drag on an
+            // unselected bar adds it to the selection (`layer_bar_hits`) and moves them all.
             let start = || {
-                let edited = edited_layers(layer.id, &g.selected);
+                let mut edited = edited_layers(layer.id, &g.selected);
+                if kind == "move" && shift && !g.selected.contains(&layer.id) {
+                    edited.extend(g.selected.iter().map(|l| l.0));
+                }
                 let (i, o) = (layer.in_point.seconds(), layer.out_point.seconds());
                 let ends = match kind {
                     "move" => vec![i, o],
@@ -3543,7 +3547,6 @@ fn layer_bar_drag(g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
             };
             let mut drag = ctx.data(|d| d.get_temp::<BarDrag>(id)).filter(|_| !resp.drag_started()).unwrap_or_else(start);
             drag.px += f64::from(resp.drag_delta().x);
-            let shift = ctx.input(|i| i.modifiers.shift);
             let frames = bar_drag_frames(drag.px, g.tl.pps, g.tl.fd, &drag.ends, &drag.targets, shift);
             if frames != drag.sent {
                 let d = frames.saturating_sub(drag.sent) as f64 * g.tl.fd;

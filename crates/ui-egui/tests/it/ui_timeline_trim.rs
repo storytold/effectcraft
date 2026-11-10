@@ -148,6 +148,19 @@ fn dragging_bar_ends_trims_in_and_out() {
     assert!((i - 3.0).abs() < 1e-6 && (o - 8.0).abs() < 1.5 / 30.0 && s.abs() < 1e-6, "out extended to ~8 s, not slipped: in {i} out {o} start {s}");
 }
 
+/// A Shift-drag on an unselected bar adds it to the selection and moves the whole selection
+/// together, so the other selected layers keep their offset (#1828).
+#[test]
+fn shift_dragging_an_unselected_bar_moves_the_selection() {
+    let (mut h, solid, pre) = harness();
+    h.state_mut().session.execute("layer.select", json!({"layers": [pre]})).unwrap();
+    h.run_steps(2);
+    let b = bar(&h, solid);
+    drag_with(&mut h, b.center(), b.center() + vec2(b.width() / 4.0 * 2.5, 0.0), Modifiers::SHIFT);
+    let ((si, ..), (pi, ..)) = (timing(&h, solid), timing(&h, pre));
+    assert!(si > 4.0 && (pi - si - 1.0).abs() < 1e-6, "both moved by the same amount: solid in {si}, precomp in {pi}");
+}
+
 /// With Frames and Frame Count Start at 1, In moves to 00061 but the Duration column still counts
 /// the layer's 120 frames (#1807).
 #[test]
