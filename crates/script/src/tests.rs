@@ -1952,7 +1952,7 @@ fn setting_comp_width_and_height_leaves_the_layers_where_they_are() {
 
 /// #3395: setValue on a string effect parameter stores the text, or a File's path, as `prop.set`
 /// does. Before, every string fell through to the number check ("value must be a number").
-/// Hidden string parameters (Mesh Warp's Distortion Mesh) stay refused.
+/// Hidden string parameters (Mesh Warp's Distortion Mesh) stay refused, keys included.
 #[test]
 fn set_value_stores_a_string_parameter() {
     let mut s = session();
@@ -1967,12 +1967,14 @@ fn set_value_stores_a_string_parameter() {
         var fromString = lut.value;
         lut.setValue(new File("/luts/other.cube"));
         var mesh = fx.addProperty("Mesh Warp").property("Distortion Mesh");
-        var hidden;
-        try { mesh.setValue("x"); hidden = "no error"; } catch (e) { hidden = e.message; }
-        [lut.propertyValueType === PropertyValueType.CUSTOM_VALUE, fromString, lut.value, hidden]
+        function attempt(f) { try { f(); return "no error"; } catch (e) { return e.message; } }
+        var hidden = attempt(function () { mesh.setValue("x"); });
+        var keyed = attempt(function () { mesh.setValueAtTime(0, "x"); });
+        [lut.propertyValueType === PropertyValueType.CUSTOM_VALUE, fromString, lut.value, hidden, keyed, mesh.numKeys]
         "#,
     );
-    assert_eq!(o.result, json!([true, "/luts/look.cube", "/luts/other.cube", "\"Distortion Mesh\" can not be set"]));
+    let refused = "\"Distortion Mesh\" can not be set";
+    assert_eq!(o.result, json!([true, "/luts/look.cube", "/luts/other.cube", refused, refused, 0]));
     let (_, c) = comp_named(&s, "Str");
     assert_eq!(layer(c, "s").props.prop("effects/#1/lut").unwrap().value, KV::Str("/luts/other.cube".into()));
 }
