@@ -37,3 +37,22 @@ fn concurrent_full_batches_keep_the_device() {
     assert!(e.download(&img).is_some(), "the device no longer renders");
     assert!(g.can_readback(), "the device was lost");
 }
+
+/// Work recorded straight on the encoder (Advanced 3D's passes) counts towards the batch too:
+/// before, only `dispatch_ext` counted, so such an encoder grew without bound and took a share
+/// of the budget far smaller than the command buffers it made.
+#[test]
+fn directly_recorded_work_is_batched() {
+    crate::tests::hold_gpu_lock();
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("command budget: no adapter, skipping");
+        return;
+    };
+    let mut e = Enc::new(gpu.context());
+    for _ in 0..256 {
+        let _ = e.record(&[]);
+    }
+    assert!(e.last_submission().is_none(), "submitted before the batch was full");
+    let _ = e.record(&[]);
+    assert!(e.last_submission().is_some(), "a full batch of directly recorded work was not submitted");
+}
