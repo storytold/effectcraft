@@ -839,8 +839,11 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));
     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.secondary_clicked()).or(forwarded) {
         // The layer a left click there would select: the topmost one, keeping the group when it
-        // is already selected (#1535). The menu's list reaches the layers under it.
-        click_pick(app, ectx, map.to_comp(pos), false);
+        // is already selected (#1535), or the selected layer whose shown path is under the
+        // pointer. The menu's list reaches the layers under it.
+        if ov::segment_at(&v.paths, &map, pos, 6.0).is_none() {
+            click_pick(app, ectx, map.to_comp(pos), false);
+        }
         let point = map.to_comp(pos);
         let hits: Vec<(u64, String)> = layers_at(ectx, point).map(|l| (l.id.0, l.name.clone())).collect();
         ui.data_mut(|d| d.insert_temp(menu_hits_id, hits));

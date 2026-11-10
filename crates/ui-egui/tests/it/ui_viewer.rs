@@ -236,9 +236,9 @@ fn viewer_click_selects_the_topmost_layer_and_a_drag_moves_the_selected_one() {
     assert_eq!(h.state().session.state.selected_layers, vec![front], "nothing selected: the topmost layer");
 }
 
-/// A click on a path of the selected layer, where a layer in front covers it, stays on that path's
-/// layer rather than selecting the layer in front, so a double-click there free-transforms the
-/// path (#1535 keeps this from `pick`).
+/// A click, left or right, on a path of the selected layer, where a layer in front covers it, stays
+/// on that path's layer rather than selecting the layer in front, so a double-click there
+/// free-transforms the path (#1535 keeps this from `pick`).
 #[test]
 fn viewer_double_click_on_a_covered_path_of_the_selected_layer_free_transforms_it() {
     let mut h = selection_harness();
@@ -252,6 +252,15 @@ fn viewer_double_click_on_a_covered_path_of_the_selected_layer_free_transforms_i
     let at = screen(&h, [320.0, 150.0]);
     h.input_mut().events.push(Event::PointerMoved(at));
     h.step();
+    // A right-click there acts on the path's layer too, as a left click does.
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_layers, vec![back], "a right-click on the path keeps its layer");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(40);
     // Two clicks a frame apart: the first selects as a click does, the second double-clicks.
     for _ in 0..2 {
         for pressed in [true, false] {
