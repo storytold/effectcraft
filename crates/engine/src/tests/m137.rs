@@ -172,9 +172,16 @@ fn layer_create_null_path_menu_ops_run_the_paths_commands() {
     s.execute("layer.select", json!({"layers": [l]})).unwrap();
     let r = s.execute("layer.create", json!({"op": "nullsFollowing"})).unwrap();
     assert_eq!(r["nulls"].as_array().unwrap().len(), 4);
+    let comp = s.active_comp().unwrap().clone();
+    let first = comp.layer(effectcraft_project::LayerId(r["nulls"][0].as_u64().unwrap())).unwrap();
+    let e = first.props.prop("transform/position").unwrap().expr.as_ref().unwrap().text.clone();
+    assert!(e.contains("thisComp.layer(\"Plate\")") && e.contains(".points()[0]"), "{e}");
     // The new nulls are selected now; `layers` names the layer whose path is used.
     let r = s.execute("layer.create", json!({"op": "nullTracing", "layers": [l]})).unwrap();
     let n = r["null"].as_u64().unwrap();
+    let comp = s.active_comp().unwrap().clone();
+    let e = comp.layer(effectcraft_project::LayerId(n)).unwrap().props.prop("transform/position").unwrap().expr.as_ref().unwrap().text.clone();
+    assert!(e.contains("pointOnPath(effect(\"Progress\")(\"Slider\") / 100)"), "{e}");
     let r = s.execute("layer.create", json!({"op": "nullsPathPoints", "layers": [l]})).unwrap();
     assert_eq!(r["nulls"].as_array().unwrap().len(), 4);
     let comp = s.active_comp().unwrap().clone();
@@ -199,4 +206,22 @@ fn layer_create_null_path_menu_ops_use_the_named_layer_not_the_selected_path() {
     // An empty `layers` array is refused rather than falling back to the selection.
     s.execute("layer.select", json!({"layers": [a]})).unwrap();
     assert!(s.execute("layer.create", json!({"op": "nullsFollowing", "layers": []})).is_err());
+    // `layers` beats `layer`; a `layers` that is not an array is refused.
+    s.execute("prop.select", json!({"layer": a, "path": "masks/#1/path"})).unwrap();
+    let r = s.execute("layer.create", json!({"op": "nullsFollowing", "layer": a, "layers": [b]})).unwrap();
+    assert_eq!(r["nulls"].as_array().unwrap().len(), 3);
+    assert!(s.execute("layer.create", json!({"op": "nullsFollowing", "layers": "x"})).is_err());
+}
+
+#[test]
+fn layer_create_null_path_menu_ops_stay_on_the_path_when_a_puppet_pin_is_selected() {
+    let (mut s, l) = masked();
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    s.execute("puppet.addPin", json!({"layer": l, "position": [10, 10]})).unwrap();
+    assert!(!crate::cmd::puppet::selected_pins(&s).is_empty());
+    let r = s.execute("layer.create", json!({"op": "nullsPathPoints", "layers": [l]})).unwrap();
+    assert_eq!(r["nulls"].as_array().unwrap().len(), 4);
+    let comp = s.active_comp().unwrap().clone();
+    let plate = comp.layer(effectcraft_project::LayerId(l)).unwrap();
+    assert!(plate.props.prop("masks/#1/path").unwrap().expr.is_some());
 }

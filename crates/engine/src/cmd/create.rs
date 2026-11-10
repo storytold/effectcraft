@@ -1,7 +1,10 @@
 //! Layer ▸ Create: Convert to Editable Text (Photoshop type layers), Create Shapes from Text,
 //! Create Masks from Text, Create Shapes from Vector Layer (SVG footage) and Create 3D Layer
 //! Instance (a 2D copy of a 3D model layer that 2D effects can be applied to). Null Controllers for
-//! Path Points, Nulls Following Path Points and Null Tracing Along Path run the `paths.*` commands.
+//! Path Points, Nulls Following Path Points and Null Tracing Along Path (`nullsPathPoints` ->
+//! `paths.pointsFollowNulls`, `nullsFollowing` -> `paths.nullsFollowPoints`, `nullTracing` ->
+//! `paths.tracePath`) work on one path: the selected path, else the first path of the layer named by
+//! `layers[0]` (or `layer`); further `layers` entries are ignored and an empty `layers` is refused.
 
 use effectcraft_color::Label;
 use effectcraft_keyframe::Value as KV;
@@ -18,8 +21,9 @@ const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|in
 /// the created layer ids and what was skipped.
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let op = str_p(p, "op").ok_or_else(|| bad("layer.create", format!("missing `op` ({OPS})")))?;
-    // The Layer ▸ Create null entries are the Create Nulls From Paths commands (they pick the
-    // selected path); a `layers` param names the layer whose path they use.
+    // The Layer ▸ Create null entries are the Create Nulls From Paths commands. They work on one path:
+    // the layer is `layers[0]` when `layers` is given (it beats `layer`, as for the other ops), else
+    // `layer`, else the selection; the path is then the one selected on that layer, else its first.
     let paths_cmd = match op {
         "nullsPathPoints" => Some("paths.pointsFollowNulls"),
         "nullsFollowing" => Some("paths.nullsFollowPoints"),
@@ -27,12 +31,26 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         _ => None,
     };
     if let Some(c) = paths_cmd {
-        if matches!(p.get("layers"), Some(Value::Array(a)) if a.is_empty()) {
-            return Err(bad("layer.create", "select a layer first"));
+        let mut t = serde_json::Map::new();
+        for k in ["comp", "layer"] {
+            if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+                t.insert(k.into(), v.clone());
+            }
         }
-        let mut q = p.clone();
-        if let (Some(first), Some(o)) = (p.get("layers").and_then(|v| v.get(0)).cloned(), q.as_object_mut()) {
-            o.entry("layer").or_insert(first);
+        match p.get("layers") {
+            Some(Value::Array(a)) => match a.first() {
+                Some(first) => {
+                    t.insert("layer".into(), first.clone());
+                }
+                None => return Err(bad("layer.create", "select a layer first")),
+            },
+            Some(Value::Null) | None => {}
+            Some(_) => return Err(bad("layer.create", "`layers` must be an array")),
+        }
+        // Only the path, and `loop` for the tracing null, go on to the `paths.*` command.
+        let mut q = super::path_nulls::path_params(s, &Value::Object(t))?;
+        if let ("nullTracing", Some(l), Some(o)) = (op, p.get("loop"), q.as_object_mut()) {
+            o.insert("loop".into(), l.clone());
         }
         return s.execute(c, q);
     }
@@ -309,7 +327,10 @@ pub fn specs() -> Vec<CommandSpec> {
         "Create",
         [],
         None,
-        "{op: editableText|shapesFromText|masksFromText|shapesFromVector|instance3d|nullsPathPoints|nullsFollowing|nullTracing, layers?}",
+        "{op: editableText|shapesFromText|masksFromText|shapesFromVector|instance3d|\
+        nullsPathPoints|nullsFollowing|nullTracing, layers?, loop?} (nullsPathPoints = paths.pointsFollowNulls, \
+        nullsFollowing = paths.nullsFollowPoints, nullTracing = paths.tracePath, which also takes loop: they use the path selected on \
+        layers[0] (else the selection), else its first path; extra layers are ignored, an empty layers is refused)",
         has_layers,
         create
     )]
