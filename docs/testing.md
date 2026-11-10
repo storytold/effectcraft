@@ -2,7 +2,7 @@
 
 ```sh
 cargo test --workspace     # everything
-cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, layers, assets, wasm
+cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, lock-patches, layers, assets, wasm
 ```
 
 The After Effects test projects of `crates/aep` are not in the repository; without them the

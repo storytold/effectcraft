@@ -1,4 +1,4 @@
-//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|aep-corpus|wasm|web|ico|ci>`.
+//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus|wasm|web|ico|ci>`.
 //!
 //! - `layers`: enforces the dependency layering of `docs/architecture.md` §1 (downward-only edges,
 //!   listed same-layer edges, no UI/OS crates below L5).
@@ -6,6 +6,7 @@
 //!   and the web app.
 //! - `web [--dev] [--serve PORT]`: build the web app (`apps/effectcraft-web`) into
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
+//! - `lock-patches`: `Cargo.lock` records no unused `[patch]` entry (the Nix build cannot vendor one).
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
 //! - `aep-corpus [--dir DIR]`: fetch the After Effects test corpus at the commit pinned in
@@ -19,6 +20,7 @@
 mod aep_corpus;
 mod bench;
 mod ico;
+mod lock_patches;
 mod pdf_deps;
 mod version;
 
@@ -534,12 +536,13 @@ type Stage = fn() -> Result<(), String>;
 
 /// Every stage runs even when an earlier one fails, so one run reports all the problems.
 fn ci() -> Result<(), String> {
-    let stages: [(&str, Stage); 8] = [
+    let stages: [(&str, Stage); 9] = [
         ("audio backend", audio_backend),
         ("fmt", || run(Command::new(env!("CARGO")).args(["fmt", "--check"]))),
         ("clippy", || run(Command::new(env!("CARGO")).args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
         ("tests", tests),
         ("pdf-deps", || pdf_deps::run(&root())),
+        ("lock-patches", || lock_patches::run(&root())),
         ("layers", layers),
         ("assets", assets),
         ("wasm", wasm),
@@ -555,6 +558,7 @@ fn main() -> ExitCode {
         "wasm" => wasm(),
         "assets" => assets(),
         "pdf-deps" => pdf_deps::run(&root()),
+        "lock-patches" => lock_patches::run(&root()),
         "aep-corpus" => aep_corpus::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "ci" => ci(),
         "audio-backend" => audio_backend(),
@@ -568,7 +572,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
