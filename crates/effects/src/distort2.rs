@@ -1,6 +1,6 @@
 //! Distort effects, batch 2: Turbulent Displace, Displacement Map (self as map), Optics
-//! Compensation, Magnify, Mesh Warp, Bezier Warp, CC Bend It, CC Lens, CC Page Turn, CC Tiler,
-//! CC Griddler.
+//! Compensation, Magnify, Mesh Warp, Bezier Warp, Two-Point Bend, Lens Distortion, Page Curl, Scaled Tiles,
+//! Tile Grid.
 //!
 //! Mesh Warp and Bezier Warp share a grid rasteriser: a (nx+1)×(ny+1) grid of destination points
 //! and matching source points is split into triangles, bucketed per output row and filled
@@ -550,7 +550,7 @@ pub fn bezier_grid(ctx: &EffectCtx, offset: [f64; 2], scale: f64) -> (usize, Vec
     (n, dest, srcp)
 }
 
-// ---------------------------------------------------------------- CC Bend It
+// ---------------------------------------------------------------- Two-Point Bend
 
 fn bend_it(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let mut beta = ctx.params.f("bend").to_radians();
@@ -606,7 +606,7 @@ fn bend_it(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Lens
+// ---------------------------------------------------------------- Lens Distortion
 
 fn cc_lens(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = b.to_px(ctx.params.v2("center"));
@@ -629,7 +629,7 @@ fn cc_lens(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Page Turn
+// ---------------------------------------------------------------- Page Curl
 
 fn page_turn(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let f = b.to_px(ctx.params.v2("foldPosition"));
@@ -679,7 +679,7 @@ fn page_turn(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Tiler / CC Griddler
+// ---------------------------------------------------------------- Scaled Tiles / Tile Grid
 
 fn cc_tiler(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = (ctx.params.f("scale") / 100.0).max(0.001);
@@ -829,7 +829,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccbendit",
-            "CC Bend It",
+            "Two-Point Bend",
             vec![
                 p("bend", "Bend", num(0.0), ParamUi::Angle),
                 p("start", "Start", pt(0.5, 0.2), ParamUi::Point),
@@ -840,7 +840,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.cclens",
-            "CC Lens",
+            "Lens Distortion",
             vec![
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
                 p("size", "Size", num(50.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
@@ -850,7 +850,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccpageturn",
-            "CC Page Turn",
+            "Page Curl",
             vec![
                 p("foldPosition", "Fold Position", pt(0.7, 0.7), ParamUi::Point),
                 p("foldDirection", "Fold Direction", num(315.0), ParamUi::Angle),
@@ -864,7 +864,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.cctiler",
-            "CC Tiler",
+            "Scaled Tiles",
             vec![
                 p("scale", "Scale", num(50.0), slider(1.0, 10000.0, 1.0, 200.0, 1)),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -874,7 +874,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccgriddler",
-            "CC Griddler",
+            "Tile Grid",
             vec![
                 p("horizontalScale", "Horizontal Scale", num(100.0), slider(1.0, 1000.0, 1.0, 400.0, 1)),
                 p("verticalScale", "Vertical Scale", num(100.0), slider(1.0, 1000.0, 1.0, 400.0, 1)),

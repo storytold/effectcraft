@@ -418,14 +418,24 @@ fn set_view_camera(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"view": v.id()}))
 }
 
+/// Returns the active comp's 3D view state, with the comp size, for the 3D view commands.
 fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let (w, h) = (comp.width as f64, comp.height as f64);
     let vs = s.state.views3d.get(&cid).cloned().unwrap_or_default();
     let t = s.state.times.get(&cid).copied().unwrap_or(Tick::ZERO);
-    let ctx =
-        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
     let cam = vs.override_camera(w, h).unwrap_or_else(|| camera::active_camera(&ctx));
     let f = cam.forward();
     let lights: Vec<Value> = comp
@@ -492,7 +502,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
         let poi = if two {
             Vec3::from(get_at(l, "transform/poi", t).map(|v| v.as_vec3()).unwrap_or([w / 2.0, h / 2.0, 0.0]))
         } else {
-            let fwd = (Mat4::orientation(Vec3::from(o)) * Mat4::rotate_y(ry) * Mat4::rotate_x(rx)).apply_vec(vec3(0.0, 0.0, 1.0));
+            let fwd = (Mat4::orientation(Vec3::from(o)) * Mat4::rotation_xyz(rx, ry, 0.0)).apply_vec(vec3(0.0, 0.0, 1.0));
             pos + fwd * zoom
         };
         let mut rig = Rig { eye: pos, poi, zoom, ortho: false };
@@ -567,8 +577,17 @@ fn auto_orient(s: &mut Session, p: &Value) -> Result<Value> {
 /// through each layer's world matrix; cameras and lights contribute their position).
 fn layer_points(s: &Session, cid: ItemId, ids: &[LayerId], t: Tick) -> Vec<Vec3> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx =
-        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
     let mut out = vec![];
     for l in comp.layers.iter().filter(|l| ids.contains(&l.id)) {
         let m = ctx.world_matrix(l);

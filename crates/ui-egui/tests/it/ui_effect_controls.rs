@@ -260,14 +260,14 @@ fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
     }
 }
 
-/// Key Light's Screen Colour eyedropper picks from the effect's input: the shown frame is
+/// Screen Color Key's Screen Colour eyedropper picks from the effect's input: the shown frame is
 /// already keyed (the default screen colour takes most of a green), so sampling it would miss.
 #[test]
 fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Key", "width": 320, "height": 180, "frameRate": 30, "duration": 1})).unwrap();
     let screen = s.execute("layer.newSolid", json!({"name": "Screen", "color": "#30b050"})).unwrap()["layer"].as_u64().unwrap();
-    let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Key Light"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Screen Color Key"})).unwrap()["effects"][0].as_u64().unwrap();
     let prop = layer(&s, screen).effects().unwrap().groups().find(|g| g.uid == fx).and_then(|g| g.get("screenColour")).map(|p| p.uid).unwrap();
     s.state.selected_layers = vec![LayerId(screen)];
     let mut app = EffectcraftApp::new(s);
@@ -295,7 +295,7 @@ fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
 fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
     let (app, x) = app();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
-    let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Lumetri Color"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Color Grading"})).unwrap()["effects"][0].as_u64().unwrap();
     // Only this effect open, so its header is on screen.
     let l = layer(&h.state().session, x.small);
     let others: Vec<u64> = l.effects().unwrap().groups().map(|g| g.uid).filter(|u| *u != fx).collect();
@@ -552,6 +552,63 @@ fn extractor_offers_the_exr_layers_and_channels() {
     h.get_by_label("depth.Z").click();
     h.run_steps(3);
     assert_eq!(values(&h)[0], "depth.Z");
+    let _ = std::fs::remove_file(path);
+}
+
+/// #473: Cryptomatte's Layer popup lists the Cryptomatte layers of the footage's OpenEXR (a file
+/// with only CryptoMaterial shows CryptoMaterial, not CryptoObject), and the three standard ones
+/// when the layer has no such footage. The stored value stays the standard index.
+#[test]
+fn cryptomatte_layer_popup_follows_the_footage() {
+    use exr::prelude::*;
+    let (w, hh) = (8usize, 4usize);
+    let ch = |n: &str, v: f32| AnyChannel::new(n, FlatSamples::F32(vec![v; w * hh]));
+    let channels = AnyChannels::sort(vec![ch("R", 0.5), ch("G", 0.5), ch("B", 0.5), ch("CryptoMaterial00.R", 1.0), ch("CryptoMaterial00.G", 1.0)].into());
+    let mut exr_layer = exr::prelude::Layer::new((w, hh), LayerAttributes::default(), Encoding::FAST_LOSSLESS, channels);
+    exr_layer.attributes.other.insert(Text::from("cryptomatte/abc1234/name"), AttributeValue::Text(Text::from("CryptoMaterial")));
+    exr_layer.attributes.other.insert(Text::from("cryptomatte/abc1234/manifest"), AttributeValue::Text(Text::from(r#"{"wood":"13851a76"}"#)));
+    let path = std::env::temp_dir().join(format!("ec-ui-exr-crypto-{}.exr", std::process::id()));
+    Image::from_layer(exr_layer).write().to_file(&path).unwrap();
+
+    let mut s = effectcraft_host::session();
+    let item = s.execute("file.import", json!({"paths": [path.to_string_lossy()]})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "EXR", "width": 8, "height": 4, "frameRate": 24, "duration": 1})).unwrap();
+    let l = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "S", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    let apply = |s: &mut Session, l: u64| s.execute("effect.apply", json!({"layers": [l], "effect": "Cryptomatte"})).unwrap()["effects"][0].as_u64().unwrap();
+    let (fx, solid_fx) = (apply(&mut s, l), apply(&mut s, solid));
+    let layer_prop = |s: &Session, l: u64, fx: u64| {
+        layer(s, l).effects().and_then(|f| f.groups().find(|g| g.uid == fx)).and_then(|g| g.get("layer")).map(|p| (p.uid, p.value.as_enum())).unwrap()
+    };
+    let (uid, stored) = layer_prop(&s, l, fx);
+    assert_eq!(stored, 0, "a new effect stores CryptoObject");
+    let (solid_uid, _) = layer_prop(&s, solid, solid_fx);
+    s.state.selected_layers = vec![LayerId(l)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    settle(&mut h);
+    // The file has only CryptoMaterial, so that is what the closed popup shows, and all it lists.
+    assert!(h.query_by_label("CryptoMaterial").is_some() && h.query_by_label("CryptoObject").is_none());
+    let at = rect_of(&h, &format!("effectControls.prop.{uid}.value")).center();
+    click(&mut h, at);
+    assert!(h.query_by_label("CryptoObject").is_none() && h.query_by_label("CryptoAsset").is_none(), "only the file's layers");
+    assert_eq!(h.query_all_by_label("CryptoMaterial").count(), 2, "the popup and its entry");
+    h.query_all_by_label("CryptoMaterial").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(layer_prop(&h.state().session, l, fx).1, 1, "stored as the standard CryptoMaterial value");
+
+    // A layer without Cryptomatte footage lists the standard three.
+    h.state_mut().session.state.selected_layers = vec![LayerId(solid)];
+    settle(&mut h);
+    let at = rect_of(&h, &format!("effectControls.prop.{solid_uid}.value")).center();
+    click(&mut h, at);
+    for name in ["CryptoMaterial", "CryptoAsset"] {
+        assert!(h.query_by_label(name).is_some(), "the standard layer {name}");
+    }
+    h.get_by_label("CryptoAsset").click();
+    h.run_steps(3);
+    assert_eq!(layer_prop(&h.state().session, solid, solid_fx).1, 2);
     let _ = std::fs::remove_file(path);
 }
 

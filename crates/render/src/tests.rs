@@ -11,6 +11,7 @@ mod auto;
 mod aux_channels;
 mod collapse;
 mod color;
+mod drop_shadow_cover;
 mod footage_size;
 mod frame_blend;
 mod guides;
@@ -20,8 +21,11 @@ mod mask_feather;
 mod motion_tile;
 mod nested;
 mod paint;
+mod proxy_cache;
+mod raster_clip;
 mod remap;
 mod roi;
+mod stretch_limits;
 mod styles;
 mod time;
 
@@ -328,7 +332,7 @@ fn card_dance_comp_camera_matches_the_default_view() {
     assert!(img.get(10, 50)[3] < 0.01);
 }
 
-/// A black 2D solid with CC Particle World, under a camera layer panned right by `pan` px.
+/// A black 2D solid with Particle Emitter 3D, under a camera layer panned right by `pan` px.
 fn particle_world_scene(pan: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut l = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
@@ -358,7 +362,7 @@ fn particles_x(img: &crate::Image) -> f32 {
     sx / m
 }
 
-/// #397: CC Particle World on a 2D layer is seen through the comp's camera layer, and the layer
+/// #397: Particle Emitter 3D on a 2D layer is seen through the comp's camera layer, and the layer
 /// cache notices the camera moving.
 #[test]
 fn particle_world_follows_the_comp_camera() {
@@ -373,7 +377,7 @@ fn particle_world_follows_the_comp_camera() {
     assert!(b < a - 20.0, "panning the camera right moves the particles left: {a} -> {b}");
 }
 
-/// A black solid with CC Particle World whose Birth Rate is 3 until layer time `cut`, then 0 a
+/// A black solid with Particle Emitter 3D whose Birth Rate is 3 until layer time `cut`, then 0 a
 /// frame later (`None`: 3 throughout); the layer starts at comp time `start`, stretched `stretch` %.
 fn burst_scene(cut: Option<f64>, start: f64, stretch: f64) -> (Project, ItemId) {
     burst_scene_keys(cut, start, stretch, false)
@@ -482,9 +486,148 @@ impl crate::eval::ExprHost for ControllerRate {
     }
 }
 
+/// An expression that reads a file (as `sampleImage` does, into [`EvalCtx::reads`]) and keeps
+/// the value.
+///
+/// [`EvalCtx::reads`]: crate::eval::EvalCtx::reads
+struct ReadsAFile;
+
+impl crate::eval::ExprHost for ReadsAFile {
+    fn eval(&self, ctx: &crate::eval::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        if let Some(log) = ctx.reads {
+            log.note(crate::reads::ReadFile::new("/sampled.png", crate::reads::FileStamp::Native { len: 3, modified: Some(1) }));
+        }
+        Ok(value.clone())
+    }
+}
+
+/// What expressions read while a cached buffer is made (a mask expression, which mask motion
+/// blur also runs at shutter times the cache key doesn't see) goes to that buffer's files, not
+/// only to the frame's (#3184): a later render served the buffer lists the file too. Content,
+/// a Time effect's input and an adjustment layer's footprint.
+#[test]
+fn what_expressions_read_goes_to_the_files_of_the_buffer_they_make() {
+    use crate::reads::ReadLog;
+    use crate::{NoFootage, RenderOpts, Renderer};
+    let (mut p, cid, comp) = setup();
+    for adjustment in [false, true] {
+        let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+        l.switches.adjustment = adjustment;
+        let mut next = p.next_id;
+        let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+        p.next_id = next;
+        l.props.sub_mut("masks").unwrap().children.push(m.into());
+        l.props.prop_mut("masks/#1/path").unwrap().expr = Some(effectcraft_project::Expression { text: "sampled".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.push(l);
+    }
+    let cache = crate::LayerCache::default();
+    let c = p.comp(cid).unwrap();
+    let (content, adjustment) = (&c.layers[0], &c.layers[1]);
+    // `make`, rendered once with the expressions (the files go to `log`) and then served from
+    // the cache to a render without them: the files that render lists.
+    let files_served = |what: &str, make: &dyn Fn(&Renderer, &crate::eval::EvalCtx) -> bool| {
+        let log = ReadLog::new();
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&ReadsAFile);
+        r.cache = Some(&cache);
+        r.reads = Some(&log);
+        assert!(make(&r, &r.ctx(cid, c, Tick::ZERO)), "{what}");
+        assert!(log.files().get("/sampled.png").is_some(), "{what}: the frame lists the file");
+        let hits = cache.stats().hits;
+        let served = ReadLog::new();
+        r.expr = None;
+        r.reads = Some(&served);
+        assert!(make(&r, &r.ctx(cid, c, Tick::ZERO)), "{what}");
+        assert!(cache.stats().hits > hits, "{what}: served from the cache");
+        served.into_files()
+    };
+    let files = files_served("content", &|r, ctx| r.content_buf(ctx, content).is_some());
+    assert!(files.get("/sampled.png").is_some(), "content: {files:?}");
+    let files = files_served("input", &|r, ctx| r.layer_input(ctx, content, 0).is_some());
+    assert!(files.get("/sampled.png").is_some(), "input: {files:?}");
+    let files = files_served("footprint", &|r, ctx| r.adjustment_footprint(ctx, adjustment).is_some());
+    assert!(files.get("/sampled.png").is_some(), "footprint: {files:?}");
+}
+
+/// A text Expression Selector whose Amount is 0 for the first character and the width of the
+/// footage item named `ref.png` for the others (`textIndex == 1 ? 0 : footage("ref.png").width`).
+struct WidthOfRef;
+
+impl crate::eval::ExprHost for WidthOfRef {
+    fn eval(&self, _: &crate::eval::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        Ok(value.clone())
+    }
+    fn eval_text_selector(
+        &self,
+        ctx: &crate::eval::EvalCtx,
+        _: &effectcraft_project::Layer,
+        _: &effectcraft_project::Property,
+        index: usize,
+        _: usize,
+        _: [f64; 3],
+    ) -> Result<[f64; 3], String> {
+        let width = ctx.project.items.values().find(|i| i.name == "ref.png").and_then(|i| i.dimensions()).map_or(0.0, |d| d.0 as f64);
+        Ok([if index == 1 { 0.0 } else { width }; 3])
+    }
+}
+
+/// A text layer whose Expression Selector reads a footage item's size for every character but
+/// the first: the layer's key holds the first character's amount only, so its buffer is not
+/// stored on disk. Reopened over the same disk cache after the footage's width changed (16 to
+/// 64), the frame matches one rendered without a cache.
+#[test]
+fn a_text_expression_selector_is_not_served_from_the_disk_cache() {
+    use crate::disk_cache::{DiskCache, Kind};
+    use crate::{LayerCache, NoFootage, RenderOpts, Renderer};
+    let project = |width: u32| {
+        let (mut p, cid, comp) = setup();
+        let f = effectcraft_project::Footage { has_video: true, width, height: 16, ..Default::default() };
+        p.add_item("ref.png", Label::None, None, ItemKind::Footage(f));
+        let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+        l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "HH".into(), size: 60.0, ..Default::default() }));
+        let mut next = p.next_id;
+        let mut ids = Ids(&mut next);
+        let mut props = build::text_anim_props(&mut ids, "opacity", false);
+        for pr in &mut props {
+            pr.value = Value::Scalar(0.0);
+        }
+        let mut animator = build::text_animator(&mut ids, "Animator 1", props);
+        let sel = build::expression_selector(&mut ids, "Expression Selector 1");
+        p.next_id = next;
+        animator.sub_mut("selectors").unwrap().children.push(sel.into());
+        l.props.group_mut("text/animators").unwrap().children.push(animator.into());
+        p.comp_mut(cid).unwrap().layers.push(l);
+        (p, cid)
+    };
+    let render = |p: &Project, cid: ItemId, cache: Option<&LayerCache>| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&WidthOfRef);
+        r.cache = cache;
+        r.comp_frame(cid, Tick::ZERO)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let dc = DiskCache::open(dir.path(), 1 << 30).unwrap();
+    dc.set_min_layer_ms(0);
+    // First session: the 16 px wide footage.
+    let (p16, cid) = project(16);
+    let cache = LayerCache::default();
+    cache.set_disk(Some(dc.clone()));
+    let first = render(&p16, cid, Some(&cache));
+    dc.flush();
+    assert!(first.data.iter().any(|px| px[3] > 0.5), "the text renders");
+    // Reopened with a fresh memory cache, the footage now 64 px wide.
+    let (p64, cid) = project(64);
+    let uncached = render(&p64, cid, None);
+    assert_ne!(uncached.data, first.data, "the second character's opacity follows the width");
+    let reopened = LayerCache::default();
+    reopened.set_disk(Some(dc.clone()));
+    assert_eq!(render(&p64, cid, Some(&reopened)).data, uncached.data, "not the buffer from before the change");
+    assert!(dc.keys(Kind::Layer).is_empty(), "the text layer's buffer is not on disk");
+}
+
 /// A Birth Rate expression reading another layer: changing that layer changes the history but
 /// not the current rate (0) nor this layer's properties, which is all the layer cache key sees.
-/// CC Particle World layers with expressions therefore aren't layer cached.
+/// Particle Emitter 3D layers with expressions therefore aren't layer cached.
 #[test]
 fn particle_world_with_a_birth_rate_expression_is_not_served_from_the_layer_cache() {
     let scene = |opacity: f64| {
@@ -517,8 +660,8 @@ fn particle_world_with_a_birth_rate_expression_is_not_served_from_the_layer_cach
     assert!(light(&b) > 1.0 && light(&b) < light(&a), "fewer births: {} vs {}", light(&b), light(&a));
 }
 
-/// A grey solid (CC Mr. Mercury shades its blobs from it) with effect `id` (CC Particle Systems
-/// II, CC Mr. Mercury): Birth Rate `rate`,
+/// A grey solid (Liquid Particles shades its blobs from it) with effect `id` (CC Particle Systems
+/// II, Liquid Particles): Birth Rate `rate`,
 /// or keyed 3 until 0.5 s and 0 a frame later (`None`); Longevity 1 s.
 fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
@@ -537,7 +680,7 @@ fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
     (p, cid)
 }
 
-/// #1373 for CC Particle Systems II and CC Mr. Mercury through the renderer: a keyed burst
+/// #1373 for Particle Emitter 2D and Liquid Particles through the renderer: a keyed burst
 /// draws as the constant rate during it, still draws after the rate drops to 0 (unlike a rate
 /// of 0 throughout), and draws as nothing born once Longevity has run out.
 #[test]
@@ -820,6 +963,41 @@ fn effects_read_layer_params() {
     assert!(px[2] > 0.99 && px[0] < 0.01, "{px:?}");
 }
 
+/// A cached layer whose effect reads a precomp layer: how the precomp's layers render depends on
+/// Switches Affect Nested Comps (the precomp layer's Draft quality passes down) and on the
+/// switches the reading layer's own comp inherits, so the key must tell them apart (a buffer
+/// made under the other setting, from memory or disk, is stale).
+#[test]
+fn a_cached_layer_reading_a_precomp_is_keyed_by_the_nested_switches() {
+    let (mut p, cid, comp) = setup();
+    let mut inner = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    // A rotated square off the pixel grid: Draft (nearest) and Best (bilinear) sampling differ.
+    let mut dot = solid(&mut p, &inner, [1.0, 1.0, 1.0], 40, 40);
+    dot.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.3, 50.6, 0.0]);
+    dot.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(30.0);
+    inner.layers.push(dot);
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut pre = build::layer(&mut p, &comp, "Inner", LayerSource::Comp { item: iid }, (200, 100), None);
+    pre.switches.video = false;
+    pre.switches.quality = effectcraft_project::Quality::Draft;
+    let mut top = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    add_effect_200(&mut p, &mut top, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(pre.id.0)))]);
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(top);
+    c.layers.push(pre);
+    let frame = |nested_switches: bool, cache: Option<&crate::LayerCache>| {
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { nested_switches, ..Default::default() });
+        r.cache = cache;
+        r.comp_frame(cid, Tick::ZERO).data
+    };
+    let (on, off) = (frame(true, None), frame(false, None));
+    assert!(on != off, "the precomp layer's Draft quality passes down");
+    let cache = crate::LayerCache::default();
+    assert!(frame(true, Some(&cache)) == on);
+    assert!(frame(false, Some(&cache)) == off, "not the buffer made with switches affecting nested comps");
+    assert!(frame(true, Some(&cache)) == on, "and back");
+}
+
 /// Records whether the GPU compositor was asked to draw a frame.
 struct ProbeAccel(std::sync::atomic::AtomicBool);
 impl crate::Accelerator for ProbeAccel {
@@ -880,6 +1058,27 @@ fn comp_frame_ends_the_frame_when_the_render_panics() {
     a.ends.store(0, Ordering::SeqCst);
     let _ = crate::passes::block_on(crate::passes::comp_frame(&r, cid, Tick::ZERO));
     assert_eq!(a.ends.load(Ordering::SeqCst), 1);
+}
+
+/// The renderer labels Project Settings ▸ Video Rendering and Effects draws parse back as the
+/// backend they name (in any case), and the older spellings still work.
+#[test]
+fn renderer_labels_parse_back_and_keep_the_older_spellings() {
+    use crate::Backend;
+    for (label, backend) in [
+        ("GPU Acceleration", Backend::Gpu),
+        ("gpu acceleration", Backend::Gpu),
+        ("Mercury GPU Acceleration", Backend::Gpu),
+        ("gpu", Backend::Gpu),
+        ("Software Rendering", Backend::Cpu),
+        ("software rendering", Backend::Cpu),
+        ("Mercury Software Only", Backend::Cpu),
+        ("cpu", Backend::Cpu),
+        ("Auto", Backend::Auto),
+    ] {
+        assert_eq!(Backend::parse(label), Some(backend), "{label}");
+    }
+    assert_eq!(Backend::parse("Vulkan"), None);
 }
 
 #[test]
@@ -1048,11 +1247,11 @@ fn effects_on_text_reach_past_the_text_bounds() {
     }
     assert!(
         painted > 50 && hi.saturating_sub(lo) > 100,
-        "CC Tiler tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
+        "Scaled Tiles tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
     );
 }
 
-/// #658: CC Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
+/// #658: Directional Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
 /// the painted rectangle used to fall off its edge, so the liquid trail never appeared.
 #[test]
 fn cc_smear_trails_text_past_its_bounds() {
@@ -1071,7 +1270,7 @@ fn cc_smear_trails_text_past_its_bounds() {
     );
     p.comp_mut(cid).unwrap().layers = vec![l].into();
     let smeared = right(&render_frame(&p, cid, Tick::ZERO, 1.0));
-    assert!(plain > 40 && smeared > plain + 25, "CC Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
+    assert!(plain > 40 && smeared > plain + 25, "Directional Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
 }
 
 /// A layer parameter pointing at a shape layer sees all of it (in its effect space), and the
@@ -1327,7 +1526,7 @@ fn solo_excludes_other_layers_outside_the_soloed_layers_range() {
     assert_eq!(second.get(100, 50), [0.0, 0.0, 1.0, 1.0], "only B inside its range");
 }
 
-/// #1252: a layer blended with a CC Particle World layer, under a camera panned by `pan` px.
+/// #1252: a layer blended with a Particle Emitter 3D layer, under a camera panned by `pan` px.
 fn scene_reader_dependency(pan: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut source = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
