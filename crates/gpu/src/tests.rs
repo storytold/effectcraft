@@ -28,8 +28,10 @@ use crate::Gpu;
 
 mod adjust;
 mod adv3d;
+mod bench_share;
 mod deferred;
 mod deferred_jobs;
+mod footage_share;
 mod fx_color;
 mod fx_depth;
 mod fx_distort;
@@ -996,6 +998,49 @@ fn within_memory_returns_the_work_when_there_is_room() {
     assert_eq!((img.width, img.height), (64, 32));
 }
 
+/// A timeout can retire a context without any device error scope reporting a failure.
+/// Queued jobs keep that context alive, so CPU fallback must not wait for its last owner
+/// to drop before releasing cached uploads and working textures (#3357).
+fn retired_attempt_releases_kept_resources(retire_before: bool) {
+    hold_gpu_lock();
+    let made = Gpu::try_headless();
+    let Some(g) = require_gpu("retired memory attempt", made.as_ref()) else { return };
+    let buf = Arc::new(effectcraft_effects::Buf { img: Image::new(16, 16), offset: [0.0; 2], scale: 1.0 });
+    drop(g.ctx.upload_buf(&buf).expect("a small cached upload"));
+    drop(crate::context::Enc::new(&g.ctx).image(32, 16));
+    assert_eq!(g.ctx.upload_entries(), 1);
+    assert!(g.ctx.pool_retained_bytes() > 0);
+    // An earlier frame can return a lease after retirement; it must not refill the pool.
+    let earlier = crate::context::Enc::new(&g.ctx).image(48, 16);
+    let retire = g.ctx.device_failure_notifier();
+    if retire_before {
+        retire("synthetic readback retirement".into());
+    }
+    let called = std::cell::Cell::new(false);
+    let result = g.within_memory(|| {
+        called.set(true);
+        let out = crate::context::Enc::new(&g.ctx).image(64, 16);
+        retire("synthetic readback retirement".into());
+        out
+    });
+    assert!(matches!(result, Err(crate::FrameError::Retired(_))));
+    assert_eq!(called.get(), !retire_before);
+    assert_eq!(g.ctx.upload_entries(), 0, "CPU fallback must not retain uploaded layers");
+    assert_eq!(g.ctx.pool_retained_bytes(), 0, "CPU fallback must not retain working textures");
+    drop(earlier);
+    assert_eq!(g.ctx.pool_retained_bytes(), 0, "late leases cannot refill a retired pool");
+}
+
+#[test]
+fn within_memory_releases_caches_when_already_retired() {
+    retired_attempt_releases_kept_resources(true);
+}
+
+#[test]
+fn within_memory_releases_caches_when_retired_during_work() {
+    retired_attempt_releases_kept_resources(false);
+}
+
 /// A texture the device rejected (deliberately too wide), made outside any frame under a scope
 /// of its own: the view a frame then makes of it is the reported validation error.
 fn rejected_texture(g: &Gpu) -> wgpu::Texture {
@@ -1245,6 +1290,49 @@ fn readback_staging_stays_bounded_across_sizes() {
     }
     let held = g.ctx.staging_bytes();
     assert!(held <= (256 << 20) + 2 * 1024 * 16 * 376, "staging buffers hold {held} bytes");
+}
+
+/// #3335: a readback copies the mapped rows straight into the image (no zero-filled buffer,
+/// no intermediate byte vector), skipping each row's padding: odd widths, sub-rectangles and
+/// readbacks from several threads at once (each waiting for its own submission) return the
+/// uploaded pixels exactly.
+#[test]
+fn single_copy_readback_returns_the_exact_pixels() {
+    let Some(g) = gpu() else { return };
+    if !g.ctx.can_wait() {
+        return;
+    }
+    let image = |w: u32, h: u32, seed: f32| {
+        let mut img = Image::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = i as f32 * 0.37 + seed;
+            *p = [v, -v, v * 1e-3, 1.0 / (1.0 + v)];
+        }
+        img
+    };
+    // 37 × 16 bytes = 592 per row: padded to 768 in the staging buffer.
+    let src = image(37, 5, 0.5);
+    let up = g.ctx.upload_image(&src).expect("upload");
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let back = e.download(&up).expect("download");
+    assert_eq!((back.width, back.height), (37, 5));
+    assert_eq!(back.data, src.data);
+    let rect = e.read_rect(&up.texture, 3, 1, 5, 2, 16).expect("read_rect");
+    let want: Vec<[f32; 4]> = (1..3).flat_map(|y| (3..8).map(move |x| (x, y))).map(|(x, y)| src.data[src.idx(x, y)]).collect();
+    assert_eq!(rect, bytemuck::cast_slice::<[f32; 4], u8>(&want));
+    // Frames on several threads, each with its own encoder and submission.
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            s.spawn(move || {
+                for k in 0..3 {
+                    let src = image(61 + t, 7 + k, (t * 10 + k) as f32);
+                    let up = g.ctx.upload_image(&src).expect("upload");
+                    let back = crate::context::Enc::new(&g.ctx).download(&up).expect("download");
+                    assert_eq!(back.data, src.data, "thread {t} frame {k}");
+                }
+            });
+        }
+    });
 }
 
 /// A static adjustment layer with a time-dependent effect (Noise) keeps its footprint key

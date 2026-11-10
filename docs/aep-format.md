@@ -1,6 +1,6 @@
 # After Effects project format (`.aep`)
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-07 · **Change:** footage: an image sequence without a filename prefix stores only the suffix `Utf8`, and one imported with Force alphabetical order stores its file list in `LIST StVc` / `StVS` (section 3, footage); before that: versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-07 · **Change:** Puppet (`ADBE FreePin3`, 3.7): the property tree from an external scripting listing, **?** until a byte sample exists (#3093); before that: footage: an image sequence without a filename prefix stores only the suffix `Utf8`, and one imported with Force alphabetical order stores its file list in `LIST StVc` / `StVS` (section 3, footage); before that: versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
 
 What `crates/aep` ([`effectcraft-aep`](../crates/aep/README.md)) reads and writes, and the evidence
 for each statement. Everything here was observed on project files we generated ourselves; no
@@ -559,6 +559,36 @@ compositions, the items from one composition per popup item).** Each set value i
 | `ADBE Offset` | 1 Shift Center To: point, default the layer centre; 2 Blend With Original: fixed, **max 1 (a 0..1 fraction)**, default 0 |
 | `ADBE Deflicker` (Color Stabilizer) | 1 Stabilize: popup (Brightness, Levels, Curves), **default 2 (Levels)**; 2 Black Point, 3 Mid Point, 4 White Point: points, defaults 0.2 / 0.5 / 0.8 of the width at half the height; 5 Sample Size: fixed, max 50, default 3. The reference frame the Set Frame button picks is not among the parameters |
 
+**Importer block 2026-11-05, #3112 (`1300-thirdparty.aep`; V for the parameter lists, H for the
+data layouts, read from default instances only):**
+
+| Effect (match name, plug-in version) | Parameters (`parT` index: type, valid range, default) |
+|---|---|
+| `CS Color Neutralizer` (CC Color Neutralizer, 1.3) | 1 / 7 / 13 Shadows / Midtones / Highlights Unbalance: colours (black, 127 grey, white; pickers: setting one sets the range's sliders, e.g. [0.27, 0.55, 0.85] gives Red 42.94, Green 1.18, Blue -44.12 = (mean - channel) x 150 / 255 on 8-bit values, and leaves no colour record); 2-6, 8-12, 14-18 a group per range (start, Red, Green, Blue, end) with float sliders -100..100 (slider -50..50), default 0; 19 Pinning: float 0..100 (slider 0..50); 20 Blend w. Original: float 0..100; 21-25 the Special group: 22 View popup (Final Result, Correction B to W, Correction Stair), default 1, 23 Black Point float 0..49.9, default 0, 24 White Point float 50.1..100, default 100 |
+| `EXtractoR` (2.6.6) | 1 Channel Info (`EXtractoR-0013`): arbitrary data, 688 bytes, below; 2-6 the Process group: 3 Black Point and 4 White Point float sliders, valid ±3.4028235e38 (the float32 range; slider ±1 000), default 0 / 1; 5 UnMult: checkbox (empty `pard` name, the label in `pdnm`), default off |
+| `IDentifier` (2.6.6) | 1 Channel Info (`IDentifier-0005`): arbitrary data, 148 bytes, below; 2 Display: popup (Colors, Luma Matte, Alpha Matte, Raw), default 1; 3 ID: integer slider, max 2 147 483 647, default 0 |
+
+EXtractoR's Channel Info is the plug-in's own **little-endian** layout: `u32` 1 and 28 bytes, then
+four 164-byte records (Red, Green, Blue, Alpha), each a kind in byte 0 (1 a channel of the footage by
+name: `R`, `G`, `B` by default; 2 the input's own channel, named `(copy)`: Alpha by default) and the
+channel name NUL-terminated from record byte 35. EffectCraft imports kind 2 as its EXtractoR's `(copy)`,
+the effect input's channel of the same position as earlier effects left it, not as `A` (which names
+an OpenEXR footage's own alpha plane). The rest is not read: it differs between instances
+with the same channels (uninitialised-looking values, also in bytes 1..4 of a record: `02 00 00 32`
+on Alpha in one definition's default, which is why only byte 0 is the kind). **A chosen channel**
+(`extractor-07-preset-channel-z`, a preset of our own that reads `Z` into Red, Green and Blue) is kind
+1 with its name (`Z`), and the `u32` at record byte 4 is then 13, which looks like the channel's
+position in the EXR's sorted channel list of 14 (the defaults hold 0 there: H). IDentifier's data
+differs between instances with the same settings except for **the chosen channel's name**,
+NUL-terminated from byte 19, which is `Object ID` when no channel is chosen. After Effects lists
+only integer (UINT) channels: in 1300's EXR (a FLOAT `ID` channel) it found none ("No ID channels
+available"), so that block's preset `identifier-09-preset-channel-id` only sets ID 2; in 1310's
+EXR (UINT `objectId` and `IndexOB.X` added) the preset `identifier-09-preset-channel-objectid-id2`
+stores `objectId`, with 15 at byte 4 (the channel's position in the sorted list of 16, as for
+EXtractoR: H). Without a chosen channel After Effects leaves the layer unchanged (1300 and 1310
+defaults). The other bytes are not read. API: `ExtractorChannels`,
+`identifier_channel_type`.
+
 **Curves and Mesh Warp** (961-965, 985; applied from presets, the data is not scriptable): their
 arbitrary-data parameter (type 11) always has a record (`tdbs` with a 4-byte `cdat`) and a `LIST
 aRbs` / `aRbp`, also at the default. Curves (`ADBE CurvesCustom-0001`, 1644 bytes): `u16` 1, 1;
@@ -573,6 +603,64 @@ Columns / Quality are integer sliders with records only off their default (7, 7,
 suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -0001; Mesh Warp
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
+
+**Lumetri Color** (`ADBE Lumetri`, 1200: 63 compositions in After Effects 2026, 32 bpc, working space
+None; by script: defaults, all set, one per section, valid minima and maxima, every popup item the script
+can set, checkboxes toggled, keys, an expression; from presets made by hand, `-58` ... `-62`: an Input
+LUT, a Look, the RGB curve, Hue vs Sat, the colour wheels): 131 `parT` entries. The `-NNNN` suffix is a
+parameter id, not the position (`-0127` ... `-0130` sit between `-0005` and `-0026`), so the importer
+keys by suffix. Float sliders (type 10) store the value After Effects shows; the valid ranges (`pard`
+104 / 108) are wider than the slider's (112 / 116): Temperature / Tint -300..300 (slider -100..100),
+Saturation 0..300 (0..200), Exposure -7..7 (-5..5), Contrast, Highlights, Shadows, Whites, Blacks,
+HDR Specular, Tint Balance -150..150 (-100..100), Faded Film 0..150 (0..100), HDR White 100..1000,
+HDR Range 100..10000, Refine Blur 0..1000 (0..30), Vignette Amount -5..5 (-3..3); the read-backs of
+`-19-min` / `-20-max` equal the stored numbers. **Hidden controls are recorded in the default state**
+(`tdsb` 3) and still hold the value After Effects reads back: High Dynamic Range `-0062` (1.0),
+HDR Specular `-0064` (22), the second Look popup `-0128` (26.16 as set, read back 26), Legacy Tone And
+Saturation `-0097` (its `pard` default reads off as the script saved the project and on once the
+project was opened and saved again, `versions/1200-lumetri-26`, `-25x`, `-24x`; a fresh instance reads
+back off), Auto Color `-0124`, Face Detection `-0102`, the Auto Intensity `-0123`
+(`EffectParam::recorded_value`). Each section has an Active checkbox (blank `pard` name; `-0003` Basic
+Correction, `-0023` Creative, `-0037` Curves, `-0118` RGB Curves, `-0104` / `-0105` / `-0107` / `-0109` /
+`-0111` the hue / saturation curves, `-0046` Color Wheels, `-0068` HSL Secondary, `-0050` Vignette, on
+by default); off, the section does nothing (`-03-sec-basic-correction`, `-17-sec-vignette` render as
+`-00-defaults`). Arbitrary data (type 11, a record and `aRbs` in every instance; empty is `fe fe`):
+`-0001` an XML copy of the grade written only when the Look changes (not kept current: `-01-set-all`
+holds defaults for controls set after the Look; it names the LUT file, `Fuji F125 Kodak 2393 (by
+Adobe).cube`); `-0096` the Look's name, UTF-16LE (`SL BLUE ICE`, `Fuji F125 Kodak 2393 (by Adobe)` in
+`-59-preset-look-lut`; the popup `-0025` itself has no record, `-0128` can disagree with it:
+`-07-sec-creative` names item 20 while `-0128` holds 23), `-0095` likewise for the Input LUT
+(`ALEXA_Default_LogC2Rec709`, `-58-preset-input-lut`; the popups `-0005` / `-0127` keep no record,
+`-0004`, `-0024` and the assets `-0125` / `-0126` stay `fe fe`: the LUTs are After Effects' own files,
+named, not embedded); `-0129` the Look colour space's 16-byte id (the GUID `LookColorSpace` of `-0001`
+in Windows layout: the first 4, 2 and 2 bytes little-endian; zero for None; the Color Space popup
+`-0130` writes no record of its own, `-22-pop38-1` ... `-53-pop38-33`);
+`-0032` Split Toning (32 zero bytes); `-0039` the four RGB curves and `-0042`, `-0106`, `-0108`,
+`-0110`, `-0112` the hue / saturation curves, 520 bytes each: `i32` type (3 for the hue curves, 2 for
+Luma vs Sat and Sat vs Sat, 0 for an RGB curve), `u32` point count, then little-endian `f64` pairs x, y
+sorted by x (bytes after the counted points are stale). RGB: x and y 0..1, (0, 0), (1, 1) by default;
+the first of the four is the master curve (`-60-preset-curves-rgb`: (0.491, 0.787) lifts R, G and B
+alike, and the render follows a natural cubic spline through the points within 0.003); the order of
+the other three is H (the `-0001` XML names `ToneCurvesLuma`, `Red`, `Green`, `Blue`; no sample moves
+one). Hue / saturation: x the hue (0 red, 1/3 green) or the luma / saturation 0..1, y the offset from
+neutral 0; a fresh curve has no points, the selector colours `-0113` ... `-0117` add three at y = 0,
+the hue picked +- 0.0556. Hue vs Sat's y scales the saturation by 1 + y in linear light
+(`-61-preset-curves-huesat`: (0.0155, 0.97) takes pure red's linear saturation to 1.96 times, (0.263,
+-0.03) and (0.765, -0.02) green, cyan and blue to 0.97); the other four curves' scale is H. `-0047`
+Color Wheels, 4 `f64` triples: hue in degrees (0 red, 120 green), brightness slider 0..1 (0.5
+neutral), distance from the centre 0..1; 0, 0.5, 0 each by default; Shadows, Midtones, Highlights, then
+a fourth wheel of unknown role (`-62-preset-wheels`: Shadows 229.1, 0.370, 0.547 towards blue with the
+slider down; Midtones 0.1, 0.5, 0.395 towards red; Highlights 93.4, 0.727, 0.319 towards yellow-green
+with the slider up; the fourth at its default); `-0085` the HSL correction wheels (8 triples, the same
+default; layout H); `-0073` the HSL key, 40 bytes: a flag byte (1 once a colour was picked), then hue,
+saturation, lightness, each centre, range, tolerance (`f32` LE, fractions) and an enabled byte (fresh:
+0.5, 0, 0, on; picking RGB 0.02 0.55 0.85 gives hue centre 0.5605 = that colour's hue and lightness
+centre 0.435 = its HSL lightness, range 0.05, tolerance 0.1: `-01-set-all`; whether range is the half
+or full width is H); `-0122` the Auto Tone analysis (UTF-16 JSON). The project saved as 25.x and 24.x
+copies (`versions/1200-lumetri-25x`, `-24x`: the 58 scripted compositions, saved by After Effects
+2026) stores every Lumetri definition, valid range and value as the 26 save does. [V for the sliders,
+checkboxes, popups, the `tdsb` 3 values, the master RGB curve, Hue vs Sat, the colour wheels and the
+LUT names; H where marked]
 
 **Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our
 sample; read from 88 instances in one production project, not made by us, and from our own After
@@ -610,6 +698,52 @@ text that is empty in every sample, its length the `u32` 1 at 96 and its NUL the
 presets, and After Effects draws exactly the picked objects as selected (`crypto-06`: the box,
 `crypto-07`: box and disc, the two objects of `mat_paint`). API: `CryptomatteData` (refuses data without `cry1`, a length past the end or
 a non-zero byte at 112).
+
+**Puppet (`ADBE FreePin3`; ?: external listing, not the corpus, #3093).** No file of the
+corpus, the committed fixtures or the samples holds a Puppet. The tree below comes from outside
+the corpus: a public scripting listing of the effect's properties (a forum post, an After Effects
+release from before the Advanced and Bend pins and Density). It is not bytes we have seen; that
+After Effects writes it by the general rule (a `tdmn` and the `LIST tdgp` or `tdbs` it names,
+nested in the instance's value group `sspc/tdgp`, as masks, shapes and layer styles are) is
+**H**:
+
+```text
+Puppet                ADBE FreePin3
+  On Transparent      ADBE FreePin3 On Transparent
+  arap                ADBE FreePin3 ARAP Group            (hidden)
+    Auto-traced Shapes  ADBE FreePin3 Outlines
+    Mesh              ADBE FreePin3 Mesh Group            (hidden)
+      Mesh 1          ADBE FreePin3 Mesh Atom
+        Mesh          ADBE FreePin3 Mesh                  (hidden: the triangulation)
+        Triangles     ADBE FreePin3 Mesh Tri Count
+        Expansion     ADBE FreePin3 Mesh Expansion
+        Deform        ADBE FreePin3 PosPins
+          Puppet Pin 1  ADBE FreePin3 PosPin Atom
+            Vertex Offset ADBE FreePin3 PosPin Vtx Offset  (hidden, 2 values)
+            Vertex Index  ADBE FreePin3 PosPin Vtx Index   (hidden; 4294967295 = none)
+            Position      ADBE FreePin3 PosPin Position
+        Overlap       ADBE FreePin3 HghtPins              (hidden while empty)
+        Stiffness     ADBE FreePin3 StarchPins            (hidden while empty)
+```
+
+A pin's rest place is not a property: it is a vertex of the hidden mesh (Vertex Index) plus an
+offset, so it cannot be read without decoding the mesh data. The unit of Position (layer pixels,
+or a fraction of the layer as effect points are) is **?**. The match names of the Overlap and
+Starch pin atoms and their properties, of the Advanced and Bend pins (Scale, Rotation) and of
+Density, Mesh Rotation Refinement and the Puppet Engine are **?**, and so is which of them are
+`parT` parameters; whether After Effects stores some `parT` parameters of a fresh Puppet even at
+their defaults (the importer would then report them every time) is **?**; whether a Puppet
+without pins has an (empty) Mesh Group, or no ARAP group at all, is **?**. The importer
+(`import/puppet.rs`) therefore brings the effect in as EffectCraft's Puppet without meshes or
+pins and reports, per mesh, Triangles, Expansion and per pin group the pins, how many are keyed
+or carry an expression, and their atom match names; every entry outside this tree is named in the
+report. The sample that settles it: a fresh Puppet with no pins in one composition and, in
+another, a 400 x 800 solid in a larger composition (pixels against fractions) with a Puppet of
+three Position pins (one keyed, one moved off its rest place without
+keys), one Advanced, one Bend, one Starch and one Overlap pin, Triangles, Expansion and Density
+off their defaults, a second mesh, and a scripting read-back of every property's match name and
+value, the hidden ones included. Pins added by script are reported to come out disabled, so the
+pins are placed by hand or by a preset.
 
 ### 3.8 Masks and bezier paths (`tdgp[ADBE Mask Parade]`)
 
@@ -895,6 +1029,7 @@ another value).
 **Effects**
 
 - `pard` byte 48 (flags: **?**), 68 / 72 (the point default as a percent pair: **V** in the corpus for 074 and 368, not exposed), 120 (the float slider default again as f32: **V**, not exposed), 124 (display decimals: **H**), 132..147 (fixed slider slider-max, default copy and flags; the low bit of @144 is set on the two percent-displayed sliders and clear on Scatter: **H** "display as percent"), the colour default copy at @60, and the stale memory after the parameter name. The fixed slider valid minimum is not decoded (the float slider one is, 389).
+- Puppet (`ADBE FreePin3`, 3.7): the hidden mesh data, a pin's Vertex Index and Vertex Offset (its rest place), the unit of a pin's Position, the Overlap, Starch, Advanced and Bend pins, Density, Mesh Rotation Refinement and the Puppet Engine: no sample (**?**).
 - Effects renamed, or stacked twice on ONE layer (`Gradient Ramp 2`: does the second keep an empty `parT`?); which instance keeps the full `parT` when a second instance is created on a layer below the first; expressions on effect parameters; keyed per-channel Exposure values and a keyed checkbox; Curves / Levels (arrays), Fractal Noise, and whether the `tdpi` of a Layer Control holds an id or an index after the referenced layer is reordered or deleted.
 
 **Masks, shapes**

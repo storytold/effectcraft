@@ -30,6 +30,8 @@ pub struct Outcome {
     /// The script is waiting in a modal ScriptUI dialog's `show()` (it goes on when the dialog
     /// closes; see [`crate::dispatch_ui`]).
     pub waiting: bool,
+    /// The native frontend owns the session while this host waits for its render worker.
+    pub render_host: Option<u32>,
 }
 
 /// An uncaught script error.
@@ -55,6 +57,9 @@ impl Outcome {
         if self.waiting {
             j["waiting"] = json!(true);
         }
+        if let Some(host) = self.render_host {
+            j["renderHost"] = json!(host);
+        }
         j
     }
 }
@@ -74,13 +79,16 @@ pub(crate) struct Active {
     /// Running on a script-host thread: modal dialogs hand the session back to the caller
     /// through this link while they wait.
     pub(crate) link: Option<crate::ui::Link>,
+    /// Captured at invocation start: the frontend resets its opt-in when the caller returns.
+    pub(crate) yield_renders: bool,
     /// The files `$.evalFile` is evaluating, outermost first.
     pub(crate) loading: Vec<std::path::PathBuf>,
 }
 
 impl Active {
     pub(crate) fn new(session: Session, name: &str, host: u32) -> Active {
-        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![] }
+        let yield_renders = session.script_ui.yield_renders;
+        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, yield_renders, loading: vec![] }
     }
 }
 
@@ -130,6 +138,13 @@ fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         return Err(throw("scripts can't run scripts"));
     }
     let keys = params.as_object_mut().and_then(|o| o.remove("__keys"));
+    let yield_render = id == "renderQueue.render"
+        && params.get("wait").and_then(J::as_bool).unwrap_or(true)
+        && with_active(|a| Ok(a.yield_renders && a.link.is_some())).unwrap_or(false);
+    if yield_render {
+        let object = params.as_object_mut().ok_or_else(|| throw("renderQueue.render needs an object of parameters"))?;
+        object.insert("wait".into(), json!(false));
+    }
     let r = with_active(|a| {
         Ok(match &keys {
             Some(k) => exec_on_keys(&mut a.session, &id, params, k),
@@ -137,7 +152,10 @@ fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         })
     });
     match r {
-        Ok(Ok(v)) => Ok(js_str(&v.to_string())),
+        Ok(Ok(v)) => {
+            let v = if yield_render { crate::ui::wait_for_render(ctx, v).map_err(throw)? } else { v };
+            Ok(js_str(&v.to_string()))
+        }
         Ok(Err(e)) | Err(e) => Err(throw(e)),
     }
 }
@@ -718,6 +736,10 @@ pub fn run(session: &mut Session, req: &ScriptRequest) -> Outcome {
     };
     let Some(x) = expanded else { return run_expanded(session, req) };
     let mut out = run_expanded(session, &ScriptRequest { code: &x.code, name: req.name, console: req.console });
+    if let Some(host) = out.render_host {
+        crate::ui::keep_render_source_map(host, x);
+        return out;
+    }
     if let Some(e) = out.error.as_mut() {
         x.locate(e);
     }

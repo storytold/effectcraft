@@ -1865,3 +1865,28 @@ fn automation_roots_check_relinked_footage_again() {
     assert!(!(px[0] > 200 && px[3] > 200), "the link pointed outside afterwards was read: {px:?}");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Exporting a repro must not write to the settings store outside the automation roots.
+#[test]
+fn confined_repro_export_requires_an_explicit_writable_path() {
+    use crate::confine::Confinement;
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryConfig::default());
+    let session = Session { config: Some(store.clone()), ..Default::default() };
+    let mut s = McpServer::new(Backend::headless(session));
+    s.backend().confine(Confinement::new(&[], &[dir.path().to_path_buf()]).unwrap());
+    for params in [json!({}), json!({"path": null}), json!({"path": []}), json!({"path": [dir.path().join("repro.jsonl")]})] {
+        let (content, error) = call(&mut s, "execute_command", json!({"command": "help.exportRepro", "params": params}));
+        assert!(error, "{content:?}");
+        assert!(store.list("Repros").is_empty(), "implicit settings-store writes must be refused");
+    }
+    let path = dir.path().join("repro.jsonl");
+    call_json(&mut s, "execute_command", json!({"command": "help.exportRepro", "params": {"path": path}}));
+    assert!(path.is_file());
+    let journal = call_json(&mut s, "execute_command", json!({"command": "journal.export"}));
+    assert!(journal["script"].is_string(), "in-memory exports need no write root");
+    assert!(store.list("Repros").is_empty());
+}

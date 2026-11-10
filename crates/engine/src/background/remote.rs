@@ -430,7 +430,10 @@ impl FrameServer {
                         }
                     }
                     // A frame still waiting for readbacks is replaced: end it, so every `frame_begin` has its `frame_end`.
-                    if self.pending.take().is_some() {
+                    if let Some(old) = self.pending.take() {
+                        if let (Some((key, chose)), Some(pick)) = (old.auto, a.auto_pick()) {
+                            pick.abandoned(key, chose);
+                        }
                         a.frame_end();
                     }
                     a.frame_begin();
