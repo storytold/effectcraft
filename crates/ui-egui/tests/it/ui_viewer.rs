@@ -236,6 +236,35 @@ fn viewer_click_selects_the_topmost_layer_and_a_drag_moves_the_selected_one() {
     assert_eq!(h.state().session.state.selected_layers, vec![front], "nothing selected: the topmost layer");
 }
 
+/// A click on a path of the selected layer, where a layer in front covers it, stays on that path's
+/// layer rather than selecting the layer in front, so a double-click there free-transforms the
+/// path (#1535 keeps this from `pick`).
+#[test]
+fn viewer_double_click_on_a_covered_path_of_the_selected_layer_free_transforms_it() {
+    let mut h = selection_harness();
+    let comp = h.state().session.active_comp().unwrap();
+    let back = comp.layers[1].id;
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [back.0]})).unwrap();
+    // In Back's own space (80×80): its top edge runs through comp (320, 150), under Front.
+    s.execute("mask.new", json!({"layer": back.0, "vertices": [[10, 10], [70, 10], [70, 70], [10, 70]], "closed": true})).unwrap();
+    h.run_steps(40);
+    let at = screen(&h, [320.0, 150.0]);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    // Two clicks a frame apart: the first selects as a click does, the second double-clicks.
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.step();
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.selected_layers, vec![back], "the path's layer stays selected");
+    assert_eq!(h.state().session.state.selected_vertices.len(), 4, "all the path's points are selected");
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
+}
+
 /// A double-click where a precomp layer covers the selected layer opens the precomp: like a single
 /// click, it acts on the topmost layer, which its first click selects (#1535).
 #[test]

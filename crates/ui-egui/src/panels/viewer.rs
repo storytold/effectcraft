@@ -1851,9 +1851,13 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
                 app.ui.status = crate::i18n::tr(ROTO_HINT).to_string();
             }
             _ => {
-                if click_pick(app, ectx, cpt, mods.shift).is_none() {
+                let on_path = ov::segment_at(&paths, &map, pos, 6.0).is_some();
+                if on_path && !mods.shift {
+                    // A click on a path of a selected layer stays on that layer, even where a
+                    // layer in front covers it, so a double-click there free-transforms the path.
+                } else if click_pick(app, ectx, cpt, mods.shift).is_none() {
                     let _ = app.session.execute("edit.deselectAll", json!({}));
-                } else if !mods.shift && !app.session.state.selected_vertices.is_empty() && ov::segment_at(&paths, &map, pos, 6.0).is_none() {
+                } else if !mods.shift && !app.session.state.selected_vertices.is_empty() && !on_path {
                     // A click away from the paths, even on their layer, deselects the mask
                     // points (the layer stays selected), as in After Effects (#513).
                     let _ = app.session.execute("mask.selectVertices", json!({"vertices": []}));
