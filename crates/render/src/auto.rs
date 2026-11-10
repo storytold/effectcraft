@@ -67,7 +67,8 @@ pub struct AutoPick {
 struct Entry {
     stats: AutoStats,
     measuring: [Option<web_time::Instant>; 2],
-    // Lowered by `record`, `declined` and `abandoned`: every frame asked for ends in one.
+    // Lowered by `record`, `declined` and `abandoned`: every frame asked for ends in one (an
+    // [`AutoTicket`] makes sure of it).
     running: [u32; 2],
 }
 
@@ -106,8 +107,16 @@ impl AutoPick {
     /// A warm-up or re-probe frame not reported back by then no longer holds its side.
     const MEASURING_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
+    /// [`AutoPick::choose`] for a frame that ends where it started: the ticket reports back, and
+    /// a ticket dropped without a time (an error, a retry elsewhere, a panic, a cancelled future)
+    /// ends the frame with [`AutoPick::abandoned`].
+    pub fn ticket(&self, key: AutoKey) -> AutoTicket<'_> {
+        AutoTicket { pick: self, key, gpu: self.choose(key), open: true }
+    }
+
     /// Render the frame for `key` on the GPU? Every frame asked for reports back with
-    /// [`AutoPick::record`] (or [`AutoPick::declined`]), or ends with [`AutoPick::abandoned`].
+    /// [`AutoPick::record`] (or [`AutoPick::declined`]), or ends with [`AutoPick::abandoned`]
+    /// ([`AutoPick::ticket`] does that on its own).
     pub fn choose(&self, key: AutoKey) -> bool {
         let Ok(mut m) = self.stats.lock() else { return true };
         if m.len() > Self::MAX_KEYS && !m.contains_key(&key) {
@@ -216,6 +225,45 @@ impl AutoPick {
     pub fn reset(&self) {
         if let Ok(mut m) = self.stats.lock() {
             m.clear();
+        }
+    }
+}
+
+/// One frame [`AutoPick`] chose a side for ([`AutoPick::ticket`]): it reports the frame's time
+/// once, and ends the frame unmeasured when dropped without one.
+#[must_use = "a ticket dropped at once ends its frame unmeasured"]
+pub struct AutoTicket<'a> {
+    pick: &'a AutoPick,
+    key: AutoKey,
+    gpu: bool,
+    open: bool,
+}
+
+impl AutoTicket<'_> {
+    /// The frame renders on the GPU.
+    pub fn gpu(&self) -> bool {
+        self.gpu
+    }
+
+    /// The frame took `ms` on its side.
+    pub fn record(mut self, ms: f64) {
+        self.open = false;
+        self.pick.record(self.key, self.gpu, ms);
+    }
+
+    /// The GPU did not take the frame: it renders on the CPU, and the ticket reports from there.
+    pub fn declined(&mut self) {
+        if self.gpu {
+            self.pick.declined(self.key);
+            self.gpu = false;
+        }
+    }
+}
+
+impl Drop for AutoTicket<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.pick.abandoned(self.key, self.gpu);
         }
     }
 }

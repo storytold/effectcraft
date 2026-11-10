@@ -38,7 +38,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::reads::{ReadFiles, ReadLog};
-use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
+use effectcraft_engine::render::{AutoTicket, CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
 use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
 use rayon::prelude::*;
@@ -2009,32 +2009,32 @@ impl Worker {
         {
             // The browser cannot wait for the GPU to time it (and its CPU path is slow): always
             // the GPU there.
-            let auto = if cfg!(target_arch = "wasm32") { None } else { r.frame_auto(a, job.comp, true) };
-            if auto.is_none_or(|(p, key)| p.choose(key)) {
+            // Every exit that doesn't record ends the frame unmeasured: the ticket is dropped
+            // before a retry (`take`), or on return.
+            let mut ticket = if cfg!(target_arch = "wasm32") { None } else { r.frame_auto(a, job.comp, true).map(|(p, key)| p.ticket(key)) };
+            if ticket.as_ref().is_none_or(AutoTicket::gpu) {
                 let t0 = web_time::Instant::now();
                 match gpu_attempt(g, || g.render_display(&r, job.comp, job.t)) {
                     Ok(Some(f)) => {
                         self.gpu_succeeded();
-                        if let Some((p, key)) = auto {
+                        if let Some(t) = ticket.take() {
                             // Time the GPU's work, not just its recording.
                             g.wait();
                             if g.context().check_health().is_err() {
-                                p.abandoned(key, true);
+                                drop(t);
                                 return self.render_job(job, false, files);
                             }
-                            p.record(key, true, t0.elapsed().as_secs_f64() * 1000.0);
+                            t.record(t0.elapsed().as_secs_f64() * 1000.0);
                         }
                         return FrameImage::Gpu(Arc::new(f));
                     }
                     Ok(None) => {
-                        if let Some((p, key)) = auto {
-                            p.declined(key);
+                        if let Some(t) = &mut ticket {
+                            t.declined();
                         }
                     }
                     Err(e) => {
-                        if let Some((p, key)) = auto {
-                            p.abandoned(key, true);
-                        }
+                        drop(ticket.take());
                         self.gpu_attempt_rejected(g, &e);
                         return self.render_job(job, false, files);
                     }
@@ -2046,12 +2046,13 @@ impl Worker {
             let img = match gpu_attempt(g, || r.comp_frame_cpu(job.comp, job.t)) {
                 Ok(img) => cpu_frame(&img, &job.src.project, &job.opts),
                 Err(e) => {
+                    drop(ticket.take());
                     self.gpu_attempt_rejected(g, &e);
                     return self.render_job(job, false, files);
                 }
             };
-            if let Some((p, key)) = auto {
-                p.record(key, false, t0.elapsed().as_secs_f64() * 1000.0);
+            if let Some(t) = ticket {
+                t.record(t0.elapsed().as_secs_f64() * 1000.0);
             }
             return img;
         }

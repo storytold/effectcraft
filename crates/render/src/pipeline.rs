@@ -5,8 +5,9 @@ use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
 use super::reads::{ReadFiles, ReadLog};
 use super::{
-    Arc, AutoKey, AutoPick, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image, ItemId,
-    ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d, vec2,
+    Arc, AutoKey, AutoPick, AutoTicket, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image,
+    ItemId, ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d,
+    vec2,
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::LayerId;
@@ -584,29 +585,24 @@ impl<'a> Renderer<'a> {
         if self.depth == 0
             && let Some(a) = self.active_accel()
         {
-            let auto = self.frame_auto(a, comp_id, false);
-            if auto.is_none_or(|(p, key)| p.choose(key)) {
+            // (an error returns with the ticket, which ends the frame unmeasured)
+            let mut ticket = self.frame_auto(a, comp_id, false).map(|(p, key)| p.ticket(key));
+            if ticket.as_ref().is_none_or(AutoTicket::gpu) {
                 let t0 = web_time::Instant::now();
-                let res = scope(a);
-                if res.is_err()
-                    && let Some((p, key)) = auto
-                {
-                    p.abandoned(key, true);
-                }
-                if let Some(img) = res? {
-                    if let Some((p, key)) = auto {
-                        p.record(key, true, t0.elapsed().as_secs_f64() * 1e3);
+                if let Some(img) = scope(a)? {
+                    if let Some(t) = ticket {
+                        t.record(t0.elapsed().as_secs_f64() * 1e3);
                     }
                     return Ok(img);
                 }
-                if let Some((p, key)) = auto {
-                    p.declined(key);
+                if let Some(t) = &mut ticket {
+                    t.declined();
                 }
             }
             let t0 = web_time::Instant::now();
             let img = cpu.comp_frame_cpu(comp_id, t);
-            if let Some((p, key)) = auto {
-                p.record(key, false, t0.elapsed().as_secs_f64() * 1e3);
+            if let Some(t) = ticket {
+                t.record(t0.elapsed().as_secs_f64() * 1e3);
             }
             return Ok(img);
         }

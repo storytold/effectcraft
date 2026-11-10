@@ -328,3 +328,35 @@ fn auto_pick_abandoned_frames_stop_counting_as_running() {
     let s = pick.stats(key).unwrap();
     assert_eq!((s.cpu_ms, s.gpu_ms), (Some(10.0), Some(40.0)), "{s:?}");
 }
+
+/// A ticket that never reports (dropped on an error, a retry elsewhere, a cancelled export
+/// future) ends its frame like [`AutoPick::abandoned`]; one the GPU declined reports from the
+/// CPU. (Each exit that skipped `record` left its frame counted as running, and every later
+/// frame on that side was timed as one of several side by side.)
+#[test]
+fn auto_tickets_end_their_frame_on_every_exit() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(6), 1.0, false);
+    let mut dropped = [false; 2];
+    for _ in 0..16 {
+        let t = pick.ticket(key);
+        let gpu = t.gpu();
+        if !std::mem::replace(&mut dropped[usize::from(gpu)], true) {
+            drop(t);
+            continue;
+        }
+        t.record(if gpu { 40.0 } else { 10.0 });
+    }
+    let s = pick.stats(key).unwrap();
+    assert_eq!((s.cpu_ms, s.gpu_ms), (Some(10.0), Some(40.0)), "{s:?}");
+    // Declined: the frame renders on the CPU and reports there, one frame on it.
+    let key = AutoKey::new(ItemId(7), 1.0, false);
+    pick.ticket(key).record(10.0);
+    let mut t = pick.ticket(key);
+    assert!(t.gpu(), "the GPU's warm-up frame");
+    t.declined();
+    assert!(!t.gpu());
+    t.record(10.0);
+    pick.ticket(key).record(10.0);
+    assert_eq!(pick.stats(key).unwrap().cpu_ms, Some(10.0), "timed as one frame on the CPU");
+}
