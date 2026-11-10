@@ -219,6 +219,8 @@ fn prop_row(
         Value::Vec2(_) | Value::Vec3(_) => dims = value_vector(app, ui, &cx, &value, actions),
         Value::Color(_) => value_color(app, ui, &cx, &value, actions),
         Value::Bool(_) => value_toggle(app, ui, &cx, &value, actions),
+        // Cryptomatte's Layer: the Cryptomatte layers the footage's metadata names.
+        Value::Enum(_) if crate::panels::fx_editors::is_crypto_layer(group, prop) => value_crypto_layer(app, ui, &cx, &value, actions),
         Value::Enum(_) => value_popup(app, ui, &cx, &value, actions),
         Value::Layer(_) => value_layer_ref(app, ui, &cx, &value, actions),
         // EXtractoR's red / green / blue / alpha: a popup of the footage's OpenEXR channels (#295).
@@ -404,6 +406,33 @@ fn value_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
         if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), options, Some(*i as usize)) {
             cx.set_step(actions, json!(ni));
         }
+    }
+}
+
+/// Cryptomatte's Layer popup: the Cryptomatte layers of the layer's OpenEXR footage (the three
+/// standard ones when there are none). The stored value stays the index
+/// [`effectcraft_engine::effects::crypto_layer_name`] reads, so older projects load unchanged.
+fn value_crypto_layer(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
+    let Value::Enum(i) = value else {
+        return;
+    };
+    let PropCx { t, uid, cy, vx, r, p, layer, prop, .. } = *cx;
+    // The channels of the frame the render just read: decoded files are cached.
+    let aux = app.session.layer_channels(layer.id);
+    let (choices, shown) = effectcraft_engine::effects::crypto_layer_menu(aux.as_deref(), *i as usize);
+    let names: Vec<String> = choices.iter().map(|c| c.1.clone()).collect();
+    let widest = names.iter().map(|o| p.layout_no_wrap(o.clone(), Tokens::ui(11.5), t.text).size().x).fold(0.0, f32::max);
+    let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((widest + 30.0).clamp(80.0, (r.max.x - vx - 56.0).max(80.0)), 18.0));
+    let pop = egui::Id::unique(("ec-epop", uid));
+    if widgets::dropdown(ui, dr, shown.as_deref().unwrap_or(""), &t, egui::Id::unique(("ec-e", uid))).clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
+    let cur = names.iter().position(|n| Some(n) == shown.as_ref());
+    if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), &names, cur)
+        && let Some(c) = choices.get(ni)
+    {
+        cx.set_step(actions, json!(c.0));
     }
 }
 

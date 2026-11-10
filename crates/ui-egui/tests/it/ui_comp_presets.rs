@@ -174,6 +174,8 @@ fn composition_settings_view_stays_put_when_it_scrolls() {
 #[test]
 fn composition_settings_refits_when_the_language_changes() {
     let mut s = Session::default();
+    // Idle caching keeps repainting while it renders; this test waits for repaints to stop.
+    s.prefs.previews.cache_frames_when_idle = false;
     s.execute("comp.new", json!({"name": "Edit", "width": 2560, "height": 1440, "frameRate": 60, "duration": 4})).unwrap();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1600.0, 1000.0))
@@ -195,4 +197,24 @@ fn composition_settings_refits_when_the_language_changes() {
         assert!(view.contains_rect(ok), "{language}: after {steps} steps OK {ok:?} is outside the dialog {view:?}");
         assert_eq!(view.width() > 600.0 - 36.0, wider, "{language}: the dialog is {} wide", view.width());
     }
+}
+
+/// OK in the New Composition dialog opened over the Home screen (the native menu shows it there)
+/// leaves the Home screen for the new composition; Cancel keeps it.
+#[test]
+fn new_composition_dialog_ok_leaves_the_home_screen() {
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    h.run_steps(3);
+    h.state_mut().ui.start_screen = true;
+    h.state_mut().dialog = Some(Dialog::NewComp);
+    h.run_steps(3);
+    click(&mut h, "dialog.comp.cancel");
+    assert_eq!(h.state().dialog, None);
+    assert!(h.state().ui.start_screen, "Cancel keeps the Home screen");
+    h.state_mut().dialog = Some(Dialog::NewComp);
+    h.run_steps(3);
+    click(&mut h, "dialog.comp.ok");
+    assert_eq!(h.state().dialog, None);
+    assert!(h.state().session.active_comp_id().is_some(), "a composition was made");
+    assert!(!h.state().ui.start_screen, "OK leaves the Home screen");
 }

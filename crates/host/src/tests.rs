@@ -343,6 +343,7 @@ fn value(s: &effectcraft_engine::Session, l: u64, path: &str) -> effectcraft_eng
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     ctx.value(layer, layer.props.prop(path).unwrap())
 }
@@ -606,6 +607,7 @@ fn stereo_rig_expressions_follow_the_master_camera() {
             footage: None,
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         };
         ctx.value(layer, layer.props.prop(path).unwrap()).as_vec3()
     };
@@ -623,4 +625,36 @@ fn stereo_rig_expressions_follow_the_master_camera() {
     s.execute("prop.set", json!({"layer": ctl, "path": "effects/#1/convergence", "value": true})).unwrap();
     assert!(close(v3(&s, "transform/position"), [300.0 - d, 180.0, -800.0]), "{:?}", v3(&s, "transform/position"));
     assert!(close(v3(&s, "transform/poi"), [300.0, 180.0, 0.0]), "{:?}", v3(&s, "transform/poi"));
+}
+
+/// A text layer showing a 3D model's name (`thisComp.layer("Model").source.name`): renaming the
+/// model gives the comp a new disk key and the text shows the new name (expressions on).
+#[test]
+fn renaming_a_model_a_text_expression_reads_changes_the_key_and_the_text() {
+    use effectcraft_engine::Session;
+    let mut s = super::session();
+    let cid = effectcraft_project::ItemId(
+        s.execute("comp.new", json!({"name": "M", "width": 160, "height": 60, "frameRate": 30, "duration": 1})).unwrap()["comp"].as_u64().unwrap(),
+    );
+    let model = s
+        .edit("add model", None, |p, _| {
+            let f = effectcraft_project::Footage { kind: effectcraft_project::FootageKind::Model, ..Default::default() };
+            let model = p.add_item("chair.glb", Default::default(), None, effectcraft_project::ItemKind::Footage(f));
+            let comp = p.comp(cid).cloned().unwrap();
+            let mut l = effectcraft_project::build::layer(p, &comp, "Model", effectcraft_project::LayerSource::Model { item: model }, (16, 16), None);
+            // (not drawn: no model file; an expression still reads its source)
+            l.switches.video = false;
+            p.comp_mut(cid).unwrap().layers.push(l);
+            Ok(model)
+        })
+        .unwrap();
+    let text = s.execute("layer.newText", json!({"comp": cid.0, "text": "x"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.setExpression", json!({"comp": cid.0, "layer": text, "path": "text/sourceText", "expression": "thisComp.layer(\"Model\").source.name"}))
+        .unwrap();
+    let key = effectcraft_engine::render::disk_cache::comp_content_key(&s.project, cid);
+    let shown = |s: &mut Session| s.execute("prop.get", json!({"comp": cid.0, "layer": text, "path": "text/sourceText"})).unwrap()["evaluated"].to_string();
+    assert!(shown(&mut s).contains("chair.glb"), "{}", shown(&mut s));
+    s.execute("project.rename", json!({"item": model.0, "name": "table.glb"})).unwrap();
+    assert_ne!(effectcraft_engine::render::disk_cache::comp_content_key(&s.project, cid), key, "the comp's frames on disk hold the old name");
+    assert!(shown(&mut s).contains("table.glb"), "the text shows the new name: {}", shown(&mut s));
 }

@@ -15,6 +15,8 @@ mod ease_presets;
 mod evalfile;
 mod include;
 mod panels;
+#[cfg(not(target_arch = "wasm32"))]
+mod render_wait;
 #[cfg(not(windows))]
 mod services;
 mod startup;
@@ -137,6 +139,42 @@ fn fill_parameters_use_documented_match_names() {
            [fx.property("ADBE Fill-0002").name, fx.property("ADBE Fill-0007").name, fx.property(2).matchName].join("|")"#,
     );
     assert_eq!(o.result, json!("Color|All Masks|ADBE Fill-0007"));
+}
+
+/// #3113: effects carry After Effects' match names (`ADBE Noise2`, `ADBE OFMotionBlur`); the
+/// names earlier versions emitted still add and find the effect and its parameters.
+#[test]
+fn effects_use_after_effects_match_names_and_accept_legacy_ones() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("N", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var a = fx.addProperty("ADBE Noise2"), b = fx.addProperty("ADBE Noise"), m = fx.addProperty("ADBE OFMotionBlur");
+           var p = fx.addProperty("ADBE Pixel Motion Blur");
+           [a.matchName, b.matchName, m.matchName, p.matchName, a.property("ADBE Noise2-0001").name,
+            fx.property("ADBE Noise").matchName, a.property("ADBE Noise-0001").name, fx.numProperties]"#,
+    );
+    assert_eq!(
+        o.result,
+        json!(["ADBE Noise2", "ADBE Noise2", "ADBE OFMotionBlur", "ADBE OFMotionBlur", "Amount of Noise", "ADBE Noise2", "Amount of Noise", 4])
+    );
+}
+
+/// #3113: names that changed only in case (`ADBE Ellipse` → `ADBE ELLIPSE`, `ADBE Grow Bounds` →
+/// `ADBE GROW BOUNDS`) still find the effect and its parameters.
+#[test]
+fn match_names_that_changed_case_still_find_effects_and_parameters() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("E", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var e = fx.addProperty("ADBE Ellipse"), g = fx.addProperty("ADBE Grow Bounds");
+           [e.matchName, fx.property("ADBE Ellipse").matchName, e.property("ADBE Ellipse-0001").matchName,
+            g.matchName, fx.property("ADBE Grow Bounds").matchName, g.property("ADBE Grow Bounds-0001").matchName]"#,
+    );
+    assert_eq!(o.result, json!(["ADBE ELLIPSE", "ADBE ELLIPSE", "ADBE ELLIPSE-0001", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS-0001"]));
 }
 
 #[test]
