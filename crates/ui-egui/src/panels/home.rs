@@ -475,6 +475,8 @@ fn home_page(
     }
 }
 
+/// Run the commands the Home screen's buttons and recent files asked for, and leave Home once one
+/// opened something (not while a dialog it opened waits, nor when only the list changed).
 fn run_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(&str, serde_json::Value)>) {
     for (id, params) in actions {
         let before = (app.session.path.clone(), app.session.revision);

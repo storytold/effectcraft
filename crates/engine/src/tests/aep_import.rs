@@ -231,6 +231,7 @@ fn file_import_takes_after_effects_projects() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// File ▸ Import ▸ Adobe After Effects Project… is in the menu under that label.
 #[test]
 fn aep_menu_entry_exists() {
     let entries = crate::menus::entries();

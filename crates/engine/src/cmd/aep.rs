@@ -22,6 +22,8 @@ pub fn is_aep_path(path: &str) -> bool {
     std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("aep") || e.eq_ignore_ascii_case("aepx"))
 }
 
+/// `file.importAep`: the `.aep` / `.aepx` at `path` into the open project, in a folder named after
+/// the file; refused ([`EngineError::Refused`]) when parts would be lost and `allowLosses` is not set.
 fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.importAep", "missing `path`"))?.to_string();
     let allow_losses = b_p(p, "allowLosses").unwrap_or(false);
@@ -97,6 +99,8 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+/// `file.exportAep`: the open project as an `.aep` at `path`; refused ([`EngineError::Refused`])
+/// when parts would be lost and `allowLosses` is not set.
 fn export_aep(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.exportAep", "missing `path`"))?.to_string();
     let allow_losses = b_p(p, "allowLosses").unwrap_or(false);
@@ -133,6 +137,7 @@ fn export_aep(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"path": path, "bytes": res.bytes.len(), "report": res.report}))
 }
 
+/// File ▸ Import / Export ▸ Adobe After Effects Project….
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(

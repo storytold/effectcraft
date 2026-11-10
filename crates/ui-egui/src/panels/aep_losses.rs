@@ -90,6 +90,8 @@ pub fn lines(report: &Value) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// Draw the prompt for the conversion waiting on it: its losses by category, Cancel and Import /
+/// Export Anyway (Escape cancels).
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let Some((id, _, report)) = app.dialog_state.aep_losses.command.clone() else {
         app.dialog = None;

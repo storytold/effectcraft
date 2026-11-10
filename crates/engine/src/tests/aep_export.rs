@@ -73,6 +73,7 @@ fn bad_input_is_an_error_not_a_crash() {
     assert!(empty.execute_checked("file.exportAep", json!({"path": path})).is_ok());
 }
 
+/// File ▸ Export ▸ Adobe After Effects Project… is in the menu under that label.
 #[test]
 fn aep_export_menu_entry_exists() {
     let entries = crate::menus::entries();
