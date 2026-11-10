@@ -29,7 +29,6 @@ Shortcuts on this page use Ctrl. On macOS, use Cmd instead of Ctrl and Option in
 - Choose **Animation ▸ Keyframe Interpolation...** or **Keyframe Velocity...** to set the curve exactly.
 - Hold Alt and click a stopwatch to add an expression.
 - The Graph Editor shows value and speed graphs with draggable handles.
-- Turn on **Between Frames** in the Graph Editor's button bar (Allow Keyframes Between Frames) to place keys between frames when you drag or scale them. It is off by default: dragged keys move by whole frames and scaled keys land on frames.
 
 ## Next
 
