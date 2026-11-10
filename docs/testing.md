@@ -64,9 +64,10 @@ when an asset, an `.attribution` sidecar or `ATTRIBUTION.md` changes. The wasm c
 affected L0–L4 and web crates. Every step runs even when an earlier step fails; the final result
 names failed steps and includes timings.
 
-Changes to the root `Cargo.toml`, `Cargo.lock`, `.cargo/`, `xtask/`, `rust-toolchain(.toml)` or
-`clippy.toml` can change every crate's build, so they run the full CI instead and say why. Changes
-no crate reads (most of `docs/`, `README.md`, `.github/`, `packaging/`) only get the cheap checks.
+Changes to the root `Cargo.toml`, `Cargo.lock`, `.cargo/`, `xtask/`, `rust-toolchain(.toml)`,
+`clippy.toml` or `.config/nextest.toml` can change every crate's build or test policy, so they run
+the full CI instead and say why. Changes no crate reads (most of `docs/`, `README.md`, `.github/`,
+`packaging/`) only get the cheap checks.
 
 Limits: a crate that reads a repo file at run time through a path that is not a `../` literal in its
 sources is not detected, and building a subset of packages can unify features differently from the

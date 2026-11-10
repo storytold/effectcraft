@@ -9,7 +9,7 @@
 //! 3. Affected = those packages, every package that depends on them (transitively, through
 //!    normal and build dependencies) and every package that has one of them as a dev-dependency.
 //! 4. Workspace-wide inputs (root `Cargo.toml`, `Cargo.lock`, `.cargo/`, `xtask/`, the toolchain
-//!    file, `clippy.toml`) fall back to the full `cargo xtask ci`.
+//!    file, `clippy.toml`, `.config/nextest.toml`) fall back to the full `cargo xtask ci`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -34,13 +34,15 @@ pub struct Pkg {
     pub inputs: Vec<String>,
 }
 
-/// Changes to these force the full CI: they can change every crate's build.
+/// Changes to these force the full CI: they can change every crate's build or test policy.
 pub fn full_ci_reason(path: &str) -> Option<&'static str> {
     match path {
         "Cargo.toml" => Some("workspace Cargo.toml changed"),
         "Cargo.lock" => Some("Cargo.lock changed"),
         "rust-toolchain" | "rust-toolchain.toml" => Some("toolchain changed"),
         "clippy.toml" => Some("clippy.toml changed"),
+        // Test selection and required runner versions apply to the whole workspace.
+        ".config/nextest.toml" => Some("nextest configuration changed"),
         _ if path.starts_with(".cargo/") => Some(".cargo/ changed"),
         _ if path.starts_with("xtask/") => Some("xtask changed"),
         _ => None,
@@ -472,6 +474,15 @@ mod tests {
         // a crate manifest is not workspace-wide
         assert_eq!(plan(&files(&["crates/time/Cargo.toml"]), &p).full, None);
         assert_eq!(full_ci_reason("docs/xtask.md"), None);
+    }
+
+    #[test]
+    fn nextest_policy_alone_requires_full_ci() {
+        let pl = plan(&files(&[".config/nextest.toml"]), &ws());
+        assert_eq!(pl.full.as_deref(), Some("nextest configuration changed (.config/nextest.toml)"));
+        // Only the actual shared test input triggers this fallback, not every config file.
+        assert_eq!(full_ci_reason(".config/editor.toml"), None);
+        assert_eq!(full_ci_reason("docs/nextest.toml"), None);
     }
 
     #[test]
