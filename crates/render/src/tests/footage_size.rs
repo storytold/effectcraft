@@ -179,7 +179,9 @@ fn footage_kept_as_8_bit_levels_is_noted_as_read() {
             }
             self.clip.frame8(item, f, t, float)
         }
-        fn recording(&self, _: &crate::reads::ReadLog, f: &mut dyn FnMut()) {
+        // (as the media pool does: the files of what `f` reads go to `reads`)
+        fn recording(&self, reads: &crate::reads::ReadLog, f: &mut dyn FnMut()) {
+            reads.note(crate::reads::ReadFile::new("clip.mov", crate::reads::FileStamp::Native { len: 1, modified: Some(1) }));
             self.recording.store(true, Ordering::SeqCst);
             f();
             self.recording.store(false, Ordering::SeqCst);
@@ -193,4 +195,5 @@ fn footage_kept_as_8_bit_levels_is_noted_as_read() {
     r.comp_frame(cid, Tick::ZERO);
     assert!(src.clip.asked.load(Ordering::SeqCst) > 0, "the 8-bit levels were not asked for");
     assert_eq!(src.outside.load(Ordering::SeqCst), 0, "8-bit levels read outside the render's recording");
+    assert!(log.files().files().iter().any(|f| &*f.path == "clip.mov"), "the movie is not in the frame's files");
 }
