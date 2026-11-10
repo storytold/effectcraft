@@ -52,10 +52,20 @@ Commands (CLI, MCP, control channel):
 - `autoSave.saveOnRenderStart`: Save When Starting Render Queue
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
-  Adaptive Resolution drops to while you drag; a playing preview keeps the viewer's resolution)
+  Adaptive Resolution drops to while you drag, and the lowest a playing preview steps down to)
+- `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. Off by default (without it a first play renders
+  at the viewer's resolution at the rate frames arrive, and a looping preview plays its later loops
+  from the cache in real time, as in After Effects; with it the play stays lowered). A
+  preview at Resolution Auto that plays under 80 % of its frame rate (frames render slower than
+  that, so it plays them at the rate they arrive rather than freezing between them) steps
+  down a resolution (half the scale after two seconds, a quarter two seconds later if still slow,
+  no lower than the Adaptive Resolution Limit) for the rest of that play; stopping goes back to the viewer's resolution, and Cache
+  Frames When Idle fills it in. An explicit Resolution (the comp's or the Preview panel's) is
+  kept as set
 - `previews.cacheFramesWhenIdle`: Cache Frames When Idle (Composition ▸ Preview): after a second
   without input or edits, the viewer renders the work area into the RAM preview in the
-  background, from the current time on, until it is cached or the budget is full
+  background, from the current time on, until it is cached or the budget is full. On by default,
+  as in After Effects, so the first playback of a comp left alone for a second is already cached
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
 - `appearance.appearanceMode`: Appearance Mode (`auto` / `dark` / `light`). `auto` (Sync with System) follows the operating system's light or dark appearance while the app runs: on Linux the desktop app reads the XDG desktop portal (`org.freedesktop.appearance` `color-scheme`) once and then listens for its `SettingChanged` signal on a worker thread, repainting only when the value changes (nothing polls); `gsettings` runs at most once at start-up, by absolute path, when the portal gives no answer. Elsewhere it uses what the window system reports. With no answer it shows the dark theme. New installs stay `dark`; Sync with System is opt-in. The Tools bar's appearance button (a monitor, sun or moon) cycles Sync with System, Light and Dark (`view.theme.toggle`, Next Appearance Mode).
 - `appearance.darkTheme`: Dark Theme (`dark` / `darker`), shown in dark appearance
