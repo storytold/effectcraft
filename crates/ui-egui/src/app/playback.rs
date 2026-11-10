@@ -35,6 +35,7 @@ impl EffectcraftApp {
             plan: Some(plan),
             caching: plan.cache_first && plan.video,
             res: preset.resolution.factor(preset.custom_resolution),
+            adaptive: None,
             overlays: preset.include_overlays,
             layer_controls: preset.include_layer_controls,
             restore_max,
@@ -45,6 +46,9 @@ impl EffectcraftApp {
             starting_since: now,
             first_cached: None,
             shown_at: Default::default(),
+            pace: 0.0,
+            pace_acc: None,
+            paced_at: None,
         };
         if !self.playback.caching {
             if plan.video {

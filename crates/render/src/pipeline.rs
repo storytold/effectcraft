@@ -5,8 +5,9 @@ use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
 use super::reads::{ReadFiles, ReadLog};
 use super::{
-    Arc, AutoKey, AutoPick, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image, ItemId,
-    ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d, vec2,
+    Arc, AutoKey, AutoPick, AutoTicket, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image,
+    ItemId, ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d,
+    vec2,
 };
 use effectcraft_keyframe::Value;
 use effectcraft_project::LayerId;
@@ -584,23 +585,24 @@ impl<'a> Renderer<'a> {
         if self.depth == 0
             && let Some(a) = self.active_accel()
         {
-            let auto = self.frame_auto(a, comp_id, false);
-            if auto.is_none_or(|(p, key)| p.choose(key)) {
+            // (an error returns with the ticket, which ends the frame unmeasured)
+            let mut ticket = self.frame_auto(a, comp_id, false).map(|(p, key)| p.ticket(key));
+            if ticket.as_ref().is_none_or(AutoTicket::gpu) {
                 let t0 = web_time::Instant::now();
                 if let Some(img) = scope(a)? {
-                    if let Some((p, key)) = auto {
-                        p.record(key, true, t0.elapsed().as_secs_f64() * 1e3);
+                    if let Some(t) = ticket {
+                        t.record(t0.elapsed().as_secs_f64() * 1e3);
                     }
                     return Ok(img);
                 }
-                if let Some((p, key)) = auto {
-                    p.declined(key);
+                if let Some(t) = &mut ticket {
+                    t.declined();
                 }
             }
             let t0 = web_time::Instant::now();
             let img = cpu.comp_frame_cpu(comp_id, t);
-            if let Some((p, key)) = auto {
-                p.record(key, false, t0.elapsed().as_secs_f64() * 1e3);
+            if let Some(t) = ticket {
+                t.record(t0.elapsed().as_secs_f64() * 1e3);
             }
             return Ok(img);
         }
@@ -878,6 +880,12 @@ impl<'a> Renderer<'a> {
 
     /// Source pixels of a layer in layer space (before masks/effects).
     pub(crate) fn source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
+        self.source_with(ctx, layer, false)
+    }
+
+    /// [`Renderer::source`]; with `quantized`, footage that [`Renderer::prequantized_footage`]
+    /// counts comes quantised to the project depth.
+    fn source_with(&self, ctx: &EvalCtx, layer: &Layer, quantized: bool) -> Option<Buf> {
         let s = self.opts.scale;
         match &layer.source {
             LayerSource::Solid { item } => {
@@ -910,7 +918,7 @@ impl<'a> Renderer<'a> {
                     && let Some(nc) = self.project.comp(*item)
                 {
                     let img = self.footage_frame(ctx, layer, *item, pf, lt, None)?;
-                    return Some(self.footage_buf(&img, pf, nc.width, nc.height));
+                    return Some(self.footage_buf(&img, pf, nc.width, nc.height, false));
                 }
                 // Essential Properties overrides render the nested comp with this instance's
                 // values.
@@ -958,8 +966,12 @@ impl<'a> Renderer<'a> {
                         return Some(buf);
                     }
                 }
+                // 8 bpc plain footage: made from the footage's 8-bit levels, no float frame.
+                if quantized && let Some(buf) = self.footage_buf8(ctx, layer, item, self.proxy_for(item).unwrap_or(f), f, ctx.source_time(layer)) {
+                    return Some(buf);
+                }
                 let (img, pf) = self.footage_picture_of(ctx, layer, item, f)?;
-                Some(self.footage_buf(&img, pf, f.width, f.height))
+                Some(self.footage_buf(&img, pf, f.width, f.height, quantized && Self::prequantized_footage(layer)))
             }
             // (the font files go to this render's log, which `ctx` may not carry: see
             // [`Renderer::with_reads`])
@@ -992,15 +1004,74 @@ impl<'a> Renderer<'a> {
 
     /// A decoded frame of `f` as a layer buffer covering `w`×`h` layer pixels (the footage's
     /// nominal size; proxies are scaled up to it), converted from its colour profile.
-    fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32) -> Buf {
-        let mut buf = match self.footage_layout(img, w, h) {
-            FootageLayout::Native { scale } => Buf { img: img.clone(), offset: [0.0; 2], scale },
-            FootageLayout::Resample { width, height, scale } => Buf { img: effectcraft_raster::resample(img, width, height), offset: [0.0; 2], scale },
-        };
-        if let Some(c) = self.pipe.media_in(f) {
-            color::convert(&mut buf.img, &c);
+    ///
+    /// `quantized`: also clamp and quantise it to the project depth, as [`Renderer::masked_source`]
+    /// would (fused with the copy of the cached frame: one pass over it instead of three).
+    fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32, quantized: bool) -> Buf {
+        let c = self.pipe.media_in(f);
+        match self.footage_layout(img, w, h) {
+            FootageLayout::Native { scale } => {
+                let img = match (quantized, &c) {
+                    (true, _) => self.pipe.copy_converted(img, c.as_ref()),
+                    (false, Some(c)) => {
+                        let mut img = img.clone();
+                        color::convert(&mut img, c);
+                        img
+                    }
+                    (false, None) => img.clone(),
+                };
+                Buf { img, offset: [0.0; 2], scale }
+            }
+            FootageLayout::Resample { width, height, scale } => {
+                let mut img = effectcraft_raster::resample(img, width, height);
+                if let Some(c) = &c {
+                    color::convert(&mut img, c);
+                }
+                if quantized {
+                    self.pipe.quantize(&mut img);
+                }
+                Buf { img, offset: [0.0; 2], scale }
+            }
         }
-        buf
+    }
+
+    /// [`Renderer::footage_buf`]'s quantised buffer made from the footage's 8-bit levels
+    /// ([`FootageSource::frame8`]), the same pixels to the bit, when nothing before the quantise
+    /// changes them: an 8 bpc render at Full size of plain footage (no masks, colour profile,
+    /// Separate Fields, Frame Blending, Cineon, Invert Alpha or linear light interpretation).
+    /// `None` otherwise, and when the source has no 8-bit frame.
+    // ponytail: the media pool keeps the 8-bit and the float frame as separate entries, so a
+    // movie shown by both a plain and a masked layer in one 8 bpc comp is decoded twice per
+    // frame; derive one from the other in the pool if a comp like that turns out common.
+    #[allow(clippy::too_many_arguments)]
+    fn footage_buf8(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, pf: &Footage, f: &Footage, t: Tick) -> Option<Buf> {
+        let plain = self.pipe.levels == Some(255.0)
+            && Self::prequantized_footage(layer)
+            && self.reduced_size(f.width, f.height).is_none()
+            && self.pipe.media_in(pf).is_none()
+            && pf.fields == effectcraft_project::FieldOrder::Off
+            && !(pf.invert_alpha || pf.linear_light_applies() || pf.cineon_applies())
+            && frame_blend_mode(ctx, layer) == FrameBlend::Off;
+        if !plain {
+            return None;
+        }
+        let fr = self.read(|| self.footage.frame8(item, pf, t, self.pipe.float_curve(pf)))?;
+        let n = (fr.width as usize).checked_mul(fr.height as usize)?;
+        let px = fr.rgba.as_chunks::<4>().0;
+        if px.len() != n {
+            return None;
+        }
+        use rayon::prelude::*;
+        let data = px.par_iter().map(|&p| effectcraft_raster::expand_u8(p)).collect();
+        let k = if fr.width > 0 { f.width.max(1) as f64 / fr.width as f64 } else { 1.0 };
+        Some(Buf { img: Image { width: fr.width, height: fr.height, data }, offset: [0.0; 2], scale: 1.0 / k })
+    }
+
+    /// The layer's source is footage that [`Renderer::source`] hands over already quantised
+    /// ([`Renderer::footage_buf`]): footage without masks (masks apply to unquantised pixels).
+    /// Collapsed layers may be vector footage, drawn elsewhere: not counted.
+    fn prequantized_footage(layer: &Layer) -> bool {
+        matches!(layer.source, LayerSource::Footage { .. }) && !layer.switches.collapse && layer.masks().is_none_or(|m| m.groups().next().is_none())
     }
 
     /// How [`Renderer::footage_buf`] lays out a decoded frame `img` of footage `w`×`h` layer
@@ -1159,13 +1230,14 @@ impl<'a> Renderer<'a> {
 
     /// Source → masks, clamped/quantised to the project depth.
     fn masked_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
-        let mut buf = match self.content_times(ctx, layer) {
-            Some(times) => self.blurred_source(ctx, layer, &times)?,
-            None => self.source(ctx, layer)?,
+        let (mut buf, quantized) = match self.content_times(ctx, layer) {
+            Some(times) => (self.blurred_source(ctx, layer, &times)?, false),
+            None => (self.source_with(ctx, layer, true)?, Self::prequantized_footage(layer)),
         };
-        // A solid is filled with a quantised colour: only masks can take it off the grid.
+        // A solid is filled with a quantised colour, and plain footage comes quantised: only
+        // masks can take them off the grid.
         let solid = matches!(layer.source, LayerSource::Solid { .. });
-        if masks::apply(ctx, layer, &mut buf, self.mask_blur(ctx, layer)) || !solid {
+        if masks::apply(ctx, layer, &mut buf, self.mask_blur(ctx, layer)) || !(solid || quantized) {
             self.pipe.quantize(&mut buf.img);
         }
         Some(buf)
