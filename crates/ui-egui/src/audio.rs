@@ -35,6 +35,11 @@ pub trait AudioDevice: Send {
     /// Start pulling interleaved stereo frames from `feed` (see [`AudioFeed::pull`]).
     fn start(&mut self, feed: Arc<AudioFeed>) -> Result<(), String>;
     fn stop(&mut self);
+    /// The output stream failed since it started (a device that dropped or died): playback
+    /// drops it and re-opens the output on a timer instead of playing silence through it (#3318).
+    fn failed(&self) -> bool {
+        false
+    }
     /// Output latency in sample frames (device buffering), for A/V sync.
     fn latency_frames(&self) -> u64 {
         0
@@ -43,6 +48,10 @@ pub trait AudioDevice: Send {
     /// Audio) move queued samples to the output here.
     fn pump(&mut self) {}
 }
+
+/// How often (s) a preview whose output failed or died re-opens it while playing goes on (see
+/// [`AudioDevice::failed`]): what pause/play proves works does by hand, on a timer (#3318).
+pub const AUDIO_RETRY_S: f64 = 2.0;
 
 /// Opens the default output device (`None` when there is none).
 pub type AudioDeviceFactory = Box<dyn Fn(&AudioOutput) -> Option<Box<dyn AudioDevice>>>;
@@ -239,7 +248,13 @@ impl AudioPlayback {
                 })
                 .map_err(|e| e.to_string())?
         };
-        device.start(feed.clone())?;
+        if let Err(e) = device.start(feed.clone()) {
+            // The feeder is mixing into a feed nothing plays: stop and join it, or every refused
+            // open (the timed retry re-opens on failure) leaks a thread.
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+            return Err(e);
+        }
         Ok(AudioPlayback { feed, device, stop, thread: Some(thread), feeder: None, rate, span })
     }
 
@@ -258,6 +273,11 @@ impl AudioPlayback {
     /// The comp sample index audible now.
     pub fn clock(&self) -> i64 {
         clock_sample(&self.span, self.feed.consumed(), self.device.latency_frames())
+    }
+
+    /// The output stream failed since it started (see [`AudioDevice::failed`]).
+    pub fn failed(&self) -> bool {
+        self.device.failed()
     }
 
     pub fn finished(&self) -> bool {
@@ -557,6 +577,265 @@ mod tests {
         playback.feed.pull(&mut out);
         assert_eq!(out, [0.5; 8]);
         playback.stop();
+    }
+
+    /// #3318: an output that dies mid-play is dropped (which also ends its error loop) and
+    /// opened again while playing goes on; a refused open is retried on the timer too. Playing
+    /// continues without sound between attempts, and a recovered device brings the sound back.
+    #[test]
+    fn a_failed_output_is_reopened_while_playing() {
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::preview::PreviewShortcut;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+        use effectcraft_engine::{EditorState, Session};
+        use std::sync::atomic::AtomicUsize;
+
+        /// Three devices in a row: the first dies right after starting, the second refuses to
+        /// open, the third is healthy.
+        #[derive(Clone, Copy)]
+        enum Script {
+            Dies,
+            Refuses,
+            Healthy,
+        }
+        struct Scripted(Script);
+        impl AudioDevice for Scripted {
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            /// Opens fine unless the script refuses; how it behaves later is `failed`.
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                match self.0 {
+                    Script::Refuses => Err("device unavailable".into()),
+                    _ => Ok(()),
+                }
+            }
+            fn stop(&mut self) {}
+            /// A scripted stream dies (`Dies`) or stays healthy; a refused one never opened.
+            fn failed(&self) -> bool {
+                matches!(self.0, Script::Dies)
+            }
+        }
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "song.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(600.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("song.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(4.0));
+        let layer = build::layer(&mut p, &comp, "song.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let session =
+            Session { project: Arc::new(p), state: EditorState { active_comp: Some(cid), open_comps: vec![cid], ..Default::default() }, ..Default::default() };
+        let mut app = crate::EffectcraftApp::new(session);
+        app.use_manual_clock();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        app.hooks.audio_device = Some(Box::new(move |_| {
+            let n = factory_calls.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Scripted(match n {
+                0 => Script::Dies,
+                1 => Script::Refuses,
+                _ => Script::Healthy,
+            })))
+        }));
+
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let tick = |app: &mut crate::EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame| {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.tick(ctx, frame));
+        };
+
+        // Play (the audio-only preview starts sound at once): the first device opens and is
+        // already dead.
+        app.play_with(0.0, PreviewShortcut::AltNumpad0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the first device opened");
+        assert!(app.audio.is_some());
+
+        // The first pass notices the failure, drops the stream and arms the retry a full
+        // interval after it opened (it ran none of it); the preview keeps playing without sound.
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the failed stream was dropped, not yet re-opened");
+        assert!(app.audio.is_none(), "the dead stream is gone");
+        assert_eq!(app.playback.audio_retry_at, Some(AUDIO_RETRY_S), "the retry is armed");
+        assert!(app.playback.playing, "the preview plays on without sound");
+
+        // When the timer fires, the second device refuses to open, which arms the retry again;
+        // when that fires too, the healthy device takes over and the clock drives playback.
+        app.clock_mut().advance(2.0);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "the timer tried the output again");
+        assert!(app.audio.is_none(), "the refused open leaves no playback");
+        assert_eq!(app.playback.audio_retry_at, Some(2.0 * AUDIO_RETRY_S), "the retry is armed again");
+
+        app.clock_mut().advance(2.5);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "the timer opened the output again");
+        let a = app.audio.as_ref().expect("the recovered device plays");
+        assert!(!a.failed(), "the recovered device is healthy");
+        // The pass is delayed 2.5s past the refusal: the sound re-opens where the wall clock is
+        // now (4.5s = frame 135, wrapped into the 120-frame work area), not at the recorded
+        // audible frame of the previous pass (2s = frame 60).
+        assert_eq!(a.span.start, 24000, "the re-open follows the wall clock (frame 15 = 0.5s), not the last pass");
+        assert_eq!(app.playback.audio_retry_at, None, "a working output clears the retry");
+    }
+
+    /// A stream that starts and dies at once is not re-opened on every UI pass: the retry waits
+    /// a full interval after it opened, and the preview plays on the wall clock meanwhile.
+    #[test]
+    fn streams_that_keep_dying_are_not_reopened_on_every_pass() {
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::preview::PreviewShortcut;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+        use effectcraft_engine::{EditorState, Session};
+        use std::sync::atomic::AtomicUsize;
+
+        /// Every stream this device opens starts fine and is already dead.
+        struct Dying;
+        impl AudioDevice for Dying {
+            /// Always reports success: the failure shows up in `failed` afterwards.
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                Ok(())
+            }
+            fn stop(&mut self) {}
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            /// The stream died before it delivered anything.
+            fn failed(&self) -> bool {
+                true
+            }
+        }
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "song.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(600.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("song.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(4.0));
+        let layer = build::layer(&mut p, &comp, "song.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let session =
+            Session { project: Arc::new(p), state: EditorState { active_comp: Some(cid), open_comps: vec![cid], ..Default::default() }, ..Default::default() };
+        let mut app = crate::EffectcraftApp::new(session);
+        app.use_manual_clock();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        app.hooks.audio_device = Some(Box::new(move |_| {
+            factory_calls.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Dying))
+        }));
+
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let tick = |app: &mut crate::EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame| {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.tick(ctx, frame));
+        };
+
+        app.play_with(0.0, PreviewShortcut::AltNumpad0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the first stream opened");
+        tick(&mut app, &ctx, &frame);
+        assert!(app.audio.is_none() && app.playback.playing, "the dead stream is dropped, the preview plays on");
+        assert_eq!(app.playback.audio_retry_at, Some(AUDIO_RETRY_S), "the retry waits the interval from the open");
+
+        // Before the timer fires, further passes do nothing: no new stream per UI pass.
+        app.clock_mut().advance(0.5);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "no stream was opened before the timer");
+
+        // When it fires, a new stream opens and dies at once too; the next pass does not open
+        // another one until its own interval has run.
+        app.clock_mut().advance(1.5);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "the timer opened a second stream");
+        app.clock_mut().advance(0.2);
+        tick(&mut app, &ctx, &frame);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "a stream that just died waits for its interval");
+        assert_eq!(app.playback.audio_retry_at, Some(2.0 + AUDIO_RETRY_S), "the next retry is a full interval after the open");
+    }
+
+    /// A refused open stops and joins the feeder thread instead of leaking it: `start` returns
+    /// its error only after the feeder's current block (a slow footage read) has finished, and
+    /// the timed retry's repeated refused opens do not accumulate threads.
+    #[test]
+    fn a_failed_open_stops_the_feeder_thread() {
+        use std::time::{Duration, Instant};
+
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, build};
+        use effectcraft_engine::render::FootageSource;
+        use effectcraft_engine::render::cache::LayerCache;
+
+        /// Footage audio whose first read is slow: the feeder is inside it when the open fails.
+        /// It signals the shared `entered` once the read begins.
+        struct FirstReadSlow {
+            entered: Arc<AtomicBool>,
+        }
+        impl FootageSource for FirstReadSlow {
+            fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<effectcraft_engine::raster::Image>> {
+                None
+            }
+            fn audio(&self, _: ItemId, _: &Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+                self.entered.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_secs(2));
+                Some(vec![0.5; frames * 2])
+            }
+        }
+        /// An output that never opens, after waiting for the feeder to be inside its slow read.
+        struct Refusing {
+            entered: Arc<AtomicBool>,
+        }
+        impl AudioDevice for Refusing {
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !self.entered.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err("device unavailable".into())
+            }
+            fn stop(&mut self) {}
+        }
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "song.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(600.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("song.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
+        let layer = build::layer(&mut p, &comp, "song.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer].into();
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let entered = Arc::new(AtomicBool::new(false));
+        let src = RenderSource {
+            project: Arc::new(p),
+            footage: Arc::new(FirstReadSlow { entered: entered.clone() }),
+            expr: None,
+            layer_cache: Arc::new(LayerCache::default()),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+
+        let t = Instant::now();
+        let err = match AudioPlayback::start(
+            Box::new(Refusing { entered: entered.clone() }),
+            src,
+            cid,
+            Tick::ZERO,
+            Tick::ZERO,
+            Tick::from_seconds_f64(10.0),
+            true,
+            0,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("the device refuses"),
+        };
+        assert_eq!(err, "device unavailable");
+        // The feeder's second block was mid-read when the open failed: returning the error means
+        // the feeder was signalled and joined, not left mixing into a feed nothing plays.
+        assert!(t.elapsed() >= Duration::from_millis(1500), "start returned after {:?}, without joining the feeder", t.elapsed());
     }
 
     #[test]

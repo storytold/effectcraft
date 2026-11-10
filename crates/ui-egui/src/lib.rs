@@ -197,6 +197,15 @@ pub struct Playback {
     pub restore_max: Option<Option<PanelKind>>,
     /// Audio-only previews: the frame under the audible sample (the current time stays put).
     pub audio_frame: Option<i64>,
+    /// When playback lost its output (a failed open or a dead stream), when it is opened again
+    /// (app-clock seconds; `None` = nothing to retry). The preview plays on without sound and
+    /// the output is opened again on a timer (see `audio::AUDIO_RETRY_S`): what pause/play does
+    /// by hand, so a recovering device brings the sound back (#3318).
+    pub audio_retry_at: Option<f64>,
+    /// When the playing preview's output opened (app-clock seconds, `None` without one): a
+    /// stream that failed is re-opened `AUDIO_RETRY_S` after it opened, less what it ran, so a
+    /// device whose streams die at once does not get a new one every UI pass (#3318).
+    pub audio_opened_at: Option<f64>,
     /// The preview's sound waits for frames: a preview whose start gave up on frames that weren't
     /// cached shows every frame as it renders, silently, and starts the sound once the frames
     /// ahead are cached while it keeps real time (#208), or the rest of the preview is. Once the

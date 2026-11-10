@@ -154,7 +154,7 @@ impl EffectcraftApp {
             self.playback.start_wall = now;
             self.playback.start_frame = p.first;
             self.session.set_time(fr.tick_of(p.first));
-            self.start_audio(fr.tick_of(p.first));
+            self.start_audio(fr.tick_of(p.first), now);
         }
         ctx.request_repaint();
         true
@@ -200,6 +200,38 @@ impl EffectcraftApp {
     /// Advance the audio or scrub output and feed its latest peaks to the level meter; an idle scrub is closed after
     /// one second. With no source but an active meter, drive the meter to silence and request a repaint.
     fn pump_meters(&mut self, ctx: &egui::Context, now: f64) {
+        // A stream that failed mid-play is dropped, which also ends the device's error loop;
+        // playing goes on without sound, and the output is opened again on a timer (#3318). The
+        // re-open waits AUDIO_RETRY_S less what the stream ran: one that died at once is retried
+        // a full interval after it opened, so a device that keeps dying does not get a new
+        // stream (and thread) every UI pass.
+        if self.playback.playing && self.audio.as_ref().is_some_and(audio::AudioPlayback::failed) {
+            self.audio = None;
+            self.playback.audio_retry_at = Some(self.playback.audio_opened_at.map_or(now, |opened| (opened + audio::AUDIO_RETRY_S).max(now)));
+            self.playback.audio_opened_at = None;
+        }
+        if self.playback.playing && self.audio.is_none() && self.playback.audio_retry_at.is_some_and(|at| now >= at) {
+            self.playback.audio_retry_at = Some(now + audio::AUDIO_RETRY_S);
+            // Advance the audio-only clock to this pass before choosing where to re-open: the
+            // recorded audible frame is the previous pass's, and a pass delayed past the retry
+            // would otherwise replay stale audio. Video re-opens where the picture is.
+            if self.playback.audio_frame.is_some()
+                && let Some(p) = self.playback.plan
+                && let Some(fr) = self.session.active_comp().map(|c| c.frame_rate)
+            {
+                let n = (((now - self.playback.start_wall) * p.fps) / p.step.max(1) as f64).floor() as i64;
+                if let Some(frame) = p.frame_after(self.playback.start_frame, n) {
+                    self.playback.audio_frame = Some(frame);
+                }
+            }
+            // Open again where playback got to: where the picture is (video) or where the sound
+            // was audible (audio-only).
+            let t = match self.playback.audio_frame {
+                Some(f) => self.session.active_comp().map_or_else(|| self.session.time(), |c| c.frame_rate.tick_of(f)),
+                None => self.session.time(),
+            };
+            self.start_audio(t, now);
+        }
         if let Some(a) = &mut self.audio {
             a.pump();
             self.meter.update(a.feed.take_peaks(), now);
@@ -254,7 +286,7 @@ impl EffectcraftApp {
         // preview goes on silently, and the sound starts once frames are cached.
         if need.is_some() {
             self.playback.audio_held = false;
-            self.start_audio(fr.tick_of(cur));
+            self.start_audio(fr.tick_of(cur), now);
         }
         false
     }
@@ -273,7 +305,7 @@ impl EffectcraftApp {
             self.playback.audio_held = false;
             self.playback.start_wall = now;
             self.playback.start_frame = cur;
-            self.start_audio(fr.tick_of(cur));
+            self.start_audio(fr.tick_of(cur), now);
         }
     }
 
