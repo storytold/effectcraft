@@ -137,6 +137,23 @@ fn wheel_zooms_around_the_pointer_and_hand_tool_pans() {
     assert!(layer.effects().is_none_or(|fx| fx.groups().count() == 0), "panning adds no Roto Brush effect");
 }
 
+/// #2896: a middle-drag that began on the canvas keeps panning once the pointer has left it, and
+/// one that began off the canvas doesn't pan when the pointer moves over it.
+#[test]
+fn middle_drag_keeps_panning_off_the_canvas_and_needs_a_press_on_it() {
+    let mut h = harness();
+    let area = rect(&h, "layerPanel.area");
+    let c = area.center();
+    // The title strip, just above the canvas.
+    let off = pos2(c.x, area.min.y - 10.0);
+    drag_with(&mut h, egui::PointerButton::Middle, c, off);
+    let [x, y] = h.state().ui.layer_pan;
+    assert!(x.abs() < 1.0 && (y - (off.y - c.y)).abs() < 1.0, "the pan follows the whole drag: [{x}, {y}]");
+    let pan = h.state().ui.layer_pan;
+    drag_with(&mut h, egui::PointerButton::Middle, off, c);
+    assert_eq!(h.state().ui.layer_pan, pan, "a press off the canvas doesn't pan it");
+}
+
 #[test]
 fn zoom_tool_click_zooms_in_the_layer_panel() {
     let mut h = harness();
