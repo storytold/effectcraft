@@ -320,6 +320,30 @@ fn cache_frames_when_idle_survives_an_inverted_work_area() {
     assert!(!h.state().playback.playing);
 }
 
+/// A preview that played at full rate and then stalls on frames that aren't cached still steps
+/// down: the rate from before the stall doesn't count once nothing was shown for a second. (The
+/// last second shown kept reading as full rate through the stall, and it never stepped down.)
+#[test]
+fn playback_that_stalls_after_keeping_up_steps_down() {
+    let mut h = harness();
+    h.state_mut().session.prefs.previews.adaptive_playback = true;
+    h.state().frames.set_budget(0);
+    h.state_mut().use_manual_clock();
+    invoke(&mut h, "playback.toggle", json!({}));
+    h.step();
+    assert!(h.state().playback.playing);
+    // A second shown at the comp's rate, just before the stall.
+    let t0 = h.state().now();
+    for i in 0..30 {
+        h.state_mut().playback.frame_shown(t0 - 1.0 + f64::from(i) / 30.0);
+    }
+    for _ in 0..25 {
+        h.state_mut().clock_mut().advance(0.1);
+        h.step();
+    }
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.5);
+}
+
 /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at Auto that
 /// stalls for two seconds steps down to half its scale, two more to a quarter; an explicit Resolution and
 /// the pref turned off (its default) keep the scale, and stopping goes back to the viewer's.

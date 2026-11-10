@@ -553,7 +553,8 @@ impl EffectcraftApp {
             || pb.res.is_some()
             || !self.viewer_res().is_auto()
             || now - since < 2.0
-            || pb.achieved_fps().is_some_and(|f| f * step >= pb.fps * 0.8)
+            // (a rate from before a stall: nothing shown for a second isn't keeping up)
+            || (pb.shown_at.back().is_some_and(|t| now - t <= 1.0) && pb.achieved_fps().is_some_and(|f| f * step >= pb.fps * 0.8))
             || lower < self.session.prefs.adaptive_limit() - 1e-9
         {
             return;
