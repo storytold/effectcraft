@@ -2,8 +2,8 @@
 //!
 //! Allocation failure can abort without a panic hook. The GUI therefore owns a pipe to a
 //! helper which never loads a project, font database or GPU. Only an explicit marker after
-//! normal teardown suppresses the report. EOF alone identifies an unexpected exit, not its
-//! cause. System-wide exhaustion can still prevent the helper or its native dialog working.
+//! normal teardown suppresses the report. EOF alone identifies a lost control channel, not
+//! a process exit or its cause. System-wide exhaustion can still prevent the helper or its native dialog working.
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -26,7 +26,7 @@ const EVENT_BYTES: usize = 128;
 const EVENT_COUNT: usize = 32;
 
 /// Owned only by the GUI, never handed to another child. Dropping it without `finish` closes
-/// the pipe and reports an unexpected exit; there is intentionally no clean-exit Drop hook.
+/// the pipe and reports the incident; there is intentionally no clean-exit Drop hook.
 pub struct Reporter {
     pipe: ChildStdin,
     child: Child,
@@ -725,10 +725,14 @@ mod tests {
         assert!(!maybe_run(&[], |_| panic!("no dialog")));
         assert!(!maybe_run(&[OsString::from("--version")], |_| panic!("no dialog")));
         assert!(maybe_run(&[OsString::from(FLAG)], |_| panic!("no dialog")));
-        let args = [FLAG, "../escape", "", "", "1"].map(OsString::from);
+        let args = [FLAG, "../escape", "", "", "1", "1"].map(OsString::from);
         assert!(maybe_run(&args, |_| panic!("no dialog")));
-        let args = [FLAG, "1-1", "", "", "invalid"].map(OsString::from);
+        let args = [FLAG, "1-1", "", "", "invalid", "1"].map(OsString::from);
         assert!(maybe_run(&args, |_| panic!("no dialog")));
+        for pid in ["0", "not-a-pid", "4294967296"] {
+            let args = [FLAG, "1-1", "", "", "0", pid].map(OsString::from);
+            assert!(maybe_run(&args, |_| panic!("no dialog")));
+        }
     }
 
     #[test]
