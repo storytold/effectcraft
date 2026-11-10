@@ -19,3 +19,4 @@ effectcraft-model = { workspace = true }
 [dev-dependencies]
 effectcraft-script = { workspace = true }
 effectcraft-host = { workspace = true }
+tempfile = { workspace = true }

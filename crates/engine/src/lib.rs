@@ -21,6 +21,7 @@ pub mod menus;
 mod output_guard;
 pub mod preview;
 pub mod render_queue;
+pub mod replay;
 pub mod scriptui;
 mod settings;
 mod system;
@@ -97,7 +98,7 @@ pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
 pub use services::{FsServices, Importer, Services};
-pub use session::{DiskSaltJob, upgrade_effects};
+pub use session::upgrade_effects;
 
 pub struct Session {
     pub project: Arc<Project>,
@@ -171,6 +172,9 @@ pub struct Session {
     pub crypto_probe: Arc<std::sync::Mutex<commands::CryptoProbeSlot>>,
     /// The persistent disk cache (Settings ▸ Media & Disk Cache), when enabled.
     pub disk_cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>,
+    /// Files File ▸ Reload Footage reloaded while the disk cache was off: their entries are
+    /// dropped when it is switched on ([`Session::configure_disk_cache`]), before it is used.
+    pub pending_disk_drops: std::collections::BTreeSet<String>,
     /// Settings (Preferences).
     pub prefs: prefs::Prefs,
     /// Bumped whenever settings change (frontends re-apply theme, labels…).
@@ -254,14 +258,6 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
-    /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
-    pub disk_salt: Option<(u64, u64)>,
-    /// Take the disk cache's footage salt on a worker thread ([`Session::refresh_disk_salt`]):
-    /// frontends with an event loop (the desktop app) turn this on and call
-    /// [`Session::poll_disk_salt`] each frame; headless sessions take it at once.
-    pub disk_salt_background: bool,
-    /// The footage salt being taken in the background.
-    pub disk_salt_job: Option<DiskSaltJob>,
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
@@ -356,6 +352,7 @@ impl Default for Session {
             layer_cache: Arc::new(LayerCache::default()),
             crypto_probe: Default::default(),
             disk_cache: None,
+            pending_disk_drops: Default::default(),
             prefs: prefs::Prefs::default(),
             prefs_revision: 0,
             config: None,
@@ -391,9 +388,6 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
-            disk_salt: None,
-            disk_salt_background: false,
-            disk_salt_job: None,
             aux_footage: None,
             script_calls: ScriptCalls::default(),
         }

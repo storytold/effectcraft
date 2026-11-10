@@ -139,11 +139,35 @@ fn drop_3d_values(l: &mut Layer) {
 pub(super) fn rename(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.rename")?;
     let name = str_p(p, "name").ok_or_else(|| bad("layer.rename", "missing `name`"))?.to_string();
+    let t = s.time();
     s.edit("Rename Layer", None, |proj, _| {
-        layer_mut(proj, cid, lid)?.name = name.clone();
+        set_layer_name(layer_mut(proj, cid, lid)?, &name, t);
         Ok(())
     })?;
     Ok(Value::Null)
+}
+
+/// Give layer `l` the name `name` the user typed (comp time `t` picks the text). A text layer's
+/// name follows its text until the user renames it; an empty name makes it follow the text again
+/// (After Effects, #3233). Committing the unchanged name changes nothing.
+pub(super) fn set_layer_name(l: &mut Layer, name: &str, t: effectcraft_time::Tick) {
+    let text_name =
+        l.props.prop("text/sourceText").filter(|_| matches!(l.source, effectcraft_project::LayerSource::Text)).map(|pr| match pr.value_at(l.layer_time(t)) {
+            KV::Text(d) => effectcraft_project::text_layer_name(&d.text),
+            KV::Str(txt) => effectcraft_project::text_layer_name(&txt),
+            _ => String::new(),
+        });
+    match text_name {
+        Some(first) if name.trim().is_empty() => {
+            l.name = if first.is_empty() { "Text".to_string() } else { first };
+            l.name_follows_text = Some(true);
+        }
+        Some(_) if name != l.name => {
+            l.name = name.to_string();
+            l.name_follows_text = Some(false);
+        }
+        _ => l.name = name.to_string(),
+    }
 }
 
 /// The Timeline's Comment column.

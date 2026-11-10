@@ -322,6 +322,10 @@ build real projects through these interfaces; they are worked examples of everyt
   then `keys.velocity {"outSpeed":0,"outInfluence":33.33}`.
 * **Gradients**: `set_property {"path":"contents/gfill/colors","value":["#0080ff","#ffff00"]}` or
   `{"colors":[[0,"#0080ff"],[1,[1,1,0]]],"opacities":[[0,1],[1,0.5]]}`.
+* **Projects**: `file.import` takes `.ecproj` / `.ecprojx` and After Effects projects (`.aep`, `.aepx`)
+  too, each into a folder named after it (`projects` in the result). An After Effects project that
+  would lose parts is refused (an `errors` entry, nothing imported): `file.importAep {"path": …,
+  "dryRun": true}` lists the losses, `"allowLosses": true` imports the rest.
 * **Image sequences**: `file.import {"paths":["/r/shot_0001.png"], "sequence": true}` imports the
   file's whole numbered run as one item (several picked frames: that range; a folder: each run in
   it, also without `sequence`). Without `"sequence": true` a picked or dropped numbered file imports
@@ -713,6 +717,11 @@ in the Plug-in Library: [publishing-plugins.md](publishing-plugins.md).
   step (separated X/Y/Z Position; Orientation and X/Y/Z Rotation on 3D layers).
 * Rename a layer with Enter (or double-click a name): the whole name is selected, Enter or a
   click elsewhere commits, Escape cancels; `layer.rename {layer, name}` does it directly.
+  A text layer's name follows its text until it is renamed; renaming it to an empty name makes
+  it follow the text again (After Effects). `layer.setText` and typing on canvas rename a text
+  layer whose name still follows its text; `layer.newText {name}` and a name set by
+  `layer.settings` or a script's `layer.name = …` (which runs `layer.rename`) stay, and an empty
+  `layer.settings` name follows the text again too.
 * Ctrl/Cmd-click on the current-time display (Timeline or Composition panel) toggles the Time
   Display Style between Timecode and Frames: `file.projectSettings {"timeDisplay": "frames"}`.
 * `prop.pickWhip {layer, prop, target: {layer, prop, dimension?}}` links a property as its
@@ -855,6 +864,75 @@ not read or written.
 
 `<comp>` is an id or name, or `-` for the active comp. `<value>` is JSON (`50`, `[960,540]`,
 `"#ff0000"`) or a bare string.
+
+## Repro scripts
+
+Every journaled command the app runs (menus, panels, shortcuts, agents, scripts) goes into the session's
+command journal. A **repro script** is that journal as JSON lines, so a bug or crash becomes
+something an agent can replay and a regression test becomes a data file.
+
+```text
+// comments: lines starting with // or #; blank lines are skipped
+{"start": "new" | "demo" | {"project": "rel/or/abs.ecproj"}, "allow_errors": false}   optional, first line
+{"command": "comp.new", "params": {"name": "Main", "frameRate": 30}}
+{"command": "comp.settings", "params": {"frameRate": 0}, "expect_error": "frameRate"}
+{"expect": {"query": "comp.info", "pointer": "/frameRate", "equals": 30}}
+{"expect_no_error": true}
+```
+
+- `start`: the project to begin with (default `new`). A relative `project` path is relative to the
+  script. Other header keys (`version`, `app`, `os`, `crash`, `note`) are for people.
+- `command`: run like the app runs it. It must succeed, unless it has `expect_error` (`true`, or a
+  text the error must contain) or the header says `allow_errors` (errors are reported but
+  tolerated). A panic always fails the replay.
+- `expect`: run a command, normally a query (`prop.get`, `comp.info`, `layer.tree`, `project.summary`),
+  and compare the value at the JSON `pointer` of its result with `equals` (numbers within 1e-6).
+  Without `equals` it only checks that the query succeeds.
+- `expect_no_error`: the previous command succeeded.
+
+Where scripts come from:
+
+- `journal.export {path?}` returns `{script, steps}` (or writes `path`): the commands since the
+  project was last replaced (`file.newProject`, `file.open`, `file.openDemoProject`). Queries and
+  saves are not in it; commands a script or `file.runScript` ran are covered by that one step.
+  A successful Revert starts a new replay boundary at the saved file it reopened.
+- `help.exportRepro {path?}` saves the same for a bug report, by default to `Repros/` in the
+  settings folder (macOS `~/Library/Application Support/EffectCraft/Repros`, next to `Logs/`).
+  Confined automation must give an explicit path inside a write root; `journal.export {}`
+  remains available because it only returns the script in memory.
+- **Crash repros**: when the last-resort guard catches a panic in a command, the app writes
+  `Repros/crash-<unix time>-<command>.jsonl` there automatically (the newest 20 are kept): the
+  journal, then the command that panicked, with `"allow_errors": true` and the error in the header.
+  The error the user or agent sees names the file. Headless sessions without a settings folder
+  (the CLI, tests) don't write one.
+
+Privacy: a repro holds command ids and parameters only, never project, image or media file
+contents. Parameters can include file paths, layer and item names and text typed into text
+layers, so read a repro before sharing it.
+
+Replay one headless (a fully wired session, like the CLI's other subcommands):
+
+```sh
+effectcraft-cli replay crash.jsonl            # per-step ok/FAIL lines, then the first failure
+effectcraft-cli replay crash.jsonl --json     # {ok, panicked, steps, first_failure, skipped}
+effectcraft-cli replay crash.jsonl --keep-going
+```
+
+Replaying a repro runs its commands with your privileges and file access, including commands
+that write files or run scripts. Read repros from untrusted sources before running them, or use
+a disposable environment.
+
+It exits with status 1 when a step fails, an expectation is not met or a command panics, and
+stops at the first failure unless `--keep-going`. Steps that work on the user's files (`file.open`
+of their project, imports) need those files; replace them with a `start` project or generated
+content when you turn a report into a test. A repro only sees commands: UI state changed
+without one (a hover, a half-finished drag) is not in it.
+
+**Regression tests are data files.** A crash fix's regression test is the repro, trimmed to the
+steps that matter, with an `expect_error` or `expect` line where the fix changed the outcome,
+dropped into [`tests/repros/`](../tests/repros). `crates/host/tests/it/repros.rs` replays every
+`*.jsonl` there and fails on any panic or unmet expectation
+(`cargo nextest run -p effectcraft-host --test it -E 'test(/^repros::/)'`).
 
 ## Seeing the UI
 

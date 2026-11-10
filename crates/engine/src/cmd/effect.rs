@@ -345,6 +345,7 @@ fn warning(s: &mut Session, p: &Value) -> Result<Value> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     Ok(json!({"effect": uid, "warning": effectcraft_effects::warning(g, &mut |pr| ctx.value(layer, pr))}))
 }
@@ -378,6 +379,7 @@ fn pick_color(s: &mut Session, p: &Value) -> Result<Value> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let mut r = effectcraft_render::Renderer::new(&s.project, &*s.footage, effectcraft_render::RenderOpts::default());
     r.expr = s.expr.as_deref();
@@ -515,6 +517,7 @@ impl CryptoProbe {
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
             let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
@@ -586,6 +589,7 @@ fn probe_key<'a>(s: &'a Session, p: &Value, cmd: &str) -> Result<(ProbeKey, Tick
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let frame = probe_frame(&ctx, layer, pos);
     let o = s.render_opts(Default::default());
@@ -780,6 +784,7 @@ fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Hit> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let selection = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr)).s("selection").to_string();
     let driven = prop.expr.as_ref().is_some_and(|e| e.enabled);
@@ -1347,7 +1352,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Effect Plug-in...",
             [],
             None,
-            "{path (.wasm / .wat plug-in, API v1) | folder (loads every .wasm in it)}",
+            "{path (.wasm / .wat plug-in, WebAssembly ABI 1 or 2) | folder (loads every .wasm in it)}",
             super::always,
             plugins_load
         ),

@@ -44,11 +44,15 @@ pub struct EvalCtx<'a> {
     /// Media Replacement values overridden by the Essential Properties of a collapsed precomp
     /// instance.
     pub media_overrides: &'a [crate::MediaOverride],
+    /// Where the source files of what expressions render (`sampleImage`) are noted: the
+    /// renderer's [`Renderer::reads`](crate::Renderer::reads) while rendering.
+    pub reads: Option<&'a crate::reads::ReadLog>,
 }
 
 impl<'a> EvalCtx<'a> {
+    /// A context for `comp` at `time` with no expressions, footage, overrides or read log.
     pub fn new(project: &'a Project, comp_id: ItemId, comp: &'a Comp, time: Tick) -> EvalCtx<'a> {
-        EvalCtx { project, comp_id, comp, time, expr: None, footage: None, property_overrides: &[], media_overrides: &[] }
+        EvalCtx { project, comp_id, comp, time, expr: None, footage: None, property_overrides: &[], media_overrides: &[], reads: None }
     }
     pub fn at(&self, time: Tick) -> EvalCtx<'a> {
         EvalCtx { time, ..*self }
