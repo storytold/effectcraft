@@ -2,8 +2,35 @@
 
 ```sh
 cargo test --workspace     # everything
-cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, wasm
+cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, lock-patches, layers, assets, wasm
 ```
+
+The After Effects test projects of `crates/aep` are not in the repository; without them the
+`crates/aep`, engine and ui-egui tests that need one print `SKIPPED: fixture <name> missing` and
+pass. They live in [storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus).
+`cargo xtask aep-corpus` fetches them at the commit pinned in `crates/aep/tests/fixtures/corpus.lock`,
+checks every file against the SHA-256 listed there (any mismatch fails and installs nothing) and
+installs them in `corpus/aep`. Point `EFFECTCRAFT_AEP_FIXTURES` at that folder to run those tests
+too, and set `EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1` as well to make a missing project fail its test
+instead of skipping (a corpus run that must not pass by skipping):
+
+```sh
+cargo xtask aep-corpus
+EFFECTCRAFT_AEP_FIXTURES=corpus/aep EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1 cargo test -p effectcraft-aep
+```
+
+The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
+interactively — local variables, parameters, column breakpoints — build with the `dev-full`
+profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUTING.md`).
+
+`cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus
+`cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
+runs `missing_translations_report` with `--nocapture`, which prints the interface strings each
+language has no translation for. Those strings show in English; the report always passes.
+
+Each crate with several integration-test files has one test binary, `tests/it/main.rs`, whose
+modules are the files in `tests/it/`. Run one file with `cargo test -p <crate> --test it <module>::`
+or `cargo nextest run -p <crate> -E 'binary(it) and test(/^<module>::/)'`.
 
 ## What the tests cover
 
@@ -16,7 +43,7 @@ cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, was
 - **Effects** (`crates/effects`): each effect has a determinism test and at least one behaviour
   test (identity at neutral settings, known pixel results, or simulations giving the same frame
   whether you seek straight to it or play up to it). A registry-wide test checks that effects
-  which read the clock are declared time-dependent. `crates/effects/tests/sim_golden.rs` pins
+  which read the clock are declared time-dependent. `crates/effects/tests/it/sim_golden.rs` pins
   exact pixel hashes of the simulation effects the GPU shares plans with (CC Rainfall … Card
   Wipe) at several settings, times, bit depths and resolutions, so any change to their CPU output
   fails (re-pin with `SIM_GOLDEN_PRINT=1` after an intended change; pinned for aarch64 macOS,
@@ -68,5 +95,44 @@ instructions retired; `/usr/bin/time -v` on Linux gives max RSS and CPU; elsewhe
 It prints a table and appends one JSON line per run to `target/bench/results.jsonl` (git rev,
 date, load average, scenario, settings, metrics); `--compare OLD.jsonl` prints the % change against
 the latest matching runs there, `--compare OLD --with NEW` compares two files without rendering.
+`--repeat N` runs every scenario N times; with N > 1, one `"kind": "summary"` line per key follows
+the runs. Its `metrics` are the medians of the successful runs (byte and instruction counts
+rounded), `summary` holds `runs`, `failed` and median/p90/min/max per metric (p90 is the nearest
+rank, so it equals the max for N < 10), and its other fields (`date`, `load`, ...) are those of the
+key's last run; scripts that average runs should skip `kind: summary` lines. One failed run marks
+the summary failed. Comparisons use the latest line per key, so a key is a median only if its
+summary is the latest line (a later single run, or a batch that aborted before its summaries,
+leaves a raw run latest). The table labels each side `median of N` or `1 run` and warns when they
+differ; `--fail-over` refuses such keys.
 The table notes the 1-minute load average: on a busy machine wall time is noise, so compare
 peak memory and instructions retired, and rerun when the load differs a lot.
+
+Results files allow blank lines; corrupt records or invalid comparison fields report the file
+and line instead of being discarded. `--fail-over PCT` requires the same run keys on both sides,
+successful latest runs, and at least one comparable resource metric per run. Failed latest runs,
+missing coverage, empty results and wall-time-only measurements cannot pass the gate. Omit
+`--fail-over` for an exploratory partial comparison; failed latest runs remain visible.
+
+## Unexpected desktop exit diagnostics
+
+The desktop starts a separate, lightweight reporter before loading fonts, projects or the GPU.
+A normal exit (including a handled startup error) sends a clean marker only after desktop
+teardown. macOS finishes at the end of its successful exit hook because its native event loop
+terminates without returning to main; other platforms finish after the event loop returns.
+A teardown panic leaves reporting armed. An abort or other unexpected process termination
+closes the pipe without that marker.
+The helper saves a local report under the session log folder's `Crash Reports` directory and
+shows a native error dialog. Control-server launches save the report without a modal dialog.
+Reports contain version/platform and at most the last 64 KiB of the matching session's log.
+Logging filters and the session file size cap can omit later events from that tail.
+They are never uploaded automatically. Review logs for private project paths before sharing.
+
+Run `cargo test -p effectcraft crash_report::tests` for bounded protocol, normal shutdown,
+actual subprocess abort, unrelated child handles, concurrent sessions, missing log/helper,
+log rotation and report-write failure coverage. The three ignored tests are subprocess entry
+points launched by these tests, not manual tests.
+
+This is diagnosis, not memory recovery: a pipe closing does not prove an out-of-memory failure
+or provide the process's exit code. System-wide exhaustion, killing the whole process tree,
+or an unavailable native dialog service can also prevent the helper from reporting. Existing
+auto-save recovery remains responsible for restoring previously saved work.

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 craft-ui = { workspace = true }
+craft-quit = { workspace = true, features = ["egui"] }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -22,23 +23,39 @@ effectcraft-render = { workspace = true }
 effectcraft-engine = { workspace = true }
 effectcraft-gpu = { workspace = true }
 egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
+egui_extras = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+chrono = { workspace = true }
 rayon = { workspace = true }
 web-time = { workspace = true }
 kurbo = { workspace = true }
 image = { workspace = true }
+# Half-float viewer frames of 32 bpc projects (F16C is picked at run time).
+half = { workspace = true }
+bytemuck = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Floating panels open in OS windows of their own on desktop; the web keeps them in the page.
+craft-ui = { workspace = true, features = ["native-windows"] }
+craft-update = { workspace = true }
+# Waits for the display pass's error scopes (immediately ready on native wgpu).
+pollster = { workspace = true }
 sys-locale = { workspace = true }
 
 [dev-dependencies]
+# Fonts for kittest: the workspace `egui` features are what test roots resolve, but stating them
+# here documents the requirement (kittest's own dev-dependencies do not propagate to consumers).
+egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
-pollster = "0.4"
+pollster = "1"
+effectcraft-segment = { workspace = true }
 effectcraft-host = { workspace = true }
+effectcraft-media = { workspace = true }
 exr = { workspace = true }
+tempfile = { workspace = true }
 
 [build-dependencies]
 serde_json = { workspace = true }

@@ -111,7 +111,10 @@ fn wave_warp(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let dir = ctx.params.f("direction").to_radians();
     let speed = ctx.params.f("speed");
     let phase = ctx.params.f("phase").to_radians() + ctx.time * speed * TAU;
-    let (dx, dy) = (dir.sin(), -dir.cos());
+    // Cardinal directions must not acquire a tiny perpendicular slope: at a square-wave
+    // boundary cos(90°)'s rounding residue can flip a whole column on CPU but not GPU.
+    let axis = |v: f64| if v.abs() < 4.0 * f64::EPSILON { 0.0 } else { v };
+    let (dx, dy) = (axis(dir.sin()), -axis(dir.cos()));
     if !ctx.adjustment {
         b.pad(e, h.abs().ceil() as u32 + 1)?;
     }
@@ -177,6 +180,9 @@ fn turbulent(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let size = (ctx.params.f("size") * b.scale).max(1.0);
     if ctx.params.b("resizeLayer") && !ctx.adjustment {
         b.pad(e, amount.abs().ceil() as u32 + 1)?;
+    } else {
+        // Room for pixels displaced past the content, up to the layer's edge (#1205).
+        b.pad(e, effectcraft_effects::cover_pad(ctx, [b.img.width, b.img.height], b.offset, b.scale, amount.abs().ceil() as u32 + 1))?;
     }
     let off = b.to_px(ctx.params.v2("offset"));
     let oct = ctx.params.f("complexity").clamp(1.0, 10.0);

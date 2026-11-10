@@ -198,7 +198,9 @@ impl FrameRate {
                 return r;
             }
         }
-        FrameRate::new((fps * 1000.0).round() as i64, 1000)
+        let num = (fps * 1000.0).round() as i64;
+        // A tiny positive rate must not round to the invalid 0/1 rate.
+        FrameRate::new(if fps > 0.0 { num.max(1) } else { num }, 1000)
     }
 
     pub fn as_f64(self) -> f64 {
@@ -381,11 +383,17 @@ pub fn format_time(t: Tick, rate: FrameRate, drop_frame: bool, display: TimeDisp
             format!("{}{}+{:02}", if neg { "-" } else { "" }, a / per_ft, a % per_ft)
         }
         TimeDisplay::AudioSamples => {
-            let secs = t.0.div_euclid(TICKS_PER_SECOND);
-            let rem = Tick(t.0.rem_euclid(TICKS_PER_SECOND)).to_units_floor(sample_rate);
-            format!("{:02}:{:02}:{:02}:{rem:05}", secs / 3600, (secs / 60) % 60, secs % 60)
+            let sign = if t.0 < 0 { "-" } else { "" };
+            let abs = t.0.saturating_abs();
+            let secs = abs.div_euclid(TICKS_PER_SECOND);
+            let rem = Tick(abs.rem_euclid(TICKS_PER_SECOND)).to_units_floor(sample_rate);
+            format!("{sign}{:02}:{:02}:{:02}:{rem:05}", secs / 3600, (secs / 60) % 60, secs % 60)
         }
-        TimeDisplay::Seconds => format!("{:.3}", t.seconds()),
+        TimeDisplay::Seconds => {
+            let s = t.seconds();
+            // A value that rounds to zero must not print a sign ("-0.000").
+            format!("{:.3}", if (s * 1000.0).round() == 0.0 { 0.0 } else { s })
+        }
     }
 }
 
@@ -530,6 +538,21 @@ pub const SAMPLE_RATES: [i64; 6] = [32_000, 44_100, 48_000, 88_200, 96_000, 192_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_f64_tiny_positive_fps_is_nonzero() {
+        let r = FrameRate::from_f64(0.0001);
+        assert!(r.num > 0 && r.den > 0, "got {r:?}");
+    }
+
+    #[test]
+    fn seconds_display_has_no_negative_zero() {
+        for t in [Tick(-1), Tick(0), Tick(-100)] {
+            assert_eq!(format_time(t, FrameRate::FPS_30, false, TimeDisplay::Seconds, 48000), "0.000");
+        }
+        let one = Tick(-TICKS_PER_SECOND);
+        assert_eq!(format_time(one, FrameRate::FPS_30, false, TimeDisplay::Seconds, 48000), "-1.000");
+    }
 
     #[test]
     fn frame_rate_constructors_accept_extreme_numbers() {
@@ -699,6 +722,14 @@ mod tests {
         assert_eq!(format_time(t, r, false, TimeDisplay::Feet16, 48000), "1+00");
         assert_eq!(format_time(t, r, false, TimeDisplay::Frames, 48000), "40");
         assert_eq!(format_time(Tick::from_units(48_001, 48_000), r, false, TimeDisplay::AudioSamples, 48000), "00:00:01:00001");
+    }
+
+    #[test]
+    fn neg_samples() {
+        let r = FrameRate::FPS_30;
+        let fmt = |s: f64| format_time(Tick::from_seconds_f64(s), r, false, TimeDisplay::AudioSamples, 48000);
+        assert_eq!(fmt(-0.5), "-00:00:00:24000");
+        assert_eq!(fmt(-3700.0), "-01:01:40:00000");
     }
 
     #[test]

@@ -161,6 +161,10 @@ pub fn legacy_default(effect: &str, param: &str) -> Option<Value> {
         ("ec.key.advancedspill", "ultraSettings/tolerance") => Value::Scalar(100.0),
         // Transition: Block Dissolve's blocks had hard edges.
         ("ec.transition.blockdissolve", "softEdges") => Value::Bool(false),
+        // Linear Wipe's feather was a linear ramp with the travel extended by it (#3125).
+        ("ec.transition.linearwipe", "legacyFeather") => Value::Bool(true),
+        // 3D Channel: Cryptomatte's Matte Only put the matte in alpha too (#3127).
+        ("ec.3d.cryptomatte", crate::channel3d::MATTE_ONLY_IN_ALPHA) => Value::Bool(true),
         _ => return None,
     })
 }
@@ -239,6 +243,8 @@ fn refresh(pr: &mut Property, ps: &ParamSpec, spec: &EffectSpec) {
         // A path typed as text, or set only by commands, that got a Choose… button (Apply Color
         // LUT's LUT, the OCIO files, #514).
         (ParamUi::Hidden | ParamUi::Text, ParamUi::File { .. }) => pr.ui = ps.ui.clone(),
+        // An internal point that became a control (Liquify's Distortion Mesh Offset, #1194).
+        (ParamUi::Hidden, ParamUi::Point) => pr.ui = ParamUi::Point,
         // Same kind of value: take the spec's hints (units, ranges).
         (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b) || is_numeric_ui(a) && is_numeric_ui(b) => pr.ui = ps.ui.clone(),
         _ => {}
@@ -340,6 +346,23 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         names(g);
     }
     *g != before
+}
+
+/// The spec id of the parameter that an instance of `spec` saved at `id` (`a/b/param`) is now:
+/// `id` itself when the spec still has it, the new id of a renamed parameter
+/// ([`PARAM_ID_ALIASES`]), or the twirl-down path of a top-level parameter that moved into a
+/// group, as [`upgrade_instance`] finds them. Returns `None` when no parameter matches.
+pub fn current_param_id(spec: &EffectSpec, id: &str) -> Option<&'static str> {
+    if let Some(ps) = spec.params.iter().find(|ps| ps.id == id) {
+        return Some(ps.id);
+    }
+    if let Some((_, _, new)) = PARAM_ID_ALIASES.iter().find(|(e, old, _)| *e == spec.id && *old == id) {
+        return Some(new);
+    }
+    if id.contains('/') {
+        return None;
+    }
+    spec.params.iter().find(|ps| ps.id.rsplit('/').next() == Some(id)).map(|ps| ps.id)
 }
 
 /// Bring an effect instance saved before project schema 2 into effect space (#227).
@@ -497,6 +520,37 @@ mod tests {
         assert_eq!(pr.ui, popup.ui);
     }
 
+    /// #3127: Cryptomatte's Matte Only moved the matte from RGBA to RGB over alpha 1; a project
+    /// saved before has no Matte Only In Alpha switch and gets it on, keeping its render. A fresh
+    /// instance has it off.
+    #[test]
+    fn cryptomatte_saved_before_matte_only_in_rgb_keeps_the_matte_in_alpha() {
+        let id = crate::channel3d::MATTE_ONLY_IN_ALPHA;
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.3d.cryptomatte", &mut next);
+        assert_eq!(g.get(id).map(|p| p.value.clone()), Some(Value::Bool(false)));
+        g.children.retain(|c| c.match_id() != id);
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        let pr = g.get(id).expect("added on upgrade");
+        assert_eq!((&pr.value, &pr.ui), (&Value::Bool(true), &ParamUi::Hidden));
+    }
+
+    /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the
+    /// option it chose, by label.
+    #[test]
+    fn shift_channels_half_on_and_full_off_are_remapped_by_label() {
+        const OLD: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Half On", "Full Off"];
+        for (saved, want) in [(9u32, 10u32), (10, 9), (1, 1)] {
+            let mut next = 1;
+            let (spec, mut g) = instance("ec.channel.shiftchannels", &mut next);
+            let pr = g.get_mut("takeGreenFrom").unwrap();
+            pr.ui = ParamUi::Popup { options: OLD.iter().map(|s| s.to_string()).collect() };
+            pr.value = Value::Enum(saved);
+            upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE);
+            assert_eq!(g.get("takeGreenFrom").unwrap().value, Value::Enum(want), "saved {saved}");
+        }
+    }
+
     /// #514: Apply Color LUT's LUT was hidden (set only by commands) and the OCIO files were
     /// plain text; old projects get the Choose… file parameter, keeping the path.
     #[test]
@@ -514,6 +568,19 @@ mod tests {
         }
     }
 
+    /// #1194: Liquify's Distortion Mesh Offset was hidden; old projects show it, keeping its value.
+    #[test]
+    fn a_hidden_point_that_became_a_control_is_shown() {
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.distort.liquify", &mut next);
+        let pr = g.get_mut("distortionMeshOffset").unwrap();
+        pr.ui = ParamUi::Hidden;
+        pr.value = Value::Vec2([20.0, -5.0]);
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 100.0]));
+        let pr = g.get("distortionMeshOffset").unwrap();
+        assert_eq!((&pr.ui, &pr.value), (&ParamUi::Point, &Value::Vec2([20.0, -5.0])));
+    }
+
     #[test]
     fn upgrade_moves_params_into_twirl_down_groups() {
         let spec = find(crate::warp_stab::ID).unwrap();
@@ -526,6 +593,33 @@ mod tests {
         assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
         assert!(g.get("smoothness").is_none());
         assert_eq!(prop_at(&mut g, "stabilization/smoothness").unwrap().value, Value::Scalar(12.0));
+    }
+
+    /// A saved parameter id maps to the parameter `upgrade_instance` moves it to.
+    #[test]
+    fn current_param_id_follows_renames_and_twirl_down_moves() {
+        let stab = find(crate::warp_stab::ID).unwrap();
+        assert_eq!(current_param_id(stab, "stabilization/smoothness"), Some("stabilization/smoothness"));
+        assert_eq!(current_param_id(stab, "smoothness"), Some("stabilization/smoothness"));
+        let ctc = find("ec.color.changetocolor").unwrap();
+        assert_eq!(current_param_id(ctc, "tolerance"), Some("toleranceGroup/hue"));
+        // Radio Waves' old Velocity is the growth speed, not the new Velocity.
+        let waves = find("ec.generate.radiowaves").unwrap();
+        assert_eq!(current_param_id(waves, "velocity"), Some("waveMotion/expansion"));
+        assert_eq!(current_param_id(stab, "noSuchParam"), None);
+        assert_eq!(current_param_id(stab, "other/smoothness"), None);
+    }
+
+    /// #3125: a Linear Wipe saved before its feather followed After Effects keeps the old ramp;
+    /// a new one doesn't.
+    #[test]
+    fn old_linear_wipes_keep_the_legacy_feather() {
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.transition.linearwipe", &mut next);
+        assert_eq!(g.get("legacyFeather").unwrap().value, Value::Bool(false));
+        take_prop(&mut g, "legacyFeather");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        assert_eq!(g.get("legacyFeather").unwrap().value, Value::Bool(true));
     }
 
     #[test]
@@ -702,7 +796,13 @@ not a stroke",
         let data = effectcraft_track::roto::RotoData {
             base: Some(0),
             span: [0, 10],
-            strokes: vec![effectcraft_track::roto::Stroke { kind: effectcraft_track::roto::StrokeKind::Fg, frame: 0, radius: 5.0, points: vec![[2.0, 2.0]] }],
+            strokes: vec![effectcraft_track::roto::Stroke {
+                kind: effectcraft_track::roto::StrokeKind::Fg,
+                frame: 0,
+                radius: 5.0,
+                points: vec![[2.0, 2.0]],
+                object: 0,
+            }],
         };
         roto.get_mut(crate::roto::STROKES).unwrap().value = Value::Str(data.to_json());
         to_effect_space(spec, &mut roto, SIZE, D, &own);

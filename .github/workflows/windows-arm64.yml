@@ -33,3 +33,5 @@ jobs:
     with:
       app-name: effectcraft
       app-dir: EffectCraft
+      install-relative-path: Programs/ArtCraft/EffectCraft
+      install-scope: perUser

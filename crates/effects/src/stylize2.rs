@@ -343,7 +343,7 @@ fn brush_strokes(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---- CC Kaleida ----
+// ---- Kaleidoscope ----
 
 fn kaleida(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = b.to_px(ctx.params.v2("center"));
@@ -368,7 +368,7 @@ fn kaleida(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---- CC RepeTile ----
+// ---- Edge Tile Repeat ----
 
 #[inline]
 fn tile_coord(v: f64, size: f64) -> (i64, f64) {
@@ -433,13 +433,7 @@ fn motion_tile(ctx: &EffectCtx, b: Buf) -> Buf {
     let mirror = ctx.params.b("mirrorEdges");
     let phase = ctx.params.f("phase") / 360.0;
     let hshift = ctx.params.b("horizontalPhaseShift");
-    let (nw, nh, noff) = if ctx.adjustment {
-        (b.img.width, b.img.height, b.offset)
-    } else {
-        let ow = (lw * ctx.params.f("outputWidth") / 100.0).max(1.0 / s);
-        let oh = (lh * ctx.params.f("outputHeight") / 100.0).max(1.0 / s);
-        ((ow * s).round().max(1.0) as u32, (oh * s).round().max(1.0) as u32, [(ow - lw) * 0.5 * s, (oh - lh) * 0.5 * s])
-    };
+    let (nw, nh, noff) = crate::motion_tile_frame(ctx, b.offset, (b.img.width, b.img.height), s);
     let mut out = Image::new(nw, nh);
     let src = &b.img;
     out.rows_mut().for_each(|(y, row)| {
@@ -463,7 +457,11 @@ fn motion_tile(ctx: &EffectCtx, b: Buf) -> Buf {
                     fy = 1.0 - fy;
                 }
             }
-            *px = src.sample_bilinear(fx * lw * s + b.offset[0], fy * lh * s + b.offset[1]);
+            // Clamped: a tile edge lands exactly on a pixel centre whenever the boundary does
+            // (#2820's animated Tile Center walks it across the grid), and the plain sampler
+            // would mix in the transparent outside at the source's geometric edge, leaving a
+            // half-faded seam pixel along the fold.
+            *px = src.sample_bilinear_clamped(fx * lw * s + b.offset[0], fy * lh * s + b.offset[1]);
         }
     });
     Buf { img: out, offset: noff, scale: s }
@@ -493,7 +491,7 @@ fn color_emboss(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---- CC Vignette ----
+// ---- Vignette ----
 
 fn vignette(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let amt = ctx.params.f("amount") as f32 / 100.0;
@@ -525,7 +523,7 @@ fn vignette(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---- CC Threshold / CC Threshold RGB ----
+// ---- Channel Threshold / RGB Threshold ----
 
 fn cc_threshold(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let t = ctx.params.f("threshold") as f32 / 255.0;
@@ -671,7 +669,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.cckaleida",
-            "CC Kaleida",
+            "Kaleidoscope",
             vec![
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
                 p("size", "Size", num(100.0), slider(1.0, 1000.0, 1.0, 400.0, 1)),
@@ -682,7 +680,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccrepetile",
-            "CC RepeTile",
+            "Edge Tile Repeat",
             vec![
                 p("expandRight", "Expand Right", num(0.0), slider(0.0, 4000.0, 0.0, 500.0, 0)),
                 p("expandLeft", "Expand Left", num(0.0), slider(0.0, 4000.0, 0.0, 500.0, 0)),
@@ -720,7 +718,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccvignette",
-            "CC Vignette",
+            "Vignette",
             vec![
                 p("amount", "Amount", num(50.0), slider(-100.0, 100.0, -100.0, 100.0, 1)),
                 p("angleOfView", "Angle of View", num(60.0), slider(0.0, 179.0, 0.0, 179.0, 1)),
@@ -731,7 +729,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccthreshold",
-            "CC Threshold",
+            "Channel Threshold",
             vec![
                 p("threshold", "Threshold", num(127.0), thr()),
                 p("channel", "Channel", Value::Enum(0), popup(&["Luminance", "RGB", "Saturation", "Alpha"])),
@@ -742,7 +740,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccthresholdrgb",
-            "CC Threshold RGB",
+            "RGB Threshold",
             vec![
                 p("redThreshold", "Red Threshold", num(127.0), thr()),
                 p("greenThreshold", "Green Threshold", num(127.0), thr()),
@@ -811,6 +809,37 @@ mod tests {
         let img = ramp(10, 8);
         for (a, b) in same.img.data.iter().zip(img.data.iter()) {
             assert!((a[0] - b[0]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn motion_tile_mirror_folds_stay_opaque() {
+        // A fold that lands exactly on a pixel centre samples the source's geometric edge, where
+        // the plain bilinear tap reaches half a texel into the transparent outside — a faint
+        // seam line on the mirrored boundary that sweeps the tile while Tile Center animates
+        // (#2820). The fold must repeat the edge texel instead: opaque, and exactly the pixel
+        // it mirrors.
+        let img = ramp(10, 8);
+        let out = run_at(
+            "ec.stylize.motiontile",
+            &[("tileCenter", Value::Vec2([5.0, 4.0])), ("tileWidth", num(50.0)), ("mirrorEdges", Value::Bool(true))],
+            img.clone(),
+            0.0,
+        );
+        assert_eq!((out.img.width, out.img.height), (10, 8));
+        for (x, mirrored) in [(2i64, 0i64), (7, 9)] {
+            for y in 0..i64::from(out.img.height) {
+                let a = out.img.get(x, y);
+                assert!((a[3] - 1.0).abs() < 1e-5, "fold x={x},y={y} faded to alpha {}", a[3]);
+                let b = img.get(mirrored, y);
+                for c in 0..4 {
+                    assert!((a[c] - b[c]).abs() < 1e-5, "fold x={x},y={y} channel {c}");
+                }
+            }
+        }
+        // And no pixel anywhere in the tile faded either.
+        for px in out.img.data.iter() {
+            assert!((px[3] - 1.0).abs() < 1e-5, "tile pixel faded to alpha {}", px[3]);
         }
     }
 

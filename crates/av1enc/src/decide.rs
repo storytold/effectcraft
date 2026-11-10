@@ -3,8 +3,12 @@
 //! processes, so the reconstruction built here is exactly what a decoder produces; the syntax
 //! is written afterwards by `writer.rs`.
 
-use crate::pred::*;
-use crate::tables::*;
+use crate::pred::{INTRA_MODES_USED, InterBlock, IntraEdge, Plane, edges, half_planes, predict_inter, predict_intra};
+use crate::tables::{
+    AC_QLOOKUP, BLOCK_8X8, BLOCK_64X64, DC_PRED, DC_QLOOKUP, DCT_DCT, DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, DEFAULT_SCAN_16X16, DEFAULT_SCAN_32X32, MODE_TO_TXFM,
+    NEWMV, NUM_4X4_BLOCKS_WIDE, PARTITION_SPLIT, PARTITION_SUBSIZE, TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64, TX_SET_DCTONLY, TX_SET_INTER_3,
+    TX_SET_INTRA_2, TX_SIZE_SQR_UP, TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA,
+};
 use crate::transform::{forward_2d, inverse_2d};
 
 /// Decisions for one coded block.
@@ -100,6 +104,17 @@ pub(crate) fn intra_uv_tx_type(uv_mode: usize, uv_tx: usize) -> usize {
     if tx_in_set(tx_set(uv_tx, false), false, t) { t } else { DCT_DCT }
 }
 
+/// Geometry and coding mode of one square transform block.
+#[derive(Clone, Copy)]
+struct TransformBlock {
+    plane: usize,
+    x: usize,
+    y: usize,
+    log2: u32,
+    tx_type: usize,
+    intra: bool,
+}
+
 struct TxResult {
     levels: Vec<i32>,
     nonzero: bool,
@@ -107,10 +122,43 @@ struct TxResult {
     bits: f64,
 }
 
+/// The output and scratch buffers of one reconstruction, each `n * n` entries long.
+struct ReconBuffers<'a> {
+    deq: &'a mut [i32],
+    resid: &'a mut [i32],
+    recon: &'a mut [u16],
+}
+
+/// Outcome of trying one transform block; the levels and the reconstruction stay in `TxScratch`.
+#[derive(Clone, Copy)]
+struct TxEval {
+    nonzero: bool,
+    dist: f64,
+    bits: f64,
+}
+
+/// Buffers of the transform path, sized for the largest coded transform block (32x32). Only the
+/// first `n * n` entries are used; they are reused across candidates instead of being allocated.
+struct TxScratch {
+    res: [i32; 1024],
+    coef: [f32; 1024],
+    levels: [i32; 1024],
+    deq: [i32; 1024],
+    resid: [i32; 1024],
+    recon: [u16; 1024],
+}
+
+impl Default for TxScratch {
+    fn default() -> Self {
+        TxScratch { res: [0; 1024], coef: [0.0; 1024], levels: [0; 1024], deq: [0; 1024], resid: [0; 1024], recon: [0; 1024] }
+    }
+}
+
 /// Saved encoder state of a block area (reconstruction, BlockDecoded flags).
 struct Snapshot {
     planes: [Vec<u16>; 3],
-    decoded: Box<[[[bool; 35]; 35]; 3]>,
+    /// BlockDecoded flags of the block area only (the only flags coding inside it can change).
+    decoded: [[[bool; 16]; 16]; 3],
 }
 
 pub(crate) struct Decider<'a> {
@@ -127,13 +175,20 @@ pub(crate) struct Decider<'a> {
     ac_q: f32,
     dc_qi: i64,
     ac_qi: i64,
+    /// Smallest magnitude that quantises to a non-zero level, `[dc, ac][intra]`.
+    dead_zone: [[f32; 2]; 2],
     lambda: f64,
     lambda_sad: f64,
     /// Half-sample interpolations of the reference luma (visible area): (8, 0), (0, 8), (8, 8).
     half: [Vec<u16>; 3],
+    /// Transform buffers, taken out while a block is being tried (see `code_tx`).
+    scratch: Option<Box<TxScratch>>,
 }
 
 const MODE_BITS_INTRA: f64 = 3.0;
+/// Dead-zone quantiser rounding offsets (below one half) for inter and intra blocks.
+const INTER_RND: f32 = 0.30;
+const INTRA_RND: f32 = 0.38;
 
 impl<'a> Decider<'a> {
     pub fn new(g: &'a FrameGeom, bd: u32, qidx: u8, intra_only: bool, src: &'a [Plane; 3], refr: Option<&'a RefFrame>) -> Self {
@@ -160,12 +215,14 @@ impl<'a> Decider<'a> {
             ac_q: ac_qi as f32,
             dc_qi,
             ac_qi,
+            dead_zone: [dc_qi, ac_qi].map(|q| [INTER_RND, INTRA_RND].map(|rnd| zero_threshold(q as f32, rnd))),
             lambda,
             lambda_sad: lambda.sqrt(),
             half: match refr {
-                Some(rf) => [(8, 0), (0, 8), (8, 8)].map(|(fx, fy)| subpel_plane(&rf.planes[0], g.width, g.height, fx, fy, bd)),
+                Some(rf) => half_planes(&rf.planes[0], g.width, g.height, bd),
                 None => Default::default(),
             },
+            scratch: None,
         }
     }
 
@@ -211,6 +268,13 @@ impl<'a> Decider<'a> {
         }
     }
 
+    /// The BlockDecoded cells `mark_decoded` can set for blocks inside (r, c, n4): rows and
+    /// columns `by + 1 .. by + 1 + step` / `bx + 1 ..` of `decoded[plane]`.
+    fn decoded_region(plane: usize, r: usize, c: usize, n4: usize) -> (usize, usize, usize) {
+        let s = (plane > 0) as usize;
+        ((r & 15) >> s, (c & 15) >> s, (n4 >> s).max(1))
+    }
+
     fn snapshot(&self, r: usize, c: usize, n4: usize) -> Snapshot {
         let planes = std::array::from_fn(|p| {
             let s = (p > 0) as usize;
@@ -222,7 +286,14 @@ impl<'a> Decider<'a> {
             }
             v
         });
-        Snapshot { planes, decoded: self.decoded.clone() }
+        let mut decoded = [[[false; 16]; 16]; 3];
+        for (p, d) in decoded.iter_mut().enumerate() {
+            let (by, bx, step) = Self::decoded_region(p, r, c, n4);
+            for i in 0..step {
+                d[i][..step].copy_from_slice(&self.decoded[p][by + i + 1][bx + 1..bx + 1 + step]);
+            }
+        }
+        Snapshot { planes, decoded }
     }
 
     fn restore(&mut self, snap: &Snapshot, r: usize, c: usize, n4: usize) {
@@ -234,7 +305,12 @@ impl<'a> Decider<'a> {
                 pl.data[y * pl.stride + x0..y * pl.stride + x0 + n].copy_from_slice(&snap.planes[p][i * n..i * n + n]);
             }
         }
-        self.decoded.clone_from(&snap.decoded);
+        for p in 0..3 {
+            let (by, bx, step) = Self::decoded_region(p, r, c, n4);
+            for i in 0..step {
+                self.decoded[p][by + i + 1][bx + 1..bx + 1 + step].copy_from_slice(&snap.decoded[p][i][..step]);
+            }
+        }
     }
 
     fn set_mvs(&mut self, r: usize, c: usize, n4: usize, mv: [i32; 2]) {
@@ -324,8 +400,10 @@ impl<'a> Decider<'a> {
         let log2 = (n4 * 4).trailing_zeros();
         let (sbr, sbc) = ((r & 15) as isize, (c & 15) as isize);
         let bd = self.bd;
-        let mut pred = vec![0u16; 32 * 32];
-        let mut best_pred = vec![0u16; 32 * 32];
+        let mut pred = [0u16; 32 * 32];
+        let mut best_pred = [0u16; 32 * 32];
+        let mut best_levels = [0i32; 32 * 32];
+        let mut best_recon = [0u16; 32 * 32];
         let n = 1usize << log2;
         // luma
         let e = IntraEdge {
@@ -343,26 +421,26 @@ impl<'a> Decider<'a> {
         let ed = edges(&self.rec[0], &e);
         // modes ranked by SATD, then a rate-distortion choice of mode and transform type among
         // the best three
-        let mut ranked: Vec<(f64, usize)> = INTRA_MODES_USED
-            .iter()
-            .map(|&mode| {
-                predict_intra(&ed, &e, mode, &mut pred);
-                let sad = self.satd(0, c * 4, r * 4, n, &pred[..n * n]) as f64;
-                (sad + self.lambda_sad * if mode == DC_PRED { 1.0 } else { MODE_BITS_INTRA }, mode)
-            })
-            .collect();
+        let mut ranked: [(f64, usize); INTRA_MODES_USED.len()] = INTRA_MODES_USED.map(|mode| {
+            predict_intra(&ed, &e, mode, &mut pred);
+            let sad = self.satd(0, c * 4, r * 4, n, &pred[..n * n]) as f64;
+            (sad + self.lambda_sad * if mode == DC_PRED { 1.0 } else { MODE_BITS_INTRA }, mode)
+        });
         ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
         let tx_y = tx_size_for(log2);
-        let mut best: Option<(f64, usize, usize, TxResult, Option<Vec<u16>>)> = None;
+        let mut best: Option<(f64, usize, usize, TxEval, bool)> = None;
+        let mut sc = self.scratch.take().unwrap_or_default();
         for &(_, mode) in ranked.iter().take(3) {
             predict_intra(&ed, &e, mode, &mut pred);
-            let mut types = vec![DCT_DCT];
+            let mut types = [DCT_DCT; 2];
+            let mut n_types = 1;
             let alt = MODE_TO_TXFM[mode] as usize;
             if alt != DCT_DCT && tx_in_set(tx_set(tx_y, false), false, alt) {
-                types.push(alt);
+                types[1] = alt;
+                n_types = 2;
             }
-            for &t in &types {
-                let (res, recon) = self.try_tx(0, c * 4, r * 4, log2, t, &pred[..n * n], true);
+            for &t in &types[..n_types] {
+                let (res, has_recon) = self.try_tx(&mut sc, TransformBlock { plane: 0, x: c * 4, y: r * 4, log2, tx_type: t, intra: true }, &pred[..n * n]);
                 let type_bits = if !res.nonzero || tx_set(tx_y, false) == TX_SET_DCTONLY {
                     0.0
                 } else if t == DCT_DCT {
@@ -374,18 +452,24 @@ impl<'a> Decider<'a> {
                 let cost = res.dist + self.lambda * (res.bits + type_bits + mode_bits);
                 if best.as_ref().is_none_or(|b| cost < b.0) {
                     best_pred[..n * n].copy_from_slice(&pred[..n * n]);
-                    best = Some((cost, mode, t, res, recon));
+                    best_levels[..n * n].copy_from_slice(&sc.levels[..n * n]);
+                    if has_recon {
+                        best_recon[..n * n].copy_from_slice(&sc.recon[..n * n]);
+                    }
+                    best = Some((cost, mode, t, res, has_recon));
                 }
             }
         }
+        self.scratch = Some(sc);
         // Every ranked mode tries DCT_DCT, so `best` is always set; without a candidate the block
         // can't be coded intra (an infinite cost keeps it from being chosen).
-        let Some((_, y_mode, tx_type_y, ty, recon)) = best else {
+        let Some((_, y_mode, tx_type_y, ty, has_recon)) = best else {
             let leaf =
                 Leaf { bsize, is_inter: false, y_mode: DC_PRED, uv_mode: DC_PRED, tx_type_y: DCT_DCT, mv: [0, 0], skip: true, coefs: Default::default() };
             return (leaf, f64::INFINITY);
         };
-        self.put(0, c * 4, r * 4, n, recon.as_deref().unwrap_or(&best_pred[..n * n]));
+        self.put(0, c * 4, r * 4, n, if has_recon { &best_recon[..n * n] } else { &best_pred[..n * n] });
+        let ty = TxResult { levels: best_levels[..n * n].to_vec(), nonzero: ty.nonzero, dist: ty.dist, bits: ty.bits };
         let tx_type_y = if ty.nonzero { tx_type_y } else { DCT_DCT };
         self.mark_decoded(0, r, c, n4);
         // chroma (one mode for both planes)
@@ -422,7 +506,7 @@ impl<'a> Decider<'a> {
         let uv_type = intra_uv_tx_type(uv_mode, uv_tx);
         let mut code_uv = |i: usize| {
             predict_intra(&ced[i], &ce[i], uv_mode, &mut pred);
-            let t = self.code_tx(1 + i, c * 2, r * 2, clog2, uv_type, &pred[..cn * cn], true);
+            let t = self.code_tx(TransformBlock { plane: 1 + i, x: c * 2, y: r * 2, log2: clog2, tx_type: uv_type, intra: true }, &pred[..cn * cn]);
             self.mark_decoded(1 + i, r, c, n4);
             t
         };
@@ -450,13 +534,17 @@ impl<'a> Decider<'a> {
             let (vw, vh) = self.g.visible(p);
             let pn = n >> s;
             let (x, y) = ((c * 4) >> s, (r * 4) >> s);
-            predict_inter(&refr.planes[p], vw as i32 - 1, vh as i32 - 1, x, y, pn, pn, mv, s, self.bd, &mut pred[..pn * pn]);
+            predict_inter(
+                &refr.planes[p],
+                &InterBlock { last_x: vw as i32 - 1, last_y: vh as i32 - 1, x, y, width: pn, height: pn, mv, subsampling: s, bit_depth: self.bd },
+                &mut pred[..pn * pn],
+            );
             if bsize == BLOCK_64X64 {
                 // coded as a skip block: the prediction is the reconstruction
                 dist += self.sse(p, x, y, pn, &pred[..pn * pn]);
                 self.put(p, x, y, pn, &pred[..pn * pn]);
             } else {
-                let t = self.code_tx(p, x, y, log2 - s as u32, DCT_DCT, &pred[..pn * pn], false);
+                let t = self.code_tx(TransformBlock { plane: p, x, y, log2: log2 - s as u32, tx_type: DCT_DCT, intra: false }, &pred[..pn * pn]);
                 dist += t.dist;
                 tx.push(t);
             }
@@ -515,19 +603,27 @@ impl<'a> Decider<'a> {
             let (dy, dx) = (m[0] >> 3, m[1] >> 3);
             dx >= lim_x.0 && dx <= lim_x.1 && dy >= lim_y.0 && dy <= lim_y.1
         };
+        let lg = log2_table();
         let mv_bits = |m: [i32; 2]| -> f64 {
-            let comp = |d: i32| if d == 0 { 0.5 } else { 2.0 + 2.0 * ((d.abs() / 8) as f64 + 1.0).log2() };
+            let comp = |d: i32| if d == 0 { 0.5 } else { 2.0 + 2.0 * log2_of(lg, (d.abs() / 8) as usize + 1) };
             comp(m[0] - pred_mv[0]) + comp(m[1] - pred_mv[1])
         };
-        let cost =
-            |m: [i32; 2]| -> f64 { self.sad_ref(&refr.planes[0], x0 + (m[1] >> 3), y0 + (m[0] >> 3), c * 4, r * 4, n) as f64 + self.lambda_sad * mv_bits(m) };
+        // `bound` is the cost to beat: the SAD stops early once the cost cannot be below it (the
+        // callers only accept a strictly lower cost, so the result is unchanged)
+        let cost = |m: [i32; 2], bound: f64| -> f64 {
+            let lb = self.lambda_sad * mv_bits(m);
+            self.sad_ref(&refr.planes[0], [x0 + (m[1] >> 3), y0 + (m[0] >> 3)], [c * 4, r * 4], n, [lb, bound]) as f64 + lb
+        };
+        // positions already evaluated cannot beat `best` again (costs are deterministic)
+        let mut seen: Vec<[i32; 2]> = Vec::with_capacity(64);
         let mut best = ([0, 0], f64::MAX);
         for &m in &cands {
             let m = [m[0] & !7, m[1] & !7];
-            if !valid(m) {
+            if !valid(m) || seen.contains(&m) {
                 continue;
             }
-            let cst = cost(m);
+            seen.push(m);
+            let cst = cost(m, best.1);
             if cst < best.1 {
                 best = (m, cst);
             }
@@ -548,10 +644,11 @@ impl<'a> Decider<'a> {
                 let center = best.0;
                 for d in [[-step, 0], [step, 0], [0, -step], [0, step]] {
                     let m = [center[0] + d[0], center[1] + d[1]];
-                    if !valid(m) {
+                    if !valid(m) || seen.contains(&m) {
                         continue;
                     }
-                    let cst = cost(m);
+                    seen.push(m);
+                    let cst = cost(m, best.1);
                     if cst < best.1 {
                         best = (m, cst);
                         moved = true;
@@ -562,15 +659,18 @@ impl<'a> Decider<'a> {
         }
         // half- then quarter-sample refinement (plus the exact neighbour candidates)
         let mut buf = vec![0u16; n * n];
-        let sub_cost = |m: [i32; 2], buf: &mut Vec<u16>| -> f64 {
+        let sub_cost = |m: [i32; 2], buf: &mut Vec<u16>, bound: f64| -> f64 {
             self.search_block(m, c * 4, r * 4, n, buf);
-            self.sad(0, c * 4, r * 4, n, buf) as f64 + self.lambda_sad * mv_bits(m)
+            let lb = self.lambda_sad * mv_bits(m);
+            self.sad_bounded(0, [c * 4, r * 4], n, buf, [lb, bound]) as f64 + lb
         };
+        let mut seen_sub: Vec<[i32; 2]> = Vec::with_capacity(24);
         for m in cands {
             if m[0] & 7 != 0 || m[1] & 7 != 0 {
                 let m = [m[0] & !1, m[1] & !1];
-                if valid(m) {
-                    let cst = sub_cost(m, &mut buf);
+                if valid(m) && !seen_sub.contains(&m) {
+                    seen_sub.push(m);
+                    let cst = sub_cost(m, &mut buf, best.1);
                     if cst < best.1 {
                         best = (m, cst);
                     }
@@ -581,10 +681,11 @@ impl<'a> Decider<'a> {
             let center = best.0;
             for d in [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]] {
                 let m = [center[0] + d[0] * step, center[1] + d[1] * step];
-                if !valid(m) {
+                if !valid(m) || seen_sub.contains(&m) {
                     continue;
                 }
-                let cst = sub_cost(m, &mut buf);
+                seen_sub.push(m);
+                let cst = sub_cost(m, &mut buf, best.1);
                 if cst < best.1 {
                     best = (m, cst);
                 }
@@ -670,7 +771,8 @@ impl<'a> Decider<'a> {
     }
 
     /// SAD of the source block at (x, y) (luma) against the reference block at (rx, ry).
-    fn sad_ref(&self, refp: &Plane, rx: i32, ry: i32, x: usize, y: usize, n: usize) -> u64 {
+    /// Stops after a row once `sad + lb >= bound` (the cost can no longer win).
+    fn sad_ref(&self, refp: &Plane, [rx, ry]: [i32; 2], [x, y]: [usize; 2], n: usize, [lb, bound]: [f64; 2]) -> u64 {
         let (vw, vh) = (self.g.width, self.g.height);
         let w = n.min(vw.saturating_sub(x));
         let h = n.min(vh.saturating_sub(y));
@@ -690,45 +792,16 @@ impl<'a> Decider<'a> {
                     sad += (s[j] as i32 - b as i32).unsigned_abs() as u64;
                 }
             }
+            if sad as f64 + lb >= bound {
+                return sad;
+            }
         }
         sad
     }
 
-    /// Sum of absolute Hadamard-transformed differences (4x4 or 8x8 sub-blocks) of a prediction
-    /// against the source, scaled to about the size of the SAD.
-    fn satd(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
-        let src = &self.src[p];
-        let k = n.min(8);
-        let mut total = 0u64;
-        let mut d = [0i32; 64];
-        for by in (0..n).step_by(k) {
-            for bx in (0..n).step_by(k) {
-                for i in 0..k {
-                    let row = &src.row(y + by + i)[x + bx..x + bx + k];
-                    for j in 0..k {
-                        d[i * k + j] = row[j] as i32 - pred[(by + i) * n + bx + j] as i32;
-                    }
-                }
-                for i in 0..k {
-                    hadamard(&mut d[i * k..i * k + k]);
-                }
-                let mut col = [0i32; 8];
-                let mut s = 0u64;
-                for j in 0..k {
-                    for i in 0..k {
-                        col[i] = d[i * k + j];
-                    }
-                    hadamard(&mut col[..k]);
-                    s += col[..k].iter().map(|v| v.unsigned_abs() as u64).sum::<u64>();
-                }
-                total += s / (k as u64 / 2);
-            }
-        }
-        total
-    }
-
-    /// SAD of a prediction against the source over the visible part of the block.
-    fn sad(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+    /// SAD of a prediction against the source over the visible part of the block. Stops after a row
+    /// once `sad + lb >= bound` (the cost can no longer win).
+    fn sad_bounded(&self, p: usize, [x, y]: [usize; 2], n: usize, pred: &[u16], [lb, bound]: [f64; 2]) -> u64 {
         let (vw, vh) = self.g.visible(p);
         let w = n.min(vw.saturating_sub(x));
         let h = n.min(vh.saturating_sub(y));
@@ -737,8 +810,58 @@ impl<'a> Decider<'a> {
         for i in 0..h {
             let row = &src.row(y + i)[x..x + w];
             s += row.iter().zip(&pred[i * n..i * n + w]).map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs()).sum::<u32>() as u64;
+            if s as f64 + lb >= bound {
+                return s;
+            }
         }
         s
+    }
+
+    /// Sum of absolute Hadamard-transformed differences (4x4 or 8x8 sub-blocks) of a prediction
+    /// against the source, scaled to about the size of the SAD.
+    fn satd(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+        if n >= 8 { self.satd_k::<8>(p, x, y, n, pred) } else { self.satd_k::<4>(p, x, y, n, pred) }
+    }
+
+    /// `satd` with K x K Hadamard sub-blocks (fixed sizes so the butterflies vectorise).
+    fn satd_k<const K: usize>(&self, p: usize, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+        let src = &self.src[p];
+        let mut total = 0u64;
+        for by in (0..n).step_by(K) {
+            for bx in (0..n).step_by(K) {
+                // d[i] holds row i of the differences
+                let mut d = [[0i32; K]; K];
+                for (i, di) in d.iter_mut().enumerate() {
+                    let row = &src.row(y + by + i)[x + bx..x + bx + K];
+                    let pr = &pred[(by + i) * n + bx..(by + i) * n + bx + K];
+                    for j in 0..K {
+                        di[j] = row[j] as i32 - pr[j] as i32;
+                    }
+                }
+                // vertical butterflies across rows (all columns at once)
+                let mut h = 1;
+                while h < K {
+                    for i0 in (0..K).step_by(2 * h) {
+                        for i in i0..i0 + h {
+                            let (a, b) = (d[i], d[i + h]);
+                            for j in 0..K {
+                                d[i][j] = a[j] + b[j];
+                                d[i + h][j] = a[j] - b[j];
+                            }
+                        }
+                    }
+                    h *= 2;
+                }
+                // horizontal butterflies within each row
+                let mut s = 0u64;
+                for di in d.iter_mut() {
+                    hadamard(di);
+                    s += di.iter().map(|v| v.unsigned_abs() as u64).sum::<u64>();
+                }
+                total += s / (K as u64 / 2);
+            }
+        }
+        total
     }
 
     fn sse(&self, p: usize, x: usize, y: usize, n: usize, blk: &[u16]) -> f64 {
@@ -771,36 +894,48 @@ impl<'a> Decider<'a> {
 
     /// Transform, quantise and reconstruct one square transform block of `plane` at (x, y)
     /// over the prediction `pred`; the reconstruction is written to `rec`.
-    fn code_tx(&mut self, p: usize, x: usize, y: usize, log2: u32, tx_type: usize, pred: &[u16], intra: bool) -> TxResult {
-        let (res, recon) = self.try_tx(p, x, y, log2, tx_type, pred, intra);
+    fn code_tx(&mut self, block: TransformBlock, pred: &[u16]) -> TxResult {
+        let TransformBlock { plane: p, x, y, log2, .. } = block;
+        let mut sc = self.scratch.take().unwrap_or_default();
+        let (res, has_recon) = self.try_tx(&mut sc, block, pred);
         let n = 1usize << log2;
-        self.put(p, x, y, n, recon.as_deref().unwrap_or(pred));
-        res
+        self.put(p, x, y, n, if has_recon { &sc.recon[..n * n] } else { pred });
+        let levels = sc.levels[..n * n].to_vec();
+        self.scratch = Some(sc);
+        TxResult { levels, nonzero: res.nonzero, dist: res.dist, bits: res.bits }
     }
 
-    /// Transform and quantise one block; returns the result and its reconstruction (None: the
-    /// prediction) without writing it.
-    fn try_tx(&self, p: usize, x: usize, y: usize, log2: u32, tx_type: usize, pred: &[u16], intra: bool) -> (TxResult, Option<Vec<u16>>) {
+    /// Transform and quantise one block without writing it. The levels are left in `sc.levels`;
+    /// the flag tells whether `sc.recon` holds the reconstruction (false: it is the prediction).
+    fn try_tx(&self, sc: &mut TxScratch, block: TransformBlock, pred: &[u16]) -> (TxEval, bool) {
+        let TransformBlock { plane: p, x, y, log2, tx_type, intra } = block;
         let n = 1usize << log2;
+        let nn = n * n;
         let tx_sz = tx_size_for(log2);
         let bd = self.bd;
         let src = &self.src[p];
-        let mut res = vec![0i32; n * n];
+        let TxScratch { res, coef, levels, deq, resid, recon } = sc;
+        let (res, coef, levels) = (&mut res[..nn], &mut coef[..nn], &mut levels[..nn]);
         for i in 0..n {
             let row = &src.row(y + i)[x..x + n];
             for j in 0..n {
                 res[i * n + j] = row[j] as i32 - pred[i * n + j] as i32;
             }
         }
-        let mut coef = vec![0f32; n * n];
-        forward_2d(&res, &mut coef, n, tx_type);
+        forward_2d(res, coef, n, tx_type);
         // dead-zone quantiser: rounding offset below one half
-        let rnd = if intra { 0.38f32 } else { 0.30f32 };
-        let mut levels = vec![0i32; n * n];
+        let rnd = if intra { INTRA_RND } else { INTER_RND };
+        let [dc_thr, ac_thr] = [self.dead_zone[0][intra as usize], self.dead_zone[1][intra as usize]];
+        levels.fill(0);
         let mut nonzero = false;
         for (k, (&cf, l)) in coef.iter().zip(levels.iter_mut()).enumerate() {
-            let q = if k == 0 { self.dc_q } else { self.ac_q };
-            let a = (cf.abs() / q + rnd).floor() as i32;
+            let (q, thr) = if k == 0 { (self.dc_q, dc_thr) } else { (self.ac_q, ac_thr) };
+            // dead zone: below the exact threshold the level is zero, no division needed
+            if cf.abs() < thr {
+                continue;
+            }
+            // the operand is >= 0, so truncation equals floor
+            let a = (cf.abs() / q + rnd) as i32;
             if a != 0 {
                 *l = if cf < 0.0 { -a.min(1 << 16) } else { a.min(1 << 16) };
                 nonzero = true;
@@ -808,23 +943,26 @@ impl<'a> Decider<'a> {
         }
         let zero_dist = self.sse(p, x, y, n, pred);
         if !nonzero {
-            return (TxResult { levels, nonzero, dist: zero_dist, bits: 1.0 }, None);
+            return (TxEval { nonzero, dist: zero_dist, bits: 1.0 }, false);
         }
-        let recon = self.reconstruct(&levels, tx_sz, tx_type, pred, n, bd);
-        let dist = self.sse(p, x, y, n, &recon);
-        let bits = estimate_bits(&levels, tx_sz);
+        let recon = &mut recon[..nn];
+        self.reconstruct(levels, ReconBuffers { deq: &mut deq[..nn], resid: &mut resid[..nn], recon }, tx_sz, tx_type, pred, bd);
+        let dist = self.sse(p, x, y, n, recon);
+        let bits = estimate_bits(levels, tx_sz);
         if dist + self.lambda * bits >= zero_dist + self.lambda {
-            levels.iter_mut().for_each(|l| *l = 0);
-            return (TxResult { levels, nonzero: false, dist: zero_dist, bits: 1.0 }, None);
+            levels.fill(0);
+            return (TxEval { nonzero: false, dist: zero_dist, bits: 1.0 }, false);
         }
-        (TxResult { levels, nonzero: true, dist, bits }, Some(recon))
+        (TxEval { nonzero: true, dist, bits }, true)
     }
 
-    /// Dequantisation (7.12.3) and the inverse transform, added to the prediction.
-    fn reconstruct(&self, levels: &[i32], tx_sz: usize, tx_type: usize, pred: &[u16], n: usize, bd: u32) -> Vec<u16> {
+    /// Dequantisation (7.12.3) and the inverse transform, added to the prediction; the result is
+    /// written to `recon`. `deq` and `resid` are scratch buffers of `n * n` entries.
+    fn reconstruct(&self, levels: &[i32], bufs: ReconBuffers, tx_sz: usize, tx_type: usize, pred: &[u16], bd: u32) {
+        let ReconBuffers { deq, resid, recon } = bufs;
         let denom: i64 = if tx_sz == TX_32X32 { 2 } else { 1 };
         let lim = 1i64 << (7 + bd);
-        let mut deq = vec![0i32; n * n];
+        deq.fill(0);
         for (k, (&l, d)) in levels.iter().zip(deq.iter_mut()).enumerate() {
             if l == 0 {
                 continue;
@@ -834,11 +972,39 @@ impl<'a> Decider<'a> {
             let mag = (dq.abs() & 0xFF_FFFF) / denom;
             *d = (if dq < 0 { -mag } else { mag }).clamp(-lim, lim - 1) as i32;
         }
-        let mut resid = vec![0i32; n * n];
-        inverse_2d(&deq, &mut resid, tx_sz, tx_type, bd);
+        inverse_2d(deq, resid, tx_sz, tx_type, bd);
         let max = (1i32 << bd) - 1;
-        pred.iter().zip(&resid).map(|(&p, &r)| (p as i32 + r).clamp(0, max) as u16).collect()
+        for ((o, &p), &r) in recon.iter_mut().zip(pred).zip(resid.iter()) {
+            *o = (p as i32 + r).clamp(0, max) as u16;
+        }
     }
+}
+
+/// Smallest `x >= 0` with `(x / q + rnd) as i32 >= 1` in f32 arithmetic. The expression is
+/// monotone in `x`, so a binary search over the bit patterns finds the exact boundary.
+fn zero_threshold(q: f32, rnd: f32) -> f32 {
+    let (mut lo, mut hi) = (0u32, f32::MAX.to_bits());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if (f32::from_bits(mid) / q + rnd) as i32 >= 1 {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    f32::from_bits(lo)
+}
+
+const LOG2_TABLE_LEN: usize = 1025;
+
+/// `log2(i)` for `i < LOG2_TABLE_LEN`, computed with the same `f64::log2` call as the direct form.
+fn log2_table() -> &'static [f64; LOG2_TABLE_LEN] {
+    static TABLE: std::sync::OnceLock<[f64; LOG2_TABLE_LEN]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|i| (i as f64).log2()))
+}
+
+fn log2_of(table: &[f64; LOG2_TABLE_LEN], v: usize) -> f64 {
+    if v < LOG2_TABLE_LEN { table[v] } else { (v as f64).log2() }
 }
 
 /// Unnormalised Walsh-Hadamard transform of 4 or 8 values, in place.
@@ -869,13 +1035,14 @@ fn estimate_bits(levels: &[i32], tx_sz: usize) -> f64 {
     if eob == 0 {
         return 1.0;
     }
-    let mut bits = 3.0 + (eob as f64).log2();
+    let lg = log2_table();
+    let mut bits = 3.0 + log2_of(lg, eob);
     for &pos in &scan[..eob] {
         let a = levels[pos as usize].unsigned_abs();
         bits += match a {
             0 => 0.7,
             1 => 2.5,
-            _ => 3.5 + 1.6 * (a as f64).log2(),
+            _ => 3.5 + 1.6 * log2_of(lg, a as usize),
         };
     }
     bits
@@ -887,5 +1054,220 @@ pub(crate) fn scan_for(tx_sz: usize) -> &'static [u16] {
         TX_8X8 => &DEFAULT_SCAN_8X8,
         TX_16X16 => &DEFAULT_SCAN_16X16,
         _ => &DEFAULT_SCAN_32X32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tables::{AC_QLOOKUP, DC_QLOOKUP};
+
+    /// The quantiser as it was before the dead-zone threshold and the truncation.
+    fn quant_ref(cf: f32, q: f32, rnd: f32) -> i32 {
+        (cf.abs() / q + rnd).floor() as i32
+    }
+
+    fn quant_new(cf: f32, q: f32, rnd: f32, thr: f32) -> i32 {
+        if cf.abs() < thr {
+            return 0;
+        }
+        (cf.abs() / q + rnd) as i32
+    }
+
+    #[test]
+    fn dead_zone_threshold_is_exact() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for table in AC_QLOOKUP.iter().chain(DC_QLOOKUP.iter()) {
+            for &qi in table.iter() {
+                let q = qi as f32;
+                for rnd in [INTER_RND, INTRA_RND] {
+                    let thr = zero_threshold(q, rnd);
+                    // the boundary itself and its neighbours
+                    let b = thr.to_bits();
+                    for bits in b.saturating_sub(3)..=b + 3 {
+                        let cf = f32::from_bits(bits);
+                        assert_eq!(quant_ref(cf, q, rnd), quant_new(cf, q, rnd, thr), "q {q} rnd {rnd} cf {cf}");
+                        assert_eq!(quant_ref(-cf, q, rnd), quant_new(-cf, q, rnd, thr));
+                    }
+                    for _ in 0..200 {
+                        let cf = f32::from_bits((next() >> 32) as u32 & 0x7fff_ffff);
+                        if cf.is_nan() {
+                            continue;
+                        }
+                        assert_eq!(quant_ref(cf, q, rnd), quant_new(cf, q, rnd, thr));
+                        let cf = (next() % 100_000) as f32 / 100.0;
+                        assert_eq!(quant_ref(cf, q, rnd), quant_new(cf, q, rnd, thr));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn log2_table_matches_direct_log2() {
+        let t = log2_table();
+        for v in 1..3000usize {
+            assert_eq!(log2_of(t, v).to_bits(), (v as f64).log2().to_bits(), "{v}");
+        }
+    }
+
+    /// The SATD as it was before the fixed-size version: runtime block size, column gather.
+    fn satd_ref(src: &Plane, x: usize, y: usize, n: usize, pred: &[u16]) -> u64 {
+        let k = n.min(8);
+        let mut total = 0u64;
+        let mut d = [0i32; 64];
+        for by in (0..n).step_by(k) {
+            for bx in (0..n).step_by(k) {
+                for i in 0..k {
+                    let row = &src.row(y + by + i)[x + bx..x + bx + k];
+                    for j in 0..k {
+                        d[i * k + j] = row[j] as i32 - pred[(by + i) * n + bx + j] as i32;
+                    }
+                }
+                for i in 0..k {
+                    hadamard(&mut d[i * k..i * k + k]);
+                }
+                let mut col = [0i32; 8];
+                let mut s = 0u64;
+                for j in 0..k {
+                    for i in 0..k {
+                        col[i] = d[i * k + j];
+                    }
+                    hadamard(&mut col[..k]);
+                    s += col[..k].iter().map(|v| v.unsigned_abs() as u64).sum::<u64>();
+                }
+                total += s / (k as u64 / 2);
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn satd_fixed_size_matches_runtime_size() {
+        let g = FrameGeom::new(100, 80);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for bd in [8u32, 10] {
+            let max = (1u64 << bd) - 1;
+            let mut mk = |w: usize, h: usize| {
+                let mut p = Plane::new(w, h);
+                p.data.iter_mut().for_each(|v| *v = (next() % (max + 1)) as u16);
+                p
+            };
+            let src = [mk(128, 128), mk(64, 64), mk(64, 64)];
+            let dec = Decider::new(&g, bd, 100, true, &src, None);
+            for n in [4usize, 8, 16, 32] {
+                let pred: Vec<u16> = (0..n * n).map(|_| (next() % (max + 1)) as u16).collect();
+                for (p, x, y) in [(0, 0, 0), (0, 32, 40), (1, 8, 4)] {
+                    assert_eq!(dec.satd(p, x, y, n, &pred), satd_ref(&src[p], x, y, n, &pred), "n {n} plane {p}");
+                }
+            }
+        }
+    }
+
+    fn xorshift(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    /// A snapshot keeps only the BlockDecoded cells of the block area. Coding inside the block
+    /// marks sub-blocks of every smaller size; restoring must give back the whole 3x35x35 array
+    /// as it was, for every block size of a 64x64 superblock and every aligned position.
+    #[test]
+    fn snapshot_restore_brings_back_every_blockdecoded_flag() {
+        let g = FrameGeom::new(256, 256);
+        let mut next = xorshift(0x2545_f491_4f6c_dd1d);
+        let src = [Plane::new(256, 256), Plane::new(128, 128), Plane::new(128, 128)];
+        let mut dec = Decider::new(&g, 8, 100, true, &src, None);
+        for random_start in [false, true] {
+            for n4 in [1usize, 2, 4, 8, 16] {
+                for sb in [0usize, 16] {
+                    for r in (sb..sb + 16).step_by(n4) {
+                        for c in (sb..sb + 16).step_by(n4) {
+                            for plane in dec.decoded.iter_mut() {
+                                for row in plane.iter_mut() {
+                                    for v in row.iter_mut() {
+                                        *v = random_start && next() & 1 == 1;
+                                    }
+                                }
+                            }
+                            let before = dec.decoded.clone();
+                            let snap = dec.snapshot(r, c, n4);
+                            // every sub-block of every size inside the block, as coding marks them
+                            let mut m = n4;
+                            loop {
+                                for rr in (r..r + n4).step_by(m) {
+                                    for cc in (c..c + n4).step_by(m) {
+                                        for p in 0..3 {
+                                            dec.mark_decoded(p, rr, cc, m);
+                                        }
+                                    }
+                                }
+                                if m == 1 {
+                                    break;
+                                }
+                                m /= 2;
+                            }
+                            dec.restore(&snap, r, c, n4);
+                            assert!(dec.decoded == before, "n4 {n4} at ({r}, {c}), random start {random_start}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bounded SADs return the full SAD whenever the cost can still win (`sad + lb < bound`)
+    /// and otherwise a partial sum that already loses, so the callers' strict `<` decides the same.
+    #[test]
+    fn bounded_sad_stops_only_once_the_cost_cannot_win() {
+        let g = FrameGeom::new(100, 80);
+        let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+        let mut mk = |w: usize, h: usize| {
+            let mut p = Plane::new(w, h);
+            p.data.iter_mut().for_each(|v| *v = (next() % 256) as u16);
+            p
+        };
+        let src = [mk(128, 128), mk(64, 64), mk(64, 64)];
+        let refp = mk(128, 128);
+        let mut next = xorshift(0x1234_5678_9abc_def1);
+        let dec = Decider::new(&g, 8, 100, false, &src, None);
+        for n in [4usize, 8, 16, 32] {
+            for (x, y, rx, ry) in [(0usize, 0usize, 0i32, 0i32), (32, 40, 29, 43), (96, 72, 90, 70), (8, 8, -5, -3)] {
+                let full_ref = dec.sad_ref(&refp, [rx, ry], [x, y], n, [0.0, f64::INFINITY]);
+                let pred: Vec<u16> = (0..n * n).map(|_| (next() % 256) as u16).collect();
+                let full_pred = dec.sad_bounded(0, [x, y], n, &pred, [0.0, f64::INFINITY]);
+                for _ in 0..50 {
+                    let lb = (next() % 64) as f64 * 0.75;
+                    let b_ref = (next() % (2 * full_ref + 2)) as f64;
+                    let b_pred = (next() % (2 * full_pred + 2)) as f64;
+                    let got_ref = dec.sad_ref(&refp, [rx, ry], [x, y], n, [lb, b_ref]);
+                    let got_pred = dec.sad_bounded(0, [x, y], n, &pred, [lb, b_pred]);
+                    for (got, full, bound) in [(got_ref, full_ref, b_ref), (got_pred, full_pred, b_pred)] {
+                        if full as f64 + lb < bound {
+                            assert_eq!(got, full, "n {n} at ({x}, {y}) bound {bound}");
+                        } else {
+                            assert!(got as f64 + lb >= bound && got <= full, "n {n} at ({x}, {y}) bound {bound}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

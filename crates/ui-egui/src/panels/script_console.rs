@@ -7,8 +7,8 @@ use egui::{Align2, Rect, Sense, pos2, vec2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::EffectcraftApp;
 use crate::theme::Tokens;
+use crate::{EffectcraftApp, a11y, widgets};
 
 /// One line of console output.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -74,6 +74,9 @@ pub fn run(app: &mut EffectcraftApp, ctx: &egui::Context) {
     con.input.clear();
 }
 
+/// The Script Console panel: the output log (newest lines at the bottom, coloured by kind), the
+/// multi-line script input and Run/Clear. Run — the button or ⌘/Ctrl+Enter while typing — hands the
+/// input to the script runner; Clear only empties the log. The input text and log are UI state.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let input_h = 86.0;
@@ -99,23 +102,30 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(
             out_rect.center(),
             Align2::CENTER_CENTER,
-            "JavaScript with the After Effects scripting object model — try app.project.numItems",
+            crate::i18n::tr("JavaScript with the After Effects scripting object model — try app.project.numItems"),
             Tokens::ui(12.0),
             t.text_faint,
         );
     }
     app.auto.add("scriptConsole.output", out_rect, "Script Console output");
+    // The output is painted text; a screen reader gets the same lines (the newest 200) as a log.
+    let tail = app.ui.script_console.log.len().saturating_sub(200);
+    let text: Vec<&str> = app.ui.script_console.log.iter().skip(tail).map(|l| l.text.as_str()).collect();
+    a11y::log(ui, egui::Id::unique("script-console-output"), out_rect, tr("Script Console output"), &text.join("\n"));
     // Input.
     let in_rect = Rect::from_min_size(pos2(rect.min.x + 4.0, out_rect.max.y + 4.0), vec2(rect.width() - 8.0, input_h - 8.0));
     let mut run_now = false;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(in_rect));
     let te = egui::TextEdit::multiline(&mut app.ui.script_console.input)
-        .id(egui::Id::new("script-console-input"))
+        .id(egui::Id::unique("script-console-input"))
         .font(Tokens::mono(12.0))
         .desired_width(in_rect.width())
         .desired_rows(4)
+        // Tab leaves the field (it would otherwise type a tab character and trap the keyboard).
+        .lock_focus(false)
         .hint_text(tr("Script… (⌘/Ctrl+Enter runs)"));
     let resp = child.add_sized(in_rect.size(), te);
+    a11y::name(&resp, tr("Script… (⌘/Ctrl+Enter runs)"));
     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
         run_now = true;
     }
@@ -124,12 +134,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let bar = Rect::from_min_size(pos2(rect.min.x, rect.max.y - bar_h), vec2(rect.width(), bar_h));
     let run_r = Rect::from_min_size(pos2(bar.max.x - 64.0, bar.min.y + 2.0), vec2(56.0, 20.0));
     let clear_r = Rect::from_min_size(pos2(bar.max.x - 128.0, bar.min.y + 2.0), vec2(56.0, 20.0));
-    let run_resp = ui.interact(run_r, egui::Id::new("script-console-run"), Sense::click());
+    let run_resp = ui.interact(run_r, egui::Id::unique("script-console-run"), Sense::click());
     p.rect_filled(run_r, 3.0, if run_resp.hovered() { t.accent_hover } else { t.accent });
     p.text(run_r.center(), Align2::CENTER_CENTER, tr("Run"), Tokens::ui(12.0), egui::Color32::WHITE);
-    let clear_resp = ui.interact(clear_r, egui::Id::new("script-console-clear"), Sense::click());
+    let clear_resp = ui.interact(clear_r, egui::Id::unique("script-console-clear"), Sense::click());
     p.rect_stroke(clear_r, 3.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
     p.text(clear_r.center(), Align2::CENTER_CENTER, tr("Clear"), Tokens::ui(12.0), t.text);
+    a11y::button(&run_resp, tr("Run"), !app.ui.script_console.input.trim().is_empty());
+    a11y::button(&clear_resp, tr("Clear"), !app.ui.script_console.log.is_empty());
+    widgets::focus_outline(ui, &run_resp, &t);
+    widgets::focus_outline(ui, &clear_resp, &t);
     app.auto.add("scriptConsole.run", run_r, "Run");
     app.auto.add("scriptConsole.clear", clear_r, "Clear");
     if run_resp.clicked() {

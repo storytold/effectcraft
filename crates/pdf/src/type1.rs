@@ -143,7 +143,7 @@ impl Type1 {
                 q += 1;
             }
             q += 1;
-            let bytes = priv_.get(q..q + n)?;
+            let bytes = priv_.get(q..q.checked_add(n)?)?;
             Some((cs(bytes), q + n))
         };
         if let Some(p) = find(&priv_, b"/Subrs", 0) {
@@ -531,5 +531,18 @@ mod tests {
         assert_eq!(w, 600.0);
         assert!((p.area().abs() - 250_000.0).abs() < 1e-6);
         assert_eq!(p.bounding_box(), kurbo::Rect::new(50.0, 0.0, 550.0, 500.0));
+    }
+
+    /// A `/Subrs` entry whose `RD` length is `usize::MAX`: the bytes are not in the file, and
+    /// `q + n` must not overflow.
+    #[test]
+    fn huge_rd_lengths_do_not_overflow() {
+        let mut out = b"%!PS-AdobeFont-1.0: Test 001\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\ncurrentfile eexec\n".to_vec();
+        let mut priv_ = b"dup /Private 8 dict dup begin /lenIV -1 def\n/Subrs 1 array\ndup 0 18446744073709551615 RD\n".to_vec();
+        priv_.extend_from_slice(b"end\n/CharStrings 1 dict dup begin\n/.notdef 4 RD \x8b\x8b\r\x0e ND\nend\nend\nmark currentfile closefile\n");
+        out.extend(encrypt(&priv_, EEXEC_R, 4));
+        out.extend_from_slice(b"\n0000000000000000\ncleartomark\n");
+        let t = Type1::parse(&out).expect("the damaged Subrs entry is skipped");
+        assert!(t.has_glyph(".notdef"));
     }
 }

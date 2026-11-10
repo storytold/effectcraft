@@ -78,6 +78,8 @@ const SEEDS: &[&str] = &[
     "mask('Mask 1').maskOpacity",
     "mask('Mask 1').maskPath.points()[0]",
     "content('Rectangle 1').content('Rectangle Path 1').size[0]",
+    "thisProperty.propertyGroup(1).propertyIndex * 10 + thisProperty.propertyGroup(1).numProperties",
+    "effect(1)(1).propertyGroup(1).propertyGroup(2).name",
     "marker.numKeys > 0 ? marker.key(1).time : 0",
     "marker.nearestKey(time).comment",
     "thisComp.marker.key(1).time",
@@ -91,6 +93,8 @@ const SEEDS: &[&str] = &[
     "linear(time, 0, 1, 0, 100)",
     "ease(time, 0, 2, [0, 0], [100, 50])",
     "easeIn(time, 0, 1, 0, 360) + easeOut(time, 1, 2, 0, 10)",
+    "bezier(time, 0, 1, 0, 100, [0.42, 0, 0.58, 1])",
+    "bezier(time, [0, 0], [100, 50], [0.25, 0.1, 0.25, 1])",
     "clamp(value * 2, 0, 100)",
     "length([0, 0], [3, 4]) + dot([1, 0], [0, 1]) + cross([1, 0, 0], [0, 1, 0])[2]",
     "normalize([3, 4])[0] * degreesToRadians(180)",
@@ -130,7 +134,7 @@ const TOKENS: &[&str] = &[
     "catch", "finally", "throw ", "class ", "this", "null", "undefined", "NaN", "Infinity", "true", "-0", "0x", "1e", "1n",
     "/a+/g", "time", "value", "index", "thisComp", "thisLayer", "thisProperty", "layer(", "comp(", "effect(", "mask(",
     "content(", "key(", "marker", "valueAtTime(", "wiggle(", "loopOut(", "sourceRectAtTime(", "toComp(", "text.sourceText",
-    ".style", ".setText(", "createPath(", "seedRandom(", "random(", "linear(", "__h(", "__begin", "__S", "arguments",
+    ".style", ".setText(", ".propertyGroup(", ".propertyIndex", "createPath(", "seedRandom(", "random(", "linear(", "__h(", "__begin", "__S", "arguments",
 ];
 
 /// Numbers swapped in for numeric literals.

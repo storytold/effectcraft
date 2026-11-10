@@ -7,6 +7,11 @@
 //! pass for a precomp of a 3D comp. Without auxiliary channels they pass the layer through
 //! (EXtractoR still maps the layer's own R, G, B and A).
 //!
+//! 3D Layer Instance (Create 3D Layer Instance's own effect, Layer ▸ Create) is not an aux
+//! reader: it replaces the layer's pixels with a referenced layer's render — for a 3D model
+//! layer, its render on its own through the comp's camera — so 2D effects can be applied to a
+//! 3D layer's render.
+//!
 //! Aux pixels are looked up nearest-neighbour (IDs must not be interpolated) at each buffer
 //! pixel's layer position, so render scale and layer padding are respected.
 
@@ -25,6 +30,25 @@ fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, ren
     EffectSpec { id, name, category: "3D Channel", params, render, gpu: false, float: true }
 }
 
+/// The effects that read their layer's auxiliary channels ([`crate::EffectHost::aux`]): every
+/// 3D Channel effect but 3D Layer Instance.
+const READS_AUX: [&str; 8] = [
+    "ec.3d.channelextract",
+    "ec.3d.cryptomatte",
+    "ec.3d.depthmatte",
+    "ec.3d.depthoffield",
+    "ec.3d.extractor",
+    "ec.3d.fog3d",
+    "ec.3d.idmatte",
+    "ec.3d.identifier",
+];
+
+/// Does effect `id` read its layer's auxiliary channels ([`crate::EffectHost::aux`])? The media
+/// layer then decodes the footage's picture together with its channels (#474).
+pub fn reads_aux(id: &str) -> bool {
+    READS_AUX.contains(&id)
+}
+
 fn aux(ctx: &EffectCtx) -> Option<Arc<AuxChannels>> {
     ctx.env.host?.aux()
 }
@@ -37,14 +61,22 @@ fn index_map(b: &Buf, a: &AuxChannels) -> Vec<Option<usize>> {
 /// [`index_map`] sampling each pixel at sub-pixel position `at` (0..1).
 fn index_map_at(b: &Buf, a: &AuxChannels, at: [f64; 2]) -> Vec<Option<usize>> {
     let (w, h) = (b.img.width as usize, b.img.height as usize);
-    let inv = 1.0 / b.scale.max(1e-9);
     (0..w * h)
         .into_par_iter()
         .map(|i| {
-            let (x, y) = ((i % w) as f64 + at[0], (i / w) as f64 + at[1]);
-            a.index_at((x - b.offset[0]) * inv, (y - b.offset[1]) * inv)
+            let [x, y] = aux_point(b.scale, b.offset, [(i % w) as f64 + at[0], (i / w) as f64 + at[1]]);
+            a.index_at(x, y)
         })
         .collect()
+}
+
+/// The layer point where 3D Channel effects look up the aux for buffer position `p` (pixel
+/// `i` + sub-pixel offset) of a buffer with `scale` and `offset`. The Cryptomatte pick calls
+/// it too, so the two can't pick different aux pixels.
+#[inline]
+pub fn aux_point(scale: f64, offset: [f64; 2], p: [f64; 2]) -> [f64; 2] {
+    let inv = 1.0 / scale.max(1e-9);
+    [(p[0] - offset[0]) * inv, (p[1] - offset[1]) * inv]
 }
 
 /// A channel sampled into the buffer grid (`fill` outside).
@@ -326,7 +358,7 @@ fn wild(pat: &str, name: &str) -> bool {
 /// Split a selection at its commas. A name in double or single quotes stays whole, commas
 /// included (Blender allows `Green, Glossy`), and a backslash takes the next character
 /// literally (`Green\, Glossy`, `\"`). Unquoted text is trimmed; the quotes are dropped.
-fn selection_names(sel: &str) -> Vec<String> {
+pub(crate) fn selection_names(sel: &str) -> Vec<String> {
     let mut out = vec![];
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -351,7 +383,7 @@ fn selection_names(sel: &str) -> Vec<String> {
     out
 }
 
-/// Parse a selection: comma-separated names (optionally quoted, see [`selection_names`]) or
+/// Parse a selection: comma-separated names (optionally quoted, see `selection_names`) or
 /// `<hex>` hashes / wildcards.
 pub fn selection_hashes(sel: &str, manifest: Option<&[(String, u32)]>) -> Vec<u32> {
     let mut out = vec![];
@@ -377,7 +409,67 @@ pub fn selection_hashes(sel: &str, manifest: Option<&[(String, u32)]>) -> Vec<u3
     out
 }
 
+/// The Cryptomatte layers every renderer names, and the Layer popup's options when the footage
+/// has no Cryptomatte metadata. The stored Layer value is an index: 0-2 are these (an exact
+/// match or a suffix such as `ViewLayer.CryptoObject`), 3 and up are the file's other Cryptomatte
+/// layers in name order, so a project saved before the popup followed the footage loads unchanged.
 pub const CRYPTO_LAYERS: [&str; 3] = ["CryptoObject", "CryptoMaterial", "CryptoAsset"];
+
+/// The Layer popup's entries for Cryptomatte `layers` (sorted, as [`AuxChannels::crypto_layers`]
+/// returns them): the stored value and the layer's name, in value order. Of several layers
+/// that fit one standard slot (`A.CryptoObject`, `B.CryptoObject`) the first one keeps the standard
+/// slot, so existing projects load unchanged, and the others get the next custom slots.
+fn crypto_layer_slots(layers: &[String]) -> Vec<(usize, &str)> {
+    let mut out: Vec<(usize, &str)> = vec![];
+    let mut custom = CRYPTO_LAYERS.len();
+    for l in layers {
+        match CRYPTO_LAYERS.iter().position(|w| l == w || l.ends_with(w)) {
+            Some(i) if !out.iter().any(|(j, _)| *j == i) => out.push((i, l)),
+            _ => {
+                out.push((custom, l));
+                custom += 1;
+            }
+        }
+    }
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
+/// What the Layer popup lists for the footage `aux`: the Cryptomatte layers the file has, as
+/// (stored value, name), or the three standard ones when there is none (no footage, not an
+/// OpenEXR, no Cryptomatte channels).
+pub fn crypto_layer_choices(aux: Option<&AuxChannels>) -> Vec<(usize, String)> {
+    crypto_layer_menu(aux, 0).0
+}
+
+/// The Layer popup for the stored value `index`: [`crypto_layer_choices`], and the name of the
+/// entry the effect reads (the first when `index` names none, as the effect does).
+pub fn crypto_layer_menu(aux: Option<&AuxChannels>, index: usize) -> (Vec<(usize, String)>, Option<String>) {
+    let layers = aux.map(AuxChannels::crypto_layers).unwrap_or_default();
+    if layers.is_empty() {
+        let all: Vec<(usize, String)> = CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+        let shown = all.iter().find(|c| c.0 == index).or(all.first()).map(|c| c.1.clone());
+        return (all, shown);
+    }
+    let slots = crypto_layer_slots(&layers);
+    let shown = slots.iter().find(|(i, _)| *i == index).map(|(_, n)| n.to_string()).or_else(|| layers.first().cloned());
+    (slots.into_iter().map(|(i, n)| (i, n.to_string())).collect(), shown)
+}
+
+/// The Cryptomatte layer the effect reads: the one called `name` when the footage has it (Layer
+/// Name, the layer an imported After Effects project names), else [`crypto_layer_name`]'s.
+pub fn crypto_layer_named(aux: &AuxChannels, name: &str, index: usize) -> Option<String> {
+    aux.resolve_crypto_layer_named(name, &crypto_layer_name(aux, index)?)
+}
+
+/// The Cryptomatte layer of `aux` that the stored Layer value `index` reads: its slot's layer, else
+/// the first layer (what a file without that layer has always shown). `None` without any.
+pub fn crypto_layer_name(aux: &AuxChannels, index: usize) -> Option<String> {
+    if aux.crypto_layers().is_empty() {
+        return None;
+    }
+    crypto_layer_menu(Some(aux), index).1
+}
 
 /// Rank planes as [`AuxChannels::crypto_rank_planes`] returns them.
 type RankPlanes<'a> = [(&'a [f32], &'a [f32])];
@@ -395,13 +487,42 @@ fn crypto_matte(planes: &RankPlanes, sel: &[u32], i: usize) -> f32 {
         .clamp(0.0, 1.0)
 }
 
+/// [`id_color`] of the last ID seen on each rank plane, per worker. Neighbouring pixels mostly
+/// carry the same IDs, so this skips the hash and the HSL conversion for most of them. Keyed by the
+/// ID's bits, so it returns exactly what [`id_color`] would.
+///
+/// Keep the per-pixel loop below as it is: with NaN coverage, which NaN payload ends up in a
+/// channel depends on the order the compiler adds the ranks in, and a row-wise loop let it reorder
+/// them (`crypto_aux_image_is_bit_exact_on_edge_values` catches that).
+#[derive(Default)]
+struct IdColorMemo(Vec<(u32, [f32; 3])>);
+
+impl IdColorMemo {
+    #[inline]
+    fn get(&mut self, rank: usize, id: f32) -> [f32; 3] {
+        let bits = id.to_bits();
+        match self.0.get_mut(rank) {
+            Some(e) if e.0 == bits => e.1,
+            Some(e) => {
+                *e = (bits, id_color(id));
+                e.1
+            }
+            None => {
+                let c = id_color(id);
+                self.0.resize(rank + 1, (bits, c));
+                c
+            }
+        }
+    }
+}
+
 /// The coverage-weighted ID colours at aux pixel `i` (the spec's preview).
 #[inline]
-fn crypto_colors(planes: &RankPlanes, i: usize) -> [f32; 3] {
+fn crypto_colors(planes: &RankPlanes, i: usize, memo: &mut IdColorMemo) -> [f32; 3] {
     let mut c = [0.0f32; 3];
-    for (id, cov) in planes {
+    for (rank, (id, cov)) in planes.iter().enumerate() {
         let (Some(&id), Some(&cov)) = (id.get(i), cov.get(i)) else { continue };
-        let k = id_color(id);
+        let k = memo.get(rank, id);
         for j in 0..3 {
             c[j] += k[j] * cov;
         }
@@ -413,48 +534,82 @@ fn crypto_colors(planes: &RankPlanes, i: usize) -> [f32; 3] {
 /// selection's coverage (A), computed in parallel with the rank planes resolved once. The GPU
 /// effect uploads this image and samples it per layer pixel.
 pub fn crypto_aux_image(a: &AuxChannels, layer: &str, sel: &[u32]) -> Image {
+    crypto_aux_image_with(a, layer, sel, CryptoAux::ColorsAndMatte)
+}
+
+/// What [`crypto_aux_image_with`] computes per aux pixel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoAux {
+    /// The coverage-weighted ID colours (RGB) and the selection's coverage (A).
+    ColorsAndMatte,
+    /// Only the selection's coverage (A); the RGB stays 0.
+    MatteOnly,
+}
+
+impl CryptoAux {
+    /// What the Cryptomatte effect reads for `display` and Matte Only: the ID colours are only
+    /// read by the Colors display (0) without Matte Only; Matte, Preview and Matte Only need the
+    /// matte alone.
+    pub fn for_display(display: u32, matte_only: bool) -> Self {
+        if display == 0 && !matte_only { Self::ColorsAndMatte } else { Self::MatteOnly }
+    }
+}
+
+/// [`crypto_aux_image`]; with [`CryptoAux::MatteOnly`] the RGB stays 0 and only the matte (A) is
+/// computed, for the displays that never read the ID colours.
+pub fn crypto_aux_image_with(a: &AuxChannels, layer: &str, sel: &[u32], what: CryptoAux) -> Image {
     let planes = a.crypto_rank_planes(layer);
     let mut img = Image::new(a.width, a.height);
-    img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let c = crypto_colors(&planes, i);
+    img.data.par_iter_mut().enumerate().for_each_init(IdColorMemo::default, |memo, (i, px)| {
+        let c = match what {
+            CryptoAux::ColorsAndMatte => crypto_colors(&planes, i, memo),
+            CryptoAux::MatteOnly => [0.0; 3],
+        };
         *px = [c[0], c[1], c[2], crypto_matte(&planes, sel, i)];
     });
     img
 }
 
+/// The hidden switch that keeps Matte Only as projects saved before #3127 render it: the matte in
+/// RGB and alpha. Fresh instances have it off (the matte in RGB over alpha 1, as After Effects'
+/// Cryptomatte plug-in shows Matte Only); `migrate::legacy_default` turns it on for older saves.
+pub const MATTE_ONLY_IN_ALPHA: &str = "matteOnlyInAlpha";
+
+/// A Matte Only pixel for matte `m`: grey `m` over alpha 1, or with `in_alpha` (older
+/// projects) `m` in every channel. The GPU shader (`fx_depth.wgsl`, op 7) does the same.
+#[inline]
+pub fn matte_only_px(m: f32, in_alpha: bool) -> Px {
+    if in_alpha { [m; 4] } else { [m, m, m, 1.0] }
+}
+
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
-    let layers = a.crypto_layers();
-    if layers.is_empty() {
-        return b;
-    }
-    let want = CRYPTO_LAYERS[(ctx.params.e("layer") as usize).min(2)];
-    let layer = layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).unwrap_or(&layers[0]).clone();
+    let Some(layer) = crypto_layer_named(&a, ctx.params.s("layerName"), ctx.params.e("layer") as usize) else { return b };
     let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
     let idx = index_map(&b, &a);
     let display = ctx.params.e("display");
     let matte_only = ctx.params.b("matteOnly");
+    let in_alpha = ctx.params.b(MATTE_ONLY_IN_ALPHA);
     let planes = a.crypto_rank_planes(&layer);
-    let src = b.img.clone();
-    b.img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let m = idx[i].map_or(0.0, |k| crypto_matte(&planes, &sel, k));
+    b.img.data.par_iter_mut().zip(idx.par_iter()).for_each_init(IdColorMemo::default, |memo, (px, &k)| {
+        let m = k.map_or(0.0, |k| crypto_matte(&planes, &sel, k));
         if matte_only {
-            *px = [m, m, m, m];
+            *px = matte_only_px(m, in_alpha);
             return;
         }
         *px = match display {
             // Colors: coverage-weighted ID colours (the spec's preview), selection brighter.
             0 => {
-                let c = idx[i].map_or([0.0; 3], |k| crypto_colors(&planes, k));
+                let c = k.map_or([0.0; 3], |k| crypto_colors(&planes, k, memo));
                 let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
                 [c[0], c[1], c[2], 1.0]
             }
-            // Matte: the layer keyed by the selection.
-            1 => src.data[i].map(|v| v * m),
+            // Matte: the layer keyed by the selection (each pixel only reads itself, so no copy).
+            1 => px.map(|v| v * m),
             // Preview: the layer with the selection tinted.
             _ => {
-                let s = src.data[i];
+                let s = *px;
                 [s[0] * (1.0 - 0.5 * m) + 0.5 * m * s[3], s[1] * (1.0 - 0.5 * m) + 0.5 * m * s[3], s[2] * (1.0 - 0.5 * m), s[3]]
             }
         };
@@ -464,6 +619,39 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- EXtractoR
 
+/// EXtractoR's channel name for After Effects' `(copy)`: the effect input's own channel of the
+/// same position (red's red ... alpha's alpha), as the earlier effects left it, never a footage
+/// channel of some name (an OpenEXR's `A` is the file's alpha, not the input's).
+pub const EXTRACTOR_COPY: &str = "(copy)";
+
+/// Whether an EXtractoR channel name is [`EXTRACTOR_COPY`].
+pub fn is_extractor_copy(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(EXTRACTOR_COPY)
+}
+
+/// The layer's own channel an EXtractoR output channel at position `k` reads when no footage
+/// channel of that name exists: `R`/`G`/`B`/`A` (or the long names) by name, [`EXTRACTOR_COPY`]
+/// its own position.
+pub fn extractor_own_channel(k: usize, name: &str) -> Option<usize> {
+    if is_extractor_copy(name) {
+        return (k < 4).then_some(k);
+    }
+    match name.trim().to_ascii_uppercase().as_str() {
+        "R" | "RED" => Some(0),
+        "G" | "GREEN" => Some(1),
+        "B" | "BLUE" => Some(2),
+        "A" | "ALPHA" => Some(3),
+        _ => None,
+    }
+}
+
+/// The footage channel an EXtractoR output channel reads by name: none for an empty name or
+/// [`EXTRACTOR_COPY`] (the input's own channel).
+pub fn extractor_aux_channel<'a>(a: &'a AuxChannels, name: &str) -> Option<&'a [f32]> {
+    let n = name.trim();
+    if n.is_empty() || is_extractor_copy(n) { None } else { a.get(n) }
+}
+
 fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let a = aux(ctx);
     let names = [ctx.params.s("red"), ctx.params.s("green"), ctx.params.s("blue"), ctx.params.s("alpha")];
@@ -471,17 +659,11 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let unmult = ctx.params.b("unMult");
     let clip = ctx.params.b("clip");
     let idx = a.as_ref().map(|a| index_map(&b, a));
-    // Each output channel: an aux channel by name, or the layer's own R/G/B/A.
-    let own = |n: &str| match n.trim().to_ascii_uppercase().as_str() {
-        "R" | "RED" => Some(0),
-        "G" | "GREEN" => Some(1),
-        "B" | "BLUE" => Some(2),
-        "A" | "ALPHA" => Some(3),
-        "" => None,
-        _ => None,
-    };
-    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| if n.trim().is_empty() { None } else { a.get(n.trim()) })).collect();
-    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(n) == Some(k)) {
+    // Each output channel: an aux channel by name, or the layer's own R/G/B/A (`(copy)`: its
+    // own position, never an aux channel).
+    let own = |k: usize, n: &str| extractor_own_channel(k, n);
+    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| extractor_aux_channel(a, n))).collect();
+    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(k, n) == Some(k)) {
         return b;
     }
     let src = b.img.clone();
@@ -497,7 +679,7 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
             o[k] = match (src_ch[k], idx.as_ref().and_then(|m| m[i])) {
                 (Some(ch), Some(j)) => ch[j],
                 (Some(_), None) => 0.0,
-                (None, _) => match own(names[k]) {
+                (None, _) => match own(k, names[k]) {
                     Some(c) => straight[c],
                     None => {
                         if k == 3 {
@@ -516,6 +698,19 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
         let c = if unmult && al > 1e-6 { [o[0] / al, o[1] / al, o[2] / al] } else { [o[0], o[1], o[2]] };
         *px = premul(c, al);
     });
+    b
+}
+
+/// A 2D copy of a referenced layer (Create 3D Layer Instance's solid): the layer's pixels
+/// replaced with the referenced layer's render, alpha included — the copy is transparent
+/// where the referenced layer isn't. A 3D model or primitive layer is rendered on its own
+/// through the comp's camera, as After Effects renders 3D layers; another layer is read with
+/// its masks and effects. With no layer chosen the effect passes the layer through, as a layer
+/// parameter with nothing chosen does.
+fn instance_3d(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    if let Some(o) = ctx.layer_param("layer", true) {
+        b.img = crate::util::fit_layer(ctx, &b, &o, false);
+    }
     b
 }
 
@@ -543,6 +738,11 @@ pub fn specs() -> Vec<EffectSpec> {
                 text("selection", "Selection", ""),
                 p("display", "Display", Value::Enum(2), popup(&["Colors", "Matte", "Preview"])),
                 p("matteOnly", "Matte Only", Value::Bool(false), ParamUi::Checkbox),
+                p(MATTE_ONLY_IN_ALPHA, "Matte Only In Alpha", Value::Bool(false), ParamUi::Hidden),
+                // A layer named in full (`CryptoMaterial`); empty uses Layer. Last, so the
+                // earlier parameters keep their indexes and saved instances, which get it
+                // appended, have the same order as new ones.
+                text("layerName", "Layer Name", ""),
             ],
             cryptomatte,
         ),
@@ -619,349 +819,9 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             identifier,
         ),
+        spec("ec.3d.instance3d", "3D Layer Instance", vec![p("layer", "Layer", Value::Layer(None), ParamUi::Layer)], instance_3d),
     ]
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{EffectEnv, EffectHost, LayerPixels, run_fx};
-    use effectcraft_raster::channels3d::crypto_float;
-
-    /// A 20×10 layer: left half object 1 at depth 100, right half object 2 at depth 500; the
-    /// top-right corner is background. Cryptomatte: "left" / "right".
-    struct AuxHost(Arc<AuxChannels>);
-    impl EffectHost for AuxHost {
-        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
-            None
-        }
-        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
-            None
-        }
-        fn aux(&self) -> Option<Arc<AuxChannels>> {
-            Some(self.0.clone())
-        }
-    }
-
-    fn scene() -> AuxHost {
-        let (w, h) = (20usize, 10usize);
-        let mut a = AuxChannels::new(w as u32, h as u32, 1.0);
-        let (mut z, mut id, mut r, mut g) = (vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h]);
-        let (hl, hr) = (crypto_hash("left"), crypto_hash("right"));
-        for y in 0..h {
-            for x in 0..w {
-                let i = y * w + x;
-                if x >= 15 && y < 3 {
-                    z[i] = BACKGROUND_DEPTH;
-                } else if x < 10 {
-                    z[i] = 100.0;
-                    id[i] = 1.0;
-                    r[i] = crypto_float(hl);
-                    g[i] = 1.0;
-                } else {
-                    z[i] = 500.0;
-                    id[i] = 2.0;
-                    r[i] = crypto_float(hr);
-                    g[i] = 1.0;
-                }
-            }
-        }
-        a.channels = vec![("Z".into(), z), ("ObjectID".into(), id), ("CryptoObject00.R".into(), r), ("CryptoObject00.G".into(), g)];
-        a.manifests = vec![("CryptoObject".into(), vec![("left".into(), hl), ("right".into(), hr)])];
-        AuxHost(Arc::new(a))
-    }
-
-    fn img() -> Image {
-        Image::filled(20, 10, [0.5, 0.5, 0.5, 1.0])
-    }
-
-    fn run(id: &str, vals: &[(&str, Value)], host: &AuxHost) -> Image {
-        run_fx(id, vals, img(), 0.0, EffectEnv { host: Some(host), ..Default::default() }).img
-    }
-
-    #[test]
-    fn passes_through_without_aux_channels() {
-        for s in specs() {
-            let out = run_fx(s.id, &[], img(), 0.0, EffectEnv::default());
-            assert_eq!(out.img.data, img().data, "{}", s.id);
-        }
-    }
-
-    #[test]
-    fn depth_matte_thresholds() {
-        let h = scene();
-        let o = run("ec.3d.depthmatte", &[("depth", num(300.0))], &h);
-        assert_eq!(o.get(2, 5)[3], 0.0);
-        assert_eq!(o.get(12, 5)[3], 1.0);
-        let inv = run("ec.3d.depthmatte", &[("depth", num(300.0)), ("invert", Value::Bool(true))], &h);
-        assert_eq!(inv.get(2, 5)[3], 1.0);
-        assert_eq!(inv.get(12, 5)[3], 0.0);
-        // Feather: a ramp of 800 units centred on 300 → depth 100 at 0.25, 500 at 0.75.
-        let f = run("ec.3d.depthmatte", &[("depth", num(300.0)), ("feather", num(800.0))], &h);
-        assert!((f.get(2, 5)[3] - 0.25).abs() < 1e-5 && (f.get(12, 5)[3] - 0.75).abs() < 1e-5);
-    }
-
-    #[test]
-    fn channel_extract_maps_depth_and_ids() {
-        let h = scene();
-        let o = run("ec.3d.channelextract", &[("blackPoint", num(0.0)), ("whitePoint", num(1000.0))], &h);
-        assert!((o.get(2, 5)[0] - 0.1).abs() < 1e-6 && (o.get(12, 5)[0] - 0.5).abs() < 1e-6);
-        assert_eq!(o.get(17, 1)[0], 1.0);
-        let ids = run("ec.3d.channelextract", &[("channel", Value::Enum(1)), ("whitePoint", num(2.0))], &h);
-        assert_eq!(ids.get(2, 5)[0], 0.5);
-        // Invert Depth Map flips the ramp; without Clamp Output values run past 1.
-        let inv = run("ec.3d.channelextract", &[("blackPoint", num(0.0)), ("whitePoint", num(1000.0)), ("invertDepthMap", Value::Bool(true))], &h);
-        assert!((inv.get(2, 5)[0] - 0.9).abs() < 1e-6);
-        let raw = run("ec.3d.channelextract", &[("blackPoint", num(0.0)), ("whitePoint", num(100.0)), ("clampOutput", Value::Bool(false))], &h);
-        assert!(raw.get(12, 5)[0] > 1.5);
-    }
-
-    #[test]
-    fn id_matte_and_identifier() {
-        let h = scene();
-        let o = run("ec.3d.idmatte", &[("idSelection", num(2.0))], &h);
-        assert_eq!(o.get(2, 5)[3], 0.0);
-        assert_eq!(o.get(12, 5)[3], 1.0);
-        let l = run("ec.3d.identifier", &[("display", Value::Enum(1)), ("id", num(1.0))], &h);
-        assert_eq!(l.get(2, 5)[0], 1.0);
-        assert_eq!(l.get(12, 5)[0], 0.0);
-        let c = run("ec.3d.identifier", &[], &h);
-        assert_ne!(c.get(2, 5), c.get(12, 5));
-    }
-
-    /// The parallel aux image (rank planes resolved once) is bit-identical to the per-pixel
-    /// reduction over `crypto_ranks` it replaces.
-    #[test]
-    fn crypto_aux_image_matches_the_per_pixel_reduction() {
-        let (w, h) = (7u32, 5u32);
-        let n = (w * h) as usize;
-        let mut a = AuxChannels::new(w, h, 1.0);
-        let ids = [crypto_hash("cube"), crypto_hash("sphere"), crypto_hash("ring")].map(effectcraft_raster::channels3d::crypto_float);
-        for (k, ch) in ["00.R", "00.G", "00.B", "00.A", "01.R", "01.G", "01.B", "01.A"].iter().enumerate() {
-            let v: Vec<f32> = (0..n).map(|i| if k % 2 == 0 { ids[(i + k) % 3] } else { ((i * 7 + k * 3) % 11) as f32 / 10.0 }).collect();
-            a.channels.push((format!("CryptoObject{ch}"), v));
-        }
-        let sel = vec![crypto_hash("sphere"), crypto_hash("ring")];
-        let img = crypto_aux_image(&a, "CryptoObject", &sel);
-        for i in 0..n {
-            let ranks = a.crypto_ranks("CryptoObject", i);
-            let m: f32 = ranks.iter().filter(|(id, c)| *c > 0.0 && sel.contains(&id.to_bits())).map(|(_, c)| *c).sum::<f32>().clamp(0.0, 1.0);
-            let mut c = [0.0f32; 3];
-            for (id, cov) in &ranks {
-                let k = id_color(*id);
-                for j in 0..3 {
-                    c[j] += k[j] * cov;
-                }
-            }
-            let want = [c[0], c[1], c[2], m];
-            assert_eq!(img.data[i].map(f32::to_bits), want.map(f32::to_bits), "pixel {i}");
-        }
-    }
-
-    /// The lookup before #473, kept as the reference: the rank channels formatted and searched
-    /// by name for every pixel.
-    fn ranks_by_name(a: &AuxChannels, layer: &str, i: usize) -> Vec<(f32, f32)> {
-        let mut out = vec![];
-        for k in 0.. {
-            let get = |c: &str| a.get(&format!("{layer}{k:02}.{c}"));
-            let (Some(r), Some(g)) = (get("R"), get("G")) else { break };
-            out.push((r[i], g[i]));
-            if let (Some(b), Some(al)) = (get("B"), get("A")) {
-                out.push((b[i], al[i]));
-            }
-        }
-        out
-    }
-
-    /// The reduction before #473 over those ranks: (ID colours, selection coverage).
-    fn reduce_by_name(a: &AuxChannels, layer: &str, sel: &[u32], i: usize) -> ([f32; 3], f32) {
-        let ranks = ranks_by_name(a, layer, i);
-        let m: f32 = ranks.iter().filter(|(id, c)| *c > 0.0 && sel.contains(&id.to_bits())).map(|(_, c)| *c).sum::<f32>().clamp(0.0, 1.0);
-        let mut c = [0.0f32; 3];
-        for (id, cov) in &ranks {
-            let k = id_color(*id);
-            for j in 0..3 {
-                c[j] += k[j] * cov;
-            }
-        }
-        (c, m)
-    }
-
-    /// A 6×2 Cryptomatte layer with awkward values: NaN, ±inf, negative and -0.0 coverage, NaN
-    /// and -0.0 IDs; rank 01 has no B/A pair, rank 02 is missing, so rank 03 (filled with values
-    /// that would change every pixel) must be ignored as before.
-    fn edge_aux(with_rank_after_gap: bool) -> AuxChannels {
-        let (w, h) = (6u32, 2u32);
-        let nan_payload = f32::from_bits(0x7fc0_1234);
-        let (hs, hc) = (crypto_float(crypto_hash("sphere")), crypto_float(crypto_hash("cube")));
-        let cov = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5, -0.0, 0.0, 0.25, 1.0, 2.0, f32::MIN_POSITIVE, nan_payload, 0.5];
-        let ids = [hs, f32::NAN, hc, -0.0, 0.0, nan_payload, hs, hc, f32::NAN, hs, hc, -0.0];
-        let rot = |v: &[f32; 12], k: usize| -> Vec<f32> { (0..12).map(|i| v[(i + k) % 12]).collect() };
-        let mut a = AuxChannels::new(w, h, 1.0);
-        let mut push = |n: &str, v: Vec<f32>| a.channels.push((format!("CryptoObject{n}"), v));
-        push("00.R", rot(&ids, 0));
-        push("00.G", rot(&cov, 0));
-        push("00.B", rot(&ids, 3));
-        push("00.A", rot(&cov, 5));
-        push("01.R", rot(&ids, 7));
-        push("01.G", rot(&cov, 2));
-        if with_rank_after_gap {
-            push("03.R", vec![hs; 12]);
-            push("03.G", vec![1.0; 12]);
-            push("03.B", vec![hc; 12]);
-            push("03.A", vec![1.0; 12]);
-        }
-        a
-    }
-
-    fn edge_selection() -> Vec<u32> {
-        vec![crypto_hash("sphere"), f32::NAN.to_bits(), 0x7fc0_1234, (-0.0f32).to_bits()]
-    }
-
-    /// Edge values give bit-identical results to the lookup by name, the missing B/A pair is
-    /// skipped and a rank after a gap is ignored.
-    #[test]
-    fn crypto_aux_image_is_bit_exact_on_edge_values() {
-        let sel = edge_selection();
-        let a = edge_aux(true);
-        assert_eq!(a.crypto_rank_planes("CryptoObject").len(), 3, "00.R/G, 00.B/A, 01.R/G; not 03 after the gap");
-        let img = crypto_aux_image(&a, "CryptoObject", &sel);
-        let without_gap_rank = crypto_aux_image(&edge_aux(false), "CryptoObject", &sel);
-        for i in 0..12 {
-            let (c, m) = reduce_by_name(&a, "CryptoObject", &sel, i);
-            let want = [c[0], c[1], c[2], m];
-            assert_eq!(img.data[i].map(f32::to_bits), want.map(f32::to_bits), "pixel {i}");
-            assert_eq!(img.data[i].map(f32::to_bits), without_gap_rank.data[i].map(f32::to_bits), "pixel {i}: the rank after the gap was used");
-        }
-    }
-
-    /// The CPU effect on a 20×10 layer over the 6×2 edge aux: pixels inside the aux area match
-    /// the lookup by name bit for bit in every display mode, pixels outside it (no aux index)
-    /// get an empty matte and no ID colour.
-    #[test]
-    fn cryptomatte_cpu_path_is_bit_exact_inside_and_outside_the_aux_area() {
-        let a = edge_aux(true);
-        let host = AuxHost(Arc::new(a.clone()));
-        let names = "sphere, <7fc00000>, <7fc01234>, <80000000>";
-        assert_eq!(selection_hashes(names, None), edge_selection());
-        let src = img().data[0];
-        for (display, matte_only) in [(0, false), (1, false), (2, false), (0, true)] {
-            let out = run(
-                "ec.3d.cryptomatte",
-                &[("selection", Value::Str(names.into())), ("display", Value::Enum(display)), ("matteOnly", Value::Bool(matte_only))],
-                &host,
-            );
-            let expect = |c: [f32; 3], m: f32| -> [f32; 4] {
-                if matte_only {
-                    return [m; 4];
-                }
-                match display {
-                    0 => {
-                        let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
-                        [c[0], c[1], c[2], 1.0]
-                    }
-                    1 => src.map(|v| v * m),
-                    _ => [src[0] * (1.0 - 0.5 * m) + 0.5 * m * src[3], src[1] * (1.0 - 0.5 * m) + 0.5 * m * src[3], src[2] * (1.0 - 0.5 * m), src[3]],
-                }
-            };
-            for (x, y) in [(0u32, 0u32), (1, 0), (5, 0), (0, 1), (3, 1), (5, 1)] {
-                let (c, m) = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize);
-                assert_eq!(
-                    out.get(x as i64, y as i64).map(f32::to_bits),
-                    expect(c, m).map(f32::to_bits),
-                    "display {display} matteOnly {matte_only} at ({x}, {y})"
-                );
-            }
-            for (x, y) in [(6u32, 0u32), (19, 0), (0, 2), (12, 9)] {
-                assert_eq!(
-                    out.get(x as i64, y as i64).map(f32::to_bits),
-                    expect([0.0; 3], 0.0).map(f32::to_bits),
-                    "display {display} matteOnly {matte_only} outside the aux at ({x}, {y})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn cryptomatte_selects_by_name_and_wildcard() {
-        let h = scene();
-        let m = run("ec.3d.cryptomatte", &[("selection", Value::Str("right".into())), ("matteOnly", Value::Bool(true))], &h);
-        assert_eq!(m.get(2, 5)[3], 0.0);
-        assert_eq!(m.get(12, 5)[3], 1.0);
-        let w = run("ec.3d.cryptomatte", &[("selection", Value::Str("l*".into())), ("display", Value::Enum(1))], &h);
-        assert_eq!(w.get(2, 5)[3], 1.0);
-        assert_eq!(w.get(12, 5)[3], 0.0);
-        assert!(wild("*ight", "right") && wild("r*t", "right") && !wild("x*", "right"));
-        let hex = format!("<{:08x}>", crypto_hash("left"));
-        assert_eq!(selection_hashes(&hex, None), vec![crypto_hash("left")]);
-    }
-
-    /// #473: a name with a comma in it (Blender allows `Green, Glossy`) is selected when it is
-    /// quoted or its comma escaped, instead of being cut into two names that match nothing.
-    #[test]
-    fn cryptomatte_selection_keeps_quoted_names_with_commas_whole() {
-        let manifest = vec![("Green, Glossy".to_string(), 7), ("Green".to_string(), 1), ("Glossy".to_string(), 2), ("ring".to_string(), 3)];
-        let m = Some(manifest.as_slice());
-        assert_eq!(selection_hashes(r#""Green, Glossy""#, m), vec![7]);
-        assert_eq!(selection_hashes("'Green, Glossy', ring", m), vec![7, 3]);
-        assert_eq!(selection_hashes(r"Green\, Glossy", m), vec![7]);
-        assert_eq!(selection_hashes(r#"ring , "Green, Glossy""#, m), vec![3, 7]);
-        // Without a manifest the whole name is hashed.
-        assert_eq!(selection_hashes(r#""Green, Glossy""#, None), vec![crypto_hash("Green, Glossy")]);
-        // Plain lists, apostrophes inside names and an unclosed quote still parse.
-        assert_eq!(selection_hashes("Green, Glossy", m), vec![1, 2]);
-        assert_eq!(selection_names("Bob's mat, ring"), vec!["Bob's mat", "ring"]);
-        assert_eq!(selection_names(r#""Green, Glossy"#), vec!["Green, Glossy"]);
-        assert_eq!(selection_names(r#"say \"hi\""#), vec![r#"say "hi""#]);
-    }
-
-    #[test]
-    fn fog_and_depth_of_field_follow_depth() {
-        let h = scene();
-        let f = run("ec.3d.fog3d", &[("fogColor", col(1.0, 0.0, 0.0)), ("fogEndDepth", num(1000.0)), ("scatteringDensity", num(0.0))], &h);
-        // Linear fog: 10 % at depth 100, 50 % at 500, full on the background.
-        assert!((f.get(2, 5)[0] - 0.55).abs() < 1e-4, "{:?}", f.get(2, 5));
-        assert!((f.get(12, 5)[0] - 0.75).abs() < 1e-4);
-        assert!((f.get(17, 1)[0] - 1.0).abs() < 1e-4 && f.get(17, 1)[1] < 1e-4);
-        assert!((dof_radius(100.0, 100.0, 0.0, 10.0, 50.0)).abs() < 1e-6);
-        assert!((dof_radius(200.0, 100.0, 0.0, 10.0, 50.0) - 10.0).abs() < 1e-6);
-        assert_eq!(dof_radius(140.0, 100.0, 100.0, 10.0, 50.0), 0.0);
-        // A sharp edge at the far object blurs when focused near.
-        let mut pic = Image::new(20, 10);
-        for y in 0..10 {
-            for x in 0..20 {
-                let v = if x % 2 == 0 { 1.0 } else { 0.0 };
-                pic.set(x, y, [v, v, v, 1.0]);
-            }
-        }
-        let env = EffectEnv { host: Some(&h), ..Default::default() };
-        let d = run_fx("ec.3d.depthoffield", &[("focalPlane", num(100.0)), ("maximumRadius", num(4.0))], pic.clone(), 0.0, env).img;
-        assert_eq!(d.get(4, 5), pic.get(4, 5));
-        assert!((d.get(12, 5)[0] - 0.5).abs() < 0.3 && d.get(12, 5) != pic.get(12, 5));
-    }
-
-    #[test]
-    fn extractor_maps_named_channels() {
-        let h = scene();
-        let o = run("ec.3d.extractor", &[("red", Value::Str("Z".into())), ("whitePoint", num(1000.0))], &h);
-        assert!((o.get(2, 5)[0] - 0.1).abs() < 1e-6);
-        assert!((o.get(2, 5)[1] - 0.0005).abs() < 1e-6);
-        // Without aux: the layer's own channels can be swapped.
-        let s = run_fx("ec.3d.extractor", &[("red", Value::Str("A".into()))], Image::filled(2, 2, [0.2, 0.3, 0.4, 1.0]), 0.0, EffectEnv::default());
-        assert_eq!(s.img.get(0, 0), [1.0, 0.3, 0.4, 1.0]);
-    }
-
-    #[test]
-    fn channel_extract_antialias_averages_sub_pixels() {
-        // Depth at twice the layer resolution, alternating 0 / 1000 per aux column.
-        let mut a = AuxChannels::new(40, 20, 2.0);
-        a.channels = vec![("Z".into(), (0..800).map(|i| if i % 2 == 0 { 0.0 } else { 1000.0 }).collect())];
-        let host = AuxHost(Arc::new(a));
-        let vals = [("blackPoint", num(0.0)), ("whitePoint", num(1000.0))];
-        let hard = run("ec.3d.channelextract", &vals, &host);
-        let v = hard.get(5, 5)[0];
-        assert!(v == 0.0 || v == 1.0, "{v}");
-        let soft = run("ec.3d.channelextract", &[vals.as_slice(), &[("antialias", Value::Bool(true))]].concat(), &host);
-        assert!((soft.get(5, 5)[0] - 0.5).abs() < 1e-5, "{:?}", soft.get(5, 5));
-    }
-}
+mod tests;

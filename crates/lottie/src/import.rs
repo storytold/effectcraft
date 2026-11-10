@@ -47,7 +47,9 @@ fn s<'a>(j: &'a Json, k: &str) -> Option<&'a str> {
 
 fn hex_color(sc: &str) -> [f32; 3] {
     let h = sc.trim_start_matches('#');
-    let c = |i: usize| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0) as f32 / 255.0;
+    let c = |i: usize| {
+        h.get(i..i + 2).filter(|x| x.bytes().all(|b| b.is_ascii_hexdigit())).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0) as f32 / 255.0
+    };
     [c(0), c(2), c(4)]
 }
 
@@ -88,6 +90,23 @@ impl Ctx<'_> {
     }
 }
 
+/// The file an external image asset (`u` + `p`) names, taken from `base_dir`, the folder of the
+/// Lottie file. Only local files, or files on the network share the Lottie file is on, are
+/// imported (see `craft_docpath`).
+fn external_image(stored: &str, base_dir: &str) -> Result<String, String> {
+    let doc = (!base_dir.is_empty()).then(|| {
+        let doc = std::path::Path::new(base_dir).join("lottie.json");
+        std::path::absolute(&doc).unwrap_or(doc)
+    });
+    match craft_docpath::resolve_absolute(stored, doc.as_deref()) {
+        Ok(path) => Ok(path.to_string_lossy().into_owned()),
+        Err(craft_docpath::Refused::Invalid) if doc.is_none() && craft_docpath::resolve(stored, None).is_ok() => {
+            Err(format!("{stored} is relative and the Lottie file's folder is not known"))
+        }
+        Err(why) => Err(format!("{stored}: {why}")),
+    }
+}
+
 /// Import a Lottie document (JSON or a stored `.lottie` archive) into `project` as a new
 /// composition. `store` saves embedded images and returns the file path to use;
 /// `base_dir` resolves external image references.
@@ -116,6 +135,17 @@ pub fn import(
             cx.fonts.push((n, fam, st));
         }
     }
+    // Glyph outlines embedded for players without the fonts. Text is set in installed fonts.
+    if let Some(chars) = doc.get("chars").and_then(Json::as_array).filter(|c| !c.is_empty()) {
+        let mut fams: Vec<&str> = vec![];
+        for fam in chars.iter().filter_map(|c| s(c, "fFamily")).filter(|f| !f.trim().is_empty()) {
+            if !fams.contains(&fam) {
+                fams.push(fam);
+            }
+        }
+        let of = if fams.is_empty() { String::new() } else { format!(" of {}", fams.join(", ")) };
+        cx.im.warn(format!("embedded glyphs (`chars`){of} are not imported; text uses the installed fonts"));
+    }
     let (w, h) = (w.round().max(1.0) as u32, h.round().max(1.0) as u32);
     let duration = tb.tick(op);
     // Pass 1: asset items (precomps empty for now, images stored).
@@ -124,7 +154,9 @@ pub fn import(
         let Some(id) = s(a, "id") else { continue };
         if a.get("layers").is_some() {
             let folder = cx.folder(project);
-            let (aw, ah) = (f(a, "w").map(|v| v as u32).unwrap_or(w), f(a, "h").map(|v| v as u32).unwrap_or(h));
+            let layer = precomp_layer_size(&doc, &assets, id);
+            let aw = f(a, "w").map(|v| v as u32).or(layer.map(|l| l.0)).unwrap_or(w);
+            let ah = f(a, "h").map(|v| v as u32).or(layer.map(|l| l.1)).unwrap_or(h);
             let arate = f(a, "fr").map(FrameRate::from_f64).unwrap_or(rate);
             let c = Comp::new(aw, ah, arate, duration);
             let nm = s(a, "nm").unwrap_or(id).to_string();
@@ -145,8 +177,13 @@ pub fn import(
                 (cx.store)(&ImportedImage { id: id.to_string(), name: nm.clone(), bytes: data, ext: ext.into() })
             } else {
                 let u = s(a, "u").unwrap_or("");
-                let rel = format!("{u}{p}");
-                Some(if rel.starts_with('/') || cx.base_dir.is_empty() { rel } else { format!("{}/{rel}", cx.base_dir.trim_end_matches('/')) })
+                match external_image(&format!("{u}{p}"), cx.base_dir) {
+                    Ok(path) => Some(path),
+                    Err(why) => {
+                        cx.im.warn(format!("image asset `{id}` is not imported: {why}"));
+                        continue;
+                    }
+                }
             };
             let Some(path) = path else {
                 cx.im.warn(format!("image asset `{id}` could not be stored"));
@@ -218,6 +255,19 @@ pub fn import(
     Ok(ImportResult { comp: id, items: cx.items, warnings: cx.im.warnings })
 }
 
+/// The `w`/`h` of the first precomp layer, in the main comp or in any asset, that shows asset `id`.
+/// lottie-spec gives a precomposition asset no size: the layer's `w`/`h` are its clipping rect.
+fn precomp_layer_size(doc: &Json, assets: &[Json], id: &str) -> Option<(u32, u32)> {
+    let lists = doc.get("layers").into_iter().chain(assets.iter().filter_map(|a| a.get("layers")));
+    lists.filter_map(Json::as_array).flatten().find_map(|l| {
+        if l.get("ty").and_then(Json::as_u64) != Some(0) || s(l, "refId") != Some(id) {
+            return None;
+        }
+        let (lw, lh) = f(l, "w").zip(f(l, "h"))?;
+        Some((lw.round().max(1.0) as u32, lh.round().max(1.0) as u32))
+    })
+}
+
 fn transform(im: &Im, ks: &Json, tr: &mut PropGroup, next: &mut u64) {
     let set = |tr: &mut PropGroup, m: &str, j: Option<&Json>, conv: &dyn Fn(&Json) -> Option<Value>| {
         if let (Some(j), Some(p)) = (j, tr.get_mut(m)) {
@@ -266,7 +316,8 @@ fn masks(im: &Im, ids: &mut Ids, list: &[Json], g: &mut PropGroup) {
                 import_prop(im, j, p, conv);
             }
         };
-        set("pt", "path", &shapes::to_path);
+        let closed = m.get("cl").and_then(Json::as_bool).unwrap_or(false);
+        set("pt", "path", &|v| shapes::to_path(v, closed));
         set("o", "opacity", &anim::to_scalar);
         set("x", "expansion", &anim::to_scalar);
         set("f", "feather", &anim::to_vec2);
@@ -377,7 +428,19 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         l.in_point = tb.tick(ip);
         l.out_point = tb.tick(op.max(ip));
         l.start_time = tb.tick(f(j, "st").unwrap_or(0.0));
-        l.stretch = f(j, "sr").unwrap_or(1.0) * 100.0;
+        // Below 1 % (or 0) the layer time divides by ~0, and layer.timeStretch refuses it too.
+        let sr = f(j, "sr").unwrap_or(1.0);
+        l.stretch = if sr.is_finite() && sr.abs() >= 0.01 {
+            // Past ±9900 % too (#3247): the largest stretch a layer supports, sign kept.
+            let pct = effectcraft_project::limits::stretch(sr * 100.0);
+            if pct.to_bits() != (sr * 100.0).to_bits() {
+                cx.im.warn(format!("{name}: a time stretch of {} % is not supported ({pct} % used)", sr * 100.0));
+            }
+            pct
+        } else {
+            cx.im.warn(format!("{name}: a time stretch of {} % is not supported (100 % used)", sr * 100.0));
+            100.0
+        };
         if j.get("ddd").and_then(Json::as_u64) == Some(1) {
             l.switches.three_d = true;
         }
@@ -461,5 +524,17 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
             l.parent = parent_id;
             l.track_matte = matte_id;
         }
+    }
+}
+
+#[cfg(test)]
+mod hex_color_tests {
+    use super::hex_color;
+
+    #[test]
+    fn hex_color_rejects_plus_sign() {
+        assert_eq!(hex_color("#+f0000"), [0.0, 0.0, 0.0]);
+        assert_eq!(hex_color("#zz0000"), [0.0, 0.0, 0.0]);
+        assert_eq!(hex_color("#ff0000"), [1.0, 0.0, 0.0]);
     }
 }
