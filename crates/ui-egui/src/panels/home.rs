@@ -481,7 +481,7 @@ fn run_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(&str
         match crate::menus::invoke(app, ctx, id, params) {
             Err(e) => app.ui.status = e,
             // Asking to save the open project first: Home stays until it is answered.
-            Ok(r) if r.get("dialog").is_some() => {}
+            Ok(r) if crate::menus::waits_on_dialog(&r) => {}
             // Leave Home unless only the list changed or a file dialog was cancelled.
             Ok(_) => {
                 let cancelled = matches!(id, "file.open" | "file.import") && (app.session.path.clone(), app.session.revision) == before;
