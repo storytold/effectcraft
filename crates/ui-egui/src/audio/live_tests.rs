@@ -34,6 +34,7 @@ impl FootageSource for Ramp {
     }
 }
 
+/// Construct a paused feeder whose short nonzero span makes every source sample observable.
 fn playback(footage: Arc<dyn FootageSource>) -> AudioPlayback {
     let mut project = Project::default();
     let f = Footage { path: "ramp.wav".into(), kind: FootageKind::Audio, has_audio: true, ..Default::default() };
@@ -64,16 +65,19 @@ fn playback(footage: Arc<dyn FootageSource>) -> AudioPlayback {
     }
 }
 
+/// Run exactly one production feeder block, without a background refill racing assertions.
 fn mix(p: &AudioPlayback) {
     feed_block(&p.state, p.comp, &p.feed, &p.span, p.rate, p.mix);
 }
 
+/// Copy the active project and apply a layer edit through the same snapshot boundary as the UI.
 fn edit(p: &AudioPlayback, update: impl FnOnce(&mut Layer)) -> Arc<Project> {
     let mut project = p.project().unwrap();
     update(&mut Arc::make_mut(&mut project).comp_mut(p.comp).unwrap().layers[0]);
     project
 }
 
+/// Levels edits retain sample position across the loop boundary and the exclusive non-looping end.
 #[test]
 fn project_replacement_resumes_at_the_first_unconsumed_sample() {
     for looping in [false, true] {
@@ -122,6 +126,7 @@ impl FootageSource for Gated {
     }
 }
 
+/// A slow mix must not block edits or publish samples from the superseded project generation.
 #[test]
 fn a_block_in_flight_cannot_publish_after_a_mute() {
     let (entered, waiting) = mpsc::channel();
@@ -151,6 +156,7 @@ impl ExprHost for OpacityLevels {
     }
 }
 
+/// Video properties are irrelevant to a plain mix, but may be dependencies of audio expressions.
 #[test]
 fn video_edits_keep_the_queue_unless_audio_expressions_can_read_them() {
     for expression in [false, true] {
@@ -180,6 +186,7 @@ fn video_edits_keep_the_queue_unless_audio_expressions_can_read_them() {
     }
 }
 
+/// Reused nested comps cost linear visits while edits to their descendants remain detectable.
 #[test]
 fn shared_nested_comps_are_compared_once_per_depth() {
     let mut project = Project::default();

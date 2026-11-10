@@ -344,6 +344,7 @@ fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
 /// Each shared precomp is compared once per depth. A depth limit alone still visits an
 /// exponentially large number of paths in a small graph of reused precomps, blocking the UI.
 fn audio_changed_inner(old: &Project, new: &Project, comp: ItemId, seen: &mut HashSet<(ItemId, usize)>) -> bool {
+    /// Compare one comp and its reachable audio sources, without revisiting a shared path depth.
     fn comps_differ(old: &Project, new: &Project, comp: ItemId, depth: usize, seen: &mut HashSet<(ItemId, usize)>) -> bool {
         if depth >= 16 || !seen.insert((comp, depth)) {
             return false;
