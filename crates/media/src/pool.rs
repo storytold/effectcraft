@@ -66,8 +66,9 @@ struct Entry {
 /// Conformed audio files written by builds before this version are ignored (and written again):
 /// version 1 files of sources longer than about 12:36 at 48 kHz were silent from there on (#172);
 /// version 2 files were written silent where the source failed to decode, and kept the footage
-/// silent from then on (#324).
-const CONFORM_VERSION: u32 = 3;
+/// silent from then on (#324); version 3 files of AC-3 5.1 in MP4 lacked the centre and
+/// surrounds, which were dropped when the sample entry named 2 channels (#1547).
+const CONFORM_VERSION: u32 = 4;
 
 /// Footage longer than this (24 hours) is read from its decoder rather than conformed: its
 /// duration comes from the file's header, and a damaged one claiming days of audio had the
