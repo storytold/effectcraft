@@ -1112,9 +1112,10 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.edit("Replace Footage", None, |proj, _| {
         let it = proj.item_mut(item).ok_or_else(|| bad("file.replaceFootage", "no such item"))?;
-        it.name = name;
+        let old_name = std::mem::replace(&mut it.name, name.clone());
         it.kind = ItemKind::Footage(f);
         retarget_layers(proj, item, |_| LayerSource::Footage { item });
+        rename_layers_named_after(proj, item, &old_name, &name);
         for (id, nf) in moved {
             if let Some(it) = proj.item_mut(id) {
                 it.kind = ItemKind::Footage(nf);
@@ -1127,6 +1128,22 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.toast(format!("Also relinked {} other missing footage item(s)", relinked.len()));
     Ok(json!({"relinked": relinked}))
+}
+
+/// Rename the layers of `item` that still carry `old`, the item's previous name, to `new`: a layer
+/// named after its footage follows a replacement as in After Effects, and one the user renamed
+/// keeps its name (#3371).
+fn rename_layers_named_after(proj: &mut Project, item: ItemId, old: &str, new: &str) {
+    let ids: Vec<ItemId> = proj.comps().map(|(id, _)| *id).collect();
+    for cid in ids {
+        if let Some(c) = proj.comp_mut(cid) {
+            for l in &mut c.layers {
+                if l.source.item() == Some(item) && l.name == old {
+                    l.name = new.to_string();
+                }
+            }
+        }
+    }
 }
 
 /// Point every layer using `item` at a new source kind.

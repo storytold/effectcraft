@@ -297,3 +297,25 @@ fn edits_do_no_disk_cache_file_work() {
     assert_eq!(dc.file_checks(), 0, "no file looked at for the disk cache");
     let _ = std::fs::remove_dir_all(&cache);
 }
+
+/// #3371: replacing footage renames the layers still named after it, as After Effects does, but
+/// leaves a layer the user renamed alone.
+#[test]
+fn replace_footage_renames_the_layers_named_after_it() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")], "sequence": false})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 32, "frameRate": 30, "duration": 10})).unwrap();
+    let named = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let renamed = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.rename", json!({"layer": renamed, "name": "Hero"})).unwrap();
+    let name = |s: &Session, l: u64| s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap().name.clone();
+    assert_eq!((name(&s, named).as_str(), name(&s, renamed).as_str()), ("shot_0001.png", "Hero"), "set up");
+    s.state.project_selection = vec![ItemId(item.as_u64().unwrap())];
+    s.execute("file.replaceFootage", json!({"path": at(&dir, "shot_0004.png")})).unwrap();
+    assert_eq!(name(&s, named), "shot_0004.png", "a layer named after the footage follows it");
+    assert_eq!(name(&s, renamed), "Hero", "a renamed layer keeps its name");
+    // Undo puts both names back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!((name(&s, named).as_str(), name(&s, renamed).as_str()), ("shot_0001.png", "Hero"));
+}
