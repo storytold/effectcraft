@@ -434,6 +434,34 @@ fn cti_snaps_to_the_nearest_candidate() {
     assert!(c.contains(&comp.duration.seconds()) && c.contains(&0.0));
 }
 
+/// A dragged layer's own In / Out points are no snap targets; moved, neither are its markers
+/// (#1828).
+#[test]
+fn bar_drags_dont_snap_to_their_own_layer() {
+    let mut app = app();
+    let bx = app.session.active_comp().unwrap().layers.iter().find(|l| l.name == "Box").unwrap().id.0;
+    app.session.execute("layer.addMarker", json!({"layers": [bx], "time": 1.0})).unwrap();
+    let comp = app.session.active_comp().unwrap().clone();
+    let rows = build_rows(&app, &comp);
+    let all = snap_targets(&comp, &rows, &[], false);
+    let trimmed = snap_targets(&comp, &rows, &[bx], false);
+    let moved = snap_targets(&comp, &rows, &[bx], true);
+    assert_eq!(trimmed.len(), all.len() - 2, "trimming drops only the layer's In and Out");
+    assert!(trimmed.contains(&1.0) && !moved.contains(&1.0), "moving drops the layer's marker: {moved:?}");
+}
+
+/// Shift snaps a bar drag's nearest end to a target within 8 px of the pointer; farther away, or
+/// without Shift, the bar moves by the whole frames the pointer covered (#1828).
+#[test]
+fn bar_drags_snap_their_ends_with_shift() {
+    let (pps, fd, ends) = (100.0, 0.1, [2.0, 6.0]);
+    assert_eq!(bar_drag_frames(95.0, pps, fd, &ends, &[3.0], true), 10, "5 px short of 2 → 3 s snaps");
+    assert_eq!(bar_drag_frames(95.0, pps, fd, &ends, &[3.0], false), 9, "no snap without Shift");
+    assert_eq!(bar_drag_frames(88.0, pps, fd, &ends, &[3.0], true), 8, "12 px away lets go");
+    assert_eq!(bar_drag_frames(104.0, pps, fd, &ends, &[3.0, 7.06], true), 11, "the target nearest the pointer wins");
+    assert_eq!(bar_drag_frames(5.0, 0.0, 0.0, &ends, &[0.0], true), i64::MAX, "zero zoom saturates, no panic");
+}
+
 /// Every string drawn by one frame of `draw`.
 fn drawn_text(mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
     fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
@@ -959,25 +987,33 @@ fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
         rows.push(Row { layer: LayerId(*id), depth: 1, kind: RowKind::Prop { uid: uid(*id) } });
     }
     // Rows are 20 pt and 400 pt wide: the outline is left of x 200, a key at 0 s sits at x 205.
-    let hit_rows: Vec<(Rect, Row)> =
-        rows.iter().enumerate().map(|(i, r)| (Rect::from_min_size(pos2(0.0, 20.0 * i as f32), vec2(400.0, 20.0)), r.clone())).collect();
     let tm = TMap { x0: 205.0, start: 0.0, pps: 100.0 };
-    let go = |br: Rect| box_targets(comp, &rows, &hit_rows, &tm, 0.0, 20.0, 200.0, false, br);
+    let view = marquee::View { tm, top: 0.0, graph_x0: 200.0, graph_on: false };
+    // Press at `from` with the rows scrolled by `s0`, release at `to` scrolled by `s1`.
+    let drag = |from: Pos2, s0: f32, to: Pos2, s1: f32| {
+        let (paint, sel) = marquee::Anchor::press(&view, s0, from).selection(&view, s1, to);
+        marquee::targets(comp, &rows, &tm, -s1, 20.0, paint, &sel)
+    };
+    let go = |from: Pos2, to: Pos2| drag(from, 0.0, to, 0.0);
     let keyed = |ks: &[effectcraft_engine::KeyRef]| ks.iter().map(|k| k.layer.0).collect::<Vec<_>>();
     // From the outline across the boundary: layer A's row (y 0..20) and B's row, and their keys.
-    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 65.0)));
+    let (ls, ks) = go(pos2(10.0, 5.0), pos2(260.0, 65.0));
     assert_eq!(ls, [layers[0], layers[1]]);
     assert_eq!(keyed(&ks), [layers[0], layers[1]]);
-    // The same box dragged the other way is the same rectangle: the same rows, the same keys.
-    let (ls, ks) = go(Rect::from_two_pos(pos2(260.0, 65.0), pos2(10.0, 5.0)));
+    // The same box dragged the other way: the same rows, the same keys.
+    let (ls, ks) = go(pos2(260.0, 65.0), pos2(10.0, 5.0));
     assert_eq!((ls, keyed(&ks)), (vec![layers[0], layers[1]], vec![layers[0], layers[1]]));
     // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
-    let (ls, ks) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(150.0, 65.0)));
+    let (ls, ks) = go(pos2(10.0, 5.0), pos2(150.0, 65.0));
     assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
     // Kept inside the time graph: keys only, no rows (a marquee over empty track area).
-    let (ls, ks) = go(Rect::from_min_max(pos2(204.0, 5.0), pos2(260.0, 65.0)));
+    let (ls, ks) = go(pos2(204.0, 5.0), pos2(260.0, 65.0));
     assert_eq!((ls.len(), keyed(&ks)), (0, vec![layers[0], layers[1]]));
     // A locked layer is not selected as a row (the engine drops its keys in keys.select).
-    let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
+    let (ls, _) = go(pos2(10.0, 5.0), pos2(260.0, 119.0));
+    assert_eq!(ls, [layers[0], layers[1]]);
+    // Scrolled 20 pt mid-drag: the pressed corner stays on layer A's row (#2859), so A is still
+    // selected; a screen-fixed anchor would start the box below A and select only B.
+    let (ls, _) = drag(pos2(10.0, 5.0), 0.0, pos2(260.0, 45.0), 20.0);
     assert_eq!(ls, [layers[0], layers[1]]);
 }

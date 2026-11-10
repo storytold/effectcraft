@@ -1,4 +1,4 @@
-use super::{EffectcraftApp, FrameKey, FrameWindow, ItemId, PlaybackPass, audio, frames};
+use super::{EffectcraftApp, FrameKey, FrameWindow, ItemId, PlaybackPass, frames};
 
 /// Seconds without a project change before paused prefetch resumes (see
 /// [`EffectcraftApp::editing`]).
@@ -82,6 +82,7 @@ impl EffectcraftApp {
         let step = plan.map_or(1, |p| p.step);
         let fit_ahead = self.frames_that_fit(&c, scale) - 1;
         self.prefetch_playback(&PlaybackPass { cur: lead, ..pass }, fit_ahead);
+        self.wake_silent_preview();
         self.pump_meters(ctx, now);
         if !self.playback.playing {
             self.cache_when_idle(ctx, &c, &series, now, input_active, (wa, wb));
@@ -201,6 +202,10 @@ impl EffectcraftApp {
     /// one second. With no source but an active meter, drive the meter to silence and request a repaint.
     fn pump_meters(&mut self, ctx: &egui::Context, now: f64) {
         if let Some(a) = &mut self.audio {
+            // An edit while playing (mute, unmute, solo, levels): the sound follows it (#2104).
+            if a.project().is_some_and(|p| !std::sync::Arc::ptr_eq(&p, &self.session.project)) {
+                a.follow_project(self.session.project.clone());
+            }
             a.pump();
             self.meter.update(a.feed.take_peaks(), now);
         } else if let Some(s) = &mut self.scrub {
@@ -259,6 +264,29 @@ impl EffectcraftApp {
         false
     }
 
+    /// A silent preview whose project was edited so that it has sound now (a layer unmuted while
+    /// playing, #2104): video previews wait for cached frames; audio-only previews start from
+    /// their moving audio frame, not the stationary timeline. Checked once per project edit.
+    fn wake_silent_preview(&mut self) {
+        let pb = &self.playback;
+        if self.audio.is_some() || !pb.playing || pb.caching || pb.starting || pb.audio_held {
+            return;
+        }
+        if pb.silent_project.as_ref().is_some_and(|p| std::sync::Arc::ptr_eq(p, &self.session.project)) {
+            return;
+        }
+        self.playback.silent_project = Some(self.session.project.clone());
+        if !self.audio_plays() {
+            return;
+        }
+        if self.playback.plan.is_some_and(|p| p.video) {
+            self.playback.audio_held = true;
+        } else if let Some(c) = self.session.active_comp() {
+            let frame = self.playback.audio_frame.unwrap_or(self.playback.start_frame);
+            self.start_audio(c.frame_rate.tick_of(frame));
+        }
+    }
+
     /// Held sound starts once the frames ahead are cached (see `Playback::audio_held`): the
     /// prefetch's `ahead` when the silent preview keeps real time, else the rest of the preview.
     fn start_held_audio(&mut self, pass: &PlaybackPass<'_>, fit: i64) {
@@ -293,7 +321,7 @@ impl EffectcraftApp {
             return true;
         }
         let snap = |f: i64| wa + (f - wa).div_euclid(step) * step;
-        let target = snap(audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb));
+        let target = snap(fr.frame_at(a.clock_time()).clamp(wa, wb));
         if !video {
             self.playback.audio_frame = Some(target);
         } else if self.frames.is_cached(&FrameKey { frame: target, ..series }) {
@@ -322,7 +350,7 @@ impl EffectcraftApp {
     fn sound_frame(&self, fr: effectcraft_engine::time::FrameRate, wa: i64, wb: i64, step: i64) -> Option<i64> {
         let a = self.audio.as_ref()?;
         let step = step.max(1);
-        Some(wa + (audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb) - wa).div_euclid(step) * step)
+        Some(wa + (fr.frame_at(a.clock_time()).clamp(wa, wb) - wa).div_euclid(step) * step)
     }
 
     /// The last cached frame after the current one and before `target`, in play order: what a

@@ -23,6 +23,7 @@ mod apple_events;
 mod audio_out;
 mod control_server;
 mod crash_report;
+mod diagnostic_state;
 mod launch_guard;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -183,7 +184,7 @@ fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
 fn main() -> eframe::Result {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if crash_report::maybe_run(&args, |description| {
-        rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title("EffectCraft stopped unexpectedly").set_description(description).show();
+        rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title("EffectCraft diagnostic report").set_description(description).show();
     }) {
         return Ok(());
     }
@@ -246,8 +247,15 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
     #[cfg(target_os = "linux")]
     appimage::integrate_from_env(ICON_PNG);
     // Settings ▸ Startup & Repair ▸ Window Graphics, switched to OpenGL when the last launch
-    // stopped as its window opened (a crashing graphics driver, #243).
-    let mut launch = launch_guard::Launch::begin(effectcraft_host::config_dir().as_deref(), std::env::var_os("WGPU_BACKEND").is_some());
+    // stopped as its window opened (the marker alone does not establish a cause).
+    let backend_override = std::env::var_os("WGPU_BACKEND");
+    let mut launch = launch_guard::Launch::begin(effectcraft_host::config_dir().as_deref(), backend_override.is_some());
+    diagnostic_state::record(reporter, launch.source.event());
+    if let Some(value) = backend_override {
+        for event in diagnostic_state::backend_override_events(&value) {
+            diagnostic_state::record(reporter, event);
+        }
+    }
     let on_gl = launch.backends == Some(eframe::wgpu::Backends::GL);
     let notice = launch.notice.take();
     let options = eframe::NativeOptions {
@@ -281,16 +289,33 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
         Box::new(move |cc| {
             EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
-                Some(rs) => log::info!("graphics: {:?}", rs.adapter.get_info()),
-                None => log::info!("graphics: no wgpu device"),
+                Some(rs) => {
+                    let info = rs.adapter.get_info();
+                    log::info!("graphics: {info:?}");
+                    let event = match info.backend {
+                        eframe::wgpu::Backend::Noop => "actual GPU backend: noop",
+                        eframe::wgpu::Backend::Vulkan => "actual GPU backend: vulkan",
+                        eframe::wgpu::Backend::Metal => "actual GPU backend: metal",
+                        eframe::wgpu::Backend::Dx12 => "actual GPU backend: dx12",
+                        eframe::wgpu::Backend::Gl => "actual GPU backend: gl",
+                        eframe::wgpu::Backend::BrowserWebGpu => "actual GPU backend: webgpu",
+                    };
+                    diagnostic_state::record(&desktop_reporter, event);
+                }
+                None => diagnostic_state::record(&desktop_reporter, "actual GPU backend: no wgpu device"),
             }
             // This executable owns the shared device's handlers. Install them before
             // EffectCraft's compositor pipelines are built, without changing handlers from
             // inside Gpu::new. eframe has already constructed its presentation renderer here.
             let gpu_failures = effectcraft_ui_egui::gpu_failure::GpuFailureBridge::new(&cc.egui_ctx);
+            let observations = diagnostic_state::GpuObservations::new(&desktop_reporter);
+            let scoped_observed = observations.clone();
+            gpu_failures.set_scoped_error_observer(move |error| scoped_observed.scoped(error));
             if let Some(rs) = &cc.wgpu_render_state {
+                let errors_observed = observations.clone();
                 let errors = gpu_failures.clone();
                 rs.device.on_uncaptured_error(std::sync::Arc::new(move |error| {
+                    errors_observed.uncaptured(&error);
                     let message = format!("uncaptured GPU error: {error}");
                     if errors.report(&message, false) {
                         log::error!("{message}");
@@ -298,6 +323,7 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
                 }));
                 let lost = gpu_failures.clone();
                 rs.device.set_device_lost_callback(move |reason, message| {
+                    observations.device_lost(reason);
                     lost.report(&format!("GPU device lost ({reason:?}): {message}"), true);
                 });
             }
