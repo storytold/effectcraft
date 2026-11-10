@@ -1940,6 +1940,9 @@ impl Drop for Enc<'_> {
 }
 
 impl<'g> Enc<'g> {
+    /// Recorded steps (passes and copies) after which the work is submitted.
+    const BATCH: usize = 256;
+
     pub fn new(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.register()).unwrap_or(0);
         Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: false }
@@ -1981,6 +1984,13 @@ impl<'g> Enc<'g> {
         for img in imgs {
             self.uses(img);
         }
+        // Every caller's work counts towards the batch, not only `dispatch_ext`'s: passes
+        // recorded here directly (Advanced 3D, YUV) cost command buffers too, and the share
+        // `submit` takes of the device's budget is sized by this count (#2746).
+        if self.pending >= Self::BATCH {
+            self.submit();
+        }
+        self.pending += 1;
         self.encoder()
     }
 
@@ -2092,9 +2102,8 @@ impl<'g> Enc<'g> {
             }
             pass.dispatch_workgroups(groups.0.max(1), groups.1.max(1), 1);
         }
-        self.pending += 1;
         // Keep command buffers (and the transient textures they hold) bounded.
-        if self.pending >= 256 {
+        if self.pending >= Self::BATCH {
             self.submit();
         }
     }
