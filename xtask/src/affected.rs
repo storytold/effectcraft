@@ -601,7 +601,9 @@ let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out");
         assert_eq!(changed_files(root, "HEAD").unwrap(), files(&[tracked, untracked]));
     }
 
-    #[cfg(unix)]
+    // macOS (APFS) refuses file names that aren't UTF-8 ("Illegal byte sequence"), so there the
+    // fixture can't be made and such a change can't happen.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn changed_files_reject_non_utf8_instead_of_silently_omitting_it() {
         use std::os::unix::ffi::OsStringExt;
