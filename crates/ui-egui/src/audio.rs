@@ -18,7 +18,7 @@
 //! **Scrubbing:** Ctrl/Cmd-dragging the current-time indicator plays a short snippet of the mix
 //! at each new frame ([`AudioScrub`], `playback.scrubAudio`), as in After Effects.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -338,11 +338,17 @@ impl Drop for AudioPlayback {
 /// Effects switch, Audio Levels or effects, or the same for a nested comp. Other edits (video
 /// properties, names, labels) do not change the mix unless an audio expression can read them.
 fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
-    fn comps_differ(old: &Project, new: &Project, comp: ItemId, depth: usize) -> bool {
-        let (Some(a), Some(b)) = (old.comp(comp), new.comp(comp)) else { return old.comp(comp).is_some() != new.comp(comp).is_some() };
-        if depth >= 16 {
+    audio_changed_inner(old, new, comp, &mut HashSet::new())
+}
+
+/// Each shared precomp is compared once per depth. A depth limit alone still visits an
+/// exponentially large number of paths in a small graph of reused precomps, blocking the UI.
+fn audio_changed_inner(old: &Project, new: &Project, comp: ItemId, seen: &mut HashSet<(ItemId, usize)>) -> bool {
+    fn comps_differ(old: &Project, new: &Project, comp: ItemId, depth: usize, seen: &mut HashSet<(ItemId, usize)>) -> bool {
+        if depth >= 16 || !seen.insert((comp, depth)) {
             return false;
         }
+        let (Some(a), Some(b)) = (old.comp(comp), new.comp(comp)) else { return old.comp(comp).is_some() != new.comp(comp).is_some() };
         a.layers.len() != b.layers.len()
             || a.layers.iter().zip(&b.layers).any(|(x, y)| {
                 x.id != y.id
@@ -360,7 +366,7 @@ fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
                     || audio_has_expression(y)
                     || match &x.source {
                         LayerSource::Footage { item } => footage_differs(old, new, *item),
-                        LayerSource::Comp { item } => comps_differ(old, new, *item, depth + 1),
+                        LayerSource::Comp { item } => comps_differ(old, new, *item, depth + 1, seen),
                         _ => false,
                     }
             })
@@ -386,7 +392,7 @@ fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
         };
         f(old) != f(new)
     }
-    comps_differ(old, new, comp, 0)
+    comps_differ(old, new, comp, 0, seen)
 }
 
 /// Mix one block at the feeder's cursor into the feed and move the cursor on (wrapping or

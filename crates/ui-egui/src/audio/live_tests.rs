@@ -179,3 +179,31 @@ fn video_edits_keep_the_queue_unless_audio_expressions_can_read_them() {
         }
     }
 }
+
+#[test]
+fn shared_nested_comps_are_compared_once_per_depth() {
+    let mut project = Project::default();
+    let mut child = None;
+    for _ in 0..10 {
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        if let Some(item) = child {
+            for _ in 0..10 {
+                let mut layer = build::layer(&mut project, &comp, "Nested", LayerSource::Comp { item }, (64, 36), None);
+                layer.switches.audio = false;
+                comp.layers.push(layer);
+            }
+        }
+        child = Some(project.add_item("Nested", Label::Sandstone, None, ItemKind::Comp(comp.into())));
+    }
+    let root = child.unwrap();
+    let mut edited = project.clone();
+    edited.comp_mut(root).unwrap().layers[0].name = "Renamed".into();
+    let mut seen = std::collections::HashSet::new();
+    assert!(!super::audio_changed_inner(&project, &edited, root, &mut seen));
+    assert_eq!(seen.len(), 10, "compare the ten comps, not a billion paths through them");
+    let leaf = *seen.iter().find(|(_, depth)| *depth == 9).map(|(item, _)| item).unwrap();
+    let mut layer = project.comp(root).unwrap().layers[0].clone();
+    layer.source = LayerSource::Null;
+    edited.comp_mut(leaf).unwrap().layers.push(layer);
+    assert!(super::audio_changed(&project, &edited, root), "memoization must still find a nested edit");
+}
