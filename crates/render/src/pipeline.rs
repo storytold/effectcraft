@@ -1278,6 +1278,14 @@ impl<'a> Renderer<'a> {
         Some((buf, key, files))
     }
 
+    /// Whether [`Self::layer_input`] of `layer` (through its first `effects` effects) is kept in the
+    /// layer cache, so asking again for an unchanged input is a lookup. `false` for inputs it
+    /// renders every time: precomps (a whole nested composition), adjustment layers, layers whose
+    /// effects read other times, and any input when the renderer has no cache.
+    pub fn layer_input_cacheable(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> bool {
+        self.cache.is_some() && cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects).is_some()
+    }
+
     /// A layer's input at the context time: source → masks → its first `effects` effects
     /// (what Time effects read at neighbouring times), in effect space (see [`effect_bounds`]):
     /// what effect `effects` sees. Served from / stored in the layer cache under its own key,
