@@ -58,6 +58,21 @@ fn posterize_time_holds_frames() {
     assert!((alpha(&render(&plain, cid, 0.3, None)) - 0.3).abs() < 0.01);
 }
 
+/// #3396: each hold renders at its own time. Rounded to the microsecond, the hold at 1/12 s fell
+/// just before frame 2, so 12 fps in a 24 fps comp held frames 0, 1, 4, 6, 7, 10 of the footage
+/// (and of Hold keys, read here) instead of 0, 2, 4, 6, 8, 10.
+#[test]
+fn posterize_time_holds_land_on_their_frames() {
+    let (mut p, cid) = scene(Some(("ec.time.posterizetime", &[("frameRate", Value::Scalar(12.0))])));
+    let comp = p.comp_mut(cid).unwrap();
+    comp.frame_rate = FrameRate::FPS_24;
+    // On frame n the mask's opacity is n × 4 % (a Hold key on every frame).
+    comp.layers[0].props.prop_mut("masks/#1/opacity").unwrap().keys =
+        (0..24).map(|n| Keyframe::new(Tick::from_units(n, 24), Value::Scalar(n as f64 * 4.0)).hold()).collect();
+    let held: Vec<i64> = (0..12).map(|n| (alpha(&render(&p, cid, n as f64 / 24.0, None)) * 25.0).round() as i64).collect();
+    assert_eq!(held, [0, 0, 2, 2, 4, 4, 6, 6, 8, 8, 10, 10]);
+}
+
 #[test]
 fn echo_blends_neighbouring_frames() {
     let vals = [("echoTime", Value::Scalar(-0.1)), ("numberOfEchoes", Value::Scalar(2.0)), ("decay", Value::Scalar(0.5))];

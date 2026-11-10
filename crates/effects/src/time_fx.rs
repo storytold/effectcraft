@@ -174,12 +174,14 @@ fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
 /// [`fetch`] with the first `effects` effects of the stack only (0: source and masks).
 fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> {
     let host = ctx.env.host?;
-    // Dedupe times (sub-microsecond differences are the same frame).
-    let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
-    uniq.sort_unstable();
-    uniq.dedup();
+    // Dedupe times (sub-microsecond differences are the same frame), but render each at the time
+    // asked for: rounded to the microsecond, a time can land just before its frame (1/12 s is
+    // 83 333 µs, which is frame 1 of 24 fps footage, not frame 2) (#3396).
+    let mut uniq: Vec<(i64, f64)> = times.iter().map(|&t| ((t * 1e6).round() as i64, t)).collect();
+    uniq.sort_by_key(|&(k, _)| k);
+    uniq.dedup_by_key(|&mut (k, _)| k);
     // Every effect before this one (the host bounds the count to them).
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
+    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&(k, t)| (k, host.self_at(t, effects))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
