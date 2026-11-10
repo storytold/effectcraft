@@ -54,6 +54,15 @@ fn pace_for(prev: f64, lead: i64, target: i64, fps: f64, dt: f64) -> f64 {
     prev + (raw - prev) * k
 }
 
+/// Cached frames (`cached`, sorted) among the next `max` frames `after(1..=max)` plays, and how
+/// many frames it plays (`after` is `None` past the end). Counted, not the consecutive run: one
+/// late frame (a GPU warm-up frame, a heavy one) with frames cached beyond it holds the clock
+/// for a moment when it gets there, rather than slowing the whole preview to a crawl.
+fn lead_of(after: impl Fn(i64) -> Option<i64>, cached: &[i64], max: i64) -> (i64, i64) {
+    let ahead: Vec<i64> = (1..=max).map_while(after).collect();
+    (ahead.iter().filter(|f| cached.binary_search(f).is_ok()).count() as i64, ahead.len() as i64)
+}
+
 impl PlaybackPass<'_> {
     /// The frame `k` played frames after `from` (wrapping as the preview loops), `None` once a
     /// preview that doesn't loop has reached its end.
@@ -430,9 +439,8 @@ impl EffectcraftApp {
         self.playback.paced_at = Some(now);
         if video {
             // The lead counts out of twice the prefetch depth: the prefetch keeps that many
-            // frames coming, so a full lead means rendering keeps up.
-            let target = (pass.ahead * 2).max(1);
-            let lead = self.cached_lead(pass, target);
+            // frames coming (or the frames left before the end), so a full lead means rendering keeps up.
+            let (lead, target) = self.cached_lead(pass, (pass.ahead * 2).max(1));
             let prev = if self.playback.pace > 0.0 { self.playback.pace } else { fps };
             let pace = pace_for(prev, lead, target, fps, dt);
             self.playback.pace = pace;
@@ -522,12 +530,11 @@ impl EffectcraftApp {
         ctx.request_repaint();
     }
 
-    /// Cached frames among the next `max` in play order. Counted, not the consecutive run: one
-    /// late frame (a GPU warm-up frame, a heavy one) with frames cached beyond it holds the clock
-    /// for a moment when it gets there, rather than slowing the whole preview to a crawl.
-    fn cached_lead(&self, pass: &PlaybackPass<'_>, max: i64) -> i64 {
-        let cached = self.frames.cached_frames(&pass.series);
-        (1..=max).map_while(|k| pass.frame_after(pass.cur, k)).filter(|f| cached.binary_search(f).is_ok()).count() as i64
+    /// Cached frames among the next `max` in play order, and how many of those there are (fewer
+    /// near the end of a preview that doesn't loop: its cached tail is a full lead). See
+    /// [`lead_of`].
+    fn cached_lead(&self, pass: &PlaybackPass<'_>, max: i64) -> (i64, i64) {
+        lead_of(|k| pass.frame_after(pass.cur, k), &self.frames.cached_frames(&pass.series), max)
     }
 
     /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at
@@ -654,7 +661,7 @@ impl EffectcraftApp {
 
 #[cfg(test)]
 mod pace_tests {
-    use super::pace_for;
+    use super::{lead_of, pace_for};
 
     /// The pace follows the cached lead: real time with a full lead, a third of it with a third,
     /// never under an eighth, unchanged with nothing ahead, and smoothed over time.
@@ -670,6 +677,24 @@ mod pace_tests {
         assert!((p - (30.0 - 20.0 * (1.0 - (-1.0f64).exp()))).abs() < 1e-6);
         assert_eq!(pace_for(30.0, 4, 12, 30.0, 0.0), 30.0, "no time passed: unchanged");
         assert!(pace_for(10.0, 12, 12, 30.0, 0.5) > 10.0, "and up again as the lead fills");
+    }
+
+    /// Near the end of a preview that doesn't loop, the lead counts out of the frames left: a
+    /// cached tail plays in real time. (It counted out of the full depth, and a cached preview
+    /// slowed down over its last frames, a short one for its whole length.)
+    #[test]
+    fn a_cached_end_is_a_full_lead() {
+        let cached: Vec<i64> = (0..=20).collect();
+        let to_20 = |cur: i64| move |k: i64| Some(cur + k).filter(|f| *f <= 20);
+        assert_eq!(lead_of(to_20(5), &cached, 12), (12, 12));
+        assert_eq!(lead_of(to_20(16), &cached, 12), (4, 4));
+        assert_eq!(lead_of(to_20(20), &cached, 12), (0, 0));
+        let (lead, target) = lead_of(to_20(16), &cached, 12);
+        assert!((pace_for(30.0, lead, target, 30.0, 10.0) - 30.0).abs() < 1e-6);
+        // Frames left uncached still count against it.
+        assert_eq!(lead_of(to_20(16), &[17, 19], 12), (2, 4));
+        // Looping: the walk wraps, always `max` frames.
+        assert_eq!(lead_of(|k| Some((18 + k) % 21), &cached, 12), (12, 12));
     }
 }
 
