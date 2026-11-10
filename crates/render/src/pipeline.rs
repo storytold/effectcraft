@@ -1056,7 +1056,7 @@ impl<'a> Renderer<'a> {
         if !plain {
             return None;
         }
-        let fr = self.footage.frame8(item, pf, t, self.pipe.float_curve(pf))?;
+        let fr = self.read(|| self.footage.frame8(item, pf, t, self.pipe.float_curve(pf)))?;
         let n = (fr.width as usize).checked_mul(fr.height as usize)?;
         let px = fr.rgba.as_chunks::<4>().0;
         if px.len() != n {

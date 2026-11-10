@@ -157,3 +157,40 @@ fn footage_kept_as_8_bit_levels_renders_the_same_pixels() {
         assert_eq!(q8.asked.into_inner() > 0, used, "{depth:?} {invert} {scale}");
     }
 }
+
+/// The 8-bit levels are read while the render records its reads: the movie is in the files the
+/// frame (and a cached layer buffer) was made of. (Read outside, a buffer of a movie listed no
+/// files and was still marked complete: changed on disk, it was served stale.)
+#[test]
+fn footage_kept_as_8_bit_levels_is_noted_as_read() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Noted {
+        clip: Clip8,
+        recording: AtomicBool,
+        outside: AtomicUsize,
+    }
+    impl FootageSource for Noted {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            self.clip.frame(item, f, t)
+        }
+        fn frame8(&self, item: ItemId, f: &Footage, t: Tick, float: crate::FloatCurve) -> Option<Arc<crate::disk_cache::Frame8>> {
+            if !self.recording.load(Ordering::SeqCst) {
+                self.outside.fetch_add(1, Ordering::SeqCst);
+            }
+            self.clip.frame8(item, f, t, float)
+        }
+        fn recording(&self, _: &crate::reads::ReadLog, f: &mut dyn FnMut()) {
+            self.recording.store(true, Ordering::SeqCst);
+            f();
+            self.recording.store(false, Ordering::SeqCst);
+        }
+    }
+    let (p, cid) = project(BitDepth::Bpc8, false);
+    let src = Noted { clip: Clip8 { asked: Default::default() }, recording: AtomicBool::new(false), outside: AtomicUsize::new(0) };
+    let log = crate::reads::ReadLog::new();
+    let mut r = Renderer::new(&p, &src, RenderOpts::default());
+    r.reads = Some(&log);
+    r.comp_frame(cid, Tick::ZERO);
+    assert!(src.clip.asked.load(Ordering::SeqCst) > 0, "the 8-bit levels were not asked for");
+    assert_eq!(src.outside.load(Ordering::SeqCst), 0, "8-bit levels read outside the render's recording");
+}
