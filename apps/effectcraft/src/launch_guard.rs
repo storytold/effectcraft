@@ -28,11 +28,34 @@ const MARKER: &str = "launch-pending";
 /// switch back in Settings.
 pub const SETTLE: Duration = Duration::from_secs(3);
 
+/// Why this launch requested its window graphics APIs. An interrupted startup is an
+/// observation, not proof that a driver caused the previous exit.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum BackendSource {
+    #[default]
+    Default,
+    SavedPreference,
+    InterruptedStartup,
+    EnvironmentOverride,
+}
+
+impl BackendSource {
+    pub fn event(self) -> &'static str {
+        match self {
+            Self::Default => "backend source: default",
+            Self::SavedPreference => "backend source: saved OpenGL preference",
+            Self::InterruptedStartup => "backend source: previous interrupted startup; OpenGL fallback",
+            Self::EnvironmentOverride => "backend source: WGPU_BACKEND present",
+        }
+    }
+}
+
 /// This launch's window graphics.
 #[derive(Debug, Default)]
 pub struct Launch {
     /// The graphics APIs the window may use (`None`: eframe's default).
     pub backends: Option<Backends>,
+    pub source: BackendSource,
     /// Switched to OpenGL because the previous launch stopped as its window opened: the message
     /// to show.
     pub notice: Option<String>,
@@ -48,7 +71,10 @@ impl Launch {
     /// launch stopped as its window opened (where OpenGL exists: not macOS), and leave this
     /// launch's marker. `env_override`: `WGPU_BACKEND` is set.
     pub fn begin(dir: Option<&Path>, env_override: bool) -> Launch {
-        let Some(dir) = dir.filter(|_| !env_override) else { return Launch::default() };
+        if env_override {
+            return Launch { source: BackendSource::EnvironmentOverride, ..Launch::default() };
+        }
+        let Some(dir) = dir else { return Launch::default() };
         let prefs_path = dir.join(PREFS_FILE);
         let mut prefs = std::fs::read_to_string(&prefs_path).map(|t| Prefs::from_json(&t)).unwrap_or_default();
         let marker = dir.join(MARKER);
@@ -69,6 +95,13 @@ impl Launch {
             );
         }
         let backends = (prefs.startup.window_graphics == "gl").then_some(Backends::GL);
+        let source = if notice.is_some() {
+            BackendSource::InterruptedStartup
+        } else if backends.is_some() {
+            BackendSource::SavedPreference
+        } else {
+            BackendSource::Default
+        };
         let (marker, lock) = match std::fs::create_dir_all(dir).and_then(|()| File::create(&marker)) {
             // Where locks aren't available the guard works as before.
             Ok(f) => (Some(marker), f.try_lock().is_ok().then_some(f)),
@@ -77,7 +110,7 @@ impl Launch {
                 (None, None)
             }
         };
-        Launch { backends, notice, marker, lock, first_frame: None }
+        Launch { backends, source, notice, marker, lock, first_frame: None }
     }
 
     /// The window drew a frame. Until the launch has settled, returns how long that still takes
@@ -142,6 +175,7 @@ mod tests {
         // may still crash as the window is shown); frames for `SETTLE` do.
         let mut l = Launch::begin(Some(&dir), false);
         assert_eq!((l.backends, l.notice.is_some()), (None, false));
+        assert_eq!(l.source, BackendSource::Default);
         assert!(dir.join(MARKER).exists());
         let t0 = Instant::now();
         assert_eq!(l.frame_drawn_at(t0), Some(SETTLE));
@@ -159,14 +193,18 @@ mod tests {
         } else {
             assert_eq!(l.backends, Some(Backends::GL));
             assert!(l.notice.is_some());
+            assert_eq!(l.source, BackendSource::InterruptedStartup);
             assert_eq!(window_graphics(&dir), "gl", "saved in Settings");
             l.exited();
             let l = Launch::begin(Some(&dir), false);
             assert_eq!((l.backends, l.notice.is_some()), (Some(Backends::GL), false), "it stays, without the notice");
+            assert_eq!(l.source, BackendSource::SavedPreference);
         }
         // `WGPU_BACKEND` wins, and leaves no marker.
         let _ = std::fs::remove_file(dir.join(MARKER));
-        assert_eq!(Launch::begin(Some(&dir), true).backends, None);
+        let overridden = Launch::begin(Some(&dir), true);
+        assert_eq!(overridden.backends, None);
+        assert_eq!(overridden.source, BackendSource::EnvironmentOverride);
         assert!(!dir.join(MARKER).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
