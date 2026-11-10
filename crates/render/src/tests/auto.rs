@@ -308,3 +308,23 @@ fn auto_pick_counts_frames_running_side_by_side() {
     assert!(s.cpu_ms.unwrap() < 30.0 && s.gpu_ms.unwrap() > 100.0, "{s:?}");
     assert!(lanes.iter().filter(|g| **g).count() <= 1, "{lanes:?}");
 }
+
+/// A frame that ends without a time (a GPU failure, a remote frame replaced before it finished)
+/// no longer counts as running: the frames after it are timed as one at a time. (It stayed
+/// counted, and every later frame on its side was timed as half its cost.)
+#[test]
+fn auto_pick_abandoned_frames_stop_counting_as_running() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(5), 1.0, false);
+    let mut dropped = [false; 2];
+    for _ in 0..16 {
+        let gpu = pick.choose(key);
+        if !std::mem::replace(&mut dropped[usize::from(gpu)], true) {
+            pick.abandoned(key, gpu);
+            continue;
+        }
+        pick.record(key, gpu, if gpu { 40.0 } else { 10.0 });
+    }
+    let s = pick.stats(key).unwrap();
+    assert_eq!((s.cpu_ms, s.gpu_ms), (Some(10.0), Some(40.0)), "{s:?}");
+}

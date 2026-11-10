@@ -587,7 +587,13 @@ impl<'a> Renderer<'a> {
             let auto = self.frame_auto(a, comp_id, false);
             if auto.is_none_or(|(p, key)| p.choose(key)) {
                 let t0 = web_time::Instant::now();
-                if let Some(img) = scope(a)? {
+                let res = scope(a);
+                if res.is_err()
+                    && let Some((p, key)) = auto
+                {
+                    p.abandoned(key, true);
+                }
+                if let Some(img) = res? {
                     if let Some((p, key)) = auto {
                         p.record(key, true, t0.elapsed().as_secs_f64() * 1e3);
                     }

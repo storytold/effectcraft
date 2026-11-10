@@ -67,9 +67,7 @@ pub struct AutoPick {
 struct Entry {
     stats: AutoStats,
     measuring: [Option<web_time::Instant>; 2],
-    // ponytail: a frame that never reports back (a GPU failure path, a replaced remote frame)
-    // leaves its side counted as running, which only makes that side look cheaper; capped at
-    // MAX_RUNNING, cleared by `AutoPick::reset`.
+    // Lowered by `record`, `declined` and `abandoned`: every frame asked for ends in one.
     running: [u32; 2],
 }
 
@@ -109,7 +107,7 @@ impl AutoPick {
     const MEASURING_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// Render the frame for `key` on the GPU? Every frame asked for reports back with
-    /// [`AutoPick::record`] (or [`AutoPick::declined`]).
+    /// [`AutoPick::record`] (or [`AutoPick::declined`]), or ends with [`AutoPick::abandoned`].
     pub fn choose(&self, key: AutoKey) -> bool {
         let Ok(mut m) = self.stats.lock() else { return true };
         if m.len() > Self::MAX_KEYS && !m.contains_key(&key) {
@@ -191,6 +189,21 @@ impl AutoPick {
             s.declined = true;
             s.gpu_ms = None;
             s.since_probe = 0;
+        }
+    }
+
+    /// A frame for `key` asked of `gpu`'s side ends without a time (it failed, or was replaced
+    /// before it finished). Without this its side stays counted as running, and every later
+    /// frame there is timed as one of several running side by side: that side looks cheaper.
+    // ponytail: clears the side's warm-up/probe mark even when another frame holds it; that
+    // only lets the next probe start early.
+    pub fn abandoned(&self, key: AutoKey, gpu: bool) {
+        if let Ok(mut m) = self.stats.lock()
+            && let Some(e) = m.get_mut(&key)
+        {
+            e.measuring[usize::from(gpu)] = None;
+            let n = &mut e.running[usize::from(gpu)];
+            *n = n.saturating_sub(1);
         }
     }
 

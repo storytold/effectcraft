@@ -2019,6 +2019,7 @@ impl Worker {
                             // Time the GPU's work, not just its recording.
                             g.wait();
                             if g.context().check_health().is_err() {
+                                p.abandoned(key, true);
                                 return self.render_job(job, false, files);
                             }
                             p.record(key, true, t0.elapsed().as_secs_f64() * 1000.0);
@@ -2031,6 +2032,9 @@ impl Worker {
                         }
                     }
                     Err(e) => {
+                        if let Some((p, key)) = auto {
+                            p.abandoned(key, true);
+                        }
                         self.gpu_attempt_rejected(g, &e);
                         return self.render_job(job, false, files);
                     }
