@@ -242,7 +242,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "ブラシのダイナミクス"),
     ("Caching frames", "フレームをキャッシュ中"),
     ("Cancel", "キャンセル"),
-    ("Import After Effects Project", "After Effectsプロジェクトを読み込み"),
+    ("Import Adobe After Effects Project", "Adobe After Effectsプロジェクトを読み込み"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "このプロジェクトの一部は正確に読み込めません（省略または変更されます）:"),
     ("Import Anyway", "このまま読み込み"),
     ("Casts Shadows", "シャドウを落とす"),
@@ -1383,7 +1383,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "画笔动态"),
     ("Caching frames", "正在缓存帧"),
     ("Cancel", "取消"),
-    ("Import After Effects Project", "导入 After Effects 项目"),
+    ("Import Adobe After Effects Project", "导入 Adobe After Effects 项目"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此项目的某些部分无法准确导入（将被省略或更改）："),
     ("Import Anyway", "仍然导入"),
     ("Casts Shadows", "投射阴影"),
@@ -2499,7 +2499,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Penseldynamik"),
     ("Caching frames", "Cachelagrar bildrutor"),
     ("Cancel", "Avbryt"),
-    ("Import After Effects Project", "Importera After Effects-projekt"),
+    ("Import Adobe After Effects Project", "Importera Adobe After Effects-projekt"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Vissa delar av projektet kan inte importeras exakt (utelämnas eller ändras):",
@@ -3188,6 +3188,14 @@ const SWEDISH: &[(&str, &str)] = &[
     ("A built-in preset has this name", "En inbyggd förinställning har det här namnet"),
     ("Cannot import dropped files: {}", "Kan inte importera släppta filer: {}"),
     ("Cannot open dropped project {}: {}", "Kan inte öppna det släppta projektet {}: {}"),
+    (
+        "Imported footage has an unlabeled alpha channel: choose how to interpret it in File ▸ Interpret Footage ▸ Main…",
+        "Importerat material har en omärkt alfakanal: välj hur den ska tolkas i Arkiv ▸ Tolka material ▸ Huvud…",
+    ),
+    (
+        "Skipped {} more file(s) while a dialog is open; import them again after it",
+        "Hoppade över {} fil(er) till medan en dialogruta är öppen; importera dem igen efteråt",
+    ),
     ("Click in the Composition panel to sample text {}", "Klicka i panelen Komposition för att hämta text {}"),
     ("Click to sample text {}", "Klicka för att hämta text {}"),
     ("Comment of {}: {}", "Kommentar till {}: {}"),
@@ -3768,7 +3776,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "筆刷動態"),
     ("Caching frames", "正在快取幀"),
     ("Cancel", "取消"),
-    ("Import After Effects Project", "匯入 After Effects 專案"),
+    ("Import Adobe After Effects Project", "匯入 Adobe After Effects 專案"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此專案的部分內容無法準確匯入（將被省略或變更）："),
     ("Import Anyway", "仍要匯入"),
     ("Casts Shadows", "投射陰影"),
@@ -4834,7 +4842,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Brush Dynamics", "Динаміка пензля"),
     ("Caching frames", "Кешування кадрів"),
     ("Cancel", "Скасувати"),
-    ("Import After Effects Project", "Імпортувати проєкт After Effects"),
+    ("Import Adobe After Effects Project", "Імпортувати проєкт Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Деякі частини цього проєкту неможливо імпортувати точно (їх пропущено або змінено):",
@@ -5415,7 +5423,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dinâmica do pincel"),
     ("Caching frames", "Armazenando quadros em cache"),
     ("Cancel", "Cancelar"),
-    ("Import After Effects Project", "Importar projeto do After Effects"),
+    ("Import Adobe After Effects Project", "Importar projeto do Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Algumas partes deste projeto não podem ser importadas exatamente (omitidas ou alteradas):",
@@ -6188,7 +6196,7 @@ const POLISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamika pędzla"),
     ("Caching frames", "Buforowanie klatek"),
     ("Cancel", "Anuluj"),
-    ("Import After Effects Project", "Importuj projekt After Effects"),
+    ("Import Adobe After Effects Project", "Importuj projekt Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Niektórych części tego projektu nie można zaimportować dokładnie (zostaną pominięte lub zmienione):",
@@ -6944,7 +6952,7 @@ const CZECH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamika štětce"),
     ("Caching frames", "Ukládání snímků do mezipaměti"),
     ("Cancel", "Zrušit"),
-    ("Import After Effects Project", "Importovat projekt After Effects"),
+    ("Import Adobe After Effects Project", "Importovat projekt Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Některé části tohoto projektu nelze importovat přesně (budou vynechány nebo změněny):",
@@ -7519,7 +7527,7 @@ const SPANISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dinámica del pincel"),
     ("Caching frames", "Almacenando fotogramas en caché"),
     ("Cancel", "Cancelar"),
-    ("Import After Effects Project", "Importar proyecto de After Effects"),
+    ("Import Adobe After Effects Project", "Importar proyecto de Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Algunas partes de este proyecto no se pueden importar con exactitud (se omiten o cambian):",
@@ -8085,7 +8093,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Brush Dynamics", "ფუნჯის დინამიკა"),
     ("Caching frames", "კადრების ქეშირება"),
     ("Cancel", "გაუქმება"),
-    ("Import After Effects Project", "After Effects-ის პროექტის იმპორტი"),
+    ("Import Adobe After Effects Project", "Adobe After Effects-ის პროექტის იმპორტი"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "ამ პროექტის ზოგიერთი ნაწილის ზუსტად იმპორტი შეუძლებელია (გამოტოვებული ან შეცვლილი):",
@@ -9058,7 +9066,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamique du pinceau"),
     ("Caching frames", "Mise en cache des images"),
     ("Cancel", "Annuler"),
-    ("Import After Effects Project", "Importer un projet After Effects"),
+    ("Import Adobe After Effects Project", "Importer un projet Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Certaines parties de ce projet ne peuvent pas être importées à l’identique (omises ou modifiées) :",
@@ -9801,6 +9809,14 @@ const FRENCH: &[(&str, &str)] = &[
     ),
     ("Only one project can be opened per drop; skipped {} more", "Un seul projet peut être ouvert par dépôt ; {} de plus ignoré(s)"),
     ("Cannot open dropped project {}: {}", "Impossible d’ouvrir le projet déposé {} : {}"),
+    (
+        "Imported footage has an unlabeled alpha channel: choose how to interpret it in File ▸ Interpret Footage ▸ Main…",
+        "Le métrage importé a une couche alpha non étiquetée : choisissez son interprétation dans Fichier ▸ Interpréter le métrage ▸ Principal…",
+    ),
+    (
+        "Skipped {} more file(s) while a dialog is open; import them again after it",
+        "{} fichier(s) de plus ignoré(s) pendant qu’une boîte de dialogue est ouverte ; importez-les ensuite",
+    ),
     ("Cannot import dropped files: {}", "Impossible d’importer les fichiers déposés : {}"),
     ("A built-in preset has this name", "Un préréglage intégré porte ce nom"),
     ("Replaces your preset with this name", "Remplace votre préréglage portant ce nom"),
