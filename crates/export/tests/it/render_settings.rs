@@ -501,3 +501,150 @@ fn a_job_renders_on_one_compositor() {
     assert_eq!(cpu.frames.load(Ordering::SeqCst), 0);
     assert_eq!(c[0].get_pixel(10, 44).0, [255, 0, 0, 255], "the CPU drew the red block");
 }
+
+/// A GPU compositor stand-in that renders the frame exactly as the CPU does, after `delay`, and
+/// either as it is or solid green (`green`), counting its frames.
+struct TimedAccel {
+    delay: std::time::Duration,
+    green: bool,
+    frames: AtomicUsize,
+}
+
+impl TimedAccel {
+    fn new(delay_ms: u64, green: bool) -> TimedAccel {
+        TimedAccel { delay: std::time::Duration::from_millis(delay_ms), green, frames: AtomicUsize::new(0) }
+    }
+}
+
+impl Accelerator for TimedAccel {
+    fn name(&self) -> String {
+        "timed".into()
+    }
+    fn comp_frame(&self, r: &Renderer, comp: ItemId, t: Tick) -> Option<Image> {
+        self.frames.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        let c = r.project.comp(comp)?;
+        Some(if self.green { Image::filled(c.width, c.height, [0.0, 1.0, 0.0, 1.0]) } else { r.comp_frame_cpu(comp, t) })
+    }
+    fn supports_effect(&self, _id: &str) -> bool {
+        false
+    }
+    fn effects(&self, _chain: &[FxStep], _buf: &Buf, _levels: Option<f32>) -> Option<Buf> {
+        None
+    }
+}
+
+/// The environment forces the compositor or the GPU frames in flight: the measured choice
+/// isn't what these tests check then.
+fn measurement_overridden() -> bool {
+    std::env::var_os(effectcraft_export::RENDERER_ENV).is_some() || std::env::var_os("EFFECTCRAFT_GPU_INFLIGHT").is_some()
+}
+
+/// [`run_on`] on a pool of 8 threads (a batch of 8 frames: room to measure both compositors on
+/// the first one, whatever the machine), returning the PNGs and the render log.
+fn run_pooled(p: &Project, cid: ItemId, s: &RenderSettings, path: &str, options: JobOptions, accel: &dyn Accelerator) -> (Vec<image::RgbaImage>, String) {
+    let om = OutputModule::for_format(OutputFormat::PngSequence);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+    let options = JobOptions { log: RenderLog::PlusSettings, ..options };
+    let (r, files) = pool.install(|| run_on(p, cid, s, &om, path, options, (Some(accel), false)));
+    let n = r.expect("export").frames as usize;
+    let log = files.lock().unwrap().iter().find(|(p, _)| p.ends_with("_RenderLog.txt")).map(|(_, d)| String::from_utf8(d.clone()).unwrap()).expect("log");
+    ((0..n).map(|i| png(&files, i)).collect(), log)
+}
+
+#[test]
+fn a_transfer_bound_gpu_job_renders_on_the_cpu() {
+    // #3335: a GPU project whose GPU frames are slower than the CPU's renders the whole job on
+    // the CPU's frame-parallel compositor, measured on its first frames, and says so in the log.
+    if measurement_overridden() {
+        return;
+    }
+    let (mut p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    p.settings.gpu_acceleration = true;
+    let s = custom(0.0, 0.8);
+    let slow = TimedAccel::new(60, true);
+    let (frames, log) = run_pooled(&p, cid, &s, "/r/a_[#####].png", JobOptions::default(), &slow);
+    assert_eq!(frames.len(), 20);
+    // The GPU rendered its warm-up and timed frames only, and none of them is in the output.
+    assert_eq!(slow.frames.load(Ordering::SeqCst), 3);
+    for (i, f) in frames.iter().enumerate() {
+        assert_eq!(f.get_pixel(10, 44).0, [255, 0, 0, 255], "frame {i} is not the CPU's");
+    }
+    assert!(log.contains("Renderer: Software Rendering (measured on the first frames: GPU "), "{log}");
+    // The queue item's next output module follows the first one's choice without measuring.
+    let shared = Mutex::new(None);
+    let opts = || JobOptions { renderer: Some(&shared), ..Default::default() };
+    let slow = TimedAccel::new(60, true);
+    run_pooled(&p, cid, &s, "/r/b_[#####].png", opts(), &slow);
+    assert_eq!(*shared.lock().unwrap(), Some(effectcraft_render::Backend::Cpu));
+    let again = TimedAccel::new(0, true);
+    let (frames, log) = run_pooled(&p, cid, &s, "/r/c_[#####].png", opts(), &again);
+    assert_eq!(again.frames.load(Ordering::SeqCst), 0);
+    assert!(frames.iter().all(|f| f.get_pixel(10, 44).0 == [255, 0, 0, 255]));
+    assert!(log.contains("Renderer: Software Rendering (as the queue item's first output module)"), "{log}");
+}
+
+#[test]
+fn a_gpu_job_that_measures_no_faster_on_the_cpu_stays_on_the_gpu() {
+    if measurement_overridden() {
+        return;
+    }
+    // A slow CPU (a large comp of eight rotating, translucent full-frame layers, composited
+    // anew every frame) against a GPU that only fills the frame: every frame is the GPU's.
+    let (mut p, cid) = project(FrameRate::new(25, 1), |p, comp| {
+        comp.width = 1920;
+        comp.height = 1080;
+        let big = p.add_item("Big", Label::Red, None, ItemKind::Solid(Solid { color: [0.2, 0.4, 0.6], width: 1920, height: 1080, pixel_aspect: 1.0 }));
+        for k in 0..8 {
+            let mut l = build::layer(p, comp, "Big", LayerSource::Solid { item: big }, (1920, 1080), None);
+            l.props.prop_mut("transform/rotation").unwrap().keys =
+                vec![Keyframe::new(Tick::ZERO, Value::Scalar(k as f64)), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Scalar(90.0 + k as f64))];
+            l.props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(50.0);
+            comp.layers.insert(0, l);
+        }
+    });
+    p.settings.gpu_acceleration = true;
+    let s = custom(0.0, 0.6);
+    let fast = TimedAccel::new(0, true);
+    let (frames, log) = run_pooled(&p, cid, &s, "/r/d_[#####].png", JobOptions::default(), &fast);
+    assert_eq!(frames.len(), 15);
+    assert_eq!(fast.frames.load(Ordering::SeqCst), 15, "every kept frame, warm-up and measured ones included, is the GPU's");
+    assert!(frames.iter().all(|f| f.pixels().all(|px| px.0 == [0, 255, 0, 255])));
+    assert!(log.contains("Renderer: GPU Acceleration (measured on the first frames: GPU "), "{log}");
+}
+
+#[test]
+fn gpu_cpu_and_measured_jobs_write_the_same_frames() {
+    // #3335: where the two compositors agree, a job is the same whichever renders it: the GPU
+    // (forced), the CPU (Software Only) or the measured choice.
+    if measurement_overridden() {
+        return;
+    }
+    let (mut p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let s = custom(0.0, 0.8);
+    let echo = TimedAccel::new(5, false);
+    p.settings.gpu_acceleration = false;
+    let (cpu, log) = run_pooled(&p, cid, &s, "/i/a_[#####].png", JobOptions::default(), &echo);
+    assert!(log.contains("Renderer: Software Rendering (the project's renderer)"), "{log}");
+    p.settings.gpu_acceleration = true;
+    let gpu_slot = Mutex::new(Some(effectcraft_render::Backend::Gpu));
+    let (gpu, _) = run_pooled(&p, cid, &s, "/i/b_[#####].png", JobOptions { renderer: Some(&gpu_slot), ..Default::default() }, &echo);
+    let (auto, _) = run_pooled(&p, cid, &s, "/i/c_[#####].png", JobOptions::default(), &echo);
+    assert_eq!(cpu.len(), 20);
+    assert_eq!(cpu, gpu);
+    assert_eq!(cpu, auto);
+}
+
+#[test]
+fn renderer_choice_follows_the_measurement() {
+    use effectcraft_export::{JobRenderer, pick_renderer};
+    assert_eq!(pick_renderer(Some(117.0), Some(68.0)), JobRenderer::Cpu);
+    assert_eq!(pick_renderer(Some(68.0), Some(117.0)), JobRenderer::Gpu);
+    // Ties and noise stay on the GPU: the CPU must be clearly faster.
+    assert_eq!(pick_renderer(Some(100.0), Some(90.0)), JobRenderer::Gpu);
+    assert_eq!(pick_renderer(Some(100.0), Some(80.0)), JobRenderer::Cpu);
+    // Unmeasured or nonsense: the GPU, unless the GPU stopped while measuring.
+    assert_eq!(pick_renderer(None, None), JobRenderer::Gpu);
+    assert_eq!(pick_renderer(Some(f64::NAN), Some(1.0)), JobRenderer::Gpu);
+    assert_eq!(pick_renderer(None, Some(50.0)), JobRenderer::Cpu);
+}

@@ -143,6 +143,8 @@ const WRITES: &[(&str, &[&str])] = &[
     ("shortcuts.export", &["path"]),
     ("renderQueue.add", &["output", "path"]),
     ("file.exportTimeline", &["path"]),
+    ("journal.export", &["path"]),
+    ("help.exportRepro", &["path"]),
     // `path` / `output` may also be a file-name template, as for render.preRender.
     ("file.createProxy", &["path", "output"]),
 ];
@@ -280,6 +282,11 @@ impl Confinement {
         if matches!(id, "file.openRecent" | "file.importRecent" | "anim.applyRecentPreset") && !given {
             return Err(Error::BadArgs(format!("`{id}`: give `path` while file access is confined")));
         }
+        // The default repro destination is the settings store, not an automation write root.
+        // Require a single explicit path so missing, null or array parameters cannot bypass it.
+        if id == "help.exportRepro" && params.get("path").and_then(Value::as_str).is_none() {
+            return Err(Error::BadArgs("`help.exportRepro`: give `path` inside an automation write root while file access is confined".into()));
+        }
         let mut lookups = vec![];
         // An output the agent did not name is derived from where the project sits: the Default
         // Output Folder preference when that is set, beside the project file otherwise — and the
@@ -380,6 +387,10 @@ impl FootageSource for ConfinedFootage {
     /// The frame with an explicit size and float curve, or `None` when the footage lies outside the allowed roots.
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
+    }
+    /// The frame as 8-bit levels, or `None` when the footage lies outside the allowed roots.
+    fn frame8(&self, item: ItemId, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<effectcraft_engine::render::disk_cache::Frame8>> {
+        self.readable(footage).then(|| self.inner.frame8(item, footage, t, float)).flatten()
     }
     /// The footage audio from the inner source, or `None` when the footage lies outside the allowed roots.
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {

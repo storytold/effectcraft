@@ -242,7 +242,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "ブラシのダイナミクス"),
     ("Caching frames", "フレームをキャッシュ中"),
     ("Cancel", "キャンセル"),
-    ("Import After Effects Project", "After Effectsプロジェクトを読み込み"),
+    ("Import Adobe After Effects Project", "Adobe After Effectsプロジェクトを読み込み"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "このプロジェクトの一部は正確に読み込めません（省略または変更されます）:"),
     ("Import Anyway", "このまま読み込み"),
     ("... and {} more", "…ほか {} 件"),
@@ -709,8 +709,8 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Import Photoshop File", "Photoshopファイルを読み込み"),
     ("Interpret Unlabeled Alpha As", "ラベルのないアルファの解釈"),
     ("Join the ArtCraft Discord", "ArtCraftのDiscordに参加"),
-    ("Mercury GPU Acceleration ({})", "Mercury GPUアクセラレーション（{}）"),
-    ("Mercury Software Only", "Mercuryソフトウェアのみ"),
+    ("GPU Acceleration ({})", "GPUアクセラレーション（{}）"),
+    ("Software Rendering", "ソフトウェアレンダリング"),
     ("OCIO (built-in ACES config)", "OCIO（組み込みACES設定）"),
     ("Off (Final Quality)", "オフ（最終品質）"),
     ("OpenGL (compatibility)", "OpenGL（互換）"),
@@ -892,6 +892,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Footage Frame Cache", "フッテージフレームキャッシュ"),
     ("Preview (RAM) Cache", "プレビュー（RAM）キャッシュ"),
     ("Reduce Cache Size When System Is Low on Memory", "システムのメモリが不足しているときにキャッシュサイズを減らす"),
+    ("GPU Frames Rendered at Once", "一度にレンダリングするGPUフレーム数"),
     ("Video", "ビデオ"),
     ("Enable Video Preview Output", "ビデオプレビュー出力を有効にする"),
     ("Video Device", "ビデオデバイス"),
@@ -1119,7 +1120,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Script Console", "スクリプトコンソール"),
     ("Essential Graphics", "エッセンシャルグラフィックス"),
     ("ScriptUI Panel", "ScriptUIパネル"),
-    ("Lumetri Scopes", "Lumetriスコープ"),
+    ("Video Scopes", "ビデオスコープ"),
     ("Media Browser", "メディアブラウザー"),
     ("Content-Aware Fill", "コンテンツに応じた塗りつぶし"),
     ("Create Nulls From Paths", "パスからヌルを作成"),
@@ -1319,6 +1320,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("per second", "毎秒"),
     ("Waveform", "波形"),
     ("steps", "ステップ"),
+    ("GPU Acceleration (no GPU: software)", "GPUアクセラレーション（GPUなし：ソフトウェア）"),
 ];
 
 const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
@@ -1382,7 +1384,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "画笔动态"),
     ("Caching frames", "正在缓存帧"),
     ("Cancel", "取消"),
-    ("Import After Effects Project", "导入 After Effects 项目"),
+    ("Import Adobe After Effects Project", "导入 Adobe After Effects 项目"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此项目的某些部分无法准确导入（将被省略或更改）："),
     ("Import Anyway", "仍然导入"),
     ("... and {} more", "……还有 {} 项"),
@@ -1839,8 +1841,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Import Photoshop File", "导入 Photoshop 文件"),
     ("Interpret Unlabeled Alpha As", "将未标记的 Alpha 解释为"),
     ("Join the ArtCraft Discord", "加入 ArtCraft Discord"),
-    ("Mercury GPU Acceleration ({})", "Mercury GPU 加速（{}）"),
-    ("Mercury Software Only", "仅 Mercury 软件"),
+    ("GPU Acceleration ({})", "GPU 加速（{}）"),
+    ("Software Rendering", "软件渲染"),
     ("OCIO (built-in ACES config)", "OCIO（内置 ACES 配置）"),
     ("Off (Final Quality)", "关闭（最终质量）"),
     ("OpenGL (compatibility)", "OpenGL（兼容）"),
@@ -2024,6 +2026,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Footage Frame Cache", "素材帧缓存"),
     ("Preview (RAM) Cache", "预览（内存）缓存"),
     ("Reduce Cache Size When System Is Low on Memory", "系统内存不足时减少缓存大小"),
+    ("GPU Frames Rendered at Once", "GPU 同时渲染的帧数"),
     ("Video", "视频"),
     ("Enable Video Preview Output", "启用视频预览输出"),
     ("Video Device", "视频设备"),
@@ -2282,7 +2285,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Script Console", "脚本控制台"),
     ("Essential Graphics", "基本图形"),
     ("ScriptUI Panel", "ScriptUI 面板"),
-    ("Lumetri Scopes", "Lumetri 示波器"),
+    ("Video Scopes", "视频示波器"),
     ("Media Browser", "媒体浏览器"),
     ("Content-Aware Fill", "内容识别填充"),
     ("Create Nulls From Paths", "从路径创建空对象"),
@@ -2435,6 +2438,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Blend Mode", "混合模式"),
     ("Show mesh", "显示网格"),
     ("Record Options...", "记录选项..."),
+    ("GPU Acceleration (no GPU: software)", "GPU 加速（无 GPU：软件）"),
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -2497,7 +2501,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Penseldynamik"),
     ("Caching frames", "Cachelagrar bildrutor"),
     ("Cancel", "Avbryt"),
-    ("Import After Effects Project", "Importera After Effects-projekt"),
+    ("Import Adobe After Effects Project", "Importera Adobe After Effects-projekt"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Vissa delar av projektet kan inte importeras exakt (utelämnas eller ändras):",
@@ -2953,8 +2957,8 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Import Photoshop File", "Importera Photoshop-fil"),
     ("Interpret Unlabeled Alpha As", "Tolka omärkt alfa som"),
     ("Join the ArtCraft Discord", "Gå med i ArtCraft på Discord"),
-    ("Mercury GPU Acceleration ({})", "Mercury GPU-acceleration ({})"),
-    ("Mercury Software Only", "Endast Mercury-programvara"),
+    ("GPU Acceleration ({})", "GPU-acceleration ({})"),
+    ("Software Rendering", "Programvarurendering"),
     ("OCIO (built-in ACES config)", "OCIO (inbyggd ACES-konfiguration)"),
     ("Off (Final Quality)", "Av (slutlig kvalitet)"),
     ("OpenGL (compatibility)", "OpenGL (kompatibilitet)"),
@@ -3136,6 +3140,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Footage Frame Cache", "Bildrutecache för material"),
     ("Preview (RAM) Cache", "Förhandsgranskningscache (RAM)"),
     ("Reduce Cache Size When System Is Low on Memory", "Minska cachestorleken när systemet har ont om minne"),
+    ("GPU Frames Rendered at Once", "GPU-bildrutor som renderas samtidigt"),
     ("Video", "Video"),
     ("Enable Video Preview Output", "Aktivera videoutgång för förhandsgranskning"),
     ("Video Device", "Videoenhet"),
@@ -3186,6 +3191,14 @@ const SWEDISH: &[(&str, &str)] = &[
     ("A built-in preset has this name", "En inbyggd förinställning har det här namnet"),
     ("Cannot import dropped files: {}", "Kan inte importera släppta filer: {}"),
     ("Cannot open dropped project {}: {}", "Kan inte öppna det släppta projektet {}: {}"),
+    (
+        "Imported footage has an unlabeled alpha channel: choose how to interpret it in File ▸ Interpret Footage ▸ Main…",
+        "Importerat material har en omärkt alfakanal: välj hur den ska tolkas i Arkiv ▸ Tolka material ▸ Huvud…",
+    ),
+    (
+        "Skipped {} more file(s) while a dialog is open; import them again after it",
+        "Hoppade över {} fil(er) till medan en dialogruta är öppen; importera dem igen efteråt",
+    ),
     ("Click in the Composition panel to sample text {}", "Klicka i panelen Komposition för att hämta text {}"),
     ("Click to sample text {}", "Klicka för att hämta text {}"),
     ("Comment of {}: {}", "Kommentar till {}: {}"),
@@ -3194,7 +3207,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Drop {} files to import", "Släpp {} filer för att importera"),
     ("Effects", "Effekter"),
     ("Label of {}: {}", "Etikett för {}: {}"),
-    ("Mercury GPU Acceleration (no GPU: software)", "Mercury GPU-acceleration (ingen GPU: programvara)"),
+    ("GPU Acceleration (no GPU: software)", "GPU-acceleration (ingen GPU: programvara)"),
     ("Only one project can be opened per drop; skipped {} more", "Bara ett projekt kan öppnas per släpp; hoppade över {} till"),
     ("Open in Essential Graphics", "Öppna i Grundläggande grafik"),
     ("Original color: click to go back to it", "Originalfärg: klicka för att återgå till den"),
@@ -3443,7 +3456,7 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Script Console", "Skriptkonsol"),
     ("Essential Graphics", "Grundläggande grafik"),
     ("ScriptUI Panel", "ScriptUI-panel"),
-    ("Lumetri Scopes", "Lumetri-scope"),
+    ("Video Scopes", "Videoskop"),
     ("Media Browser", "Mediebläddrare"),
     ("Content-Aware Fill", "Innehållsmedveten fyllning"),
     ("Create Nulls From Paths", "Skapa nullobjekt från banor"),
@@ -3766,7 +3779,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "筆刷動態"),
     ("Caching frames", "正在快取幀"),
     ("Cancel", "取消"),
-    ("Import After Effects Project", "匯入 After Effects 專案"),
+    ("Import Adobe After Effects Project", "匯入 Adobe After Effects 專案"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此專案的部分內容無法準確匯入（將被省略或變更）："),
     ("Import Anyway", "仍要匯入"),
     ("... and {} more", "……還有 {} 項"),
@@ -4354,6 +4367,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Footage Frame Cache", "素材影格快取"),
     ("Preview (RAM) Cache", "預覽（記憶體）快取"),
     ("Reduce Cache Size When System Is Low on Memory", "系統記憶體不足時減少快取大小"),
+    ("GPU Frames Rendered at Once", "GPU 同時算圖的影格數"),
     ("Video", "視訊"),
     ("Enable Video Preview Output", "啟用視訊預覽輸出"),
     ("Video Device", "視訊裝置"),
@@ -4612,7 +4626,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Script Console", "指令碼主控台"),
     ("Essential Graphics", "基本圖形"),
     ("ScriptUI Panel", "ScriptUI 面板"),
-    ("Lumetri Scopes", "Lumetri 示波器"),
+    ("Video Scopes", "視訊示波器"),
     ("Media Browser", "媒體瀏覽器"),
     ("Content-Aware Fill", "內容感知填色"),
     ("Create Nulls From Paths", "從路徑建立空物件"),
@@ -4765,6 +4779,9 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Blend Mode", "混合模式"),
     ("Show mesh", "顯示網格"),
     ("Record Options...", "記錄選項..."),
+    ("Software Rendering", "軟體算繪"),
+    ("GPU Acceleration ({})", "GPU 加速（{}）"),
+    ("GPU Acceleration (no GPU: software)", "GPU 加速（無 GPU：軟體）"),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
@@ -4829,7 +4846,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Brush Dynamics", "Динаміка пензля"),
     ("Caching frames", "Кешування кадрів"),
     ("Cancel", "Скасувати"),
-    ("Import After Effects Project", "Імпортувати проєкт After Effects"),
+    ("Import Adobe After Effects Project", "Імпортувати проєкт Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Деякі частини цього проєкту неможливо імпортувати точно (їх пропущено або змінено):",
@@ -5306,8 +5323,8 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Import Photoshop File", "Імпорт файлу Photoshop"),
     ("Interpret Unlabeled Alpha As", "Інтерпретувати непозначену альфу як"),
     ("Join the ArtCraft Discord", "Приєднатися до Discord ArtCraft"),
-    ("Mercury GPU Acceleration ({})", "Прискорення Mercury GPU ({})"),
-    ("Mercury Software Only", "Лише програмний Mercury"),
+    ("GPU Acceleration ({})", "Прискорення GPU ({})"),
+    ("Software Rendering", "Програмне відтворення"),
     ("OCIO (built-in ACES config)", "OCIO (вбудована конфігурація ACES)"),
     ("Off (Final Quality)", "Вимкнено (остаточна якість)"),
     ("OpenGL (compatibility)", "OpenGL (сумісність)"),
@@ -5353,6 +5370,8 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Project", "Проєкт"),
     ("Total Offset", "Загальний зсув"),
     ("Per Layer", "На шар"),
+    ("Video Scopes", "Відеоскопи"),
+    ("GPU Acceleration (no GPU: software)", "Прискорення GPU (без GPU: програмне)"),
 ];
 
 // Brazilian Portuguese.
@@ -5409,7 +5428,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dinâmica do pincel"),
     ("Caching frames", "Armazenando quadros em cache"),
     ("Cancel", "Cancelar"),
-    ("Import After Effects Project", "Importar projeto do After Effects"),
+    ("Import Adobe After Effects Project", "Importar projeto do Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Algumas partes deste projeto não podem ser importadas exatamente (omitidas ou alteradas):",
@@ -5916,6 +5935,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Recent Projects Shown", "Projetos recentes exibidos"),
     ("Red", "Vermelho"),
     ("Reduce Cache Size When System Is Low on Memory", "Reduzir o tamanho do cache quando o sistema estiver com pouca memória"),
+    ("GPU Frames Rendered at Once", "Quadros da GPU renderizados de uma vez"),
     ("Remove from favorites", "Remover dos favoritos"),
     ("Repair", "Reparo"),
     ("Report Missing Frames", "Relatar quadros ausentes"),
@@ -5985,7 +6005,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Guess", "Adivinhar"),
     ("Import Image Sequence", "Importar sequência de imagens"),
     ("Import PDF / Illustrator File", "Importar arquivo PDF / Illustrator"),
-    ("Mercury Software Only", "Apenas software Mercury"),
+    ("Software Rendering", "Renderização por software"),
     ("OCIO (built-in ACES config)", "OCIO (config do ACES integrado)"),
     ("Still Duration", "Duração da imagem fixa"),
     ("Straight", "Direto"),
@@ -6092,7 +6112,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Light", "Claro"),
     ("Lines", "Linhas"),
     ("Memory & CPU", "Memória e CPU"),
-    ("Mercury GPU Acceleration ({})", "Aceleração de GPU Mercury ({})"),
+    ("GPU Acceleration ({})", "Aceleração de GPU ({})"),
     ("Off", "Desativado"),
     ("Options", "Opções"),
     ("Overlay", "Sobrepor"),
@@ -6117,6 +6137,8 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Video", "Vídeo"),
     ("channel", "canal"),
     ("files", "arquivos"),
+    ("Video Scopes", "Escopos de vídeo"),
+    ("GPU Acceleration (no GPU: software)", "Aceleração de GPU (sem GPU: software)"),
 ];
 
 /// Polish (pl): original translations covering every row in the Chinese panel catalogs.
@@ -6180,7 +6202,7 @@ const POLISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamika pędzla"),
     ("Caching frames", "Buforowanie klatek"),
     ("Cancel", "Anuluj"),
-    ("Import After Effects Project", "Importuj projekt After Effects"),
+    ("Import Adobe After Effects Project", "Importuj projekt Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Niektórych części tego projektu nie można zaimportować dokładnie (zostaną pominięte lub zmienione):",
@@ -6636,8 +6658,8 @@ const POLISH: &[(&str, &str)] = &[
     ("Import Photoshop File", "Importuj plik Photoshopa"),
     ("Interpret Unlabeled Alpha As", "Interpretuj nieoznaczoną alfę jako"),
     ("Join the ArtCraft Discord", "Dołącz do Discorda ArtCraft"),
-    ("Mercury GPU Acceleration ({})", "Akceleracja Mercury GPU ({})"),
-    ("Mercury Software Only", "Tylko programowy Mercury"),
+    ("GPU Acceleration ({})", "Akceleracja GPU ({})"),
+    ("Software Rendering", "Renderowanie programowe"),
     ("OCIO (built-in ACES config)", "OCIO (wbudowana konfiguracja ACES)"),
     ("Off (Final Quality)", "Wył. (jakość końcowa)"),
     ("OpenGL (compatibility)", "OpenGL (zgodność)"),
@@ -6875,6 +6897,8 @@ const POLISH: &[(&str, &str)] = &[
     ("Resolution:", "Rozdzielczość:"),
     ("Guide Layer", "Warstwa pomocnicza"),
     ("Layer Styles", "Style warstwy"),
+    ("Video Scopes", "Wskaźniki wideo"),
+    ("GPU Acceleration (no GPU: software)", "Akceleracja GPU (bez GPU: programowa)"),
 ];
 
 /// Czech (cs): original translations covering every row in the Chinese panel catalogs.
@@ -6935,7 +6959,7 @@ const CZECH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamika štětce"),
     ("Caching frames", "Ukládání snímků do mezipaměti"),
     ("Cancel", "Zrušit"),
-    ("Import After Effects Project", "Importovat projekt After Effects"),
+    ("Import Adobe After Effects Project", "Importovat projekt Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Některé části tohoto projektu nelze importovat přesně (budou vynechány nebo změněny):",
@@ -7388,8 +7412,8 @@ const CZECH: &[(&str, &str)] = &[
     ("Import Photoshop File", "Importovat soubor Photoshop"),
     ("Interpret Unlabeled Alpha As", "Interpretovat neoznačenou alfu jako"),
     ("Join the ArtCraft Discord", "Připojit se na Discord ArtCraft"),
-    ("Mercury GPU Acceleration ({})", "GPU akcelerace Mercury ({})"),
-    ("Mercury Software Only", "Pouze softwarové zpracování Mercury"),
+    ("GPU Acceleration ({})", "Akcelerace GPU ({})"),
+    ("Software Rendering", "Softwarové vykreslování"),
     ("OCIO (built-in ACES config)", "OCIO (vestavěná konfigurace ACES)"),
     ("Off (Final Quality)", "Vypnuto (finální kvalita)"),
     ("OpenGL (compatibility)", "OpenGL (kompatibilita)"),
@@ -7440,6 +7464,8 @@ const CZECH: &[(&str, &str)] = &[
     ("Variable fonts only", "Jen proměnná písma"),
     ("Total Offset", "Celkový posun"),
     ("Per Layer", "Na vrstvu"),
+    ("Video Scopes", "Videoskopy"),
+    ("GPU Acceleration (no GPU: software)", "Akcelerace GPU (bez GPU: software)"),
 ];
 
 /// Spanish: neutral, tú, sentence case; the same source strings as the Chinese catalogs, in the same
@@ -7509,7 +7535,7 @@ const SPANISH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dinámica del pincel"),
     ("Caching frames", "Almacenando fotogramas en caché"),
     ("Cancel", "Cancelar"),
-    ("Import After Effects Project", "Importar proyecto de After Effects"),
+    ("Import Adobe After Effects Project", "Importar proyecto de Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Algunas partes de este proyecto no se pueden importar con exactitud (se omiten o cambian):",
@@ -7969,8 +7995,8 @@ const SPANISH: &[(&str, &str)] = &[
     ("Import Photoshop File", "Importar archivo de Photoshop"),
     ("Interpret Unlabeled Alpha As", "Interpretar alfa sin etiquetar como"),
     ("Join the ArtCraft Discord", "Únete al Discord de ArtCraft"),
-    ("Mercury GPU Acceleration ({})", "Aceleración por GPU Mercury ({})"),
-    ("Mercury Software Only", "Solo software Mercury"),
+    ("GPU Acceleration ({})", "Aceleración por GPU ({})"),
+    ("Software Rendering", "Renderizado por software"),
     ("OCIO (built-in ACES config)", "OCIO (configuración ACES integrada)"),
     ("Off (Final Quality)", "Desactivado (calidad final)"),
     ("OpenGL (compatibility)", "OpenGL (compatibilidad)"),
@@ -8011,6 +8037,8 @@ const SPANISH: &[(&str, &str)] = &[
     ("After Effects project", "Proyecto de After Effects"),
     ("Lottie animation", "Animación de Lottie"),
     ("Project", "Proyecto"),
+    ("Video Scopes", "Monitores de vídeo"),
+    ("GPU Acceleration (no GPU: software)", "Aceleración por GPU (sin GPU: software)"),
 ];
 
 /// Georgian (ka): every row of the Chinese catalogs, in the same order (the tests keep them in step).
@@ -8074,7 +8102,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Brush Dynamics", "ფუნჯის დინამიკა"),
     ("Caching frames", "კადრების ქეშირება"),
     ("Cancel", "გაუქმება"),
-    ("Import After Effects Project", "After Effects-ის პროექტის იმპორტი"),
+    ("Import Adobe After Effects Project", "Adobe After Effects-ის პროექტის იმპორტი"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "ამ პროექტის ზოგიერთი ნაწილის ზუსტად იმპორტი შეუძლებელია (გამოტოვებული ან შეცვლილი):",
@@ -8538,8 +8566,8 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Import Photoshop File", "Photoshop ფაილის იმპორტი"),
     ("Interpret Unlabeled Alpha As", "უცნობი ალფას ინტერპრეტაცია"),
     ("Join the ArtCraft Discord", "შემოგვიერთდით Discord-ზე"),
-    ("Mercury GPU Acceleration ({})", "GPU აჩქარება ({})"),
-    ("Mercury Software Only", "მხოლოდ Mercury Software"),
+    ("GPU Acceleration ({})", "GPU აჩქარება ({})"),
+    ("Software Rendering", "პროგრამული რენდერი"),
     ("OCIO (built-in ACES config)", "OCIO (ჩაშენებული ACES კონფიგურაცია)"),
     ("Off (Final Quality)", "გამორთული (საბოლოო ხარისხი)"),
     ("OpenGL (compatibility)", "OpenGL (თავსებადობა)"),
@@ -8771,6 +8799,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Total Offset", "ჯამური წანაცვლება"),
     ("Per Layer", "შრიდან შრემდე"),
     ("Track", "ტრეკინგი"),
+    ("Video Scopes", "ვიდეოსკოპები"),
 ];
 
 /// Georgian rows for interface text no other catalog has yet: strings the panels already send
@@ -8961,7 +8990,7 @@ const GEORGIAN_PANELS: &[(&str, &str)] = &[
     ("Solid Settings", "სოლიდის პარამეტრები"),
     ("Save as Template", "შაბლონად შენახვა"),
     ("My Custom RGB", "ჩემი მორგებული RGB"),
-    ("Mercury GPU Acceleration (no GPU: software)", "Mercury GPU აჩქარება (GPU არ არის: პროგრამული)"),
+    ("GPU Acceleration (no GPU: software)", "GPU აჩქარება (GPU არ არის: პროგრამული)"),
     ("Sort by {}, {}", "დალაგება: {}, {}"),
     ("Sort by {}", "დალაგება: {}"),
     ("Label of {}: {}", "{}-ის იარლიყი: {}"),
@@ -9047,7 +9076,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Brush Dynamics", "Dynamique du pinceau"),
     ("Caching frames", "Mise en cache des images"),
     ("Cancel", "Annuler"),
-    ("Import After Effects Project", "Importer un projet After Effects"),
+    ("Import Adobe After Effects Project", "Importer un projet Adobe After Effects"),
     (
         "Some parts of this project cannot be imported exactly (left out or changed):",
         "Certaines parties de ce projet ne peuvent pas être importées à l’identique (omises ou modifiées) :",
@@ -9521,8 +9550,8 @@ const FRENCH: &[(&str, &str)] = &[
     ("Import Photoshop File", "Importer un fichier Photoshop"),
     ("Interpret Unlabeled Alpha As", "Interpréter l’alpha non étiqueté comme"),
     ("Join the ArtCraft Discord", "Rejoindre le Discord ArtCraft"),
-    ("Mercury GPU Acceleration ({})", "Accélération GPU Mercury ({})"),
-    ("Mercury Software Only", "Mercury, logiciel uniquement"),
+    ("GPU Acceleration ({})", "Accélération GPU ({})"),
+    ("Software Rendering", "Rendu logiciel"),
     ("OCIO (built-in ACES config)", "OCIO (configuration ACES intégrée)"),
     ("Off (Final Quality)", "Désactivé (qualité finale)"),
     ("OpenGL (compatibility)", "OpenGL (compatibilité)"),
@@ -9791,6 +9820,14 @@ const FRENCH: &[(&str, &str)] = &[
     ),
     ("Only one project can be opened per drop; skipped {} more", "Un seul projet peut être ouvert par dépôt ; {} de plus ignoré(s)"),
     ("Cannot open dropped project {}: {}", "Impossible d’ouvrir le projet déposé {} : {}"),
+    (
+        "Imported footage has an unlabeled alpha channel: choose how to interpret it in File ▸ Interpret Footage ▸ Main…",
+        "Le métrage importé a une couche alpha non étiquetée : choisissez son interprétation dans Fichier ▸ Interpréter le métrage ▸ Principal…",
+    ),
+    (
+        "Skipped {} more file(s) while a dialog is open; import them again after it",
+        "{} fichier(s) de plus ignoré(s) pendant qu’une boîte de dialogue est ouverte ; importez-les ensuite",
+    ),
     ("Cannot import dropped files: {}", "Impossible d’importer les fichiers déposés : {}"),
     ("A built-in preset has this name", "Un préréglage intégré porte ce nom"),
     ("Replaces your preset with this name", "Remplace votre préréglage portant ce nom"),
@@ -9937,7 +9974,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Solid Settings", "Paramètres du solide"),
     ("Save as Template", "Enregistrer en tant que modèle"),
     ("My Custom RGB", "Mon RVB personnalisé"),
-    ("Mercury GPU Acceleration (no GPU: software)", "Accélération GPU Mercury (aucun GPU : logiciel)"),
+    ("GPU Acceleration (no GPU: software)", "Accélération GPU (aucun GPU : logiciel)"),
     ("Sort by {}, {}", "Trier par {}, {}"),
     ("Sort by {}", "Trier par {}"),
     ("Label of {}: {}", "Étiquette de {} : {}"),
@@ -10058,7 +10095,7 @@ const FRENCH: &[(&str, &str)] = &[
     ("Script Console", "Console de scripts"),
     ("Essential Graphics", "Graphiques essentiels"),
     ("ScriptUI Panel", "Panneau ScriptUI"),
-    ("Lumetri Scopes", "Scopes Lumetri"),
+    ("Video Scopes", "Oscilloscopes vidéo"),
     ("Media Browser", "Explorateur de médias"),
     ("Content-Aware Fill", "Remplissage adapté au contenu"),
     ("Create Nulls From Paths", "Créer des objets nuls à partir de tracés"),
@@ -10276,6 +10313,26 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check rendered feature labels only. Format names, compatibility tokens and user text
+    /// are not subject to this guard, and a missing translation keeps its English fallback.
+    #[test]
+    fn renamed_panel_labels_do_not_reintroduce_vendor_names() {
+        for language in ["en", "ja", "zh-hans", "zh-hant", "fr", "sv", "ka", "cs", "de", "es", "pl", "pt-br", "ru", "uk"] {
+            set_current(language);
+            for source in ["GPU Acceleration ({})", "GPU Acceleration (no GPU: software)", "Software Rendering", "Video Scopes"] {
+                let rendered = tr(source);
+                assert!(!rendered.is_empty(), "{language}: {source}");
+                let label = rendered.to_lowercase();
+                for mark in ["lumetri", "mercury", "mocha", "keylight"] {
+                    assert!(!label.contains(mark), "{language}: {source} -> {rendered}");
+                }
+            }
+            // A real interchange label remains factual, not rewritten or rejected.
+            assert!(!tr("Export Adobe Premiere Pro Project").is_empty());
+        }
+        set_current("en");
+    }
 
     /// The interface text that has moved into this catalog. Add a panel here when you convert it;
     /// `every_row_is_used_by_a_converted_panel` then looks for its rows' English sources in it.

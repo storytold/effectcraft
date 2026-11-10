@@ -136,8 +136,12 @@ const IGNORED: [&str; 4] = ["ADBE Position_0", "ADBE Position_1", "ADBE Position
 /// How the stored Anchor Point becomes pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AnchorUnit {
-    /// A fraction of a source this big (pixels): AV layers.
+    /// A fraction of a source this big (pixels): AV layers; the source's centre when absent.
     Source(u32, u32),
+    /// A fraction of a null object's source this big (pixels); its top-left corner when absent:
+    /// After Effects 2026 reads a null's absent Anchor Point as `[0, 0]` (#3099: two nulls made
+    /// with `addNull`, one left at its default, read back `[0, 0, 0]` and `[10, 20, 0]`).
+    Null(u32, u32),
     /// Pixels as stored, the origin when absent: text (385) and shape (462) layers, which have no
     /// source.
     Pixels,
@@ -168,6 +172,14 @@ pub(crate) fn import_transform(
         AnchorUnit::Source(w, h) => {
             let (sw, sh) = (f64::from(w), f64::from(h));
             (Kind::Anchor(sw, sh), tr.anchor_px(sw, sh))
+        }
+        AnchorUnit::Null(w, h) => {
+            let (sw, sh) = (f64::from(w), f64::from(h));
+            let px = match tr.anchor_fraction.source {
+                ValueSource::Default | ValueSource::Unreadable => [0.0; 3],
+                ValueSource::Stored | ValueSource::Keyframed => tr.anchor_px(sw, sh),
+            };
+            (Kind::Anchor(sw, sh), px)
         }
         AnchorUnit::Pixels | AnchorUnit::PointOfInterest => (Kind::Anchor(1.0, 1.0), tr.text_anchor_px()),
     };
