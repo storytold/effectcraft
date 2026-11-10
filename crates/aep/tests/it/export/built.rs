@@ -83,6 +83,45 @@ fn ntsc_and_odd_frame_rates_use_the_time_bases_after_effects_writes() {
     }
 }
 
+/// #3099: After Effects reads a null's absent Anchor Point as its top-left corner `[0, 0]`. A
+/// null anchored at its centre is written (it was left out as "the default" and came back at the
+/// corner); one at the corner is not, and both import back as they were.
+#[test]
+fn null_anchor_points_round_trip() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 800, 600, FrameRate::new(30, 1), 2.0, None);
+    add_layer(&mut p, c, "Corner", LayerSource::Null, (100, 100));
+    add_layer(&mut p, c, "Centre", LayerSource::Null, (100, 100));
+    for (idx, anchor) in [(0, [50.0, 50.0, 0.0]), (1, [0.0, 0.0, 0.0])] {
+        with_layer(&mut p, c, idx, |l| {
+            if let Some(a) = l.props.prop_mut("transform/anchor") {
+                a.value = Value::Vec3(anchor);
+            }
+        });
+    }
+    let r = export_all(&p);
+    let file = parse(&r.bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find(|i| i.comp().is_some()).expect("comp");
+    let stored: Vec<_> =
+        comp.comp().expect("c").layers().map(|l| (l.name().unwrap_or_default(), l.transform(800, 600).expect("transform").anchor_fraction.source)).collect();
+    assert_eq!(stored, [("Centre".to_string(), effectcraft_aep::ValueSource::Stored), ("Corner".to_string(), effectcraft_aep::ValueSource::Default)]);
+    let mut back = Project::default();
+    let none = |_: &str| false;
+    let res = effectcraft_aep::import::import(
+        &mut back,
+        &r.bytes,
+        &effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) },
+    )
+    .expect("import");
+    let comp = res.comps.first().and_then(|id| back.comp(*id)).expect("comp");
+    for (name, want) in [("Centre", [50.0, 50.0]), ("Corner", [0.0, 0.0])] {
+        let l = comp.layers.iter().find(|l| l.name == name).expect("layer");
+        let a = l.props.prop("transform/anchor").expect("anchor").value.as_vec2();
+        assert!(close(a[0], want[0]) && close(a[1], want[1]), "{name}: {a:?}");
+    }
+}
+
 #[test]
 fn layer_header_fields() {
     let mut p = Project::default();

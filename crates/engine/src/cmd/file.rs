@@ -719,8 +719,8 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.project.settings).unwrap_or_default())
 }
 
-/// Video Rendering and Effects: report or set the renderer (Mercury GPU Acceleration when a GPU
-/// adapter exists, else Mercury Software Only).
+/// Video Rendering and Effects: report or set the renderer (GPU Acceleration when a GPU
+/// adapter exists, else Software Rendering).
 fn render_backend(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(b) = p.get("backend").or_else(|| p.get("renderer")) {
         let gpu = match b {
@@ -748,14 +748,14 @@ pub fn backend_status(s: &Session) -> Value {
     let gpu = s.project.settings.gpu_acceleration;
     // Why it renders on the CPU (#262).
     let why = if !gpu {
-        Some("the project's renderer is Mercury Software Only".to_string())
+        Some("the project's renderer is Software Rendering".to_string())
     } else if adapter.is_none() {
         Some(s.accel_note.clone().unwrap_or_else(|| "no GPU compositor is attached".into()))
     } else {
         None
     };
     json!({
-        "renderer": if gpu { "Mercury GPU Acceleration" } else { "Mercury Software Only" },
+        "renderer": if gpu { "GPU Acceleration" } else { "Software Rendering" },
         "gpuAcceleration": gpu,
         "adapter": adapter,
         "active": if gpu && adapter.is_some() { "gpu" } else { "cpu" },

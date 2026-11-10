@@ -176,9 +176,11 @@ fn psd_layer(s: &Session, path: &str, l: &SourceLayer) -> Option<(u32, Option<(u
     Some((u32::try_from(found.index).ok()?, size))
 }
 
+/// The pixel size of vector footage `f` as its file is now (its page, framing and layer), or
+/// `None` when the file cannot be read or shows nothing.
 fn vector_size(s: &Session, f: &Footage) -> Option<(u32, u32)> {
     let bytes = s.services.read_file(&f.path).ok()?;
-    let doc = crate::vector::vector_doc(&f.path, &bytes, f.layer.as_ref(), f.page)?.ok()?;
+    let doc = crate::vector::footage_doc(f, &bytes)?.ok()?;
     (!doc.root.children.is_empty()).then(|| doc.pixel_size())
 }
 
@@ -229,6 +231,10 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
             // The layer is gone from the file: keep the item as it was.
             None => (w, h) = (f.width, f.height),
         },
+        // A placed page of an After Effects project keeps the size After Effects stored: the
+        // layers' anchors and masks are measured against it, and the page is drawn to fill it
+        // (the probe would measure the page as a viewer frames it, #3099).
+        None if f.placed_page => (w, h) = (f.width, f.height),
         // A later page of a PDF: the probe measures the first page.
         None if f.page != 0 => (w, h) = (f.width, f.height),
         None => {}
