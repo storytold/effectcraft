@@ -30,6 +30,48 @@ fn raster_surface_budget_rejects_oversized_destination_before_allocation() {
     assert_eq!((img.width, img.height), (0, 0));
 }
 
+/// A translucent group of several shapes (and a clipped, masked or blended one) is drawn through
+/// an offscreen surface as large as the image, and the surfaces alive at once are bounded. An
+/// image too big for that is drawn in bands, and is the image drawn whole: before, the group was
+/// left out (the white stroke of a Continuously Rasterized .ai layer scaled up several times
+/// vanished from renders).
+#[test]
+fn a_group_that_does_not_fit_the_surface_budget_is_drawn_in_bands() {
+    use crate::raster::rasterize_limited;
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">
+            <rect width="64" height="48" fill="#036"/>
+            <g opacity="0.5">
+              <rect x="3" y="2" width="50" height="30" fill="#fff" transform="rotate(17 30 20)"/>
+              <circle cx="40" cy="30" r="14.3" fill="#f80"/>
+            </g></svg>"##,
+    )
+    .unwrap();
+    let (w, h) = (192, 144);
+    let m = Affine::scale(3.0);
+    let image_bytes = w as usize * h as usize * std::mem::size_of::<[f32; 4]>();
+    let (whole, complete) = rasterize_limited(&doc, w, h, m, usize::MAX / 2);
+    assert!(complete);
+    assert!(px(&whole, 96, 72)[3] > 0.9, "the group is in the whole image");
+    // Room for the image and little more: the group can't be drawn whole, nor can the image be
+    // drawn in one pass; bands give the same pixels.
+    for limit in [image_bytes * 3 / 2, image_bytes * 2, image_bytes * 5 / 2] {
+        let (banded, complete) = rasterize_limited(&doc, w, h, m, limit);
+        assert!(complete, "limit {limit}");
+        assert_eq!((banded.width, banded.height), (w, h));
+        // Anti-aliased edges are sampled at coordinates shifted by the band's first row: a sample
+        // on an edge may fall either side, a sixteenth of a pixel's coverage on a few edge pixels.
+        let differ = banded.data.iter().zip(&whole.data).filter(|(a, b)| !near(**a, **b, 1e-6)).count();
+        assert!(banded.data.iter().zip(&whole.data).all(|(a, b)| near(*a, *b, 0.07)), "limit {limit}: the bands differ from the whole image");
+        assert!(differ * 100 < whole.data.len(), "limit {limit}: {differ} pixels differ");
+    }
+    // The public entry point (the real budget) draws it whole too.
+    assert_eq!(rasterize_with(&doc, w, h, m).data, whole.data);
+    // An image over the budget by itself is empty, and reported incomplete.
+    let (img, complete) = rasterize_limited(&doc, w, h, m, image_bytes - 1);
+    assert!(!complete && img.data.is_empty());
+}
+
 #[test]
 fn basic_shapes_structure() {
     let d = parse(BASIC).unwrap();

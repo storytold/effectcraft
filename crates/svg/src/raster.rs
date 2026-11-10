@@ -19,11 +19,69 @@ pub fn rasterize(doc: &Doc, w: u32, h: u32, scale: f64) -> Image {
 }
 
 /// Rasterise `doc` with `m` mapping document pixels to image pixels.
+///
+/// A clipped, masked, blended or translucent group is drawn through offscreen surfaces as large
+/// as the image, and the surfaces alive at once are bounded ([`MAX_LIVE_SURFACE_BYTES`]). When
+/// they don't fit, the image is drawn in bands of rows, each with surfaces of its own size: the
+/// same pixels, whatever the size of the image.
 pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
-    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES };
-    let Some(mut img) = budget.image(w, h, None) else { return Image::default() };
+    rasterize_limited(doc, w, h, m, MAX_LIVE_SURFACE_BYTES).0
+}
+
+/// [`rasterize_with`] under a budget of `limit_bytes` live surfaces; whether every group was
+/// drawn (false when even a single row of the image needs more than the budget allows, or the
+/// image itself is over it, which is then empty).
+pub(crate) fn rasterize_limited(doc: &Doc, w: u32, h: u32, m: Affine, limit_bytes: usize) -> (Image, bool) {
+    match draw_once(doc, w, h, m, limit_bytes) {
+        Some((img, true)) => (img, true),
+        Some((_, false)) => rasterize_banded(doc, w, h, m, limit_bytes),
+        None => (Image::default(), false),
+    }
+}
+
+/// One pass over the whole image: `None` when the image itself is over the budget, else the image
+/// and whether every group fit.
+fn draw_once(doc: &Doc, w: u32, h: u32, m: Affine, limit_bytes: usize) -> Option<(Image, bool)> {
+    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes, refused: false };
+    let mut img = budget.image(w, h, None)?;
     draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
-    img
+    Some((img, !budget.refused))
+}
+
+/// The image drawn in bands of rows. A band is the document shifted up by its first row, so its
+/// pixels are those of the same rows of the whole image. Bands are as tall as their surfaces fit
+/// in what the budget leaves after the output image (at least a quarter of it), halving where a
+/// band doesn't fit.
+fn rasterize_banded(doc: &Doc, w: u32, h: u32, m: Affine, limit_bytes: usize) -> (Image, bool) {
+    const PIXEL: usize = std::mem::size_of::<[f32; 4]>();
+    let (Some(row_bytes), Some(pixels)) = ((w as usize).checked_mul(PIXEL), (w as usize).checked_mul(h as usize)) else { return (Image::default(), false) };
+    let mut data = Vec::new();
+    if data.try_reserve_exact(pixels).is_err() {
+        return (Image::default(), false);
+    }
+    data.resize(pixels, [0.0; 4]);
+    let mut out = Image { width: w, height: h, data };
+    let band_limit = limit_bytes.saturating_sub(pixels.saturating_mul(PIXEL)).max(limit_bytes / 4);
+    // The image and up to two surfaces of a group over a backdrop.
+    let mut rows = u32::try_from((band_limit / row_bytes.max(1) / 3).max(1)).unwrap_or(u32::MAX).min(h);
+    let (mut y0, mut complete) = (0, true);
+    while y0 < h {
+        let n = rows.min(h - y0);
+        let band_m = Affine::translate((0.0, -f64::from(y0))) * m;
+        match draw_once(doc, w, n, band_m, band_limit) {
+            Some((band, fits)) if fits || n == 1 => {
+                complete &= fits;
+                let start = y0 as usize * w as usize;
+                if let Some(dst) = out.data.get_mut(start..start + band.data.len()) {
+                    dst.copy_from_slice(&band.data);
+                }
+                y0 += n;
+            }
+            _ if n > 1 => rows = n.div_ceil(2),
+            _ => return (out, false),
+        }
+    }
+    (out, complete)
 }
 
 /// Bound the simultaneously live offscreen image surfaces created by nested groups.
@@ -32,6 +90,8 @@ const MAX_LIVE_SURFACE_BYTES: usize = 512 * 1024 * 1024;
 struct SurfaceBudget {
     live_bytes: usize,
     limit_bytes: usize,
+    /// A surface was refused (over the limit, or not allocatable): something was not drawn.
+    refused: bool,
 }
 
 impl SurfaceBudget {
@@ -40,10 +100,14 @@ impl SurfaceBudget {
         let bytes = pixels.checked_mul(std::mem::size_of::<[f32; 4]>())?;
         let new_live = self.live_bytes.checked_add(bytes)?;
         if new_live > self.limit_bytes {
+            self.refused = true;
             return None;
         }
         let mut data = Vec::new();
-        data.try_reserve_exact(pixels).ok()?;
+        if data.try_reserve_exact(pixels).is_err() {
+            self.refused = true;
+            return None;
+        }
         data.resize(pixels, [0.0; 4]);
         if let Some(source) = copy {
             if source.width != width || source.height != height || source.data.len() != pixels {
