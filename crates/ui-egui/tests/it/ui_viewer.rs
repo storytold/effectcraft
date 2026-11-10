@@ -210,6 +210,18 @@ fn viewer_click_selects_the_topmost_layer_and_a_drag_moves_the_selected_one() {
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
     assert_eq!(h.state().session.state.selected_layers, vec![front], "a click selects the layer in front of the selected one (#1535)");
+    // A right-click selects what a left click would, so the menu acts on the layer in front,
+    // here where both layers cover the pointer and the layer behind is selected.
+    h.state_mut().session.execute("layer.select", json!({"layers": [back.0]})).unwrap();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_layers, vec![front], "a right-click selects the layer in front");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
     h.state_mut().session.execute("layer.select", json!({"layers": [back.0]})).unwrap();
     h.run_steps(40);
     let (front0, back0) = (position_and_anchor(&h, front).0, position_and_anchor(&h, back).0);
@@ -222,15 +234,6 @@ fn viewer_click_selects_the_topmost_layer_and_a_drag_moves_the_selected_one() {
     let at = screen(&h, [300.0, 180.0]);
     click(&mut h, at);
     assert_eq!(h.state().session.state.selected_layers, vec![front], "nothing selected: the topmost layer");
-    // A right-click selects what a left click would, so the menu acts on the layer in front.
-    h.state_mut().session.execute("layer.select", json!({"layers": [back.0]})).unwrap();
-    h.run_steps(3);
-    for pressed in [true, false] {
-        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
-        h.step();
-    }
-    h.run_steps(2);
-    assert_eq!(h.state().session.state.selected_layers, vec![front], "a right-click selects the layer in front");
 }
 
 /// A double-click where a precomp layer covers the selected layer opens the precomp: like a single

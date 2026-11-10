@@ -41,7 +41,8 @@ fn quad_area(q: &[[f64; 2]; 4]) -> f64 {
 
 /// The layer a drag from a comp point acts on, selected (Shift toggles the topmost layer). As in
 /// After Effects, a selected layer under the point comes before the layers in front of it, so it
-/// can be dragged where they cover it; otherwise the topmost layer (#230). Clicks use
+/// can be dragged where they cover it; otherwise the topmost layer (#230). The Puppet tool's pin
+/// placement uses it too, so a pin can go on a selected layer behind others. Other clicks use
 /// [`click_pick`].
 pub(crate) fn pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool) -> Option<LayerId> {
     pick_layer(app, ectx, cpt, toggle, true)
