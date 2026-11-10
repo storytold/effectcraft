@@ -172,6 +172,17 @@ fn caps_and_small_caps() {
 }
 
 #[test]
+fn indexed_caret_lookup_matches_a_linear_scan() {
+    let l = layout("fi abc\n\nde fg hi", &st(40.0), &ParagraphStyle::default());
+    for pos in 0..=l.lines.iter().map(|x| x.range.end).max().unwrap_or(0) + 2 {
+        let li = l.lines.iter().enumerate().filter(|(_, x)| x.range.start <= pos).map(|(i, _)| i).next_back().unwrap_or(0);
+        let line = &l.lines[li];
+        let want = line.carets.iter().min_by_key(|(b, _)| b.abs_diff(pos)).map_or(line.x, |c| c.1);
+        assert_eq!(l.caret(pos), (want, line.baseline, li), "pos {pos}");
+    }
+}
+
+#[test]
 fn ligature_caret_interpolates() {
     // Inter has an "fi"-like ligature only via calt in some versions; use "ffi" which most
     // fonts ligate. Whatever shaping does, every char boundary has a caret.
