@@ -209,14 +209,17 @@ impl Drives {
 
     /// [`Drives::note`] in a set that grows (queued outputs): what is resolved already stays
     /// valid unless the key brings a new letter or the first UNC path. `file` is the number of
-    /// the output when the key is one file (a sequence's pattern is only noted).
-    fn note_at(&mut self, key: &str, file: Option<usize>) {
-        if self.note(key) {
+    /// the output when the key is one file (a sequence's pattern is only noted). `true` when
+    /// everything resolved has to be made again.
+    fn note_at(&mut self, key: &str, file: Option<usize>) -> bool {
+        let changed = self.note(key);
+        if changed {
             self.resolved = std::sync::OnceLock::new();
         } else if let (Some(at), Some(resolved)) = (file, self.resolved.get_mut()) {
             let root = drive_letter(key).and_then(resolved_root);
             resolved.entry(with_root(key, root)).or_insert(at);
         }
+        changed
     }
 
     /// `key` as the place it names when `resolving`, else as it is: keys of one place are equal
@@ -522,6 +525,31 @@ struct Writes {
     /// compare by a root that was looked up again meanwhile.
     #[cfg(windows)]
     drives: Drives,
+    /// What each output names once its drive is resolved, made when a comparison first needs it
+    /// and kept in step with the outputs ([`Writes::push`]): comparing outputs then takes no
+    /// lookup, lock or allocation per output.
+    #[cfg(windows)]
+    places: std::sync::OnceLock<Vec<Place>>,
+}
+
+/// The place an output names, drive resolved ([`Writes::places`]).
+#[cfg(windows)]
+struct Place {
+    /// The file's name, or the sequence's pattern as [`Target::Frames`] has it.
+    target: String,
+    /// A sequence's output path as a name (`sequence_frame` takes it); empty for a file.
+    pattern: String,
+}
+
+#[cfg(windows)]
+impl Place {
+    /// The place `write` names, its keys resolved by `resolve`.
+    fn of(write: &Write, resolve: impl Fn(&str) -> String) -> Place {
+        match &write.target {
+            Target::File { key } => Place { target: resolve(key), pattern: String::new() },
+            Target::Frames { key, .. } => Place { target: resolve(key), pattern: resolve(&crate::output_guard::key(Path::new(&write.path))) },
+        }
+    }
 }
 
 /// The common range whose formatted numbers agree. Once the number (including a minus sign)
@@ -564,6 +592,45 @@ impl Writes {
         }
     }
 
+    /// The places the earlier outputs name, when `resolving`.
+    #[cfg(windows)]
+    fn places(&self, resolving: bool) -> Option<&[Place]> {
+        resolving.then(|| {
+            self.places
+                .get_or_init(|| {
+                    // (each letter's root once)
+                    let roots: HashMap<char, Option<String>> = self.drives.letters.iter().map(|l| (*l, resolved_root(*l))).collect();
+                    let resolve = |key: &str| with_root(key, drive_letter(key).and_then(|l| roots.get(&l).cloned().flatten()));
+                    self.all.iter().map(|write| Place::of(write, resolve)).collect()
+                })
+                .as_slice()
+        })
+    }
+
+    /// The name of earlier output `at` (its target `key`) for comparing with a later one: its
+    /// place when `resolving`.
+    fn earlier_target<'a>(&'a self, at: usize, key: &'a str, resolving: bool) -> std::borrow::Cow<'a, str> {
+        #[cfg(windows)]
+        if resolving {
+            return match self.places(true).and_then(|places| places.get(at)) {
+                Some(place) => std::borrow::Cow::Borrowed(place.target.as_str()),
+                None => std::borrow::Cow::Owned(self.place(key, true)),
+            };
+        }
+        let _ = (at, resolving);
+        std::borrow::Cow::Borrowed(key)
+    }
+
+    /// The sequence pattern of earlier output `at`, as a name: its place when `resolving`.
+    fn earlier_pattern(&self, at: usize, earlier: &Write, resolving: bool) -> std::borrow::Cow<'_, str> {
+        #[cfg(windows)]
+        if resolving && let Some(place) = self.places(true).and_then(|places| places.get(at)) {
+            return std::borrow::Cow::Borrowed(place.pattern.as_str());
+        }
+        let _ = at;
+        std::borrow::Cow::Owned(self.place(&crate::output_guard::key(Path::new(&earlier.path)), resolving))
+    }
+
     fn is_empty(&self) -> bool {
         self.all.is_empty()
     }
@@ -580,10 +647,9 @@ impl Writes {
                 }
                 let resolving = self.resolving(key);
                 let key = self.place(key, resolving);
-                self.all.iter().find_map(|earlier| {
+                self.all.iter().enumerate().find_map(|(at, earlier)| {
                     let Target::Frames { first, end, .. } = earlier.target else { return None };
-                    let pattern = self.place(&crate::output_guard::key(Path::new(&earlier.path)), resolving);
-                    let frame = sequence_frame(&pattern, &key)?;
+                    let frame = sequence_frame(&self.earlier_pattern(at, earlier, resolving), &key)?;
                     (first..end).contains(&frame).then_some(Clash { earlier, files: 1, first: frame })
                 })
             }
@@ -593,13 +659,13 @@ impl Writes {
             Target::Frames { key, width, first, end } => {
                 let resolving = self.resolving(key);
                 let (place, pattern) = (self.place(key, resolving), self.place(&crate::output_guard::key(Path::new(&later.path)), resolving));
-                self.all.iter().find_map(|earlier| {
+                self.all.iter().enumerate().find_map(|(at, earlier)| {
                     let (files, start) = match &earlier.target {
-                        Target::Frames { key: other, width: other_width, first: from, end: to } if place == self.place(other, resolving) => {
+                        Target::Frames { key: other, width: other_width, first: from, end: to } if place == self.earlier_target(at, other, resolving) => {
                             common_frames(*first, *end, *from, *to, *width, *other_width)?
                         }
                         Target::File { key } => {
-                            let frame = sequence_frame(&pattern, &self.place(key, resolving))?;
+                            let frame = sequence_frame(&pattern, &self.earlier_target(at, key, resolving))?;
                             if !(*first..*end).contains(&frame) {
                                 return None;
                             }
@@ -610,6 +676,18 @@ impl Writes {
                     Some(Clash { earlier, files, first: start })
                 })
             }
+        }
+    }
+
+    /// Keep the places in step with a new output, or drop them when what they were resolved
+    /// with changed (a new letter, the first UNC path). Before it joins `all`: the places are
+    /// made over `all`.
+    #[cfg(windows)]
+    fn note_place(&mut self, write: &Write, changed: bool) {
+        if changed {
+            self.places = std::sync::OnceLock::new();
+        } else if let Some(places) = self.places.get_mut() {
+            places.push(Place::of(write, |key| with_root(key, drive_letter(key).and_then(resolved_root))));
         }
     }
 
@@ -625,12 +703,16 @@ impl Writes {
             // starts a new one, from `files`, when a new letter or the first UNC path arrives)
             Target::File { key } => {
                 #[cfg(windows)]
-                self.drives.note_at(key, Some(at));
+                let changed = self.drives.note_at(key, Some(at));
+                #[cfg(windows)]
+                self.note_place(&write, changed);
                 self.files.entry(key.clone()).or_insert(at);
             }
             Target::Frames { key, .. } => {
                 #[cfg(windows)]
-                self.drives.note_at(key, None);
+                let changed = self.drives.note_at(key, None);
+                #[cfg(windows)]
+                self.note_place(&write, changed);
             }
         }
         self.all.push(write);
@@ -1558,6 +1640,61 @@ mod tests {
         job.push(frames(6, r"\\server\third\out\f_[#####].png", 0, 5)).unwrap();
         assert_eq!(clash(&job, &movie(9, r"\\server\third\out\f_00001.png")), Some((6, 1, 1)));
         assert_eq!(clash(&job, &movie(9, r"P:\out\d.mp4")), Some((4, 1, 0)));
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A queue of thousands of outputs, some by drive letter and some by UNC path, is built
+    /// without looking a drive up per output (the resolver is asked once per letter) and without
+    /// the comparisons costing a lock or an allocation per pair of outputs.
+    #[test]
+    #[cfg(windows)]
+    fn a_big_mixed_queue_is_built_with_few_lookups() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let started = std::time::Instant::now();
+        let mut job = Writes::default();
+        let mut first_clash = None;
+        for i in 0..5000u64 {
+            let path = if i % 2 == 0 { format!(r"P:\out\f{i}.mp4") } else { format!(r"\\server\share\out2\f{i}.mp4") };
+            let write = if i % 50 == 0 { frames(i + 1, &format!(r"P:\seq{i}\f_[#####].png"), 0, 10) } else { movie(i + 1, &path) };
+            if let Some(found) = clash(&job, &write) {
+                first_clash = Some(found);
+            }
+            job.push(write).unwrap();
+        }
+        assert_eq!(first_clash, None, "all of them are different files");
+        // The same files by the other spelling, and a frame of a sequence.
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\f2.mp4")), Some((3, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"P:\out2\f1.mp4")), Some((2, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\seq100\f_00004.png")), Some((101, 1, 4)));
+        assert_eq!(clash(&job, &frames(9, r"\\server\share\seq100\f_[#####].png", 9, 5)), Some((101, 1, 9)));
+        assert_eq!(clash(&job, &frames(9, r"\\server\share\seq100\f_[#####].png", 10, 5)), None);
+        assert!(count.get() <= 2, "{} lookups", count.get());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A sequence alone brings the first UNC path, or a new letter, after the resolved places
+    /// were made; a file queried against it collides.
+    #[test]
+    #[cfg(windows)]
+    fn a_sequence_alone_brings_a_new_place_after_the_places_were_made() {
+        drive_roots(&[('p', r"\\?\UNC\server\share\"), ('q', r"\\?\UNC\server\other\")]);
+        let mut job = job_of([movie(1, r"P:\out\a.mp4"), frames(2, r"P:\seq\f_[#####].png", 0, 5)]);
+        // (a UNC file queried: the places and the map are made)
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\a.mp4")), Some((1, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\seq\f_00001.png")), Some((2, 1, 1)));
+        // the first UNC path comes with a sequence
+        job.push(frames(3, r"\\server\share\unc\f_[#####].png", 0, 5)).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"P:\unc\f_00002.png")), Some((3, 1, 2)), "a file by letter, the sequence by UNC");
+        assert_eq!(clash(&job, &movie(9, r"P:\unc\f_00005.png")), None, "beyond its frames");
+        // a new letter comes with a sequence
+        job.push(frames(4, r"Q:\other\f_[#####].png", 0, 5)).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"\\server\other\other\f_00003.png")), Some((4, 1, 3)), "a file by UNC, the sequence by letter");
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\other\f_00003.png")), None, "another share");
+        // places already made are extended by a sequence on a known place
+        job.push(frames(5, r"p:\more\f_[#####].png", 0, 5)).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\more\f_00004.png")), Some((5, 1, 4)));
+        assert_eq!(clash(&job, &frames(9, r"\\server\share\more\f_[#####].png", 4, 5)), Some((5, 1, 4)));
         DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
     }
 
