@@ -1897,7 +1897,13 @@ fn add_merge_paths_gradient_ignores_an_open_line_apart() {
     let l = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.addShapeItem", json!({"layer": l, "kind": "rect"})).unwrap();
     let line = s.execute("layer.addShapeItem", json!({"layer": l, "kind": "path"})).unwrap()["path"].as_str().unwrap().to_string();
-    let open = ShapePath { vertices: vec![[800.0, 0.0], [900.0, 0.0]], in_tangents: vec![[0.0; 2]; 2], out_tangents: vec![[0.0; 2]; 2], closed: false, feather: Vec::new() };
+    let open = ShapePath {
+        vertices: vec![[800.0, 0.0], [900.0, 0.0]],
+        in_tangents: vec![[0.0; 2]; 2],
+        out_tangents: vec![[0.0; 2]; 2],
+        closed: false,
+        feather: Vec::new(),
+    };
     s.execute("prop.set", json!({"layer": l, "path": format!("{line}/path"), "value": Value::Path(open).to_json()})).unwrap();
     s.execute("layer.addShapeItem", json!({"layer": l, "kind": "merge", "paint": true})).unwrap();
     let l = layer(&s, l);
