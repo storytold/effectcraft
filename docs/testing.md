@@ -165,16 +165,45 @@ A teardown panic leaves reporting armed. An abort or other unexpected process te
 closes the pipe without that marker.
 The helper saves a local report under the session log folder's `Crash Reports` directory and
 shows a native error dialog. Control-server launches save the report without a modal dialog.
-Reports contain version/platform and at most the last 64 KiB of the matching session's log.
-Logging filters and the session file size cap can omit later events from that tail.
+Reports contain version/platform, UTC detection and observer-start times, observed duration,
+GUI uptime at the last target-present sample, and at most the last 64 KiB of the matching
+session's log. A separate ring retains the last 32 timestamped, fixed-vocabulary backend and
+GPU observations even if startup messages have fallen out of the log tail. `WGPU_BACKEND`
+values are normalized to known backend names; arbitrary environment text is not copied.
+Logging filters and the session file size cap can omit later events from the log tail.
 They are never uploaded automatically. Review logs for private project paths before sharing.
+
+On Windows the helper acquires a process handle before acknowledging readiness and retains
+it until the GUI exits. It records the real OS exit status in unsigned hexadecimal, with a
+small lookup of known status names. These bits are **not a verified exception record**:
+software can explicitly set the same code, and an access violation does not identify the
+faulting module or prove a driver crash. Other platforms report exit status as unavailable.
+A lost pipe while the GUI is still present, or a failed/absent process refresh, is not reported
+as confirmed termination.
+
+The helper samples only the target process and system RAM at roughly one-second intervals,
+retaining a count, last-attempt time, sampled resident-memory maximum, Windows private-commit
+maximum (virtual memory on other platforms), and system available-RAM minimum. This is a
+fixed-size summary, not a memory dump. OS query failure can leave stale or zero values, and
+sampling misses short spikes. System commit limits/usage and GPU VRAM budgets are not captured.
+No threshold is treated as proof of memory exhaustion. Typed wgpu OOM, internal/validation
+errors and device-loss notifications are observations; device destruction is distinguished
+from unknown loss, and neither establishes why the process later exited.
 
 Run `cargo test -p effectcraft crash_report::tests` for bounded protocol, normal shutdown,
 actual subprocess abort, unrelated child handles, concurrent sessions, missing log/helper,
-log rotation and report-write failure coverage. The three ignored tests are subprocess entry
+log rotation, bounded retained events, live-GUI pipe loss, and report-write failure coverage.
+Windows also tests a real subprocess exit with explicit `0xC0000017` bits, without exhausting
+memory or pretending that the exit was an actual OOM exception. The three ignored tests are subprocess entry
 points launched by these tests, not manual tests.
 
-This is diagnosis, not memory recovery: a pipe closing does not prove an out-of-memory failure
-or provide the process's exit code. System-wide exhaustion, killing the whole process tree,
+These are observations, not memory recovery or a causal diagnosis: a pipe closing does not
+prove an out-of-memory failure. System-wide exhaustion, killing the whole process tree,
 or an unavailable native dialog service can also prevent the helper from reporting. Existing
 auto-save recovery remains responsible for restoring previously saved work.
+
+Native exception records, faulting-module attribution and driver/TDR confirmation require
+separately collected OS event evidence or a native dump. They are deliberately not gathered
+here: dumps can contain document contents and credentials. Any future dump workflow must be
+explicitly opt-in, bounded, local-first and separately reviewed before sharing. This reporter
+must remain useful when those sources are unavailable.
