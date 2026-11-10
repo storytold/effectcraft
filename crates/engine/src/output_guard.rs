@@ -207,15 +207,24 @@ impl Drives {
         }
     }
 
-    /// [`Drives::note`] for file number `at`, in a set that grows (queued outputs): what is
-    /// resolved already stays valid unless the key brings a new letter or the first UNC path.
-    fn note_at(&mut self, key: &str, at: usize) {
+    /// [`Drives::note`] in a set that grows (queued outputs): what is resolved already stays
+    /// valid unless the key brings a new letter or the first UNC path. `file` is the number of
+    /// the output when the key is one file (a sequence's pattern is only noted).
+    fn note_at(&mut self, key: &str, file: Option<usize>) {
         if self.note(key) {
             self.resolved = std::sync::OnceLock::new();
-        } else if let Some(resolved) = self.resolved.get_mut() {
+        } else if let (Some(at), Some(resolved)) = (file, self.resolved.get_mut()) {
             let root = drive_letter(key).and_then(resolved_root);
             resolved.entry(with_root(key, root)).or_insert(at);
         }
+    }
+
+    /// `key` as the place it names when `resolving`, else as it is: keys of one place are equal
+    /// when both are resolved. Whether to resolve is decided by the output asking
+    /// ([`Drives::matters`]), for all the keys it is compared with: an earlier output on the
+    /// letter it names is the one that makes it matter.
+    fn place(&self, key: &str, resolving: bool) -> String {
+        if resolving { with_root(key, drive_letter(key).and_then(resolved_root)) } else { key.to_string() }
     }
 
     /// Whether an output with `key` can name a file of a protected path under another root:
@@ -507,8 +516,10 @@ struct Writes {
     path_bytes: usize,
     /// The first output to write a file, by name.
     files: HashMap<String, usize>,
-    /// Which drive letters the files are on: a mapped network drive and its UNC path name one
-    /// file ([`Drives`]), as for the files the project reads.
+    /// Which drive letters the files and sequences are on: a mapped network drive and its UNC
+    /// path name one place ([`Drives`]), as for the files the project reads. The roots come from
+    /// a cache that keeps them 60 s ([`ROOT_TTL`]), so a queue built over a longer time may
+    /// compare by a root that was looked up again meanwhile.
     #[cfg(windows)]
     drives: Drives,
 }
@@ -530,6 +541,29 @@ fn common_frames(first: i64, end: i64, from: i64, to: i64, width: usize, other_w
 }
 
 impl Writes {
+    /// Whether the keys an output with `key` is compared with are resolved to the places they
+    /// name ([`Drives::matters`]; never outside Windows).
+    fn resolving(&self, key: &str) -> bool {
+        #[cfg(windows)]
+        return self.drives.matters(key);
+        #[cfg(not(windows))]
+        {
+            let _ = key;
+            false
+        }
+    }
+
+    /// `key`, a file's name or a sequence's pattern, as the place it names when `resolving`.
+    fn place(&self, key: &str, resolving: bool) -> String {
+        #[cfg(windows)]
+        return self.drives.place(key, resolving);
+        #[cfg(not(windows))]
+        {
+            let _ = resolving;
+            key.to_string()
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.all.is_empty()
     }
@@ -544,31 +578,38 @@ impl Writes {
                 if let Some(at) = at {
                     return Some(Clash { earlier: self.all.get(at)?, files: 1, first: 0 });
                 }
+                let resolving = self.resolving(key);
+                let key = self.place(key, resolving);
                 self.all.iter().find_map(|earlier| {
                     let Target::Frames { first, end, .. } = earlier.target else { return None };
-                    let frame = sequence_frame(&crate::output_guard::key(Path::new(&earlier.path)), key)?;
+                    let pattern = self.place(&crate::output_guard::key(Path::new(&earlier.path)), resolving);
+                    let frame = sequence_frame(&pattern, &key)?;
                     (first..end).contains(&frame).then_some(Clash { earlier, files: 1, first: frame })
                 })
             }
             // A frame that is there already is left alone, so a later output that skips existing
             // frames replaces none of an earlier one's.
             Target::Frames { .. } if later.skips => None,
-            Target::Frames { key, width, first, end } => self.all.iter().find_map(|earlier| {
-                let (files, start) = match &earlier.target {
-                    Target::Frames { key: other, width: other_width, first: from, end: to } if key == other => {
-                        common_frames(*first, *end, *from, *to, *width, *other_width)?
-                    }
-                    Target::File { key } => {
-                        let frame = sequence_frame(&crate::output_guard::key(Path::new(&later.path)), key)?;
-                        if !(*first..*end).contains(&frame) {
-                            return None;
+            Target::Frames { key, width, first, end } => {
+                let resolving = self.resolving(key);
+                let (place, pattern) = (self.place(key, resolving), self.place(&crate::output_guard::key(Path::new(&later.path)), resolving));
+                self.all.iter().find_map(|earlier| {
+                    let (files, start) = match &earlier.target {
+                        Target::Frames { key: other, width: other_width, first: from, end: to } if place == self.place(other, resolving) => {
+                            common_frames(*first, *end, *from, *to, *width, *other_width)?
                         }
-                        (1, frame)
-                    }
-                    _ => return None,
-                };
-                Some(Clash { earlier, files, first: start })
-            }),
+                        Target::File { key } => {
+                            let frame = sequence_frame(&pattern, &self.place(key, resolving))?;
+                            if !(*first..*end).contains(&frame) {
+                                return None;
+                            }
+                            (1, frame)
+                        }
+                        _ => return None,
+                    };
+                    Some(Clash { earlier, files, first: start })
+                })
+            }
         }
     }
 
@@ -580,12 +621,17 @@ impl Writes {
         self.path_bytes = path_bytes;
         let at = self.all.len();
         match &write.target {
+            // (`note_at` goes before the insert: it extends a resolved map by this output, and
+            // starts a new one, from `files`, when a new letter or the first UNC path arrives)
             Target::File { key } => {
                 #[cfg(windows)]
-                self.drives.note_at(key, at);
+                self.drives.note_at(key, Some(at));
                 self.files.entry(key.clone()).or_insert(at);
             }
-            Target::Frames { .. } => {}
+            Target::Frames { key, .. } => {
+                #[cfg(windows)]
+                self.drives.note_at(key, None);
+            }
         }
         self.all.push(write);
         Ok(())
@@ -1403,6 +1449,115 @@ mod tests {
         assert_eq!(clash(&unc, &movie(9, r"\\server\share\a.mp4")), Some((1, 1, 0)));
         assert_eq!(clash(&unc, &movie(9, r"\\server\share\b.mp4")), None);
         assert_eq!(count.get(), 0);
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// #3328: sequences are compared by the place they name too: sequence and sequence, movie
+    /// and sequence, sequence and movie, by drive letter against UNC path; ranges that don't
+    /// overlap still don't collide.
+    #[test]
+    #[cfg(windows)]
+    fn queued_sequences_collide_under_drive_and_unc_spellings() {
+        let count = drive_roots(&[('p', r"\\?\UNC\server\share\"), ('q', r"\\?\UNC\server\other\")]);
+        let letter = r"P:\out\f_[#####].png";
+        let unc = r"\\server\share\out\f_[#####].png";
+        // sequence, then sequence
+        let job = job_of([frames(1, letter, 0, 10)]);
+        assert_eq!(clash(&job, &frames(9, unc, 5, 10)), Some((1, 5, 5)), "frames 5..10 are shared");
+        assert_eq!(clash(&job, &frames(9, unc, 10, 5)), None, "the next frames");
+        assert_eq!(clash(&job, &frames(9, r"\\server\other\out\f_[#####].png", 0, 10)), None, "another share");
+        assert_eq!(clash(&job, &frames(9, r"\\server\share\out\g_[#####].png", 0, 10)), None, "another name");
+        assert_eq!(clash(&job, &frames(9, r"Q:\out\f_[#####].png", 0, 10)), None, "another letter, another share");
+        let job = job_of([frames(1, unc, 0, 10)]);
+        assert_eq!(clash(&job, &frames(9, letter, 9, 3)), Some((1, 1, 9)), "UNC first, the letter after");
+        assert_eq!(clash(&job, &frames(9, letter, 10, 3)), None);
+        // a movie that is a frame of an earlier sequence
+        let job = job_of([frames(1, letter, 0, 10)]);
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\f_00003.png")), Some((1, 1, 3)), "file after sequence");
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\f_00010.png")), None, "beyond its frames");
+        assert_eq!(clash(&job, &movie(9, r"\\server\other\out\f_00003.png")), None, "another share");
+        // a sequence that has a frame of an earlier movie
+        let job = job_of([movie(1, r"\\server\share\out\f_00003.png")]);
+        assert_eq!(clash(&job, &frames(9, letter, 0, 10)), Some((1, 1, 3)), "sequence after file");
+        assert_eq!(clash(&job, &frames(9, letter, 4, 10)), None, "its frames start after it");
+        let job = job_of([movie(1, r"P:\out\f_00003.png")]);
+        assert_eq!(clash(&job, &frames(9, unc, 0, 10)), Some((1, 1, 3)), "the other way round");
+        assert!(count.get() <= 2, "P and Q only");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A subst drive and the local letter of its folder name one place, and the roots' own
+    /// separators don't double up.
+    #[test]
+    #[cfg(windows)]
+    fn a_subst_drive_and_a_local_letter_name_one_place() {
+        drive_roots(&[('x', r"\\?\C:\work"), ('y', r"\\?\C:\"), ('c', r"\\?\C:\")]);
+        let job = job_of([movie(1, r"C:\work\out\a.mp4")]);
+        assert_eq!(clash(&job, &movie(9, r"X:\out\a.mp4")), Some((1, 1, 0)), "X: is C:/work");
+        assert_eq!(clash(&job, &movie(9, r"X:\out\b.mp4")), None);
+        let job = job_of([movie(1, r"X:\out\a.mp4")]);
+        assert_eq!(clash(&job, &movie(9, r"c:\WORK\out\a.mp4")), Some((1, 1, 0)), "the other way round");
+        assert_eq!(clash(&job, &movie(9, r"c:\out\a.mp4")), None, "C: itself is not C:/work");
+        let job = job_of([movie(1, r"C:\out\a.mp4")]);
+        assert_eq!(clash(&job, &movie(9, r"Y:\out\a.mp4")), Some((1, 1, 0)), "Y: is C:/ itself");
+        let job = job_of([frames(1, r"X:\out\f_[#####].png", 0, 5)]);
+        assert_eq!(clash(&job, &frames(9, r"C:\work\out\f_[#####].png", 4, 5)), Some((1, 1, 4)));
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// `..` segments and trailing separators don't hide a place, by letter or UNC path.
+    #[test]
+    #[cfg(windows)]
+    fn dot_segments_and_trailing_separators_do_not_hide_a_place() {
+        drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let job = job_of([movie(1, r"P:\out\..\out\a.mp4\")]);
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\a.mp4")), Some((1, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\x\..\out\.\a.mp4\")), Some((1, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\..\..\out\a.mp4")), Some((1, 1, 0)), "`..` stops at the share");
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\..\a.mp4")), None, "another folder");
+        let job = job_of([movie(1, r"\\server\share\out\a.mp4\")]);
+        assert_eq!(clash(&job, &movie(9, r"p:\out\sub\..\a.mp4")), Some((1, 1, 0)));
+        assert_eq!(clash(&job, &movie(9, r"p:\..\out\a.mp4")), Some((1, 1, 0)), "`..` stops at the drive root");
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A letter whose root can't be resolved keeps its spelling: it collides with itself, not
+    /// with a UNC path or another letter, and nothing fails.
+    #[test]
+    #[cfg(windows)]
+    fn an_unresolved_letter_keeps_its_spelling_in_the_queue() {
+        drive_roots(&[('p', r"\\?\UNC\server\share\")]);
+        let job = job_of([movie(1, r"Q:\out\a.mp4"), frames(2, r"Q:\seq\f_[#####].png", 0, 5)]);
+        assert_eq!(clash(&job, &movie(9, r"q:\OUT\a.mp4")), Some((1, 1, 0)), "the letter still matches");
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\a.mp4")), None, "not a UNC path");
+        assert_eq!(clash(&job, &movie(9, r"P:\out\a.mp4")), None, "not another letter");
+        assert_eq!(clash(&job, &movie(9, r"q:\seq\f_00002.png")), Some((2, 1, 2)));
+        assert_eq!(clash(&job, &frames(9, r"Q:\seq\f_[#####].png", 4, 3)), Some((2, 1, 4)));
+        assert_eq!(clash(&job, &frames(9, r"\\server\share\seq\f_[#####].png", 0, 5)), None);
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\seq\f_00002.png")), None);
+        DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// The first UNC path arriving after the resolved map was built (or the first output on a
+    /// second letter) is compared with the outputs that were there before.
+    #[test]
+    #[cfg(windows)]
+    fn a_late_first_unc_path_meets_the_earlier_letters() {
+        drive_roots(&[('p', r"\\?\UNC\server\share\"), ('q', r"\\?\UNC\server\other\")]);
+        let mut job = job_of([movie(1, r"P:\out\a.mp4"), movie(2, r"P:\out\b.mp4")]);
+        assert_eq!(clash(&job, &movie(9, r"P:\out\b.mp4")), Some((2, 1, 0)), "one letter: by name");
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\b.mp4")), Some((2, 1, 0)), "the map is built");
+        job.push(movie(3, r"\\server\share\out\c.mp4")).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"P:\out\c.mp4")), Some((3, 1, 0)), "the first UNC path is in it");
+        assert_eq!(clash(&job, &movie(9, r"p:\out\a.mp4")), Some((1, 1, 0)));
+        job.push(movie(4, r"p:\out\d.mp4")).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"\\server\share\out\d.mp4")), Some((4, 1, 0)), "added to a built map");
+        job.push(movie(5, r"Q:\out\e.mp4")).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"\\server\other\out\e.mp4")), Some((5, 1, 0)), "a new letter");
+        // a first sequence on a new place after the map was built
+        job.push(frames(6, r"\\server\third\out\f_[#####].png", 0, 5)).unwrap();
+        assert_eq!(clash(&job, &movie(9, r"\\server\third\out\f_00001.png")), Some((6, 1, 1)));
+        assert_eq!(clash(&job, &movie(9, r"P:\out\d.mp4")), Some((4, 1, 0)));
         DRIVE_ROOT.with(|h| *h.borrow_mut() = None);
     }
 
