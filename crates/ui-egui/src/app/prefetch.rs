@@ -54,6 +54,17 @@ fn pace_for(prev: f64, lead: i64, target: i64, fps: f64, dt: f64) -> f64 {
     prev + (raw - prev) * k
 }
 
+/// How many frames after the current one the pace measures its lead over: twice the prefetch
+/// depth `ahead`, but only frames the RAM preview can keep cached together with the current one.
+/// `prefetch_playback` requests offsets `0..fit_ahead` from the current frame (the current frame
+/// and `fit_ahead - 1` after it), so a lead counted over more frames than that could never fill:
+/// a preview that renders every frame at once would still be slowed down to a fraction of its
+/// frame rate. 0 when not even one frame after the current one is prefetched: the pace can't
+/// measure anything, and the clock runs in real time (holding on frames that aren't cached).
+fn pace_horizon(ahead: i64, fit_ahead: i64) -> i64 {
+    (ahead * 2).max(1).min(fit_ahead - 1).max(0)
+}
+
 /// Cached frames (`cached`, sorted) among the next `max` frames `after(1..=max)` plays, and how
 /// many frames it plays (`after` is `None` past the end). Counted, not the consecutive run: one
 /// late frame (a GPU warm-up frame, a heavy one) with frames cached beyond it holds the clock
@@ -145,7 +156,7 @@ impl EffectcraftApp {
         if self.advance_audio_clock(&pass, step) {
             return;
         }
-        self.advance_frame_clock(&pass, step);
+        self.advance_frame_clock(&pass, step, fit_ahead);
     }
 
     /// While paused (scrubbing, editing) the viewer's frame comes first: prefetch only a few
@@ -428,7 +439,7 @@ impl EffectcraftApp {
     /// frame (or holds when it is not cached yet). While frames arrive slower than the frame
     /// rate it runs at their pace ([`pace_for`]): every frame shows, evenly, as After Effects
     /// plays a preview it hasn't cached yet; real time again once the frames ahead are cached.
-    fn advance_frame_clock(&mut self, pass: &PlaybackPass<'_>, step: i64) {
+    fn advance_frame_clock(&mut self, pass: &PlaybackPass<'_>, step: i64, fit_ahead: i64) {
         let PlaybackPass { ctx, now, plan, video, frame_rate: fr, cur, series, .. } = *pass;
         let FrameWindow { last: wb, .. } = pass.window;
         // The plan carries the rate the preview was started with (and `play_with` copies it to
@@ -439,10 +450,16 @@ impl EffectcraftApp {
         self.playback.paced_at = Some(now);
         if video {
             // The lead counts out of twice the prefetch depth: the prefetch keeps that many
-            // frames coming (or the frames left before the end), so a full lead means rendering keeps up.
-            let (lead, target) = self.cached_lead(pass, (pass.ahead * 2).max(1));
+            // frames coming (or the frames left before the end), so a full lead means rendering
+            // keeps up. No more than the RAM preview holds ([`pace_horizon`]).
+            let horizon = pace_horizon(pass.ahead, fit_ahead);
             let prev = if self.playback.pace > 0.0 { self.playback.pace } else { fps };
-            let pace = pace_for(prev, lead, target, fps, dt);
+            let pace = if horizon > 0 {
+                let (lead, target) = self.cached_lead(pass, horizon);
+                pace_for(prev, lead, target, fps, dt)
+            } else {
+                fps
+            };
             self.playback.pace = pace;
             if pace < fps * 0.8 {
                 self.step_down(now, pass.scale);
@@ -662,7 +679,26 @@ impl EffectcraftApp {
 
 #[cfg(test)]
 mod pace_tests {
-    use super::{lead_of, pace_for};
+    use super::{lead_of, pace_for, pace_horizon};
+
+    /// The lead is measured over no more frames than the RAM preview keeps ahead of the current
+    /// one, so a full cache plays in real time. (It counted out of twice the prefetch depth: with
+    /// room for 4 frames, at most 2 after the current one were ever cached, and a preview that
+    /// rendered at once played at a quarter of its frame rate.)
+    #[test]
+    fn the_pace_horizon_fits_in_the_ram_preview() {
+        // A roomy budget: twice the prefetch depth.
+        assert_eq!(pace_horizon(6, 400), 12);
+        // Room for 4 frames: the prefetch requests offsets 0..3, so 2 after the current one.
+        assert_eq!(pace_horizon(6, 3), 2);
+        let (lead, target) = lead_of(|k| Some(10 + k), &[10, 11, 12], pace_horizon(6, 3));
+        assert!((pace_for(30.0, lead, target, 30.0, 10.0) - 30.0).abs() < 1e-6, "a full cache plays in real time");
+        // Room for the current frame only (or nothing): no lead to measure.
+        assert_eq!(pace_horizon(6, 1), 0);
+        assert_eq!(pace_horizon(6, 0), 0);
+        // No prefetch depth: still the next frame.
+        assert_eq!(pace_horizon(0, 400), 1);
+    }
 
     /// The pace follows the cached lead: real time with a full lead, a third of it with a third,
     /// never under an eighth, unchanged with nothing ahead, and smoothed over time.

@@ -395,3 +395,44 @@ fn playback_that_cannot_keep_up_steps_down_a_resolution() {
     stall(&mut h, 2.5);
     assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
 }
+
+/// A preview that renders every frame at once plays in real time even when the RAM preview holds
+/// only a few frames. (The pace measured its lead over twice the prefetch depth, more frames than
+/// a small RAM preview keeps ahead, so such a preview was slowed to a fraction of its frame rate.)
+#[test]
+fn a_preview_that_keeps_up_plays_in_real_time_with_a_small_ram_preview() {
+    let mut h = harness();
+    let cid = h.state().session.active_comp_id().unwrap();
+    let series = h.state().shown_series(cid);
+    let s = series.scale as f64 / 1000.0;
+    let frame = (320.0 * s).ceil() * (180.0 * s).ceil() * 4.0;
+    // Room for 4 frames (90 % of 5): the prefetch keeps the current frame and 2 after it.
+    h.state().frames.set_budget((frame * 5.0) as usize);
+    h.state_mut().use_manual_clock();
+    h.state_mut().session.set_time(Tick::ZERO);
+    invoke(&mut h, "playback.toggle", json!({}));
+    let fr = h.state().session.active_comp().unwrap().frame_rate;
+    // Rendering keeps up: the frames ahead are rendered before the clock moves on.
+    let settle = |h: &mut Harness<'_, EffectcraftApp>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            h.step();
+            let cur = fr.frame_at(h.state().session.time());
+            let cached = h.state().frames.cached_frames(&series);
+            if (1..=2).all(|k| cached.contains(&((cur + k) % 240))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("frames ahead never cached");
+    };
+    for _ in 0..48 {
+        settle(&mut h);
+        h.state_mut().clock_mut().advance(1.0 / 24.0);
+        h.step();
+    }
+    let pb = &h.state().playback;
+    assert!(pb.playing);
+    assert!(pb.pace >= 24.0 * 0.98, "plays at {} fps of 24", pb.pace);
+    assert!(fr.frame_at(h.state().session.time()) >= 40, "the clock kept real time: {:?}", h.state().session.time());
+}
