@@ -339,9 +339,10 @@ mod tests {
 
     #[test]
     fn gauss_pass_is_bit_identical_to_the_per_pixel_kernel() {
-        // Sizes narrower and shorter than the kernel too (every tap near an edge), with
-        // negative, zero and HDR values.
-        for (w, h) in [(37, 23), (3, 2), (1, 9), (64, 1)] {
+        // Sizes narrower and shorter than the kernel too (every tap near an edge), one wider
+        // than three tiles (tiles past the first, and a partial last one), with negative, zero
+        // and HDR values.
+        for (w, h) in [(37, 23), (3, 2), (1, 9), (64, 1), (300, 5)] {
             let mut img = Image::new(w, h);
             for (i, p) in img.data.iter_mut().enumerate() {
                 let v = ((i * 7919) % 101) as f32 / 37.0 - 0.6;
