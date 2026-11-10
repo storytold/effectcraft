@@ -572,9 +572,13 @@ mod tests {
         let spec = find("ec.perspective.cccylinder").unwrap();
         let radius = spec.params.iter().find(|p| p.id == "radius").unwrap();
         assert!(matches!(radius.ui, ParamUi::Slider { min, max, .. } if min == 0.0 && max == 30000.0), "{:?}", radius.ui);
+        // The cylinder's axis on the left edge: at 400 % its radius is 400 / 100 * 100 / 2π ≈ 63.7 px,
+        // so a pixel 70 px along is past it there and inside the 30000 % one.
         let img = Image::filled(100, 20, [0.5, 0.5, 0.5, 1.0]);
-        let out = run("ec.perspective.cccylinder", &img, &[("radius", num(30000.0))]).img;
-        let px = out.get(50 + 40, 10);
+        let at_edge = |radius: f64| run("ec.perspective.cccylinder", &img, &[("radius", num(radius)), ("position", Value::Vec2([0.0, 10.0]))]).img;
+        let clamped = at_edge(400.0).get(70, 10);
+        assert_eq!(clamped[3], 0.0, "beyond a 400 % cylinder: {clamped:?}");
+        let px = at_edge(30000.0).get(70, 10);
         assert!(px.iter().all(|v| v.is_finite()) && px[3] > 0.99, "{px:?}");
     }
 
