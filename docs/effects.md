@@ -9,7 +9,7 @@ EffectCraft ships 308 effects with 2992 parameters in total, grouped into the sa
 - **32**: 308 effects process 32-bit float (HDR, overbright) pixels without clamping.
 - **Status**: 308 implemented in full, 0 partial (what is missing is listed).
 
-Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`).
+Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`). A parameter that was renamed keeps its old name working in expressions of older projects: `effect("CC Ball Action")("Instability State")` still reads Scatter Motion.
 
 ## 3D Channel
 

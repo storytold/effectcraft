@@ -7,9 +7,10 @@
 //! the answers and runs the script again. Expressions are pure functions of these answers, so
 //! re-running is exact, and the runtime stays free of borrowed state.
 
+use effectcraft_effects::migrate::PARAM_ID_ALIASES;
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{Comp, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
+use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
 
@@ -283,8 +284,22 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 .find(|n| n.match_id() == m)
                 .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(name)))
                 .or_else(|| g.children.iter().find(|n| compact(n.name()) == c || compact(n.match_id()) == c))
+                // Last, so a legacy name never shadows a current one.
+                .or_else(|| legacy_effect_child(g, &c))
         }
     }
+}
+
+/// A parameter of an effect instance addressed by a name it had when the project was saved
+/// ([`PARAM_ID_ALIASES`]): `effect("CC Ball Action")("Instability State")` keeps reading the
+/// parameter that is now Scatter Motion. `c` is the compacted (lowercase, no spaces) name. Only
+/// renames inside the instance's own top-level group count; moves into twirl-downs do not.
+fn legacy_effect_child<'g>(g: &'g PropGroup, c: &str) -> Option<&'g Node> {
+    let GroupKind::Effect { effect } = &g.kind else { return None };
+    PARAM_ID_ALIASES
+        .iter()
+        .filter(|(e, old, new)| e == effect && !old.contains('/') && !new.contains('/') && compact(old) == c)
+        .find_map(|(_, _, new)| g.children.iter().find(|n| n.match_id() == *new))
 }
 
 impl<'a> Resolver<'a> {
