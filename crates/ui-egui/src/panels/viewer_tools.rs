@@ -93,7 +93,7 @@ pub(crate) fn snap_landed(ctx: &egui::Context, at: [f64; 2]) {
     s.hits.retain(|h| {
         let on = |k: usize| (at[k] - h.pos[k]).abs() < 1e-6;
         match h.kind {
-            SnapKind::Point => on(0) || on(1),
+            SnapKind::Point => on(0) && on(1),
             SnapKind::VLine => on(0),
             SnapKind::HLine => on(1),
         }
@@ -1012,5 +1012,26 @@ mod tests {
         assert_eq!(out.size, [3, 1]);
         assert_eq!(out.pixels[1], egui::Color32::from_gray(128), "texels average their pixels");
         assert_eq!(out.pixels[2], egui::Color32::WHITE, "the last one only the pixels it holds");
+    }
+
+    /// A point target snaps both axes, so a drag that lands on only one of its coordinates keeps
+    /// no point feedback; lines keep theirs on their own axis (#2860).
+    #[test]
+    fn landed_feedback_keeps_a_point_only_when_both_axes_land() {
+        let hit = |kind, pos| vw::SnapTarget { kind, pos, priority: 0, source: SnapSource::Comp, span: None };
+        let ctx = egui::Context::default();
+        let run = |at: [f64; 2]| {
+            let s = Snap {
+                delta: [0.0; 2],
+                hits: vec![hit(SnapKind::Point, [10.0, 20.0]), hit(SnapKind::VLine, [10.0, 0.0]), hit(SnapKind::HLine, [0.0, 99.0])],
+                at: [0.0; 2],
+            };
+            ctx.data_mut(|d| d.insert_temp(snap_id(), s));
+            snap_landed(&ctx, at);
+            ctx.data(|d| d.get_temp::<Snap>(snap_id())).map(|s| s.hits.iter().map(|h| h.kind).collect::<Vec<_>>())
+        };
+        assert_eq!(run([10.0, 20.0]), Some(vec![SnapKind::Point, SnapKind::VLine]), "both axes land: the point stays");
+        assert_eq!(run([10.0, 50.0]), Some(vec![SnapKind::VLine]), "only x lands: the point goes, the vertical line stays");
+        assert_eq!(run([50.0, 20.0]), None, "only y lands on the point: nothing is left to show");
     }
 }
