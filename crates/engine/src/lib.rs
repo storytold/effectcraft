@@ -21,6 +21,7 @@ pub mod menus;
 mod output_guard;
 pub mod preview;
 pub mod render_queue;
+pub mod replay;
 pub mod scriptui;
 mod settings;
 mod system;
