@@ -46,7 +46,7 @@ struct Tex {
 /// drag), or when the delta is zero / not finite.
 fn middle_pan_delta(area: Rect, press_origin: Option<Pos2>, pressed: bool, delta: egui::Vec2) -> Option<egui::Vec2> {
     let d = if pressed { egui::Vec2::ZERO } else { delta };
-    (press_origin.is_some_and(|p| area.contains(p)) && d != egui::Vec2::ZERO && d.x.is_finite() && d.y.is_finite()).then_some(d)
+    (press_origin.is_some_and(|p| area.contains(p)) && d.x.is_finite() && d.y.is_finite() && d != egui::Vec2::ZERO).then_some(d)
 }
 
 /// The `egui::Id` of the cached render of the layer shown in this panel ([`Tex`]), with the key
@@ -461,5 +461,14 @@ mod tests {
         assert_eq!(middle_pan_delta(area, inside, true, d), None);
         assert_eq!(middle_pan_delta(area, inside, false, vec2(f32::NAN, 1.0)), None);
         assert_eq!(middle_pan_delta(area, inside, false, egui::Vec2::ZERO), None);
+        assert_eq!(middle_pan_delta(area, inside, false, vec2(1.0, f32::INFINITY)), None);
+        assert_eq!(middle_pan_delta(area, inside, false, vec2(f32::NEG_INFINITY, 0.0)), None);
+        // Movement along one axis only still pans.
+        assert_eq!(middle_pan_delta(area, inside, false, vec2(4.0, 0.0)), Some(vec2(4.0, 0.0)));
+        assert_eq!(middle_pan_delta(area, inside, false, vec2(0.0, -4.0)), Some(vec2(0.0, -4.0)));
+        // A press exactly on the canvas edge counts as on the canvas; one just past it does not.
+        assert_eq!(middle_pan_delta(area, Some(pos2(0.0, 0.0)), false, d), Some(d));
+        assert_eq!(middle_pan_delta(area, Some(pos2(100.0, 100.0)), false, d), Some(d));
+        assert_eq!(middle_pan_delta(area, Some(pos2(100.5, 50.0)), false, d), None);
     }
 }
