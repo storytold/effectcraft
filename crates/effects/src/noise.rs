@@ -254,8 +254,14 @@ pub(crate) fn preview_compose(ctx: &EffectCtx, b: &mut Buf, orig: &Image) {
     });
 }
 
+/// How far the grain statistics read around a sample box: their high-pass subtracts a Gaussian
+/// of sigma 1.5, three box passes of radius 1 (`noise2::grain_stats_boxes`).
+const SAMPLE_REACH: usize = 3;
+
 /// Boxes (x, y, size in buffer px) where grain is sampled: the flattest of a grid of
-/// candidate boxes (real grain shows best where the picture has no detail).
+/// candidate boxes (real grain shows best where the picture has no detail). A box and the
+/// [`SAMPLE_REACH`] px around it are opaque: a transparent pixel there is black once
+/// unpremultiplied, and the high-pass would measure that edge as grain.
 pub(crate) fn sample_boxes(img: &Image, count: usize, size: usize) -> Vec<(usize, usize, usize)> {
     let (w, h) = (img.width as usize, img.height as usize);
     let size = size.clamp(3, w.min(h).max(3));
@@ -264,6 +270,19 @@ pub(crate) fn sample_boxes(img: &Image, count: usize, size: usize) -> Vec<(usize
     }
     let low = Plane::luma(img);
     let step = (size / 2).max(1);
+    // Transparent pixels (alpha 0.5 or less) in a summed-area table: `sat[y * (w + 1) + x]`
+    // counts them above and left of (x, y).
+    let sw = w + 1;
+    let mut sat = vec![0usize; sw * (h + 1)];
+    for y in 0..h {
+        let mut run = 0;
+        for x in 0..w {
+            let opaque = img.data[y * w + x][3] > 0.5;
+            run += usize::from(!opaque);
+            sat[(y + 1) * sw + x + 1] = sat[y * sw + x + 1] + run;
+        }
+    }
+    let sat = sat.as_slice();
     // Candidate rows in parallel; the sort below is a total order (variance, y, x), so the
     // result does not depend on the collection order.
     let rows: Vec<usize> = (0..=h - size).step_by(step).collect();
@@ -271,20 +290,23 @@ pub(crate) fn sample_boxes(img: &Image, count: usize, size: usize) -> Vec<(usize
         .par_iter()
         .flat_map_iter(|&y| {
             let data = low.data.as_slice();
-            let alpha = img.data.as_slice();
             (0..=w - size).step_by(step).filter_map(move |x| {
+                let (x0, y0) = (x.saturating_sub(SAMPLE_REACH), y.saturating_sub(SAMPLE_REACH));
+                let (x1, y1) = ((x + size + SAMPLE_REACH).min(w), (y + size + SAMPLE_REACH).min(h));
+                if sat[y1 * sw + x1] + sat[y0 * sw + x0] != sat[y0 * sw + x1] + sat[y1 * sw + x0] {
+                    return None;
+                }
                 // Variance of the picture inside the box (the flattest boxes hold the least detail).
-                let (mut s, mut sq, mut n, mut opaque) = (0.0f32, 0.0f32, 0.0f32, true);
+                let (mut s, mut sq, mut n) = (0.0f32, 0.0f32, 0.0f32);
                 for yy in y..y + size {
                     for xx in x..x + size {
                         let v = data[yy * w + xx];
                         s += v;
                         sq += v * v;
                         n += 1.0;
-                        opaque &= alpha[yy * w + xx][3] > 0.5;
                     }
                 }
-                opaque.then(|| (sq / n - (s / n).powi(2), x, y))
+                Some((sq / n - (s / n).powi(2), x, y))
             })
         })
         .collect();

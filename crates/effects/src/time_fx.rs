@@ -1,11 +1,13 @@
 //! Time effects (Effect > Time): Echo, Posterize Time, Time Difference, Time Displacement,
-//! Timewarp, CC Force Motion Blur, CC Wide Time and Pixel Motion Blur.
+//! Timewarp, Temporal Motion Blur, Temporal Blend and Pixel Motion Blur.
 //!
 //! These read the layer at *other* layer times through [`EffectHost::self_at`]: its source with
 //! its masks and the effects applied before them, as After Effects renders them (SceneYard:
-//! Echo after CC Particle Systems II echoes the fireworks, not the black solid under them;
-//! Posterize Time after Turbulent Displace steps the displacement). Without a host (tests,
-//! thumbnails) they pass their input through.
+//! Echo after Particle Emitter 2D echoes the fireworks, not the black solid under them;
+//! Posterize Time after Turbulent Displace steps the displacement). Timewarp is the exception:
+//! it retimes the layer's source with its masks and ignores the effects above it (After
+//! Effects 2026: a red solid with a Gradient Ramp and then Timewarp shows the red solid).
+//! Without a host (tests, thumbnails) they pass their input through.
 //!
 //! Timewarp's Pixel Motion estimates block-matching optical flow between neighbouring frames
 //! ([`effectcraft_raster::flow`]); Pixel Motion Blur averages sub-frame samples.
@@ -121,7 +123,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.time.ccforcemotionblur",
-            "CC Force Motion Blur",
+            "Temporal Motion Blur",
             vec![
                 p("motionBlurLevels", "Motion Blur Levels", num(8.0), slider(2.0, 64.0, 2.0, 32.0, 0)),
                 p("overrideShutterAngle", "Override Shutter Angle", Value::Bool(true), ParamUi::Checkbox),
@@ -132,7 +134,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.time.ccwidetime",
-            "CC Wide Time",
+            "Temporal Blend",
             vec![
                 p("forwardSteps", "Forward Steps", num(3.0), slider(0.0, 45.0, 0.0, 15.0, 0)),
                 p("backwardSteps", "Backward Steps", num(3.0), slider(0.0, 45.0, 0.0, 15.0, 0)),
@@ -163,15 +165,21 @@ struct Frames {
     imgs: Vec<Image>,
 }
 
-/// Fetch the layer (source + masks) at layer times `times`. `None` without a host.
+/// Fetch the layer (source + masks + the effects before this one) at layer times `times`.
+/// `None` without a host.
 fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
+    fetch_with(ctx, times, usize::MAX)
+}
+
+/// [`fetch`] with the first `effects` effects of the stack only (0: source and masks).
+fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> {
     let host = ctx.env.host?;
     // Dedupe times (sub-microsecond differences are the same frame).
     let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
     uniq.sort_unstable();
     uniq.dedup();
     // Every effect before this one (the host bounds the count to them).
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, usize::MAX))).collect();
+    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
@@ -261,6 +269,9 @@ fn mean_of(ctx: &EffectCtx, b: Buf, times: &[f64]) -> Buf {
 
 // ---------------------------------------------------------------- Echo
 
+/// Echo: the layer at the current time and `numberOfEchoes` earlier (or later) times
+/// `echoTime` apart, each weighted Starting Intensity × Decay^i and combined by the Echo Operator
+/// (Add, Maximum, Minimum, Screen, Composite In Back, Composite In Front, Blend).
 fn echo(ctx: &EffectCtx, b: Buf) -> Buf {
     let n = ctx.params.f("numberOfEchoes").round().clamp(0.0, 255.0) as usize;
     let dt = ctx.params.f("echoTime");
@@ -270,7 +281,6 @@ fn echo(ctx: &EffectCtx, b: Buf) -> Buf {
     let times: Vec<f64> = (0..=n).map(|i| ctx.time + i as f64 * dt).collect();
     let Some(fr) = fetch(ctx, &times) else { return b };
     let weights: Vec<f32> = (0..=n).map(|i| start * decay.powi(i as i32)).collect();
-    let count = (n + 1) as f32;
     let w = fr.grid.img.width;
     let h = fr.grid.img.height;
     let mut out = Image::new(w, h);
@@ -289,22 +299,25 @@ fn echo(ctx: &EffectCtx, b: Buf) -> Buf {
                 2 => (0..4).for_each(|c| acc[c] = acc[c].min(q[c])),
                 // Screen
                 3 => (0..4).for_each(|c| acc[c] = acc[c] + q[c] - acc[c] * q[c]),
-                // Composite In Back: each later echo goes behind what is there.
+                // Composite In Back: the layer goes in back, each echo is composited over what
+                // is there, the oldest on top, with its weight as opacity (After Effects 2026,
+                // opaque layer, one and three echoes). Whether the weight scales the alpha of a
+                // transparent layer's echo or fades it is not measured.
                 4 => {
-                    let ia = 1.0 - acc[3];
-                    (0..4).for_each(|c| acc[c] += q[c] * ia);
-                }
-                // Composite In Front: each later echo goes on top.
-                5 => {
                     let ia = 1.0 - q[3];
                     (0..4).for_each(|c| acc[c] = q[c] + acc[c] * ia);
                 }
-                // Blend (average) and Add
+                // Composite In Front: the layer stays in front, each echo goes behind what is
+                // there (After Effects 2026: an opaque layer hides its echo).
+                5 => {
+                    let ia = 1.0 - acc[3];
+                    (0..4).for_each(|c| acc[c] += q[c] * ia);
+                }
+                // Add, and Blend: After Effects 2026 sums the weighted frames for Blend as well,
+                // with no normalisation (3 echoes at intensity 1 give 4x the layer; intensity
+                // 0.5, decay 0.5 and 2 echoes give alpha 0.875).
                 _ => (0..4).for_each(|c| acc[c] += q[c]),
             }
-        }
-        if op == 6 {
-            acc.iter_mut().for_each(|c| *c /= count);
         }
         if op == 2 && acc[0] == f32::MAX {
             acc = [0.0; 4];
@@ -451,9 +464,74 @@ fn time_displacement(ctx: &EffectCtx, b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- Timewarp
 
-/// Source layer time Timewarp shows at layer time `t`.
+/// Source layer time Timewarp shows at layer time `t` when Speed is the same at every time:
+/// Source Frame maps directly, Speed (a rate in %) gives `t × speed / 100`. An animated Speed
+/// is integrated instead (see [`timewarp_integrate_speed`]).
 pub fn timewarp_source_time(t: f64, by_frame: bool, speed: f64, source_frame: f64, fps: f64) -> f64 {
     if by_frame { source_frame / fps } else { t * speed / 100.0 }
+}
+
+/// Speed samples per composition frame when integrating an animated Speed.
+const TW_SPEED_SAMPLES_PER_FRAME: f64 = 2.0;
+/// Most Speed samples one integration takes (longer spans widen the step instead).
+const TW_SPEED_MAX_SAMPLES: f64 = 50_000.0;
+
+/// Source layer time of Adjust Time By = Speed at layer time `t` with an animated Speed: Speed
+/// is a rate (100 % = real time), so the source time is the integral of `speed / 100` over layer
+/// time from 0 to `t` (toward 0 with the sign for negative `t`). `speed_at(lt)` is Speed at layer
+/// time `lt`; a missing or non-finite sample counts as `now` (the current Speed), or 0 when that
+/// is not finite either. Midpoint rule on a fixed grid from 0, [`TW_SPEED_SAMPLES_PER_FRAME`]
+/// samples per frame at `fps`, at most [`TW_SPEED_MAX_SAMPLES`] samples. A non-finite result falls back to
+/// `t × now / 100`, then to 0.
+pub fn timewarp_integrate_speed(t: f64, fps: f64, now: f64, speed_at: impl Fn(f64) -> Option<f64>) -> f64 {
+    let flat = t * now / 100.0;
+    let fallback = |v: f64| {
+        if v.is_finite() {
+            v
+        } else if flat.is_finite() {
+            flat
+        } else {
+            0.0
+        }
+    };
+    if !t.is_finite() || t == 0.0 {
+        return fallback(flat);
+    }
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let span = t.abs();
+    // Cells of a fixed step anchored at 0 (whole cells plus a partial last one), so successive
+    // frames share their samples and a Hold key's jump lands the same way on every frame; only a
+    // span past the sample budget widens the step.
+    let mut h = 1.0 / (fps * TW_SPEED_SAMPLES_PER_FRAME);
+    if !(span / h).is_finite() || span / h >= TW_SPEED_MAX_SAMPLES {
+        h = span / TW_SPEED_MAX_SAMPLES;
+    }
+    if !h.is_finite() || h <= 0.0 {
+        return fallback(flat);
+    }
+    let whole = (span / h).floor().clamp(0.0, TW_SPEED_MAX_SAMPLES);
+    let rest = (span - whole * h).max(0.0);
+    let sign = t.signum();
+    let held = if now.is_finite() { now } else { 0.0 };
+    let sample = |lt: f64| speed_at(sign * lt).filter(|v| v.is_finite()).unwrap_or(held);
+    // `whole` is a whole number in 0..=TW_SPEED_MAX_SAMPLES, so the count is exact.
+    let full: f64 = (0..whole as u64).map(|i| sample((i as f64 + 0.5) * h)).sum::<f64>() * h;
+    let part = if rest > 0.0 { sample(whole * h + rest * 0.5) * rest } else { 0.0 };
+    fallback(sign * (full + part) / 100.0)
+}
+
+/// Source layer time Timewarp shows at the frame: [`timewarp_source_time`], except that an
+/// animated Speed (keyframes or an expression, read through the effect host) is integrated
+/// from layer time 0 ([`timewarp_integrate_speed`]), so a speed ramp plays on from where the
+/// footage is instead of jumping to another segment.
+fn timewarp_source(ctx: &EffectCtx, by_frame: bool, speed: f64, fps: f64) -> f64 {
+    let direct = timewarp_source_time(ctx.time, by_frame, speed, ctx.params.f("sourceFrame"), fps);
+    if by_frame {
+        return direct;
+    }
+    let idx = ctx.env.effect_index;
+    let Some(host) = ctx.env.host.filter(|h| !h.param_is_static(idx, "speed")) else { return direct };
+    timewarp_integrate_speed(ctx.time, fps, speed, |lt| host.param_at(idx, "speed", lt).map(|v| v.as_f64()))
 }
 
 /// Timewarp's Pixel Motion settings (the Tuning group and Source Crops).
@@ -747,7 +825,7 @@ fn timewarp_instants(ctx: &EffectCtx) -> (Vec<(f64, f32)>, Vec<f64>, f64) {
     let fps = ctx.fps();
     let by_frame = ctx.params.e("adjustTimeBy") == 1;
     let speed = ctx.params.f("speed");
-    let src = timewarp_source_time(ctx.time, by_frame, speed, ctx.params.f("sourceFrame"), fps);
+    let src = timewarp_source(ctx, by_frame, speed, fps);
     let mut instants: Vec<(f64, f32)> = vec![];
     if ctx.params.b("motionBlur/enableMotionBlur") {
         let angle = if ctx.params.e("motionBlur/shutterControl") == 1 { ctx.params.f("motionBlur/shutterAngle") } else { 180.0 };
@@ -786,7 +864,8 @@ pub fn timewarp_plan(ctx: &EffectCtx) -> Option<TimewarpPlan> {
     let (instants, times, fps) = timewarp_instants(ctx);
     let method = ctx.params.e("method");
     let one = method > 0 && ctx.params.b("tuning/buildFromOneImage");
-    let fr = fetch(ctx, &times)?;
+    // The source with its masks, without the effects above Timewarp.
+    let fr = fetch_with(ctx, &times, 0)?;
     let pm = PixelMotion::from(ctx, fr.grid.scale);
     let mattes = fetch_layer(ctx, "matteLayer", &times, &fr.grid);
     let warps = fetch_layer(ctx, "warpLayer", &times, &fr.grid);
@@ -879,7 +958,8 @@ pub fn timewarp_plan(ctx: &EffectCtx) -> Option<TimewarpPlan> {
 /// vectors (block-matching optical flow, [`effectcraft_raster::flow`]) tuned by the Tuning
 /// group. A Matte Layer splits foreground and background so each moves on its own vectors; a
 /// Warp Layer supplies the motion instead of the layer itself. Motion Blur averages Shutter
-/// Samples instants across the shutter.
+/// Samples instants across the shutter. Adjust Time By = Speed treats Speed as a rate
+/// integrated from layer time 0 (keyframing it ramps the playback speed).
 fn timewarp(ctx: &EffectCtx, b: Buf) -> Buf {
     match timewarp_plan(ctx) {
         Some(plan) => plan.render_cpu(),
@@ -914,7 +994,7 @@ fn matte_image(m: &[f32], like: &Image) -> Image {
     out
 }
 
-// ---------------------------------------------------------------- CC Force Motion Blur / CC Wide Time / Pixel Motion Blur
+// ---------------------------------------------------------------- Temporal Motion Blur / Temporal Blend / Pixel Motion Blur
 
 fn force_motion_blur(ctx: &EffectCtx, b: Buf) -> Buf {
     let n = ctx.params.f("motionBlurLevels").round().clamp(2.0, 64.0) as usize;
@@ -1016,8 +1096,8 @@ mod tests {
             None
         }
         fn self_at(&self, t: f64, effects: usize) -> Option<Buf> {
-            // Time effects see every effect before them.
-            assert_eq!(effects, usize::MAX);
+            // Time effects see every effect before them; Timewarp only the source and masks.
+            assert!(effects == usize::MAX || effects == 0, "{effects}");
             let v = if self.static_layer { 0.4 } else { t as f32 };
             Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
         }
@@ -1026,6 +1106,32 @@ mod tests {
     fn run(id: &str, vals: &[(&str, Value)], t: f64, host: &Clock) -> Buf {
         let env = EffectEnv { host: Some(host), frame_rate: 10.0, comp_time: t, ..Default::default() };
         run_fx(id, vals, Image::filled(6, 4, [0.9, 0.0, 0.0, 1.0]), t, env)
+    }
+
+    /// After Effects 2026: Timewarp retimes the layer's source (with masks) and ignores the
+    /// effects above it; Echo keeps them.
+    #[test]
+    fn timewarp_reads_the_source_without_the_effects_above_it() {
+        struct Asked(std::sync::Mutex<Vec<usize>>);
+        impl EffectHost for Asked {
+            fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+                None
+            }
+            fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+                None
+            }
+            fn self_at(&self, _: f64, effects: usize) -> Option<Buf> {
+                self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(effects);
+                // The source (effects 0) is red, the layer with its effects green.
+                let c = if effects == 0 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0, 1.0] };
+                Some(Buf { img: Image::filled(6, 4, c), offset: [0.0; 2], scale: 1.0 })
+            }
+        }
+        let host = Asked(std::sync::Mutex::new(vec![]));
+        let env = EffectEnv { host: Some(&host), frame_rate: 10.0, comp_time: 1.0, ..Default::default() };
+        let out = run_fx("ec.time.timewarp", &[("speed", num(25.0))], Image::filled(6, 4, [0.0, 1.0, 0.0, 1.0]), 1.0, env);
+        assert_eq!(out.img.get(2, 2), [1.0, 0.0, 0.0, 1.0]);
+        assert!(host.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().all(|&e| e == 0));
     }
 
     #[test]
@@ -1046,7 +1152,7 @@ mod tests {
         let want = 0.8 + 0.5 * 0.7 + 0.25 * 0.6;
         assert!((out.img.data[0][0] - want as f32).abs() < 1e-4, "{}", out.img.data[0][0]);
         assert_eq!(out.img.data[0][3], 1.0);
-        // Maximum picks the brightest weighted frame; Blend averages.
+        // Maximum picks the brightest weighted frame; Blend sums like Add (#3124).
         let mut v = vals.to_vec();
         v.push(("echoOperator", Value::Enum(1)));
         let out = run("ec.time.echo", &v, 0.8, &h);
@@ -1054,7 +1160,136 @@ mod tests {
         v.pop();
         v.push(("echoOperator", Value::Enum(6)));
         let out = run("ec.time.echo", &v, 0.8, &h);
-        assert!((out.img.data[0][0] - want as f32 / 3.0).abs() < 1e-4);
+        assert!((out.img.data[0][0] - want as f32).abs() < 1e-4, "{}", out.img.data[0][0]);
+    }
+
+    /// Row y = 130, x = 60..111 of the importer sample's SRC test card (#3124): a black-to-white
+    /// ramp across 320 px under an opaque white 30 px square whose centre moves from x = 20 at
+    /// 0 s to x = 300 at 2 s.
+    struct MovingSquare;
+    impl EffectHost for MovingSquare {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let centre = 20.0 + 140.0 * t;
+            let (s0, s1) = (centre - 15.0, centre + 15.0);
+            let mut img = Image::new(52, 1);
+            for (i, px) in img.data.iter_mut().enumerate() {
+                let x = 60.0 + i as f64;
+                let cover = ((x + 1.0).min(s1) - x.max(s0)).clamp(0.0, 1.0) as f32;
+                let ramp = ((x + 0.5) / 320.0) as f32;
+                let v = cover + (1.0 - cover) * ramp;
+                *px = [v, v, v, 1.0];
+            }
+            Some(Buf { img, offset: [0.0; 2], scale: 1.0 })
+        }
+    }
+
+    /// After Effects 2026 renders of that row at 0.5 s, Echo Time −1/30 s, one echo, Starting
+    /// Intensity 1, Decay 1 (renders/echo-00 ... echo-10 of the 2026-11-05 importer sample, 32 bpc,
+    /// saved as 8-bit PNGs that hold floor(value × 25.5)).
+    #[rustfmt::skip]
+    const AE_ECHO_ROW: [(u32, &str, [u8; 52]); 6] = [
+        (0, "Add", [9, 9, 9, 10, 10, 10, 10, 10, 10, 11, 24, 31, 31, 31, 31, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 39, 33, 33, 33, 33, 16, 16, 17, 17, 17, 17, 17]),
+        (1, "Maximum", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 18, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 8, 8, 8, 8, 8, 8, 8]),
+        (2, "Minimum", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 13, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]),
+        (3, "Screen", [8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 20, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 14, 14, 14, 14, 14, 14, 14]),
+        (4, "Composite In Back", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 18, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 13, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]),
+        (5, "Composite In Front", [4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 8, 8, 8, 8, 8, 8, 8]),
+    ];
+
+    /// #3124: every operator but Blend against the After Effects row. Composite In Back puts
+    /// the echo over the layer (the trailing echo hides the square's leading edge), In Front
+    /// keeps the layer on top (the output is the current frame).
+    #[test]
+    fn echo_operators_match_after_effects_at_the_moving_edge() {
+        let h = MovingSquare;
+        for (op, name, ae) in AE_ECHO_ROW {
+            let vals = [("echoTime", num(-1.0 / 30.0)), ("numberOfEchoes", num(1.0)), ("echoOperator", Value::Enum(op))];
+            let env = EffectEnv { host: Some(&h), frame_rate: 25.0, comp_time: 0.5, ..Default::default() };
+            let out = run_fx("ec.time.echo", &vals, Image::new(52, 1), 0.5, env);
+            for (x, want) in ae.iter().enumerate() {
+                let got = (out.img.data[x][0] * 25.5).floor();
+                assert!((got - f32::from(*want)).abs() <= 1.0, "{name}: x = {} got {got}, After Effects {want}", 60 + x);
+                assert_eq!(out.img.data[x][3], 1.0, "{name}: alpha at x = {}", 60 + x);
+            }
+        }
+    }
+
+    /// Row y = 130, x = 36..111 of the same test card as read back from 16-bit renders: there the
+    /// ramp is x / 320 at the pixel's left edge (the 8-bit row above cannot tell that apart).
+    struct MovingSquareRow16;
+    impl EffectHost for MovingSquareRow16 {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let centre = 20.0 + 140.0 * t;
+            let (s0, s1) = (centre - 15.0, centre + 15.0);
+            let mut img = Image::new(76, 1);
+            for (i, px) in img.data.iter_mut().enumerate() {
+                let x = 36.0 + i as f64;
+                let cover = ((x + 1.0).min(s1) - x.max(s0)).clamp(0.0, 1.0);
+                let v = (cover + (1.0 - cover) * x / 320.0) as f32;
+                *px = [v, v, v, 1.0];
+            }
+            Some(Buf { img, offset: [0.0; 2], scale: 1.0 })
+        }
+    }
+
+    /// After Effects 2026 renders of that row at 0.5 s (renders/echo-13 ... echo-16 of the
+    /// 2026-11-05 importer sample, group 1110-extra, 32 bpc, 16-bit PNGs holding value × 6553.5):
+    /// operator, Echo Time, Number Of Echoes, Starting Intensity, Decay, alpha code, row codes.
+    #[rustfmt::skip]
+    const AE_ECHO_ROW16: [(u32, f64, f64, f64, f64, u16, [u16; 76]); 4] = [
+        (6, -1.0 / 30.0, 3.0, 1.0, 1.0, 65535, [2949, 3031, 3111, 3193, 3275, 3357, 3439, 3521, 3603, 3685, 3767, 3849, 3931, 4013, 4095, 4177, 4259, 4341, 4423, 4505, 4587, 4669, 4751, 4833, 4915, 10301, 10361, 10423, 10485, 12293, 15809, 15851, 15891, 15933, 19369, 21113, 21135, 21155, 21175, 26205, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 26213, 21523, 21543, 21565, 21585, 20063, 17039, 17079, 17121, 17161, 14215, 12759, 12819, 12881, 12943, 8607, 8683, 8765, 8847, 8929, 9011, 9093]),
+        (6, -1.0 / 30.0, 2.0, 0.5, 0.5, 57343, [643, 661, 679, 697, 715, 733, 751, 769, 787, 805, 823, 839, 859, 877, 895, 911, 929, 949, 965, 983, 1001, 1021, 1037, 1055, 1073, 1091, 1109, 1127, 1145, 1381, 1831, 1847, 1861, 1877, 2743, 3183, 3193, 3203, 3213, 5727, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5733, 5541, 5159, 5163, 5165, 5167, 4423, 4051, 4059, 4065, 4073, 1883, 1897, 1917, 1933, 1951, 1969, 1987]),
+        (4, -0.08, 3.0, 1.0, 0.5, 65535, [737, 757, 777, 797, 819, 1267, 1571, 1589, 1607, 1625, 1643, 1661, 1679, 1697, 1715, 1733, 2229, 2965, 2977, 2991, 3005, 3017, 3031, 3045, 3059, 3071, 3085, 3443, 4833, 4839, 4845, 4853, 4859, 4865, 4873, 4497, 4251, 4261, 4269, 5923, 5927, 5931, 5933, 5935, 5939, 5941, 5517, 4885, 4891, 4899, 4905, 4913, 4919, 4927, 4933, 4941, 4947, 4649, 3443, 3457, 3471, 3485, 3497, 3511, 3525, 3539, 3553, 3567, 3581, 2151, 2169, 2191, 2211, 2231, 2251, 2273]),
+        (5, -0.08, 3.0, 1.0, 0.5, 65535, [737, 757, 777, 797, 819, 839, 859, 879, 901, 921, 941, 961, 983, 1003, 1023, 1043, 1063, 1085, 1105, 1125, 1145, 1167, 1187, 1207, 1227, 1249, 1269, 1289, 1309, 1331, 1351, 1371, 1391, 1413, 1433, 1453, 1473, 1495, 1515, 6545, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 6553, 2157, 2169, 2191, 2211, 2231, 2251, 2273]),
+    ];
+
+    /// #3124: Blend sums the weighted frames like Add (no normalisation, Starting Intensity weights
+    /// the current frame too), and with three echoes Composite In Back stacks the oldest echo on
+    /// top while In Front leaves the opaque current frame alone. The alpha is checked as measured.
+    /// The RGB comparison of the half-transparent Blend row reads the PNG as premultiplied colour
+    /// (`saveFrameToPng` does not document which it writes); the opaque rows do not depend on it.
+    #[test]
+    fn echo_blend_and_three_echo_composites_match_after_effects() {
+        let h = MovingSquareRow16;
+        for (op, dt, n, start, decay, alpha, ae) in AE_ECHO_ROW16 {
+            let vals = [
+                ("echoTime", num(dt)),
+                ("numberOfEchoes", num(n)),
+                ("startingIntensity", num(start)),
+                ("decay", num(decay)),
+                ("echoOperator", Value::Enum(op)),
+            ];
+            let env = EffectEnv { host: Some(&h), frame_rate: 25.0, comp_time: 0.5, ..Default::default() };
+            let out = run_fx("ec.time.echo", &vals, Image::new(76, 1), 0.5, env);
+            // Pixels a square edge passes through: After Effects anti-aliases the card's square a
+            // little differently from the box coverage above, so they get 24 codes (0.4 %).
+            let edges: Vec<f64> = (0..=n as usize)
+                .flat_map(|i| {
+                    let c = 20.0 + 140.0 * (0.5 + i as f64 * dt);
+                    [(c - 15.0).floor(), (c + 15.0).floor()]
+                })
+                .collect();
+            for (x, want) in ae.iter().enumerate() {
+                let px = out.img.data[x];
+                let got = px[0] * 6553.5;
+                let tol = if edges.contains(&(36.0 + x as f64)) { 24.0 } else { 4.0 };
+                assert!((got - f32::from(*want)).abs() <= tol, "op {op}, n {n}: x = {} got {got}, After Effects {want}", 36 + x);
+                let a = px[3] * 65535.0;
+                assert!((a - f32::from(alpha)).abs() <= 2.0, "op {op}, n {n}: alpha at x = {} got {a}, After Effects {alpha}", 36 + x);
+            }
+        }
     }
 
     #[test]
@@ -1186,6 +1421,88 @@ mod tests {
         // Force Motion Blur looks forward over the shutter.
         let out = run("ec.time.ccforcemotionblur", &[], 1.0, &h);
         assert!(out.img.data[0][0] > 1.0);
+    }
+
+    /// [`Clock`] whose Timewarp (effect 2) Speed is animated: `speed(lt)` at layer time `lt`.
+    struct Ramp {
+        speed: fn(f64) -> f64,
+    }
+    impl EffectHost for Ramp {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let v = t as f32;
+            Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
+        }
+        /// Timewarp's (effect 2) Speed follows `speed`; every other parameter is unknown.
+        fn param_at(&self, effect_index: usize, id: &str, lt: f64) -> Option<Value> {
+            (effect_index == 2 && id == "speed").then(|| num((self.speed)(lt)))
+        }
+        /// Only Timewarp's (effect 2) Speed is animated.
+        fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
+            !(effect_index == 2 && id == "speed")
+        }
+    }
+
+    fn run_ramp(vals: &[(&str, Value)], t: f64, host: &Ramp) -> Buf {
+        let env = EffectEnv { host: Some(host), frame_rate: 10.0, comp_time: t, effect_index: 2, ..Default::default() };
+        run_fx("ec.time.timewarp", vals, Image::filled(6, 4, [0.9, 0.0, 0.0, 1.0]), t, env)
+    }
+
+    /// #2803: an animated Speed is a rate integrated from layer time 0, so a speed ramp plays on
+    /// from where the footage is instead of jumping to another segment.
+    #[test]
+    fn timewarp_integrates_animated_speed() {
+        // Speed 100 % for the first second, then 50 %: at t = 2 s the source is 1 + 0.5 = 1.5 s
+        // (`t × speed` would jump back to 1.0 s).
+        let h = Ramp { speed: |lt| if lt < 1.0 { 100.0 } else { 50.0 } };
+        let vals = [("method", Value::Enum(0)), ("speed", num(50.0))];
+        let out = run_ramp(&vals, 2.0, &h);
+        assert!((out.img.data[0][0] - 1.5).abs() < 1e-4, "{}", out.img.data[0][0]);
+        // Continuous across the change: just past 1 s the source is just past 1 s.
+        let out = run_ramp(&vals, 1.2, &h);
+        assert!((out.img.data[0][0] - 1.1).abs() < 1e-4, "{}", out.img.data[0][0]);
+        // Negative layer time integrates toward 0.
+        let src = timewarp_integrate_speed(-2.0, 10.0, 50.0, |lt| Some(if lt > -1.0 { 100.0 } else { 50.0 }));
+        assert!((src + 1.5).abs() < 1e-9, "{src}");
+        // A Hold key between samples (1.03 s) lands the same way on every frame: past it, each
+        // 0.1 s frame advances the source by exactly 50 % of a frame.
+        let hold = |lt: f64| Some(if lt < 1.03 { 100.0 } else { 50.0 });
+        let at = |t: f64| timewarp_integrate_speed(t, 10.0, 50.0, hold);
+        for k in 12..40 {
+            let (a, b) = (at((k - 1) as f64 / 10.0), at(k as f64 / 10.0));
+            assert!((b - a - 0.05).abs() < 1e-9, "k={k}: {}", b - a);
+        }
+        // A static Speed keeps `t × speed / 100` exactly.
+        assert_eq!(timewarp_source_time(2.0, false, 37.0, 0.0, 10.0), 2.0 * 37.0 / 100.0);
+        // Source Frame mode ignores Speed.
+        let out = run_ramp(&[("method", Value::Enum(0)), ("adjustTimeBy", Value::Enum(1)), ("sourceFrame", num(3.0))], 2.0, &h);
+        assert!((out.img.data[0][0] - 0.3).abs() < 1e-5);
+    }
+
+    /// Never crash: non-finite or huge Speeds, times and frame rates give finite source times
+    /// and pixels.
+    #[test]
+    fn timewarp_animated_speed_survives_bad_values() {
+        // Non-finite samples count as the current Speed (or 0); the result is always finite.
+        for t in [0.0, 1.0, -3.0, 1e9, f64::MAX, f64::INFINITY, f64::NAN] {
+            for now in [50.0, f64::NAN, f64::INFINITY, 1e308] {
+                let src = timewarp_integrate_speed(t, 10.0, now, |lt| Some(if lt < 0.5 { f64::NAN } else { 1e308 }));
+                assert!(src.is_finite(), "t={t} now={now}: {src}");
+                let src = timewarp_integrate_speed(t, f64::NAN, now, |_| None);
+                assert!(src.is_finite(), "t={t} now={now}: {src}");
+            }
+        }
+        let h = Ramp { speed: |lt| if lt < 1.0 { f64::NAN } else { f64::INFINITY } };
+        let out = run_ramp(&[("method", Value::Enum(2)), ("speed", num(50.0)), ("motionBlur/enableMotionBlur", Value::Bool(true))], 2.0, &h);
+        assert!(out.img.data.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        let h = Ramp { speed: |_| 1e308 };
+        let out = run_ramp(&[("method", Value::Enum(1)), ("speed", num(1e308))], 2.0, &h);
+        assert!(out.img.data.iter().all(|p| p.iter().all(|c| c.is_finite())));
     }
 
     #[test]

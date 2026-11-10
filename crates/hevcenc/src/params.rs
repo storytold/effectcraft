@@ -25,6 +25,9 @@ pub struct SeqParams {
     pub profile_idc: u8,
     pub level_idc: u8,
     pub full_range: bool,
+    pub colour_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coeffs: u8,
     pub fps_num: u32,
     pub fps_den: u32,
 }
@@ -166,9 +169,9 @@ fn vui(w: &mut BitWriter, p: &SeqParams) {
     w.put(5, 3); // video_format: unspecified
     w.flag(p.full_range);
     w.put(1, 1); // colour_description_present_flag
-    w.put(1, 8); // colour_primaries BT.709
-    w.put(1, 8); // transfer_characteristics BT.709
-    w.put(1, 8); // matrix_coeffs BT.709
+    w.put(p.colour_primaries as u32, 8); // colour_primaries
+    w.put(p.transfer_characteristics as u32, 8); // transfer_characteristics
+    w.put(p.matrix_coeffs as u32, 8); // matrix_coeffs
     w.put(0, 1); // chroma_loc_info_present_flag
     w.put(0, 1); // neutral_chroma_indication_flag
     w.put(0, 1); // field_seq_flag

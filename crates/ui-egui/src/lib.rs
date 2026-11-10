@@ -24,6 +24,7 @@ pub mod bench;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
+pub mod display_gpu;
 pub mod dock;
 pub mod dock_ui;
 mod expression_diagnostics;
@@ -152,6 +153,11 @@ pub enum Dialog {
     UnsavedChanges,
     /// Delete Project items that compositions use? (`panels::delete_items`).
     DeleteItems,
+    /// Import an After Effects project although some of it cannot be imported exactly?
+    /// (`panels::aep_losses`).
+    AepLosses,
+    /// Un-precompose although it changes the picture or drops something? (`panels::unprecompose`).
+    Unprecompose,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
@@ -184,6 +190,9 @@ pub struct Playback {
     pub caching: bool,
     /// Resolution override while playing (pixel step), `None` = the viewer's.
     pub res: Option<u32>,
+    /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: the lower render
+    /// scale this play stepped down to, and when (seconds). See `step_down`.
+    pub adaptive: Option<(f64, f64)>,
     /// Include Overlays / Include Layer Controls.
     pub overlays: bool,
     pub layer_controls: bool,
@@ -191,16 +200,20 @@ pub struct Playback {
     pub restore_max: Option<Option<PanelKind>>,
     /// Audio-only previews: the frame under the audible sample (the current time stays put).
     pub audio_frame: Option<i64>,
-    /// The preview's sound waits for frames: while the frames ahead aren't cached, every frame
-    /// shows as it renders, silently; the sound starts once the rest of the preview (or what
-    /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
-    /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
+    /// The preview's sound waits for frames: a preview whose start gave up on frames that weren't
+    /// cached shows every frame as it renders, silently, and starts the sound once the frames
+    /// ahead are cached while it keeps real time (#208), or the rest of the preview is. Once the
+    /// sound plays it goes on through frames that aren't cached, and the picture drops frames to
+    /// follow it (#2473).
     pub audio_held: bool,
+    /// The project last checked for a silent preview that became audible (#2104).
+    pub silent_project: Option<Arc<effectcraft_engine::project::Project>>,
     /// Starting a preview with sound (#947): the playhead stays on the first frame while the
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently
     /// while they rendered and the sound started at the later frame, so the opening was lost.
-    /// A stall later on still falls back to [`Playback::audio_held`].
+    /// Once the sound plays, a stall no longer stops it: the picture drops frames to follow it
+    /// (#2473).
     pub starting: bool,
     /// When the preview started (seconds): [`Playback::starting`] gives up after `STARTUP_LIMIT`.
     pub starting_since: f64,
@@ -209,6 +222,14 @@ pub struct Playback {
     pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
+    /// The rate the silent clock advances at (comp frames per second, at most `fps`; 0 = the
+    /// frame rate): below real time while frames arrive slower than that, so a first playback
+    /// shows them evenly instead of in bursts between freezes (see `pace_for`).
+    pub pace: f64,
+    /// Played frames the paced clock owes (fractional), `Some` while it runs below real time.
+    pub pace_acc: Option<f64>,
+    /// When the silent clock last ran (seconds), for the pace.
+    pub paced_at: Option<f64>,
 }
 
 impl Playback {
@@ -294,6 +315,7 @@ pub struct EffectcraftApp {
     pub(crate) input_waiters: Vec<Sender<serde_json::Value>>,
     /// Control requests waiting for an offloaded job (`wait: true` in the browser).
     pub(crate) job_waiters: Vec<(control::JobWaiter, Sender<serde_json::Value>)>,
+    pub(crate) script_waiters: Vec<(u32, Sender<serde_json::Value>)>,
     pending_screenshots: Vec<PendingShot>,
     /// Pixels reserved by queued and in-flight screenshot requests.
     shot_bytes: usize,
@@ -311,10 +333,28 @@ pub struct EffectcraftApp {
     /// The last GPU frame shown: its egui texture id (registered with egui-wgpu), key and texture.
     pub(crate) viewer_native: Option<(egui::TextureId, FrameKey, Arc<effectcraft_gpu::DisplayFrame>)>,
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
-    pub(crate) viewer_shown: Option<(egui::TextureId, FrameKey)>,
-    /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames fill it on
-    /// demand ([`EffectcraftApp::viewer_pixels`]).
+    /// (`None` texture: a half-float frame, drawn by the display pass.)
+    pub(crate) viewer_shown: Option<(Option<egui::TextureId>, FrameKey)>,
+    /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
+    pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames and
+    /// half-float frames fill it on demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,
+    /// The half-float frame on screen (32 bpc projects; its key is `viewer_shown`'s).
+    pub(crate) viewer_f16: Option<Arc<frames::F16Frame>>,
+    /// The window's egui-wgpu device (with or without a GPU compositor on it): the display pass
+    /// runs there.
+    pub(crate) window_wgpu: Option<eframe::egui_wgpu::RenderState>,
+    /// The display pass on that device (made with the first frame that needs it), and whether
+    /// making it failed (the pass then runs on the CPU).
+    pub(crate) display_gpu: Option<Arc<display_gpu::DisplayGpu>>,
+    pub(crate) display_gpu_failed: bool,
+    /// The Composition viewer's and the snapshot's displayed textures (display pass).
+    pub(crate) viewer_bake: display_gpu::Bake,
+    pub(crate) snapshot_bake: display_gpu::Bake,
+    /// The snapshot in half floats for the display pass (the image it was made from, not kept
+    /// alive by this).
+    pub(crate) snapshot_f16: Option<(std::sync::Weak<effectcraft_engine::render::Image>, Arc<frames::F16Frame>)>,
     /// wasm32: an asynchronous readback of a GPU viewer frame (key asked for, result).
     viewer_readback: (Option<FrameKey>, Arc<std::sync::Mutex<Option<(FrameKey, Arc<egui::ColorImage>)>>>),
     /// egui-wgpu's device, once the first frame arrives (desktop and WebGPU).
@@ -332,7 +372,7 @@ pub struct EffectcraftApp {
     /// files, started with the first project that has items ([`Self::tick_footage_reload`]).
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
-    footage_watch_key: Option<(u64, String)>,
+    footage_watch_key: Option<(u64, String, bool)>,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,
