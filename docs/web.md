@@ -407,8 +407,9 @@ The control channel of the desktop app (`docs/control-protocol.md`) as promises.
 with the method's `result`, errors reject with the message. `request`, `execute`, `commands`,
 `uiInspect` and `screenshot` come from [`craft-web-api`](https://github.com/storytold/craft-libs/tree/main/crates/web-api)
 (storytold/craft-libs#413), the same shape in every Craft app: a call the app does not answer within
-30 seconds rejects, and an app that has not started it still runs it when it reaches it (EffectCraft's
-control requests cannot be withdrawn). EffectCraft has no `document.inspect`, so there is no
+30 seconds rejects in the page, but EffectCraft's control requests cannot be withdrawn: the app still runs
+the call when it reaches it, and a retry after a timeout can apply it twice. A call that takes longer than
+30 seconds to be answered, a long `render.frame` for example, rejects in the page while the app finishes it. EffectCraft has no `document.inspect`, so there is no
 `docInspect`.
 
 | Call | |
