@@ -51,8 +51,10 @@ struct State {
     worker: bool,
     /// Bumped with each new setting: a copy started under another one is thrown away.
     epoch: u64,
-    /// The free space seen last on the copies' disk and when (read at most every 30 s).
-    space: Option<((u64, u64), std::time::Instant)>,
+    /// The free space seen last on the copies' disk, when (read at most every 30 s) and how many
+    /// bytes the copies took then: what they took more or less since is what the disk gained
+    /// or lost since, so the reading is not stale ([`limit`]).
+    space: Option<((u64, u64), std::time::Instant, u64)>,
     /// The limit is held below the setting by free disk space.
     reserve_limited: bool,
     /// Folders being adopted now ([`configure`]): the worker starts no copy meanwhile (a copy
@@ -136,7 +138,9 @@ pub fn configure(config: Option<LocalizeConfig>) {
             st.copies.insert(original, Copy { last_use, ..copy });
         }
         if let Some(space) = space {
-            st.space = Some((space, std::time::Instant::now()));
+            // (read after the scan: the adopted copies were on the disk already)
+            let bytes = st.bytes;
+            st.space = Some((space, std::time::Instant::now(), bytes));
         }
         let max = limit(&mut st);
         evict_to(&mut st, max)
@@ -370,12 +374,17 @@ fn start_worker(_st: &mut State) {}
 /// every 30 s).
 fn limit(st: &mut State) -> u64 {
     let Some(c) = st.config.clone() else { return 0 };
-    let fresh = st.space.is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_secs(30));
+    let fresh = st.space.is_some_and(|(_, at, _)| at.elapsed() < std::time::Duration::from_secs(30));
     if !fresh && let Some(read) = &c.disk_space {
-        st.space = read().map(|s| (s, std::time::Instant::now()));
+        let bytes = st.bytes;
+        st.space = read().map(|s| (s, std::time::Instant::now(), bytes));
     }
+    // (free space then, less what the copies took since, plus what they took then: what the
+    // copies may take; a copy written meanwhile is not free room, a copy evicted is)
     let cap = match st.space {
-        Some(((total, available), _)) if total > 0 => st.bytes.saturating_add(available).saturating_sub(effectcraft_render::disk_cache::disk_reserve(total)),
+        Some(((total, available), _, at_bytes)) if total > 0 => {
+            at_bytes.saturating_add(available).saturating_sub(effectcraft_render::disk_cache::disk_reserve(total))
+        }
         _ => u64::MAX,
     };
     st.reserve_limited = cap < c.max_bytes;
@@ -411,7 +420,7 @@ fn local_name(original: &Path) -> String {
 fn worker() {
     let (m, cv) = state();
     loop {
-        let (job, config, epoch, room) = {
+        let (job, config, epoch) = {
             let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
             loop {
                 if st.adopting == 0
@@ -420,8 +429,7 @@ fn worker() {
                     st.queue.pop_front();
                     st.queued.remove(&p);
                     st.copying = Some((p.clone(), st.epoch));
-                    let room = limit(&mut st);
-                    break (p, c, st.epoch, room);
+                    break (p, c, st.epoch);
                 }
                 let (g, timeout) = match cv.wait_timeout(st, std::time::Duration::from_secs(30)) {
                     Ok(r) => r,
@@ -434,7 +442,26 @@ fn worker() {
                 }
             }
         };
-        let copied = copy_file(&job, &config.folder, room);
+        // Room is made for the incoming file before it is written: the least recently used
+        // copies go first, so the disk's reserve is never eaten (a file over the limit is skipped).
+        let make_room = |incoming: u64| {
+            let (fits, gone) = {
+                let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
+                if st.epoch != epoch {
+                    return false;
+                }
+                let max = limit(&mut st);
+                if incoming > max {
+                    return false;
+                }
+                (true, evict_to(&mut st, max - incoming))
+            };
+            for local in gone {
+                remove_copy(&local);
+            }
+            fits
+        };
+        let copied = copy_file(&job, &config.folder, &make_room);
         let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
         st.copying = None;
         let mut gone = vec![];
@@ -475,10 +502,10 @@ fn worker() {
 /// in between leaves a record without its copy or a temporary, both deleted when the folder is
 /// adopted; never a copy without a record, nor old bytes beside a new record); its
 /// modification time set to the source's. The copy, its size and the
-/// source's identity, or `None` (larger than `room`, unreadable, or changed while it was
-/// copied).
+/// source's identity, or `None` (`make_room` refused its size, unreadable, or changed while it
+/// was copied). `make_room` is asked, with the file's size, before anything is written.
 #[cfg(not(target_arch = "wasm32"))]
-fn copy_file(original: &Path, folder: &Path, room: u64) -> Option<(PathBuf, u64, FileStamp)> {
+fn copy_file(original: &Path, folder: &Path, make_room: &dyn Fn(u64) -> bool) -> Option<(PathBuf, u64, FileStamp)> {
     #[cfg(test)]
     {
         let hook = BEFORE_COPY.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -487,7 +514,7 @@ fn copy_file(original: &Path, folder: &Path, room: u64) -> Option<(PathBuf, u64,
         }
     }
     let meta = std::fs::metadata(original).ok().filter(std::fs::Metadata::is_file)?;
-    if meta.len() > room {
+    if !make_room(meta.len()) {
         return None;
     }
     let before = FileStamp::of_metadata(&meta);
@@ -736,5 +763,50 @@ mod tests {
         assert!(busy.exists(), "the copy being made stays");
         assert!(other.exists(), "not the localizer's: left alone");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// #3301 review: free space is read every 30 s, but copies are made in between. Two copies
+    /// inside one reading each looked at the same free space (and at room that existing copies
+    /// took), so together they ate the disk's reserve. Now room is made before a copy is
+    /// written, and what the copies took since the reading is not free.
+    #[test]
+    fn two_copies_in_one_free_space_reading_keep_the_reserve() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _hooks = HookGuard;
+        let root = std::env::temp_dir().join(format!("ec-3301-reserve-{}", std::process::id()));
+        let (share, local) = (root.join("share"), root.join("local"));
+        std::fs::create_dir_all(&share).unwrap();
+        treat_as_network(&share);
+        let (a, b) = (share.join("a.exr"), share.join("b.exr"));
+        std::fs::write(&a, vec![1u8; 2000]).unwrap();
+        std::fs::write(&b, vec![2u8; 2000]).unwrap();
+        // The disk has 3000 bytes above its reserve and keeps saying so (a cached reading).
+        let total = 1u64 << 40;
+        let free = effectcraft_render::disk_cache::disk_reserve(total) + 3000;
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = reads.clone();
+        let disk_space: std::sync::Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync> = std::sync::Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some((total, free))
+        });
+        configure(Some(LocalizeConfig { folder: local.clone(), max_bytes: 1 << 30, network: vec![], disk_space: Some(disk_space) }));
+        request(&a);
+        let s = wait_for(|s| s.files == 1 && s.copying.is_none());
+        assert_eq!((s.files, s.bytes), (1, 2000), "{s:?}");
+        request(&b);
+        let stamp = |p: &Path| FileStamp::of_metadata(&std::fs::metadata(p).unwrap());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while local_copy(&b, &stamp(&b)).is_none() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let s = wait_for(|s| s.copying.is_none() && s.queued == 0);
+        assert!(local_copy(&b, &stamp(&b)).is_some(), "the new copy is kept: {s:?}");
+        assert!(local_copy(&a, &stamp(&a)).is_none(), "the older one made room");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1, "one reading for both copies");
+        assert!(s.bytes <= 3000, "the reserve is kept: {s:?}");
+        assert_eq!(s.files, 1, "the older copy made room: {s:?}");
+        let tmp = std::fs::read_dir(&local).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count()).unwrap_or(0);
+        assert_eq!(tmp, 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
