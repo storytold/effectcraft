@@ -1040,6 +1040,9 @@ impl<'a> Renderer<'a> {
     /// changes them: an 8 bpc render at Full size of plain footage (no masks, colour profile,
     /// Separate Fields, Frame Blending, Cineon, Invert Alpha or linear light interpretation).
     /// `None` otherwise, and when the source has no 8-bit frame.
+    // ponytail: the media pool keeps the 8-bit and the float frame as separate entries, so a
+    // movie shown by both a plain and a masked layer in one 8 bpc comp is decoded twice per
+    // frame; derive one from the other in the pool if a comp like that turns out common.
     #[allow(clippy::too_many_arguments)]
     fn footage_buf8(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, pf: &Footage, f: &Footage, t: Tick) -> Option<Buf> {
         let plain = self.pipe.levels == Some(255.0)
