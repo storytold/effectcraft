@@ -3498,7 +3498,8 @@ struct BarDrag {
 
 /// The whole frames a bar drag of `px` moves its ends by: truncated as the pointer goes, or with
 /// `shift`, the move that puts one of `ends` on the nearest target within 8 px of the pointer
-/// (#1828). Measured from the pointer, never the snapped result, so dragging on lets go.
+/// (#1828). Measured from the pointer, never the snapped result, so dragging on lets go. The
+/// move stays whole frames, so an end off the frame grid lands within half a frame of its target.
 fn bar_drag_frames(px: f64, pps: f64, fd: f64, ends: &[f64], targets: &[f64], shift: bool) -> i64 {
     let secs = px / pps;
     let snapped = shift
