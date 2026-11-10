@@ -111,10 +111,10 @@ fn main() {
     run(&mut s, "prop.addKey", json!({"layer": solid, "path": "transform/position", "time": 0.0, "value": [200.0, 540.0]}));
     run(&mut s, "prop.addKey", json!({"layer": solid, "path": "transform/position", "time": secs, "value": [1720.0, 540.0]}));
     run(&mut s, "prop.set", json!({"layer": solid, "path": "transform/opacity", "value": 70.0}));
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     p.settings.bit_depth = effectcraft_engine::project::BitDepth::Bpc32;
     p.settings.gpu_acceleration = gpu;
-    s.project = Arc::new(p);
+    s.set_project(Arc::new(p));
 
     let _ = std::fs::remove_dir_all(&out);
     let dirs = [out.join("a"), out.join("b")];

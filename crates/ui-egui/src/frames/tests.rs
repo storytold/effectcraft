@@ -3162,7 +3162,7 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
     let comp = session.active_comp_id().unwrap();
     let solid = session.execute("layer.newSolid", serde_json::json!({"color": "#ff0000"})).unwrap()["layer"].clone();
     session.execute("effect.apply", serde_json::json!({"layers": [solid], "effect": "Gaussian Blur"})).unwrap();
-    src.project = session.project;
+    src.project = (*session.project).clone();
     src.gpu = Some(gpu.clone());
     src.gpu_display = true;
     let mut job = Job {

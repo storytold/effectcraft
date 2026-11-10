@@ -589,7 +589,7 @@ fn placed_vector_footage_fills_its_stored_size_at_every_resolution() {
     let own = s.render(own_comp, Tick::ZERO, RenderOpts::default());
     assert!(red(own.get(50, 90)) && blue(own.get(150, 90)));
     // Two placed items of the file with the sizes an After Effects project stores (other aspects).
-    let proj = std::sync::Arc::make_mut(&mut s.project);
+    let proj = s.project_mut();
     let ItemKind::Footage(f) = &mut proj.item_mut(item).unwrap().kind else { panic!("footage") };
     (f.width, f.height, f.placed_page) = (100, 80, true);
     let tall = effectcraft_project::Footage { width: 60, height: 120, ..f.clone() };
@@ -640,7 +640,7 @@ fn shapes_from_a_placed_page_stay_inside_its_frame() {
     let mut s = effectcraft_host::session();
     let item = ItemId(s.execute_checked("file.import", json!({"paths": [path]})).unwrap()["items"][0].as_u64().unwrap());
     // As an After Effects project stores it: the ArtBox's size, placed.
-    let ItemKind::Footage(f) = &mut std::sync::Arc::make_mut(&mut s.project).item_mut(item).unwrap().kind else { panic!("footage") };
+    let ItemKind::Footage(f) = &mut s.project_mut().item_mut(item).unwrap().kind else { panic!("footage") };
     (f.width, f.height, f.placed_page) = (241, 121, true);
     s.execute("comp.new", json!({"name": "Big", "width": 400, "height": 300, "frameRate": 25, "duration": 1})).unwrap();
     let lid = s.execute_checked("layer.addItem", json!({"item": item.0})).unwrap()["layer"].as_u64().unwrap();
@@ -683,7 +683,7 @@ fn images_from_a_placed_page_stay_inside_its_frame() {
     std::fs::write(&path, image_pdf_with("/ArtBox [20 15 100 70]")).unwrap();
     let mut s = effectcraft_host::session();
     let item = ItemId(s.execute_checked("file.import", json!({"paths": [path]})).unwrap()["items"][0].as_u64().unwrap());
-    let ItemKind::Footage(f) = &mut std::sync::Arc::make_mut(&mut s.project).item_mut(item).unwrap().kind else { panic!("footage") };
+    let ItemKind::Footage(f) = &mut s.project_mut().item_mut(item).unwrap().kind else { panic!("footage") };
     (f.width, f.height, f.placed_page) = (80, 55, true);
     s.execute("comp.new", json!({"name": "Big", "width": 200, "height": 150, "frameRate": 25, "duration": 1})).unwrap();
     let lid = s.execute_checked("layer.addItem", json!({"item": item.0})).unwrap()["layer"].as_u64().unwrap();
@@ -741,7 +741,7 @@ fn a_pdf_with_an_art_box_imported_here_keeps_the_viewer_framing() {
     assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 1.0 / 255.0);
     let saved = s.project.to_json();
     assert!(!saved.contains("placed_page"), "the saved project is in the earlier format");
-    s.project = std::sync::Arc::new(Project::from_json(&saved).unwrap());
+    s.set_project(std::sync::Arc::new(Project::from_json(&saved).unwrap()));
     assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 1.0 / 255.0, "reopened");
 }
 
@@ -828,7 +828,7 @@ fn aep_ai_layer_with_masks_under_two_nulls_renders_like_after_effects() {
             .find(|i| matches!(&i.kind, ItemKind::Footage(f) if f.path.ends_with(name)))
             .map(|i| i.id)
             .unwrap_or_else(|| panic!("footage {name}"));
-        let ItemKind::Footage(f) = &mut std::sync::Arc::make_mut(&mut s.project).item_mut(item).unwrap().kind else { panic!("footage") };
+        let ItemKind::Footage(f) = &mut s.project_mut().item_mut(item).unwrap().kind else { panic!("footage") };
         assert_eq!((f.width, f.height, f.placed_page), (size.0, size.1, true), "{name}: After Effects' size of the placed .ai");
         (f.path, f.missing) = (file.to_string_lossy().into_owned(), false);
     }

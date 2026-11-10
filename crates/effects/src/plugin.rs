@@ -490,7 +490,7 @@ pub fn unregister_plugin(id: &str) -> bool {
 /// Whether the registered plug-in `id` reads the layer at other times (its neighbouring frames),
 /// so the render cache must key its layer on the layer time.
 pub fn reads_other_times(id: &str) -> bool {
-    SLOTS.iter().filter_map(|s| s.get()).any(|p| p.manifest().id == id && p.reads_other_times())
+    (0..MAX_PLUGINS).any(|i| slot_read(i).plugin.as_ref().is_some_and(|p| p.manifest().id == id && p.reads_other_times()))
 }
 
 fn leak(s: &str) -> &'static str {

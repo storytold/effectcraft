@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-link"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "craft-command",
  "craft-ipc",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-plugins"
-version = "0.21.0"
+version = "0.23.1"
 dependencies = [
  "bytemuck",
  "craft-command",
