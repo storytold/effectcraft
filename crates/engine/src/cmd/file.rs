@@ -319,15 +319,19 @@ impl Prober {
             return f.map(|footage| Probed { name, footage, ask_alpha: false, warning: None }).map_err(fail);
         }
         let importer = self.importer.as_ref().ok_or_else(|| fail("media import is not available in this build".into()))?;
-        let mut f = crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?;
-        let mut warning = None;
+        // What the file's own import left out (a model's textures over the limits) is a warning too.
+        let (mut f, mut warning) = match src {
+            Source::File(_) => importer.probe_noting(path).map_err(fail)?,
+            _ => (crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?, None),
+        };
         // Settings ▸ Import ▸ Report Missing Frames (numbered sequences).
         if f.kind == FootageKind::Sequence
             && !f.alphabetical
             && self.report_missing_frames
             && let Some(gaps) = crate::sequence::missing_report(&f.sequence)
         {
-            warning = Some(format!("{name}: {gaps} (the previous frame is held)"));
+            let gaps = format!("{name}: {gaps} (the previous frame is held)");
+            warning = Some(warning.map_or(gaps.clone(), |w| format!("{w}; {gaps}")));
         }
         // Settings ▸ Import ▸ Interpret Unlabeled Alpha As: images only (a 3D model renders its
         // own alpha, and audio and data have none).
