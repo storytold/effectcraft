@@ -220,7 +220,18 @@ pub enum PsOp {
 /// (the caller rejects it when `ops` ends past the cap).
 fn ps_parse(lx: &mut crate::object::Lexer, depth: usize, ops: &mut usize) -> Vec<PsOp> {
     let mut out = vec![];
-    while let Some(o) = lx.next() {
+    loop {
+        // A calculator holds no arrays or dictionaries: one is skipped as a single token without
+        // being built (the lexer would allocate every element before this counted it).
+        if lx.at_compound() {
+            if *ops > MAX_CALC_OPS {
+                break;
+            }
+            lx.skip_compound();
+            *ops += 1;
+            continue;
+        }
+        let Some(o) = lx.next() else { break };
         if *ops > MAX_CALC_OPS {
             break;
         }
@@ -803,6 +814,26 @@ mod tests {
         let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
         let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
         assert_eq!(ps_len(&code), MAX_CALC_OPS + 1);
+    }
+
+    #[test]
+    fn arrays_and_dictionaries_in_a_calculator_are_skipped_whole() {
+        // Strings with brackets, nested arrays and a dictionary are one skipped token each; the
+        // operators around them still parse.
+        let src = b"{ 1 [ (a]b) [1 2] << /K [3 4] /S (>>) >> 5 ] 2 add << /A 1 >> mul }";
+        let mut lx = crate::object::Lexer::new(src, 0);
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
+        assert_eq!(code, vec![PsOp::Num(1.0), PsOp::Num(2.0), PsOp::Op("add".into()), PsOp::Op("mul".into())]);
+        // A huge array is skipped once the cap is passed, not read to its end.
+        let src = format!("{{ [ {}] 1 }}", "0 ".repeat(MAX_CALC_OPS * 100));
+        let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
+        let mut scanned = 0;
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut scanned).into_iter().next() else { panic!() };
+        assert_eq!(code, vec![PsOp::Num(1.0)]);
+        // An unclosed one ends at the end of the data.
+        let mut lx = crate::object::Lexer::new(b"[ 1 2 ", 0);
+        lx.skip_compound();
+        assert_eq!(lx.pos, 6);
     }
 
     #[test]
