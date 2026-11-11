@@ -336,11 +336,12 @@ impl PathSeg {
             row.sort_by(|a, b| a.0.total_cmp(&b.0));
             // With crossings missing, edges that swap places inside the band make its trapezoids
             // wrong: it is left out.
-            if truncated && !row.windows(2).all(|w| w[0].1 <= w[1].1 + 1e-9 && w[0].2 <= w[1].2 + 1e-9) {
-                continue;
-            }
+            let swapped = truncated && !row.windows(2).all(|w| w[0].1 <= w[1].1 + 1e-9 && w[0].2 <= w[1].2 + 1e-9);
             let mut wind = 0;
             for k in 0..row.len().saturating_sub(1) {
+                if swapped {
+                    break;
+                }
                 wind += row[k].3;
                 let inside = if even_odd { wind % 2 != 0 } else { wind != 0 };
                 if inside {
@@ -349,6 +350,7 @@ impl PathSeg {
                     out.push([[l.1, ya], [r.2, yb], [l.2, yb]]);
                 }
             }
+            // (Every band's edge scan counts, a band left out included.)
             work = work.saturating_add(edges.len());
             if out.len() > max_triangles || work > max_work {
                 log::warn!("fillPath: over its triangle or work budget, filled down to y = {yb}");
@@ -1025,6 +1027,9 @@ mod tests {
         let bow = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 10.0, y: 10.0 }, PathSeg::L { x: 0.0, y: 10.0 }, PathSeg::L { x: 10.0, y: 0.0 }];
         assert!((area(&PathSeg::fill_triangles(&bow, 48, false)) - 50.0).abs() < 1e-9);
         let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
+        // Bands left out still count against the work budget (it ends the scan after the first).
+        let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, 1]);
         assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
     }
 }
