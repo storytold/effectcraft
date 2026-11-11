@@ -448,16 +448,20 @@ fn cancelled_export_removes_only_files_it_opened() {
 /// (it checked only the primary destination, then truncated the overflow file).
 #[test]
 fn skip_existing_keeps_a_frame_in_the_overflow_folder() {
-    struct Overflow;
+    use std::path::PathBuf;
+    // Room only in the second overflow folder; the frame already sits in the first (which is full).
+    struct Overflow(PathBuf);
     impl StorageQuota for Overflow {
         fn has_room(&self, path: &str, _: u64) -> bool {
-            path.contains("overflow")
+            std::path::Path::new(path).starts_with(&self.0)
         }
     }
     let guard = tempfile::tempdir().unwrap();
-    let (dir, over) = (guard.path().to_path_buf(), guard.path().join("overflow"));
+    let (dir, full, over) = (guard.path().to_path_buf(), guard.path().join("full"), guard.path().join("over"));
+    std::fs::create_dir_all(&full).unwrap();
     std::fs::create_dir_all(&over).unwrap();
-    std::fs::write(over.join("clip_00000.png"), b"keep").unwrap();
+    std::fs::write(full.join("clip_00000.png"), b"keep").unwrap();
+    let quota = Overflow(over.clone());
     let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
     let settings = RenderSettings { skip_existing: true, storage_overflow: true, ..Default::default() };
     let om = OutputModule::for_format(OutputFormat::PngSequence);
@@ -474,12 +478,17 @@ fn skip_existing_keeps_a_frame_in_the_overflow_folder() {
             path: path.to_str().unwrap(),
             sink: None,
             nested_switches: true,
-            options: JobOptions { storage: Some(&Overflow), overflow: vec![over.to_string_lossy().into_owned()], ..Default::default() },
+            options: JobOptions {
+                storage: Some(&quota),
+                overflow: vec![full.to_string_lossy().into_owned(), over.to_string_lossy().into_owned()],
+                ..Default::default()
+            },
         },
         &mut |_| true,
     );
     assert!(result.is_ok(), "{result:?}");
-    assert_eq!(std::fs::read(over.join("clip_00000.png")).unwrap(), b"keep");
+    assert_eq!(std::fs::read(full.join("clip_00000.png")).unwrap(), b"keep");
+    assert!(!over.join("clip_00000.png").exists(), "no duplicate in another overflow folder");
     assert!(over.join("clip_00001.png").exists(), "the other frames are still written");
 }
 
