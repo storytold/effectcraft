@@ -147,8 +147,8 @@ impl Session {
 
     /// Sets the time of every comp related to `comp` through precomp layers: down into the comps
     /// it nests (through each layer's timing) and up into the comps nesting it. A seen-set keeps
-    /// cycles and diamonds finite; each found time is clamped to its comp's last frame, snapped to
-    /// the nearest frame and stored in `state.times`. The caller owns the text-editor boundary.
+    /// cycles and diamonds finite; each found time goes through [`comp_frame_at`] (as a direct move
+    /// does) and is stored in `state.times`. The caller owns the text-editor boundary.
     fn sync_related_times_inner(&mut self, comp: ItemId, t: Tick) {
         let mut seen = std::collections::BTreeSet::from([comp]);
         let mut todo = vec![(comp, t)];
@@ -178,7 +178,7 @@ impl Session {
         }
         for (cid, ct) in found {
             if let Some(c) = self.project.comp(cid) {
-                let ct = c.frame_rate.snap_nearest(ct.clamp(Tick::ZERO, (c.duration - c.frame_duration()).max(Tick::ZERO)));
+                let ct = comp_frame_at(c, ct);
                 self.state.times.insert(cid, ct);
             }
         }

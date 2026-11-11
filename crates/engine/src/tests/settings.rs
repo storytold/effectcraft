@@ -490,6 +490,19 @@ fn fitted_layers_in_the_final_partial_frame_get_the_playhead() {
     assert_eq!(s.time(), effectcraft_time::Tick::from_seconds_f64(2.0));
 }
 
+/// Synchronize Time of All Related Items reaches a nested comp's final partial frame as a direct
+/// move does: the inner comp is 2.01 s (set at 100 fps, then 24 fps), the outer sits at 2.0 s.
+#[test]
+fn synced_time_reaches_a_nested_final_partial_frame() {
+    let mut s = Session::default();
+    let inner = s.execute("comp.new", json!({"name": "Inner", "duration": 2.01, "frameRate": 100, "open": false})).unwrap()["comp"].as_u64().unwrap();
+    s.execute("comp.settings", json!({"comp": inner, "frameRate": 24})).unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "duration": 4, "frameRate": 24})).unwrap();
+    s.execute("layer.addItem", json!({"item": inner, "time": 0})).unwrap();
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(2.0));
+    assert_eq!(s.time_of(effectcraft_project::ItemId(inner)), effectcraft_time::Tick::from_seconds_f64(2.0));
+}
+
 #[test]
 fn default_spatial_interpolation_linear() {
     let mut s = session_with_comp();
