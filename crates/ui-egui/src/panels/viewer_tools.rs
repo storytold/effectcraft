@@ -90,13 +90,17 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
 /// reached, and is gone if there are none.
 pub(crate) fn snap_landed(ctx: &egui::Context, at: [f64; 2]) {
     let Some(mut s) = ctx.data(|d| d.get_temp::<Snap>(snap_id())) else { return };
-    s.hits.retain(|h| {
+    // A point the handle reached on one axis only shows as the line through it on that axis.
+    s.hits.retain_mut(|h| {
         let on = |k: usize| (at[k] - h.pos[k]).abs() < 1e-6;
-        match h.kind {
-            SnapKind::Point => on(0) && on(1),
-            SnapKind::VLine => on(0),
-            SnapKind::HLine => on(1),
-        }
+        let kind = match (h.kind, on(0), on(1)) {
+            (SnapKind::Point, true, true) => SnapKind::Point,
+            (SnapKind::Point | SnapKind::VLine, true, _) => SnapKind::VLine,
+            (SnapKind::Point | SnapKind::HLine, _, true) => SnapKind::HLine,
+            _ => return false,
+        };
+        h.kind = kind;
+        true
     });
     s.at = at;
     if s.hits.is_empty() {
@@ -1014,8 +1018,8 @@ mod tests {
         assert_eq!(out.pixels[2], egui::Color32::WHITE, "the last one only the pixels it holds");
     }
 
-    /// A point target snaps both axes, so a drag that lands on only one of its coordinates keeps
-    /// no point feedback; lines keep theirs on their own axis (#2860).
+    /// A point target snaps both axes, so a drag that lands on only one of its coordinates shows
+    /// the line through it on that axis instead; lines keep theirs on their own axis (#2860).
     #[test]
     fn landed_feedback_keeps_a_point_only_when_both_axes_land() {
         let hit = |kind, pos| vw::SnapTarget { kind, pos, priority: 0, source: SnapSource::Comp, span: None };
@@ -1031,7 +1035,8 @@ mod tests {
             ctx.data(|d| d.get_temp::<Snap>(snap_id())).map(|s| s.hits.iter().map(|h| h.kind).collect::<Vec<_>>())
         };
         assert_eq!(run([10.0, 20.0]), Some(vec![SnapKind::Point, SnapKind::VLine]), "both axes land: the point stays");
-        assert_eq!(run([10.0, 50.0]), Some(vec![SnapKind::VLine]), "only x lands: the point goes, the vertical line stays");
-        assert_eq!(run([50.0, 20.0]), None, "only y lands on the point: nothing is left to show");
+        assert_eq!(run([10.0, 50.0]), Some(vec![SnapKind::VLine, SnapKind::VLine]), "only x lands: the point shows as its vertical line");
+        assert_eq!(run([50.0, 20.0]), Some(vec![SnapKind::HLine]), "only y lands on the point: its horizontal line");
+        assert_eq!(run([50.0, 50.0]), None, "nothing lands: nothing is left to show");
     }
 }
