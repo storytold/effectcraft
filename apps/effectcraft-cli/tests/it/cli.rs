@@ -432,7 +432,13 @@ s.property('Position').expression = '[80, nope + 1]';
 app.project.items.addComp('Clean', 160, 90, 1, 1, 24).layers.addSolid([0, 0, 1], 'Blue', 160, 90, 1);",
     )
     .unwrap();
-    ok_json(&["script", jsx.to_str().unwrap(), "--save-as", p]);
+    let v = ok_json(&["script", jsx.to_str().unwrap(), "--save-as", p]);
+    let errors = v["expressionErrors"].as_array().unwrap_or_else(|| panic!("script save: no expressionErrors: {v}"));
+    assert_eq!(errors.len(), 1, "only 'Broken' fails: {v}");
+    assert!(errors[0].as_str().unwrap().contains("comp 'Broken'"), "{v}");
+    let clean = tmp("expr-errors-clean.ecproj");
+    let v = ok_json(&["script", "--eval", "app.project.items.addComp('Clean', 160, 90, 1, 1, 24);", "--save-as", clean.to_str().unwrap()]);
+    assert!(v.get("expressionErrors").is_none(), "{v}");
 
     let png = tmp("expr-errors.png");
     let out = bin().args(["render-frame", "--project", p, "--comp", "Broken", "--out", png.to_str().unwrap(), "--json"]).output().unwrap();

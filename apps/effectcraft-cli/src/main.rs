@@ -514,11 +514,19 @@ fn tool(b: &mut Backend, name: &str, a: Value) -> Result<Value, Failure> {
 }
 
 /// The error bar's lines from an `expr.errors` result: a render that evaluates a failing
-/// expression still succeeds, so `render` and `render-frame` name what failed (#3444).
+/// expression still succeeds, so `render`, `render-frame` and `script` name what failed (#3444).
 fn expression_errors(r: &Value) -> Vec<String> {
     r["text"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
 }
 
+/// Every comp's failing expressions at its current time, the check `script` runs after it saves.
+fn project_expression_errors(b: &mut Backend) -> Vec<String> {
+    let Ok(p) = tool(b, "get_project", json!({})) else { return vec![] };
+    let comps: Vec<u64> = p["items"].as_array().into_iter().flatten().filter(|i| i["type"] == "Composition").filter_map(|i| i["id"].as_u64()).collect();
+    comps.into_iter().flat_map(|id| b.exec("expr.errors", json!({"comp": id})).map(|r| expression_errors(&r)).unwrap_or_default()).collect()
+}
+
+/// One stderr line per failing expression; the exit code stays 0 so existing callers keep working.
 fn warn_expression_errors(errors: &[String]) {
     for e in errors {
         note!("warning: expression error: {e}");
@@ -537,10 +545,15 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
     let mut b = backend(args, false)?;
     let r = b.exec("script.run", json!({"code": code, "name": name}))?;
     let saved = maybe_save(&mut b, args)?;
+    let errors = if saved.is_some() && r["error"].is_null() { project_expression_errors(&mut b) } else { vec![] };
+    warn_expression_errors(&errors);
     if json_out {
         let mut o = r.clone();
         if let Some(p) = &saved {
             o["saved"] = json!(p);
+        }
+        if !errors.is_empty() {
+            o["expressionErrors"] = json!(errors);
         }
         emit(&o, true);
     } else {
