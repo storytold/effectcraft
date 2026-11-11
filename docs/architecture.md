@@ -340,10 +340,13 @@ whichever compositor measured faster for it (`render::auto::AutoPick`, kept by t
 per comp, output scale and path (readback or viewer display) it averages CPU and GPU frame times
 (warm-up on both sides, the fastest warm-up frame starting the average, single stalls capped),
 picks the GPU unless the CPU is clearly faster, and re-measures the other side every 48 frames.
-Render Queue jobs don't use Auto: every frame of a job renders on the project's renderer (the
-GPU compositor with GPU Acceleration), so runs of a render don't differ by timing.
 Light comps (a few small layers, which the CPU composites only within their bounds) then stay on
-the CPU instead of paying for full-frame passes and a readback. A GPU frame walks the comp like
+the CPU instead of paying for full-frame passes and a readback. Render Queue jobs don't use
+Auto per frame: a job renders every frame on one compositor, never a mix (#3335). A GPU
+Acceleration job with an accelerator times both on its first frames
+(`export::pipeline::Cx::probe`, jobs of 12 frames or more) and keeps the faster, the CPU only
+when clearly faster; `EFFECTCRAFT_RQ_RENDERER=gpu|cpu` fixes the choice, and readback-deferred
+accelerators (the web) render on the project's renderer. A GPU frame walks the comp like
 `draw_comp`: cached layer buffers are uploaded once per buffer, then transformed with the CPU's
 sampling (nearest, bilinear, Catmull-Rom bicubic, the same minification pre-filter), motion-blur
 sub-samples are accumulated, and track mattes, Preserve Transparency, layer style passes,
@@ -412,7 +415,12 @@ as NaNs (a kernel that skips pixels fails the oracle) and validation errors pani
 (`ui-egui::frames`); headless renders, the CLI (unless `--gpu`) and CI use the CPU. Outside
 tests, device errors are logged rather than fatal. A viewer frame that runs out of video memory
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
-the RAM preview keeps half as many GPU frames from then on. The same guard catches a frame's
+the RAM preview keeps half as many GPU frames from then on. However many frame threads the viewer
+runs, at most two of them start GPU render attempts at once. Shared-pool workers use the CPU
+when both slots are busy rather than blocking Rayon helpers; dedicated single-thread preview
+lanes wait for admission and remain on the GPU, so
+working-texture pressure is bounded by concurrent attempts rather than the thread count (#3028).
+A single large frame or retained frames can still exceed the available video memory. The same guard catches a frame's
 validation errors (an invalid texture, often left by a failed allocation): that frame renders on
 the CPU and the kept textures are freed, but the compositor stays on and, with no allocation
 failure before it, the RAM preview keeps its GPU frames (#1319). A frame whose render panics is
