@@ -346,15 +346,21 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
         return v.clone();
     }
     let inline = src.contains('\n') || src.contains("LUT_");
-    let parsed = if inline { parse_cube(src) } else { read_text_file(Path::new(src.trim())).ok().and_then(|t| parse_cube(&t)) }.map(Arc::new);
+    let parsed = if inline {
+        parse_cube(src)
+    } else {
+        read_text_file(Path::new(src.trim())).map_err(|e| log::warn!("LUT not loaded: {e}")).ok().and_then(|t| parse_cube(&t))
+    }
+    .map(Arc::new);
     if let Ok(mut m) = cache.lock() {
         m.insert(src.to_string(), parsed.clone());
     }
     parsed
 }
 
-/// Largest text file an effect reads (a LUT, an OCIO config, Mocha shape data).
-const MAX_TEXT_FILE_BYTES: u64 = 256 << 20;
+/// Largest text file an effect reads (a LUT, an OCIO config, Mocha shape data): 1 GiB, over the
+/// ~0.45 GB a 256³ `.cube` takes with six decimals, so no supported LUT is refused.
+const MAX_TEXT_FILE_BYTES: u64 = 1 << 30;
 
 /// A text file an effect parameter or a saved project names: only a regular file, and only up to
 /// [`MAX_TEXT_FILE_BYTES`] (`/dev/zero` or a FIFO would never end).
