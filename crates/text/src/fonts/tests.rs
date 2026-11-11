@@ -473,6 +473,24 @@ fn microsoft_families_resolve_to_metric_compatible_substitutes() {
     assert!(unknown.missing);
 }
 
+/// An installed Microsoft family is used as is and not reported missing, even when its
+/// substitute is also available (#1677). It runs in a child process so the Calibri fixture does
+/// not reach the substitute test above.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn an_installed_microsoft_family_wins_over_its_substitute() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_CALIBRI";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_child(CHILD, "fonts::tests::an_installed_microsoft_family_wins_over_its_substitute");
+        return;
+    }
+    add_font_data(test_font("Carlito"));
+    add_font_data(test_font("Calibri"));
+    let resolved = resolve("Calibri", "Regular");
+    assert_eq!(face(resolved.face).info.family, "Calibri");
+    assert!(!resolved.missing, "the installed family is available");
+}
+
 #[test]
 fn the_han_order_follows_the_cjk_locale() {
     // Chinese first for any Chinese tag, whether or not it names a script.
