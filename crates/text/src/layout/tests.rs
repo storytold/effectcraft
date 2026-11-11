@@ -523,6 +523,7 @@ fn item_glyphs_in_matches_a_full_scan() {
             assert_eq!(got, want, "{clusters:?} {a}..{b}");
         }
     }
+}
 
 #[test]
 fn run_lookup_by_bisection_matches_the_scan() {
