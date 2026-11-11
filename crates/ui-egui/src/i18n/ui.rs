@@ -2442,7 +2442,6 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("GPU Acceleration (no GPU: software)", "GPU 加速（无 GPU：软件）"),
 ];
 
-/// Swedish (`sv`), written from the English source.
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
     ("Auto-saves", "שמירות אוטומטיות"),
@@ -2465,8 +2464,49 @@ const HEBREW: &[(&str, &str)] = &[
     ("Delete", "מחיקה"),
     ("Layer", "שכבה"),
     ("File", "קובץ"),
+
+    ("New Project", "פרויקט חדש"),
+    ("Open Project…", "פתיחת פרויקט…"),
+    ("New Composition", "קומפוזיציה חדשה"),
+    ("Open Demo Project", "פתיחת פרויקט הדגמה"),
+    ("Create a new project, or open the demo project to look around.", "אפשר ליצור פרויקט חדש או לפתוח את פרויקט ההדגמה כדי להכיר את הממשק."),
+    ("Open Last Saved Project", "פתיחת הפרויקט האחרון שנשמר"),
+    ("Recent Projects Shown", "מספר הפרויקטים האחרונים המוצגים"),
+    ("Recent", "אחרונים"),
+    ("Projects", "פרויקטים"),
+    ("Project: {}", "פרויקט: {}"),
+    ("Auto-Save", "שמירה אוטומטית"),
+    ("Save Every", "שמירה כל"),
+    ("Auto-Save Location", "מיקום השמירה האוטומטית"),
+    ("Save When Starting Render Queue", "שמירה בעת התחלת תור הרינדור"),
+    ("Save Now", "שמור עכשיו"),
+    ("New Project Loads Template", "טעינת תבנית בפרויקט חדש"),
+    ("Open Composition", "פתיחת קומפוזיציה"),
+    ("Open New Composition", "פתיחת קומפוזיציה חדשה"),
+    ("Save from #{}", "שמירה מתוך #{}"),
+    ("Saved {}", "נשמר: {}"),
+    (" Open Auto-Save ", " פתיחת שמירה אוטומטית "),
+    ("Browse…", "עיון…"),
+    ("Browser Storage", "אחסון דפדפן"),
+    ("Open Output", "פתיחת הפלט"),
+    ("Export...", "ייצוא..."),
+    ("Import...", "ייבוא..."),
+    ("Imported media", "מדיה שיובאה"),
+    ("Close Panel", "סגירת חלונית"),
+    ("Restore Panel Size", "שחזור גודל החלונית"),
+    ("New from Template", "חדש מתבנית"),
+    ("Create a new Folder", "יצירת תיקייה חדשה"),
+    ("File Path", "נתיב הקובץ"),
+    ("Rename", "שינוי שם"),
+    ("Delete selected project items", "מחיקת הפריטים שנבחרו בפרויקט"),
+    ("Save Current as Template…", "שמירת הנוכחי כתבנית…"),
+    ("New composition name:", "שם הקומפוזיציה החדשה:"),
+    ("New Duration:", "משך חדש:"),
+    ("Open a composition to see its scopes", "פתיחת קומפוזיציה כדי להציג את טווחי המדידה"),
+    ("Open a composition to track motion.", "פתח קומפוזיציה כדי לעקוב אחר תנועה."),
 ];
 
+/// Swedish (`sv`), written from the English source.
 const SWEDISH: &[(&str, &str)] = &[
     ("Appearance Settings…", "Utseendeinställningar…"),
     ("Add to favorites", "Lägg till i favoriter"),
@@ -10329,6 +10369,30 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opening, saving and restoring a project must be understandable in Hebrew Native UI.
+    #[test]
+    fn hebrew_project_entry_and_autosave_panels_are_localized() {
+        set_current("he");
+        for (english, translated) in [
+            ("Open Project…", "פתיחת פרויקט…"),
+            ("Open Demo Project", "פתיחת פרויקט הדגמה"),
+            ("Recent Projects Shown", "מספר הפרויקטים האחרונים המוצגים"),
+            ("Project: {}", "פרויקט: {}"),
+            ("Auto-Save", "שמירה אוטומטית"),
+            ("Save Now", "שמור עכשיו"),
+            ("Saved {}", "נשמר: {}"),
+            (" Open Auto-Save ", " פתיחת שמירה אוטומטית "),
+        ] {
+            assert_eq!(tr(english), translated, "Hebrew missing for {english}");
+        }
+        let name = "demo.ecproj";
+        assert_eq!(tr_args("Project: {}", &[&name]), "פרויקט: demo.ecproj");
+        assert_eq!(tr_args("Saved {}", &[&name]), "נשמר: demo.ecproj");
+        set_current("en");
+        assert_eq!(tr("Open Project…"), "Open Project…");
+    }
+
 
     /// Check rendered feature labels only. Format names, compatibility tokens and user text
     /// are not subject to this guard, and a missing translation keeps its English fallback.
