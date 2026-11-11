@@ -444,6 +444,45 @@ fn cancelled_export_removes_only_files_it_opened() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Skip Existing keeps a frame that is already in the overflow folder the frame is placed in
+/// (it checked only the primary destination, then truncated the overflow file).
+#[test]
+fn skip_existing_keeps_a_frame_in_the_overflow_folder() {
+    struct Overflow;
+    impl StorageQuota for Overflow {
+        fn has_room(&self, path: &str, _: u64) -> bool {
+            path.contains("overflow")
+        }
+    }
+    let guard = tempfile::tempdir().unwrap();
+    let (dir, over) = (guard.path().to_path_buf(), guard.path().join("overflow"));
+    std::fs::create_dir_all(&over).unwrap();
+    std::fs::write(over.join("clip_00000.png"), b"keep").unwrap();
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let settings = RenderSettings { skip_existing: true, storage_overflow: true, ..Default::default() };
+    let om = OutputModule::for_format(OutputFormat::PngSequence);
+    let path = dir.join("clip_[#####].png");
+    let result = export(
+        &Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &om,
+            path: path.to_str().unwrap(),
+            sink: None,
+            nested_switches: true,
+            options: JobOptions { storage: Some(&Overflow), overflow: vec![over.to_string_lossy().into_owned()], ..Default::default() },
+        },
+        &mut |_| true,
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(std::fs::read(over.join("clip_00000.png")).unwrap(), b"keep");
+    assert!(over.join("clip_00001.png").exists(), "the other frames are still written");
+}
+
 /// A GPU compositor stand-in that renders every frame solid green (the CPU draws the bar and the
 /// block on black) and keeps Auto's timing history.
 #[derive(Default)]

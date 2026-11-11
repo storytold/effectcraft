@@ -329,7 +329,12 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
                 let mut buf = std::io::Cursor::new(Vec::new());
                 write_still(cx, &mut buf, &img, comp, StillOutput { format: fmt, channels, size: (w, h), quality: cx.output.quality })?;
                 let data = buf.into_inner();
-                let path = cx.place(&path, data.len() as u64);
+                let primary = path;
+                let path = cx.place(&primary, data.len() as u64);
+                // Skip Existing also protects a frame already in the overflow folder.
+                if cx.settings.skip_existing && path != primary && out::exists(cx.sink, &path) {
+                    return Ok(0);
+                }
                 let mut f = cx.create(&path)?;
                 std::io::Write::write_all(&mut f, &data).map_err(io)?;
                 f.finish()
