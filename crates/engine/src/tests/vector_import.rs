@@ -411,3 +411,30 @@ fn vector_footage_thumbnails_are_drawn_at_thumbnail_size() {
     assert_eq!((w, h), (64, 32));
     assert_eq!(*source.0.lock().unwrap(), [64.0 / 16_000.0]);
 }
+
+/// A vector footage thumbnail whose drawn size is a pixel over the requested one is shrunk by
+/// that pixel, not halved by an integer step.
+#[test]
+fn a_vector_thumbnail_one_pixel_over_is_not_halved() {
+    use std::sync::Arc;
+
+    use effectcraft_project::{Footage, ItemId};
+    use effectcraft_raster::Image;
+    use effectcraft_time::Tick;
+
+    struct Over;
+    impl crate::render::FootageSource for Over {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn vector_frame(&self, _: ItemId, _: &Footage, _: f64) -> Option<Arc<Image>> {
+            Some(Arc::new(Image::new(64, 64)))
+        }
+    }
+    let mut s = Session { footage: Arc::new(Over), ..Default::default() };
+    let f = Footage { path: "/m/sq.svg".into(), codec: "SVG".into(), width: 121, height: 121, has_video: true, ..Default::default() };
+    let item = std::sync::Arc::make_mut(&mut s.project).add_item("sq.svg", effectcraft_color::Label::Sandstone, None, ItemKind::Footage(f));
+    let (w, h, px) = (s.thumbnail_job(item, Tick::ZERO, 63).unwrap())().unwrap();
+    assert_eq!((w, h), (63, 63));
+    assert_eq!(px.len(), 63 * 63 * 4);
+}
