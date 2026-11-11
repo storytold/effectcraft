@@ -649,6 +649,31 @@ fn time_set_keeps_the_frame_shown_in_the_current_time_field() {
     assert_eq!(r["frame"], 13);
 }
 
+/// A comp that starts before 0 shows its first frames as negative timecode (`-0:00:00:12`).
+/// Typing back what the current-time display shows (Go to Time opens with it) stays on that frame;
+/// the leading `-` used to move back from the current frame instead. A bare `-n` still steps back,
+/// and in a comp that starts at 0 a `-` stays relative.
+#[test]
+fn time_set_round_trips_negative_displayed_timecode() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Pre-roll", "width": 64, "height": 64, "frameRate": 24, "duration": 4, "startTime": -1})).unwrap();
+    for frame in [0_i64, 1, 12, 23, 24, 25, 60] {
+        let r = s.execute("time.set", json!({"frame": frame})).unwrap();
+        let display = r["display"].as_str().unwrap().to_string();
+        let r = s.execute("time.set", json!({"timecode": display})).unwrap();
+        assert_eq!(r["frame"], frame, "displayed {display}");
+    }
+    s.execute("time.set", json!({"frame": 12})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"timecode": "-0:00:00:12"})).unwrap()["display"], "-0:00:00:12");
+    assert_eq!(s.execute("time.set", json!({"timecode": "-5"})).unwrap()["frame"], 7, "a bare -n steps back");
+    assert_eq!(s.execute("time.set", json!({"timecode": "-0:00:00:20"})).unwrap()["frame"], 4);
+    assert!(s.execute("time.set", json!({"timecode": "- -1:00"})).is_err(), "a second sign is still an error");
+
+    s.execute("comp.settings", json!({"startTime": 0})).unwrap();
+    s.execute("time.set", json!({"frame": 12})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"timecode": "-0:00:00:02"})).unwrap()["frame"], 10, "relative when the comp starts at 0");
+}
+
 /// Frames display style: typed digits are a frame count, so 00100 is frame 100, not 1 s (#530).
 #[test]
 fn time_set_reads_frames_style_digits_as_a_frame_count() {

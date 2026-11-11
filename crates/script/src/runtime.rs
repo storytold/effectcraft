@@ -427,6 +427,8 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
                 let p = p.to_string_lossy();
                 Ok(json!(if op == "exists" { s.services.exists(&p) } else { s.services.is_dir(&p) }))
             }
+            // The write gate alone, with no side effect on the file (export wrappers).
+            "checkWrite" => check_access(s, &path, true).map(|_| json!(true)),
             "read" | "readBinary" => {
                 let p = check_access(s, &path, false)?;
                 let bytes = s.services.read_file(&p.to_string_lossy()).map_err(|e| format!("Unable to read {path}: {e}"))?;
