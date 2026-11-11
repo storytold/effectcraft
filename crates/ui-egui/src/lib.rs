@@ -190,6 +190,9 @@ pub struct Playback {
     pub caching: bool,
     /// Resolution override while playing (pixel step), `None` = the viewer's.
     pub res: Option<u32>,
+    /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: the lower render
+    /// scale this play stepped down to, and when (seconds). See `step_down`.
+    pub adaptive: Option<(f64, f64)>,
     /// Include Overlays / Include Layer Controls.
     pub overlays: bool,
     pub layer_controls: bool,
@@ -219,6 +222,14 @@ pub struct Playback {
     pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
+    /// The rate the silent clock advances at (comp frames per second, at most `fps`; 0 = the
+    /// frame rate): below real time while frames arrive slower than that, so a first playback
+    /// shows them evenly instead of in bursts between freezes (see `pace_for`).
+    pub pace: f64,
+    /// Played frames the paced clock owes (fractional), `Some` while it runs below real time.
+    pub pace_acc: Option<f64>,
+    /// When the silent clock last ran (seconds), for the pace.
+    pub paced_at: Option<f64>,
 }
 
 impl Playback {

@@ -38,7 +38,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::reads::{ReadFiles, ReadLog};
-use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
+use effectcraft_engine::render::{AutoTicket, CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
 use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
 use rayon::prelude::*;
@@ -101,8 +101,12 @@ impl GpuRenderSlots {
     /// A Rayon helper may be executing a nested frame while an admitted render waits for
     /// its work. Blocking that helper on a permit would deadlock the render (#3028).
     fn for_render(&self, max: usize) -> Option<GpuRenderSlot<'_>> {
-        // Dedicated preview pools have one thread, protected from nested drains. They cannot
-        // be helpers of another admitted frame, so waiting preserves GPU preview throughput.
+        // Only a lane's drain thread waits: it renders one frame at a time, protected from
+        // nested drains, and a lane runs one drain at a time (it is idle again, and can be
+        // started anew, only once its drain found no job, so no frame of the lane is still
+        // running). The lane's other threads ([`LANE_WIDTH`]) only help with that frame's
+        // parallel work and are Rayon helpers here: they never wait. So no thread waits while
+        // an admitted frame waits for it, and waiting keeps the GPU preview's throughput.
         #[cfg(not(target_arch = "wasm32"))]
         if DRAINING_LANE.get() {
             return Some(self.acquire(max));
@@ -571,10 +575,8 @@ fn put_disk_frame(dc: &DiskCache, dk: u128, img: &FrameImage, files: &ReadFiles,
         return false;
     }
     match img {
-        FrameImage::Cpu(img) => {
-            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba, files, virtual_id, since)
-        }
+        // (one copy; the disk cache's writer thread compresses it)
+        FrameImage::Cpu(img) => dc.put_frame_owned(dk, img.size[0] as u32, img.size[1] as u32, img.as_raw().to_vec(), files, virtual_id, since),
         FrameImage::CpuF16(f) => dc.put_frame_f16(dk, f.width, f.height, f.bits(), files, virtual_id, since),
         FrameImage::Gpu(_) => false,
     }
@@ -709,15 +711,36 @@ struct DiskCarry {
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_DISK_SERIES: usize = 8;
 
+/// Threads per lane (see [`Queue::lanes`]). A frame's passes are memory-bound and stop scaling
+/// at about 4 threads, so a core per lane (12 frames at once, each on one thread) and 4 cores
+/// per lane cache frames at the same rate (within 3 %, widths 1–4 measured on 12 cores); but the
+/// 12 single-threaded frames start and finish together, so a preview that can't keep up shows
+/// them in bursts, and its second frame waits for the whole batch (0.3–1.3 s). Three lanes of
+/// four threads finish frames 3× as often and the second frame shows in 0.13–0.45 s.
+/// Never fewer than two lanes: one would finish frames in a single file.
+const LANE_WIDTH: usize = 4;
+
 impl Default for Frames {
     fn default() -> Self {
+        Self::with_lane_width(LANE_WIDTH)
+    }
+}
+
+impl Frames {
+    /// A frame cache whose lanes are `width` threads each (see [`LANE_WIDTH`]); `Default` uses
+    /// [`LANE_WIDTH`], benchmarks compare widths.
+    pub fn with_lane_width(width: usize) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let _ = width;
         #[cfg(not(target_arch = "wasm32"))]
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16);
         #[cfg(not(target_arch = "wasm32"))]
-        let lanes: Vec<rayon::ThreadPool> = (0..threads)
+        let width = width.clamp(1, (threads / 2).max(1));
+        #[cfg(not(target_arch = "wasm32"))]
+        let lanes: Vec<rayon::ThreadPool> = (0..(threads / width).max(1))
             .map_while(|i| {
                 rayon::ThreadPoolBuilder::new()
-                    .num_threads(1)
+                    .num_threads(width)
                     .thread_name(move |_| format!("ec-preview-{i}"))
                     .panic_handler(|_| log::error!("a frame render panicked; that frame was skipped"))
                     .build()
@@ -766,6 +789,15 @@ impl Default for Frames {
             #[cfg(not(target_arch = "wasm32"))]
             disk_series: Arc::default(),
         }
+    }
+
+    /// How many frames render at once on the lanes (a playing preview's prefetch, Cache Frames
+    /// When Idle); in the browser, the frame workers.
+    pub fn lanes(&self) -> usize {
+        #[cfg(target_arch = "wasm32")]
+        return self.remote_slots().max(1);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.queue.lock().map_or(1, |q| q.lanes.max(1))
     }
 }
 
@@ -1692,7 +1724,7 @@ struct Worker {
 thread_local! {
     /// This pool thread is inside [`Worker::drain`] (rendering a frame).
     static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Only the single thread of a dedicated preview lane may wait for GPU admission.
+    /// Only a lane's drain thread may wait for GPU admission (see [`GpuRenderSlots::for_render`]).
     static DRAINING_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -1981,28 +2013,32 @@ impl Worker {
         {
             // The browser cannot wait for the GPU to time it (and its CPU path is slow): always
             // the GPU there.
-            let auto = if cfg!(target_arch = "wasm32") { None } else { r.frame_auto(a, job.comp, true) };
-            if auto.is_none_or(|(p, key)| p.choose(key)) {
+            // Every exit that doesn't record ends the frame unmeasured: the ticket is dropped
+            // before a retry (`take`), or on return.
+            let mut ticket = if cfg!(target_arch = "wasm32") { None } else { r.frame_auto(a, job.comp, true).map(|(p, key)| p.ticket(key)) };
+            if ticket.as_ref().is_none_or(AutoTicket::gpu) {
                 let t0 = web_time::Instant::now();
                 match gpu_attempt(g, || g.render_display(&r, job.comp, job.t)) {
                     Ok(Some(f)) => {
                         self.gpu_succeeded();
-                        if let Some((p, key)) = auto {
+                        if let Some(t) = ticket.take() {
                             // Time the GPU's work, not just its recording.
                             g.wait();
                             if g.context().check_health().is_err() {
+                                drop(t);
                                 return self.render_job(job, false, files);
                             }
-                            p.record(key, true, t0.elapsed().as_secs_f64() * 1000.0);
+                            t.record(t0.elapsed().as_secs_f64() * 1000.0);
                         }
                         return FrameImage::Gpu(Arc::new(f));
                     }
                     Ok(None) => {
-                        if let Some((p, key)) = auto {
-                            p.declined(key);
+                        if let Some(t) = &mut ticket {
+                            t.declined();
                         }
                     }
                     Err(e) => {
+                        drop(ticket.take());
                         self.gpu_attempt_rejected(g, &e);
                         return self.render_job(job, false, files);
                     }
@@ -2014,12 +2050,13 @@ impl Worker {
             let img = match gpu_attempt(g, || r.comp_frame_cpu(job.comp, job.t)) {
                 Ok(img) => cpu_frame(&img, &job.src.project, &job.opts),
                 Err(e) => {
+                    drop(ticket.take());
                     self.gpu_attempt_rejected(g, &e);
                     return self.render_job(job, false, files);
                 }
             };
-            if let Some((p, key)) = auto {
-                p.record(key, false, t0.elapsed().as_secs_f64() * 1000.0);
+            if let Some(t) = ticket {
+                t.record(t0.elapsed().as_secs_f64() * 1000.0);
             }
             return img;
         }
