@@ -2114,3 +2114,22 @@ fn delimited_data_row_objects_are_bounded() {
     };
     assert!(crate::host::footage_data_json(&f).unwrap().contains("\"a\":1"));
 }
+
+/// The row-object estimate counts serialized (escaped) header bytes and each distinct name once.
+#[test]
+fn delimited_data_estimate_counts_escaped_and_distinct_headers() {
+    let data = |text: String| effectcraft_project::Footage {
+        path: "/d.csv".into(),
+        kind: effectcraft_project::FootageKind::Data,
+        data: Some(text),
+        ..Default::default()
+    };
+    // A control character serializes as six bytes: 200 KiB of them over 100 rows is ~120 MiB.
+    let mut text = format!("{}\n", "\u{1}".repeat(200 << 10));
+    text.push_str(&"1\n".repeat(100));
+    assert!(crate::host::footage_data_json(&data(text)).is_none());
+    // A name repeated across many columns is one key per row object.
+    let mut text = format!("{}\n", vec!["x"; 100].join(","));
+    text.push_str(&"1\n".repeat(140_000));
+    assert!(crate::host::footage_data_json(&data(text)).is_some());
+}

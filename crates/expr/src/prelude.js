@@ -1205,10 +1205,13 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
 (function () {
   var nest = __nest, stack = __stack, apply = Reflect.apply, construct = Reflect.construct, str = String;
   var define = Object.defineProperty, describe = Object.getOwnPropertyDescriptor, proto = Object.getPrototypeOf;
+  // The original `join`, kept before the guard below replaces it. Descriptors below have a null
+  // prototype: one that inherits `get`/`set` from a changed `Object.prototype` would be refused.
+  var join = Array.prototype.join;
   // Replace `obj[name]` keeping its attributes.
   function replace(obj, name, f) {
     var d = describe(obj, name);
-    define(obj, name, { value: f, writable: d.writable, enumerable: d.enumerable, configurable: true });
+    define(obj, name, { __proto__: null, value: f, writable: d.writable, enumerable: d.enumerable, configurable: true });
   }
   function guard(obj, name) {
     var f = obj[name];
@@ -1232,19 +1235,20 @@ function nearestKey(t) { return thisProperty.nearestKey(t); }
     // in helpers (`push`, `slice`, `join`, `String`) can be replaced by the expression, and
     // must not make the check see other text than the constructor gets.
     var w = function () {
-      var n = arguments.length, args = [], params = '';
+      var n = arguments.length, args = [], heads = [];
       for (var i = 0; i < n; i++) {
         var s = str(arguments[i]);
         if (typeof s !== 'string') s = '';
-        define(args, i, { value: s, writable: true, enumerable: true, configurable: true });
-        if (i < n - 1) params = i ? params + ',' + s : s;
+        define(args, i, { __proto__: null, value: s, writable: true, enumerable: true, configurable: true });
+        if (i < n - 1) define(heads, i, { __proto__: null, value: s, writable: true, enumerable: true, configurable: true });
       }
       stack();
-      nest(params);
+      // Joined in one pass: adding each piece to a growing string copies it every time.
+      nest(apply(join, heads, [',']));
       nest(n ? args[n - 1] : '');
       return construct(F, args);
     };
-    define(w, 'name', { value: F.name, configurable: true });
+    define(w, 'name', { __proto__: null, value: F.name, configurable: true });
     w.prototype = F.prototype;
     replace(F.prototype, 'constructor', w);
     return w;

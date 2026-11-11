@@ -70,6 +70,12 @@ fn eval_and_function_still_work() {
 }
 
 #[test]
+fn function_constructor_ignores_changes_to_object_prototype() {
+    let f = fx();
+    assert_eq!(f.num("Object.prototype.get = 1; Object.prototype.set = 1; Function('a', 'b', 'return a + b')(2, 3)", 0.0), 5.0);
+}
+
+#[test]
 fn deep_array_result_is_an_error_or_text_not_a_crash() {
     // The result itself: detaching it used to `toString` it past depth 4.
     let _ = eval_small_stack(&format!("{DEEP_ARRAY} a"));
