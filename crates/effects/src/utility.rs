@@ -695,6 +695,8 @@ mod read_text_file_tests {
         assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
         // Opening a FIFO with no writer would block: this returns at once.
         assert!(super::read_text_file(&fifo).is_err());
+        // An OCIO FileTransform source reads through the same bounded reader.
+        assert!(crate::ocio::load_file(&fifo.to_string_lossy()).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
