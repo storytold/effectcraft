@@ -152,12 +152,24 @@ fn run_files(services: &dyn Services, path: &str, alphabetical: bool, folders: &
 /// and (with the Sequence option, or [`SequenceOptions::folders`] for a folder's files) numbered
 /// stills of one run one [`Source::Sequence`].
 pub fn group(services: &dyn Services, paths: &[String], opts: SequenceOptions) -> Vec<Source> {
+    // Each folder's runs, listed once for everything that needs them (a picked folder's listing
+    // is kept for the run lookup of its lone files).
+    let mut folders: HashMap<String, HashMap<RunKey, Vec<String>>> = HashMap::new();
     // Each file, and whether it may join a sequence.
     let mut files: Vec<(String, bool)> = vec![];
     for p in paths {
         if services.is_dir(p) {
-            let mut inside: Vec<String> =
-                services.list_dir(p).into_iter().filter(|f| matches!(crate::media_browser::kind_of(f), Some(k) if k != "project")).collect();
+            let listing = services.list_dir(p);
+            let mut runs: HashMap<RunKey, Vec<String>> = HashMap::new();
+            for f in &listing {
+                if let Some(k) = run_key(f, opts.alphabetical) {
+                    runs.entry(k).or_default().push(f.clone());
+                }
+            }
+            if let Some(dir) = runs.keys().next().map(|k| k.0.clone()) {
+                folders.entry(dir).or_insert(runs);
+            }
+            let mut inside: Vec<String> = listing.into_iter().filter(|f| matches!(crate::media_browser::kind_of(f), Some(k) if k != "project")).collect();
             inside.sort_by_key(|f| file_name(f).to_lowercase());
             files.extend(inside.into_iter().map(|f| (f, opts.folders)));
         } else {
@@ -183,7 +195,6 @@ pub fn group(services: &dyn Services, paths: &[String], opts: SequenceOptions) -
             None => out.push(Some(Source::File(f))),
         }
     }
-    let mut folders = HashMap::new();
     for ((_, mut picked), at) in runs.into_iter().zip(slot) {
         sort_run(&mut picked, opts.alphabetical);
         // One picked file: its whole run from the folder.
@@ -357,6 +368,31 @@ mod tests {
         let picked: Vec<String> = names.iter().map(|s| s.to_string()).collect();
         let g = group(&t, &picked, SequenceOptions::default());
         assert_eq!(g.len(), 2000);
+        assert_eq!(t.1.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// A picked folder's listing serves the run lookup of its lone files: one listing in all.
+    #[test]
+    fn a_picked_folder_is_listed_once() {
+        struct Counting(Table, std::sync::atomic::AtomicUsize);
+        impl Services for Counting {
+            fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+                self.0.read_file(path)
+            }
+            fn write_file(&self, p: &str, b: &[u8]) -> std::io::Result<()> {
+                self.0.write_file(p, b)
+            }
+            fn list_dir(&self, dir: &str) -> Vec<String> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.0.list_dir(dir)
+            }
+            fn is_dir(&self, path: &str) -> bool {
+                self.0.is_dir(path)
+            }
+        }
+        let t = Counting(Table(vec!["/s/a_0001.png", "/s/b_0001.png", "/s/b_0002.png"]), Default::default());
+        let g = group(&t, &strs(&["/s"]), SequenceOptions { sequence: true, folders: true, alphabetical: false });
+        assert_eq!(g.len(), 2, "{g:?}");
         assert_eq!(t.1.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 

@@ -108,21 +108,21 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             let supported = matches!(old.kind, FootageKind::Still | FootageKind::Sequence | FootageKind::Video | FootageKind::Audio)
                 && old.layer.is_none() && old.page == 0;
             let name = Path::new(&old.path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
-            let paths = index.get(name).cloned().unwrap_or_default();
+            let paths = index.get(name).map_or(&[][..], Vec::as_slice);
             let mut candidates = vec![];
             let mut accepted = vec![];
             // Past a few candidates the item is ambiguous anyway: list no more of them.
-            for path in paths.into_iter().take(MAX_CANDIDATES) {
+            for path in paths.iter().take(MAX_CANDIDATES) {
                 if ctl.cancelled() {
                     return Err(crate::render_queue::CANCELLED.into());
                 }
                 let mut reason = "source type requires manual replacement".to_string();
                 let mut confidence = "low";
                 if supported {
-                    let probed = probes.entry(path.clone()).or_insert_with(|| importer.probe(&path));
+                    let probed = probes.entry(path.clone()).or_insert_with(|| importer.probe(path));
                     match probed {
                         Ok(f) if compatible(old, f) => {
-                            if old.kind != FootageKind::Sequence || (!old.sequence.is_empty() && sequence_at(old, &path).is_some()) {
+                            if old.kind != FootageKind::Sequence || (!old.sequence.is_empty() && sequence_at(old, path).is_some()) {
                                 confidence = "high";
                                 reason = "exact filename and compatible source metadata".into();
                                 accepted.push(path.clone());
