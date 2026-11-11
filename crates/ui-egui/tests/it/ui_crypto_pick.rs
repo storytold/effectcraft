@@ -277,84 +277,103 @@ fn eyedropper_arms_hovers_picks_with_modifiers_and_stays_armed_until_esc() {
     let _ = std::fs::remove_dir_all(&ids.dir);
 }
 
-/// Window and panel sizes × display scales × viewer zoom / pan × Resolution (and a proxy): hover
-/// and click name the ID of the pixel the viewer shows, next to cell edges too. Each hover is
-/// checked against the rendered matte of the named ID at the point the screen maps back to.
+// Window and panel sizes × display scales, one test each so they run in parallel. Together they
+// took ~90 s as one test, and ~10 min under coverage, where that one test set the slowest shard.
 #[test]
-fn picks_what_the_viewer_shows_across_sizes_scales_zoom_pan_resolution_and_proxies() {
+fn picks_what_the_viewer_shows_at_900x640_and_1x() {
+    picks_what_the_viewer_shows(0, vec2(900.0, 640.0), 1.0, 300.0);
+}
+
+#[test]
+fn picks_what_the_viewer_shows_at_1280x720_and_1_25x() {
+    picks_what_the_viewer_shows(1, vec2(1280.0, 720.0), 1.25, 420.0);
+}
+
+#[test]
+fn picks_what_the_viewer_shows_at_1600x1000_and_1_5x() {
+    picks_what_the_viewer_shows(2, vec2(1600.0, 1000.0), 1.5, 360.0);
+}
+
+#[test]
+fn picks_what_the_viewer_shows_at_2400x1400_and_2x() {
+    picks_what_the_viewer_shows(3, vec2(2400.0, 1400.0), 2.0, 600.0);
+}
+
+/// Case `i`: a window of `size` at display scale `ppp`, with an Effect Controls panel `ec` wide,
+/// × viewer zoom / pan × Resolution (and a proxy). Hover and click name the ID of the pixel the
+/// viewer shows, next to cell edges too. Each hover is checked against the rendered matte of the
+/// named ID at the point the screen maps back to. Case 0 also checks frames from the idle cache.
+fn picks_what_the_viewer_shows(i: usize, size: egui::Vec2, ppp: f32, ec: f32) {
     let mut checked = 0;
     let mut failures = vec![];
-    let cases = [(vec2(900.0, 640.0), 1.0, 300.0), (vec2(1280.0, 720.0), 1.25, 420.0), (vec2(1600.0, 1000.0), 1.5, 360.0), (vec2(2400.0, 1400.0), 2.0, 600.0)];
-    for (i, (size, ppp, ec)) in cases.into_iter().enumerate() {
-        let (s, ids) = crypto_session(&format!("matrix{i}"), 1919, 1079, false);
-        let mut h = harness(s, size, ppp, ec);
-        h.state_mut().session.execute_checked("prop.set", json!({"path": "effects/#1/matteOnly", "value": true})).unwrap();
-        arm(&mut h, &ids);
-        for proxy in [false, true] {
-            if proxy {
-                let p = ids.dir.join("proxy").join("plate_proxy.exr");
-                h.state_mut().session.execute("file.setProxy", json!({"item": ids.footage, "path": p.to_string_lossy()})).unwrap();
-            }
-            for res in [Resolution::Full, Resolution::Half, Resolution::Third, Resolution::Quarter, Resolution::Custom(6)] {
-                for (zoom, pan) in [(None, [0.0, 0.0]), (Some(0.5), [0.0, 0.0]), (Some(2.0), [-300.0, 120.0])] {
-                    let cid = h.state().session.active_comp_id().unwrap();
-                    h.state_mut().session.set_resolution(cid, res).unwrap();
-                    h.state_mut().ui.viewer.zoom = zoom.map(|z: f32| z / ppp);
-                    h.state_mut().ui.viewer.pan = pan;
-                    settle(&mut h);
-                    let area = h.state().auto.find("viewer.fxPick").unwrap().rect;
-                    let scale = shown_scale(&h);
-                    // Points next to cell edges, in the middle and at the far corner.
-                    // (Cell edges far from the origin: 925, 1044 shows the 1/3 vs 0.333 rounding.)
-                    for p in [[36.6, 28.7], [37.4, 29.3], [959.7, 539.2], [1918.4, 1078.6], [74.1, 57.9], [925.4, 1044.4], [1110.6, 1043.6]] {
-                        let Some(sp) = comp_to_screen(&h.ctx, [p[0] as f32, p[1] as f32]) else { continue };
-                        if sp.x < area[0] + 4.0 || sp.y < area[1] + 40.0 || sp.x > area[0] + area[2] - 4.0 || sp.y > area[1] + area[3] - 4.0 {
-                            continue;
-                        }
-                        let got = hover(&mut h, sp);
-                        let got = got.trim_end_matches(" (selected)").to_string();
-                        // The comp point under the cursor, as the viewer maps it back.
-                        let q = to_comp(&h, sp);
-                        checked += 1;
-                        // The named ID has the largest coverage of the shown pixel (a blended edge
-                        // pixel of a proxy at Quarter has several). No ID named: the frame shows
-                        // (almost) no matte there either (an odd size's last half-resolution pixel
-                        // samples just outside the layer).
-                        let ok = if got.starts_with('c') { largest(&mut h, &got, q, scale) } else { got == HINT && lit(&mut h, "*", q, scale) < 0.5 };
-                        if !ok {
-                            failures.push(format!(
-                                "{size:?} ppp {ppp} proxy {proxy} {res:?} zoom {zoom:?} (scale {scale}): at {q:?} hover {got:?} is not lit there"
-                            ));
-                        }
+    let (s, ids) = crypto_session(&format!("matrix{i}"), 1919, 1079, false);
+    let mut h = harness(s, size, ppp, ec);
+    h.state_mut().session.execute_checked("prop.set", json!({"path": "effects/#1/matteOnly", "value": true})).unwrap();
+    arm(&mut h, &ids);
+    for proxy in [false, true] {
+        if proxy {
+            let p = ids.dir.join("proxy").join("plate_proxy.exr");
+            h.state_mut().session.execute("file.setProxy", json!({"item": ids.footage, "path": p.to_string_lossy()})).unwrap();
+        }
+        for res in [Resolution::Full, Resolution::Half, Resolution::Third, Resolution::Quarter, Resolution::Custom(6)] {
+            for (zoom, pan) in [(None, [0.0, 0.0]), (Some(0.5), [0.0, 0.0]), (Some(2.0), [-300.0, 120.0])] {
+                let cid = h.state().session.active_comp_id().unwrap();
+                h.state_mut().session.set_resolution(cid, res).unwrap();
+                h.state_mut().ui.viewer.zoom = zoom.map(|z: f32| z / ppp);
+                h.state_mut().ui.viewer.pan = pan;
+                settle(&mut h);
+                let area = h.state().auto.find("viewer.fxPick").unwrap().rect;
+                let scale = shown_scale(&h);
+                // Points next to cell edges, in the middle and at the far corner.
+                // (Cell edges far from the origin: 925, 1044 shows the 1/3 vs 0.333 rounding.)
+                for p in [[36.6, 28.7], [37.4, 29.3], [959.7, 539.2], [1918.4, 1078.6], [74.1, 57.9], [925.4, 1044.4], [1110.6, 1043.6]] {
+                    let Some(sp) = comp_to_screen(&h.ctx, [p[0] as f32, p[1] as f32]) else { continue };
+                    if sp.x < area[0] + 4.0 || sp.y < area[1] + 40.0 || sp.x > area[0] + area[2] - 4.0 || sp.y > area[1] + area[3] - 4.0 {
+                        continue;
+                    }
+                    let got = hover(&mut h, sp);
+                    let got = got.trim_end_matches(" (selected)").to_string();
+                    // The comp point under the cursor, as the viewer maps it back.
+                    let q = to_comp(&h, sp);
+                    checked += 1;
+                    // The named ID has the largest coverage of the shown pixel (a blended edge
+                    // pixel of a proxy at Quarter has several). No ID named: the frame shows
+                    // (almost) no matte there either (an odd size's last half-resolution pixel
+                    // samples just outside the layer).
+                    let ok = if got.starts_with('c') { largest(&mut h, &got, q, scale) } else { got == HINT && lit(&mut h, "*", q, scale) < 0.5 };
+                    if !ok {
+                        failures
+                            .push(format!("{size:?} ppp {ppp} proxy {proxy} {res:?} zoom {zoom:?} (scale {scale}): at {q:?} hover {got:?} is not lit there"));
                     }
                 }
             }
-            // Frames from Cache Frames When Idle (the first case): rendered on the grid the
-            // viewer renders and the pick reads (1/3, not the key's 0.333), so frame 20 from the
-            // idle cache is frame 0 as the viewer rendered it, and hovers there are right too.
-            if i == 0 && !proxy {
-                (h.state_mut().ui.viewer.zoom, h.state_mut().ui.viewer.pan) = (None, [0.0, 0.0]);
-                for res in [Resolution::Third, Resolution::Custom(6)] {
-                    let fails = idle_cached_frames_are_shown_frames(&mut h, res);
-                    checked += 1;
-                    failures.extend(fails);
-                }
-            }
-            // A click picks what the hover named.
+        }
+        // Frames from Cache Frames When Idle (the first case): rendered on the grid the
+        // viewer renders and the pick reads (1/3, not the key's 0.333), so frame 20 from the
+        // idle cache is frame 0 as the viewer rendered it, and hovers there are right too.
+        if i == 0 && !proxy {
             (h.state_mut().ui.viewer.zoom, h.state_mut().ui.viewer.pan) = (None, [0.0, 0.0]);
-            settle(&mut h);
-            let sp = comp_to_screen(&h.ctx, [959.7, 539.2]).unwrap();
-            let named = hover(&mut h, sp);
-            click(&mut h, sp, Modifiers::NONE);
-            assert_eq!(selection(&h, &ids), named.trim_end_matches(" (selected)"));
-            if proxy {
-                h.state_mut().session.execute("file.setProxy", json!({"item": ids.footage, "path": null})).ok();
+            for res in [Resolution::Third, Resolution::Custom(6)] {
+                let fails = idle_cached_frames_are_shown_frames(&mut h, res);
+                checked += 1;
+                failures.extend(fails);
             }
         }
-        let _ = std::fs::remove_dir_all(&ids.dir);
+        // A click picks what the hover named.
+        (h.state_mut().ui.viewer.zoom, h.state_mut().ui.viewer.pan) = (None, [0.0, 0.0]);
+        settle(&mut h);
+        let sp = comp_to_screen(&h.ctx, [959.7, 539.2]).unwrap();
+        let named = hover(&mut h, sp);
+        click(&mut h, sp, Modifiers::NONE);
+        assert_eq!(selection(&h, &ids), named.trim_end_matches(" (selected)"));
+        if proxy {
+            h.state_mut().session.execute("file.setProxy", json!({"item": ids.footage, "path": null})).ok();
+        }
     }
+    let _ = std::fs::remove_dir_all(&ids.dir);
     assert!(failures.is_empty(), "{} of {checked} hovers wrong:\n{}", failures.len(), failures.join("\n"));
-    assert!(checked > 100, "{checked}");
+    // more than 100 over the four cases, as when they were one test
+    assert!(checked > 25, "{checked}");
 }
 
 fn set_frame(h: &mut Harness<'_, EffectcraftApp>, f: i64) {

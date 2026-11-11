@@ -382,6 +382,127 @@ fn new_layers_start_at_the_current_time_when_asked() {
     assert_eq!(s.active_comp().unwrap().layers[0].start_time.seconds().round(), 2.0);
 }
 
+/// Settings ▸ General ▸ Fit New Layers to Work Area: new text, solid, shape, null and adjustment
+/// layers span the work area, ahead of the start-time setting; footage keeps its own length.
+#[test]
+fn new_layers_fit_the_work_area_when_asked() {
+    let mut s = session_with_comp();
+    s.execute("comp.workArea", json!({"start": 2, "end": 5})).unwrap();
+    let span = |s: &Session| {
+        let l = &s.active_comp().unwrap().layers[0];
+        let r = |t: effectcraft_time::Tick| (t.seconds() * 10.0).round() / 10.0;
+        (r(l.start_time), r(l.in_point), r(l.out_point))
+    };
+    s.execute("layer.newSolid", json!({})).unwrap();
+    assert_eq!(span(&s), (0.0, 0.0, 10.0), "off by default");
+
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.createLayersAtCompStart", "value": false})).unwrap();
+    // The tools that draw on their new layer (Type, shape tools, Pen) move the playhead into it;
+    // the menu commands leave it.
+    for (cmd, p, draws) in [
+        ("layer.newSolid", json!({}), false),
+        ("layer.newAdjustment", json!({}), false),
+        ("layer.newNull", json!({}), false),
+        ("layer.newText", json!({"text": "a"}), false),
+        ("layer.newText", json!({"text": "a", "edit": true}), true),
+        ("layer.newShape", json!({"kind": "rect"}), false),
+        ("shape.newShape", json!({"kind": "ellipse"}), true),
+        ("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]}), true),
+    ] {
+        s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
+        s.state.selected_layers.clear();
+        s.state.text_edit = None;
+        s.execute(cmd, p).unwrap();
+        assert_eq!(span(&s), (2.0, 2.0, 5.0), "{cmd}");
+        assert_eq!(s.time().seconds().round(), if draws { 2.0 } else { 7.0 }, "{cmd} playhead");
+    }
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
+
+    let nested = s.execute("comp.new", json!({"name": "Nested", "duration": 3, "open": false})).unwrap()["comp"].as_u64().unwrap();
+    s.execute("layer.addItem", json!({"item": nested})).unwrap();
+    assert_eq!(span(&s), (7.0, 7.0, 10.0), "footage and comps keep their own timing");
+}
+
+/// A tool command aimed at another comp moves that comp's playhead into its work area and
+/// leaves the active comp's playhead where it was.
+#[test]
+fn fitted_layers_in_another_comp_move_that_comps_playhead() {
+    let mut s = session_with_comp();
+    let active = s.active_comp_id().unwrap();
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    let other = effectcraft_project::ItemId(s.execute("comp.new", json!({"name": "Other", "duration": 10, "open": false})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("comp.workArea", json!({"comp": other.0, "start": 2, "end": 5})).unwrap();
+    s.execute("comp.workArea", json!({"start": 8, "end": 9})).unwrap();
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
+    for (cmd, p) in [
+        ("layer.newText", json!({"comp": other.0, "text": "a", "edit": true})),
+        ("shape.newShape", json!({"comp": other.0, "kind": "ellipse"})),
+        ("shape.newPath", json!({"comp": other.0, "vertices": [[0, 0], [10, 0], [10, 10]]})),
+    ] {
+        s.set_time_of(other, effectcraft_time::Tick::from_seconds_f64(7.0));
+        s.state.selected_layers.clear();
+        s.state.text_edit = None;
+        s.execute(cmd, p).unwrap();
+        assert_eq!(s.time_of(other).seconds().round(), 2.0, "{cmd}: the target comp's playhead");
+        assert_eq!(s.time_of(active).seconds().round(), 7.0, "{cmd}: the active comp's playhead");
+    }
+}
+
+/// A work area off the frame grid (set at 25 fps, then the comp went to 30 fps): the playhead
+/// goes to the first frame inside it, not the nearest frame before its start.
+#[test]
+fn fitted_layers_off_the_frame_grid_move_the_playhead_inside_them() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Grid", "duration": 2, "frameRate": 25})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 0.04, "end": 0.08})).unwrap();
+    s.execute("comp.settings", json!({"frameRate": 30})).unwrap();
+    for (cmd, p) in [("layer.newText", json!({"text": "a", "edit": true})), ("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]}))] {
+        s.set_time(effectcraft_time::Tick::from_seconds_f64(1.0));
+        s.state.selected_layers.clear();
+        s.state.text_edit = None;
+        s.execute(cmd, p).unwrap();
+        let l = &s.active_comp().unwrap().layers[0];
+        let t = s.time();
+        assert!(l.in_point <= t && t < l.out_point, "{cmd}: {t:?} in {:?}..{:?}", l.in_point, l.out_point);
+        assert_eq!(t, effectcraft_time::Tick::from_seconds_f64(2.0 / 30.0), "{cmd}: the first frame inside");
+    }
+}
+
+/// A duration off the frame grid (2.01 s set at 100 fps, then 24 fps) keeps its final partial
+/// frame reachable: a layer fitted to a work area inside it gets the playhead on that frame.
+#[test]
+fn fitted_layers_in_the_final_partial_frame_get_the_playhead() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Tail", "duration": 2.01, "frameRate": 100})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 2.0, "end": 2.01})).unwrap();
+    s.execute("comp.settings", json!({"frameRate": 24})).unwrap();
+    s.set_time(effectcraft_time::Tick::ZERO);
+    s.execute("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]})).unwrap();
+    let l = &s.active_comp().unwrap().layers[0];
+    let t = s.time();
+    assert!(l.in_point <= t && t < l.out_point, "{t:?} in {:?}..{:?}", l.in_point, l.out_point);
+    assert_eq!(t, effectcraft_time::Tick::from_seconds_f64(2.0), "frame 48 of 24 fps");
+    // The playhead can't go past that last frame.
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(5.0));
+    assert_eq!(s.time(), effectcraft_time::Tick::from_seconds_f64(2.0));
+}
+
+/// Synchronize Time of All Related Items reaches a nested comp's final partial frame as a direct
+/// move does: the inner comp is 2.01 s (set at 100 fps, then 24 fps), the outer sits at 2.0 s.
+#[test]
+fn synced_time_reaches_a_nested_final_partial_frame() {
+    let mut s = Session::default();
+    let inner = s.execute("comp.new", json!({"name": "Inner", "duration": 2.01, "frameRate": 100, "open": false})).unwrap()["comp"].as_u64().unwrap();
+    s.execute("comp.settings", json!({"comp": inner, "frameRate": 24})).unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "duration": 4, "frameRate": 24})).unwrap();
+    s.execute("layer.addItem", json!({"item": inner, "time": 0})).unwrap();
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(2.0));
+    assert_eq!(s.time_of(effectcraft_project::ItemId(inner)), effectcraft_time::Tick::from_seconds_f64(2.0));
+}
+
 #[test]
 fn default_spatial_interpolation_linear() {
     let mut s = session_with_comp();

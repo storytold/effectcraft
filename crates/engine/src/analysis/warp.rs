@@ -119,6 +119,20 @@ pub fn signature(p: &Project, comp: ItemId, layer: &Layer) -> String {
         },
         _ => String::new(),
     };
+    signature_with_source(p, comp, layer, &src)
+}
+
+/// Before `Footage::placed_page` was added in 0.23, the persisted signature hashed the
+/// same Debug representation without that last field. Only ordinary footage can match it.
+pub(crate) fn signature_before_placed_page(p: &Project, comp: ItemId, layer: &Layer) -> Option<String> {
+    let LayerSource::Footage { item } = &layer.source else { return None };
+    let ItemKind::Footage(footage) = &p.item(*item)?.kind else { return None };
+    let src = format!("{footage:?}");
+    let old = src.strip_suffix(", placed_page: false }")?;
+    Some(signature_with_source(p, comp, layer, &format!("{old} }}")))
+}
+
+fn signature_with_source(p: &Project, comp: ItemId, layer: &Layer, src: &str) -> String {
     let rate = p.comp(comp).map(|c| format!("{:?}", c.frame_rate)).unwrap_or_default();
     let s = format!(
         "{:?}|{src}|{:?}|{:?}|{:?}|{}|{:?}|{rate}",

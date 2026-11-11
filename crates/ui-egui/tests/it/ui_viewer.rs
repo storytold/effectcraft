@@ -1145,6 +1145,38 @@ fn shape_pen_draws_a_closed_shape_layer() {
     assert_eq!(sp.vertices.len(), 4);
 }
 
+/// Fit New Layers to Work Area with the playhead past the work area: the Pen's new shape layer
+/// spans the work area and the playhead moves into it, so the path and its vertex controls show
+/// and the closing click lands.
+#[test]
+fn pen_draws_on_a_layer_fitted_to_the_work_area_past_the_playhead() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 1, "end": 2})).unwrap();
+    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(3.0));
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let n0 = h.state().session.active_comp().unwrap().layers.len();
+    for p in [[200.0, 100.0], [400.0, 120.0], [300.0, 260.0]] {
+        let at = screen(&h, p);
+        click(&mut h, at);
+    }
+    let l = h.state().session.active_comp().unwrap().layers[0].clone();
+    let t = h.state().session.time();
+    assert!(l.in_point <= t && t < l.out_point, "the playhead is on the new layer: {t:?} in {:?}..{:?}", l.in_point, l.out_point);
+    assert_eq!((l.in_point.seconds().round(), l.out_point.seconds().round()), (1.0, 2.0), "the layer keeps the work area");
+    let path = l.props.sub("contents").unwrap().groups().next().unwrap().sub("contents").unwrap().groups().next().unwrap().clone();
+    assert!(h.state().auto.find(&format!("viewer.shapePath.{}.vertex.0", path.uid)).is_some(), "the Pen's vertex controls show");
+    let at = screen(&h, [200.0, 100.0]);
+    click(&mut h, at);
+    let comp = h.state().session.active_comp().unwrap().clone();
+    assert_eq!(comp.layers.len(), n0 + 1);
+    let sp = comp.layers[0].props.find_group(path.uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    assert_eq!(sp.vertices.len(), 3);
+    assert!(sp.closed, "the click on the first vertex closes the path");
+}
+
 #[test]
 fn motion_path_key_drag_edits_that_key() {
     let mut h = harness();

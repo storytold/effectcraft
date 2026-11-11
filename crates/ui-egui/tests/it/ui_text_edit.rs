@@ -169,6 +169,36 @@ fn type_tool_click_type_edit_and_commit() {
     assert!(h.state().session.state.text_edit.is_none());
 }
 
+/// Fit New Layers to Work Area with the playhead past the work area: the Type tool's new layer
+/// spans the work area and the playhead moves into it, so the text shows while it is typed and
+/// after it is committed.
+#[test]
+fn type_tool_text_fitted_to_the_work_area_past_the_playhead_shows() {
+    let mut h = harness(app());
+    h.state_mut().show_panel(PanelKind::Composition);
+    let s = &mut h.state_mut().session;
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 0.5, "end": 1})).unwrap();
+    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(1.5));
+    h.run_steps(3);
+    h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
+    h.run_steps(1);
+    let comp = rect(&h, "viewer.comp");
+    click(&mut h, comp.center(), Modifiers::NONE);
+    type_text(&mut h, "Hi");
+    assert!(h.state().auto.find("viewer.textEdit").is_some(), "the edit region shows");
+    let (lid, text, _, _) = edited(&h);
+    assert_eq!(text, "Hi");
+    key(&mut h, Key::Escape, Modifiers::NONE);
+    assert!(h.state().session.state.text_edit.is_none(), "committed");
+    let s = &h.state().session;
+    let l = s.active_comp().unwrap().layer(LayerId(lid)).unwrap();
+    let t = s.time();
+    assert!(l.in_point <= t && t < l.out_point, "the committed text is on screen: {t:?} in {:?}..{:?}", l.in_point, l.out_point);
+    assert_eq!(((l.in_point.seconds() * 10.0).round(), (l.out_point.seconds() * 10.0).round()), (5.0, 10.0), "the layer keeps the work area");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hi");
+}
+
 /// #831: clicking another panel (a solid's row in the Timeline) ends text editing and gives the
 /// keyboard back, whether the edit began with the Type tool (which stays selected) or by command:
 /// typed characters change no text and Space plays. The Character panel keeps the edit, and a

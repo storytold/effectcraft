@@ -3325,18 +3325,19 @@ fn gpu_render_slots_never_block_rayon_helpers() {
     assert_eq!(*slots.busy.lock().unwrap(), 0);
 }
 
-/// Dedicated preview lanes have one protected thread and can wait without creating the
-/// shared-pool helper dependency cycle. They must keep rendering on a healthy GPU.
+/// A lane's drain thread can wait without creating the shared-pool helper dependency cycle,
+/// and must keep rendering on a healthy GPU; the lane's other threads ([`LANE_WIDTH`] wide)
+/// help with its frame and never wait.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
     let slots = GpuRenderSlots::new();
     let first = slots.acquire(2);
     let second = slots.acquire(2);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(LANE_WIDTH).build().unwrap();
     let (started, ready) = std::sync::mpsc::channel();
     let (tx, rx) = std::sync::mpsc::channel();
-    let (early, admitted) = std::thread::scope(|scope| {
+    let (early, admitted, helper) = std::thread::scope(|scope| {
         scope.spawn(|| {
             pool.install(|| {
                 let _drain = Draining::enter(Some(0)).unwrap();
@@ -3347,13 +3348,19 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
             });
         });
         ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        // Another thread of the same lane, while its drain thread waits: it declines.
+        let (htx, hrx) = std::sync::mpsc::channel();
+        let (pool, slots) = (&pool, &slots);
+        scope.spawn(move || pool.install(|| htx.send(slots.for_render(2).is_none()).unwrap()));
+        let helper = hrx.recv_timeout(std::time::Duration::from_secs(2));
         let early = rx.recv_timeout(std::time::Duration::from_millis(100));
         drop((first, second));
         let admitted = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
-        (early, admitted)
+        (early, admitted, helper)
     });
     assert!(early.is_err(), "busy dedicated lane must wait instead of falling back to CPU");
     assert_eq!(admitted, Ok(true));
+    assert_eq!(helper, Ok(true), "a lane's helper thread must not wait on GPU permits");
     pool.install(|| {
         assert!(!DRAINING.get());
         assert!(!DRAINING_LANE.get());

@@ -8,7 +8,7 @@
 //!
 //! Automation ids: `dialog.aepLosses.continue`, `dialog.aepLosses.cancel`.
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use egui::vec2;
 use serde_json::{Value, json};
 
@@ -22,9 +22,6 @@ pub struct Pending {
     /// After Effects projects dropped or picked with it, imported once it is answered.
     pub queue: Vec<String>,
 }
-
-/// How many detail lines of a loss category the prompt shows.
-const DETAILS: usize = 3;
 
 /// Whether the prompt is showing with a conversion waiting on it.
 pub fn asking(app: &EffectcraftApp) -> bool {
@@ -77,14 +74,24 @@ fn category(c: &str) -> String {
     chars.next().map(|f| f.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The report's losses as lines: one per category with its count, and a few of its details.
+/// The report's losses as lines: one per category with how many occurrences are left out or
+/// changed, then every detail line the report keeps and "… and N more" for the occurrences none
+/// describes (#3365).
 pub fn lines(report: &Value) -> Vec<(String, Vec<String>)> {
     let Some(losses) = report["losses"].as_array() else { return vec![] };
     losses
         .iter()
         .map(|l| {
-            let head = format!("{} ({})", category(l["category"].as_str().unwrap_or("other")), l["count"].as_u64().unwrap_or(0));
-            let details = l["details"].as_array().map(|d| d.iter().filter_map(Value::as_str).take(DETAILS).map(str::to_string).collect()).unwrap_or_default();
+            let count = l["count"].as_u64().unwrap_or(0);
+            let head = tr_args("{}: {} left out or changed", &[&category(l["category"].as_str().unwrap_or("other")), &count]);
+            let mut details: Vec<String> =
+                l["details"].as_array().map(|d| d.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+            // An export report has no `unlisted`: each of its lines is one occurrence.
+            let listed = u64::try_from(details.len()).unwrap_or(u64::MAX);
+            let unlisted = l["unlisted"].as_u64().unwrap_or_else(|| count.saturating_sub(listed));
+            if unlisted > 0 {
+                details.push(tr_args("… and {} more", &[&unlisted]));
+            }
             (head, details)
         })
         .collect()
@@ -179,9 +186,23 @@ mod tests {
     fn the_report_reads_as_categories_with_counts_and_details() {
         let report = json!({"losses": [{"category": "layer_styles", "count": 4, "details": ["a", "b", "c", "d"]}, {"category": "effects", "count": 1}]});
         let l = lines(&report);
-        assert_eq!(l[0], ("Layer styles (4)".to_string(), vec!["a".to_string(), "b".into(), "c".into()]));
-        assert_eq!(l[1], ("Effects (1)".to_string(), vec![]));
+        assert_eq!(l[0], ("Layer styles: 4 left out or changed".to_string(), vec!["a".to_string(), "b".into(), "c".into(), "d".into()]));
+        assert_eq!(l[1], ("Effects: 1 left out or changed".to_string(), vec!["… and 1 more".to_string()]));
         assert!(lines(&json!({})).is_empty());
+    }
+
+    /// #3365: every detail line shows, then how many occurrences have none: the report's
+    /// `unlisted` (an effect line can describe many instances), else the lines past the count.
+    #[test]
+    fn every_detail_shows_and_the_rest_is_counted() {
+        let details: Vec<String> = (0..20).map(|i| format!("d{i}")).collect();
+        let l = lines(&json!({"losses": [{"category": "masks", "count": 27, "details": details}]}));
+        assert_eq!(l[0].1.len(), 21);
+        assert_eq!(l[0].1[20], "… and 7 more");
+        let l = lines(&json!({"losses": [{"category": "effects", "count": 50, "details": ["X, and 44 more like it"], "unlisted": 5}]}));
+        assert_eq!(l[0].1, ["X, and 44 more like it", "… and 5 more"]);
+        let l = lines(&json!({"losses": [{"category": "effects", "count": 45, "details": ["X, and 44 more like it"], "unlisted": 0}]}));
+        assert_eq!(l[0].1, ["X, and 44 more like it"]);
     }
 
     /// Projects dropped or picked together wait only behind a prompt that shows; with none

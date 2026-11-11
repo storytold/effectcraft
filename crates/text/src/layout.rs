@@ -278,19 +278,26 @@ pub struct Layout {
 impl Layout {
     /// Line index for a caret at byte `pos`.
     pub fn line_of(&self, pos: usize) -> usize {
-        let mut li = 0;
-        for (i, l) in self.lines.iter().enumerate() {
-            if l.range.start <= pos {
-                li = i;
-            }
-        }
-        li
+        // Lines are in text order: the last one starting at or before `pos`.
+        self.lines.partition_point(|l| l.range.start <= pos).saturating_sub(1)
     }
     /// Caret position `(x, baseline, line)` for byte offset `pos`.
     pub fn caret(&self, pos: usize) -> (f32, f32, usize) {
         let li = self.line_of(pos);
         let Some(l) = self.lines.get(li) else { return (0.0, 0.0, 0) };
-        let x = l.carets.iter().min_by_key(|(b, _)| b.abs_diff(pos)).map_or(l.x, |c| c.1);
+        // Carets are sorted by byte offset and unique: the nearest is next to the insertion point (the lower on a tie).
+        let i = l.carets.partition_point(|c| c.0 < pos);
+        let x = match (i.checked_sub(1).and_then(|k| l.carets.get(k)), l.carets.get(i)) {
+            (Some(p), Some(n)) => {
+                if pos - p.0 <= n.0 - pos {
+                    p.1
+                } else {
+                    n.1
+                }
+            }
+            (Some(c), None) | (None, Some(c)) => c.1,
+            (None, None) => l.x,
+        };
         (x, l.baseline, li)
     }
     /// Nearest caret byte offset to point `(x, y)`.
