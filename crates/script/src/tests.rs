@@ -700,6 +700,56 @@ fn save_frame_to_png_writes_behind_the_file_gate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A script that runs the export commands itself (`app.run`, `__exec`) meets the same file-write
+/// preference as the wrappers; with the preference off nothing is created or replaced.
+#[test]
+fn export_commands_run_directly_by_a_script_respect_the_file_gate() {
+    let dir = std::env::temp_dir().join(format!("ec-direct-export-{}", std::process::id()));
+    // A leftover dir from an interrupted run (same pid) must not feed stale absence checks.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("frame.png");
+    let tpl = dir.join("card.ectemplate");
+    let kept = dir.join("kept.png");
+    std::fs::write(&kept, b"original").unwrap();
+    let mut s = session();
+    s.execute("comp.new", json!({"name": "Card", "width": 64, "height": 64, "duration": 1})).unwrap();
+    s.execute("layer.newText", json!({"text": "Hi"})).unwrap();
+    ok(&mut s, "var c = app.project.activeItem; c.layer(1).property('ADBE Transform Group').property('ADBE Opacity').addToMotionGraphicsTemplate(c);");
+    let q = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
+    let comp = s.active_comp_id().unwrap().0;
+    for (code, target) in [
+        (format!("app.run('comp.saveFrameAs', {{comp: {comp}, path: {}}})", q(&png)), &png),
+        (format!("__exec('comp.saveFrameAs', JSON.stringify({{comp: {comp}, path: {}}}))", q(&png)), &png),
+        (format!("app.run('essential.exportTemplate', {{comp: {comp}, path: {}}})", q(&tpl)), &tpl),
+        (format!("app.run('comp.saveFrameAs', {{comp: {comp}, path: {}}})", q(&kept)), &kept),
+    ] {
+        let o = run_code(&mut s, &code, "direct.jsx");
+        let e = o.error.unwrap_or_else(|| panic!("`{code}` was not refused"));
+        assert!(e.message.contains("Allow Scripts to Write Files"), "{e:?}");
+        if target == &kept {
+            assert_eq!(std::fs::read(&kept).unwrap(), b"original");
+        } else {
+            assert!(!target.exists(), "{} was written", target.display());
+        }
+    }
+    // The wrappers check the gate without touching the file: an existing one is left as it was.
+    let o = run_code(&mut s, &format!("app.project.activeItem.saveFrameToPng(0, new File({}))", q(&kept)), "wrap.jsx");
+    assert!(o.error.is_some());
+    assert_eq!(std::fs::read(&kept).unwrap(), b"original");
+    let o = run_code(&mut s, &format!("app.project.activeItem.exportAsMotionGraphicsTemplate(true, {})", q(&tpl)), "wrap.jsx");
+    assert!(o.error.is_some());
+    assert!(!tpl.exists());
+    // The user, from the UI, is not a script: the same command writes.
+    s.execute("comp.saveFrameAs", json!({"comp": comp, "path": png.to_string_lossy()})).unwrap();
+    assert!(png.exists());
+    // With the preference on, the script's direct call writes too.
+    s.prefs.scripting.allow_scripts_write_files = true;
+    ok(&mut s, &format!("app.run('essential.exportTemplate', {{comp: {comp}, path: {}}})", q(&tpl)));
+    assert!(std::fs::metadata(&tpl).unwrap().len() > 100);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #1246: with Warn User When Executing Files on, a script that asserts `confirmed` itself still
 /// gets the question; only the user's answer opens the file.
 #[test]
