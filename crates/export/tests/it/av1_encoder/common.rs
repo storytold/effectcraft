@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use effectcraft_av1enc::{Encoder, EncoderConfig, Frame, Packet};
+use craft_video::av1::{Encoder, EncoderConfig, Frame, Packet};
 
 /// A synthetic 4:2:0 picture.
 pub struct Pic {
@@ -95,7 +95,7 @@ pub fn encode_and_check(cfg: EncoderConfig, pics: &[Pic]) -> Run {
     let mut dec = filmcraft_av1::Decoder::with_threads(1);
     let mut run = Run { packets: Vec::new(), recons: Vec::new(), psnr_y: Vec::new(), lf_levels: Vec::new() };
     for (i, p) in pics.iter().enumerate() {
-        let pkt = enc.encode(&p.frame());
+        let pkt = enc.encode(&p.frame()).expect("encode");
         let rec = enc.last_reconstruction().expect("reconstruction");
         let out = dec.decode(&pkt.data).unwrap_or_else(|e| panic!("frame {i}: decode error {e:?}"));
         assert_eq!(out.len(), 1, "frame {i}: one picture per packet");
