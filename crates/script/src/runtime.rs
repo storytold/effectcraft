@@ -792,10 +792,14 @@ fn skip_template_text(b: &[u8], i: &mut usize) -> bool {
 /// expression literal rather than dividing: after an operator, an opening bracket, a separator,
 /// a keyword that takes an expression, or at the start. After a name, a number, a string or a
 /// closing bracket it divides (a regular expression after `)` is the one case this misreads).
-fn regex_may_start(b: &[u8], prev: u8, at: usize) -> bool {
+/// `after_dot`: the word ending at `at` follows a `.` (a property name, never a keyword); a `++`
+/// or `--` before the `/` is a postfix update, so it divides.
+fn regex_may_start(b: &[u8], prev: u8, at: usize, after_dot: bool) -> bool {
     match prev {
         0 => true,
+        b'+' | b'-' if at > 0 && b.get(at - 1) == Some(&prev) => false,
         b'(' | b',' | b'=' | b':' | b'[' | b'!' | b'&' | b'|' | b'?' | b'{' | b';' | b'+' | b'-' | b'*' | b'%' | b'<' | b'>' | b'~' | b'^' => true,
+        _ if after_dot => false,
         c if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' => {
             let start = (0..=at).rev().find(|&k| !b.get(k).is_some_and(|d| d.is_ascii_alphanumeric() || *d == b'_' || *d == b'$')).map_or(0, |k| k + 1);
             let word = b.get(start..=at).unwrap_or_default();
@@ -833,6 +837,9 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
     // The last significant byte (not space or comment), and where it is.
     let (mut prev, mut prev_at) = (0u8, 0usize);
+    // Whether the word that ends at `prev_at` came right after a `.` token (comments and
+    // whitespace between them do not matter).
+    let mut word_after_dot = false;
     // The bracket depth of each open `${`, to tell its closing `}` from an inner one.
     let mut interpolations: Vec<usize> = vec![];
     while let Some(&c) = b.get(i) {
@@ -894,10 +901,14 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
                 i += 2;
                 continue;
             }
-            b'/' if regex_may_start(b, prev, prev_at) => skip_regex(b, &mut i),
+            b'/' if regex_may_start(b, prev, prev_at, word_after_dot) => skip_regex(b, &mut i),
             _ => {}
         }
         if !c.is_ascii_whitespace() {
+            let word = |d: u8| d.is_ascii_alphanumeric() || d == b'_' || d == b'$';
+            if word(c) && !word(prev) {
+                word_after_dot = prev == b'.';
+            }
             (prev, prev_at) = (c, i);
         }
         i += 1;
@@ -988,6 +999,11 @@ mod nesting_tests {
         assert!(check_nesting(&format!("a = (4) / 2 / 3; b = {}", deep(5000))).is_err());
         // After a keyword that takes an expression a slash starts a regular expression.
         assert!(check_nesting(&format!("typeof /`/ ; {}", deep(5000))).is_err());
+        // A postfix update or a property named like a keyword is followed by a division, not a
+        // regular expression (the deep brackets after it must still be counted).
+        for head in ["i++ /", "i-- /", "obj.in /", "obj . in /", "obj . /* c */ in /", "obj.\n  typeof /"] {
+            assert!(check_nesting(&format!("x = {head} {} / 2", deep(5000))).is_err(), "{head}");
+        }
     }
 
     #[test]
