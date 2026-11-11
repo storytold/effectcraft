@@ -269,7 +269,14 @@ pub(crate) struct Collector {
     losses: BTreeMap<LossCategory, Loss>,
     pub missing_footage: Vec<String>,
     pub missing_fonts: Vec<String>,
+    /// The effects with no counterpart, by match name: the first instance's report line and how
+    /// many instances there were. They get a line each in [`Collector::finish`], so one that
+    /// comes after the example lines are used up is still named (#3365).
+    unmapped_effects: BTreeMap<String, (String, usize)>,
 }
+
+/// How many different unmapped effects get a line of their own (a file names at most this many).
+const MAX_UNMAPPED_EFFECTS: usize = 100;
 
 impl Collector {
     /// Records one loss.
@@ -281,7 +288,28 @@ impl Collector {
         }
     }
 
-    pub fn finish(self) -> ImportReport {
+    /// Records one instance of an effect with no counterpart. The loss is counted now; its line is
+    /// made in [`Collector::finish`], one per effect with the number of instances, so that many
+    /// other losses cannot hide which effects were dropped.
+    pub fn lose_unmapped_effect(&mut self, match_name: &str, detail: String) {
+        let loss = self.losses.entry(LossCategory::Effects).or_insert_with(|| Loss { category: LossCategory::Effects, count: 0, details: Vec::new() });
+        loss.count = loss.count.saturating_add(1);
+        if let Some(seen) = self.unmapped_effects.get_mut(match_name) {
+            seen.1 = seen.1.saturating_add(1);
+        } else if self.unmapped_effects.len() < MAX_UNMAPPED_EFFECTS {
+            self.unmapped_effects.insert(match_name.to_string(), (detail, 1));
+        }
+        // (Past the limit an effect is only counted: its name is not worth a line of its own.)
+    }
+
+    pub fn finish(mut self) -> ImportReport {
+        if let Some(loss) = self.losses.get_mut(&LossCategory::Effects) {
+            let named = std::mem::take(&mut self.unmapped_effects).into_values().map(|(first, n)| match n {
+                1 => first,
+                _ => format!("{first}, and {} more like it", n - 1),
+            });
+            loss.details.splice(0..0, named);
+        }
         ImportReport {
             imported: self.imported,
             losses: self.losses.into_values().collect(),
@@ -301,3 +329,45 @@ pub const LIMITATIONS: &[&str] = &[
     "Text: per-character 3D, text on a path and several style slots of unknown meaning are not decoded (stored values that differ from the default are reported as text layer features).",
     "Footage that is not a solid is linked by its stored path with its stored frame rate and duration; the importer never opens the files (use Reload Footage after the files are found).",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #3365: with other losses filling the 20 example lines, an effect with no counterpart still
+    /// gets its own line, with how many instances were lost. The category's count is unchanged.
+    #[test]
+    fn every_unmapped_effect_is_named_however_many_other_losses_there_are() {
+        let mut col = Collector::default();
+        for i in 0..30 {
+            col.lose(LossCategory::Effects, format!("C: 'L{i}': parameter P not imported"));
+        }
+        for i in 0..25 {
+            col.lose_unmapped_effect("CC Cylinder", format!("C: 'Cyl{i}' has the effect 'CC Cylinder' (CC Cylinder)"));
+        }
+        col.lose_unmapped_effect("Pseudo/", "C: 'D' has the effect 'Dropdown' (Pseudo/)".to_string());
+        let report = col.finish();
+        let effects = report.losses.iter().find(|l| l.category == LossCategory::Effects).unwrap();
+        assert_eq!(effects.count, 56, "30 parameters, 25 cylinders and 1 dropdown");
+        let named = |what: &str| effects.details.iter().filter(|d| d.contains(what)).collect::<Vec<_>>();
+        assert_eq!(named("(CC Cylinder)").len(), 1, "{:?}", effects.details);
+        assert!(named("(CC Cylinder)")[0].contains("24 more"), "{:?}", named("(CC Cylinder)"));
+        // One instance stays the single line it was.
+        assert_eq!(named("(Pseudo/)"), ["C: 'D' has the effect 'Dropdown' (Pseudo/)"]);
+        assert!(effects.details.len() <= MAX_DETAILS + 2, "the examples stay bounded");
+    }
+
+    /// A file with more than [`MAX_UNMAPPED_EFFECTS`] different unmapped effects names that many
+    /// and counts the rest, whatever room the example lines have.
+    #[test]
+    fn at_most_the_limit_of_unmapped_effects_are_named() {
+        let mut col = Collector::default();
+        for i in 0..=MAX_UNMAPPED_EFFECTS {
+            col.lose_unmapped_effect(&format!("Effect {i}"), format!("C: 'L' has the effect 'Effect {i}' (Effect {i})"));
+        }
+        let report = col.finish();
+        let effects = report.losses.iter().find(|l| l.category == LossCategory::Effects).unwrap();
+        assert_eq!(effects.count, MAX_UNMAPPED_EFFECTS + 1, "every instance is counted");
+        assert_eq!(effects.details.len(), MAX_UNMAPPED_EFFECTS, "{} lines", effects.details.len());
+    }
+}

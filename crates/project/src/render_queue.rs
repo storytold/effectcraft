@@ -779,6 +779,27 @@ pub struct Crop {
     pub right: i32,
 }
 
+/// The largest side of a frame an output module writes (Resize is capped there too).
+pub const MAX_OUTPUT_SIDE: i32 = 30_000;
+
+/// Crop edges `a`/`b` of one axis of `side` pixels: padding is taken back only as far as keeps
+/// the result within [`MAX_OUTPUT_SIDE`], so a mixed pair that stays inside the cap is kept as
+/// saved. Each edge is also bounded (what the larger of the side and the cap allows), so the
+/// arithmetic on them cannot overflow.
+fn bound_edges(a: i32, b: i32, side: i32) -> (i32, i32) {
+    let hi = side.max(MAX_OUTPUT_SIDE);
+    let (mut a, mut b) = (a.clamp(-MAX_OUTPUT_SIDE, hi), b.clamp(-MAX_OUTPUT_SIDE, hi));
+    let excess = i64::from(side) - i64::from(a) - i64::from(b) - i64::from(MAX_OUTPUT_SIDE);
+    if excess > 0 {
+        // Only padding (negative edges) grows the side: take back as much of it as needed.
+        let excess = i32::try_from(excess).unwrap_or(i32::MAX);
+        let from_a = excess.min(-a.min(0));
+        a += from_a;
+        b += (excess - from_a).min(-b.min(0));
+    }
+    (a, b)
+}
+
 impl Crop {
     /// Edges `(top, left, bottom, right)` in pixels of a `w`×`h` frame rendered at `scale`.
     pub fn edges(&self, w: u32, h: u32, scale: f64) -> (i32, i32, i32, i32) {
@@ -801,7 +822,12 @@ impl Crop {
             let b = conv((y + rh) * scale, hi).max(t);
             return (t, l, hi - b, wi - r);
         }
-        (self.top, self.left, self.bottom, self.right)
+        // Negative edges pad the frame: keep each padded side within the largest frame an
+        // output module writes, or a few saved integers ask for a canvas of gigapixels.
+        let (wi, hi) = (i32::try_from(w).unwrap_or(i32::MAX), i32::try_from(h).unwrap_or(i32::MAX));
+        let (t, b) = bound_edges(self.top, self.bottom, hi);
+        let (l, r) = bound_edges(self.left, self.right, wi);
+        (t, l, b, r)
     }
 }
 
@@ -1271,8 +1297,8 @@ impl OutputModule {
             // Width rules; height follows the cropped frame's aspect.
             rh = ((rw as f64 * ch as f64 / cw as f64).round() as u32).max(1);
         }
-        rw = rw.min(30_000);
-        rh = rh.min(30_000);
+        rw = rw.min(MAX_OUTPUT_SIDE as u32);
+        rh = rh.min(MAX_OUTPUT_SIDE as u32);
         (rw, rh)
     }
     /// The written frame size of an item (Render Settings resolution, Crop, Resize, codec
@@ -1692,6 +1718,23 @@ pub fn sanitize(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crop_padding_stays_within_the_largest_output_frame() {
+        use super::*;
+        let crop = |top, left, bottom, right| Crop { enabled: true, top, left, bottom, right, ..Default::default() };
+        let m = |c: Crop| OutputModule { crop: c, ..Default::default() };
+        // Saved edges padding by billions of pixels: the frame stops at the cap.
+        assert_eq!(m(crop(i32::MIN, i32::MIN, i32::MIN, i32::MIN)).frame_size(100, 50, 1.0), (30_000, 30_000));
+        assert_eq!(m(crop(-20_000, 0, -20_000, -1)).frame_size(100, 50, 1.0), (101, 30_000));
+        // Ordinary crops and pads are unchanged.
+        assert_eq!(crop(1, -2, 3, 4).edges(100, 50, 1.0), (1, -2, 3, 4));
+        // A mixed pair beyond the side that still ends within the cap is kept as saved (50 px).
+        assert_eq!(crop(0, 150, 0, -100).edges(100, 50, 1.0), (0, 150, 0, -100));
+        assert_eq!(m(crop(0, 150, 0, -100)).frame_size(100, 50, 1.0), (50, 50));
+        assert_eq!(m(crop(10, 10, 10, 10)).frame_size(100, 50, 1.0), (80, 30));
+        assert_eq!(m(crop(i32::MAX, 0, 0, 0)).frame_size(100, 50, 1.0), (100, 1));
+    }
+
     use super::*;
 
     #[test]
