@@ -357,7 +357,8 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
     // Images naming one source decode once, and all of them within one pixel budget.
     let mut image_of: HashMap<String, Option<Arc<Texture>>> = HashMap::new();
     let mut pixels_left = MAX_IMPORT_TEXTURE_PIXELS;
-    for im in arr(&j, "images") {
+    let mut warnings: Vec<String> = vec![];
+    for (n, im) in arr(&j, "images").iter().enumerate() {
         let (uri, view) = (im.get("uri").and_then(Value::as_str), idx(im, "bufferView"));
         let key = match (uri, view) {
             (Some(u), _) => format!("uri:{u}"),
@@ -377,7 +378,15 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
                     b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
                 })
             };
-            data.and_then(|b| Texture::decode_within(&b, &mut pixels_left).ok()).map(Arc::new)
+            match data.map(|b| Texture::decode_within(&b, &mut pixels_left)) {
+                Some(Ok(t)) => Some(Arc::new(t)),
+                Some(Err(e)) => {
+                    log::warn!("model: glTF image {n} left out: {e}");
+                    warnings.push(format!("image {n} left out: {e}"));
+                    None
+                }
+                None => None,
+            }
         });
         images.push(image.clone());
     }
@@ -412,6 +421,9 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
                     // one that does not fit is left out like an undecodable image.
                     let cost = u64::from(img.width) * u64::from(img.height);
                     if cost > pixels_left {
+                        warnings.push(format!(
+                            "a texture with another wrap mode left out: the model's textures would hold more than {MAX_IMPORT_TEXTURE_PIXELS} pixels"
+                        ));
                         tex_map.push(None);
                         continue;
                     }
@@ -575,7 +587,7 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
         .and_then(|e| e.get("KHR_lights_punctual"))
         .map(|e| arr(e, "lights").iter().enumerate().map(|(i, l)| light(l, i)).collect())
         .unwrap_or_default();
-    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights, warnings: Vec::new() })
+    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights, warnings })
 }
 
 fn name_or(v: &Value, d: String) -> String {

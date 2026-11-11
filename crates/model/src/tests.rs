@@ -855,3 +855,30 @@ fn contour_grouping_is_bounded() {
     assert_eq!(g.len(), extrude::MAX_CONTOURS);
     assert!(g.iter().all(|o| o.holes.is_empty()));
 }
+
+/// A texture the import leaves out (too large, or not an image) is named in `Model::warnings`,
+/// which the import shows the user; the model still loads.
+#[test]
+fn left_out_textures_are_reported_as_import_warnings() {
+    // A 24-bit BMP header claiming 9000×9000 (81 MP, over one texture's limit) over no pixel data.
+    let mut big = b"BM".to_vec();
+    big.extend_from_slice(&[0; 8]);
+    big.extend_from_slice(&54u32.to_le_bytes());
+    big.extend_from_slice(&40u32.to_le_bytes());
+    big.extend_from_slice(&9000u32.to_le_bytes());
+    big.extend_from_slice(&9000u32.to_le_bytes());
+    big.extend_from_slice(&[1, 0, 24, 0]);
+    big.extend_from_slice(&[0; 24]);
+    let mtl = b"newmtl A\nmap_Kd big.bmp\nnewmtl B\nmap_Kd junk.png\nnewmtl C\nmap_Kd gone.png\n".to_vec();
+    let src = b"mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl A\nf 1 2 3\n";
+    let m = obj::parse(src, &|name| match name {
+        "m.mtl" => Some(mtl.clone()),
+        "big.bmp" => Some(big.clone()),
+        "junk.png" => Some(b"not an image".to_vec()),
+        _ => None,
+    })
+    .unwrap();
+    assert!(m.textures.is_empty());
+    let all = m.warnings.join("|");
+    assert!(all.contains("big.bmp") && all.contains("junk.png") && all.contains("gone.png"), "{all}");
+}

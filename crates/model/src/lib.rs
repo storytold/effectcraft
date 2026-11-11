@@ -66,8 +66,9 @@ pub struct Texture {
 
 /// Most pixels one texture may hold (8192 × 8192: 1 GiB as float RGBA).
 pub const MAX_TEXTURE_PIXELS: u64 = 1 << 26;
-/// Most pixels the textures of one import may hold together (2 GiB as float RGBA).
-pub const MAX_IMPORT_TEXTURE_PIXELS: u64 = 1 << 27;
+/// Most pixels the textures of one import may hold together (8 GiB as float RGBA: thirty-two 4K
+/// maps). A texture past it is left out and the import says so (`Model::warnings`).
+pub const MAX_IMPORT_TEXTURE_PIXELS: u64 = 1 << 29;
 
 impl Texture {
     pub fn solid(c: [f32; 4]) -> Texture {

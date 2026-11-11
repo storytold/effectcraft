@@ -43,11 +43,13 @@ fn resolve_reference(resolve: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> O
 pub struct TextureCache {
     loaded: HashMap<String, Option<usize>>,
     pixels_left: u64,
+    /// Textures left out, for the user.
+    pub warnings: Vec<String>,
 }
 
 impl Default for TextureCache {
     fn default() -> Self {
-        TextureCache { loaded: HashMap::new(), pixels_left: MAX_IMPORT_TEXTURE_PIXELS }
+        TextureCache { loaded: HashMap::new(), pixels_left: MAX_IMPORT_TEXTURE_PIXELS, warnings: vec![] }
     }
 }
 
@@ -55,12 +57,13 @@ impl Default for TextureCache {
 /// reference through `cache`).
 pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>, cache: &mut TextureCache) -> Vec<Material> {
     let mut out: Vec<Material> = vec![];
-    let TextureCache { loaded, pixels_left } = cache;
+    let TextureCache { loaded, pixels_left, warnings } = cache;
     let mut tex = |name: &str, textures: &mut Vec<Arc<Texture>>| -> Option<TexRef> {
         let key = name.trim().to_string();
         let t = *loaded.entry(key.clone()).or_insert_with(|| {
             let Some(b) = resolve_reference(resolve, &key) else {
                 log::warn!("model: texture `{key}` was not found next to the model");
+                warnings.push(format!("texture `{key}` was not found next to the model"));
                 return None;
             };
             match Texture::decode_within(&b, pixels_left) {
@@ -70,6 +73,7 @@ pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures
                 }
                 Err(e) => {
                     log::warn!("model: cannot decode texture `{key}`: {e}");
+                    warnings.push(format!("texture `{key}` left out: {e}"));
                     None
                 }
             }
@@ -310,7 +314,9 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         }
         mesh.primitives.push(p);
     }
-    Ok(Model::single(mesh, materials).with_textures(textures))
+    let mut model = Model::single(mesh, materials).with_textures(textures);
+    model.warnings = cache.warnings;
+    Ok(model)
 }
 
 impl Model {
