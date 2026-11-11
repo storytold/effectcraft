@@ -15,6 +15,8 @@ mod ease_presets;
 mod evalfile;
 mod include;
 mod panels;
+#[cfg(not(target_arch = "wasm32"))]
+mod render_wait;
 #[cfg(not(windows))]
 mod services;
 mod startup;
@@ -137,6 +139,42 @@ fn fill_parameters_use_documented_match_names() {
            [fx.property("ADBE Fill-0002").name, fx.property("ADBE Fill-0007").name, fx.property(2).matchName].join("|")"#,
     );
     assert_eq!(o.result, json!("Color|All Masks|ADBE Fill-0007"));
+}
+
+/// #3113: effects carry After Effects' match names (`ADBE Noise2`, `ADBE OFMotionBlur`); the
+/// names earlier versions emitted still add and find the effect and its parameters.
+#[test]
+fn effects_use_after_effects_match_names_and_accept_legacy_ones() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("N", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var a = fx.addProperty("ADBE Noise2"), b = fx.addProperty("ADBE Noise"), m = fx.addProperty("ADBE OFMotionBlur");
+           var p = fx.addProperty("ADBE Pixel Motion Blur");
+           [a.matchName, b.matchName, m.matchName, p.matchName, a.property("ADBE Noise2-0001").name,
+            fx.property("ADBE Noise").matchName, a.property("ADBE Noise-0001").name, fx.numProperties]"#,
+    );
+    assert_eq!(
+        o.result,
+        json!(["ADBE Noise2", "ADBE Noise2", "ADBE OFMotionBlur", "ADBE OFMotionBlur", "Amount of Noise", "ADBE Noise2", "Amount of Noise", 4])
+    );
+}
+
+/// #3113: names that changed only in case (`ADBE Ellipse` → `ADBE ELLIPSE`, `ADBE Grow Bounds` →
+/// `ADBE GROW BOUNDS`) still find the effect and its parameters.
+#[test]
+fn match_names_that_changed_case_still_find_effects_and_parameters() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("E", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade");
+           var e = fx.addProperty("ADBE Ellipse"), g = fx.addProperty("ADBE Grow Bounds");
+           [e.matchName, fx.property("ADBE Ellipse").matchName, e.property("ADBE Ellipse-0001").matchName,
+            g.matchName, fx.property("ADBE Grow Bounds").matchName, g.property("ADBE Grow Bounds-0001").matchName]"#,
+    );
+    assert_eq!(o.result, json!(["ADBE ELLIPSE", "ADBE ELLIPSE", "ADBE ELLIPSE-0001", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS", "ADBE GROW BOUNDS-0001"]));
 }
 
 #[test]
@@ -1943,4 +1981,33 @@ fn file_masks_match_without_backtracking() {
         "[__globMatch('\\u03bf\\u03c2.txt', '\\u039f\\u03a3.txt'), __globMatch('\\u03a3*', '\\u03c2x'), __globMatch('k', '\\u212a'), __globMatch('a', 'b')].join()",
     );
     assert_eq!(r.result.as_str(), Some("true,true,false,false"));
+}
+
+/// #3395: setValue on a string effect parameter stores the text, or a File's path, as `prop.set`
+/// does. Before, every string fell through to the number check ("value must be a number").
+/// Hidden string parameters (Mesh Warp's Distortion Mesh) stay refused, keys included.
+#[test]
+fn set_value_stores_a_string_parameter() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Str", 64, 36, 1, 1, 24);
+        var l = c.layers.addSolid([1, 0, 0], "s", 64, 36, 1);
+        var fx = l.property("ADBE Effect Parade");
+        var lut = fx.addProperty("Apply Color LUT").property("LUT");
+        lut.setValue("/luts/look.cube");
+        var fromString = lut.value;
+        lut.setValue(new File("/luts/other.cube"));
+        var mesh = fx.addProperty("Mesh Warp").property("Distortion Mesh");
+        function attempt(f) { try { f(); return "no error"; } catch (e) { return e.message; } }
+        var hidden = attempt(function () { mesh.setValue("x"); });
+        var keyed = attempt(function () { mesh.setValueAtTime(0, "x"); });
+        [lut.propertyValueType === PropertyValueType.CUSTOM_VALUE, fromString, lut.value, hidden, keyed, mesh.numKeys]
+        "#,
+    );
+    let refused = "\"Distortion Mesh\" can not be set";
+    assert_eq!(o.result, json!([true, "/luts/look.cube", "/luts/other.cube", refused, refused, 0]));
+    let (_, c) = comp_named(&s, "Str");
+    assert_eq!(layer(c, "s").props.prop("effects/#1/lut").unwrap().value, KV::Str("/luts/other.cube".into()));
 }

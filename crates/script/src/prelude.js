@@ -26,7 +26,7 @@ function __err(msg) {
 }
 function __num(v, what) {
   var n = Number(v);
-  if (typeof v === "boolean" || isNaN(n)) throw __err((what || "value") + " must be a number");
+  if (typeof v === "boolean" || Number.isNaN(n)) throw __err((what || "value") + " must be a number");
   return n;
 }
 function __str(v) {
@@ -43,11 +43,11 @@ if (typeof String.prototype.substr !== "function") {
       if (this === null || this === undefined) throw new TypeError("String.substr called on null or undefined");
       var text = String(this), n = text.length;
       var from = Number(start);
-      if (isNaN(from)) from = 0;
+      if (Number.isNaN(from)) from = 0;
       // ToIntegerOrInfinity, then clamp positive or negative offsets.
       from = from < 0 ? Math.max(n + Math.ceil(from), 0) : Math.min(Math.floor(from), n);
       var count = length === undefined ? n - from : Number(length);
-      if (isNaN(count) || count <= 0) return "";
+      if (Number.isNaN(count) || count <= 0) return "";
       return text.slice(from, from + count);
     },
     writable: true, configurable: true
@@ -461,7 +461,7 @@ function __callable(o) {
 // 1-based collections with `[n]` access.
 var __coll = {
   get: function (t, k, r) {
-    if (typeof k === "string" && /^[0-9]+$/.test(k)) return t.__at(parseInt(k, 10));
+    if (typeof k === "string" && /^[0-9]+$/.test(k)) return t.__at(Number.parseInt(k, 10));
     return Reflect.get(t, k, r);
   },
 };
@@ -891,6 +891,12 @@ Property.prototype.property = function () { return null; };
       var idx = v?.__id !== undefined ? v.index : __num(v);
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
+    }
+    // A string parameter (a LUT or look file, a text field) takes the text, or a File's path (#3395).
+    // A hidden one (Mesh Warp's mesh) stays refused by the key setters too, as by setValue.
+    if (info.type === "string") {
+      if (info.hidden) throw __err("\"" + info.name + "\" can not be set");
+      return __str(v);
     }
     if (info.type === "enum") return __num(v) - 1;
     if (info.type === "bool") return typeof v === "boolean" ? v : __num(v) !== 0;

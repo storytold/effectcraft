@@ -878,7 +878,7 @@ fn broadcast_colors(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CC Toner, CC Color Offset, CC Kernel
+// Multi-Tone Tint, Channel Offset, Convolution Kernel
 
 fn cc_toner(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let g = |id: &str| {
@@ -1101,7 +1101,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.color.cctoner",
-            "CC Toner",
+            "Multi-Tone Tint",
             vec![
                 p("tones", "Tones", Value::Enum(1), popup(&["Duotone", "Tritone", "Pentone"])),
                 p("highlights", "Highlights", col(1.0, 1.0, 1.0), ParamUi::Color),
@@ -1115,7 +1115,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.color.cccoloroffset",
-            "CC Color Offset",
+            "Channel Offset",
             vec![
                 p("redPhase", "Red Phase", num(0.0), ParamUi::Angle),
                 p("greenPhase", "Green Phase", num(0.0), ParamUi::Angle),
@@ -1124,7 +1124,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             cc_color_offset,
         ),
-        spec("ec.color.cckernel", "CC Kernel", k_params, cc_kernel),
+        spec("ec.color.cckernel", "Convolution Kernel", k_params, cc_kernel),
     ]
 }
 

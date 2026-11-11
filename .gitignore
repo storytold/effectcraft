@@ -5,3 +5,7 @@ target/
 /log
 .DS_Store
 .claude/worktrees/
+__pycache__/
+
+# After Effects test corpus fetched by `cargo xtask aep-corpus`
+/corpus/

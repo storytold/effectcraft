@@ -319,6 +319,135 @@ fn panels_taller_than_their_space_have_a_scroll_bar_to_drag() {
     }
 }
 
+/// A window of `height` with one `panel` maximized, with rows to fill it: effects on the selected
+/// layers, queued renders, markers with a long comment, a folder of files.
+fn panel_with_rows(panel: effectcraft_ui_egui::dock::PanelKind, height: f32, folder: &std::path::Path) -> Harness<'static, EffectcraftApp> {
+    let mut h = harness(640.0, height);
+    let app = h.state_mut();
+    let layers: Vec<u64> = app.session.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
+    app.session.execute("layer.select", json!({"layers": layers})).unwrap();
+    for e in ["slider", "angle", "checkbox", "color", "point"] {
+        app.session.execute("effect.apply", json!({"effect": format!("ec.control.{e}"), "layers": [layers[0]]})).unwrap();
+    }
+    for i in 0..6 {
+        app.session.execute("renderQueue.add", json!({})).unwrap();
+        let comment = "a marker comment long enough to run right across the panel and off its far edge, under anything there";
+        app.session.execute("markers.set", json!({"new": true, "time": 1.0 + i as f64 * 0.5, "comment": comment})).unwrap();
+    }
+    app.session.execute("mediaBrowser.go", json!({"path": folder.to_string_lossy(), "importableOnly": false})).unwrap();
+    app.show_panel(panel);
+    app.ui.maximized = Some(panel);
+    h.run_steps(4);
+    h
+}
+
+/// A folder of files for the Media Browser's tiles, under a name only `test` uses.
+fn folder_of_files(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ec-ui-scrolling-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..24 {
+        std::fs::write(dir.join(format!("file{i}.txt")), "x").unwrap();
+    }
+    dir
+}
+
+/// The right edge of the elements under `prefix` level with `track` (or anywhere, without one),
+/// other than the scroll bar `bar`.
+fn rightmost(h: &Harness<'_, EffectcraftApp>, prefix: &str, bar: &str, track: Option<Rect>) -> Option<f32> {
+    h.state()
+        .auto
+        .query(prefix)
+        .into_iter()
+        .filter(|e| e.id != bar)
+        .map(|e| Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3])))
+        .filter(|r| track.is_none_or(|t| r.max.y > t.min.y && r.min.y < t.max.y))
+        .map(|r| r.max.x)
+        .reduce(f32::max)
+}
+
+/// The text painted this frame, with where it shows (cut by its clip).
+fn painted_text(h: &Harness<'_, EffectcraftApp>) -> Vec<(String, Rect)> {
+    h.output()
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some((t.galley.text().to_string(), t.visual_bounding_rect().intersect(c.clip_rect))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The panels that scroll their rows: the elements in them (none for a panel that only paints),
+/// the scroll bar, and how far in from the panel's edge the rows end at full width (`None`: their
+/// width is capped).
+const SCROLLED_PANELS: [(effectcraft_ui_egui::dock::PanelKind, &str, &str, Option<f32>); 12] = {
+    use effectcraft_ui_egui::dock::PanelKind as P;
+    [
+        (P::EffectControls, "effectControls.", "effectControls.scroll", Some(0.0)),
+        (P::EffectsPresets, "effects.", "effects.scroll", Some(0.0)),
+        (P::Info, "info.", "info.scroll", None),
+        (P::MediaBrowser, "mediaBrowser.entry.", "mediaBrowser.scroll", None),
+        (P::Preview, "preview.", "preview.scroll", None),
+        (P::History, "history.state.", "history.scroll", Some(0.0)),
+        (P::Markers, "markers.", "markers.scroll", None),
+        (P::Properties, "properties.", "properties.scroll", Some(12.0)),
+        (P::RenderQueue, "renderQueue.item.", "renderQueue.scroll", Some(0.0)),
+        (P::Character, "character.", "character.scroll", Some(10.0)),
+        (P::Paragraph, "paragraph.", "paragraph.scroll", Some(10.0)),
+        (P::Project, "project.item.", "project.vscroll", Some(0.0)),
+    ]
+};
+
+/// While a panel's rows overflow, they (and their widgets and text) stop before its scroll bar,
+/// which was drawn over them (#2867).
+#[test]
+fn panel_rows_stop_before_their_scroll_bar() {
+    let folder = folder_of_files("short");
+    for (panel, prefix, bar, _) in SCROLLED_PANELS {
+        // (The Project panel's list starts below its item preview and search: a taller window.)
+        let h = panel_with_rows(panel, if bar == "project.vscroll" { 330.0 } else { 240.0 }, &folder);
+        assert!(scrolled(&h, bar).1 > 0.0, "{bar}: the rows overflow");
+        let track = rect(&h, bar);
+        if let Some(right) = rightmost(&h, prefix, bar, Some(track)) {
+            assert!(right <= track.min.x, "{bar}: the rows end at {right}, on the track {track:?}");
+        } else {
+            assert!(matches!(bar, "info.scroll" | "markers.scroll"), "{bar}: no rows beside the track");
+        }
+        let lane = Rect::from_x_y_ranges(track.min.x..=track.max.x, track.y_range());
+        for (text, at) in painted_text(&h) {
+            assert!(!at.intersects(lane), "{bar}: {text:?} shows at {at:?}, on the track {track:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// Panels whose rows fit show no bar and give up no width for one.
+#[test]
+fn panels_with_room_keep_their_full_width() {
+    let folder = folder_of_files("tall");
+    for (panel, prefix, bar, inset) in SCROLLED_PANELS {
+        let h = panel_with_rows(panel, 1600.0, &folder);
+        assert!(h.state().auto.find(bar).is_none(), "{bar}: the rows fit");
+        let edge = rect(&h, &format!("panel.{}", panel.id())).max.x - 1.0;
+        if let Some(inset) = inset {
+            let right = rightmost(&h, prefix, bar, None).unwrap_or_else(|| panic!("{bar}: no rows"));
+            assert!((edge - inset - right).abs() < 0.01, "{bar}: the rows end at {right}, {inset} in from {edge}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// The Render Queue's header columns stay over their columns when the rows narrow for the bar.
+#[test]
+fn render_queue_header_lines_up_with_narrowed_rows() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    let h = panel_with_rows(PanelKind::RenderQueue, 240.0, &std::env::temp_dir());
+    assert!(scrolled(&h, "renderQueue.scroll").1 > 0.0, "the rows overflow");
+    let status = rect(&h, "renderQueue.item.1.status");
+    let header = painted_text(&h).into_iter().find(|(text, _)| text == "Status").expect("the Status header");
+    assert!((header.1.min.x - status.min.x - 2.0).abs() < 2.0, "the header ({:?}) over the column ({status:?})", header.1);
+}
+
 /// In a narrow Effect Controls panel an animated point's values stay clear of its keyframe
 /// navigator (â—€ â—† â–¶), which was drawn over them (#271).
 #[test]
