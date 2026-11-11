@@ -517,6 +517,8 @@ pub struct Model {
     pub cameras: Vec<ModelCamera>,
     /// Punctual lights embedded in the file (glTF `KHR_lights_punctual`).
     pub lights: Vec<ModelLight>,
+    /// Parts of the file the import left out (textures over the limits), for the user.
+    pub warnings: Vec<String>,
 }
 
 /// A camera embedded in a model file.
