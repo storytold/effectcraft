@@ -60,6 +60,9 @@ pub(crate) fn placeholder(
             ParamUi::Popup { options } => options.len(),
             _ => 0,
         };
+        if p.kind == ParamKind::Popup && popup_len(p).is_some_and(|n| n > items) {
+            col.lose(LossCategory::Effects, format!("{here}: parameter {label}: the items past the first {MAX_POPUP_ITEMS} not kept"));
+        }
         let cost = col.placeholder_cost.saturating_add(items).saturating_add(1);
         if cost > MAX_COST {
             col.lose(LossCategory::Effects, format!("{here}: parameter {label} not kept (past the import's {MAX_COST} placeholder parameters)"));
@@ -99,7 +102,7 @@ fn shape(p: &EffectParam<'_, '_>, size: (u32, u32)) -> Option<(Option<Kind>, Par
             // The file's items, separators (`(-`) included: After Effects counts them.
             let options: Vec<String> = match &p.items {
                 Some(items) => items.iter().take(MAX_POPUP_ITEMS).cloned().collect(),
-                None => (1..=usize::from(p.popup_item_count()?).min(MAX_POPUP_ITEMS)).map(|i| format!("Item {i}")).collect(),
+                None => (1..=popup_len(p)?.min(MAX_POPUP_ITEMS)).map(|i| format!("Item {i}")).collect(),
             };
             let n = u32::try_from(options.len()).ok().filter(|n| *n > 0)?;
             (Kind::EffectPopup(n), ParamUi::Popup { options }, Value::Enum(0))
@@ -107,6 +110,11 @@ fn shape(p: &EffectParam<'_, '_>, size: (u32, u32)) -> Option<(Option<Kind>, Par
         _ => return None,
     };
     Some((Some(kind), ui, default))
+}
+
+/// How many items a popup has: the file's names, else the count in its definition.
+fn popup_len(p: &EffectParam<'_, '_>) -> Option<usize> {
+    p.items.as_ref().map(Vec::len).or_else(|| p.popup_item_count().map(usize::from))
 }
 
 /// The property id of `p`: its match name when that is one segment of a property path (a
@@ -159,8 +167,12 @@ fn fill(p: &EffectParam<'_, '_>, prop: &mut Property, kind: Kind, cx: &LayerCtx<
             None => return,
         },
     };
-    match convert(value, kind) {
-        Some(v) => prop.value = v,
-        None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?})")),
+    match (convert(value, kind), value) {
+        (Some(v), _) => prop.value = v,
+        // An item of the file that is past the ones kept (reported with the cut): the first item.
+        (None, ParamValue::Index(i)) if usize::try_from(i).is_ok_and(|i| i > MAX_POPUP_ITEMS && popup_len(p).is_some_and(|n| i <= n)) => {
+            col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item {i} is past the items kept, the first item used"));
+        }
+        (None, _) => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?})")),
     }
 }

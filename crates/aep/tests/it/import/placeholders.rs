@@ -125,6 +125,22 @@ fn a_popup_default_of_no_item_takes_the_first_item() {
     assert!(losses(&r, LossCategory::DamagedData, "Some Fx").is_empty());
 }
 
+/// A popup past the 1024 items kept: the cut is reported, and a selection among the cut items
+/// takes the first item and is reported as such, not as damaged data.
+#[test]
+fn a_popup_past_the_items_kept_is_reported() {
+    let items: &'static [&'static str] = Box::leak((0..1100).map(|i| &*Box::leak(format!("I{i}").into_boxed_str())).collect::<Vec<_>>().into_boxed_slice());
+    let fx = Fx { match_name: "Long Fx", name: "Long", defs: vec![popup("Pick", 1, items)], values: vec![(1, 1050.0)], data: vec![], keys: vec![] };
+    let (g, r) = placeholder_of(&fx);
+    let pick = g.prop("Long Fx-0001").unwrap();
+    assert_eq!(pick.value, Value::Enum(0));
+    assert!(matches!(&pick.ui, ParamUi::Popup { options } if options.len() == 1024));
+    let found = losses(&r, LossCategory::Effects, "Long Fx");
+    assert!(found.iter().any(|d| d.contains("past the first 1024")), "{found:?}");
+    assert!(found.iter().any(|d| d.contains("item 1050 is past the items kept")), "{found:?}");
+    assert!(losses(&r, LossCategory::DamagedData, "Long Fx").is_empty());
+}
+
 /// Many large popups stay within the import's budget: what is beyond is reported, not kept.
 #[test]
 fn a_hostile_placeholder_stays_bounded() {
