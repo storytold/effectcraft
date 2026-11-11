@@ -196,6 +196,9 @@ pub(crate) struct Work {
     pub times: Vec<Tick>,
 }
 
+/// Most pixels a source frame is brought to for analysis (2 GiB as float RGBA).
+const MAX_SOURCE_PIXELS: u64 = 1 << 27;
+
 /// The layer's source frame at comp time `t` at 100 % (layer pixels + offset = image pixels).
 /// Footage at its native size is used straight from the footage source (no copy unless its
 /// Cineon Settings convert it).
@@ -223,6 +226,11 @@ pub(crate) fn source_frame(
         // Footage decoded at another size: bring it to layer pixels.
         let w = (buf.img.width as f64 / buf.scale).round().max(1.0) as u32;
         let h = (buf.img.height as f64 / buf.scale).round().max(1.0) as u32;
+        // The scale comes from the footage's saved width alone: a decoded frame of another
+        // aspect would give a height far beyond anything the layer shows.
+        if u64::from(w) * u64::from(h) > MAX_SOURCE_PIXELS {
+            return None;
+        }
         let off = [buf.offset[0] / buf.scale, buf.offset[1] / buf.scale];
         return Some((Arc::new(effectcraft_raster::resample(&buf.img, w, h)), off));
     }

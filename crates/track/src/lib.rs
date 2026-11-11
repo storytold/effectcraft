@@ -405,6 +405,9 @@ const SMALL_MOTION: f64 = 1.0;
 /// Lowest coarse NCC score of the best match for which the fine stage may search only ±1.
 const RELIABLE_SCORE: f64 = 0.8;
 
+/// Largest feature or search region side (layer pixels) a track point works with.
+pub const MAX_REGION_SIDE: f64 = 4096.0;
+
 /// Per-point tracking state.
 #[derive(Clone, Debug)]
 struct PointState {
@@ -445,6 +448,15 @@ impl PointState {
     }
 
     fn new(spec: PointSpec, frame: &Frame, opts: &TrackOptions) -> PointState {
+        // Regions come from saved projects and commands: each frame's crop and correlation
+        // search grow with them, so they are kept to a side a real feature never exceeds.
+        let side = |v: f64| if v.is_finite() { v.clamp(0.0, MAX_REGION_SIDE) } else { 0.0 };
+        let spec = PointSpec {
+            feature_size: spec.feature_size.map(side),
+            search_size: spec.search_size.map(side),
+            search_offset: spec.search_offset.map(|v| if v.is_finite() { v.clamp(-MAX_REGION_SIDE, MAX_REGION_SIDE) } else { 0.0 }),
+            ..spec
+        };
         let c = [spec.center[0] + frame.offset[0], spec.center[1] + frame.offset[1]];
         let mut st = PointState { spec, center: c, shape: [1.0, 0.0], velocity: [0.0; 2], templates: vec![], levels: 0 };
         let range = st.range();

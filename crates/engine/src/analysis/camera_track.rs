@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use crate::offload::JobKind;
 use crate::tracking::lock;
-use crate::warp::{analysis_times, signature};
+use crate::warp::{analysis_times, analysis_truncated, signature};
 use crate::{Event, Session};
 
 /// Live analysis progress (serde for agents / the control channel).
@@ -316,9 +316,12 @@ impl Session {
         if l.switches.adjustment {
             return Err("3D Camera Tracker needs footage, not an adjustment layer".into());
         }
-        let times = analysis_times(c, l);
+        let times = analysis_times(c, l, crate::warp::MAX_ANALYSIS_FRAMES);
         if times.len() < 2 {
             return Err("the layer must be at least two frames long".into());
+        }
+        if analysis_truncated(c, l, &times) {
+            return Err(format!("the layer is longer than {} frames: trim it before analysing", crate::warp::MAX_ANALYSIS_FRAMES));
         }
         let size = effectcraft_render::effect_bounds(&self.project, c, l).0;
         let params = static_params(g);
@@ -518,8 +521,8 @@ pub fn placed(project: &Project, cid: ItemId, lid: LayerId, uid: Uid) -> Option<
     let k0 = solve.first_solved()?;
     let comp_size = [comp.width as f64, comp.height as f64];
     let world = solve.world(comp_size, solve.frames[k0].focal * scale);
-    let mut times = analysis_times(comp, layer);
-    times.truncate(solve.frames.len());
+    // Only the frames the solve has: not the whole layer's schedule, then cut.
+    let times = analysis_times(comp, layer, solve.frames.len());
     Some(Placed { solve, world, scale, times, comp_size })
 }
 
