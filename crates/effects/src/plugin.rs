@@ -29,7 +29,8 @@
 //! parameter kinds. External effect helpers (`effectcraft-helper-host`) are built on it.
 //!
 //! The WebAssembly ABI is versioned separately ([`WASM_API_VERSION`]): ABI 1 is `ec_render`;
-//! ABI 2 adds `ec_render2`, which receives the layer's previous and next frames.
+//! ABI 2 adds `ec_render2`, which receives the layer's previous and next frames, and the
+//! optional `ec.source_at` import for reading the effect's own layer at any layer time.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -42,8 +43,9 @@ use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, Params, RenderFn};
 /// The plug-in API version this build implements (manifests with API 1 or 2 are accepted).
 pub const PLUGIN_API_VERSION: u32 = 2;
 /// The newest WebAssembly ABI this build implements (a module's `ec_api_version`). ABI 1 is
-/// `ec_render`; ABI 2 adds `ec_render2` and the layer's neighbouring frames. This is separate
-/// from the plug-in API version: a module's manifest `api` stays 1 or 2.
+/// `ec_render`; ABI 2 adds `ec_render2`, the layer's neighbouring frames, and the optional
+/// `ec.source_at` import. This is separate from the plug-in API version: a module's manifest
+/// `api` stays 1 or 2.
 pub const WASM_API_VERSION: u32 = 2;
 /// The oldest WebAssembly ABI this build still loads.
 pub const MIN_WASM_API_VERSION: u32 = 1;
@@ -184,6 +186,10 @@ pub struct PluginManifest {
     pub author: String,
     #[serde(default)]
     pub description: String,
+    /// WebAssembly ABI 2 host imports the module uses. Only `source_at` is allowed; the
+    /// module must import exactly what it declares here.
+    #[serde(default)]
+    pub imports: Vec<String>,
     #[serde(default)]
     pub params: Vec<PluginParam>,
 }
@@ -207,6 +213,15 @@ impl PluginManifest {
         }
         if self.params.len() > max_params {
             return Err(format!("plug-in `{}` has {} parameters (at most {max_params})", self.id, self.params.len()));
+        }
+        let mut seen_imports = std::collections::HashSet::new();
+        for name in &self.imports {
+            if name != "source_at" {
+                return Err(format!("plug-in `{}`: unknown import `{name}` (only `source_at` is allowed)", self.id));
+            }
+            if !seen_imports.insert(name.as_str()) {
+                return Err(format!("plug-in `{}`: duplicate import `{name}`", self.id));
+            }
         }
         let mut seen = std::collections::HashSet::new();
         for p in &self.params {
@@ -298,6 +313,13 @@ pub trait PluginHost {
     /// **layer time** in seconds, in its own extent (see [`PluginImage::origin`]; it is not
     /// padded). `None` when unavailable (adjustment layers, no host).
     fn input_at(&self, layer_time: f64) -> Option<PluginImage>;
+    /// This effect's input at another **layer time** with the first `effects` effects of the
+    /// layer's stack applied (`0` = source and masks), never past the effect being rendered.
+    /// The default ignores `effects` and is [`PluginHost::input_at`]; hosts that can apply a
+    /// partial stack override it.
+    fn source_at(&self, layer_time: f64, _effects: usize) -> Option<PluginImage> {
+        self.input_at(layer_time)
+    }
     /// The layer chosen in Layer parameter `param_id` at **layer time** `layer_time` (converted
     /// to composition time), effects and masks applied, resampled into this layer's buffer
     /// (same size, origin and scale as the frame, centred when the layers differ in size).
@@ -656,6 +678,11 @@ impl PluginHost for RenderHost<'_, '_> {
     fn input_at(&self, layer_time: f64) -> Option<PluginImage> {
         let host = self.ctx.env.host?;
         host.self_at(layer_time, self.ctx.env.effect_index).map(PluginImage::from_buf)
+    }
+
+    fn source_at(&self, layer_time: f64, effects: usize) -> Option<PluginImage> {
+        let host = self.ctx.env.host?;
+        host.self_at(layer_time, effects.min(self.ctx.env.effect_index)).map(PluginImage::from_buf)
     }
 
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage> {

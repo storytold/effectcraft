@@ -13,6 +13,7 @@
 //! | `ec_alloc` | `(bytes: i32) -> i32` | a buffer of at least `bytes` bytes, 8-byte aligned; it may reuse the previous one |
 //! | `ec_render` (ABI 1) | `(pixels: i32, width: i32, height: i32, params: i32, nparams: i32, time: f64, scale: f64) -> i32` | process the pixels in place; 0 = ok |
 //! | `ec_render2` (ABI 2) | `ec_render`'s arguments, then `prev: i32, prev_time: f64, next: i32, next_time: f64, flags: i32` | the same, with the neighbouring frames; 0 = ok |
+//! | `ec.source_at` (ABI 2, optional) | `(layer_time: f64, effects: i32, dst_ptr: i32, dst_len: i32) -> i32` | host import declared in the manifest's `imports`; writes the effect's input at another layer time (first `effects` effects applied) into the module's memory; 0 = ok, 1 = unavailable, 2 = bad buffer |
 //!
 //! For each render the host asks `ec_alloc` for one buffer holding the parameters (`nparams`
 //! little-endian `f64`s) followed by the pixels (`width × height × 4` little-endian `f32`s,
@@ -20,6 +21,11 @@
 //! module gets two more pixel buffers after the current frame: the layer's previous and next
 //! frames, resampled onto the current grid, and their layer times. The buffers are always
 //! allocated (zeroed when a frame does not exist); `flags` bit 0/1 says which are real.
+//!
+//! ABI 2 modules may also declare `"imports": ["source_at"]` and import `ec.source_at` to read
+//! their own layer's pixels at **any** layer time, with the first `effects` effects of the stack
+//! applied. The host caps a render at 64 calls, counting every call that reaches it; the module
+//! stays deterministic and sandboxed, and no other import is accepted.
 //!
 //! Modules run in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter (pure Rust,
 //! MIT/Apache-2.0) with deterministic floats, no imports (no files, network or clock) and a
