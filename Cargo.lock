@@ -1587,6 +1587,7 @@ dependencies = [
  "filmcraft-aac",
  "filmcraft-h264enc",
  "filmcraft-isobmff",
+ "filmcraft-matroska",
  "filmcraft-opus",
  "filmcraft-prores",
  "filmcraft-vp9",

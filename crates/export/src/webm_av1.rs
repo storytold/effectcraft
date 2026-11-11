@@ -12,7 +12,7 @@ use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
 use crate::encode::VideoEncoder;
 use crate::encode::mix;
-use crate::webm::{CLUSTER, EBML, INFO, OPUS_RATE, SEGMENT, TRACK_ENTRY, TRACKS, el, el_float, el_str, el_uint, id_bytes, opus_encoder, vint};
+use crate::webm::{CLUSTER, EBML, INFO, OPUS_RATE, SEGMENT, TRACK_ENTRY, TRACKS, colour, el, el_float, el_str, el_uint, id_bytes, opus_encoder, vint};
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
 struct Block {
@@ -85,6 +85,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     let mut video = vec![];
     el_uint(&mut video, 0xB0, w as u64);
     el_uint(&mut video, 0xBA, h as u64);
+    colour(&mut video, codes);
     el(&mut v, 0xE0, &video);
     el(&mut tracks, TRACK_ENTRY, &v);
     if let Some(o) = &opus {

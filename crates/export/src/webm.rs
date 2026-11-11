@@ -18,7 +18,7 @@ use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
-use crate::encode::{mix, pcm_bytes};
+use crate::encode::{Codes, mix, output_codes, pcm_bytes};
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
 pub(crate) const OPUS_RATE: u32 = 48_000;
@@ -65,6 +65,20 @@ pub(crate) fn el_uint(out: &mut Vec<u8>, id: u32, v: u64) {
 
 pub(crate) fn el_float(out: &mut Vec<u8>, id: u32, v: f64) {
     el(out, id, &v.to_be_bytes());
+}
+
+/// Video ▸ `Colour` (RFC 9559): the frames' matrix, range, transfer and primaries as H.273 code
+/// points ([`output_codes`]), with Range 1 (broadcast), the limited range every encoder here
+/// writes (#2925). VP9's own `color_space` only carries the matrix and range, so without this a
+/// Rec. 2020, P3, PQ or HLG render reads as BT.709. Renders have no mastering display or content
+/// light levels, so there is no `MasteringMetadata`, `MaxCLL` or `MaxFALL` to write.
+pub(crate) fn colour(video: &mut Vec<u8>, c: Codes) {
+    let mut colour = vec![];
+    el_uint(&mut colour, 0x55B1, c.matrix.into()); // MatrixCoefficients
+    el_uint(&mut colour, 0x55B9, 1); // Range: broadcast
+    el_uint(&mut colour, 0x55BA, c.transfer.into()); // TransferCharacteristics
+    el_uint(&mut colour, 0x55BB, c.primaries.into()); // Primaries
+    el(video, 0x55B0, &colour);
 }
 
 pub(crate) fn el_str(out: &mut Vec<u8>, id: u32, s: &str) {
@@ -202,6 +216,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     if alpha {
         el_uint(&mut video, 0x53C0, 1);
     }
+    colour(&mut video, output_codes(&job.project.settings, job.output.channels));
     el(&mut v, 0xE0, &video);
     el(&mut tracks, TRACK_ENTRY, &v);
     if let Some(o) = &opus {
