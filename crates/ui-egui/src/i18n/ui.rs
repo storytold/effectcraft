@@ -2444,6 +2444,36 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Default Output:", "פלט ברירת מחדל:"),
+    ("System Default", "ברירת המחדל של המערכת"),
+    ("No device list from this host; the system default output is used.", "לא התקבלה רשימת התקני פלט ממחשב זה; ייעשה שימוש בפלט ברירת המחדל של המערכת."),
+    ("Stored, but not used by EffectCraft yet", "ההגדרה נשמרת, אך EffectCraft עדיין אינו משתמש בה"),
+    ("Darker", "כהה יותר"),
+    ("Lighter", "בהיר יותר"),
+    ("Default", "ברירת מחדל"),
+    ("Choose...", "בחירה..."),
+    ("Disk cache limit in effect: {} MB", "מגבלת מטמון הדיסק בפועל: {} MB"),
+    ("Limited by free disk space: EffectCraft keeps {} GB of this disk free.", "מוגבל לפי המקום הפנוי: EffectCraft משאיר {} GB פנויים בדיסק זה."),
+    ("No room left: nothing is written to the disk cache until disk space is freed.", "אין מקום פנוי: לא ייכתבו נתונים למטמון הדיסק עד שיתפנה מקום."),
+    ("Appearance Mode", "מצב תצוגה"),
+    ("Light Theme", "ערכת נושא בהירה"),
+    ("Dark Theme", "ערכת נושא כהה"),
+    ("Search plug-ins and effects", "חיפוש תוספים ואפקטים"),
+    ("Refresh", "רענון"),
+    ("Fetch Catalog", "טעינת קטלוג"),
+    ("Restart EffectCraft to finish", "יש להפעיל מחדש את EffectCraft להשלמת הפעולה"),
+    ("Label Colors and Names:", "צבעים ושמות של תוויות:"),
+    ("Reset Labels", "איפוס תוויות"),
+    ("Previous", "הקודם"),
+    ("Next", "הבא"),
+    ("EffectCraft didn't quit normally last time.", "EffectCraft לא נסגר כראוי בפעם הקודמת."),
+    ("Latest auto-save: {}", "השמירה האוטומטית האחרונה: {}"),
+    ("Don't Recover", "לא לשחזר"),
+    ("Request Persistent Storage", "בקשת אחסון קבוע"),
+    ("No plug-ins match the search.", "לא נמצאו תוספים המתאימים לחיפוש."),
+    ("Nothing is downloaded until you fetch the catalog.", "לא יורד דבר עד לטעינת הקטלוג."),
+    ("Before", "לפני"),
+    ("After", "אחרי"),
     ("Auto-saves", "שמירות אוטומטיות"),
     ("Back", "חזרה"),
     ("About EffectCraft", "אודות EffectCraft"),
@@ -10368,6 +10398,36 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hebrew preferences and crash recovery must be understandable without changing settings IDs.
+    #[test]
+    fn hebrew_preferences_and_recovery_controls_are_localized() {
+        set_current("he");
+        for (english, translated) in [
+            ("Default Output:", "פלט ברירת מחדל:"),
+            ("System Default", "ברירת המחדל של המערכת"),
+            ("Darker", "כהה יותר"),
+            ("Lighter", "בהיר יותר"),
+            ("Appearance Mode", "מצב תצוגה"),
+            ("Light Theme", "ערכת נושא בהירה"),
+            ("Dark Theme", "ערכת נושא כהה"),
+            ("Refresh", "רענון"),
+            ("Fetch Catalog", "טעינת קטלוג"),
+            ("Reset Labels", "איפוס תוויות"),
+            ("Previous", "הקודם"),
+            ("Next", "הבא"),
+            ("Don't Recover", "לא לשחזר"),
+        ] {
+            assert_eq!(tr(english), translated, "Hebrew missing for {english}");
+        }
+        let value = "example.ecproj";
+        assert_eq!(tr_args("Latest auto-save: {}", &[&value]), "השמירה האוטומטית האחרונה: example.ecproj");
+        let capacity = 512;
+        assert_eq!(tr_args("Disk cache limit in effect: {} MB", &[&capacity]), "מגבלת מטמון הדיסק בפועל: 512 MB");
+        set_current("en");
+        assert_eq!(tr("Don't Recover"), "Don't Recover");
+        assert_eq!(tr("Light Theme"), "Light Theme");
+    }
 
     /// Opening, saving and restoring a project must be understandable in Hebrew Native UI.
     #[test]
