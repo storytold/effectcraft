@@ -39,7 +39,11 @@ fn box_h_into(src: &[Px], out: &mut [Px], w: usize, r: usize, repeat: bool) {
         if repeat {
             let (left, right) = (r as f32, (r - inside) as f32);
             for c in 0..4 {
-                acc[c] += row[0][c] * left + row[w - 1][c] * right;
+                acc[c] += row[0][c] * left;
+                // A zero count adds nothing (0 * NaN would be NaN).
+                if right > 0.0 {
+                    acc[c] += row[w - 1][c] * right;
+                }
             }
         }
         for x in 0..w {
@@ -76,6 +80,10 @@ fn box_v_into(src: &[Px], out: &mut [Px], w: usize, h: usize, r: usize, repeat: 
         // The starting window: rows inside the image once each, the repeated edge rows counted.
         let (lo, hi) = (ya - r as isize, ya + r as isize);
         let add = |acc: &mut [Px], rw: &[Px], k: f32| {
+            // A zero count adds nothing (0 * NaN would be NaN).
+            if k == 0.0 {
+                return;
+            }
             for (a, p) in acc.iter_mut().zip(rw) {
                 for c in 0..4 {
                     a[c] += p[c] * k;
@@ -280,6 +288,18 @@ pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_finite_edge_pixel_outside_every_window_is_not_counted() {
+        // 9 wide, radius 1: the last pixel is in no window of the first pixels; likewise the last row.
+        let mut src = vec![[1.0f32; 4]; 81];
+        src[80] = [f32::NAN; 4];
+        let mut out = vec![[0.0f32; 4]; 81];
+        box_h_into(&src, &mut out, 9, 1, true);
+        assert!(out[0].iter().all(|v| v.is_finite()), "{:?}", out[0]);
+        box_v_into(&src, &mut out, 9, 9, 1, true);
+        assert!(out[0].iter().all(|v| v.is_finite()), "{:?}", out[0]);
+    }
 
     #[test]
     fn box_windows_count_repeated_edges_and_take_any_radius() {
