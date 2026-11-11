@@ -143,11 +143,9 @@ pub fn configure(config: Option<LocalizeConfig>) {
             st.space = Some((space, std::time::Instant::now(), bytes));
         }
         let max = limit(&mut st);
-        evict_to(&mut st, max)
+        evict_to(&mut st, max, &HashSet::new())
     };
-    for local in gone {
-        remove_copy(&local);
-    }
+    delete_evicted(gone, epoch);
 }
 
 /// The copies' record beside a copy.
@@ -232,9 +230,9 @@ fn adopt(folder: &Path, busy: Option<&str>) -> Vec<(PathBuf, Copy)> {
         let fine = parsed.as_ref().is_some_and(|(_, _, len)| std::fs::metadata(&local).is_ok_and(|m| m.is_file() && m.len() == *len));
         match parsed {
             Some((original, source, len)) if fine => found.push((original, Copy { local, len, source, last_use: 0 })),
+            // (a copy that can't be deleted keeps its record, and is looked at again next time)
             _ => {
-                let _ = std::fs::remove_file(&rec);
-                let _ = std::fs::remove_file(&local);
+                remove_copy(&local);
             }
         }
     }
@@ -345,16 +343,52 @@ pub(crate) fn local_copy(original: &Path, now: &FileStamp) -> Option<PathBuf> {
     if let Some(g) = &gone {
         st.bytes = st.bytes.saturating_sub(g.len);
     }
+    let epoch = st.epoch;
     drop(st);
     if let Some(g) = gone {
-        remove_copy(&g.local);
+        delete_evicted(vec![(original.to_path_buf(), g)], epoch);
     }
     None
 }
 
-fn remove_copy(local: &Path) {
-    let _ = std::fs::remove_file(local);
+/// Delete a copy's file and its record. `false` when the file could not be deleted (open
+/// elsewhere, read-only): it is still on the disk, so its record stays (it is adopted again
+/// later) and the caller keeps counting its bytes.
+fn remove_copy(local: &Path) -> bool {
+    #[cfg(test)]
+    if FAIL_REMOVE.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|p| p == local) {
+        return false;
+    }
+    match std::fs::remove_file(local) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
+    }
     let _ = std::fs::remove_file(record_path(local));
+    true
+}
+
+/// A copy dropped from the books and the source it was made of.
+type Evicted = (PathBuf, Copy);
+
+/// Delete the files of evicted copies (without the lock). Those that could not be deleted are
+/// still on the disk: they go back on the books (their bytes counted again, unless the setting
+/// changed since `epoch`); their sources are returned.
+fn delete_evicted(victims: Vec<Evicted>, epoch: u64) -> Vec<PathBuf> {
+    let stuck: Vec<Evicted> = victims.into_iter().filter(|(_, c)| !remove_copy(&c.local)).collect();
+    if stuck.is_empty() {
+        return vec![];
+    }
+    let mut st = lock();
+    let mut sources = vec![];
+    for (original, copy) in stuck {
+        sources.push(original.clone());
+        if st.epoch == epoch && !st.copies.contains_key(&original) {
+            st.bytes = st.bytes.saturating_add(copy.len);
+            st.copies.insert(original, copy);
+        }
+    }
+    sources
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -392,15 +426,16 @@ fn limit(st: &mut State) -> u64 {
 }
 
 /// Drop the least recently used copies until they take at most `max` bytes; their files, which
-/// the caller deletes once it let go of the lock ([`remove_copy`]).
+/// the caller deletes once it let go of the lock ([`delete_evicted`]). Copies whose source is in
+/// `skip` (their files could not be deleted just now) stay.
 #[must_use]
-fn evict_to(st: &mut State, max: u64) -> Vec<PathBuf> {
+fn evict_to(st: &mut State, max: u64, skip: &HashSet<PathBuf>) -> Vec<Evicted> {
     let mut gone = vec![];
     while st.bytes > max {
-        let Some(oldest) = st.copies.iter().min_by_key(|(_, c)| c.last_use).map(|(p, _)| p.clone()) else { break };
+        let Some(oldest) = st.copies.iter().filter(|(p, _)| !skip.contains(*p)).min_by_key(|(_, c)| c.last_use).map(|(p, _)| p.clone()) else { break };
         if let Some(c) = st.copies.remove(&oldest) {
             st.bytes = st.bytes.saturating_sub(c.len);
-            gone.push(c.local);
+            gone.push((oldest, c));
         }
     }
     gone
@@ -444,27 +479,34 @@ fn worker() {
         };
         // Room is made for the incoming file before it is written: the least recently used
         // copies go first, so the disk's reserve is never eaten (a file over the limit is skipped).
+        // A copy whose file can't be deleted stays on the books (its bytes are still on the
+        // disk); the file is refused when that leaves too little room.
         let make_room = |incoming: u64| {
-            let (fits, gone) = {
-                let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
-                if st.epoch != epoch {
-                    return false;
-                }
-                let max = limit(&mut st);
-                if incoming > max {
-                    return false;
-                }
-                (true, evict_to(&mut st, max - incoming))
-            };
-            for local in gone {
-                remove_copy(&local);
+            let mut stuck = HashSet::new();
+            loop {
+                let victims = {
+                    let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
+                    if st.epoch != epoch {
+                        return false;
+                    }
+                    let max = limit(&mut st);
+                    if incoming > max {
+                        return false;
+                    }
+                    let victims = evict_to(&mut st, max - incoming, &stuck);
+                    if victims.is_empty() {
+                        return st.bytes.saturating_add(incoming) <= max;
+                    }
+                    victims
+                };
+                stuck.extend(delete_evicted(victims, epoch));
             }
-            fits
         };
         let copied = copy_file(&job, &config.folder, &make_room);
         let mut st = m.lock().unwrap_or_else(PoisonError::into_inner);
         st.copying = None;
         let mut gone = vec![];
+        let mut evicted = vec![];
         match copied {
             Some((local, len, source)) if st.epoch == epoch => {
                 if let Some(old) = st.copies.remove(&job) {
@@ -475,7 +517,7 @@ fn worker() {
                 st.copies.insert(job, Copy { local, len, source, last_use });
                 st.bytes = st.bytes.saturating_add(len);
                 let max = limit(&mut st);
-                gone = evict_to(&mut st, max);
+                evicted = evict_to(&mut st, max, &HashSet::new());
             }
             // (made under an earlier setting: thrown away, unless the folder's adoption took it
             // as the current copy meanwhile)
@@ -494,6 +536,7 @@ fn worker() {
         for local in gone {
             remove_copy(&local);
         }
+        delete_evicted(evicted, epoch);
     }
 }
 
@@ -556,6 +599,10 @@ fn copy_file(original: &Path, folder: &Path, make_room: &dyn Fn(u64) -> bool) ->
         }
     }
 }
+
+/// Copies whose deletion fails (tests).
+#[cfg(test)]
+static FAIL_REMOVE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// Runs before each copy, with the source's path (tests).
 #[cfg(test)]
@@ -696,6 +743,7 @@ mod tests {
         fn drop(&mut self) {
             *BEFORE_COPY.lock().unwrap_or_else(PoisonError::into_inner) = None;
             *BEFORE_ADOPT.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            FAIL_REMOVE.lock().unwrap_or_else(PoisonError::into_inner).clear();
             configure(None);
         }
     }
@@ -807,6 +855,42 @@ mod tests {
         assert_eq!(s.files, 1, "the older copy made room: {s:?}");
         let tmp = std::fs::read_dir(&local).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count()).unwrap_or(0);
         assert_eq!(tmp, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #3301 review: an old copy whose file can't be deleted (open elsewhere, read-only) is still
+    /// on the disk: it stays on the books, so the new file is refused (its room was not freed)
+    /// instead of the disk holding 4000 bytes while the accounting says 2000.
+    #[test]
+    fn a_copy_that_cannot_be_deleted_keeps_its_bytes_counted() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _hooks = HookGuard;
+        let root = std::env::temp_dir().join(format!("ec-3301-stuck-{}", std::process::id()));
+        let (share, local) = (root.join("share"), root.join("local"));
+        std::fs::create_dir_all(&share).unwrap();
+        treat_as_network(&share);
+        let (a, b) = (share.join("a.exr"), share.join("b.exr"));
+        std::fs::write(&a, vec![1u8; 2000]).unwrap();
+        std::fs::write(&b, vec![2u8; 2000]).unwrap();
+        let total = 1u64 << 40;
+        let free = effectcraft_render::disk_cache::disk_reserve(total) + 3000;
+        let disk_space: std::sync::Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync> = std::sync::Arc::new(move || Some((total, free)));
+        configure(Some(LocalizeConfig { folder: local.clone(), max_bytes: 1 << 30, network: vec![], disk_space: Some(disk_space) }));
+        let stamp = |p: &Path| FileStamp::of_metadata(&std::fs::metadata(p).unwrap());
+        request(&a);
+        wait_for(|s| s.files == 1 && s.copying.is_none());
+        let a_copy = local_copy(&a, &stamp(&a)).expect("a's copy");
+        // Its file can't be deleted.
+        FAIL_REMOVE.lock().unwrap().push(a_copy.clone());
+        request(&b);
+        let s = wait_for(|s| s.copying.is_none() && s.queued == 0 && s.skipped == 1);
+        assert_eq!(s.skipped, 1, "the new file is refused: its room was not freed: {s:?}");
+        assert_eq!((s.files, s.bytes), (1, 2000), "the old copy is still counted: {s:?}");
+        assert!(a_copy.exists() && record_path(&a_copy).exists(), "its file and record are still there");
+        assert!(local_copy(&b, &stamp(&b)).is_none());
+        let on_disk: u64 =
+            std::fs::read_dir(&local).unwrap().flatten().filter(|e| e.path().extension().is_none_or(|x| x != "src")).map(|e| e.metadata().unwrap().len()).sum();
+        assert_eq!(on_disk, s.bytes, "the books match the disk");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
