@@ -2464,7 +2464,6 @@ const HEBREW: &[(&str, &str)] = &[
     ("Delete", "מחיקה"),
     ("Layer", "שכבה"),
     ("File", "קובץ"),
-
     ("New Project", "פרויקט חדש"),
     ("Open Project…", "פתיחת פרויקט…"),
     ("New Composition", "קומפוזיציה חדשה"),
@@ -10392,7 +10391,6 @@ mod tests {
         set_current("en");
         assert_eq!(tr("Open Project…"), "Open Project…");
     }
-
 
     /// Check rendered feature labels only. Format names, compatibility tokens and user text
     /// are not subject to this guard, and a missing translation keeps its English fallback.
