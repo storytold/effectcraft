@@ -402,7 +402,7 @@ impl RenderSettings {
             let f0 = Self::ceil_frame(film, self.span(comp).0);
             return FrameSample::Fields { first: film.tick_of(f0.saturating_add(a)), second: film.tick_of(f0.saturating_add(b)), upper_first };
         }
-        let f = self.first_frame(comp).saturating_add(i as i64);
+        let f = self.first_frame(comp).saturating_add(i64::try_from(i).unwrap_or(i64::MAX));
         let t = r.tick_of(f);
         let half = Tick(r.tick_of(f.saturating_add(1)).0.saturating_sub(t.0) / 2);
         FrameSample::Fields { first: t, second: Tick(t.0.saturating_add(half.0)), upper_first }
@@ -440,7 +440,7 @@ impl RenderSettings {
     }
     /// Comp time of output frame `i`.
     pub fn frame_time(&self, comp: &Comp, i: u64) -> Tick {
-        self.rate(comp).tick_of(self.first_frame(comp).saturating_add(i as i64))
+        self.rate(comp).tick_of(self.first_frame(comp).saturating_add(i64::try_from(i).unwrap_or(i64::MAX)))
     }
     pub fn effective_scale(&self, comp: &Comp) -> f64 {
         let s = self.resolution.clamp(0.01, 4.0);
@@ -1856,9 +1856,13 @@ mod tests {
                 [(FieldRender::Off, Pulldown::Off), (FieldRender::UpperFirst, Pulldown::Off), (FieldRender::UpperFirst, Pulldown::Wssww)]
             {
                 let s = RenderSettings { frame_rate: Some(rate), field_render, pulldown, time_span: TimeSpan::LengthOfComp, ..Default::default() };
-                let _ = (s.first_frame(&c), s.frame_count(&c), s.frame_time(&c, 1), s.sample(&c, 1), s.sample(&c, u64::MAX));
+                let _ = (s.first_frame(&c), s.frame_count(&c), s.frame_time(&c, 1), s.sample(&c, 1));
+                let _ = (s.frame_time(&c, u64::MAX), s.sample(&c, u64::MAX));
             }
         }
+        // An index past i64::MAX clamps forward; it must not wrap to a frame before the start.
+        let s = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
+        assert!(s.frame_time(&c, u64::MAX) > s.frame_time(&c, 0));
     }
 
     #[test]
