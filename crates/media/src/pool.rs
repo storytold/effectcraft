@@ -712,7 +712,8 @@ impl Inner {
         rate.frame_at(t).clamp(0, total - 1) % n
     }
 
-    /// Number of frames in `d` at `rate` (rounded).
+    /// Number of frames in `d` at `rate` (rounded); 0 when `rate.den` is 0 (an invalid rate from a
+    /// project file).
     fn frame_count(rate: FrameRate, d: Tick) -> i64 {
         let den = TICKS_PER_SECOND as i128 * rate.den as i128;
         if den == 0 {
