@@ -8100,7 +8100,6 @@ const CZECH: &[(&str, &str)] = &[
     ("Height", "Výška"),
     ("Shape", "Tvar"),
     ("Mode", "Režim"),
-    ("Frame", "Snímek"),
     ("Orientation", "Orientace"),
     ("Create", "Vytvořit"),
     ("Overlap", "Překrytí"),
