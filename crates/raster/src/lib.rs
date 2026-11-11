@@ -293,7 +293,8 @@ impl Image {
         });
         out
     }
-    /// From straight-alpha 8-bit RGBA.
+    /// From straight-alpha 8-bit RGBA. If `rgba` is shorter than `width * height * 4`, the
+    /// missing pixels stay transparent; a trailing partial pixel is ignored.
     pub fn from_rgba8(width: u32, height: u32, rgba: &[u8]) -> Image {
         let mut img = Image::new(width, height);
         img.data.par_iter_mut().zip(rgba.par_chunks_exact(4)).for_each(|(p, s)| {
