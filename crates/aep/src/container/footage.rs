@@ -52,8 +52,9 @@ pub struct Footage {
 
 /// One layer of a Photoshop file shown by a footage item, from its `opti` (tag `8BPS`,
 /// docs/aep-format.md 3.3): the layer record's index as a big-endian `i32` at byte 14 (-1 for the
-/// merged image), its bounds top, left, bottom, right as little-endian `i32` at 78, 82, 86 and
-/// 90, and its name (UTF-8, NUL terminated) from byte 344.
+/// merged image), the document's sides as little-endian `u32` at 32 and 36, its bounds top, left,
+/// bottom, right as little-endian `i32` at 78, 82, 86 and 90, and its name (UTF-8, NUL
+/// terminated) from byte 344.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PsdLayer {
     /// The layer record's position in the file (bottom of the stack = 0).
@@ -62,6 +63,9 @@ pub struct PsdLayer {
     /// Top, left, bottom, right in document pixels; all 0 for a layer without pixels (an
     /// adjustment layer).
     pub bounds: [i32; 4],
+    /// The document's two sides (bytes 32 and 36; which one is the width is not sampled: the one
+    /// file read has a square document). 0 when not stored.
+    pub document: [u32; 2],
 }
 
 /// Most bytes of a Photoshop layer name read.
@@ -76,6 +80,12 @@ impl PsdLayer {
         Some((w, h))
     }
 
+    /// Whether the document is `size` big, its sides in either order.
+    pub fn document_is(&self, size: (u32, u32)) -> bool {
+        let [a, b] = self.document;
+        a > 0 && b > 0 && ((a, b) == size || (b, a) == size)
+    }
+
     /// The layer an `opti` names; `None` for another tag, the merged image or a cut record.
     fn read(opti: &[u8]) -> Option<Self> {
         if opti.get(..4) != Some(&b"8BPS"[..]) {
@@ -85,7 +95,8 @@ impl PsdLayer {
         let le_i32 = |at| le_u32(opti, at).map(|v| i32::from_le_bytes(v.to_le_bytes()));
         // (After Effects writes 602 bytes; a longer hostile name is cut.)
         let name = opti.get(344..).map(|b| text(until_nul(b.get(..MAX_NAME).unwrap_or(b)))).unwrap_or_default();
-        Some(Self { index, name, bounds: [le_i32(78)?, le_i32(82)?, le_i32(86)?, le_i32(90)?] })
+        let document = [le_u32(opti, 32).unwrap_or(0), le_u32(opti, 36).unwrap_or(0)];
+        Some(Self { index, name, bounds: [le_i32(78)?, le_i32(82)?, le_i32(86)?, le_i32(90)?], document })
     }
 }
 
@@ -444,6 +455,14 @@ mod tests {
         assert_eq!(PsdLayer::read(&opti(2, [0; 4], b"")).unwrap().size(), None);
         assert_eq!(PsdLayer::read(&opti(2, [i32::MIN, i32::MIN, i32::MAX, i32::MAX], b"")).unwrap().size(), Some((u32::MAX, u32::MAX)));
         assert_eq!(PsdLayer::read(&opti(2, [i32::MAX, 0, i32::MIN, 1], b"")).unwrap().size(), None);
+        // The document's size, its sides in either order; none when not stored.
+        let mut doc = opti(0, [0, 0, 1000, 800], b"");
+        doc[32..36].copy_from_slice(&800u32.to_le_bytes());
+        doc[36..40].copy_from_slice(&1000u32.to_le_bytes());
+        let l = PsdLayer::read(&doc).unwrap();
+        assert_eq!(l.document, [800, 1000]);
+        assert!(l.document_is((800, 1000)) && l.document_is((1000, 800)) && !l.document_is((800, 800)));
+        assert!(!PsdLayer::read(&opti(0, [0; 4], b"")).unwrap().document_is((0, 0)));
     }
 
     #[test]

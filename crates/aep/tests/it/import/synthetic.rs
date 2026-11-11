@@ -844,12 +844,14 @@ fn a_default_state_colour_record_holds_the_value() {
 }
 
 /// The project with its png item made one layer of a Photoshop file `art.psd`: the `opti` of
-/// docs/aep-format.md 3.3 (tag `8BPS`, the layer index at 14, its bounds at 78-94, its name at
-/// 344) and the item `size` big.
+/// docs/aep-format.md 3.3 (tag `8BPS`, the layer index at 14, a 1000 x 1000 document at 32 and 36,
+/// its bounds at 78-94, its name at 344) and the item `size` big.
 fn as_psd_layer(index: i32, bounds: [i32; 4], name: &str, size: (u32, u32)) -> Vec<u8> {
     let mut opti = vec![0u8; 602];
     opti[..4].copy_from_slice(b"8BPS");
     opti[14..18].copy_from_slice(&index.to_be_bytes());
+    opti[32..36].copy_from_slice(&1000u32.to_le_bytes());
+    opti[36..40].copy_from_slice(&1000u32.to_le_bytes());
     for (i, v) in bounds.iter().enumerate() {
         opti[78 + 4 * i..82 + 4 * i].copy_from_slice(&v.to_le_bytes());
     }
@@ -894,6 +896,22 @@ fn a_photoshop_layer_item_shows_its_layer() {
         let l = f.layer.expect("the layer");
         assert_eq!((l.index, l.name.as_str(), l.layer_size, (f.width, f.height)), (7, "Tëst", layer_size, size));
     }
+}
+
+/// A layer as big as the document but off its corner fits both framings: shown at its own bounds
+/// and reported. One at the corner, or bigger than the document, reads one way and is not.
+#[test]
+fn a_photoshop_layer_as_big_as_the_document_off_its_corner_is_reported() {
+    let framing = |bounds, size| {
+        let (p, r) = run(&as_psd_layer(3, bounds, "Moved", size), true);
+        let found = losses(&r.unwrap(), LossCategory::UnsupportedItems);
+        (the_footage(&p).layer.map(|l| l.layer_size), found.iter().any(|d| d.contains("'Moved/art.psd'") && d.contains("as big as the document")))
+    };
+    assert_eq!(framing([5, 10, 1005, 1010], (1000, 1000)), (Some(true), true));
+    assert_eq!(framing([0, 0, 1000, 1000], (1000, 1000)), (Some(true), false));
+    assert_eq!(framing([9, -346, 1083, 1086], (1432, 1074)), (Some(true), false));
+    // An item of another size frames the layer on the document: no ambiguity.
+    assert_eq!(framing([5, 10, 1005, 1010], (800, 800)), (Some(false), false));
 }
 
 /// #3087: a Photoshop layer without pixels (an adjustment layer) keeps the merged image and is

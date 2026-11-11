@@ -352,14 +352,23 @@ fn is_placed_page_path(path: &str) -> bool {
 
 /// The Photoshop layer a footage item shows (#3087): at its own bounds when the item is as big
 /// as they are (Retain Layer Sizes), else on the document. A layer without pixels (an adjustment
-/// layer) keeps the merged image and is reported.
+/// layer) keeps the merged image and is reported. So is a layer as big as the document but not at
+/// its corner: the item's size fits both framings, and its bounds are used.
 fn source_layer(f: &crate::Footage, name: &str, col: &mut Collector) -> Option<SourceLayer> {
     let l = f.psd_layer.as_ref()?;
     let Some(size) = l.size() else {
         col.lose(LossCategory::UnsupportedItems, format!("footage '{name}': a Photoshop layer without pixels (an adjustment layer), the merged image used"));
         return None;
     };
-    Some(SourceLayer { index: l.index, name: l.name.clone(), layer_size: size == (f.width, f.height), ..SourceLayer::default() })
+    let layer_size = size == (f.width, f.height);
+    let [top, left, ..] = l.bounds;
+    if layer_size && (top, left) != (0, 0) && l.document_is(size) {
+        col.lose(
+            LossCategory::UnsupportedItems,
+            format!("footage '{name}': a Photoshop layer as big as the document but at ({left}, {top}), shown at its own bounds (Retain Layer Sizes assumed)"),
+        );
+    }
+    Some(SourceLayer { index: l.index, name: l.name.clone(), layer_size, ..SourceLayer::default() })
 }
 
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
