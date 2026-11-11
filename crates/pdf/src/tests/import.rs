@@ -725,3 +725,18 @@ fn an_image_with_a_named_base_inside_an_array_is_not_shared_between_resource_dic
     assert_eq!(found.len(), 2, "{:?}", doc.skipped);
     assert_ne!(found[0].rgba, found[1].rgba, "each placement is decoded with its own colour space");
 }
+
+#[test]
+fn a_tiling_pattern_is_charged_for_the_clip_geometry_its_tiles_copy() {
+    // The cell is one group whose clip path has 8,000 segments; each of the 2,704 tiles copies
+    // that path, which is more than the operation budget although the cell holds three nodes.
+    let clip: String = (0..8_000).map(|i| format!("{} {} l ", i % 7, i % 5)).collect();
+    let cell = format!("q 0 0 m {clip} h W n 0 0 1 1 re f Q").into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "/Pattern cs /P1 scn 0 0 50 50 re f",
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Resources << >> >>".into(), Some(cell))],
+    ))
+    .unwrap();
+    assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
+}

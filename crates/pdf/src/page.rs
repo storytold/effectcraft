@@ -254,6 +254,36 @@ fn affine(v: &[f64]) -> Affine {
 /// The most tiles one tiling-pattern fill draws.
 const MAX_TILES: usize = 4096;
 
+/// What copying `nodes` costs, in operations: one per node, plus the elements of every path a
+/// shape holds and of every clip, and the content of every soft mask (all copied with the node).
+fn copy_weight(nodes: &[Node]) -> usize {
+    enum Item<'a> {
+        Node(&'a Node),
+        Group(&'a Group),
+    }
+    let mut weight = 0usize;
+    let mut pending: Vec<Item> = nodes.iter().map(Item::Node).collect();
+    while let Some(item) = pending.pop() {
+        weight = weight.saturating_add(1);
+        let group = match item {
+            Item::Node(Node::Group(g)) | Item::Group(g) => g,
+            Item::Node(Node::Shape(sh)) => {
+                if let effectcraft_svg::Geom::Path(p) = &sh.geom {
+                    weight = weight.saturating_add(p.elements().len());
+                }
+                continue;
+            }
+            Item::Node(Node::Image(_)) => continue,
+        };
+        weight = group.clip.iter().map(|(p, _)| p.elements().len()).fold(weight, usize::saturating_add);
+        pending.extend(group.children.iter().map(Item::Node));
+        if let Some(m) = &group.mask {
+            pending.push(Item::Group(&m.content));
+        }
+    }
+    weight
+}
+
 /// The deepest `q` nests (the specification's implementation limit is 28; every saved state
 /// keeps a copy of the dash array).
 const MAX_SAVED: usize = 4096;
@@ -866,18 +896,11 @@ impl<'a> Interp<'a> {
             self.b.skip("tiling pattern (too many tiles)");
             return;
         }
-        // Every tile copies the cell: the nodes copied (shapes, images and groups, with what the
-        // groups hold) count as operations, so nested patterns cannot multiply a cell past the
-        // budget.
+        // Every tile copies the cell: what is copied (shapes, images and groups, with their path
+        // elements, clip geometry, soft-mask content and what the groups hold) counts as
+        // operations, so nested patterns cannot multiply a cell past the budget.
         let tiles_n = ((i1 - i0 + 1.0) * (j1 - j0 + 1.0)).max(1.0) as usize;
-        let mut cell_nodes = 0usize;
-        let mut pending: Vec<&Node> = cell.iter().collect();
-        while let Some(n) = pending.pop() {
-            cell_nodes += 1;
-            if let Node::Group(g) = n {
-                pending.extend(g.children.iter());
-            }
-        }
+        let cell_nodes = copy_weight(&cell);
         let Some(cost) = tiles_n.checked_mul(cell_nodes.max(1)).filter(|c| *c <= self.budget) else {
             self.b.skip("tiling pattern (operation limit)");
             return;
