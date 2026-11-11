@@ -290,7 +290,10 @@ impl PathSeg {
         // Where two edges cross, a band boundary. Edges by top, so each is compared only with the
         // ones that start above its bottom (the pairs that share some height); the pairs and the
         // boundaries found are counted against the budgets, and past one the rest are not looked
-        // for (the fill is then approximate below that point, and says so).
+        // for. A band that holds a crossing that was not looked for is not filled (its edges
+        // change order inside it, which the band loop below tells), so what is drawn is never
+        // outside the path.
+        let mut truncated = false;
         let mut order: Vec<usize> = (0..edges.len()).collect();
         order.sort_by(|&a, &b| edges[a].0[1].total_cmp(&edges[b].0[1]));
         let mut pairs = 0usize;
@@ -302,7 +305,8 @@ impl PathSeg {
                 }
                 pairs += 1;
                 if pairs > max_work || ys.len() > max_bands {
-                    log::warn!("fillPath: over its crossing budget; crossings past this point are not cut");
+                    log::warn!("fillPath: over its crossing budget; bands with crossings that were not cut are left unfilled");
+                    truncated = true;
                     break 'cross;
                 }
                 let (lo, hi) = (a.0[1].max(b.0[1]), a.1[1].min(b.1[1]));
@@ -330,6 +334,11 @@ impl PathSeg {
             row.clear();
             row.extend(edges.iter().filter(|e| e.0[1] < ym && ym < e.1[1]).map(|e| (x_at(e, ym), x_at(e, ya), x_at(e, yb), e.2)));
             row.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // With crossings missing, edges that swap places inside the band make its trapezoids
+            // wrong: it is left out.
+            if truncated && !row.windows(2).all(|w| w[0].1 <= w[1].1 + 1e-9 && w[0].2 <= w[1].2 + 1e-9) {
+                continue;
+            }
             let mut wind = 0;
             for k in 0..row.len().saturating_sub(1) {
                 wind += row[k].3;
@@ -1000,7 +1009,7 @@ mod tests {
         let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, usize::MAX, usize::MAX, 1]);
         assert!(!t.is_empty() && area(&t) < 4.0);
         // Many crossing edges (every pair of 120 diagonals meets): the crossing scan is held to the
-        // band and work budgets too, and the top of the fill still draws.
+        // band and work budgets too.
         let fan: Vec<PathSeg> = (0..60)
             .flat_map(|i| {
                 let x = i as f64;
@@ -1009,7 +1018,13 @@ mod tests {
             .collect();
         for limits in [[usize::MAX, 50, usize::MAX, usize::MAX], [usize::MAX, usize::MAX, usize::MAX, 500]] {
             let t = PathSeg::fill_triangles_within(&fan, 48, false, limits);
-            assert!(!t.is_empty(), "{limits:?}");
+            assert!(area(&t) <= area(&PathSeg::fill_triangles(&fan, 48, false)) + 1e-6, "{limits:?}");
         }
+        // Bands whose crossings were not looked for are not filled: a bow tie (area 50, crossing at
+        // y = 5) under a crossing budget of one boundary gives no overlapping triangles.
+        let bow = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 10.0, y: 10.0 }, PathSeg::L { x: 0.0, y: 10.0 }, PathSeg::L { x: 10.0, y: 0.0 }];
+        assert!((area(&PathSeg::fill_triangles(&bow, 48, false)) - 50.0).abs() < 1e-9);
+        let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
     }
 }
