@@ -1370,6 +1370,13 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
         if sel.is_empty() {
             return Err(bad(CMD, "no `path` given and no selected property has an expression"));
         }
+        // Every layer is checked before the first is converted: a refusal leaves them all as they were.
+        let step = comp.frame_duration().0;
+        for (lid, _) in &sel {
+            if let Some(l) = comp.layer(*lid) {
+                check_convertible(step, l)?;
+            }
+        }
         let mut n = 0;
         for (lid, uid) in sel {
             n += convert_one_expr(s, cid, lid, uid)?.as_u64().unwrap_or(0);
@@ -1383,6 +1390,22 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
 /// Most keyframes Convert Expression to Keyframes makes (2.4 hours at 30 fps).
 const MAX_CONVERTED_KEYS: u64 = 1 << 18;
 
+/// One evaluation and one key per frame of the layer: its In and Out points and the composition's
+/// frame duration are saved data, so the step must advance and the count (a partial last frame
+/// rounded up, as the loop steps, in 128 bits) is checked before any key is made.
+fn check_convertible(step: i64, layer: &Layer) -> Result<()> {
+    const CMD: &str = "prop.convertExpressionToKeyframes";
+    if step <= 0 {
+        return Err(bad(CMD, "the composition's frame duration is not positive"));
+    }
+    let (step, span) = (i128::from(step), i128::from(layer.out_point.0) - i128::from(layer.in_point.0));
+    let frames = if span > 0 { (span + step - 1) / step } else { 0 };
+    if frames > i128::from(MAX_CONVERTED_KEYS) {
+        return Err(bad(CMD, format!("the layer spans {frames} frames; at most {MAX_CONVERTED_KEYS} are converted")));
+    }
+    Ok(())
+}
+
 /// Replaces the expression on one property with keyframes sampled from its evaluated values.
 /// Returns the number of properties converted.
 fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Result<Value> {
@@ -1390,12 +1413,7 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();
     let pr = layer.props.find(uid).ok_or_else(|| bad("prop.convertExpressionToKeyframes", "no property"))?.clone();
     let fd = comp.frame_duration();
-    // One evaluation and one key per frame of the layer: its In and Out points are saved data,
-    // so the count is checked before any is made.
-    let frames = (layer.out_point.0.saturating_sub(layer.in_point.0)).max(0) as u64 / fd.0.max(1) as u64;
-    if frames > MAX_CONVERTED_KEYS {
-        return Err(bad("prop.convertExpressionToKeyframes", format!("the layer spans {frames} frames; at most {MAX_CONVERTED_KEYS} are converted")));
-    }
+    check_convertible(fd.0, &layer)?;
     let mut keys = vec![];
     let mut t = layer.in_point;
     while t < layer.out_point {
