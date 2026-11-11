@@ -22,8 +22,24 @@ impl Session {
     /// when the snapshot was taken; if one is open after the replacement it is treated as an
     /// unverified document replacement, so it never inherits an old composition.
     pub fn sanitize_after_replacement(&mut self, before: Option<&commands::text_edit::EditorSnapshot>) {
+        let project = self.project.clone();
+        self.retain_mask_reveals_in(&project);
         self.sanitize_state();
         commands::text_edit::after_replacement(self, before);
+    }
+
+    /// Drop reveals for removed masks before the restored allocator can reuse their IDs.
+    pub(crate) fn retain_mask_reveals_in(&mut self, project: &crate::Project) {
+        self.events.retain(|event| {
+            let Event::Frontend { command, params } = event else { return true };
+            if command != "timeline.revealMask" {
+                return true;
+            }
+            let comp = params.get("comp").and_then(Value::as_u64).map(ItemId).and_then(|id| project.comp(id));
+            let layer = params.get("layer").and_then(Value::as_u64).map(LayerId).and_then(|id| comp.and_then(|c| c.layer(id)));
+            let mask = params.get("mask").and_then(Value::as_u64);
+            layer.and_then(|l| l.masks()).is_some_and(|m| m.groups().any(|g| Some(g.uid) == mask))
+        });
     }
 
     /// Drop selections that no longer exist. Each comp keeps its own selection (#1001); a layer id

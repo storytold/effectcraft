@@ -526,3 +526,31 @@ fn text_animate_menu_adds_an_animator_with_the_property() {
     let a = animators(&h).unwrap().groups().next().unwrap().clone();
     assert!(has(&a, "opacity"), "Opacity was added: {:?}", a.sub("properties"));
 }
+
+/// Both creation commands must expose editable widgets while preserving Position and the drawing panel's focus.
+#[test]
+fn mask_reveal_created_controls_are_editable_without_leaving_the_viewer() {
+    for command in ["layer.addMask", "mask.new"] {
+        let mut s = session();
+        let layer = s.execute("layer.newSolid", json!({"name": "Plate"})).unwrap()["layer"].as_u64().unwrap();
+        let position = s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().uid;
+        let mut h = harness(s);
+        h.state_mut().ui.timeline.layer_reveal.insert(layer, vec!["position".into()]);
+        h.state_mut().ui.focused = effectcraft_ui_egui::dock::PanelKind::Composition;
+        let ctx = h.ctx.clone();
+        let result =
+            effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, command, json!({"layer": layer, "vertices": [[10, 10], [50, 10], [50, 40]]})).unwrap();
+        let mask = result["mask"].as_u64().unwrap();
+        h.run_steps(3);
+        let feather = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("masks/#1/feather").unwrap().uid;
+        assert!(h.state().auto.find(&format!("timeline.group.{mask}.name")).is_some());
+        assert!(h.state().auto.find(&format!("timeline.prop.{position}.value.0")).is_some());
+        assert_eq!(h.state().ui.focused, effectcraft_ui_egui::dock::PanelKind::Composition);
+        click(&mut h, &format!("timeline.prop.{feather}.value.0"));
+        h.input_mut().events.push(Event::Text("12".into()));
+        h.step();
+        h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find(feather).unwrap().value.components(), [12.0, 12.0]);
+    }
+}

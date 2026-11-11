@@ -82,16 +82,26 @@ fn paths_of(f: &Footage) -> impl Iterator<Item = &String> {
 
 /// Footage paths that came from a document, with the path of that document (`None`: one without
 /// a file). Any other path was chosen in this session and is followed as given.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredPaths(Arc<HashMap<String, Option<String>>>);
 
 impl StoredPaths {
     /// Record the footage paths of `p`, loaded from the document at `document`. A path already
     /// recorded keeps the document it came from first.
     pub(crate) fn add(&mut self, p: &Project, document: Option<&str>) {
+        self.add_items(p, |_| true, document);
+    }
+
+    /// Record the footage paths of the items of `p` that `pick` selects, loaded from the document
+    /// at `document` (an imported file: the rest of the project keeps its own origin).
+    pub(crate) fn add_items(&mut self, p: &Project, pick: impl Fn(ItemId) -> bool, document: Option<&str>) {
         let map = Arc::make_mut(&mut self.0);
-        for item in p.items.values() {
-            if let ItemKind::Footage(f) = &item.kind {
+        for item in p.items.values().filter(|i| pick(i.id)) {
+            let original = match &item.kind {
+                ItemKind::Footage(f) => Some(f),
+                _ => None,
+            };
+            for f in original.into_iter().chain(item.proxy.as_ref().map(|p| &p.footage)) {
                 for q in paths_of(f) {
                     map.entry(q.clone()).or_insert_with(|| document.map(str::to_string));
                 }
@@ -134,17 +144,27 @@ impl StoredPaths {
 /// replaced by the file they resolve to, and an item with a path that is not followed is marked
 /// missing. Returns those items with the refused path and why.
 pub(crate) fn resolve_footage(p: &mut Project, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
+    resolve_footage_of(p, |_| true, project)
+}
+
+/// [`resolve_footage`] for the items of `p` that `pick` selects (the ones an import added).
+pub(crate) fn resolve_footage_of(p: &mut Project, pick: impl Fn(ItemId) -> bool, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
     let mut refused = vec![];
-    for item in p.items.values_mut() {
-        let ItemKind::Footage(f) = &mut item.kind else { continue };
-        match footage_paths(f, project) {
-            Ok((path, sequence)) => {
-                f.path = path;
-                f.sequence = sequence;
-            }
-            Err((path, why)) => {
-                f.missing = true;
-                refused.push((item.id, path, why));
+    for item in p.items.values_mut().filter(|i| pick(i.id)) {
+        let original = match &mut item.kind {
+            ItemKind::Footage(f) => Some(f),
+            _ => None,
+        };
+        for f in original.into_iter().chain(item.proxy.as_mut().map(|p| &mut p.footage)) {
+            match footage_paths(f, project) {
+                Ok((path, sequence)) => {
+                    f.path = path;
+                    f.sequence = sequence;
+                }
+                Err((path, why)) => {
+                    f.missing = true;
+                    refused.push((item.id, path, why));
+                }
             }
         }
     }
