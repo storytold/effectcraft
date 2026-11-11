@@ -44,7 +44,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 | Simulation | 18 | 18 | Particle Playground lacks Particle Exploder, text particles, ephemeral mapper; CC Particle World camera fixed (#397) |
 | Stylize | 25 | 25 | Glow's halo (coverage of a dim layer's edge) and blur width match After Effects 2026 renders; glows above the threshold match too (each channel 8 × (value − threshold + 0.061), measured at three thresholds and two radii); Composite Original's labels are swapped against After Effects (EffectCraft's On Top adds the glow over the original, which After Effects calls Behind); Motion Tile output size (#369) |
 | Text | 2 | 2 | — |
-| Time | 8 | 8 | #535 (Pixel Motion Blur, Vector Detail) is closed |
+| Time | 8 | 8 | Timewarp retimes the layer's source and masks without the effects above it, as After Effects 2026; #535 (Pixel Motion Blur, Vector Detail) is closed |
 | Transition | 17 | 17 | Venetian Blinds matches After Effects 2026 renders (band phase from the layer centre, Gaussian feather on both edges) except within ~6 px of the layer edge (up to 48/255); Radial Wipe's Feather matches After Effects 2026 (a Gaussian of σ = 0.4 × Feather pixels on both edges of the wedge) |
 | Utility | 9 | 7 | — |
 
@@ -71,6 +71,7 @@ the GPU is performance, not parity.
 | 2026-10-19 | minor | Radial Wipe: Feather is in pixels on both edges of the wiped wedge (was degrees on the moving edge only), measured against After Effects 2026 (CPU and GPU) |
 | 2026-10-19 | minor | Fractal / Turbulent Noise: lattice cell = Scale × 2/3 px (Block noise every 66.7 px at Scale 100, as After Effects 2026), CPU and GPU |
 | 2026-10-19 | minor | Transform: After Effects' skew order and output beyond the layer bounds, measured against After Effects 2026 renders of three cases (CPU and GPU) |
+| 2026-10-19 | minor | Timewarp ignores the effects above it (source and masks only), measured against After Effects 2026 |
 | 2026-10-19 | minor | Tritone uses Rec. 601 luminance, measured against After Effects 2026 renders of a red solid and a grey ramp (CPU and GPU) |
 | 2026-10-19 | minor | Black & White's Tint keeps the gray's luminosity (Color blend), measured against After Effects 2026 renders (CPU and GPU) |
 | 2026-10-19 | minor | Levels: "Off for 32 bpc Color" no longer clips in 32 bpc projects, unclipped values extrapolate below Output Black; Levels (Individual Controls) applies the channel controls before the RGB ones, measured against After Effects 2026 (CPU and GPU) |

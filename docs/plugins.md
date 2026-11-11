@@ -11,7 +11,7 @@ Guide):
 
 | After Effects | EffectCraft | |
 |---|---|---|
-| Effect plug-ins (C/C++ SDK, `.aex` / `.plugin`) | [Effect plug-ins](#effect-plug-ins): WebAssembly modules (plug-in API v1) or Rust; the `Plug-ins` folder next to the settings loads at start-up | Different ABI: After Effects SDK plug-ins can't run (G8) |
+| Effect plug-ins (C/C++ SDK, `.aex` / `.plugin`) | [Effect plug-ins](#effect-plug-ins): WebAssembly modules (WebAssembly ABI 1 and 2) or Rust; the `Plug-ins` folder next to the settings loads at start-up | Different ABI: After Effects SDK plug-ins can't run (G8) |
 | Scripts folder: its scripts are listed in File ▸ Scripts | `Scripts/` in the settings folder (File ▸ Scripts ▸ Install Script File… copies a script there), listed in File ▸ Scripts with the bundled samples; a subfolder (one level) is a submenu named after it | Same |
 | File ▸ Scripts ▸ Run Script File… (`.jsx`, `.jsxbin`) | `.jsx` / `.js` | Gap: `.jsxbin` (an undocumented binary encoding) |
 | File ▸ Scripts ▸ Recent Script Files: the 10 most recently run scripts; Cmd+Option+Shift+D (Ctrl+Alt+Shift+D on Windows) reruns one | File ▸ Scripts ▸ Recent Script Files lists the 10 scripts run last (script files and File ▸ Scripts entries, newest first, kept in the settings); Cmd+Alt+Shift+D runs the most recent one again (`file.runScript {"recent": 0}`, a key that can be changed in Edit ▸ Keyboard Shortcuts) | Same |
@@ -152,7 +152,7 @@ example of a keyframe tool.
 
 ## Effect plug-ins
 
-EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 2**; WebAssembly ABI 1).
+EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 2**; WebAssembly ABI 1 and 2).
 A plug-in effect behaves exactly like a built-in one: it is listed in Effects & Presets (and the
 Effect menu) under its category, applied by id (`effect.apply {"effect": "org.example.posterize"}`)
 or display name, its parameters are ordinary properties (keyframes, expressions, Effect Controls,
@@ -178,7 +178,8 @@ author, source, params}]}`.
 * **Parameters** arrive flattened to `f64`s in the order they are declared: slider, angle,
   checkbox (0 / 1) and popup (0-based index) take one value, point two (already in **buffer
   pixels**), colour four (RGBA 0–1).
-* **Time** is layer time in seconds.
+* **Time** is layer time in seconds. A WebAssembly module written for ABI 2 also gets the
+  layer's neighbouring frames at other times (see [WebAssembly ABI](#webassembly-abi)).
 * Rendering must be **deterministic** and may run on several threads at once (a WebAssembly
   plug-in gets one instance per thread).
 * A failed render (an error code, a trap, running out of fuel) leaves the frame unchanged.
@@ -216,22 +217,36 @@ Every plug-in describes itself with a JSON manifest:
   parameters; a slider needs `min ≤ default ≤ max` (and `sliderMin ≤ sliderMax`); the manifest
   is at most 1 MiB.
 
-### WebAssembly ABI (v1)
+### WebAssembly ABI
 
-A module with **no imports** that exports:
+A module with **no imports** exports:
 
 | export | signature | |
 |---|---|---|
 | `memory` | memory | linear memory shared with the host |
-| `ec_api_version` | `() -> i32` | must return `1` |
+| `ec_api_version` | `() -> i32` | `1` for ABI 1, `2` for ABI 2 (neighbouring frames) |
 | `ec_manifest_ptr`, `ec_manifest_len` | `() -> i32` | the UTF-8 JSON manifest in memory |
 | `ec_alloc` | `(bytes: i32) -> i32` | a buffer of at least `bytes` bytes, 8-byte aligned; it may reuse the previous one |
-| `ec_render` | `(pixels: i32, width: i32, height: i32, params: i32, nparams: i32, time: f64, scale: f64) -> i32` | process the pixels in place; return 0 on success |
+| `ec_render` (ABI 1) | `(pixels: i32, width: i32, height: i32, params: i32, nparams: i32, time: f64, scale: f64) -> i32` | process the pixels in place; return 0 on success |
+| `ec_render2` (ABI 2) | `ec_render`'s arguments, then `prev: i32, prev_time: f64, next: i32, next_time: f64, flags: i32` | the same, with the neighbouring frames; return 0 on success |
 
 For each frame the host calls `ec_alloc` once for a buffer holding the parameters (`nparams`
-little-endian `f64`s) followed by the pixels (`width × height × 4` little-endian `f32`s), fills it,
-calls `ec_render`, and reads the pixels back. Each call gets a fuel budget proportional to the
-frame size; a module that loops forever stops with an error instead of hanging the app.
+little-endian `f64`s) followed by the pixels (`width × height × 4` little-endian `f32`s,
+premultiplied RGBA, row-major), fills it, calls the module's render export, and reads the pixels
+back. An ABI 2 module gets two more pixel buffers after the current frame: the previous and next
+frames, resampled onto the current buffer's grid. At a frame boundary they are the frames before
+and after it (`time ± 1/fps`); between frames they are the two frames that bracket `time`.
+
+The neighbour buffers are always allocated (zeroed when the layer has no pixels there, so a
+module can read both without a null check). `flags` bit 0 is set when `prev` holds a real frame,
+bit 1 when `next` does; `prev_time` / `next_time` are those frames' layer times in seconds (0
+when absent). The ABI version is the module's `ec_api_version` and is independent of the
+manifest's `api` (the native plug-in API): a module can use ABI 2 while its manifest says
+`"api": 1`. Because an ABI 2 module reads other times, its layer is keyed on the layer time in
+the render cache; ABI 1 modules keep the time-independent key.
+
+Each call gets a fuel budget proportional to the frame size; a module that loops forever stops
+with an error instead of hanging the app.
 
 #### Example
 
@@ -324,8 +339,10 @@ register_plugin(Arc::new(Swap(manifest)))?; // before the UI builds its menus
 ## Plug-in API 2 (native plug-ins)
 
 API 2 is for Rust plug-ins and for hosts that bring effects from elsewhere (such as
-[external effect helpers](external-helpers.md)); the WebAssembly ABI stays at 1. Manifests with `"api": 1` or `2` are accepted,
-`effect.plugins.list` reports `api: 2`, and up to 1024 plug-in effects can be registered.
+[external effect helpers](external-helpers.md)); the WebAssembly ABI is versioned separately
+(ABI 2 adds the neighbouring frames, see [WebAssembly ABI](#webassembly-abi)). Manifests with
+`"api": 1` or `2` are accepted, `effect.plugins.list` reports `api: 2`, and up to 1024 plug-in
+effects can be registered.
 
 * **New parameter types**: `point3` (`default` `[x, y, z]`; x, y arrive in buffer pixels, z as is),
   `layer` (another layer of the composition; flattens to its id, -1 for none, read with
@@ -354,9 +371,11 @@ API 2 is for Rust plug-ins and for hosts that bring effects from elsewhere (such
 
 ### Compatibility
 
-The API version is checked when a plug-in loads: a manifest or module for another version is
-refused with a message. Within a version the contract above does not change; additions (new
-parameter types, new optional exports) bump the version.
+The API version is checked when a plug-in loads: this build implements plug-in API 1 and 2 and
+WebAssembly ABI 1 and 2; a manifest or module for another version is refused with a message.
+ABI 1 modules load and render unchanged; ABI 2 modules add `ec_render2` and the neighbouring
+frames. Within a version the contract above does not change; additions (new parameter types,
+new optional exports) bump the version.
 
 ## Plug-in Library
 

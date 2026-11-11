@@ -44,11 +44,15 @@ pub struct EvalCtx<'a> {
     /// Media Replacement values overridden by the Essential Properties of a collapsed precomp
     /// instance.
     pub media_overrides: &'a [crate::MediaOverride],
+    /// Where the source files of what expressions render (`sampleImage`) are noted: the
+    /// renderer's [`Renderer::reads`](crate::Renderer::reads) while rendering.
+    pub reads: Option<&'a crate::reads::ReadLog>,
 }
 
 impl<'a> EvalCtx<'a> {
+    /// A context for `comp` at `time` with no expressions, footage, overrides or read log.
     pub fn new(project: &'a Project, comp_id: ItemId, comp: &'a Comp, time: Tick) -> EvalCtx<'a> {
-        EvalCtx { project, comp_id, comp, time, expr: None, footage: None, property_overrides: &[], media_overrides: &[] }
+        EvalCtx { project, comp_id, comp, time, expr: None, footage: None, property_overrides: &[], media_overrides: &[], reads: None }
     }
     pub fn at(&self, time: Tick) -> EvalCtx<'a> {
         EvalCtx { time, ..*self }
@@ -203,13 +207,7 @@ impl<'a> EvalCtx<'a> {
         // Auto-orient (along path / towards camera) replaces Orientation.
         let orient = crate::three_d::camera::auto_orient_3d(self, layer, p)
             .unwrap_or_else(|| Mat4::orientation(Vec3::from(self.v3(layer, tr, "orientation", [0.0; 3]))));
-        Mat4::translate(p)
-            * orient
-            * Mat4::rotate_z(rz)
-            * Mat4::rotate_y(ry)
-            * Mat4::rotate_x(rx)
-            * Mat4::scale(Vec3::from(scale) / 100.0)
-            * Mat4::translate(-Vec3::from(anchor))
+        Mat4::translate(p) * orient * Mat4::rotation_xyz(rx, ry, rz) * Mat4::scale(Vec3::from(scale) / 100.0) * Mat4::translate(-Vec3::from(anchor))
     }
 
     /// Layer space → comp (world) space, including parents.

@@ -538,16 +538,83 @@ fn noise(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-fn linear_wipe(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let done = ctx.params.f("completion") / 100.0;
-    let ang = ctx.params.f("angle").to_radians();
-    let feather = (ctx.params.f("feather") * b.scale).max(0.001);
-    let (w, h) = (b.img.width as f64, b.img.height as f64);
-    // Direction the wipe travels: angle 90° wipes left→right.
+/// Linear Wipe's geometry: the direction the wipe travels (angle 90° wipes left → right) and the
+/// range of `x·dx + y·dy` over a `w` × `h` buffer's corners.
+pub fn linear_wipe_axis(angle_deg: f64, w: f64, h: f64) -> ([f64; 2], f64, f64) {
+    let ang = angle_deg.to_radians();
     let (dx, dy) = (ang.sin(), -ang.cos());
     let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)];
-    let proj: Vec<f64> = corners.iter().map(|(x, y)| x * dx + y * dy).collect();
-    let (lo, hi) = (proj.iter().cloned().fold(f64::INFINITY, f64::min), proj.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+    let proj = corners.map(|(x, y)| x * dx + y * dy);
+    let (lo, hi) = (proj.iter().copied().fold(f64::INFINITY, f64::min), proj.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+    ([dx, dy], lo, hi)
+}
+
+/// Linear Wipe's Feather (`feather` pixels at preview `scale`) as the Gaussian sigma that
+/// softens the edge of a `w` × `h` buffer. After Effects' feathered edge is the hard wipe
+/// blurred with the layer's edges repeated; our importer sample (Feather 16 at 77°, 2026-11-05)
+/// matches three box passes of radius 6 per axis, sigma 6.35..6.6, so sigma = Feather / 2.5
+/// (pinned at Feather 16 only, #3125). Capped at twice the buffer's longer side, past which
+/// a blur with repeated edges no longer changes and the running sums only cost time.
+pub fn linear_wipe_sigma(feather: f64, scale: f64, w: f64, h: f64) -> f64 {
+    let s = feather * scale / 2.5;
+    if s.is_finite() && s > 0.0 { s.min(2.0 * w.max(h).max(1.0)) } else { 0.0 }
+}
+
+fn linear_wipe(ctx: &EffectCtx, b: Buf) -> Buf {
+    if ctx.params.b("legacyFeather") {
+        return linear_wipe_legacy(ctx, b);
+    }
+    linear_wipe_blurred(ctx, b)
+}
+
+/// After Effects' Linear Wipe (#3125): the edge sits at `lo + completion·(hi − lo)` whatever the
+/// feather (0 % keeps the layer, 100 % clears it), anti-aliased by pixel coverage, and Feather
+/// blurs that hard matte with the layer's edges repeated (so the feather leans opaque where it
+/// meets the layer's sides, as After Effects' does).
+fn linear_wipe_blurred(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let done = ctx.params.f("completion") / 100.0;
+    if done.is_nan() || done <= 0.0 {
+        return b;
+    }
+    if done >= 1.0 {
+        b.img.data.iter_mut().for_each(|px| *px = [0.0; 4]);
+        return b;
+    }
+    let (w, h) = (b.img.width as f64, b.img.height as f64);
+    let ([dx, dy], lo, hi) = linear_wipe_axis(ctx.params.f("angle"), w, h);
+    let edge = lo + (hi - lo) * done;
+    if !(edge.is_finite() && dx.is_finite() && dy.is_finite()) {
+        return b;
+    }
+    let mut mask = Image::new(b.img.width, b.img.height);
+    mask.rows_mut().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let d = (x as f64 + 0.5) * dx + (y as f64 + 0.5) * dy;
+            *px = [((d - edge) + 0.5).clamp(0.0, 1.0) as f32; 4];
+        }
+    });
+    let sigma = linear_wipe_sigma(ctx.params.f("feather"), b.scale, w, h);
+    // Three box passes per axis (the measured shape; the GPU runs the same passes). Below
+    // Feather ~2 they leave the anti-aliased edge alone.
+    if sigma > 1e-3 {
+        mask = gaussian_blur(&mask, sigma, sigma, true);
+    }
+    for (px, m) in b.img.data.iter_mut().zip(mask.data.iter()) {
+        let k = m[3].clamp(0.0, 1.0);
+        for c in px.iter_mut() {
+            *c *= k;
+        }
+    }
+    b
+}
+
+/// Linear Wipe as EffectCraft drew it before #3125 (projects saved then keep it): a linear ramp
+/// Feather pixels wide, the travel extended by the feather at both ends.
+fn linear_wipe_legacy(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let done = ctx.params.f("completion") / 100.0;
+    let feather = (ctx.params.f("feather") * b.scale).max(0.001);
+    let (w, h) = (b.img.width as f64, b.img.height as f64);
+    let ([dx, dy], lo, hi) = linear_wipe_axis(ctx.params.f("angle"), w, h);
     let edge = lo - feather + (hi - lo + 2.0 * feather) * done;
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
@@ -838,6 +905,8 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("completion", "Transition Completion", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
                 p("angle", "Wipe Angle", num(90.0), ParamUi::Angle),
                 p("feather", "Feather", num(0.0), slider(0.0, 32000.0, 0.0, 500.0, 1)),
+                // Projects saved before #3125 keep the earlier linear feather ramp.
+                p("legacyFeather", "Legacy Feather", Value::Bool(false), ParamUi::Hidden),
             ],
             linear_wipe,
         ),
@@ -888,6 +957,72 @@ mod tests {
     fn blurred_row(id: &str, param: &str, v: f64) -> Vec<f32> {
         let out = run_fx(id, &[(param, num(v)), ("repeatEdge", Value::Bool(true))], edge(), 0.0, EffectEnv::default());
         (16..24).map(|x| out.img.get(x, 4)[0]).collect()
+    }
+
+    fn wipe(vals: &[(&str, Value)]) -> effectcraft_raster::Image {
+        let card = effectcraft_raster::Image::filled(320, 180, [1.0, 1.0, 1.0, 1.0]);
+        run_fx("ec.transition.linearwipe", vals, card, 0.0, EffectEnv::default()).img
+    }
+
+    /// #3125: After Effects 2026's Linear Wipe on our 320 × 180 importer sample (2026-11-05,
+    /// `linwipe-01-set-all`): Completion 10, Wipe Angle 77, Feather 16. Alpha (8-bit) of rows
+    /// 150 and 120 from x = 8, where the feathered edge crosses the layer away from its sides.
+    #[test]
+    fn linear_wipe_feather_matches_after_effects() {
+        const ROW150: [u8; 48] = [
+            0, 0, 0, 0, 0, 1, 2, 3, 6, 9, 12, 17, 23, 31, 39, 49, 61, 73, 86, 100, 115, 129, 144, 158, 172, 185, 198, 208, 218, 226, 233, 239, 244, 247, 250,
+            252, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
+        const ROW120: [u8; 48] = [
+            3, 5, 8, 12, 17, 23, 30, 39, 49, 60, 72, 85, 99, 114, 128, 143, 157, 171, 184, 197, 208, 217, 226, 233, 239, 243, 247, 250, 252, 253, 254, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
+        let vals = [("completion", num(10.0)), ("angle", num(77.0)), ("feather", num(16.0))];
+        let out = wipe(&vals);
+        for (y, row) in [(150, &ROW150), (120, &ROW120)] {
+            for (i, &ae) in row.iter().enumerate() {
+                let x = 8 + i as i64;
+                let a = out.get(x, y)[3] * 255.0;
+                assert!((a - ae as f32).abs() <= 2.5, "({x}, {y}): {a} vs After Effects {ae}");
+            }
+        }
+        // Where the edge meets the layer's left side the feather leans opaque, as in After
+        // Effects (179 at (0, 30); a profile across the edge alone gives about 110).
+        assert!(out.get(0, 30)[3] * 255.0 > 160.0, "{}", out.get(0, 30)[3] * 255.0);
+        // Projects saved before keep the old linear ramp, which put the edge 13 px further left.
+        let legacy = wipe(&[vals.as_slice(), &[("legacyFeather", Value::Bool(true))]].concat());
+        assert!((legacy.get(23, 150)[3] * 255.0 - 129.0).abs() > 100.0);
+    }
+
+    /// #3125: without feather After Effects' edge sits at Completion × the layer's extent along
+    /// the wipe (9.5 % of 320 px = 30.4, `linwipe-04-keys`; 22 % = 70.4, `linwipe-05-expr`); the
+    /// edge pixel is anti-aliased (After Effects 143 / 255, coverage gives 0.6). 0 % keeps the
+    /// layer and 100 % clears it whatever the feather (`linwipe-02-min`, `linwipe-03-max`).
+    #[test]
+    fn linear_wipe_edge_follows_completion() {
+        for (c, col) in [(9.5, 30), (22.0, 70)] {
+            let out = wipe(&[("completion", num(c)), ("angle", num(90.0))]);
+            for y in [0, 90, 179] {
+                assert_eq!(out.get(col - 1, y)[3], 0.0, "{c}");
+                assert_eq!(out.get(col + 1, y)[3], 1.0, "{c}");
+                assert!((out.get(col, y)[3] - 143.0 / 255.0).abs() < 0.05, "{c}: {}", out.get(col, y)[3]);
+            }
+        }
+        let max = wipe(&[("completion", num(100.0)), ("feather", num(32000.0))]);
+        assert!(max.data.iter().all(|p| p[3] == 0.0));
+        let min = wipe(&[("completion", num(0.0)), ("feather", num(32000.0))]);
+        assert!(min.data.iter().all(|p| p[3] == 1.0));
+    }
+
+    /// Hostile values: a huge feather is capped (no slow or oversized blur), NaN does not spread.
+    #[test]
+    fn linear_wipe_survives_hostile_values() {
+        let out = wipe(&[("completion", num(50.0)), ("feather", num(1e12))]);
+        assert!(out.data.iter().all(|p| p[3].is_finite()));
+        let out = wipe(&[("completion", num(50.0)), ("angle", num(f64::NAN)), ("feather", num(f64::NAN))]);
+        assert!(out.data.iter().all(|p| p[3].is_finite()));
+        let out = wipe(&[("completion", num(f64::NAN))]);
+        assert!(out.data.iter().all(|p| p[3] == 1.0));
     }
 
     #[test]
