@@ -238,7 +238,7 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
         }
         // `RotoData::add` would clip the span short of this frame and keep a stroke that never takes effect.
         if let Some(base) = data_of(g).base
-            && (frame - base).abs() > MAX_SPAN_FRAMES
+            && frame.abs_diff(base) > MAX_SPAN_FRAMES.unsigned_abs()
         {
             return Err(bad(cmd, format!("frame {frame} is more than {MAX_SPAN_FRAMES} frames from the base frame {base}")));
         }
