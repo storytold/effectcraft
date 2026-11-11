@@ -2,6 +2,7 @@
 //! lookup tables (.cube).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use effectcraft_color::luminance;
@@ -345,11 +346,39 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
         return v.clone();
     }
     let inline = src.contains('\n') || src.contains("LUT_");
-    let parsed = if inline { parse_cube(src) } else { std::fs::read_to_string(src.trim()).ok().and_then(|t| parse_cube(&t)) }.map(Arc::new);
+    let parsed = if inline {
+        parse_cube(src)
+    } else {
+        read_text_file(Path::new(src.trim())).map_err(|e| log::warn!("LUT not loaded: {e}")).ok().and_then(|t| parse_cube(&t))
+    }
+    .map(Arc::new);
     if let Ok(mut m) = cache.lock() {
         m.insert(src.to_string(), parsed.clone());
     }
     parsed
+}
+
+/// Largest text file an effect reads (a LUT, an OCIO config, Mocha shape data): 1 GiB, over the
+/// ~0.45 GB a 256³ `.cube` takes with six decimals, so no supported LUT is refused.
+const MAX_TEXT_FILE_BYTES: u64 = 1 << 30;
+
+/// A text file an effect parameter or a saved project names: only a regular file, and only up to
+/// [`MAX_TEXT_FILE_BYTES`] (`/dev/zero` or a FIFO would never end).
+pub(crate) fn read_text_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let too_big =
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a text file of at most {} MiB", path.display(), MAX_TEXT_FILE_BYTES >> 20));
+    let (file, meta) = effectcraft_project::open_regular_file(path)?;
+    if meta.len() > MAX_TEXT_FILE_BYTES {
+        return Err(too_big());
+    }
+    // One byte past the limit: a file that grew after the metadata check is an error, not a prefix.
+    let mut text = String::new();
+    file.take(MAX_TEXT_FILE_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(too_big());
+    }
+    Ok(text)
 }
 
 fn apply_lut(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -657,5 +686,23 @@ mod tests {
         let out = run("ec.utility.growbounds", &[("pixels", num(5.0))], test_img());
         assert_eq!((out.img.width, out.img.height), (18, 18));
         assert_eq!(out.offset, [5.0, 5.0]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod read_text_file_tests {
+    #[test]
+    fn devices_and_fifos_are_refused_without_reading() {
+        assert!(super::read_text_file(std::path::Path::new("/dev/zero")).is_err());
+        let dir = std::env::temp_dir().join(format!("ec-fx-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("lut.cube");
+        let _ = std::fs::remove_file(&fifo);
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        // Opening a FIFO with no writer would block: this returns at once.
+        assert!(super::read_text_file(&fifo).is_err());
+        // An OCIO FileTransform source reads through the same bounded reader.
+        assert!(crate::ocio::load_file(&fifo.to_string_lossy()).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

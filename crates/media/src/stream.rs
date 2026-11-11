@@ -30,11 +30,7 @@ impl FileReader {
     pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
         #[cfg(test)]
         crate::count_open(path);
-        let file = std::fs::File::open(path)?;
-        let m = file.metadata()?;
-        if !m.is_file() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
-        }
+        let (file, m) = effectcraft_project::open_regular_file(path)?;
         Ok(Self { file, len: m.len(), stamp: FileStamp::of_metadata(&m) })
     }
 }

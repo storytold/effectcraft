@@ -11,6 +11,8 @@ pub mod essential;
 mod file_check;
 pub mod limits;
 pub mod props;
+mod regular_file;
+pub use regular_file::open_regular_file;
 pub mod render_queue;
 pub mod render_templates;
 pub mod sequence;
