@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-29 · **Change:** minor (SAM 2 crate added to the layer table) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-11 · **Change:** minor (the effect registry count re-measured: 308; earlier: SAM 2 crate added to the layer table) · **Target:** Adobe After Effects 2026
 
 EffectCraft is a stack of small Rust crates. The engine knows nothing about the user interface;
 the egui frontend, the command-line tool and the MCP server all sit on top of the same `Session`
@@ -29,7 +29,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L1 | `path` | Bezier paths, path operators (trim, offset, round corners, zig zag, twist, merge…), stroking, coverage masks |
 | L2 | `project` | The document: items, compositions, layers, the property tree, render queue model, `.ecproj` serde |
 | L2 | `text` | Fonts, shaping, layout, per-glyph geometry, text animators and selectors |
-| L2 | `effects` | The effect registry (306 effects) and their CPU implementations |
+| L2 | `effects` | The effect registry (308 effects) and their CPU implementations |
 | L2 | `svg` | SVG import (W3C SVG 1.1/2 static subset: shapes, paths, transforms, `use`, CSS, gradients) and rasterisation at any scale |
 | L2 | `pdf` | PDF, PDF-compatible Illustrator (`.ai`) and EPS (PostScript subset) vector footage into the `svg` render tree: paths, fills, strokes, shadings, tiling patterns, clipping, text (embedded TrueType / CFF / Type 1 / Type 3 fonts; the bundled `text` fonts for the standard 14), images, blend modes, soft masks, optional-content layers |
 | L2 | `model` | 3D models for Advanced 3D: glTF 2.0 (`.gltf`/`.glb`) and OBJ/MTL import (meshes, PBR metallic-roughness materials and textures, node hierarchy, skins, animations), parametric primitives, extruded/bevelled outline meshes and polygon triangulation |

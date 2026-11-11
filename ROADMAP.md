@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-11 · **Change:** minor (the stage text and work list say `.aep` / `.aepx` import and `.aep` export exist in `crates/aep`; the percentages and hours are not re-estimated; previously: ProRes alpha final-run conformance; previously: features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -31,12 +31,15 @@ About 60–70% of these hours parallelise ([detail](docs/target-app-parity.md#re
 Hours are one Opus 5.5 agent working sequentially, calibrated on this repository's history
 ([how](docs/target-app-parity.md#calibration-of-the-hours)).
 
+The percentages and hours on this page are the 12 October estimates. The counts, issue and pull request statuses
+and lists were re-checked on 2026-11-11; a new estimate needs new evidence, not an edit.
+
 ### Stage
 
 **Alpha**, because all six core workflows of the [alpha gate](docs/roadmap.md#alpha-gate)
 (set up, animate, text and shapes, composite, preview, save and deliver) work end to end on macOS
 and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) import only as far as the importer's coverage goes (what it can't map is reported) and File ▸ Open doesn't take them yet, and that coverage isn't measured against real projects; fidelity against After Effects is measured for one narrow case (scalar ease,
-168 samples); 216 issues are open on 12 October, six of them crash reports (#580, #501, #426, #341, #234, #879). Beta needs ≈ 75% ready and `.aep`
+168 samples); 782 issues are open and 904 closed on 2026-11-11, 44 of them labelled critical, most of those crashes, aborts or out-of-memory kills (gap 3), and the security audit has 16 open findings (gap 26). Beta needs ≈ 75% ready and `.aep`
 opening reliably: `.aep` coverage and File ▸ Open, and the owner decision on clean-room scope (#190; the original 80–160 h was for the importer, which exists, and is not re-estimated), the fidelity harness and
 P0/P1 corpus (60–100 h), the crash and bug backlog (40–80 h), performance (40–70 h),
 Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and text (100–160 h).
@@ -105,7 +108,7 @@ Ranked; detail in [docs/roadmap.md](docs/roadmap.md) and [docs/gaps.md](docs/gap
 
 | | Next | Hours |
 |---|---|---:|
-| 1 | Fix the open crash reports; run `cargo xtask ci` on every pull request (G3) | 15–30 |
+| 1 | Fix the open crash reports and the open security audit findings (G3, gaps 3 and 26); `cargo xtask ci` already runs on every pull request (#2204) | 15–30 (12 October) |
 | 2 | Fidelity harness against After Effects: rendered frames, a corpus case per P0/P1 feature (G1) | 60–100 |
 | 3 | Real-user reliability on Linux and Windows; the open mask, effect, text and 3D bugs (G2) | 100–190 |
 | 4 | `.aep` / `.aepx` coverage and File ▸ Open (the importer exists); the owner's clean-room decision, #190 (G4) | not re-estimated (was 80–160) |

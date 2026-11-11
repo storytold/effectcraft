@@ -1,6 +1,6 @@
 # Effects parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (effect colour labels; earlier change: parameter count and closed issue references re-audited against `upstream/main` 470ea7a3 and the generated effects.md) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (counts re-measured from the registry at `origin/main` 4ac6cdb2: 308 effects, 3,039 parameters, 280 on the GPU; the quality ratings are the 12 October ones; earlier: effect colour labels) · **Target:** Adobe After Effects 2026
 
 Effects are the deepest single area of After Effects. This page separates the four questions
 that a single "306 of 306" hides: does each effect exist, does it run fast, does it look like
@@ -11,10 +11,10 @@ After Effects', and does the preset library exist. The per-effect catalogue is t
 
 | Question | Value | Kind |
 |---|---|---|
-| Effects present | **306** registered, 3,017 parameters; all of After Effects' effects by name (298 at the M9.11 count) plus Obsolete and our own | Measured: registry, [effects.md](effects.md). After Effects 26.5's `Plug-ins/Effects` holds 306 `.plugin` bundles in 231 entries (one bundle can hold several effects, so this is a cross-check, not a match) |
+| Effects present | **308** registered, 3,039 parameters (`effect.list`, 11 November); all of After Effects' effects by name (298 at the M9.11 count) plus Obsolete and our own | Measured: registry, [effects.md](effects.md). After Effects 26.5's `Plug-ins/Effects` holds 306 `.plugin` bundles in 231 entries (one bundle can hold several effects, so this is a cross-check, not a match) |
 | Parameter names, order, popups, units, defaults | aligned in M9.12 | Agent-checked against After Effects' documentation, not against a live dump |
-| On the GPU | **280** (92%) | Measured: registry flags; GPU vs CPU agreement tested per effect |
-| 32-bit float, no clamping | 306 | Measured: registry flags |
+| On the GPU | **280** (91%) | Measured: registry flags; GPU vs CPU agreement tested per effect |
+| 32-bit float, no clamping | 308 | Measured: registry flags |
 | **Rendered output matches After Effects** | **partly measured** | Some colour effects are checked against After Effects 2026 renders of our own test projects: Tint, Tritone, Black & White, Exposure, Levels, Curves, Luma Key, Extract, 4-Color Gradient and Fill within 1–3/255, Brightness & Contrast up to 6.2/255 (Color Correction, Generate and Keying rows below); Radial Blur, Glow, Venetian Blinds, Radial Wipe, Fractal / Turbulent Noise and Transform are checked the same way (rows below); every other effect is unmeasured. `effectcraft_effects::fidelity::compare_frames` exists for the corpus ([fidelity/README.md](fidelity/README.md)); simulation effects are pinned by golden hashes of our own output (M13.27) |
 | Animation presets | **76** original presets (8 text-animator, 23 Transitions, 23 Backgrounds, 22 Behaviors) against After Effects' **621** `.ffx` presets | Measured: `crates/engine/presets/text_animators.json`, `crates/engine/presets/transitions.json`, `crates/engine/presets/backgrounds.json`, `crates/engine/presets/behaviors.json`; the After Effects `Presets` folder |
 | 26.x additions | Curl Noise (26.3) present (#463 open); effect colour labels (26.5) present in Effect Controls only, not in the Timeline; the rebuilt Effect Controls (26.5) missing | Release notes |
