@@ -398,3 +398,7 @@ impl Default for Session {
 mod rq_tests;
 #[cfg(test)]
 mod tests;
+
+/// CI speed trial (effectcraft#3443): a one-line engine change, not for merging.
+#[doc(hidden)]
+pub const CI_SPEED_TRIAL: u32 = 1;
