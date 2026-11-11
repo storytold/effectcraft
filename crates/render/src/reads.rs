@@ -10,6 +10,7 @@
 //! The list is what a cache entry on disk has to check before it is used: a handful of files per
 //! frame, never every file of every footage item.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// The identity of a file as a render read it (frame and layer entries on disk store it, see
@@ -265,6 +266,31 @@ impl ReadLog {
     pub fn into_files(self) -> ReadFiles {
         self.files.into_inner().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// At most this many followed files are remembered ([`followed`]).
+const MAX_FOLLOWED: usize = 4096;
+
+static FOLLOWED: Mutex<BTreeSet<Arc<str>>> = Mutex::new(BTreeSet::new());
+
+/// Note that renders follow `path`: they read it as it is now, with no reload (a LUT file an
+/// effect names, #3493).
+pub(crate) fn follow(path: &str) {
+    let mut set = FOLLOWED.lock().unwrap_or_else(PoisonError::into_inner);
+    if set.len() < MAX_FOLLOWED && !set.contains(path) {
+        set.insert(path.into());
+    }
+}
+
+/// The files renders in this process followed: what was made of one of them is stale once its
+/// stamp changes, with nothing else to say so.
+pub fn followed() -> BTreeSet<Arc<str>> {
+    FOLLOWED.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+/// Whether renders followed `path` ([`followed`]).
+pub fn is_followed(path: &str) -> bool {
+    FOLLOWED.lock().unwrap_or_else(PoisonError::into_inner).contains(path)
 }
 
 #[cfg(test)]

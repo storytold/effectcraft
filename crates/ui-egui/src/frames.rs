@@ -37,7 +37,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
-use effectcraft_engine::render::reads::{ReadFiles, ReadLog};
+use effectcraft_engine::render::reads::{self, ReadFile, ReadFiles, ReadLog};
 use effectcraft_engine::render::{AutoTicket, CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
 use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
@@ -146,6 +146,7 @@ const GPU_LANE_STEP: std::time::Duration = std::time::Duration::from_millis(500)
 const GPU_LANE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 mod f16;
+mod followed;
 pub use f16::{F16_PIXEL_BYTES, F16Frame};
 
 /// A rendered viewer frame: 8-bit CPU pixels, half-float CPU pixels (32 bpc) or a GPU texture.
@@ -298,6 +299,11 @@ struct Cache {
     playhead: Option<Playhead>,
     /// Scale of the frame on screen (the newest urgent request): frames of other scales go first.
     scale: Option<u32>,
+    /// Versions of followed files that changed on disk: frames made of one are not kept
+    /// ([`followed`]).
+    stale: HashSet<ReadFile>,
+    /// A kept frame may be made of a followed file: checks are due ([`Frames::follows_files`]).
+    follows: bool,
 }
 
 impl Cache {
@@ -309,6 +315,10 @@ impl Cache {
     /// [`Cache::insert`] with the source files the frame was made of and the disk cache's drop
     /// generation when its render started.
     fn insert_with(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>) {
+        if self.is_stale(files.as_deref()) {
+            return;
+        }
+        self.follows |= files.as_deref().is_some_and(|f| f.files().iter().any(|f| reads::is_followed(&f.path)));
         let (sz, gpu) = (img.bytes(), img.is_gpu());
         if let Some(old) = self.map.insert(k, Cached { img, files, since }) {
             self.forget(&old.img);
@@ -708,6 +718,9 @@ pub struct Frames {
     /// A carry job is scheduled or running: at most one at a time, draining the edits in order.
     #[cfg(not(target_arch = "wasm32"))]
     carry_scheduled: Arc<AtomicBool>,
+    /// A [`Frames::check_followed_files`] pass is scheduled or running.
+    #[cfg(not(target_arch = "wasm32"))]
+    followed_check: Arc<AtomicBool>,
     /// The disk series (scale, view and options hash) each comp's frames are cached in.
     #[cfg(not(target_arch = "wasm32"))]
     disk_series: Arc<Mutex<HashMap<u64, Vec<(u32, u64)>>>>,
@@ -768,7 +781,7 @@ impl Frames {
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
+            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None, stale: HashSet::new(), follows: false })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -802,6 +815,8 @@ impl Frames {
             disk_carries: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
             carry_scheduled: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            followed_check: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
             disk_series: Arc::default(),
         }

@@ -258,9 +258,6 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
-    /// Each LUT file effects read when last seen, `None` while it couldn't be stamped (missing):
-    /// a change drops the frames kept in memory ([`footage_reload`], #3493).
-    pub lut_stamps: std::collections::HashMap<String, Option<footage_reload::Stamp>>,
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
@@ -391,7 +388,6 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
-            lut_stamps: Default::default(),
             aux_footage: None,
             script_calls: ScriptCalls::default(),
         }

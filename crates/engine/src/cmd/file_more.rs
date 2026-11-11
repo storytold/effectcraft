@@ -1269,7 +1269,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Reload Changed Footage",
             [],
             None,
-            "{} — reload the footage whose file changed on disk since it was last seen (size or modification time; Settings ▸ Import ▸ Automatically Reload Footage runs this in the background; image sequences only with All Footage); files seen for the first time are only remembered. Returns {files, reloaded}, and `luts`: how many LUT files effects read changed (the frames kept in memory are dropped)",
+            "{} — reload the footage whose file changed on disk since it was last seen (size or modification time; Settings ▸ Import ▸ Automatically Reload Footage runs this in the background; image sequences only with All Footage); files seen for the first time are only remembered. Returns {files, reloaded}",
             has_items,
             crate::footage_reload::command
         ),
