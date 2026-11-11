@@ -123,6 +123,20 @@ fn cell_json(c: &str) -> serde_json::Value {
 /// Bytes of header names the row objects of delimited data may repeat in all.
 const MAX_DATA_JSON_BYTES: usize = 64 << 20;
 
+/// The bytes `s` takes as a JSON string (quotes and `serde_json`'s escapes), counted without
+/// building it: a header of control characters must not be serialized in full to be refused.
+pub(crate) fn json_string_len(s: &str) -> usize {
+    let body: usize = s
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            c if u32::from(c) < 0x20 => 6,
+            c => c.len_utf8(),
+        })
+        .fold(0, usize::saturating_add);
+    body.saturating_add(2)
+}
+
 /// The data of a data footage item as `{data, rows, header}` JSON (see [`Req::FootageData`]).
 pub fn footage_data_json(f: &effectcraft_project::Footage) -> Option<String> {
     let text = f.data.as_deref()?;
@@ -141,7 +155,7 @@ pub fn footage_data_json(f: &effectcraft_project::Footage) -> Option<String> {
             // Every row object repeats every distinct header name (a repeated name keeps its last
             // column), as serialized: a long header over many rows is far more than the text itself.
             let distinct: std::collections::HashSet<&String> = header.iter().collect();
-            let keys: usize = distinct.iter().map(|k| serde_json::to_string(k).map_or(k.len() * 6 + 2, |j| j.len()) + 2).sum();
+            let keys: usize = distinct.iter().map(|k| json_string_len(k) + 2).fold(0, usize::saturating_add);
             if keys.saturating_mul(body.len()) > MAX_DATA_JSON_BYTES {
                 return None;
             }

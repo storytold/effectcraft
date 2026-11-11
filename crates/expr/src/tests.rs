@@ -2134,3 +2134,10 @@ fn delimited_data_estimate_counts_escaped_and_distinct_headers() {
     text.push_str(&"1\n".repeat(140_000));
     assert!(crate::host::footage_data_json(&data(text)).is_some());
 }
+
+#[test]
+fn json_string_length_matches_the_serialized_one() {
+    for s in ["", "plain", "a\"b\\c", "tab\tnl\ncr\rbs\u{8}ff\u{c}", "\u{1}\u{1f}\u{7f}", "é界😀", &"\u{1}".repeat(1000)] {
+        assert_eq!(crate::host::json_string_len(s), serde_json::to_string(s).unwrap().len(), "{s:?}");
+    }
+}
