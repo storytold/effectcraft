@@ -154,6 +154,10 @@ fn unique_names_and_cycles() {
         d.layers.push(l);
     }
     assert_eq!(d.unique_layer_name("Red Solid 1"), "Red Solid 2");
+    // Digits that end a word stay in the stem.
+    let mut e = c.clone();
+    e.layers[0].name = "v-b1.mp4".into();
+    assert_eq!(e.unique_layer_name("v-b1.mp4"), "v-b1.mp4 2");
     assert!(p.comp_contains(cid, cid));
 }
 

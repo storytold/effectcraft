@@ -271,7 +271,7 @@ impl Comp {
         if !self.layers.iter().any(|l| l.name == base) {
             return base.to_string();
         }
-        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
+        let stem = crate::item::name_stem(base);
         // The suffixes in use, gathered in one pass: trying each candidate against every layer
         // made importing many layers of one name cubic.
         let taken: std::collections::HashSet<u64> = self
