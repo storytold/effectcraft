@@ -2444,6 +2444,18 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
+    ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
+    (
+        "Some parts of this project cannot be imported exactly (left out or changed):",
+        "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):",
+    ),
+    (
+        "Some parts of this project cannot be exported exactly (left out or changed):",
+        "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):",
+    ),
+    ("Import Anyway", "ייבוא בכל זאת"),
+    ("Export Anyway", "ייצוא בכל זאת"),
     ("Revert Project", "חזרה לגרסה השמורה"),
     ("Unsaved Changes", "שינויים שלא נשמרו"),
     (
@@ -10440,6 +10452,32 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Native AEP loss-warning must translate the title and risky continue actions.
+    /// Command IDs and format brand names remain unchanged.
+    #[test]
+    fn hebrew_aep_import_export_loss_warning_is_explicit() {
+        set_current("he");
+        for (english, translated) in [
+            ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
+            ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
+            (
+                "Some parts of this project cannot be imported exactly (left out or changed):",
+                "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):",
+            ),
+            (
+                "Some parts of this project cannot be exported exactly (left out or changed):",
+                "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):",
+            ),
+            ("Import Anyway", "ייבוא בכל זאת"),
+            ("Export Anyway", "ייצוא בכל זאת"),
+        ] {
+            assert_eq!(tr(english), translated, "AEP loss warning: {english}");
+        }
+        set_current("en");
+        assert_eq!(tr("Export Anyway"), "Export Anyway");
+        assert_eq!(tr("Import Adobe After Effects Project"), "Import Adobe After Effects Project");
+    }
 
     /// Unsaved changes and revert must stay clear in Hebrew without altering file names or actions.
     #[test]
