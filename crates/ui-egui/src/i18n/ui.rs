@@ -2444,6 +2444,24 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Just now", "הרגע"),
+    ("Yesterday", "אתמול"),
+    ("{} minute ago", "לפני {} דקה"),
+    ("{} minutes ago", "לפני {} דקות"),
+    ("{} hour ago", "לפני {} שעה"),
+    ("{} hours ago", "לפני {} שעות"),
+    ("{} day ago", "לפני {} יום"),
+    ("{} days ago", "לפני {} ימים"),
+    ("Community", "קהילה"),
+    ("More ArtCraft apps", "יישומי ArtCraft נוספים"),
+    ("Welcome to EffectCraft", "ברוכים הבאים ל־EffectCraft"),
+    ("Motion graphics and visual effects · version {}", "גרפיקה בתנועה ואפקטים חזותיים · גרסה {}"),
+    ("Filter recent files", "סינון קבצים אחרונים"),
+    ("Clear list", "ניקוי הרשימה"),
+    ("(missing)", "(חסר)"),
+    ("EffectCraft project", "פרויקט EffectCraft"),
+    ("After Effects project", "פרויקט After Effects"),
+    ("Lottie animation", "אנימציית Lottie"),
     ("Proxy Use: {}", "שימוש בקובץ תחליפי: {}"),
     ("Effects: {}", "אפקטים: {}"),
     ("Solo Switches: {}", "מתגי סולו: {}"),
@@ -10478,6 +10496,44 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Native Home welcome, community rail, recent-file filter, relative dates and
+    /// file kinds must be readable in Hebrew without translating file paths.
+    #[test]
+    fn hebrew_native_home_recent_files_and_relative_dates_are_localized() {
+        let source = include_str!("../panels/home.rs");
+        set_current("he");
+        for (english, hebrew) in [
+            ("Just now", "הרגע"),
+            ("Yesterday", "אתמול"),
+            ("{} minute ago", "לפני {} דקה"),
+            ("{} minutes ago", "לפני {} דקות"),
+            ("{} hour ago", "לפני {} שעה"),
+            ("{} hours ago", "לפני {} שעות"),
+            ("{} day ago", "לפני {} יום"),
+            ("{} days ago", "לפני {} ימים"),
+            ("Community", "קהילה"),
+            ("More ArtCraft apps", "יישומי ArtCraft נוספים"),
+            ("Welcome to EffectCraft", "ברוכים הבאים ל־EffectCraft"),
+            ("Motion graphics and visual effects · version {}", "גרפיקה בתנועה ואפקטים חזותיים · גרסה {}"),
+            ("Filter recent files", "סינון קבצים אחרונים"),
+            ("Clear list", "ניקוי הרשימה"),
+            ("(missing)", "(חסר)"),
+            ("EffectCraft project", "פרויקט EffectCraft"),
+            ("After Effects project", "פרויקט After Effects"),
+            ("Lottie animation", "אנימציית Lottie"),
+        ] {
+            assert_eq!(tr(english), hebrew, "Home: {english}");
+            assert!(source.contains(&format!("{english:?}")), "No Native Home source for {english}");
+            assert_eq!(english.matches("{}").count(), hebrew.matches("{}").count());
+        }
+        assert_eq!(tr_args("{} hours ago", &[&3]), "לפני 3 שעות");
+        assert_eq!(tr_args("Motion graphics and visual effects · version {}", &[&"1.2.3"]), "גרפיקה בתנועה ואפקטים חזותיים · גרסה 1.2.3");
+        set_current("en");
+        assert_eq!(tr("Welcome to EffectCraft"), "Welcome to EffectCraft");
+        assert_eq!(tr_args("{} days ago", &[&2]), "2 days ago");
+    }
+
 
     /// The Native AEP loss-warning must translate the title and risky continue actions.
     /// Command IDs and format brand names remain unchanged.
