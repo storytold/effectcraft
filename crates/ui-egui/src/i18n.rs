@@ -8923,9 +8923,14 @@ mod tests {
             assert_eq!(label(&app, command, english), hebrew);
         }
         assert_eq!(label(&app, "file.openRecent", "My Project.ecproj"), "My Project.ecproj");
-        let item = MenuEntry { label: "Open Project...".into(), command: "file.open".into(),
-            params: serde_json::Value::Null, shortcut: None, alt_shortcuts: Vec::new() };
-        assert_eq!(entry(&app, &item, item.label.clone()), "פתיחת פרויקט...");
+        let item = MenuEntry {
+            label: "Open Project...".into(),
+            command: "file.open".into(),
+            params: serde_json::Value::Null,
+            shortcut: None,
+            alt_shortcuts: Vec::new(),
+        };
+        assert_eq!(entry(&app, &item, item.label.clone()), "פתח פרויקט...");
         assert_eq!(item.command, "file.open");
         ui::set_current("he");
         assert_eq!(tr("Auto-saves"), "שמירות אוטומטיות");
