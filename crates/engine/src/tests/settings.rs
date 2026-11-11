@@ -398,20 +398,26 @@ fn new_layers_fit_the_work_area_when_asked() {
 
     s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
     s.execute("prefs.set", json!({"key": "general.createLayersAtCompStart", "value": false})).unwrap();
-    s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
-    for (cmd, p) in [
-        ("layer.newSolid", json!({})),
-        ("layer.newAdjustment", json!({})),
-        ("layer.newNull", json!({})),
-        ("layer.newText", json!({"text": "a"})),
-        ("layer.newShape", json!({"kind": "rect"})),
-        ("shape.newShape", json!({"kind": "ellipse"})),
-        ("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]})),
+    // The tools that draw on their new layer (Type, shape tools, Pen) move the playhead into it;
+    // the menu commands leave it.
+    for (cmd, p, draws) in [
+        ("layer.newSolid", json!({}), false),
+        ("layer.newAdjustment", json!({}), false),
+        ("layer.newNull", json!({}), false),
+        ("layer.newText", json!({"text": "a"}), false),
+        ("layer.newText", json!({"text": "a", "edit": true}), true),
+        ("layer.newShape", json!({"kind": "rect"}), false),
+        ("shape.newShape", json!({"kind": "ellipse"}), true),
+        ("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]}), true),
     ] {
+        s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
         s.state.selected_layers.clear();
+        s.state.text_edit = None;
         s.execute(cmd, p).unwrap();
         assert_eq!(span(&s), (2.0, 2.0, 5.0), "{cmd}");
+        assert_eq!(s.time().seconds().round(), if draws { 2.0 } else { 7.0 }, "{cmd} playhead");
     }
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
 
     let nested = s.execute("comp.new", json!({"name": "Nested", "duration": 3, "open": false})).unwrap()["comp"].as_u64().unwrap();
     s.execute("layer.addItem", json!({"item": nested})).unwrap();

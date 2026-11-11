@@ -363,6 +363,9 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_layers = vec![lid];
         Ok((lid, group))
     })?;
+    if target.is_none() {
+        super::layer::show_span(s, span);
+    }
     Ok(json!({"layer": lid.0, "group": group}))
 }
 

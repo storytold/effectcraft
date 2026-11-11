@@ -301,6 +301,9 @@ fn new_path(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_vertices = vec![VertexRef { layer: lid, mask: path_uid, index: n - 1 }];
         Ok((lid, group, path_uid))
     })?;
+    if target.is_none() {
+        super::layer::show_span(s, span);
+    }
     Ok(json!({"layer": lid.0, "group": group, "path": path_uid}))
 }
 
