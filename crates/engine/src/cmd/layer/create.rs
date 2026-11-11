@@ -31,12 +31,19 @@ pub(crate) fn fit_span(l: &mut Layer, span: Option<(Tick, Tick)>) {
 }
 
 /// Tools draw on the layer they create: when it was fitted to a span the playhead is outside,
-/// move `comp`'s playhead to the span's start so the new layer shows. The layer's timing is kept.
+/// move `comp`'s playhead to the first frame in the span so the new layer shows. The layer's timing
+/// is kept. The work area need not sit on frames (a typed start, a frame-rate change), so the
+/// frame is rounded up from the start, not to the nearest; a span holding no frame moves nothing.
 pub(crate) fn show_span(s: &mut Session, comp: ItemId, span: Option<(Tick, Tick)>) {
+    let Some(fr) = s.project.comp(comp).map(|c| c.frame_rate) else { return };
     if let Some((start, end)) = span
         && !(start..end).contains(&s.time_of(comp))
     {
-        s.set_time_of(comp, start);
+        let first = fr.snap(start);
+        let first = if first < start { fr.tick_of(fr.frame_at(start).saturating_add(1)) } else { first };
+        if first < end {
+            s.set_time_of(comp, first);
+        }
     }
 }
 

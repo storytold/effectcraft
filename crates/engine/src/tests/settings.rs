@@ -449,6 +449,27 @@ fn fitted_layers_in_another_comp_move_that_comps_playhead() {
     }
 }
 
+/// A work area off the frame grid (set at 25 fps, then the comp went to 30 fps): the playhead
+/// goes to the first frame inside it, not the nearest frame before its start.
+#[test]
+fn fitted_layers_off_the_frame_grid_move_the_playhead_inside_them() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Grid", "duration": 2, "frameRate": 25})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 0.04, "end": 0.08})).unwrap();
+    s.execute("comp.settings", json!({"frameRate": 30})).unwrap();
+    for (cmd, p) in [("layer.newText", json!({"text": "a", "edit": true})), ("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]}))] {
+        s.set_time(effectcraft_time::Tick::from_seconds_f64(1.0));
+        s.state.selected_layers.clear();
+        s.state.text_edit = None;
+        s.execute(cmd, p).unwrap();
+        let l = &s.active_comp().unwrap().layers[0];
+        let t = s.time();
+        assert!(l.in_point <= t && t < l.out_point, "{cmd}: {t:?} in {:?}..{:?}", l.in_point, l.out_point);
+        assert_eq!(t, effectcraft_time::Tick::from_seconds_f64(2.0 / 30.0), "{cmd}: the first frame inside");
+    }
+}
+
 #[test]
 fn default_spatial_interpolation_linear() {
     let mut s = session_with_comp();
