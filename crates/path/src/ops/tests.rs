@@ -183,6 +183,25 @@ fn offset_copies() {
 }
 
 #[test]
+fn offset_copies_are_budgeted_by_the_output_they_return() {
+    // An open one-segment subpath comes back as a closed outline of several elements, so the copies
+    // stop when the returned elements pass the budget, not when the input segments would.
+    let line = || {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.line_to((50.0, 0.0));
+        p
+    };
+    let one = offset_within(&[line()], 5.0, Join::Round, 4.0, 1.0, 0.0, usize::MAX)[0].elements().len();
+    assert!(one > 4, "{one}");
+    let o = offset_within(&[line()], 5.0, Join::Round, 4.0, 50.0, 0.0, one * 3);
+    let moves = o[0].elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
+    assert!((1..50).contains(&moves) && o[0].elements().len() <= one * 4, "{moves} contours, {} elements", o[0].elements().len());
+    // The first copy always comes back, however small the budget.
+    assert!(!offset_within(&[line()], 5.0, Join::Round, 4.0, 5.0, 0.0, 0)[0].elements().is_empty());
+}
+
+#[test]
 fn offset_open_path_outlines() {
     let mut l = BezPath::new();
     l.move_to((0.0, 0.0));

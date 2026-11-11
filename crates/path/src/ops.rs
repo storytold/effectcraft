@@ -351,6 +351,11 @@ fn round_sub(sub: &Sub, r: f64, out: &mut BezPath) {
 /// join. `copies` copies are made, copy *i* (0-based) offset by `amount · (i + 1 + copy_offset)`,
 /// all returned in the same compound path.
 pub fn offset(paths: &[BezPath], amount: f64, join: Join, miter_limit: f64, copies: f64, copy_offset: f64) -> Vec<BezPath> {
+    offset_within(paths, amount, join, miter_limit, copies, copy_offset, MAX_OPERATOR_SEGMENTS)
+}
+
+/// [`offset`] with each path's result held to `max` elements (its first copy aside).
+fn offset_within(paths: &[BezPath], amount: f64, join: Join, miter_limit: f64, copies: f64, copy_offset: f64, max: usize) -> Vec<BezPath> {
     let n = pieces_within_budget(paths, copies.round().clamp(1.0, 1000.0) as usize);
     paths
         .iter()
@@ -358,7 +363,16 @@ pub fn offset(paths: &[BezPath], amount: f64, join: Join, miter_limit: f64, copi
             let mut out = BezPath::new();
             for i in 0..n {
                 let d = amount * (i as f64 + 1.0 + copy_offset);
-                out.extend(crate::offset::offset_path(p, d, join, miter_limit).elements().iter().copied());
+                let copy = crate::offset::offset_path(p, d, join, miter_limit);
+                // The budget is spent on what `offset_path` returns (an open subpath comes back as
+                // a closed outline of many segments; a zero offset as the path itself): the first
+                // copy is always kept, and a copy that would pass the budget is not made, so the
+                // work stays within a small multiple of it.
+                if i > 0 && out.elements().len().saturating_add(copy.elements().len()) > max {
+                    log::warn!("path: Offset Paths made {i} of {n} copies; more would pass {max} segments");
+                    break;
+                }
+                out.extend(copy.elements().iter().copied());
             }
             out
         })
