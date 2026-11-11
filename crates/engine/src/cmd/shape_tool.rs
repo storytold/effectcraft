@@ -364,7 +364,7 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         Ok((lid, group))
     })?;
     if target.is_none() {
-        super::layer::show_span(s, span);
+        super::layer::show_span(s, cid, span);
     }
     Ok(json!({"layer": lid.0, "group": group}))
 }

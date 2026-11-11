@@ -114,16 +114,21 @@ impl Session {
     /// editor is open, so playback with no text editor does no text copying.
     pub fn set_time(&mut self, t: Tick) {
         if let Some(c) = self.state.active_comp {
-            let t = self.project.comp(c).map_or(t, |comp| comp_frame_at(comp, t));
-            let edited = commands::text_edit::active_editor_snapshot(self);
-            self.state.times.insert(c, t);
-            if self.prefs.general.sync_time_related_items {
-                // Direct call: this `set_time` owns the editor snapshot for both time changes,
-                // so a synced move does not take a second snapshot or start a second epoch.
-                self.sync_related_times_inner(c, t);
-            }
-            commands::text_edit::after_external_change(self, edited.as_ref());
+            self.set_time_of(c, t);
         }
+    }
+
+    /// Move `comp`'s current time, as [`Session::set_time`] does for the active comp.
+    pub fn set_time_of(&mut self, c: ItemId, t: Tick) {
+        let t = self.project.comp(c).map_or(t, |comp| comp_frame_at(comp, t));
+        let edited = commands::text_edit::active_editor_snapshot(self);
+        self.state.times.insert(c, t);
+        if self.prefs.general.sync_time_related_items {
+            // Direct call: this `set_time_of` owns the editor snapshot for both time changes,
+            // so a synced move does not take a second snapshot or start a second epoch.
+            self.sync_related_times_inner(c, t);
+        }
+        commands::text_edit::after_external_change(self, edited.as_ref());
     }
 
     /// Settings ▸ General ▸ Synchronize Time of All Related Items: moving the current time of

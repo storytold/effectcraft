@@ -31,12 +31,12 @@ pub(crate) fn fit_span(l: &mut Layer, span: Option<(Tick, Tick)>) {
 }
 
 /// Tools draw on the layer they create: when it was fitted to a span the playhead is outside,
-/// move the playhead to the span's start so the new layer shows. The layer's timing is kept.
-pub(crate) fn show_span(s: &mut Session, span: Option<(Tick, Tick)>) {
+/// move `comp`'s playhead to the span's start so the new layer shows. The layer's timing is kept.
+pub(crate) fn show_span(s: &mut Session, comp: ItemId, span: Option<(Tick, Tick)>) {
     if let Some((start, end)) = span
-        && !(start..end).contains(&s.time())
+        && !(start..end).contains(&s.time_of(comp))
     {
-        s.set_time(start);
+        s.set_time_of(comp, start);
     }
 }
 
@@ -244,7 +244,7 @@ pub(super) fn new_text(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(id)
     })?;
     if edit {
-        show_span(s, span);
+        show_span(s, cid, span);
     }
     Ok(json!({"layer": id.0}))
 }

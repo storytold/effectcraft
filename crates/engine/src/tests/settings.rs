@@ -424,6 +424,31 @@ fn new_layers_fit_the_work_area_when_asked() {
     assert_eq!(span(&s), (7.0, 7.0, 10.0), "footage and comps keep their own timing");
 }
 
+/// A tool command aimed at another comp moves that comp's playhead into its work area and
+/// leaves the active comp's playhead where it was.
+#[test]
+fn fitted_layers_in_another_comp_move_that_comps_playhead() {
+    let mut s = session_with_comp();
+    let active = s.active_comp_id().unwrap();
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    let other = effectcraft_project::ItemId(s.execute("comp.new", json!({"name": "Other", "duration": 10, "open": false})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("comp.workArea", json!({"comp": other.0, "start": 2, "end": 5})).unwrap();
+    s.execute("comp.workArea", json!({"start": 8, "end": 9})).unwrap();
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
+    for (cmd, p) in [
+        ("layer.newText", json!({"comp": other.0, "text": "a", "edit": true})),
+        ("shape.newShape", json!({"comp": other.0, "kind": "ellipse"})),
+        ("shape.newPath", json!({"comp": other.0, "vertices": [[0, 0], [10, 0], [10, 10]]})),
+    ] {
+        s.set_time_of(other, effectcraft_time::Tick::from_seconds_f64(7.0));
+        s.state.selected_layers.clear();
+        s.state.text_edit = None;
+        s.execute(cmd, p).unwrap();
+        assert_eq!(s.time_of(other).seconds().round(), 2.0, "{cmd}: the target comp's playhead");
+        assert_eq!(s.time_of(active).seconds().round(), 7.0, "{cmd}: the active comp's playhead");
+    }
+}
+
 #[test]
 fn default_spatial_interpolation_linear() {
     let mut s = session_with_comp();
