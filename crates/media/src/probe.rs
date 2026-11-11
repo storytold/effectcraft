@@ -43,11 +43,25 @@ fn side_file_reader(model: &Path) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
     }
 }
 
+thread_local! {
+    /// What the last model probed on this thread left out (see [`probe_noting`]).
+    static MODEL_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`probe`], and what the import left out of the file (a 3D model's textures over the limits),
+/// for the user.
+pub fn probe_noting(path: impl AsRef<Path>) -> Result<(Footage, Option<String>)> {
+    MODEL_WARNING.with(|w| w.borrow_mut().take());
+    let f = probe(path)?;
+    Ok((f, MODEL_WARNING.with(|w| w.borrow_mut().take())))
+}
+
 /// Probe a 3D model (glTF 2.0 / OBJ / STL / FBX): a [`FootageKind::Model`] item whose duration is its
 /// longest animation. `resolve` reads sibling resources.
 pub fn probe_model(path: &str, bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Footage> {
     let m = effectcraft_model::load(path, bytes, resolve).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
     let s = m.summary();
+    MODEL_WARNING.with(|w| *w.borrow_mut() = (!m.warnings.is_empty()).then(|| format!("{path}: {}", m.warnings.join("; "))));
     let dur = s.animations.iter().map(|a| a.1).fold(0.0f64, f64::max);
     let codec = match effectcraft_model::format_of(path) {
         Some("obj") => "OBJ",

@@ -575,7 +575,7 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
         .and_then(|e| e.get("KHR_lights_punctual"))
         .map(|e| arr(e, "lights").iter().enumerate().map(|(i, l)| light(l, i)).collect())
         .unwrap_or_default();
-    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights })
+    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights, warnings: Vec::new() })
 }
 
 fn name_or(v: &Value, d: String) -> String {
