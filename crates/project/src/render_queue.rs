@@ -398,14 +398,14 @@ impl RenderSettings {
         let r = self.rate(comp);
         if let Some((a, b)) = self.pulldown.fields(i) {
             // Film frames at 4/5 of the output rate, from the first one starting in the span.
-            let film = FrameRate::new(r.num * 4, r.den * 5);
+            let film = FrameRate::new(r.num.saturating_mul(4), r.den.saturating_mul(5));
             let f0 = Self::ceil_frame(film, self.span(comp).0);
-            return FrameSample::Fields { first: film.tick_of(f0 + a), second: film.tick_of(f0 + b), upper_first };
+            return FrameSample::Fields { first: film.tick_of(f0.saturating_add(a)), second: film.tick_of(f0.saturating_add(b)), upper_first };
         }
-        let f = self.first_frame(comp) + i as i64;
+        let f = self.first_frame(comp).saturating_add(i64::try_from(i).unwrap_or(i64::MAX));
         let t = r.tick_of(f);
-        let half = Tick((r.tick_of(f + 1).0 - t.0) / 2);
-        FrameSample::Fields { first: t, second: Tick(t.0 + half.0), upper_first }
+        let half = Tick(r.tick_of(f.saturating_add(1)).0.saturating_sub(t.0) / 2);
+        FrameSample::Fields { first: t, second: Tick(t.0.saturating_add(half.0)), upper_first }
     }
     /// The comp-time span `[start, end)` to render.
     pub fn span(&self, comp: &Comp) -> (Tick, Tick) {
@@ -426,7 +426,7 @@ impl RenderSettings {
     /// First output-rate frame starting at or after `t`.
     fn ceil_frame(r: FrameRate, t: Tick) -> i64 {
         let f = r.frame_at(t);
-        if r.tick_of(f) < t { f + 1 } else { f }
+        if r.tick_of(f) < t { f.saturating_add(1) } else { f }
     }
     /// Output-rate frame number of output frame 0 (the first frame starting inside the span).
     pub fn first_frame(&self, comp: &Comp) -> i64 {
@@ -435,12 +435,12 @@ impl RenderSettings {
     /// Number of output frames: those starting in `[start, end)` (at least 1).
     pub fn frame_count(&self, comp: &Comp) -> u64 {
         let (_, b) = self.span(comp);
-        let n = Self::ceil_frame(self.rate(comp), b) - self.first_frame(comp);
+        let n = Self::ceil_frame(self.rate(comp), b).saturating_sub(self.first_frame(comp));
         n.max(1) as u64
     }
     /// Comp time of output frame `i`.
     pub fn frame_time(&self, comp: &Comp, i: u64) -> Tick {
-        self.rate(comp).tick_of(self.first_frame(comp) + i as i64)
+        self.rate(comp).tick_of(self.first_frame(comp).saturating_add(i64::try_from(i).unwrap_or(i64::MAX)))
     }
     pub fn effective_scale(&self, comp: &Comp) -> f64 {
         let s = self.resolution.clamp(0.01, 4.0);
@@ -1888,6 +1888,24 @@ mod tests {
         assert_eq!(s.sample(&c, 3), FrameSample::Fields { first: Tick::from_seconds_f64(0.12), second: Tick::from_seconds_f64(0.14), upper_first: false });
         let p = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
         assert_eq!(p.sample(&c, 3), FrameSample::Progressive(Tick::from_seconds_f64(0.12)));
+    }
+
+    /// A huge frame rate override must not overflow frame arithmetic.
+    #[test]
+    fn huge_frame_rate_does_not_overflow() {
+        let c = Comp::new(64, 48, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        for rate in [FrameRate::new(i64::MAX, 1), FrameRate::new(3_000_000_000_000_000_000, 2_000_000_000_000_000_000)] {
+            for (field_render, pulldown) in
+                [(FieldRender::Off, Pulldown::Off), (FieldRender::UpperFirst, Pulldown::Off), (FieldRender::UpperFirst, Pulldown::Wssww)]
+            {
+                let s = RenderSettings { frame_rate: Some(rate), field_render, pulldown, time_span: TimeSpan::LengthOfComp, ..Default::default() };
+                let _ = (s.first_frame(&c), s.frame_count(&c), s.frame_time(&c, 1), s.sample(&c, 1));
+                let _ = (s.frame_time(&c, u64::MAX), s.sample(&c, u64::MAX));
+            }
+        }
+        // An index past i64::MAX clamps forward; it must not wrap to a frame before the start.
+        let s = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
+        assert!(s.frame_time(&c, u64::MAX) > s.frame_time(&c, 0));
     }
 
     #[test]
