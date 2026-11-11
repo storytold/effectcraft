@@ -459,7 +459,9 @@ fn microsoft_families_resolve_to_metric_compatible_substitutes() {
 
         let resolved = resolve(requested, style);
         let family = &face(resolved.face).info.family;
-        if family.eq_ignore_ascii_case(requested) {
+        let installed = all_faces().iter().any(|f| f.info.family.eq_ignore_ascii_case(requested));
+        if installed {
+            assert!(family.eq_ignore_ascii_case(requested), "an installed {requested} wins over {family}");
             assert!(!resolved.missing, "an installed original family is available");
         } else {
             assert_eq!(family, substitute);
