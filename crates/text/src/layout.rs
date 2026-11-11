@@ -628,10 +628,10 @@ fn is_hanging_open(c: char) -> bool {
     matches!(c, '"' | '\'' | '\u{2018}' | '\u{201c}' | '(' | '\u{ab}')
 }
 
-/// Whether each run starts at or after the end of the one before it (the runs of a document):
-/// the precondition of [`run_at`]'s bisection.
+/// Whether no run is reversed and each starts at or after the end of the one before it (the runs
+/// of a document): the precondition of [`run_at`]'s bisection.
 fn runs_ordered(runs: &[(Range<usize>, TextStyle)]) -> bool {
-    runs.windows(2).all(|w| w[0].0.end <= w[1].0.start)
+    runs.iter().all(|(r, _)| r.start <= r.end) && runs.windows(2).all(|w| w[0].0.end <= w[1].0.start)
 }
 
 /// Style runs with whether they are [`runs_ordered`].

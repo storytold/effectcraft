@@ -522,5 +522,12 @@ fn run_lookup_by_bisection_matches_the_scan() {
         assert_eq!(run_at(&overlapping, false, b), scan(&overlapping, b), "{b}");
     }
     assert_eq!(run_at(&overlapping, false, 6), 0);
+    // A reversed range (20..0) among others is not ordered either, and takes the scan.
+    #[allow(clippy::reversed_empty_ranges)]
+    let reversed: Vec<(Range<usize>, TextStyle)> = vec![(0..10, st(10.0)), (20..0, st(20.0)), (5..15, st(30.0)), (15..20, st(40.0))];
+    assert!(!runs_ordered(&reversed));
+    for b in 0..30 {
+        assert_eq!(run_at(&reversed, runs_ordered(&reversed), b), scan(&reversed, b), "{b}");
+    }
     assert_eq!(run_at(&[], true, 5), 0);
 }
