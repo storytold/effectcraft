@@ -654,6 +654,25 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         self.tick_footage_reload(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_followed_files(ctx);
+    }
+
+    /// Kept frames made of a LUT file that changed on disk are dropped (#3493), whatever
+    /// Automatically Reload Footage says: renders always read LUT files as they are now.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tick_followed_files(&mut self, ctx: &egui::Context) {
+        use effectcraft_engine::footage_reload::{FOCUSED_INTERVAL, UNFOCUSED_INTERVAL};
+        let interval = if self.focused { FOCUSED_INTERVAL } else { UNFOCUSED_INTERVAL };
+        let key = egui::Id::unique("frames.followedChecked");
+        let last: f64 = ctx.data(|d| d.get_temp(key)).unwrap_or(f64::NEG_INFINITY);
+        if self.now - last >= interval.as_secs_f64() {
+            ctx.data_mut(|d| d.insert_temp(key, self.now));
+            self.frames.check_followed_files();
+        }
+        if self.frames.follows_files() {
+            ctx.request_repaint_after(interval);
+        }
     }
 
     /// One background worker tracks source availability and optional content reloads. It wakes

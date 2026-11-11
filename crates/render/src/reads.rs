@@ -56,12 +56,21 @@ pub fn epoch_nanos(t: std::time::SystemTime) -> i128 {
 pub struct ReadFile {
     pub path: Arc<str>,
     pub stamp: FileStamp,
+    /// Renders read it as it is now, with nothing to reload it (a LUT file an effect names,
+    /// #3493): what was made of it is stale once its stamp changes, so frames kept in memory
+    /// are checked against it.
+    pub followed: bool,
 }
 
 impl ReadFile {
     /// A file read with the given path and stamp.
     pub fn new(path: impl Into<Arc<str>>, stamp: FileStamp) -> ReadFile {
-        ReadFile { path: path.into(), stamp }
+        ReadFile { path: path.into(), stamp, followed: false }
+    }
+
+    /// A [followed](ReadFile::followed) file read with the given path and stamp.
+    pub fn followed(path: impl Into<Arc<str>>, stamp: FileStamp) -> ReadFile {
+        ReadFile { path: path.into(), stamp, followed: true }
     }
 }
 
@@ -111,12 +120,15 @@ impl std::hash::Hash for ReadFiles {
 }
 
 impl ReadFiles {
-    /// Note a file read (once per path).
+    /// Note a file read (once per path; followed if any read of it was).
     pub fn add(&mut self, file: ReadFile) {
         match self.files.binary_search_by(|f| f.path.cmp(&file.path)) {
             Ok(i) => {
-                if self.files.get(i).is_some_and(|f| f.stamp != file.stamp) {
-                    self.incomplete = true;
+                if let Some(f) = self.files.get_mut(i) {
+                    if f.stamp != file.stamp {
+                        self.incomplete = true;
+                    }
+                    f.followed |= file.followed;
                 }
             }
             Err(i) => {
@@ -292,6 +304,17 @@ mod tests {
         let files: ReadFiles = [file("/a", 1), file("/a", 2)].into_iter().collect();
         assert_eq!(files.len(), 1);
         assert!(!files.is_complete());
+    }
+
+    /// A file a render read both as footage and as a followed file is followed (#3493).
+    #[test]
+    fn a_file_read_both_ways_is_followed() {
+        let lut = ReadFile::followed("/a", FileStamp::Native { len: 1, modified: Some(7) });
+        for order in [[file("/a", 1), lut.clone()], [lut.clone(), file("/a", 1)]] {
+            let files: ReadFiles = order.into_iter().collect();
+            assert_eq!(files.files(), std::slice::from_ref(&lut));
+            assert!(files.is_complete());
+        }
     }
 
     /// Modification times keep their full value: before 1970 (not "no time") and past 2554

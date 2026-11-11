@@ -7,6 +7,7 @@ mod aux_footage;
 mod blender;
 mod camera_track;
 mod codec_options;
+mod color_lut;
 mod color_view;
 mod crypto_pick;
 mod delete_keys;

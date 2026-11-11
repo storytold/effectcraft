@@ -32,6 +32,10 @@ impl Dependencies<'_> {
             && let Some(fx) = layer.effects()
         {
             for g in fx.groups().take(limit.unwrap_or(usize::MAX)).filter(|g| g.enabled) {
+                // (the LUT files it reads: the owner's own effects and those of what it draws)
+                for file in super::lut_files(ctx, layer, g) {
+                    file.hash(self.h);
+                }
                 self.group(ctx, layer, g, 0)?;
             }
         }

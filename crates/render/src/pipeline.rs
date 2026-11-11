@@ -822,6 +822,12 @@ impl<'a> Renderer<'a> {
             })
             .filter(|(_, _, s)| !effectcraft_effects::audio_fx::is_audio_effect(s.id))
             .collect();
+        // (a frame on disk made with a LUT file is checked against it)
+        if let Some(log) = self.reads {
+            for (_, g, _) in &stack {
+                cache::lut_files(ctx, layer, g).for_each(|f| log.note(f));
+            }
+        }
         let accel = self.active_accel();
         let mut k = 0;
         while k < stack.len() {

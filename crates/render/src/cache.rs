@@ -27,7 +27,7 @@ use effectcraft_project::{FootageKind, ItemKind, Layer, LayerSource, Node, PropG
 
 use crate::disk_cache::{EntryFiles, SharedVirtualFileId, VirtualFileId, layer_disk_key};
 use crate::eval::EvalCtx;
-use crate::reads::ReadFiles;
+use crate::reads::{FileStamp, ReadFile, ReadFiles};
 
 mod dependencies;
 
@@ -921,6 +921,22 @@ fn reads_comp_scene(layer: &Layer) -> bool {
                     && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect } if effectcraft_effects::READS_COMP_SCENE.contains(&effect.as_str()))
             })
         })
+}
+
+/// The LUT files effect `g` of `layer` names ([`effectcraft_effects::lut_params`]), each as it is
+/// now (one `metadata` call): in the keys of what the effect makes and with the files a render
+/// reads, so an edited, created or deleted LUT file renders again (#3493). Each is
+/// [followed](ReadFile::followed), so frames kept elsewhere are checked against it.
+pub(crate) fn lut_files<'c>(ctx: &'c EvalCtx, layer: &'c Layer, g: &'c PropGroup) -> impl Iterator<Item = ReadFile> + 'c {
+    let effect = match &g.kind {
+        effectcraft_project::GroupKind::Effect { effect } => effect.as_str(),
+        _ => "",
+    };
+    effectcraft_effects::lut_params(effect).iter().filter_map(move |path| {
+        let Value::Str(src) = ctx.value(layer, g.prop(path)?) else { return None };
+        let file = effectcraft_effects::lut_file(&src)?;
+        Some(ReadFile::followed(file, FileStamp::native(file).unwrap_or(FileStamp::Missing)))
+    })
 }
 
 /// Cache key for the styled layer (content key + the Layer Styles group: structure, eye

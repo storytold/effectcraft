@@ -330,26 +330,61 @@ impl Lut {
     }
 }
 
-type LutCache = Mutex<HashMap<String, Option<Arc<Lut>>>>;
+/// A LUT file's size and modification time: a cached file is read again once they change.
+type FileId = (u64, Option<std::time::SystemTime>);
 
-/// Load (and cache) a LUT from inline `.cube` text or a file path.
+/// Parsed LUTs by parameter text, each file-backed one with the identity it was read at.
+type LutCache = Mutex<HashMap<String, (Option<FileId>, Option<Arc<Lut>>)>>;
+
+/// The parameters (match id paths) of effect `effect` that hold a LUT for [`load_lut`]: renders
+/// key and check them against the file they name (#3493).
+pub fn lut_params(effect: &str) -> &'static [&'static str] {
+    match effect {
+        "ec.utility.applylut" => &["lut"],
+        "ec.color.lumetri" => &["basicCorrection/inputLutFile", "creative/lookFile"],
+        _ => &[],
+    }
+}
+
+/// The file a LUT parameter names, or `None` for `.cube` text and an empty parameter.
+pub fn lut_file(src: &str) -> Option<&str> {
+    // `.cube` text always spans lines (a size header, then data rows); a path never does, even one
+    // whose file name contains `LUT_` (#3454). Trimmed, as the path is, so a trailing newline is a path.
+    let path = src.trim();
+    (!path.is_empty() && !path.contains('\n')).then_some(path)
+}
+
+/// Load (and cache) a LUT from inline `.cube` text or a file path. A file is looked at (one
+/// `metadata` call) on every load and read again once its size or modification time changed, so
+/// an edited, created or repaired file is picked up; one that can't be read is not kept.
 pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     if src.trim().is_empty() {
         return None;
     }
     static CACHE: OnceLock<LutCache> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let path = lut_file(src);
+    let id = match path {
+        Some(p) => {
+            let md = std::fs::metadata(p).ok()?;
+            Some((md.len(), md.modified().ok()))
+        }
+        None => None,
+    };
     if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
+        && let Some((seen, v)) = m.get(src)
+        && *seen == id
     {
         return v.clone();
     }
-    // `.cube` text always spans lines (a size header, then data rows); a path never does, even one
-    // whose file name contains `LUT_` (#3454). Trimmed, as the path is, so a trailing newline is a path.
-    let inline = src.trim().contains('\n');
-    let parsed = if inline { parse_cube(src) } else { std::fs::read_to_string(src.trim()).ok().and_then(|t| parse_cube(&t)) }.map(Arc::new);
+    // (taken before the read: a file written meanwhile has a newer identity, and is read again)
+    let parsed = match path {
+        Some(p) => parse_cube(&std::fs::read_to_string(p).ok()?),
+        None => parse_cube(src),
+    }
+    .map(Arc::new);
     if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
+        m.insert(src.to_string(), (id, parsed.clone()));
     }
     parsed
 }
@@ -497,6 +532,48 @@ mod tests {
         assert!(load_lut(&path).is_some(), "{path}");
         assert!(load_lut(&format!("{path}\r\n")).is_some(), "{path} with a trailing newline");
         assert!(load_lut(&identity_cube(2)).is_some(), "inline text");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #3493: a LUT file was read once per process, whatever happened to it afterwards. It is
+    /// read again once its size or modification time changes (set here, so the same-size edit
+    /// doesn't depend on the clock).
+    #[test]
+    fn a_lut_file_is_read_again_once_it_changes() {
+        const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+        const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str, secs: u64| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let at = |src: &str| load_lut(src).map(|l| l.apply([0.5; 3]));
+        // Edited in place, to the same size.
+        let edited = write("edited.cube", BLACK, 1_000);
+        assert_eq!(at(&edited), Some([0.0; 3]));
+        write("edited.cube", WHITE, 2_000);
+        assert_eq!(at(&edited), Some([1.0; 3]), "an edited file");
+        assert_eq!(at(&format!("{edited}\n")), Some([1.0; 3]), "with a trailing newline, a path");
+        // Created after it was asked for, then deleted.
+        let created = dir.join("created.cube").to_string_lossy().into_owned();
+        assert_eq!(at(&created), None);
+        write("created.cube", WHITE, 1_000);
+        assert_eq!(at(&created), Some([1.0; 3]), "a file created after it was missing");
+        std::fs::remove_file(&created).unwrap();
+        assert_eq!(at(&created), None, "a deleted file");
+        // Repaired after it failed to parse.
+        let repaired = write("repaired.cube", "not a lut", 1_000);
+        assert_eq!(at(&repaired), None);
+        write("repaired.cube", WHITE, 2_000);
+        assert_eq!(at(&repaired), Some([1.0; 3]), "a repaired file");
+        // Inline text is its own content: the same text is the same LUT.
+        let inline = load_lut(BLACK).unwrap();
+        assert!(Arc::ptr_eq(&inline, &load_lut(BLACK).unwrap()));
+        assert_eq!(at(WHITE), Some([1.0; 3]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
