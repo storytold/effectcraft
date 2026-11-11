@@ -225,11 +225,7 @@ const RAIL_W: f32 = 236.0;
 /// or mirroring filename/path data. Other interface languages retain the original geometry.
 fn home_regions(rect: Rect, rtl: bool) -> (Rect, Rect) {
     let w = RAIL_W.min(rect.width() * 0.4);
-    let rail = if rtl {
-        Rect::from_min_max(pos2(rect.max.x - w, rect.min.y), rect.max)
-    } else {
-        Rect::from_min_size(rect.min, vec2(w, rect.height()))
-    };
+    let rail = if rtl { Rect::from_min_max(pos2(rect.max.x - w, rect.min.y), rect.max) } else { Rect::from_min_size(rect.min, vec2(w, rect.height())) };
     let main = if rtl {
         Rect::from_min_max(pos2(rect.min.x + 40.0, rect.min.y + 32.0), pos2(rail.min.x - 40.0, rect.max.y - 16.0))
     } else {
@@ -549,7 +545,9 @@ mod tests {
             ctx.run_ui(Default::default(), |ui| {
                 app.auto.begin_frame();
                 show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0)));
-            }).textures_delta.clear();
+            })
+            .textures_delta
+            .clear();
             let rect = app.auto.find("home.file.open").expect("Open Project control").rect;
             assert_eq!(rect[0] > 600.0, should_be_right, "{locale}: misplaced Open Project");
             assert!(rect[2] > 100.0, "{locale}: Open Project must remain clickable");
