@@ -259,8 +259,9 @@ impl PathSeg {
     /// every vertex and edge crossing; inside a band no edges cross, so each inside span is a
     /// trapezoid (two triangles). Edges are compared pairwise and every band looks at every edge,
     /// on the UI thread, for geometry a script chooses, so a path past [`MAX_FILL_EDGES`] edges,
-    /// [`MAX_FILL_BANDS`] bands, [`MAX_FILL_TRIANGLES`] triangles or [`MAX_FILL_WORK`] steps is
-    /// filled only as far as the limit allows (topmost part first) and a warning is logged.
+    /// [`MAX_FILL_BANDS`] bands, [`MAX_FILL_TRIANGLES`] triangles or [`MAX_FILL_WORK`] steps (edge
+    /// pairs compared, then edges looked at per band) is filled only as far as the limit allows
+    /// (topmost part first) and a warning is logged.
     pub fn fill_triangles(path: &[PathSeg], n: usize, even_odd: bool) -> Vec<[[f64; 2]; 3]> {
         Self::fill_triangles_within(path, n, even_odd, [MAX_FILL_EDGES, MAX_FILL_BANDS, MAX_FILL_TRIANGLES, MAX_FILL_WORK])
     }
@@ -286,10 +287,24 @@ impl PathSeg {
         }
         let x_at = |e: &([f64; 2], [f64; 2], i32), y: f64| e.0[0] + (e.1[0] - e.0[0]) * (y - e.0[1]) / (e.1[1] - e.0[1]);
         let mut ys: Vec<f64> = edges.iter().flat_map(|e| [e.0[1], e.1[1]]).collect();
-        // Where two edges cross, a band boundary.
-        for i in 0..edges.len() {
-            for j in i + 1..edges.len() {
+        // Where two edges cross, a band boundary. Edges by top, so each is compared only with the
+        // ones that start above its bottom (the pairs that share some height); the pairs and the
+        // boundaries found are counted against the budgets, and past one the rest are not looked
+        // for (the fill is then approximate below that point, and says so).
+        let mut order: Vec<usize> = (0..edges.len()).collect();
+        order.sort_by(|&a, &b| edges[a].0[1].total_cmp(&edges[b].0[1]));
+        let mut pairs = 0usize;
+        'cross: for (k, &i) in order.iter().enumerate() {
+            for &j in &order[k + 1..] {
                 let (a, b) = (&edges[i], &edges[j]);
+                if b.0[1] >= a.1[1] {
+                    break;
+                }
+                pairs += 1;
+                if pairs > max_work || ys.len() > max_bands {
+                    log::warn!("fillPath: over its crossing budget; crossings past this point are not cut");
+                    break 'cross;
+                }
                 let (lo, hi) = (a.0[1].max(b.0[1]), a.1[1].min(b.1[1]));
                 if hi <= lo {
                     continue;
@@ -984,5 +999,17 @@ mod tests {
         // Work over the limit stops the cut.
         let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, usize::MAX, usize::MAX, 1]);
         assert!(!t.is_empty() && area(&t) < 4.0);
+        // Many crossing edges (every pair of 120 diagonals meets): the crossing scan is held to the
+        // band and work budgets too, and the top of the fill still draws.
+        let fan: Vec<PathSeg> = (0..60)
+            .flat_map(|i| {
+                let x = i as f64;
+                [PathSeg::M { x, y: 0.0 }, PathSeg::L { x: 60.0 - x, y: 100.0 }, PathSeg::L { x: x + 0.5, y: 100.0 }]
+            })
+            .collect();
+        for limits in [[usize::MAX, 50, usize::MAX, usize::MAX], [usize::MAX, usize::MAX, usize::MAX, 500]] {
+            let t = PathSeg::fill_triangles_within(&fan, 48, false, limits);
+            assert!(!t.is_empty(), "{limits:?}");
+        }
     }
 }
