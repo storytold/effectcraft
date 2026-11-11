@@ -842,3 +842,68 @@ fn a_default_state_colour_record_holds_the_value() {
     assert_eq!(colour(&default_state), colour(&written));
     assert_ne!(colour(&default_state), colour(&unchanged), "the recorded colour, not the default");
 }
+
+/// The project with its png item made one layer of a Photoshop file `art.psd`: the `opti` of
+/// docs/aep-format.md 3.3 (tag `8BPS`, the layer index at 14, its bounds at 78-94, its name at
+/// 344) and the item `size` big.
+fn as_psd_layer(index: i32, bounds: [i32; 4], name: &str, size: (u32, u32)) -> Vec<u8> {
+    let mut opti = vec![0u8; 602];
+    opti[..4].copy_from_slice(b"8BPS");
+    opti[14..18].copy_from_slice(&index.to_be_bytes());
+    for (i, v) in bounds.iter().enumerate() {
+        opti[78 + 4 * i..82 + 4 * i].copy_from_slice(&v.to_le_bytes());
+    }
+    opti[344..344 + name.len()].copy_from_slice(name.as_bytes());
+    let alias = br#"{"fullpath":"C:\\x\\art.psd","platform":1,"target_is_folder":false}"#.to_vec();
+    mutate(&mut |c| {
+        if !c.is_list(b"Pin ") {
+            return;
+        }
+        let Body::List { children, .. } = &mut c.body else { return };
+        if !children.iter().any(|k| k.is(b"opti") && k.bytes().is_some_and(|d| d.get(..4) == Some(&b"png!"[..]))) {
+            return;
+        }
+        // No sequence naming between the alias and the `opti`.
+        children.retain(|k| k.is(b"sspc") || k.is(b"opti") || k.is_list(b"Als2"));
+        for k in children.iter_mut() {
+            if k.is(b"opti") {
+                k.body = Body::Data(opti.clone().into());
+            } else if k.is(b"sspc") {
+                set_data(k, 30, &size.0.to_be_bytes());
+                set_data(k, 34, &size.1.to_be_bytes());
+            }
+        }
+        visit(children, &mut |k| {
+            if k.is(b"alas") {
+                k.body = Body::Data(alias.clone().into());
+            }
+        });
+    })
+}
+
+/// #3087: an item made from one layer of a Photoshop file shows that layer, named
+/// `<layer>/<file>`; it showed the whole document, named after the file. Item as big as the layer:
+/// Retain Layer Sizes; as big as the document: the layer on the document.
+#[test]
+fn a_photoshop_layer_item_shows_its_layer() {
+    for (size, layer_size) in [((48, 15), true), ((1000, 1000), false)] {
+        let (p, r) = run(&as_psd_layer(7, [749, 800, 764, 848], "Tëst", size), true);
+        r.unwrap();
+        let (name, f) = p.items.values().find_map(|i| if let ItemKind::Footage(f) = &i.kind { Some((i.name.clone(), f.clone())) } else { None }).unwrap();
+        assert_eq!(name, "Tëst/art.psd");
+        let l = f.layer.expect("the layer");
+        assert_eq!((l.index, l.name.as_str(), l.layer_size, (f.width, f.height)), (7, "Tëst", layer_size, size));
+    }
+}
+
+/// #3087: a Photoshop layer without pixels (an adjustment layer) keeps the merged image and is
+/// reported; the merged image itself (index -1) is no layer.
+#[test]
+fn a_photoshop_layer_without_pixels_keeps_the_merged_image() {
+    let (p, r) = run(&as_psd_layer(4, [0; 4], "Levels 1", (1000, 1000)), true);
+    let found = losses(&r.unwrap(), LossCategory::UnsupportedItems);
+    assert!(found.iter().any(|d| d.contains("'Levels 1/art.psd'") && d.contains("without pixels")), "{found:?}");
+    assert_eq!(the_footage(&p).layer, None);
+    let (p, _) = run(&as_psd_layer(-1, [0; 4], "", (1000, 1000)), true);
+    assert_eq!(the_footage(&p).layer, None);
+}
