@@ -2444,6 +2444,9 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("New Composition From Footage", "קומפוזיציה חדשה מקובץ מדיה"),
+    ("Search project", "חיפוש בפרויקט"),
+    ("Select an item to see its details", "בחרו פריט להצגת פרטיו"),
     ("Just now", "הרגע"),
     ("Yesterday", "אתמול"),
     ("{} minute ago", "לפני {} דקה"),
@@ -10496,6 +10499,24 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Screenshot-backed Hebrew empty-viewer and project-panel controls.
+    #[test]
+    fn hebrew_empty_viewer_and_project_details_are_localized() {
+        let viewer = include_str!("../panels/viewer/frame.rs");
+        let project = include_str!("../panels/project.rs");
+        set_current("he");
+        for (english, hebrew, source) in [
+            ("New Composition From Footage", "קומפוזיציה חדשה מקובץ מדיה", viewer),
+            ("Search project", "חיפוש בפרויקט", project),
+            ("Select an item to see its details", "בחרו פריט להצגת פרטיו", project),
+        ] {
+            assert!(source.contains(&format!("{english:?}")), "Missing Native callsite: {english}");
+            assert_eq!(tr(english), hebrew, "Untranslated Native control: {english}");
+        }
+        set_current("en");
+        assert_eq!(tr("New Composition From Footage"), "New Composition From Footage");
+    }
 
     /// The Native Home welcome, community rail, recent-file filter, relative dates and
     /// file kinds must be readable in Hebrew without translating file paths.
