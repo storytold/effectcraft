@@ -395,6 +395,9 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
     // reads (other footage, a proxy, the project file itself), and then nothing is written.
     let protected = s.protected_files();
     let mut used_names = BTreeSet::new();
+    // Where each file name's numbering resumes: a name repeated many times is numbered from its
+    // own file name, not by prefixing the previous candidate again.
+    let mut next_k: BTreeMap<String, usize> = BTreeMap::new();
     let mut plan: Vec<(ItemId, Vec<(String, String)>)> = vec![];
     for it in s.project.items.values() {
         let ItemKind::Footage(f) = &it.kind else { continue };
@@ -404,11 +407,17 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
         let files: Vec<&String> = if f.sequence.is_empty() { vec![&f.path] } else { f.sequence.iter().collect() };
         let mut pairs = vec![];
         for src in files {
-            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
-            let mut k = 2;
-            while !used_names.insert(name.clone()) {
-                name = format!("{k}_{name}");
-                k += 1;
+            let file = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
+            let mut name = file.clone();
+            if !used_names.insert(name.clone()) {
+                let k = next_k.entry(file.clone()).or_insert(2);
+                loop {
+                    name = format!("{k}_{file}");
+                    *k += 1;
+                    if used_names.insert(name.clone()) {
+                        break;
+                    }
+                }
             }
             let dst = format!("{folder}/(Footage)/{name}");
             // A file that is already where its copy goes stays (it is not copied onto itself).

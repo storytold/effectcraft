@@ -16,3 +16,4 @@ effectcraft-path = { workspace = true }
 kurbo = { workspace = true }
 roxmltree = "0.21"
 rayon = { workspace = true }
+log = { workspace = true }
