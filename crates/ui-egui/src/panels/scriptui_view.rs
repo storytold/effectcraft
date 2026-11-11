@@ -26,6 +26,8 @@ enum Act {
     Close(u32),
     /// A mouse event (`scriptui.mouse` parameters without window and widget).
     Mouse(u32, u32, Value),
+    /// A keyboard event (`scriptui.key` parameters without window).
+    Key(u32, u32, Value),
     /// A docked panel's new size (`scriptui.resize`).
     Resize(u32, [f32; 2]),
 }
@@ -81,6 +83,42 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
     for c in w.children.iter().filter(|c| c.visible) {
         draw_widget(app, ui, origin, win, c, acts);
     }
+}
+
+/// Applies ScriptUI focus requests or deactivations to a control.
+fn apply_focus(app: &EffectcraftApp, ui: &mut egui::Ui, win: u32, w: &Widget, id: egui::Id, r: &egui::Response) {
+    let (target_widget, seq) = app.session.script_ui.window(win).map(|sw| (sw.focus_widget, sw.focus_seq)).unwrap_or((None, 0));
+    let focus_seq_id = egui::Id::unique(("sui-focus-seq", win, w.id));
+    let last_seq: u64 = ui.data(|d| d.get_temp(focus_seq_id)).unwrap_or(0);
+    let has_focus = ui.memory(|m| m.has_focus(id));
+
+    if seq > last_seq {
+        if target_widget == Some(w.id) {
+            if w.enabled && !w.read_only && !has_focus {
+                r.request_focus();
+                ui.ctx().memory_mut(|mem| mem.request_focus(id));
+                let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+                st.store(ui.ctx(), id);
+            }
+            ui.data_mut(|d| d.insert_temp(focus_seq_id, seq));
+        } else {
+            if has_focus {
+                ui.ctx().memory_mut(|mem| mem.surrender_focus(id));
+            }
+            ui.data_mut(|d| d.insert_temp(focus_seq_id, seq));
+        }
+    } else if w.active && !has_focus && last_seq == 0 && w.enabled && !w.read_only {
+        r.request_focus();
+        ui.ctx().memory_mut(|mem| mem.request_focus(id));
+        let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+        st.store(ui.ctx(), id);
+    }
+
+    // Track observed user focus separately from the last applied request sequence.
+    let user_focus_id = egui::Id::unique(("sui-user-focus", win, w.id));
+    ui.data_mut(|d| d.insert_temp(user_focus_id, has_focus));
 }
 
 /// Draws ScriptUI widget `w` of window `win` at its bounds offset by `origin`, registering it for
@@ -149,10 +187,16 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             if !focused {
                 buf = w.text.clone();
             }
-            let te = if w.multiline { egui::TextEdit::multiline(&mut buf) } else { egui::TextEdit::singleline(&mut buf) };
+            let mut te = if w.multiline { egui::TextEdit::multiline(&mut buf) } else { egui::TextEdit::singleline(&mut buf) };
+            if !w.placeholder.is_empty() {
+                te = te.hint_text(&w.placeholder);
+            }
             let te = te.id(id).interactive(!w.read_only).font(Tokens::ui(12.0));
             let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(rect, te)).inner;
             let r = tip(r);
+
+            apply_focus(app, ui, win, w, id, &r);
+
             // Live updates already sent the text: the commit still runs onChange.
             let dirty_id = id.with("dirty");
             let dirty = ui.data(|d| d.get_temp::<bool>(dirty_id)).unwrap_or(false);
@@ -501,6 +545,61 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
+/// Finds the widget matching egui's focused ID within the widget hierarchy.
+fn find_focused_widget(w: &Widget, win: u32, fid: egui::Id) -> Option<&Widget> {
+    if egui::Id::unique(("sui", win, w.id)) == fid {
+        return Some(w);
+    }
+    for c in &w.children {
+        if let Some(found) = find_focused_widget(c, win, fid) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Dispatches keyboard events (navigation, enter, escape, tab) to the focused ScriptUI control
+/// in the window, respecting modality and text editing state.
+fn key_events(ui: &egui::Ui, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
+    if !active {
+        return;
+    }
+    let Some(fid) = ui.memory(|m| m.focused()) else {
+        return;
+    };
+    let Some(target) = find_focused_widget(root, win, fid) else {
+        return;
+    };
+    let target_widget = target.id;
+    let (events, _mods) = ui.input(|i| (i.events.clone(), i.modifiers));
+    for e in &events {
+        let egui::Event::Key { key, pressed: true, modifiers, .. } = e else { continue };
+        let (key_str, key_name) = match key {
+            egui::Key::ArrowUp => ("ArrowUp", "Up"),
+            egui::Key::ArrowDown => ("ArrowDown", "Down"),
+            egui::Key::ArrowLeft => ("ArrowLeft", "Left"),
+            egui::Key::ArrowRight => ("ArrowRight", "Right"),
+            egui::Key::Enter => ("Enter", "Enter"),
+            egui::Key::Escape => ("Escape", "Escape"),
+            egui::Key::Tab => ("Tab", "Tab"),
+            _ => continue,
+        };
+        acts.push(Act::Key(
+            win,
+            target_widget,
+            json!({
+                "type": "keydown",
+                "key": key_str,
+                "keyName": key_name,
+                "altKey": modifiers.alt,
+                "ctrlKey": modifiers.ctrl,
+                "shiftKey": modifiers.shift,
+                "metaKey": modifiers.mac_cmd,
+            }),
+        ));
+    }
+}
+
 /// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
 fn snug(r: Rect, text: &str) -> Rect {
     let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
@@ -525,6 +624,15 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
                 }
                 ("scriptui.mouse", v)
             }
+            Act::Key(w, id, mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("window".into(), json!(w));
+                    if id > 0 {
+                        o.insert("widget".into(), json!(id));
+                    }
+                }
+                ("scriptui.key", v)
+            }
         };
         match crate::menus::invoke(app, ctx, cmd, p) {
             Ok(r) => {
@@ -547,6 +655,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         return;
     }
     let t = app.tokens;
+    let services = app.session.services.clone();
     let mut acts = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
@@ -558,10 +667,12 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         });
         let _ = r;
     }
+    let mut modal_layers = Vec::new();
     for w in &windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
-        let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
+        let is_palette = w.kind == WindowKind::Palette;
+        let order = if w.modal || is_palette { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
             .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
@@ -572,16 +683,27 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
             .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel_bg))
             .show(ctx, |ui| {
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                paint_draw(ui, rect, &w.root.draw, &t, &*services);
+                key_events(ui, w.id, &w.root, w.modal || !blocked, &mut acts);
                 draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
                 mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
                 rect
             });
         if let Some(r) = resp {
             app.auto.add(&format!("scriptui.{}", w.id), r.response.rect, &w.title);
+            if is_palette {
+                ctx.move_to_top(r.response.layer_id);
+            } else if w.modal {
+                modal_layers.push(r.response.layer_id);
+            }
         }
         if !open {
             acts.push(Act::Close(w.id));
         }
+    }
+    // Modals are raised after all palettes so they always remain on top regardless of creation order.
+    for layer in modal_layers {
+        ctx.move_to_top(layer);
     }
     perform(app, ctx, acts);
 }
@@ -611,6 +733,7 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     let content = rect;
     egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
         let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
+        key_events(ui, id, &w.root, !modal, &mut acts);
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });

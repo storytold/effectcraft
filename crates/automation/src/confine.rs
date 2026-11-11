@@ -58,6 +58,7 @@ const REFUSED: &[&str] = &[
     "scriptui.click",
     "scriptui.set",
     "scriptui.mouse",
+    "scriptui.key",
     "scriptui.close",
     "file.executeFile",
     "effect.helpers.scan",
