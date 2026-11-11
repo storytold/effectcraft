@@ -439,6 +439,9 @@ fn analyze(s: &mut Session, p: &V) -> Result<V> {
     if times.len() < 2 {
         return Err(bad("track.analyze", "nothing to analyze in that direction (at the layer's end)"));
     }
+    // Only when a frame is left over: reaching the end on the cap-th frame is not truncation.
+    let truncated = times.len() >= crate::warp::MAX_ANALYSIS_FRAMES
+        && analysis_times_up_to(comp, layer, dir, now, start, end, crate::warp::MAX_ANALYSIS_FRAMES + 1).len() > crate::warp::MAX_ANALYSIS_FRAMES;
     let lt0 = layer.layer_time(times[0]);
     let points: Vec<_> = tg.track_points().map(|g| point_values(g, lt0)).collect();
     if points.is_empty() {
@@ -462,7 +465,7 @@ fn analyze(s: &mut Session, p: &V) -> Result<V> {
     Ok(json!({
         "frames": times.len() - 1,
         // Hit the frame cap: track again from the last frame to go further.
-        "truncated": times.len() >= crate::warp::MAX_ANALYSIS_FRAMES,
+        "truncated": truncated,
         "start": times[0].seconds(),
         "end": times.last().map(|t| t.seconds()),
         "running": s.is_tracking(),
@@ -473,6 +476,19 @@ fn analyze(s: &mut Session, p: &V) -> Result<V> {
 /// Comp times to analyse from the CTI (`now`) in `dir`, bounded by `start` / `end` and the
 /// layer's In/Out points; the first is the start frame.
 pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, dir: Direction, now: Tick, start: Option<Tick>, end: Option<Tick>) -> Vec<Tick> {
+    analysis_times_up_to(comp, layer, dir, now, start, end, crate::warp::MAX_ANALYSIS_FRAMES)
+}
+
+/// [`analysis_times`] with at most `cap` of them.
+fn analysis_times_up_to(
+    comp: &effectcraft_project::Comp,
+    layer: &Layer,
+    dir: Direction,
+    now: Tick,
+    start: Option<Tick>,
+    end: Option<Tick>,
+    cap: usize,
+) -> Vec<Tick> {
     let fd = comp.frame_duration();
     let lo = layer.in_point.max(Tick::ZERO);
     let hi = layer.out_point.min(comp.duration) - fd;
@@ -481,7 +497,7 @@ pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, di
         Direction::Forward | Direction::FrameForward => {
             let mut t = start.unwrap_or(now).clamp(lo, hi);
             let stop = if dir == Direction::FrameForward { t + fd } else { end.unwrap_or(hi).min(hi) };
-            while t <= stop && t <= hi && times.len() < crate::warp::MAX_ANALYSIS_FRAMES {
+            while t <= stop && t <= hi && times.len() < cap {
                 times.push(t);
                 t += fd;
             }
@@ -489,7 +505,7 @@ pub(crate) fn analysis_times(comp: &effectcraft_project::Comp, layer: &Layer, di
         Direction::Backward | Direction::FrameBackward => {
             let mut t = end.unwrap_or(now).clamp(lo, hi);
             let stop = if dir == Direction::FrameBackward { t - fd } else { start.unwrap_or(lo).max(lo) };
-            while t >= stop && t >= lo && times.len() < crate::warp::MAX_ANALYSIS_FRAMES {
+            while t >= stop && t >= lo && times.len() < cap {
                 times.push(t);
                 t -= fd;
             }
