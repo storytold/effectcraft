@@ -115,17 +115,33 @@ fn box_row(src: &[f32], dst: &mut [f32], r: usize) {
         dst.copy_from_slice(src);
         return;
     }
-    let get = |i: isize| src[i.clamp(0, n as isize - 1) as usize];
-    let norm = 1.0 / (2 * r + 1) as f32;
-    let mut acc = 0.0f64;
-    for i in -(r as isize)..=(r as isize) {
-        acc += get(i) as f64;
+    // Past the row the window only adds more copies of the edge pixels; the radius is clamped
+    // so the index arithmetic below cannot overflow (the means are unchanged in practice).
+    let r = r.min(MAX_BOX_RADIUS);
+    let (last, ri) = (n - 1, r as i64);
+    let get = |i: i64| src[i.clamp(0, last as i64) as usize];
+    let norm = 1.0 / (2.0 * r as f64 + 1.0);
+    // The first window, -r..=r: the edge pixels it repeats are counted, not visited, so the
+    // work depends on the row length and not on the radius.
+    let inside = r.min(last);
+    let mut acc = (r as f64 + 1.0) * src[0] as f64 + src[1..=inside].iter().map(|v| *v as f64).sum::<f64>();
+    // Only when the window actually repeats the last pixel: 0 * inf would be NaN otherwise.
+    if r > inside {
+        acc += (r - inside) as f64 * src[last] as f64;
     }
     for x in 0..n {
-        dst[x] = acc as f32 * norm;
-        acc += get(x as isize + r as isize + 1) as f64 - get(x as isize - r as isize) as f64;
+        dst[x] = (acc * norm) as f32;
+        let xi = x as i64;
+        acc += get(xi + ri + 1) as f64 - get(xi - ri) as f64;
     }
 }
+
+/// Largest box radius [`box_row`] uses (larger radii come from absurd blur amounts in a
+/// project, such as a Mocha shape's feather).
+const MAX_BOX_RADIUS: usize = 1 << 30;
+
+/// Largest sigma [`box_radii`] spreads into boxes (see [`MAX_BOX_RADIUS`]).
+const MAX_BOX_SIGMA: f64 = 1e8;
 
 /// Separable box mean with radii `rx`, `ry` (edges repeated).
 pub fn box_plane(p: &Plane, rx: usize, ry: usize) -> Plane {
@@ -138,9 +154,10 @@ pub fn box_plane(p: &Plane, rx: usize, ry: usize) -> Plane {
 
 /// Box radii for `n` passes approximating a Gaussian of `sigma`.
 pub fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
-    if sigma <= 0.0 {
+    if sigma.is_nan() || sigma <= 0.0 || n == 0 {
         return vec![0; n];
     }
+    let sigma = sigma.min(MAX_BOX_SIGMA);
     let w_ideal = (12.0 * sigma * sigma / n as f64 + 1.0).sqrt();
     let mut wl = w_ideal.floor() as i64;
     if wl % 2 == 0 {
@@ -840,5 +857,38 @@ mod tests {
         let p = Plane { w: 16, h: 16, data: vec![0.7; 256] };
         let o = guided_filter(&g, &p, 2, 1e-3);
         assert!(o.data.iter().all(|v| (v - 0.7).abs() < 1e-3));
+    }
+
+    /// The box mean counts repeated edge pixels instead of visiting them: the same means as a
+    /// direct sum, and a huge radius (a Mocha feather of 1e300) costs a row's worth of work.
+    #[test]
+    fn box_row_matches_a_direct_sum_and_bounds_the_radius() {
+        let src = [1.0f32, 2.0, 3.0, 5.0, 8.0];
+        for r in [0usize, 1, 2, 4, 5, 9, 40] {
+            let mut dst = [0.0f32; 5];
+            box_row(&src, &mut dst, r);
+            for (x, d) in dst.iter().enumerate() {
+                let ri = r as i64;
+                let sum: f64 = (x as i64 - ri..=x as i64 + ri).map(|i| src[i.clamp(0, 4) as usize] as f64).sum();
+                let want = (sum / (2 * r + 1) as f64) as f32;
+                assert!((d - want).abs() < 1e-5, "r={r} x={x}: {d} vs {want}");
+            }
+        }
+        // An infinite last pixel inside the window still yields a finite first mean.
+        let mut inf = [0.0f32; 3];
+        box_row(&[1.0, 2.0, f32::INFINITY], &mut inf, 1);
+        assert!((inf[0] - 4.0 / 3.0).abs() < 1e-6, "{inf:?}");
+        let mut one = [0.0f32];
+        box_row(&[0.25], &mut one, usize::MAX);
+        assert!((one[0] - 0.25).abs() < 1e-6);
+        let mut dst = [0.0f32; 5];
+        box_row(&src, &mut dst, usize::MAX);
+        assert!(dst.iter().all(|v| v.is_finite() && (1.0..=8.0).contains(v)), "{dst:?}");
+        for sigma in [1e300, f64::MAX, f64::INFINITY, f64::NAN, -1.0] {
+            assert_eq!(box_radii(sigma, 3).len(), 3);
+        }
+        let p = Plane { w: 4, h: 3, data: vec![0.5; 12] };
+        let g = gauss_plane(&p, 1e300, 1e300);
+        assert!(g.data.iter().all(|v| (v - 0.5).abs() < 1e-4), "{:?}", g.data);
     }
 }
