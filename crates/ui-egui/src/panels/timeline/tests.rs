@@ -981,3 +981,16 @@ fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
     let (ls, _) = go(Rect::from_min_max(pos2(10.0, 5.0), pos2(260.0, 119.0)));
     assert_eq!(ls, [layers[0], layers[1]]);
 }
+
+/// Shift-dragging a layer bar: its nearer edge sticks to a candidate within the tolerance, and an
+/// edge that is out of reach leaves the move alone.
+#[test]
+fn bar_snap_shift_sticks_the_nearest_edge() {
+    let cands = [0.0, 2.0, 5.0];
+    // The in edge is 0.04 s before 2.0: nudged onto it.
+    assert!((bar_snap_shift(&cands, &[1.96, 4.0], 0.1) - 0.04).abs() < 1e-9);
+    // The out edge is 0.03 s past 5.0: pulled back; it is nearer than the in edge's 0.08.
+    assert!((bar_snap_shift(&cands, &[1.92, 5.03], 0.1) + 0.03).abs() < 1e-9);
+    // Nothing in reach: no correction.
+    assert_eq!(bar_snap_shift(&cands, &[3.0, 3.5], 0.1), 0.0);
+}

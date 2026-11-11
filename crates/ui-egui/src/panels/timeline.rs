@@ -3469,20 +3469,81 @@ fn layer_quick_offset_begin(ui: &mut egui::Ui, g: &Rw, rc: &RowCtx<'_>, body: &e
     ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id)
 }
 
+/// Times a Shift-dragged layer bar snaps to (comp seconds): the in / out points and markers of
+/// the layers that aren't moving, the layer-less comp markers, the work area ends, the comp start
+/// and end, and the current time.
+fn bar_snap_candidates(comp: &Comp, moving: &[u64], now: f64) -> Vec<f64> {
+    let mut v = vec![0.0, now, comp.work_area.0.seconds(), comp.work_area.1.seconds(), comp.duration.seconds()];
+    v.extend(comp.markers.iter().map(|m| m.time.seconds()));
+    for l in comp.layers.iter().filter(|l| !moving.contains(&l.id.0)) {
+        v.push(l.in_point.seconds());
+        v.push(l.out_point.seconds());
+        v.extend(l.markers.iter().map(|m| l.comp_time(m.time).seconds()));
+    }
+    v
+}
+
+/// The correction (seconds) that puts the nearest of the `edges` on a candidate within
+/// `tolerance`, or 0 when none is close enough.
+fn bar_snap_shift(cands: &[f64], edges: &[f64], tolerance: f64) -> f64 {
+    edges.iter().map(|t| snap_time(cands, *t, tolerance) - t).filter(|d| *d != 0.0).min_by(|x, y| x.abs().total_cmp(&y.abs())).unwrap_or(0.0)
+}
+
 /// Moving and trimming a layer bar by whole frames.
 fn layer_bar_drag(g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
     let BarResps { body, lin, lout } = bars;
     let pps = g.tl.pps;
     let fd = g.tl.fd;
     let ctx = g.tl.ctx.clone();
+    let comp = g.tl.comp.clone();
+    let now = g.tl.time.seconds();
     let actions = &mut g.tl.actions;
     let selected = &g.selected;
     let ui_actions = &mut g.ui_actions;
     let layer = rc.layer;
     let drag_key = format!("bar-{}", layer.id.0);
+    let free_id = egui::Id::unique(("bar-free", layer.id.0));
     for (resp, kind) in [(&body, "move"), (&lin, "in"), (&lout, "out")] {
         if kind == "move" && quick {
             continue;
+        }
+        if kind == "move" && resp.drag_started() {
+            // Where the grabbed layers' outer edges start, and how far the pointer has gone since.
+            let moving = edited_layers(layer.id, selected);
+            let edges = comp.layers.iter().filter(|l| moving.contains(&l.id.0)).fold(None, |a: Option<(f64, f64)>, l| {
+                let (i, o) = (l.in_point.seconds(), l.out_point.seconds());
+                Some(a.map_or((i, o), |(lo, hi)| (lo.min(i), hi.max(o))))
+            });
+            if let Some((lo, hi)) = edges {
+                ctx.data_mut(|d| d.insert_temp(free_id, (lo, hi, 0.0_f64)));
+            }
+        }
+        if resp.dragged() && kind == "move" {
+            // Shift-drag: the bar sticks to the other layers' ends, the current time, markers and the
+            // work area within 8 px, like a magnet. The pointer keeps its own free position, so
+            // dragging on past the snap point lets go of it.
+            let st: Option<(f64, f64, f64)> = ctx.data(|d| d.get_temp(free_id));
+            if let Some((lo, hi, free)) = st {
+                let free = free + f64::from(resp.drag_delta().x) / pps.max(1e-6);
+                ctx.data_mut(|d| d.insert_temp(free_id, (lo, hi, free)));
+                if ctx.input(|i| i.modifiers.shift) {
+                    let moving = edited_layers(layer.id, selected);
+                    let cands = bar_snap_candidates(&comp, &moving, now);
+                    let want_lo = lo + free;
+                    let want = want_lo + bar_snap_shift(&cands, &[want_lo, hi + free], 8.0 / pps.max(1e-6));
+                    let cur_lo = comp.layers.iter().filter(|l| moving.contains(&l.id.0)).map(|l| l.in_point.seconds()).fold(f64::INFINITY, f64::min);
+                    if cur_lo.is_finite() {
+                        let frames = ((want - cur_lo) / fd).round() as i64;
+                        if frames != 0 {
+                            let params = json!({"layers": json!(moving), "delta": frames as f64 * fd, "merge": drag_key});
+                            actions.push(("layer.timing".into(), params));
+                        }
+                    }
+                    // The plain drag's pixel remainder starts over once Shift is let go.
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(("bar-acc", layer.id.0, kind)), 0.0_f32));
+                    continue;
+                }
+            }
         }
         if resp.dragged() {
             let acc_id = egui::Id::unique(("bar-acc", layer.id.0, kind));
@@ -3505,6 +3566,7 @@ fn layer_bar_drag(g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
             ctx.data_mut(|d| d.insert_temp(acc_id, acc));
         }
         if resp.drag_stopped() {
+            ctx.data_mut(|d| d.remove::<(f64, f64, f64)>(free_id));
             ctx.data_mut(|d| d.remove::<f32>(egui::Id::unique(("bar-acc", layer.id.0, kind))));
             ui_actions.push(UiAct::EndMerge);
         }
