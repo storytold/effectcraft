@@ -885,3 +885,16 @@ fn french_levels_popup_items_are_recognized() {
     }
     assert_eq!(r1.report.imported.effects, r2.report.imported.effects);
 }
+
+/// `popup_alias` must cover every item of a popup it claims to know, not only the one a first
+/// report happened to show: Channel's French "Rouge", "Vert", "Bleu" ("Alpha" is the same word in
+/// both languages) alongside the already-covered "RVB" (`effect_map.rs`, reviewed on #3432).
+#[test]
+fn french_levels_channel_aliases_cover_every_item() {
+    use effectcraft_aep::effect_map::popup_alias;
+    for (french, english) in [("rvb", "rgb"), ("rouge", "red"), ("vert", "green"), ("bleu", "blue")] {
+        assert_eq!(popup_alias(french), Some(english), "{french}");
+    }
+    // "Alpha" needs no alias: the same word in both languages.
+    assert_eq!(popup_alias("alpha"), None);
+}

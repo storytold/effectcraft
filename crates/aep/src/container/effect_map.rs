@@ -1155,8 +1155,12 @@ pub fn popup_key(item: &str) -> String {
 /// from a confirmed After Effects label, never a guess at a whole menu's translation.
 pub fn popup_alias(key: &str) -> Option<&'static str> {
     Some(match key {
-        // French: Levels' Channel popup (`ADBE Easy Levels2-0001`).
+        // French: Levels' Channel popup (`ADBE Easy Levels2-0001`). "Alpha" is the same word in
+        // both languages, so it needs no entry.
         "rvb" => "rgb",
+        "rouge" => "red",
+        "vert" => "green",
+        "bleu" => "blue",
         // French: Levels' Clip to Output Black / White popups (`-0008`, `-0009`).
         "activé" => "on",
         "désactivé" => "off",
