@@ -1939,6 +1939,7 @@ dependencies = [
  "effectcraft-path",
  "effectcraft-raster",
  "kurbo",
+ "log",
  "rayon",
  "roxmltree",
 ]
