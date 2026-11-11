@@ -225,18 +225,32 @@ pub fn parse_csp(text: &str) -> Option<(Lut, [Vec<(f32, f32)>; 3])> {
 }
 
 fn shape(curve: &[(f32, f32)], x: f32) -> f32 {
-    if curve.len() < 2 {
+    shape_by(curve.len(), |k| curve[k], x)
+}
+
+/// Piecewise-linear lookup of `x` in the monotone table `at(0..n)` of `(x, y)` points.
+fn shape_by(n: usize, at: impl Fn(usize) -> (f32, f32), x: f32) -> f32 {
+    if n < 2 {
         return x;
     }
-    let i = curve.partition_point(|p| p.0 < x).clamp(1, curve.len() - 1);
-    let (a, b) = (curve[i - 1], curve[i]);
+    // partition_point over the indices, so no per-call copy of the table is needed.
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if at(mid).0 < x {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let i = lo.clamp(1, n - 1);
+    let (a, b) = (at(i - 1), at(i));
     let t = ((x - a.0) / (b.0 - a.0).max(1e-12)).clamp(0.0, 1.0);
     a.1 + (b.1 - a.1) * t
 }
 
 fn shape_inv(curve: &[(f32, f32)], y: f32) -> f32 {
-    let flipped: Vec<(f32, f32)> = curve.iter().map(|&(a, b)| (b, a)).collect();
-    shape(&flipped, y)
+    shape_by(curve.len(), |k| (curve[k].1, curve[k].0), y)
 }
 
 /// Parse transform text by its format (detected from `ext` or the content).
@@ -319,9 +333,8 @@ impl FileXform {
                     let mut x = c;
                     if lut.n1 > 1 {
                         x = [0, 1, 2].map(|i| {
-                            let curve: Vec<(f32, f32)> =
-                                (0..lut.n1).map(|k| (lut.d1[k][i], lut.dmin[i] + (lut.dmax[i] - lut.dmin[i]) * k as f32 / (lut.n1 - 1) as f32)).collect();
-                            shape(&curve, c[i])
+                            let at = |k: usize| (lut.d1[k][i], lut.dmin[i] + (lut.dmax[i] - lut.dmin[i]) * k as f32 / (lut.n1 - 1) as f32);
+                            shape_by(lut.n1, at, c[i])
                         });
                     }
                     if let Some(s) = shaper {

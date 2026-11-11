@@ -104,6 +104,26 @@ fn identity_lattice(n: usize, f: impl Fn([f32; 3]) -> [f32; 3]) -> Vec<[f32; 3]>
     v
 }
 
+/// Inverting a long 1D table looks values up in place: the curve was rebuilt (a copy of the
+/// whole table) for every channel of every pixel.
+#[test]
+fn spi1d_inverse_does_not_copy_the_table_per_pixel() {
+    let n = 1 << 20;
+    let mut text = format!("Version 1\nFrom 0 1\nLength {n}\nComponents 1\n{{\n");
+    for k in 0..n {
+        let x = k as f32 / (n - 1) as f32;
+        text += &format!("{}\n", x * x);
+    }
+    text += "}\n";
+    let x = parse_file(&text, "spi1d").unwrap();
+    for i in 0..3000 {
+        let v = i as f32 / 3000.0;
+        let o = x.apply([v, v, v], 1, false, "");
+        let back = x.apply(o, 1, true, "");
+        assert!((back[0] - v).abs() < 1e-3 && back[0] == back[2], "{v}: {back:?}");
+    }
+}
+
 /// Sony Imageworks `.spi1d`, `.spi3d` and `.spimtx` (Blender's configs use them, #410), and
 /// malformed ones rejected without panicking.
 #[test]
