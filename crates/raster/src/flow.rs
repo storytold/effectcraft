@@ -113,13 +113,47 @@ pub fn block_flow(a: &Image, b: &Image, block: u32, radius: i32) -> Flow {
     block_flow_window(a, b, block, block, radius)
 }
 
+/// Largest coarse search radius honoured (the effects use at most 64).
+const MAX_RADIUS: i32 = 1024;
+/// Upper bound on the pixel comparisons of one motion search (about 4·10¹²: minutes of work on
+/// many cores). A finer vector grid than this allows is made coarser, by doubling the tile.
+const MAX_SEARCH_WORK: f64 = 4.4e12;
+
+/// The pixel comparisons [`block_flow_window`] makes for tiles of `bs`: every tile, at every
+/// pyramid level, tries its candidate vectors with a `window`-sized block, then refines.
+fn search_work(w: usize, h: usize, bs: usize, win: i64, radius: i64) -> f64 {
+    let tiles = (w.div_ceil(bs).max(1) as f64) * (h.div_ceil(bs).max(1) as f64);
+    let reach = (bs as i64).max(win) as usize * 2;
+    let (mut lw, mut lh, mut top) = (w, h, 0u32);
+    while top < 3 && lw / 2 >= reach && lh / 2 >= reach {
+        (lw, lh, top) = (lw / 2, lh / 2, top + 1);
+    }
+    let mut per_tile = 5.0 * (win * win) as f64;
+    for level in 0..=top {
+        let lbs = (win >> level).max(4) as f64;
+        let (seeds, r) = if level == top { (1.0, radius as f64) } else { (6.0, 1.0) };
+        per_tile += seeds * (2.0 * r + 1.0).powi(2) * lbs * lbs;
+    }
+    tiles * per_tile
+}
+
+/// The tile size to search with: `tile`, doubled while the search would exceed [`MAX_SEARCH_WORK`].
+fn planned_tile(w: usize, h: usize, tile: usize, win: i64, radius: i64) -> usize {
+    let mut bs = tile;
+    while bs < w.max(h) && search_work(w, h, bs, win, radius) > MAX_SEARCH_WORK {
+        bs *= 2;
+    }
+    bs
+}
+
 /// [`block_flow`] with separate vector spacing and matching window: one vector per
 /// `tile × tile` tile, each matched with the `window × window` block centred on its tile
 /// (Timewarp's Vector Detail and Block Size).
 pub fn block_flow_window(a: &Image, b: &Image, tile: u32, window: u32, radius: i32) -> Flow {
-    let bs = tile.max(2) as usize;
     // The matching cost per vector grows with the window's area; 512 is far above any block size the effects offer.
     let win = i64::from(window.clamp(4, 512));
+    let radius = radius.min(MAX_RADIUS);
+    let bs = planned_tile(a.width as usize, a.height as usize, tile.max(2) as usize, win, i64::from(radius));
     // Window origin relative to the tile origin.
     let wo = bs as i64 / 2 - win / 2;
     let (w, h) = (a.width as usize, a.height as usize);
@@ -267,6 +301,16 @@ pub fn interpolate(a: &Image, b: &Image, w: f32) -> Image {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_fine_vector_grid_with_a_huge_window_is_made_coarser() {
+        // 8K frame, a vector per 2 px, a 512-px window and a 1024-px search: far past the budget.
+        let t = super::planned_tile(7680, 4320, 2, 512, 1024);
+        assert!(t > 2 && super::search_work(7680, 4320, t, 512, 1024) <= super::MAX_SEARCH_WORK);
+        // Pixel Motion Blur's finest grid with its largest search keeps its grid on a 1080p frame.
+        assert_eq!(super::planned_tile(1920, 1080, 2, 16, 64), 2);
+        assert_eq!(super::planned_tile(1920, 1080, 8, 64, 4), 8);
+    }
+
     use super::*;
 
     /// A textured image shifted right by `dx` pixels.
