@@ -1387,8 +1387,10 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
     convert_one_expr(s, cid, lid, uid)
 }
 
-/// Most keyframes Convert Expression to Keyframes makes (2.4 hours at 30 fps).
-const MAX_CONVERTED_KEYS: u64 = 1 << 18;
+/// Most keyframes Convert Expression to Keyframes makes: 2^20, 4.8 hours at 60 fps (After Effects
+/// compositions run to 3 hours, 648,000 frames at 60 fps).
+const MAX_CONVERTED_KEYS: u64 = 1 << 20;
+const _: () = assert!(MAX_CONVERTED_KEYS >= 3 * 3600 * 60);
 
 /// One evaluation and one key per frame of the layer: its In and Out points and the composition's
 /// frame duration are saved data, so the step must advance and the count (a partial last frame
