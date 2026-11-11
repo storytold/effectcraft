@@ -899,19 +899,22 @@ fn a_photoshop_layer_item_shows_its_layer() {
 }
 
 /// A layer as big as the document but off its corner fits both framings: shown at its own bounds
-/// and reported. One at the corner, or bigger than the document, reads one way and is not.
+/// and reported. One at the corner, or bigger than the document, reads one way and is not. An item
+/// as big as neither is shown on the document and reported.
 #[test]
 fn a_photoshop_layer_as_big_as_the_document_off_its_corner_is_reported() {
     let framing = |bounds, size| {
         let (p, r) = run(&as_psd_layer(3, bounds, "Moved", size), true);
         let found = losses(&r.unwrap(), LossCategory::UnsupportedItems);
-        (the_footage(&p).layer.map(|l| l.layer_size), found.iter().any(|d| d.contains("'Moved/art.psd'") && d.contains("as big as the document")))
+        let said = |what: &str| found.iter().any(|d| d.contains("'Moved/art.psd'") && d.contains(what));
+        (the_footage(&p).layer.map(|l| l.layer_size), said("as big as the document"), said("neither the Photoshop layer's size"))
     };
-    assert_eq!(framing([5, 10, 1005, 1010], (1000, 1000)), (Some(true), true));
-    assert_eq!(framing([0, 0, 1000, 1000], (1000, 1000)), (Some(true), false));
-    assert_eq!(framing([9, -346, 1083, 1086], (1432, 1074)), (Some(true), false));
-    // An item of another size frames the layer on the document: no ambiguity.
-    assert_eq!(framing([5, 10, 1005, 1010], (800, 800)), (Some(false), false));
+    assert_eq!(framing([5, 10, 1005, 1010], (1000, 1000)), (Some(true), true, false));
+    assert_eq!(framing([0, 0, 1000, 1000], (1000, 1000)), (Some(true), false, false));
+    assert_eq!(framing([9, -346, 1083, 1086], (1432, 1074)), (Some(true), false, false));
+    assert_eq!(framing([749, 800, 764, 848], (1000, 1000)), (Some(false), false, false));
+    // An item as big as neither the layer nor the document: shown on the document, reported.
+    assert_eq!(framing([5, 10, 1005, 1010], (800, 800)), (Some(false), false, true));
 }
 
 /// #3087: a Photoshop layer without pixels (an adjustment layer) keeps the merged image and is

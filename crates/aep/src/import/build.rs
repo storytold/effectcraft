@@ -353,7 +353,8 @@ fn is_placed_page_path(path: &str) -> bool {
 /// The Photoshop layer a footage item shows (#3087): at its own bounds when the item is as big
 /// as they are (Retain Layer Sizes), else on the document. A layer without pixels (an adjustment
 /// layer) keeps the merged image and is reported. So is a layer as big as the document but not at
-/// its corner: the item's size fits both framings, and its bounds are used.
+/// its corner (the item's size fits both framings; its bounds are used), and an item as big as
+/// neither (the document is used).
 fn source_layer(f: &crate::Footage, name: &str, col: &mut Collector) -> Option<SourceLayer> {
     let l = f.psd_layer.as_ref()?;
     let Some(size) = l.size() else {
@@ -361,6 +362,12 @@ fn source_layer(f: &crate::Footage, name: &str, col: &mut Collector) -> Option<S
         return None;
     };
     let layer_size = size == (f.width, f.height);
+    if !layer_size && l.document.iter().all(|side| *side > 0) && !l.document_is((f.width, f.height)) {
+        col.lose(
+            LossCategory::UnsupportedItems,
+            format!("footage '{name}': {} x {} is neither the Photoshop layer's size nor the document's, shown on the document", f.width, f.height),
+        );
+    }
     let [top, left, ..] = l.bounds;
     if layer_size && (top, left) != (0, 0) && l.document_is(size) {
         col.lose(
