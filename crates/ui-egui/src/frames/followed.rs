@@ -1,6 +1,7 @@
 //! Frames made of a followed file (a LUT file an effect names, #3493) are checked against it.
 //! Renders read such a file as it is now, and nothing in a frame's key says which version it was
-//! made of: a pass on the frame pool stamps the followed files the kept frames read and drops the frames made of another version. The frame's own file list says which
+//! made of: a pass on the frame pool stamps the followed files the kept frames read (each file
+//! once) and drops the frames made of another version. The frame's own file list says which
 //! files are followed, as rendered or as read from the disk cache. A superseded version is
 //! remembered as stale, so a frame still rendering with it is not kept when it finishes
 //! ([`Cache::insert_with`]).
@@ -20,8 +21,8 @@ use super::Cache;
 #[cfg(not(target_arch = "wasm32"))]
 use super::{FrameKey, Frames};
 
-/// Superseded file versions remembered at most ([`Cache::stale`]); past it they are forgotten,
-/// and the next pass catches a late frame instead.
+/// Superseded file versions remembered at most ([`Cache::stale`]). Past it some are forgotten:
+/// a late frame made of one is kept until the next pass drops it.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_STALE: usize = 1024;
 
@@ -42,36 +43,38 @@ impl Cache {
         self.map.values().filter_map(|c| c.files.as_deref()).flat_map(|f| f.files()).filter(|f| f.followed).cloned().collect()
     }
 
-    /// Note `superseded` as stale, forget the versions that are current (`now`) again, and drop
-    /// the frames made of a stale version. Returns how many.
+    /// Forget the stale versions that are current (`now`) again, drop the frames made of a
+    /// stale or `superseded` version, and remember `superseded` as stale (at most
+    /// [`MAX_STALE`]). Returns how many frames were dropped.
     #[cfg(not(target_arch = "wasm32"))]
-    fn drop_stale(&mut self, now: &HashMap<Arc<str>, FileStamp>, superseded: Vec<ReadFile>) -> usize {
+    fn drop_stale(&mut self, now: &HashMap<Arc<str>, FileStamp>, superseded: HashSet<ReadFile>) -> usize {
         self.stale.retain(|f| now.get(&f.path) != Some(&f.stamp));
-        if self.stale.len().saturating_add(superseded.len()) > MAX_STALE {
-            self.stale.clear();
-        }
-        self.stale.extend(superseded);
-        let gone: Vec<FrameKey> = self.map.iter().filter(|(_, c)| self.is_stale(c.files.as_deref())).map(|(k, _)| *k).collect();
+        let made_of_stale = |c: &super::Cached| c.files.as_deref().is_some_and(|f| f.files().iter().any(|f| superseded.contains(f) || self.stale.contains(f)));
+        let gone: Vec<FrameKey> = self.map.iter().filter(|(_, c)| made_of_stale(c)).map(|(k, _)| *k).collect();
         for k in &gone {
             self.remove(k);
         }
         self.order.retain(|k| self.map.contains_key(k));
+        if self.stale.len().saturating_add(superseded.len()) > MAX_STALE {
+            self.stale.clear();
+        }
+        self.stale.extend(superseded.into_iter().take(MAX_STALE));
         gone.len()
     }
 }
 
 /// One pass: stamp the followed files the frames in `cache` read and drop the frames made of
 /// another version. Returns how many were dropped and whether any frame kept reads a followed
-/// file. The files are stamped without the cache's lock.
+/// file. The files are stamped without the cache's lock, each path once.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn check(cache: &Mutex<Cache>) -> (usize, bool) {
     // (the stale versions' files too: one written back as it was is current again)
     let (seen, stale) = cache.lock().map(|c| (c.followed_reads(), c.stale.iter().map(|f| f.path.clone()).collect::<Vec<_>>())).unwrap_or_default();
-    let now: HashMap<Arc<str>, FileStamp> =
-        seen.iter().map(|f| &f.path).chain(&stale).map(|p| (p.clone(), FileStamp::native(p).unwrap_or(FileStamp::Missing))).collect();
+    let paths: HashSet<Arc<str>> = seen.iter().map(|f| f.path.clone()).chain(stale).collect();
+    let now: HashMap<Arc<str>, FileStamp> = paths.into_iter().map(|p| (p.clone(), FileStamp::native(&p).unwrap_or(FileStamp::Missing))).collect();
     // (only versions a kept frame read before the stamps were taken: a frame made since may have
     // read a newer one)
-    let superseded: Vec<ReadFile> = seen.into_iter().filter(|f| now.get(&f.path) != Some(&f.stamp)).collect();
+    let superseded: HashSet<ReadFile> = seen.into_iter().filter(|f| now.get(&f.path) != Some(&f.stamp)).collect();
     let Ok(mut c) = cache.lock() else { return (0, false) };
     let dropped = c.drop_stale(&now, superseded);
     c.follows = c.map.values().any(|k| follows(k.files.as_deref()));
@@ -118,10 +121,11 @@ mod tests {
     use effectcraft_engine::project::ItemId;
     use effectcraft_engine::render::RenderOpts;
     use effectcraft_engine::render::disk_cache::DiskCache;
+    use effectcraft_engine::render::reads::{FileStamp, ReadFile, ReadFiles};
     use effectcraft_engine::time::Tick;
     use serde_json::json;
 
-    use super::check;
+    use super::{MAX_STALE, check};
     use crate::frames::{FrameImage, FrameKey, Frames, RenderSource};
 
     const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
@@ -274,5 +278,34 @@ mod tests {
             assert_eq!(check(&again.cache), (1, false), "expression: {expression}");
             assert_eq!(red(&again, &src, cid, key), 255, "expression: {expression}");
         }
+    }
+
+    /// More superseded versions than are remembered: every frame made of one is dropped, at most
+    /// [`MAX_STALE`] are remembered, and a late frame of a forgotten one is dropped by the next
+    /// check.
+    #[test]
+    fn versions_past_the_bound_are_still_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = MAX_STALE + 8;
+        // (each frame made of its own LUT file, gone since)
+        let read = |i: usize| {
+            let path = dir.path().join(format!("{i}.cube"));
+            ReadFile::followed(path.to_string_lossy().as_ref(), FileStamp::Native { len: 1, modified: Some(1) })
+        };
+        let files = |i: usize| Some(Arc::new([read(i)].into_iter().collect::<ReadFiles>()));
+        let key = |i: usize| FrameKey { revision: 0, content: 0, comp: 0, frame: i as i64, scale: 1000, view: 0, opts: 0 };
+        let img = || FrameImage::Cpu(Arc::new(egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK])));
+        let f = Frames::default();
+        for i in 0..n {
+            f.cache.lock().unwrap().insert_with(key(i), img(), files(i), None);
+        }
+        assert_eq!(check(&f.cache), (n, false));
+        let stale = f.cache.lock().unwrap().stale.clone();
+        assert!(stale.len() <= MAX_STALE, "{} remembered", stale.len());
+        let forgotten = (0..n).find(|i| !stale.contains(&read(*i))).unwrap();
+        f.cache.lock().unwrap().insert_with(key(forgotten), img(), files(forgotten), None);
+        assert!(f.get(&key(forgotten)).is_some(), "kept until the next check");
+        assert_eq!(check(&f.cache), (1, false));
+        assert!(f.get(&key(forgotten)).is_none());
     }
 }
