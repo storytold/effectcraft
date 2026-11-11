@@ -340,10 +340,13 @@ whichever compositor measured faster for it (`render::auto::AutoPick`, kept by t
 per comp, output scale and path (readback or viewer display) it averages CPU and GPU frame times
 (warm-up on both sides, the fastest warm-up frame starting the average, single stalls capped),
 picks the GPU unless the CPU is clearly faster, and re-measures the other side every 48 frames.
-Render Queue jobs don't use Auto: every frame of a job renders on the project's renderer (the
-GPU compositor with GPU Acceleration), so runs of a render don't differ by timing.
 Light comps (a few small layers, which the CPU composites only within their bounds) then stay on
-the CPU instead of paying for full-frame passes and a readback. A GPU frame walks the comp like
+the CPU instead of paying for full-frame passes and a readback. Render Queue jobs don't use
+Auto per frame: a job renders every frame on one compositor, never a mix (#3335). A GPU
+Acceleration job with an accelerator times both on its first frames
+(`export::pipeline::Cx::probe`, jobs of 12 frames or more) and keeps the faster, the CPU only
+when clearly faster; `EFFECTCRAFT_RQ_RENDERER=gpu|cpu` fixes the choice, and readback-deferred
+accelerators (the web) render on the project's renderer. A GPU frame walks the comp like
 `draw_comp`: cached layer buffers are uploaded once per buffer, then transformed with the CPU's
 sampling (nearest, bilinear, Catmull-Rom bicubic, the same minification pre-filter), motion-blur
 sub-samples are accumulated, and track mattes, Preserve Transparency, layer style passes,

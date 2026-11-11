@@ -99,7 +99,17 @@ Commands (CLI, MCP, control channel):
   one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
-  `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+  `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting: they keep one
+  frame per thread in flight, so their memory grows with the core count. Set
+  `EFFECTCRAFT_CPU_INFLIGHT` to a whole number of frames (at least 1) to cap the frames in
+  flight of every Render Queue render and export, `effectcraft-cli render` included
+  ([#1615](https://github.com/storytold/effectcraft/issues/1615)); previews don't read it. One
+  exception: while a job on GPU Acceleration times both compositors on its first frames, it
+  renders them under the cap but keeps them all (up to 12) until it has chosen. That timing
+  picks the compositor that a job of 12 frames or more renders every frame on (the render log
+  names it and why). `EFFECTCRAFT_RQ_RENDERER` set to `gpu` or `cpu` skips it and renders on
+  that compositor; `auto` (the default) measures. A queue item's later output modules reuse its
+  first one's choice, and Software Rendering projects always render on the CPU.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles
