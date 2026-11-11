@@ -603,6 +603,47 @@ fn object_matte_background_job_cancel_and_freeze() {
     assert_eq!(status(&mut s)["frozen"], true);
 }
 
+/// A queue edit preserves a frozen matte made before the footage signature gained placed_page.
+#[test]
+fn render_queue_keeps_frozen_object_matte_with_legacy_footage_key() {
+    use effectcraft_effects::{object_matte, roto::{FROZEN, FrozenCache, INPUT_KEY}};
+    use effectcraft_keyframe::Value::Str;
+    use std::sync::Arc;
+
+    hold_roto_cache_test_lock();
+    let (mut s, clip, _) = setup(|f| draw(center(f)));
+    let cid = s.active_comp_id().unwrap();
+    let r = s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "point": center(0), "before": 0, "after": 2})).unwrap();
+    let uid = r["effect"].as_u64().unwrap();
+    s.execute_checked("objectMatte.freeze", json!({"layer": clip.0, "wait": true})).unwrap();
+
+    let layer = s.project.comp(cid).unwrap().layer(clip).unwrap();
+    let legacy = crate::roto::input_key_before_placed_page(&s.project, cid, layer, uid).unwrap();
+    assert_ne!(legacy, crate::roto::input_key(&s.project, cid, layer, uid));
+    let fps = s.project.comp(cid).unwrap().frame_rate.as_f64();
+    // Recreate the two keys serialized by 0.22, leaving the real frozen alpha data alone.
+    let p = Arc::make_mut(&mut s.project);
+    let g = p.comp_mut(cid).unwrap().layer_mut(clip).unwrap().props.find_group_mut(uid).unwrap();
+    g.get_mut(INPUT_KEY).unwrap().value = Str(legacy.clone());
+    let params = crate::roto::params_static(g);
+    let Some(Str(value)) = params.get(FROZEN) else { panic!("missing frozen matte") };
+    let mut frozen: FrozenCache = serde_json::from_str(value).unwrap();
+    assert_eq!(frozen.frames.len(), 3);
+    frozen.key = object_matte::frozen_key(&params, [f64::from(W), f64::from(H)], fps, None);
+    let saved = Str(serde_json::to_string(&frozen).unwrap());
+    g.get_mut(FROZEN).unwrap().value = saved.clone();
+
+    s.execute_checked("renderQueue.add", json!({"comp": cid.0, "format": "png", "output": "matte.png"})).unwrap();
+    let params = |s: &Session| {
+        crate::roto::params_static(s.project.comp(cid).unwrap().layer(clip).unwrap().props.find_group(uid).unwrap())
+    };
+    assert_eq!(params(&s).get(INPUT_KEY), Some(&Str(legacy)));
+    assert_eq!(params(&s).get(FROZEN), Some(&saved));
+
+    s.execute_checked("layer.timing", json!({"layer": clip.0, "out": 0.5})).unwrap();
+    assert_eq!(params(&s).get(FROZEN), Some(&Str(String::new())));
+}
+
 /// Computed Object Matte segmentations go to the persistent disk cache: a second session on the
 /// same folder and project gets them back without segmenting (its frames cannot even be read
 /// here), and another prompt (other keys) finds nothing.
