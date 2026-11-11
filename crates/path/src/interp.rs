@@ -311,6 +311,9 @@ fn frame(v: &[P]) -> (P, f64) {
     (c, r)
 }
 
+/// Vertex counts above this skip the shape contexts (quadratic to build) and search the starting
+/// vertex coarsely; no mask comes near it (the Add Vertices option itself stops at 2000).
+const MAX_CONTEXT_VERTICES: usize = 4096;
 const RBINS: usize = 5;
 const ABINS: usize = 12;
 
@@ -412,10 +415,18 @@ pub fn correspond(a: &ShapePath, b: &ShapePath, o: &InterpOpts) -> (ShapePath, S
         }
         if !o.first_vertices_match {
             let n = ra.len();
-            let use_sc = o.quality > 0.0;
+            let large = n > MAX_CONTEXT_VERTICES;
+            let use_sc = o.quality > 0.0 && !large;
             let (sa, sb) = if use_sc { (Some(shape_contexts(&ra.vertices)), Some(shape_contexts(&rb.vertices))) } else { (None, None) };
             // Quality limits the offsets examined exhaustively (coarse step), then refines.
-            let step = if o.quality >= 50.0 { 1 } else { ((n as f64 / 24.0).ceil() as usize).max(1) };
+            // (A very large shape tries about 3 √n offsets, not n, each costing a pass over it.)
+            let step = if large {
+                (n as f64).sqrt().ceil() as usize
+            } else if o.quality >= 50.0 {
+                1
+            } else {
+                ((n as f64 / 24.0).ceil() as usize).max(1)
+            };
             let mut best = (f64::MAX, 0usize);
             let mut k = 0;
             while k < n {
@@ -591,5 +602,23 @@ mod tests {
         let lin = interpolate(&a, &b, 0.5, &InterpOpts { linear: true, ..Default::default() });
         let l2 = (lin.vertices[1][0] - lin.vertices[0][0]).hypot(lin.vertices[1][1] - lin.vertices[0][1]);
         assert!(l2 < 80.0);
+    }
+
+    /// A shape with tens of thousands of vertices is matched without the quadratic shape contexts
+    /// and exhaustive offset search.
+    #[test]
+    fn very_large_shapes_are_matched_in_bounded_time() {
+        let n = 30_000;
+        let circle = |rot: f64| -> ShapePath {
+            let pts: Vec<P> = (0..n)
+                .map(|i| [100.0 * (rot + i as f64 * std::f64::consts::TAU / n as f64).cos(), 100.0 * (rot + i as f64 * std::f64::consts::TAU / n as f64).sin()])
+                .collect();
+            ShapePath::polygon(&pts, true)
+        };
+        let o = InterpOpts { one_to_one: true, quality: 100.0, ..Default::default() };
+        let t = std::time::Instant::now();
+        let (a, b) = correspond(&circle(0.0), &circle(1.0), &o);
+        assert_eq!((a.len(), b.len()), (n, n));
+        assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
     }
 }

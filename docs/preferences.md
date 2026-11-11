@@ -37,6 +37,7 @@ Commands (CLI, MCP, control channel):
 - `general.showToolTips`: Show Tool Tips
 - `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
+- `general.fitNewLayersToWorkArea`: Fit New Layers to Work Area (off by default). On: new text, solid, shape, null and adjustment layers start at the work area start and end at its end, ahead of Create Layers at Composition Start Time. Footage and compositions keep their own length.
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
 - `startup.offerCrashRecovery`: Offer to Open the Latest Auto-Save After a Crash
@@ -99,10 +100,13 @@ Commands (CLI, MCP, control channel):
   one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
-  `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting: they keep one
-  frame per thread in flight, so their memory grows with the core count. Set
-  `EFFECTCRAFT_CPU_INFLIGHT` to a whole number of frames (at least 1) to cap the frames in
-  flight of every Render Queue render and export, `effectcraft-cli render` included
+  `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting. A job on GPU
+  Acceleration that renders on the CPU (it measured the CPU faster, or the GPU stopped) fits
+  its CPU frames in flight into half the memory the system has free, at the size a GPU frame
+  measured, from 1 to one per thread; the app log names the count. Other CPU renders (Software
+  Rendering projects) keep one frame per thread in flight, so their memory grows with the core
+  count. Set `EFFECTCRAFT_CPU_INFLIGHT` to a whole number of frames (at least 1) to cap the
+  frames in flight of every Render Queue render and export, `effectcraft-cli render` included
   ([#1615](https://github.com/storytold/effectcraft/issues/1615)); previews don't read it. One
   exception: while a job on GPU Acceleration times both compositors on its first frames, it
   renders them under the cap but keeps them all (up to 12) until it has chosen. That timing
