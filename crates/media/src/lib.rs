@@ -84,16 +84,7 @@ pub fn is_importable(path: &std::path::Path) -> bool {
 /// `/dev/zero` or a FIFO as footage, and reading those never ends (#2134).
 pub(crate) fn read_regular_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    // Checked before opening too: opening a FIFO with no writer blocks, so the check after the
-    // open would never run. shortcut: a FIFO swapped in between still blocks; O_NONBLOCK would close it.
-    if !std::fs::metadata(path)?.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
-    }
-    let mut file = std::fs::File::open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
-    }
+    let (mut file, meta) = effectcraft_project::open_regular_file(path)?;
     let mut bytes = Vec::new();
     // A sparse file can claim far more than memory: an error, not an abort.
     bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;

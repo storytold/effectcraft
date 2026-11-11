@@ -347,15 +347,18 @@ const MAX_TEXT_FILE_BYTES: u64 = 256 << 20;
 /// [`MAX_TEXT_FILE_BYTES`] (`/dev/zero` or a FIFO would never end).
 pub(crate) fn read_text_file(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let meta = std::fs::metadata(path)?;
-    if !meta.is_file() || meta.len() > MAX_TEXT_FILE_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{} is not a text file of at most {} MiB", path.display(), MAX_TEXT_FILE_BYTES >> 20),
-        ));
+    let too_big =
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a text file of at most {} MiB", path.display(), MAX_TEXT_FILE_BYTES >> 20));
+    let (file, meta) = effectcraft_project::open_regular_file(path)?;
+    if meta.len() > MAX_TEXT_FILE_BYTES {
+        return Err(too_big());
     }
+    // One byte past the limit: a file that grew after the metadata check is an error, not a prefix.
     let mut text = String::new();
-    std::fs::File::open(path)?.take(MAX_TEXT_FILE_BYTES).read_to_string(&mut text)?;
+    file.take(MAX_TEXT_FILE_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(too_big());
+    }
     Ok(text)
 }
 
