@@ -316,7 +316,7 @@ impl Collector {
         if let Some(loss) = self.losses.get_mut(&LossCategory::Effects) {
             // The most used effects first.
             let mut named: Vec<(String, usize)> = std::mem::take(&mut self.unmapped_effects).into_values().collect();
-            named.sort_by(|a, b| b.1.cmp(&a.1));
+            named.sort_by_key(|n| std::cmp::Reverse(n.1));
             let described = named.iter().fold(0usize, |sum, (_, n)| sum.saturating_add(*n));
             loss.unlisted = loss.unlisted.saturating_sub(described);
             let lines = named.into_iter().map(|(first, n)| match n {
