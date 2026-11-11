@@ -316,7 +316,11 @@ fn make_private(folder: &Path) -> std::io::Result<()> {
     let tmp_real = tmp.canonicalize().unwrap_or_else(|_| tmp.clone());
     let given = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
     let real = folder.canonicalize().unwrap_or_else(|_| given.clone());
-    // The shared folder itself is not ours to change: only folders inside it.
+    // The shared folder itself is not ours to change or to keep a cache in: refused.
+    if [&given, &real].iter().any(|p| **p == tmp || **p == tmp_real) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the disk cache folder is the shared temp folder"));
+    }
+    // Only folders inside it are made private.
     let inside = |p: &PathBuf, t: &PathBuf| p.starts_with(t) && p != t;
     if ![&given, &real].iter().any(|p| inside(p, &tmp) || inside(p, &tmp_real)) {
         return Ok(());
@@ -1049,6 +1053,13 @@ mod tests {
         assert!(DiskCache::open(&link, 1 << 20).is_err());
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_temp_folder_itself_is_refused_as_a_cache_folder() {
+        let tmp = std::env::temp_dir();
+        assert!(DiskCache::open(&tmp, 1 << 20).is_err());
     }
 
     #[cfg(unix)]
