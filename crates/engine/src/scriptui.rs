@@ -195,13 +195,14 @@ impl ImageRef {
     }
 }
 
-/// Most edges a ScriptUI `fillPath` is filled with (eight 256-segment ellipses).
-pub const MAX_FILL_EDGES: usize = 2048;
-/// Most horizontal bands a ScriptUI fill is cut into (vertices and edge crossings).
-pub const MAX_FILL_BANDS: usize = 8192;
-/// Most triangles a ScriptUI fill produces (edges × bands can each pass their limit and still
-/// multiply into millions); a fill past it paints nothing.
-pub const MAX_FILL_TRIANGLES: usize = 1 << 19;
+/// Most edges a ScriptUI `fillPath` is filled with (a path past it fills its first edges).
+pub const MAX_FILL_EDGES: usize = 65_536;
+/// Most horizontal bands a ScriptUI fill is cut into (vertices and edge crossings); the topmost are filled.
+pub const MAX_FILL_BANDS: usize = 262_144;
+/// Most triangles a ScriptUI fill produces.
+pub const MAX_FILL_TRIANGLES: usize = 1 << 22;
+/// Most band-by-edge steps a fill takes while cutting bands.
+pub const MAX_FILL_WORK: usize = 1 << 31;
 
 impl PathSeg {
     /// The subpaths of `path` as polylines (ellipses flattened to `n` segments), each with
@@ -256,11 +257,15 @@ impl PathSeg {
     /// self-intersecting and holed paths fill correctly (frontends' polygon fills are often
     /// convex-only). Exact trapezoid decomposition: the plane is cut into horizontal bands at
     /// every vertex and edge crossing; inside a band no edges cross, so each inside span is a
-    /// trapezoid (two triangles). A path of more than [`MAX_FILL_EDGES`] edges, or cut into more
-    /// than [`MAX_FILL_BANDS`] bands, or that would make more than [`MAX_FILL_TRIANGLES`]
-    /// triangles, fills nothing: edges are compared pairwise and every band
-    /// looks at every edge, on the UI thread, for geometry a script chooses.
+    /// trapezoid (two triangles). Edges are compared pairwise and every band looks at every edge,
+    /// on the UI thread, for geometry a script chooses, so a path past [`MAX_FILL_EDGES`] edges,
+    /// [`MAX_FILL_BANDS`] bands, [`MAX_FILL_TRIANGLES`] triangles or [`MAX_FILL_WORK`] steps is
+    /// filled only as far as the limit allows (topmost part first) and a warning is logged.
     pub fn fill_triangles(path: &[PathSeg], n: usize, even_odd: bool) -> Vec<[[f64; 2]; 3]> {
+        Self::fill_triangles_within(path, n, even_odd, [MAX_FILL_EDGES, MAX_FILL_BANDS, MAX_FILL_TRIANGLES, MAX_FILL_WORK])
+    }
+
+    fn fill_triangles_within(path: &[PathSeg], n: usize, even_odd: bool, [max_edges, max_bands, max_triangles, max_work]: [usize; 4]) -> Vec<[[f64; 2]; 3]> {
         // Non-horizontal edges, top to bottom, with their winding direction.
         let mut edges: Vec<([f64; 2], [f64; 2], i32)> = vec![];
         for (pts, _) in PathSeg::polylines(path, n) {
@@ -272,7 +277,11 @@ impl PathSeg {
                 edges.push(if a[1] < b[1] { (a, b, 1) } else { (b, a, -1) });
             }
         }
-        if edges.len() < 2 || edges.len() > MAX_FILL_EDGES {
+        if edges.len() > max_edges {
+            log::warn!("fillPath: {} edges, filling only the first {max_edges}", edges.len());
+            edges.truncate(max_edges);
+        }
+        if edges.len() < 2 {
             return vec![];
         }
         let x_at = |e: &([f64; 2], [f64; 2], i32), y: f64| e.0[0] + (e.1[0] - e.0[0]) * (y - e.0[1]) / (e.1[1] - e.0[1]);
@@ -293,9 +302,11 @@ impl PathSeg {
         }
         ys.sort_by(f64::total_cmp);
         ys.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        if ys.len() > MAX_FILL_BANDS {
-            return vec![];
+        if ys.len() > max_bands {
+            log::warn!("fillPath: {} bands, filling only the topmost {max_bands}", ys.len());
+            ys.truncate(max_bands);
         }
+        let mut work = 0usize;
         let mut out = vec![];
         let mut row: Vec<(f64, f64, f64, i32)> = vec![];
         for w in ys.windows(2) {
@@ -314,8 +325,11 @@ impl PathSeg {
                     out.push([[l.1, ya], [r.2, yb], [l.2, yb]]);
                 }
             }
-            if out.len() > MAX_FILL_TRIANGLES {
-                return vec![];
+            work = work.saturating_add(edges.len());
+            if out.len() > max_triangles || work > max_work {
+                log::warn!("fillPath: over its triangle or work budget, filled down to y = {yb}");
+                out.truncate(max_triangles);
+                break;
             }
         }
         out
@@ -947,24 +961,28 @@ mod tests {
         assert!((area(&PathSeg::fill_triangles(&open, 48, false)) - 8.0).abs() < 1e-9);
     }
 
-    /// A script's path of thousands of crossing edges fills nothing instead of tying up the UI
-    /// thread: comparing every pair of edges and every band against every edge.
+    /// A script's path past the fill budgets is filled as far as they allow, never emptied.
     #[test]
-    fn a_fill_past_its_edge_or_band_budget_is_empty() {
-        // A zigzag of MAX_FILL_EDGES + 2 edges.
-        let zig: Vec<[f64; 2]> = (0..MAX_FILL_EDGES + 2).map(|i| [i as f64, if i % 2 == 0 { 0.0 } else { 100.0 }]).collect();
-        assert!(PathSeg::fill_triangles(&poly(&zig), 48, false).is_empty());
-        // A star of crossing chords under the edge budget, whose crossings exceed the bands.
-        let n = 1001;
-        let star: Vec<[f64; 2]> = (0..n)
-            .map(|i| {
-                let a = (i * 500 % n) as f64 * std::f64::consts::TAU / n as f64;
-                [100.0 * a.cos(), 100.0 * a.sin()]
-            })
-            .collect();
-        assert!(PathSeg::fill_triangles(&poly(&star), 48, false).is_empty());
-        // Each limit holds (2,048 edges, 2,048 bands) but together they make 2 million triangles.
-        let rects: Vec<PathSeg> = (0..1024).map(|i| PathSeg::R { x: 2.0 * i as f64, y: i as f64, w: 1.0, h: 2048.0 }).collect();
-        assert!(PathSeg::fill_triangles(&rects, 48, false).is_empty());
+    fn a_fill_past_its_budgets_draws_what_fits() {
+        let area = |t: &[[[f64; 2]; 3]]| {
+            t.iter().map(|t| ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs() / 2.0).sum::<f64>()
+        };
+        let rect = |x: f64, y: f64, w: f64, h: f64| PathSeg::R { x, y, w, h };
+        let rects: Vec<PathSeg> = (0..8).map(|i| rect(2.0 * i as f64, 0.0, 1.0, 10.0)).collect();
+        let full = PathSeg::fill_triangles(&rects, 48, false);
+        assert!((area(&full) - 80.0).abs() < 1e-9);
+        // Edges over the limit: the first edges still fill (4 edges = 2 rectangles).
+        let t = PathSeg::fill_triangles_within(&rects, 48, false, [4, usize::MAX, usize::MAX, usize::MAX]);
+        assert!((area(&t) - 20.0).abs() < 1e-9, "{}", area(&t));
+        // Triangles over the limit: truncated, not empty.
+        let t = PathSeg::fill_triangles_within(&rects, 48, false, [usize::MAX, usize::MAX, 6, usize::MAX]);
+        assert_eq!(t.len(), 6);
+        // Bands over the limit: the topmost band fills.
+        let stair: Vec<PathSeg> = (0..4).map(|i| rect(0.0, i as f64, 1.0, 1.0)).collect();
+        let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(!t.is_empty() && area(&t) < 4.0);
+        // Work over the limit stops the cut.
+        let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, usize::MAX, usize::MAX, 1]);
+        assert!(!t.is_empty() && area(&t) < 4.0);
     }
 }
