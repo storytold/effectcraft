@@ -2444,6 +2444,14 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Revert Project", "חזרה לגרסה השמורה"),
+    ("Unsaved Changes", "שינויים שלא נשמרו"),
+    ("Revert “{}” to the last saved version? Changes made since then will be lost.", "להחזיר את \u{2068}“{}”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו."),
+    ("Save changes to “{}” before closing?", "לשמור את השינויים בקובץ \u{2068}“{}”\u{2069} לפני הסגירה?"),
+    ("Your changes will be lost if you don't save them.", "השינויים יאבדו אם לא יישמרו."),
+    ("  Revert  ", "  שחזור  "),
+    ("   Save   ", "   שמירה   "),
+    ("Don't Save", "לא לשמור"),
     ("A built-in preset has this name", "קיימת תבנית מובנית בשם זה"),
     ("Replaces your preset with this name", "מחליף את התבנית שלך בשם זה"),
     ("   OK   ", "   אישור   "),
@@ -10429,6 +10437,40 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unsaved changes and revert must stay clear in Hebrew without altering file names or actions.
+    #[test]
+    fn hebrew_unsaved_project_prompts_preserve_filename() {
+        set_current("he");
+        for (english, hebrew) in [
+            ("Revert Project", "חזרה לגרסה השמורה"),
+            ("Unsaved Changes", "שינויים שלא נשמרו"),
+            ("   Save   ", "   שמירה   "),
+            ("  Revert  ", "  שחזור  "),
+            ("Don't Save", "לא לשמור"),
+            ("Your changes will be lost if you don't save them.", "השינויים יאבדו אם לא יישמרו."),
+        ] {
+            assert_eq!(tr(english), hebrew, "unsaved prompt: {english}");
+        }
+        let name = "draft 01.ecproj";
+        assert_eq!(
+            tr_args("Save changes to “{}” before closing?", &[&name]),
+            "לשמור את השינויים בקובץ \u{2068}“draft 01.ecproj”\u{2069} לפני הסגירה?"
+        );
+        assert_eq!(
+            tr_args(
+                "Revert “{}” to the last saved version? Changes made since then will be lost.",
+                &[&name]
+            ),
+            "להחזיר את \u{2068}“draft 01.ecproj”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו."
+        );
+        set_current("en");
+        assert_eq!(tr("Don't Save"), "Don't Save");
+        assert_eq!(
+            tr_args("Save changes to “{}” before closing?", &[&name]),
+            "Save changes to “draft 01.ecproj” before closing?"
+        );
+    }
 
     /// Hebrew composition dialog labels must resolve without changing aspect/timecode values.
     #[test]

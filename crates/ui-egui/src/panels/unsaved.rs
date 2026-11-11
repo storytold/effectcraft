@@ -8,7 +8,7 @@
 //! `dialog.unsaved.cancel`. Enter answers Save, Cmd+Backspace (Ctrl elsewhere) Don't Save and, in
 //! the Revert prompt, Cmd+R Revert.
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use egui::{Color32, vec2};
 use serde_json::{Value, json};
 
@@ -111,12 +111,12 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let revert = is_revert(app);
     let name = project_name(app);
     let mut answer = None;
-    let title = if revert { "Revert Project" } else { "Unsaved Changes" };
+    let title = if revert { tr("Revert Project") } else { tr("Unsaved Changes") };
     super::dialogs::modal(ctx, title, vec2(460.0, 170.0), t, |ui| {
         let text = if revert {
-            format!("Revert “{name}” to the last saved version? Changes made since then will be lost.")
+            tr_args("Revert “{}” to the last saved version? Changes made since then will be lost.", &[&name])
         } else {
-            format!("Save changes to “{name}” before closing?")
+            tr_args("Save changes to “{}” before closing?", &[&name])
         };
         ui.label(egui::RichText::new(text).color(t.tab_text_active));
         if !revert {
@@ -125,7 +125,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         }
         ui.add_space(18.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (label, key) = if revert { ("  Revert  ", "dialog.unsaved.revert") } else { ("   Save   ", "dialog.unsaved.save") };
+            let (label, key) = if revert { (tr("  Revert  "), "dialog.unsaved.revert") } else { (tr("   Save   "), "dialog.unsaved.save") };
             // Revert discards work: red, like Delete.
             let r = ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(if revert { t.danger } else { t.accent }));
             app.auto.add(key, r.rect, label.trim());
