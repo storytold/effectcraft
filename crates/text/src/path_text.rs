@@ -21,12 +21,24 @@ impl PathMeasure {
         let mut done = false;
         // The tolerance grows with the path's size (0.05 for ordinary layer-sized paths): a
         // path with huge coordinates would otherwise flatten into hundreds of millions of points.
-        let bbox = kurbo::Shape::bounding_box(path);
-        let size = bbox.width().max(bbox.height());
-        if !size.is_finite() {
-            done = true;
+        // Only the first subpath is measured, so only it sets the tolerance and gets flattened.
+        let mut first = BezPath::new();
+        for el in path.iter() {
+            if matches!(el, PathEl::MoveTo(_)) && !first.elements().is_empty() {
+                break;
+            }
+            first.push(el);
+            if matches!(el, PathEl::ClosePath) {
+                break;
+            }
         }
-        kurbo::flatten(path.iter(), 0.05_f64.max(size * 1e-6), |el| {
+        // A non-finite coordinate (an infinite control point too) measures nothing.
+        if !first.is_finite() {
+            return PathMeasure::default();
+        }
+        let bbox = kurbo::Shape::bounding_box(&first);
+        let size = bbox.width().max(bbox.height());
+        kurbo::flatten(first.iter(), 0.05_f64.max(size * 1e-6), |el| {
             if done {
                 return;
             }
@@ -148,6 +160,23 @@ mod tests {
         q.move_to((0.0, 0.0));
         q.curve_to((f64::INFINITY, 0.0), (1.0, 1.0), (2.0, 0.0));
         assert_eq!(PathMeasure::new(&q, false).pts.len(), 0);
+        // Even with finite endpoints, an infinite control point is refused before flattening.
+        let mut r = BezPath::new();
+        r.move_to((0.0, 0.0));
+        r.curve_to((f64::INFINITY, f64::INFINITY), (f64::INFINITY, 0.0), (1.0, 0.0));
+        assert_eq!(PathMeasure::new(&r, false).pts.len(), 0);
+    }
+
+    #[test]
+    fn a_distant_second_subpath_does_not_coarsen_the_first() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
+        p.move_to((1e9, 1e9));
+        p.line_to((1e9 + 1.0, 1e9));
+        let m = PathMeasure::new(&p, false);
+        assert!(m.pts.len() > 10, "{}", m.pts.len());
+        assert!(m.length() > 150.0, "{}", m.length());
     }
 
     #[test]

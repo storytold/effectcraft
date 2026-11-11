@@ -107,22 +107,29 @@ fn extra_dirs(var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     var.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
 }
 
-fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>) {
-    // Each real folder is listed once: symlinks fanning out to the same folders would otherwise
-    // be walked again along every path to them (exponentially many within the depth bound).
-    if !seen.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())) {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            // Bounded, so a symlink loop ends.
-            if depth < 8 {
-                walk(&p, depth + 1, out, seen);
+/// Font files under `roots`, each real folder listed once. Breadth first from every root, so a
+/// folder reached by several routes is listed at its shallowest and keeps the most depth below it.
+fn walk(roots: &[PathBuf], out: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, u32)> = roots.iter().map(|r| (r.clone(), 0)).collect();
+    while let Some((dir, depth)) = queue.pop_front() {
+        // Symlinks fanning out to the same folders would otherwise be walked again along every
+        // path to them (exponentially many within the depth bound).
+        if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // Bounded, so a symlink loop ends.
+                if depth < 8 {
+                    queue.push_back((p, depth + 1));
+                }
+            } else if p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+            {
+                out.push(p);
             }
-        } else if p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
-            out.push(p);
         }
     }
 }
@@ -130,10 +137,7 @@ fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>, seen: &mut st
 impl FontSource for DirectorySource {
     fn faces(&self) -> Vec<FaceInfo> {
         let mut files = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for d in &self.dirs {
-            walk(d, 0, &mut files, &mut seen);
-        }
+        walk(&self.dirs, &mut files);
         files.sort();
         files.dedup();
         let mut out = Vec::new();
@@ -216,15 +220,23 @@ pub struct VMetrics {
 /// A font file's bytes, shared by every face of it that is loaded (the faces of a collection
 /// each held their own copy of the whole file).
 fn file_bytes(p: &std::path::Path) -> Option<Arc<Vec<u8>>> {
-    static FILES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Vec<u8>>>>> =
-        std::sync::LazyLock::new(Default::default);
-    let mut files = FILES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(b) = files.get(p).and_then(std::sync::Weak::upgrade) {
+    type Key = (PathBuf, u64, Option<std::time::SystemTime>);
+    static FILES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Key, std::sync::Weak<Vec<u8>>>>> = std::sync::LazyLock::new(Default::default);
+    let lock = || FILES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Keyed by size and modification time too: a file replaced at the same path is read afresh.
+    let m = std::fs::metadata(p).ok()?;
+    let key: Key = (p.to_path_buf(), m.len(), m.modified().ok());
+    if let Some(b) = lock().get(&key).and_then(std::sync::Weak::upgrade) {
         return Some(b);
     }
+    // Read outside the lock: a slow file must not hold up every other face's first load.
     let b = Arc::new(std::fs::read(p).ok()?);
+    let mut files = lock();
+    if let Some(b) = files.get(&key).and_then(std::sync::Weak::upgrade) {
+        return Some(b);
+    }
     files.retain(|_, w| w.strong_count() > 0);
-    files.insert(p.to_path_buf(), Arc::downgrade(&b));
+    files.insert(key, Arc::downgrade(&b));
     Some(b)
 }
 
