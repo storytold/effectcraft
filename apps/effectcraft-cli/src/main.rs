@@ -126,6 +126,8 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            a relative --out is relative to the working directory
                                            --progress: progress lines on stderr when it is not a terminal
                                            (progress <frames done> <total> <seconds elapsed> <seconds left|->)
+                                           render/render-frame warn on stderr about failing expressions
+                                           (render: at the first rendered frame); the exit code stays 0
   render/render-frame --template T.ectemplate [--values V.json]   render one template instance
   bench [--comp C] [--time S] [--scale K] [--n N] [--play N] [--gpu [--adv3d]]   per-layer/effect render timings;
                                            --play N renders N consecutive frames with/without the layer cache;
@@ -138,7 +140,8 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            lighting change, occlusion, leaving and re-entering the frame
   script FILE.jsx [F.ecproj] | --eval CODE run JavaScript with the After Effects-style object model
                                            (app.project, comps, layers, properties…); prints writeLn
-                                           output and the result; errors exit 1 with file:line:col
+                                           output and the result; errors exit 1 with file:line:col;
+                                           failing expressions it leaves in the project are warned about
   replay SCRIPT.jsonl [--keep-going]       replay a repro script headless (journal.export, crash repros):
                                            per-step ok/error and the first failure; exits 1 when a step
                                            fails, an expectation is not met or a command panics
@@ -513,17 +516,30 @@ fn tool(b: &mut Backend, name: &str, a: Value) -> Result<Value, Failure> {
     }
 }
 
-/// The error bar's lines from an `expr.errors` result: a render that evaluates a failing
+/// The error bar's lines from an `expr.errors` reply: a render that evaluates a failing
 /// expression still succeeds, so `render`, `render-frame` and `script` name what failed (#3444).
-fn expression_errors(r: &Value) -> Vec<String> {
-    r["text"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+/// A check that could not run says so instead of passing as clean.
+fn expression_errors(r: Result<Value, impl std::fmt::Display>) -> Vec<String> {
+    match r {
+        Ok(r) => r["text"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
+        Err(e) => {
+            note!("warning: could not check expressions: {e}");
+            vec![]
+        }
+    }
 }
 
-/// Every comp's failing expressions at its current time, the check `script` runs after it saves.
+/// Every comp's failing expressions at its current time, the check `script` runs once it succeeds
+/// (whether it saved through `--save`/`--save-as`, `app.project.save()`, or not at all). It covers
+/// the whole project the script leaves behind, including expressions that were already broken: one
+/// expression evaluation per comp, no rendering.
 fn project_expression_errors(b: &mut Backend) -> Vec<String> {
-    let Ok(p) = tool(b, "get_project", json!({})) else { return vec![] };
+    let p = match tool(b, "get_project", json!({})) {
+        Ok(p) => p,
+        Err(Failure::Usage(e) | Failure::Error(e)) => return expression_errors(Err::<Value, _>(e)),
+    };
     let comps: Vec<u64> = p["items"].as_array().into_iter().flatten().filter(|i| i["type"] == "Composition").filter_map(|i| i["id"].as_u64()).collect();
-    comps.into_iter().flat_map(|id| b.exec("expr.errors", json!({"comp": id})).map(|r| expression_errors(&r)).unwrap_or_default()).collect()
+    comps.into_iter().flat_map(|id| expression_errors(b.exec("expr.errors", json!({"comp": id})))).collect()
 }
 
 /// One stderr line per failing expression; the exit code stays 0 so existing callers keep working.
@@ -545,8 +561,7 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
     let mut b = backend(args, false)?;
     let r = b.exec("script.run", json!({"code": code, "name": name}))?;
     let saved = maybe_save(&mut b, args)?;
-    let errors = if saved.is_some() && r["error"].is_null() { project_expression_errors(&mut b) } else { vec![] };
-    warn_expression_errors(&errors);
+    let errors = if r["error"].is_null() { project_expression_errors(&mut b) } else { vec![] };
     if json_out {
         let mut o = r.clone();
         if let Some(p) = &saved {
@@ -567,6 +582,8 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
             note!("saved {p}");
         }
     }
+    // After the script's own output, so a warning doesn't land above it.
+    warn_expression_errors(&errors);
     if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
         let pos = match (e["line"].as_u64(), e["column"].as_u64()) {
             (Some(l), Some(c)) => format!(":{l}:{c}"),
@@ -838,8 +855,8 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             let f = b.render_to_file(comp.as_ref(), time, max_side, args.flag("--transparent"), &out)?;
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let mut info = json!({"path": out, "comp": f.comp, "time": f.time, "width": f.width, "height": f.height, "ms": (ms * 10.0).round() / 10.0});
-            // An app without the query (an older bridge) just has nothing to report.
-            let errors = b.exec("expr.errors", json!({"comp": f.comp, "time": f.time})).map(|r| expression_errors(&r)).unwrap_or_default();
+            // An app without the query (an older bridge) gets a "could not check" warning, not a clean result.
+            let errors = expression_errors(b.exec("expr.errors", json!({"comp": f.comp, "time": f.time})));
             warn_expression_errors(&errors);
             if !errors.is_empty() {
                 info["expressionErrors"] = json!(errors);
@@ -1059,10 +1076,21 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
             other => failed.push(format!("{name}: {}", other.label())),
         }
     }
+    // Checked after the loop, which borrows the queue. A comp queued twice from the same start is
+    // checked and warned about once; each of its results still lists the errors.
+    let mut checked: std::collections::HashMap<(u64, u64), Vec<String>> = std::collections::HashMap::new();
     for (i, comp, time) in checks {
-        let errors = s.execute("expr.errors", json!({"comp": comp, "time": time})).map(|r| expression_errors(&r)).unwrap_or_default();
-        warn_expression_errors(&errors);
-        if let Some(r) = results.get_mut(i).filter(|_| !errors.is_empty()) {
+        let errors = checked
+            .entry((comp, time.to_bits()))
+            .or_insert_with(|| {
+                let errors = expression_errors(s.execute("expr.errors", json!({"comp": comp, "time": time})));
+                warn_expression_errors(&errors);
+                errors
+            })
+            .clone();
+        if !errors.is_empty()
+            && let Some(r) = results.get_mut(i)
+        {
             r["expressionErrors"] = json!(errors);
         }
     }
