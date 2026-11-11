@@ -222,7 +222,8 @@ pub fn input_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
     input_key_with_signature(crate::warp::signature(p, comp, layer), layer, uid)
 }
 
-pub(crate) fn input_key_before_placed_page(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> Option<String> {
+/// Recognize the input key serialized before 0.23 without re-keying its frozen matte.
+fn input_key_before_placed_page(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> Option<String> {
     let signature = crate::warp::signature_before_placed_page(p, comp, layer)?;
     Some(input_key_with_signature(signature, layer, uid))
 }
