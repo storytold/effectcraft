@@ -829,6 +829,7 @@ fn propagate_survives_empty_frames() {
         assert_eq!((next.w, next.h), (w as usize, h as usize));
         assert!(next.matte.is_empty());
     }
+}
 
 #[test]
 fn saved_spans_stay_around_the_base_frame_within_the_limit() {
