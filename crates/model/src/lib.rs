@@ -74,16 +74,20 @@ impl Texture {
     pub fn solid(c: [f32; 4]) -> Texture {
         Texture { width: 1, height: 1, data: vec![c], wrap: [Wrap::Repeat; 2] }
     }
-    /// Decode a PNG or JPEG of at most [`MAX_TEXTURE_PIXELS`].
+    /// The pixel size an image claims, read from its header without decoding it.
+    pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+        let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| perr(format!("image: {e}")))?;
+        reader.into_dimensions().map_err(|e| perr(format!("image: {e}")))
+    }
+    /// Decode a PNG or JPEG.
     pub fn decode(bytes: &[u8]) -> Result<Texture> {
         Self::decode_within(bytes, &mut MAX_IMPORT_TEXTURE_PIXELS.clone())
     }
-    /// [`decode`](Self::decode) taking the pixels from `pixels_left`, an import's remaining
+    /// [`decode`](Self::decode), of at most [`MAX_TEXTURE_PIXELS`], taking the pixels from `pixels_left`, an import's remaining
     /// texture budget, before the image is decoded.
     pub fn decode_within(bytes: &[u8], pixels_left: &mut u64) -> Result<Texture> {
         let err = |e: image::ImageError| perr(format!("image: {e}"));
-        let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| perr(format!("image: {e}")))?;
-        let (w, h) = reader.into_dimensions().map_err(err)?;
+        let (w, h) = Self::dimensions(bytes)?;
         let pixels = w as u64 * h as u64;
         if pixels > MAX_TEXTURE_PIXELS {
             return Err(ModelError::Unsupported(format!("a {w}×{h} texture (at most {MAX_TEXTURE_PIXELS} pixels)")));
