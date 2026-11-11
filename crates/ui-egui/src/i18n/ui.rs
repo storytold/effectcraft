@@ -2444,6 +2444,37 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("A built-in preset has this name", "קיימת תבנית מובנית בשם זה"),
+    ("Replaces your preset with this name", "מחליף את התבנית שלך בשם זה"),
+    ("   OK   ", "   אישור   "),
+    ("Preset:", "תבנית:"),
+    ("Save Preset…", "שמירת תבנית…"),
+    ("Delete Preset", "מחיקת תבנית"),
+    ("Width:", "רוחב:"),
+    ("Lock Aspect Ratio to {}", "נעילת יחס ממדים ל־{}"),
+    ("Height:", "גובה:"),
+    ("Pixel Aspect Ratio:", "יחס ממדי פיקסל:"),
+    ("Frame Aspect Ratio: {}", "יחס ממדי מסגרת: {}"),
+    ("Frame Rate:", "קצב מסגרות:"),
+    ("frames per second", "מסגרות לשנייה"),
+    ("Resolution:", "רזולוציה:"),
+    ("Custom", "מותאם אישית"),
+    ("{} x {}, {}MB per 8bpc frame", "{} × {}, ‏{} MB למסגרת ב־8 סיביות לערוץ"),
+    ("Start Timecode:", "קוד זמן התחלה:"),
+    ("Duration:", "משך:"),
+    ("Background Color:", "צבע רקע:"),
+    ("Anchor:", "נקודת עיגון:"),
+    ("Preserve frame rate when nested or in render queue", "שמירת קצב המסגרות בקינון או בתור הרינדור"),
+    ("Preserve resolution when nested", "שמירת הרזולוציה בקינון"),
+    ("Motion Blur", "טשטוש תנועה"),
+    ("Shutter Angle:", "זווית תריס:"),
+    ("Shutter Phase:", "מופע התריס:"),
+    ("Samples Per Frame:", "דגימות למסגרת:"),
+    ("Adaptive Sample Limit:", "מגבלת דגימות מותאמת:"),
+    ("Renderer:", "מנוע רינדור:"),
+    ("Advanced 3D", "תלת־ממד מתקדם"),
+    ("Classic 3D", "תלת־ממד קלאסי"),
+    ("Composition Name:", "שם הקומפוזיציה:"),
     ("Default Output:", "פלט ברירת מחדל:"),
     ("System Default", "ברירת המחדל של המערכת"),
     ("No device list from this host; the system default output is used.", "לא התקבלה רשימת התקני פלט ממחשב זה; ייעשה שימוש בפלט ברירת המחדל של המערכת."),
@@ -10398,6 +10429,40 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hebrew composition dialog labels must resolve without changing aspect/timecode values.
+    #[test]
+    fn hebrew_native_composition_settings_are_localized() {
+        set_current("he");
+        for (english, hebrew) in [
+            ("Composition Name:", "שם הקומפוזיציה:"),
+            ("Preset:", "תבנית:"),
+            ("Save Preset…", "שמירת תבנית…"),
+            ("Width:", "רוחב:"),
+            ("Height:", "גובה:"),
+            ("Pixel Aspect Ratio:", "יחס ממדי פיקסל:"),
+            ("Frame Rate:", "קצב מסגרות:"),
+            ("Resolution:", "רזולוציה:"),
+            ("Start Timecode:", "קוד זמן התחלה:"),
+            ("Duration:", "משך:"),
+            ("Background Color:", "צבע רקע:"),
+            ("Preserve resolution when nested", "שמירת הרזולוציה בקינון"),
+            ("Renderer:", "מנוע רינדור:"),
+            ("Advanced 3D", "תלת־ממד מתקדם"),
+            ("Classic 3D", "תלת־ממד קלאסי"),
+        ] {
+            assert_eq!(tr(english), hebrew, "composition label: {english}");
+        }
+        let ratio = "16:9";
+        assert_eq!(tr_args("Frame Aspect Ratio: {}", &[&ratio]), "יחס ממדי מסגרת: 16:9");
+        let width = 1920;
+        let height = 1080;
+        let megabytes = "8.3";
+        assert_eq!(tr_args("{} x {}, {}MB per 8bpc frame", &[&width, &height, &megabytes]), "1920 × 1080, ‏8.3 MB למסגרת ב־8 סיביות לערוץ");
+        set_current("en");
+        assert_eq!(tr("Composition Name:"), "Composition Name:");
+        assert_eq!(tr("Width:"), "Width:");
+    }
 
     /// Hebrew preferences and crash recovery must be understandable without changing settings IDs.
     #[test]
