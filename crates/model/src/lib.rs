@@ -68,6 +68,11 @@ impl Texture {
     pub fn solid(c: [f32; 4]) -> Texture {
         Texture { width: 1, height: 1, data: vec![c], wrap: [Wrap::Repeat; 2] }
     }
+    /// The pixel size an image claims, read from its header without decoding it.
+    pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+        let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| perr(format!("image: {e}")))?;
+        reader.into_dimensions().map_err(|e| perr(format!("image: {e}")))
+    }
     /// Decode a PNG or JPEG.
     pub fn decode(bytes: &[u8]) -> Result<Texture> {
         let img = image::load_from_memory(bytes).map_err(|e| perr(format!("image: {e}")))?.to_rgba32f();
