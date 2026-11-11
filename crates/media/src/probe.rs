@@ -9,12 +9,12 @@ use image::metadata::Orientation;
 
 use crate::{MediaError, Result, ext_of, rate_from_fc};
 
-/// Most pixels a still may decode to: 2 GiB as the renderer's float RGBA (16384 × 8192, beyond
-/// any camera's still). A browser tab's wasm32 heap can't hold one allocation that large (and
-/// the decoded input beside it): 512 MiB there, and on 32-bit targets, where one allocation may
-/// not pass `isize::MAX` (2 GiB).
+/// Most pixels a still may decode to: 4 GiB as the renderer's float RGBA (2^28, 16384 × 16384;
+/// 150-megapixel medium-format frames, stitched panoramas and large scans decode). A browser tab's
+/// wasm32 heap can't hold one allocation that large (and the decoded input beside it): 512 MiB
+/// there, and on 32-bit targets, where one allocation may not pass `isize::MAX` (2 GiB).
 #[cfg(not(any(target_arch = "wasm32", target_pointer_width = "32")))]
-pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 27;
+pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 28;
 #[cfg(any(target_arch = "wasm32", target_pointer_width = "32"))]
 pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 25;
 
@@ -486,5 +486,22 @@ mod tests {
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX, u32::MAX - 1, 1, 0].into_iter()), None);
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX; 300].into_iter()), None);
         assert_eq!(video_rate(b"not a movie"), None);
+    }
+
+    /// A 150-megapixel still (a medium-format frame) is not refused for its size: only its (absent)
+    /// pixel data fails, not the dimension check. A still past the limit is.
+    #[cfg(not(any(target_arch = "wasm32", target_pointer_width = "32")))]
+    #[test]
+    fn stills_up_to_the_limit_pass_the_size_check() {
+        let bmp = |w: u32, h: u32| {
+            let mut b = vec![b'B', b'M', 0, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0];
+            b.extend_from_slice(&w.to_le_bytes());
+            b.extend_from_slice(&h.to_le_bytes());
+            b.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            b
+        };
+        let limit = |e: image::ImageError| matches!(e, image::ImageError::Limits(_));
+        assert!(!load_oriented(&bmp(14_000, 10_800), None).err().is_some_and(limit), "150 MP passes the check");
+        assert!(load_oriented(&bmp(20_000, 20_000), None).err().is_some_and(limit), "400 MP is refused");
     }
 }
