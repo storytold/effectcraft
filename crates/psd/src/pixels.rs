@@ -115,25 +115,6 @@ impl Psd {
         Ok(plane)
     }
 
-    /// Whether the channel at `offset` can hold `w`×`h` samples: a known compression, and for raw
-    /// data the samples, for RLE the row sizes, within its length. Checked before the result of a
-    /// decode is allocated.
-    fn check_channel(&self, offset: usize, len: usize, w: usize, h: usize) -> Result<()> {
-        let end = offset.checked_add(len).filter(|&e| e <= self.data.len()).ok_or(Error::Truncated)?;
-        let mut r = Reader::at(self.data.get(..end).ok_or(Error::Truncated)?, offset);
-        let comp = r.u16()?;
-        let need = match comp {
-            0 => self.row_bytes(w).checked_mul(h),
-            1 => h.checked_mul(if self.psb { 4 } else { 2 }),
-            2 | 3 => Some(0),
-            c => return Err(Error::Unsupported(format!("compression {c}"))),
-        };
-        if need.is_none_or(|need| need > r.remaining()) {
-            return Err(Error::Truncated);
-        }
-        Ok(())
-    }
-
     /// One channel as `w * h` floats (0..1), charged to `budget` (the caller releases it).
     fn channel_floats(&self, offset: usize, len: usize, w: usize, h: usize, budget: &mut Budget) -> Result<Vec<f32>> {
         let raw = self.channel_bytes(offset, len, w, h, budget)?;
@@ -287,20 +268,10 @@ impl Psd {
         let black_bytes = if self.mode == ColorMode::Cmyk && want > 3 { 4 * n as u64 } else { 0 };
         let transient = if matches!(comp, 2 | 3) { (size as u64).saturating_mul(want as u64) } else { size as u64 };
         budget.check((16 * n as u64).saturating_add(black_bytes).saturating_add(transient))?;
-        // The channel data is checked (compression, row sizes, raw length) before the result is
-        // allocated, so a truncated file fails without first filling a document-sized buffer.
-        let mut stream = self.open_planes(comp, &mut r, nch, want, (w, h), &mut budget)?;
-        if comp == 0 && size.checked_mul(want).is_none_or(|need| need > r.remaining()) {
-            return Err(Error::Truncated);
-        }
-        if let PlaneStream::Zip(v) = &stream
-            && size.checked_mul(want).is_none_or(|need| v.len() < need)
-        {
-            return Err(Error::Truncated);
-        }
         // Opaque black until a channel says otherwise.
         let mut data = budget.filled(n, [0.0f32, 0.0, 0.0, 1.0])?;
         let mut black = if self.mode == ColorMode::Cmyk && want > 3 { Some(budget.filled(n, 0.0f32)?) } else { None };
+        let mut stream = self.open_planes(comp, &mut r, nch, want, (w, h), &mut budget)?;
         for c in 0..want {
             let raw = self.decode_plane(comp, &mut stream, &mut r, c, (w, h), &mut budget)?;
             self.store_merged_channel(c, &raw, &mut data, &mut black);
@@ -356,21 +327,6 @@ impl Psd {
             }
         }
         budget.check((16 * n as u64).saturating_add(pixels_peak.max(mask_peak)))?;
-        if l.has_pixels() && sw > 0 && sh > 0 {
-            let cc = self.mode.color_channels();
-            for c in l.channels.iter().filter(|c| c.id == -1 || (c.id >= 0 && (c.id as usize) < cc)) {
-                self.check_channel(c.offset, c.len, sw, sh)?;
-            }
-        }
-        // The layer mask's channel too: it is decoded after the result is allocated.
-        if let Some(m) = l.mask.filter(|m| !m.disabled)
-            && let Some(c) = l.channels.iter().find(|c| c.id == -2)
-        {
-            let (mw, mh) = (m.rect.width() as usize, m.rect.height() as usize);
-            if mw > 0 && mh > 0 {
-                self.check_channel(c.offset, c.len, mw, mh)?;
-            }
-        }
         let mut out = budget.filled(n, [0.0f32; 4])?;
         if sw > 0 && sh > 0 {
             // The source rows / columns that land inside the output (64-bit: file bounds can span
