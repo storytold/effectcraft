@@ -273,6 +273,10 @@ fn copy_weight(nodes: &[Node]) -> usize {
                 if let effectcraft_svg::Geom::Path(p) = &sh.geom {
                     weight = weight.saturating_add(p.elements().len());
                 }
+                // A stroke's dash array is copied with it.
+                if let Some((dash, _)) = sh.stroke.as_ref().and_then(|s| s.dash.as_ref()) {
+                    weight = weight.saturating_add(dash.len());
+                }
                 // A gradient paint is copied with its stops.
                 for paint in [sh.fill.as_ref(), sh.stroke.as_ref().map(|s| &s.paint)].into_iter().flatten() {
                     if let Paint::Gradient(g) = paint {
@@ -1308,6 +1312,20 @@ mod weight_tests {
         };
         assert_eq!(copy_weight(&[shape(Some(Paint::Color([0.0; 3])))]), 1);
         assert_eq!(copy_weight(&[shape(Some(gradient(500)))]), 501);
+        // A stroke's dash array counts too.
+        let mut stroked = shape(None);
+        if let Node::Shape(sh) = &mut stroked {
+            sh.stroke = Some(effectcraft_svg::Stroke {
+                paint: Paint::Color([0.0; 3]),
+                opacity: 1.0,
+                width: 1.0,
+                cap: Cap::Butt,
+                join: Join::Miter,
+                miter: 4.0,
+                dash: Some((vec![1.0; 256], 0.0)),
+            });
+        }
+        assert_eq!(copy_weight(&[stroked]), 257);
         // A mask's content is counted with the group that holds it.
         let mut inner = Group::new("mask");
         inner.children.push(shape(None));
