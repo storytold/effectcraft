@@ -10534,7 +10534,6 @@ mod tests {
         assert_eq!(tr_args("{} days ago", &[&2]), "2 days ago");
     }
 
-
     /// The Native AEP loss-warning must translate the title and risky continue actions.
     /// Command IDs and format brand names remain unchanged.
     #[test]
