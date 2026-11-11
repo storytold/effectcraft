@@ -106,6 +106,42 @@ fn expansion_grows_the_outline() {
     assert!((am - pi * 225.0).abs() < 60.0, "{am}");
 }
 
+/// An imported Expansion far past the property's range is clamped instead of padding the grid
+/// by that many pixels (a 1e12 expansion would ask for terabytes).
+#[test]
+fn hostile_expansion_is_clamped() {
+    let (w, h) = (40, 40);
+    let alpha = disc_alpha(w, h, [20.0, 20.0], 10.0);
+    let max = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], EXPANSION_RANGE.1)).abs();
+    // A non-finite Expansion is taken as zero (the unexpanded outline), not clamped to the maximum.
+    let zero = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], 0.0)).abs();
+    for e in [1e12, f64::MAX, f64::INFINITY, f64::NAN] {
+        let a = signed_area(&outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], e)).abs();
+        let want = if e.is_finite() { max } else { zero };
+        assert!((a - want).abs() < 1.0, "{e}: {a} vs {want}");
+    }
+    assert!(outline(&alpha, w, h, 1e9, [0.0; 2], [20.0, 20.0], 100.0).is_empty());
+    let _ = outline(&alpha, w, h, 1.0, [0.0; 2], [20.0, 20.0], -1e12);
+}
+
+/// A high-scale layer with a large Expansion is traced at a coarser resolution, not skipped, and a
+/// tiny buffer with a huge padded grid stays within the grid budget.
+#[test]
+fn high_scale_expansion_is_traced_coarser_instead_of_skipped() {
+    let (w, h) = (40, 40);
+    let alpha = disc_alpha(w, h, [20.0, 20.0], 10.0);
+    // Scale 32, Expansion 130: 4160 px of padding, past MAX_PAD, so it is shrunk by 2.
+    let scale = 32.0;
+    let o = outline(&alpha, w, h, scale, [0.0; 2], [20.0, 20.0], 130.0);
+    let area = signed_area(&o).abs();
+    // The disc has radius 10 / 32 layer px; expanded by 130.
+    let r = 10.0 / scale + 130.0;
+    assert!((area - std::f64::consts::PI * r * r).abs() < 0.03 * std::f64::consts::PI * r * r, "{area}");
+    // One pixel at scale 20.48 and Expansion 1e12 (clamped): its 8197 px square grid is over budget.
+    let o = outline(&[1.0], 1, 1, 20.48, [0.0; 2], [0.5, 0.5], 1e12);
+    assert!(o.len() >= 3);
+}
+
 fn rect_mesh(w: f64, h: f64, tris: f64) -> Mesh {
     triangulate(&[[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], &MeshOpts { triangles: tris, density: 50.0, expansion: 0.0 })
 }
