@@ -440,6 +440,12 @@ fn remove_scale(b: &Homography, c: [f64; 2]) -> Homography {
     Homography::scale_about(1.0 / s, p0).then_after(b)
 }
 
+/// Widest window: 3 sigma of the largest Smoothness (1000%) with Smooth More at its maximum, at 240 fps.
+const MAX_SMOOTH_RADIUS: usize = 8640;
+/// Most window taps (frames x radius) one smoothing pass does; past it the window narrows so planning
+/// stays bounded (an hour at 60 fps with the widest setting is about 4.7e8).
+const MAX_SMOOTH_WORK: usize = 1 << 30;
+
 /// Corrective transforms (source → stabilized, before framing) for every frame.
 pub fn corrections(a: &WarpAnalysis, s: &StabSettings) -> Vec<Homography> {
     let n = a.frames.len();
@@ -470,7 +476,8 @@ pub fn corrections(a: &WarpAnalysis, s: &StabSettings) -> Vec<Homography> {
         }
         StabResult::SmoothMotion => {
             let sigma = s.sigma();
-            let rad = ((3.0 * sigma).ceil() as usize).min(n.saturating_sub(1));
+            // 3 sigma covers every supported setting; the work cap only bites on extreme frame counts.
+            let rad = (((3.0 * sigma).ceil() as usize).min(MAX_SMOOTH_RADIUS)).min(n.saturating_sub(1)).min(MAX_SMOOTH_WORK / n);
             for t in 0..n {
                 if sigma < 0.3 || rad == 0 {
                     out.push(Homography::IDENTITY);
@@ -715,6 +722,47 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_stored_fps_does_not_widen_the_smoothing_window_past_the_cap() {
+        let (a, _) = shaky(9500);
+        let s = StabSettings { fps: 1e9, preserve_scale: false, ..Default::default() };
+        // Window 8640 each side: one frame is smoothed over at most 17281 frames, not all 9500.
+        let c = corrections(&a, &s);
+        assert_eq!(c.len(), 9500);
+        assert!(c.iter().all(|h| h.0.iter().flatten().all(|v| v.is_finite())));
+        // A jump at frame 9400 is outside frame 0's window (frames 0..=8640): its correction is
+        // unchanged. Smoothing over the whole clip would move it.
+        let (mut jumped, _) = shaky(9500);
+        let f = &mut jumped.frames[9400];
+        f.t[0] += 80.0;
+        f.s[2] += 80.0;
+        f.h[2] += 80.0;
+        let c2 = corrections(&jumped, &s);
+        for (x, y) in c[0].0.iter().flatten().zip(c2[0].0.iter().flatten()) {
+            assert!((x - y).abs() < 1e-9, "{x} vs {y}");
+        }
+        assert!(
+            c[9499].0.iter().flatten().zip(c2[9499].0.iter().flatten()).any(|(x, y)| (x - y).abs() > 1e-6),
+            "the jump does move frames whose window holds it"
+        );
+    }
+
+    #[test]
+    fn the_widest_supported_smoothness_keeps_its_full_window() {
+        // 1000% Smoothness, Smooth More at its maximum, 60 fps: sigma 720 frames, radius 2160.
+        let s = StabSettings { smoothness: 1000.0, crop_less_smooth_more: 100.0, fps: 60.0, preserve_scale: false, ..Default::default() };
+        let (a, _) = shaky(3000);
+        let c = corrections(&a, &s);
+        let (mut jumped, _) = shaky(3000);
+        let f = &mut jumped.frames[2000];
+        f.t[0] += 80.0;
+        f.s[2] += 80.0;
+        f.h[2] += 80.0;
+        let c2 = corrections(&jumped, &s);
+        // Frame 0 sees a jump 2000 frames away (the old 1024-frame cap could not).
+        assert!(c[0].0.iter().flatten().zip(c2[0].0.iter().flatten()).any(|(x, y)| (x - y).abs() > 1e-9));
+    }
+
+    #[test]
     fn smoothing_removes_jitter_and_no_motion_locks() {
         let (a, path) = shaky(90);
         // A scene point at (320, 180) on frame 0 appears at (320, 180) - path[k] on frame k.
@@ -885,6 +933,32 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// `cargo test --release -p effectcraft-track subspace_plan_bench -- --ignored --nocapture`
+    /// (`RAYON_NUM_THREADS=1` for one thread): `plan()` of a 300-frame synthetic parallax shot.
+    #[test]
+    #[ignore]
+    fn subspace_plan_bench() {
+        let n = 300;
+        let scene = Scene::new(n);
+        let mut an = Analyzer::new(scene.size, AnalyzeOpts::default());
+        for t in 0..n {
+            let img = scene.frame(t);
+            an.push(&Frame { img: &img, offset: [0.0; 2] });
+        }
+        let a = an.finish(0.0, 1.0 / 24.0);
+        for ripple in [Ripple::Automatic, Ripple::Enhanced] {
+            let s = StabSettings { method: Method::SubspaceWarp, ripple, framing: Framing::StabilizeOnly, fps: 24.0, ..Default::default() };
+            let mut times = vec![];
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                std::hint::black_box(plan(&a, &s));
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!("plan {ripple:?}, {} tracks, {} threads: median {:.1} ms", a.tracks.len(), rayon::current_num_threads(), times[2]);
+        }
     }
 
     #[test]

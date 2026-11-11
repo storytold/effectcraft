@@ -231,6 +231,7 @@ fn position_now(s: &Session, layer: u64) -> [f64; 2] {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let v = ctx.value(l, l.props.prop("transform/position").unwrap()).components();
     [v[0], v[1]]

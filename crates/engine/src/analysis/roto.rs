@@ -219,7 +219,16 @@ fn fnv(s: &str) -> u64 {
 /// What the effect's input frames are made of: the layer's source and timing, its masks and the
 /// effects above the Roto Brush.
 pub fn input_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
-    let mut s = crate::warp::signature(p, comp, layer);
+    input_key_with_signature(crate::warp::signature(p, comp, layer), layer, uid)
+}
+
+/// Recognize the input key serialized before 0.23 without re-keying its frozen matte.
+fn input_key_before_placed_page(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> Option<String> {
+    let signature = crate::warp::signature_before_placed_page(p, comp, layer)?;
+    Some(input_key_with_signature(signature, layer, uid))
+}
+
+fn input_key_with_signature(mut s: String, layer: &Layer, uid: Uid) -> String {
     if let Some(m) = layer.masks() {
         s.push_str(&format!("{m:?}"));
     }
@@ -247,7 +256,9 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
             for g in fxg.groups().filter(|g| is_roto(g) || is_object_matte(g)) {
                 let key = input_key(after, *cid, l, g.uid);
                 let old = before.comp(*cid).and_then(|bc| bc.layer(l.id)).and_then(|ol| ol.props.find_group(g.uid));
-                if str_of(g, INPUT_KEY) != key {
+                let saved_key = str_of(g, INPUT_KEY);
+                // Keep a matching old key: the frozen cache itself also hashes that key.
+                if saved_key != key && input_key_before_placed_page(after, *cid, l, g.uid).as_deref() != Some(saved_key.as_str()) {
                     set.push((*cid, l.id, g.uid, key));
                     todo.push((*cid, l.id, g.uid));
                 } else if old.is_none_or(|o| guard_of(o) != guard_of(g)) {
@@ -489,6 +500,8 @@ async fn run_work(w: Work, shared: &RotoShared) {
         // With the classic engine, Propagate leaves no saved tracking behind.
         *lock(&shared.saved) = Some(String::new());
     }
+    // Freezing again keeps the frames frozen already (resolved once: it reads the whole frozen cache).
+    let kept = if w.task == RotoTask::Freeze && !w.object_matte { fx::applying_frozen(&w.params, w.size, w.fps) } else { None };
     for (k, f) in w.frames.iter().enumerate() {
         if cancel() {
             let mut s = lock(&shared.state);
@@ -524,7 +537,7 @@ async fn run_work(w: Work, shared: &RotoShared) {
                 }
             }
             (RotoTask::Propagate, false) => chain.ensure(*f, &mut get, &cancel).is_some(),
-            (RotoTask::Freeze, false) => match fx::frame_matte(&w.params, w.size, w.fps, *f, &mut get, &cancel) {
+            (RotoTask::Freeze, false) => match fx::frame_matte(&w.params, w.size, w.fps, *f, kept.as_deref(), &mut get, &cancel) {
                 Some((a, b)) => {
                     if let Some(img) = src.get(*f) {
                         frozen.size = [img.width as usize, img.height as usize];
@@ -852,6 +865,7 @@ impl Session {
     /// instances in the background.
     pub fn poll_roto(&mut self, auto: bool) -> bool {
         self.poll_models();
+        self.poll_library();
         let changed = self.poll_roto_job();
         // Edited instances stay pending while the model they will segment with is still loading.
         let loading = self.roto_model_loading();

@@ -261,15 +261,73 @@ pub fn is_vector(f: &effectcraft_project::Footage) -> bool {
     effectcraft_render::is_vector_footage(f) || f.path.to_ascii_lowercase().ends_with(".svg")
 }
 
+/// `doc` (the document of footage `f`) in the footage's layer pixels, as the renderer draws it
+/// ([`effectcraft_render::vector_fit`]): a placed page of an After Effects project is scaled to
+/// fill the size stored for it; other footage is unchanged.
+pub fn fitted_to_footage(mut doc: Doc, f: &effectcraft_project::Footage) -> Doc {
+    let (_, [sx, sy]) = effectcraft_render::vector_fit(f, [doc.width, doc.height], doc.pixel_size(), 1.0);
+    if f.placed_page {
+        doc.root.transform = Affine::scale_non_uniform(sx, sy) * doc.root.transform;
+        (doc.width, doc.height) = (doc.width * sx, doc.height * sy);
+    }
+    doc
+}
+
+/// Create Shapes from Vector Layer on a placed page of an After Effects project: a hidden shape
+/// layer filling the frame the footage is drawn in (its `width` × `height` raster, in the layer
+/// pixels of [`fitted_to_footage`]'s document), to be the Alpha track matte of every layer made
+/// from the page, so bleed, art past the artboard and the page's background stay hidden as on
+/// the footage (#3099). `None` for other footage, whose shapes are converted whole as before.
+///
+/// A track matte is drawn at the composition's resolution, so its edge is the footage's raster
+/// edge on shape and image layers alike; a mask on an image layer would be drawn at the image's
+/// own resolution and blur its edge when the image is scaled up.
+pub fn frame_matte(proj: &mut Project, comp: &Comp, src: &Layer, f: &effectcraft_project::Footage) -> Option<Layer> {
+    if !f.placed_page || f.width == 0 || f.height == 0 {
+        return None;
+    }
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{0}" height="{1}"><rect width="{0}" height="{1}" fill="#ffffff"/></svg>"##,
+        f.width, f.height
+    );
+    let doc = effectcraft_svg::parse(svg.as_bytes()).ok()?;
+    let mut l = build::layer(proj, comp, &format!("{} Frame", src.name), LayerSource::Shape, (0, 0), None);
+    add_doc_shapes(proj, &mut l, &doc);
+    copy_transform(proj, src, &mut l);
+    like_source(&mut l, src);
+    // The layers it mattes carry the source's opacity already.
+    if let Some(o) = l.props.prop_mut("transform/opacity") {
+        o.value = Value::Scalar(100.0);
+        o.keys.clear();
+        o.expr = None;
+    }
+    l.name = comp.unique_layer_name(&format!("{} Frame", src.name));
+    l.switches.video = false;
+    Some(l)
+}
+
+/// The vector document of footage `f` (its file read as `bytes`; `None` for other formats): its
+/// page, framed as [`effectcraft_project::Footage::placed_page`] says, restricted to its layer.
+pub fn footage_doc(f: &effectcraft_project::Footage, bytes: &[u8]) -> Option<Result<Doc, String>> {
+    let framing = if f.placed_page { effectcraft_pdf::Framing::Placed } else { effectcraft_pdf::Framing::Viewer };
+    vector_doc(&f.path, bytes, f.layer.as_ref(), f.page, framing)
+}
+
 /// The vector document of an SVG / PDF / AI / EPS file (`None` for other formats): page
-/// `page` of a PDF, restricted to one layer when `layer` names it.
-pub fn vector_doc(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::SourceLayer>, page: u32) -> Option<Result<Doc, String>> {
+/// `page` of a PDF framed as `framing` says, restricted to one layer when `layer` names it.
+pub fn vector_doc(
+    path: &str,
+    bytes: &[u8],
+    layer: Option<&effectcraft_project::SourceLayer>,
+    page: u32,
+    framing: effectcraft_pdf::Framing,
+) -> Option<Result<Doc, String>> {
     if path.to_ascii_lowercase().ends_with(".svg") || effectcraft_svg::looks_like_svg(bytes) {
         return Some(effectcraft_svg::parse(bytes).map_err(|e| format!("{path}: {e}")));
     }
     effectcraft_pdf::sniff(bytes)?;
     Some(
-        effectcraft_pdf::parse_page(bytes, page as usize)
+        effectcraft_pdf::parse_page_framed(bytes, page as usize, framing)
             .map(|d| match layer {
                 Some(l) => effectcraft_pdf::layer_doc_with_sizes(&d, l.index as usize, l.layer_size).0,
                 None => d,
@@ -419,35 +477,51 @@ pub fn split_at_images(doc: &Doc) -> Vec<Doc> {
             })
             .sum()
     }
-    /// Keep the shapes between images `seg − 1` and `seg`; `seen` counts images passed.
-    fn prune(g: &effectcraft_svg::Group, seg: usize, seen: &mut usize) -> effectcraft_svg::Group {
-        let mut out = g.clone();
-        out.children = vec![];
+    /// `g` without its children, holding `children` instead (nothing below `g` is copied).
+    fn shell(g: &effectcraft_svg::Group, children: Vec<Node>) -> effectcraft_svg::Group {
+        effectcraft_svg::Group {
+            name: g.name.clone(),
+            transform: g.transform,
+            opacity: g.opacity,
+            children,
+            clip: g.clip.clone(),
+            blend: g.blend,
+            mask: g.mask.clone(),
+            isolated: g.isolated,
+            knockout: g.knockout,
+        }
+    }
+    /// One traversal for every segment: the pieces of `g` as (segment, group), by ascending
+    /// segment; `seen` counts images passed. Each shape is copied once, into its own segment.
+    fn split(g: &effectcraft_svg::Group, seen: &mut usize) -> Vec<(usize, effectcraft_svg::Group)> {
+        let mut by: Vec<(usize, Vec<Node>)> = vec![];
+        let mut put = |seg: usize, node: Node| match by.last_mut() {
+            Some(last) if last.0 == seg => last.1.push(node),
+            _ => by.push((seg, vec![node])),
+        };
         for c in &g.children {
             match c {
                 Node::Image(_) => *seen += 1,
-                Node::Shape(_) => {
-                    if *seen == seg {
-                        out.children.push(c.clone());
-                    }
-                }
+                Node::Shape(_) => put(*seen, c.clone()),
                 Node::Group(s) => {
-                    let p = prune(s, seg, seen);
-                    if !p.children.is_empty() {
-                        out.children.push(Node::Group(p));
+                    for (seg, part) in split(s, seen) {
+                        put(seg, Node::Group(part));
                     }
                 }
             }
         }
-        out
+        by.into_iter().map(|(seg, children)| (seg, shell(g, children))).collect()
     }
     let n = count(&doc.root);
-    (0..=n)
-        .map(|seg| {
-            let mut d = doc.clone();
-            d.root = prune(&doc.root, seg, &mut 0);
-            d
-        })
+    let mut roots: Vec<Option<effectcraft_svg::Group>> = vec![None; n + 1];
+    for (seg, part) in split(&doc.root, &mut 0) {
+        if let Some(slot) = roots.get_mut(seg) {
+            *slot = Some(part);
+        }
+    }
+    roots
+        .into_iter()
+        .map(|root| Doc { width: doc.width, height: doc.height, root: root.unwrap_or_else(|| shell(&doc.root, vec![])), skipped: doc.skipped.clone() })
         .collect()
 }
 
@@ -596,4 +670,74 @@ pub fn masks_layer(proj: &mut Project, comp: &Comp, name: &str, outlines: Vec<Sh
         }
     }
     l
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_svg::{Geom, Group, Image, Shape};
+
+    fn shape(name: &str) -> Node {
+        let geom = Geom::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, rx: 0.0, ry: 0.0 };
+        Node::Shape(Shape {
+            name: name.into(),
+            geom,
+            transform: Affine::IDENTITY,
+            fill: None,
+            fill_opacity: 1.0,
+            fill_rule: effectcraft_svg::FillRule::NonZero,
+            stroke: None,
+            opacity: 1.0,
+        })
+    }
+    fn image() -> Node {
+        Node::Image(Image { name: "i".into(), transform: Affine::IDENTITY, width: 1, height: 1, rgba: std::sync::Arc::new(vec![0; 4]), opacity: 1.0 })
+    }
+    fn group(name: &str, children: Vec<Node>) -> Node {
+        let mut g = Group::new(name);
+        g.children = children;
+        Node::Group(g)
+    }
+    fn names(g: &Group, out: &mut Vec<String>) {
+        for c in &g.children {
+            match c {
+                Node::Shape(s) => out.push(s.name.clone()),
+                Node::Group(s) => {
+                    out.push(format!("<{}", s.name));
+                    names(s, out);
+                    out.push(format!("{}>", s.name));
+                }
+                Node::Image(_) => out.push("IMG".into()),
+            }
+        }
+    }
+
+    /// Segment `k` keeps the shapes between image `k - 1` and `k`, with the groups that hold them.
+    #[test]
+    fn split_keeps_each_segments_shapes_and_their_groups() {
+        let mut root = Group::new("root");
+        root.children = vec![
+            shape("a"),
+            image(),
+            group("g1", vec![shape("b"), image(), shape("c"), group("g2", vec![shape("d"), image(), shape("e")])]),
+            image(),
+            group("empty", vec![image()]),
+            shape("f"),
+        ];
+        let doc = Doc { width: 10.0, height: 10.0, root, skipped: vec![] };
+        let segs = split_at_images(&doc);
+        assert_eq!(segs.len(), 6);
+        let got: Vec<Vec<String>> = segs
+            .iter()
+            .map(|d| {
+                let mut v = vec![];
+                names(&d.root, &mut v);
+                v
+            })
+            .collect();
+        let want: Vec<Vec<&str>> =
+            vec![vec!["a"], vec!["<g1", "b", "g1>"], vec!["<g1", "c", "<g2", "d", "g2>", "g1>"], vec!["<g1", "<g2", "e", "g2>", "g1>"], vec![], vec!["f"]];
+        assert_eq!(got, want);
+        assert!(segs.iter().all(|d| d.root.name == "root" && d.width == 10.0));
+    }
 }

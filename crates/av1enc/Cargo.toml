@@ -12,4 +12,5 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
+tempfile = { workspace = true }
 filmcraft-av1 = { workspace = true }

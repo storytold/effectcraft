@@ -6,7 +6,7 @@
 //! | ProRes | QuickTime MOV | FilmCraft ProRes 422 Proxy/LT/422/HQ, 10-bit; 4444/4444 XQ 4:4:4 | 4444 (16-bit alpha coding) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | Uncompressed | QuickTime MOV (`raw `) | 8-bit RGB (depth 24, rows padded to even bytes) or ARGB (depth 32) | RGB + Alpha (straight or premultiplied) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | PNG / JPEG / TIFF sequence | one file per frame | 8-bit | PNG, TIFF | — |
-//! | OpenEXR sequence | one file per frame | 32-bit float, linear light, premultiplied | yes | — |
+//! | OpenEXR sequence | one file per frame, scan lines | 32-bit float (default) or half float, linear light, premultiplied; compression None, RLE, ZIPS, ZIP (default), PIZ, PXR24, B44, B44A, DWAA, DWAB | yes | — |
 //! | Targa sequence | one file per frame | uncompressed 8-bit: 24-bit RGB, 32-bit RGB + Alpha (8 alpha bits), 8-bit grey for Alpha; top-left origin | yes (straight or premultiplied) | — |
 //! | Animated GIF | GIF89a | 256-colour palette per frame (NeuQuant) | 1-bit | — |
 //! | WebM | WebM (Matroska) | VP9 profile 0 (`effectcraft-vp9enc`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`effectcraft-av1enc`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
@@ -34,6 +34,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod encode;
+pub mod exr_out;
 mod hevc_av1;
 mod out;
 mod pipeline;
@@ -52,6 +53,7 @@ pub use effectcraft_project::render_queue;
 pub use effectcraft_project::render_queue::StorageQuota;
 pub use out::Sink;
 pub(crate) use pipeline::Cx;
+pub use pipeline::{CACHE_BUDGET, GPU_INFLIGHT_MAX, RENDERER_ENV, auto_gpu_frames, pick_renderer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
@@ -106,6 +108,45 @@ pub struct JobOptions<'a> {
     pub storage: Option<&'a dyn StorageQuota>,
     /// Overflow folders, in order.
     pub overflow: Vec<String>,
+    /// Layer caches shared by the consecutive jobs of a Render Queue run (#3335): the job
+    /// renders through them instead of fresh ones, and leaves the accelerator's pooled working
+    /// textures for the next job (whoever holds the caches calls
+    /// [`effectcraft_render::Accelerator::render_end`] after the last one). `None`: the job
+    /// starts cold and trims the pool when it ends, as a one-off export does.
+    pub caches: Option<JobCaches<'a>>,
+    /// The compositor of the job's frames (`Backend::Gpu` or `Backend::Cpu`; `Auto` counts as unset), shared by the output modules of
+    /// one queue item: when it holds a choice the job renders on it; otherwise the job stores
+    /// the compositor it chose there, so the item's other output modules encode the same
+    /// frames. `None`: the job decides alone.
+    pub renderer: Option<&'a std::sync::Mutex<Option<effectcraft_render::Backend>>>,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
+    /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+    pub gpu_frames: Option<usize>,
+    /// Reads the bytes of memory the system can hand out now (`None`: unknown), for Auto's CPU
+    /// frames in flight (#1615): read at most once per job, when a job renders on the CPU after
+    /// a GPU frame measured a frame's working memory. `None`: CPU frames are capped only by
+    /// `EFFECTCRAFT_CPU_INFLIGHT`.
+    pub free_memory: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
+}
+
+/// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,
+/// because a buffer an effect made on the GPU is not the CPU's, and neither may stand in for
+/// the other.
+#[derive(Clone, Copy)]
+pub struct JobCaches<'a> {
+    pub gpu: &'a effectcraft_render::LayerCache,
+    pub cpu: &'a effectcraft_render::LayerCache,
+}
+
+/// The compositor a job's frames render on: the GPU's (GPU Acceleration, with an
+/// accelerator) or the CPU's frame-parallel one (Software Rendering). The whole job renders
+/// on one of them, never a mix: the two differ slightly. A GPU project with an accelerator
+/// measures both on its first frames and renders the job on the faster (#3335); the choice is
+/// in the render log. `EFFECTCRAFT_RQ_RENDERER=gpu|cpu|auto` overrides the measurement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JobRenderer {
+    Gpu,
+    Cpu,
 }
 
 /// Progress after a batch of frames.
@@ -175,7 +216,10 @@ pub fn export(job: &Job, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<
 pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
     let t0 = Instant::now();
     let cx = Cx::new(job);
+    // A job of a Render Queue run leaves the pooled working textures warm for the next one.
+    let render = RenderEnd(job.accel.filter(|_| job.options.caches.is_none()));
     let mut r = export_with(&cx, progress, t0).await;
+    drop(render);
     if matches!(r, Err(ExportError::Cancelled)) {
         cx.remove_cancelled_outputs()?;
         return r;
@@ -186,6 +230,18 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
         rep.overflow = cx.overflowed.lock().unwrap_or_else(|e| e.into_inner()).clone();
     }
     r
+}
+
+/// Calls [`effectcraft_render::Accelerator::render_end`] when dropped: after the export, and
+/// also when it panics or its future is dropped (a browser worker aborting it).
+struct RenderEnd<'a>(Option<&'a dyn effectcraft_render::Accelerator>);
+
+impl Drop for RenderEnd<'_> {
+    fn drop(&mut self) {
+        if let Some(a) = self.0 {
+            a.render_end();
+        }
+    }
 }
 
 async fn export_with(cx: &Cx<'_>, progress: &mut dyn FnMut(&Progress) -> bool, t0: Instant) -> Result<Report> {
@@ -297,37 +353,44 @@ struct StillOutput {
 
 fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &Image, comp: &Comp, output: StillOutput) -> Result<()> {
     let StillOutput { format: fmt, channels, size: (w, h), quality } = output;
-    use image::{ExtendedColorType, ImageEncoder, ImageFormat};
+    use image::{ExtendedColorType, ImageEncoder};
     match fmt {
         OutputFormat::ExrSequence => {
             // Linear light, premultiplied (the EXR convention); RGB keeps alpha = 1 over the background.
             // Colour is floored at 0 but not capped at 1: a 32 bpc frame's over-range values survive (#339).
-            let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            // The frame was rendered without the HDR step (`RenderOpts::skip_hdr_step`) and is
+            // decoded with the output space's curve, in the output space's primaries.
+            let pipe = effectcraft_render::color::Pipe::of(&cx.project.settings);
+            let dec = pipe.output_linear();
+            let lin3 = |c: [f32; 3]| dec.apply(c.map(|v| v.max(0.0)));
             let mut data = Vec::with_capacity((w * h * 4) as usize);
             for y in 0..h {
                 for x in 0..w {
                     let p = if x < img.width && y < img.height { img.data[img.idx(x, y)] } else { [0.0; 4] };
                     let (c, a) = match channels {
-                        Channels::Alpha => {
-                            let a = p[3].clamp(0.0, 1.0);
-                            ([lin(a); 3], 1.0)
-                        }
+                        // Alpha is coverage, not encoded colour: written as it is.
+                        Channels::Alpha => ([p[3].clamp(0.0, 1.0); 3], 1.0),
                         Channels::Rgba => {
                             let a = p[3].clamp(0.0, 1.0);
-                            let s = |c: f32| if a > 0.0 { lin((c / a).max(0.0)) * a } else { 0.0 };
-                            ([s(p[0]), s(p[1]), s(p[2])], a)
+                            let c = if a > 0.0 { lin3([p[0] / a, p[1] / a, p[2] / a]).map(|v| v * a) } else { [0.0; 3] };
+                            (c, a)
                         }
                         Channels::Rgb => {
+                            // The background is added to the output-encoded frame as it is, as every other output
+                            // does (`Image::to_rgba8_over`), then decoded with the frame: same colour as a PNG.
                             let k = 1.0 - p[3].clamp(0.0, 1.0);
-                            let c = |i: usize| lin((p[i] + comp.background[i] * k).max(0.0));
-                            ([c(0), c(1), c(2)], 1.0)
+                            (lin3([0, 1, 2].map(|i| p[i] + comp.background[i] * k)), 1.0)
                         }
                     };
                     data.extend_from_slice(&[c[0], c[1], c[2], a]);
                 }
             }
-            let buf = image::Rgba32FImage::from_raw(w, h, data).ok_or_else(|| ExportError::Encode("exr buffer".into()))?;
-            image::DynamicImage::ImageRgba32F(buf).write_to(file, ImageFormat::OpenExr).map_err(|e| ExportError::Encode(e.to_string()))
+            // Scan lines with the module's compression and sample type (`exr_out`), naming the primaries and
+            // white the values are in (the output space's), for Nuke, AE and Blender.
+            let om = cx.output;
+            let chroma = Some(pipe.output_linear_space().exr_chromaticities());
+            exr_out::write_rgba(file, &data, (w as usize, h as usize), (om.exr_compression, om.exr_bit_depth), chroma)
+                .map_err(|e| ExportError::Encode(e.to_string()))
         }
         OutputFormat::JpegSequence => {
             let px = cx.pixels(img, comp, if channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb }, w, h);

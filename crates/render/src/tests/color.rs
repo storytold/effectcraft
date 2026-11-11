@@ -339,3 +339,49 @@ fn float_footage_is_encoded_once_with_the_working_gamma() {
         assert_eq!(render(2.4, Some(ColorSpace::Srgb), linear_light), srgb);
     }
 }
+
+/// `RenderOpts::skip_hdr_step` (float outputs) skips Project Settings ▸ HDR: its top-level frame
+/// is the Clip frame in every mode, while other renders keep compand / tone mapping.
+#[test]
+fn skip_hdr_step_frames_are_the_clip_frames() {
+    use effectcraft_project::HdrMode;
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc16, BitDepth::Bpc32] {
+        let (mut p, cid, _) = setup(depth);
+        p.settings.working_space = Some(ColorSpace::Srgb);
+        p.settings.linearize = true;
+        add_solid(&mut p, cid, [4.0, 2.0, 0.5], BlendMode::Normal, 100.0);
+        let frame = |p: &Project, skip_hdr_step: bool| {
+            Renderer::new(p, &crate::NoFootage, RenderOpts { skip_hdr_step, ..Default::default() }).comp_frame(cid, Tick::ZERO)
+        };
+        let clip = frame(&p, false);
+        assert_eq!(clip.data, frame(&p, true).data, "{depth:?} Clip");
+        for mode in [HdrMode::Compand, HdrMode::ToneMap] {
+            p.settings.hdr = mode;
+            assert_eq!(frame(&p, true).data, clip.data, "{depth:?} {mode:?}");
+            assert_ne!(frame(&p, false).data, clip.data, "{depth:?} {mode:?} keeps the HDR step");
+        }
+    }
+}
+
+/// `Pipe::output_linear` decodes with the output space's curve (the Working Gamma's when
+/// unmanaged) and undoes `Pipe::output` exactly where the primaries match.
+#[test]
+fn output_linear_decodes_with_the_output_curve() {
+    use effectcraft_color::Conversion;
+    use effectcraft_project::ProjectSettings;
+    let pipe = |ws: Option<ColorSpace>, out: Option<ColorSpace>, gamma: f64| {
+        crate::color::Pipe::of(&ProjectSettings { working_space: ws, output_space: out, working_gamma: gamma, ..Default::default() })
+    };
+    assert_eq!(pipe(None, None, 2.2).output_linear(), Conversion::linearize(ColorSpace::Srgb));
+    assert_eq!(pipe(None, Some(ColorSpace::DisplayP3), 2.4).output_linear(), Conversion::linearize(ColorSpace::Rec709), "unmanaged: the Working Gamma");
+    assert_eq!(pipe(Some(ColorSpace::Srgb), None, 2.4).output_linear(), Conversion::linearize(ColorSpace::Srgb));
+    assert_eq!(pipe(Some(ColorSpace::Srgb), Some(ColorSpace::Rec709), 2.2).output_linear(), Conversion::linearize(ColorSpace::Rec709));
+    // Linear light in, linear light out: 4.0 stays 4.0 through output + output_linear.
+    let p = pipe(Some(ColorSpace::Rec709), Some(ColorSpace::Srgb), 2.2);
+    let p = crate::color::Pipe { linear: true, ..p };
+    let enc = p.output().unwrap().apply([4.0, 1.0, 0.25]);
+    let lin = p.output_linear().apply(enc);
+    for (got, want) in lin.into_iter().zip([4.0, 1.0, 0.25]) {
+        assert!((got - want).abs() <= 1e-5 * want, "{lin:?}");
+    }
+}
