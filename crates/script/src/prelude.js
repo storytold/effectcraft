@@ -867,6 +867,12 @@ Property.prototype.property = function () { return null; };
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
     }
+    // A string parameter (a LUT or look file, a text field) takes the text, or a File's path (#3395).
+    // A hidden one (Mesh Warp's mesh) stays refused by the key setters too, as by setValue.
+    if (info.type === "string") {
+      if (info.hidden) throw __err("\"" + info.name + "\" can not be set");
+      return __str(v);
+    }
     if (info.type === "enum") return __num(v) - 1;
     if (info.type === "bool") return typeof v === "boolean" ? v : __num(v) !== 0;
     if (info.type === "color") {

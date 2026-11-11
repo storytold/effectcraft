@@ -1949,3 +1949,32 @@ fn setting_comp_width_and_height_leaves_the_layers_where_they_are() {
     let (_, c) = comp_named(&s, "w");
     assert_eq!(layer(c, "s").props.prop("transform/position").unwrap().value, KV::Vec3([100.0, 100.0, 0.0]));
 }
+
+/// #3395: setValue on a string effect parameter stores the text, or a File's path, as `prop.set`
+/// does. Before, every string fell through to the number check ("value must be a number").
+/// Hidden string parameters (Mesh Warp's Distortion Mesh) stay refused, keys included.
+#[test]
+fn set_value_stores_a_string_parameter() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Str", 64, 36, 1, 1, 24);
+        var l = c.layers.addSolid([1, 0, 0], "s", 64, 36, 1);
+        var fx = l.property("ADBE Effect Parade");
+        var lut = fx.addProperty("Apply Color LUT").property("LUT");
+        lut.setValue("/luts/look.cube");
+        var fromString = lut.value;
+        lut.setValue(new File("/luts/other.cube"));
+        var mesh = fx.addProperty("Mesh Warp").property("Distortion Mesh");
+        function attempt(f) { try { f(); return "no error"; } catch (e) { return e.message; } }
+        var hidden = attempt(function () { mesh.setValue("x"); });
+        var keyed = attempt(function () { mesh.setValueAtTime(0, "x"); });
+        [lut.propertyValueType === PropertyValueType.CUSTOM_VALUE, fromString, lut.value, hidden, keyed, mesh.numKeys]
+        "#,
+    );
+    let refused = "\"Distortion Mesh\" can not be set";
+    assert_eq!(o.result, json!([true, "/luts/look.cube", "/luts/other.cube", refused, refused, 0]));
+    let (_, c) = comp_named(&s, "Str");
+    assert_eq!(layer(c, "s").props.prop("effects/#1/lut").unwrap().value, KV::Str("/luts/other.cube".into()));
+}
