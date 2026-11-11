@@ -507,3 +507,34 @@ fn workers_styling_a_layer_at_once_share_its_buffers() {
         assert!(st.passes.iter().zip(&first.passes).all(|(a, b)| std::sync::Arc::ptr_eq(&a.0, &b.0)), "one set of passes");
     }
 }
+
+/// A styled layer served from the cache lists the files of the body and passes it was served,
+/// not only its content's (#3184): one made of other files (another worker's, or from disk,
+/// whose list can't vouch for them) passes that on to the buffers made of it (flattened, in the
+/// blending space), which are then not kept on disk as complete.
+#[test]
+fn a_cached_styled_layer_lists_the_files_of_its_cached_buffers() {
+    let (p, cid) = scene([1.0; 3], None, |p, c, l| add(p, c, l, "dropShadow"));
+    let layer = &p.comp(cid).unwrap().layers[0];
+    let styled = |cache: &crate::LayerCache| {
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+        r.cache = Some(cache);
+        let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
+        r.styled_layer(&ctx, layer).unwrap()
+    };
+    let first = styled(&crate::LayerCache::default());
+    assert!(first.files.is_complete() && !first.passes.is_empty());
+    let key = first.key.unwrap();
+    // Body and passes kept with a list that can't vouch for them; the content renders again.
+    let cache = crate::LayerCache::default();
+    let mut unsure = crate::reads::ReadFiles::default();
+    unsure.mark_incomplete();
+    let unsure = std::sync::Arc::new(unsure);
+    cache.insert(key, first.body.clone(), unsure.clone());
+    for (i, (b, _)) in first.passes.iter().enumerate() {
+        cache.insert(crate::cache::derive(key, i as u64 + 1), b.clone(), unsure.clone());
+    }
+    let hit = styled(&cache);
+    assert!(std::sync::Arc::ptr_eq(&hit.body, &first.body), "the cached body");
+    assert!(!hit.files.is_complete(), "{:?}", hit.files);
+}

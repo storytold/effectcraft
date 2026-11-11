@@ -54,7 +54,7 @@ fn nested_groups_keep_indentation_value_alignment_and_effect_gaps_at_fixed_compa
     let mut s = Session::default();
     s.execute("comp.new", json!({"width":64,"height":36,"duration":1})).unwrap();
     s.execute("layer.newSolid", json!({"name":"Plate","color":"#406080"})).unwrap();
-    let fx = s.execute("effect.apply", json!({"effect":"Lumetri Color"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"effect":"Color Grading"})).unwrap()["effects"][0].as_u64().unwrap();
     let next = s.execute("effect.apply", json!({"effect":"Checkbox Control"})).unwrap()["effects"][0].as_u64().unwrap();
     let g = s.active_comp().unwrap().layers[0].props.find_group(fx).unwrap();
     let basic = g.sub("basicCorrection").unwrap();

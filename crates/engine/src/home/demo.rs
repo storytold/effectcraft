@@ -238,7 +238,7 @@ fn showcase_3d(p: &mut Project, solids: ItemId) -> Comp {
     anim(&mut cam, "cameraOptions/focusDistance", keys(&[(0.0, Value::Scalar(1700.0)), (5.0, Value::Scalar(1900.0)), (10.0, Value::Scalar(1650.0))]));
 
     // Key light: warm spot casting soft shadows. Fill: cool ambient.
-    let mut key = build::layer(p, &c, "Key Light", LayerSource::Light { kind: effectcraft_project::LightKind::Spot }, (1920, 1080), None);
+    let mut key = build::layer(p, &c, "Screen Color Key", LayerSource::Light { kind: effectcraft_project::LightKind::Spot }, (1920, 1080), None);
     set(&mut key, "transform/position", Value::Vec3([500.0, -500.0, -700.0]));
     set(&mut key, "transform/poi", Value::Vec3([960.0, 600.0, 300.0]));
     set(&mut key, "lightOptions/intensity", Value::Scalar(150.0));

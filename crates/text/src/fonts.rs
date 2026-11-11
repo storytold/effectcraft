@@ -158,11 +158,24 @@ fn info_from(n: FaceNames, data: FaceData, origin: &'static str) -> FaceInfo {
     }
 }
 
+/// A font file's bytes and its metadata from the same open file (so the metadata describes the
+/// bytes, not a later version of the file).
+fn read_with_metadata(path: &std::path::Path) -> std::io::Result<(Vec<u8>, std::fs::Metadata)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let meta = f.metadata()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)?;
+    Ok((bytes, meta))
+}
+
 /// A loaded (or loadable) face.
 pub struct Face {
     pub id: FaceId,
     pub info: FaceInfo,
     bytes: OnceLock<Option<FaceBytes>>,
+    /// The file's metadata as its bytes were read (a [`FaceData::File`] face, once loaded).
+    file_meta: OnceLock<std::fs::Metadata>,
     shaper: OnceLock<harfrust::ShaperData>,
 }
 
@@ -195,15 +208,28 @@ pub struct VMetrics {
 }
 
 impl Face {
+    /// The font file bytes, loaded once on first use, or `None` when they cannot be read.
     fn bytes(&self) -> Option<&[u8]> {
         self.bytes
             .get_or_init(|| match &self.info.data {
                 FaceData::Static(b) => Some(FaceBytes::Static(b)),
                 FaceData::Shared(b) => Some(FaceBytes::Shared(b.clone())),
-                FaceData::File(p) => std::fs::read(p).ok().map(|v| FaceBytes::Shared(Arc::new(v))),
+                FaceData::File(p) => {
+                    let (bytes, meta) = read_with_metadata(p).ok()?;
+                    let _ = self.file_meta.set(meta);
+                    Some(FaceBytes::Shared(Arc::new(bytes)))
+                }
             })
             .as_ref()
             .map(FaceBytes::get)
+    }
+    /// The file a [`FaceData::File`] face is drawn from, with its metadata as its bytes were read
+    /// (`None` when it could not be read): what text drawn with the face was made of. Loads the
+    /// face. `None` for bundled faces and faces from memory.
+    pub fn file_read(&self) -> Option<(&std::path::Path, Option<&std::fs::Metadata>)> {
+        let FaceData::File(p) = &self.info.data else { return None };
+        let _ = self.bytes();
+        Some((p, self.file_meta.get()))
     }
     /// The parsed font (None if the file is missing or unreadable).
     pub fn font(&self) -> Option<FontRef<'_>> {
@@ -314,7 +340,7 @@ fn bundled_default_face() -> Arc<Face> {
             variable: false,
             instances: Vec::new(),
         });
-    Arc::new(Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() })
+    Arc::new(Face { id: 0, info, bytes: OnceLock::new(), file_meta: OnceLock::new(), shaper: OnceLock::new() })
 }
 
 fn db() -> &'static RwLock<Db> {
@@ -331,9 +357,10 @@ fn db() -> &'static RwLock<Db> {
     })
 }
 
+/// Adds a face to the database and returns its id.
 fn push(db: &mut Db, info: FaceInfo) -> FaceId {
     let id = db.faces.len();
-    db.faces.push(Arc::new(Face { id, info, bytes: OnceLock::new(), shaper: OnceLock::new() }));
+    db.faces.push(Arc::new(Face { id, info, bytes: OnceLock::new(), file_meta: OnceLock::new(), shaper: OnceLock::new() }));
     id
 }
 
