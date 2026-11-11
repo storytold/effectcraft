@@ -935,6 +935,7 @@ pub fn layer(project: &mut Project, comp: &Comp, name: &str, source: LayerSource
     Layer {
         id,
         name: comp.unique_layer_name(name),
+        name_follows_text: None,
         source,
         label,
         comment: String::new(),

@@ -343,14 +343,34 @@ pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> boo
     app.session.snapshot.is_some() && (app.session.state.viewer.show_snapshot || f5)
 }
 
-/// Show Channel and exposure, then the display colour conversion (View ▸ Use Display Color
-/// Management / Simulate Output).
-fn transformed(img: &egui::ColorImage, ch: Channel, colorized: bool, stops: f32, dc: Option<vw::DisplayColor>) -> egui::ColorImage {
-    let mut px: Vec<[u8; 4]> = img.pixels.iter().map(|c| c.to_array()).collect();
-    if let Some(dc) = dc.filter(|_| matches!(ch, Channel::Rgb | Channel::RgbStraight)) {
-        dc.apply(&mut px);
+/// The viewer's display pass for frames encoded as `encoding`: Show Channel, exposure, the HDR
+/// step such frames still need, then the display colour conversion `dc` (View ▸ Use Display
+/// Color Management / Simulate Output).
+pub(crate) fn display_pass(app: &EffectcraftApp, encoding: vw::FrameEncoding, dc: Option<&vw::DisplayColor>) -> vw::DisplayPass {
+    let o = &app.session.state.viewer;
+    vw::DisplayPass::new(o.channel, o.colorized, o.exposure, encoding, dc)
+}
+
+/// How the project's 8-bit viewer frames are encoded (rendered with the HDR step).
+pub(crate) fn rgba8_encoding(app: &EffectcraftApp) -> vw::FrameEncoding {
+    vw::FrameEncoding::of(&app.session.project.settings, false)
+}
+
+/// A key of a display pass's parameters, for the texture caches.
+pub(crate) fn pass_key(pass: &vw::DisplayPass) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::display_gpu::uniform(pass).hash(&mut h);
+    if let Some(vw::PassColor::Lut(l)) = &pass.color {
+        (std::sync::Arc::as_ptr(l) as usize).hash(&mut h);
     }
-    vw::display_transform(&mut px, ch, colorized, stops);
+    h.finish()
+}
+
+/// The display pass on the CPU over an 8-bit frame.
+fn transformed(img: &egui::ColorImage, pass: &vw::DisplayPass) -> egui::ColorImage {
+    let mut px: Vec<[u8; 4]> = img.pixels.iter().map(|c| c.to_array()).collect();
+    pass.apply_rgba8(&mut px);
     egui::ColorImage::new(img.size, px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect())
 }
 
@@ -362,9 +382,60 @@ pub(crate) fn display_key(app: &EffectcraftApp, has_conversion: bool) -> String 
         + &format!("{:?}{:?}{}", app.session.project.settings.working_space, app.session.project.settings.output_space, opts.display_color_management)
 }
 
+/// Draw `src` through `pass` into `rect`: the display pass on egui-wgpu's device (one texture per
+/// slot, with mips), else on the CPU into a texture averaged down for the magnification (#417).
+fn draw_through_pass(
+    app: &mut EffectcraftApp,
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    snapshot: bool,
+    src: crate::display_gpu::Source,
+    pass: &vw::DisplayPass,
+    rect: Rect,
+) {
+    let smooth = app.session.prefs.viewer_zoom_smooth();
+    if let Some(gpu) = app.display_gpu()
+        && let Some(rs) = &app.window_wgpu
+    {
+        let bake = if snapshot { &mut app.snapshot_bake } else { &mut app.viewer_bake };
+        if let Some(id) = bake.show(rs, &gpu, &src, pass, smooth) {
+            painter.image(id, rect, bake.uv(), Color32::WHITE);
+            return;
+        }
+    }
+    let size = src.size();
+    let minify = super::viewer::minify_factor(smooth, size[0] as f64, (rect.width() * ctx.pixels_per_point()) as f64);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let ptr = match &src {
+            crate::display_gpu::Source::F16(f) => std::sync::Arc::as_ptr(f) as usize,
+            crate::display_gpu::Source::Rgba8(c) => std::sync::Arc::as_ptr(c) as usize,
+        };
+        (ptr, pass_key(pass), minify).hash(&mut h);
+        h.finish()
+    };
+    let id = egui::Id::unique(if snapshot { "viewer-snapshot-tex" } else { "viewer-display-tex" });
+    let tex = match ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)) {
+        Some((k, tex)) if k == key => tex,
+        _ => {
+            let img = match &src {
+                crate::display_gpu::Source::F16(f) => f.to_color_image(pass),
+                crate::display_gpu::Source::Rgba8(c) => transformed(c, pass),
+            };
+            let img = crate::frames::fit_texture_by(img, crate::frames::max_texture_side(ctx), minify);
+            let tex = ctx.load_texture(if snapshot { "viewer-snapshot" } else { "viewer-display" }, img, super::viewer::zoom_texture_options(smooth));
+            ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
+            tex
+        }
+    };
+    painter.image(tex.id(), rect, fitted_uv(ctx, size, minify), Color32::WHITE);
+}
+
 /// Draw the frame into `comp_rect`: the rendered frame (covering the region of interest when one
-/// is set), or the snapshot while Show Snapshot is on / F5 is held, through Show Channel and the
-/// exposure. Fast Previews ▸ Wireframe draws layer outlines instead.
+/// is set), or the snapshot while Show Snapshot is on / F5 is held, through the display pass (Show
+/// Channel, exposure, the HDR step of 32 bpc frames, display colour). Fast Previews ▸ Wireframe
+/// draws layer outlines instead.
 pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter: &egui::Painter, comp_rect: Rect, cid: ItemId, ectx: &EvalCtx) {
     clear_sample_source(ctx);
     let opts = app.session.state.viewer.clone();
@@ -391,47 +462,58 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         }
         return;
     }
+    // The snapshot went (Purge, a new one): its half floats and texture go too.
+    if app
+        .snapshot_f16
+        .as_ref()
+        .is_some_and(|(img, _)| app.session.snapshot.as_ref().is_none_or(|s| !std::ptr::eq(img.as_ptr(), std::sync::Arc::as_ptr(&s.image))))
+    {
+        app.snapshot_f16 = None;
+        app.snapshot_bake.free(app.window_wgpu.as_ref());
+    }
     let dc = vw::DisplayColor::of(&app.session);
-    let dc_key = display_key(app, dc.is_some());
-    let plain = opts.channel == Channel::Rgb && opts.exposure == 0.0 && dc.is_none();
-    let display = SampleDisplay { channel: opts.channel, colorized: opts.colorized, exposure: opts.exposure, conversion: dc.clone() };
     let region = shown_region(ctx, [ectx.comp.width as f32, ectx.comp.height as f32]);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     if snap {
         let Some(s) = app.session.snapshot.clone() else { return };
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (std::sync::Arc::as_ptr(&s.image) as usize, opts.channel.id(), opts.colorized, opts.exposure.to_bits(), &dc_key).hash(&mut h);
-            h.finish()
-        };
-        let id = egui::Id::unique("viewer-snapshot-tex");
-        let tex = match ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)) {
-            Some((k, tex)) if k == key => tex,
-            _ => {
-                let img = crate::frames::to_color_image(&s.image);
-                let img = if plain { img } else { transformed(&img, opts.channel, opts.colorized, opts.exposure, dc) };
-                let opts = super::viewer::zoom_texture_options(app.session.prefs.viewer_zoom_smooth());
-                let tex = crate::frames::load_fitted(ctx, "viewer-snapshot", img, opts);
-                ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
-                tex
+        let pass = display_pass(app, s.encoding, dc.as_ref());
+        // The snapshot in half floats, made once (it holds the render's full range).
+        let f = match &app.snapshot_f16 {
+            Some((_, f)) => f.clone(),
+            None => {
+                let f = std::sync::Arc::new(crate::frames::F16Frame::from_image(&s.image, s.encoding));
+                app.snapshot_f16 = Some((std::sync::Arc::downgrade(&s.image), f.clone()));
+                f
             }
         };
-        painter.image(tex.id(), comp_rect, uv, Color32::WHITE);
-        note_sample_source(
-            ctx,
-            SampleSource::Snapshot(s.image.clone()),
-            [0.0, 0.0, ectx.comp.width as f64, ectx.comp.height as f64],
-            (!plain).then_some(display),
-        );
+        draw_through_pass(app, ctx, painter, true, crate::display_gpu::Source::F16(f), &pass, comp_rect);
+        note_sample_source(ctx, SampleSource::Snapshot(s.image.clone()), [0.0, 0.0, ectx.comp.width as f64, ectx.comp.height as f64], Some(pass));
         painter.text(comp_rect.left_top() + vec2(6.0, 6.0), Align2::LEFT_TOP, crate::i18n::tr("Snapshot"), Tokens::ui(11.0), SNAP_COLOR);
         return;
     }
+    let zoom = comp_rect.width() as f64 / ectx.comp.width.max(1) as f64;
+    let roi_rect = || match texture_roi(ctx) {
+        Some([x, y, w, h]) => Rect::from_min_size(comp_rect.min + vec2((x * zoom) as f32, (y * zoom) as f32), vec2((w * zoom) as f32, (h * zoom) as f32)),
+        None => comp_rect,
+    };
+    // A half-float frame (32 bpc): always through the display pass, which applies the HDR step
+    // after the exposure.
+    if let Some(f) = app.viewer_f16.clone() {
+        if app.viewer_shown.is_none_or(|(_, k)| k.comp != cid.0) {
+            return;
+        }
+        let pass = display_pass(app, f.encoding, dc.as_ref());
+        draw_through_pass(app, ctx, painter, false, crate::display_gpu::Source::F16(f.clone()), &pass, roi_rect());
+        note_sample_source(ctx, SampleSource::F16(f), region, Some(pass));
+        return;
+    }
+    let pass = display_pass(app, rgba8_encoding(app), dc.as_ref());
+    let plain = pass.is_identity();
     // A GPU frame (the web viewer): drawn straight from its texture; Show Channel / exposure
     // read it back first (asynchronously in the browser: from the next frame on).
-    let gpu = matches!((&app.viewer_shown, &app.viewer_native), (Some(s), Some(n)) if s.0 == n.0 && s.1 == n.1 && n.1.comp == cid.0);
+    let gpu = matches!((&app.viewer_shown, &app.viewer_native), (Some(s), Some(n)) if s.0 == Some(n.0) && s.1 == n.1 && n.1.comp == cid.0);
     let rect = if gpu {
-        let Some(id) = app.viewer_shown.map(|s| s.0) else { return };
+        let Some(id) = app.viewer_shown.and_then(|s| s.0) else { return };
         if plain || app.viewer_pixels().is_none() {
             if !plain {
                 ctx.request_repaint();
@@ -448,11 +530,7 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         if k.comp != cid.0 {
             return;
         }
-        let zoom = comp_rect.width() as f64 / ectx.comp.width.max(1) as f64;
-        let rect = match texture_roi(ctx) {
-            Some([x, y, w, h]) => Rect::from_min_size(comp_rect.min + vec2((x * zoom) as f32, (y * zoom) as f32), vec2((w * zoom) as f32, (h * zoom) as f32)),
-            None => comp_rect,
-        };
+        let rect = roi_rect();
         if plain {
             let uv = app.viewer_image.as_ref().map_or(uv, |src| fitted_uv(ctx, src.size, minify));
             painter.image(tex.id(), rect, uv, Color32::WHITE);
@@ -464,43 +542,16 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         rect
     };
     let Some(src) = app.viewer_image.clone() else { return };
-    let smooth = app.session.prefs.viewer_zoom_smooth();
-    // Averaged down for the magnification, as the frame's own texture is (#417).
-    let minify = super::viewer::minify_factor(smooth, src.size[0] as f64, (rect.width() * ctx.pixels_per_point()) as f64);
-    let key = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (std::sync::Arc::as_ptr(&src) as usize, opts.channel.id(), opts.colorized, opts.exposure.to_bits(), &dc_key, minify).hash(&mut h);
-        h.finish()
-    };
-    let id = egui::Id::unique("viewer-display-tex");
-    let tex = match ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)) {
-        Some((k, tex)) if k == key => tex,
-        _ => {
-            let img =
-                crate::frames::fit_texture_by(transformed(&src, opts.channel, opts.colorized, opts.exposure, dc), crate::frames::max_texture_side(ctx), minify);
-            let tex = ctx.load_texture("viewer-display", img, super::viewer::zoom_texture_options(smooth));
-            ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
-            tex
-        }
-    };
-    painter.image(tex.id(), rect, fitted_uv(ctx, src.size, minify), Color32::WHITE);
-    note_sample_source(ctx, SampleSource::Cpu(src), region, Some(display));
+    draw_through_pass(app, ctx, painter, false, crate::display_gpu::Source::Rgba8(src.clone()), &pass, rect);
+    note_sample_source(ctx, SampleSource::Cpu(src), region, Some(pass));
 }
 
 #[derive(Clone)]
 enum SampleSource {
     Cpu(std::sync::Arc<egui::ColorImage>),
+    F16(std::sync::Arc<crate::frames::F16Frame>),
     Gpu(crate::frames::FrameKey),
     Snapshot(std::sync::Arc<effectcraft_engine::render::Image>),
-}
-
-#[derive(Clone)]
-struct SampleDisplay {
-    channel: Channel,
-    colorized: bool,
-    exposure: f32,
-    conversion: Option<vw::DisplayColor>,
 }
 
 #[derive(Clone)]
@@ -508,7 +559,7 @@ struct DisplayedSample {
     pass: u64,
     source: SampleSource,
     region: [f64; 4],
-    display: Option<SampleDisplay>,
+    display: Option<vw::DisplayPass>,
 }
 
 fn sample_source_id() -> egui::Id {
@@ -519,36 +570,40 @@ pub(crate) fn clear_sample_source(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<DisplayedSample>(sample_source_id()));
 }
 
-fn note_sample_source(ctx: &egui::Context, source: SampleSource, region: [f64; 4], display: Option<SampleDisplay>) {
+fn note_sample_source(ctx: &egui::Context, source: SampleSource, region: [f64; 4], display: Option<vw::DisplayPass>) {
     let sample = DisplayedSample { pass: ctx.cumulative_pass_nr(), source, region, display };
     ctx.data_mut(|data| data.insert_temp(sample_source_id(), sample));
 }
 
-/// Sample only a frame actually drawn this pass, with that draw's channel, exposure and
-/// display conversion. Hidden and wireframe views deliberately have no sample source.
+/// Sample only a frame actually drawn this pass, with that draw's display pass (channel,
+/// exposure, HDR step and display conversion). Hidden and wireframe views deliberately have no
+/// sample source.
 pub(crate) fn sample_displayed(app: &EffectcraftApp, ctx: &egui::Context, point: [f64; 2]) -> Option<[f32; 4]> {
     let sample = ctx.data(|data| data.get_temp::<DisplayedSample>(sample_source_id()))?;
     if sample.pass != ctx.cumulative_pass_nr() {
         return None;
     }
-    let pixel = match sample.source {
-        SampleSource::Cpu(image) => super::fx_widgets::frame_pixel(&image, sample.region, point)?,
+    let rgba8 = |c: Color32| c.to_array().map(|v| v as f32 / 255.0);
+    // The frame's premultiplied pixel.
+    let raw: [f32; 4] = match sample.source {
+        SampleSource::Cpu(image) => rgba8(super::fx_widgets::frame_pixel(&image, sample.region, point)?),
+        SampleSource::F16(f) => f.pixel(super::fx_widgets::frame_pixel_index(f.size(), sample.region, point)?)?,
         SampleSource::Gpu(key) => {
             if app.viewer_shown.map(|(_, shown)| shown) != Some(key) {
                 return None;
             }
-            super::fx_widgets::frame_pixel(app.viewer_image.as_ref()?, sample.region, point)?
+            rgba8(super::fx_widgets::frame_pixel(app.viewer_image.as_ref()?, sample.region, point)?)
         }
         SampleSource::Snapshot(image) => {
             let index = super::fx_widgets::frame_pixel_index([image.width as usize, image.height as usize], sample.region, point)?;
-            crate::frames::display_pixel(*image.data.get(index)?)
+            *image.data.get(index)?
         }
     };
-    let image = egui::ColorImage::new([1, 1], vec![pixel]);
-    let image = match sample.display {
-        Some(display) => transformed(&image, display.channel, display.colorized, display.exposure, display.conversion),
-        None => image,
+    let shown = match &sample.display {
+        Some(pass) => pass.pixel(raw),
+        None => crate::frames::display_pixel(raw).to_array(),
     };
+    let image = egui::ColorImage::new([1, 1], vec![Color32::from_rgba_premultiplied(shown[0], shown[1], shown[2], shown[3])]);
     super::fx_widgets::sample_frame(&image, [0.0, 0.0, 1.0, 1.0], [0.5, 0.5])
 }
 

@@ -38,7 +38,7 @@ fn harness(panel: Panel, angle: f64) -> (Harness<'static, EffectcraftApp>, u64, 
     s.execute("comp.new", json!({"name": "Angles", "width": 320, "height": 180, "duration": 4})).unwrap();
     let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
     let uid = if matches!(panel, Panel::EffectControls) {
-        let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "CC Bend It"})).unwrap()["effects"][0].as_u64().unwrap();
+        let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "Two-Point Bend"})).unwrap()["effects"][0].as_u64().unwrap();
         s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(fx).unwrap().get("bend").unwrap().uid
     } else {
         s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/rotation").unwrap().uid

@@ -51,6 +51,21 @@ impl Flow {
     }
 }
 
+/// The `Plane::luma` of `a` and `b` packed into one image (`a` in the red channel, `b` in the
+/// green; the rest zero). A device block matcher takes this as its input rather than computing
+/// the luma itself: the weighted sum is not reproducible on a device, which may contract
+/// `a·b + c` into a fused multiply-add, and the search's near-tie choices would then differ.
+pub fn luma_pair(a: &Image, b: &Image) -> Image {
+    let luma = |p: &[f32; 4]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2] + 0.25 * p[3];
+    let mut out = Image::new(a.width, a.height);
+    out.data.par_iter_mut().enumerate().for_each(|(i, q)| {
+        let la = a.data.get(i).map(luma).unwrap_or(0.0);
+        let lb = b.data.get(i).map(luma).unwrap_or(0.0);
+        *q = [la, lb, 0.0, 0.0];
+    });
+    out
+}
+
 /// A single-channel plane.
 struct Plane {
     w: usize,
@@ -103,7 +118,8 @@ pub fn block_flow(a: &Image, b: &Image, block: u32, radius: i32) -> Flow {
 /// (Timewarp's Vector Detail and Block Size).
 pub fn block_flow_window(a: &Image, b: &Image, tile: u32, window: u32, radius: i32) -> Flow {
     let bs = tile.max(2) as usize;
-    let win = window.max(4) as i64;
+    // The matching cost per vector grows with the window's area; 512 is far above any block size the effects offer.
+    let win = i64::from(window.clamp(4, 512));
     // Window origin relative to the tile origin.
     let wo = bs as i64 / 2 - win / 2;
     let (w, h) = (a.width as usize, a.height as usize);
@@ -278,6 +294,13 @@ mod tests {
             }
         }
         s / n as f32
+    }
+
+    #[test]
+    fn a_huge_matching_window_is_held_to_the_cap() {
+        let (a, b) = (texture(520, 520, 0.0), texture(520, 520, 2.0));
+        let capped = block_flow_window(&a, &b, 260, 512, 2);
+        assert_eq!(block_flow_window(&a, &b, 260, u32::MAX, 2).v, capped.v);
     }
 
     #[test]
