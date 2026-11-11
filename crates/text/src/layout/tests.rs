@@ -523,4 +523,29 @@ fn item_glyphs_in_matches_a_full_scan() {
             assert_eq!(got, want, "{clusters:?} {a}..{b}");
         }
     }
+
+#[test]
+fn run_lookup_by_bisection_matches_the_scan() {
+    let scan = |runs: &[(Range<usize>, TextStyle)], b: usize| {
+        runs.iter().position(|(r, _)| b >= r.start && b < r.end).unwrap_or_else(|| runs.iter().rposition(|(r, _)| r.start <= b).unwrap_or(0))
+    };
+    let runs: Vec<(Range<usize>, TextStyle)> = (0..50).map(|i| (i * 3..i * 3 + 3, st(10.0))).collect();
+    let gapped: Vec<(Range<usize>, TextStyle)> = (0..50).map(|i| (i * 4..i * 4 + 3, st(10.0))).collect();
+    // Overlapping runs: the first run holding a byte wins, as in the scan.
+    let overlapping: Vec<(Range<usize>, TextStyle)> = vec![(0..10, st(10.0)), (5..15, st(20.0)), (12..20, st(30.0))];
+    assert!(runs_ordered(&runs) && runs_ordered(&gapped) && !runs_ordered(&overlapping));
+    for b in 0..220 {
+        assert_eq!(run_at(&runs, true, b), scan(&runs, b), "{b}");
+        assert_eq!(run_at(&gapped, true, b), scan(&gapped, b), "{b}");
+        assert_eq!(run_at(&overlapping, false, b), scan(&overlapping, b), "{b}");
+    }
+    assert_eq!(run_at(&overlapping, false, 6), 0);
+    // A reversed range (20..0) among others is not ordered either, and takes the scan.
+    #[allow(clippy::reversed_empty_ranges)]
+    let reversed: Vec<(Range<usize>, TextStyle)> = vec![(0..10, st(10.0)), (20..0, st(20.0)), (5..15, st(30.0)), (15..20, st(40.0))];
+    assert!(!runs_ordered(&reversed));
+    for b in 0..30 {
+        assert_eq!(run_at(&reversed, runs_ordered(&reversed), b), scan(&reversed, b), "{b}");
+    }
+    assert_eq!(run_at(&[], true, 5), 0);
 }

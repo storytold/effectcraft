@@ -98,8 +98,12 @@ pub struct Loss {
     pub category: LossCategory,
     /// How many occurrences (exact).
     pub count: usize,
-    /// Up to [`MAX_DETAILS`] example lines.
+    /// Example lines: up to [`MAX_DETAILS`], and for effects with no counterpart one more line per
+    /// effect (with its number of instances).
     pub details: Vec<String>,
+    /// How many of the `count` occurrences no line of `details` describes.
+    #[serde(default)]
+    pub unlisted: usize,
 }
 
 /// What arrived in the project.
@@ -281,7 +285,7 @@ const MAX_UNMAPPED_EFFECTS: usize = 100;
 impl Collector {
     /// Records one loss.
     pub fn lose(&mut self, category: LossCategory, detail: impl Into<String>) {
-        let loss = self.losses.entry(category).or_insert_with(|| Loss { category, count: 0, details: Vec::new() });
+        let loss = self.losses.entry(category).or_insert_with(|| Loss { category, count: 0, details: Vec::new(), unlisted: 0 });
         loss.count = loss.count.saturating_add(1);
         if loss.details.len() < MAX_DETAILS {
             loss.details.push(detail.into());
@@ -292,7 +296,8 @@ impl Collector {
     /// made in [`Collector::finish`], one per effect with the number of instances, so that many
     /// other losses cannot hide which effects were dropped.
     pub fn lose_unmapped_effect(&mut self, match_name: &str, detail: String) {
-        let loss = self.losses.entry(LossCategory::Effects).or_insert_with(|| Loss { category: LossCategory::Effects, count: 0, details: Vec::new() });
+        let loss =
+            self.losses.entry(LossCategory::Effects).or_insert_with(|| Loss { category: LossCategory::Effects, count: 0, details: Vec::new(), unlisted: 0 });
         loss.count = loss.count.saturating_add(1);
         if let Some(seen) = self.unmapped_effects.get_mut(match_name) {
             seen.1 = seen.1.saturating_add(1);
@@ -303,12 +308,22 @@ impl Collector {
     }
 
     pub fn finish(mut self) -> ImportReport {
+        // Every line describes one occurrence, except an unmapped effect's, which describes all
+        // its instances.
+        for loss in self.losses.values_mut() {
+            loss.unlisted = loss.count.saturating_sub(loss.details.len());
+        }
         if let Some(loss) = self.losses.get_mut(&LossCategory::Effects) {
-            let named = std::mem::take(&mut self.unmapped_effects).into_values().map(|(first, n)| match n {
+            // The most used effects first.
+            let mut named: Vec<(String, usize)> = std::mem::take(&mut self.unmapped_effects).into_values().collect();
+            named.sort_by_key(|n| std::cmp::Reverse(n.1));
+            let described = named.iter().fold(0usize, |sum, (_, n)| sum.saturating_add(*n));
+            loss.unlisted = loss.unlisted.saturating_sub(described);
+            let lines = named.into_iter().map(|(first, n)| match n {
                 1 => first,
                 _ => format!("{first}, and {} more like it", n - 1),
             });
-            loss.details.splice(0..0, named);
+            loss.details.splice(0..0, lines);
         }
         ImportReport {
             imported: self.imported,
@@ -355,6 +370,25 @@ mod tests {
         // One instance stays the single line it was.
         assert_eq!(named("(Pseudo/)"), ["C: 'D' has the effect 'Dropdown' (Pseudo/)"]);
         assert!(effects.details.len() <= MAX_DETAILS + 2, "the examples stay bounded");
+        // 20 parameter lines, the cylinders' line and the dropdown's describe 46; 10 parameters
+        // have no line.
+        assert_eq!(effects.unlisted, 10);
+        // The most used effect comes first.
+        assert!(effects.details[0].contains("(CC Cylinder)"), "{:?}", effects.details);
+    }
+
+    /// #3365: each category says how many of its occurrences have no example line.
+    #[test]
+    fn a_loss_counts_the_occurrences_without_a_line() {
+        let mut col = Collector::default();
+        for i in 0..27 {
+            col.lose(LossCategory::Masks, format!("mask {i}"));
+        }
+        col.lose(LossCategory::ShapeLayers, "one");
+        let report = col.finish();
+        let unlisted = |c| report.losses.iter().find(|l| l.category == c).map(|l| (l.details.len(), l.unlisted));
+        assert_eq!(unlisted(LossCategory::Masks), Some((MAX_DETAILS, 7)));
+        assert_eq!(unlisted(LossCategory::ShapeLayers), Some((1, 0)));
     }
 
     /// A file with more than [`MAX_UNMAPPED_EFFECTS`] different unmapped effects names that many
@@ -369,5 +403,6 @@ mod tests {
         let effects = report.losses.iter().find(|l| l.category == LossCategory::Effects).unwrap();
         assert_eq!(effects.count, MAX_UNMAPPED_EFFECTS + 1, "every instance is counted");
         assert_eq!(effects.details.len(), MAX_UNMAPPED_EFFECTS, "{} lines", effects.details.len());
+        assert_eq!(effects.unlisted, 1, "the effect past the limit has no line");
     }
 }
