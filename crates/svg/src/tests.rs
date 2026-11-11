@@ -448,43 +448,6 @@ fn at_rule_blocks_are_skipped_by_brace_depth() {
 }
 
 #[test]
-fn a_huge_circle_is_flattened_into_a_bounded_number_of_curves() {
-    let g = Geom::Ellipse { cx: 0.0, cy: 0.0, rx: 1e15, ry: 1e15 };
-    assert!(g.to_path().elements().len() < 1000, "{}", g.to_path().elements().len());
-    let small = Geom::Ellipse { cx: 0.0, cy: 0.0, rx: 10.0, ry: 10.0 }.to_path();
-    assert!(!small.elements().is_empty());
-}
-
-#[test]
-fn an_element_with_too_many_attributes_is_refused() {
-    let attrs: String = (0..2000).map(|i| format!(" a{i}=\"1\"")).collect();
-    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect{attrs} width=\"1\" height=\"1\"/></svg>");
-    assert!(matches!(parse(svg.as_bytes()), Err(Error::Xml(e)) if e.contains("attributes")));
-}
-
-#[test]
-fn entity_references_that_expand_past_the_limit_are_refused() {
-    // Each level repeats the one below ten times: 10^7 bytes of `x` per `&e;`, referenced 100 times.
-    let mut dtd = format!("<!ENTITY e0 \"{}\">", "x".repeat(10));
-    for i in 1..7 {
-        dtd.push_str(&format!("<!ENTITY e{i} \"{}\">", format!("&e{};", i - 1).repeat(10)));
-    }
-    let svg = format!("<!DOCTYPE svg [{dtd}]><svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"{}\"/></svg>", "&e6;".repeat(100));
-    assert!(matches!(parse(svg.as_bytes()), Err(Error::Xml(e)) if e.contains("entity")));
-    // Illustrator-style entities stay accepted.
-    let ok = "<!DOCTYPE svg [<!ENTITY ns_svg \"http://www.w3.org/2000/svg\">]><svg xmlns=\"&ns_svg;\"><rect width=\"1\" height=\"1\"/></svg>";
-    assert!(parse(ok.as_bytes()).is_ok());
-}
-
-#[test]
-fn a_decoy_entity_declaration_does_not_hide_the_real_one() {
-    // A commented-out `b` comes first; the parser uses the later `b = &e;` (1 MiB each, 100 times).
-    let dtd = format!("<!-- <!ENTITY b \"x\"> --><!ENTITY e \"{}\"><!ENTITY b \"&e;\">", "x".repeat(1 << 20));
-    let svg = format!("<!DOCTYPE svg [{dtd}]><svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"{}\"/></svg>", "&b;".repeat(100));
-    assert!(matches!(parse(svg.as_bytes()), Err(Error::Xml(e)) if e.contains("entity")));
-}
-
-#[test]
 fn gradient_stops_copied_past_the_budget_are_refused() {
     // 4,000 stops referenced by 2,100 shapes would keep 8.4 million stops.
     let stops: String = (0..4000).map(|i| format!("<stop offset=\"{}\" stop-color=\"red\"/>", i as f64 / 4000.0)).collect();

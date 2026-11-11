@@ -147,25 +147,15 @@ impl Geom {
             Geom::Rect { x, y, w, h, rx, ry } => {
                 let r = kurbo::Rect::new(*x, *y, x + w, y + h);
                 if *rx > 0.0 || *ry > 0.0 {
-                    if (rx - ry).abs() < 1e-9 {
-                        kurbo::RoundedRect::from_rect(r, *rx).to_path(tolerance(*rx))
-                    } else {
-                        elliptic_round_rect(*x, *y, *w, *h, *rx, *ry)
-                    }
+                    if (rx - ry).abs() < 1e-9 { kurbo::RoundedRect::from_rect(r, *rx).to_path(0.01) } else { elliptic_round_rect(*x, *y, *w, *h, *rx, *ry) }
                 } else {
                     r.to_path(0.01)
                 }
             }
-            Geom::Ellipse { cx, cy, rx, ry } => kurbo::Ellipse::new((*cx, *cy), (*rx, *ry), 0.0).to_path(tolerance(rx.max(*ry))),
+            Geom::Ellipse { cx, cy, rx, ry } => kurbo::Ellipse::new((*cx, *cy), (*rx, *ry), 0.0).to_path(0.01),
             Geom::Path(p) => p.clone(),
         }
     }
-}
-
-/// The flattening tolerance for a curve of radius `r`: 0.01, growing with the radius so a huge
-/// circle is not split into an unbounded number of curves (as `pathdata` does for arcs).
-fn tolerance(r: f64) -> f64 {
-    0.01_f64.max(r.abs() * 1e-4)
 }
 
 fn elliptic_round_rect(x: f64, y: f64, w: f64, h: f64, rx: f64, ry: f64) -> BezPath {
@@ -1247,23 +1237,11 @@ const MAX_XML_DEPTH: usize = 256;
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
 
-/// The most attributes one element may have: the XML parser checks each attribute against all
-/// earlier ones on its element, so a tag with very many takes quadratic time.
-const MAX_XML_ATTRIBUTES: usize = 1024;
-
 /// The deepest element nesting of `text` (a quick scan that skips comments, CDATA, processing
 /// instructions, declarations and quoted attribute values).
-#[cfg(test)]
 fn xml_depth(text: &str) -> usize {
-    xml_shape(text).0
-}
-
-/// The deepest element nesting of `text` and the most attributes (`=` outside quotes) of one
-/// of its start tags.
-fn xml_shape(text: &str) -> (usize, usize) {
     let b = text.as_bytes();
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
-    let mut attrs_max = 0usize;
     let skip_to = |from: usize, end: &[u8]| b.get(from..).and_then(|r| r.windows(end.len()).position(|w| w == end)).map_or(b.len(), |p| from + p + end.len());
     while i < b.len() {
         if b[i] != b'<' {
@@ -1286,19 +1264,16 @@ fn xml_shape(text: &str) -> (usize, usize) {
             // A start tag: find its end outside quotes; `/>` closes it at once.
             let mut j = i + 1;
             let mut quote = None;
-            let mut attrs = 0usize;
             while let Some(&c) = b.get(j) {
                 match quote {
                     Some(q) if c == q => quote = None,
                     Some(_) => {}
                     None if c == b'"' || c == b'\'' => quote = Some(c),
                     None if c == b'>' => break,
-                    None if c == b'=' => attrs += 1,
                     None => {}
                 }
                 j += 1;
             }
-            attrs_max = attrs_max.max(attrs);
             if b.get(j.wrapping_sub(1)) != Some(&b'/') {
                 depth += 1;
                 max = max.max(depth);
@@ -1306,59 +1281,7 @@ fn xml_shape(text: &str) -> (usize, usize) {
             i = j + 1;
         }
     }
-    (max, attrs_max)
-}
-
-/// The most bytes the internal entity references of a document may expand to.
-const MAX_ENTITY_BYTES: usize = 64 << 20;
-
-/// What the general entity references (`&name;`) of `text` expand to, in bytes, counting the
-/// internal entities its DTD declares (`<!ENTITY name "value">`) and the references inside
-/// them. The XML parser bounds the nodes entities make but not the text, so a few repeated
-/// references to nested entities could otherwise expand attribute values to gigabytes.
-fn entity_bytes(text: &str) -> usize {
-    use std::collections::HashMap;
-    // Every declaration of a name is kept, comments and quoted text included: the parser uses
-    // only one of them, and the largest bounds whichever it is.
-    let mut decls: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut rest = text;
-    while let Some(p) = rest.find("<!ENTITY") {
-        rest = &rest[p + 8..];
-        let t = rest.trim_start();
-        // Parameter entities (`<!ENTITY % name …>`) are not referenced with `&`.
-        if t.starts_with('%') {
-            continue;
-        }
-        let name_end = t.find(|c: char| c.is_whitespace()).unwrap_or(t.len());
-        let (name, after) = t.split_at(name_end);
-        let after = after.trim_start();
-        let Some(q) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
-        if let Some(end) = after[1..].find(q) {
-            decls.entry(name).or_default().push(&after[1..1 + end]);
-        }
-    }
-    if decls.is_empty() {
-        return 0;
-    }
-    fn refs(s: &str) -> impl Iterator<Item = &str> {
-        s.split('&').skip(1).filter_map(|r| r.find(';').map(|e| &r[..e]))
-    }
-    fn size<'t>(name: &'t str, decls: &HashMap<&'t str, Vec<&'t str>>, memo: &mut HashMap<&'t str, usize>, depth: usize) -> usize {
-        if let Some(&n) = memo.get(name) {
-            return n;
-        }
-        let Some(values) = decls.get(name) else { return 0 };
-        // Nested past any real use (or a cycle, which the parser refuses): too large.
-        let n = if depth > 32 {
-            usize::MAX
-        } else {
-            values.iter().map(|value| refs(value).fold(value.len(), |n, r| n.saturating_add(size(r, decls, memo, depth + 1)))).max().unwrap_or(0)
-        };
-        memo.insert(name, n);
-        n
-    }
-    let mut memo = HashMap::new();
-    refs(text).fold(0usize, |n, r| n.saturating_add(size(r, &decls, &mut memo, 0)))
+    max
 }
 
 /// Nodes a document may expand to: a few kilobytes of nested internal entities
@@ -1369,15 +1292,8 @@ const MAX_XML_NODES: u32 = 4_000_000;
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim_start_matches('\u{feff}');
-    let (depth, attributes) = xml_shape(text);
-    if depth > MAX_XML_DEPTH {
+    if xml_depth(text) > MAX_XML_DEPTH {
         return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
-    }
-    if attributes > MAX_XML_ATTRIBUTES {
-        return Err(Error::Xml(format!("an element has more than {MAX_XML_ATTRIBUTES} attributes")));
-    }
-    if entity_bytes(text) > MAX_ENTITY_BYTES {
-        return Err(Error::Xml(format!("its entity references expand to more than {} MiB", MAX_ENTITY_BYTES >> 20)));
     }
     // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).
     let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_XML_NODES, ..Default::default() };

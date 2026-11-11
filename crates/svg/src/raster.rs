@@ -421,6 +421,9 @@ fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
 fn draw_node(n: &Node, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     let Some(left) = budget.draws_left.checked_sub(1) else { return };
     budget.draws_left = left;
+    if left == 0 {
+        log::warn!("svg: draw budget reached, the rest of the drawing is skipped");
+    }
     match n {
         Node::Group(g) => draw_group(g, m, opacity, dst, budget),
         Node::Shape(s) => {
