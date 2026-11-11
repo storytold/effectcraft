@@ -831,10 +831,84 @@ fn from_cwd(path: &str) -> Result<String, Failure> {
     std::path::absolute(path).map(|p| p.to_string_lossy().into_owned()).map_err(|e| Failure::Error(format!("render: cannot resolve --out {path}: {e}")))
 }
 
+/// The `renderQueue.add` settings for `render --out`: every render flag the command takes, as the
+/// action's parameters.
+fn render_item_params(args: &Args, out: &str) -> Result<Value, Failure> {
+    use effectcraft_engine::project::render_queue::OutputFormat;
+    let mut p = json!({"output": out});
+    if let Some(c) = args.opt("--comp") {
+        p["comp"] = json!(c);
+    }
+    let ext = std::path::Path::new(out).extension().map(|e| e.to_string_lossy().to_string());
+    if let Some(f) = args.opt("--format").map(str::to_string).or(ext) {
+        p["format"] = json!(f);
+    }
+    match (args.num("--start")?, args.num("--end")?) {
+        (None, None) => p["timeSpan"] = json!(if args.flag("--work-area") { "workArea" } else { "comp" }),
+        (a, b) => {
+            p["start"] = json!(a.unwrap_or(0.0));
+            if let Some(b) = b {
+                p["end"] = json!(b);
+            }
+        }
+    }
+    if let Some(v) = args.num("--fps")? {
+        p["frameRate"] = json!(v);
+    }
+    if let Some(r) = args.opt("--resolution").or(args.opt("--scale")) {
+        p["resolution"] = r.parse::<f64>().map(|v| json!(v)).unwrap_or(json!(r));
+    }
+    for (flag, key) in [("--quality", "quality"), ("--channels", "channels"), ("--prores", "proresProfile"), ("--audio", "audio")] {
+        if let Some(v) = args.opt(flag) {
+            p[key] = json!(v);
+        }
+    }
+    if let Some(v) = args.num("--jpeg-quality")? {
+        p["quality"] = json!(v);
+    }
+    if let Some(v) = args.num("--webp-quality")? {
+        p["quality"] = json!(v);
+        p["webpCompression"] = json!("lossy");
+    }
+    if args.flag("--webp-lossless") {
+        p["webpCompression"] = json!("lossless");
+    }
+    if let Some(v) = args.num("--webp-alpha-quality")? {
+        p["webpAlphaQuality"] = json!(v);
+    }
+    if let Some(v) = args.num("--bitrate")? {
+        p["bitrate"] = json!(v);
+        // VP9 WebM encodes by quality unless told to target the bitrate (#440).
+        // The format parser decides what is WebM, so its aliases (`vp9`, `webmvp9opus`) count.
+        if p["format"].as_str().and_then(OutputFormat::from_name) == Some(OutputFormat::WebM) {
+            p["webmBitrate"] = json!(true);
+        }
+    }
+    for (flag, key) in [
+        ("--profile", "profile"),
+        ("--level", "level"),
+        ("--rate-control", "rateControl"),
+        ("--webm-codec", "webmCodec"),
+        ("--opus-app", "opusApplication"),
+        ("--exr-compression", "exrCompression"),
+        ("--exr-depth", "exrBitDepth"),
+    ] {
+        if let Some(v) = args.opt(flag) {
+            p[key] = json!(v);
+        }
+    }
+    for (flag, key) in [("--video-quality", "quality"), ("--keyint", "keyframeInterval"), ("--audio-bitrate", "audioBitrate")] {
+        if let Some(v) = args.num(flag)? {
+            p[key] = json!(v);
+        }
+    }
+    Ok(p)
+}
+
 /// `render`: queue `--comp` (or the active comp) with the given settings unless `--queue`, then
 /// render the queue with a progress line on stderr. Fails if any item fails.
 fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
-    use effectcraft_engine::project::render_queue::{OutputFormat, RenderStatus};
+    use effectcraft_engine::project::render_queue::RenderStatus;
     if args.opt("--bridge").is_some() {
         return usage_err("render runs headless; use `exec renderQueue.add` / `renderQueue.render` with --bridge");
     }
@@ -850,73 +924,7 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
     if !args.flag("--queue") {
         let Some(out) = args.opt("--out") else { return usage_err("render: --out FILE is required (or --queue)") };
         let out = &from_cwd(out)?;
-        let mut p = json!({"output": out});
-        if let Some(c) = args.opt("--comp") {
-            p["comp"] = json!(c);
-        }
-        let ext = std::path::Path::new(out).extension().map(|e| e.to_string_lossy().to_string());
-        if let Some(f) = args.opt("--format").map(str::to_string).or(ext) {
-            p["format"] = json!(f);
-        }
-        match (args.num("--start")?, args.num("--end")?) {
-            (None, None) => p["timeSpan"] = json!(if args.flag("--work-area") { "workArea" } else { "comp" }),
-            (a, b) => {
-                p["start"] = json!(a.unwrap_or(0.0));
-                if let Some(b) = b {
-                    p["end"] = json!(b);
-                }
-            }
-        }
-        if let Some(v) = args.num("--fps")? {
-            p["frameRate"] = json!(v);
-        }
-        if let Some(r) = args.opt("--resolution").or(args.opt("--scale")) {
-            p["resolution"] = r.parse::<f64>().map(|v| json!(v)).unwrap_or(json!(r));
-        }
-        for (flag, key) in [("--quality", "quality"), ("--channels", "channels"), ("--prores", "proresProfile"), ("--audio", "audio")] {
-            if let Some(v) = args.opt(flag) {
-                p[key] = json!(v);
-            }
-        }
-        if let Some(v) = args.num("--jpeg-quality")? {
-            p["quality"] = json!(v);
-        }
-        if let Some(v) = args.num("--webp-quality")? {
-            p["quality"] = json!(v);
-            p["webpCompression"] = json!("lossy");
-        }
-        if args.flag("--webp-lossless") {
-            p["webpCompression"] = json!("lossless");
-        }
-        if let Some(v) = args.num("--webp-alpha-quality")? {
-            p["webpAlphaQuality"] = json!(v);
-        }
-        if let Some(v) = args.num("--bitrate")? {
-            p["bitrate"] = json!(v);
-            // VP9 WebM encodes by quality unless told to target the bitrate (#440).
-            // The format parser decides what is WebM, so its aliases (`vp9`, `webmvp9opus`) count.
-            if p["format"].as_str().and_then(OutputFormat::from_name) == Some(OutputFormat::WebM) {
-                p["webmBitrate"] = json!(true);
-            }
-        }
-        for (flag, key) in [
-            ("--profile", "profile"),
-            ("--level", "level"),
-            ("--rate-control", "rateControl"),
-            ("--webm-codec", "webmCodec"),
-            ("--opus-app", "opusApplication"),
-            ("--exr-compression", "exrCompression"),
-            ("--exr-depth", "exrBitDepth"),
-        ] {
-            if let Some(v) = args.opt(flag) {
-                p[key] = json!(v);
-            }
-        }
-        for (flag, key) in [("--video-quality", "quality"), ("--keyint", "keyframeInterval"), ("--audio-bitrate", "audioBitrate")] {
-            if let Some(v) = args.num(flag)? {
-                p[key] = json!(v);
-            }
-        }
+        let p = render_item_params(args, out)?;
         // Render exactly this item: unqueue whatever the project's queue already holds.
         for k in 0..s.project.render_queue.len() {
             let _ = s.execute("renderQueue.setRender", json!({"index": k + 1, "render": false}));
