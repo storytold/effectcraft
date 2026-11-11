@@ -245,6 +245,8 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Import Adobe After Effects Project", "Adobe After Effectsプロジェクトを読み込み"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "このプロジェクトの一部は正確に読み込めません（省略または変更されます）:"),
     ("Import Anyway", "このまま読み込み"),
+    ("{}: {} left out or changed", "{}：{} 件が省略または変更"),
+    ("… and {} more", "…ほか {} 件"),
     ("Casts Shadows", "シャドウを落とす"),
     ("Change Renderer…", "レンダラーを変更…"),
     (
@@ -1386,6 +1388,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Import Adobe After Effects Project", "导入 Adobe After Effects 项目"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此项目的某些部分无法准确导入（将被省略或更改）："),
     ("Import Anyway", "仍然导入"),
+    ("{}: {} left out or changed", "{}：{} 项被省略或更改"),
+    ("… and {} more", "…以及另外 {} 项"),
     ("Casts Shadows", "投射阴影"),
     ("Change Renderer…", "更改渲染器…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "修改快捷键会创建自定义预设；默认预设保持不变。"),
@@ -2505,6 +2509,8 @@ const SWEDISH: &[(&str, &str)] = &[
         "Vissa delar av projektet kan inte importeras exakt (utelämnas eller ändras):",
     ),
     ("Import Anyway", "Importera ändå"),
+    ("{}: {} left out or changed", "{}: {} utelämnas eller ändras"),
+    ("… and {} more", "… och {} till"),
     ("Casts Shadows", "Kastar skuggor"),
     ("Change Renderer…", "Byt renderare…"),
     (
@@ -3778,6 +3784,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Import Adobe After Effects Project", "匯入 Adobe After Effects 專案"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "此專案的部分內容無法準確匯入（將被省略或變更）："),
     ("Import Anyway", "仍要匯入"),
+    ("{}: {} left out or changed", "{}：{} 項被省略或變更"),
+    ("… and {} more", "…以及另外 {} 項"),
     ("Casts Shadows", "投射陰影"),
     ("Change Renderer…", "更改算圖引擎…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "修改快速鍵會創建自定義預設集；預設預設集保持不變。"),
@@ -4847,6 +4855,8 @@ const UKRAINIAN: &[(&str, &str)] = &[
         "Деякі частини цього проєкту неможливо імпортувати точно (їх пропущено або змінено):",
     ),
     ("Import Anyway", "Усе одно імпортувати"),
+    ("{}: {} left out or changed", "{}: {} пропущено або змінено"),
+    ("… and {} more", "… і ще {}"),
     ("Casts Shadows", "Відкидає тіні"),
     ("Change Renderer…", "Змінити рушій рендерингу…"),
     (
@@ -5428,6 +5438,8 @@ const PORTUGUESE: &[(&str, &str)] = &[
         "Algumas partes deste projeto não podem ser importadas exatamente (omitidas ou alteradas):",
     ),
     ("Import Anyway", "Importar mesmo assim"),
+    ("{}: {} left out or changed", "{}: {} omitidos ou alterados"),
+    ("… and {} more", "… e mais {}"),
     ("Casts Shadows", "Projeta sombras"),
     ("Change Renderer…", "Alterar renderizador…"),
     (
@@ -6201,6 +6213,8 @@ const POLISH: &[(&str, &str)] = &[
         "Niektórych części tego projektu nie można zaimportować dokładnie (zostaną pominięte lub zmienione):",
     ),
     ("Import Anyway", "Importuj mimo to"),
+    ("{}: {} left out or changed", "{}: {} pominięto lub zmieniono"),
+    ("… and {} more", "… i {} więcej"),
     ("Casts Shadows", "Rzuca cienie"),
     ("Change Renderer…", "Zmień renderer…"),
     (
@@ -6957,6 +6971,8 @@ const CZECH: &[(&str, &str)] = &[
         "Některé části tohoto projektu nelze importovat přesně (budou vynechány nebo změněny):",
     ),
     ("Import Anyway", "Přesto importovat"),
+    ("{}: {} left out or changed", "{}: {} vynecháno nebo změněno"),
+    ("… and {} more", "… a {} dalších"),
     ("Casts Shadows", "Vrhat stíny"),
     ("Change Renderer…", "Změnit vykreslovací modul…"),
     (
@@ -7532,6 +7548,8 @@ const SPANISH: &[(&str, &str)] = &[
         "Algunas partes de este proyecto no se pueden importar con exactitud (se omiten o cambian):",
     ),
     ("Import Anyway", "Importar de todos modos"),
+    ("{}: {} left out or changed", "{}: {} omitidos o cambiados"),
+    ("… and {} more", "… y {} más"),
     ("Casts Shadows", "Proyecta sombras"),
     ("Change Renderer…", "Cambiar motor de procesamiento…"),
     (
@@ -8098,6 +8116,8 @@ const GEORGIAN: &[(&str, &str)] = &[
         "ამ პროექტის ზოგიერთი ნაწილის ზუსტად იმპორტი შეუძლებელია (გამოტოვებული ან შეცვლილი):",
     ),
     ("Import Anyway", "მაინც იმპორტი"),
+    ("{}: {} left out or changed", "{}: {} გამოტოვებული ან შეცვლილი"),
+    ("… and {} more", "… და კიდევ {}"),
     ("Casts Shadows", "ჩრდილს აგდებს"),
     ("Change Renderer…", "რენდერერის შეცვლა…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "მალსახმობის შეცვლა ქმნის მორგებულ პრესეტს; ნაგულისხმევი უცვლელი რჩება."),
@@ -9070,6 +9090,8 @@ const FRENCH: &[(&str, &str)] = &[
         "Certaines parties de ce projet ne peuvent pas être importées à l’identique (omises ou modifiées) :",
     ),
     ("Import Anyway", "Importer quand même"),
+    ("{}: {} left out or changed", "{} : {} omis ou modifiés"),
+    ("… and {} more", "… et {} de plus"),
     ("Casts Shadows", "Projette des ombres"),
     ("Change Renderer…", "Changer de moteur de rendu…"),
     (

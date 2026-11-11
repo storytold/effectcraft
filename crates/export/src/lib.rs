@@ -122,6 +122,11 @@ pub struct JobOptions<'a> {
     /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
     /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
     pub gpu_frames: Option<usize>,
+    /// Reads the bytes of memory the system can hand out now (`None`: unknown), for Auto's CPU
+    /// frames in flight (#1615): read at most once per job, when a job renders on the CPU after
+    /// a GPU frame measured a frame's working memory. `None`: CPU frames are capped only by
+    /// `EFFECTCRAFT_CPU_INFLIGHT`.
+    pub free_memory: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
 }
 
 /// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,

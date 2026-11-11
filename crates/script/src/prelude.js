@@ -867,6 +867,12 @@ Property.prototype.property = function () { return null; };
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
     }
+    // A string parameter (a LUT or look file, a text field) takes the text, or a File's path (#3395).
+    // A hidden one (Mesh Warp's mesh) stays refused by the key setters too, as by setValue.
+    if (info.type === "string") {
+      if (info.hidden) throw __err("\"" + info.name + "\" can not be set");
+      return __str(v);
+    }
     if (info.type === "enum") return __num(v) - 1;
     if (info.type === "bool") return typeof v === "boolean" ? v : __num(v) !== 0;
     if (info.type === "color") {
@@ -1652,7 +1658,7 @@ CompItem.prototype.constructor = CompItem;
   P.saveFrameToPng = function (time, file) {
     var f = __str(file);
     if (!f) throw __err("saveFrameToPng: missing file");
-    __file("write", f, "");
+    __file("checkWrite", f);
     __call("comp.saveFrameAs", { comp: this.__id, path: f, time: __num(time, "time") });
   };
   P.openInEssentialGraphics = function () { __call("comp.openInEssentialGraphics", { comp: this.__id }); };
@@ -1662,8 +1668,8 @@ CompItem.prototype.constructor = CompItem;
     if (!/\.[A-Za-z0-9]+$/.test(f)) f += ".ectemplate";
     if (!overwrite && JSON.parse(__file("exists", f)) === true) return false;
     if (this.__controllers().length === 0) return false;
-    // The file gate applies to templates too.
-    __file("write", f, "");
+    // The file gate applies to templates too (checked without touching the file).
+    __file("checkWrite", f);
     __call("essential.exportTemplate", { comp: this.__id, path: f });
     return true;
   };

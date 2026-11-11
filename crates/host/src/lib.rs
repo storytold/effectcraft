@@ -65,6 +65,7 @@ impl Exporter for FileExporter {
                     caches: job.caches.map(|c| effectcraft_export::JobCaches { gpu: &c.gpu, cpu: &c.cpu }),
                     renderer: job.renderer,
                     gpu_frames: job.gpu_frames,
+                    free_memory: Some(&free_memory),
                 },
                 nested_switches: job.nested_switches,
             };
@@ -85,6 +86,11 @@ impl Exporter for FileExporter {
             }
         })
     }
+}
+
+/// The memory the system can hand out now, for an export's Auto CPU frames in flight (#1615).
+fn free_memory() -> Option<u64> {
+    effectcraft_engine::sysinfo::memory().map(|m| m.available)
 }
 
 /// A new session with media, import, expressions, scripting and export enabled.
