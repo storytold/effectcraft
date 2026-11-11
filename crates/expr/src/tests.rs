@@ -2095,6 +2095,7 @@ fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {
         let pixel = crate::sample::sample_image(ctx, cid, layer, [0.0, 0.0], [0.5, 0.5], post, 0.0).unwrap();
         assert!(pixel[0] > 0.99 && pixel[3] > 0.99, "postEffect={post}: {pixel:?}");
     }
+}
 
 /// Delimited data whose row objects would repeat a long header many times is refused.
 #[test]
