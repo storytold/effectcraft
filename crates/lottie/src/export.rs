@@ -145,16 +145,18 @@ fn hex(c: [f32; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
 }
 
-fn mime_of(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".webp") {
-        "image/webp"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
+/// The image type `bytes` hold, by their signature; `None` for anything else.
+pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
     } else {
-        "image/png"
+        None
     }
 }
 
@@ -286,7 +288,13 @@ impl Doc<'_> {
             self.ex.warn(format!("{}: cannot read image `{}` (layer exported as a null)", l.name, f.path));
             return None;
         };
-        let uri = format!("data:{};base64,{}", mime_of(&f.path), crate::base64::encode(&bytes));
+        // What a project calls a still is embedded only when it is one: the path can name any
+        // file (an imported animation's asset), and the export would carry its bytes verbatim.
+        let Some(mime) = image_mime(&bytes) else {
+            self.ex.warn(format!("{}: `{}` is not a PNG, JPEG, GIF or WebP image (layer exported as a null)", l.name, f.path));
+            return None;
+        };
+        let uri = format!("data:{mime};base64,{}", crate::base64::encode(&bytes));
         self.assets.push(json!({"id": id, "nm": it.name, "w": f.width, "h": f.height, "u": "", "p": uri, "e": 1}));
         self.done.insert(id.clone());
         Some(id)

@@ -39,5 +39,6 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # (tests render comps that read layers through effects; already a dependency of effectcraft-render)
 effectcraft-effects = { workspace = true }

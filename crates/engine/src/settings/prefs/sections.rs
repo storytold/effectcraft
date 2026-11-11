@@ -36,6 +36,9 @@ page!(General {
     viewer_wheel_scrubbing: bool = false,
     /// Create New Layers at Composition Start Time (off: at the current time).
     create_layers_at_comp_start: bool = true,
+    /// Fit New Layers to Work Area: new text, solid, shape, null and adjustment layers span the
+    /// work area instead of the whole composition (off, as in After Effects).
+    fit_new_layers_to_work_area: bool = false,
     switches_affect_nested_comps: bool = true,
     /// Default Spatial Interpolation to Linear.
     default_spatial_linear: bool = false,
