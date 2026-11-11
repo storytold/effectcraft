@@ -342,7 +342,8 @@ fn ffmpeg_oracle_decodes_ogg_opus() {
             }
         }
         let (enc, packets) = encode(&pcm, channels, rate);
-        let path = std::env::temp_dir().join(format!("effectcraft-opusenc-{}-{channels}.opus", std::process::id()));
+        let guard = tempfile::tempdir().unwrap();
+        let path = guard.path().join("out.opus");
         std::fs::write(&path, ogg_opus(&enc, &packets, len)).unwrap();
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
