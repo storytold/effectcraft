@@ -843,6 +843,48 @@ fn a_default_state_colour_record_holds_the_value() {
     assert_ne!(colour(&default_state), colour(&unchanged), "the recorded colour, not the default");
 }
 
+/// #3087: an expression on Orientation arrives with the stored value, as on any property; it was
+/// dropped together with the value and reported as "not decoded".
+#[test]
+fn an_orientation_expression_is_imported_with_its_value() {
+    let bytes = mutate(&mut |c| {
+        if !c.is_list(b"otst") {
+            return;
+        }
+        for child in c.children_mut() {
+            if child.is_list(b"tdbs") {
+                let Body::List { children, .. } = &mut child.body else { continue };
+                for k in children.iter_mut() {
+                    if k.is(b"tdsb") {
+                        set_data(k, 0, &1u32.to_be_bytes());
+                    } else if k.is(b"tdb4") {
+                        set_data(k, 120, &[1]);
+                    }
+                }
+                children.push(Chunk::data(*b"Utf8", b"[0, time * 90, 0]".to_vec()));
+            } else if child.is_list(b"otky") {
+                for k in child.children_mut() {
+                    let degrees: Vec<u8> = [10.0f64, 20.0, 30.0].iter().flat_map(|d| d.to_be_bytes()).collect();
+                    set_data(k, 0, &degrees);
+                }
+            }
+        }
+    });
+    let (p, r) = run(&bytes, true);
+    assert_eq!(losses(&r.unwrap(), LossCategory::TransformProperties), Vec::<String>::new());
+    let mut seen = 0;
+    for item in p.items.values() {
+        let ItemKind::Comp(c) = &item.kind else { continue };
+        for layer in &c.layers {
+            let Some(o) = layer.transform().and_then(|t| t.prop("orientation")).filter(|o| o.expr.is_some()) else { continue };
+            assert_eq!(o.value, effectcraft_keyframe::Value::Vec3([10.0, 20.0, 30.0]), "{}", layer.name);
+            assert_eq!(o.expr.as_ref().map(|e| (e.text.as_str(), e.enabled)), Some(("[0, time * 90, 0]", true)), "{}", layer.name);
+            seen += 1;
+        }
+    }
+    assert!(seen > 0);
+}
+
 /// `SYNTHETIC` with Levels' Channel and Clip to Output Black / White popups' item names (`pdnm`)
 /// rewritten to the French labels a French-language After Effects stores there, keeping the same
 /// item order so the index each popup is set to is unaffected.

@@ -9,6 +9,8 @@
 //!   premultiplied): the composite as `R`, `G`, `B`, `A` plus one `<layer name>.R/G/B/A` channel
 //!   set per layer (the layer-prefixed channel convention multi-layer EXR readers use).
 
+use std::collections::{HashMap, HashSet};
+
 use effectcraft_color::BlendMode;
 use effectcraft_project::{ItemId, LayerId, Project};
 use effectcraft_raster::Image;
@@ -141,17 +143,22 @@ pub fn layered_psd(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
 
 /// A unique EXR layer name (no dots: they separate the layer from the channel). Printable ASCII only:
 /// the `exr` crate panics on characters it cannot store in a channel name (#1702).
-fn exr_name(name: &str, used: &mut Vec<String>) -> String {
+/// `used` holds the names given so far, `next` the suffix each base's search resumes at: many
+/// layers of one name take a name each without retrying every suffix before theirs.
+fn exr_name(name: &str, used: &mut HashSet<String>, next: &mut HashMap<String, usize>) -> String {
     let base: String = name.chars().map(|c| if c == '.' || !(c == ' ' || c.is_ascii_graphic()) { '_' } else { c }).collect();
     let base = if base.trim().is_empty() { "Layer".to_string() } else { base };
-    let mut n = base.clone();
-    let mut k = 2;
-    while used.contains(&n) {
-        n = format!("{base} {k}");
-        k += 1;
+    if used.insert(base.clone()) {
+        return base;
     }
-    used.push(n.clone());
-    n
+    let k = next.entry(base.clone()).or_insert(2);
+    loop {
+        let n = format!("{base} {k}");
+        *k += 1;
+        if used.insert(n.clone()) {
+            return n;
+        }
+    }
 }
 
 /// The multi-layer EXR bytes of a frame and the channel names.
@@ -186,9 +193,9 @@ pub fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
         }
     };
     push("", &full);
-    let mut used = vec![];
+    let (mut used, mut next) = (HashSet::new(), HashMap::new());
     for l in &layers {
-        let n = exr_name(&l.name, &mut used);
+        let n = exr_name(&l.name, &mut used, &mut next);
         push(&n, &l.image);
     }
     let layer = Layer::new((w, h), LayerAttributes::default(), Encoding::SMALL_LOSSLESS, AnyChannels::sort(channels.into()));
@@ -247,4 +254,24 @@ pub fn specs() -> Vec<CommandSpec> {
             save_exr
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::exr_name;
+
+    #[test]
+    fn many_layers_of_one_name_take_a_name_each_in_order() {
+        let (mut used, mut next) = (HashSet::new(), HashMap::new());
+        // `A 3` is taken by a layer of its own before the repeats reach it.
+        let names: Vec<String> = ["A", "A", "A 3", "A", "A.b"].iter().map(|n| exr_name(n, &mut used, &mut next)).collect();
+        assert_eq!(names, ["A", "A 2", "A 3", "A 4", "A_b"]);
+        // 20 000 layers of one name: each found without retrying the suffixes before it.
+        for _ in 0..20_000 {
+            exr_name("Same", &mut used, &mut next);
+        }
+        assert_eq!(next["Same"], 20_001);
+    }
 }
