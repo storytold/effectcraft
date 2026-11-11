@@ -2446,7 +2446,10 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 const HEBREW: &[(&str, &str)] = &[
     ("Revert Project", "חזרה לגרסה השמורה"),
     ("Unsaved Changes", "שינויים שלא נשמרו"),
-    ("Revert “{}” to the last saved version? Changes made since then will be lost.", "להחזיר את \u{2068}“{}”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו."),
+    (
+        "Revert “{}” to the last saved version? Changes made since then will be lost.",
+        "להחזיר את \u{2068}“{}”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו.",
+    ),
     ("Save changes to “{}” before closing?", "לשמור את השינויים בקובץ \u{2068}“{}”\u{2069} לפני הסגירה?"),
     ("Your changes will be lost if you don't save them.", "השינויים יאבדו אם לא יישמרו."),
     ("  Revert  ", "  שחזור  "),
@@ -10453,23 +10456,14 @@ mod tests {
             assert_eq!(tr(english), hebrew, "unsaved prompt: {english}");
         }
         let name = "draft 01.ecproj";
+        assert_eq!(tr_args("Save changes to “{}” before closing?", &[&name]), "לשמור את השינויים בקובץ \u{2068}“draft 01.ecproj”\u{2069} לפני הסגירה?");
         assert_eq!(
-            tr_args("Save changes to “{}” before closing?", &[&name]),
-            "לשמור את השינויים בקובץ \u{2068}“draft 01.ecproj”\u{2069} לפני הסגירה?"
-        );
-        assert_eq!(
-            tr_args(
-                "Revert “{}” to the last saved version? Changes made since then will be lost.",
-                &[&name]
-            ),
+            tr_args("Revert “{}” to the last saved version? Changes made since then will be lost.", &[&name]),
             "להחזיר את \u{2068}“draft 01.ecproj”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו."
         );
         set_current("en");
         assert_eq!(tr("Don't Save"), "Don't Save");
-        assert_eq!(
-            tr_args("Save changes to “{}” before closing?", &[&name]),
-            "Save changes to “draft 01.ecproj” before closing?"
-        );
+        assert_eq!(tr_args("Save changes to “{}” before closing?", &[&name]), "Save changes to “draft 01.ecproj” before closing?");
     }
 
     /// Hebrew composition dialog labels must resolve without changing aspect/timecode values.
