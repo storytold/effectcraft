@@ -230,7 +230,15 @@ pub fn outline(paths: &[BezPath], style: &StrokeStyle, res_scale: f64) -> Option
     let half = style.width / 2.0;
     for path in paths {
         // Fine enough for the width profile: ½ device pixel, at most ~20 000 samples per path.
-        let rough = flatten(path, 0.1 / rs, f64::INFINITY);
+        // The first approximation's tolerance never drops below 10⁻⁷ of the path's extent, so a
+        // curve with huge coordinates cannot subdivide into billions of points before the step
+        // below applies (ordinary extents keep the ½-pixel tolerance).
+        let bb = kurbo::Shape::bounding_box(path);
+        let extent = bb.width().max(bb.height());
+        if !extent.is_finite() {
+            continue;
+        }
+        let rough = flatten(path, (0.1 / rs).max(extent * 1e-7), f64::INFINITY);
         for poly0 in rough {
             let len0 = poly0.len();
             if len0 <= 0.0 {
@@ -395,5 +403,22 @@ mod tests {
         assert!(m.data.iter().all(|v| *v <= 1.0001));
         let area: f32 = m.data.iter().sum();
         assert!(area > 240.0 * 6.0 * 0.8 && area < 240.0 * 6.0 * 1.05, "{area}");
+    }
+
+    /// A curve with enormous coordinates is approximated within a bounded number of points.
+    #[test]
+    fn huge_coordinates_do_not_explode_the_first_approximation() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((1e13, 0.0), (-1e13, 1e13), (1e13, 1e13));
+        let st = StrokeStyle {
+            width: 4.0,
+            taper: Some(Taper { percent: true, start_len: 50.0, end_len: 50.0, start_width: 0.0, end_width: 0.0, start_ease: 0.0, end_ease: 0.0 }),
+            ..Default::default()
+        };
+        let t = std::time::Instant::now();
+        let o = outline(&[p], &st, 1.0).unwrap();
+        assert!(o.elements().len() < 200_000, "{}", o.elements().len());
+        assert!(t.elapsed().as_secs() < 20);
     }
 }
