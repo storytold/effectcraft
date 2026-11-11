@@ -382,14 +382,14 @@ fn playback_that_cannot_keep_up_steps_down_a_resolution() {
 
     // An explicit Resolution is kept.
     let cid = h.state().session.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Full;
+    h.state_mut().session.project_mut().comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Full;
     play(&mut h);
     stall(&mut h, 2.5);
     assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
     invoke(&mut h, "playback.toggle", json!({}));
 
     // So is Auto with the pref off.
-    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Auto;
+    h.state_mut().session.project_mut().comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Auto;
     h.state_mut().session.prefs.previews.adaptive_playback = false;
     play(&mut h);
     stall(&mut h, 2.5);
