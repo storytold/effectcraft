@@ -18,7 +18,7 @@
 //!   replaced by one of the same size and time is read again.
 //! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
 //!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
-//!   header's format byte tells them apart: 2 and 3, both with their source files first), layer
+//!   header's format byte tells them apart: 5 and 6, both with their source files first), layer
 //!   buffers (format 4, their source files first) as `f32` RGBA with the bytes shuffled into
 //!   planes (exact, so cached and fresh renders are bit-identical), Roto Brush / Object Matte segmentations as
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
@@ -110,9 +110,11 @@ pub struct FrameF16 {
 /// #3184).
 const FORMAT_RGBA8: u8 = 0;
 /// Frame entries: their source files ([`EntryFiles`]), then 8-bit or half-float pixels. The
-/// formats before them (0: 8-bit, 1: half float, without files) read as misses and are deleted.
-const FORMAT_RGBA8_FILES: u8 = 2;
-const FORMAT_F16_FILES: u8 = 3;
+/// formats before them read as misses and are deleted: 0 (8-bit) and 1 (half float) without
+/// files, 2 and 3 without the LUT files effects name (#3493; a frame's key doesn't change when
+/// one does).
+const FORMAT_RGBA8_FILES: u8 = 5;
+const FORMAT_F16_FILES: u8 = 6;
 /// Layer entries: their source files ([`EntryFiles`]), then the buffer. The format before it
 /// (0, without files) reads as a miss and is deleted.
 const FORMAT_LAYER_FILES: u8 = 4;
@@ -1731,6 +1733,25 @@ mod tests {
         dc.put_frame_f16(4, w, h, &rgba[1..], &ReadFiles::default(), None, 0);
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3493: frame entries of the formats before LUT files were listed (2: 8-bit, 3: half float)
+    /// may be made of a LUT file that changed since, which their key doesn't show: misses, deleted.
+    #[test]
+    fn frame_entries_without_their_lut_files_are_not_used() {
+        let dir = tmpdir("pre-3493");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for (key, format, payload) in [(1, 2, encode_frame(2, 2, &[9; 16])), (2, 3, encode_frame_f16(1, 1, &[0x3c00; 4]))] {
+            let p = dc.path(Kind::Frame, key);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, seal_format(Kind::Frame, format, &with_files(&EntryFiles::default(), payload))).unwrap();
+        }
+        dc.rescan();
+        assert!(dc.contains(Kind::Frame, 1) && dc.contains(Kind::Frame, 2));
+        assert!(dc.get_frame(1, None).is_none());
+        assert!(dc.get_frame_f16(2, None).is_none());
+        assert!(!dc.contains(Kind::Frame, 1) && !dc.contains(Kind::Frame, 2), "deleted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

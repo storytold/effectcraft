@@ -37,7 +37,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use effectcraft_engine::project::{Comp, Heard, ItemId, ItemKind, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
-use effectcraft_engine::render::reads::{self, ReadFile, ReadFiles, ReadLog};
+use effectcraft_engine::render::reads::{ReadFile, ReadFiles, ReadLog};
 use effectcraft_engine::render::{AutoTicket, CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
 use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
@@ -318,7 +318,7 @@ impl Cache {
         if self.is_stale(files.as_deref()) {
             return;
         }
-        self.follows |= files.as_deref().is_some_and(|f| f.files().iter().any(|f| reads::is_followed(&f.path)));
+        self.follows |= followed::follows(files.as_deref());
         let (sz, gpu) = (img.bytes(), img.is_gpu());
         if let Some(old) = self.map.insert(k, Cached { img, files, since }) {
             self.forget(&old.img);

@@ -1,11 +1,12 @@
 //! Frames made of a followed file (a LUT file an effect names, #3493) are checked against it.
 //! Renders read such a file as it is now, and nothing in a frame's key says which version it was
-//! made of: a pass on the frame pool stamps the followed files the kept frames read and drops the
-//! frames made of another version. That version is remembered as stale, so a frame still
-//! rendering with it is not kept when it finishes ([`Cache::insert_with`]).
+//! made of: a pass on the frame pool stamps the followed files the kept frames read and drops the frames made of another version. The frame's own file list says which
+//! files are followed, as rendered or as read from the disk cache. A superseded version is
+//! remembered as stale, so a frame still rendering with it is not kept when it finishes
+//! ([`Cache::insert_with`]).
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::Ordering;
 #[cfg(not(target_arch = "wasm32"))]
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use effectcraft_engine::render::reads::ReadFiles;
 #[cfg(not(target_arch = "wasm32"))]
-use effectcraft_engine::render::reads::{self, FileStamp, ReadFile};
+use effectcraft_engine::render::reads::{FileStamp, ReadFile};
 
 use super::Cache;
 #[cfg(not(target_arch = "wasm32"))]
@@ -24,6 +25,11 @@ use super::{FrameKey, Frames};
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_STALE: usize = 1024;
 
+/// Whether `files` holds a followed file (checks are due while such a frame is kept).
+pub(super) fn follows(files: Option<&ReadFiles>) -> bool {
+    files.is_some_and(|f| f.files().iter().any(|f| f.followed))
+}
+
 impl Cache {
     /// Whether `files` holds a version of a followed file known to be superseded.
     pub(super) fn is_stale(&self, files: Option<&ReadFiles>) -> bool {
@@ -32,8 +38,8 @@ impl Cache {
 
     /// The followed files the kept frames read, each version once.
     #[cfg(not(target_arch = "wasm32"))]
-    fn followed_reads(&self, followed: &BTreeSet<Arc<str>>) -> HashSet<ReadFile> {
-        self.map.values().filter_map(|c| c.files.as_deref()).flat_map(|f| f.files()).filter(|f| followed.contains(&f.path)).cloned().collect()
+    fn followed_reads(&self) -> HashSet<ReadFile> {
+        self.map.values().filter_map(|c| c.files.as_deref()).flat_map(|f| f.files()).filter(|f| f.followed).cloned().collect()
     }
 
     /// Note `superseded` as stale, forget the versions that are current (`now`) again, and drop
@@ -59,9 +65,8 @@ impl Cache {
 /// file. The files are stamped without the cache's lock.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn check(cache: &Mutex<Cache>) -> (usize, bool) {
-    let followed = reads::followed();
     // (the stale versions' files too: one written back as it was is current again)
-    let (seen, stale) = cache.lock().map(|c| (c.followed_reads(&followed), c.stale.iter().map(|f| f.path.clone()).collect::<Vec<_>>())).unwrap_or_default();
+    let (seen, stale) = cache.lock().map(|c| (c.followed_reads(), c.stale.iter().map(|f| f.path.clone()).collect::<Vec<_>>())).unwrap_or_default();
     let now: HashMap<Arc<str>, FileStamp> =
         seen.iter().map(|f| &f.path).chain(&stale).map(|p| (p.clone(), FileStamp::native(p).unwrap_or(FileStamp::Missing))).collect();
     // (only versions a kept frame read before the stamps were taken: a frame made since may have
@@ -69,7 +74,7 @@ pub(super) fn check(cache: &Mutex<Cache>) -> (usize, bool) {
     let superseded: Vec<ReadFile> = seen.into_iter().filter(|f| now.get(&f.path) != Some(&f.stamp)).collect();
     let Ok(mut c) = cache.lock() else { return (0, false) };
     let dropped = c.drop_stale(&now, superseded);
-    c.follows = c.map.values().filter_map(|k| k.files.as_deref()).any(|f| f.files().iter().any(|f| followed.contains(&f.path)));
+    c.follows = c.map.values().any(|k| follows(k.files.as_deref()));
     (dropped, c.follows)
 }
 
@@ -112,6 +117,7 @@ mod tests {
 
     use effectcraft_engine::project::ItemId;
     use effectcraft_engine::render::RenderOpts;
+    use effectcraft_engine::render::disk_cache::DiskCache;
     use effectcraft_engine::time::Tick;
     use serde_json::json;
 
@@ -130,9 +136,9 @@ mod tests {
     }
 
     /// A grey solid through Apply Color LUT naming `lut`, as its value or (`expression`) as the
-    /// string an expression returns, in a session with expressions: the frame cache, the render
-    /// source, the comp and the key of its first frame.
-    fn graded(lut: &Path, expression: bool) -> (Frames, RenderSource, ItemId, FrameKey) {
+    /// string an expression returns, in a session with expressions, rendered with `disk`: the
+    /// frame cache, the render source, the comp and the key of its first frame.
+    fn graded(lut: &Path, expression: bool, disk: Option<Arc<DiskCache>>) -> (Frames, RenderSource, ItemId, FrameKey) {
         let mut s = effectcraft_host::session();
         let cid = ItemId(
             s.execute_checked("comp.new", json!({"name": "C", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap()["comp"].as_u64().unwrap(),
@@ -153,7 +159,7 @@ mod tests {
             layer_cache: Arc::default(),
             gpu: None,
             gpu_display: false,
-            disk: None,
+            disk,
         };
         let f = Frames::default();
         let key = FrameKey { revision: s.revision, content: f.content_of(&s.project, s.revision, cid), comp: cid.0, frame: 0, scale: 1000, view: 0, opts: 0 };
@@ -183,7 +189,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let lut = dir.path().join("grade.cube");
             write_lut(&lut, BLACK, 1_000);
-            let (f, src, cid, key) = graded(&lut, expression);
+            let (f, src, cid, key) = graded(&lut, expression, None);
             assert_eq!(red(&f, &src, cid, key), 0, "expression: {expression}");
             assert!(f.follows_files(), "checks are due once such a frame is kept, before any check");
             let late = f.cache.lock().unwrap().map.get(&key).map(|c| (c.img.clone(), c.files.clone())).unwrap();
@@ -205,7 +211,7 @@ mod tests {
     fn a_created_or_restored_lut_file_renders_again() {
         let dir = tempfile::tempdir().unwrap();
         let lut = dir.path().join("later.cube");
-        let (f, src, cid, key) = graded(&lut, false);
+        let (f, src, cid, key) = graded(&lut, false, None);
         assert_eq!(red(&f, &src, cid, key), 128, "no file: the layer as it is");
         write_lut(&lut, BLACK, 1_000);
         assert_eq!(check(&f.cache), (1, false), "a file created");
@@ -217,5 +223,56 @@ mod tests {
         assert!(!f.follows_files(), "no checks are due");
         assert_eq!(red(&f, &src, cid, key), 0, "the version written back is current again");
         assert_eq!(check(&f.cache), (0, true));
+    }
+
+    /// #3493, through the frame pool as the app runs it: a kept frame renders again once the LUT
+    /// file it was made of changes.
+    #[test]
+    fn a_kept_frame_renders_again_once_its_lut_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lut = dir.path().join("pool.cube");
+        write_lut(&lut, BLACK, 1_000);
+        let (f, src, cid, key) = graded(&lut, false, None);
+        assert_eq!(red(&f, &src, cid, key), 0);
+        write_lut(&lut, WHITE, 2_000);
+        for _ in 0..2000 {
+            f.check_followed_files();
+            if f.get(&key).is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(red(&f, &src, cid, key), 255);
+    }
+
+    /// A frame read from the disk cache by a new frame cache (the next session: nothing in this
+    /// one rendered it) is checked against the LUT file it was made of like a rendered one.
+    #[test]
+    fn a_frame_from_the_disk_cache_renders_again_once_its_lut_file_changes() {
+        for expression in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let lut = dir.path().join("disk.cube");
+            write_lut(&lut, BLACK, 1_000);
+            let disk = DiskCache::open(dir.path().join("cache"), 1 << 30).unwrap();
+            let (first, src, cid, key) = graded(&lut, expression, Some(disk.clone()));
+            assert_eq!(red(&first, &src, cid, key), 0);
+            for _ in 0..400 {
+                disk.flush();
+                if disk.stats().entries >= 1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(disk.stats().entries, 1, "stored (expression: {expression})");
+            let again = Frames::default();
+            let key = FrameKey { content: again.content_of(&src.project, key.revision, cid), ..key };
+            let hits = disk.stats().hits;
+            assert_eq!(red(&again, &src, cid, key), 0);
+            assert_eq!(disk.stats().hits, hits + 1, "read from the disk cache, not rendered (expression: {expression})");
+            assert!(again.follows_files(), "expression: {expression}");
+            write_lut(&lut, WHITE, 2_000);
+            assert_eq!(check(&again.cache), (1, false), "expression: {expression}");
+            assert_eq!(red(&again, &src, cid, key), 255, "expression: {expression}");
+        }
     }
 }

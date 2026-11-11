@@ -926,7 +926,7 @@ fn reads_comp_scene(layer: &Layer) -> bool {
 /// The LUT files effect `g` of `layer` names ([`effectcraft_effects::lut_params`]), each as it is
 /// now (one `metadata` call): in the keys of what the effect makes and with the files a render
 /// reads, so an edited, created or deleted LUT file renders again (#3493). Each is
-/// [followed](crate::reads::followed), so frames kept elsewhere can be checked against it.
+/// [followed](ReadFile::followed), so frames kept elsewhere are checked against it.
 pub(crate) fn lut_files<'c>(ctx: &'c EvalCtx, layer: &'c Layer, g: &'c PropGroup) -> impl Iterator<Item = ReadFile> + 'c {
     let effect = match &g.kind {
         effectcraft_project::GroupKind::Effect { effect } => effect.as_str(),
@@ -935,8 +935,7 @@ pub(crate) fn lut_files<'c>(ctx: &'c EvalCtx, layer: &'c Layer, g: &'c PropGroup
     effectcraft_effects::lut_params(effect).iter().filter_map(move |path| {
         let Value::Str(src) = ctx.value(layer, g.prop(path)?) else { return None };
         let file = effectcraft_effects::lut_file(&src)?;
-        crate::reads::follow(file);
-        Some(ReadFile::new(file, FileStamp::native(file).unwrap_or(FileStamp::Missing)))
+        Some(ReadFile::followed(file, FileStamp::native(file).unwrap_or(FileStamp::Missing)))
     })
 }
 

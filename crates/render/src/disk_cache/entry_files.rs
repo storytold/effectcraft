@@ -6,7 +6,8 @@
 //! `u32 count`, then per file `u32 path length`, the path (UTF-8), a tag byte and its fields:
 //! `0` a file on disk (`u64 size`, `u8 has time`, `i128 time`: nanoseconds since the Unix epoch,
 //! negative before it), `1` bytes from the browser's file table (`u64 size`, `u64 content
-//! hash`), `2` a file that could not be read.
+//! hash`), `2` a file that could not be read. The tag's high bit ([`FOLLOWED`]) marks a
+//! [followed](ReadFile::followed) file.
 
 use std::sync::Arc;
 
@@ -15,6 +16,10 @@ use crate::reads::{FileStamp, MAX_READ_FILES, ReadFile, ReadFiles};
 
 /// Longest path an entry stores (bytes): a longer one is not a path this app opened.
 const MAX_PATH_BYTES: usize = 1 << 16;
+
+/// The tag bit of a [followed](ReadFile::followed) file: a frame read from disk is checked
+/// against it in memory as the render that made it was (#3493).
+const FOLLOWED: u8 = 0x80;
 
 /// A file's identity as a frame entry keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +38,8 @@ pub enum EntryStamp {
 pub struct EntryFile {
     pub path: Arc<str>,
     pub stamp: EntryStamp,
+    /// The file is [followed](ReadFile::followed).
+    pub followed: bool,
 }
 
 /// Every file a frame entry was made of.
@@ -58,7 +65,7 @@ impl EntryFiles {
                 }
                 FileStamp::Missing => EntryStamp::Missing,
             };
-            out.push(EntryFile { path: f.path.clone(), stamp });
+            out.push(EntryFile { path: f.path.clone(), stamp, followed: f.followed });
         }
         Some(EntryFiles(out))
     }
@@ -88,7 +95,7 @@ impl EntryFiles {
                     EntryStamp::Virtual { .. } => FileStamp::Virtual,
                     EntryStamp::Missing => FileStamp::Missing,
                 };
-                ReadFile::new(f.path.clone(), stamp)
+                ReadFile { path: f.path.clone(), stamp, followed: f.followed }
             })
             .collect()
     }
@@ -105,19 +112,20 @@ impl EntryFiles {
         for f in &self.0 {
             out.extend_from_slice(&(f.path.len() as u32).to_le_bytes());
             out.extend_from_slice(f.path.as_bytes());
+            let followed = if f.followed { FOLLOWED } else { 0 };
             match f.stamp {
                 EntryStamp::Native { len, modified } => {
-                    out.push(0);
+                    out.push(followed);
                     out.extend_from_slice(&len.to_le_bytes());
                     out.push(u8::from(modified.is_some()));
                     out.extend_from_slice(&modified.unwrap_or(0).to_le_bytes());
                 }
                 EntryStamp::Virtual { len, hash } => {
-                    out.push(1);
+                    out.push(followed | 1);
                     out.extend_from_slice(&len.to_le_bytes());
                     out.extend_from_slice(&hash.to_le_bytes());
                 }
-                EntryStamp::Missing => out.push(2),
+                EntryStamp::Missing => out.push(followed | 2),
             }
         }
     }
@@ -136,7 +144,8 @@ impl EntryFiles {
                 return None;
             }
             let path: Arc<str> = std::str::from_utf8(r.take(len)?).ok()?.into();
-            let stamp = match r.u8()? {
+            let tag = r.u8()?;
+            let stamp = match tag & !FOLLOWED {
                 0 => {
                     let len = r.u64()?;
                     let has = r.u8()?;
@@ -151,7 +160,7 @@ impl EntryFiles {
                 2 => EntryStamp::Missing,
                 _ => return None,
             };
-            out.push(EntryFile { path, stamp });
+            out.push(EntryFile { path, stamp, followed: tag & FOLLOWED != 0 });
         }
         Some((EntryFiles(out), r.0))
     }
@@ -210,6 +219,9 @@ mod tests {
             ReadFile::new("/e.png", FileStamp::Native { len: 6, modified: Some(i128::from(u64::MAX) + 1) }),
             ReadFile::new("/c.png", FileStamp::Missing),
             ReadFile::new("/v.mov", FileStamp::Virtual),
+            // Followed (#3493): a file on disk, and one that could not be read.
+            ReadFile::followed("/grade.cube", FileStamp::Native { len: 7, modified: Some(3) }),
+            ReadFile::followed("/look.cube", FileStamp::Missing),
         ]
         .into_iter()
         .collect()
@@ -219,13 +231,13 @@ mod tests {
     fn lists_round_trip_and_damage_is_caught() {
         let id = |p: &str| (p == "/v.mov").then_some((8, 77));
         let list = EntryFiles::of(&files(), Some(&id)).unwrap();
-        assert_eq!(list.files()[5].stamp, EntryStamp::Virtual { len: 8, hash: 77 });
+        assert_eq!(list.files().iter().find(|f| &*f.path == "/v.mov").map(|f| f.stamp), Some(EntryStamp::Virtual { len: 8, hash: 77 }));
         let mut bytes = vec![];
         list.encode(&mut bytes);
         bytes.extend_from_slice(b"rest");
         let (back, rest) = EntryFiles::decode(&bytes).unwrap();
         assert_eq!((back, rest), (list.clone(), &b"rest"[..]));
-        assert_eq!(list.to_read_files(), files());
+        assert_eq!(list.to_read_files(), files(), "followed files included");
         // Every truncation is caught (never a panic, never a shorter list).
         let mut plain = vec![];
         list.encode(&mut plain);
