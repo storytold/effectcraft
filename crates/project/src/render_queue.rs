@@ -485,6 +485,8 @@ impl RenderSettings {
             TimeSpan::Custom { start, end } => format!("Custom ({:.3}s – {:.3}s)", start.seconds(), end.seconds()),
         };
         let rate = match (self.frame_rate, comp) {
+            // A saved override outside the supported rates renders at the clamped one: say so.
+            (Some(r), Some(c)) if self.rate(c) != r => format!("{:.3} fps (renders at {:.3})", r.as_f64(), self.rate(c).as_f64()),
             (Some(r), _) => format!("{:.3} fps", r.as_f64()),
             (None, Some(c)) => format!("Use comp's frame rate ({:.3})", c.frame_rate.as_f64()),
             (None, None) => "Use comp's frame rate".into(),
@@ -1906,6 +1908,9 @@ mod tests {
         assert!(huge.frame_count(&c) <= 2001, "{}", huge.frame_count(&c));
         assert_eq!(s(FrameRate::new(0, 1)).rate(&c), c.frame_rate);
         assert_eq!(s(FrameRate::new(60, 1)).rate(&c), FrameRate::new(60, 1));
+        let shown = |r| s(r).describe(Some(&c)).into_iter().find(|l| l.0 == "Frame Rate").map(|l| l.1).unwrap_or_default();
+        assert!(shown(FrameRate::new(1_000_000_000_000, 1)).contains("renders at 1000.000"), "{}", shown(FrameRate::new(1_000_000_000_000, 1)));
+        assert_eq!(shown(FrameRate::new(60, 1)), "60.000 fps");
     }
 
     #[test]
