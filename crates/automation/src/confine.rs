@@ -231,7 +231,9 @@ impl Confinement {
             Err(e) => return Err(Error::BadArgs(format!("cannot render to `{output}`: its numbered folders in `{}` can't be checked: {e}", scan.display()))),
         };
         let mut seen = 0;
-        for e in entries.flatten() {
+        for e in entries {
+            let e =
+                e.map_err(|e| Error::BadArgs(format!("cannot render to `{output}`: its numbered folders in `{}` can't be checked: {e}", scan.display())))?;
             let name = e.file_name().to_string_lossy().into_owned();
             let Some(digits) = name.strip_prefix(prefix).and_then(|n| n.strip_suffix(dir_tail)) else { continue };
             if !digits.strip_prefix('-').unwrap_or(digits).bytes().all(|b| b.is_ascii_digit()) || digits.is_empty() {
@@ -254,9 +256,16 @@ impl Confinement {
 
     /// `dir` holds no symbolic link that leads outside the write roots.
     fn check_no_outward_links(&self, dir: &Path, output: &str) -> Result<()> {
-        let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
-        for e in entries.flatten() {
-            if !e.file_type().is_ok_and(|t| t.is_symlink()) {
+        // A folder that does not exist yet holds no link; one that can't be listed might.
+        let cannot = |e: std::io::Error| Error::BadArgs(format!("cannot render to `{output}`: its folder `{}` can't be checked for links: {e}", dir.display()));
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(cannot(e)),
+        };
+        for e in entries {
+            let e = e.map_err(cannot)?;
+            if !e.file_type().map_err(cannot)?.is_symlink() {
                 continue;
             }
             let link = e.path();
@@ -893,6 +902,28 @@ mod tests {
         assert!(c.check_command("render.preRender", &add).is_err());
         let e = c.check_lookup(&Lookup::RenderOutputs, &queue).unwrap_err().to_string();
         assert!(e.contains("frames_00001.png"), "{e}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_render_folder_that_cannot_be_listed_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("ec-confine-seq-nolist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let write = base.join("out");
+        std::fs::create_dir_all(&write).unwrap();
+        let c = Confinement::new(&[], std::slice::from_ref(&write)).unwrap();
+        let template = write.join("frames_[#####].png").to_string_lossy().into_owned();
+        let add = serde_json::json!({"output": template});
+        // Writable and searchable but not listable: a link in it could not be seen.
+        std::fs::set_permissions(&write, std::fs::Permissions::from_mode(0o300)).unwrap();
+        // A user who can list it anyway (root) sees no difference to test.
+        if std::fs::read_dir(&write).is_err() {
+            assert!(c.check_command("renderQueue.add", &add).is_err());
+        }
+        std::fs::set_permissions(&write, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
 
