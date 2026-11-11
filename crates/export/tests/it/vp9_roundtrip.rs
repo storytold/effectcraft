@@ -1,7 +1,7 @@
-//! The VP9 intra encoder (`effectcraft-vp9enc`) round-trips through FilmCraft's VP9 decoder (and
+//! The VP9 intra encoder (`craft_video::vp9`) round-trips through FilmCraft's VP9 decoder (and
 //! ffmpeg as an external oracle when installed): sizes, lossless exactness, PSNR.
 
-use effectcraft_vp9enc::{EncoderConfig, Vp9Encoder};
+use craft_video::vp9::{EncoderConfig, Vp9Encoder};
 use filmcraft_vp9::{Decoder, Plane};
 
 fn plane_u8(p: &Plane) -> Vec<u8> {

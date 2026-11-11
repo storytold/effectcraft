@@ -1090,6 +1090,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-audio"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3#851e484f42e582245ef1a9401e7caf0b843b8cc3"
+dependencies = [
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3)",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-docpath"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=e11f9d9aebea5f6b8e74643c1ea1ed172ba5f545#e11f9d9aebea5f6b8e74643c1ea1ed172ba5f545"
@@ -1130,6 +1139,14 @@ dependencies = [
  "unicode-bidi",
  "windows-registry",
  "writeable",
+]
+
+[[package]]
+name = "craft-media"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3#851e484f42e582245ef1a9401e7caf0b843b8cc3"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1205,6 +1222,16 @@ dependencies = [
  "winreg",
  "winsafe",
  "zip 9.1.3",
+]
+
+[[package]]
+name = "craft-video"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3#851e484f42e582245ef1a9401e7caf0b843b8cc3"
+dependencies = [
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3)",
+ "rayon",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1475,13 +1502,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "effectcraft-av1enc"
-version = "0.24.0"
-dependencies = [
- "filmcraft-av1",
-]
-
-[[package]]
 name = "effectcraft-cli"
 version = "0.24.0"
 dependencies = [
@@ -1569,10 +1589,11 @@ dependencies = [
 name = "effectcraft-export"
 version = "0.24.0"
 dependencies = [
- "effectcraft-av1enc",
+ "craft-audio",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3)",
+ "craft-video",
  "effectcraft-color",
  "effectcraft-effects",
- "effectcraft-hevcenc",
  "effectcraft-keyframe",
  "effectcraft-media",
  "effectcraft-opusenc",
@@ -1580,13 +1601,9 @@ dependencies = [
  "effectcraft-raster",
  "effectcraft-render",
  "effectcraft-time",
- "effectcraft-vp9enc",
  "exr",
- "filmcraft-aac",
- "filmcraft-h264enc",
- "filmcraft-isobmff",
- "filmcraft-opus",
- "filmcraft-prores",
+ "filmcraft-av1",
+ "filmcraft-hevc",
  "filmcraft-vp9",
  "gif",
  "image",
@@ -1653,13 +1670,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "effectcraft-hevcenc"
-version = "0.24.0"
-dependencies = [
- "filmcraft-hevc",
 ]
 
 [[package]]
@@ -1742,7 +1752,9 @@ dependencies = [
 name = "effectcraft-media"
 version = "0.24.0"
 dependencies = [
+ "craft-audio",
  "craft-docpath",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=851e484f42e582245ef1a9401e7caf0b843b8cc3)",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-model",
@@ -1754,12 +1766,9 @@ dependencies = [
  "effectcraft-svg",
  "effectcraft-time",
  "exr",
- "filmcraft-aac",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-frame",
- "filmcraft-isobmff",
- "filmcraft-matroska",
  "filmcraft-media",
  "filmcraft-mpegts",
  "filmcraft-time",
@@ -1788,7 +1797,7 @@ dependencies = [
 name = "effectcraft-opusenc"
 version = "0.24.0"
 dependencies = [
- "filmcraft-opus",
+ "craft-audio",
 ]
 
 [[package]]
@@ -2011,10 +2020,6 @@ dependencies = [
  "toml",
  "web-time",
 ]
-
-[[package]]
-name = "effectcraft-vp9enc"
-version = "0.24.0"
 
 [[package]]
 name = "effectcraft-web"
@@ -2483,7 +2488,7 @@ name = "filmcraft-bitstream"
 version = "0.12.0"
 source = "git+https://github.com/storytold/filmcraft?rev=d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5#d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5"
 dependencies = [
- "craft-media",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=f0ad6c1e1d297908915f4be315b0fcfc9be7b5d4)",
 ]
 
 [[package]]
@@ -2585,16 +2590,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "filmcraft-h264enc"
-version = "0.12.0"
-source = "git+https://github.com/storytold/filmcraft?rev=d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5#d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5"
-dependencies = [
- "filmcraft-bitstream",
- "rayon",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "filmcraft-hevc"
 version = "0.12.0"
 source = "git+https://github.com/storytold/filmcraft?rev=d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5#d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5"
@@ -2626,7 +2621,7 @@ name = "filmcraft-isobmff"
 version = "0.12.0"
 source = "git+https://github.com/storytold/filmcraft?rev=d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5#d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5"
 dependencies = [
- "craft-media",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=f0ad6c1e1d297908915f4be315b0fcfc9be7b5d4)",
 ]
 
 [[package]]
@@ -2634,7 +2629,7 @@ name = "filmcraft-matroska"
 version = "0.12.0"
 source = "git+https://github.com/storytold/filmcraft?rev=d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5#d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5"
 dependencies = [
- "craft-media",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=f0ad6c1e1d297908915f4be315b0fcfc9be7b5d4)",
 ]
 
 [[package]]
