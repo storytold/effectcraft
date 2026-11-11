@@ -7,11 +7,33 @@ use super::{Arc, HashMap, Lut, Mutex, OnceLock, parse_cube};
 #[derive(Clone, Debug)]
 pub enum FileXform {
     /// A lattice/1D LUT with an optional per-channel piecewise-linear shaper (cineSpace pre-LUT).
-    Lut { lut: Lut, shaper: Option<[Vec<(f32, f32)>; 3]> },
+    Lut { lut: Lut, shaper: Option<[Vec<(f32, f32)>; 3]>, inv: OnceLock<LutInverse> },
     /// CDL corrections by id (in file order).
     Cdl(Vec<(String, Cdl)>),
     /// A matrix with offset (Sony Imageworks `.spimtx`), as a MatrixTransform's.
     Matrix { m: [f64; 16], offset: [f64; 4] },
+}
+
+/// The tables inverse evaluation looks values up in, built on first use (not per pixel).
+#[derive(Clone, Debug)]
+pub struct LutInverse {
+    /// A 1D LUT's per-channel (value, input) curves.
+    curves: Option<[Vec<(f32, f32)>; 3]>,
+    /// The shaper's per-channel (output, input) curves.
+    shaper: Option<[Vec<(f32, f32)>; 3]>,
+}
+
+fn flipped(curve: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    curve.iter().map(|&(a, b)| (b, a)).collect()
+}
+
+impl LutInverse {
+    fn of(lut: &Lut, shaper: Option<&[Vec<(f32, f32)>; 3]>) -> Self {
+        let curves = (lut.n3 == 0 && lut.n1 > 1).then(|| {
+            [0, 1, 2].map(|i| (0..lut.n1).map(|k| (lut.d1[k][i], lut.dmin[i] + (lut.dmax[i] - lut.dmin[i]) * k as f32 / (lut.n1 - 1) as f32)).collect())
+        });
+        Self { curves, shaper: shaper.map(|s| [flipped(&s[0]), flipped(&s[1]), flipped(&s[2])]) }
+    }
 }
 
 /// Parse a Sony Imageworks `.spimtx` matrix: three rows of four numbers, three matrix columns
@@ -225,32 +247,13 @@ pub fn parse_csp(text: &str) -> Option<(Lut, [Vec<(f32, f32)>; 3])> {
 }
 
 fn shape(curve: &[(f32, f32)], x: f32) -> f32 {
-    shape_by(curve.len(), |k| curve[k], x)
-}
-
-/// Piecewise-linear lookup of `x` in the monotone table `at(0..n)` of `(x, y)` points.
-fn shape_by(n: usize, at: impl Fn(usize) -> (f32, f32), x: f32) -> f32 {
-    if n < 2 {
+    if curve.len() < 2 {
         return x;
     }
-    // partition_point over the indices, so no per-call copy of the table is needed.
-    let (mut lo, mut hi) = (0, n);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if at(mid).0 < x {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    let i = lo.clamp(1, n - 1);
-    let (a, b) = (at(i - 1), at(i));
+    let i = curve.partition_point(|p| p.0 < x).clamp(1, curve.len() - 1);
+    let (a, b) = (curve[i - 1], curve[i]);
     let t = ((x - a.0) / (b.0 - a.0).max(1e-12)).clamp(0.0, 1.0);
     a.1 + (b.1 - a.1) * t
-}
-
-fn shape_inv(curve: &[(f32, f32)], y: f32) -> f32 {
-    shape_by(curve.len(), |k| (curve[k].1, curve[k].0), y)
 }
 
 /// Parse transform text by its format (detected from `ext` or the content).
@@ -261,21 +264,21 @@ pub fn parse_file(text: &str, ext: &str) -> Option<FileXform> {
         return (!v.is_empty()).then_some(FileXform::Cdl(v));
     }
     if ext == "csp" || text.trim_start().starts_with("CSPLUTV100") {
-        return parse_csp(text).map(|(lut, s)| FileXform::Lut { lut, shaper: Some(s) });
+        return parse_csp(text).map(|(lut, s)| FileXform::Lut { lut, shaper: Some(s), inv: OnceLock::new() });
     }
     if ext == "spimtx" {
         return parse_spimtx(text);
     }
     if ext == "spi1d" || text.trim_start().starts_with("Version") {
-        return parse_spi1d(text).map(|lut| FileXform::Lut { lut, shaper: None });
+        return parse_spi1d(text).map(|lut| FileXform::Lut { lut, shaper: None, inv: OnceLock::new() });
     }
     if ext == "spi3d" || text.trim_start().starts_with("SPILUT") {
-        return parse_spi3d(text).map(|lut| FileXform::Lut { lut, shaper: None });
+        return parse_spi3d(text).map(|lut| FileXform::Lut { lut, shaper: None, inv: OnceLock::new() });
     }
     if ext == "cube" || text.contains("LUT_3D_SIZE") || text.contains("LUT_1D_SIZE") {
-        return parse_cube(text).map(|lut| FileXform::Lut { lut, shaper: None });
+        return parse_cube(text).map(|lut| FileXform::Lut { lut, shaper: None, inv: OnceLock::new() });
     }
-    parse_3dl(text).map(|lut| FileXform::Lut { lut, shaper: None })
+    parse_3dl(text).map(|lut| FileXform::Lut { lut, shaper: None, inv: OnceLock::new() })
 }
 
 type FileCache = Mutex<HashMap<String, Option<Arc<FileXform>>>>;
@@ -317,7 +320,7 @@ impl FileXform {
                 o.map(|v| v as f32)
             }
             FileXform::Matrix { m, offset } => crate::ocio_config::matrix_apply(m, offset, c.map(|v| v as f64), inverse).map(|v| v as f32),
-            FileXform::Lut { lut, shaper } => {
+            FileXform::Lut { lut, shaper, inv } => {
                 let fwd = |c: [f32; 3]| {
                     let c = match shaper {
                         Some(s) => [shape(&s[0], c[0]), shape(&s[1], c[1]), shape(&s[2], c[2])],
@@ -330,15 +333,13 @@ impl FileXform {
                 }
                 if lut.n3 == 0 {
                     // 1D: invert each channel exactly through the (monotone) tables.
+                    let inv = inv.get_or_init(|| LutInverse::of(lut, shaper.as_ref()));
                     let mut x = c;
-                    if lut.n1 > 1 {
-                        x = [0, 1, 2].map(|i| {
-                            let at = |k: usize| (lut.d1[k][i], lut.dmin[i] + (lut.dmax[i] - lut.dmin[i]) * k as f32 / (lut.n1 - 1) as f32);
-                            shape_by(lut.n1, at, c[i])
-                        });
+                    if let Some(curves) = &inv.curves {
+                        x = [0, 1, 2].map(|i| shape(&curves[i], c[i]));
                     }
-                    if let Some(s) = shaper {
-                        x = [shape_inv(&s[0], x[0]), shape_inv(&s[1], x[1]), shape_inv(&s[2], x[2])];
+                    if let Some(s) = &inv.shaper {
+                        x = [shape(&s[0], x[0]), shape(&s[1], x[1]), shape(&s[2], x[2])];
                     }
                     return x;
                 }

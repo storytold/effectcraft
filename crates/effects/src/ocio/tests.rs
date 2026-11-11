@@ -124,6 +124,15 @@ fn spi1d_inverse_does_not_copy_the_table_per_pixel() {
     }
 }
 
+/// A non-monotone 1D table (accepted for forward use) inverts as it always did: the lookup is the
+/// slice's own `partition_point`, on tables built once.
+#[test]
+fn spi1d_inverse_of_a_nonmonotone_table_is_unchanged() {
+    let x = parse_file("Version 1\nFrom 0 1\nLength 5\nComponents 1\n{\n0\n0\n0\n1\n0\n}\n", "spi1d").unwrap();
+    let o = x.apply([0.5, 0.5, 0.5], 1, true, "");
+    assert!((o[0] - 0.625).abs() < 1e-6, "{o:?}");
+}
+
 /// Sony Imageworks `.spi1d`, `.spi3d` and `.spimtx` (Blender's configs use them, #410), and
 /// malformed ones rejected without panicking.
 #[test]
