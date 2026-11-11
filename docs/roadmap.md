@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: milestones moved from ROADMAP.md, current focus and next steps with Opus 5.5 estimates) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-11 · **Change:** minor (the `.aep` entries say the importer and exporter exist; hours not re-estimated; earlier: major, new file: milestones moved from ROADMAP.md, current focus and next steps with Opus 5.5 estimates) · **Target:** Adobe After Effects 2026
 
 Forward-looking detail behind the [ROADMAP](../ROADMAP.md). The work list itself, one gap at a
 time, is [gaps.md](gaps.md); the numbers are in [target-app-parity.md](target-app-parity.md).
@@ -16,7 +16,7 @@ In this order (gap numbers from [gaps.md](gaps.md)):
    case for every P0 feature, then P1. 60–100 h; needs After Effects running on the owner's Mac.
 3. **Real-user reliability** (gaps 5, 6, 8, 9, 11, G2): the open Linux and Windows interaction,
    mask, effect and text bugs, each with a scripted test. 60–120 h, parallel.
-4. **Owner decision on `.aep`** (gap 1, G4): then the importer. 80–160 h after the decision.
+4. **`.aep` coverage and the owner decision** (gap 1, G4): the importer and exporter exist; the decision on clean-room scope (#190) is open. Not re-estimated (was 80–160 h).
 5. **Performance** (gap 5, G5): benchmarks at 1080p and 4K; real-time cached playback. 40–70 h.
 
 ## Alpha gate
@@ -70,7 +70,7 @@ against After Effects in [gaps.md](gaps.md), not as milestones.
 | Crash fixes and a PR CI gate | 3, 4 | 15–30 | yes | GPUs for #591 / #613 |
 | G1 fidelity harness and P0/P1 corpus | 2 | 60–100 | after the harness | After Effects runs on the owner's Mac |
 | Open bug backlog (Linux, Windows, masks, effects, text, 3D) | 5, 6, 8, 9, 11, 12, 24 | 100–190 | yes | Linux / Windows testers |
-| `.aep` / `.aepx` import | 1 | 80–160 | partly | Owner decision on clean-room scope |
+| `.aep` / `.aepx` coverage and File ▸ Open | 1 | not re-estimated (was 80–160) | partly | Owner decision on clean-room scope (#190) |
 | Performance benchmarks and real-time preview | 5, 15 | 50–100 | partly | — |
 | Localization depth | 16 | 60–110 | yes | Native-speaker review |
 | Preset library, 26.x features, Object Matte | 7, 14, 21 | 50–95 | yes | — |

@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-05 · **Change:** minor (ProRes alpha final-run conformance; previously: features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-11 · **Change:** minor (the stage text and work list say `.aep` / `.aepx` import and `.aep` export exist in `crates/aep`; the percentages and hours are not re-estimated; previously: ProRes alpha final-run conformance; previously: features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -35,10 +35,9 @@ Hours are one Opus 5.5 agent working sequentially, calibrated on this repository
 
 **Alpha**, because all six core workflows of the [alpha gate](docs/roadmap.md#alpha-gate)
 (set up, animate, text and shapes, composite, preview, save and deliver) work end to end on macOS
-and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) can't be opened, which
-alone rules out beta; fidelity against After Effects is measured for one narrow case (scalar ease,
+and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) import only as far as the importer's coverage goes (what it can't map is reported) and File ▸ Open doesn't take them yet, and that coverage isn't measured against real projects; fidelity against After Effects is measured for one narrow case (scalar ease,
 168 samples); 216 issues are open on 12 October, six of them crash reports (#580, #501, #426, #341, #234, #879). Beta needs ≈ 75% ready and `.aep`
-opening reliably: the `.aep` owner decision and importer (80–160 h), the fidelity harness and
+opening reliably: `.aep` coverage and File ▸ Open, and the owner decision on clean-room scope (#190; the original 80–160 h was for the importer, which exists, and is not re-estimated), the fidelity harness and
 P0/P1 corpus (60–100 h), the crash and bug backlog (40–80 h), performance (40–70 h),
 Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and text (100–160 h).
 
@@ -109,7 +108,7 @@ Ranked; detail in [docs/roadmap.md](docs/roadmap.md) and [docs/gaps.md](docs/gap
 | 1 | Fix the open crash reports; run `cargo xtask ci` on every pull request (G3) | 15–30 |
 | 2 | Fidelity harness against After Effects: rendered frames, a corpus case per P0/P1 feature (G1) | 60–100 |
 | 3 | Real-user reliability on Linux and Windows; the open mask, effect, text and 3D bugs (G2) | 100–190 |
-| 4 | `.aep` / `.aepx` import, after the owner's clean-room decision (G4) | 80–160 |
+| 4 | `.aep` / `.aepx` coverage and File ▸ Open (the importer exists); the owner's clean-room decision, #190 (G4) | not re-estimated (was 80–160) |
 | 5 | Performance: benchmarks at 1080p / 4K, real-time cached playback, hardware video (G5) | 50–100 |
 | 6 | Localization depth: effect names, all panels, Korean / Italian (G9) | 60–110 |
 

@@ -1,6 +1,6 @@
 # Parity with After Effects
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (statements that `.aep` projects can't be opened now say the importer and exporter exist; percentages and hours not re-estimated; earlier: issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
 left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
@@ -16,7 +16,7 @@ left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
 |---|---|---|
 | **Feature breadth** (does each After Effects 26.5 feature exist?) | **≈ 91%** | Estimated, weighted by area (table below). The self-graded 92-item checklist says 89 done / 3 partial (≈ 99%), but it was written before After Effects 26.2 and 26.5 and does not count animation presets, project formats or hardware; see the appendix |
 | **Ready for real work** (can an After Effects professional do client work here?) | **≈ 45%** (range 40–50%) | Estimated: 60% feature depth (≈ 50%, table below), 15% opening and delivering work files (≈ 35%), 10% performance (≈ 35%), 10% stability (≈ 45%), 5% platforms (≈ 65%) |
-| **Stage** | **alpha** | All six core workflows pass the [alpha gate](roadmap.md#alpha-gate) on macOS and ready (≈ 45%) is above the ≈ 40% bar, but `.aep` projects can't be opened, fidelity is measured for one narrow case, and 216 issues are open on 12 October ([ROADMAP](../ROADMAP.md#stage)) |
+| **Stage** | **alpha** | All six core workflows pass the [alpha gate](roadmap.md#alpha-gate) on macOS and ready (≈ 45%) is above the ≈ 40% bar, but `.aep` import is partial (reported losses, not measured against real projects, and File ▸ Open doesn't take them), fidelity is measured for one narrow case, and 216 issues are open on 12 October ([ROADMAP](../ROADMAP.md#stage)) |
 | **Mainstream practitioner** (the typical motion designer's weekly work) | **≈ 47%** | Estimated: everyday depth 72% × interaction 0.90 × stability 0.90 × file exchange 0.80 ([below](#mainstream-practitioner)) |
 | **Essentials user** (core features only) | **≈ 52%** | Estimated: core depth 77% × launch/stability 0.88 × clarity 0.90 × opening files 0.85 ([below](#essentials-user)) |
 | Remaining to **beta** (≈ 75% ready, `.aep` opens) | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
@@ -33,7 +33,7 @@ left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
 Each audience's hours are a subset of the next (essentials ≤ mainstream ≤ full). They are
 calibrated like the rest of this file ([calibration](#calibration-of-the-hours)): a behaviour bug
 with its regression test ≈ 0.1–0.3 h, a mid-size feature 1–4 h. About 60–70% parallelises across
-5–8 agents. The serial parts: the `.aep` owner decision before the importer, and the fidelity
+5–8 agents. The serial parts: the `.aep` owner decision on clean-room scope (#190), and the fidelity
 harness before per-feature scores. Every audience needs After Effects running on the owner's Mac
 for reference captures.
 
@@ -98,7 +98,7 @@ verification included. Calibrated against this repository's own history:
   beauty layer + OCIO v2 configs (#449) ≈ 1.3 h. So a user-reported behaviour bug costs ≈ 0.1–0.3 h,
   a mid-size feature 1–4 h.
 - What history can't calibrate: fidelity work (each corpus case needs After Effects running,
-  which only the owner's Mac has), `.aep` import (blocked on an owner decision), and anything
+  which only the owner's Mac has), `.aep` coverage (the importer exists; the clean-room decision, #190, is open), and anything
   needing hardware we don't have. Those carry the widest ranges.
 - **Parallelism:** about 70% of the hours parallelise across 5–8 agents (effects fidelity,
   languages, bugs, formats are independent). Serial chains: the G1 harness before per-feature
@@ -137,7 +137,7 @@ Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensio
 | Features, breadth | 91% | (in features) | Table above | this file |
 | Features, ready for real work | 50% | 360–660 | Table above | this file, [gaps.md](gaps.md) |
 | UI/UX fidelity | 65% | 60–120 | After Effects-shaped menus (587 entries), panels, workspaces, shortcuts; many interaction issues still open; multi-monitor only as separate panel windows (#486 open); Effect Controls not yet like 26.5's | [ui-parity.md](ui-parity.md) |
-| File formats | 50% | 130–230 | `.aep` / `.aepx` / `.mogrt` / `.ffx` can't be read; strong modern codecs (H.264, HEVC, AV1, VP9, ProRes) | [file-format-parity.md](file-format-parity.md) |
+| File formats | 50% | 130–230 | `.aep` / `.aepx` import and `.aep` export are partial; `.mogrt` / `.ffx` can't be read; strong modern codecs (H.264, HEVC, AV1, VP9, ProRes) | [file-format-parity.md](file-format-parity.md) |
 | Hardware | 40% | 60–120 | wgpu GPU on Metal/Vulkan/Direct3D 12/WebGPU with CPU fallback; no hardware decode/encode; Direct3D 12 compositor fails (#613); no video-out hardware | [hardware-parity.md](hardware-parity.md) |
 | Localization | 24% | 60–110 + review | Average coverage of After Effects' 10 non-English languages (measured catalog rows over ≈ 4,200 strings): menus in 10 languages, panels in 7, effects in Simplified Chinese and Japanese; After Effects ships 11 languages fully | [localization-parity.md](localization-parity.md) |
 | Performance | 35% | 50–100 | Internal numbers only; users report stutter and slow scrubbing | [gaps.md](gaps.md#g5-performance-at-real-world-scale) |
@@ -149,7 +149,7 @@ Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensio
 
 **Totals.** Summing the rows double-counts: AI overlaps Tracking, performance overlaps Preview,
 UI overlaps every area. With the overlaps removed: **≈ 850–1,500 h to full parity**, of which
-**≈ 350–620 h to beta**: `.aep` import (80–160 h, after the owner decision), the G1 fidelity
+**≈ 350–620 h to beta**: `.aep` coverage (80–160 h as first estimated for the importer, which exists; not re-estimated; the owner decision, #190, is open), the G1 fidelity
 harness and P0/P1 corpus (60–100 h), the open bug and crash backlog (40–80 h), performance to
 real-time preview at 1080p (40–70 h), Linux/Windows reliability (30–50 h), and feature depth in
 animation, masks, effects and text (100–160 h).
@@ -161,7 +161,7 @@ The full-target number is a written weighted sum, not a single judgement:
 | Component | Weight | Value | Source |
 |---|---:|---:|---|
 | Feature depth | 60% | 50% | Weighted feature-area table above |
-| Opening and delivering work files | 15% | 35% | [file-format-parity.md](file-format-parity.md): `.aep` / `.mogrt` / `.ffx` 0%, delivery formats strong |
+| Opening and delivering work files | 15% | 35% | [file-format-parity.md](file-format-parity.md): `.mogrt` / `.ffx` 0%, `.aep` partial (not re-estimated), delivery formats strong |
 | Performance | 10% | 35% | By dimension, below |
 | Stability | 10% | 45% | By dimension, below |
 | Platforms | 5% | 65% | By dimension, below |
@@ -234,7 +234,7 @@ first-time user) get their work done?* No advanced options, pro workflows or exc
 |---|---:|---|
 | Launch and stability | ×0.88 | Start-up failures (#501, #234 macOS 27, #613 Direct3D 12; #596 is closed); #426 timeline crash while playing |
 | Discoverability and UI clarity | ×0.90 | After Effects' dense layout reproduced faithfully; Home screen and interactive Learn tutorials help; renders fail silently on macOS until an output folder is chosen (#446); layout nitpicks (#581) |
-| Opening files people send | ×0.85 | Tutorial projects and templates arrive as `.aep` / `.mogrt`, which don't open |
+| Opening files people send | ×0.85 | Tutorial projects and templates arrive as `.aep` / `.mogrt`: `.aep` opens as far as the importer maps it, `.mogrt` doesn't |
 
 76.75% × 0.88 × 0.90 × 0.85 = **51.7%, ≈ 52%**.
 
