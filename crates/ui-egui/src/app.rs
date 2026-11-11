@@ -44,6 +44,7 @@ impl EffectcraftApp {
             playback: Playback::default(),
             dialog: None,
             hooks: Hooks::default(),
+            link_close: Default::default(),
             fps: 60.0,
             clock: AppClock::default(),
             now: 0.0,
@@ -144,6 +145,12 @@ impl EffectcraftApp {
 
 impl eframe::App for EffectcraftApp {
     fn on_exit(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Whatever the user answered about their own project, the link project is written.
+            let _ = effectcraft_link::live::flush_sidecars(&self.session);
+            effectcraft_link::live::closing();
+        }
         self.save_workspace_state();
         // Clean exit: no crash recovery next launch (unless the graphics device was lost with
         // unsaved changes, which are in the auto-save it offers).

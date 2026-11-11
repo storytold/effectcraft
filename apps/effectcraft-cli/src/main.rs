@@ -631,10 +631,11 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             let mut b = backend(args, true)?;
             let p = tool(&mut b, "get_project", json!({}))?;
             let comp = tool(&mut b, "get_comp", json!({})).ok();
+            let commands = b.session().map(|session| session.command_count()).unwrap_or_else(|| effectcraft_engine::command_specs().len());
             let info = json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "mode": if b.is_bridge() { "bridge" } else { "headless" },
-                "commands": effectcraft_engine::command_specs().len(),
+                "commands": commands,
                 "effects": effectcraft_engine::effects::registry().len(),
                 "project": p,
                 "activeComp": comp,
@@ -1511,7 +1512,7 @@ fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
     // Every comp, plus an adjustment-layer comp built for the benchmark (the main comp under a
     // full-frame adjustment layer with a GPU effect stack) and an Advanced 3D comp (`--adv3d`:
     // that one only).
-    let mut project = (*s.project).clone();
+    let mut project = (**s.project).clone();
     project.settings.gpu_acceleration = true;
     let comps: Vec<ItemId> = match args.opt("--comp") {
         _ if args.flag("--adv3d") => adv3d_bench_comp(&mut project).into_iter().collect(),

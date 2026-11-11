@@ -210,9 +210,10 @@ impl Session {
     /// The active shortcut preset resolved against every bindable command, File ▸ Scripts'
     /// entries included.
     pub fn shortcuts(&self) -> &ShortcutTable {
+        // A plugin registered after the first shortcuts() call is invisible until shortcuts_changed() clears the cache.
         self.shortcut_table.get_or_init(|| {
             let scripts: Vec<String> = crate::commands::scripts::scripts(self).into_iter().filter(|e| !e.panel).map(|e| e.name).collect();
-            ShortcutTable::build_with_scripts(&self.keymaps, &self.ui_commands, &scripts)
+            ShortcutTable::build_with_scripts(&self.keymaps, &self.ui_commands, &self.registry, &scripts)
         })
     }
 

@@ -44,6 +44,8 @@ craft-update = { workspace = true }
 # Waits for the display pass's error scopes (immediately ready on native wgpu).
 pollster = { workspace = true }
 sys-locale = { workspace = true }
+# `craft-ipc` uses local sockets. The web build of this crate does not include it.
+effectcraft-link = { workspace = true }
 
 [dev-dependencies]
 # Fonts for kittest: the workspace `egui` features are what test roots resolve, but stating them
@@ -51,8 +53,10 @@ sys-locale = { workspace = true }
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
 pollster = "1"
+craft-ipc = { workspace = true }
 effectcraft-segment = { workspace = true }
 effectcraft-host = { workspace = true }
+effectcraft-interchange = { workspace = true }
 effectcraft-media = { workspace = true }
 exr = { workspace = true }
 tempfile = { workspace = true }

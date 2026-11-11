@@ -76,7 +76,7 @@ fn a_project_within_the_limits_opens_unchanged() {
     let text = s.project.to_file_json().unwrap();
     let (p, notes) = effectcraft_project::Project::from_json_repaired(&text).unwrap();
     assert!(notes.is_empty(), "{notes:?}");
-    assert_eq!(p, *s.project);
+    assert_eq!(p, **s.project);
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn a_project_with_a_precomp_cycle_opens_adds_and_renders_without_running_out_of_
     }
     let (a, b, c) = (ids[0], ids[1], ids[2]);
     {
-        let proj = std::sync::Arc::make_mut(&mut s.project);
+        let proj = s.project_mut();
         for (outer, inner) in [(a, b), (b, a)] {
             let comp = proj.comp(outer).unwrap().clone();
             let l = effectcraft_project::build::layer(proj, &comp, "pre", effectcraft_project::LayerSource::Comp { item: inner }, (32, 32), None);

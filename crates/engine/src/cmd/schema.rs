@@ -41,61 +41,28 @@ pub fn accepted_params(doc: &str) -> Option<Vec<String>> {
     None
 }
 
-/// Top-level pieces of a params doc (split at depth-0 commas), e.g. `{layer?, path|prop, value}`
-/// → `["layer?", "path|prop", "value"]`.
-fn doc_pieces(doc: &str) -> Option<Vec<String>> {
-    let body = doc.trim().strip_prefix('{')?;
-    let (mut out, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
-    for c in body.chars() {
-        match c {
-            '{' | '[' | '(' => depth += 1,
-            ']' | ')' => depth -= 1,
-            '}' if depth == 0 => {
-                if !cur.trim().is_empty() {
-                    out.push(cur.trim().to_string());
-                }
-                return Some(out);
-            }
-            '}' => depth -= 1,
-            ',' if depth == 0 => {
-                if !cur.trim().is_empty() {
-                    out.push(cur.trim().to_string());
-                }
-                cur.clear();
-                continue;
-            }
-            _ => {}
-        }
-        cur.push(c);
-    }
-    None
-}
-
 /// The JSON Schema of a command's parameters, derived from its params doc: one property per
 /// accepted key (described by its piece of the doc), no others. MCP `describe_command` and
-/// `list_commands {schemas: true}` serve it.
+/// `list_commands {schemas: true}` serve it. The doc parser lives in `craft-command`.
 pub fn params_schema(spec: &CommandSpec) -> Value {
-    let mut props = serde_json::Map::new();
-    let mut required = vec![];
-    for piece in doc_pieces(spec.params).unwrap_or_default() {
-        let keys = accepted_params(&format!("{{{piece}}}")).unwrap_or_default();
-        let alternatives = keys.len() > 1;
-        for k in keys {
-            // `key?` is optional; so is any key with alternatives (`path|prop`).
-            let optional = alternatives || piece.contains(&format!("{k}?"));
-            if !optional && !required.contains(&k) {
-                required.push(k.clone());
-            }
-            props.insert(k, serde_json::json!({"description": piece}));
-        }
+    craft_command::schema::from_doc(spec.params).value
+}
+
+/// The same schema from a bare params doc (a registry row from `craft-command`, or a dynamic command).
+pub fn params_schema_doc(doc: &str) -> Value {
+    craft_command::schema::from_doc(doc).value
+}
+
+/// Same check as [`check_params`], for a command that has no local row (a registry row or a dynamic command).
+pub fn check_params_doc(id: &str, doc: &str, params: &Value) -> Result<()> {
+    let (Some(obj), Some(accepted)) = (params.as_object(), accepted_params(doc)) else { return Ok(()) };
+    let ok = |k: &str| ALWAYS_OK.contains(&k) || accepted.iter().any(|a| a == k || ALIASES.iter().any(|(param, alias)| param == a && *alias == k));
+    let unknown: Vec<&str> = obj.keys().map(String::as_str).filter(|k| !ok(k)).collect();
+    if unknown.is_empty() {
+        return Ok(());
     }
-    serde_json::json!({
-        "type": "object",
-        "description": spec.params,
-        "properties": props,
-        "required": required,
-        "additionalProperties": accepted_params(spec.params).is_none(),
-    })
+    let list = if accepted.is_empty() { "none".to_string() } else { accepted.join(", ") };
+    Err(bad(id, format!("unknown parameter(s) {}; accepted: {list} (doc: {doc})", unknown.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "))))
 }
 
 /// Keys every command understands (comp targeting, gesture merging) and accepted aliases.
@@ -105,15 +72,5 @@ const ALIASES: &[(&str, &str)] = &[("layers", "layer"), ("layer", "layers"), ("t
 
 /// Reject unknown top-level parameters (typos, guessed names) with the list of accepted keys.
 pub fn check_params(spec: &CommandSpec, params: &Value) -> Result<()> {
-    let (Some(obj), Some(accepted)) = (params.as_object(), accepted_params(spec.params)) else { return Ok(()) };
-    let ok = |k: &str| ALWAYS_OK.contains(&k) || accepted.iter().any(|a| a == k || ALIASES.iter().any(|(doc, alias)| doc == a && *alias == k));
-    let unknown: Vec<&str> = obj.keys().map(String::as_str).filter(|k| !ok(k)).collect();
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    let list = if accepted.is_empty() { "none".to_string() } else { accepted.join(", ") };
-    Err(bad(
-        spec.id,
-        format!("unknown parameter(s) {}; accepted: {list} (doc: {})", unknown.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "), spec.params),
-    ))
+    check_params_doc(spec.id, spec.params, params)
 }

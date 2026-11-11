@@ -18,6 +18,10 @@
 //! - `ui.screenshot {path?, panel?, id?}`: PNG of the window (or one panel / element, resolved when the capture is issued)
 //! - `render.frame {comp?, time?, max_side?, path?, base64?}`: PNG of a comp frame rendered by the session
 //! - `ui.resize {width, height}` / `ui.focus` / `app.quit {force?}` (a modified project asks to save first unless `force`)
+//! - `link.open {link_id, payload, place, result_path, source}`: import an OTIO hand-off and open the comp
+//! - `link.attach {link_id, project, comp}`: reopen a bound link and return its format and epoch
+//! - `link.close {link_id}`: unbind a link, keep the comp and its edits, reply `{comp, comp_name, edited}`
+//! - `link.renderResult {link_id}`: encode the bound comp to the binding's result path as ProRes 4444
 //!
 //! The full reference with examples is `docs/control-protocol.md`.
 
@@ -198,6 +202,92 @@ fn err(e: impl std::fmt::Display) -> Outcome {
     Outcome::Done(json!({"ok": false, "error": e.to_string()}))
 }
 
+/// `link.open` returns the protocol object. Legacy methods stay on [`err`].
+#[cfg(not(target_arch = "wasm32"))]
+fn link_open(app: &mut EffectcraftApp, params: &Value) -> Outcome {
+    match effectcraft_link::open_link(&mut app.session, params) {
+        Ok(opened) => match serde_json::to_value(&opened) {
+            Ok(result) => {
+                // The linked comp is the point of the hand-off: do not leave the Home screen over it.
+                app.ui.start_screen = false;
+                Outcome::Done(json!({"ok": true, "result": result}))
+            }
+            Err(e) => Outcome::Done(effectcraft_link::LinkOpenError::io(format!("could not encode the link.open reply: {e}")).reply()),
+        },
+        Err(e) => Outcome::Done(e.reply()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn link_open(_app: &mut EffectcraftApp, _params: &Value) -> Outcome {
+    Outcome::Done(json!({
+        "ok": false,
+        "error": {"code": "not_ready", "message": "link.open is not available in the web build", "data": {}}
+    }))
+}
+
+/// `link.close` unbinds a link and keeps the comp with its edits.
+#[cfg(not(target_arch = "wasm32"))]
+fn link_close(app: &mut EffectcraftApp, params: &Value) -> Outcome {
+    match effectcraft_link::close_link(&mut app.session, params) {
+        Ok(result) => Outcome::Done(json!({"ok": true, "result": result})),
+        Err(e) => Outcome::Done(e.reply()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn link_close(_app: &mut EffectcraftApp, _params: &Value) -> Outcome {
+    Outcome::Done(json!({
+        "ok": false,
+        "error": {"code": "not_ready", "message": "link.close is not available in the web build", "data": {}}
+    }))
+}
+
+/// `link.attach` returns the bound comp's format and epoch. It does not create a comp.
+#[cfg(not(target_arch = "wasm32"))]
+fn link_attach(app: &mut EffectcraftApp, params: &Value) -> Outcome {
+    match effectcraft_link::attach_link(&mut app.session, params) {
+        Ok(result) => {
+            app.ui.start_screen = false;
+            Outcome::Done(json!({"ok": true, "result": result}))
+        }
+        Err(e) => Outcome::Done(e.reply()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn link_attach(_app: &mut EffectcraftApp, _params: &Value) -> Outcome {
+    Outcome::Done(json!({
+        "ok": false,
+        "error": {"code": "not_ready", "message": "link.attach is not available in the web build", "data": {}}
+    }))
+}
+
+/// `link.renderResult` encodes on this thread. The session is not shared with a worker, so the
+/// handler waits until [`effectcraft_link::render_result`] returns the file. It does not reply
+/// `started: true`.
+#[cfg(not(target_arch = "wasm32"))]
+fn link_render_result(app: &mut EffectcraftApp, params: &Value) -> Outcome {
+    let Some(link_id) = params.get("link_id").and_then(Value::as_str) else {
+        return Outcome::Done(effectcraft_link::RenderError::bad_params("missing `link_id`").reply());
+    };
+    match effectcraft_link::render_result(&mut app.session, link_id) {
+        Ok(outcome) => match serde_json::to_value(&outcome) {
+            Ok(result) => Outcome::Done(json!({"ok": true, "result": result})),
+            Err(e) => Outcome::Done(effectcraft_link::RenderError::io(format!("could not encode the link.renderResult reply: {e}")).reply()),
+        },
+        Err(e) => Outcome::Done(e.reply()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn link_render_result(_app: &mut EffectcraftApp, _params: &Value) -> Outcome {
+    Outcome::Done(json!({
+        "ok": false,
+        "error": {"code": "not_ready", "message": "link.renderResult is not available in the web build", "data": {}}
+    }))
+}
+
 fn modifiers(p: &Value) -> egui::Modifiers {
     let m = p.get("modifiers").unwrap_or(p);
     let b = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
@@ -253,6 +343,11 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
         "ui.resize" => resize(ctx, p),
         "ui.focus" => focus(ctx),
         "app.quit" => quit(app, ctx, p),
+        "app.activate" => Outcome::Done(crate::link_ui::activate(app, ctx, p)),
+        "link.open" => link_open(app, p),
+        "link.attach" => link_attach(app, p),
+        "link.renderResult" => link_render_result(app, p),
+        "link.close" => link_close(app, p),
         m => err(format!("unknown method `{m}`")),
     }
 }
@@ -294,7 +389,7 @@ fn execute_command(app: &mut EffectcraftApp, ctx: &egui::Context, method: &str, 
 
 /// Replies with `command.list`'s result, forwarding `filter` and `enabledOnly`.
 fn engine_commands(app: &mut EffectcraftApp, p: &Value) -> Outcome {
-    match app.session.execute("command.list", json!({"filter": p.get("filter"), "enabledOnly": p.get("enabledOnly")})) {
+    match app.session.execute("command.list", json!({"filter": p.get("filter"), "enabledOnly": p.get("enabledOnly"), "schemas": true})) {
         Ok(v) => ok(v),
         Err(e) => err(e),
     }

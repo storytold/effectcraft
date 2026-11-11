@@ -347,14 +347,7 @@ fn no_op_ime_deletion_keeps_a_static_plain_text_value_and_records_no_step() {
     let (mut s, t) = session("abc");
     // Legacy/imported text can still be stored as a plain Str rather than a TextDoc.
     let cid = s.active_comp_id().unwrap();
-    let pr = std::sync::Arc::make_mut(&mut s.project)
-        .comp_mut(cid)
-        .unwrap()
-        .layer_mut(effectcraft_project::LayerId(t))
-        .unwrap()
-        .props
-        .prop_mut("text/sourceText")
-        .unwrap();
+    let pr = s.project_mut().comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap().props.prop_mut("text/sourceText").unwrap();
     pr.value = KV::Str("abc".into());
     begin_edit_at(&mut s, t, 0);
     let steps = undo_steps(&s);
@@ -538,7 +531,7 @@ fn atomic_batch_rollback_after_a_cross_comp_editor_switch_bumps_the_epoch() {
     let layer = s.active_comp().unwrap().layer(effectcraft_project::LayerId(t)).unwrap().clone();
     let other = new_other_comp(&mut s);
     let other_id = effectcraft_project::ItemId(other);
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(other_id).unwrap().layers.push(layer);
+    s.project_mut().comp_mut(other_id).unwrap().layers.push(layer);
     s.execute("comp.open", json!({"comp": original.0})).unwrap();
     begin_edit_at(&mut s, t, 3);
     let owner = ime_owner(&s);
@@ -877,7 +870,7 @@ fn removing_the_active_comp_does_not_retarget_its_text_editor() {
         let layer = s.active_comp().unwrap().layer(effectcraft_project::LayerId(t)).unwrap().clone();
         let other = new_other_comp(&mut s);
         let other_id = effectcraft_project::ItemId(other);
-        std::sync::Arc::make_mut(&mut s.project).comp_mut(other_id).unwrap().layers.push(layer);
+        s.project_mut().comp_mut(other_id).unwrap().layers.push(layer);
         s.execute("comp.open", json!({"comp": other})).unwrap();
         s.execute("comp.open", json!({"comp": original.0})).unwrap();
         begin_edit_at(&mut s, t, 1);
@@ -886,7 +879,7 @@ fn removing_the_active_comp_does_not_retarget_its_text_editor() {
         // Reproduce cleanup after a project replacement, bypassing Session::edit's earlier
         // document guard so this specifically exercises sanitize_state's fallback-comp branch.
         let edited = crate::commands::text_edit::active_editor_snapshot(&s);
-        std::sync::Arc::make_mut(&mut s.project).items.remove(&original);
+        s.project_mut().items.remove(&original);
         if replacement {
             s.sanitize_after_replacement(edited.as_ref());
         } else {
@@ -1487,7 +1480,7 @@ fn a_text_layer_name_ends_at_a_bare_carriage_return() {
     retype(&mut s, t, "E\rF");
     assert_eq!(layer_name(&s, t), "E");
     let cid = s.active_comp_id().unwrap();
-    let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap();
+    let l = s.project_mut().comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap();
     l.name = "Para1".into();
     l.name_follows_text = None;
     l.props.prop_mut("text/sourceText").unwrap().value = effectcraft_keyframe::Value::Text(Box::new(TextDoc::plain("Para1\rPara2")));
@@ -1510,7 +1503,7 @@ fn older_text_layers_without_the_name_state_follow_as_before() {
     }
     let legacy = |s: &mut Session, name: &str| {
         let cid = s.active_comp_id().unwrap();
-        let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap();
+        let l = s.project_mut().comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(t)).unwrap();
         l.name = name.into();
         l.name_follows_text = None;
     };

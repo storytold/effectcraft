@@ -170,7 +170,29 @@ pub(crate) use params::{
     b_p, bad, comp_id, f_p, frontend, layer_mut, layer_p, layers_or, layers_p, merge_p, popup_options, resolve_effect_path, resolve_layer, selectable,
     selected_leaf_props, str_p, time_p, unlocked, visible_p,
 };
-pub use schema::{accepted_params, check_params, params_schema};
+pub use schema::{accepted_params, check_params, check_params_doc, params_schema, params_schema_doc};
+
+/// The built-in rows as `craft-command` registry rows. The engine keeps its own non-generic
+/// [`CommandSpec`] (upstream's table type) and converts it once.
+pub fn registry_specs() -> &'static [craft_command::CommandSpec<Session, EngineError>] {
+    static ROWS: OnceLock<Vec<craft_command::CommandSpec<Session, EngineError>>> = OnceLock::new();
+    ROWS.get_or_init(|| {
+        command_specs()
+            .iter()
+            .map(|c| craft_command::CommandSpec {
+                id: c.id,
+                label: c.label,
+                menu: c.menu,
+                shortcut: c.shortcut,
+                alt_shortcuts: c.alt_shortcuts,
+                params: c.params,
+                enabled: c.enabled,
+                run: c.run,
+                journal: c.journal,
+            })
+            .collect()
+    })
+}
 
 pub fn command_specs() -> &'static [CommandSpec] {
     static SPECS: OnceLock<Vec<CommandSpec>> = OnceLock::new();

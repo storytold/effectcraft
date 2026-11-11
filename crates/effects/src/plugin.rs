@@ -417,7 +417,23 @@ pub trait EffectPlugin: Send + Sync {
     }
 }
 
-static SLOTS: [OnceLock<Arc<dyn EffectPlugin>>; MAX_PLUGINS] = [const { OnceLock::new() }; MAX_PLUGINS];
+/// One registry slot. `last` outlives an unload, so a plug-in that comes back with the same
+/// manifest reuses its spec instead of leaking a new one.
+#[derive(Default)]
+struct Slot {
+    plugin: Option<Arc<dyn EffectPlugin>>,
+    last: Option<(PluginManifest, &'static EffectSpec)>,
+}
+
+static SLOTS: [RwLock<Slot>; MAX_PLUGINS] = [const { RwLock::new(Slot { plugin: None, last: None }) }; MAX_PLUGINS];
+
+fn slot_read(i: usize) -> std::sync::RwLockReadGuard<'static, Slot> {
+    SLOTS[i].read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn slot_write(i: usize) -> std::sync::RwLockWriteGuard<'static, Slot> {
+    SLOTS[i].write().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Registered plug-in effects, in registration order.
 fn plugin_specs() -> &'static RwLock<Vec<&'static EffectSpec>> {
@@ -456,13 +472,25 @@ fn set_plugin_error(id: &str, error: Option<String>) {
 
 /// The plug-in behind a registered effect id.
 pub fn plugin(id: &str) -> Option<Arc<dyn EffectPlugin>> {
-    SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).cloned()
+    (0..MAX_PLUGINS).find_map(|i| slot_read(i).plugin.clone().filter(|p| p.manifest().id == id))
+}
+
+/// Unload a registered plug-in effect: it leaves the listings and its instances pass pixels
+/// through. Its slot is reused when a plug-in with the same id registers again. False if no
+/// plug-in has that id.
+pub fn unregister_plugin(id: &str) -> bool {
+    let Some(i) = (0..MAX_PLUGINS).find(|i| slot_read(*i).plugin.as_ref().is_some_and(|p| p.manifest().id == id)) else { return false };
+    slot_write(i).plugin = None;
+    if let Ok(mut specs) = plugin_specs().write() {
+        specs.retain(|s| s.id != id);
+    }
+    true
 }
 
 /// Whether the registered plug-in `id` reads the layer at other times (its neighbouring frames),
 /// so the render cache must key its layer on the layer time.
 pub fn reads_other_times(id: &str) -> bool {
-    SLOTS.iter().filter_map(|s| s.get()).any(|p| p.manifest().id == id && p.reads_other_times())
+    (0..MAX_PLUGINS).any(|i| slot_read(i).plugin.as_ref().is_some_and(|p| p.manifest().id == id && p.reads_other_times()))
 }
 
 fn leak(s: &str) -> &'static str {
@@ -504,20 +532,29 @@ pub fn register_plugin(plugin: Arc<dyn EffectPlugin>) -> Result<&'static EffectS
     if crate::registry().iter().any(|s| s.id == m.id) || specs.iter().any(|s| s.id == m.id) {
         return Err(format!("an effect with id `{}` is already registered", m.id));
     }
-    let slot = SLOTS
-        .iter()
-        .position(|s| s.get().is_none())
+    let slot = (0..MAX_PLUGINS)
+        .find(|i| slot_read(*i).last.as_ref().is_some_and(|(l, _)| l.id == m.id) && slot_read(*i).plugin.is_none())
+        .or_else(|| (0..MAX_PLUGINS).find(|i| slot_read(*i).last.is_none()))
+        .or_else(|| (0..MAX_PLUGINS).find(|i| slot_read(*i).plugin.is_none()))
         .ok_or_else(|| format!("too many plug-in effects: a session registers at most {MAX_PLUGINS}; remove some plug-ins and restart EffectCraft"))?;
-    SLOTS[slot].set(plugin).map_err(|_| "plug-in slot taken".to_string())?;
-    let spec: &'static EffectSpec = Box::leak(Box::new(EffectSpec {
-        id: leak(&m.id),
-        name: leak(&m.name),
-        category: leak(&m.category),
-        params: m.params.iter().map(param_spec).collect(),
-        render: TRAMPOLINES[slot],
-        gpu: false,
-        float: true,
-    }));
+    let mut guard = slot_write(slot);
+    let spec = match guard.last.as_ref().filter(|(l, _)| *l == m) {
+        Some((_, spec)) => *spec,
+        None => {
+            let spec: &'static EffectSpec = Box::leak(Box::new(EffectSpec {
+                id: leak(&m.id),
+                name: leak(&m.name),
+                category: leak(&m.category),
+                params: m.params.iter().map(param_spec).collect(),
+                render: TRAMPOLINES[slot],
+                gpu: false,
+                float: true,
+            }));
+            guard.last = Some((m, spec));
+            spec
+        }
+    };
+    guard.plugin = Some(plugin);
     specs.push(spec);
     Ok(spec)
 }
@@ -696,7 +733,7 @@ impl PluginHost for RenderHost<'_, '_> {
 }
 
 fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
-    let Some(plugin) = SLOTS[slot].get() else { return buf };
+    let Some(plugin) = slot_read(slot).plugin.clone() else { return buf };
     let m = plugin.manifest();
     let texts = flatten_texts(m, ctx.params);
     let flat = flatten(m, ctx, &buf);

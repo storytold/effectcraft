@@ -772,7 +772,7 @@ fn the_unlabeled_alpha_question_does_not_replace_an_open_dialog() {
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
     let footage = Footage { path: "/m/matte.tga".into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() };
-    let item = std::sync::Arc::make_mut(&mut app.session.project).add_item("matte.tga", Default::default(), None, ItemKind::Footage(footage)).0;
+    let item = app.session.project_mut().add_item("matte.tga", Default::default(), None, ItemKind::Footage(footage)).0;
     app.dialog = Some(crate::Dialog::AepLosses);
     super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": item, "reason": "unlabeledAlpha"})).unwrap();
     assert_eq!(app.dialog, Some(crate::Dialog::AepLosses), "the waiting dialog stays");

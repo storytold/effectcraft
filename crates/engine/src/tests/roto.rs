@@ -676,7 +676,7 @@ fn object_matte_mattes_persist_in_the_disk_cache() {
     // "Reopen": a new session on the same folder and project.
     let (mut s2, _, _) = setup(|f| draw(center(f)));
     enable(&mut s2);
-    s2.project = saved;
+    s2.set_project(saved);
     s2.bump();
     s2.open_comp(cid);
     assert_eq!(s2.roto_keys(cid, clip, uid).unwrap(), keys, "the same input key, so the same keys");

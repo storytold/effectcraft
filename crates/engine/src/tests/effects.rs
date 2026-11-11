@@ -46,7 +46,7 @@ fn animate_effect(s: &mut Session, lid: u64, uid: u64, path: &str, keys: &[(f64,
 
 fn set_layer_clock(s: &mut Session, lid: u64, start: f64, stretch: f64) {
     let cid = s.active_comp_id().unwrap();
-    let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    let l = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
     l.start_time = Tick::from_seconds_f64(start);
     l.stretch = stretch;
 }
@@ -143,7 +143,7 @@ fn pasted_effects_preserve_comp_timing_and_eased_values_on_stretched_layers() {
             animate_effect(&mut s, a, blur, "blurriness", &[(3.0, 10.0), (5.0, 30.0)]);
             let uid = effect_group(&s, a, blur).get("blurriness").unwrap().uid;
             let cid = s.active_comp_id().unwrap();
-            let pr = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
+            let pr = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
             for key in &mut pr.keys {
                 key.in_interp = Interp::Bezier;
                 key.out_interp = Interp::Bezier;
@@ -185,7 +185,7 @@ fn pasted_spatial_effect_keys_preserve_the_eased_path_on_reversed_layers() {
             s.execute("prop.addKey", json!({"layer": a, "prop": uid, "time": time, "timeBase": "comp", "value": value})).unwrap();
         }
         let cid = s.active_comp_id().unwrap();
-        let pr = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
+        let pr = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
         pr.spatial = true;
         for key in &mut pr.keys {
             key.in_interp = Interp::Bezier;
@@ -278,7 +278,7 @@ fn effect_paste_keeps_exact_ntsc_frame_offsets() {
     let frame = effectcraft_time::FrameRate::new(30000, 1001).frame_duration();
     let blur = apply(&mut s, a, "Gaussian Blur");
     let uid = effect_group(&s, a, blur).get("blurriness").unwrap().uid;
-    let pr = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
+    let pr = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
     pr.keys = vec![
         effectcraft_keyframe::Keyframe::new(frame.mul_ratio(11, 1), KV::Scalar(10.0)),
         effectcraft_keyframe::Keyframe::new(frame.mul_ratio(43, 1), KV::Scalar(30.0)),
@@ -543,7 +543,7 @@ fn opening_an_old_project_upgrades_effect_instances() {
             Some((first, rest)) => take(g.sub_mut(first)?, rest),
         }
     }
-    let mut old = (*s.project).clone();
+    let mut old = (**s.project).clone();
     let cid = s.active_comp_id().unwrap();
     {
         let comp = std::sync::Arc::make_mut(match &mut old.items.get_mut(&cid).unwrap().kind {

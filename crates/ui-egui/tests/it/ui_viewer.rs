@@ -191,7 +191,7 @@ fn viewer_click_picks_nothing_while_the_solo_layer_is_inactive() {
     let s = &mut h.state_mut().session;
     s.execute("layer.setSwitch", json!({"layers": [front.0], "switch": "solo", "value": true})).unwrap();
     let cid = s.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(front).unwrap().in_point = effectcraft_engine::time::Tick::from_seconds_f64(1.0);
+    s.project_mut().comp_mut(cid).unwrap().layer_mut(front).unwrap().in_point = effectcraft_engine::time::Tick::from_seconds_f64(1.0);
     h.run_steps(3);
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
@@ -3430,8 +3430,7 @@ fn unselected_null_keeps_its_outline() {
     h.run_steps(3);
     assert_eq!(outlines(&h), 0, "an unsoloed null follows solo scope");
     let cid = h.state().session.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().layer_mut(LayerId(solid)).unwrap().out_point =
-        effectcraft_engine::time::Tick::ZERO;
+    h.state_mut().session.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(solid)).unwrap().out_point = effectcraft_engine::time::Tick::ZERO;
     h.run_steps(2);
     assert_eq!(outlines(&h), 0, "an inactive soloed layer still sets solo scope");
     h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "solo", "value": true})).unwrap();

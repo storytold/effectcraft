@@ -21,6 +21,7 @@ mod fidelity;
 mod frame_export;
 mod fuzz_open;
 mod history;
+mod hook_idle;
 mod import_project;
 mod instance3d;
 mod key_metadata_order;

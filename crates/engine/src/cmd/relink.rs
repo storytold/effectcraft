@@ -232,7 +232,7 @@ mod tests {
         let path = dir.file(&format!("old/{name}"), b"valid");
         let id = s.execute("file.import", json!({"paths": [path], "sequence": false})).unwrap()["items"][0].as_u64().unwrap();
         let id = ItemId(id);
-        let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind else { panic!("footage") };
+        let ItemKind::Footage(f) = &mut s.project_mut().item_mut(id).unwrap().kind else { panic!("footage") };
         f.invert_alpha = true;
         f.loop_count = 3;
         f.start_timecode = Some(1001);
@@ -308,7 +308,7 @@ mod tests {
         let (mut s, id, mut old) = setup(&dir, "shot_0002.png");
         old.kind = FootageKind::Sequence;
         old.sequence = vec![old.path.clone(), dir.0.join("old/shot_0004.png").to_str().unwrap().into()];
-        Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind = ItemKind::Footage(old.clone());
+        s.project_mut().item_mut(id).unwrap().kind = ItemKind::Footage(old.clone());
         dir.file("new/shot_0002.png", b"valid");
         assert_eq!(search(&mut s, &dir, false)["relinked"], 0);
         dir.file("new/shot_0004.png", b"valid");

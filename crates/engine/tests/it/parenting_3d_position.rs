@@ -22,7 +22,7 @@ fn solid(s: &mut Session, name: &str) -> u64 {
 fn fixture(three: bool, rotated: bool) -> (Session, u64, u64) {
     let mut s = Session::default();
     command(&mut s, "comp.new", json!({"name":"Synthetic 3D parent","width":64,"height":48,"duration":2,"frameRate":24}));
-    Arc::make_mut(&mut s.project).settings.bit_depth = BitDepth::Bpc32;
+    s.project_mut().settings.bit_depth = BitDepth::Bpc32;
     let parent = solid(&mut s, "Parent");
     let child = solid(&mut s, "Child");
     command(&mut s, "layer.setSwitch", json!({"layers":[parent],"switch":"video","value":false}));
@@ -229,7 +229,7 @@ fn parenting_3d_position_spatial_tangents_follow_relative_parent_space() {
     }
     // Generated manual spatial-curve data; temporal interpolation remains linear.
     let cid = s.active_comp_id().unwrap();
-    let pr = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/position").unwrap();
+    let pr = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/position").unwrap();
     for key in &mut pr.keys {
         key.spatial_auto = false;
     }
@@ -322,7 +322,7 @@ fn parenting_uniform_parent_preserves_animated_eased_scale() {
         command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/scale","time":time,"value":value}));
     }
     let cid = s.active_comp_id().unwrap();
-    let scale = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/scale").unwrap();
+    let scale = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/scale").unwrap();
     for key in &mut scale.keys {
         key.in_interp = Interp::Bezier;
         key.out_interp = Interp::Bezier;
@@ -463,7 +463,7 @@ fn parenting_uniform_parent_preserves_eased_position_at_quarter_times_and_undo()
             command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/position","time":time,"value":value}));
         }
         let cid = s.active_comp_id().unwrap();
-        let position = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/position").unwrap();
+        let position = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/position").unwrap();
         for key in &mut position.keys {
             key.in_interp = Interp::Bezier;
             key.out_interp = Interp::Bezier;
@@ -556,7 +556,7 @@ fn parenting_mixed_axis_eased_orientation_preserves_arcs_and_key_metadata() {
             command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/orientation","time":time,"value":value}));
         }
         let cid = s.active_comp_id().unwrap();
-        let orientation = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/orientation").unwrap();
+        let orientation = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/orientation").unwrap();
         for key in &mut orientation.keys {
             key.in_interp = Interp::Bezier;
             key.out_interp = Interp::Bezier;

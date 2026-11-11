@@ -136,7 +136,7 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
 
 /// Every menu entry, flattened with its submenu path.
 pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
-    effectcraft_engine::menus::entries()
+    let mut items: Vec<MenuItem> = effectcraft_engine::menus::entries()
         .into_iter()
         .map(|(path, e)| MenuItem {
             id: e.command.clone(),
@@ -147,5 +147,11 @@ pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
             checked: entry_checked(app, e),
             params: e.params.clone(),
         })
-        .collect()
+        .collect();
+    for (id, label, path) in app.session.dynamic_menu_rows() {
+        let shortcut = app.session.shortcuts().shortcut_of(&id, &Value::Null).map(str::to_string);
+        let enabled = app.session.is_enabled(&id);
+        items.push(MenuItem { id, label, path, shortcut, enabled, checked: None, params: Value::Null });
+    }
+    items
 }

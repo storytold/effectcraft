@@ -245,7 +245,7 @@ mod tests {
         app.dialog_state.aep_losses.queue = vec!["/a/Two.aep".into()];
         app.dialog = Some(Dialog::UnsavedChanges);
         // Rec. 2020 has no After Effects counterpart: exporting asks.
-        std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
+        app.session.project_mut().settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
         let dir = TempDir::new();
         assert_eq!(guard(&mut app, "file.exportAep", &json!({"path": dir.0.join("out.aep").to_string_lossy()})), Ok(true));
         assert_eq!(app.dialog, Some(Dialog::AepLosses));
@@ -271,7 +271,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         // Rec. 2020 has no After Effects counterpart: the export reports it.
-        std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
+        app.session.project_mut().settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
         let dir = TempDir::new();
         let path = dir.0.join("out.aep");
         let params = json!({"path": path.to_string_lossy()});
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn a_false_consent_still_asks() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
+        app.session.project_mut().settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
         let dir = TempDir::new();
         let params = json!({"path": dir.0.join("out.aep").to_string_lossy(), "allowLosses": false, "dryRun": false});
         assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));

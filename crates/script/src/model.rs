@@ -46,10 +46,12 @@ pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
         "sourceRect" => source_rect(s, a),
         "pointConvert" => point_convert(s, a),
         "resolveAdd" => resolve_add(s, a),
-        "menuCommandId" => Ok(menu_command_id(a.get("name").and_then(J::as_str).unwrap_or(""))),
+        "menuCommandId" => Ok(menu_command_id(s, a.get("name").and_then(J::as_str).unwrap_or(""))),
         "commandAt" => {
             let i = u(a, "index").unwrap_or(0) as usize;
-            Ok(effectcraft_engine::command_specs().get(i.wrapping_sub(1)).map(|c| json!(c.id)).unwrap_or(J::Null))
+            let mut ids = Vec::new();
+            s.registry.for_each(|view| ids.push(view.id.to_string()));
+            Ok(ids.get(i.wrapping_sub(1)).map(|id| json!(id)).unwrap_or(J::Null))
         }
         "exprError" => {
             let code = a.get("code").and_then(J::as_str).unwrap_or("");
@@ -756,14 +758,24 @@ fn text_animator_property(name: &str) -> Option<&'static str> {
 
 /// `app.findMenuCommandId(name)`: 1-based index of the command whose label matches (menu items
 /// first), 0 when none does.
-fn menu_command_id(name: &str) -> J {
+fn menu_command_id(s: &Session, name: &str) -> J {
     let norm = |s: &str| s.trim().trim_end_matches("...").trim_end_matches('…').trim().to_ascii_lowercase();
     let n = norm(name);
-    let specs = effectcraft_engine::command_specs();
-    let pick = specs
+    let mut with_menu = std::collections::HashSet::<String>::new();
+    for spec in effectcraft_engine::command_specs() {
+        if !spec.menu.is_empty() {
+            with_menu.insert(spec.id.to_string());
+        }
+    }
+    for (id, _, _) in s.dynamic_menu_rows() {
+        with_menu.insert(id);
+    }
+    let mut rows = Vec::new();
+    s.registry.for_each(|view| rows.push((view.id.to_string(), view.label.to_string(), with_menu.contains(view.id))));
+    let pick = rows
         .iter()
-        .position(|c| !c.menu.is_empty() && norm(c.label) == n)
-        .or_else(|| specs.iter().position(|c| norm(c.label) == n))
-        .or_else(|| specs.iter().position(|c| c.id == name));
+        .position(|(_, label, has_menu)| *has_menu && norm(label) == n)
+        .or_else(|| rows.iter().position(|(_, label, _)| norm(label) == n))
+        .or_else(|| rows.iter().position(|(id, _, _)| id == name));
     json!(pick.map(|i| i + 1).unwrap_or(0))
 }

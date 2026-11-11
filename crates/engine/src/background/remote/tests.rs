@@ -139,7 +139,7 @@ fn replica_follows_edits_through_diffs_and_renders_the_same_frames() {
     let FrameMsg::Patch { ops, .. } = &msg else { panic!("expected a patch") };
     assert!(!ops.is_empty() && serde_json::to_string(ops).unwrap().len() < s.project.to_json().len() / 2);
     assert!(send(msg, &mut w).is_empty());
-    assert_eq!(**w.project().unwrap(), *s.project);
+    assert_eq!(**w.project().unwrap(), **s.project);
     let out = render(&mut w, s.revision, 2);
     assert_eq!(out[0].1.as_deref(), Some(&local(&s, comp, t, opts)[..]));
     // A request for another revision is refused as stale.

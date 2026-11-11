@@ -606,7 +606,7 @@ impl Session {
         items.retain(|modules| modules.first().is_none_or(|(it, _)| !refused.iter().any(|r| r.item == it.id)));
         problems.extend(refused.iter().map(|r| (r.item, RenderStatus::Failed(r.reason.clone()))));
         if !problems.is_empty() {
-            let p = Arc::make_mut(&mut self.project);
+            let p = self.project_mut();
             for (id, st) in problems {
                 if let Some(i) = p.render_queue.iter_mut().find(|i| i.id == id) {
                     i.status = st;
@@ -731,7 +731,7 @@ impl Session {
         let changed = !updates.is_empty();
         let mut post: Vec<(u64, String)> = vec![];
         if changed {
-            let p = Arc::make_mut(&mut self.project);
+            let p = self.project_mut();
             for u in &updates {
                 match u {
                     ItemUpdate::Started { id, unix } => {
@@ -757,7 +757,8 @@ impl Session {
                     }
                 }
             }
-            self.bump();
+            let hooks = self.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("render_queue"), || self.bump());
         }
         let mut completed = None;
         if finished && let Some(mut job) = self.render_job.take() {

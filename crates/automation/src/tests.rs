@@ -1094,7 +1094,7 @@ fn render_panic_is_an_error_and_session_remains_usable() {
     }
     let mut session = Session { footage: Arc::new(BrokenFootage(Mutex::new(true))), ..Default::default() };
     session.execute("comp.new", json!({"width":16,"height":16})).unwrap();
-    let item = Arc::make_mut(&mut session.project).add_item(
+    let item = session.project_mut().add_item(
         "synthetic",
         Label::Aqua,
         None,
@@ -1648,7 +1648,6 @@ fn render_frame_never_writes_over_a_file_the_project_reads() {
         color::Label,
         project::{Footage, FootageKind, ItemKind},
     };
-    use std::sync::Arc;
     let dir = std::env::temp_dir().join(format!("effectcraft-mcp-overwrite-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1657,7 +1656,7 @@ fn render_frame_never_writes_over_a_file_the_project_reads() {
     let mut session = Session::default();
     session.execute("comp.new", json!({"width": 16, "height": 16})).unwrap();
     session.execute("file.saveAs", json!({"path": project.to_string_lossy()})).unwrap();
-    Arc::make_mut(&mut session.project).add_item(
+    session.project_mut().add_item(
         "clip.png",
         Label::Aqua,
         None,

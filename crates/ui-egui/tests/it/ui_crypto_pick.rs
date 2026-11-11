@@ -1316,7 +1316,7 @@ fn a_cancelled_build_does_not_keep_the_next_pick_waiting() {
         match how {
             "disarm" => h.key_press(egui::Key::Escape),
             _ => {
-                let p = (*h.state().session.project).clone();
+                let p = (**h.state().session.project).clone();
                 h.state_mut().session.replace_project(p, None);
                 h.state_mut().session.state.selected_layers = vec![LayerId(ids.layer)];
             }

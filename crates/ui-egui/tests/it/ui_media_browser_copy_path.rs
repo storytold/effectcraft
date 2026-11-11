@@ -80,7 +80,7 @@ fn file_folder_and_virtual_paths_copy_from_the_context_menu_without_document_cha
         assert_eq!(click(&mut h, &id, PointerButton::Primary), [path]);
         h.run_steps(3);
         assert!(h.state().auto.find(&id).is_none());
-        assert_eq!(h.state().session.project, project);
+        assert_eq!(*h.state().session.project, project);
         assert_eq!(h.state().session.revision, revision);
         assert_eq!(h.state().session.history.undo.len(), history);
         assert_eq!(serde_json::to_value(&h.state().session.state.media_browser).unwrap(), browser);
@@ -121,7 +121,7 @@ fn copy_path_control_command_preserves_the_path_and_rejects_bad_arguments() {
             assert_eq!(reply, Some(json!({"ok": false, "error": "A source path is required"})));
             assert!(copied.is_empty());
         }
-        assert_eq!(app.session.project, project);
+        assert_eq!(*app.session.project, project);
         assert_eq!(app.session.revision, revision);
         assert_eq!(app.session.history.undo.len(), history);
     }

@@ -80,7 +80,7 @@ fn footage_on_other_computers_is_never_looked_at() {
     let mut s = Session::default();
     for (name, path) in &stored {
         let f = Footage { path: path.clone(), width: 64, height: 48, has_video: true, ..Default::default() };
-        Arc::make_mut(&mut s.project).add_item(name, crate::color::Label::None, None, ItemKind::Footage(f));
+        s.project_mut().add_item(name, crate::color::Label::None, None, ItemKind::Footage(f));
     }
     let project = dir.join("p.ecproj");
     s.execute("file.saveAs", json!({"path": project.to_string_lossy()})).unwrap();
@@ -176,7 +176,7 @@ fn reveal_deleted_file_in_existing_folder_offers_relink_guidance() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut s = Session::default();
     let file = dir.join("deleted.png");
-    let id = std::sync::Arc::make_mut(&mut s.project).add_item(
+    let id = s.project_mut().add_item(
         "Deleted",
         Default::default(),
         None,
@@ -193,13 +193,13 @@ fn relative_proxy_is_resolved_and_checked_next_to_the_project() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("proxy.png"), b"x").unwrap();
     let mut s = Session::default();
-    let id = Arc::make_mut(&mut s.project).add_item(
+    let id = s.project_mut().add_item(
         "Plate",
         Default::default(),
         None,
         ItemKind::Footage(Footage { path: dir.join("proxy.png").to_string_lossy().into_owned(), width: 64, height: 32, ..Default::default() }),
     );
-    Arc::make_mut(&mut s.project).item_mut(id).unwrap().proxy = Some(Box::new(effectcraft_project::Proxy {
+    s.project_mut().item_mut(id).unwrap().proxy = Some(Box::new(effectcraft_project::Proxy {
         footage: Footage { path: "proxy.png".into(), width: 32, height: 16, ..Default::default() },
         enabled: true,
     }));

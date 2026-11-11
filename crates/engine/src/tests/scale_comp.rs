@@ -78,9 +78,9 @@ fn scale_comp_doubles_the_frame_with_keys_and_parented_layers() {
 
     // One undo step, and one redo step.
     s.execute("edit.undo", json!({})).unwrap();
-    assert!(s.project == before, "undo restores the comp and every layer");
+    assert!(*s.project == before, "undo restores the comp and every layer");
     s.execute("edit.redo", json!({})).unwrap();
-    assert!(s.project == after, "redo scales the comp and every layer again");
+    assert!(*s.project == after, "redo scales the comp and every layer again");
 }
 
 #[test]
@@ -185,9 +185,7 @@ fn scale_comp_gives_z_its_own_speed_when_a_scale_key_has_one_ease() {
     s.execute("keys.setEase", json!({"layer": card, "path": "transform/scale", "time": 0, "side": "out", "speed": 300, "influence": 50})).unwrap();
     // One ease for every dimension, as a project file may store it.
     let cid = s.active_comp_id().unwrap();
-    let key =
-        &mut std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(card)).unwrap().props.prop_mut("transform/scale").unwrap().keys
-            [0];
+    let key = &mut s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(card)).unwrap().props.prop_mut("transform/scale").unwrap().keys[0];
     key.out_ease.truncate(1);
     let scale0 = v3(&s, card, "transform/scale", 0.25);
 
@@ -281,7 +279,7 @@ fn scale_comp_refuses_a_bad_factor_and_changes_nothing() {
             Err(EngineError::BadParams { cmd, msg }) => assert!(cmd == "comp.scale" && msg.contains(why), "{p}: {msg}"),
             other => panic!("{p} is refused as bad parameters, got {other:?}"),
         }
-        assert!(s.project == before, "{p} leaves the project alone");
+        assert!(*s.project == before, "{p} leaves the project alone");
     }
     s.execute("comp.scale", json!({"factor": 1})).unwrap();
 }

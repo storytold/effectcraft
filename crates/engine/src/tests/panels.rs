@@ -716,7 +716,7 @@ fn footage_that_cannot_be_decoded_reports_why() {
         has_video: true,
         ..Default::default()
     };
-    let item = std::sync::Arc::make_mut(&mut s.project).add_item("Clip", Default::default(), None, ItemKind::Footage(f));
+    let item = s.project_mut().add_item("Clip", Default::default(), None, ItemKind::Footage(f));
     let sum = s.execute("project.summary", json!({})).unwrap();
     let it = sum["items"].as_array().unwrap().iter().find(|i| i["id"] == json!(item.0)).unwrap();
     assert_eq!(it["problem"], json!("H.264 (High 4:2:2) isn't supported by the built-in decoder"));
@@ -742,7 +742,7 @@ fn a_proxy_in_use_that_cannot_be_decoded_reports_why() {
     let mut s = Session { footage: Arc::new(BrokenProxies), ..Default::default() };
     let comp = s.execute("comp.new", json!({"name": "C", "width": 64, "height": 36, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
     let still = Footage { kind: FootageKind::Still, path: "a.png".into(), width: 64, height: 36, has_video: true, ..Default::default() };
-    let item = std::sync::Arc::make_mut(&mut s.project).add_item("Plate", Default::default(), None, ItemKind::Footage(still));
+    let item = s.project_mut().add_item("Plate", Default::default(), None, ItemKind::Footage(still));
     let proxy = Footage {
         kind: FootageKind::Video,
         path: "plate.avi".into(),
@@ -758,13 +758,13 @@ fn a_proxy_in_use_that_cannot_be_decoded_reports_why() {
         sum["items"].as_array().unwrap().iter().find(|i| i["id"] == json!(id)).unwrap().get("problem").cloned()
     };
     for id in [item.0, comp] {
-        let p = std::sync::Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         p.items.get_mut(&ItemId(id)).unwrap().proxy = Some(Box::new(effectcraft_project::Proxy { footage: proxy.clone(), enabled: true }));
         assert_eq!(problem(&mut s, id), Some(want.clone()), "item {id}");
-        std::sync::Arc::make_mut(&mut s.project).items.get_mut(&ItemId(id)).unwrap().proxy.as_mut().unwrap().enabled = false;
+        s.project_mut().items.get_mut(&ItemId(id)).unwrap().proxy.as_mut().unwrap().enabled = false;
         assert_eq!(problem(&mut s, id), None, "item {id}: its own file shows, and is fine");
     }
-    std::sync::Arc::make_mut(&mut s.project).items.get_mut(&item).unwrap().proxy.as_mut().unwrap().enabled = true;
+    s.project_mut().items.get_mut(&item).unwrap().proxy.as_mut().unwrap().enabled = true;
     s.execute("footage.open", json!({"item": item.0})).unwrap();
     assert_eq!(s.execute("footage.info", json!({})).unwrap()["problem"], want);
 }

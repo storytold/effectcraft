@@ -588,8 +588,7 @@ fn type_tool_selected_text_preference_skips_ineligible_layers_and_falls_back_to_
             }
             "inactive" => {
                 let cid = a.session.active_comp_id().unwrap();
-                std::sync::Arc::make_mut(&mut a.session.project).comp_mut(cid).unwrap().layer_mut(LayerId(original)).unwrap().out_point =
-                    effectcraft_engine::time::Tick::ZERO;
+                a.session.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(original)).unwrap().out_point = effectcraft_engine::time::Tick::ZERO;
             }
             "unsoloed" => {
                 a.session.execute("layer.setSwitch", json!({"layers": [topmost], "switch": "solo", "value": true})).unwrap();

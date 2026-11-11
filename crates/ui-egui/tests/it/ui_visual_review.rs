@@ -17,7 +17,7 @@ fn all_ui_review_captures() {
         s.execute("layer.newText", json!({"text":"EffectCraft","name":"Title"})).unwrap();
         s.execute("layer.newSolid", json!({"name":"Plate","color":"#406080","width":160,"height":120})).unwrap();
         s.execute("renderQueue.add", json!({"format":"png","output":"review-[#####].png"})).unwrap();
-        std::sync::Arc::make_mut(&mut s.project).settings.gpu_acceleration = false;
+        s.project_mut().settings.gpu_acceleration = false;
         let mut h = Harness::builder().with_size(size).build_eframe(|_| EffectcraftApp::new(s));
         h.run_steps(4);
         h.render_serialized().unwrap().save(out.join(format!("{label}-workspace.png"))).unwrap();

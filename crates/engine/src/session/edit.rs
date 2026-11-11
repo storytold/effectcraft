@@ -33,8 +33,8 @@ impl Session {
         if self.script_ui.render_host.is_some() {
             return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
         }
-        let before = self.project.clone();
-        let mut p = (*self.project).clone();
+        let before = Arc::clone(&self.project);
+        let mut p = (**self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
         // Layer styles: one Global Light per comp, whichever layer edited it.
@@ -73,8 +73,9 @@ impl Session {
             self.history.abandon_redo(&before);
         }
         self.history.merge_key = merge.map(str::to_string);
-        self.project = Arc::new(p);
+        self.set_project(Arc::new(p));
         self.state = st;
+        self.pending_merged = same;
         self.bump();
         Ok(r)
     }
@@ -102,6 +103,13 @@ impl Session {
         }
         self.refresh_aux_footage();
         self.events.push(Event::ProjectChanged { revision: self.revision });
+        let merged = self.pending_merged;
+        self.pending_merged = false;
+        let hooks = self.hooks.clone();
+        let cause = hooks.current_cause();
+        let snapshot = Arc::clone(&self.project);
+        hooks.changed(self.revision, cause, merged, snapshot);
+        self.project.mark_bumped();
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
@@ -114,7 +122,7 @@ impl Session {
         if self.project.comp(comp).ok_or(EngineError::NoComp)?.resolution == r {
             return Ok(());
         }
-        Arc::make_mut(&mut self.project).comp_mut(comp).ok_or(EngineError::NoComp)?.resolution = r;
+        self.project_mut().comp_mut(comp).ok_or(EngineError::NoComp)?.resolution = r;
         self.bump();
         Ok(())
     }
@@ -127,7 +135,7 @@ impl Session {
         if keep.is_empty() {
             return;
         }
-        let p = Arc::make_mut(&mut self.project);
+        let p = self.project_mut();
         for (id, r) in keep {
             if let Some(c) = p.comp_mut(id) {
                 c.resolution = r;
@@ -143,17 +151,20 @@ impl Session {
         if self.script_ui.render_host.is_some() {
             return false;
         }
-        let Some((label, p)) = self.history.undo.pop() else { return false };
-        let edited = commands::text_edit::active_editor_snapshot(self);
-        let probe = commands::kept_crypto_probe(self);
-        let cur = std::mem::replace(&mut self.project, p);
-        self.keep_view_settings(&cur);
-        self.history.merge_key = None;
-        self.sanitize_after_replacement(edited.as_ref());
-        self.bump();
-        commands::keep_crypto_probe(self, probe, &cur);
-        self.history.redo.push((label, cur));
-        true
+        let hooks = self.hooks.clone();
+        hooks.with_cause(craft_command::Cause::Undo, || {
+            let Some((label, p)) = self.history.undo.pop() else { return false };
+            let edited = commands::text_edit::active_editor_snapshot(self);
+            let probe = commands::kept_crypto_probe(self);
+            let cur = self.swap_project(p);
+            self.keep_view_settings(&cur);
+            self.history.merge_key = None;
+            self.sanitize_after_replacement(edited.as_ref());
+            self.bump();
+            commands::keep_crypto_probe(self, probe, &cur);
+            self.history.redo.push((label, cur));
+            true
+        })
     }
 
     /// Redoes one step: the current project goes back onto the undo stack, per-comp Resolution is
@@ -164,17 +175,20 @@ impl Session {
         if self.script_ui.render_host.is_some() {
             return false;
         }
-        let Some((label, p)) = self.history.redo.pop() else { return false };
-        let edited = commands::text_edit::active_editor_snapshot(self);
-        let probe = commands::kept_crypto_probe(self);
-        let cur = std::mem::replace(&mut self.project, p);
-        self.keep_view_settings(&cur);
-        self.history.merge_key = None;
-        self.sanitize_after_replacement(edited.as_ref());
-        self.bump();
-        commands::keep_crypto_probe(self, probe, &cur);
-        self.history.undo.push((label, cur));
-        true
+        let hooks = self.hooks.clone();
+        hooks.with_cause(craft_command::Cause::Redo, || {
+            let Some((label, p)) = self.history.redo.pop() else { return false };
+            let edited = commands::text_edit::active_editor_snapshot(self);
+            let probe = commands::kept_crypto_probe(self);
+            let cur = self.swap_project(p);
+            self.keep_view_settings(&cur);
+            self.history.merge_key = None;
+            self.sanitize_after_replacement(edited.as_ref());
+            self.bump();
+            commands::keep_crypto_probe(self, probe, &cur);
+            self.history.undo.push((label, cur));
+            true
+        })
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -229,13 +243,14 @@ impl Session {
             }
         }
         self.layer_cache.clear();
-        self.project = Arc::new(p);
+        self.set_project(Arc::new(p));
         // The set of footage effects read the channels of is sent again, even when it is empty.
         self.aux_footage = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;
-        self.bump();
+        let hooks = self.hooks.clone();
+        hooks.with_cause(craft_command::Cause::Load, || self.bump());
         self.mark_saved();
         let first = self.project.comps().next().map(|(id, _)| *id);
         if let Some(c) = first {

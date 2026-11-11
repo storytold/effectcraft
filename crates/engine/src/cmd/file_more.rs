@@ -436,7 +436,7 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
     // Collect Files makes its folder (and the footage folder inside it).
     #[cfg(not(target_arch = "wasm32"))]
     std::fs::create_dir_all(format!("{folder}/(Footage)")).map_err(|e| EngineError::Other(format!("cannot create {folder}: {e}")))?;
-    let mut proj = (*s.project).clone();
+    let mut proj = (**s.project).clone();
     let mut copied = 0;
     let mut errors = vec![];
     for (id, pairs) in plan {

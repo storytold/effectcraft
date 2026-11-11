@@ -804,7 +804,7 @@ fn mask_reveal_ignores_undone_deleted_inactive_and_replaced_project_events() {
                 app.session.execute("comp.new", json!({"name": "Other"})).unwrap();
             }
             Stale::Replace => {
-                let project = (*app.session.project).clone();
+                let project = (**app.session.project).clone();
                 let comp = app.session.active_comp_id().unwrap();
                 app.session.replace_project(project, None);
                 app.session.execute("comp.open", json!({"comp": comp.0})).unwrap();

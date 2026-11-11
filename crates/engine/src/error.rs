@@ -15,10 +15,19 @@ pub enum EngineError {
     Project(#[from] effectcraft_project::ProjectError),
     #[error("{0}")]
     Other(String),
+    #[error(transparent)]
+    Command(#[from] craft_command::CommandError),
     /// Refused because parts would be lost in a conversion; nothing changed. `losses` names them,
     /// `advice` how to go on (`file.importAep` / `file.exportAep` without `allowLosses`).
     #[error("{losses} ({advice})")]
     Refused { losses: String, advice: &'static str },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<craft_plugin_host::invoke::CallError> for EngineError {
+    fn from(e: craft_plugin_host::invoke::CallError) -> Self {
+        EngineError::Other(format!("plug-in: {e}"))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

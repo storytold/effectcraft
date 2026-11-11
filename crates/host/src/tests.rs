@@ -26,7 +26,7 @@ fn refuse_overflow_collision(same_folder: bool) {
         storage_quota: Some(Arc::new(OverflowOnly(overflow.clone()))),
         ..Default::default()
     };
-    Arc::make_mut(&mut s.project).render_prefs.overflow_folders = vec![overflow.to_string_lossy().into_owned(); 2];
+    s.project_mut().render_prefs.overflow_folders = vec![overflow.to_string_lossy().into_owned(); 2];
     s.execute("comp.new", json!({"width": 16, "height": 16, "frameRate": 10, "duration": 0.2})).unwrap();
     for index in 0..2 {
         let folder = if same_folder { dir.clone() } else { dir.join(index.to_string()) };

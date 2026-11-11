@@ -47,7 +47,7 @@ fn disk_cache_settings_persistence_and_invalidation() {
     let saved = s.project.clone();
     drop(s);
     let mut s2 = session(&dir);
-    s2.project = saved;
+    s2.set_project(saved);
     s2.bump();
     s2.open_comp(cid);
     let dc2 = s2.disk_cache.clone().unwrap();
@@ -128,7 +128,7 @@ fn comp_content_keys_come_from_memory() {
     assert_eq!(effectcraft_render::disk_cache::comp_content_key(&s.project, cid), k2);
     // A proxy, and its Use Proxy switch, change the pixels.
     let set_proxy = |s: &mut Session, enabled: bool| {
-        let it = std::sync::Arc::make_mut(&mut s.project).items.get_mut(&cid).unwrap();
+        let it = s.project_mut().items.get_mut(&cid).unwrap();
         it.proxy = Some(Box::new(effectcraft_project::Proxy { footage: effectcraft_project::Footage::default(), enabled }));
         effectcraft_render::disk_cache::comp_content_key(&s.project, cid)
     };
@@ -169,7 +169,7 @@ fn the_disk_cache_is_attached_at_once_and_edits_do_no_file_work() {
     s.execute("prop.set", json!({"layer": "#1", "path": "transform/opacity", "value": 50})).unwrap();
     s.execute_checked("prefs.set", json!({"key": "disk.diskCacheMaxGb", "value": 30})).unwrap();
     assert!(attached(&s), "edits and other settings keep it attached");
-    let same = (*s.project).clone();
+    let same = (**s.project).clone();
     s.replace_project(same, None);
     assert!(attached(&s), "opening a project keeps it attached");
     // The first render uses it: a solid reads no file, so nothing is checked either.

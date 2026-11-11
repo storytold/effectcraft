@@ -1984,12 +1984,57 @@ fn phase_tail(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("viewer-video-off-chip"), r));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    footage_banner(app, &ctx, &painter, area, cid);
+
     vt::draw_snap(&ctx, &painter, &map, ectx);
     vt::rulers(app, ui, &map, outer, area);
     vt::bottom_bar(app, ui, bar, zoom, time, comp);
     if err_h > 0.0 {
         super::expr_bar::draw(app, ui, err_bar, cid);
     }
+}
+
+/// Footage the comp needs and cannot read. Looked up again after this long, so a file that comes
+/// back clears the banner without an edit.
+#[cfg(not(target_arch = "wasm32"))]
+const FOOTAGE_LOOK: f64 = 1.0;
+
+/// Most file names the banner lists before it counts the rest.
+#[cfg(not(target_arch = "wasm32"))]
+const BANNER_NAMES: usize = 3;
+
+/// Say it in the comp when its footage is missing or unreadable. Such a comp renders flat, and a
+/// flat grey frame says nothing about why. The text names the files.
+#[cfg(not(target_arch = "wasm32"))]
+fn footage_banner(app: &mut EffectcraftApp, ctx: &egui::Context, painter: &egui::Painter, area: Rect, cid: effectcraft_engine::project::ItemId) {
+    let key = egui::Id::unique(("viewer-footage-missing", cid.0));
+    let now = ctx.input(|i| i.time);
+    let revision = app.session.revision;
+    let cached: Option<(u64, f64, Vec<String>)> = ctx.data(|d| d.get_temp(key));
+    let paths = match cached {
+        Some((rev, at, paths)) if rev == revision && now - at < FOOTAGE_LOOK => paths,
+        _ => {
+            let paths = effectcraft_link::unusable_footage(&app.session, cid);
+            ctx.data_mut(|d| d.insert_temp(key, (revision, now, paths.clone())));
+            paths
+        }
+    };
+    if paths.is_empty() {
+        return;
+    }
+    ctx.request_repaint_after(std::time::Duration::from_secs_f64(FOOTAGE_LOOK));
+    let name = |path: &String| std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+    let mut names: Vec<String> = paths.iter().take(BANNER_NAMES).map(name).collect();
+    if paths.len() > BANNER_NAMES {
+        names.push(format!("+{} more", paths.len() - BANNER_NAMES));
+    }
+    let text = format!("{}: {}", crate::i18n::tr("Footage missing or unreadable"), names.join(", "));
+    let galley = painter.layout_no_wrap(text.clone(), Tokens::medium(13.0), Color32::WHITE);
+    let r = Rect::from_center_size(pos2(area.center().x, area.max.y - 36.0), galley.size() + vec2(28.0, 14.0)).intersect(area);
+    painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(0x9c, 0x1d, 0x1d, 0xe6));
+    painter.galley(pos2(r.center().x - galley.size().x / 2.0, r.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+    app.auto.add("viewer.footageMissing", r, &text);
 }
 pub(crate) use crate::widgets::hex_rgb;
 

@@ -12,7 +12,7 @@ fn offset_layer(start: f64, stretch: f64) -> (Session, u64) {
     let layer = s.execute("layer.newSolid", json!({"name": "A", "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.timing", json!({"layer": layer, "start": start, "in": 10.5, "out": 20})).unwrap();
     let cid = s.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap().stretch = stretch;
+    s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap().stretch = stretch;
     (s, layer)
 }
 
@@ -130,7 +130,7 @@ fn excessive_stretch_or_start_conversions_fail_without_clamping_keys() {
     for (start, stretch, base, time) in [(10.5, 1e300, "layer", 1.0), (10.5, 1e-300, "comp", 15.3), (Tick::MAX.seconds(), 100.0, "layer", 1.0)] {
         let (mut s, layer) = offset_layer(10.5, 100.0);
         let cid = s.active_comp_id().unwrap();
-        let ly = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap();
+        let ly = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(layer)).unwrap();
         ly.start_time = Tick::from_seconds_f64(start);
         ly.stretch = stretch;
         let before = s.history.undo.len();
