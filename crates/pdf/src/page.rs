@@ -15,7 +15,7 @@ use kurbo::{Point, Shape as _};
 use crate::build::{Builder, MAX_PATH};
 use crate::color::{Cs, Func, color_space, names_resource, text_string};
 use crate::font::Font;
-use crate::object::{Dict, File, Lexer, Obj, decode_stream};
+use crate::object::{Dict, File, Lexer, Obj, decode_stream, decode_stream_within};
 
 /// A page: its dictionary with inherited attributes resolved.
 pub struct Page {
@@ -116,8 +116,10 @@ pub fn page_content(file: &File, page: &Page) -> Vec<u8> {
         None => vec![],
     };
     for p in parts {
+        // Each part is decoded within what is left of the allowance (a stream that inflates past it
+        // is left out, not decoded in full first).
         if let Obj::Stream(d, raw) = p
-            && let Some(data) = decode_stream(file, d, raw)
+            && let Some(data) = decode_stream_within(file, d, raw, MAX_CONTENT.saturating_sub(out.len()))
         {
             if out.len().saturating_add(data.len()) > MAX_CONTENT {
                 break;
@@ -271,6 +273,12 @@ fn copy_weight(nodes: &[Node]) -> usize {
                 if let effectcraft_svg::Geom::Path(p) = &sh.geom {
                     weight = weight.saturating_add(p.elements().len());
                 }
+                // A gradient paint is copied with its stops.
+                for paint in [sh.fill.as_ref(), sh.stroke.as_ref().map(|s| &s.paint)].into_iter().flatten() {
+                    if let Paint::Gradient(g) = paint {
+                        weight = weight.saturating_add(g.stops.len());
+                    }
+                }
                 continue;
             }
             Item::Node(Node::Image(_)) => continue,
@@ -374,8 +382,7 @@ impl<'a> Interp<'a> {
                 "j" => self.gs.join = [Join::Miter, Join::Round, Join::Bevel][(n(0) as usize).min(2)],
                 "M" => self.gs.miter = n(0),
                 "d" => {
-                    let mut arr = args.first().map(|a| self.file.nums(a)).unwrap_or_default();
-                    arr.truncate(MAX_DASH);
+                    let arr = args.first().map(|a| self.file.nums_first(a, MAX_DASH)).unwrap_or_default();
                     self.gs.dash = (!arr.is_empty() && arr.iter().any(|v| *v > 0.0)).then(|| (arr, n(1)));
                 }
                 "gs" => {
@@ -693,8 +700,7 @@ impl<'a> Interp<'a> {
             self.gs.fill_alpha = v.clamp(0.0, 1.0);
         }
         if let Some(Obj::Array(d)) = f.get(g, "D") {
-            let mut arr = d.first().map(|a| f.nums(a)).unwrap_or_default();
-            arr.truncate(MAX_DASH);
+            let arr = d.first().map(|a| f.nums_first(a, MAX_DASH)).unwrap_or_default();
             let ph = d.get(1).and_then(|p| f.resolve(p).num()).unwrap_or(0.0);
             self.gs.dash = (!arr.is_empty() && arr.iter().any(|v| *v > 0.0)).then_some((arr, ph));
         }
@@ -1270,5 +1276,43 @@ impl<'a> Interp<'a> {
             self.gs = g;
             self.close_to(d);
         }
+    }
+}
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    #[test]
+    fn copying_a_tile_costs_its_gradient_stops_clips_and_mask_content() {
+        let gradient = |n: usize| {
+            Paint::Gradient(Gradient {
+                kind: GradientKind::Linear { x1: 0.0, y1: 0.0, x2: 1.0, y2: 0.0 },
+                stops: vec![(0.0, [0.0; 4]); n],
+                bbox_units: true,
+                transform: Affine::IDENTITY,
+                spread: Spread::Pad,
+            })
+        };
+        let shape = |fill: Option<Paint>| {
+            Node::Shape(effectcraft_svg::Shape {
+                name: "s".into(),
+                geom: effectcraft_svg::Geom::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, rx: 0.0, ry: 0.0 },
+                transform: Affine::IDENTITY,
+                fill,
+                fill_opacity: 1.0,
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+                opacity: 1.0,
+            })
+        };
+        assert_eq!(copy_weight(&[shape(Some(Paint::Color([0.0; 3])))]), 1);
+        assert_eq!(copy_weight(&[shape(Some(gradient(500)))]), 501);
+        // A mask's content is counted with the group that holds it.
+        let mut inner = Group::new("mask");
+        inner.children.push(shape(None));
+        let mut g = Group::new("g");
+        g.mask = Some(Box::new(SoftMask { content: inner, luminosity: true, backdrop: [0.0; 3] }));
+        assert_eq!(copy_weight(&[Node::Group(g)]), 3);
     }
 }
