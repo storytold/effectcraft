@@ -851,9 +851,6 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut material_of: HashMap<i64, usize> = HashMap::new();
     let mut texture_of: HashMap<i64, Option<usize>> = HashMap::new();
-    // One pixel budget for every texture of the import.
-    let mut pixels_left = crate::MAX_IMPORT_TEXTURE_PIXELS;
-    let mut warnings: Vec<String> = vec![];
     let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Option<usize> {
         if let Some(t) = texture_of.get(&tid) {
             return *t;
@@ -877,14 +874,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
                     resolve(&f).or_else(|| resolve(f.rsplit('/').next()?))
                 })
             })?;
-            let t = match Texture::decode_within(&bytes, &mut pixels_left) {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("model: FBX texture left out: {e}");
-                    warnings.push(format!("texture left out: {e}"));
-                    return None;
-                }
-            };
+            let t = Texture::decode(&bytes).ok()?;
             textures.push(Arc::new(t));
             Some(textures.len() - 1)
         })();
@@ -957,7 +947,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     if meshes.is_empty() {
         return Err(perr("FBX file without meshes"));
     }
-    Ok(Model { meshes, nodes, roots: vec![0], materials, textures, warnings, ..Model::default() })
+    Ok(Model { meshes, nodes, roots: vec![0], materials, textures, ..Model::default() })
 }
 
 #[cfg(test)]
