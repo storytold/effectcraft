@@ -45,6 +45,7 @@ impl Tick {
         clamp128((self.0 as i128 * per_second as i128).div_euclid(TICKS_PER_SECOND as i128))
     }
     /// Conversion from a rational timestamp `pts * num / den` seconds (container timebases).
+    /// Saturates to the `Tick` range when the result does not fit.
     pub fn from_rational(pts: i64, num: i64, den: i64) -> Tick {
         let t = (pts as i128).saturating_mul(num as i128).saturating_mul(TICKS_PER_SECOND as i128);
         // i128::MIN / -1 does not fit; the true quotient is far above Tick's range, so saturate.
