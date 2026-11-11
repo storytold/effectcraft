@@ -1,13 +1,19 @@
 use super::value::V;
 use super::{Rc, RefCell, ascii85, is_white, parse_num};
 
-/// Source tokenizer (the data source for `currentfile`).
+/// Source tokenizer (the data source for `currentfile`). A name of any length is read: the file
+/// bounds how many there are, running one is bounded where it is executed, and keeping one (as a
+/// dictionary key, say) is charged and length-capped there.
 pub(super) struct Src<'a> {
     pub(super) d: &'a [u8],
     pub(crate) pos: usize,
 }
 
-impl Src<'_> {
+impl<'a> Src<'a> {
+    pub(super) fn new(d: &'a [u8]) -> Src<'a> {
+        Src { d, pos: 0 }
+    }
+
     fn skip_ws(&mut self) {
         while self.pos < self.d.len() {
             let c = self.d[self.pos];
@@ -206,7 +212,10 @@ impl Src<'_> {
     /// Step over inline image data that follows an `image` operator reading `currentfile`.
     pub(super) fn skip_image_data(&mut self) {
         self.skip_ws();
-        if self.d[self.pos..].starts_with(b"<~") || self.d.get(self.pos).is_some_and(|c| (b'!'..=b'u').contains(c) && !c.is_ascii_hexdigit()) {
+        // ASCII85 data: `<~` or a base-85 digit (`!`..`u`, or `z` for four zero bytes) that is not
+        // a hex digit, read to its `~>` terminator.
+        let a85 = |c: &u8| (*c == b'z' || (b'!'..=b'u').contains(c)) && !c.is_ascii_hexdigit();
+        if self.d[self.pos..].starts_with(b"<~") || self.d.get(self.pos).is_some_and(a85) {
             match self.d[self.pos..].windows(2).position(|w| w == b"~>") {
                 Some(p) => self.pos += p + 2,
                 None => self.pos = self.d.len(),
