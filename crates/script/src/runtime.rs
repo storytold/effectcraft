@@ -832,6 +832,17 @@ fn regex_may_start(b: &[u8], prev: u8, at: usize, after_dot: bool) -> bool {
     }
 }
 
+/// Whether the `.` at `at` is a property access: not the decimal point of a number (`1.`, `12.`)
+/// that ends there. A number written `1.5.x` has a fraction before the dot, so that dot accesses.
+fn dot_is_property(b: &[u8], at: usize) -> bool {
+    let word = |d: u8| d.is_ascii_alphanumeric() || d == b'_' || d == b'$';
+    let start = (0..at).rev().find(|&k| !b.get(k).is_some_and(|d| word(*d))).map_or(0, |k| k + 1);
+    let before = b.get(start..at).unwrap_or_default();
+    let integer = !before.is_empty() && before.iter().all(u8::is_ascii_digit);
+    // `1.5.x`: digits that follow another `.` are a fraction.
+    !(integer && !(start > 0 && b.get(start - 1) == Some(&b'.')))
+}
+
 /// Skip a regular expression literal that starts at `b[*i]` (a `/`), to its closing `/` (flags
 /// follow as ordinary letters). A `/` inside a class `[…]` or after a backslash does not end it,
 /// and neither a quote nor a backtick inside it starts a string; a line break ends it.
@@ -928,8 +939,11 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
         }
         if !c.is_ascii_whitespace() {
             let word = |d: u8| d.is_ascii_alphanumeric() || d == b'_' || d == b'$';
-            if word(c) && !word(prev) {
-                word_after_dot = prev == b'.';
+            // A word starts where the byte before it is not a word byte (white space and comments
+            // end a word too): it is a property name when a `.` that is not part of a number
+            // comes right before it.
+            if word(c) && (i == 0 || !b.get(i - 1).is_some_and(|d| word(*d))) {
+                word_after_dot = prev == b'.' && dot_is_property(b, prev_at);
             }
             (prev, prev_at) = (c, i);
         }
@@ -1023,8 +1037,14 @@ mod nesting_tests {
         assert!(check_nesting(&format!("typeof /`/ ; {}", deep(5000))).is_err());
         // A postfix update or a property named like a keyword is followed by a division, not a
         // regular expression (the deep brackets after it must still be counted).
-        for head in ["i++ /", "i-- /", "obj.in /", "obj . in /", "obj . /* c */ in /", "obj.\n  typeof /"] {
+        for head in ["i++ /", "i-- /", "obj.in /", "obj . in /", "obj . /* c */ in /", "obj.\n  typeof /", "a1.in /", "1.5.in /"] {
             assert!(check_nesting(&format!("x = {head} {} / 2", deep(5000))).is_err(), "{head}");
+        }
+        // A keyword after a property name is still a keyword (`obj.in in /re/`), and the dot of a
+        // number does not make the word after it a property (`1. in /re/`): the regular expression
+        // is skipped, so the backtick inside it opens nothing and the brackets after it count.
+        for head in ["obj.in in", "1. in", "12. typeof"] {
+            assert!(check_nesting(&format!("x = {head} /`/; y = {}", deep(5000))).is_err(), "{head}");
         }
     }
 
