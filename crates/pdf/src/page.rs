@@ -1058,6 +1058,7 @@ impl<'a> Interp<'a> {
         let m = f.get(d, "Matrix").map(|m| affine(&f.nums(m))).unwrap_or(Affine::IDENTITY);
         let form_res = f.get_dict(d, "Resources").cloned().unwrap_or_else(|| res.clone());
         self.saved.push((self.gs.clone(), self.b.depth()));
+        let entry = self.saved.len();
         // A transparency group XObject (§11.6.6) composites as one object: the current alpha
         // (and the blend-mode and soft-mask groups already open around it) apply to its
         // result, and its contents start from the initial alpha.
@@ -1092,6 +1093,9 @@ impl<'a> Interp<'a> {
         self.path = path;
         self.tm = tm;
         self.tlm = tlm;
+        // The stream may have stopped at the `q` limit with states of its own still saved: they
+        // go, so the pop below restores this form's entry state.
+        self.saved.truncate(entry);
         if let Some((g, dd)) = self.saved.pop() {
             self.gs = g;
             self.close_to(dd);
@@ -1269,6 +1273,7 @@ impl<'a> Interp<'a> {
         // (one for sixteen), so a long procedure shown many times spends the budget.
         self.budget = self.budget.saturating_sub(content.len() / 16);
         self.saved.push((self.gs.clone(), self.b.depth()));
+        let entry = self.saved.len();
         self.gs.ctm *= m;
         let path = std::mem::take(&mut self.path);
         let (tm, tlm) = (self.tm, self.tlm);
@@ -1276,6 +1281,8 @@ impl<'a> Interp<'a> {
         self.path = path;
         self.tm = tm;
         self.tlm = tlm;
+        // (As in `form`: states the glyph procedure left saved at the `q` limit are dropped.)
+        self.saved.truncate(entry);
         if let Some((g, d)) = self.saved.pop() {
             self.gs = g;
             self.close_to(d);

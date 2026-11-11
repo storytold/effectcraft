@@ -740,3 +740,33 @@ fn a_tiling_pattern_is_charged_for_the_clip_geometry_its_tiles_copy() {
     .unwrap();
     assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
 }
+
+#[test]
+fn a_form_stopped_at_the_q_limit_restores_the_state_it_was_entered_with() {
+    // The form saves 4,100 states (past the limit of 4,096) after setting a blue fill; the page's
+    // red fill must be back once the form is left, not the form's last saved state.
+    let form = format!("0 0 1 rg {}", "q ".repeat(4_100)).into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "1 0 0 rg /Fm Do 0 0 10 10 re f",
+        "/XObject << /Fm 10 0 R >>",
+        vec![(10, "<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << >> >>".into(), Some(form))],
+    ))
+    .unwrap();
+    fn last_fill(g: &effectcraft_svg::Group, out: &mut Option<[f64; 3]>) {
+        for n in &g.children {
+            match n {
+                effectcraft_svg::Node::Group(g) => last_fill(g, out),
+                effectcraft_svg::Node::Shape(s) => {
+                    if let Some(effectcraft_svg::Paint::Color(c)) = &s.fill {
+                        *out = Some(*c);
+                    }
+                }
+                effectcraft_svg::Node::Image(_) => {}
+            }
+        }
+    }
+    let mut fill = None;
+    last_fill(&doc.root, &mut fill);
+    assert_eq!(fill, Some([1.0, 0.0, 0.0]));
+    assert!(doc.skipped.iter().any(|s| s.contains("nesting limit")), "{:?}", doc.skipped);
+}
