@@ -382,6 +382,42 @@ fn new_layers_start_at_the_current_time_when_asked() {
     assert_eq!(s.active_comp().unwrap().layers[0].start_time.seconds().round(), 2.0);
 }
 
+/// Settings ▸ General ▸ Fit New Layers to Work Area: new text, solid, shape, null and adjustment
+/// layers span the work area, ahead of the start-time setting; footage keeps its own length.
+#[test]
+fn new_layers_fit_the_work_area_when_asked() {
+    let mut s = session_with_comp();
+    s.execute("comp.workArea", json!({"start": 2, "end": 5})).unwrap();
+    let span = |s: &Session| {
+        let l = &s.active_comp().unwrap().layers[0];
+        let r = |t: effectcraft_time::Tick| (t.seconds() * 10.0).round() / 10.0;
+        (r(l.start_time), r(l.in_point), r(l.out_point))
+    };
+    s.execute("layer.newSolid", json!({})).unwrap();
+    assert_eq!(span(&s), (0.0, 0.0, 10.0), "off by default");
+
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.createLayersAtCompStart", "value": false})).unwrap();
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(7.0));
+    for (cmd, p) in [
+        ("layer.newSolid", json!({})),
+        ("layer.newAdjustment", json!({})),
+        ("layer.newNull", json!({})),
+        ("layer.newText", json!({"text": "a"})),
+        ("layer.newShape", json!({"kind": "rect"})),
+        ("shape.newShape", json!({"kind": "ellipse"})),
+        ("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]})),
+    ] {
+        s.state.selected_layers.clear();
+        s.execute(cmd, p).unwrap();
+        assert_eq!(span(&s), (2.0, 2.0, 5.0), "{cmd}");
+    }
+
+    let nested = s.execute("comp.new", json!({"name": "Nested", "duration": 3, "open": false})).unwrap()["comp"].as_u64().unwrap();
+    s.execute("layer.addItem", json!({"item": nested})).unwrap();
+    assert_eq!(span(&s), (7.0, 7.0, 10.0), "footage and comps keep their own timing");
+}
+
 #[test]
 fn default_spatial_interpolation_linear() {
     let mut s = session_with_comp();

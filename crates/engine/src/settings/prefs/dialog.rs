@@ -92,6 +92,7 @@ pub fn pages() -> Vec<Page> {
                 s("general.showToolTips", "Show Tool Tips", B, true),
                 s("general.viewerWheelScrubbing", "Scrub Composition Frames with Mouse Wheel", B, true),
                 s("general.createLayersAtCompStart", "Create Layers at Composition Start Time", B, true),
+                s("general.fitNewLayersToWorkArea", "Fit New Layers to Work Area", B, true),
                 s("general.switchesAffectNestedComps", "Switches Affect Nested Comps", B, true),
                 s("general.defaultSpatialLinear", "Default Spatial Interpolation to Linear", B, true),
                 s("general.preserveConstantVertexCount", "Preserve Constant Vertex and Feather Point Count when Editing Masks", B, true),

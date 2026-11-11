@@ -37,6 +37,7 @@ Commands (CLI, MCP, control channel):
 - `general.showToolTips`: Show Tool Tips
 - `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
+- `general.fitNewLayersToWorkArea`: Fit New Layers to Work Area (off by default). On: new text, solid, shape, null and adjustment layers start at the work area start and end at its end, ahead of Create Layers at Composition Start Time. Footage and compositions keep their own length.
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
 - `startup.offerCrashRecovery`: Offer to Open the Latest Auto-Save After a Crash
