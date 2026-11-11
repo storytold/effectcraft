@@ -513,6 +513,18 @@ fn tool(b: &mut Backend, name: &str, a: Value) -> Result<Value, Failure> {
     }
 }
 
+/// The error bar's lines from an `expr.errors` result: a render that evaluates a failing
+/// expression still succeeds, so `render` and `render-frame` name what failed (#3444).
+fn expression_errors(r: &Value) -> Vec<String> {
+    r["text"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+}
+
+fn warn_expression_errors(errors: &[String]) {
+    for e in errors {
+        note!("warning: expression error: {e}");
+    }
+}
+
 /// `script FILE.jsx [project]` / `script --eval CODE`: run JavaScript against a headless session
 /// (an empty project unless one is given, or `--demo`) or the running app (`--bridge`).
 fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
@@ -812,7 +824,13 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             let t0 = std::time::Instant::now();
             let f = b.render_to_file(comp.as_ref(), time, max_side, args.flag("--transparent"), &out)?;
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
-            let info = json!({"path": out, "comp": f.comp, "time": f.time, "width": f.width, "height": f.height, "ms": (ms * 10.0).round() / 10.0});
+            let mut info = json!({"path": out, "comp": f.comp, "time": f.time, "width": f.width, "height": f.height, "ms": (ms * 10.0).round() / 10.0});
+            // An app without the query (an older bridge) just has nothing to report.
+            let errors = b.exec("expr.errors", json!({"comp": f.comp, "time": f.time})).map(|r| expression_errors(&r)).unwrap_or_default();
+            warn_expression_errors(&errors);
+            if !errors.is_empty() {
+                info["expressionErrors"] = json!(errors);
+            }
             if json_out {
                 emit(&info, true);
             } else {
@@ -1013,15 +1031,26 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
     }
     let mut results = vec![];
     let mut failed = vec![];
+    let mut checks = vec![];
     for it in s.project.render_queue.iter().filter(|i| attempted.contains(&i.id)) {
         let name = s.project.item(it.comp).map(|i| i.name.clone()).unwrap_or_else(|| "?".into());
         match &it.status {
             RenderStatus::Done => {
                 note!("done: {name} → {} in {:.2}s", it.last_output.as_deref().unwrap_or("?"), it.render_time.unwrap_or(0.0));
                 results.push(json!({"comp": name, "output": it.last_output, "seconds": it.render_time}));
+                // Checked at the first rendered frame.
+                let start = s.project.comp(it.comp).map(|c| it.settings.span(c).0.seconds()).unwrap_or(0.0);
+                checks.push((results.len() - 1, it.comp.0, start));
             }
             RenderStatus::Failed(e) => failed.push(format!("{name}: {e}")),
             other => failed.push(format!("{name}: {}", other.label())),
+        }
+    }
+    for (i, comp, time) in checks {
+        let errors = s.execute("expr.errors", json!({"comp": comp, "time": time})).map(|r| expression_errors(&r)).unwrap_or_default();
+        warn_expression_errors(&errors);
+        if let Some(r) = results.get_mut(i).filter(|_| !errors.is_empty()) {
+            r["expressionErrors"] = json!(errors);
         }
     }
     if !failed.is_empty() {

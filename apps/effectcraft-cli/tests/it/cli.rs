@@ -417,6 +417,47 @@ fn render_frame_writes_png() {
     assert!((v["time"].as_f64().unwrap() - 0.5).abs() < 0.02, "{v}");
 }
 
+/// A failing expression doesn't fail a render, but `render-frame` and `render` name it on stderr
+/// and in their JSON, as the app's error bar does (#3444). A clean comp reports nothing.
+#[test]
+fn render_reports_expression_errors() {
+    let proj = tmp("expr-errors.ecproj");
+    let p = proj.to_str().unwrap();
+    let jsx = tmp("expr-errors.jsx");
+    std::fs::write(
+        &jsx,
+        "var c = app.project.items.addComp('Broken', 160, 90, 1, 1, 24);
+var s = c.layers.addSolid([1, 0, 0], 'Red', 160, 90, 1);
+s.property('Position').expression = '[80, nope + 1]';
+app.project.items.addComp('Clean', 160, 90, 1, 1, 24).layers.addSolid([0, 0, 1], 'Blue', 160, 90, 1);",
+    )
+    .unwrap();
+    ok_json(&["script", jsx.to_str().unwrap(), "--save-as", p]);
+
+    let png = tmp("expr-errors.png");
+    let out = bin().args(["render-frame", "--project", p, "--comp", "Broken", "--out", png.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(out.status.success(), "a failing expression doesn't fail the render");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let errors = v["expressionErrors"].as_array().unwrap_or_else(|| panic!("no expressionErrors: {v}"));
+    assert_eq!(errors.len(), 1, "{v}");
+    assert!(errors[0].as_str().unwrap().contains("nope") && errors[0].as_str().unwrap().contains("'Red'"), "{v}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning: expression error:") && err.contains("nope"), "{err}");
+
+    let v = ok_json(&["render-frame", "--project", p, "--comp", "Clean", "--out", png.to_str().unwrap()]);
+    assert!(v.get("expressionErrors").is_none(), "{v}");
+
+    let gif = tmp("expr-errors.gif");
+    let out = bin()
+        .args(["render", "--project", p, "--comp", "Broken", "--format", "gif", "--end", "0.1", "--out", gif.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["rendered"][0]["expressionErrors"][0].as_str().is_some_and(|e| e.contains("nope")), "{v}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("warning: expression error:"));
+}
+
 #[test]
 fn errors_are_json() {
     let (code, v) = run_json(&["exec", "no.such.command", "--empty"]);
