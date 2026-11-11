@@ -26,7 +26,7 @@ function __err(msg) {
 }
 function __num(v, what) {
   var n = Number(v);
-  if (typeof v === "boolean" || isNaN(n)) throw __err((what || "value") + " must be a number");
+  if (typeof v === "boolean" || Number.isNaN(n)) throw __err((what || "value") + " must be a number");
   return n;
 }
 function __str(v) {
@@ -43,11 +43,11 @@ if (typeof String.prototype.substr !== "function") {
       if (this === null || this === undefined) throw new TypeError("String.substr called on null or undefined");
       var text = String(this), n = text.length;
       var from = Number(start);
-      if (isNaN(from)) from = 0;
+      if (Number.isNaN(from)) from = 0;
       // ToIntegerOrInfinity, then clamp positive or negative offsets.
       from = from < 0 ? Math.max(n + Math.ceil(from), 0) : Math.min(Math.floor(from), n);
       var count = length === undefined ? n - from : Number(length);
-      if (isNaN(count) || count <= 0) return "";
+      if (Number.isNaN(count) || count <= 0) return "";
       return text.slice(from, from + count);
     },
     writable: true, configurable: true
@@ -436,7 +436,7 @@ function __callable(o) {
 // 1-based collections with `[n]` access.
 var __coll = {
   get: function (t, k, r) {
-    if (typeof k === "string" && /^[0-9]+$/.test(k)) return t.__at(parseInt(k, 10));
+    if (typeof k === "string" && /^[0-9]+$/.test(k)) return t.__at(Number.parseInt(k, 10));
     return Reflect.get(t, k, r);
   },
 };

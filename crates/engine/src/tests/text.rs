@@ -49,6 +49,38 @@ fn animate_text_adds_animators_with_companion_properties() {
     let _ = s.render(cid, s.time(), Default::default());
 }
 
+/// `animator` counts from 1, as `#n` references do, and a uid match wins over an index: every
+/// command that takes it says so, and 0 fails with an error that says so (agents reading
+/// `uid|index` tried 0).
+#[test]
+fn animator_indices_count_from_1_and_say_so() {
+    let (mut s, t) = session();
+    let uid = s.execute("layer.addTextAnimator", json!({"layer": t, "property": "position"})).unwrap()["animator"].as_u64().unwrap();
+    for id in ["layer.addTextAnimatorProperty", "layer.addTextSelector", "text.addSelector", "text.animatorFontAxes"] {
+        let spec = crate::cmd::command_specs().iter().find(|c| c.id == id).unwrap();
+        assert!(spec.params.contains("animator?: uid|index (1-based; a uid match wins over an index)"), "{id}: {}", spec.params);
+    }
+    for (id, p) in [
+        ("layer.addTextAnimatorProperty", json!({"layer": t, "animator": 0, "property": "fillHue"})),
+        ("layer.addTextSelector", json!({"layer": t, "animator": 0, "kind": "wiggly"})),
+    ] {
+        let e = s.execute(id, p).unwrap_err().to_string();
+        assert!(e.contains("no animator 0") && e.contains("1-based"), "{id}: {e}");
+    }
+    let r = s.execute("layer.addTextSelector", json!({"layer": t, "animator": 1, "kind": "wiggly"})).unwrap();
+    assert_eq!(r["animator"].as_u64(), Some(uid));
+    // A second animator whose uid is 1: `animator: 1` is that uid, not the first animator, and
+    // index 2 reaches the same animator.
+    s.execute("layer.addTextAnimator", json!({"layer": t, "property": "opacity"})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(t)).unwrap();
+    layer.props.group_mut("text/animators").unwrap().children[1].as_group_mut().unwrap().uid = 1;
+    for (id, animator) in [("layer.addTextSelector", 1), ("text.addSelector", 1), ("layer.addTextSelector", 2)] {
+        let r = s.execute(id, json!({"layer": t, "animator": animator, "kind": "wiggly"})).unwrap();
+        assert_eq!(r["animator"].as_u64(), Some(1), "{id} animator {animator}: {r}");
+    }
+}
+
 #[test]
 fn add_property_and_selectors_with_undo_redo() {
     let (mut s, t) = session();

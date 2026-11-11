@@ -75,3 +75,32 @@ fn mask_motion_blur_follows_the_render_and_the_comp() {
     let (p, cid) = project(false);
     assert!(alpha_at_25(&p, cid, true) < 0.01, "the comp's switch off");
 }
+
+/// Whether mask motion blur may run at all (the render options, Switches Affect Nested Comps with
+/// a precomp layer's switch off) is part of the layer cache key, also for a layer whose own
+/// switch is off: a buffer made with the gate open must not serve a render with it closed.
+#[test]
+fn the_mask_motion_blur_gate_keys_the_layer_cache() {
+    let (mut p, inner) = project(true);
+    let mut outer = Comp::new(100, 100, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    outer.enable_motion_blur = true;
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: inner }, (100, 100), None);
+    pre.switches.motion_blur = false;
+    outer.layers.push(pre);
+    let oid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+    let half = Tick::from_seconds_f64(0.5 / 30.0);
+    let cache = crate::LayerCache::default();
+    let render = |cid: ItemId, opts: RenderOpts, cached: bool| {
+        let mut r = Renderer::new(&p, &NoFootage, opts);
+        r.cache = cached.then_some(&cache);
+        r.comp_frame(cid, half).data
+    };
+    let on = RenderOpts { motion_blur: true, nested_switches: true, ..Default::default() };
+    let off = RenderOpts { nested_switches: false, ..on };
+    assert!(render(oid, on, false) != render(oid, off, false), "the precomp layer's switch closes the gate");
+    assert!(render(oid, off, true) == render(oid, off, false));
+    assert!(render(oid, on, true) == render(oid, on, false), "not the buffer blurred with the gate open");
+    let still = RenderOpts { motion_blur: false, ..on };
+    assert!(render(inner, on, true) == render(inner, on, false));
+    assert!(render(inner, still, true) == render(inner, still, false), "Render Settings ▸ Motion Blur off");
+}

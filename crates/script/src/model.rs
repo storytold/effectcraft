@@ -451,6 +451,9 @@ fn find_child<'a>(l: &'a Layer, g: &'a PropGroup, k: &str, depth: u8) -> Option<
     g.children
         .iter()
         .find(|n| chain_of(n) == k)
+        .or_else(|| matchnames::current_name(k).and_then(|m| g.children.iter().find(|n| chain_of(n) == m)))
+        // Match names that changed only in case (`ADBE Ellipse` is now `ADBE ELLIPSE`, #3113).
+        .or_else(|| g.children.iter().find(|n| chain_of(n).eq_ignore_ascii_case(k)))
         .or_else(|| g.children.iter().find(|n| n.name() == k))
         .or_else(|| g.children.iter().find(|n| n.match_id() == k))
         .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(k)))

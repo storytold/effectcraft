@@ -171,9 +171,9 @@ impl MixEnv<'_> {
             return out;
         }
         let m = b - a;
-        // A tiny stretch would fetch a vast source range for one block: past MAX_SPEED the layer
-        // plays at that speed.
-        let speed = (100.0 / l.stretch).min(MAX_SPEED);
+        // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
+        // usize::MAX source samples for one block.
+        let speed = (100.0 / l.effective_stretch()).min(MAX_SPEED);
         let src_n = ((m as f64 * speed).ceil() as usize).max(1);
         let lt = l.layer_time(sample_tick(i0 + a as i64, rate));
         let buf = match &l.source {
@@ -309,7 +309,8 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
-        if !audible(project, l) || (any_solo && !l.switches.solo) || l.stretch <= 0.0 {
+        // The stretch the layer's time uses (#3247): 0 and NaN play at 100 %, as `layer_time`.
+        if !audible(project, l) || (any_solo && !l.switches.solo) || l.effective_stretch() <= 0.0 {
             continue;
         }
         // Sample range of the block that falls inside the layer's [in, out).
