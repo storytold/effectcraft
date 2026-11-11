@@ -625,8 +625,14 @@ fn a_font_file_replaced_at_the_same_path_is_read_again() {
     let scratch = Scratch::new("font-bytes");
     let p = scratch.0.join("a.ttf");
     std::fs::write(&p, b"old").unwrap();
-    let old = file_bytes(&p).unwrap();
+    let (old, old_meta) = file_bytes(&p).unwrap();
+    // Faces of one file share its bytes, and the metadata is that of the file the bytes came from.
+    let (again, _) = file_bytes(&p).unwrap();
+    assert!(Arc::ptr_eq(&old, &again));
+    assert_eq!(old_meta.len(), 3);
     std::fs::write(&p, b"new, longer").unwrap();
-    assert_eq!(file_bytes(&p).unwrap().as_slice(), b"new, longer");
+    let (new, new_meta) = file_bytes(&p).unwrap();
+    assert_eq!(new.as_slice(), b"new, longer");
+    assert_eq!(new_meta.len(), 11);
     assert_eq!(old.as_slice(), b"old");
 }

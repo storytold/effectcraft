@@ -168,17 +168,6 @@ fn info_from(n: FaceNames, data: FaceData, origin: &'static str) -> FaceInfo {
     }
 }
 
-/// A font file's bytes and its metadata from the same open file (so the metadata describes the
-/// bytes, not a later version of the file).
-fn read_with_metadata(path: &std::path::Path) -> std::io::Result<(Vec<u8>, std::fs::Metadata)> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
-    let meta = f.metadata()?;
-    let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes)?;
-    Ok((bytes, meta))
-}
-
 /// A loaded (or loadable) face.
 pub struct Face {
     pub id: FaceId,
@@ -218,26 +207,33 @@ pub struct VMetrics {
 }
 
 /// A font file's bytes, shared by every face of it that is loaded (the faces of a collection
-/// each held their own copy of the whole file).
-fn file_bytes(p: &std::path::Path) -> Option<Arc<Vec<u8>>> {
+/// each held their own copy of the whole file), with the metadata of the open file they were read
+/// from (so it describes the bytes, not a later version of the file).
+fn file_bytes(p: &std::path::Path) -> std::io::Result<(Arc<Vec<u8>>, std::fs::Metadata)> {
+    use std::io::Read;
     type Key = (PathBuf, u64, Option<std::time::SystemTime>);
-    static FILES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Key, std::sync::Weak<Vec<u8>>>>> = std::sync::LazyLock::new(Default::default);
+    type Entry = (std::sync::Weak<Vec<u8>>, std::fs::Metadata);
+    static FILES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Key, Entry>>> = std::sync::LazyLock::new(Default::default);
     let lock = || FILES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hit = |files: &std::collections::HashMap<Key, Entry>, key: &Key| files.get(key).and_then(|(w, m)| Some((w.upgrade()?, m.clone())));
+    let mut f = std::fs::File::open(p)?;
     // Keyed by size and modification time too: a file replaced at the same path is read afresh.
-    let m = std::fs::metadata(p).ok()?;
+    let m = f.metadata()?;
     let key: Key = (p.to_path_buf(), m.len(), m.modified().ok());
-    if let Some(b) = lock().get(&key).and_then(std::sync::Weak::upgrade) {
-        return Some(b);
+    if let Some(found) = hit(&lock(), &key) {
+        return Ok(found);
     }
     // Read outside the lock: a slow file must not hold up every other face's first load.
-    let b = Arc::new(std::fs::read(p).ok()?);
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)?;
+    let b = Arc::new(bytes);
     let mut files = lock();
-    if let Some(b) = files.get(&key).and_then(std::sync::Weak::upgrade) {
-        return Some(b);
+    if let Some(found) = hit(&files, &key) {
+        return Ok(found);
     }
-    files.retain(|_, w| w.strong_count() > 0);
-    files.insert(key, Arc::downgrade(&b));
-    Some(b)
+    files.retain(|_, (w, _)| w.strong_count() > 0);
+    files.insert(key, (Arc::downgrade(&b), m.clone()));
+    Ok((b, m))
 }
 
 impl Face {
@@ -248,9 +244,9 @@ impl Face {
                 FaceData::Static(b) => Some(FaceBytes::Static(b)),
                 FaceData::Shared(b) => Some(FaceBytes::Shared(b.clone())),
                 FaceData::File(p) => {
-                    let (bytes, meta) = read_with_metadata(p).ok()?;
+                    let (bytes, meta) = file_bytes(p).ok()?;
                     let _ = self.file_meta.set(meta);
-                    Some(FaceBytes::Shared(Arc::new(bytes)))
+                    Some(FaceBytes::Shared(bytes))
                 }
             })
             .as_ref()

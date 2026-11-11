@@ -628,15 +628,23 @@ fn is_hanging_open(c: char) -> bool {
     matches!(c, '"' | '\'' | '\u{2018}' | '\u{201c}' | '(' | '\u{ab}')
 }
 
+/// Whether each run starts at or after the end of the one before it (the runs of a document):
+/// the precondition of [`run_at`]'s bisection.
+fn runs_ordered(runs: &[(Range<usize>, TextStyle)]) -> bool {
+    runs.windows(2).all(|w| w[0].0.end <= w[1].0.start)
+}
+
 /// The style run index covering global byte `b` (the run before it at a boundary, for empty
-/// paragraphs at the end).
-fn run_at(runs: &[(Range<usize>, TextStyle)], b: usize) -> usize {
-    // Runs from a document are ordered and contiguous: the last one starting at or before `b`
-    // holds it, found by bisection (a scan from the first run per character was quadratic).
-    // Anything else (a gap, unordered runs) takes the scan as before.
-    let i = runs.partition_point(|(r, _)| r.start <= b).saturating_sub(1);
-    if runs.get(i).is_some_and(|(r, _)| r.contains(&b)) {
-        return i;
+/// paragraphs at the end). `ordered` is [`runs_ordered`] of `runs`.
+fn run_at(runs: &[(Range<usize>, TextStyle)], ordered: bool, b: usize) -> usize {
+    // Ordered, non-overlapping runs: the last one starting at or before `b` is the only one that
+    // can hold it, found by bisection (a scan from the first run per character was quadratic).
+    // Anything else (a gap, overlapping or unordered runs) takes the scan, whose first match wins.
+    if ordered {
+        let i = runs.partition_point(|(r, _)| r.start <= b).saturating_sub(1);
+        if runs.get(i).is_some_and(|(r, _)| r.contains(&b)) {
+            return i;
+        }
     }
     runs.iter().position(|(r, _)| b >= r.start && b < r.end).unwrap_or_else(|| runs.iter().rposition(|(r, _)| r.start <= b).unwrap_or(0))
 }
@@ -714,6 +722,7 @@ impl<'a> Para<'a> {
         text: &'a str,
         base: usize,
         runs: &'a [(Range<usize>, TextStyle)],
+        ordered: bool,
         primaries: &'a [Resolved],
         variation_ids: &'a [u32],
         para: &'a ParagraphStyle,
@@ -722,7 +731,7 @@ impl<'a> Para<'a> {
         let default_level = para.rtl.map(|r| if r { Level::rtl() } else { Level::ltr() });
         let bidi = BidiInfo::new(text, default_level);
         let base_rtl = bidi.paragraphs[0].level.is_rtl();
-        let chars = char_forms(text, base, runs, primaries, &bidi);
+        let chars = char_forms(text, base, runs, ordered, primaries, &bidi);
         let items = build_items(text, &chars, runs);
         // Prefix widths and the preceding non-whitespace boundary make candidate line widths O(1).
         // Every-line composition evaluates O(n²) candidate breaks; summing each candidate's bytes
@@ -1028,10 +1037,10 @@ impl<'a> Para<'a> {
 }
 
 /// Each char with its shaped form, face, direction and run.
-fn char_forms(text: &str, base: usize, runs: &[(Range<usize>, TextStyle)], primaries: &[Resolved], bidi: &BidiInfo) -> Vec<CharInfo> {
+fn char_forms(text: &str, base: usize, runs: &[(Range<usize>, TextStyle)], ordered: bool, primaries: &[Resolved], bidi: &BidiInfo) -> Vec<CharInfo> {
     text.char_indices()
         .map(|(b, c)| {
-            let si = run_at(runs, base + b);
+            let si = run_at(runs, ordered, base + b);
             let style = &runs[si].1;
             let primary = primaries[si].face;
             let face_of = |ch: char| if ch.is_whitespace() { primary } else { fonts::fallback_for(ch, primary) };
@@ -1090,13 +1099,14 @@ fn paragraph(
     text: &str,
     base: usize,
     runs: &[(Range<usize>, TextStyle)],
+    ordered: bool,
     primaries: &[Resolved],
     variation_ids: &[u32],
     para: &ParagraphStyle,
     width: Option<f32>,
 ) -> Vec<ParaLine> {
     if text.is_empty() {
-        let si = run_at(runs, base);
+        let si = run_at(runs, ordered, base);
         let pm = style_metrics(primaries, runs, si);
         // No text to resolve a direction from: the explicit one.
         let rtl = para.rtl == Some(true);
@@ -1117,7 +1127,7 @@ fn paragraph(
             underline: None,
         }];
     }
-    let p = Para::new(text, base, runs, primaries, variation_ids, para, width);
+    let p = Para::new(text, base, runs, ordered, primaries, variation_ids, para, width);
     let ranges = p.break_ranges();
     let nlines = ranges.len();
     ranges.into_iter().enumerate().map(|(li, r)| p.place_line(li, r, li + 1 == nlines)).collect()
@@ -1174,18 +1184,19 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     });
     let runs = cleared.as_deref().unwrap_or(runs);
     let variation_ids: Vec<u32> = runs.iter().map(|(_, s)| crate::variable::intern(&s.variations)).collect();
+    let ordered = runs_ordered(runs);
     let mut lay = Layout { missing_font: primaries.iter().any(|p| p.missing), text_len: text.len(), ..Default::default() };
     let mut plines: Vec<(usize, ParaLine)> = Vec::new();
     for (pi, span) in paragraph_ranges(text).enumerate() {
         let p = text.get(span.bytes.clone()).unwrap_or_default();
-        plines.extend(paragraph(p, span.bytes.start, runs, &primaries, &variation_ids, para_at(pi), width).into_iter().map(|l| (pi, l)));
+        plines.extend(paragraph(p, span.bytes.start, runs, ordered, &primaries, &variation_ids, para_at(pi), width).into_iter().map(|l| (pi, l)));
     }
     let mut baseline = 0.0f32;
     for (i, (pi, pl)) in plines.into_iter().enumerate() {
         let para = para_at(pi);
         if i == 0 {
             // Vertical type keeps its first column at the font ascent (not measured in AE).
-            let vertical = runs.get(run_at(runs, pl.range.start)).is_some_and(|r| r.1.vertical)
+            let vertical = runs.get(run_at(runs, ordered, pl.range.start)).is_some_and(|r| r.1.vertical)
                 || runs.iter().any(|r| r.1.vertical && r.0.start < pl.range.end && r.0.end > pl.range.start);
             baseline = if width.is_some() { if vertical { pl.ascent } else { pl.first } } else { 0.0 };
         } else {
@@ -1205,7 +1216,7 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
         }));
         let x = shift + pl.left_trim;
         if let Some((u0, u1)) = pl.underline {
-            let si = run_at(runs, pl.range.start);
+            let si = run_at(runs, ordered, pl.range.start);
             let pm = fonts::face(primaries[si].face).metrics(runs[si].1.size);
             lay.underlines.push([u0 + shift, baseline + pm.underline_pos, u1 + shift, baseline + pm.underline_pos + pm.underline_thickness]);
         }
