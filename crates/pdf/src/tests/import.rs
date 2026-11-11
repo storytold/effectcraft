@@ -2,6 +2,7 @@
 //! corrupt inputs (generated fixtures).
 
 use crate::tests::{coverage, page_pdf, render, shape_names};
+use crate::write::pdf;
 use crate::*;
 
 fn eps(body: &[u8]) -> Doc {
@@ -583,4 +584,189 @@ fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
         let doc = eps(format!("{prog} {want} eq {{ 0 0 10 10 rectfill }} if\n").as_bytes());
         assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
+}
+
+/// Parses `bytes` on a thread of its own, and fails the test when parsing takes more than 20 s.
+fn pdf_soon(bytes: Vec<u8>) -> Result<Doc, Error> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(parse(&bytes)).ok());
+    rx.recv_timeout(std::time::Duration::from_secs(20)).expect("parsing did not finish")
+}
+
+#[test]
+fn a_fanning_out_page_tree_is_walked_within_the_visit_budget() {
+    // Three levels of Pages nodes each listing the next one 1,000 times: 10^9 visits (each
+    // copying the inherited resources) within the depth limit. The walk stops at 100,000.
+    let kids = |n: u32| format!("<< /Type /Pages /Kids [{}] /Count 1 >>", format!("{n} 0 R ").repeat(1000));
+    let objs = vec![
+        (1, "<< /Type /Catalog /Pages 2 0 R >>".into(), None),
+        (2, format!("<< /Type /Pages /Kids [{}] /Count 1 /Resources << /Font << >> >> >>", "3 0 R ".repeat(1000)), None),
+        (3, kids(4), None),
+        (4, kids(5), None),
+        (5, "<< /Type /Page /Parent 4 0 R /MediaBox [0 0 200 100] /Contents 6 0 R >>".into(), None),
+        (6, "<< >>".into(), Some(b"0 0 10 10 re f".to_vec())),
+    ];
+    let doc = pdf_soon(pdf(&objs, 1)).unwrap();
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn saved_states_stop_nesting_at_the_limit() {
+    // `q` nests at most 4,096 deep (each copy keeps the dash array): past it the stream stops,
+    // and the square painted before it stays.
+    let doc = parse(&page_pdf(&format!("0 0 10 10 re f [1 2] 0 d {}20 20 10 10 re f", "q ".repeat(5000)), "", vec![])).unwrap();
+    assert_eq!(doc.flatten().len(), 1, "{:?}", doc.skipped);
+    assert_eq!(doc.skipped, ["content (nesting limit)"]);
+}
+
+#[test]
+fn text_stops_at_the_path_limit() {
+    // The outlines of 100,000 H's (13 elements each) pass the path limit: the text is left out
+    // (noted), and the square after it is still painted.
+    let content = format!("BT /F1 10 Tf ({}) Tj ET 20 20 10 10 re f", "H".repeat(100_000));
+    let doc = pdf_soon(page_pdf(&content, "/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>", vec![])).unwrap();
+    assert_eq!(doc.skipped, ["text (path limit)"]);
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn an_image_placed_twice_is_decoded_once() {
+    let objs = vec![(10, "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 >>".into(), Some(vec![255; 12]))];
+    let doc = parse(&page_pdf("q 50 0 0 50 0 0 cm /Im1 Do Q q 50 0 0 50 100 0 cm /Im1 Do Q", "/XObject << /Im1 10 0 R >>", objs)).unwrap();
+    assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    let images: Vec<_> = doc.root.children.iter().flat_map(|n| if let Node::Group(g) = n { g.children.iter().collect() } else { vec![] }).collect();
+    let [Node::Image(a), Node::Image(b)] = images.as_slice() else { panic!("two images: {images:?}") };
+    assert!(std::sync::Arc::ptr_eq(&a.rgba, &b.rgba), "the second placement shares the first's pixels");
+}
+
+#[test]
+fn a_tiling_pattern_is_charged_for_every_tile_it_copies() {
+    // A cell of 8,000 squares copied into 2,704 tiles would be 21.6 million nodes: more than the
+    // operation budget, so the fill is left out (noted) rather than expanded.
+    let cell = "0 0 1 1 re f ".repeat(8_000).into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "/Pattern cs /P1 scn 0 0 50 50 re f",
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Resources << >> >>".into(), Some(cell))],
+    ))
+    .unwrap();
+    assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
+}
+
+#[test]
+fn a_tiling_pattern_is_charged_for_images_it_copies() {
+    // The cell holds 8,000 image placements, which are not shapes: each tile still copies them.
+    let cell = "/Im1 Do ".repeat(8_000).into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "/Pattern cs /P1 scn 0 0 50 50 re f",
+        "/Pattern << /P1 10 0 R >>",
+        vec![
+            (
+                10,
+                "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Resources << /XObject << /Im1 11 0 R >> >> >>"
+                    .into(),
+                Some(cell),
+            ),
+            (11, "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>".into(), Some(vec![255])),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
+}
+
+#[test]
+fn an_image_with_a_named_colour_space_is_not_shared_between_resource_dictionaries() {
+    fn images<'a>(g: &'a effectcraft_svg::Group, out: &mut Vec<&'a effectcraft_svg::Image>) {
+        for n in &g.children {
+            match n {
+                Node::Group(g) => images(g, out),
+                Node::Image(i) => out.push(i),
+                Node::Shape(_) => {}
+            }
+        }
+    }
+    let form = |space: &str| {
+        format!("<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Resources << /XObject << /Im 10 0 R >> /ColorSpace << /CS1 /{space} >> >> >>")
+    };
+    let objs = vec![
+        (10, "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /CS1 /BitsPerComponent 8 >>".into(), Some(vec![10, 20, 30])),
+        (11, form("DeviceGray"), Some(b"/Im Do".to_vec())),
+        (12, form("DeviceRGB"), Some(b"/Im Do".to_vec())),
+    ];
+    let doc = parse(&page_pdf("/FA Do /FB Do", "/XObject << /FA 11 0 R /FB 12 0 R >>", objs)).unwrap();
+    let mut found = vec![];
+    images(&doc.root, &mut found);
+    assert_eq!(found.len(), 2, "{:?}", doc.skipped);
+    assert_ne!(found[0].rgba, found[1].rgba, "each placement is decoded with its own colour space");
+}
+
+#[test]
+fn an_image_with_a_named_base_inside_an_array_is_not_shared_between_resource_dictionaries() {
+    fn images<'a>(g: &'a effectcraft_svg::Group, out: &mut Vec<&'a effectcraft_svg::Image>) {
+        for n in &g.children {
+            match n {
+                Node::Group(g) => images(g, out),
+                Node::Image(i) => out.push(i),
+                Node::Shape(_) => {}
+            }
+        }
+    }
+    let form = |space: &str| {
+        format!("<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Resources << /XObject << /Im 10 0 R >> /ColorSpace << /CS1 /{space} >> >> >>")
+    };
+    let objs = vec![
+        (10, "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace [/Indexed /CS1 0 <0A141E>] /BitsPerComponent 8 >>".into(), Some(vec![0])),
+        (11, form("DeviceGray"), Some(b"/Im Do".to_vec())),
+        (12, form("DeviceRGB"), Some(b"/Im Do".to_vec())),
+    ];
+    let doc = parse(&page_pdf("/FA Do /FB Do", "/XObject << /FA 11 0 R /FB 12 0 R >>", objs)).unwrap();
+    let mut found = vec![];
+    images(&doc.root, &mut found);
+    assert_eq!(found.len(), 2, "{:?}", doc.skipped);
+    assert_ne!(found[0].rgba, found[1].rgba, "each placement is decoded with its own colour space");
+}
+
+#[test]
+fn a_tiling_pattern_is_charged_for_the_clip_geometry_its_tiles_copy() {
+    // The cell is one group whose clip path has 8,000 segments; each of the 2,704 tiles copies
+    // that path, which is more than the operation budget although the cell holds three nodes.
+    let clip: String = (0..8_000).map(|i| format!("{} {} l ", i % 7, i % 5)).collect();
+    let cell = format!("q 0 0 m {clip} h W n 0 0 1 1 re f Q").into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "/Pattern cs /P1 scn 0 0 50 50 re f",
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 /Resources << >> >>".into(), Some(cell))],
+    ))
+    .unwrap();
+    assert_eq!(doc.skipped, ["tiling pattern (operation limit)"]);
+}
+
+#[test]
+fn a_form_stopped_at_the_q_limit_restores_the_state_it_was_entered_with() {
+    // The form saves 4,100 states (past the limit of 4,096) after setting a blue fill; the page's
+    // red fill must be back once the form is left, not the form's last saved state.
+    let form = format!("0 0 1 rg {}", "q ".repeat(4_100)).into_bytes();
+    let doc = pdf_soon(page_pdf(
+        "1 0 0 rg /Fm Do 0 0 10 10 re f",
+        "/XObject << /Fm 10 0 R >>",
+        vec![(10, "<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << >> >>".into(), Some(form))],
+    ))
+    .unwrap();
+    fn last_fill(g: &effectcraft_svg::Group, out: &mut Option<[f64; 3]>) {
+        for n in &g.children {
+            match n {
+                effectcraft_svg::Node::Group(g) => last_fill(g, out),
+                effectcraft_svg::Node::Shape(s) => {
+                    if let Some(effectcraft_svg::Paint::Color(c)) = &s.fill {
+                        *out = Some(*c);
+                    }
+                }
+                effectcraft_svg::Node::Image(_) => {}
+            }
+        }
+    }
+    let mut fill = None;
+    last_fill(&doc.root, &mut fill);
+    assert_eq!(fill, Some([1.0, 0.0, 0.0]));
+    assert!(doc.skipped.iter().any(|s| s.contains("nesting limit")), "{:?}", doc.skipped);
 }

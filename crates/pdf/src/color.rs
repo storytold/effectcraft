@@ -94,6 +94,28 @@ pub fn color_space(file: &File, o: &Obj, res: Option<&Dict>) -> Cs {
     color_space_at(file, o, res, 0)
 }
 
+/// Whether decoding colour space `o` looks a name up in the page resources: a name that is not a
+/// device space, anywhere in the definition (an Indexed base, a Separation or DeviceN alternate, an
+/// ICCBased alternate). The same image then decodes differently under different resources.
+pub fn names_resource(file: &File, o: &Obj, depth: usize) -> bool {
+    if depth >= MAX_DEPTH {
+        return true;
+    }
+    match file.resolve(o) {
+        Obj::Name(n) => !matches!(n.as_str(), "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "G" | "RGB" | "CMYK"),
+        Obj::Array(a) => {
+            let inner = match a.first().map(|h| file.resolve(h)).and_then(Obj::name).unwrap_or("") {
+                "Indexed" | "I" => a.get(1).cloned(),
+                "Separation" | "DeviceN" => a.get(2).cloned(),
+                "ICCBased" => a.get(1).map(|s| file.resolve(s)).and_then(Obj::dict).and_then(|d| file.get(d, "Alternate")).cloned(),
+                _ => None,
+            };
+            inner.is_some_and(|i| names_resource(file, &i, depth + 1))
+        }
+        _ => false,
+    }
+}
+
 /// [`color_space`] nested `depth` levels deep: DeviceGray past [`MAX_DEPTH`].
 fn color_space_at(file: &File, o: &Obj, res: Option<&Dict>, depth: usize) -> Cs {
     if depth >= MAX_DEPTH {

@@ -212,9 +212,20 @@ pub fn layer_names(doc: &Doc) -> Vec<String> {
 
 /// The document with only layer `index` (for one layer of a file imported as a composition).
 pub fn layer_doc(doc: &Doc, index: usize) -> Doc {
-    let mut d = doc.clone();
-    d.root.children = doc.root.children.get(index).cloned().into_iter().collect();
-    d
+    // Only the root's attributes and the one child are copied, not every layer.
+    let Group { name, transform, opacity, clip, blend, mask, isolated, knockout, .. } = &doc.root;
+    let root = Group {
+        name: name.clone(),
+        transform: *transform,
+        opacity: *opacity,
+        children: doc.root.children.get(index).cloned().into_iter().collect(),
+        clip: clip.clone(),
+        blend: *blend,
+        mask: mask.clone(),
+        isolated: *isolated,
+        knockout: *knockout,
+    };
+    Doc { width: doc.width, height: doc.height, root, skipped: doc.skipped.clone() }
 }
 
 /// One layer, optionally cropped to its artwork, and its original document-space top-left.

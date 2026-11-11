@@ -666,7 +666,12 @@ impl File {
 
     /// Numbers of an array (references resolved).
     pub fn nums(&self, o: &Obj) -> Vec<f64> {
-        self.resolve(o).array().map(|a| a.iter().filter_map(|x| self.resolve(x).num()).collect()).unwrap_or_default()
+        self.nums_first(o, usize::MAX)
+    }
+
+    /// The first `max` numbers of an array (the rest are not resolved or collected).
+    pub fn nums_first(&self, o: &Obj, max: usize) -> Vec<f64> {
+        self.resolve(o).array().map(|a| a.iter().filter_map(|x| self.resolve(x).num()).take(max).collect()).unwrap_or_default()
     }
 
     /// The document catalog.
