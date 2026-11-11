@@ -69,7 +69,7 @@ fn ref_decode_channel(p: &Psd, offset: usize, len: usize, w: usize, h: usize) ->
         }
         2 | 3 => {
             let rest = r.bytes(r.remaining())?;
-            let mut v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, rowb * h).map_err(|e| Error::Invalid(format!("zip: {e:?}")))?;
+            let mut v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
             v.resize(rowb * h, 0);
             if comp == 3 {
                 ref_unpredict(p.depth, &mut v, w, h);
@@ -112,7 +112,8 @@ fn ref_composite(p: &Psd) -> Result<Pixels> {
         }
         2 | 3 => {
             let rest = r.bytes(r.remaining())?;
-            let v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, want * rowb * h).map_err(|e| Error::Invalid(format!("zip: {e:?}")))?;
+            let v =
+                miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, want * rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
             for (c, pl) in planes.iter_mut().enumerate().take(want) {
                 let mut plane = v.get(c * rowb * h..(c + 1) * rowb * h).ok_or(Error::Truncated)?.to_vec();
                 if comp == 3 {
@@ -448,7 +449,7 @@ fn unpredict_matches_the_reference_and_allocates_one_scratch_row() {
         let mut a: Vec<u8> = (0..w * h * bps).map(|i| (i * 31 % 251) as u8).collect();
         let mut b = a.clone();
         counters::take(&SCRATCH);
-        p.unpredict(&mut a, w, h);
+        p.unpredict(&mut a, w, h, &mut Budget::new(u64::MAX)).unwrap();
         let scratch = counters::take(&SCRATCH);
         let old_allocs = ref_unpredict(depth, &mut b, w, h);
         assert_eq!(a, b, "{depth} bit");
@@ -473,11 +474,11 @@ fn raw_planes_are_borrowed_and_zip_planes_are_unpredicted_in_place() {
     let mut v: Vec<u8> = (0..3 * 40 * 30).map(|i| (i % 255) as u8).collect();
     let range = v.as_ptr_range();
     for comp in [2, 3] {
-        let got = q.zip_plane(comp, &mut v, 1, 40, 30).unwrap();
+        let got = q.zip_plane(comp, &mut v, 1, 40, 30, &mut Budget::new(u64::MAX)).unwrap();
         assert_eq!(got.len(), 1200);
         assert!(range.contains(&got.as_ptr()), "compression {comp}");
     }
-    assert!(q.zip_plane(2, &mut v, 3, 40, 30).is_err());
+    assert!(q.zip_plane(2, &mut v, 3, 40, 30, &mut Budget::new(u64::MAX)).is_err());
 }
 
 #[test]

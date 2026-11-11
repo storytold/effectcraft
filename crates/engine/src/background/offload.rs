@@ -375,7 +375,7 @@ pub(crate) fn job_accel() -> Option<Arc<dyn Accelerator>> {
 }
 
 /// Render options of an analysis's input frames: 100 %; with an accelerator, the project's
-/// renderer (Mercury GPU Acceleration: its GPU effects on the device; Software Only: the CPU).
+/// renderer (GPU Acceleration: its GPU effects on the device; Software Only: the CPU).
 pub(crate) fn analysis_opts(accel: Option<&dyn Accelerator>) -> RenderOpts {
     RenderOpts { scale: 1.0, backend: if accel.is_some() { Backend::Auto } else { Backend::Cpu }, ..Default::default() }
 }
@@ -558,6 +558,7 @@ async fn fill(s: &mut Session, plan: crate::commands::content_fill::FillPlan, po
         true
     };
     let accel = job_accel();
+    let fill = accel.as_deref().and_then(|a| a.inpaint());
     let files = crate::commands::content_fill::run_plan(
         &plan,
         &s.project,
@@ -566,6 +567,7 @@ async fn fill(s: &mut Session, plan: crate::commands::content_fill::FillPlan, po
         &s.layer_cache,
         s.services.as_ref(),
         accel.as_deref(),
+        fill,
         &mut progress,
         &mut |_| {},
     )

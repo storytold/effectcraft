@@ -27,7 +27,9 @@ pub(crate) fn path_value(v: &Value) -> Json {
     }
 }
 
-pub(crate) fn to_path(j: &Json) -> Option<Value> {
+/// A Lottie path. `closed` is used when the path has no `c`: Bodymovin 3.x and early 4.x keep the
+/// flag outside the path, as `cl` on a mask and `closed` on an `sh` item.
+pub(crate) fn to_path(j: &Json, closed: bool) -> Option<Value> {
     let o = match j {
         Json::Array(a) => a.first()?,
         o => o,
@@ -48,7 +50,7 @@ pub(crate) fn to_path(j: &Json) -> Option<Value> {
         in_tangents: fit(pts("i")),
         out_tangents: fit(pts("o")),
         vertices,
-        closed: o.get("c").and_then(Json::as_bool).unwrap_or(false),
+        closed: o.get("c").and_then(Json::as_bool).unwrap_or(closed),
         feather: Vec::new(),
     }))
 }
@@ -434,7 +436,7 @@ fn import_shape_transform(im: &Im, j: &Json, tr: &mut PropGroup) {
 }
 
 /// Import Lottie shape items into shape contents groups.
-pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<PropGroup> {
+pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &mut dyn Iterator<Item = &Json>) -> Vec<PropGroup> {
     let mut out = vec![];
     for j in items {
         let ty = j.get("ty").and_then(Json::as_str).unwrap_or("");
@@ -445,9 +447,10 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
         };
         let mut g = match ty {
             "gr" => {
-                let list = j.get("it").and_then(Json::as_array).cloned().unwrap_or_default();
-                let inner: Vec<Json> = list.iter().filter(|i| i.get("ty").and_then(Json::as_str) != Some("tr")).cloned().collect();
-                let children = import_items(im, ids, &inner);
+                // Borrowed, not cloned: each nesting level copying its subtree costs memory
+                // quadratic in the depth.
+                let list = j.get("it").and_then(Json::as_array).map(Vec::as_slice).unwrap_or_default();
+                let children = import_items(im, ids, &mut list.iter().filter(|i| i.get("ty").and_then(Json::as_str) != Some("tr")));
                 let mut g = build::shape_group(ids, "Group 1", children);
                 if let Some(tr) = list.iter().find(|i| i.get("ty").and_then(Json::as_str) == Some("tr"))
                     && let Some(t) = g.sub_mut("transform")
@@ -493,7 +496,8 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
             "sh" => {
                 let mut g = build::shape_path(ids, ShapePath::default());
                 dir(&mut g);
-                set(im, &mut g, "path", j.get("ks"), &to_path);
+                let closed = j.get("closed").and_then(Json::as_bool).unwrap_or(false);
+                set(im, &mut g, "path", j.get("ks"), &|v| to_path(v, closed));
                 g
             }
             "fl" => {

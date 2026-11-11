@@ -1,0 +1,7 @@
+asset:        synthetic.aep
+title:        Small After Effects test project for the .aep importer's damage tests
+author:       EffectCraft contributors
+source:       original work (made in After Effects 2026 from own data: a composition, three generated 8x8 PNGs as an image sequence, a solid, a folder, Levels and Glow effects with expressions)
+license:      MIT OR Apache-2.0
+added:        2026-11-03 by EffectCraft contributors
+notes:        The working space was set to None; the one Utf8 chunk that held an embedded ICC profile was replaced by {} and nothing else was changed. See crates/aep/README.md (Clean room).

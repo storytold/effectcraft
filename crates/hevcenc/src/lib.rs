@@ -83,6 +83,10 @@ pub struct EncoderConfig {
     pub keyint: u32,
     /// BT.709 limited range is signalled in the VUI unless this is set.
     pub full_range: bool,
+    /// The VUI colour description (ITU-T H.273 code points); BT.709 by default.
+    pub colour_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coeffs: u8,
 }
 
 impl EncoderConfig {
@@ -97,6 +101,9 @@ impl EncoderConfig {
             rate: RateControl::ConstantQp(28),
             keyint: 60,
             full_range: false,
+            colour_primaries: 1,
+            transfer_characteristics: 1,
+            matrix_coeffs: 1,
         }
     }
 }
@@ -234,6 +241,9 @@ impl Encoder {
             profile_idc: cfg.profile.idc(),
             level_idc,
             full_range: cfg.full_range,
+            colour_primaries: cfg.colour_primaries,
+            transfer_characteristics: cfg.transfer_characteristics,
+            matrix_coeffs: cfg.matrix_coeffs,
             fps_num: cfg.fps_num,
             fps_den: cfg.fps_den,
         };
