@@ -43,6 +43,7 @@ type Index = HashMap<&'static str, &'static str>;
 /// Every language with panel rows, for the tests and the missing-strings report.
 #[cfg(test)]
 const ROWS: &[(&str, &[(&str, &str)])] = &[
+    ("he", HEBREW),
     ("ja", JAPANESE),
     ("zh-hans", SIMPLIFIED_CHINESE),
     ("zh-hant", TRADITIONAL_CHINESE),
@@ -60,6 +61,7 @@ const ROWS: &[(&str, &[(&str, &str)])] = &[
 /// The catalog for `language`, indexed by English source (built on first use: panels translate
 /// hundreds of strings a frame); `None` for English and any language that has no rows yet.
 fn catalog(language: &str) -> Option<&'static Index> {
+    static HE: OnceLock<Index> = OnceLock::new();
     static JA: OnceLock<Index> = OnceLock::new();
     static HANS: OnceLock<Index> = OnceLock::new();
     static HANT: OnceLock<Index> = OnceLock::new();
@@ -72,6 +74,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static SV: OnceLock<Index> = OnceLock::new();
     static FR: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
+        "he" => (&HE, HEBREW),
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
         "zh-hant" => (&HANT, TRADITIONAL_CHINESE),
@@ -2440,6 +2443,30 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 ];
 
 /// Swedish (`sv`), written from the English source.
+/// Partial Hebrew UI catalog, authored against English source strings.
+const HEBREW: &[(&str, &str)] = &[
+    ("Auto-saves", "שמירות אוטומטיות"),
+    ("Back", "חזרה"),
+    ("About EffectCraft", "אודות EffectCraft"),
+    ("Add to favorites", "הוסף למועדפים"),
+    ("Remove from favorites", "הסר מהמועדפים"),
+    ("Add to Composition", "הוסף לקומפוזיציה"),
+    ("Active", "פעיל"),
+    ("Project", "פרויקט"),
+    ("Composition", "קומפוזיציה"),
+    ("Cancel", "ביטול"),
+    ("Close", "סגור"),
+    ("Open", "פתח"),
+    ("Import", "ייבוא"),
+    ("Export", "ייצוא"),
+    ("Appearance Settings…", "הגדרות מראה…"),
+    ("Settings", "הגדרות"),
+    ("New", "חדש"),
+    ("Delete", "מחיקה"),
+    ("Layer", "שכבה"),
+    ("File", "קובץ"),
+];
+
 const SWEDISH: &[(&str, &str)] = &[
     ("Appearance Settings…", "Utseendeinställningar…"),
     ("Add to favorites", "Lägg till i favoriter"),

@@ -15,7 +15,7 @@ pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 13] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
+const CATALOG_CODES: [&str; 14] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "he", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -128,7 +128,7 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
 /// rather than draw boxes; `?lang=` and a language chosen in Settings still select them.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn web_draws(language: &str) -> bool {
-    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka")
+    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka" | "he")
 }
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
@@ -141,6 +141,7 @@ fn supported(locale: Option<&str>) -> &'static str {
     let rest: Vec<String> = parts.map(|p| p.to_ascii_lowercase()).collect();
     match primary.as_str() {
         "ja" => "ja",
+        "he" | "iw" => "he",
         "uk" => "uk",
         "es" => "es",
         "cs" => "cs",
@@ -165,6 +166,7 @@ fn supported(locale: Option<&str>) -> &'static str {
 /// macOS row alone leaves the other two in English (#1450).
 const REVEAL_FINDER: &[(&str, &str, &str)] = &[
     ("uk", "Показати у Провіднику", "Показати у файловому менеджері"),
+    ("he", "הצג בסייר הקבצים", "הצג במנהל הקבצים"),
     ("de", "Im Explorer anzeigen", "Im Dateimanager anzeigen"),
     ("cs", "Zobrazit v Průzkumníku", "Zobrazit ve správci souborů"),
     ("ja", "エクスプローラーで表示", "ファイルマネージャーで表示"),
@@ -208,6 +210,7 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
 /// The menu catalog for `language`; `None` for English.
 fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str, &'static str)]> {
     Some(match language {
+        "he" => HEBREW,
         "ja" => JAPANESE,
         "zh-hans" => SIMPLIFIED_CHINESE,
         "zh-hant" => TRADITIONAL_CHINESE,
@@ -298,6 +301,7 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         // A colon before the history's (untranslated) action name: "Отменить: Comp1".
         "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
         "sv" => Some(("Ångra", "Det går inte att ångra", "Gör om", "Det går inte att göra om")),
+        "he" => Some(("בטל", "אין פעולה לביטול", "בצע שוב", "אין פעולה לביצוע חוזר")),
         _ => None,
     };
     match e.command.as_str() {
@@ -1096,6 +1100,48 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("help.appPage", "EffectCraft Home Page", "EffectCraft 主页"),
     ("help.github", "EffectCraft on GitHub", "GitHub 上的 EffectCraft"),
     ("file.openDemoProject", "Open Demo Project", "打开示例项目"),
+];
+
+/// Hebrew starter catalog translated from English source labels; missing rows fall back to English.
+const HEBREW: &[(&str, &str, &str)] = &[
+    ("", "File", "קובץ"),
+    ("", "New", "חדש"),
+    ("file.newProject", "New Project", "פרויקט חדש"),
+    ("file.newFromTemplate", "New Project from Template...", "פרויקט חדש מתבנית..."),
+    ("file.open", "Open Project...", "פתח פרויקט..."),
+    ("", "Open Recent", "קבצים אחרונים"),
+    ("file.clearRecent", "Clear Recent Projects", "נקה פרויקטים אחרונים"),
+    ("file.close", "Close", "סגור"),
+    ("file.closeProject", "Close Project", "סגור פרויקט"),
+    ("file.save", "Save", "שמור"),
+    ("", "Save As", "שמירה בשם"),
+    ("file.saveAs", "Save As...", "שמירה בשם..."),
+    ("file.saveCopy", "Save a Copy...", "שמור עותק..."),
+    ("file.incrementAndSave", "Increment and Save", "הגדל מספר גרסה ושמור"),
+    ("file.revert", "Revert", "חזור לגרסה השמורה"),
+    ("", "Import", "ייבוא"),
+    ("file.import", "File...", "קובץ..."),
+    ("", "Export", "ייצוא"),
+    ("file.openDemoProject", "Open Demo Project", "פתח פרויקט לדוגמה"),
+    ("", "Edit", "עריכה"),
+    ("edit.undo", "Undo", "בטל"),
+    ("edit.redo", "Redo", "בצע שוב"),
+    ("edit.cut", "Cut", "גזור"),
+    ("edit.copy", "Copy", "העתק"),
+    ("edit.paste", "Paste", "הדבק"),
+    ("edit.selectAll", "Select All", "בחר הכול"),
+    ("edit.deselectAll", "Deselect All", "בטל בחירה"),
+    ("", "Composition", "קומפוזיציה"),
+    ("comp.new", "New Composition...", "קומפוזיציה חדשה..."),
+    ("", "Layer", "שכבה"),
+    ("", "Effect", "אפקט"),
+    ("", "Animation", "הנפשה"),
+    ("", "View", "תצוגה"),
+    ("", "Window", "חלון"),
+    ("", "Help", "עזרה"),
+    ("", "Settings...", "הגדרות..."),
+    ("app.settings", "General...", "כללי..."),
+    ("file.projectSettings", "Project Settings...", "הגדרות פרויקט..."),
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -8853,6 +8899,39 @@ mod tests {
         assert_eq!(settings_page_title("Roto Brush"), tr("Roto Brush"));
         set_current("en");
         assert_eq!(settings_page_title("Type"), "Type");
+    }
+
+    /// Hebrew must be selectable without changing automation keys or project filenames.
+    #[test]
+    fn hebrew_file_workflow_and_locale_are_wired_to_existing_commands() {
+        assert_eq!(supported(Some("he-IL")), "he");
+        assert_eq!(supported(Some("iw_IL")), "he");
+        assert_eq!(code("he"), "he");
+        assert!(!web_draws("he"), "web has no guaranteed embedded Hebrew face");
+
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key":"general.language","value":"he"})).unwrap();
+        assert_eq!(language(&app), "he");
+        for (command, english, hebrew) in [
+            ("", "File", "קובץ"),
+            ("file.newProject", "New Project", "פרויקט חדש"),
+            ("file.open", "Open Project...", "פתח פרויקט..."),
+            ("file.save", "Save", "שמור"),
+            ("file.saveAs", "Save As...", "שמירה בשם..."),
+            ("file.closeProject", "Close Project", "סגור פרויקט"),
+        ] {
+            assert_eq!(label(&app, command, english), hebrew);
+        }
+        assert_eq!(label(&app, "file.openRecent", "My Project.ecproj"), "My Project.ecproj");
+        let item = MenuEntry { label: "Open Project...".into(), command: "file.open".into(),
+            params: serde_json::Value::Null, shortcut: None, alt_shortcuts: Vec::new() };
+        assert_eq!(entry(&app, &item, item.label.clone()), "פתיחת פרויקט...");
+        assert_eq!(item.command, "file.open");
+        ui::set_current("he");
+        assert_eq!(tr("Auto-saves"), "שמירות אוטומטיות");
+        assert_eq!(tr("Back"), "חזרה");
+        assert_eq!(tr("Not a catalog key"), "Not a catalog key");
+        ui::set_current("en");
     }
 
     #[test]
