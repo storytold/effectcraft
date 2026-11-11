@@ -2444,6 +2444,38 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Proxy Use: {}", "שימוש בקובץ תחליפי: {}"),
+    ("Effects: {}", "אפקטים: {}"),
+    ("Solo Switches: {}", "מתגי סולו: {}"),
+    ("Guide Layers: {}", "שכבות עזר: {}"),
+    ("Color Depth: {}", "עומק צבע: {}"),
+    ("Frame Blending: {}", "מיזוג מסגרות: {}"),
+    ("Motion Blur: {}", "טשטוש תנועה: {}"),
+    ("Field Render: {}", "רינדור שדות: {}"),
+    ("3:2 Pulldown: {}", "המרת 3:2: {}"),
+    ("Format: {}", "פורמט: {}"),
+    ("Video Codec: {}", "מקודד וידאו: {}"),
+    ("Opus Bitrate: {} kbps", "קצב סיביות Opus: {} kbps"),
+    ("Opus Tuning: {}", "כוונון Opus: {}"),
+    ("Post-Render Action: {}", "פעולה לאחר הרינדור: {}"),
+    ("Sample Format: {}", "פורמט דגימה: {}"),
+    ("EXR Bit Depth: {}", "עומק סיביות EXR: {}"),
+    ("Profile: {}", "פרופיל: {}"),
+    ("Rate Control: {}", "בקרת קצב: {}"),
+    ("Current Render", "רינדור נוכחי"),
+    ("Render", "רינדור"),
+    ("Notify", "התראה"),
+    ("Stop", "עצור"),
+    ("Duplicate", "שכפול"),
+    ("Remove", "הסרה"),
+    ("Move Up", "העברה למעלה"),
+    ("Move Down", "העברה למטה"),
+    ("Log:", "יומן:"),
+    ("Output To:", "פלט אל:"),
+    ("Output file name template", "תבנית שם קובץ הפלט"),
+    ("Output file: {}", "קובץ פלט: {}"),
+    ("Template: {}\n{}", "תבנית: {}\n{}"),
+    ("The render queue is empty.", "תור הרינדור ריק."),
     ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
     ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
     ("Some parts of this project cannot be imported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):"),
@@ -10554,6 +10586,61 @@ mod tests {
         set_current("en");
         assert_eq!(tr("Don't Recover"), "Don't Recover");
         assert_eq!(tr("Light Theme"), "Light Theme");
+    }
+
+    /// Native render-queue controls must translate the displayed labels, not change settings IDs.
+    #[test]
+    fn hebrew_render_queue_controls_are_localized() {
+        let source = include_str!("../panels/render_queue.rs");
+        set_current("he");
+        for (english, translated) in [
+    ("Proxy Use: {}", "שימוש בקובץ תחליפי: {}"),
+    ("Effects: {}", "אפקטים: {}"),
+    ("Solo Switches: {}", "מתגי סולו: {}"),
+    ("Guide Layers: {}", "שכבות עזר: {}"),
+    ("Color Depth: {}", "עומק צבע: {}"),
+    ("Frame Blending: {}", "מיזוג מסגרות: {}"),
+    ("Motion Blur: {}", "טשטוש תנועה: {}"),
+    ("Field Render: {}", "רינדור שדות: {}"),
+    ("3:2 Pulldown: {}", "המרת 3:2: {}"),
+    ("Format: {}", "פורמט: {}"),
+    ("Video Codec: {}", "מקודד וידאו: {}"),
+    ("Opus Bitrate: {} kbps", "קצב סיביות Opus: {} kbps"),
+    ("Opus Tuning: {}", "כוונון Opus: {}"),
+    ("Post-Render Action: {}", "פעולה לאחר הרינדור: {}"),
+    ("Sample Format: {}", "פורמט דגימה: {}"),
+    ("EXR Bit Depth: {}", "עומק סיביות EXR: {}"),
+    ("Profile: {}", "פרופיל: {}"),
+    ("Rate Control: {}", "בקרת קצב: {}"),
+    ("Current Render", "רינדור נוכחי"),
+    ("Render", "רינדור"),
+    ("Notify", "התראה"),
+    ("Stop", "עצור"),
+    ("Duplicate", "שכפול"),
+    ("Remove", "הסרה"),
+    ("Move Up", "העברה למעלה"),
+    ("Move Down", "העברה למטה"),
+    ("Log:", "יומן:"),
+    ("Output To:", "פלט אל:"),
+    ("Output file name template", "תבנית שם קובץ הפלט"),
+    ("Output file: {}", "קובץ פלט: {}"),
+    ("Template: {}\n{}", "תבנית: {}\n{}"),
+    ("The render queue is empty.", "תור הרינדור ריק."),
+        ] {
+            assert_eq!(tr(english), translated, "Render Queue: {english}");
+            let source_key = english.replace('\n', "\\n");
+            assert!(
+                source.contains(&format!("tr(\\\"{source_key}\\\""))
+                    || source.contains(&format!("tr_args(\\\"{source_key}\\\"")),
+                "No render queue source usage for {english}"
+            );
+            assert_eq!(english.matches("{}").count(), translated.matches("{}").count());
+        }
+        assert_eq!(tr_args("Output file: {}", &[&"גרסה_02.mov"]), "קובץ פלט: גרסה_02.mov");
+        assert_eq!(tr_args("Opus Bitrate: {} kbps", &[&128]), "קצב סיביות Opus: 128 kbps");
+        set_current("en");
+        assert_eq!(tr("The render queue is empty."), "The render queue is empty.");
+        assert_eq!(tr_args("Output file: {}", &[&"test.mov"]), "Output file: test.mov");
     }
 
     /// Opening, saving and restoring a project must be understandable in Hebrew Native UI.
