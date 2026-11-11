@@ -830,6 +830,12 @@ mod tests {
         let mut scanned = 0;
         let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut scanned).into_iter().next() else { panic!() };
         assert_eq!(code, vec![PsOp::Num(1.0)]);
+        // A large string inside a skipped array is passed over, not decoded: escapes, nested
+        // parentheses, a hexadecimal string and names all end where the lexer would end them.
+        let big = format!("{{ [ ({}) <{}> /{} (a\\)b(c)) 7 ] 1 }}", "x".repeat(1 << 20), "ab".repeat(1 << 19), "N".repeat(1 << 10));
+        let mut lx = crate::object::Lexer::new(big.as_bytes(), 0);
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
+        assert_eq!(code, vec![PsOp::Num(1.0)]);
         // An unclosed one ends at the end of the data.
         let mut lx = crate::object::Lexer::new(b"[ 1 2 ", 0);
         lx.skip_compound();
