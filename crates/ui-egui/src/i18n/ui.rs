@@ -2446,14 +2446,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 const HEBREW: &[(&str, &str)] = &[
     ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
     ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
-    (
-        "Some parts of this project cannot be imported exactly (left out or changed):",
-        "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):",
-    ),
-    (
-        "Some parts of this project cannot be exported exactly (left out or changed):",
-        "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):",
-    ),
+    ("Some parts of this project cannot be imported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):"),
+    ("Some parts of this project cannot be exported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):"),
     ("Import Anyway", "ייבוא בכל זאת"),
     ("Export Anyway", "ייצוא בכל זאת"),
     ("Revert Project", "חזרה לגרסה השמורה"),
@@ -10461,14 +10455,8 @@ mod tests {
         for (english, translated) in [
             ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
             ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
-            (
-                "Some parts of this project cannot be imported exactly (left out or changed):",
-                "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):",
-            ),
-            (
-                "Some parts of this project cannot be exported exactly (left out or changed):",
-                "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):",
-            ),
+            ("Some parts of this project cannot be imported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):"),
+            ("Some parts of this project cannot be exported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):"),
             ("Import Anyway", "ייבוא בכל זאת"),
             ("Export Anyway", "ייצוא בכל זאת"),
         ] {
