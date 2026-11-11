@@ -1713,7 +1713,22 @@ pub fn numbered_template(template: &str, n: u32) -> String {
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
+    let mut s: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
+    // At most a file name's worth (255 UTF-8 bytes, whole characters only): a template repeating
+    // a long name token must not expand to gigabytes. A cut name ends in a hash of the whole
+    // name so long names that share a prefix stay distinct.
+    if s.len() > 255 {
+        // shortcut: 64-bit FNV-1a, not collision-resistant against crafted names; use a real hash if names become untrusted keys.
+        let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let mut end = 255 - 17;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str(&format!("-{hash:016x}"));
+    }
+    // `.` and `..` would name the folder itself or its parent when the token is a path component.
+    if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
 }
 
 #[cfg(test)]
@@ -1738,9 +1753,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sanitize_limits_the_name_in_bytes() {
+        // 255 two-byte characters are cut to whole characters plus a 17-byte hash suffix.
+        let s = sanitize(&"é".repeat(255));
+        assert!(s.len() <= 255 && s.len() > 235, "{}", s.len());
+        assert!(s.starts_with("éé") && s.is_char_boundary(s.len() - 17));
+        // Names that share their first 255 bytes stay distinct, and a name that fits is untouched.
+        let (a, b) = (sanitize(&format!("{}A", "界".repeat(85))), sanitize(&format!("{}B", "界".repeat(85))));
+        assert_ne!(a, b);
+        assert!(a.len() <= 255 && b.len() <= 255);
+        assert_eq!(sanitize(&"n".repeat(255)), "n".repeat(255));
+        assert_eq!(sanitize(&"é".repeat(127)), "é".repeat(127));
+    }
+
+    #[test]
     fn templates_and_sequences() {
         let v = TemplateVars { comp_name: "Main/Title", project_name: "P", width: 1920, height: 1080, frame_rate: 29.97, start_frame: 0, end_frame: 9 };
         assert_eq!(expand_template(DEFAULT_TEMPLATE, OutputFormat::H264, &v), "Main_Title.mp4");
+        // A dot-only name is not a parent-folder component; a long one is cut to a file name.
+        for name in ["..", "."] {
+            let v = TemplateVars { comp_name: name, ..v };
+            assert_eq!(expand_template("out/[compName]/x.[fileExtension]", OutputFormat::Gif, &v), format!("out/{}/x.gif", "_".repeat(name.len())));
+        }
+        let long = "n".repeat(100_000);
+        let v2 = TemplateVars { comp_name: &long, ..v };
+        assert_eq!(expand_template(&"[compName]".repeat(100), OutputFormat::Gif, &v2).len(), 255 * 100);
         assert_eq!(expand_template("[compName]_[width]x[height]@[frameRate].[fileExtension]", OutputFormat::Gif, &v), "Main_Title_1920x1080@29.97.gif");
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");

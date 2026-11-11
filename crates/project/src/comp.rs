@@ -268,8 +268,19 @@ impl Comp {
     /// `base`, or the next free numbered name when a layer already has it (`Shape Layer 2`,
     /// `v-b1.mp4 2`; see `numbered_name`).
     pub fn unique_layer_name(&self, base: &str) -> String {
-        let taken = |n: &str| self.layers.iter().any(|l| l.name == n);
-        if taken(base) { crate::item::numbered_name(base, taken) } else { base.to_string() }
+        if !self.layers.iter().any(|l| l.name == base) {
+            return base.to_string();
+        }
+        let stem = crate::item::name_stem(base);
+        // The suffixes in use, gathered in one pass: trying each candidate against every layer
+        // made importing many layers of one name cubic.
+        let taken: std::collections::HashSet<u64> = self
+            .layers
+            .iter()
+            .filter_map(|l| l.name.strip_prefix(stem)?.strip_prefix(' '))
+            .filter_map(|s| s.parse::<u64>().ok().filter(|n| n.to_string() == s))
+            .collect();
+        (2..).find(|i| !taken.contains(i)).map(|i| format!("{stem} {i}")).unwrap_or_default()
     }
 }
 
