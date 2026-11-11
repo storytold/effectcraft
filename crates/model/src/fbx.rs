@@ -36,6 +36,12 @@ const MAX_ARRAY_BYTES: usize = 1 << 30;
 /// wire type) plus the meshes built from them (#1234).
 const MAX_IMPORT_BYTES: usize = 1 << 31;
 
+/// Most pixels one texture may hold (8192 × 8192) and all the textures of one import together
+/// (2^29: 8 GiB as float RGBA, thirty-two 4K maps). A texture past a limit is left out and the
+/// import says so.
+const MAX_TEXTURE_PIXELS: u64 = 1 << 26;
+const MAX_TEXTURE_IMPORT_PIXELS: u64 = 1 << 29;
+
 /// What is left of an import's memory budget.
 struct Budget(std::cell::Cell<usize>);
 
@@ -862,6 +868,10 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     // Decoded images by the source actually used (embedded Video id, else the resolved file
     // name): Texture objects aliasing one image share its pixels instead of each keeping a copy.
     let mut image_of: HashMap<(Option<i64>, String), Option<usize>> = HashMap::new();
+    // Textures have their own allowance (pixels, as `Texture::decode_within` counts them); the
+    // memory budget is for the file's own records.
+    let mut texture_pixels_left = MAX_TEXTURE_IMPORT_PIXELS;
+    let mut warnings: Vec<String> = vec![];
     // Ok(None): no usable image (the material goes untextured). Err: the memory budget ran out.
     let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Result<Option<usize>> {
         if let Some(t) = texture_of.get(&tid) {
@@ -900,16 +910,30 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
                 Some(i) => *i,
                 None => {
                     // Charge the decoded size before decoding, so a small file claiming huge
-                    // dimensions is refused before its pixels are allocated.
-                    let i = match Texture::dimensions(&bytes) {
-                        Ok((w, h)) => {
-                            budget.take((w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(16)), "a texture")?;
-                            Texture::decode(&bytes).ok().map(|t| {
-                                textures.push(Arc::new(t));
-                                textures.len() - 1
-                            })
+                    // dimensions is refused before its pixels are allocated. A texture past the
+                    // limits is left out (the material goes untextured) and the import says so.
+                    let loaded = Texture::dimensions(&bytes).and_then(|(w, h)| {
+                        let pixels = u64::from(w) * u64::from(h);
+                        if pixels > MAX_TEXTURE_PIXELS {
+                            return Err(perr(format!("a {w}×{h} texture (at most {MAX_TEXTURE_PIXELS} pixels)")));
                         }
-                        Err(_) => None,
+                        if pixels > texture_pixels_left {
+                            return Err(perr(format!("a {w}×{h} texture: the model's textures would hold more than {MAX_TEXTURE_IMPORT_PIXELS} pixels")));
+                        }
+                        let t = Texture::decode(&bytes)?;
+                        texture_pixels_left -= pixels;
+                        Ok(t)
+                    });
+                    let i = match loaded {
+                        Ok(t) => {
+                            textures.push(Arc::new(t));
+                            Some(textures.len() - 1)
+                        }
+                        Err(e) => {
+                            log::warn!("model: FBX texture left out: {e}");
+                            warnings.push(format!("texture left out: {e}"));
+                            None
+                        }
                     };
                     image_of.insert(key, i);
                     i
@@ -987,7 +1011,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     if meshes.is_empty() {
         return Err(perr("FBX file without meshes"));
     }
-    Ok(Model { meshes, nodes, roots: vec![0], materials, textures, ..Model::default() })
+    Ok(Model { meshes, nodes, roots: vec![0], materials, textures, warnings, ..Model::default() })
 }
 
 #[cfg(test)]

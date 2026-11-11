@@ -448,12 +448,12 @@ Connections:  {"#;
     let m = parse(doc.as_bytes(), &resolve).unwrap();
     assert_eq!(m.textures.len(), 1);
     assert!(m.materials.iter().all(|x| x.base_color_tex.map(|t| t.texture) == Some(0)));
-    // Decoded pixels count against the import's memory budget (the two pixels take 32 bytes).
+    // Textures have their own allowance: a tight record budget does not drop them.
     let (_, nodes) = read(doc.as_bytes()).unwrap();
     let values = value_bytes(&nodes).unwrap();
     let mesh = mesh_bytes(&m.meshes[0]).unwrap();
-    assert_eq!(parse_within(doc.as_bytes(), &resolve, values + mesh + 32).unwrap().textures.len(), 1);
-    assert!(parse_within(doc.as_bytes(), &resolve, values + mesh + 31).unwrap_err().to_string().contains("memory limit"));
+    assert_eq!(parse_within(doc.as_bytes(), &resolve, values + mesh).unwrap().textures.len(), 1);
+    assert!(m.warnings.is_empty());
 }
 
 /// A PNG that is only a header claiming `w`×`h` pixels (an empty data chunk follows).
@@ -478,7 +478,7 @@ fn png_header_only(w: u32, h: u32) -> Vec<u8> {
 }
 
 #[test]
-fn texture_budget_is_charged_before_decoding_and_its_error_propagates() {
+fn a_texture_past_the_limits_is_left_out_with_a_warning_not_a_failed_import() {
     let objects = r#"
 	Texture: 600, "Texture::Base", "" {
 		RelativeFilename: "maps\base.png"
@@ -486,10 +486,12 @@ fn texture_budget_is_charged_before_decoding_and_its_error_propagates() {
 }
 Connections:  {"#;
     let doc = ASCII.replace("}\nConnections:  {", objects).replace("C: \"OO\",500,300\n", "C: \"OO\",500,300\n\tC: \"OP\",600,400, \"DiffuseColor\"\n");
-    // 30000×30000 pixels would take ~14 GiB; the header alone must be refused against the budget.
+    // 30000×30000 pixels would take ~14 GiB; the header alone is refused, before anything is allocated.
     let huge = png_header_only(30000, 30000);
     let resolve = |_: &str| Some(huge.clone());
-    assert!(parse(doc.as_bytes(), &resolve).unwrap_err().to_string().contains("memory limit"));
+    let m = parse(doc.as_bytes(), &resolve).unwrap();
+    assert!(m.textures.is_empty() && m.materials.iter().all(|x| x.base_color_tex.is_none()));
+    assert!(m.warnings.iter().any(|w| w.contains("30000")), "{:?}", m.warnings);
 }
 
 #[test]
