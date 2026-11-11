@@ -170,6 +170,32 @@ fn color_grading_lut_files_render_again() {
     assert!(near(reds(&s, comps), 0.0), "{:?}", reds(&s, comps));
 }
 
+/// The frames kept in memory are keyed by the project alone: the footage watcher's stamps (here
+/// `footage.reloadChanged`, its pass on the spot) drop them once a LUT file changes, goes away or
+/// comes back.
+#[test]
+fn a_changed_lut_file_drops_the_frames_kept_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let lut = dir.path().join("watched.cube");
+    write_lut(&lut, BLACK, 1_000);
+    let mut s = session(None);
+    graded(&mut s, "Apply Color LUT", &[("lut", json!(lut.to_string_lossy()))]);
+    let look = |s: &mut Session| {
+        s.events.clear();
+        let r = s.execute_checked("footage.reloadChanged", json!({})).unwrap();
+        (r.get("luts").and_then(serde_json::Value::as_u64), s.events.iter().filter(|e| matches!(e, crate::Event::PurgeCaches)).count())
+    };
+    assert_eq!(look(&mut s), (None, 0), "a file seen for the first time is only remembered");
+    assert_eq!(look(&mut s), (None, 0), "an unchanged file");
+    write_lut(&lut, WHITE, 2_000);
+    assert_eq!(look(&mut s), (Some(1), 1), "an edited file");
+    std::fs::remove_file(&lut).unwrap();
+    assert_eq!(look(&mut s), (Some(1), 1), "a deleted file");
+    write_lut(&lut, WHITE, 3_000);
+    assert_eq!(look(&mut s), (Some(1), 1), "a file created again");
+    assert_eq!(look(&mut s), (None, 0));
+}
+
 /// `.cube` text in the parameter is its own content: it renders, and stays cached.
 #[test]
 fn an_inline_lut_stays_cached() {

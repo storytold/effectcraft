@@ -17,6 +17,9 @@
 //! redraws for footage that didn't change; `footage.reloadChanged` takes the stamps on the spot
 //! (CLI, agents, tests). Like the footage check after File ▸ Open, an automatic reload records
 //! the state of the disk: it is not an undo step and doesn't modify the project.
+//!
+//! The LUT files effects name are stamped along with the footage: renders look at them
+//! themselves, but a change to one drops the frames kept in memory, which can't tell (#3493).
 
 use std::collections::BTreeSet;
 
@@ -62,6 +65,45 @@ fn automatic_paths(s: &Session) -> BTreeSet<String> {
     if s.prefs.import.auto_reload_footage == "off" { BTreeSet::new() } else { reload_paths(s) }
 }
 
+/// The LUT files effects name ([`effectcraft_effects::lut_params`]: Apply Color LUT, Color
+/// Grading). Renders look at them themselves (#3493); the frames kept in memory are keyed by the
+/// project alone, so a change to one drops them.
+fn lut_paths(project: &effectcraft_project::Project) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for (_, comp) in project.comps() {
+        for g in comp.layers.iter().filter_map(|l| l.effects()).flat_map(|fx| fx.groups()) {
+            let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
+            for p in effectcraft_effects::lut_params(effect).iter().filter_map(|path| g.prop(path)) {
+                for v in std::iter::once(&p.value).chain(p.keys.iter().map(|k| &k.value)) {
+                    if let effectcraft_keyframe::Value::Str(src) = v
+                        && let Some(file) = effectcraft_effects::lut_file(src)
+                    {
+                        paths.insert(file.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// The LUT files watched automatically: none while automatic reload is Off.
+fn automatic_luts(s: &Session) -> BTreeSet<String> {
+    if s.prefs.import.auto_reload_footage == "off" { BTreeSet::new() } else { lut_paths(&s.project) }
+}
+
+/// Compare fresh stamps of the LUT files with the ones last seen: a file seen for the first time
+/// is only remembered; one that changed, appeared or went away drops the frames kept in memory.
+/// Returns how many changed.
+fn apply_lut_stamps(s: &mut Session, now: Stamps) -> usize {
+    let before = std::mem::replace(&mut s.lut_stamps, now.iter().cloned().collect());
+    let changed = now.iter().filter(|(p, stamp)| before.get(p).is_some_and(|old| old != stamp)).count();
+    if changed > 0 {
+        s.events.push(crate::Event::PurgeCaches);
+    }
+    changed
+}
+
 /// Embedded data is excluded from availability warnings, but its external file can still be
 /// reloaded. Compare these paths without cloning sequences during unrelated project edits.
 fn data_paths(project: &effectcraft_project::Project) -> impl Iterator<Item = (ItemId, &str, &[String])> {
@@ -75,6 +117,8 @@ fn data_paths(project: &effectcraft_project::Project) -> impl Iterator<Item = (I
 #[derive(Clone, Default)]
 pub struct Watched {
     reload: BTreeSet<String>,
+    /// LUT files effects read ([`lut_paths`]).
+    luts: BTreeSet<String>,
     sources: Arc<Vec<Source>>,
     project: Option<Arc<effectcraft_project::Project>>,
     reload_mode: String,
@@ -88,6 +132,7 @@ impl PartialEq for Watched {
         self.stored_paths == other.stored_paths
             && self.reload_mode == other.reload_mode
             && self.reload == other.reload
+            && self.luts == other.luts
             && (Arc::ptr_eq(&self.sources, &other.sources) || self.sources == other.sources)
     }
 }
@@ -97,6 +142,7 @@ impl PartialEq for Watched {
 pub fn watched(s: &Session) -> Watched {
     Watched {
         reload: automatic_paths(s),
+        luts: automatic_luts(s),
         sources: Arc::new(if s.check_footage_on_open { availability::sources(s) } else { Vec::new() }),
         project: Some(s.project.clone()),
         reload_mode: s.prefs.import.auto_reload_footage.clone(),
@@ -107,18 +153,24 @@ pub fn watched(s: &Session) -> Watched {
 impl Watched {
     /// A worker may sleep indefinitely only when neither content nor availability is watched.
     fn is_empty(&self) -> bool {
-        self.reload.is_empty() && self.sources.is_empty()
+        self.reload.is_empty() && self.luts.is_empty() && self.sources.is_empty()
     }
     /// Complete the synchronous pass used by explicit commands. Automatic availability uses
     /// Scanner::poll instead, so long sequences cannot consume an unbounded polling pass.
     fn scan(&self, services: &dyn Services) -> Observation {
-        Observation { stamps: self.reload.iter().map(|p| (p.clone(), services.stamp(p))).collect(), missing: availability::scan(&self.sources, services) }
+        Observation { stamps: stamp_all(&self.reload, services), luts: stamp_all(&self.luts, services), missing: availability::scan(&self.sources, services) }
     }
+}
+
+/// The stamps of `paths` now.
+fn stamp_all(paths: &BTreeSet<String>, services: &dyn Services) -> Stamps {
+    paths.iter().map(|p| (p.clone(), services.stamp(p))).collect()
 }
 
 #[derive(Clone, PartialEq)]
 struct Observation {
     stamps: Stamps,
+    luts: Stamps,
     missing: Vec<bool>,
 }
 
@@ -163,7 +215,12 @@ impl Scan {
             ReloadPolicy::Manual => reload_paths(s),
         };
         let stamps = self.observation.stamps.into_iter().filter(|(p, _)| current.contains(p)).collect();
-        apply_stamps(s, stamps)
+        let luts = apply_lut_stamps(s, self.observation.luts);
+        let mut out = apply_stamps(s, stamps)?;
+        if luts > 0 {
+            out["luts"] = json!(luts);
+        }
+        Ok(out)
     }
 }
 
@@ -398,6 +455,7 @@ pub(crate) fn command(s: &mut Session, _: &Value) -> crate::Result<Value> {
     let services = s.services.clone();
     let watched = Watched {
         reload: reload_paths(s),
+        luts: lut_paths(&s.project),
         sources: Arc::new(availability::sources(s)),
         project: Some(s.project.clone()),
         reload_mode: s.prefs.import.auto_reload_footage.clone(),
@@ -460,7 +518,8 @@ impl Watcher {
     pub fn update(&mut self, s: &Session) {
         let same_sources = availability::sources_match(s, &self.paths.sources);
         let same_data = self.paths.project.as_ref().is_some_and(|before| data_paths(before).eq(data_paths(&s.project)));
-        if same_sources && same_data && self.paths.stored_paths == s.stored_paths && self.paths.reload_mode == s.prefs.import.auto_reload_footage {
+        let same_luts = self.paths.luts == automatic_luts(s);
+        if same_sources && same_data && same_luts && self.paths.stored_paths == s.stored_paths && self.paths.reload_mode == s.prefs.import.auto_reload_footage {
             let project = Some(s.project.clone());
             self.paths.project = project.clone();
             self.pending.lock().unwrap_or_else(PoisonError::into_inner).paths.project = project;
@@ -545,7 +604,7 @@ fn watch(
             continue;
         }
         let stamps =
-            Observation { stamps: paths.reload.iter().map(|p| (p.clone(), services.stamp(p))).collect(), missing: scanner.poll(&paths.sources, services) };
+            Observation { stamps: stamp_all(&paths.reload, services), luts: stamp_all(&paths.luts, services), missing: scanner.poll(&paths.sources, services) };
         if last.as_ref() != Some(&stamps) {
             last = Some(stamps.clone());
             *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(Scan::new(paths.clone(), stamps, ReloadPolicy::Automatic));
@@ -852,5 +911,36 @@ mod watcher_tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "the worker is still running");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A LUT file an effect names is watched once the edit naming it reaches the watcher, and a
+    /// change to it drops the frames kept in memory (#3493).
+    #[test]
+    fn lut_files_effects_name_are_watched() {
+        let disk = Arc::new(Disk::default());
+        disk.set("/grade.cube", (10, 1));
+        let mut s = Session { services: disk.clone(), ..Default::default() };
+        s.execute_checked("comp.new", json!({"name": "C", "width": 8, "height": 8, "frameRate": 30, "duration": 1})).unwrap();
+        let l = s.execute_checked("layer.newSolid", json!({})).unwrap()["layer"].clone();
+        let (mut w, wakes) = start(&disk, TICK, LONG).unwrap();
+        w.update(&s);
+        s.execute_checked("effect.apply", json!({"layer": l, "effect": "Apply Color LUT"})).unwrap();
+        s.execute_checked("prop.set", json!({"layer": l, "path": "effects/#1/lut", "value": "/grade.cube"})).unwrap();
+        w.update(&s);
+        let mut next = |n: usize| {
+            let mut scan = None;
+            wait_until("a report", || {
+                scan = w.take().filter(|_| wakes.load(Ordering::SeqCst) >= n);
+                scan.is_some()
+            });
+            let scan = scan.unwrap();
+            let luts = scan.observation.luts.clone();
+            s.events.clear();
+            scan.apply(&mut s).unwrap();
+            (luts, s.events.iter().any(|e| matches!(e, crate::Event::PurgeCaches)))
+        };
+        assert_eq!(next(1), (vec![("/grade.cube".to_string(), Some((10, 1)))], false), "first seen: remembered");
+        disk.set("/grade.cube", (10, 2));
+        assert_eq!(next(2), (vec![("/grade.cube".to_string(), Some((10, 2)))], true));
     }
 }
