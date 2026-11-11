@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed; earlier change: major (new file: milestones moved from ROADMAP.md, current focus and next steps with Opus 5.5 estimates)) · **Target:** Adobe After Effects 2026
 
 Forward-looking detail behind the [ROADMAP](../ROADMAP.md). The work list itself, one gap at a
 time, is [gaps.md](gaps.md); the numbers are in [target-app-parity.md](target-app-parity.md).

@@ -1,6 +1,6 @@
 # Parity with After Effects
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed; earlier change: minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged)) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
 left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
@@ -68,7 +68,7 @@ corpus in both apps yet.
   field, paste SVG/AI as shapes, faster mask tracker, copy frame to clipboard, Curl Noise,
   variable-font filter) and 26.5 (September 2026: percentage guides, Object Matte disk cache,
   effect colour labels, a rebuilt Effect Controls panel, ACES 2.0 through OpenColorIO 2.5.1).
-- **From this repository at `origin/main` 4ac6cdb2 (2026-11-11):** 617 menu entries in the After Effects-shaped menu tree (`crates/engine/src/menus.rs`), 763 commands listed by `effectcraft-cli commands` (the 411 of 10 October used a counting method that was not recorded, so the two are not comparable), 308 registered effects (`effect.list`), 14 export formats (`OutputFormat::ALL`), 573,305 lines of Rust, 6,115 tests in the 10 November CI run (nextest, without the GPU crate), 3,613 commits, and 782 issues are open and 904 closed on 2026-11-11 (322 pull requests open, 1,232 merged). 280 of the effects run on the GPU (`effect.list`); the language catalogs and the preset count were not re-measured.
+- **From this repository at `origin/main` 4ac6cdb2 (2026-11-11):** 617 menu entries in the After Effects-shaped menu tree (`crates/engine/src/menus.rs`), 763 commands listed by `effectcraft-cli commands` (the 411 of 10 October used a counting method that was not recorded, so the two are not comparable), 308 registered effects (`effect.list`), 14 export formats (`OutputFormat::ALL`), 573,305 lines of Rust, 6,115 tests in the 10 November CI run (nextest, without the GPU crate), 4,489 commits, and 782 issues are open and 904 closed on 2026-11-11 (322 pull requests open, 1,232 merged). 280 of the effects run on the GPU (`effect.list`); the language catalogs and the preset count were not re-measured.
 - **Earlier, from this repository at `origin/main` 1446e27 (10 October 2026):** 587 menu entries in the
   After Effects-shaped menu tree (`crates/engine/src/menus.rs`), 411 registered engine commands,
   306 registered effects (280 on the GPU, [effects.md](effects.md)), 13 export formats
@@ -122,11 +122,11 @@ compositing and effects dominate; audio is light). Hours are to full parity for 
 | Shapes, masks and roto | 9% | 93% | 45% | 30–50 | Open mask and shape issues (#1004, #1033, #960); #999, #1042, #932, #510, #513, #527, #509 and #303 are closed; paste SVG/AI as shape layers (26.3; SVG markup pastes since #738) |
 | Text and typography | 7% | 94% | 50% | 20–35 | CJK text in comps renders wrongly (#453); paragraph alignment (#316, closed); soft text at Fit (#417, mostly fixed by #444); toolbar font options (#550); #483 and #583 are closed; variable-font filter landed (#741) |
 | Effects and animation presets | 14% | 85% | 40% | 70–130 | All 308 effects exist (306 on 10 October), but rendered output is unmeasured against After Effects; 76 built-in presets (text, Transitions, Backgrounds, Behaviors) against After Effects' 621 ([effects-parity.md](effects-parity.md)); open effect bugs (#580 crash, #463, #369, #473; #474, #514 and #526 are closed); effect colour labels (26.5); see [effects-parity.md](effects-parity.md) |
-| 3D (Classic and Advanced) | 6% | 82% | 35% | 35–65 | glTF, OBJ, STL and FBX 7.x models are read (no FBX animation or skinning, no USD/USDZ), no Substance materials, mesh displacement unverified; no 3D transform gizmos (#392, #347); reflections (#261); camera aperture (#260); #489 and #315 are closed |
+| 3D (Classic and Advanced) | 6% | 82% | 35% | 35–65 | glTF, OBJ, STL and FBX 7.x models are read (no FBX animation or skinning, no USD/USDZ), no Substance materials, mesh displacement unverified; no 3D transform gizmos (#392 open; #347 was closed as a duplicate); reflections (#261); camera aperture (#260); #489 and #315 are closed |
 | Tracking and AI-assisted tools | 5% | 80% | 35% | 35–70 | Object Matte (26.2) has the effect, the viewer tool (click / box), background tracking, Freeze and the 26.5 disk cache, not yet compared with After Effects; Roto Brush (MobileSAM) and face tracking (MediaPipe) unmeasured against After Effects; camera-tracker view (#505) |
-| Preview and cache | 7% | 92% | 40% | 25–50 | Playback stutters on cached frames (#595, #304); late audio (#504, #335); #329 and #554 are closed; no benchmark against After Effects |
+| Preview and cache | 7% | 92% | 40% | 25–50 | Playback stutters on cached frames (#595, #304); sound that starts late (#3176); #504, #335, #329 and #554 are closed; no benchmark against After Effects |
 | Render queue and export | 7% | 85% | 55% | 25–45 | No hardware encoding; ProRes 4444 colour tag (#340); rendering over an existing file (#325); #446 and #372 (8-bit uncompressed QuickTime, #778) are closed; HEVC/AV1 without B-frames |
-| Audio | 2% | 85% | 45% | 6–12 | Audio sync and crackle (#335); audio to keyframes depth |
+| Audio | 2% | 85% | 45% | 6–12 | Sound that starts late (#3176; #335 and #504 are closed); audio to keyframes depth |
 | **Weighted** | 100% | **≈ 91%** | **≈ 50%** | **≈ 360–660** | |
 
 Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensions below.
@@ -144,7 +144,7 @@ Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensio
 | Performance | 35% | 50–100 | Internal numbers only; users report stutter and slow scrubbing | [gaps.md](gaps.md#g5-performance-at-real-world-scale) |
 | Stability | 45% | 40–80 | 44 open issues labelled critical, most of them crashes, aborts or out-of-memory kills (gap 3), and 16 open security audit findings (gap 26); #341, #879, #591, #306 and #511 are closed; `cargo xtask ci` runs on every pull request (#2204) | [gaps.md](gaps.md#g3-stability-and-a-green-main) |
 | Platforms | 65% | 30–60 | Releases for macOS, Windows x64/x86/ARM64, Linux, FreeBSD and the web (more than After Effects), but Linux and Windows users hit basic bugs | [gaps.md](gaps.md#g2-real-user-reliability-on-every-platform) |
-| Ecosystem and plug-ins | 20% | 40–80 | After Effects scripts and expressions mostly carry over; OpenFX plug-ins run in external helpers (the helper ships separately); no After Effects SDK (`.aex`) plug-ins, `.ffx` presets or `.mogrt`; our WebAssembly plug-in API has no third-party plug-ins yet | [plugins.md](plugins.md) |
+| Ecosystem and plug-ins | 20% | 40–80 | After Effects scripts and expressions mostly carry over; OpenFX plug-ins can run through an external helper (protocol in `crates/helper-host`; the only OpenFX helper is the unofficial `ec-extension-ofx`, and #327 is open); no After Effects SDK (`.aex`) plug-ins, `.ffx` presets or `.mogrt`; our WebAssembly plug-in API has no third-party plug-ins yet | [plugins.md](plugins.md) |
 | AI features | 35% | 40–80 (overlaps Tracking) | Roto Brush (MobileSAM) and face tracking (MediaPipe) as optional downloads; Object Matte (point / box prompt, same model; viewer tool, background tracking, Freeze, disk cache) unmeasured against After Effects; the After Effects bundle ships Whisper, BERT and Marian tokenizers and a shot-cut model we have no equivalent of | [gaps.md](gaps.md) |
 | Agent control (beyond After Effects) | ahead | — | Every command is drivable over MCP, the control channel and the CLI | [agents.md](agents.md) |
 
@@ -195,7 +195,7 @@ generative/cloud AI (Object Matte, Firefly), Adobe services and team features, s
 | Shape layers and masks | 12% | 65% | #510, #513, #527 mask bugs and #303 Mesh Warp were counted here and are now closed; open: #1004, #1033, #960; #999 and #1042 are closed |
 | Text and text animators | 12% | 70% | #453 CJK (open); #316 alignment and #583 font search (closed) |
 | Everyday effects: blurs, glow, fill/tint, curves/levels, keying, drop shadow, displacement | 10% | 70% | All present with GPU paths; unmeasured against After Effects; #514 Apply Color LUT (closed) |
-| Preview (RAM preview with audio) | 8% | 55% | #595, #304 stutter; #504 late audio (#554 closed) |
+| Preview (RAM preview with audio) | 8% | 55% | #595, #304 stutter; #3176 sound starts late (#504 and #554 closed) |
 | Render to H.264 / ProRes / PNG sequences | 6% | 75% | Encoder tests; #340 ProRes 4444 tag (open); #446 default macOS output folder (closed) |
 | **Average depth** | 100% | **72.2%** | |
 
@@ -205,7 +205,7 @@ Discounts for what still stops real work:
 |---|---:|---|
 | Interaction fidelity | ×0.90 | UI parity ≈ 65% ([ui-parity.md](ui-parity.md)): viewer zoom keys (#570), multi-monitor only as separate panel windows (#486 open); Graph Editor jitter (#456) and snapping (#352) are closed |
 | Stability on real machines | ×0.90 | 44 open issues labelled critical, most of them crashes (gap 3; #341, #879, #591, #306 and #511 are closed); Direct3D 12 compositor fails (#613); CI runs on every pull request (#2204) (factor not re-estimated) |
-| File exchange with After Effects users | ×0.80 | `.aep` / `.aepx` import only as far as the importer maps them (the rest is reported); `.mogrt` and `.ffx` don't open (factor not re-estimated); colleagues' and bought templates are affected; PSD, AI, footage and rendered deliverables exchange fine |
+| File exchange with After Effects users | ×0.80 | `.aep` / `.aepx` import (File ▸ Import or dropping the file, with a prompt when something would be lost) only as far as the importer maps them; `.mogrt` and `.ffx` don't open (factor not re-estimated); colleagues' and bought templates are affected; PSD, AI, footage and rendered deliverables exchange fine |
 
 72.2% × 0.90 × 0.90 × 0.80 = **46.8%, ≈ 47%**. It sits only just above the full number because
 the gap is not in After Effects' long tail: fidelity, stability and `.aep` exchange hit
@@ -223,7 +223,7 @@ first-time user) get their work done?* No advanced options, pro workflows or exc
 | Launch, new project, undo, save, reopen | 10% | 85% | Versioned project reopen tests, auto-save and crash recovery |
 | Import a video, picture or song | 10% | 75% | #431 and #324 (closed) |
 | New comp; move, scale, rotate, fade and trim layers | 15% | 80% | `ui_viewer`, Timeline tests |
-| Add and style text | 10% | 70% | #316 (open), #583 (closed) |
+| Add and style text | 10% | 70% | #316 and #583 (both closed) |
 | Draw shapes and simple masks | 10% | 70% | Shape tool tests; #513 mask drawing feedback (closed) |
 | Keyframes and Easy Ease | 15% | 85% | Ease measured against After Effects |
 | Apply a few common effects | 10% | 75% | Effects & Presets search, Effect Controls tests |
@@ -234,8 +234,8 @@ first-time user) get their work done?* No advanced options, pro workflows or exc
 | Discount | Factor | Evidence |
 |---|---:|---|
 | Launch and stability | ×0.88 | Start-up failures (#501, #234 macOS 27, #613 Direct3D 12; #596 is closed); #426 timeline crash while playing |
-| Discoverability and UI clarity | ×0.90 | After Effects' dense layout reproduced faithfully; Home screen and interactive Learn tutorials help; renders fail silently on macOS until an output folder is chosen (#446); layout nitpicks (#581) |
-| Opening files people send | ×0.85 | Tutorial projects and templates arrive as `.aep` / `.mogrt`: `.aep` opens as far as the importer maps it, `.mogrt` doesn't |
+| Discoverability and UI clarity | ×0.90 | After Effects' dense layout reproduced faithfully; Home screen and interactive Learn tutorials help; layout nitpicks (#581); the macOS render-output-folder report (#446) is closed |
+| Opening files people send | ×0.85 | Tutorial projects and templates arrive as `.aep` / `.mogrt`: `.aep` imports (File ▸ Import, or dropping the file; File ▸ Open doesn't take it yet) as far as the importer maps it, `.mogrt` doesn't |
 
 76.75% × 0.88 × 0.90 × 0.85 = **51.7%, ≈ 52%**.
 
@@ -1168,6 +1168,7 @@ top of this page and in items 16–18 above.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Counts re-measured at `origin/main` 4ac6cdb2 (menu entries, commands, effects, lines of Rust, tests, commits, issues and pull requests); issue statuses re-checked and closed ones removed from the evidence (#316, #335, #347, #446, #504 and others); the `.aep`, 3D-model, CI and OpenFX statements corrected; percentages, hours and the factors in the audience tables not re-estimated |
 | 2026-10-12 | minor | Audited against `upstream/main` 470ea7a3: open crash list, closed-issue references in the area tables, export formats 12 to 13, localization ≈ 12% to ≈ 18%, `#include`, built-in preset count, 12 October repository counts |
 | 2026-10-10 | minor | Readiness-by-audience table: hours to ≈ 95% for each of the three numbers; the full number stays an additive weighted sum (unchanged) |
 | 2026-10-10 | minor | Added mainstream practitioner (≈ 47%) and essentials user (≈ 52%) numbers with weights, discounts and GitHub user evidence; wrote down how the full ready number is built (unchanged at ≈ 45%) |

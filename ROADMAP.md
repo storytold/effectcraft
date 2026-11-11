@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-11 · **Change:** minor (counts and statuses re-checked against `origin/main` 4ac6cdb2: the counts re-measured, the status of every issue and pull request cited checked, `.aep` import and export and OpenFX helpers described as they are; the percentages and hours are the 12 October estimates and are not re-estimated; see gaps.md for the full list of what changed; earlier change: minor (ProRes alpha final-run conformance; previously: features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774)) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -38,7 +38,7 @@ and lists were re-checked on 2026-11-11; a new estimate needs new evidence, not 
 
 **Alpha**, because all six core workflows of the [alpha gate](docs/roadmap.md#alpha-gate)
 (set up, animate, text and shapes, composite, preview, save and deliver) work end to end on macOS
-and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) import only as far as the importer's coverage goes (what it can't map is reported) and File ▸ Open doesn't take them yet, and that coverage isn't measured against real projects; fidelity against After Effects is measured for one narrow case (scalar ease,
+and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) import only as far as the importer's coverage goes (the losses it detects are reported) and File ▸ Open doesn't take them yet, and that coverage isn't measured against real projects; fidelity against After Effects is measured for one narrow case (scalar ease,
 168 samples); 782 issues are open and 904 closed on 2026-11-11, 44 of them labelled critical, most of those crashes, aborts or out-of-memory kills (gap 3), and the security audit has 16 open findings (gap 26). Beta needs ≈ 75% ready and `.aep`
 opening reliably: `.aep` coverage and File ▸ Open, and the owner decision on clean-room scope (#190; the original 80–160 h was for the importer, which exists, and is not re-estimated), the fidelity harness and
 P0/P1 corpus (60–100 h), the crash and bug backlog (40–80 h), performance (40–70 h),
@@ -183,6 +183,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Counts, issue and pull request statuses re-checked against `origin/main` 4ac6cdb2 (open issues 216 to 782, lines of Rust, tests, commits); the stage text and the next-steps list say `.aep` import and export exist, name the security audit and no longer ask for a CI gate; percentages and hours not re-estimated |
 | 2026-10-30 | minor | Progress log: text Line Join, Timeline drag-reorder and Shift multi-select of effects, viewer edge pan, effect padding budget, MP4 edit-list duration, Render Queue clock, ScriptUI drag capture and docked-panel size |
 | 2026-10-22 | minor | Localization: 300 more panel/dialog rows in Japanese and the Chinese catalogs, plus the review's three missing rows (Basic, Advanced, Play/Stop) — panel tabs, form and dialog labels, context menus, tracker/graph/text-panel controls, File-panel footers, credits; language shares recounted after #1774 (Japanese 27% → 46% with 297 effect names, Simplified Chinese 29% → 46% with 307 effect names, Traditional Chinese 29% → 38%, overall 18% → 24%) |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |

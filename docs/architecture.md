@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-11 · **Change:** minor (the effect registry count re-measured: 308; earlier: SAM 2 crate added to the layer table) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-11 · **Change:** minor (the effect registry count re-measured: 308; earlier change: minor (SAM 2 crate added to the layer table)) · **Target:** Adobe After Effects 2026
 
 EffectCraft is a stack of small Rust crates. The engine knows nothing about the user interface;
 the egui frontend, the command-line tool and the MCP server all sit on top of the same `Session`
@@ -817,6 +817,7 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | The effect registry count re-measured: 308 effects |
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
 
 PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

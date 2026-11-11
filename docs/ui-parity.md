@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (menu entry count re-measured: 617 at `origin/main` 4ac6cdb2; the percentages are the 12 October ones; earlier: accessibility row, second slice) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (menu entry count re-measured: 617 at `origin/main` 4ac6cdb2; the percentages are the 12 October ones; earlier change: minor (accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable, #1335; earlier changes: accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; shape group Contents row elided; path-editing layer bounds #1220; closed issue references re-audited against `upstream/main` 470ea7a3)) · **Target:** Adobe After Effects 2026
 
 How closely EffectCraft's interaction matches After Effects: tools, handles, snapping, nudging,
 modifier keys, shortcuts, drag behaviour, numeric entry, panels, context menus and feel. Evidence
@@ -49,6 +49,7 @@ Effects running; most of the rest parallelises.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Menu entry count re-measured: 617 (587 on 10 October); percentages left as of 12 October |
 | 2026-10-18 | minor | A shape group's inner Contents (After Effects' elided Vectors group) draws no row: the group's path, fill/stroke and Transform list directly under the group |
 | 2026-10-13 | minor | Accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable (#1335); no screen reader tested |
 | 2026-10-13 | minor | Accessibility row: AccessKit audit and contrast tests, Effects & Presets, Settings and Render Queue named and keyboard-operable (#1335); no screen reader tested |

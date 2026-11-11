@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-11-11 · **Change:** minor (11 November: hardware decode and encode say what the maintainers decided on 5 November (#819, #498); #504 marked closed; the hours are the 12 October estimates) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-11-11 · **Change:** minor (11 November: hardware decode and encode say what the maintainers decided on 5 November (#819, #498); #504 marked closed; the hours are the 12 October estimates; earlier change: minor (Content-Aware Fill's PatchMatch and flow search on the GPU)) · **Target:** Adobe After Effects 2026
 
 Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
