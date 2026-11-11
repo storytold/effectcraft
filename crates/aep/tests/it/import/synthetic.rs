@@ -842,3 +842,46 @@ fn a_default_state_colour_record_holds_the_value() {
     assert_eq!(colour(&default_state), colour(&written));
     assert_ne!(colour(&default_state), colour(&unchanged), "the recorded colour, not the default");
 }
+
+/// `SYNTHETIC` with Levels' Channel and Clip to Output Black / White popups' item names (`pdnm`)
+/// rewritten to the French labels a French-language After Effects stores there, keeping the same
+/// item order so the index each popup is set to is unaffected.
+fn with_french_levels_popups() -> Vec<u8> {
+    let (mut channel, mut clip) = (0, 0);
+    let bytes = mutate(&mut |c| {
+        if !c.is(b"Utf8") {
+            return;
+        }
+        if c.bytes() == Some(b"RGB|Red|Green|Blue|Alpha".as_slice()) {
+            *c = Chunk::data(*b"Utf8", b"RVB|Rouge|Vert|Bleu|Alpha".to_vec());
+            channel += 1;
+        } else if c.bytes() == Some(b"On|Off|Off for 32 bpc Color".as_slice()) {
+            *c = Chunk::data(*b"Utf8", "Activé|Désactivé|Désactivé pour la couleur 32 bpc".as_bytes().to_vec());
+            clip += 1;
+        }
+    });
+    assert_eq!(channel, 2, "Levels' Channel pdnm");
+    assert_eq!(clip, 4, "Levels' two Clip pdnm (Black and White), each stored twice");
+    bytes
+}
+
+/// A popup's item names in the file are matched to EffectCraft's own (English) ones by name
+/// (`popup_key`): a project saved by a French After Effects stores "RVB", "Activé", "Désactivé
+/// pour la couleur 32 bpc" for Levels' Channel and Clip to Output Black / White (observed in a
+/// real "Niveaux" effect, After Effects 2026 26.0.0x67). Before `popup_alias`, none of these
+/// matched EffectCraft's English-only options, so each came back "has no counterpart, default
+/// used" and the real selection was silently lost.
+#[test]
+fn french_levels_popup_items_are_recognized() {
+    let (unchanged, r1) = run(SYNTHETIC, true);
+    let (french, r2) = run(&with_french_levels_popups(), true);
+    let (r1, r2) = (r1.unwrap(), r2.unwrap());
+    let found = losses(&r2, LossCategory::Effects);
+    assert!(!found.iter().any(|d| d.contains("has no counterpart")), "{found:?}");
+    for id in ["channel", "clipToOutputBlack", "clipToOutputWhite"] {
+        let want: Vec<_> = effect_values(&unchanged).into_iter().filter(|(p, _)| p == id).collect();
+        let got: Vec<_> = effect_values(&french).into_iter().filter(|(p, _)| p == id).collect();
+        assert_eq!(got, want, "{id}");
+    }
+    assert_eq!(r1.report.imported.effects, r2.report.imported.effects);
+}

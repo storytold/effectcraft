@@ -1147,6 +1147,24 @@ pub fn popup_key(item: &str) -> String {
     s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
 }
 
+/// The English [`popup_key`] a non-English After Effects popup item name stands for, when this
+/// table knows it; `None` otherwise. EffectCraft's own popup options are English only, so a
+/// project saved by an After Effects set to another UI language never matches them by name and
+/// the parameter falls back to its default (observed on a real "Niveaux" project, French After
+/// Effects 2026 26.0.0x67: Levels' Channel and Clip to Output Black / White). Add an entry only
+/// from a confirmed After Effects label, never a guess at a whole menu's translation.
+pub fn popup_alias(key: &str) -> Option<&'static str> {
+    Some(match key {
+        // French: Levels' Channel popup (`ADBE Easy Levels2-0001`).
+        "rvb" => "rgb",
+        // French: Levels' Clip to Output Black / White popups (`-0008`, `-0009`).
+        "activé" => "on",
+        "désactivé" => "off",
+        "désactivé pour la couleur 32 bpc" => "off for 32 bpc color",
+        _ => return None,
+    })
+}
+
 /// The table row of an After Effects match name.
 pub fn by_match_name(match_name: &str) -> Option<&'static EffectMap> {
     EFFECTS.iter().find(|m| m.match_name == match_name)
