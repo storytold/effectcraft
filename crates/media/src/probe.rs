@@ -10,8 +10,12 @@ use image::metadata::Orientation;
 use crate::{MediaError, Result, ext_of, rate_from_fc};
 
 /// Most pixels a still may decode to: 2 GiB as the renderer's float RGBA (16384 × 8192, beyond
-/// any camera's still).
+/// any camera's still). A browser tab's wasm32 heap can't hold one allocation that large (and
+/// the decoded input beside it): 512 MiB there.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 27;
+#[cfg(target_arch = "wasm32")]
+pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 25;
 
 /// Frame rate given to image sequences on import (After Effects' default preference).
 pub const DEFAULT_SEQUENCE_RATE: FrameRate = FrameRate::FPS_30;

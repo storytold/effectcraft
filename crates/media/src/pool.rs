@@ -859,6 +859,8 @@ impl Inner {
         let loaded = crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes));
         let img = match loaded {
             Ok(img) => img,
+            // Over the size limit: the layered fallback would allocate its planes anyway.
+            Err(e @ image::ImageError::Limits(_)) => return Err(MediaError::Decode(format!("{path}: {e}"))),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
             Err(e) => crate::exr_channels::cached_layered_image(path, bytes).ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?,
         };

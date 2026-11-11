@@ -93,7 +93,12 @@ impl Anim {
         if crate::webp_anim::is_webp(bytes) {
             return crate::webp_anim::load(bytes);
         }
-        let dec = GifDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
+        let mut dec = GifDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
+        // A frame may be far larger than the canvas, and the decoder allocates its buffer before
+        // decoding it: no single buffer may pass what all the frames may hold.
+        let mut limits = image::Limits::no_limits();
+        limits.max_alloc = Some(MAX_BYTES as u64);
+        image::ImageDecoder::set_limits(&mut dec, limits).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
         // The decoder allocates the full logical canvas for the first frame, however small the
         // frames themselves are: check it before decoding any.
         let (w, h) = image::ImageDecoder::dimensions(&dec);
@@ -183,6 +188,17 @@ mod tests {
         assert_eq!(colour_at(&pool, &f, 0.17), [0.0, 0.0, 1.0]);
         // Past the end it holds the last frame.
         assert_eq!(colour_at(&pool, &f, 5.0), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_frame_far_larger_than_the_canvas_is_refused_before_it_is_allocated() {
+        // A 1×1 canvas and a 20000×20000 frame (1.6 GB of RGBA); the data itself is not there.
+        let mut bytes = b"GIF89a".to_vec();
+        // (a two-entry global colour table, so the frame gets as far as its buffer)
+        bytes.extend([1, 0, 1, 0, 0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+        bytes.extend([0x2c, 0, 0, 0, 0, 0x20, 0x4e, 0x20, 0x4e, 0, 2, 0]);
+        let e = crate::gif_anim::Anim::load(&bytes).err().expect("refused").to_string();
+        assert!(e.to_lowercase().contains("memory"), "{e}");
     }
 
     #[test]
