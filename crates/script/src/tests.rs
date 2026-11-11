@@ -1951,6 +1951,18 @@ fn setting_comp_width_and_height_leaves_the_layers_where_they_are() {
 }
 
 #[test]
+fn a_hashbang_line_does_not_hide_deep_nesting_from_eval() {
+    // Boa reads a leading `#!` line of eval source as a comment, so the backtick on it opens no
+    // template: the brackets after it are counted and refused.
+    let mut s = session();
+    let code = "var deep = new Array(5000).join('(') + '1' + new Array(5000).join(')'); var r; \
+        try { eval('#! `\\n' + deep); r = 'ran'; } catch (e) { r = 'refused'; } r";
+    assert_eq!(ok(&mut s, code).result.as_str(), Some("refused"));
+    assert!(crate::runtime::check_nesting(&format!("#! `\n{}1{}", "(".repeat(5000), ")".repeat(5000))).is_err());
+    assert!(crate::runtime::check_nesting("#! `\n(1)").is_ok());
+}
+
+#[test]
 fn code_compiled_at_run_time_passes_the_nesting_check() {
     // `eval` and `new Function` of a string nested past the limit are refused with a catchable
     // error instead of overflowing the parser's stack; shallow code still compiles.

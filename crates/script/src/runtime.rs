@@ -545,7 +545,11 @@ impl boa_engine::context::HostHooks for Hooks {
         _context: &mut Context,
     ) -> JsResult<()> {
         let mut code: String = parameters.iter().map(|p| p.to_std_string_escaped()).collect::<Vec<_>>().join(",");
-        code.push('\n');
+        // With no parameters (`eval`) the body is the source as it stands, so a leading `#!` line
+        // is still its first line; with parameters it sits inside a function, where it is no comment.
+        if !parameters.is_empty() {
+            code.push('\n');
+        }
         code.push_str(&body.to_std_string_escaped());
         check_nesting(&code).map_err(|e| JsNativeError::syntax().with_message(e).into())
     }
@@ -870,6 +874,10 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
     // The last significant byte (not space or comment), and where it is.
     let (mut prev, mut prev_at) = (0u8, 0usize);
+    // A `#!` line at the very start is a comment (Boa reads it so): its text is not scanned.
+    if b.starts_with(b"#!") {
+        i = b.iter().position(|d| *d == b'\n').unwrap_or(b.len());
+    }
     // Whether the word that ends at `prev_at` came right after a `.` token (comments and
     // whitespace between them do not matter).
     let mut word_after_dot = false;
