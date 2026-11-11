@@ -606,7 +606,10 @@ fn object_matte_background_job_cancel_and_freeze() {
 /// A queue edit preserves a frozen matte made before the footage signature gained placed_page.
 #[test]
 fn render_queue_keeps_frozen_object_matte_with_legacy_footage_key() {
-    use effectcraft_effects::{object_matte, roto::{FROZEN, FrozenCache, INPUT_KEY}};
+    use effectcraft_effects::{
+        object_matte,
+        roto::{FROZEN, FrozenCache, INPUT_KEY},
+    };
     use effectcraft_keyframe::Value::Str;
     use std::sync::Arc;
 
@@ -634,9 +637,7 @@ fn render_queue_keeps_frozen_object_matte_with_legacy_footage_key() {
     g.get_mut(FROZEN).unwrap().value = saved.clone();
 
     s.execute_checked("renderQueue.add", json!({"comp": cid.0, "format": "png", "output": "matte.png"})).unwrap();
-    let params = |s: &Session| {
-        crate::roto::params_static(s.project.comp(cid).unwrap().layer(clip).unwrap().props.find_group(uid).unwrap())
-    };
+    let params = |s: &Session| crate::roto::params_static(s.project.comp(cid).unwrap().layer(clip).unwrap().props.find_group(uid).unwrap());
     assert_eq!(params(&s).get(INPUT_KEY), Some(&Str(legacy)));
     assert_eq!(params(&s).get(FROZEN), Some(&saved));
 
