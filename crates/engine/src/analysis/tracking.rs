@@ -199,9 +199,27 @@ pub(crate) struct Work {
 /// Most pixels a source frame is brought to for analysis (2 GiB as float RGBA).
 const MAX_SOURCE_PIXELS: u64 = 1 << 27;
 
-/// The layer's source frame at comp time `t` at 100 % (layer pixels + offset = image pixels).
-/// Footage at its native size is used straight from the footage source (no copy unless its
-/// Cineon Settings convert it).
+/// Why a layer's source frame could not be had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FrameError {
+    /// The layer has no pixels at that time.
+    Missing,
+    /// The frame at 100 % would be `width` x `height`, more than analysis holds ([`MAX_SOURCE_PIXELS`]).
+    TooLarge { width: u32, height: u32 },
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::Missing => f.write_str("the layer has no pixels"),
+            FrameError::TooLarge { width, height } => {
+                write!(f, "the layer's frame is {width} x {height} pixels at 100 %, more than the {MAX_SOURCE_PIXELS} pixels analysis works on")
+            }
+        }
+    }
+}
+
+/// [`source_frame_checked`] without the reason: `None` when there is no frame to use.
 pub(crate) fn source_frame(
     r: &Renderer,
     project: &Project,
@@ -211,6 +229,22 @@ pub(crate) fn source_frame(
     t: Tick,
     expr: Option<&dyn ExprHost>,
 ) -> Option<(Arc<Image>, [f64; 2])> {
+    source_frame_checked(r, project, cid, comp, layer, t, expr).ok()
+}
+
+/// The layer's source frame at comp time `t` at 100 % (layer pixels + offset = image pixels).
+/// Footage at its native size is used straight from the footage source (no copy unless its
+/// Cineon Settings convert it). A frame too large to bring to 100 % is [`FrameError::TooLarge`],
+/// not an absent frame.
+pub(crate) fn source_frame_checked(
+    r: &Renderer,
+    project: &Project,
+    cid: ItemId,
+    comp: &Comp,
+    layer: &Layer,
+    t: Tick,
+    expr: Option<&dyn ExprHost>,
+) -> Result<(Arc<Image>, [f64; 2]), FrameError> {
     let ctx = EvalCtx { project, comp_id: cid, comp, time: t, expr, footage: None, property_overrides: &[], media_overrides: &[] };
     if let effectcraft_project::LayerSource::Footage { item } = &layer.source
         && let Some(effectcraft_project::ItemKind::Footage(f)) = project.item(*item).map(|i| &i.kind)
@@ -219,9 +253,9 @@ pub(crate) fn source_frame(
         && img.width == f.width
         && img.height == f.height
     {
-        return Some((effectcraft_render::cineon_frame(img, f), [0.0; 2]));
+        return Ok((effectcraft_render::cineon_frame(img, f), [0.0; 2]));
     }
-    let buf = r.layer_source(&ctx, layer)?;
+    let buf = r.layer_source(&ctx, layer).ok_or(FrameError::Missing)?;
     if (buf.scale - 1.0).abs() > 1e-9 && buf.scale > 0.0 {
         // Footage decoded at another size: bring it to layer pixels.
         let w = (buf.img.width as f64 / buf.scale).round().max(1.0) as u32;
@@ -229,12 +263,12 @@ pub(crate) fn source_frame(
         // The scale comes from the footage's saved width alone: a decoded frame of another
         // aspect would give a height far beyond anything the layer shows.
         if u64::from(w) * u64::from(h) > MAX_SOURCE_PIXELS {
-            return None;
+            return Err(FrameError::TooLarge { width: w, height: h });
         }
         let off = [buf.offset[0] / buf.scale, buf.offset[1] / buf.scale];
-        return Some((Arc::new(effectcraft_raster::resample(&buf.img, w, h)), off));
+        return Ok((Arc::new(effectcraft_raster::resample(&buf.img, w, h)), off));
     }
-    Some((Arc::new(buf.img), buf.offset))
+    Ok((Arc::new(buf.img), buf.offset))
 }
 
 pub(crate) async fn run_work(w: Work, shared: &TrackShared) {
@@ -634,5 +668,19 @@ mod tests {
         for (got, want) in a.iter().zip(ra4.iter().map(|p| h.apply(*p))) {
             assert!((got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6);
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_error_tests {
+    use super::FrameError;
+
+    #[test]
+    fn a_frame_too_large_to_analyse_is_told_apart_from_a_missing_one() {
+        let big = FrameError::TooLarge { width: 160_000, height: 160_000 };
+        assert_ne!(big, FrameError::Missing);
+        let text = big.to_string();
+        assert!(text.contains("160000 x 160000") && text.contains("analysis"), "{text}");
+        assert_eq!(FrameError::Missing.to_string(), "the layer has no pixels");
     }
 }

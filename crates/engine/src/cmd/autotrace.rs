@@ -112,13 +112,15 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         let r = &r;
         let (project, expr) = (&s.project, s.expr.as_deref());
         use rayon::prelude::*;
-        times
+        let traced: std::result::Result<Vec<Vec<Traced>>, String> = times
             .par_iter()
-            .map(|t| match crate::tracking::source_frame(r, project, cid, &comp, &layer, *t, expr) {
-                Some((img, off)) => trace_frame(&img, off, ch, invert, blur, &o),
-                None => vec![],
+            .map(|t| match crate::tracking::source_frame_checked(r, project, cid, &comp, &layer, *t, expr) {
+                Ok((img, off)) => Ok(trace_frame(&img, off, ch, invert, blur, &o)),
+                Err(crate::tracking::FrameError::Missing) => Ok(vec![]),
+                Err(e) => Err(format!("{e} (at {:.3} s)", t.seconds())),
             })
-            .collect()
+            .collect();
+        traced.map_err(|e| bad(c, e))?
     };
     let n_masks = frames.iter().map(Vec::len).max().unwrap_or(0);
     if n_masks == 0 {

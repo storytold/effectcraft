@@ -31,14 +31,17 @@ impl LayerFrames {
         LayerFrames { project: s.project.clone(), footage: s.footage.clone(), expr: s.expr.clone(), cache: s.layer_cache.clone(), comp, layer }
     }
     /// Run `f` with a frame getter: comp time → (layer source pixels, offset in layer space).
-    pub fn with<R>(&self, f: impl FnOnce(&(dyn Fn(Tick) -> Option<(Arc<effectcraft_raster::Image>, [f64; 2])> + Sync)) -> R) -> Option<R> {
+    pub fn with<R>(
+        &self,
+        f: impl FnOnce(&(dyn Fn(Tick) -> std::result::Result<(Arc<effectcraft_raster::Image>, [f64; 2]), crate::tracking::FrameError> + Sync)) -> R,
+    ) -> Option<R> {
         let comp = self.project.comp(self.comp)?;
         let layer = comp.layer(self.layer)?;
         let mut r = Renderer::new(&self.project, self.footage.as_ref(), RenderOpts::default());
         r.expr = self.expr.as_deref();
         r.cache = Some(&self.cache);
         let r = &r;
-        let get = |t: Tick| crate::tracking::source_frame(r, &self.project, self.comp, comp, layer, t, self.expr.as_deref());
+        let get = |t: Tick| crate::tracking::source_frame_checked(r, &self.project, self.comp, comp, layer, t, self.expr.as_deref());
         Some(f(&get))
     }
 }
@@ -62,8 +65,17 @@ pub(crate) fn analyse(
         // Signatures in batches (parallel), with progress and cancel between batches.
         for (k, chunk) in times.chunks(8).enumerate() {
             use rayon::prelude::*;
-            let batch: Vec<cuts::Signature> = chunk.par_iter().map(|t| get(*t).map(|(img, _)| cuts::signature(&img)).unwrap_or_default()).collect();
-            sigs.extend(batch);
+            // No pixels at a time is an empty signature (as before); a frame too large to analyse
+            // fails the detection rather than reading as "no cut".
+            let batch: std::result::Result<Vec<cuts::Signature>, String> = chunk
+                .par_iter()
+                .map(|t| match get(*t) {
+                    Ok((img, _)) => Ok(cuts::signature(&img)),
+                    Err(crate::tracking::FrameError::Missing) => Ok(cuts::Signature::default()),
+                    Err(e) => Err(format!("{e} (at {:.3} s)", t.seconds())),
+                })
+                .collect();
+            sigs.extend(batch?);
             if !progress(((k + 1) * 8).min(times.len()) as u64, times.len() as u64) {
                 return Err(crate::render_queue::CANCELLED.to_string());
             }
