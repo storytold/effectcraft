@@ -630,9 +630,11 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 )],
             )
         }
+        // The time as the project displays it (timecode, or frames from Start Numbering Frames At,
+        // or feet + frames), which `time.set` reads back the same way.
         "time.set" if !has(p, &["time", "frame", "timecode"]) => {
-            let frame = comp.map(|c| c.frame_rate.frame_at(t)).unwrap_or(0);
-            ("Go to Time".into(), vec![Field::num("frame", "Frame", frame as f64)])
+            let shown = comp.map(|c| crate::panels::timecode(s, c, t)).unwrap_or_default();
+            ("Go to Time".into(), vec![Field::text("timecode", "Time", &shown)])
         }
         "view.addGuide" if !has(p, &["position"]) => {
             let (w, _) = comp.map(|c| (c.width, c.height)).unwrap_or((1920, 1080));
@@ -1106,6 +1108,26 @@ mod tests {
         assert_eq!(app.dialog_state.form.params()["value"], json!([42.0, 540.0]));
         frame(&mut app, vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
         assert!(app.dialog.is_none(), "one Enter confirms");
+    }
+
+    /// Go to Time shows the time as the project displays it, so with Frames numbered from 1 the
+    /// viewer's frame 00013 opens as 00013 and 00020 goes to the frame displayed 00020 (the
+    /// engine's frame 19). The dialog used to show and take the engine's own frame number (#3373).
+    #[test]
+    fn go_to_time_uses_the_projects_frame_numbering() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 36, "frameRate": 24, "duration": 4})).unwrap();
+        app.session.execute("file.projectSettings", json!({"timeDisplay": "frames", "frameStart": 1})).unwrap();
+        app.session.execute("time.set", json!({"frame": 12})).unwrap();
+        assert!(open_form(&mut app, "time.set", &json!({})));
+        let f = &app.dialog_state.form;
+        assert_eq!(f.command, "time.set");
+        assert!(matches!(&f.fields[0].kind, FieldKind::Text(t) if t == "00013"), "{:?}", f.fields[0]);
+        app.dialog_state.form.fields[0].kind = FieldKind::Text("00020".into());
+        let (command, params) = (app.dialog_state.form.command.clone(), app.dialog_state.form.params());
+        app.session.execute(&command, params).unwrap();
+        let at = app.session.active_comp().unwrap().frame_rate.frame_at(app.session.time());
+        assert_eq!(at, 19, "displayed 00020 with frames starting at 1");
     }
 
     /// File ▸ Export ▸ Adobe Premiere Pro Project… opens a form that says it writes Final Cut Pro
