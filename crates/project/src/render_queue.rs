@@ -421,7 +421,12 @@ impl RenderSettings {
     /// The output frame rate: the Frame Rate override, unless the comp preserves its frame rate
     /// (Composition Settings ▸ Preserve frame rate when nested or in render queue).
     pub fn rate(&self, comp: &Comp) -> FrameRate {
-        if comp.preserve_frame_rate { comp.frame_rate } else { self.frame_rate.unwrap_or(comp.frame_rate) }
+        if comp.preserve_frame_rate {
+            return comp.frame_rate;
+        }
+        // A saved override is held to the supported rates, as a comp's own rate is: its frame count
+        // is the export's work.
+        self.frame_rate.map_or(comp.frame_rate, |r| crate::limits::frame_rate(r, comp.frame_rate))
     }
     /// First output-rate frame starting at or after `t`.
     fn ceil_frame(r: FrameRate, t: Tick) -> i64 {
@@ -480,6 +485,8 @@ impl RenderSettings {
             TimeSpan::Custom { start, end } => format!("Custom ({:.3}s – {:.3}s)", start.seconds(), end.seconds()),
         };
         let rate = match (self.frame_rate, comp) {
+            // A saved override outside the supported rates renders at the clamped one: say so.
+            (Some(r), Some(c)) if self.rate(c) != r => format!("{:.3} fps (renders at {:.3})", r.as_f64(), self.rate(c).as_f64()),
             (Some(r), _) => format!("{:.3} fps", r.as_f64()),
             (None, Some(c)) => format!("Use comp's frame rate ({:.3})", c.frame_rate.as_f64()),
             (None, None) => "Use comp's frame rate".into(),
@@ -1925,6 +1932,22 @@ mod tests {
         assert_eq!(s.sample(&c, 3), FrameSample::Fields { first: Tick::from_seconds_f64(0.12), second: Tick::from_seconds_f64(0.14), upper_first: false });
         let p = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
         assert_eq!(p.sample(&c, 3), FrameSample::Progressive(Tick::from_seconds_f64(0.12)));
+    }
+
+    /// A saved Frame Rate override outside the supported rates is clamped, so a short comp cannot
+    /// ask for billions of output frames.
+    #[test]
+    fn frame_rate_override_is_held_to_the_supported_rates() {
+        let c = Comp::new(64, 48, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let s = |r| RenderSettings { frame_rate: Some(r), time_span: TimeSpan::LengthOfComp, ..Default::default() };
+        let huge = s(FrameRate::new(1_000_000_000_000, 1));
+        assert_eq!(huge.rate(&c).as_f64(), crate::limits::MAX_FPS);
+        assert!(huge.frame_count(&c) <= 2001, "{}", huge.frame_count(&c));
+        assert_eq!(s(FrameRate::new(0, 1)).rate(&c), c.frame_rate);
+        assert_eq!(s(FrameRate::new(60, 1)).rate(&c), FrameRate::new(60, 1));
+        let shown = |r| s(r).describe(Some(&c)).into_iter().find(|l| l.0 == "Frame Rate").map(|l| l.1).unwrap_or_default();
+        assert!(shown(FrameRate::new(1_000_000_000_000, 1)).contains("renders at 1000.000"), "{}", shown(FrameRate::new(1_000_000_000_000, 1)));
+        assert_eq!(shown(FrameRate::new(60, 1)), "60.000 fps");
     }
 
     #[test]
