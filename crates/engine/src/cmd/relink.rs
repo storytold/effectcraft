@@ -1,6 +1,6 @@
 //! Recover moved media without replacing interpretation, sequence ranges or layer timing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
@@ -11,6 +11,8 @@ use crate::{Result, Session, cmd};
 
 const COMMAND: &str = "file.relinkFootage";
 const ENTRY_LIMIT: usize = 100_000;
+/// Candidates listed for one missing item (more than one already makes it ambiguous).
+const MAX_CANDIDATES: usize = 32;
 
 fn enabled(_: &Session) -> std::result::Result<(), String> {
     if cfg!(target_arch = "wasm32") { Err("folder relinking requires the desktop filesystem".into()) } else { Ok(()) }
@@ -95,6 +97,8 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);
     s.spawn_task("relink", "Relinking missing footage", wait, move |ctl| {
         let index = files(&folder, ctl)?;
+        // Each candidate file is probed once, however many missing items share its name.
+        let mut probes: HashMap<String, std::result::Result<Footage, String>> = HashMap::new();
         let mut rows = vec![];
         let mut updates = vec![];
         for (n, (id, old)) in missing.iter().enumerate() {
@@ -104,19 +108,21 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             let supported = matches!(old.kind, FootageKind::Still | FootageKind::Sequence | FootageKind::Video | FootageKind::Audio)
                 && old.layer.is_none() && old.page == 0;
             let name = Path::new(&old.path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
-            let paths = index.get(name).cloned().unwrap_or_default();
+            let paths = index.get(name).map_or(&[][..], Vec::as_slice);
             let mut candidates = vec![];
             let mut accepted = vec![];
-            for path in paths {
+            // Past a few candidates the item is ambiguous anyway: list no more of them.
+            for path in paths.iter().take(MAX_CANDIDATES) {
                 if ctl.cancelled() {
                     return Err(crate::render_queue::CANCELLED.into());
                 }
                 let mut reason = "source type requires manual replacement".to_string();
                 let mut confidence = "low";
                 if supported {
-                    match importer.probe(&path) {
-                        Ok(f) if compatible(old, &f) => {
-                            if old.kind != FootageKind::Sequence || (!old.sequence.is_empty() && sequence_at(old, &path).is_some()) {
+                    let probed = probes.entry(path.clone()).or_insert_with(|| importer.probe(path));
+                    match probed {
+                        Ok(f) if compatible(old, f) => {
+                            if old.kind != FootageKind::Sequence || (!old.sequence.is_empty() && sequence_at(old, path).is_some()) {
                                 confidence = "high";
                                 reason = "exact filename and compatible source metadata".into();
                                 accepted.push(path.clone());
@@ -282,6 +288,19 @@ mod tests {
         assert_eq!(key(&s), original_key);
         s.execute("edit.redo", json!({})).unwrap();
         assert_eq!(get(&s, id), expected);
+    }
+
+    #[test]
+    fn many_same_named_candidates_list_at_most_the_cap() {
+        let dir = Fixture::new();
+        let (mut s, id, old) = setup(&dir, "plate.png");
+        for i in 0..MAX_CANDIDATES + 8 {
+            dir.file(&format!("new/{i}/plate.png"), b"valid");
+        }
+        let r = search(&mut s, &dir, false);
+        assert_eq!(r["items"][0]["status"], "ambiguous");
+        assert_eq!(r["items"][0]["candidates"].as_array().unwrap().len(), MAX_CANDIDATES);
+        assert_eq!(get(&s, id), old);
     }
 
     #[test]

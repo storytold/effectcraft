@@ -58,6 +58,10 @@ const QUEUE_LIMIT: usize = 64;
 /// frames, so a fully cached comp came back with gaps in its blue bar.
 #[cfg(not(target_arch = "wasm32"))]
 const FRAME_QUEUE_BYTES: usize = 1 << 30;
+/// Pending layer and matte bytes before new ones are dropped: a layer job holds its float
+/// buffer until the writer compresses it (64 of them at 4K were ~8.5 GB).
+#[cfg(not(target_arch = "wasm32"))]
+const LAYER_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -264,9 +268,39 @@ impl LayerPrefetch {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Job {
     /// Kind, key, header format byte, payload.
-    Write(Kind, u128, u8, Vec<u8>),
+    Write(Kind, u128, u8, Payload),
     /// Delete the frame and layer entries made of these files ([`DiskCache::drop_files`]).
     Drop(Vec<Arc<str>>),
+}
+
+/// What a queued write holds. 8-bit frames and layer buffers are encoded (LZ4) on the writer
+/// thread, not on the render thread that queued them: encoding a 1080p frame took ~9 ms of every
+/// frame's render, and a full queue no longer throws away encoding work.
+enum Payload {
+    Encoded(Vec<u8>),
+    /// 8-bit premultiplied RGBA, `width * height * 4` bytes, and the files it was made of.
+    Frame(u32, u32, Vec<u8>, EntryFiles),
+    Layer(Arc<Buf>, EntryFiles),
+}
+
+impl Payload {
+    /// Bytes it holds (the frame queue's budget).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn len(&self) -> usize {
+        match self {
+            Payload::Encoded(p) | Payload::Frame(_, _, p, _) => p.len(),
+            Payload::Layer(b, _) => b.img.data.len().saturating_mul(std::mem::size_of::<effectcraft_raster::Px>()),
+        }
+    }
+
+    /// The entry's payload: its source files, then its pixels.
+    fn encode(self) -> Vec<u8> {
+        match self {
+            Payload::Encoded(p) => p,
+            Payload::Frame(w, h, rgba, files) => with_files(&files, encode_frame(w, h, &rgba)),
+            Payload::Layer(b, files) => with_files(&files, encode_layer(&b)),
+        }
+    }
 }
 
 struct Queue {
@@ -274,8 +308,10 @@ struct Queue {
     frames: std::collections::VecDeque<Job>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     frame_bytes: usize,
-    /// Layer and matte writes.
+    /// Layer and matte writes, and their payload bytes.
     jobs: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    job_bytes: usize,
     busy: bool,
     /// Keys of frames queued or being written.
     pending_frames: std::collections::HashSet<u128>,
@@ -330,7 +366,21 @@ impl Queue {
             }
             return Some(j);
         }
-        self.jobs.pop_front()
+        let j = self.jobs.pop_front()?;
+        if let Job::Write(_, _, _, p) = &j {
+            self.job_bytes = self.job_bytes.saturating_sub(p.len());
+        }
+        Some(j)
+    }
+
+    /// No room for a `kind` write of `len` bytes. A layer bigger than the whole budget is still
+    /// taken when nothing else is queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn full(&self, kind: Kind, len: usize) -> bool {
+        match kind {
+            Kind::Frame => self.frame_bytes.saturating_add(len) > FRAME_QUEUE_BYTES,
+            _ => self.jobs.len() >= QUEUE_LIMIT || (self.job_bytes > 0 && self.job_bytes.saturating_add(len) > LAYER_QUEUE_BYTES),
+        }
     }
     fn is_empty(&self) -> bool {
         self.frames.is_empty() && self.jobs.is_empty()
@@ -462,6 +512,7 @@ impl DiskCache {
                     frames: Default::default(),
                     frame_bytes: 0,
                     jobs: Default::default(),
+                    job_bytes: 0,
                     busy: cfg!(not(target_arch = "wasm32")),
                     pending_frames: Default::default(),
                     drops: Drops::default(),
@@ -650,6 +701,7 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.job_bytes = 0;
             q.frames.clear();
             q.pending_frames.clear();
         }
@@ -771,20 +823,20 @@ impl DiskCache {
 
     /// Queue a write; `false` when it was dropped (a full queue).
     fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) -> bool {
-        self.enqueue_format(kind, key, FORMAT_RGBA8, payload, None)
+        self.enqueue_format(kind, key, FORMAT_RGBA8, Payload::Encoded(payload), None)
     }
 
     /// [`DiskCache::enqueue`] with the entry's header format byte. `made`: the source files of a
     /// frame or layer entry and the drop generation its reads started at
     /// ([`DiskCache::drop_generation`]); refused (`false`) when one of them was dropped since.
-    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Vec<u8>, made: Option<(&EntryFiles, u64)>) -> bool {
+    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Payload, made: Option<(&EntryFiles, u64)>) -> bool {
         let stale = |q: &Queue| made.is_some_and(|(files, since)| q.drops.stale(files.files().iter().map(|f| &f.path), since));
         #[cfg(target_arch = "wasm32")]
         {
             if self.queue.0.lock().is_ok_and(|q| stale(&q)) {
                 return false;
             }
-            self.write_format(kind, key, format, &payload);
+            self.write_format(kind, key, format, &payload.encode());
             true
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -794,11 +846,7 @@ impl DiskCache {
             if stale(&q) {
                 return false;
             }
-            let full = match kind {
-                Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
-                _ => q.jobs.len() >= QUEUE_LIMIT,
-            };
-            if full {
+            if q.full(kind, payload.len()) {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
@@ -807,6 +855,7 @@ impl DiskCache {
                 q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
                 q.frames.push_back(Job::Write(kind, key, format, payload));
             } else {
+                q.job_bytes = q.job_bytes.saturating_add(payload.len());
                 q.jobs.push_back(Job::Write(kind, key, format, payload));
             }
             cv.notify_all();
@@ -1033,7 +1082,7 @@ impl DiskCache {
         }
         self.count_encode();
         let payload = with_files(&files, encode_frame_f16(width, height, rgba));
-        self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, payload, Some((&files, since)))
+        self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, Payload::Encoded(payload), Some((&files, since)))
     }
 
     /// Write a half-float frame synchronously (tests); a list that can't be stored is not.
@@ -1050,6 +1099,22 @@ impl DiskCache {
     /// render started at).
     #[allow(clippy::too_many_arguments)]
     pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
+        self.put_frame_owned(key, width, height, rgba.to_vec(), files, virtual_id, since)
+    }
+
+    /// [`DiskCache::put_frame`] of a frame the caller hands over (no copy; compressed on the
+    /// writer thread).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame_owned(
+        &self,
+        key: u128,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        files: &ReadFiles,
+        virtual_id: Option<VirtualFileId<'_>>,
+        since: u64,
+    ) -> bool {
         if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return false;
         }
@@ -1057,13 +1122,13 @@ impl DiskCache {
         if self.contains(Kind::Frame, key) {
             return true;
         }
-        // (no room on the disk: refused before the pixels are compressed)
+        // (no room on the disk: refused before the pixels are queued and compressed)
         if !self.accepts_writes() {
             return false;
         }
         self.count_encode();
-        let payload = with_files(&files, encode_frame(width, height, rgba));
-        self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, payload, Some((&files, since)))
+        let made = files.clone();
+        self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, Payload::Frame(width, height, rgba, files), Some((&made, since)))
     }
 
     /// A layer buffer (key: [`layer_disk_key`]) whose source files are unchanged, with those
@@ -1078,13 +1143,14 @@ impl DiskCache {
     /// [`EntryFiles::of`]: a buffer whose files can't all be named must not be stored). Refused
     /// when one of them was dropped after `since`, the [`DiskCache::drop_generation`] its render
     /// started at.
-    pub fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
-        // (no room on the disk: refused before the buffer is compressed)
+    /// The buffer is shared, and encoded on the writer thread.
+    pub fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
+        // (no room on the disk: refused before the buffer is queued and compressed)
         if self.contains(Kind::Layer, key) || !self.accepts_writes() {
             return;
         }
         self.count_encode();
-        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, with_files(files, encode_layer(buf)), Some((files, since)));
+        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, Payload::Layer(buf.clone(), files.clone()), Some((files, since)));
     }
 
     /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
@@ -1192,7 +1258,7 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
         let Some(cache) = dc.upgrade() else { return };
         let written = match job {
             Job::Write(kind, key, format, payload) => {
-                cache.write_format(kind, key, format, &payload);
+                cache.write_format(kind, key, format, &payload.encode());
                 (kind == Kind::Frame).then_some(key)
             }
             Job::Drop(paths) => {
@@ -1292,7 +1358,7 @@ impl crate::cache::LayerStore for DiskCache {
         DiskCache::get_layer(self, key, virtual_id).map(|(b, f)| (Arc::new(b), f))
     }
     /// Queues a layer write on the disk cache.
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64) {
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
         DiskCache::put_layer(self, key, buf, files, since);
     }
     /// The current drop generation of the disk cache.
@@ -1706,7 +1772,7 @@ mod tests {
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         assert!(dc.get_layer(42, None).is_none());
         let b = buf(1, 33, 17);
-        dc.put_layer(42, &b, &EntryFiles::default(), 0);
+        dc.put_layer(42, &Arc::new(b.clone()), &EntryFiles::default(), 0);
         dc.flush();
         let (back, files) = dc.get_layer(42, None).unwrap();
         assert!(files.is_empty() && files.is_complete());
@@ -1715,10 +1781,14 @@ mod tests {
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
         assert!(dc.put_frame(7, 20, 10, &rgba, &ReadFiles::default(), None, 0));
         assert!(!dc.put_frame(8, 2, 2, &[0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
+        // Handed over and compressed on the writer thread: the same pixels come back.
+        assert!(dc.put_frame_owned(9, 20, 10, rgba.clone(), &ReadFiles::default(), None, 0));
+        assert!(!dc.put_frame_owned(10, 2, 2, vec![0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
         dc.flush();
         assert_eq!(dc.get_frame(7, None).map(|f| f.0).unwrap().rgba, rgba);
+        assert_eq!(dc.get_frame(9, None).map(|f| f.0).unwrap().rgba, rgba);
         let st = dc.stats();
-        assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
+        assert_eq!((st.entries, st.hits, st.misses, st.writes), (3, 3, 1, 3));
         // Wrong kind is a miss.
         assert!(dc.get_frame(42, None).map(|f| f.0).is_none());
     }
@@ -1773,6 +1843,36 @@ mod tests {
         assert_ne!(comp_content_key(&p, cid), key, "the expression reads the model's name");
     }
 
+    /// Layer jobs hold float buffers until they are compressed: the queue holds at most
+    /// [`LAYER_QUEUE_BYTES`] of them (64 at 4K held ~8.5 GB), and a single bigger one only alone.
+    #[test]
+    fn layer_writes_queue_within_a_byte_budget() {
+        let mut q = Queue {
+            frames: Default::default(),
+            frame_bytes: 0,
+            jobs: Default::default(),
+            job_bytes: 0,
+            busy: true,
+            pending_frames: Default::default(),
+            drops: Drops::default(),
+        };
+        let layer = LAYER_QUEUE_BYTES / 4 + 1;
+        for _ in 0..3 {
+            assert!(!q.full(Kind::Layer, layer));
+            q.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Encoded(vec![])));
+            q.job_bytes += layer;
+        }
+        assert!(q.full(Kind::Layer, layer), "a fourth would pass the budget");
+        assert!(!q.full(Kind::Frame, 1024), "frames have their own budget");
+        let mut empty = Queue { jobs: Default::default(), job_bytes: 0, ..q };
+        assert!(!empty.full(Kind::Layer, 2 * LAYER_QUEUE_BYTES), "a single big layer, alone");
+        // Taking a job gives its bytes back.
+        empty.job_bytes = 3;
+        empty.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Encoded(vec![0; 3])));
+        assert!(empty.pop().is_some());
+        assert_eq!(empty.job_bytes, 0);
+    }
+
     /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
     /// on disk afterwards (the blue bar came back with gaps).
     #[test]
@@ -1780,7 +1880,7 @@ mod tests {
         let dir = tmpdir("burst");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         for k in 0..300 {
-            dc.put_layer(10_000 + k, &buf(1, 64, 64), &EntryFiles::default(), 0);
+            dc.put_layer(10_000 + k, &Arc::new(buf(1, 64, 64)), &EntryFiles::default(), 0);
         }
         let rgba = vec![7u8; 32 * 32 * 4];
         for k in 0..300 {
@@ -1950,7 +2050,7 @@ mod tests {
         let rgba = vec![7u8; 16 * 16 * 4];
         assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
         assert!(!dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0), "refused");
-        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
         dc.flush();
         assert_eq!(dc.encodes(), 0, "nothing compressed");
         assert_eq!(dc.stats().entries, 0);
@@ -1960,7 +2060,7 @@ mod tests {
         assert_eq!(dc.stats().limit_bytes, 32 << 20);
         assert!(!dc.accepts_writes());
         assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
-        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
         assert_eq!(dc.encodes(), 0, "nothing compressed");
         // A small limit the setting asks for (not free space) is used.
         dc.set_disk_space(None);
@@ -1971,7 +2071,7 @@ mod tests {
         dc.set_disk_space(Some((4096 * GB, 500 * GB)));
         assert!(dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0));
         assert!(dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0));
-        dc.put_layer(3, &buf(3, 16, 16), &EntryFiles::default(), 0);
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
         dc.flush();
         assert_eq!(dc.encodes(), 3);
         assert_eq!(dc.stats().entries, 3);
@@ -2076,11 +2176,11 @@ mod tests {
         assert!(dc.get_frame(k, Some(&two)).is_none() && !dc.contains(Kind::Frame, k), "replaced: a miss, deleted");
         // A layer buffer made of it.
         let lk = layer_disk_key(7);
-        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
+        dc.put_layer(lk, &Arc::new(buf(1, 4, 4)), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
         dc.flush();
         assert!(dc.get_layer(lk, Some(&one)).is_some_and(|(b, f)| b.img == buf(1, 4, 4).img && f == files && f.is_complete()));
         assert!(dc.get_layer(lk, None).is_none() && !dc.contains(Kind::Layer, lk), "no identity: a miss, deleted");
-        dc.put_layer(lk, &buf(1, 4, 4), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
+        dc.put_layer(lk, &Arc::new(buf(1, 4, 4)), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
         dc.flush();
         assert!(dc.get_layer(lk, Some(&two)).is_none() && !dc.contains(Kind::Layer, lk), "replaced: a miss, deleted");
         // The browser's sealed layer entries carry the same list.
@@ -2324,7 +2424,7 @@ mod tests {
         assert!(dc.dropped_since(&read(&[&a]), before) && !dc.dropped_since(&read(&[&b]), before));
         assert!(!dc.put_frame(1, 1, 1, &[1; 4], &read(&[&a, &b]), None, before), "a frame from before the drop");
         assert!(!dc.put_frame_f16(2, 1, 1, &[1; 4], &read(&[&a]), None, before));
-        dc.put_layer(3, &buf(3, 2, 2), &EntryFiles::of(&read(&[&a]), None).unwrap(), before);
+        dc.put_layer(3, &Arc::new(buf(3, 2, 2)), &EntryFiles::of(&read(&[&a]), None).unwrap(), before);
         assert!(dc.put_frame(4, 1, 1, &[4; 4], &read(&[&b]), None, before), "b.png wasn't dropped");
         dc.flush();
         assert!(!dc.contains(Kind::Frame, 1) && !dc.contains(Kind::Frame, 2) && !dc.contains(Kind::Layer, 3));
@@ -2334,7 +2434,7 @@ mod tests {
         let after = dc.drop_generation();
         assert!(after > before && !dc.dropped_since(&read(&[&a]), after));
         assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None, after));
-        dc.put_layer(6, &buf(6, 2, 2), &EntryFiles::of(&read(&[&a]), None).unwrap(), after);
+        dc.put_layer(6, &Arc::new(buf(6, 2, 2)), &EntryFiles::of(&read(&[&a]), None).unwrap(), after);
         dc.flush();
         assert_eq!(dc.get_frame(5, None).map(|f| f.0.rgba), Some(vec![5; 4]));
         assert!(dc.get_layer(6, None).is_some());

@@ -37,6 +37,14 @@ pub trait FootageSource: Send + Sync {
             None => self.frame(item, footage, t),
         }
     }
+    /// [`FootageSource::frame_with`]'s full-size frame as 8-bit levels: each pixel is
+    /// [`effectcraft_raster::quantize_px_u8`] of the float pixel `frame_with` would give, so
+    /// [`effectcraft_raster::expand_u8`] makes that frame quantised to 8 bpc, bit for bit, from a
+    /// quarter of the memory (an 8 bpc render of 8-bit footage). `None` when the source has no
+    /// cheaper way than the float frame; the renderer then takes that.
+    fn frame8(&self, _item: ItemId, _footage: &Footage, _t: Tick, _float: FloatCurve) -> Option<Arc<crate::disk_cache::Frame8>> {
+        None
+    }
     /// `frames` interleaved stereo sample frames of `item`'s audio from source time `t` at
     /// `rate` Hz (`None` when unavailable). The first sample is `t.to_units_floor(rate)`;
     /// a sample boundary uses the earliest representable tick that selects that sample.
@@ -214,6 +222,9 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.read(|| self.inner.frame_with(item, footage, t, size, float))
+    }
+    fn frame8(&self, item: ItemId, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<crate::disk_cache::Frame8>> {
+        self.read(|| self.inner.frame8(item, footage, t, float))
     }
 }
 

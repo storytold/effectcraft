@@ -370,9 +370,16 @@ fn quant(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * (NB - 1) as f32).round() as u16
 }
 
+/// Largest median window radius (buffer pixels) for Median, Median (Legacy), Dust & Scratches
+/// and the other median users. Radius goes to 255 in the UI; filling one (2r + 1)² window per
+/// row costs the square of the radius, so a project value far beyond it is held here (also
+/// keeping the window's pixel count well inside `u32` / `i32` on the GPU).
+pub const MEDIAN_MAX_RADIUS: usize = 512;
+
 /// Per-channel median over a (2r+1)² window of the premultiplied channels (values quantised to
 /// 512 levels in 0..1, edges repeated).
 pub(crate) fn median_image(img: &Image, r: usize) -> Image {
+    let r = r.min(MEDIAN_MAX_RADIUS);
     let (w, h) = (img.width as usize, img.height as usize);
     if r == 0 || w == 0 || h == 0 {
         return img.clone();
@@ -869,6 +876,17 @@ mod tests {
         for p in &out.img.data {
             assert!((p[0] - 0.5).abs() < 2.0 / 511.0, "{p:?}");
         }
+    }
+
+    #[test]
+    fn median_radius_is_capped() {
+        // A project's Radius far beyond the UI's 255 takes the capped window, not a
+        // (2r + 1)² fill per row (or an overflow) on a tiny image.
+        let mut img = Image::filled(4, 3, [0.2, 0.3, 0.4, 1.0]);
+        img.set(1, 1, [1.0, 1.0, 1.0, 1.0]);
+        let capped = median_image(&img, MEDIAN_MAX_RADIUS);
+        assert_eq!(median_image(&img, usize::MAX).data, capped.data);
+        assert_eq!(median_image(&img, MEDIAN_MAX_RADIUS + 1000).data, capped.data);
     }
 
     #[test]

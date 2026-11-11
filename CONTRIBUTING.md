@@ -26,7 +26,7 @@ that variable set.
 ```sh
 cargo run -p effectcraft -- --demo       # the desktop app, with the demo project
 cargo test --workspace
-cargo xtask ci                           # what every commit must pass
+cargo xtask ci                           # what every commit must pass (dev-profile checks and tests)
 ```
 
 The default `dev` profile keeps debug info to line tables: builds are fast and panics/backtraces

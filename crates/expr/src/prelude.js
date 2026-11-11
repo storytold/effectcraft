@@ -234,7 +234,7 @@ function __cubicBezier(curve) {
     x1 = curve[0]; y1 = curve[1]; x2 = curve[2]; y2 = curve[3];
   }
   if (typeof x1 !== 'number' || typeof y1 !== 'number' || typeof x2 !== 'number' || typeof y2 !== 'number' ||
-      !isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) {
+      !Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
     return __lin;
   }
   x1 = Math.max(0, Math.min(1, x1));
@@ -418,8 +418,8 @@ function hslToRgb(c) {
 function hexToRgb(hex) {
   var s = String(hex).replace(/^#|^0x/i, '');
   if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
-  var n = parseInt(s.slice(0, 6), 16);
-  var a = s.length >= 8 ? parseInt(s.slice(6, 8), 16) / 255 : 1;
+  var n = Number.parseInt(s.slice(0, 6), 16);
+  var a = s.length >= 8 ? Number.parseInt(s.slice(6, 8), 16) / 255 : 1;
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a];
 }
 
@@ -502,7 +502,7 @@ function __child(c, l, group, key) {
 // it (default 1), the layer at the top (#1619).
 function __ancestor(c, l, path, countUp) {
   var n = countUp === undefined ? 1 : __v(countUp);
-  if (typeof n !== 'number' || !(n >= 1) || !isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
+  if (typeof n !== 'number' || !(n >= 1) || !Number.isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
   n = Math.floor(n);
   var info = __h(__ANCESTOR, c, l, path, n);
   if (info === 'layer') return __layer(c, l);
