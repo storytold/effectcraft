@@ -20,6 +20,40 @@ fn last_pointer_id() -> egui::Id {
     egui::Id::unique("menu-bar-last-pointer")
 }
 
+/// The egui MenuBar container defaults to left-to-right even inside an RTL parent.
+/// Set the title row direction *inside* the MenuBar scope so File stays at the
+/// right edge for Hebrew, without reversing the engine's menu/action IDs.
+fn title_row_layout(language: &str) -> egui::Layout {
+    if language == "he" { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) }
+}
+
+#[cfg(test)]
+mod title_layout_tests {
+    use super::title_row_layout;
+
+    /// egui::MenuBar forces LTR internally; the nested title scope must override
+    /// its direction and anchor File to the right, without changing LTR locales.
+    #[test]
+    fn hebrew_file_title_is_right_of_edit_and_english_stays_left() {
+        for (language, rtl) in [("he", true), ("en", false), ("ja", false)] {
+            let ctx = egui::Context::default();
+            let mut file_x = f32::NAN;
+            let mut edit_x = f32::NAN;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.with_layout(title_row_layout(language), |ui| {
+                        file_x = ui.button("File").rect.center().x;
+                        edit_x = ui.button("Edit").rect.center().x;
+                    });
+                });
+            });
+            out.textures_delta.clear();
+            assert!(file_x.is_finite() && edit_x.is_finite(), "{language}: buttons should be laid out");
+            assert_eq!(file_x > edit_x, rtl, "{language}: wrong physical top-level menu order");
+        }
+    }
+}
+
 /// Draw the in-window menu bar (the engine's AE menu tree).
 ///
 /// The titles open on the press, not the release (native menu bars): while one is held the menus
@@ -47,59 +81,65 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     let last = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or(last_pointer_id(), None), pointer));
     let moved = pointer.is_some() && pointer != last;
     let mut drawn = 0;
+    let title_layout = title_row_layout(crate::i18n::language(app));
     ui.horizontal_centered(|ui| {
         ui.add_space(6.0);
         egui::MenuBar::new().config(egui::containers::menu::MenuConfig::new().style(crate::widgets::menu_style)).ui(ui, |ui| {
-            for node in effectcraft_engine::menus::menu_bar() {
-                let MenuNode::Submenu { label, children } = node else { continue };
-                // The open title takes the open button's look while its menu is up (as in AE).
-                let inactive = ui.style().visuals.widgets.inactive;
-                if open_prev == Some(drawn) {
-                    ui.style_mut().visuals.widgets.inactive = ui.style().visuals.widgets.open;
+            // MenuBar resets to LTR internally: nest the language's physical title layout here.
+            ui.with_layout(title_layout, |ui| {
+                for node in effectcraft_engine::menus::menu_bar() {
+                    let MenuNode::Submenu { label, children } = node else {
+                        continue;
+                    };
+                    // The open title takes the open button's look while its menu is up (as in AE).
+                    let inactive = ui.style().visuals.widgets.inactive;
+                    if open_prev == Some(drawn) {
+                        ui.style_mut().visuals.widgets.inactive = ui.style().visuals.widgets.open;
+                    }
+                    let mut response = ui.add(egui::Button::new(crate::i18n::label(app, "", label)));
+                    ui.style_mut().visuals.widgets.inactive = inactive;
+                    // A press on a title opens its menu at once (a second press on the open one closes
+                    // it), and while it is held the menus below are browsable. The keyboard and the
+                    // accessibility activation report `clicked` without the primary button (the press
+                    // then happened somewhere else), and toggle the menu. Hovering another title
+                    // switches to it once the pointer has moved: merely resting there must not take a
+                    // keyboard-driven menu over.
+                    // With the button down elsewhere nothing is hovered, so the title under the
+                    // pointer takes the highlight by hand: the hover-switch to it shows, one frame
+                    // later like egui's own hover (the open title keeps its open look).
+                    if moved && response.contains_pointer() && open_prev.is_some_and(|p| p != drawn) {
+                        response = response.highlight();
+                    }
+                    let pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && response.hovered();
+                    let cmd = if pressed {
+                        nav.set_browsing();
+                        Some(egui::SetOpenCommand::Bool(open_prev != Some(drawn)))
+                    } else if response.clicked() && !response.clicked_by(egui::PointerButton::Primary) {
+                        Some(egui::SetOpenCommand::Toggle)
+                    } else if moved && response.enabled() && response.contains_pointer() && open_prev.is_some_and(|p| p != drawn) {
+                        Some(egui::SetOpenCommand::Bool(true))
+                    } else {
+                        None
+                    };
+                    let inner = egui::Popup::menu(&response)
+                        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+                        .style(crate::widgets::menu_style)
+                        .open_memory(cmd)
+                        .show(|ui| {
+                            ui.set_min_width(if label == "Effect" { 200.0 } else { 280.0 });
+                            let browsing = nav.browsing();
+                            crate::widgets::menu_scroll(ui, browsing, |ui| menu_nodes(app, ui, children, &mut clicked, &mut nav, 0));
+                        });
+                    nav.top(&response);
+                    // The titles and the open menus: a press inside them is not an outside press.
+                    nav.cover(response.rect);
+                    if let Some(inner) = &inner {
+                        nav.cover(inner.response.rect);
+                    }
+                    app.auto.add(&format!("menu.{label}"), response.rect, label);
+                    drawn += 1;
                 }
-                let mut response = ui.add(egui::Button::new(crate::i18n::label(app, "", label)));
-                ui.style_mut().visuals.widgets.inactive = inactive;
-                // A press on a title opens its menu at once (a second press on the open one closes
-                // it), and while it is held the menus below are browsable. The keyboard and the
-                // accessibility activation report `clicked` without the primary button (the press
-                // then happened somewhere else), and toggle the menu. Hovering another title
-                // switches to it once the pointer has moved: merely resting there must not take a
-                // keyboard-driven menu over.
-                // With the button down elsewhere nothing is hovered, so the title under the
-                // pointer takes the highlight by hand: the hover-switch to it shows, one frame
-                // later like egui's own hover (the open title keeps its open look).
-                if moved && response.contains_pointer() && open_prev.is_some_and(|p| p != drawn) {
-                    response = response.highlight();
-                }
-                let pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) && response.hovered();
-                let cmd = if pressed {
-                    nav.set_browsing();
-                    Some(egui::SetOpenCommand::Bool(open_prev != Some(drawn)))
-                } else if response.clicked() && !response.clicked_by(egui::PointerButton::Primary) {
-                    Some(egui::SetOpenCommand::Toggle)
-                } else if moved && response.enabled() && response.contains_pointer() && open_prev.is_some_and(|p| p != drawn) {
-                    Some(egui::SetOpenCommand::Bool(true))
-                } else {
-                    None
-                };
-                let inner = egui::Popup::menu(&response)
-                    .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
-                    .style(crate::widgets::menu_style)
-                    .open_memory(cmd)
-                    .show(|ui| {
-                        ui.set_min_width(if label == "Effect" { 200.0 } else { 280.0 });
-                        let browsing = nav.browsing();
-                        crate::widgets::menu_scroll(ui, browsing, |ui| menu_nodes(app, ui, children, &mut clicked, &mut nav, 0));
-                    });
-                nav.top(&response);
-                // The titles and the open menus: a press inside them is not an outside press.
-                nav.cover(response.rect);
-                if let Some(inner) = &inner {
-                    nav.cover(inner.response.rect);
-                }
-                app.auto.add(&format!("menu.{label}"), response.rect, label);
-                drawn += 1;
-            }
+            });
         });
     });
     crate::menu_keys::handle(&ctx, &nav);
@@ -257,7 +297,9 @@ pub(crate) fn submenu_at(app: &mut EffectcraftApp, ui: &mut egui::Ui, path: &[&s
     let mut nodes = effectcraft_engine::menus::menu_bar();
     let mut found = None;
     for label in path {
-        let Some(n) = nodes.iter().find(|n| matches!(n, MenuNode::Submenu { label: l, .. } if l == label)) else { return };
+        let Some(n) = nodes.iter().find(|n| matches!(n, MenuNode::Submenu { label: l, .. } if l == label)) else {
+            return;
+        };
         if let MenuNode::Submenu { children, .. } = n {
             nodes = children;
         }
