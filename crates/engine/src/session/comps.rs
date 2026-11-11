@@ -1,8 +1,11 @@
 use super::{Comp, CompSelection, Event, ItemId, LayerId, Result, Session, Tick, Value, commands};
 
-/// `t` as a current time of `comp`: a frame within its duration.
+/// `t` as a current time of `comp`: a frame within its duration. The last frame is the last one
+/// that starts before the end, so a final partial frame (a duration off the frame grid after a
+/// frame-rate change) stays reachable; on the grid it is `duration - frame_duration`.
 fn comp_frame_at(comp: &Comp, t: Tick) -> Tick {
-    comp.frame_rate.snap_nearest(t.min(comp.duration - comp.frame_duration()).max(Tick::ZERO))
+    let last = comp.frame_rate.snap(comp.duration - Tick(1)).max(Tick::ZERO);
+    comp.frame_rate.snap_nearest(t.max(Tick::ZERO)).min(last)
 }
 
 impl Session {

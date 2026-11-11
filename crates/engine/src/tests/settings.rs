@@ -470,6 +470,26 @@ fn fitted_layers_off_the_frame_grid_move_the_playhead_inside_them() {
     }
 }
 
+/// A duration off the frame grid (2.01 s set at 100 fps, then 24 fps) keeps its final partial
+/// frame reachable: a layer fitted to a work area inside it gets the playhead on that frame.
+#[test]
+fn fitted_layers_in_the_final_partial_frame_get_the_playhead() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Tail", "duration": 2.01, "frameRate": 100})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 2.0, "end": 2.01})).unwrap();
+    s.execute("comp.settings", json!({"frameRate": 24})).unwrap();
+    s.set_time(effectcraft_time::Tick::ZERO);
+    s.execute("shape.newPath", json!({"vertices": [[0, 0], [10, 0], [10, 10]]})).unwrap();
+    let l = &s.active_comp().unwrap().layers[0];
+    let t = s.time();
+    assert!(l.in_point <= t && t < l.out_point, "{t:?} in {:?}..{:?}", l.in_point, l.out_point);
+    assert_eq!(t, effectcraft_time::Tick::from_seconds_f64(2.0), "frame 48 of 24 fps");
+    // The playhead can't go past that last frame.
+    s.set_time(effectcraft_time::Tick::from_seconds_f64(5.0));
+    assert_eq!(s.time(), effectcraft_time::Tick::from_seconds_f64(2.0));
+}
+
 #[test]
 fn default_spatial_interpolation_linear() {
     let mut s = session_with_comp();
