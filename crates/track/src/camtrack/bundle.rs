@@ -490,6 +490,9 @@ fn adjust_impl(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts, al
             let mut cams_seen: Vec<u32> = by_pt[j].iter().map(|&oi| obs[oi as usize].cam).collect();
             cams_seen.sort_unstable();
             let repeated_camera = cams_seen.windows(2).any(|p| p[0] == p[1]);
+            // Parameter index → entry in `ps.w`, for points that repeat a camera (a linear search
+            // per entry would be quadratic in their observations).
+            let mut slot: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
             for &oi in &by_pt[j] {
                 let ob = &obs[oi as usize];
                 let ci = ob.cam as usize;
@@ -541,7 +544,17 @@ fn adjust_impl(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts, al
                             [w * (ja[0] * jx[0][0] + ja[1] * jx[1][0]), w * (ja[0] * jx[0][1] + ja[1] * jx[1][1]), w * (ja[0] * jx[0][2] + ja[1] * jx[1][2])];
                         // Each observation of a point is on another camera: only the shared focal
                         // length repeats.
-                        let repeats = repeated_camera || Some(*ia) == l.shared || l.dist.is_some_and(|g| *ia == g || *ia == g + 1);
+                        let repeats = Some(*ia) == l.shared || l.dist.is_some_and(|g| *ia == g || *ia == g + 1);
+                        if repeated_camera {
+                            match slot.get(ia) {
+                                Some(&k) => ps.w[k].1 = add(ps.w[k].1, wv),
+                                None => {
+                                    slot.insert(*ia, ps.w.len());
+                                    ps.w.push((*ia, wv));
+                                }
+                            }
+                            continue;
+                        }
                         let found = if repeats { ps.w.iter_mut().find(|e| e.0 == *ia) } else { None };
                         match found {
                             Some(e) => e.1 = add(e.1, wv),
