@@ -496,17 +496,23 @@ fn make_private(folder: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     // Judge the folder as written and as it resolves (a relative path, a link or an alias such as
     // /tmp -> /private/tmp can all land in the shared temp folder).
-    let tmp = std::env::temp_dir();
-    let tmp_real = tmp.canonicalize().unwrap_or_else(|_| tmp.clone());
+    // The shared roots: the process's temp folder (`TMPDIR`) and the system's own, which a cache
+    // configured by path lands in whatever `TMPDIR` says.
+    let roots: Vec<PathBuf> = [std::env::temp_dir(), PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]
+        .into_iter()
+        .flat_map(|t| {
+            let real = t.canonicalize().unwrap_or_else(|_| t.clone());
+            [t, real]
+        })
+        .collect();
     let given = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
     let real = folder.canonicalize().unwrap_or_else(|_| given.clone());
     // The shared folder itself is not ours to change or to keep a cache in: refused.
-    if [&given, &real].iter().any(|p| **p == tmp || **p == tmp_real) {
+    if [&given, &real].iter().any(|p| roots.contains(p)) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the disk cache folder is the shared temp folder"));
     }
     // Only folders inside it are made private.
-    let inside = |p: &PathBuf, t: &PathBuf| p.starts_with(t) && p != t;
-    if ![&given, &real].iter().any(|p| inside(p, &tmp) || inside(p, &tmp_real)) {
+    if ![&given, &real].iter().any(|p| roots.iter().any(|t| p.starts_with(t) && **p != *t)) {
         return Ok(());
     }
     if std::fs::symlink_metadata(folder)?.file_type().is_symlink() {
@@ -1203,8 +1209,12 @@ impl DiskCache {
     /// A segmentation (chain key, scale) written by [`DiskCache::put_seg`].
     pub fn get_seg(&self, key: u64, scale: f64) -> Option<effectcraft_effects::roto::FrameSeg> {
         let p = self.read(Kind::Matte, seg_key(key, scale))?;
-        let raw = decompress_checked(&p, None)?;
-        effectcraft_effects::roto::FrameSeg::from_bytes(&raw)
+        let seg = decompress_checked(&p, None).and_then(|raw| effectcraft_effects::roto::FrameSeg::from_bytes(&raw));
+        if seg.is_none() {
+            // A rejected entry would otherwise stay indexed and keep `put_seg` from replacing it.
+            self.discard(Kind::Matte, seg_key(key, scale));
+        }
+        seg
     }
 
     /// Queue a segmentation for writing.
@@ -1455,7 +1465,8 @@ fn decompress_checked(p: &[u8], expected: Option<usize>) -> Option<Vec<u8>> {
     if size > MAX_ENTRY_BYTES || expected.is_some_and(|e| e != size) {
         return None;
     }
-    lz4_flex::decompress(p.get(4..)?, size).ok()
+    // A block that ends short of the size it states is damaged: callers index by that size.
+    lz4_flex::decompress(p.get(4..)?, size).ok().filter(|raw| raw.len() == size)
 }
 
 fn decode_frame(p: &[u8]) -> Option<Frame8> {
@@ -1565,7 +1576,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-6";
+const RENDER_VERSION: &str = "effectcraft-render-7";
 
 /// Feeds the `Debug` form of `v` into the hash, followed by a separator byte.
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
@@ -1685,7 +1696,7 @@ mod tests {
         let dc = DiskCache::open(&d, 1 << 20).unwrap();
         assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
         drop(dc);
-        let link = tmpdir("link");
+        let link = tmpdir("link-private-temp");
         std::os::unix::fs::symlink(&d, &link).unwrap();
         assert!(DiskCache::open(&link, 1 << 20).is_err());
         let _ = std::fs::remove_file(&link);
@@ -1737,6 +1748,20 @@ mod tests {
         // A well-formed entry still decodes.
         let ok = encode_frame(2, 2, &[7; 16]);
         assert_eq!(decode_frame(&ok).map(|f| f.rgba), Some(vec![7; 16]));
+    }
+
+    #[test]
+    fn a_block_shorter_than_the_size_it_states_is_rejected() {
+        // The payload states 100 bytes but holds a valid block of 10: `lz4_flex` returns the 10.
+        let mut p = 100u32.to_le_bytes().to_vec();
+        p.extend_from_slice(&lz4_flex::block::compress(&[5u8; 10]));
+        assert!(decompress_checked(&p, None).is_none());
+        // A half-float frame whose planes come up short is refused, not indexed past.
+        let mut f16 = 2u32.to_le_bytes().to_vec();
+        f16.extend_from_slice(&2u32.to_le_bytes());
+        f16.extend_from_slice(&32u32.to_le_bytes());
+        f16.extend_from_slice(&lz4_flex::block::compress(&[1u8; 8]));
+        assert!(decode_frame_f16(&f16).is_none());
     }
 
     fn tmpdir(name: &str) -> PathBuf {

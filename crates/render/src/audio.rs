@@ -28,7 +28,7 @@ const MAX_DEPTH: usize = 16;
 const MAX_SPEED: f64 = 100.0;
 
 /// The most effect preroll (history before a block) mixed, in seconds, across a layer's effects.
-const MAX_PREROLL_SECONDS: f64 = 10.0;
+const MAX_PREROLL_SECONDS: f64 = 30.0;
 
 /// The longest footage a waveform summarises (a day).
 const MAX_PEAK_SECONDS: i64 = 24 * 3600;

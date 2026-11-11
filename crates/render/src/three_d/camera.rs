@@ -350,9 +350,18 @@ pub fn auto_orient_3d(ctx: &EvalCtx, layer: &Layer, pos: Vec3) -> Option<Mat4> {
             if nesting >= MAX_ORIENT_NESTING {
                 return None;
             }
+            // Restored when this scope ends, a panic unwinding through it included (the CPU retry
+            // after one must not start with a raised count).
+            struct Restore(usize);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    ORIENT_NESTING.with(|n| n.set(self.0));
+                }
+            }
             ORIENT_NESTING.with(|n| n.set(nesting + 1));
+            let restore = Restore(nesting);
             let parent = parent_world(ctx, layer);
-            ORIENT_NESTING.with(|n| n.set(nesting));
+            drop(restore);
             let eye = active_camera(ctx).eye;
             let e = parent.inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
             let d = pos - e;

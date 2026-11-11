@@ -198,6 +198,35 @@ pub fn in_index_units(layer: &Layer, uid: effectcraft_project::Uid) -> bool {
 
 /// Selection of every glyph by an animator's selectors, per dimension.
 pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &TextLayout) -> Vec<[f64; 3]> {
+    animator_selection_within(ctx, layer, anim, lay, &SelectorBudget::new())
+}
+
+/// The Expression Selector evaluations one layer's animators may run in all: counted, not timed,
+/// so the same frame renders the same on every machine.
+pub struct SelectorBudget(std::cell::Cell<usize>);
+
+impl SelectorBudget {
+    pub fn new() -> SelectorBudget {
+        SelectorBudget(std::cell::Cell::new(MAX_SELECTOR_EVALS))
+    }
+
+    /// Take one evaluation; `false` when none are left.
+    fn take(&self) -> bool {
+        let left = self.0.get();
+        self.0.set(left.saturating_sub(1));
+        left > 0
+    }
+}
+
+impl Default for SelectorBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`animator_selection`] drawing its Expression Selector evaluations from `budget`, which the
+/// caller shares across the layer's animators.
+pub fn animator_selection_within(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &TextLayout, budget: &SelectorBudget) -> Vec<[f64; 3]> {
     let sels: Vec<&PropGroup> = anim.sub("selectors").map(|s| s.groups().filter(|g| g.enabled).collect()).unwrap_or_default();
     if sels.is_empty() {
         // No selectors: every character is fully affected.
@@ -262,17 +291,15 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
                     ctx.value(layer, prop)
                 }
                 .as_vec3();
-                // One allowance for the whole layer: the expression runs per character, each run
-                // with its own time limit, so a slow expression on a long text is stopped once it
-                // has failed or the layer's evaluations pass MAX_SELECTOR_TIME.
-                let start = web_time::Instant::now();
+                // One allowance for the whole layer (`budget`, shared by its animators): the
+                // expression runs per character, so a slow expression on a long text is stopped
+                // once it has failed or the layer's evaluations pass MAX_SELECTOR_EVALS.
                 let stopped = std::cell::Cell::new(false);
                 Box::new(move |i, n, prev| {
                     let pv = prev.map(|x| x * 100.0);
                     // Without an expression engine: the static amount scales the selection.
                     let fallback = [0, 1, 2].map(|d| stat[d] * prev[d]);
-                    let live = !stopped.get() && start.elapsed() < MAX_SELECTOR_TIME;
-                    let r = match ctx.expr.filter(|_| live && prop.has_expression()) {
+                    let r = match ctx.expr.filter(|_| prop.has_expression() && !stopped.get() && budget.take()) {
                         Some(h) => h.eval_text_selector(ctx, layer, prop, i, n, pv).unwrap_or_else(|_| {
                             stopped.set(true);
                             fallback
@@ -302,15 +329,17 @@ pub fn animator_selection(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup, lay: &
     acc
 }
 
-/// The most time one layer's Expression Selectors may take across all its characters.
-const MAX_SELECTOR_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+/// The most Expression Selector evaluations one layer's animators run across all its characters
+/// (a text of 32,768 characters under one expression selector, or fewer under several).
+const MAX_SELECTOR_EVALS: usize = 32_768;
 /// Evaluate animators for every glyph.
 pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &TextLayout) -> Vec<CharXf> {
     let mut out = vec![CharXf::default(); lay.glyphs.len()];
     let Some(anims) = text.sub("animators") else { return out };
+    let budget = SelectorBudget::new();
     for anim in anims.groups().filter(|g| g.enabled) {
         let Some(props) = anim.sub("properties") else { continue };
-        let sel = animator_selection(ctx, layer, anim, lay);
+        let sel = animator_selection_within(ctx, layer, anim, lay, &budget);
         let get = |m: &str| props.get(m).map(|p| ctx.value(layer, p).components());
         let get1 = |m: &str| props.get(m).map(|p| ctx.value(layer, p).as_f64());
         let c3 = |v: Vec<f64>, d: f64| [v.first().copied().unwrap_or(d), v.get(1).copied().unwrap_or(d), v.get(2).copied().unwrap_or(d)];
