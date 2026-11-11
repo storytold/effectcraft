@@ -180,3 +180,34 @@ fn an_inline_lut_stays_cached() {
     assert!(near(reds(&s, comps), 1.0));
     assert_eq!(s.layer_cache.stats().misses, misses);
 }
+
+/// A LUT file an Essential Property override names, in a precomp's instance (collapsed or not),
+/// is the one the render keys and reads: the instance renders again when that file changes.
+#[test]
+fn an_overridden_lut_file_renders_again() {
+    for collapse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, over) = (dir.path().join("base.cube"), dir.path().join("override.cube"));
+        write_lut(&base, WHITE, 1_000);
+        write_lut(&over, BLACK, 1_000);
+        let mut s = session(None);
+        s.execute_checked("comp.new", json!({"name": "Card", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+        let card = s.active_comp_id().unwrap();
+        let solid = s.execute_checked("layer.newSolid", json!({"color": "#808080", "width": 16, "height": 16})).unwrap()["layer"].clone();
+        s.execute_checked("effect.apply", json!({"layer": solid, "effect": "Apply Color LUT"})).unwrap();
+        s.execute_checked("prop.set", json!({"layer": solid, "path": "effects/#1/lut", "value": base.to_string_lossy()})).unwrap();
+        let control = s.execute_checked("essential.addProperty", json!({"layer": solid, "path": "effects/#1/lut"})).unwrap()["controls"][0].clone();
+        s.execute_checked("comp.new", json!({"name": "Main", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+        let main = s.active_comp_id().unwrap();
+        let instance = s.execute_checked("layer.addItem", json!({"item": card.0})).unwrap()["layer"].clone();
+        s.execute_checked("layer.setSwitch", json!({"layers": [instance], "switch": "collapse", "value": collapse})).unwrap();
+        s.execute_checked("essential.set", json!({"layer": instance, "control": control, "value": over.to_string_lossy()})).unwrap();
+        assert!(near([red(&s, card), red(&s, card)], 1.0), "the source comp reads its own file");
+        assert!(near([red(&s, main), red(&s, main)], 0.0), "the instance reads the override's (collapse: {collapse})");
+        let hits = s.layer_cache.stats().hits;
+        assert!(near([red(&s, main), red(&s, main)], 0.0));
+        assert!(s.layer_cache.stats().hits > hits, "the instance is cached (collapse: {collapse})");
+        write_lut(&over, WHITE, 2_000);
+        assert!(near([red(&s, main), red(&s, main)], 1.0), "collapse: {collapse}: {}", red(&s, main));
+    }
+}
