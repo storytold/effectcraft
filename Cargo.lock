@@ -1479,6 +1479,7 @@ name = "effectcraft-av1enc"
 version = "0.23.1"
 dependencies = [
  "filmcraft-av1",
+ "tempfile",
 ]
 
 [[package]]
@@ -1592,6 +1593,7 @@ dependencies = [
  "image",
  "log",
  "rayon",
+ "tempfile",
  "thiserror 2.0.21",
  "web-time",
 ]
@@ -1768,6 +1770,7 @@ dependencies = [
  "log",
  "rayon",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
