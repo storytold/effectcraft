@@ -2,8 +2,8 @@
 //! of a layer's source.
 
 use crate::container::bytes::{be_f32, be_f64, be_i32, be_u32, cstr, le_u32, text, until_nul};
-use crate::container::chunk::Chunk;
 use crate::container::header::Rational;
+use crate::container::index::Node;
 use crate::container::typed::{Item, ItemKind, Layer, Project};
 
 /// The footage data of an item (`LIST Pin ` with `sspc`, `opti` and, for files, `Als2/alas`).
@@ -101,21 +101,6 @@ impl PsdLayer {
 }
 
 impl Footage {
-    /// The number of frames of an image sequence (`duration * native_frame_rate`: 3/30 s at 30 fps is
-    /// 3); `None` for anything else.
-    pub fn sequence_frame_count(&self) -> Option<u32> {
-        if !self.is_sequence {
-            return None;
-        }
-        let d = self.duration?;
-        let frames = i128::from(d.num).checked_mul(i128::from(self.native_frame_rate))?;
-        let den = i128::from(d.den);
-        if den <= 0 || frames % den != 0 {
-            return None;
-        }
-        u32::try_from(frames / den).ok()
-    }
-
     /// The solid's colour as fractions R, G, B.
     pub fn solid_rgb(&self) -> Option<[f32; 3]> {
         let [_, r, g, b] = self.solid_argb?;
@@ -269,14 +254,13 @@ impl SequenceInfo {
 /// is unreadable (empty). A name that is not a plain file name (holding `/`, `\`, `:` or a control
 /// character such as NUL, or being `.` or `..`) makes the whole list unreadable (empty): the names
 /// are joined to the folder.
-fn sequence_file_list(list: &Chunk<'_>) -> Vec<String> {
+fn sequence_file_list(list: Node<'_, '_>) -> Vec<String> {
     // After Effects writes the count first (the one sample); a list without a readable count is
     // not read rather than guessed.
     let Some(count) = list.child(b"StVS").and_then(|c| c.bytes()).and_then(|b| le_u32(b, 0)).and_then(|n| usize::try_from(n).ok()) else {
         return Vec::new();
     };
-    let names: Vec<String> =
-        list.children().iter().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).take(count).map(text).filter(|n| !n.is_empty()).collect();
+    let names: Vec<String> = list.children().filter(|c| c.is(b"Utf8")).filter_map(Node::bytes).take(count).map(text).filter(|n| !n.is_empty()).collect();
     if names.iter().any(|n| n.contains(|c: char| matches!(c, '/' | '\\' | ':') || c.is_control()) || n == "." || n == "..") {
         return Vec::new();
     }
@@ -308,9 +292,8 @@ impl<'f, 'a> Item<'f, 'a> {
         }
         let pin = self.chunk.child_list(b"Pin ")?;
         let sspc = pin.child(b"sspc")?.bytes()?;
-        let kids = pin.children();
-        let after = kids.iter().position(|c| c.is_list(b"Als2"))?;
-        let naming = || kids.iter().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
+        let after = pin.children().position(|c| c.is_list(b"Als2"))?;
+        let naming = || pin.children().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
         let (start, end, digits) = (be_u32(sspc, 172)?, be_u32(sspc, 176)?, be_u32(sspc, 180)?);
         // Force alphabetical order: the file list replaces the numbering.
         if let Some(list) = naming().find(|c| c.is_list(b"StVc")) {
@@ -320,7 +303,7 @@ impl<'f, 'a> Item<'f, 'a> {
             }
             return Some(SequenceInfo { prefix: String::new(), suffix: String::new(), start, end, digits, files });
         }
-        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).map(text).take(2).collect();
+        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(Node::bytes).map(text).take(2).collect();
         let (prefix, suffix) = match names.as_slice() {
             [prefix, suffix] => (prefix.clone(), suffix.clone()),
             // An empty prefix is not stored (`0001.png` has only `.png`).
@@ -348,12 +331,6 @@ impl<'f, 'a> Item<'f, 'a> {
     /// The label colour index, byte 58 of `idta` (15 for a composition made by precomposing).
     pub fn label(&self) -> Option<u8> {
         self.chunk.child(b"idta")?.bytes()?.get(58).copied()
-    }
-
-    /// The ids of the compositions this item uses as precomp layers: the little-endian `u32` of
-    /// each `idpi` chunk.
-    pub fn used_item_ids(&self) -> Vec<u32> {
-        self.chunk.children().iter().filter(|c| c.is(b"idpi")).filter_map(|c| le_u32(c.bytes()?, 0)).collect()
     }
 
     /// The footage data of a footage item.
@@ -403,11 +380,6 @@ impl<'f, 'a> Project<'f, 'a> {
     /// The item a layer is made from (its source id), e.g. the solid, the footage or the precomp.
     pub fn layer_source(&self, layer: &Layer<'f, 'a>) -> Option<Item<'f, 'a>> {
         self.item_by_id(layer.header()?.source_id?)
-    }
-
-    /// The name a layer shows: its own name, or its source's name when it has none.
-    pub fn layer_display_name(&self, layer: &Layer<'f, 'a>) -> Option<String> {
-        layer.name().or_else(|| self.layer_source(layer)?.display_name())
     }
 
     /// The pixel size of a layer's source: a footage item's width and height, or a precomp's

@@ -13,7 +13,7 @@ fn layers(name: &str) -> Option<Vec<(String, bool, Option<TrackMatte>, u32)>> {
         comp.layers()
             .map(|l| {
                 let h = l.header().expect("header");
-                (project.layer_display_name(&l).unwrap_or_default(), h.is_video_enabled(), l.track_matte(), h.id)
+                (l.name().or_else(|| project.layer_source(&l)?.display_name()).unwrap_or_default(), h.is_video_enabled(), l.track_matte(), h.id)
             })
             .collect()
     })

@@ -13,7 +13,6 @@ fn text_layer_document(name: &str) -> Option<TextDocument> {
         let layer = comp.layers().find(|l| l.name().as_deref() == Some("T")).expect("the text layer T");
         let h = layer.header().unwrap();
         assert_eq!(h.layer_type, LayerType::Text);
-        assert!(h.name_is_user_set());
         layer.text_document().expect("text document")
     })
 }
@@ -192,7 +191,6 @@ fn png_footage_layer() {
     // The path comes from the alias JSON (the fixture holds a neutral replacement of the original).
     assert!(f.path.as_deref().is_some_and(|p| p.ends_with("test8x8.png")), "{:?}", f.path);
     assert_eq!(project.layer_source_size(&layer), Some((8, 8)));
-    assert_eq!(project.layer_display_name(&layer).as_deref(), Some("png"));
     // L is still there below it.
     assert_eq!(comp.layers().count(), 2);
 }

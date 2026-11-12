@@ -128,6 +128,13 @@ pub fn resolve(name: &str) -> Option<PathBuf> {
     locate(name).map(|s| s.path().clone())
 }
 
+/// The ids of the compositions an item uses as precomposition layers, as the file stores them:
+/// the little-endian `u32` of each `idpi` chunk (the importer does not read them; the exporter
+/// writes them).
+pub fn used_item_ids(item: &effectcraft_aep::Item<'_, '_>) -> Vec<u32> {
+    item.chunk().children().filter(|c| c.is(b"idpi")).filter_map(|c| Some(u32::from_le_bytes(c.bytes()?.get(..4)?.try_into().ok()?))).collect()
+}
+
 /// The bytes of a case (see the module comment), or `None` when it is missing.
 pub fn try_fixture(name: &str) -> Option<Vec<u8>> {
     match locate(name)? {

@@ -4,42 +4,57 @@
 //!
 //! Only facts that were established from our own one-change-per-file corpus and are checked by
 //! tests against it are decoded (see `docs/aep-format.md` for the evidence). Everything else
-//! stays reachable through the raw [`Chunk`] tree. Views borrow the file and never fail loudly:
-//! a chunk that does not have the expected shape yields `None` or is skipped.
+//! stays reachable through the raw chunk tree ([`Node`]). Views borrow the file and never fail
+//! loudly: a chunk that does not have the expected shape yields `None` or is skipped.
+//!
+//! A view reads either tree: the owned [`Chunk`](crate::container::Chunk) tree
+//! ([`Project::new`]) or the flat [`TreeIndex`] the importer builds ([`Project::from_index`]);
+//! both give the same answers.
 
 use crate::container::bytes::{be_f64, be_u16, be_u32, text, until_nul};
-use crate::container::chunk::{AepFile, Chunk};
+use crate::container::chunk::AepFile;
+use crate::container::index::{Node, Root, TreeIndex};
 
 /// The name a user gave a property or group: the `Utf8` inside its `tdsn` chunk. `None` for the
 /// sentinel `-_0_/-` ("no custom name") and for empty names.
-pub(crate) fn user_name(chunk: &Chunk<'_>) -> Option<String> {
-    let name = chunk.child(b"tdsn")?.children().iter().find(|c| c.is(b"Utf8"))?.bytes().map(text)?;
+pub(crate) fn user_name(chunk: Node<'_, '_>) -> Option<String> {
+    let name = chunk.child(b"tdsn")?.child(b"Utf8")?.bytes().map(text)?;
     (!name.is_empty() && name != "-_0_/-").then_some(name)
 }
 
 /// The content of a `Utf8` child as text (not trimmed).
-pub(crate) fn utf8_child(chunk: &Chunk<'_>) -> Option<String> {
-    chunk.child(b"Utf8").and_then(Chunk::bytes).map(text)
+pub(crate) fn utf8_child(chunk: Node<'_, '_>) -> Option<String> {
+    chunk.child(b"Utf8").and_then(Node::bytes).map(text)
 }
 
 /// The project: the top-level `LIST Fold`, which holds the project items.
 #[derive(Debug, Clone, Copy)]
 pub struct Project<'f, 'a> {
-    pub(crate) fold: &'f Chunk<'a>,
+    pub(crate) fold: Node<'f, 'a>,
     /// The top-level `LIST EfdG` (project-level effect definitions), when there is one.
-    pub(crate) effect_defs: Option<&'f Chunk<'a>>,
+    pub(crate) effect_defs: Option<Node<'f, 'a>>,
 }
 
 impl<'f, 'a> Project<'f, 'a> {
     /// The project view of a file, or `None` when it has no `LIST Fold`.
     pub fn new(file: &'f AepFile<'a>) -> Option<Self> {
-        file.list(b"Fold").map(|fold| Self { fold, effect_defs: file.list(b"EfdG") })
+        Self::of(Root::from(file))
+    }
+
+    /// The project view of an indexed file ([`TreeIndex`]), or `None` when it has no `LIST Fold`.
+    pub fn from_index(index: &'f TreeIndex<'a>) -> Option<Self> {
+        Self::of(Root::from(index))
+    }
+
+    /// The project view of either tree: its `LIST Fold` and `LIST EfdG`.
+    pub(crate) fn of(root: Root<'f, 'a>) -> Option<Self> {
+        root.list(b"Fold").map(|fold| Self { fold, effect_defs: root.list(b"EfdG") })
     }
 
     /// The top-level items (the project panel's root; folders hold their children, see
     /// [`Item::children`]).
     pub fn items(&self) -> impl Iterator<Item = Item<'f, 'a>> + 'f {
-        self.fold.children().iter().filter(|c| c.is_list(b"Item")).map(|chunk| Item { chunk })
+        self.fold.children().filter(|c| c.is_list(b"Item")).map(|chunk| Item { chunk })
     }
 
     /// True when the `LIST Fold` could not be read as chunks (damaged): its items cannot be seen.
@@ -78,12 +93,12 @@ pub enum ItemKind {
 /// A project item (`LIST Item`).
 #[derive(Debug, Clone, Copy)]
 pub struct Item<'f, 'a> {
-    pub(crate) chunk: &'f Chunk<'a>,
+    pub(crate) chunk: Node<'f, 'a>,
 }
 
 impl<'f, 'a> Item<'f, 'a> {
     /// The underlying chunk.
-    pub fn chunk(&self) -> &'f Chunk<'a> {
+    pub fn chunk(&self) -> Node<'f, 'a> {
         self.chunk
     }
 
@@ -106,7 +121,7 @@ impl<'f, 'a> Item<'f, 'a> {
 
     /// The items inside a folder (`LIST Sfdr`).
     pub fn children(&self) -> impl Iterator<Item = Item<'f, 'a>> + 'f {
-        self.chunk.child_list(b"Sfdr").into_iter().flat_map(|sfdr| sfdr.children().iter()).filter(|c| c.is_list(b"Item")).map(|chunk| Item { chunk })
+        self.chunk.child_list(b"Sfdr").into_iter().flat_map(Node::children).filter(|c| c.is_list(b"Item")).map(|chunk| Item { chunk })
     }
 
     /// Whether the item has the `LIST Sfdr` of a folder's contents (After Effects writes an empty
@@ -117,7 +132,7 @@ impl<'f, 'a> Item<'f, 'a> {
 
     /// True when the folder's `LIST Sfdr` is there but could not be read as chunks (damaged).
     pub fn folder_contents_unreadable(&self) -> bool {
-        self.chunk.child_list(b"Sfdr").is_some_and(Chunk::is_opaque_list)
+        self.chunk.child_list(b"Sfdr").is_some_and(Node::is_opaque_list)
     }
 
     /// The composition view when this item has composition data (`cdta`).
@@ -135,6 +150,15 @@ pub struct TimeBase {
 }
 
 impl TimeBase {
+    /// The NTSC rates and the value After Effects stores for each (a float32 of exactly these
+    /// decimals): the one table the importer and the exporter use.
+    pub(crate) const NTSC: [(effectcraft_time::FrameRate, f32); 4] = [
+        (effectcraft_time::FrameRate::FPS_23_976, 23.976),
+        (effectcraft_time::FrameRate::FPS_29_97, 29.97),
+        (effectcraft_time::FrameRate::FPS_59_94, 59.94),
+        (effectcraft_time::FrameRate::FPS_119_88, 119.88),
+    ];
+
     /// Frames per second (`timescale / frame_duration`), `None` for a zero duration.
     pub fn frame_rate(&self) -> Option<f64> {
         (self.frame_duration != 0).then(|| f64::from(self.timescale) / f64::from(self.frame_duration))
@@ -149,7 +173,7 @@ impl TimeBase {
 /// A composition item (an [`Item`] with `cdta`).
 #[derive(Debug, Clone, Copy)]
 pub struct Comp<'f, 'a> {
-    pub(crate) item: &'f Chunk<'a>,
+    pub(crate) item: Node<'f, 'a>,
 }
 
 impl<'f, 'a> Comp<'f, 'a> {
@@ -163,19 +187,19 @@ impl<'f, 'a> Comp<'f, 'a> {
     /// The layers, top layer first (`LIST Layr`; the `DLay`/`SLay`/`CLay`/`SecL` lists next to
     /// them are not layers).
     pub fn layers(&self) -> impl Iterator<Item = Layer<'f, 'a>> + 'f {
-        self.item.children().iter().filter(|c| c.is_list(b"Layr")).map(|chunk| Layer { chunk })
+        self.item.children().filter(|c| c.is_list(b"Layr")).map(|chunk| Layer { chunk })
     }
 }
 
 /// A layer (`LIST Layr`).
 #[derive(Debug, Clone, Copy)]
 pub struct Layer<'f, 'a> {
-    pub(crate) chunk: &'f Chunk<'a>,
+    pub(crate) chunk: Node<'f, 'a>,
 }
 
 impl<'f, 'a> Layer<'f, 'a> {
     /// The underlying chunk.
-    pub fn chunk(&self) -> &'f Chunk<'a> {
+    pub fn chunk(&self) -> Node<'f, 'a> {
         self.chunk
     }
 
@@ -205,12 +229,12 @@ pub enum PropNode<'f, 'a> {
     /// A property (`LIST tdbs`).
     Property(Property<'f, 'a>),
     /// Any other list that follows a match name (observed: `otst`, the effect instance `sspc`).
-    Other(&'f Chunk<'a>),
+    Other(Node<'f, 'a>),
 }
 
 impl<'f, 'a> PropNode<'f, 'a> {
     /// The node a `LIST` after a match name is.
-    fn of(c: &'f Chunk<'a>) -> Self {
+    fn of(c: Node<'f, 'a>) -> Self {
         if c.is_list(b"tdgp") {
             PropNode::Group(PropGroup { chunk: c })
         } else if c.is_list(b"tdbs") {
@@ -233,17 +257,18 @@ pub struct PropEntry<'f, 'a> {
 /// `ADBE Group End` closes the group and names nothing.
 #[derive(Debug, Clone, Copy)]
 pub struct PropGroup<'f, 'a> {
-    pub(crate) chunk: &'f Chunk<'a>,
+    pub(crate) chunk: Node<'f, 'a>,
 }
 
 impl<'f, 'a> PropGroup<'f, 'a> {
-    /// A group view of a `LIST tdgp` chunk.
-    pub fn from_chunk(chunk: &'f Chunk<'a>) -> Option<Self> {
+    /// A group view of a `LIST tdgp` chunk (a [`Chunk`](crate::container::Chunk) or a [`Node`]).
+    pub fn from_chunk(chunk: impl Into<Node<'f, 'a>>) -> Option<Self> {
+        let chunk = chunk.into();
         chunk.is_list(b"tdgp").then_some(Self { chunk })
     }
 
     /// The underlying chunk.
-    pub fn chunk(&self) -> &'f Chunk<'a> {
+    pub fn chunk(&self) -> Node<'f, 'a> {
         self.chunk
     }
 
@@ -264,7 +289,7 @@ impl<'f, 'a> PropGroup<'f, 'a> {
         for c in self.chunk.children() {
             if c.is(b"tdmn") {
                 pending = c.bytes().map(match_name);
-            } else if c.id == crate::container::chunk::LIST
+            } else if c.is(&crate::container::chunk::LIST)
                 && let Some(name) = pending.take()
             {
                 out.push(PropEntry { match_name: name, node: PropNode::of(c) });
@@ -285,9 +310,9 @@ impl<'f, 'a> PropGroup<'f, 'a> {
         for c in self.chunk.children() {
             if c.is(b"tdmn") {
                 pending = c.bytes();
-            } else if c.id == crate::container::chunk::LIST
+            } else if c.is(&crate::container::chunk::LIST)
                 && let Some(body) = pending.take()
-                && match_name(body) == name
+                && match_name_is(body, name)
             {
                 return Some(PropNode::of(c));
             }
@@ -314,21 +339,30 @@ fn match_name(body: &[u8]) -> String {
     text(until_nul(body))
 }
 
+/// `match_name(body) == name` without building the `String`: equal bytes match; otherwise only
+/// a body that is not valid UTF-8 can still match (through its U+FFFD replacements), and only a
+/// name that holds U+FFFD.
+fn match_name_is(body: &[u8], name: &str) -> bool {
+    let bytes = until_nul(body);
+    bytes == name.as_bytes() || (name.contains('\u{FFFD}') && String::from_utf8_lossy(bytes) == name)
+}
+
 /// A property (`LIST tdbs`): `tdsb`, `tdsn`, the 124-byte header `tdb4`, then either the static
 /// value `cdat` or a keyframe `LIST list`.
 #[derive(Debug, Clone, Copy)]
 pub struct Property<'f, 'a> {
-    pub(crate) chunk: &'f Chunk<'a>,
+    pub(crate) chunk: Node<'f, 'a>,
 }
 
 impl<'f, 'a> Property<'f, 'a> {
-    /// A property view of a `LIST tdbs` chunk.
-    pub fn from_chunk(chunk: &'f Chunk<'a>) -> Option<Self> {
+    /// A property view of a `LIST tdbs` chunk (a [`Chunk`](crate::container::Chunk) or a [`Node`]).
+    pub fn from_chunk(chunk: impl Into<Node<'f, 'a>>) -> Option<Self> {
+        let chunk = chunk.into();
         chunk.is_list(b"tdbs").then_some(Self { chunk })
     }
 
     /// The underlying chunk.
-    pub fn chunk(&self) -> &'f Chunk<'a> {
+    pub fn chunk(&self) -> Node<'f, 'a> {
         self.chunk
     }
 
@@ -436,12 +470,13 @@ pub struct KeyLayout {
 impl<'f> KeyList<'f> {
     /// A view of a `LIST list` chunk. `None` when `lhd3` is not 52 bytes or `ldat` is not exactly
     /// `count * record_size` bytes (a list without `ldat` must have no records).
-    pub fn from_chunk<'a>(chunk: &'f Chunk<'a>) -> Option<Self> {
+    pub fn from_chunk<'a: 'f>(chunk: impl Into<Node<'f, 'a>>) -> Option<Self> {
+        let chunk = chunk.into();
         if !chunk.is_list(b"list") {
             return None;
         }
         let header = ListHeader::parse(chunk.child(b"lhd3")?.bytes()?)?;
-        let ldat: &[u8] = chunk.child(b"ldat").and_then(Chunk::bytes).unwrap_or(&[]);
+        let ldat: &[u8] = chunk.child(b"ldat").and_then(Node::bytes).unwrap_or(&[]);
         let expected = usize::try_from(header.count).ok()?.checked_mul(usize::try_from(header.record_size).ok()?)?;
         (ldat.len() == expected).then_some(Self { header, ldat, layout: None })
     }
@@ -500,6 +535,7 @@ impl<'f> Keyframe<'f> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::Chunk;
 
     fn key_list(count: u32, record_size: u32, ldat: &[u8]) -> Chunk<'static> {
         let mut lhd3 = vec![0u8; 52];
@@ -535,5 +571,23 @@ mod tests {
         assert!(matches!(g.get("B"), Some(PropNode::Property(_))));
         assert!(g.get("C").is_none());
         assert_eq!(g.names(), ["A", "B", "A"]);
+    }
+
+    /// Match name is agrees with comparing the decoded name.
+    #[test]
+    fn match_name_is_agrees_with_comparing_the_decoded_name() {
+        let bodies: [&[u8]; 9] =
+            [b"ADBE Position\0\0\0", b"ADBE Position", b"ADBE Pos", b"", b"\0ADBE", b"ADBE \xff Bad\0", b"\xff", b"\xef\xbf\xbd", "Gr\u{fc}n\0".as_bytes()];
+        let names = ["ADBE Position", "ADBE Pos", "", "ADBE \u{FFFD} Bad", "\u{FFFD}", "Gr\u{fc}n", "ADBE Position\0", "ADBE \u{FFFD}"];
+        for body in bodies {
+            for name in names {
+                assert_eq!(match_name_is(body, name), match_name(body) == name, "{body:?} vs {name:?}");
+            }
+        }
+        // Names read back from a group find their entries, a damaged one included.
+        let group = Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdmn", b"X\xffY\0".to_vec()), Chunk::list(*b"tdbs", Vec::new())]);
+        let g = PropGroup::from_chunk(&group).expect("group");
+        let names = g.names();
+        assert!(g.get(&names[0]).is_some());
     }
 }

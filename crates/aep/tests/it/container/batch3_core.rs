@@ -117,8 +117,8 @@ fn a_transform_set_to_its_default_adds_no_record() {
         assert_eq!(t.opacity_percent.source, ValueSource::Default);
         assert!(layer.properties().unwrap().find(&["ADBE Transform Group", "ADBE Position"]).is_none());
         // The two cases are layers of one file: they differ in the layer id only.
-        let a = without_layer_id(layer.chunk());
-        skip!(with_layer("299-save-noise.aep", L, |_, other| assert_eq!(a, without_layer_id(other.chunk()))));
+        let a = without_layer_id(&layer.chunk().to_chunk());
+        skip!(with_layer("299-save-noise.aep", L, |_, other| assert_eq!(a, without_layer_id(&other.chunk().to_chunk()))));
     }));
 }
 
@@ -140,16 +140,13 @@ fn scale_keys_keep_their_ease_type_major() {
         }
         assert_near(&keys[0].value().unwrap(), &[1.0, 1.0, 1.0], 1e-9);
         assert_near(&keys[1].value().unwrap(), &[2.0, 1.5, 1.0], 1e-9);
-        // The raw block: [in speed x3][in influence x3][out speed x3][out influence x3].
-        assert_near(&keys[0].plain_ease_slots().unwrap(), &[0.0, 0.0, 0.0, 0.33, 0.33, 0.33, 0.2, 0.2, 0.2, 0.66, 0.66, 0.66], 1e-9);
-        assert_near(&keys[1].plain_ease_slots().unwrap(), &[0.1, 0.1, 0.1, 0.66, 0.66, 0.66, 0.0, 0.0, 0.0, 0.33, 0.33, 0.33], 1e-9);
+        // The raw block is [in speed x3][in influence x3][out speed x3][out influence x3].
         for i in 0..3 {
             assert!(same_ease(&keys[0].ease_component(i).unwrap(), &ease(0.0, 0.33, 0.2, 0.66)), "key 1 component {i}");
             assert!(same_ease(&keys[1].ease_component(i).unwrap(), &ease(0.1, 0.66, 0.0, 0.33)), "key 2 component {i}");
         }
         assert!(keys[0].ease_component(3).is_none());
         assert_eq!(keys[0].ease_components().unwrap().len(), 3);
-        assert!(keys[0].color_distance().is_none());
     }));
 }
 
@@ -172,7 +169,6 @@ fn mask_feather_keys_keep_their_ease_type_major() {
         }
         assert_near(&keys[0].value().unwrap(), &[0.0, 0.0], 1e-9);
         assert_near(&keys[1].value().unwrap(), &[50.0, 30.0], 1e-9);
-        assert_near(&keys[0].plain_ease_slots().unwrap(), &[0.0, 0.0, 0.33, 0.33, 15.0, 15.0, 0.66, 0.66], 1e-9);
         for i in 0..2 {
             assert!(same_ease(&keys[0].ease_component(i).unwrap(), &ease(0.0, 0.33, 15.0, 0.66)), "key 1 component {i}");
             assert!(same_ease(&keys[1].ease_component(i).unwrap(), &ease(8.0, 0.66, 0.0, 0.33)), "key 2 component {i}");
@@ -213,14 +209,15 @@ fn bezier_colour_keys_carry_the_distance_to_the_next_key() {
             assert_eq!((k.interpolation_in(), k.interpolation_out()), (Some(Interpolation::Bezier), Some(Interpolation::Bezier)));
             assert!(same_ease(&k.ease_component(0).unwrap(), &ease(0.0, 0.0, 0.0, 0.0)));
         }
-        assert!(near(keys[0].color_distance().unwrap(), 255.0 * 2f64.sqrt(), 1e-3), "{:?}", keys[0].color_distance());
-        assert!(near(keys[0].color_distance().unwrap(), 360.6245, 1e-3));
-        assert_eq!(keys[1].color_distance(), Some(0.0));
+        let distance = |k: &effectcraft_aep::Keyframe<'_>| k.spatial().unwrap().segment_length;
+        assert!(near(distance(&keys[0]), 255.0 * 2f64.sqrt(), 1e-3), "{}", distance(&keys[0]));
+        assert!(near(distance(&keys[0]), 360.6245, 1e-3));
+        assert_eq!(distance(&keys[1]), 0.0);
     }));
     skip!(with_layer("210-key-fill-color-2key-linear.aep", L, |_, layer| {
         let p = layer.effects()[0].params().into_iter().find(|p| p.name == "Color").unwrap();
         let k = p.stored().unwrap().keys().unwrap().keyframes().next().unwrap();
-        assert_eq!(k.color_distance(), Some(0.0));
+        assert_eq!(k.spatial().unwrap().segment_length, 0.0);
     }));
 }
 
@@ -243,21 +240,19 @@ fn time_stretch_is_an_exact_ratio() {
     let (h, in_p, out_p, scale) = skip!(stretch_facts("316-layer-stretch50.aep"));
     assert_eq!((h.stretch, h.stretch_den), (1, 2));
     assert_eq!(h.stretch_ratio(), Some(rat(1, 2)));
-    assert_eq!(h.stretch_percent(), 50.0);
     assert_eq!(h.out_relative, rat(128000, 25600));
     assert_eq!((in_p, out_p, scale), (Some(rat(0, 1)), Some(rat(5, 2)), 25600));
     // 317: 150 %: 3/2, ends at 7.5 s, the property time scale is 25600 x 3/2.
     let (h, in_p, out_p, scale) = skip!(stretch_facts("317-layer-stretch150.aep"));
     assert_eq!((h.stretch, h.stretch_den), (3, 2));
     assert_eq!(h.stretch_ratio(), Some(rat(3, 2)));
-    assert_eq!(h.stretch_percent(), 150.0);
     assert_eq!((in_p, out_p, scale), (Some(rat(0, 1)), Some(rat(15, 2)), 38400));
     // 018: 200 %: 2/1, ends at 10 s, time scale 51200. The base is 1/1.
     let (h, _, out_p, scale) = skip!(stretch_facts("018-layer-stretch200.aep"));
     assert_eq!((h.stretch, h.stretch_den, h.stretch_ratio()), (2, 1, Some(rat(2, 1))));
     assert_eq!((out_p, scale), (Some(rat(10, 1)), 51200));
     let (h, _, out_p, scale) = skip!(stretch_facts("000-base.aep"));
-    assert_eq!((h.stretch, h.stretch_den, h.stretch_percent()), (1, 1, 100.0));
+    assert_eq!((h.stretch, h.stretch_den, h.stretch_ratio()), (1, 1, Some(rat(1, 1))));
     assert_eq!((out_p, scale), (Some(rat(5, 1)), 25600));
 }
 
@@ -269,9 +264,9 @@ fn fractional_times_are_exact_multiples_of_one_over_25600() {
     assert_eq!(h.in_relative, rat(8532, 25600));
     assert_eq!(h.out_relative, rat(136532, 25600));
     assert_eq!(h.start, rat(0, 25600));
+    // 0.33328125 s and 5.33328125 s.
     assert_eq!(h.in_point(), Some(rat(2133, 6400)));
-    assert_eq!(h.in_point_seconds(), Some(0.33328125));
-    assert_eq!(h.out_point_seconds(), Some(5.33328125));
+    assert_eq!(h.out_point(), Some(rat(34133, 6400)));
     assert_eq!(h.stretch_ratio(), Some(rat(1, 1)));
 }
 
@@ -364,18 +359,17 @@ fn pixel_aspect_shutter_phase_and_display_start() {
     // 325: pixelAspect 0.9091 reads back 0.90909090909091 = the exact ratio 10/11.
     let h = skip!(comp_header("325-comp-pixelaspect-0.9091.aep"));
     assert_eq!(h.pixel_aspect.reduced(), Some(rat(10, 11)));
-    assert!(near(h.pixel_aspect_ratio().unwrap(), 0.90909090909091, 1e-12));
     // 326: shutterPhase -90, the shutter angle stays 180.
     let h = skip!(comp_header("326-comp-shutterphase-m90.aep"));
     assert_eq!((h.shutter_phase, h.shutter_angle), (Some(-90), 180));
     // 327: displayStartFrame 100 at 25 fps = 4 s = 102400/25600; the shutter phase is back to 0.
     let h = skip!(comp_header("327-comp-displaystartframe-100.aep"));
     assert_eq!(h.display_start, Some(rat(102400, 25600)));
-    assert_eq!((h.display_start_seconds(), h.display_start_frame(), h.shutter_phase), (Some(4.0), Some(100), Some(0)));
+    assert_eq!(h.shutter_phase, Some(0));
     // The base: no phase, start 0.
     let h = skip!(comp_header("000-base.aep"));
-    assert_eq!((h.shutter_phase, h.display_start_seconds(), h.display_start_frame()), (Some(0), Some(0.0), Some(0)));
-    assert_eq!(h.pixel_aspect_ratio(), Some(1.0));
+    assert_eq!((h.shutter_phase, h.display_start.and_then(|r| r.reduced())), (Some(0), Some(rat(0, 1))));
+    assert_eq!(h.pixel_aspect.reduced(), Some(rat(1, 1)));
     // A short chunk still decodes the old fields.
     let bytes = [0u8; 176];
     let h = effectcraft_aep::CompHeader::parse(&bytes).unwrap();

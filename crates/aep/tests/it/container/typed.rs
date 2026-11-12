@@ -111,7 +111,7 @@ fn match_names_come_from_the_tdmn_chunks() {
     assert!(!names.iter().any(|n| n == "ADBE Group End"));
     assert!(root.find(&["ADBE Transform Group", "ADBE Nonexistent"]).is_none());
     // The raw tdmn body is 40 bytes, NUL padded.
-    let raw = root.chunk().children().iter().find(|c| c.is(b"tdmn")).unwrap();
+    let raw = root.chunk().children().find(|c| c.is(b"tdmn")).unwrap();
     assert_eq!(raw.bytes().unwrap().len(), 40);
 }
 
@@ -150,8 +150,8 @@ fn effect_parameter_value() {
     assert!(instance.is_list(b"sspc"));
     // The effect's name is in a nested fnam chunk.
     let fnam = instance.child(b"fnam").unwrap();
-    assert!(matches!(fnam.body, Body::Chunks(_)));
-    assert_eq!(fnam.children()[0].bytes(), Some(&b"Slider Control"[..]));
+    assert!(matches!(fnam.to_chunk().body, Body::Chunks(_)));
+    assert_eq!(fnam.children().next().unwrap().bytes(), Some(&b"Slider Control"[..]));
     // The parameters are a property group inside the instance.
     let params = PropGroup::from_chunk(instance.child_list(b"tdgp").unwrap()).unwrap();
     assert_eq!(params.names(), ["ADBE Slider Control-0000", "ADBE Slider Control-0001", "ADBE Effect Built In Params"]);
@@ -186,7 +186,7 @@ fn position_keyframes() {
     assert_eq!(times, [0, 25_600, 64_000]);
     let seconds: Vec<f64> = times.iter().map(|t| tb.seconds(*t).unwrap()).collect();
     assert_eq!(seconds, [0.0, 1.0, 2.5]);
-    let values: Vec<[f64; 3]> = keys.keyframes().map(|k| k.spatial_value().unwrap()).collect();
+    let values: Vec<Vec<f64>> = keys.keyframes().map(|k| k.value().unwrap()).collect();
     assert_eq!(values, [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 100.0, 0.0]]);
 }
 

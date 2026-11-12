@@ -154,16 +154,15 @@ use effectcraft_aep::{AepFile, Body, Chunk, Comp, Layer, Project, PropGroup, Pro
 
 /// Touches the property accessors; none may panic on a damaged property.
 fn exercise_property(p: &Property<'_, '_>) {
-    let _ = (p.header(), p.dims(), p.is_animated(), p.static_value(), p.time_scale(), p.flags(), p.is_static_flag_set());
-    let _ = (p.expression(), p.expression_flags().map(|f| (f.all_set(), f.disabled())), p.expression_enabled(), p.user_name(), p.first_key_value());
-    let _ = p.color_argb();
+    let _ = (p.header(), p.dims(), p.is_animated(), p.static_value(), p.time_scale(), p.flags());
+    let _ = (p.expression(), p.expression_flags().map(|f| f.disabled()), p.expression_enabled(), p.user_name(), p.first_key_value());
     if let Some(keys) = p.keys() {
         let scale = p.time_scale().unwrap_or(0);
         for k in keys.keyframes() {
-            let _ = (k.time_units(), k.spatial_value(), k.raw().len(), k.kind(), k.seconds(scale), k.seconds(0));
+            let _ = (k.time_units(), k.raw().len(), k.kind(), k.seconds(scale), k.seconds(0));
             let _ = (k.interpolation_in(), k.interpolation_out(), k.flags(), k.label(), k.is_roving());
-            let _ = (k.scalar_value(), k.ease(), k.spatial(), k.components(), k.value(), k.plain_ease_slots());
-            let _ = (k.ease_components(), k.color_distance());
+            let _ = (k.scalar_value(), k.ease(), k.spatial(), k.components(), k.value());
+            let _ = k.ease_components();
             for component in [0, 1, 2, 3, 7, 255, usize::MAX] {
                 let _ = k.ease_component(component);
             }
@@ -193,17 +192,14 @@ fn exercise_group(g: &PropGroup<'_, '_>, depth: usize) {
 fn exercise_layer(project: &Project<'_, '_>, comp_size: (u32, u32), layer: &Layer<'_, '_>) {
     let _ = (layer.name(), layer.is_three_d(), layer.id(), layer.track_matte());
     if let Some(h) = layer.header() {
-        let _ = (h.in_point(), h.out_point(), h.in_point_seconds(), h.out_point_seconds(), h.start_seconds(), h.stretch_percent());
-        let _ = (h.stretch_ratio(), h.stretch_den);
+        let _ = (h.in_point(), h.out_point(), h.stretch_ratio(), h.stretch_den);
         let _ = (h.is_shy(), h.is_locked(), h.is_solo(), h.is_three_d(), h.is_motion_blur(), h.is_adjustment(), h.is_guide());
-        let _ = (h.is_null_object(), h.collapses_transformations(), h.name_is_user_set(), h.quality, h.blend_mode, h.layer_type);
+        let _ = (h.is_null_object(), h.collapses_transformations(), h.quality, h.blend_mode, h.layer_type);
         let _ = (h.is_enabled(), h.is_video_enabled(), h.is_audio_enabled(), h.is_effects_enabled(), h.is_auto_oriented(), h.light_type(), h.blend_mode.code());
     }
     let _ = (layer.is_enabled(), layer.is_audio_enabled(), layer.is_effects_enabled());
-    let _ = (layer.camera_position().map(|p| p.reported(comp_size.0, comp_size.1, true)), layer.camera_point_of_interest(), layer.light_intensity());
+    let _ = layer.camera_position().map(|p| (p.stored, p.auto_state));
     let _ = project.layer_anchor_px(layer);
-    let _ = (layer.camera_zoom(), layer.camera_depth_of_field(), layer.camera_focus_distance(), layer.camera_aperture());
-    let _ = (layer.light_color(), layer.light_cone_angle(), layer.light_cone_feather());
     let _ = layer
         .time_remap()
         .map(|t| (t.enabled, t.keys.iter().fold(0.0, |acc, k| acc + k.value_seconds + k.time_seconds.unwrap_or(0.0) + f64::from(k.time_units))));
@@ -230,7 +226,7 @@ fn exercise_layer(project: &Project<'_, '_>, comp_size: (u32, u32), layer: &Laye
             }
         }
     }
-    let _ = (project.layer_source(layer).map(|i| i.id()), project.layer_display_name(layer), project.layer_source_size(layer));
+    let _ = (project.layer_source(layer).map(|i| i.id()), project.layer_source(layer).and_then(|i| i.display_name()), project.layer_source_size(layer));
     if let Some(t) = layer.transform(comp_size.0, comp_size.1) {
         let _ = (t.anchor_px(f64::from(comp_size.0), f64::from(comp_size.1)), t.position.value, t.opacity_percent.value);
     }
@@ -263,7 +259,6 @@ fn exercise_layer(project: &Project<'_, '_>, comp_size: (u32, u32), layer: &Laye
     }
     for m in layer.masks() {
         let _ = (m.name.clone(), m.mode, m.inverted, m.counter, m.feather, m.opacity_percent, m.expansion, m.path_animated, m.path_key_seconds.len());
-        let _ = project.mask_vertices_px(layer, &m).map(|shapes| shapes.iter().map(Vec::len).sum::<usize>());
         for s in &m.shapes {
             let _ = (s.vertex_count(), s.vertices((1920.0, 1080.0)).len(), s.vertices((f64::NAN, f64::INFINITY)).len(), s.open);
         }
@@ -291,10 +286,9 @@ fn exercise_comp(project: &Project<'_, '_>, comp: &Comp<'_, '_>) {
     let mut size = (1920, 1080);
     if let Some(h) = comp.header() {
         size = (u32::from(h.width), u32::from(h.height));
-        let _ = (h.frame_rate(), h.frame_rate_from_fixed(), h.duration_seconds(), h.work_area_start_seconds(), h.work_area_end_seconds());
-        let _ = (h.frame_rate_exact(), h.duration_frames());
-        let _ = (h.background_rgb(), h.pixel_aspect_ratio(), h.pixel_aspect.reduced(), h.shutter_angle, h.motion_blur);
-        let _ = (h.shutter_phase, h.display_start, h.display_start_seconds(), h.display_start_frame());
+        let _ = (h.frame_rate(), h.frame_rate_fixed, h.duration_seconds(), h.work_area_start_units, h.work_area_end_units);
+        let _ = (h.background, h.pixel_aspect.to_f64(), h.pixel_aspect.reduced(), h.shutter_angle, h.motion_blur);
+        let _ = (h.shutter_phase, h.display_start.map(|r| r.to_f64()));
     }
     for layer in comp.layers() {
         exercise_layer(project, size, &layer);
@@ -305,10 +299,8 @@ fn exercise_comp(project: &Project<'_, '_>, comp: &Comp<'_, '_>) {
 fn exercise(file: &AepFile<'_>) {
     let Some(project) = Project::new(file) else { return };
     for item in project.all_items() {
-        let _ = (item.kind(), item.name(), item.id(), item.label(), item.used_item_ids(), item.footage(), item.display_name());
-        let _ = item
-            .footage()
-            .map(|f| (f.duration, f.native_frame_rate, f.bits_per_pixel, f.file_size, f.audio_sample_rate, f.is_sequence, f.sequence_frame_count()));
+        let _ = (item.kind(), item.name(), item.id(), item.label(), item.footage(), item.display_name());
+        let _ = item.footage().map(|f| (f.duration, f.native_frame_rate, f.bits_per_pixel, f.file_size, f.audio_sample_rate, f.is_sequence));
         let _ = item.id().and_then(|id| project.item_by_id(id));
         if let Some(comp) = item.comp() {
             exercise_comp(&project, &comp);
@@ -561,12 +553,12 @@ fn extreme_values_in_the_decoded_headers() {
     use effectcraft_aep::{CompHeader, LayerHeader, Rational, ShapePath};
     // Every field at its maximum: no overflow, no division by zero, no panic.
     let h = LayerHeader::parse(&[0xff; 164]).unwrap();
-    let _ = (h.in_point(), h.out_point(), h.in_point_seconds(), h.out_point_seconds(), h.start_seconds(), h.stretch_percent());
+    let _ = (h.in_point(), h.out_point(), h.start.to_f64(), h.stretch_ratio());
     let mut zero_den = [0u8; 164];
     zero_den[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
     zero_den[12..16].copy_from_slice(&i32::MIN.to_be_bytes());
     let h = LayerHeader::parse(&zero_den).unwrap();
-    assert_eq!((h.in_point(), h.out_point(), h.start_seconds()), (None, None, None));
+    assert_eq!((h.in_point(), h.out_point(), h.start.to_f64()), (None, None, None));
     let mut wide = [0u8; 164];
     wide[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
     wide[12..16].copy_from_slice(&i32::MIN.to_be_bytes());
@@ -574,14 +566,12 @@ fn extreme_values_in_the_decoded_headers() {
     wide[20..24].copy_from_slice(&i32::MAX.to_be_bytes());
     wide[24..28].copy_from_slice(&u32::MAX.to_be_bytes());
     let h = LayerHeader::parse(&wide).unwrap();
-    let _ = (h.in_point(), h.in_point_seconds());
+    let _ = h.in_point();
     let c = CompHeader::parse(&[0xff; 204]).unwrap();
-    assert_eq!((c.duration_seconds(), c.work_area_start_seconds(), c.work_area_end_units), (None, None, None));
-    let _ = (c.frame_rate(), c.frame_rate_from_fixed(), c.background_rgb(), c.pixel_aspect_ratio(), c.frame_rate_exact());
-    assert_eq!(c.duration_frames(), Some(1));
+    assert_eq!((c.duration_seconds(), c.work_area_end_units), (None, None));
+    let _ = (c.frame_rate(), c.pixel_aspect.to_f64());
     let zero = CompHeader::parse(&[0; 204]).unwrap();
-    assert_eq!((zero.frame_rate(), zero.pixel_aspect_ratio(), zero.duration_seconds()), (None, None, None));
-    assert_eq!((zero.frame_rate_exact(), zero.duration_frames()), (None, None));
+    assert_eq!((zero.frame_rate(), zero.pixel_aspect.to_f64(), zero.duration_seconds()), (None, None, None));
     let all = LayerHeader::parse(&[0xff; 164]).unwrap();
     let _ = (all.is_enabled(), all.is_auto_oriented(), all.light_type(), all.blend_mode.code());
     assert_eq!(LayerHeader::parse(&[0u8; 164]).unwrap().light_type(), None);
@@ -680,7 +670,7 @@ fn hostile_text_dictionaries_and_marker_headers_never_panic() {
 
 #[test]
 fn extreme_values_in_the_batch_3_fields() {
-    use effectcraft_aep::{CompHeader, Footage, LayerHeader, Rational};
+    use effectcraft_aep::{CompHeader, LayerHeader};
     // Time stretch: zero and maximal numerators and denominators (bytes 8 and 108), with extreme times.
     for (num, den) in [(0u32, 0u32), (1, 0), (0, 1), (u32::MAX, 1), (1, u32::MAX), (u32::MAX, u32::MAX), (3, 2)] {
         let mut ldta = [0u8; 164];
@@ -693,7 +683,7 @@ fn extreme_values_in_the_batch_3_fields() {
         ldta[28..32].copy_from_slice(&i32::MIN.to_be_bytes());
         ldta[32..36].copy_from_slice(&1u32.to_be_bytes());
         let h = LayerHeader::parse(&ldta).unwrap();
-        let _ = (h.stretch_ratio(), h.stretch_percent(), h.in_point(), h.out_point(), h.in_point_seconds(), h.out_point_seconds());
+        let _ = (h.stretch_ratio(), h.in_point(), h.out_point());
         if den == 0 {
             assert_eq!((h.stretch_ratio(), h.in_point(), h.out_point()), (None, None, None));
         }
@@ -701,32 +691,8 @@ fn extreme_values_in_the_batch_3_fields() {
     // Display start and shutter phase from extreme bytes; a missing tail leaves them unknown.
     for fill in [0x00u8, 0x7f, 0x80, 0xff] {
         let c = CompHeader::parse(&[fill; 204]).unwrap();
-        let _ = (c.shutter_phase, c.display_start, c.display_start_seconds(), c.display_start_frame());
+        let _ = (c.shutter_phase, c.display_start.map(|r| r.to_f64()));
     }
-    let zero_rate = CompHeader::parse(&[0; 204]).unwrap();
-    assert_eq!((zero_rate.display_start_seconds(), zero_rate.display_start_frame()), (None, None));
-    // Footage durations: zero denominator, negative and maximal numerators, a huge frame rate.
-    let base = Footage {
-        file_type: String::new(),
-        width: 0,
-        height: 0,
-        name: None,
-        is_solid: false,
-        solid_argb: None,
-        path: None,
-        duration: None,
-        native_frame_rate: 0,
-        bits_per_pixel: 0,
-        file_size: 0,
-        audio_sample_rate: None,
-        is_sequence: true,
-        psd_layer: None,
-    };
-    for (num, den, rate) in [(3i64, 30i64, 30u32), (3, 0, 30), (-3, 30, 30), (i64::MAX, 1, u32::MAX), (i64::MIN, -1, u32::MAX), (1, i64::MAX, 1), (0, 1, 0)] {
-        let f = Footage { duration: Some(Rational { num, den }), native_frame_rate: rate, ..base.clone() };
-        let _ = f.sequence_frame_count();
-    }
-    assert_eq!(Footage { duration: Some(Rational { num: 3, den: 30 }), native_frame_rate: 30, ..base.clone() }.sequence_frame_count(), Some(3));
-    assert_eq!(Footage { duration: Some(Rational { num: 3, den: 0 }), native_frame_rate: 30, ..base.clone() }.sequence_frame_count(), None);
-    assert_eq!(Footage { duration: None, ..base }.sequence_frame_count(), None);
+    // A zero denominator has no value.
+    assert_eq!(CompHeader::parse(&[0; 204]).unwrap().display_start.and_then(|r| r.to_f64()), None);
 }

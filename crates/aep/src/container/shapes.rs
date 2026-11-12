@@ -10,7 +10,7 @@
 //! points are in pixels relative to the layer origin.
 
 use crate::container::masks::ShapePath;
-use crate::container::typed::{Layer, PropGroup, PropNode, Property};
+use crate::container::typed::{Layer, PropGroup, PropNode};
 use crate::container::values::{Tracked, read, read_opt};
 
 /// The stroke line cap (`ADBE Vector Stroke Line Cap`, stored as a double; butt is the default and
@@ -140,7 +140,7 @@ fn number(group: &PropGroup<'_, '_>, name: &str) -> Option<Tracked<f64>> {
 fn paths_of(group: &PropGroup<'_, '_>) -> Vec<ShapePath> {
     let Some(PropNode::Other(oms)) = group.get("ADBE Vector Shape") else { return Vec::new() };
     let Some(omks) = oms.child_list(b"omks") else { return Vec::new() };
-    omks.children().iter().filter(|c| c.is_list(b"shap")).filter_map(ShapePath::from_chunk).collect()
+    omks.children().filter(|c| c.is_list(b"shap")).filter_map(ShapePath::from_chunk).collect()
 }
 
 fn item(match_name: String, group: &PropGroup<'_, '_>) -> ShapeItem {
@@ -260,14 +260,5 @@ impl<'f, 'a> Layer<'f, 'a> {
                 PropNode::Property(_) | PropNode::Other(_) => None,
             })
             .collect()
-    }
-}
-
-impl<'f, 'a> Property<'f, 'a> {
-    /// The ARGB fractions of a static colour property (4 components stored as doubles 0..255).
-    pub fn color_argb(&self) -> Option<[f64; 4]> {
-        let v = self.static_value()?;
-        let [a, r, g, b] = *v.as_slice().first_chunk::<4>()?;
-        Some([a / 255.0, r / 255.0, g / 255.0, b / 255.0])
     }
 }

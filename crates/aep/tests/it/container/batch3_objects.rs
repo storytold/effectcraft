@@ -148,19 +148,21 @@ fn a_mask_box_is_normalised_to_the_layer_size() {
     for (got, want) in m.shapes[0].bbox.iter().zip(want_box) {
         assert!(near(f64::from(*got), want, 1e-6), "{:?}", m.shapes[0].bbox);
     }
-    let shapes = project.mask_vertices_px(&layer, m).unwrap();
-    assert_eq!(shapes.len(), 1);
-    let got: Vec<[f64; 2]> = shapes[0].iter().map(|v| v.position).collect();
+    // The box scales by the size of the layer's source (the importer takes that size from the
+    // source item it matched, the same item `layer_source_size` reads).
+    let (w, h) = project.layer_source_size(&layer).unwrap();
+    assert_eq!(m.shapes.len(), 1);
+    let got: Vec<[f64; 2]> = m.shapes[0].vertices((f64::from(w), f64::from(h))).iter().map(|v| v.position).collect();
     for (g, w) in got.iter().zip([[20.0, 30.0], [80.0, 30.0], [80.0, 70.0], [20.0, 70.0]]) {
         assert_near(g, &w, 1e-3);
     }
     assert_eq!(got.len(), 4);
-    // A layer without a sized source has no pixel vertices.
+    // A layer without a sized source has no size to scale by.
     let bytes = fixture!("333-shape-group-two-rects.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
     let shape = layer_named(&first_comp(&project), "Shape");
-    assert!(project.mask_vertices_px(&shape, m).is_none());
+    assert!(project.layer_source_size(&shape).is_none());
 }
 
 #[test]
@@ -178,12 +180,14 @@ fn one_mkif_per_mask_and_the_mode_none() {
         assert_eq!((m.mode, m.inverted, m.counter), (Some(MaskMode::Add), Some(false), Some(counter)));
         assert_eq!(m.shapes.len(), 1);
     }
-    let v1 = project.mask_vertices_px(&layer, &masks[0]).unwrap();
+    let (w, h) = project.layer_source_size(&layer).unwrap();
+    let px = |m: &effectcraft_aep::Mask| m.shapes.iter().map(|s| s.vertices((f64::from(w), f64::from(h)))).collect::<Vec<_>>();
+    let v1 = px(&masks[0]);
     for (v, w) in v1[0].iter().zip(ellipse_vertices()) {
         assert_near(&v.position, &w, 1e-2);
     }
     // Mask 2 has its own box (500..900 x 350..650) normalised to the layer.
-    let v2 = project.mask_vertices_px(&layer, &masks[1]).unwrap();
+    let v2 = px(&masks[1]);
     for (v, w) in v2[0].iter().zip([[500.0, 350.0], [900.0, 350.0], [900.0, 650.0], [500.0, 650.0]]) {
         assert_near(&v.position, &w, 1e-2);
     }
@@ -382,78 +386,16 @@ fn the_last_style_run_absorbs_the_final_carriage_return() {
 
 // ------------------------------------------------------------------ camera and light (341-345)
 
+/// Camera zoom keeps the auto position.
 #[test]
-fn camera_zoom_and_depth_of_field() {
-    let camera = |name: &str| {
-        Some({
-            let bytes = crate::common::try_fixture(name)?;
-            let file = open(&bytes);
-            let project = Project::new(&file).unwrap();
-            let layer = layer_of_type(&first_comp(&project), LayerType::Camera);
-            (
-                layer.camera_zoom(),
-                layer.camera_depth_of_field(),
-                layer.camera_focus_distance(),
-                layer.camera_aperture(),
-                layer.camera_position().map(|p| (p.stored, p.auto_state)),
-            )
-        })
-    };
-    // 341: Zoom 2000 is stored; the auto Position keeps [0, 0, -2666.67].
-    let (zoom, dof, focus, aperture, pos) = skip!(camera("341-camera-zoom-2000.aep"));
-    assert_eq!(zoom.map(|z| (z.value, z.source)), Some((2000.0, ValueSource::Stored)));
-    assert_eq!((dof.map(|d| (d.value, d.source)), focus, aperture), (Some((false, ValueSource::Default)), None, None));
-    let (stored, auto) = pos.unwrap();
-    assert!(auto && near(stored[2], -2666.67, 0.01) && stored[0] == 0.0, "{stored:?}");
-    // 342: DOF on, Focus Distance 800, Aperture 30; Zoom stays the default.
-    let (zoom, dof, focus, aperture, _) = skip!(camera("342-camera-dof-800-30.aep"));
-    assert_eq!(zoom.map(|z| (z.source, near(z.value, 2666.67, 0.01))), Some((ValueSource::Default, true)));
-    assert_eq!(dof.map(|d| (d.value, d.source)), Some((true, ValueSource::Stored)));
-    assert_eq!(focus.map(|f| (f.value, f.source)), Some((800.0, ValueSource::Stored)));
-    assert_eq!(aperture.map(|f| (f.value, f.source)), Some((30.0, ValueSource::Stored)));
-    // The default camera (256) has nothing but the default zoom.
-    let (zoom, dof, ..) = skip!(camera("256-camera-two-node-default.aep"));
-    assert_eq!((zoom.unwrap().source, dof.unwrap().value), (ValueSource::Default, false));
-    assert_eq!(zoom.unwrap().value, effectcraft_aep::DEFAULT_CAMERA_ZOOM);
-}
-
-#[test]
-fn light_colour_cone_angle_and_feather() {
-    let light = |name: &str| {
-        Some({
-            let bytes = crate::common::try_fixture(name)?;
-            let file = open(&bytes);
-            let project = Project::new(&file).unwrap();
-            let layer = layer_of_type(&first_comp(&project), LayerType::Light);
-            assert_eq!(layer.header().unwrap().light_type(), Some(effectcraft_aep::LightType::Spot), "{name}");
-            let t = |x: Option<effectcraft_aep::Tracked<f64>>| x.map(|x| (x.value, x.source));
-            (layer.light_color().map(|c| (c.value, c.source)), t(layer.light_cone_angle()), t(layer.light_cone_feather()))
-        })
-    };
-    // The default spot light: white, 90, 50, all absent.
-    let (colour, angle, feather) = skip!(light("254-light-spot-intensity-50.aep"));
-    assert_eq!((colour, angle, feather), (Some(([1.0; 4], ValueSource::Default)), Some((90.0, ValueSource::Default)), Some((50.0, ValueSource::Default))));
-    // 343: colour [1,0,0,1] = ARGB doubles [255,255,0,0].
-    let (colour, angle, feather) = skip!(light("343-light-spot-color-red.aep"));
-    assert_eq!(colour, Some(([1.0, 1.0, 0.0, 0.0], ValueSource::Stored)));
-    assert_eq!((angle, feather), (Some((90.0, ValueSource::Default)), Some((50.0, ValueSource::Default))));
-    // 344: Cone Angle 60. 345: Cone Feather 30.
-    let (colour, angle, feather) = skip!(light("344-light-spot-coneangle-60.aep"));
-    assert_eq!((colour.unwrap().1, angle, feather), (ValueSource::Default, Some((60.0, ValueSource::Stored)), Some((50.0, ValueSource::Default))));
-    let (_, angle, feather) = skip!(light("345-light-spot-conefeather-30.aep"));
-    assert_eq!((angle, feather), (Some((90.0, ValueSource::Default)), Some((30.0, ValueSource::Stored))));
-    // A point light (252) stores Cone Angle 90 / Feather 50 in their default state.
-    let bytes = fixture!("252-light-point.aep");
+fn camera_zoom_keeps_the_auto_position() {
+    // 341: Zoom 2000 is stored (checked on import); the auto Position keeps [0, 0, -2666.67].
+    let bytes = fixture!("341-camera-zoom-2000.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_of_type(&first_comp(&project), LayerType::Light);
-    assert_eq!(layer.light_cone_angle().map(|a| (a.value, a.source)), Some((90.0, ValueSource::Stored)));
-    // Layers without light options have no light accessors.
-    let bytes = fixture!("000-base.aep");
-    let file = open(&bytes);
-    let project = Project::new(&file).unwrap();
-    let solid = base_layer(&first_comp(&project));
-    assert!(solid.light_color().is_none() && solid.camera_zoom().is_none() && solid.camera_depth_of_field().is_none());
+    let layer = layer_of_type(&first_comp(&project), LayerType::Camera);
+    let pos = layer.camera_position().unwrap();
+    assert!(pos.auto_state && near(pos.stored[2], -2666.67, 0.01) && pos.stored[0] == 0.0, "{:?}", pos.stored);
 }
 
 // ------------------------------------------------------------------ marker data (347-349, 249)
@@ -503,7 +445,7 @@ fn audio_footage_item() {
     assert_eq!((f.width, f.height, f.is_solid), (0, 0, false));
     assert_eq!(f.duration, Some(rat(48000, 48000)));
     assert_eq!((f.audio_sample_rate, f.file_size, f.bits_per_pixel, f.native_frame_rate), (Some(48000.0), 96044, 0, 0));
-    assert!(!f.is_sequence && f.sequence_frame_count().is_none());
+    assert!(!f.is_sequence && item.sequence_info().is_none());
     // The combined file stores no display name for the item (the single-case file had
     // "test-tone.wav"); the path names the file.
     assert_eq!(item.label(), Some(7));
@@ -527,7 +469,7 @@ fn image_sequence_is_one_item() {
         assert_eq!(f.duration, Some(rat(3, 30)), "{name}");
         assert_eq!((f.native_frame_rate, f.bits_per_pixel, f.file_size, f.audio_sample_rate), (30, 24, 504, None), "{name}");
         assert!(f.is_sequence, "{name}");
-        assert_eq!(f.sequence_frame_count(), Some(3), "{name}");
+        assert_eq!(item.sequence_info().map(|s| s.frame_count()), Some(3), "{name}");
         // The first file name sits in opti; the alias points at the sequence folder.
         assert_eq!(f.name.as_deref(), Some("seq_001.png"), "{name}");
         assert!(f.path.as_deref().is_some_and(|p| p.ends_with("test-seq")), "{name}");

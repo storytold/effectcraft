@@ -2,8 +2,10 @@
 //! linear-light switches, the time display and the frame count start. Cases 620-634: one change
 //! each against the base project 620; every field below is the only byte (or chunk) that changes.
 
+use crate::container::bytes::be_u32;
 use crate::container::chunk::AepFile;
 use crate::container::footage::json_string;
+use crate::container::index::{Node, Root, TreeIndex};
 
 /// The time display style (`nhed` byte 8, feet + frames byte 11, film type byte 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +56,17 @@ pub struct ProjectSettings {
 impl ProjectSettings {
     /// Reads the settings from the top-level chunks.
     pub fn read(file: &AepFile<'_>) -> ProjectSettings {
-        let nhed = file.chunk(b"nhed").and_then(|c| c.bytes());
+        Self::of(Root::from(file))
+    }
+
+    /// Reads the settings from the top-level chunks of an indexed file.
+    pub fn read_index(index: &TreeIndex<'_>) -> ProjectSettings {
+        Self::of(Root::from(index))
+    }
+
+    /// Reads the settings from the top-level chunks of either tree.
+    pub(crate) fn of(file: Root<'_, '_>) -> ProjectSettings {
+        let nhed = file.chunk(b"nhed").and_then(Node::bytes);
         let byte = |i: usize| nhed.and_then(|b| b.get(i).copied());
         let bits_per_channel = byte(15).and_then(|v| match v {
             0 => Some(8),
@@ -73,9 +85,9 @@ impl ProjectSettings {
             1 => Some(1),
             _ => None,
         });
-        let flag = |id: &[u8; 4]| file.chunk(id).and_then(|c| c.bytes()).and_then(|b| b.first().copied()) == Some(1);
-        let working_gamma_24 = file.chunk(b"dwga").and_then(|c| c.bytes()).and_then(|b| b.get(..4)).map(|b| b != [0, 0, 0, 0]);
-        let scene_compensation = file.chunk(b"acer").and_then(|c| c.bytes()).and_then(|b| b.first().copied()).map(|v| v != 0);
+        let flag = |id: &[u8; 4]| file.chunk(id).and_then(Node::bytes).and_then(|b| b.first().copied()) == Some(1);
+        let working_gamma_24 = file.chunk(b"dwga").and_then(Node::bytes).and_then(|b| b.get(..4)).map(|b| b != [0, 0, 0, 0]);
+        let scene_compensation = file.chunk(b"acer").and_then(Node::bytes).and_then(|b| b.first().copied()).map(|v| v != 0);
         ProjectSettings {
             bits_per_channel,
             working_space: working_space(file),
@@ -90,9 +102,10 @@ impl ProjectSettings {
 }
 
 /// The working space: the `Utf8` right after `PwCs`.
-fn working_space(file: &AepFile<'_>) -> Option<WorkingSpace> {
-    let at = file.chunks.iter().position(|c| c.is(b"PwCs"))?;
-    let json = file.chunks.get(at.checked_add(1)?).filter(|c| c.is(b"Utf8"))?.bytes()?;
+fn working_space(file: Root<'_, '_>) -> Option<WorkingSpace> {
+    let mut chunks = file.chunks();
+    chunks.find(|c| c.is(b"PwCs"))?;
+    let json = chunks.next().filter(|c| c.is(b"Utf8"))?.bytes()?;
     let trimmed: Vec<u8> = json.iter().copied().filter(|b| !b.is_ascii_whitespace() && *b != 0).collect();
     if trimmed == b"{}" {
         return Some(WorkingSpace::None);
@@ -130,7 +143,7 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 /// The profile description (ICC.1 tag `desc`): a v2 `desc` (ASCII) or a v4 `mluc` (its first
 /// record, UTF-16BE). `None` when the profile or the tag is cut short.
 fn icc_description(icc: &[u8]) -> Option<String> {
-    let be32 = |at: usize| icc.get(at..at.checked_add(4)?).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
+    let be32 = |at: usize| be_u32(icc, at);
     let count = be32(128)?;
     let tag = (0..count.min(1024)).find_map(|i| {
         let at = 132usize.checked_add(usize::try_from(i).ok()?.checked_mul(12)?)?;
@@ -141,13 +154,13 @@ fn icc_description(icc: &[u8]) -> Option<String> {
     let body = icc.get(off..off.checked_add(len)?)?;
     let text = match body.get(..4)? {
         b"desc" => {
-            let n = usize::try_from(u32::from_be_bytes(body.get(8..12)?.try_into().ok()?)).ok()?;
+            let n = usize::try_from(be_u32(body, 8)?).ok()?;
             let ascii = body.get(12..12usize.checked_add(n)?)?;
             String::from_utf8_lossy(ascii.split(|b| *b == 0).next().unwrap_or_default()).into_owned()
         }
         b"mluc" => {
-            let n = usize::try_from(u32::from_be_bytes(body.get(20..24)?.try_into().ok()?)).ok()?;
-            let at = usize::try_from(u32::from_be_bytes(body.get(24..28)?.try_into().ok()?)).ok()?;
+            let n = usize::try_from(be_u32(body, 20)?).ok()?;
+            let at = usize::try_from(be_u32(body, 24)?).ok()?;
             let units: Vec<u16> = body.get(at..at.checked_add(n)?)?.as_chunks::<2>().0.iter().map(|p| u16::from_be_bytes(*p)).collect();
             String::from_utf16_lossy(&units)
         }
