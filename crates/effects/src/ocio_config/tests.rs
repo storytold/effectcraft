@@ -452,3 +452,26 @@ fn an_ocio_config_and_its_luts_are_read_again_once_they_change() {
     assert!(load_config(&src).is_err(), "a deleted config");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A LUT a cached config read that changes is noticed without a render loading the config (the
+/// interface's watcher), and the config's files name it (frame and layer cache keys hold them).
+#[test]
+fn check_lut_files_notices_a_configs_lut() {
+    let dir = std::env::temp_dir().join(format!("ec-fx-3538-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lut = dir.join("watched.cube");
+    std::fs::write(&lut, "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n").unwrap();
+    let config = dir.join("config.ocio");
+    std::fs::write(&config, "ocio_profile_version: 2\ncolorspaces:\n  - !<ColorSpace>\n    name: lin\n  - !<ColorSpace>\n    name: graded\n    to_reference: !<FileTransform> {src: watched.cube}\n").unwrap();
+    let src = config.to_string_lossy().into_owned();
+    assert!(load_config(&src).is_ok());
+    let files = crate::lut_files(&src);
+    assert!(files.contains(&lut.to_string_lossy().into_owned()), "{files:?}");
+    let before = crate::check_lut_files();
+    assert!(cached_files(&src).is_some(), "an unchanged config stays");
+    std::fs::write(&lut, "LUT_1D_SIZE 3\n0 0 0\n0.5 0.5 0.5\n1 1 1\n").unwrap();
+    assert!(crate::check_lut_files() > before);
+    assert!(cached_files(&src).is_none(), "a config whose LUT changed is read again");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
