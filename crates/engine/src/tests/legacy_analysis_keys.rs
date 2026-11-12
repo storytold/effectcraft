@@ -75,6 +75,15 @@ fn analyses_saved_by_0_22_survive_edits_that_keep_their_frames() {
     assert!(cleared(&s));
     s.execute_checked("edit.undo", json!({})).unwrap();
     assert_eq!(saved(&s), before);
+    // Footage framed as a placed page has other frames too, though 0.22 had no such field.
+    s.edit("place page", None, |p, _| {
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = p.item_mut(FOOTAGE).map(|i| &mut i.kind) {
+            f.placed_page = true;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(cleared(&s));
 }
 
 /// Solving again reuses the 0.22 tracks rather than tracking the (here offline) footage again.
