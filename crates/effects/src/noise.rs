@@ -978,6 +978,10 @@ mod tests {
             *p = premul([0.6, 0.3, (i % 7) as f32 / 7.0], 1.0);
         }
         for id in ["ec.noise.noisehls", "ec.noise.noisehlsauto"] {
+            for (param, lo, hi) in [("hue", 0.0, 1000.0), ("lightness", 0.0, 1000.0), ("saturation", 0.0, 1000.0), ("grainSize", 0.0, 100.0)] {
+                let ui = &crate::find(id).unwrap().params.iter().find(|p| p.id == param).unwrap().ui;
+                assert!(matches!(ui, ParamUi::Slider { min, max, .. } if *min == lo && *max == hi), "{id} {param}: {ui:?}");
+            }
             let at = |amount: f64, grain: f64| {
                 let vals =
                     [("noise", Value::Enum(2)), ("hue", num(amount)), ("lightness", num(amount)), ("saturation", num(amount)), ("grainSize", num(grain))];

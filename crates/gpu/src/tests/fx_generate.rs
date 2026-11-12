@@ -83,6 +83,11 @@ fn wipes() {
     effect_case("ec.transition.radialwipe", &[("completion", n(45.0)), ("wipe", e(1)), ("center", pt(30.2, 19.6))]);
     effect_case("ec.transition.radialwipe", &[("completion", n(60.0)), ("wipe", e(2)), ("startAngle", n(-40.0)), ("feather", n(3.0))]);
     effect_case("ec.transition.radialwipe", &[("completion", n(0.0)), ("feather", n(20.0))]);
+    // #3472-#3474: the ends of After Effects' ranges (a Feather wider than 8 blinds is the CPU's
+    // even veil).
+    effect_case("ec.transition.venetian", &[("completion", n(40.0)), ("width", n(1.0)), ("feather", n(6.0))]);
+    effect_case("ec.transition.venetian", &[("completion", n(40.0)), ("width", n(32000.0)), ("feather", n(32000.0))]);
+    effect_case("ec.transition.radialwipe", &[("completion", n(40.0)), ("feather", n(32000.0))]);
     effect_case("ec.transition.gradientwipe", &[("completion", n(40.0))]);
     effect_case("ec.transition.gradientwipe", &[("completion", n(55.0)), ("softness", n(30.0)), ("invert", b(true))]);
     effect_case("ec.transition.gradientwipe", &[("completion", n(100.0))]);
@@ -147,6 +152,8 @@ fn generators() {
     );
     effect_case("ec.generate.checkerboard", &[("sizeFrom", e(0)), ("corner", pt(16.0, 11.0)), ("color", c(0.9, 0.3, 0.1)), ("blendingMode", e(1))]);
     effect_case("ec.generate.grid", &[("width", n(12.0)), ("border", n(3.0))]);
+    // #3476: a border wider than the cells (After Effects' maximum).
+    effect_case("ec.generate.grid", &[("width", n(12.0)), ("border", n(2000.0))]);
     effect_case(
         "ec.generate.grid",
         &[
