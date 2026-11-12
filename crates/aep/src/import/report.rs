@@ -161,6 +161,10 @@ pub struct Imported {
     /// in [`LossCategory::Effects`]).
     #[serde(default)]
     pub effects: usize,
+    /// Effects with no counterpart, kept as placeholders that render nothing (their parameters,
+    /// for expressions; each is also in [`LossCategory::Effects`]).
+    #[serde(default)]
+    pub placeholder_effects: usize,
     /// Layer styles (Drop Shadow, Stroke, ...), one per style on a layer.
     #[serde(default)]
     pub layer_styles: usize,
@@ -278,6 +282,9 @@ pub(crate) struct Collector {
     /// many instances there were. They get a line each in [`Collector::finish`], so one that
     /// comes after the example lines are used up is still named (#3365).
     unmapped_effects: BTreeMap<String, (String, usize)>,
+    /// The properties and popup items the placeholders of this import hold so far (at most
+    /// `placeholder::MAX_COST`).
+    pub placeholder_cost: usize,
 }
 
 /// How many different unmapped effects get a line of their own (a file names at most this many).
