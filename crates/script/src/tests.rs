@@ -882,6 +882,17 @@ fn frames_count_type_sets_the_project_frame_count() {
     assert_eq!(s.project.settings.frame_start, 0);
 }
 
+/// `CompItem.displayStartFrame` reads and writes the comp start time in frames.
+#[test]
+fn comp_display_start_frame_follows_the_frame_rate() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        "var c = app.project.items.addComp('c', 64, 64, 1, 4, 25); var a = c.displayStartFrame; c.displayStartFrame = 100; [a, c.displayStartFrame, c.displayStartTime].join('|')",
+    );
+    assert_eq!(o.result, json!("0|100|4"));
+}
+
 #[test]
 fn console_keeps_variables() {
     let mut s = session();
