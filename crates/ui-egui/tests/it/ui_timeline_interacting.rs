@@ -158,6 +158,36 @@ fn work_area_drag_keeps_full_resolution() {
     release(&mut f.h, from);
 }
 
+/// Scrubs the precomp's Audio Levels in the Timeline; `reads_audio` adds an expression that
+/// reads audio. Returns whether the viewer drew a draft while held.
+fn audio_levels_scrub(reads_audio: bool) -> bool {
+    let mut f = fixture("adaptive");
+    if reads_audio {
+        let rotation = json!({"layer": f.solid, "path": "transform/rotation", "expression": "thisComp.layer(1).audioLevels; value"});
+        f.h.state_mut().session.execute("prop.setExpression", rotation).unwrap();
+    }
+    let uid = f.h.state().session.active_comp().unwrap().layers.iter().find(|l| l.id.0 == f.pre).unwrap().props.prop("audio/levels").unwrap().uid;
+    let tl = &mut f.h.state_mut().ui.timeline;
+    tl.open_layers.insert(f.pre);
+    tl.layer_reveal.insert(f.pre, vec!["props".into()]);
+    tl.reveal_props.insert(uid);
+    f.h.run_steps(3);
+    let from = rect(&f.h, &format!("timeline.prop.{uid}.value.0")).center();
+    let before = on_screen(&f.h);
+    hold(&mut f.h, from, from + vec2(40.0, 0.0));
+    assert_ne!(on_screen(&f.h), before, "the scrub changed the levels");
+    let draft = draft(&f.h);
+    release(&mut f.h, from);
+    draft
+}
+
+/// A layer's audio is pixels only when something draws it (an expression reading audio here).
+#[test]
+fn audio_levels_scrub_draws_a_draft_only_when_audio_is_drawn() {
+    assert!(audio_levels_scrub(true), "an expression reads the audio");
+    assert!(!audio_levels_scrub(false), "nothing draws the audio");
+}
+
 /// Markers are pixels only to the expressions that read them (#1083): moving one keeps Full.
 #[test]
 fn marker_drag_keeps_full_resolution() {
