@@ -2444,6 +2444,12 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Pre-compose", "יצירת קומפוזיציית ביניים"),
+    ("Leave all attributes in \"{}\"", "השארת כל המאפיינים ב־\u{2068}\"{}\"\u{2069}"),
+    ("Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.", "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"{}\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית."),
+    ("Move all attributes into the new composition", "העברת כל המאפיינים לקומפוזיציה החדשה"),
+    ("Use this option to place the currently selected layers together into a new intermediate composition.", "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה."),
+    ("Adjust composition duration to the time span of the selected layers", "התאמת משך הקומפוזיציה לטווח הזמן של השכבות שנבחרו"),
     ("New Composition From Footage", "קומפוזיציה חדשה מקובץ מדיה"),
     ("Search project", "חיפוש בפרויקט"),
     ("Select an item to see its details", "בחרו פריט להצגת פרטיו"),
@@ -10662,6 +10668,36 @@ mod tests {
         set_current("en");
         assert_eq!(tr("Don't Recover"), "Don't Recover");
         assert_eq!(tr("Light Theme"), "Light Theme");
+    }
+
+    /// The native Pre-compose dialog must translate all options and safely embed mixed-direction layer names.
+    #[test]
+    fn hebrew_precompose_dialog_has_translated_controls_and_bidi_safe_layer_name() {
+        let source = include_str!("../panels/precomp.rs");
+        assert!(source.contains("modal(ctx, tr(\"Pre-compose\")"));
+        assert!(source.contains("radio_value(&mut d.leave, false, tr(\"Move all attributes into the new composition\"))"));
+        assert!(source.contains("egui::RichText::new(tr_args("));
+        set_current("he");
+        for (english, expected) in [
+            ("Pre-compose", "יצירת קומפוזיציית ביניים"),
+            ("Move all attributes into the new composition", "העברת כל המאפיינים לקומפוזיציה החדשה"),
+            ("Use this option to place the currently selected layers together into a new intermediate composition.", "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה."),
+            ("Adjust composition duration to the time span of the selected layers", "התאמת משך הקומפוזיציה לטווח הזמן של השכבות שנבחרו"),
+        ] {
+            assert_eq!(tr(english), expected, "Pre-compose: {english}");
+        }
+        let file = "clip_01.mov";
+        assert_eq!(
+            tr_args("Leave all attributes in \"{}\"", &[&file]),
+            "השארת כל המאפיינים ב־\u{2068}\"clip_01.mov\"\u{2069}"
+        );
+        assert_eq!(
+            tr_args("Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.", &[&file]),
+            "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"clip_01.mov\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית."
+        );
+        set_current("en");
+        assert_eq!(tr("Pre-compose"), "Pre-compose");
+        assert_eq!(tr_args("Leave all attributes in \"{}\"", &[&file]), "Leave all attributes in \"clip_01.mov\"");
     }
 
     /// Native render-queue controls must translate the displayed labels, not change settings IDs.

@@ -111,7 +111,7 @@ pub fn draft_params(d: &PrecomposeDraft) -> serde_json::Value {
 pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut d = app.dialog_state.precompose.clone();
     let (mut ok, mut cancel) = (false, false);
-    super::dialogs::modal(ctx, "Pre-compose", vec2(520.0, 360.0), t, |ui| {
+    super::dialogs::modal(ctx, tr("Pre-compose"), vec2(520.0, 360.0), t, |ui| {
         ui.horizontal(|ui| {
             ui.label(tr("New composition name:"));
             let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(260.0));
@@ -123,16 +123,16 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             let r = ui.radio_value(&mut d.leave, true, tr_args("Leave all attributes in \"{}\"", &[&d.layer_name]));
             app.auto.add("dialog.precompose.leave", r.rect, "Leave all attributes");
             ui.label(
-                egui::RichText::new(format!(
+                egui::RichText::new(tr_args(
                     "Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.",
-                    d.layer_name
+                    &[&d.layer_name],
                 ))
                 .color(t.text_dim)
                 .size(11.0),
             );
         });
         ui.add_space(6.0);
-        let r = ui.radio_value(&mut d.leave, false, "Move all attributes into the new composition");
+        let r = ui.radio_value(&mut d.leave, false, tr("Move all attributes into the new composition"));
         app.auto.add("dialog.precompose.move", r.rect, "Move all attributes");
         ui.label(
             egui::RichText::new(tr("Use this option to place the currently selected layers together into a new intermediate composition."))
