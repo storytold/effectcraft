@@ -14,6 +14,16 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/media")
 }
 
+/// Where a fixture is written before it is renamed into place. Unique per call: tests running as
+/// threads of one process share its id, and two of them asking for the same fixture before it exists
+/// must not write the same staging file.
+fn staging_path(out: &Path, name: &str, ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    out.with_file_name(format!("tmp-{}-{call}-{name}", std::process::id())).with_extension(ext)
+}
+
 /// A fixture with `layout`'s channels `names` (join order) each carrying its own sine, encoded
 /// with `codec_args`. `None` when ffmpeg is missing or cannot make it.
 fn fixture(name: &str, layout: &str, names: &[&str], freqs: &[u32], codec_args: &[&str]) -> Option<PathBuf> {
@@ -27,7 +37,7 @@ fn fixture(name: &str, layout: &str, names: &[&str], freqs: &[u32], codec_args: 
     }
     std::fs::create_dir_all(fixtures()).ok()?;
     let ext = out.extension()?.to_string_lossy().to_string();
-    let tmp = out.with_file_name(format!("tmp-{}-{name}", std::process::id())).with_extension(ext);
+    let tmp = staging_path(&out, name, &ext);
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
     let mut map = String::new();
@@ -207,6 +217,13 @@ fn ac3_entry_naming_two(p: &Path) -> PathBuf {
     let out = p.with_extension("entry2.mp4");
     std::fs::write(&out, bytes).expect("write");
     out
+}
+
+/// Two fixtures asked for at once in one process do not share a staging file.
+#[test]
+fn staging_files_are_unique_per_call() {
+    let out = fixtures().join("dm51.ac3.mp4");
+    assert_ne!(staging_path(&out, "dm51.ac3.mp4", "mp4"), staging_path(&out, "dm51.ac3.mp4", "mp4"));
 }
 
 /// AC-3 5.1 in MP4 with the spec's 2-channel sample entry keeps the centre and surrounds (#1547).
