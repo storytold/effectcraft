@@ -180,6 +180,7 @@ fn an_effect_past_the_spent_budget_gets_no_placeholder() {
     let found = losses(&r, LossCategory::Effects, "Big Fx");
     assert_eq!(found.iter().filter(|d| d.contains("and the ones after it not kept")).count(), 1, "{found:?}");
     assert!(found.iter().any(|d| d.contains("not kept (past the import's placeholder parameters)")), "{found:?}");
+    assert!(found.iter().any(|d| d.contains("kept without rendering") && !d.contains("more like it")), "the kept instance alone: {found:?}");
 }
 
 /// `bytes` with the layer's instance of `match_name` (its `tdmn` and `sspc`) repeated after it.

@@ -94,8 +94,10 @@ pub(crate) fn import_effects<'f, 'a>(
         }
         if found.is_none() && col.placeholder_cost >= crate::import::placeholder::MAX_COST {
             // The import's placeholder budget is spent: the definitions (shared by many instances)
-            // are not read again. Its own line: grouped, it would read as kept.
-            col.lose(LossCategory::Effects, format!("{lost}, not kept (past the import's placeholder parameters)"));
+            // are not read again. Named like any effect without a counterpart, in a group of its
+            // own (with the kept instances it would read as kept).
+            let key = format!("{} (not kept)", fx.match_name());
+            col.lose_unmapped_effect(&key, format!("{lost}, not kept (past the import's placeholder parameters)"));
             continue;
         }
         let params = defs.params(&fx);
