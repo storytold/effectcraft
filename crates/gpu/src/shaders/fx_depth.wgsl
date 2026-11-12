@@ -198,11 +198,13 @@ fn fxd_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        // Cryptomatte (aux = (ID colours, selection coverage)). u[0] = (op, display, matte only).
+        // Cryptomatte (aux = (ID colours, selection coverage)). u[0] = (op, display, matte only,
+        // matte only in alpha). Matte Only is the matte in RGB over alpha 1, or in every channel
+        // for projects saved before #3127 (`effectcraft_effects::matte_only_px`).
         case 7u: {
             let m = q.w;
             if (P.u[0].z != 0u) {
-                o = vec4<f32>(m);
+                o = select(vec4<f32>(m, m, m, 1.0), vec4<f32>(m), P.u[0].w != 0u);
             } else if (P.u[0].y == 0u) {
                 o = vec4<f32>(q.xyz * (1.0 - 0.5 * m) + 0.5 * m, 1.0);
             } else if (P.u[0].y == 1u) {

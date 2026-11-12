@@ -45,6 +45,25 @@ fn design(fc: f64, beta: f64, delay: usize) -> Vec<f32> {
     h.iter().map(|&v| v as f32).collect()
 }
 
+/// Dot product with eight independent partial sums, which the compiler can vectorise (a single
+/// running sum is bound by the latency of the float addition). The sums are combined pairwise.
+#[inline]
+fn dot8(a: &[f32], b: &[f32]) -> f32 {
+    let mut s = [0f32; 8];
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
+        for l in 0..8 {
+            s[l] += x[l] * y[l];
+        }
+    }
+    let mut acc = ((s[0] + s[4]) + (s[1] + s[5])) + ((s[2] + s[6]) + (s[3] + s[7]));
+    for (x, y) in ra.iter().zip(rb) {
+        acc += x * y;
+    }
+    acc
+}
+
 /// Decimates one channel of 48 kHz audio by 3, 4 or 6.
 #[derive(Clone)]
 pub struct Downsampler {
@@ -77,7 +96,7 @@ impl Downsampler {
             let t = taps - 1 + self.factor * j;
             let win = &self.buf[t + 1 - taps..=t];
             // h is symmetric, so the window can be taken in forward order.
-            out.push(win.iter().zip(&self.h).map(|(a, b)| a * b).sum());
+            out.push(dot8(win, &self.h));
         }
         let n = self.buf.len();
         self.buf.copy_within(n - (taps - 1).., 0);
@@ -95,6 +114,16 @@ mod tests {
 
     fn rms(x: &[f32]) -> f64 {
         (x.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn dot8_matches_sequential_sum() {
+        for len in [0usize, 1, 7, 8, 9, 63, 167, 251] {
+            let a: Vec<f32> = (0..len).map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0).collect();
+            let b: Vec<f32> = (0..len).map(|i| ((i * 53 % 89) as f32 - 44.0) / 44.0).collect();
+            let exact: f64 = a.iter().zip(&b).map(|(&x, &y)| x as f64 * y as f64).sum();
+            assert!((dot8(&a, &b) as f64 - exact).abs() < 1e-4, "len {len}");
+        }
     }
 
     #[test]

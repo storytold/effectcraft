@@ -1,6 +1,9 @@
 use super::write::*;
 use super::*;
 
+mod integration;
+mod opt;
+
 fn gradient(w: u32, h: u32) -> Vec<[f32; 4]> {
     (0..w * h).map(|i| [(i % w) as f32 / (w - 1).max(1) as f32, (i / w) as f32 / (h - 1).max(1) as f32, 0.25, 1.0]).collect()
 }
@@ -489,4 +492,30 @@ fn rle_composite_matches_the_raw_one() {
         assert_eq!(rle.composite().unwrap().data, raw.composite().unwrap().data, "{depth} bit");
         assert_eq!(rle.layer_pixels(2, true).unwrap().data, raw.layer_pixels(2, true).unwrap().data, "{depth} bit");
     }
+}
+
+#[test]
+fn packbits_packets_stop_at_the_row_end() {
+    // A 128-byte repeat and a 128-byte literal into 3-byte rows: the reserved row is never
+    // outgrown (capacity stays what was reserved).
+    for src in [vec![0x81u8, 7], {
+        let mut v = vec![0x7fu8];
+        v.extend([1u8; 128]);
+        v
+    }] {
+        let mut out = Vec::with_capacity(3);
+        unpack_bits(&src, 3, &mut out).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.capacity(), 3);
+    }
+}
+
+#[test]
+fn a_failed_inflate_reports_its_status_not_its_output() {
+    // A stream that inflates a megabyte of zeros, then breaks its checksum.
+    let mut z = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 1 << 20], 6);
+    let n = z.len();
+    z[n - 1] ^= 0xff;
+    let Err(Error::Invalid(msg)) = crate::limits::inflate(&z, 1 << 21) else { panic!("the checksum fails") };
+    assert!(msg.len() < 100, "{} bytes", msg.len());
 }

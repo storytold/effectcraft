@@ -58,6 +58,19 @@ location /effectcraft/ {
 
 Local test: `python3 -m http.server 8765` inside the folder, then open http://localhost:8765/.
 
+## Startup project (optional)
+
+To choose what the page opens on load, add an `effectcraft-config.json` next to `index.html`:
+
+```json
+{"startup":"empty"}
+```
+
+`"empty"` restores the last visit's project and otherwise starts blank (never the demo); `"demo"`
+always opens the demo project without saving the session (the last visit's project stays); `"last"` (the default) restores the last visit's project and shows
+the demo on a first visit. Serve the file with `Cache-Control: no-cache`. Details:
+[docs/web.md](https://github.com/storytold/effectcraft/blob/main/docs/web.md#startup-project).
+
 ## Embedding in a page (iframe)
 
 ```html

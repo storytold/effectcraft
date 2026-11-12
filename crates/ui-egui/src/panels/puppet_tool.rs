@@ -70,7 +70,7 @@ struct Cached {
 pub fn overlay(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId, layer: &Layer, t: Tick) -> Option<Overlay> {
     let fx = layer.effects()?.groups().find(|g| puppet::is_puppet(g))?;
     let key = (app.session.revision, cid.0, layer.id.0, t.0);
-    let id = egui::Id::new(("puppet-overlay", layer.id.0));
+    let id = egui::Id::unique(("puppet-overlay", layer.id.0));
     if let Some(c) = ctx.data(|d| d.get_temp::<Cached>(id))
         && c.key == key
     {
@@ -84,8 +84,8 @@ pub fn overlay(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId, layer: &L
 
 /// The layer a Puppet tool press at comp point `cpt` works on, of the selected `layers` with a
 /// Puppet effect (stack order): the one whose mesh, as deformed now, is under it (pins go on the
-/// deformed shape, also where it reaches past the layer's own bounds), else the one whose art is
-/// (a new mesh there). Never a layer without a Puppet effect: the tools stay on the layers being
+/// deformed shape, also where it reaches past the layer's own bounds), else the one `on_art` takes
+/// it (see `takes_pin`). Never a layer without a Puppet effect: the tools stay on the layers being
 /// rigged, as in After Effects (#284).
 pub fn target(ectx: &EvalCtx, layers: &[(&Layer, Overlay)], cpt: [f64; 2], on_art: impl Fn(&Layer) -> bool) -> Option<LayerId> {
     let on_mesh = |l: &Layer, ov: &Overlay| {
@@ -94,6 +94,14 @@ pub fn target(ectx: &EvalCtx, layers: &[(&Layer, Overlay)], cpt: [f64; 2], on_ar
         ov.iter().any(|(_, mesh, def, _)| puppet::contains(mesh, def, [p.x, p.y]))
     };
     layers.iter().find(|(l, ov)| on_mesh(l, ov)).or_else(|| layers.iter().find(|(l, _)| on_art(l))).map(|(l, _)| l.id)
+}
+
+/// Whether a press at comp point `cpt` places a pin on `layer`. Where it would not (the deformed
+/// layer is empty there) the press is on nothing: a click does nothing, a drag is a marquee (#2865).
+pub fn takes_pin(app: &EffectcraftApp, ectx: &EvalCtx, layer: &Layer, cpt: [f64; 2]) -> bool {
+    let Some(inv) = fx2c(ectx, layer).inverse() else { return false };
+    let p = inv.apply(gv2(cpt[0], cpt[1]));
+    effectcraft_engine::commands::puppet::places_pin(&app.session, ectx.comp_id, layer.id, [p.x, p.y], ectx.time)
 }
 
 /// Keep a pin's keyframed Position in view in the Timeline after placing, moving or recording the

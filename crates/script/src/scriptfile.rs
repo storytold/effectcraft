@@ -56,6 +56,10 @@ pub(crate) fn read(s: &Session, path: &Path) -> Result<String, String> {
     if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES as u64) {
         return Err(too_big());
     }
+    // A pipe or device reports no size and may never end: only regular files are read.
+    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+        return Err(format!("Unable to read {}: not a regular file", path.display()));
+    }
     let bytes = s.services.read_file(&path.to_string_lossy()).map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(too_big());

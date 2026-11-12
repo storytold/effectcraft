@@ -45,36 +45,46 @@ fn dt1(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f64]) {
     }
 }
 
+/// Scratch vectors (`f`, `v`, `z`) for `dt1` over a line of `n` samples; sized per pass so a
+/// 1 x N image does not allocate N-sized buffers for each of its N one-pixel rows.
+fn line_scratch(n: usize) -> (Vec<f32>, Vec<usize>, Vec<f64>) {
+    (vec![0.0; n], vec![0; n], vec![0.0; n + 1])
+}
+
 /// Euclidean distance from every pixel to the nearest pixel where `seed` is true (BIG.sqrt()
 /// when there is none).
 pub fn distance(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
     if w == 0 || h == 0 {
         return vec![];
     }
-    let mut g: Vec<f32> = seed.iter().map(|s| if *s { 0.0 } else { BIG }).collect();
-    // Columns.
-    let cols: Vec<Vec<f32>> = (0..w)
-        .into_par_iter()
-        .map(|x| {
-            let f: Vec<f32> = (0..h).map(|y| g[y * w + x]).collect();
-            let mut d = vec![0.0; h];
-            let (mut v, mut z) = (vec![0usize; h], vec![0.0f64; h + 1]);
-            dt1(&f, &mut d, &mut v, &mut z);
-            d
-        })
-        .collect();
-    for (x, c) in cols.iter().enumerate() {
-        for y in 0..h {
-            g[y * w + x] = c[y];
-        }
-    }
-    // Rows.
-    g.par_chunks_mut(w).for_each(|row| {
-        let f = row.to_vec();
-        let (mut v, mut z) = (vec![0usize; w], vec![0.0f64; w + 1]);
-        dt1(&f, row, &mut v, &mut z);
-    });
-    g.par_iter_mut().for_each(|v| *v = v.sqrt());
+    // dt1 needs its input intact while it writes the output, so each line goes through scratch
+    // (`f`, `v`, `z`) that rayon creates once per work split, not once per line. The column pass
+    // runs on a transposed copy so that every column is a contiguous chunk.
+    // Columns: `t[x * h + y]` is pixel (x, y).
+    let mut t = vec![0.0f32; w * h];
+    t.par_chunks_mut(h).enumerate().for_each_init(
+        || line_scratch(h),
+        |(f, v, z), (x, col)| {
+            for (y, fv) in f.iter_mut().enumerate() {
+                *fv = if seed.get(y * w + x).copied().unwrap_or(false) { 0.0 } else { BIG };
+            }
+            dt1(f, col, v, z);
+        },
+    );
+    // Rows, then the square root.
+    let mut g = vec![0.0f32; w * h];
+    g.par_chunks_mut(w).enumerate().for_each_init(
+        || line_scratch(w),
+        |(f, v, z), (y, row)| {
+            for (x, fv) in f.iter_mut().enumerate() {
+                *fv = t[x * h + y];
+            }
+            dt1(f, row, v, z);
+            for d in row.iter_mut() {
+                *d = d.sqrt();
+            }
+        },
+    );
     g
 }
 
@@ -135,13 +145,21 @@ pub fn box_mean(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     out
 }
 
+/// Box radius of [`gauss`]: three passes of it match the variance, 3·((2r+1)² − 1)/12 = σ².
+/// `None` when the blur is a copy.
+fn gauss_box(sigma: f64) -> Option<usize> {
+    (sigma >= 0.3).then(|| (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize)
+}
+
+/// How far (pixels, per axis) [`gauss`] reaches: an output pixel depends only on the input
+/// within this distance.
+pub fn gauss_reach(sigma: f64) -> usize {
+    gauss_box(sigma).map_or(0, |r| 3 * r)
+}
+
 /// Approximate Gaussian blur (three box passes) with standard deviation `sigma` pixels.
 pub fn gauss(src: &[f32], w: usize, h: usize, sigma: f64) -> Vec<f32> {
-    if sigma < 0.3 {
-        return src.to_vec();
-    }
-    // Box radius whose three passes match the variance: 3·((2r+1)² − 1)/12 = σ².
-    let r = (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize;
+    let Some(r) = gauss_box(sigma) else { return src.to_vec() };
     let a = box_mean(src, w, h, r);
     let b = box_mean(&a, w, h, r);
     box_mean(&b, w, h, r)
@@ -200,7 +218,8 @@ pub fn guided_filter(img: &[[f32; 3]], p: &[f32], w: usize, h: usize, r: usize, 
 /// (K. He, J. Sun and X. Tang, "Fast Matting Using Large Kernel Matting Laplacian Matrices",
 /// CVPR 2010): `(L·x)ᵢ = Σ_{k∋i} (xᵢ − a_kᵀIᵢ − b_k)` with `(a_k, b_k)` the ridge-regression
 /// fit of `x` to the colours in window k.
-pub fn closed_form(img: &[[f32; 3]], init: &[f32], known: &[bool], w: usize, h: usize, r: usize, eps: f32, iters: usize) -> Vec<f32> {
+pub fn closed_form(img: &[[f32; 3]], init: &[f32], known: &[bool], size: (usize, usize), r: usize, eps: f32, iters: usize) -> Vec<f32> {
+    let (w, h) = size;
     let n = w * h;
     if n == 0 || known.iter().all(|k| *k) {
         return init.to_vec();
@@ -429,6 +448,88 @@ pub fn motion_blur(a: &[f32], w: usize, h: usize, v: [f64; 2], samples: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_scratch_is_sized_to_the_line_not_the_image() {
+        let (f, v, z) = line_scratch(1);
+        assert_eq!((f.len(), v.len(), z.len()), (1, 1, 2));
+        // A 1 x N image: every row job needs one sample, every column job N.
+        let (w, h) = (1usize, 50_000usize);
+        let seed: Vec<bool> = (0..w * h).map(|i| i == 777).collect();
+        let d = distance(&seed, w, h);
+        let r = distance_reference(&seed, w, h);
+        assert!(d.iter().zip(&r).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    /// The distance transform as it was before the scratch reuse (one set of vectors per line).
+    fn distance_reference(seed: &[bool], w: usize, h: usize) -> Vec<f32> {
+        if w == 0 || h == 0 {
+            return vec![];
+        }
+        let mut g: Vec<f32> = seed.iter().map(|s| if *s { 0.0 } else { BIG }).collect();
+        let cols: Vec<Vec<f32>> = (0..w)
+            .map(|x| {
+                let f: Vec<f32> = (0..h).map(|y| g[y * w + x]).collect();
+                let mut d = vec![0.0; h];
+                let (mut v, mut z) = (vec![0usize; h], vec![0.0f64; h + 1]);
+                dt1(&f, &mut d, &mut v, &mut z);
+                d
+            })
+            .collect();
+        for (x, c) in cols.iter().enumerate() {
+            for y in 0..h {
+                g[y * w + x] = c[y];
+            }
+        }
+        for row in g.chunks_mut(w) {
+            let f = row.to_vec();
+            let (mut v, mut z) = (vec![0usize; w], vec![0.0f64; w + 1]);
+            dt1(&f, row, &mut v, &mut z);
+        }
+        g.iter().map(|v| v.sqrt()).collect()
+    }
+
+    #[test]
+    fn distance_is_bit_identical_to_the_per_line_version() {
+        let disk =
+            |w: usize, h: usize, cx: f64, cy: f64, r: f64| -> Vec<bool> { (0..w * h).map(|i| ((i % w) as f64 - cx).hypot((i / w) as f64 - cy) <= r).collect() };
+        let cases: Vec<(usize, usize, Vec<bool>)> = vec![
+            (64, 48, disk(64, 48, 30.0, 20.0, 11.0)),
+            (64, 48, disk(64, 48, 30.0, 20.0, 11.0).iter().map(|b| !b).collect()),
+            (97, 1, (0..97).map(|i| i % 13 == 0).collect()),
+            (1, 97, (0..97).map(|i| i % 17 == 5).collect()),
+            (40, 30, vec![true; 1200]),
+            (40, 30, vec![false; 1200]),
+            (40, 30, (0..1200).map(|i| i % 40 == 39 || i / 40 == 0).collect()),
+            (333, 211, (0..333 * 211).map(|i| (i * 7919) % 1031 == 0).collect()),
+        ];
+        for (w, h, seed) in cases {
+            let a = distance(&seed, w, h);
+            let b = distance_reference(&seed, w, h);
+            assert_eq!(a.len(), b.len());
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "{w}x{h} pixel {i}: {x} vs {y}");
+            }
+        }
+        assert!(distance(&[], 0, 5).is_empty());
+    }
+
+    /// `cargo test --release -p effectcraft-track distance_bench -- --ignored --nocapture`
+    /// (set `RAYON_NUM_THREADS` to compare thread counts).
+    #[test]
+    #[ignore]
+    fn distance_bench() {
+        let (w, h) = (1920, 1080);
+        let seed: Vec<bool> = (0..w * h).map(|i| ((i % w) as f64 - 960.0).hypot((i / w) as f64 - 540.0) <= 300.0).collect();
+        let mut times = vec![];
+        for _ in 0..15 {
+            let t = std::time::Instant::now();
+            std::hint::black_box(distance(&seed, w, h));
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!("distance 1080p, {} threads: median {:.2} ms", rayon::current_num_threads(), times[times.len() / 2]);
+    }
 
     #[test]
     fn distance_matches_brute_force() {

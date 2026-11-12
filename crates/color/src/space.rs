@@ -177,7 +177,7 @@ impl ColorSpace {
 
     /// Parse an id or label (case-insensitive, loose).
     pub fn parse(s: &str) -> Option<ColorSpace> {
-        let k: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let k: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
         match k.as_str() {
             "srgb" | "srgbiec6196621" | "srgbiec61966" | "iec6196621" => Some(ColorSpace::Srgb),
             "rec709" | "bt709" | "hdtvrec709" | "hdtv" | "709" => Some(ColorSpace::Rec709),
@@ -208,6 +208,14 @@ impl ColorSpace {
             ColorSpace::AcesCg | ColorSpace::Aces2065 => ACES_WHITE,
             _ => D65,
         }
+    }
+
+    /// The primaries and white as the OpenEXR `chromaticities` attribute stores them: red, green,
+    /// blue, white (CIE xy). Every space has a defined mapping: the PQ and HLG spaces are BT.2020
+    /// primaries with D65, the ACES spaces carry the ACES white.
+    pub fn exr_chromaticities(self) -> [[f32; 2]; 4] {
+        let [r, g, b] = self.primaries();
+        [r, g, b, self.white()].map(|c| c.map(|v| v as f32))
     }
 
     /// The transfer curve.

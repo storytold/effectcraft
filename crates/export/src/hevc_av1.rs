@@ -1,13 +1,13 @@
-//! HEVC (`effectcraft-hevcenc`) and AV1 (`effectcraft-av1enc`) video encoders for the MP4
+//! HEVC (`craft_video::hevc`) and AV1 (`craft_video::av1`) video encoders for the MP4
 //! movie writer (`hvc1` / `av01` sample entries) and AV1 in WebM, configured from the Output
 //! Module's [`VideoCodecOptions`].
 
+use craft_media::isobmff::{Av1Config, CodecConfig, FourCc, HevcConfig, SampleEntry};
 use effectcraft_project::render_queue::{CodecProfile, OutputModule, RateControlMode, VideoCodecOptions};
 use effectcraft_time::FrameRate;
-use filmcraft_isobmff::{Av1Config, CodecConfig, FourCc, HevcConfig, SampleEntry};
 use rayon::prelude::*;
 
-use crate::encode::{Packet, VideoEncoder};
+use crate::encode::{Codes, Packet, VideoEncoder};
 use crate::{ExportError, Result};
 
 fn enc_err(e: impl std::fmt::Display) -> ExportError {
@@ -55,16 +55,17 @@ struct Planes {
 // ---------------------------------------------------------------- HEVC
 
 pub(crate) struct Hevc {
-    enc: effectcraft_hevcenc::Encoder,
+    enc: craft_video::hevc::Encoder,
     w: u32,
     h: u32,
     bits: u8,
+    codes: Codes,
     planes: Planes,
 }
 
 /// The HEVC encoder settings for an output module.
-pub(crate) fn hevc_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> effectcraft_hevcenc::EncoderConfig {
-    use effectcraft_hevcenc as he;
+pub(crate) fn hevc_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> craft_video::hevc::EncoderConfig {
+    use craft_video::hevc as he;
     let o: &VideoCodecOptions = &om.codec;
     let mut cfg = he::EncoderConfig::new(w, h, rate.num as u32, rate.den as u32);
     cfg.profile = match o.profile {
@@ -81,25 +82,28 @@ pub(crate) fn hevc_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) ->
 }
 
 impl Hevc {
-    pub(crate) fn new(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> Result<Hevc> {
-        let cfg = hevc_config(w, h, rate, om);
+    pub(crate) fn new(w: u32, h: u32, rate: FrameRate, om: &OutputModule, codes: Codes) -> Result<Hevc> {
+        let mut cfg = hevc_config(w, h, rate, om);
+        (cfg.colour_primaries, cfg.transfer_characteristics, cfg.matrix_coeffs) = (codes.primaries, codes.transfer, codes.matrix);
         let bits = cfg.profile.bit_depth();
-        let enc = effectcraft_hevcenc::Encoder::new(cfg).map_err(enc_err)?;
-        Ok(Hevc { enc, w, h, bits, planes: Planes::default() })
+        let enc = craft_video::hevc::Encoder::new(cfg).map_err(enc_err)?;
+        Ok(Hevc { enc, w, h, bits, codes, planes: Planes::default() })
     }
 }
 
 impl VideoEncoder for Hevc {
     fn sample_entry(&self) -> SampleEntry {
         let cfg = HevcConfig::parse(&self.enc.hvcc()).unwrap_or_default();
-        SampleEntry::hevc(cfg, self.w as u16, self.h as u16)
+        let mut entry = SampleEntry::hevc(cfg, self.w as u16, self.h as u16);
+        crate::encode::tag_nclx_limited(&mut entry, self.codes);
+        entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let (w, h) = (self.w as usize, self.h as usize);
         let p = &mut self.planes;
         rgba_to_yuv420_bits(rgba, w, h, self.bits, &mut p.y, &mut p.u, &mut p.v);
-        let frame = effectcraft_hevcenc::Frame { y: &p.y, u: &p.u, v: &p.v, y_stride: w, uv_stride: w.div_ceil(2) };
-        let pk = self.enc.encode(&frame);
+        let frame = craft_video::hevc::Frame { y: &p.y, u: &p.u, v: &p.v, y_stride: w, uv_stride: w.div_ceil(2) };
+        let pk = self.enc.encode(&frame).map_err(enc_err)?;
         Ok(vec![Packet { data: pk.data, key: pk.keyframe, cto: 0 }])
     }
     fn flush(&mut self) -> Result<Vec<Packet>> {
@@ -110,16 +114,17 @@ impl VideoEncoder for Hevc {
 // ---------------------------------------------------------------- AV1
 
 pub(crate) struct Av1 {
-    enc: effectcraft_av1enc::Encoder,
+    enc: craft_video::av1::Encoder,
     w: u32,
     h: u32,
     bits: u8,
+    codes: Codes,
     planes: Planes,
 }
 
 /// The AV1 encoder settings for an output module.
-pub(crate) fn av1_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> effectcraft_av1enc::EncoderConfig {
-    use effectcraft_av1enc as ae;
+pub(crate) fn av1_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> craft_video::av1::EncoderConfig {
+    use craft_video::av1 as ae;
     let o: &VideoCodecOptions = &om.codec;
     let mut cfg = ae::EncoderConfig::new(w, h, rate.num as u32, rate.den as u32);
     cfg.bit_depth = o.profile.bit_depth();
@@ -133,11 +138,12 @@ pub(crate) fn av1_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> 
 }
 
 impl Av1 {
-    pub(crate) fn new(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> Result<Av1> {
-        let cfg = av1_config(w, h, rate, om);
+    pub(crate) fn new(w: u32, h: u32, rate: FrameRate, om: &OutputModule, codes: Codes) -> Result<Av1> {
+        let mut cfg = av1_config(w, h, rate, om);
+        (cfg.color_primaries, cfg.transfer_characteristics, cfg.matrix_coefficients) = (codes.primaries, codes.transfer, codes.matrix);
         let bits = cfg.bit_depth;
-        let enc = effectcraft_av1enc::Encoder::new(cfg).map_err(enc_err)?;
-        Ok(Av1 { enc, w, h, bits, planes: Planes::default() })
+        let enc = craft_video::av1::Encoder::new(cfg).map_err(enc_err)?;
+        Ok(Av1 { enc, w, h, bits, codes, planes: Planes::default() })
     }
     /// The `av1C` record (also the WebM CodecPrivate).
     pub(crate) fn av1c(&self) -> Vec<u8> {
@@ -148,14 +154,16 @@ impl Av1 {
 impl VideoEncoder for Av1 {
     fn sample_entry(&self) -> SampleEntry {
         let cfg = Av1Config::parse(&self.enc.av1c()).unwrap_or_default();
-        SampleEntry::video(FourCc(*b"av01"), CodecConfig::Av1(cfg), self.w as u16, self.h as u16)
+        let mut entry = SampleEntry::video(FourCc(*b"av01"), CodecConfig::Av1(cfg), self.w as u16, self.h as u16);
+        crate::encode::tag_nclx_limited(&mut entry, self.codes);
+        entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let (w, h) = (self.w as usize, self.h as usize);
         let p = &mut self.planes;
         rgba_to_yuv420_bits(rgba, w, h, self.bits, &mut p.y, &mut p.u, &mut p.v);
-        let frame = effectcraft_av1enc::Frame { y: &p.y, u: &p.u, v: &p.v, y_stride: w, uv_stride: w.div_ceil(2) };
-        let pk = self.enc.encode(&frame);
+        let frame = craft_video::av1::Frame { y: &p.y, u: &p.u, v: &p.v, y_stride: w, uv_stride: w.div_ceil(2) };
+        let pk = self.enc.encode(&frame).map_err(enc_err)?;
         Ok(vec![Packet { data: pk.data, key: pk.keyframe, cto: 0 }])
     }
     fn flush(&mut self) -> Result<Vec<Packet>> {
@@ -188,9 +196,9 @@ mod tests {
         om.keyframe_interval = 12;
         let rate = FrameRate::new(30, 1);
         let h = hevc_config(64, 32, rate, &om);
-        assert_eq!(h.profile, effectcraft_hevcenc::Profile::Main10);
+        assert_eq!(h.profile, craft_video::hevc::Profile::Main10);
         assert_eq!(h.level_idc, Some(123));
-        assert_eq!(h.rate, effectcraft_hevcenc::RateControl::ConstantQp(4));
+        assert_eq!(h.rate, craft_video::hevc::RateControl::ConstantQp(4));
         assert_eq!(h.keyint, 12);
         let a = av1_config(64, 32, rate, &om);
         assert_eq!((a.bit_depth, a.level_idx, a.keyint), (10, Some(9), 12));
@@ -198,6 +206,6 @@ mod tests {
         om.keyframe_interval = 0;
         om.bitrate_kbps = 3000;
         let a = av1_config(64, 32, rate, &om);
-        assert_eq!((a.rate, a.keyint), (effectcraft_av1enc::RateControl::Bitrate { kbps: 3000 }, 60));
+        assert_eq!((a.rate, a.keyint), (craft_video::av1::RateControl::Bitrate { kbps: 3000 }, 60));
     }
 }

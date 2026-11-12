@@ -92,8 +92,8 @@ const CPU_ONLY_CONTROLS: &[(&str, &[&str])] = &[
 ];
 
 /// Whether the GPU kernel of effect `id` covers the instance's current settings (see
-/// [`CPU_ONLY_CONTROLS`]; plus Cell Pattern's HQ variants and Turbulent Displace's locked
-/// pinning).
+/// `CPU_ONLY_CONTROLS`; plus Cell Pattern's HQ variants, Turbulent Displace's locked
+/// pinning and CC Particle World's motion trails and textured squares).
 pub fn gpu_supported(id: &str, ctx: &crate::EffectCtx) -> bool {
     match id {
         "ec.generate.cellpattern" if (6..=10).contains(&ctx.params.e("cellPattern")) => return false,
@@ -101,6 +101,8 @@ pub fn gpu_supported(id: &str, ctx: &crate::EffectCtx) -> bool {
         // #1195: CC Particle World's motion trails (the averaged shutter samples) render on the
         // CPU kernel until the GPU particle pass supports them.
         "ec.sim.ccparticleworld" if ctx.env.shutter.filter(|(a, _, _)| *a > 0.0).is_some() => return false,
+        // #1465: Textured Square's Texture Layer is drawn on the CPU only.
+        "ec.sim.ccparticleworld" if crate::sim::particle_world_textured(ctx) => return false,
         _ => {}
     }
     let Some((_, controls)) = CPU_ONLY_CONTROLS.iter().find(|(e, _)| *e == id) else { return true };
@@ -126,7 +128,8 @@ pub fn effects_markdown() -> String {
     s.push_str("# Effects\n\n");
     s.push_str("<!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.\n");
     s.push_str("     Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->\n\n");
-    let params: usize = r.iter().map(|e| e.params.len()).sum();
+    // The parameters the table's rows list: the shown ones, not the hidden bookkeeping ones.
+    let params: usize = r.iter().map(|e| e.params.iter().filter(|p| !matches!(p.ui, effectcraft_project::ParamUi::Hidden)).count()).sum();
     let gpu = r.iter().filter(|e| e.gpu).count();
     let float = r.iter().filter(|e| e.float).count();
     let partial = r.iter().filter(|e| PARTIAL.iter().any(|(id, _)| *id == e.id)).count();
@@ -182,6 +185,20 @@ mod tests {
         assert!(have == want, "docs/effects.md is stale: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current");
     }
 
+    /// The README quotes the number of effects (#2565): every count it gives is the registry's.
+    #[test]
+    fn readme_effect_counts_are_current() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap_or_default();
+        let words: Vec<&str> = readme.split_whitespace().collect();
+        let counts: Vec<&str> = words
+            .windows(3)
+            .filter(|w| w[0].parse::<u32>().is_ok() && (w[1].starts_with("effects") || (w[1] == "built-in" && w[2].starts_with("effects"))))
+            .map(|w| w[0])
+            .collect();
+        let n = super::registry().len().to_string();
+        assert!(!counts.is_empty() && counts.iter().all(|c| *c == n), "README.md says {counts:?} effects; the registry has {n}");
+    }
+
     #[test]
     fn cpu_only_controls_keep_effects_off_the_gpu() {
         use effectcraft_keyframe::Value;
@@ -210,6 +227,10 @@ mod tests {
             assert!(!super::gpu_supported("ec.sim.ccparticleworld", &ctx));
         }
         assert!(ok("ec.sim.ccparticleworld", &[]));
+        // #1465: the Texture Layer keeps CC Particle World on the CPU only when Textured Square draws it.
+        let tex = ("particle/texture/textureLayer", Value::Layer(Some(1)));
+        assert!(ok("ec.sim.ccparticleworld", &[tex.clone(), ("particle/particleType", Value::Enum(2))]));
+        assert!(!ok("ec.sim.ccparticleworld", &[tex, ("particle/particleType", Value::Enum(8))]));
         assert!(ok("ec.generate.cellpattern", &[("cellPattern", Value::Enum(3))]));
         assert!(!ok("ec.generate.cellpattern", &[("cellPattern", Value::Enum(9))]));
         assert!(!ok("ec.distort.turbulentdisplace", &[("pinning", Value::Enum(9))]));

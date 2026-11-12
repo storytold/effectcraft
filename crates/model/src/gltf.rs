@@ -11,12 +11,14 @@
 //! `KHR_lights_punctual` lights (directional, point, spot). Sparse accessors and morph targets
 //! are ignored.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::{cell::Cell, sync::Arc};
 
 use serde_json::Value;
 
 use crate::{
-    AlphaMode, Animation, Channel, ChannelPath, Interp, Mat4, Material, Mesh, Model, ModelError, Node, Primitive, Result, Skin, TexRef, Texture, Wrap, perr,
+    AlphaMode, Animation, Channel, ChannelPath, Interp, MAX_IMPORT_TEXTURE_PIXELS, Mat4, Material, Mesh, Model, ModelError, Node, Primitive, Result, Skin,
+    TexRef, Texture, Wrap, perr,
 };
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
@@ -87,6 +89,8 @@ pub fn uri_decode(s: &str) -> String {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
             && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
         {
             out.push(v);
@@ -112,6 +116,14 @@ fn load_uri(uri: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<
 struct Doc<'a> {
     j: &'a Value,
     buffers: Vec<Vec<u8>>,
+    /// Zero components that buffer-less accessors may still allocate, across the whole file:
+    /// nothing backs them, so many references to one capped accessor must not multiply (#2139).
+    zero_left: Cell<usize>,
+    /// Components every accessor read may still allocate, across the whole file: each primitive
+    /// that references an accessor keeps its own copy, so references must not multiply memory.
+    read_left: Cell<usize>,
+    /// The budget `read_left` started from, for the error message.
+    read_cap: usize,
 }
 
 fn arr<'v>(v: &'v Value, k: &str) -> &'v [Value] {
@@ -126,9 +138,17 @@ fn indices(v: &Value, k: &str) -> Vec<usize> {
     arr(v, k).iter().filter_map(Value::as_u64).filter_map(|c| usize::try_from(c).ok()).collect()
 }
 
-/// The most components an accessor without a buffer view (all zeros) may have: nothing in the
-/// file backs its count, so it is capped instead of checked against a buffer (#1235).
+/// The most components accessors without a buffer view (all zeros) may have, together: nothing
+/// in the file backs their counts, so they are capped instead of checked against a buffer
+/// (#1235, #2139).
 const MAX_ZERO_COMPONENTS: usize = 1 << 24;
+
+/// The most components all accessor reads in one file may allocate together (about 1 GiB as
+/// `f32`/`u32`). Each primitive keeps its own copy of what it reads, so an accessor referenced
+/// N times costs N times; this bounds that by a fixed amount rather than by buffer size, because
+/// real assets legitimately share one vertex buffer across many primitives. A 10M-triangle scan
+/// (5M vertices with position, normal, UV and tangent, 30M indices) reads about 90M.
+const MAX_READ_COMPONENTS: usize = 1 << 28;
 
 /// Where an accessor's elements lie in its buffer: `count` elements of `elem` bytes, `stride`
 /// apart from `base`, all checked to be inside `buf`.
@@ -150,7 +170,30 @@ fn nums<const N: usize>(v: &Value, k: &str, d: [f64; N]) -> [f64; N] {
     out
 }
 
+/// Bytes of component `c` of element `i`, with checked offsets (the span was validated, but
+/// nothing derived from the file is indexed unchecked).
+fn component(buf: &[u8], base: usize, stride: usize, i: usize, c: usize, csize: usize) -> Result<&[u8]> {
+    let o = i.checked_mul(stride).and_then(|o| o.checked_add(base)).and_then(|o| o.checked_add(c.checked_mul(csize)?));
+    o.and_then(|o| buf.get(o..o.checked_add(csize)?)).ok_or_else(|| perr("accessor reads past its buffer"))
+}
+
 impl Doc<'_> {
+    /// Charge `total` components to the file's read budget before allocating them.
+    fn charge(&self, total: usize) -> Result<()> {
+        let left = self.read_left.get();
+        let Some(rest) = left.checked_sub(total) else {
+            let cap = self.read_cap;
+            return Err(perr(format!("accessor reads need more than {cap} components in total ({total} requested, {left} left)")));
+        };
+        self.read_left.set(rest);
+        Ok(())
+    }
+
+    /// Charge `count` items of `per` components each.
+    fn charge_each(&self, count: usize, per: usize) -> Result<()> {
+        self.charge(count.checked_mul(per).ok_or_else(|| perr("primitive is too large"))?)
+    }
+
     /// The accessor's element count and total components (`count * n`), checked; and its span in
     /// the buffer, validated before anything is allocated from the count. `None` for an
     /// accessor without a buffer view, whose components are all zero.
@@ -161,16 +204,19 @@ impl Doc<'_> {
         };
         let total = count.checked_mul(n).ok_or_else(|| perr("accessor count is too large"))?;
         let Some(bv) = idx(acc, "bufferView") else {
-            if total > MAX_ZERO_COMPONENTS {
-                return Err(perr(format!("accessor without a bufferView has {total} components (at most {MAX_ZERO_COMPONENTS})")));
-            }
+            let left = self.zero_left.get();
+            let Some(rest) = left.checked_sub(total) else {
+                return Err(perr(format!("accessors without a bufferView have more than {MAX_ZERO_COMPONENTS} components ({total} requested, {left} left)")));
+            };
+            self.zero_left.set(rest);
+            self.charge(total)?;
             return Ok((count, total, None));
         };
         let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
         let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
         let past = || perr("accessor reads past its buffer");
         let base = idx(view, "byteOffset").unwrap_or(0).checked_add(idx(acc, "byteOffset").unwrap_or(0)).ok_or_else(past)?;
-        let elem = csize * n;
+        let elem = csize.checked_mul(n).ok_or_else(past)?;
         let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(elem);
         if stride < elem {
             return Err(perr(format!("bufferView byteStride {stride} is smaller than its {elem}-byte elements")));
@@ -181,6 +227,7 @@ impl Doc<'_> {
                 return Err(past());
             }
         }
+        self.charge(total)?;
         Ok((count, total, Some(Span { buf, base, stride })))
     }
 
@@ -214,8 +261,7 @@ impl Doc<'_> {
         // Matrices of 1/2-byte components pad columns to 4 bytes; ignored (rare).
         for i in 0..count {
             for c in 0..n {
-                let o = base + i * stride + c * csize;
-                let s = buf.get(o..o + csize).ok_or_else(|| perr("accessor reads past its buffer"))?;
+                let s = component(buf, base, stride, i, c, csize)?;
                 out[i * n + c] = match ct {
                     5126 => f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
                     5125 => u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f32,
@@ -264,8 +310,7 @@ impl Doc<'_> {
         let mut out = Vec::with_capacity(total);
         for i in 0..count {
             for c in 0..n {
-                let o = base + i * stride + c * csize;
-                let s = buf.get(o..o + csize).ok_or_else(|| perr("accessor reads past its buffer"))?;
+                let s = component(buf, base, stride, i, c, csize)?;
                 out.push(match csize {
                     1 => s[0] as u32,
                     2 => u16::from_le_bytes([s[0], s[1]]) as u32,
@@ -279,6 +324,11 @@ impl Doc<'_> {
 
 /// Parse a `.gltf` (JSON) or `.glb` file.
 pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Model> {
+    parse_with_budget(bytes, resolve, MAX_READ_COMPONENTS)
+}
+
+/// [`parse`] with a read budget of `read_budget` accessor components for the whole file.
+pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, read_budget: usize) -> Result<Model> {
     let (json, bin) = if bytes.starts_with(b"glTF") { split_glb(bytes)? } else { (bytes, None) };
     let j: Value = serde_json::from_slice(json).map_err(|e| perr(format!("glTF JSON: {e}")))?;
     let ver = j.get("asset").and_then(|a| a.get("version")).and_then(Value::as_str).unwrap_or("");
@@ -300,23 +350,45 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         };
         buffers.push(data);
     }
-    let d = Doc { j: &j, buffers };
+    let d = Doc { j: &j, buffers, zero_left: Cell::new(MAX_ZERO_COMPONENTS), read_left: Cell::new(read_budget), read_cap: read_budget };
 
     // Images → textures (decoded once per image; samplers set the wrap modes).
     let mut images: Vec<Option<Arc<Texture>>> = vec![];
-    for im in arr(&j, "images") {
-        let data = if let Some(u) = im.get("uri").and_then(Value::as_str) {
-            load_uri(u, resolve).ok()
-        } else if let Some(bv) = idx(im, "bufferView") {
-            arr(&j, "bufferViews").get(bv).and_then(|v| {
-                let b = d.buffers.get(idx(v, "buffer").unwrap_or(0))?;
-                let o = idx(v, "byteOffset").unwrap_or(0);
-                b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
-            })
-        } else {
-            None
+    // Images naming one source decode once, and all of them within one pixel budget.
+    let mut image_of: HashMap<String, Option<Arc<Texture>>> = HashMap::new();
+    let mut pixels_left = MAX_IMPORT_TEXTURE_PIXELS;
+    let mut warnings: Vec<String> = vec![];
+    for (n, im) in arr(&j, "images").iter().enumerate() {
+        let (uri, view) = (im.get("uri").and_then(Value::as_str), idx(im, "bufferView"));
+        let key = match (uri, view) {
+            (Some(u), _) => format!("uri:{u}"),
+            (None, Some(bv)) => format!("bufferView:{bv}"),
+            (None, None) => {
+                images.push(None);
+                continue;
+            }
         };
-        images.push(data.and_then(|b| Texture::decode(&b).ok()).map(Arc::new));
+        let image = image_of.entry(key).or_insert_with(|| {
+            let data = if let Some(u) = uri {
+                load_uri(u, resolve).ok()
+            } else {
+                arr(&j, "bufferViews").get(view.unwrap_or(usize::MAX)).and_then(|v| {
+                    let b = d.buffers.get(idx(v, "buffer").unwrap_or(0))?;
+                    let o = idx(v, "byteOffset").unwrap_or(0);
+                    b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
+                })
+            };
+            match data.map(|b| Texture::decode_within(&b, &mut pixels_left)) {
+                Some(Ok(t)) => Some(Arc::new(t)),
+                Some(Err(e)) => {
+                    log::warn!("model: glTF image {n} left out: {e}");
+                    warnings.push(format!("image {n} left out: {e}"));
+                    None
+                }
+                None => None,
+            }
+        });
+        images.push(image.clone());
     }
     let wrap = |v: u64| match v {
         33071 => Wrap::Clamp,
@@ -325,18 +397,45 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
     };
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut tex_map: Vec<Option<usize>> = vec![];
+    // One texture per decoded image and wrapping: repeated references share it instead of copying
+    // the pixels. The image is keyed by its allocation, so image entries naming the same file
+    // (which share one decode) also share their wrap variants.
+    let mut texture_of: HashMap<(usize, [Wrap; 2]), usize> = HashMap::new();
     for t in arr(&j, "textures") {
         let Some(img) = idx(t, "source").and_then(|s| images.get(s).cloned().flatten()) else {
             tex_map.push(None);
             continue;
         };
+        let src = Arc::as_ptr(&img) as usize;
         let samp = idx(t, "sampler").and_then(|s| arr(&j, "samplers").get(s));
         let ws = samp.and_then(|s| s.get("wrapS")).and_then(Value::as_u64).unwrap_or(10497);
         let wt = samp.and_then(|s| s.get("wrapT")).and_then(Value::as_u64).unwrap_or(10497);
         let w = [wrap(ws), wrap(wt)];
-        let tex = if img.wrap == w { img } else { Arc::new(Texture { wrap: w, ..(*img).clone() }) };
-        tex_map.push(Some(textures.len()));
-        textures.push(tex);
+        let i = match texture_of.get(&(src, w)) {
+            Some(&i) => i,
+            None => {
+                let tex = if img.wrap == w {
+                    img
+                } else {
+                    // A wrap variant copies the pixels, so it is charged to the import budget too;
+                    // one that does not fit is left out like an undecodable image.
+                    let cost = u64::from(img.width) * u64::from(img.height);
+                    if cost > pixels_left {
+                        warnings.push(format!(
+                            "a texture with another wrap mode left out: the model's textures would hold more than {MAX_IMPORT_TEXTURE_PIXELS} pixels"
+                        ));
+                        tex_map.push(None);
+                        continue;
+                    }
+                    pixels_left -= cost;
+                    Arc::new(Texture { wrap: w, ..(*img).clone() })
+                };
+                textures.push(tex);
+                texture_of.insert((src, w), textures.len() - 1);
+                textures.len() - 1
+            }
+        };
+        tex_map.push(Some(i));
     }
     let tref = |v: Option<&Value>| -> Option<TexRef> {
         let v = v?;
@@ -488,7 +587,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         .and_then(|e| e.get("KHR_lights_punctual"))
         .map(|e| arr(e, "lights").iter().enumerate().map(|(i, l)| light(l, i)).collect())
         .unwrap_or_default();
-    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights })
+    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights, warnings })
 }
 
 fn name_or(v: &Value, d: String) -> String {
@@ -567,7 +666,11 @@ fn primitive(d: &Doc, p: &Value, materials: &[Material]) -> Result<Option<Primit
     };
     let raw: Vec<u32> = match idx(p, "indices") {
         Some(a) => d.ints(a)?,
-        None => (0..n as u32).collect(),
+        None => {
+            // Generated indices are allocated like a read, once per referencing primitive.
+            d.charge(n)?;
+            (0..n as u32).collect()
+        }
     };
     if raw.iter().any(|&i| i as usize >= n) {
         return Err(perr("index out of range"));
@@ -587,11 +690,19 @@ fn primitive(d: &Doc, p: &Value, materials: &[Material]) -> Result<Option<Primit
         }
         _ => indices.extend(raw.as_chunks::<3>().0.iter().flatten()),
     }
+    // The triangle list is kept besides the raw indices (a strip or fan of k indices becomes
+    // 3(k-2)), so it is charged like a read.
+    d.charge(indices.len())?;
     if normals.len() != n {
         normals.clear();
     }
     let material = idx(p, "material").filter(|&m| m < materials.len());
     let skinned = joints.len() == n && weights.len() == n;
+    if normals.is_empty() {
+        // Flat normals unshare every vertex: position and normal, plus UVs and joints/weights.
+        let per = 6 + if uvs.len() == n { 2 } else { 0 } + if skinned { 8 } else { 0 };
+        d.charge_each(indices.len(), per)?;
+    }
     let mut prim = Primitive {
         positions,
         normals,
@@ -608,7 +719,20 @@ fn primitive(d: &Doc, p: &Value, materials: &[Material]) -> Result<Option<Primit
     }
     let needs_tangents = material.is_some_and(|m| materials[m].normal_tex.is_some());
     if needs_tangents && prim.tangents.is_empty() {
+        d.charge_each(prim.positions.len(), 4)?;
         prim.compute_tangents();
     }
     Ok(Some(prim))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uri_decode;
+
+    #[test]
+    fn uri_decode_rejects_signed_hex_pair() {
+        assert_eq!(uri_decode("a%+1b"), "a%+1b");
+        assert_eq!(uri_decode("a%-1b"), "a%-1b");
+        assert_eq!(uri_decode("a%41b"), "aAb");
+    }
 }

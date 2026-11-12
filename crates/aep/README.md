@@ -1,0 +1,99 @@
+# effectcraft-aep
+
+After Effects projects (`.aep`, `.aepx`) in one crate, the way `effectcraft-lottie` handles Lottie:
+
+- `container`: reads and writes the container as a lossless chunk tree, with a typed, read-only
+  view (below; its API is re-exported at the crate root);
+- `import`: maps the typed view into an EffectCraft project and reports everything it does not
+  import ([`docs/aep-import.md`](../../docs/aep-import.md));
+- `export`: writes an EffectCraft project as an `.aep` with every chunk built in code, and reports everything it does not export
+  ([`docs/aep-export.md`](../../docs/aep-export.md)).
+
+No file access: callers pass bytes, so the crate builds for wasm32.
+
+## Container
+
+An `.aep` is a `RIFX` container (big-endian RIFF) with form type `Egg!`: chunks of a 4-byte id, a
+big-endian `u32` size and a body padded to an even length; `LIST` chunks start with a 4-byte list
+type followed by chunks. `parse` builds the tree, `write` serialises it, and for every input that
+parses, `write(parse(x)) == x` byte for byte (container and chunk sizes are recomputed from the
+tree; pad bytes, odd bodies and the bytes after the container, an XMP packet, are kept).
+
+The XML form of a project (`.aepx`) is read into the same tree by `read_aepx` (a small bounded
+XML tokenizer, no dependency); `parse_any` picks the reader by content, so the typed view and the
+importer take either form. The mapping is in `docs/aep-format.md`, section 1.
+
+Bodies that look like lists but are not chunk sequences (for example `LIST btdk`, raw text) stay
+opaque rather than failing the parse. Input is untrusted: sizes are checked against the remaining
+input, nesting and chunk count are bounded (`Limits`), nothing is allocated from a declared size,
+and truncated or damaged files return `Err` (or, inside the container, an opaque body).
+
+The container layer decodes no chunk body. On top of it, a typed view (`Project`, `Item`, `Comp`, `Layer`,
+`Property`, ...) reads the fields whose layout was verified against the values the test files were made
+with: layer and composition headers (switches, exact times and time stretch, size, frame rate, work area, shutter phase, display start, renderer),
+static transform values in After Effects' units with the "absent = default" rule, keyframe records
+(interpolation sides, ease per component, plain and spatial templates), Time Remapping, expressions with their enable switch, effect
+instances and parameter values, masks and bezier paths with tangents, shape layer groups, text documents
+(paragraph and style runs, box, justification, tracking, faux styles, caps, leading), markers with
+duration, strings and cue data, cameras and lights with their options, footage (stills, audio, image
+sequences), solids and precomp links. Every accessor returns `Option`/an empty list on damaged data and never
+panics. Which fields are verified, which are not decoded, and how it was found is in
+[`docs/aep-format.md`](../../docs/aep-format.md).
+
+## Specifications
+
+Public specifications used for parts the format embeds:
+
+- ICC.1:2010: the profile description of a working-space profile (a v2 `desc` or a v4 `mluc`
+  tag), from which the working space's name is read (`container/settings.rs`).
+- RFC 4648 (base64): the profile data in the project's colour settings JSON (read, and written
+  by the exporter).
+- The exporter's own colour profiles (`export/icc.rs`): ICC.1:2010 version 4.3 display profiles
+  with ITU-R BT.709 primaries, D65 white, a D50 PCS and a Bradford adaptation, the IEC 61966-2-1
+  sRGB curve or a 2.4 power curve; the profile ID is the MD5 of RFC 1321.
+
+## Clean room
+
+Everything here comes from our own observations: project files that we generated ourselves with
+After Effects, one change per file, compared byte by byte. No source code or format
+documentation of another `.aep` reader or writer was used, and no Adobe asset is used. The test fixtures are such generated files
+(own test data): a few combined projects, one composition per case (`tests/fixtures/CASES.md`;
+the generator is in `tests/fixtures/tools/`). They are not in this repository but in
+[storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus), with their
+attribution, the generation notes and the inspection of their embedded content.
+`cargo xtask aep-corpus` fetches them at the commit pinned in `tests/fixtures/corpus.lock`, checks
+every file against the SHA-256 listed there and only then installs them in `corpus/aep` (ignored by
+git). The tests read them from the folder named by the `EFFECTCRAFT_AEP_FIXTURES` environment
+variable (opt-in; set `EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1` too, so that a missing project fails). The
+tests reach them only through `tests/it/common/mod.rs`, which hands a test its case as a project
+of its own cut from the combined file; a test whose fixture is missing (or with the variable not
+set) prints `SKIPPED: fixture <name> missing` and passes.
+
+`tests/fixtures/synthetic.aep` (115 KB) is one of the two projects in the repository: made in After Effects 2026
+with the working space set to None (one composition, an image sequence of three 8x8 PNGs, a
+solid, a folder, a Levels and a Glow effect with expressions). Every After Effects project embeds
+the working space's ICC profile (HP sRGB IEC61966-2.1 for the default) in a JSON settings chunk;
+the one `Utf8` chunk of this file that held a profile was replaced by `{}`, and nothing else was
+changed. The tests in `tests/it/import/synthetic.rs` damage copies of it and need no other file.
+
+`tests/fixtures/ai-mask-3099.aep` (131 KB, #3099) is the second: four hand-written one-page PDFs
+named `.ai` with distinct page boxes, placed in a composition, one of them with two masks under a
+Null parented to a Null (generated by `tests/fixtures/tools/ai-mask-3099.py` and
+`ai-mask-3099.jsx`, scrubbed with `scrub.py` and `stubicc`). `tests/it/import/ai_mask.rs` checks
+the import against After Effects' read-back, and the host's `vector_import` tests render it.
+
+## Tools
+
+- `tests/fixtures/tools/`: the generator of the test projects (regenerates the corpus with After
+  Effects; its README says how).
+- `examples/aepdump.rs`: prints the chunk tree of a file (ids, sizes, short data, match names):
+  `cargo run -p effectcraft-aep --example aepdump -- file.aep`.
+- `examples/stubicc.rs`: replaces every embedded ICC profile of a saved project by a stub that keeps
+  only the profile's description: the JSON `colorProfileData` of the working space (any white space
+  around the colon, `\/` escapes, quotes as `&quot;`) in an `.aep` chunk or the `.aepx` text, and a raw
+  profile of an imported image (an `.aep` chunk, or the `bdata` hex of an `.aepx`):
+  `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`. A profile it cannot replace
+  stops it before anything is written. The importer reads the working space's name from the
+  description only, so the project imports the same; no vendor colour data stays in the test
+  project. Check the result independently, not by the tool's count (the corpus repository has
+  `tools/aep/inspect-embedded.py`, which scans the raw bytes, base64 and hex).

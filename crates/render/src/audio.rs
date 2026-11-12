@@ -4,10 +4,13 @@
 //! (Effect > Audio, see [`effectcraft_effects::audio_fx`]) run on each layer's audio before
 //! its levels; Backwards plays the layer's [in, out) span reversed.
 //!
-//! Callers mix in short blocks (one video frame, or an audio device buffer). Effects and levels
-//! are evaluated once per block. To make the result independent of block boundaries, layer
-//! effects are run from a cleared state over a pre-roll of earlier audio and only the block's
-//! tail is kept — so preview playback and export produce identical samples.
+//! Callers mix in short blocks (one video frame, an audio device buffer, or a second of export).
+//! Effect parameters are evaluated once per block. Animated Audio Levels, and animated effects
+//! that work sample by sample (Stereo Mixer), are evaluated on a grid of comp samples every
+//! millisecond instead, so keyframed fades ramp smoothly whatever the block size. To make the
+//! result independent of block boundaries, layer effects are run from a cleared state over a
+//! pre-roll of earlier audio and only the block's tail is kept — so preview playback and export
+//! produce identical samples.
 //!
 //! Time-stretched layers are resampled nearest-sample; reversed (negative stretch) layers are
 //! silent for now.
@@ -21,33 +24,49 @@ use crate::{EvalCtx, ExprHost, FootageSource};
 
 const MAX_DEPTH: usize = 16;
 
+/// The fastest a layer's audio plays (a Stretch of 1%).
+const MAX_SPEED: f64 = 100.0;
+
+/// The most effect preroll (history before a block) mixed, in seconds, across a layer's effects.
+const MAX_PREROLL_SECONDS: f64 = 30.0;
+
+/// The longest footage a waveform summarises (a day).
+const MAX_PEAK_SECONDS: i64 = 24 * 3600;
+
 /// `frames` stereo sample frames of `comp`'s mix from comp time `start` at `rate` Hz,
 /// interleaved (L R L R …).
 pub fn mix_comp(project: &Project, footage: &dyn FootageSource, expr: Option<&dyn ExprHost>, comp: ItemId, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
     let mut out = vec![0.0f32; frames * 2];
-    mix_into(project, footage, expr, comp, start, rate, &mut out, 1.0, 1.0, 0);
+    mix_into(&AudioSources { project, footage, expr, rate }, comp, start, &mut out, 0);
     out
 }
 
 /// Whether the comp has anything audible (footage with audio, a sound generator, or a precomp
 /// that has).
 pub fn comp_has_audio(project: &Project, comp: ItemId) -> bool {
-    fn walk(project: &Project, comp: ItemId, depth: usize) -> bool {
-        let Some(c) = project.comp(comp) else { return false };
-        depth < MAX_DEPTH
-            && c.layers.iter().any(|l| {
-                l.switches.audio
-                    && (generates(l)
-                        || match &l.source {
-                            LayerSource::Footage { item } => {
-                                matches!(project.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio && !f.missing)
-                            }
-                            LayerSource::Comp { item } => walk(project, *item, depth + 1),
-                            _ => false,
-                        })
-            })
+    // Breadth first, so each comp is looked at once and at its shallowest level: a comp reached
+    // first through a long chain (past MAX_DEPTH) is still found by a shorter route, and a cycle
+    // cannot hide a result (nothing is cached as "silent" while it is being explored).
+    let mut seen = std::collections::HashSet::from([comp]);
+    let mut level = vec![comp];
+    for _ in 0..MAX_DEPTH {
+        let mut next = vec![];
+        for id in level {
+            let Some(c) = project.comp(id) else { continue };
+            for l in c.layers.iter().filter(|l| l.switches.audio) {
+                match &l.source {
+                    _ if generates(l) => return true,
+                    LayerSource::Footage { item } if matches!(project.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio && !f.missing) => {
+                        return true;
+                    }
+                    LayerSource::Comp { item } if seen.insert(*item) => next.push(*item),
+                    _ => {}
+                }
+            }
+        }
+        level = next;
     }
-    walk(project, comp, 0)
+    false
 }
 
 /// Enabled audio effects of a layer (in stack order) with their effect ids.
@@ -83,6 +102,20 @@ fn units_ceil(t: Tick, rate: u32) -> i64 {
     let n = t.0 as i128 * rate as i128;
     let d = TICKS_PER_SECOND as i128;
     (n.div_euclid(d) + i128::from(n.rem_euclid(d) != 0)) as i64
+}
+
+/// Samples between evaluations of animated levels and per-sample effects: one millisecond, on
+/// a grid of comp sample indices so the result does not depend on where a block starts.
+fn param_step(rate: u32) -> i64 {
+    i64::from(rate / 1000).max(1)
+}
+
+/// Does any property of the group change over time?
+fn animated(g: &effectcraft_project::PropGroup) -> bool {
+    g.children.iter().any(|c| match c {
+        Node::Prop(p) => p.is_animated() || p.has_expression(),
+        Node::Group(sub) => animated(sub),
+    })
 }
 
 fn sample_tick(i: i64, rate: u32) -> Tick {
@@ -138,7 +171,9 @@ impl MixEnv<'_> {
             return out;
         }
         let m = b - a;
-        let speed = 100.0 / l.stretch;
+        // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
+        // usize::MAX source samples for one block.
+        let speed = (100.0 / l.effective_stretch()).min(MAX_SPEED);
         let src_n = ((m as f64 * speed).ceil() as usize).max(1);
         let lt = l.layer_time(sample_tick(i0 + a as i64, rate));
         let buf = match &l.source {
@@ -151,7 +186,7 @@ impl MixEnv<'_> {
                     return out;
                 }
                 let mut sub = vec![0.0f32; src_n * 2];
-                mix_into(self.project, self.footage, self.expr, *item, lt, rate, &mut sub, 1.0, 1.0, self.depth + 1);
+                mix_into(&AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate }, *item, lt, &mut sub, self.depth + 1);
                 sub
             }
             _ => return out,
@@ -189,36 +224,82 @@ impl MixEnv<'_> {
     /// `i0 .. i0 + n`.
     fn layer_audio(&self, l: &Layer, i0: i64, n: usize) -> Vec<f32> {
         let t = sample_tick(i0, self.rate);
-        let fx: Vec<(&str, Params)> = audio_effect_groups(l).map(|(id, g)| (id, self.params(l, g, t))).collect();
+        let fx: Vec<(&str, &effectcraft_project::PropGroup, Params)> = audio_effect_groups(l).map(|(id, g)| (id, g, self.params(l, g, t))).collect();
         if fx.is_empty() {
             return self.layer_raw(l, i0, n, false);
         }
-        let reversed = fx.iter().any(|(id, _)| audio_fx::reverses(id));
-        let pre_s: f64 = fx.iter().map(|(id, p)| audio_fx::preroll(id, p)).sum();
+        let reversed = fx.iter().any(|(id, _, _)| audio_fx::reverses(id));
+        let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum::<f64>().clamp(0.0, MAX_PREROLL_SECONDS);
         let pre = (pre_s * self.rate as f64).ceil() as usize;
-        let mut buf = self.layer_raw(l, i0 - pre as i64, n + pre, reversed);
-        let start = l.layer_time(sample_tick(i0 - pre as i64, self.rate)).seconds();
-        for (id, p) in &fx {
-            audio_fx::process(id, p, &mut buf, self.rate, start);
+        let b0 = i0 - pre as i64;
+        let mut buf = self.layer_raw(l, b0, n + pre, reversed);
+        let start = l.layer_time(sample_tick(b0, self.rate)).seconds();
+        for (id, g, p) in &fx {
+            if audio_fx::per_sample(id) && animated(g) {
+                self.process_stepped(l, id, g, &mut buf, b0);
+            } else {
+                audio_fx::process(id, p, &mut buf, self.rate, start);
+            }
         }
         buf.drain(..pre * 2);
         buf
     }
+
+    /// Run per-sample effect `id` over `buf` (comp samples from `b0`) in pieces of the parameter
+    /// grid, each with the parameters at its first sample.
+    fn process_stepped(&self, l: &Layer, id: &str, g: &effectcraft_project::PropGroup, buf: &mut [f32], b0: i64) {
+        let step = param_step(self.rate);
+        let frames = buf.len() / 2;
+        let mut k = 0usize;
+        while k < frames {
+            let i = b0.saturating_add(k as i64);
+            let next = i.div_euclid(step).saturating_add(1).saturating_mul(step);
+            let end = usize::try_from(next.saturating_sub(b0)).unwrap_or(frames).clamp(k + 1, frames);
+            let t = sample_tick(i, self.rate);
+            if let Some(piece) = buf.get_mut(k * 2..end * 2) {
+                audio_fx::process(id, &self.params(l, g, t), piece, self.rate, l.layer_time(t).seconds());
+            }
+            k = end;
+        }
+    }
+
+    /// Linear gains (left, right) of the layer's Audio Levels for comp samples `i0 .. i0 + n`.
+    /// Animated levels are evaluated on the parameter grid and interpolated in dB in between.
+    fn level_gains(&self, l: &Layer, i0: i64, n: usize) -> Vec<[f32; 2]> {
+        let Some(pr) = l.props.sub("audio").and_then(|g| g.get("levels")) else { return vec![[1.0, 1.0]; n] };
+        let db = |i: i64| self.ctx(sample_tick(i, self.rate)).value(l, pr).as_vec2();
+        let gain = |[a, b]: [f64; 2]| [db_to_gain(a), db_to_gain(b)];
+        if !pr.is_animated() && !pr.has_expression() {
+            return vec![gain(db(i0)); n];
+        }
+        let step = param_step(self.rate);
+        let end = i0.saturating_add(n as i64);
+        let mut out = Vec::with_capacity(n);
+        let mut k = i0.div_euclid(step).saturating_mul(step);
+        let mut lo = db(k);
+        while k < end {
+            let hi = db(k.saturating_add(step));
+            for i in k.max(i0)..k.saturating_add(step).min(end) {
+                let f = (i - k) as f64 / step as f64;
+                out.push(gain([lo[0] + (hi[0] - lo[0]) * f, lo[1] + (hi[1] - lo[1]) * f]));
+            }
+            k = k.saturating_add(step);
+            lo = hi;
+        }
+        out
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn mix_into(
-    project: &Project,
-    footage: &dyn FootageSource,
-    expr: Option<&dyn ExprHost>,
-    comp_id: ItemId,
-    start: Tick,
+/// Shared inputs for composition audio mixing, including nested compositions.
+struct AudioSources<'a> {
+    project: &'a Project,
+    footage: &'a dyn FootageSource,
+    expr: Option<&'a dyn ExprHost>,
     rate: u32,
-    out: &mut [f32],
-    gl: f32,
-    gr: f32,
-    depth: usize,
-) {
+}
+
+fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut [f32], depth: usize) {
+    let AudioSources { project, footage, expr, rate } = *sources;
     let Some(comp) = project.comp(comp_id) else { return };
     if depth >= MAX_DEPTH || rate == 0 {
         return;
@@ -228,7 +309,8 @@ fn mix_into(
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
-        if !audible(project, l) || (any_solo && !l.switches.solo) || l.stretch <= 0.0 {
+        // The stretch the layer's time uses (#3247): 0 and NaN play at 100 %, as `layer_time`.
+        if !audible(project, l) || (any_solo && !l.switches.solo) || l.effective_stretch() <= 0.0 {
             continue;
         }
         // Sample range of the block that falls inside the layer's [in, out).
@@ -237,24 +319,16 @@ fn mix_into(
         if a >= b {
             continue;
         }
-        let t_a = sample_tick(s0 + a as i64, rate);
-        let (ll, lr) = levels(&env, l, t_a);
-        let (ll, lr) = (ll * gl, lr * gr);
-        if ll == 0.0 && lr == 0.0 {
+        let gains = env.level_gains(l, s0 + a as i64, b - a);
+        if gains.iter().all(|g| *g == [0.0, 0.0]) {
             continue;
         }
         let buf = env.layer_audio(l, s0 + a as i64, b - a);
-        for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
-            out[(a + i) * 2] += f[0] * ll;
-            out[(a + i) * 2 + 1] += f[1] * lr;
+        for (i, (f, g)) in buf.as_chunks::<2>().0.iter().zip(&gains).enumerate() {
+            out[(a + i) * 2] += f[0] * g[0];
+            out[(a + i) * 2 + 1] += f[1] * g[1];
         }
     }
-}
-
-fn levels(env: &MixEnv, l: &Layer, t: Tick) -> (f32, f32) {
-    let Some(g) = l.props.sub("audio") else { return (1.0, 1.0) };
-    let [a, b] = env.ctx(t).v2(l, g, "levels", [0.0, 0.0]);
-    (db_to_gain(a), db_to_gain(b))
 }
 
 /// A min/max peak summary of interleaved stereo audio for waveform drawing: one entry per
@@ -284,12 +358,14 @@ pub fn footage_peaks(footage: &dyn FootageSource, item: ItemId, f: &effectcraft_
     let bin = (64usize).max(4000 / bins_per_sec as usize);
     let rate = bin as u32 * bins_per_sec;
     let chunk = bin * bins_per_sec as usize;
-    let total = units_ceil(duration, rate).max(0) as usize;
+    // The stated duration comes from the project: at most a day is summarised, and the summary
+    // ends where the audio does.
+    let total = units_ceil(duration, rate).clamp(0, MAX_PEAK_SECONDS.saturating_mul(rate as i64)) as usize;
     let mut out = Vec::with_capacity(total / bin + 1);
     let mut i = 0usize;
     while i < total {
         let n = chunk.min(total - i);
-        let buf = footage.audio(item, f, sample_tick(i as i64, rate), n, rate).unwrap_or_else(|| vec![0.0; n * 2]);
+        let Some(buf) = footage.audio(item, f, sample_tick(i as i64, rate), n, rate) else { break };
         out.extend(peak_summary(&buf, bin));
         i += n;
     }
@@ -315,6 +391,55 @@ mod tests {
         fn audio(&self, _: ItemId, _: &Footage, start: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
             Some((0..frames).flat_map(|_| if start >= Tick::ZERO { [0.25, -0.25] } else { [0.0, 0.0] }).collect())
         }
+    }
+
+    #[test]
+    fn audio_detection_answers_each_comp_once() {
+        // Twenty levels, each comp holding two layers of the one below: 2^20 walks without a
+        // memo, and all silent. A cycle is answered too.
+        let mut p = Project::default();
+        let mk = |p: &mut Project, layers: Vec<Layer>| {
+            let mut c = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+            c.layers = layers.into();
+            p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(c.into()))
+        };
+        let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+        let mut below = mk(&mut p, vec![]);
+        for _ in 0..20 {
+            let a = build::layer(&mut p, &base, "a", LayerSource::Comp { item: below }, (0, 0), None);
+            let b = build::layer(&mut p, &base, "b", LayerSource::Comp { item: below }, (0, 0), None);
+            below = mk(&mut p, vec![a, b]);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(comp_has_audio(&p, below)).ok());
+        assert!(!rx.recv_timeout(std::time::Duration::from_secs(20)).expect("detection finishes"));
+    }
+
+    #[test]
+    fn audio_found_by_a_short_route_is_not_hidden_by_a_deep_one() {
+        let mut p = Project::default();
+        let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+        let mk = |p: &mut Project, layers: Vec<Layer>| {
+            let mut c = base.clone();
+            c.layers = layers.into();
+            p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(c.into()))
+        };
+        let f = Footage { kind: FootageKind::Audio, has_audio: true, ..Default::default() };
+        let fid = p.add_item("x.wav", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(f));
+        let sound = build::layer(&mut p, &base, "s", LayerSource::Footage { item: fid }, (0, 0), None);
+        let audible = mk(&mut p, vec![sound]);
+        // A chain of MAX_DEPTH comps ends in `audible` one level past what is searched; the root
+        // reaches `audible` directly as well, after the chain.
+        let mut chain = audible;
+        for _ in 0..MAX_DEPTH {
+            let l = build::layer(&mut p, &base, "c", LayerSource::Comp { item: chain }, (0, 0), None);
+            chain = mk(&mut p, vec![l]);
+        }
+        assert!(!comp_has_audio(&p, chain), "too deep to be found");
+        let via_chain = build::layer(&mut p, &base, "chain", LayerSource::Comp { item: chain }, (0, 0), None);
+        let direct = build::layer(&mut p, &base, "direct", LayerSource::Comp { item: audible }, (0, 0), None);
+        let root = mk(&mut p, vec![via_chain, direct]);
+        assert!(comp_has_audio(&p, root));
     }
 
     #[test]
@@ -351,7 +476,7 @@ mod tests {
             pr.value = effectcraft_project::Value::Vec2([-6.0206, -96.0]);
         }
         let mut comp = comp;
-        comp.layers = vec![l1, l2];
+        comp.layers = vec![l1, l2].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         assert!(comp_has_audio(&p, cid));
         let rate = 1000;
@@ -397,11 +522,11 @@ mod tests {
         let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
         let tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         let mut inner = base.clone();
-        inner.layers = vec![tone];
+        inner.layers = vec![tone].into();
         let inner_id = p.add_item("Inner", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(inner.into()));
         let pre = build::layer(&mut p, &base, "pre", LayerSource::Comp { item: inner_id }, (64, 64), None);
         let mut outer = base.clone();
-        outer.layers = vec![pre];
+        outer.layers = vec![pre].into();
         let outer_id = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
         let rate = 8000;
         let t = Tick::from_seconds_f64(0.5);
@@ -428,7 +553,7 @@ mod tests {
         let mut tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         tone.stretch = stretch;
         let mut comp = base.clone();
-        comp.layers = vec![tone];
+        comp.layers = vec![tone].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let n = 2000usize;
         let t = Tick::from_seconds_f64(0.5);

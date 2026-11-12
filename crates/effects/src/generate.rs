@@ -112,11 +112,26 @@ pub(crate) fn gen_blend(o: Px, g: Px, mode: u32) -> Px {
     }
 }
 
+/// 4-Color Gradient's weights are inverse squared distances softened by Blend²: each point
+/// weighs 1 / (d² + Blend²) (pixels). Fitted to After Effects 2026 renders at Blend 10, 50, 100
+/// and 300 (power 2.00 at every Blend, softening 0 / 2367 / 9817 / 90127 ≈ Blend²; mean error
+/// 0.27/255, max 0.9). Returns Blend² in buffer pixels, never 0.
+pub fn four_color_softening(blend: f64, scale: f64) -> f64 {
+    let b = blend.max(0.0) * scale;
+    (b * b).max(1e-6)
+}
+
+/// 4-Color Gradient's Jitter (percent, up to After Effects' 500 %) as the dither's strength: 1 at
+/// 100 %, a few code values of noise per unit.
+pub fn four_color_jitter(jitter: f64) -> f32 {
+    (jitter / 100.0).clamp(0.0, 5.0) as f32
+}
+
 fn four_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pts: Vec<((f64, f64), [f32; 4])> =
         (1..=4).map(|i| (b.to_px(ctx.params.v2(&format!("positionsColors/point{i}"))), ctx.params.color(&format!("positionsColors/color{i}")))).collect();
-    let blend = ctx.params.f("blend").max(1.0);
-    let jitter = (ctx.params.f("jitter") / 100.0).clamp(0.0, 1.0) as f32;
+    let k = four_color_softening(ctx.params.f("blend"), b.scale);
+    let jitter = four_color_jitter(ctx.params.f("jitter"));
     let op = ctx.params.f("opacity") as f32 / 100.0;
     let mode = ctx.params.e("blendingMode");
     let seed = ctx.seed;
@@ -126,7 +141,7 @@ fn four_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
             let mut wsum = 0.0;
             for ((qx, qy), c) in &pts {
                 let d2 = (x as f64 + 0.5 - qx).powi(2) + (y as f64 + 0.5 - qy).powi(2);
-                let w = 1.0 / (d2 / (blend * 100.0) + 1e-6).powf(1.5);
+                let w = 1.0 / (d2 + k);
                 for i in 0..3 {
                     acc[i] += c[i] as f64 * w;
                 }
@@ -283,10 +298,22 @@ pub(crate) fn fade(t: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
-/// 3D value noise in 0..1 (z = evolution).
+/// 3D value noise in 0..1 (z = evolution). The quintic fade applies on all three axes, so z
+/// eases in and out of every integer.
 pub fn value_noise(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    value_noise_z(x, y, z, seed, true)
+}
+
+/// [`value_noise`] with the evolution axis z interpolated linearly (x and y keep the quintic
+/// fade). The fade's zero slope at every integer z made a small Evolution change almost invisible
+/// next to a whole revolution (#943, #1816); linear z moves the pattern at a constant rate.
+pub fn value_noise_linear_z(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    value_noise_z(x, y, z, seed, false)
+}
+
+fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
     let (x0, y0, z0) = (x.floor(), y.floor(), z.floor());
-    let (fx, fy, fz) = (fade(x - x0), fade(y - y0), fade(z - z0));
+    let (fx, fy, fz) = (fade(x - x0), fade(y - y0), if ease_z { fade(z - z0) } else { z - z0 });
     let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let c = |dx: i32, dy: i32, dz: i32| lattice(ix + dx, iy + dy, iz + dz, seed);
@@ -328,8 +355,9 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("positionsColors/color3", "Color 3", col(1.0, 0.0, 1.0), ParamUi::Color),
                 p("positionsColors/point4", "Point 4", pt(0.9, 0.9), ParamUi::Point),
                 p("positionsColors/color4", "Color 4", col(0.0, 0.0, 1.0), ParamUi::Color),
-                p("blend", "Blend", num(100.0), slider(1.0, 1000.0, 1.0, 1000.0, 1)),
-                p("jitter", "Jitter", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                // After Effects' valid ranges (#3478, #3479); Blend keeps its lower minimum (1, not 5).
+                p("blend", "Blend", num(100.0), slider(1.0, 10000.0, 1.0, 1000.0, 1)),
+                p("jitter", "Jitter", num(0.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
                 p("opacity", "Opacity", num(100.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
                 p("blendingMode", "Blending Mode", Value::Enum(0), popup(&GEN_BLEND_MODES[..18])),
             ],
@@ -363,7 +391,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("corner", "Corner", pt(0.1, 0.1), ParamUi::Point),
                 p("width", "Width", num(64.0), slider(1.0, 4000.0, 1.0, 400.0, 1)),
                 p("height", "Height", num(64.0), slider(1.0, 4000.0, 1.0, 400.0, 1)),
-                p("border", "Border", num(2.0), slider(0.0, 400.0, 0.0, 40.0, 1)),
+                p("border", "Border", num(2.0), slider(0.0, 2000.0, 0.0, 40.0, 1)),
                 p("feather/featherWidth", "Width", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 1)),
                 p("feather/featherHeight", "Height", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 1)),
                 p("invertGrid", "Invert Grid", Value::Bool(false), ParamUi::Checkbox),
@@ -405,6 +433,27 @@ mod generator_tests {
         Image::filled(32, 32, [1.0, 0.0, 0.0, 1.0])
     }
 
+    /// #943: the evolution axis is linear, so z moves the noise at a constant rate, while the
+    /// classic `value_noise` keeps its eased z (other effects and their pinned goldens use it).
+    #[test]
+    fn linear_z_value_noise_moves_at_a_constant_rate() {
+        for (x, y, seed) in [(0.3f32, 0.7f32, 5u32), (2.4, -1.6, 11), (-3.1, 4.9, 0)] {
+            let a = value_noise_linear_z(x, y, 0.0, seed);
+            let b = value_noise_linear_z(x, y, 1.0, seed);
+            for z in [0.1f32, 0.25, 0.5, 0.75, 0.9] {
+                let want = a + (b - a) * z;
+                let got = value_noise_linear_z(x, y, z, seed);
+                assert!((got - want).abs() < 1e-5, "({x}, {y}) z {z}: {got} vs {want}");
+            }
+            // Same lattice values at whole z, and x / y are untouched.
+            assert_eq!(value_noise_linear_z(x, y, 2.0, seed), value_noise(x, y, 2.0, seed));
+        }
+        // The eased version still has the old shape: at z = 0.25 it lags the linear one.
+        let (a, b) = (value_noise(0.3, 0.7, 0.0, 5), value_noise(0.3, 0.7, 1.0, 5));
+        let eased = value_noise(0.3, 0.7, 0.25, 5);
+        assert!((eased - (a + (b - a) * 0.25)).abs() > 1e-3);
+    }
+
     #[test]
     fn gradient_ramp_stays_inside_the_layer_alpha() {
         // #1063: a shape's transparent pixels stay transparent; the ramp fills only the shape.
@@ -420,6 +469,74 @@ mod generator_tests {
                 assert!(out[..3].iter().all(|&c| c <= out[3] + 1e-6), "blend {blend}: premultiplied colour above alpha");
             }
             assert!(o.img.data.iter().any(|p| p[3] > 0.99), "blend {blend}: the ramp is drawn inside the shape");
+        }
+    }
+
+    /// #3479: Jitter goes up to After Effects' 500 %, and more jitter dithers more (the dither
+    /// stopped growing at 100 %).
+    #[test]
+    fn four_color_jitter_grows_up_to_five_hundred_percent() {
+        let img = Image::filled(32, 32, [0.0, 0.0, 0.0, 1.0]);
+        let spread = |jitter: f64| {
+            let o = run_fx("ec.generate.fourcolor", &[("jitter", num(jitter))], img.clone(), 0.0, EffectEnv::default()).img;
+            let flat = run_fx("ec.generate.fourcolor", &[], img.clone(), 0.0, EffectEnv::default()).img;
+            o.data.iter().zip(&flat.data).map(|(a, b)| (a[0] - b[0]).abs()).fold(0.0f32, f32::max)
+        };
+        let (at100, at500) = (spread(100.0), spread(500.0));
+        assert!(at100 > 0.0 && at500 > 4.0 * at100, "{at100} {at500}");
+        assert!(at500 < 0.2, "a few code values: {at500}");
+    }
+
+    /// After Effects 2026, 4-Color Gradient defaults (yellow, green, magenta, blue at 10 % / 90 %
+    /// of a 1920 × 1080 layer) at Blend 100 and 300, here on a tenth-size layer with Blend 10
+    /// and 30 (the weights scale with the layer): colours at AE pixels (10x + 5, 10y + 5).
+    #[test]
+    fn four_color_blend_matches_after_effects() {
+        let pts = [
+            ("positionsColors/point1", [19.2, 10.8]),
+            ("positionsColors/point2", [172.8, 10.8]),
+            ("positionsColors/point3", [19.2, 97.2]),
+            ("positionsColors/point4", [172.8, 97.2]),
+        ];
+        let cols = [
+            ("positionsColors/color1", [1.0, 1.0, 0.0, 1.0]),
+            ("positionsColors/color2", [0.0, 1.0, 0.0, 1.0]),
+            ("positionsColors/color3", [1.0, 0.0, 1.0, 1.0]),
+            ("positionsColors/color4", [0.0, 0.0, 1.0, 1.0]),
+        ];
+        let ae: [(f64, [(i64, i64, [f32; 3]); 5]); 2] = [
+            (
+                10.0,
+                [
+                    (30, 20, [249.0, 240.0, 15.0]),
+                    (150, 30, [20.0, 208.0, 47.0]),
+                    (60, 90, [213.0, 56.0, 199.0]),
+                    (100, 10, [115.0, 177.0, 78.0]),
+                    (10, 50, [238.0, 145.0, 110.0]),
+                ],
+            ),
+            (
+                30.0,
+                [
+                    (30, 20, [236.0, 214.0, 41.0]),
+                    (150, 30, [30.0, 189.0, 66.0]),
+                    (60, 90, [203.0, 67.0, 188.0]),
+                    (100, 10, [117.0, 173.0, 82.0]),
+                    (10, 50, [233.0, 140.0, 115.0]),
+                ],
+            ),
+        ];
+        for (blend, samples) in ae {
+            let mut vals: Vec<(&str, Value)> = pts.iter().map(|(k, v)| (*k, Value::Vec2(*v))).collect();
+            vals.extend(cols.iter().map(|(k, v)| (*k, Value::Color(*v))));
+            vals.push(("blend", num(blend)));
+            let o = run_fx("ec.generate.fourcolor", &vals, Image::filled(192, 108, [1.0, 0.0, 0.0, 1.0]), 0.0, EffectEnv::default());
+            for (x, y, want) in samples {
+                let p = o.img.get(x, y);
+                for c in 0..3 {
+                    assert!((p[c] * 255.0 - want[c]).abs() <= 3.0, "blend {blend} at ({x}, {y}) channel {c}: {} vs AE {}", p[c] * 255.0, want[c]);
+                }
+            }
         }
     }
 

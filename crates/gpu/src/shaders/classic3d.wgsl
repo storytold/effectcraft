@@ -199,6 +199,12 @@ fn attenuation(l: u32, p: vec3<f32>) -> f32 {
     return k;
 }
 
+// compose::shadow_taps: samples per side of the Shadow Diffusion kernel.
+fn shadow_taps(r_px: f32) -> u32 {
+    let n = clamp(u32(ceil(2.0 * r_px / 1.5)), 3u, 15u);
+    return n | 1u;
+}
+
 // compose::occlusion: RGB transmittance of light `l` reaching `p` past caster `c`.
 fn occlusion(c: u32, p: vec3<f32>, l: u32) -> vec3<f32> {
     let pl = planes[c];
@@ -243,9 +249,14 @@ fn occlusion(c: u32, p: vec3<f32>, l: u32) -> vec3<f32> {
     if (r * pl.tex.z < 0.5) {
         px = texel(c, hit.x, hit.y);
     } else {
-        for (var j = -1; j <= 1; j++) {
-            for (var i = -1; i <= 1; i++) {
-                px += texel(c, hit.x + f32(i) * r * 0.66, hit.y + f32(j) * r * 0.66) / 9.0;
+        // compose::shadow_taps: n × n box filter over the penumbra square.
+        let n = shadow_taps(r * pl.tex.z);
+        let step = 2.0 * r / f32(n);
+        let h = i32(n / 2u);
+        let w = 1.0 / f32(n * n);
+        for (var j = -h; j <= h; j++) {
+            for (var i = -h; i <= h; i++) {
+                px += texel(c, hit.x + f32(i) * step, hit.y + f32(j) * step) * w;
             }
         }
     }
@@ -255,16 +266,14 @@ fn occlusion(c: u32, p: vec3<f32>, l: u32) -> vec3<f32> {
     }
     let tr = pl.mat1.y;
     let dark = li.shadow.x;
-    var o = vec3<f32>(1.0);
-    for (var k = 0; k < 3; k++) {
-        var st = 0.0;
-        if (px.w > 0.0) {
-            st = clamp(px[k] / px.w, 0.0, 1.0);
-        }
-        let through = (1.0 - alpha) + alpha * tr * st;
-        o[k] = 1.0 - dark * (1.0 - through);
+    // Per channel, as whole vectors: FXC (DirectX 12) can't write a vector component through a
+    // loop index without unrolling every loop around the call, and fails (#613).
+    var st = vec3<f32>(0.0);
+    if (px.w > 0.0) {
+        st = clamp(px.xyz / px.w, vec3<f32>(0.0), vec3<f32>(1.0));
     }
-    return o;
+    let through = (1.0 - alpha) + alpha * tr * st;
+    return 1.0 - dark * (1.0 - through);
 }
 
 fn shadow_of(it: u32, l: u32, p: vec3<f32>) -> vec3<f32> {

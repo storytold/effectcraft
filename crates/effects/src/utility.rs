@@ -1,9 +1,9 @@
 //! Utility effects: bounds growth, HDR inspection/compression, Cineon log conversion and colour
 //! lookup tables (.cube).
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
+use crate::file_cache::{self, Registered};
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
@@ -55,29 +55,42 @@ fn overbrights(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Soft-knee, hue-preserving compression of the brightest channel into [0, 1).
-fn hdr_compress_value(m: f32, knee: f32) -> f32 {
-    if m <= knee {
-        return m;
-    }
-    let w = 1.0 - knee;
-    knee + w * (m - knee) / ((m - knee) + w)
+/// Luma weights HDR Highlight Compression divides by (measured against After Effects 2026).
+const HDR_LUMA: [f32; 3] = [0.30, 0.59, 0.11];
+/// Exponent of the domain the Amount blend happens in (out^0.4 is mixed linearly).
+const HDR_BLEND_GAMMA: f32 = 0.4;
+
+/// `v^e` with the sign of `v` kept (negative input stays negative, as on the GPU).
+#[inline]
+fn hdr_spow(v: f32, e: f32) -> f32 {
+    v.signum() * v.abs().powf(e)
 }
 
+/// One straight-colour pixel through HDR Highlight Compression at blend `t` (Amount / 100, > 0).
+///
+/// Measured behaviour (16-bit renders of a 0–4 HDR ramp and coloured patches at Amount 100,
+/// 90, 84, 75, 50 and 25): every channel is divided by `1 + Y` (`Y` = 0.30 R + 0.59 G + 0.11 B, so a grey
+/// value `x` lands on `x / (1 + x)`), clipped at 1, then mixed with the input as `x^0.4` values.
+fn hdr_compress_pixel(c: [f32; 3], t: f32) -> [f32; 3] {
+    let y = (HDR_LUMA[0] * c[0] + HDR_LUMA[1] * c[1] + HDR_LUMA[2] * c[2]).max(0.0);
+    let s = 1.0 / (1.0 + y);
+    let g = HDR_BLEND_GAMMA;
+    c.map(|x| {
+        let comp = (x * s).min(1.0);
+        let mixed = (1.0 - t) * hdr_spow(x, g) + t * hdr_spow(comp, g);
+        let o = hdr_spow(mixed, 1.0 / g);
+        if o.is_finite() { o } else { x }
+    })
+}
+
+/// HDR Highlight Compression: every straight-colour pixel through [`hdr_compress_pixel`] at
+/// Amount / 100; Amount 0 or NaN returns the layer unchanged.
 fn hdr_compression(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let t = (ctx.params.f("amount") / 100.0).clamp(0.0, 1.0) as f32;
-    if t <= 0.0 {
+    if t <= 0.0 || !t.is_finite() {
         return b;
     }
-    let knee = 1.0 - 0.5 * t;
-    b.img.map_straight(|c| {
-        let m = c[0].max(c[1]).max(c[2]);
-        if m <= knee {
-            return c;
-        }
-        let k = hdr_compress_value(m, knee) / m;
-        c.map(|v| v * k)
-    });
+    b.img.map_straight(|c| hdr_compress_pixel(c, t));
     b
 }
 
@@ -100,17 +113,11 @@ impl Cineon {
     fn knee(&self) -> f32 {
         1.0 - (self.rolloff / 100.0).clamp(0.0, 0.99)
     }
-    /// Normalised code value (code / 1023) → linear.
+    /// Normalized code value (code / 1023) → linear, raised to `1.7 / gamma`
+    /// ([`effectcraft_project::cineon_log_to_lin`], which Interpret Footage ▸ Cineon Settings
+    /// also uses with `1 / gamma`).
     pub fn log_to_lin(&self, v: f32) -> f32 {
-        let off = self.offset();
-        let code = v * 1023.0;
-        let mut lin = (10f32.powf((code - self.white) * 0.002 / 0.6) - off) / (1.0 - off).max(1e-6);
-        lin = lin.max(0.0).powf(1.7 / self.gamma.max(0.01));
-        let k = self.knee();
-        if k < 1.0 && lin > k {
-            let w = 1.0 - k;
-            lin = k + w * (1.0 - (-(lin - k) / w).exp());
-        }
+        let lin = effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.7, self.gamma, self.rolloff);
         self.ib + (self.iw - self.ib) * lin
     }
     /// Linear → normalised code value.
@@ -323,26 +330,71 @@ impl Lut {
     }
 }
 
-type LutCache = Mutex<HashMap<String, Option<Arc<Lut>>>>;
+/// At most this many parsed LUTs (files and inline texts) are kept, and at most
+/// [`MAX_CACHED_BYTES`] of them; the least recently used go first.
+const MAX_CACHED_LUTS: usize = 64;
+const MAX_CACHED_BYTES: usize = 512 << 20;
 
-/// Load (and cache) a LUT from inline `.cube` text or a file path.
+/// [`load_lut`]'s cache, by parameter text.
+static LUTS: Registered<Option<Arc<Lut>>> = Registered::new(MAX_CACHED_LUTS, MAX_CACHED_BYTES);
+
+/// The parameters (paths in the effect's group) of `effect` that name a file an effect reads
+/// through a cache that follows it ([`load_lut`], the OCIO file transforms and configs).
+pub fn lut_params(effect: &str) -> &'static [&'static str] {
+    match effect {
+        "ec.utility.applylut" => &["lut"],
+        "ec.color.lumetri" => &["basicCorrection/inputLutFile", "creative/lookFile"],
+        "ec.color.ociofile" => &["file"],
+        "ec.color.ociocolorspace" | "ec.color.ociodisplay" => &["configFile"],
+        _ => &[],
+    }
+}
+
+/// The file a LUT parameter names; `None` for inline `.cube` text or an empty parameter.
+pub fn lut_file(src: &str) -> Option<&str> {
+    // `.cube` text always spans lines (a size header, then data rows); a path never does, even one
+    // whose file name contains `LUT_` (#3454). Trimmed, so a trailing newline is still a path.
+    let path = src.trim();
+    (!path.is_empty() && !path.contains('\n')).then_some(path)
+}
+
+/// The files a [`lut_params`] parameter set to `src` reads: the ones its cached result was read
+/// from (an OCIO config's also the LUTs it names, and the places it looked for missing ones; an
+/// `.ocio` config not read yet is read), else the file it names.
+pub fn lut_files(src: &str) -> Vec<String> {
+    // A config not read yet is read now: the LUTs it names are its files from the first render.
+    if crate::ocio_config::cached_files(src).is_none()
+        && lut_file(src).is_some_and(|p| std::path::Path::new(p).extension().is_some_and(|e| e.eq_ignore_ascii_case("ocio")))
+    {
+        let _ = crate::ocio_config::load_config(src);
+    }
+    crate::ocio_config::cached_files(src)
+        .or_else(|| crate::ocio::cached_files(src))
+        .or_else(|| file_cache::lock(LUTS.get()).files(src))
+        .unwrap_or_else(|| lut_file(src).map(str::to_string).into_iter().collect())
+}
+
+/// Load (and cache) a LUT from inline `.cube` text or a file path. A file is stamped (one
+/// `metadata` call) on every load and read again once its size or modification time moved (see
+/// [`crate::file_cache`]); inline text is its own content.
 pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     if src.trim().is_empty() {
         return None;
     }
-    static CACHE: OnceLock<LutCache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
-    {
-        return v.clone();
-    }
-    let inline = src.contains('\n') || src.contains("LUT_");
-    let parsed = if inline { parse_cube(src) } else { std::fs::read_to_string(src.trim()).ok().and_then(|t| parse_cube(&t)) }.map(Arc::new);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
-    }
-    parsed
+    file_cache::cached(LUTS.get(), src, || {
+        let lut = match lut_file(src) {
+            Some(path) => file_cache::read(path).ok().and_then(|t| parse_cube(&t)),
+            None => parse_cube(src),
+        }
+        .map(Arc::new);
+        let bytes = lut.as_ref().map_or(0, |l| lut_bytes(l));
+        (lut, bytes)
+    })
+}
+
+/// The size of a LUT's tables.
+pub(crate) fn lut_bytes(l: &Lut) -> usize {
+    l.d1.len().saturating_add(l.d3.len()).saturating_mul(std::mem::size_of::<[f32; 3]>())
 }
 
 fn apply_lut(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -358,7 +410,7 @@ pub fn specs() -> Vec<EffectSpec> {
         spec("ec.utility.growbounds", "Grow Bounds", vec![p("pixels", "Pixels", num(0.0), slider(0.0, 4000.0, 0.0, 500.0, 0))], grow_bounds),
         spec(
             "ec.utility.ccoverbrights",
-            "CC Overbrights",
+            "Out-of-Range Display",
             vec![
                 p("channel", "Channel", Value::Enum(0), popup(&["Max RGB", "Red", "Green", "Blue", "Alpha", "Luminance"])),
                 p("highlightColor", "Highlight Color", col(1.0, 0.0, 0.0), ParamUi::Color),
@@ -477,6 +529,114 @@ mod tests {
         assert_eq!(out.img, img);
     }
 
+    /// #3454: a path containing `LUT_` was taken for `.cube` text and the file never loaded.
+    #[test]
+    fn a_path_whose_name_contains_lut_loads_the_file() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3454-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("LUT_x.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        assert!(load_lut(&path).is_some(), "{path}");
+        assert!(load_lut(&format!("{path}\r\n")).is_some(), "{path} with a trailing newline");
+        assert!(load_lut(&identity_cube(2)).is_some(), "inline text");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #3493: a LUT file was read once per process; an edited or newly created file never loaded.
+    #[test]
+    fn a_lut_file_is_read_again_once_it_changes() {
+        const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+        const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str, secs: u64| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let at = |src: &str| load_lut(src).map(|l| l.apply([0.5; 3]));
+        let edited = write("edited.cube", BLACK, 1_000);
+        assert_eq!(at(&edited), Some([0.0; 3]));
+        write("edited.cube", WHITE, 2_000);
+        assert_eq!(at(&edited), Some([1.0; 3]), "an edited file, same size");
+        let created = dir.join("created.cube").to_string_lossy().into_owned();
+        assert_eq!(at(&created), None);
+        write("created.cube", WHITE, 1_000);
+        assert_eq!(at(&created), Some([1.0; 3]), "a file created after a failed load");
+        let repaired = write("repaired.cube", "not a lut", 1_000);
+        assert_eq!(at(&repaired), None);
+        write("repaired.cube", WHITE, 2_000);
+        assert_eq!(at(&repaired), Some([1.0; 3]), "a repaired file");
+        std::fs::remove_file(&repaired).unwrap();
+        assert_eq!(at(&repaired), None, "a deleted file");
+        // Inline text is its own content: the same text is the same LUT.
+        let inline = load_lut(BLACK).unwrap();
+        assert!(Arc::ptr_eq(&inline, &load_lut(BLACK).unwrap()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file that changed is noticed without a render loading it, and the generation that tells
+    /// frames made before it apart moves.
+    #[test]
+    fn check_lut_files_forgets_a_changed_file() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grade.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let src = path.to_string_lossy().into_owned();
+        assert!(load_lut(&src).is_some());
+        let before = crate::check_lut_files();
+        assert!(file_cache::lock(LUTS.get()).contains(&src), "an unchanged file stays");
+        std::fs::write(&path, identity_cube(3)).unwrap();
+        assert!(crate::check_lut_files() > before);
+        assert!(!file_cache::lock(LUTS.get()).contains(&src), "a changed file is read again");
+        assert_eq!(load_lut(&src).map(|l| l.n3), Some(3));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The cache keeps at most [`MAX_CACHED_LUTS`] LUTs, the least recently used going first.
+    #[test]
+    fn the_lut_cache_is_bounded() {
+        // (text no other test loads: a load elsewhere would make it recently used)
+        let oldest = format!("TITLE \"bounded first\"\n{}", identity_cube(2));
+        let first = load_lut(&oldest).unwrap();
+        for i in 0..MAX_CACHED_LUTS + 8 {
+            let text = format!("TITLE \"bounded {i}\"\n{}", identity_cube(2));
+            assert!(load_lut(&text).is_some());
+            assert!(file_cache::lock(LUTS.get()).len() <= MAX_CACHED_LUTS);
+        }
+        assert!(!Arc::ptr_eq(&first, &load_lut(&oldest).unwrap()), "the oldest was let go");
+        let (bytes, sum, max) = file_cache::lock(LUTS.get()).bytes();
+        assert_eq!(bytes, sum, "the bytes kept add up");
+        assert!(bytes <= max);
+    }
+
+    /// A LUT file whose LUT left the cache is still followed: its frames are dropped when it
+    /// changes, though no render loads it again first.
+    #[test]
+    fn a_file_whose_lut_left_the_cache_is_still_followed() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-evicted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let src = path.to_string_lossy().into_owned();
+        assert!(load_lut(&src).is_some());
+        for i in 0..MAX_CACHED_LUTS + 8 {
+            assert!(load_lut(&format!("TITLE \"evict {i}\"\n{}", identity_cube(2))).is_some());
+        }
+        assert!(!file_cache::lock(LUTS.get()).contains(&src), "its LUT left the cache");
+        std::fs::write(&path, identity_cube(3)).unwrap();
+        crate::check_lut_files();
+        assert_eq!(file_cache::followed_stamp(&src), Some(file_cache::file_stamp(&src)), "the change was noticed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn one_d_lut_with_domain() {
         let lut = parse_cube("LUT_1D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 2 2 2\n1 1 1\n0 0 0\n").unwrap();
@@ -495,15 +655,154 @@ mod tests {
         assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
     }
 
+    /// Interpret Footage ▸ Cineon Settings and the Cineon Converter's Log to Linear give the same
+    /// values for the same points and Highlight Rolloff when the converter's Gamma is 1.7 times
+    /// Cineon Settings' Gamma: the converter's default 1.7 and Cineon Settings' Gamma 1 both give
+    /// linear light (code 400 is 0.10251).
+    #[test]
+    fn cineon_converter_matches_interpret_footage() {
+        let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
+        for (gamma, rolloff) in [(1.0, 20.0), (1.0, 0.0), (1.7, 50.0), (2.4, 50.0)] {
+            let mut img = Image::new(codes.len() as u32, 1);
+            for (x, code) in codes.iter().enumerate() {
+                let v = code / 1023.0;
+                img.set(x as u32, 0, [v, v, v, 1.0]);
+            }
+            let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma * 1.7)), ("highlightRolloff", num(rolloff))];
+            let out = run("ec.utility.cineon", &vals, img);
+            let settings = effectcraft_project::CineonSettings { log_conversion: true, gamma: gamma as f32, rolloff: rolloff as f32, ..Default::default() };
+            for (x, code) in codes.iter().enumerate() {
+                let footage = settings.convert(code / 1023.0);
+                let effect = out.img.data[x][0];
+                assert!((footage - effect).abs() < 1e-6, "gamma {gamma}, rolloff {rolloff}, code {code}: {footage} vs {effect}");
+            }
+        }
+        let linear = effectcraft_project::CineonSettings { gamma: 1.0, rolloff: 0.0, ..Default::default() };
+        assert!((linear.convert(400.0 / 1023.0) - 0.10251).abs() < 1e-4);
+    }
+
+    /// The Cineon Converter gives the same values as before Cineon Settings shared its
+    /// log-to-linear function, at the default Gamma (1.7) and at Gamma 2.4, for all three
+    /// conversion types.
+    #[test]
+    fn cineon_converter_output_is_unchanged() {
+        fn log_to_lin(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
+            let off = 10f32.powf((black - white) * 0.002 / 0.6);
+            let mut lin = (10f32.powf((v * 1023.0 - white) * 0.002 / 0.6) - off) / (1.0 - off).max(1e-6);
+            lin = lin.max(0.0).powf(1.7 / gamma.max(0.01));
+            let k = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
+            if k < 1.0 && lin > k {
+                let w = 1.0 - k;
+                lin = k + w * (1.0 - (-(lin - k) / w).exp());
+            }
+            lin
+        }
+        fn lin_to_log(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
+            let off = 10f32.powf((black - white) * 0.002 / 0.6);
+            let mut lin = v;
+            let k = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
+            if k < 1.0 && lin > k {
+                let w = 1.0 - k;
+                lin = k - w * (1.0 - (lin - k) / w).max(1e-6).ln();
+            }
+            lin = lin.max(0.0).powf(gamma.max(0.01) / 1.7);
+            (white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002) / 1023.0
+        }
+        let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
+        for gamma in [None, Some(2.4)] {
+            for kind in 0..3 {
+                let mut img = Image::new(codes.len() as u32, 1);
+                for (x, code) in codes.iter().enumerate() {
+                    let v = code / 1023.0;
+                    img.set(x as u32, 0, [v, v, v, 1.0]);
+                }
+                let mut vals = vec![("conversionType", Value::Enum(kind))];
+                if let Some(g) = gamma {
+                    vals.push(("gamma", num(g)));
+                }
+                let out = run("ec.utility.cineon", &vals, img);
+                let g = gamma.unwrap_or(1.7) as f32;
+                for (x, code) in codes.iter().enumerate() {
+                    let v = code / 1023.0;
+                    let want = match kind {
+                        0 => lin_to_log(v, g, 20.0, 95.0, 685.0),
+                        1 => log_to_lin(v, g, 20.0, 95.0, 685.0),
+                        _ => lin_to_log(log_to_lin(v, g, 20.0, 95.0, 685.0), 1.7, 20.0, 95.0, 685.0),
+                    };
+                    let got = out.img.data[x][0];
+                    assert!((want - got).abs() < 1e-6, "gamma {g}, type {kind}, code {code}: {want} vs {got}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn hdr_compression_behaviour() {
         let mut img = Image::new(2, 1);
         img.set(0, 0, [0.2, 0.3, 0.4, 1.0]);
         img.set(1, 0, [4.0, 2.0, 1.0, 1.0]);
+        let out = run("ec.utility.hdrcompression", &[("amount", num(0.0))], img.clone());
+        assert_eq!(out.img.data, img.data, "Amount 0 leaves the image alone");
         let out = run("ec.utility.hdrcompression", &[], img);
-        assert_eq!(out.img.data[0], [0.2, 0.3, 0.4, 1.0]);
-        let o = out.img.data[1];
-        assert!(o[0] <= 1.0 && o[0] > 0.5 && (o[0] / o[1] - 2.0).abs() < 1e-4, "{o:?}");
+        for o in &out.img.data {
+            assert!(o.iter().all(|v| v.is_finite() && *v <= 1.0), "{o:?}");
+        }
+        // Negative and huge input stays finite.
+        let mut img = Image::new(2, 1);
+        img.set(0, 0, [-0.5, 0.2, 3.0, 1.0]);
+        img.set(1, 0, [1e30, -1e30, 0.0, 1.0]);
+        let out = run("ec.utility.hdrcompression", &[("amount", num(50.0))], img);
+        assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "{:?}", out.img.data);
+    }
+
+    /// A linear value up to 1 as a code of After Effects' 16-bit PNG renders: the sRGB curve × 6553.5.
+    fn png_code(x: f32) -> f32 {
+        (if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }) * 6553.5
+    }
+
+    /// Our own measurements of After Effects 2026 (32 bpc, no working space; 16-bit PNG renders
+    /// decoded back to linear): input pixel, then the output at Amount 100, 90, 84, 75, 50 and 25.
+    #[test]
+    fn hdr_compression_matches_measured_reference() {
+        const AMOUNTS: [f64; 6] = [100.0, 90.0, 84.0, 75.0, 50.0, 25.0];
+        #[rustfmt::skip]
+        let table: [([f32; 3], [[f32; 3]; 6]); 9] = [
+            ([0.18005371; 3], [[0.1524; 3], [0.1550; 3], [0.1566; 3], [0.1590; 3], [0.1660; 3], [0.1729; 3]]),
+            ([0.49365234; 3], [[0.3302; 3], [0.3450; 3], [0.3540; 3], [0.3674; 3], [0.4073; 3], [0.4492; 3]]),
+            ([1.0058594; 3], [[0.5014; 3], [0.5427; 3], [0.5683; 3], [0.6085; 3], [0.7280; 3], [0.8602; 3]]),
+            ([2.0058594; 3], [[0.6673; 3], [0.7637; 3], [0.8256; 3], [0.9232; 3], [1.2292; 3], [1.5892; 3]]),
+            ([2.9941406; 3], [[0.7496; 3], [0.8962; 3], [0.9922; 3], [1.1465; 3], [1.6475; 3], [2.2604; 3]]),
+            ([3.9941406; 3], [[0.7998; 3], [0.9929; 3], [1.1213; 3], [1.3303; 3], [2.0312; 3], [2.9141; 3]]),
+            ([0.7998047, 0.099975586, 0.099975586], [
+                [0.6101, 0.0762, 0.0762], [0.6279, 0.0784, 0.0784], [0.6386, 0.0798, 0.0798],
+                [0.6547, 0.0817, 0.0817], [0.7012, 0.0877, 0.0877], [0.7496, 0.0937, 0.0937],
+            ]),
+            ([0.099975586, 0.7001953, 0.19995117], [
+                [0.0681, 0.4776, 0.1363], [0.0711, 0.4976, 0.1420], [0.0727, 0.5097, 0.1456],
+                [0.0754, 0.5287, 0.1508], [0.0832, 0.5829, 0.1662], [0.0912, 0.6397, 0.1825],
+            ]),
+            ([0.30004883, 0.5, 2.5], [
+                [0.1807, 0.3012, 0.9998], [0.1911, 0.3184, 1.1147], [0.1972, 0.3288, 1.1860],
+                [0.2071, 0.3453, 1.2995], [0.2359, 0.3931, 1.6484], [0.2669, 0.4444, 2.0482],
+            ]),
+        ];
+        let mut img = Image::new(table.len() as u32, 1);
+        for (x, (c, _)) in table.iter().enumerate() {
+            img.set(x as u32, 0, [c[0], c[1], c[2], 1.0]);
+        }
+        for (i, amount) in AMOUNTS.into_iter().enumerate() {
+            let out = run("ec.utility.hdrcompression", &[("amount", num(amount))], img.clone());
+            for (x, (input, want)) in table.iter().enumerate() {
+                let got = out.img.data[x];
+                for c in 0..3 {
+                    let w = want[i][c];
+                    // Up to 1: within 20 codes of the 16-bit PNG (the sRGB curve × 6553.5) the
+                    // renders were read from. Above 1 the PNG's lookup table is not known: 0.1 %.
+                    let ok = if w <= 1.0 { (png_code(got[c]) - png_code(w)).abs() <= 20.0 } else { (got[c] - w).abs() <= w * 1e-3 };
+                    assert!(ok, "amount {amount}, input {input:?}, channel {c}: {} vs AE {w}", got[c]);
+                }
+            }
+        }
     }
 
     #[test]

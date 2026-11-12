@@ -73,6 +73,53 @@ pub(crate) const IDS: &[&str] = &[
 /// not its square.
 pub(crate) const MEDIAN_BISECT_R: usize = 4;
 
+/// Physical GPUs retain the original parallel private histogram. Software Vulkan
+/// uses bounded workgroup storage to avoid its expensive first-use private-array
+/// lowering. This trades some warmed software throughput for bounded first use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MedianKernel {
+    Private64,
+    Software2,
+}
+
+impl MedianKernel {
+    pub(crate) fn for_adapter(backend: wgpu::Backend, device_type: wgpu::DeviceType) -> Self {
+        if backend == wgpu::Backend::Vulkan && device_type == wgpu::DeviceType::Cpu { Self::Software2 } else { Self::Private64 }
+    }
+
+    pub(crate) fn rows_per_workgroup(self) -> u32 {
+        match self {
+            Self::Private64 => 64,
+            Self::Software2 => 2,
+        }
+    }
+
+    pub(crate) fn workgroup_storage(self) -> u32 {
+        match self {
+            Self::Private64 => 0,
+            Self::Software2 => 16_384,
+        }
+    }
+
+    pub(crate) fn source(self) -> &'static str {
+        match self {
+            Self::Private64 => include_str!("shaders/median_private.wgsl"),
+            Self::Software2 => include_str!("shaders/median_software.wgsl"),
+        }
+    }
+
+    /// Separate test processes can qualify both implementations against existing oracles.
+    #[cfg(test)]
+    pub(crate) fn test_override(self) -> Result<Self, String> {
+        match std::env::var("EFFECTCRAFT_TEST_MEDIAN_KERNEL") {
+            Err(std::env::VarError::NotPresent) => Ok(self),
+            Ok(value) if value == "private64" => Ok(Self::Private64),
+            Ok(value) if value == "software2" => Ok(Self::Software2),
+            value => Err(format!("invalid EFFECTCRAFT_TEST_MEDIAN_KERNEL {value:?}; expected private64 or software2")),
+        }
+    }
+}
+
 /// Run effect `id` (one of [`IDS`]); `None` = this parameter combination runs on the CPU.
 pub(crate) fn apply(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     match id {
@@ -155,6 +202,8 @@ pub(crate) fn fractal(e: &mut Enc, ctx: &EffectCtx, b: GBuf, turbulent: bool) ->
 
 /// noise::median_image (of the straight colour with alpha 1 when `straight`).
 pub(crate) fn median_image(e: &mut Enc, img: &GpuImage, r: usize, straight: bool) -> GpuImage {
+    // As on the CPU: the window's radius is capped, so its first fill stays bounded.
+    let r = r.min(effectcraft_effects::MEDIAN_MAX_RADIUS);
     let q = run(e, "fxn_quant", &with_u0([straight as u32, 0, 0, 0]), img, None, None);
     // Preserve the CPU's rounded level / 511 values before the strict Dust & Scratches
     // threshold. GPU division (even residual-corrected) may differ by one ulp.
@@ -166,7 +215,8 @@ pub(crate) fn median_image(e: &mut Enc, img: &GpuImage, r: usize, straight: bool
     // sliding along the rest.
     let seg = (4 * r as u32).clamp(32, 512).min(q.width);
     let out = e.scratch(q.width, q.height);
-    e.dispatch("fxn_median_huang", &with_u0([r as u32, seg, 0, 0]), &q, None, &out, Some(&levels), (q.height.div_ceil(64), q.width.div_ceil(seg)));
+    let groups = (q.height.div_ceil(e.g.median_kernel.rows_per_workgroup()), q.width.div_ceil(seg));
+    e.dispatch("fxn_median_huang", &with_u0([r as u32, seg, 0, 0]), crate::context::KernelImages { src: &q, aux: None, out: &out }, Some(&levels), groups);
     out
 }
 
@@ -553,6 +603,8 @@ fn minimax(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 
 // ---------------------------------------------------------------- Echo / Posterize Time (time_fx.rs)
 
+/// Echo on the GPU (`time_fx::echo`): the frames fetched on the CPU, folded in order by
+/// `fxn_echo` into two ping-pong images, then `fxn_echo_fin` clamps the result.
 fn echo(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let n = ctx.params.f("numberOfEchoes").round().clamp(0.0, 255.0) as usize;
     let dt = ctx.params.f("echoTime");
@@ -572,8 +624,7 @@ fn echo(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         e.pixels("fxn_echo", &p, a, Some(&frame), o, None);
         acc.swap(0, 1);
     }
-    let mut p = with_u0([op, 0, 0, 0]);
-    p.f[0][0] = (n + 1) as f32;
+    let p = with_u0([op, 0, 0, 0]);
     let img = run(e, "fxn_echo_fin", &p, &acc[0], None, None);
     Some(GBuf { img, offset: grid.offset, scale: grid.scale })
 }

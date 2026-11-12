@@ -12,3 +12,6 @@
 
 /index.html
   Cache-Control: no-cache
+
+/effectcraft-config.json
+  Cache-Control: no-cache

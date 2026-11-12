@@ -1,0 +1,21 @@
+{
+  "id": "org.effectcraft.example.posterize-bands",
+  "name": "Posterize Bands",
+  "author": "EffectCraft contributors",
+  "license": "MIT OR Apache-2.0",
+  "repo": "https://github.com/storytold/effectcraft/tree/main/examples/plugins/posterize-bands",
+  "description": "Posterizes luminance into a chosen number of bands and tints them.",
+  "tags": ["stylize", "color"],
+  "preview": {"video": "https://github.com/storytold/effectcraft-plugins/raw/main/previews/posterize-bands.mp4"},
+  "versions": [
+    {
+      "version": "1.0.0",
+      "api": 1,
+      "minApp": "0.17.0",
+      "url": "https://github.com/storytold/effectcraft/releases/download/v0.17.0/posterize_bands.wasm",
+      "sha256": "d217309a695683de643678f456033677614cadb2890135362a32622e849498bf",
+      "size": 20100,
+      "effects": ["org.effectcraft.example.posterize-bands"]
+    }
+  ]
+}

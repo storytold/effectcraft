@@ -23,14 +23,36 @@ struct Checkpoint {
     key: u64,
     steps: u64,
     n: u32,
+    /// The birth steps of its particles (see [`born`]).
+    born: u64,
     buf: wgpu::Buffer,
     used: u64,
+}
+
+/// The particles born in the first `steps` steps of `births` (ascending birth steps) and a hash
+/// of their birth steps: a checkpoint is only resumed from when the request's births before it
+/// are the same (a keyframed Birth Rate isn't part of the system key, #1373).
+fn born(births: &[u32], steps: u64) -> (u32, u64) {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut n = 0u32;
+    for &b in births.iter().take_while(|&&b| u64::from(b) < steps) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        n += 1;
+    }
+    (n, h)
 }
 
 #[derive(Default)]
 pub(crate) struct Checkpoints {
     list: Vec<Checkpoint>,
     clock: u64,
+}
+
+impl Checkpoints {
+    /// Forget every kept state (after a failed frame, whose buffers may be invalid).
+    pub(crate) fn clear(&mut self) {
+        self.list.clear();
+    }
 }
 
 fn pipes(g: &GpuContext) -> &Pipes {
@@ -106,6 +128,10 @@ fn uniforms(req: &SimRequest, n: u32, s0: u64, prev_n: u32) -> Vec<u8> {
     out
 }
 
+/// Simulations dispatched on the GPU (tests check the GPU path really ran).
+#[cfg(test)]
+pub(crate) static DISPATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Simulate `req` (see [`effectcraft_effects::psim::ParticleSim`]).
 ///
 /// With deferred readbacks (a browser worker) the state's readback is keyed by the request
@@ -141,7 +167,7 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
         let mut c = g.particle_states.lock().ok()?;
         c.clock += 1;
         let now = c.clock;
-        match c.list.iter_mut().filter(|k| k.key == req.key && k.steps <= req.steps).max_by_key(|k| k.steps) {
+        match c.list.iter_mut().filter(|k| k.key == req.key && k.steps <= req.steps && born(req.births, k.steps) == (k.n, k.born)).max_by_key(|k| k.steps) {
             Some(k) => {
                 k.used = now;
                 (k.steps, Some(k.buf.clone()), k.n)
@@ -187,6 +213,8 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
     }
     enc.copy_buffer_to_buffer(&next, 0, &read, 0, size);
     g.queue.submit([enc.finish()]);
+    #[cfg(test)]
+    DISPATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let (Some(d), Some(k)) = (&deferred, key) {
         let row = usize::try_from(size).ok()?;
         let done = d.start(k, n, 1, [0.0; 2], 1.0);
@@ -232,7 +260,8 @@ fn keep_checkpoint(g: &GpuContext, req: &SimRequest, n: u32, next: wgpu::Buffer)
     if let Ok(mut c) = g.particle_states.lock() {
         let now = c.clock;
         c.list.retain(|k| !(k.key == req.key && k.steps == req.steps));
-        c.list.push(Checkpoint { key: req.key, steps: req.steps, n, buf: next, used: now });
+        let (_, h) = born(req.births, req.steps);
+        c.list.push(Checkpoint { key: req.key, steps: req.steps, n, born: h, buf: next, used: now });
         while c.list.len() > CHECKPOINTS {
             let Some(i) = c.list.iter().enumerate().min_by_key(|(_, k)| k.used).map(|(i, _)| i) else { break };
             c.list.remove(i);

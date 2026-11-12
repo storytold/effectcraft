@@ -8,9 +8,11 @@
 //! `--demo` opens the demo project instead (also Help ▸ Open Demo Project).
 //!
 //! `--control <port>` (or `EFFECTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
-//! see `effectcraft_ui_egui::control` for the methods.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+//! see `effectcraft_ui_egui::control` for the methods. An app started for an agent opens without
+//! taking keyboard focus and skips crash recovery, the Home screen (unless `--home`) and the
+//! startup update check.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 // Built everywhere so its tests run on every platform; only Linux AppImages use it.
 mod appearance;
@@ -20,6 +22,8 @@ mod appimage;
 mod apple_events;
 mod audio_out;
 mod control_server;
+mod crash_report;
+mod diagnostic_state;
 mod launch_guard;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -50,7 +54,7 @@ fn app_icon() -> egui::IconData {
 fn is_project_file(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
-        .and_then(|ext| ext.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|ext| ext.eq_ignore_ascii_case("ecproj") || ext.eq_ignore_ascii_case("ecprojx"))
 }
 
@@ -112,6 +116,13 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_port: Result<String, s
     Ok(Some(out))
 }
 
+/// Whether the app looks for a newer release when it starts. Not when started for an agent
+/// (`--control`): the "update available" prompt is modal and would block the run until a person
+/// dismisses it. Help ▸ Check for Updates still works.
+fn startup_update_check(control_port: Option<u16>) -> bool {
+    control_port.is_none()
+}
+
 /// A control-channel port from 1 to 65535 (0 would listen on a port nobody is told); `name` is
 /// the flag or variable it came from.
 fn control_port(name: &str, value: Option<&str>) -> Result<u16, String> {
@@ -128,17 +139,71 @@ fn control_port(name: &str, value: Option<&str>) -> Result<u16, String> {
 /// answer without pumping events, so the window stops answering the compositor and the desktop
 /// offers to force-quit it while the Open dialog is up (#1275). Windows' blocking dialog pumps
 /// its own messages, so it keeps [`effectcraft_ui_egui::Hooks::pick_files`] and friends.
-fn install_file_dialogs(app: &mut EffectcraftApp, ctx: &egui::Context) {
+/// The dialogs asked for in a frame show at its end ([`sheet_dialogs::show_asked`]), where the
+/// main window's handle is at hand.
+fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        let ctx = ctx.clone();
-        app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| sheet_dialogs::show(dialog, done, ctx.clone())));
+        let (tx, rx) = std::sync::mpsc::channel::<sheet_dialogs::Asked>();
+        app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| {
+            if tx.send((dialog, done)).is_err() {
+                log::error!("file dialog: the window is gone");
+            }
+        }));
+        Some(rx)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (app, ctx);
+    {
+        let _ = app;
+        None
+    }
 }
 
+/// External effect helpers are native programs, so they start at launch only when the user opts
+/// in with `EFFECTCRAFT_HELPERS=1`: an environment variable, outside the settings folder, so
+/// writing there alone can't run code at launch. Otherwise Effect ▸ Scan for Effect Helpers
+/// starts them.
+fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
+    if session.helpers.is_none() || std::env::var_os("EFFECTCRAFT_HELPERS").is_none_or(|v| v != "1") {
+        return;
+    }
+    match session.execute("effect.helpers.scan", json!({})) {
+        Ok(r) => {
+            for e in r["errors"].as_array().into_iter().flatten() {
+                log::warn!("effect helpers: {}", e.as_str().unwrap_or("error"));
+            }
+        }
+        Err(e) => log::warn!("effect helpers: {e}"),
+    }
+}
+
+/// Run a normal desktop launch: install logging and the panic hook, parse arguments (`--version` exits before the
+/// session log is attached), scan fonts, honor the launch guard's backend choice and open the eframe window.
+/// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
+/// reports startup failure through `startup_failed`. Returns the event loop's result.
 fn main() -> eframe::Result {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if crash_report::maybe_run(&args, |description| {
+        rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title("EffectCraft diagnostic report").set_description(description).show();
+    }) {
+        return Ok(());
+    }
+    let reporter = crash_report::Shutdown::default();
+    let result = run_desktop(&reporter);
+    // run_desktop has dropped the app and handled any startup error with its existing dialog.
+    // An unwinding panic or abort never reaches this marker.
+    if let Err(error) = reporter.finish() {
+        log::warn!("could not mark crash reporter clean: {error}");
+    }
+    result
+}
+
+fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
+    // Windows: the update helper is a copy of this program started with `--finish-update`.
+    #[cfg(windows)]
+    if let Some(result) = craft_update::self_update::finish(&effectcraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(i32::from(result.is_err()));
+    }
     // First, so the panic hook and every start-up warning are recorded. Records go to stderr
     // and the session log; Help ▸ Enable Logging writes through this logger too, and warnings
     // feed the compatibility report.
@@ -159,11 +224,22 @@ fn main() -> eframe::Result {
     // The session log lives in the settings folder (`Logs/effectcraft.log`, the previous two runs
     // kept): a launch from the Dock or a menu has no terminal. Opened after the arguments, so
     // `--version` leaves no file behind; records logged until now are written to it first.
+    let run_id = crash_report::run_id();
     if let Some(dir) = effectcraft_host::config_dir() {
-        match effectcraft_engine::logging::attach_session_log(&effectcraft_engine::logging::log_dir(Some(&dir))) {
+        let header = format!("{}\n", crash_report::session_marker(&run_id));
+        match effectcraft_engine::logging::attach_session_log_with_header(&effectcraft_engine::logging::log_dir(Some(&dir)), &header) {
             Ok(path) => log::info!("effectcraft {}, log file {}", env!("CARGO_PKG_VERSION"), path.display()),
             Err(e) => log::warn!("no log file: {e}"),
         }
+    }
+    let logs = effectcraft_engine::logging::log_dir(effectcraft_host::config_dir().as_deref());
+    match crash_report::start(&run_id, effectcraft_engine::logging::session_file().as_deref(), &logs.join("Crash Reports"), control_port.is_none()) {
+        Ok(started) => {
+            if let Err(error) = reporter.install(started) {
+                log::warn!("crash reporter could not be retained: {error}");
+            }
+        }
+        Err(error) => log::warn!("crash reporter could not start: {error}"),
     }
     // The font menus list the installed fonts: read their names while the window opens.
     effectcraft_engine::text::fonts::scan_system_in_background();
@@ -171,8 +247,15 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "linux")]
     appimage::integrate_from_env(ICON_PNG);
     // Settings ▸ Startup & Repair ▸ Window Graphics, switched to OpenGL when the last launch
-    // stopped as its window opened (a crashing graphics driver, #243).
-    let mut launch = launch_guard::Launch::begin(effectcraft_host::config_dir().as_deref(), std::env::var_os("WGPU_BACKEND").is_some());
+    // stopped as its window opened (the marker alone does not establish a cause).
+    let backend_override = std::env::var_os("WGPU_BACKEND");
+    let mut launch = launch_guard::Launch::begin(effectcraft_host::config_dir().as_deref(), backend_override.is_some());
+    diagnostic_state::record(reporter, launch.source.event());
+    if let Some(value) = backend_override {
+        for event in diagnostic_state::backend_override_events(&value) {
+            diagnostic_state::record(reporter, event);
+        }
+    }
     let on_gl = launch.backends == Some(eframe::wgpu::Backends::GL);
     let notice = launch.notice.take();
     let options = eframe::NativeOptions {
@@ -199,21 +282,40 @@ fn main() -> eframe::Result {
     let apple_events = apple_events::AppleEvents::install();
     #[cfg(target_os = "macos")]
     let apple_events = &apple_events;
+    let desktop_reporter = reporter.clone();
     let result = eframe::run_native(
         "EffectCraft",
         options,
         Box::new(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
-                Some(rs) => log::info!("graphics: {:?}", rs.adapter.get_info()),
-                None => log::info!("graphics: no wgpu device"),
+                Some(rs) => {
+                    let info = rs.adapter.get_info();
+                    log::info!("graphics: {info:?}");
+                    let event = match info.backend {
+                        eframe::wgpu::Backend::Noop => "actual GPU backend: noop",
+                        eframe::wgpu::Backend::Vulkan => "actual GPU backend: vulkan",
+                        eframe::wgpu::Backend::Metal => "actual GPU backend: metal",
+                        eframe::wgpu::Backend::Dx12 => "actual GPU backend: dx12",
+                        eframe::wgpu::Backend::Gl => "actual GPU backend: gl",
+                        eframe::wgpu::Backend::BrowserWebGpu => "actual GPU backend: webgpu",
+                    };
+                    diagnostic_state::record(&desktop_reporter, event);
+                }
+                None => diagnostic_state::record(&desktop_reporter, "actual GPU backend: no wgpu device"),
             }
             // This executable owns the shared device's handlers. Install them before
             // EffectCraft's compositor pipelines are built, without changing handlers from
             // inside Gpu::new. eframe has already constructed its presentation renderer here.
             let gpu_failures = effectcraft_ui_egui::gpu_failure::GpuFailureBridge::new(&cc.egui_ctx);
+            let observations = diagnostic_state::GpuObservations::new(&desktop_reporter);
+            let scoped_observed = observations.clone();
+            gpu_failures.set_scoped_error_observer(move |error| scoped_observed.scoped(error));
             if let Some(rs) = &cc.wgpu_render_state {
+                let errors_observed = observations.clone();
                 let errors = gpu_failures.clone();
                 rs.device.on_uncaptured_error(std::sync::Arc::new(move |error| {
+                    errors_observed.uncaptured(&error);
                     let message = format!("uncaptured GPU error: {error}");
                     if errors.report(&message, false) {
                         log::error!("{message}");
@@ -221,6 +323,7 @@ fn main() -> eframe::Result {
                 }));
                 let lost = gpu_failures.clone();
                 rs.device.set_device_lost_callback(move |reason, message| {
+                    observations.device_lost(reason);
                     lost.report(&format!("GPU device lost ({reason:?}): {message}"), true);
                 });
             }
@@ -233,16 +336,25 @@ fn main() -> eframe::Result {
             // config directory. Agent-driven runs (`--control`) skip crash recovery.
             if let Some(dir) = effectcraft_host::config_dir() {
                 // WebAssembly effect plug-ins in <config>/Plug-ins load before the menus are built.
-                let plugins = dir.join("Plug-ins");
+                let plugins = dir.join(effectcraft_engine::commands::PLUGINS_DIR);
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
+                    // Packages installed from the Plug-in Library (<config>/Plug-ins/Library).
+                    // Each package that fails to load is logged by the library itself.
+                    if let Err(e) = session.execute("library.loadInstalled", json!({})) {
+                        log::warn!("plug-in library: {e}");
+                    }
                 }
+                start_helpers_if_opted_in(&mut session);
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
             session.load_settings();
             // Fit the window to its monitor, or put it back where it was (still hidden).
             let saved_window = session.config.as_deref().and_then(window::load);
             let opened = cc.winit_window().map(|w| window::restore(w, saved_window));
+            // Scripts in Scripts/Startup run before a project opens (a failing one is reported in
+            // a toast).
+            let _ = session.execute("file.runStartupScripts", json!({}));
             let recovery = if control_port.is_none() { session.begin_recovery() } else { None };
             let project = files.iter().find(|f| is_project_file(f)).cloned();
             if let Some(p) = project {
@@ -263,6 +375,7 @@ fn main() -> eframe::Result {
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
             let mut app = EffectcraftApp::new(session);
+            app.set_startup_update_check(startup_update_check(control_port));
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
             if let Some(n) = notice {
@@ -319,7 +432,7 @@ fn main() -> eframe::Result {
             }));
             // The commands' file dialogs don't block the frame where the platform's backend
             // would (#511, #1275); see [`install_file_dialogs`].
-            install_file_dialogs(&mut app, &cc.egui_ctx);
+            let file_dialogs = install_file_dialogs(&mut app);
             #[cfg(target_os = "macos")]
             {
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
@@ -337,20 +450,19 @@ fn main() -> eframe::Result {
                 #[cfg(target_os = "macos")]
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
+                file_dialogs,
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
                 launch,
                 drawn: false,
+                reporter: desktop_reporter,
             }))
         }),
     );
-    match &result {
-        Ok(()) => log::info!("the window closed"),
-        Err(e) => {
-            if on_gl {
-                launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
-            }
-            startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
+    if let Err(e) = &result {
+        if on_gl {
+            launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
         }
+        startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
     }
     result
 }
@@ -359,9 +471,15 @@ fn main() -> eframe::Result {
 /// instead of eframe's fixed set: an older GPU that can't meet those (Intel HD Graphics 5500,
 /// #198) still opens the app, and the compositor then checks what it needs and falls back to
 /// the CPU when the device can't run it. `backends`: Window Graphics' choice, when it makes one.
+///
+/// The surface is eframe's own default, [`eframe::SurfaceConfig::LOW_LATENCY`]: vsync with one
+/// frame in flight, so a drag or a scrub shows one frame sooner. The bare
+/// `WgpuConfiguration::default()` is `HIGH_THROUGHPUT` instead (two frames in flight, three
+/// drawables on Metal): one more frame of pointer-to-screen lag on every interaction, about 8 ms
+/// at 120 Hz and 17 ms at 60 Hz, and a third 15 MB drawable held for the window.
 fn wgpu_options(backends: Option<eframe::wgpu::Backends>) -> eframe::WgpuConfiguration {
     use eframe::egui_wgpu::WgpuSetup;
-    let mut config = eframe::WgpuConfiguration::default();
+    let mut config = eframe::WgpuConfiguration::default().with_surface_config(eframe::SurfaceConfig::LOW_LATENCY);
     if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
         if let Some(b) = backends {
             setup.instance_descriptor.backends = b;
@@ -371,13 +489,20 @@ fn wgpu_options(backends: Option<eframe::wgpu::Backends>) -> eframe::WgpuConfigu
         // Iris Pro: the device is lost and the window never opens.
         // `WGPU_VALIDATION_INDIRECT_CALL=1` turns the check back on.
         setup.instance_descriptor.flags = setup.instance_descriptor.flags.difference(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL).with_env();
-        setup.device_descriptor = std::sync::Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
-            label: Some("EffectCraft device"),
-            required_limits: device_limits(adapter.limits()),
-            ..Default::default()
-        });
+        setup.device_descriptor = std::sync::Arc::new(|adapter| device_descriptor(adapter.limits()));
     }
     config
+}
+
+/// The window device's descriptor: the adapter's limits ([`device_limits`]) and `MemoryUsage`,
+/// so memory the compositor frees on the shared device goes back to the driver.
+fn device_descriptor(adapter: eframe::wgpu::Limits) -> eframe::wgpu::DeviceDescriptor<'static> {
+    eframe::wgpu::DeviceDescriptor {
+        label: Some("EffectCraft device"),
+        required_limits: device_limits(adapter),
+        memory_hints: eframe::wgpu::MemoryHints::MemoryUsage,
+        ..Default::default()
+    }
 }
 
 /// The limits to request from an adapter that offers `adapter`: all of them, with textures
@@ -411,6 +536,8 @@ fn startup_failed(e: &eframe::Error, gl_next: bool) {
 /// The desktop app: the egui app plus, on macOS, the system menu bar.
 struct Desktop {
     app: EffectcraftApp,
+    /// The commands' file dialogs, shown at the end of the frame that asked for them.
+    file_dialogs: Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
     /// Documents opened from Finder, the Dock or `open` (macOS).
@@ -421,17 +548,28 @@ struct Desktop {
     launch: launch_guard::Launch,
     /// The first frame was drawn (logged once).
     drawn: bool,
+    reporter: crash_report::Shutdown,
 }
 
 impl eframe::App for Desktop {
+    /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
+    /// file dialogs asked for and, last, hand a close to the platform quit.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu.update(&mut self.app, ctx);
-        self.app.logic(ctx, frame);
+        self.app.tick(ctx, frame);
+        self.app.finish_ime_logic(ctx);
+        if let Some(asked) = &self.file_dialogs {
+            sheet_dialogs::show_asked(asked, frame, ctx);
+        }
+        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        if let Some(asked) = &self.file_dialogs {
+            sheet_dialogs::show_asked(asked, frame, ui.ctx());
+        }
         self.window.frame(ui.ctx(), self.app.session.config.as_deref());
         if !self.drawn {
             self.drawn = true;
@@ -445,9 +583,20 @@ impl eframe::App for Desktop {
     }
 
     fn on_exit(&mut self) {
-        self.launch.exited();
-        self.window.save(self.app.session.config.as_deref());
-        self.app.on_exit();
+        // macOS terminates after this hook without returning from run_native (#341).
+        // Other platforms keep the reporter armed until main sees complete event-loop teardown.
+        let reporter = cfg!(target_os = "macos").then(|| self.reporter.clone());
+        if let Err(error) = crash_report::after_teardown(reporter.as_ref(), || {
+            log::info!("the window is closing");
+            self.launch.exited();
+            self.window.save(self.app.session.config.as_deref());
+            self.app.on_exit();
+            effectcraft_host::stop_helpers();
+            // Scripts in Scripts/Shutdown run with the project closed.
+            let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
+        }) {
+            log::warn!("could not mark crash reporter clean after teardown: {error}");
+        }
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -526,6 +675,19 @@ mod tests {
         assert!(!setup.instance_descriptor.flags.contains(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
     }
 
+    /// The window's surface keeps one frame in flight, like eframe's own default, not the two
+    /// of the bare `WgpuConfiguration::default()` (one extra frame of lag on every drag).
+    #[test]
+    fn the_window_surface_is_low_latency() {
+        for backends in [None, Some(eframe::wgpu::Backends::METAL), Some(eframe::wgpu::Backends::GL)] {
+            let surface = super::wgpu_options(backends).surface;
+            assert_eq!(surface, eframe::SurfaceConfig::LOW_LATENCY, "{backends:?}");
+            assert_eq!(surface.desired_maximum_frame_latency, Some(1));
+            assert_eq!(surface.present_mode, eframe::wgpu::PresentMode::AutoVsync);
+        }
+        assert_eq!(super::wgpu_options(None).surface, eframe::NativeOptions::default().wgpu_options.surface, "eframe's default surface");
+    }
+
     /// The window's device never asks for more than the adapter offers (#198).
     #[test]
     fn device_limits_fit_the_adapter() {
@@ -537,6 +699,17 @@ mod tests {
         }
         let big = Limits { max_texture_dimension_2d: 32768, ..Limits::default() };
         assert_eq!(super::device_limits(big).max_texture_dimension_2d, 16384);
+    }
+
+    /// The window device asks for `MemoryUsage`: the adapter's limits, unchanged.
+    #[test]
+    fn the_window_device_favours_memory_usage() {
+        use eframe::wgpu::Limits;
+        let big = Limits { max_texture_dimension_2d: 32768, ..Limits::default() };
+        let d = super::device_descriptor(big);
+        assert!(matches!(d.memory_hints, eframe::wgpu::MemoryHints::MemoryUsage));
+        assert_eq!(d.required_limits.max_texture_dimension_2d, 16384);
+        assert_eq!(d.label, Some("EffectCraft device"));
     }
 
     /// A positional .ecprojx is a project file, not an unsupported media import (#528).
@@ -563,6 +736,18 @@ mod tests {
         assert_eq!((a.control_port, a.home, a.files), (Some(9877), Some(true), vec!["a.ecproj".to_string()]));
         assert_eq!(parse(&["--version"]), None);
         assert_eq!(parse_env(&[], Ok("9000".into())).unwrap().map(|a| a.control_port), Some(Some(9000)));
+    }
+
+    /// An app started for an agent (`--control` or `EFFECTCRAFT_CONTROL_PORT`) doesn't check for
+    /// updates at start, so no modal update prompt blocks the run; a normal launch still does.
+    #[test]
+    fn agent_runs_skip_the_startup_update_check() {
+        let port = |args: &[&str], env| parse_env(args, env).unwrap().unwrap_or_default().control_port;
+        assert!(super::startup_update_check(port(&[], Err(VarError::NotPresent))));
+        assert!(super::startup_update_check(port(&[], Ok(String::new()))));
+        assert!(!super::startup_update_check(port(&["--control", "9877"], Err(VarError::NotPresent))));
+        assert!(!super::startup_update_check(port(&["--control=9877"], Err(VarError::NotPresent))));
+        assert!(!super::startup_update_check(port(&[], Ok("9877".into()))));
     }
 
     /// A missing, non-numeric or zero `--control` value stops the launch instead of starting
@@ -620,10 +805,10 @@ mod tests {
     #[test]
     fn commands_file_dialogs_do_not_block_the_frame() {
         let mut app = effectcraft_ui_egui::EffectcraftApp::new(effectcraft_engine::Session::default());
-        super::install_file_dialogs(&mut app, &egui::Context::default());
+        let asked = super::install_file_dialogs(&mut app);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        assert!(app.hooks.file_dialog_async.is_some(), "the commands' file dialogs must not block the frame");
+        assert!(app.hooks.file_dialog_async.is_some() && asked.is_some(), "the commands' file dialogs must not block the frame");
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        assert!(app.hooks.file_dialog_async.is_none(), "the blocking dialog pumps its own messages here");
+        assert!(app.hooks.file_dialog_async.is_none() && asked.is_none(), "the blocking dialog pumps its own messages here");
     }
 }
