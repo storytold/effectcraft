@@ -8,8 +8,8 @@
 //! (`Renderer::layer_input`, source → masks → the effects above it). `roto.freeze` runs the same
 //! pass and stores the final mattes in the effect (one undo step). `sync`, run after every
 //! edit, keeps each instance's hidden Input Key equal to a signature of what its frames are made
-//! of (the layer's source and timing, its masks and the effects above it) and drops frozen
-//! mattes made from other frames.
+//! of (the layer's source and timing, its masks and the effects above it: `analysis::frames_key`),
+//! and drops frozen mattes made from other frames. Footage going offline keeps them.
 //!
 //! Object Matte instances run through the same jobs (`objectMatte.propagate` / `.freeze`): the
 //! frames are [`om::job_frames`] around the reference frame, each segmented through

@@ -6,10 +6,11 @@
 //! analyzer (step 1 of 2, "Analyzing in background"); step 2 ("Stabilizing") derives the
 //! stabilization plan once to validate and cache the result. When the job finishes, the analysis is
 //! written into the effect's hidden Analysis parameter as one undo step, together with a key of
-//! what it was made from (the layer's source, In/Out, start, stretch and Time Remap). Edits that
-//! change those clear the analysis (`invalidate`, run after every edit) and queue the effect
-//! for re-analysis, which frontends start with [`Session::poll_warp`] (After Effects re-analyses
-//! automatically too).
+//! what it was made from (the layer's source, In/Out, start, stretch and Time Remap; the key is
+//! `analysis::frames_key`'s, shared with the 3D Camera Tracker and Roto Brush). Edits that change
+//! those clear the analysis (`invalidate`, run after every edit) and queue the effect for
+//! re-analysis, which frontends start with [`Session::poll_warp`] (After Effects re-analyses
+//! automatically too). Footage going offline is not such a change.
 
 use crate::offload::{JobKind, rate};
 use std::sync::atomic::{AtomicBool, Ordering};
