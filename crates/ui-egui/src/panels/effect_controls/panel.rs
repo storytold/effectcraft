@@ -4,13 +4,17 @@ use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
 use crate::dock::{PanelKind, WorkspaceExt as _};
 
-/// Plain Left/Right disclose selected effect headers before global layer nudges run.
+/// Plain Right / Left Arrow expand / collapse the selected effects, as in After Effects, before
+/// the arrows' layer nudge runs. Only while Effect Controls has the focus and is on screen: the
+/// front tab of its frame, drawn last frame (a maximized frame hides every other frame and every
+/// floating window), not behind Home. With no effect header selected the arrows still nudge.
 pub(crate) fn handle_disclosure_key(app: &mut EffectcraftApp, key: egui::Key) -> bool {
     let panel = PanelKind::EffectControls;
     if app.ui.focused != panel
         || app.ui.start_screen
+        || app.session.state.text_edit.is_some()
         || !app.ui.dock.is_visible(panel)
-        || (app.ui.dock.is_docked(panel) && app.ui.maximized.is_some_and(|m| m != panel && app.ui.dock.is_docked(m)))
+        || !app.dock_rects.iter().any(|(p, _)| *p == panel)
         || !matches!(key, egui::Key::ArrowLeft | egui::Key::ArrowRight)
     {
         return false;
