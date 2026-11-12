@@ -1377,12 +1377,13 @@ fn checkbox_and_dropdown_results() {
 }
 
 /// An effect EffectCraft does not have (an imported After Effects placeholder, #3087) is read by
-/// name like any other: its parameters by their names, a popup 1-based.
+/// name like any other: its parameters by their names, a popup 1-based. It is also found by its
+/// After Effects match name, its effect id (the group's match id is one path segment).
 #[test]
 fn an_unknown_effects_parameters_are_read_by_name() {
     let mut f = fx();
     let g = group_push(&mut f.p, |ids| {
-        let mut g = ids.group("Pseudo/0.25", "Settings");
+        let mut g = ids.group("Pseudo_0_25", "Settings");
         g.kind = effectcraft_project::GroupKind::Effect { effect: "Pseudo/0.25".into() };
         g.children.push(ids.prop("param1", "Speed", Value::Scalar(3.0)).into());
         g.children.push(ids.prop("param2", "Mode", Value::Enum(1)).into());
@@ -1392,6 +1393,8 @@ fn an_unknown_effects_parameters_are_read_by_name() {
     assert_close!(f.ev(f.b, ROT, "effect('Settings')('Speed') * 2", 0.0).unwrap().as_f64(), 6.0);
     assert_close!(f.ev(f.b, ROT, "effect('Settings')('Mode') * 10", 0.0).unwrap().as_f64(), 20.0);
     assert_close!(f.ev(f.b, ROT, "effect('Settings')(1)", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "thisLayer('Effects')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
 }
 
 #[test]

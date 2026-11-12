@@ -320,7 +320,8 @@ parameter gets the file's value:
   is imported and exported, and so is an expression on a stored effect parameter (its text and its switch).
 - **Effects without a counterpart** (third-party plug-ins, pseudo effects of expression controls,
   `Pseudo/…`) arrive as **placeholders** (#3087): an effect group whose effect id is the After
-  Effects match name. Like a missing plug-in it renders nothing and is listed by Find Missing
+  Effects match name (expressions also find it by that name, `effect("Pseudo/0.25")`; its match id
+  is that name as one path segment, `Pseudo_0_25`). Like a missing plug-in it renders nothing and is listed by Find Missing
   Effects. It holds the effect's parameters flat (without the twirl-down group markers), named as
   in After Effects, each with its value, keys and expression, in the units After Effects'
   expressions read (sliders and angles as stored, points in layer pixels, colours, checkboxes,
