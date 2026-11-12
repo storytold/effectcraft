@@ -61,7 +61,8 @@ function __err(msg) {
 // Array maths (targets of the operator rewrite).
 
 function __v(x) {
-  if (x !== null && typeof x === 'object' && x.__isProp === true) return x.value;
+  // (properties are callable, so `typeof` says function: see `__mkProp`)
+  if (x !== null && (typeof x === 'object' || typeof x === 'function') && x.__isProp === true) return x.value;
   return x;
 }
 
@@ -955,6 +956,11 @@ Prop.prototype = {
   createStyle: function () { return new __TextStyle(this.__docAt(time), 0, [], true); },
   valueOf: function () { return this.value; },
   toString: function () { return String(this.value); },
+  __call: function (k) {
+    var lv = this.value;
+    if (lv?.__isLayer) return lv(k);
+    throw new TypeError('not a callable function');
+  },
 };
 
 var __propHandler = {
@@ -976,9 +982,17 @@ var __propHandler = {
   },
 };
 
+// A property is callable, as a layer is: a layer-valued property (a Layer Control's Layer, a
+// layer parameter) stands for its layer, so `effect("Map")("Layer")("Effects")` reaches that
+// layer's Effects, as in After Effects. Calling any other property is the TypeError it was.
 var __mkProp = (function (P) {
   return function (c, l, path) {
-    return new P(new Prop(c, l, path), __propHandler);
+    var f = (k) => f.__call(k);
+    delete f.name;
+    delete f.length;
+    Object.setPrototypeOf(f, Prop.prototype);
+    Prop.call(f, c, l, path);
+    return new P(f, __propHandler);
   };
 })(Proxy);
 
