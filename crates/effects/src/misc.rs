@@ -919,7 +919,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("startAngle", "Start Angle", num(0.0), ParamUi::Angle),
                 p("center", "Wipe Center", Value::Vec2([0.5, 0.5]), ParamUi::Point),
                 p("wipe", "Wipe", Value::Enum(0), popup(&["Clockwise", "Counterclockwise", "Both"])),
-                p("feather", "Feather", num(0.0), slider(0.0, 360.0, 0.0, 50.0, 1)),
+                p("feather", "Feather", num(0.0), slider(0.0, 32000.0, 0.0, 50.0, 1)),
             ],
             radial_wipe,
         ),
