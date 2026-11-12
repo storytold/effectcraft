@@ -396,3 +396,43 @@ fn color_stabilizer_samples_the_reference_at_the_points_reference_positions() {
         assert!((o(x) - (a + b * v(x))).abs() < 1e-3, "x {x}");
     }
 }
+
+/// Writes `text` to `dir/name` with modification time `secs` (so an edit within the file system's
+/// time resolution still moves the stamp), returning the path.
+fn write_dated(dir: &std::path::Path, name: &str, text: &str, secs: u64) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    let f = std::fs::File::options().write(true).open(&path).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// #3538: OCIO File Transform read a file once per process; an edited, created, repaired or
+/// deleted file was never followed.
+#[test]
+fn an_ocio_transform_file_is_read_again_once_it_changes() {
+    const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+    const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+    let dir = std::env::temp_dir().join(format!("ec-fx-3538-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let at = |src: &str| load_file(src).map(|x| x.apply([0.5; 3], 1, false, ""));
+    let edited = write_dated(dir.as_path(), "edited.cube", BLACK, 1_000);
+    assert_eq!(at(&edited), Some([0.0; 3]));
+    write_dated(dir.as_path(), "edited.cube", WHITE, 2_000);
+    assert_eq!(at(&edited), Some([1.0; 3]), "an edited file, same size");
+    let created = dir.as_path().join("created.cube").to_string_lossy().into_owned();
+    assert_eq!(at(&created), None);
+    write_dated(dir.as_path(), "created.cube", WHITE, 1_000);
+    assert_eq!(at(&created), Some([1.0; 3]), "a file created after a failed load");
+    let repaired = write_dated(dir.as_path(), "repaired.cube", "not a lut", 1_000);
+    assert_eq!(at(&repaired), None);
+    write_dated(dir.as_path(), "repaired.cube", WHITE, 2_000);
+    assert_eq!(at(&repaired), Some([1.0; 3]), "a repaired file");
+    std::fs::remove_file(&repaired).unwrap();
+    assert_eq!(at(&repaired), None, "a deleted file");
+    // Inline text is its own content: the same text is the same transform.
+    let inline = load_file(BLACK).unwrap();
+    assert!(Arc::ptr_eq(&inline, &load_file(BLACK).unwrap()));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
