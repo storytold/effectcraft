@@ -378,7 +378,7 @@ impl LutCache {
         }
         if self.files.len() > MAX_FOLLOWED_FILES {
             let map = &self.map;
-            self.files.retain(|p, _| map.keys().any(|src| lut_file(src) == Some(p.as_str())));
+            self.files.retain(|p, _| p.as_str() == path || map.keys().any(|src| lut_file(src) == Some(p.as_str())));
         }
     }
 
@@ -644,6 +644,7 @@ mod tests {
         const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
         const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
         let dir = std::env::temp_dir().join(format!("ec-fx-3493-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, text: &str, secs: u64| {
             let path = dir.join(name);
@@ -678,6 +679,7 @@ mod tests {
     #[test]
     fn check_lut_files_forgets_a_changed_file() {
         let dir = std::env::temp_dir().join(format!("ec-fx-3493-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("grade.cube");
         std::fs::write(&path, identity_cube(2)).unwrap();
@@ -695,13 +697,15 @@ mod tests {
     /// The cache keeps at most [`MAX_CACHED_LUTS`] LUTs, the least recently used going first.
     #[test]
     fn the_lut_cache_is_bounded() {
-        let first = load_lut(&identity_cube(2)).unwrap();
+        // (text no other test loads: a load elsewhere would make it recently used)
+        let oldest = format!("TITLE \"bounded first\"\n{}", identity_cube(2));
+        let first = load_lut(&oldest).unwrap();
         for i in 0..MAX_CACHED_LUTS + 8 {
             let text = format!("TITLE \"bounded {i}\"\n{}", identity_cube(2));
             assert!(load_lut(&text).is_some());
             assert!(lut_cache().map.len() <= MAX_CACHED_LUTS);
         }
-        assert!(!Arc::ptr_eq(&first, &load_lut(&identity_cube(2)).unwrap()), "the oldest was let go");
+        assert!(!Arc::ptr_eq(&first, &load_lut(&oldest).unwrap()), "the oldest was let go");
         let c = lut_cache();
         assert_eq!(c.bytes, c.map.values().map(|e| e.bytes).sum::<usize>(), "the bytes kept add up");
         assert!(c.bytes <= MAX_CACHED_BYTES);
@@ -712,6 +716,7 @@ mod tests {
     #[test]
     fn a_file_whose_lut_left_the_cache_is_still_followed() {
         let dir = std::env::temp_dir().join(format!("ec-fx-3493-evicted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.cube");
         std::fs::write(&path, identity_cube(2)).unwrap();
@@ -724,6 +729,22 @@ mod tests {
         std::fs::write(&path, identity_cube(3)).unwrap();
         check_lut_files();
         assert_eq!(lut_cache().files.get(&src), Some(&file_stamp(&src)), "the change was noticed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Past [`MAX_FOLLOWED_FILES`], the file just read is still followed.
+    #[test]
+    fn the_file_just_read_stays_followed_past_the_limit() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..MAX_FOLLOWED_FILES + 8 {
+            let path = dir.join(format!("{i}.cube"));
+            std::fs::write(&path, identity_cube(2)).unwrap();
+            let src = path.to_string_lossy().into_owned();
+            assert!(load_lut(&src).is_some());
+            assert!(lut_cache().files.contains_key(&src), "{i}: the file just read");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
