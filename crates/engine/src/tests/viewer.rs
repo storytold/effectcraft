@@ -395,7 +395,7 @@ fn toggle_closed_combines_property_and_shape_group_selections() {
         s.execute("shape.newPath", json!({"layer": lid, "vertices": [[20, 20], [80, 20], [80, 80]], "closed": true})).unwrap()["path"].as_u64().unwrap();
     s.execute("prop.select", json!({"layer": lid, "prop": a_path})).unwrap();
     s.execute("prop.select", json!({"layer": lid, "prop": b_group, "add": true})).unwrap();
-    assert!(s.state.selected_vertices.iter().all(|v| v.mask == a_path), "only the path property implies selected vertices");
+    assert!(s.state.selected_vertices.iter().all(|v| v.mask == a_path), "only the selected path group implies selected vertices");
     assert!(!s.state.selected_vertices.is_empty());
     assert!(s.state.selected_props.contains(&(LayerId(lid), b_group)));
     let result = s.execute("path.toggleClosed", json!({})).unwrap();
@@ -528,7 +528,7 @@ fn toggle_closed_recomputes_roto_bezier_tangents() {
 }
 
 #[test]
-fn toggle_closed_fits_short_tangent_lists_like_set_closed() {
+fn toggle_closed_fits_short_tangent_lists() {
     let mut s = comp();
     let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
     let uid = s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();

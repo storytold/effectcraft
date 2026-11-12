@@ -17,9 +17,9 @@ struct Target {
     editable: bool,
 }
 
-struct Selection {
-    vertices: Vec<VertexRef>,
-    props: Vec<(LayerId, Uid)>,
+struct Selection<'a> {
+    vertices: &'a [VertexRef],
+    props: &'a [(LayerId, Uid)],
     time: Tick,
 }
 
@@ -36,16 +36,12 @@ fn group_at_mut<'a>(mut group: &'a mut PropGroup, route: &[usize]) -> Option<&'a
 /// never falls back to its siblings, and are then left out.
 fn targets(s: &Session) -> Result<Vec<Target>> {
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
-    let on_selected = |lid: &LayerId| s.state.selected_layers.contains(lid);
-    // Layer navigation and insertion can retain point/property selections on other layers.
-    let selection = Selection {
-        vertices: s.state.selected_vertices.iter().filter(|v| on_selected(&v.layer)).copied().collect(),
-        props: s.state.selected_props.iter().filter(|(lid, _)| on_selected(lid)).copied().collect(),
-        time: s.time(),
-    };
+    let selection = Selection { vertices: &s.state.selected_vertices, props: &s.state.selected_props, time: s.time() };
     let mut targets = Vec::new();
     for whole_layers in [false, true] {
-        for layer in comp.layers.iter().filter(|l| on_selected(&l.id)) {
+        // Only selected layers: navigation and insertion can retain point/property selections
+        // on other layers, and every match below is per layer.
+        for layer in comp.layers.iter().filter(|l| s.state.selected_layers.contains(&l.id)) {
             collect(&selection, layer, &layer.props, &mut Vec::new(), whole_layers, layer.switches.locked, &mut targets)?;
         }
         if !targets.is_empty() {
