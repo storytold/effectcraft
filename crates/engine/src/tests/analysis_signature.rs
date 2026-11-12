@@ -92,3 +92,71 @@ fn analyses_saved_by_0_24_survive_edits_that_keep_their_frames() {
     s.execute_checked("edit.undo", json!({})).unwrap();
     assert_eq!(saved(&s), before);
 }
+
+/// The text keys are made from today, written field by field (#3536). It changes only when this
+/// test is changed with it: a new field of a type it writes doesn't compile until it is decided
+/// in `analysis::frames_key`, and renaming a field or variant doesn't change it.
+#[test]
+fn signature_text_is_pinned() {
+    let s = open(ANALYSED_0_24);
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let key = r#"frames/1;footage=1;footage;path="/tmp/effectcraft-3456-shake.mp4";kind=video;w=160;h=120;par=1.0;rate=12/1;nativeRate=none;duration=254016000000;video=true;audio=false;alpha=ignore;matte=[0.0, 0.0, 0.0];loop=1;codec="H.264 (High)";missing=false;frames=0;profile{rec709;};layer=none;fields=off;invertAlpha=false;linearLight=false;preserveRgb=false;cineon;log=false;points=[0.0, 1023.0, 95.0, 685.0, 1.7, 20.0];units=10bit;data=none;page=0;alphabetical=false;startTimecode=none;fileTimecode=none;placedPage=false;in=0;out=254016000000;start=0;stretch=100.0;timeRemap{prop="timeRemap";scalar=0.0;spatial=false;key=0;scalar=0.2;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;key=254016000000;scalar=1.0;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;expr=none;};compRate{rate=12/1;};"#;
+    assert_eq!(crate::analysis::frames_key::signature_text(&s.project, COMP, layer), key);
+}
+
+/// Keys made today (after analysing again) match through edits, undo and save/reopen too, and
+/// renaming or relabelling never drops them.
+#[test]
+fn todays_keys_survive_edits_that_keep_their_frames() {
+    let mut s = open(ANALYSED_0_24);
+    // Analysing again writes today's keys.
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let signature = crate::analysis::frames_key::signature(&s.project, COMP, layer);
+    let input = crate::roto::input_key(&s.project, COMP, layer, ROTO);
+    assert_ne!(signature, SIGNATURE_0_24);
+    s.edit("analyse", None, |p, _| {
+        let l = p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap();
+        for (uid, id, key) in [(WARP, ANALYSIS_KEY, &signature), (TRACKER, TRACKS_KEY, &signature), (ROTO, INPUT_KEY, &input)] {
+            l.props.find_group_mut(uid).unwrap().get_mut(id).unwrap().value = Value::Str(key.clone());
+        }
+        Ok(())
+    })
+    .unwrap();
+    // The Roto Brush's key covers the effects above it: the Warp Stabilizer's new key changed it.
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let input = crate::roto::input_key(&s.project, COMP, layer, ROTO);
+    s.edit("roto key", None, |p, _| {
+        let g = p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap().props.find_group_mut(ROTO).unwrap();
+        g.get_mut(INPUT_KEY).unwrap().value = Value::Str(input.clone());
+        g.get_mut(FROZEN).unwrap().value = Value::Str("saved frozen".into());
+        Ok(())
+    })
+    .unwrap();
+    let before = saved(&s);
+    assert_eq!(before[0].1, signature);
+    assert_eq!(before[2], ("saved frozen".into(), input));
+
+    add_to_render_queue(&mut s);
+    assert_eq!(saved(&s), before);
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&s), before);
+    let mut s = open(&s.project.to_json());
+    add_to_render_queue(&mut s);
+    assert_eq!(saved(&s), before);
+    // Names and labels only show things.
+    s.execute_checked("layer.rename", json!({"layer": CLIP.0, "name": "Renamed"})).unwrap();
+    s.edit("rename", None, |p, _| {
+        let l = p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap();
+        l.props.find_group_mut(82).unwrap().name = "Soft".into();
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = p.item_mut(ItemId(1)).map(|i| &mut i.kind) {
+            f.markers.push(effectcraft_project::Marker::default());
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(saved(&s), before);
+
+    // A real change still clears them.
+    s.execute_checked("file.interpretFootage", json!({"items": [1], "invertAlpha": true})).unwrap();
+    assert!(saved(&s).iter().all(|(data, _)| data.is_empty()));
+}
