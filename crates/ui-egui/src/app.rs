@@ -44,6 +44,8 @@ impl EffectcraftApp {
             playback: Playback::default(),
             dialog: None,
             hooks: Hooks::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            motioner_runtime: Default::default(),
             fps: 60.0,
             clock: AppClock::default(),
             now: 0.0,

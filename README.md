@@ -1,11 +1,11 @@
-<p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
-</p>
+# Motioner — EffectCraft com assistente integrado
+
+Este fork inclui o painel nativo **Motioner** (Janela → Motioner), presets de movimento,
+Claude Code/Codex local e importação de PSD que preserva prévias rasterizadas de textos e
+objetos inteligentes. Texto pode ser convertido explicitamente em Layer → Create → Convert to Editable Text.
+Veja [docs/motioner.md](docs/motioner.md) para uso, limites e compilação.
+
+
 
 
 <p align="center">
@@ -390,7 +390,7 @@ part of this repository and EffectCraft, under [`docs/brand/LICENSE-brand.txt`](
 Forks and modified versions must remove them.
 
 <p align="center">
-  <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
+  <b>Motioner</b><br>
   <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
 </p>
 

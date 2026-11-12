@@ -45,6 +45,7 @@ pub mod markers;
 mod mask;
 pub mod mask_interp;
 pub(crate) mod model3d;
+mod motioner;
 mod nav_more;
 pub mod paint;
 pub mod panels_cmds;
@@ -210,6 +211,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(create::specs());
         v.extend(animation::specs());
         v.extend(anim_presets::specs());
+        v.extend(motioner::specs());
         v.extend(view::specs());
         v.extend(viewer_cmds::specs());
         v.extend(shape_stroke::specs());

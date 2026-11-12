@@ -36,6 +36,15 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
     rx
 }
 
+/// Motioner enables this only when the user sends a local-assistant request.
+pub fn start_ephemeral(ctx: egui::Context) -> Result<(u16, Receiver<ControlRequest>), String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("Local bridge: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let (tx, rx) = channel();
+    std::thread::spawn(move || accept_loop(listener, tx, ctx));
+    Ok((port, rx))
+}
+
 fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context) {
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {

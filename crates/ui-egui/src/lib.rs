@@ -13,8 +13,11 @@ pub(crate) mod a11y;
 /// prompt shows both, and an AppImage's menu entry gets the icon.
 #[cfg(not(target_arch = "wasm32"))]
 pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
+    repo: "ferronatin/motioner-app",
+    name: "Motioner",
+    developer: "Motioner contributors",
     icon_png: Some(include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.effectcraft.png")),
-    accent: Some([0xe0, 0x36, 0x8f]),
+    accent: Some([0xae, 0xd2, 0xf0]),
     ..craft_update::suite::EFFECTCRAFT
 };
 
@@ -276,6 +279,8 @@ pub struct EffectcraftApp {
     pub playback: Playback,
     pub dialog: Option<Dialog>,
     pub hooks: Hooks,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub motioner_runtime: panels::motioner::Runtime,
     pub fps: f32,
     /// The app clock and the value it had at the last [`EffectcraftApp::tick`].
     clock: AppClock,

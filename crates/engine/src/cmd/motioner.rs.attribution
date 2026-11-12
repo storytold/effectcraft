@@ -1,0 +1,8 @@
+asset: motioner.rs
+title: Motioner procedural motion presets
+author: Motioner contributors
+source: original work
+license: MIT OR Apache-2.0
+license-file: ../../../../LICENSE-MIT
+added: 2026-11-12 by Motioner contributors
+notes: Original mathematical keyframe motion implementations; no Adobe preset data.

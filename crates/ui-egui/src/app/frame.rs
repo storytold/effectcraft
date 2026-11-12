@@ -170,6 +170,8 @@ impl EffectcraftApp {
     /// `Context::request_discard` replays.
     pub fn tick(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         self.now = self.clock.now();
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::panels::motioner::poll(self, ctx);
         // The compositor exists before the first paint and while hidden (device-loss handling
         // must run there too).
         self.init_gpu(ctx, frame);

@@ -1275,6 +1275,7 @@ Window
   Media Browser | window.panel {"panel":"mediaBrowser"}
   Metadata | window.panel {"panel":"metadata"}
   Motion Sketch | window.panel {"panel":"motionSketch"}
+  Motioner | window.panel {"panel":"motioner"}
   Paint | window.panel {"panel":"paint"} | Cmd+8
   Paragraph | window.panel {"panel":"paragraph"} | Cmd+7
   Preview | window.panel {"panel":"preview"} | Cmd+3

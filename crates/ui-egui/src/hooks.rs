@@ -29,9 +29,15 @@ impl FileDialog {
 /// Called with the paths a [`FileDialog`] picked (empty: cancelled), from any thread.
 pub type DialogDone = Box<dyn FnOnce(Vec<String>) + Send>;
 
+/// Starts the opt-in local MCP control bridge on a free loopback port.
+#[cfg(not(target_arch = "wasm32"))]
+pub type LocalBridgeFn = Box<dyn Fn(egui::Context) -> Result<(u16, std::sync::mpsc::Receiver<ControlRequest>), String>>;
+
 /// Host hooks provided by the native app (file pickers etc.).
 #[derive(Default)]
 pub struct Hooks {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub start_local_bridge: Option<LocalBridgeFn>,
     /// The system appearance for Settings ▸ Appearance ▸ Sync with System (the desktop app reads
     /// the Linux desktop portal); without it, what egui reports.
     pub system_theme: Option<SystemThemeFn>,

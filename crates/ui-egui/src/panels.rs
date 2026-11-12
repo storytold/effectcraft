@@ -33,6 +33,7 @@ pub mod live_preview;
 pub mod markers_ui;
 pub mod media_panels;
 pub mod misc;
+pub mod motioner;
 pub mod object_matte_tool;
 pub mod paint_panels;
 pub mod panel_kit;
@@ -281,6 +282,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
         PanelKind::Markers => misc::markers(app, ui, rect),
         PanelKind::MaskInterpolation => anim_tools::mask_interpolation(app, ui, rect),
         PanelKind::ScriptConsole => script_console::show(app, ui, rect),
+        PanelKind::Motioner => motioner::show(app, ui, rect),
         PanelKind::Wiggler => anim_tools::wiggler(app, ui, rect),
         PanelKind::Smoother => anim_tools::smoother(app, ui, rect),
         PanelKind::MotionSketch => anim_tools::motion_sketch(app, ui, rect),

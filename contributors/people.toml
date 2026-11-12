@@ -135,3 +135,7 @@ display_name = "Jonathan Cardoso"
 
 [people.nazar-gavrylyk]
 sync_github_name = true
+
+[people.ferronatin]
+display_name = "FelipeDevv"
+sync_github_name = false
