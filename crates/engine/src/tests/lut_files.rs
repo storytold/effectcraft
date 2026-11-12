@@ -152,3 +152,37 @@ fn lumetri_follows_its_input_lut_file() {
     write(&lut, WHITE, 2_000);
     assert_all(colours(&s, comps), 1.0);
 }
+
+/// A precomp instance whose Essential Property names another LUT file follows that file, also
+/// for a layer that reads the instance through a layer parameter.
+#[test]
+fn an_overridden_lut_file_renders_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, overridden) = (dir.path().join("base.cube"), dir.path().join("override.cube"));
+    write(&base, WHITE, 1_000);
+    write(&overridden, BLACK, 1_000);
+    let mut s = session(None);
+    s.execute_checked("comp.new", json!({"name": "Grade", "width": 8, "height": 8, "frameRate": 24, "duration": 1})).unwrap();
+    let grade = s.active_comp_id().unwrap();
+    let plate = s.execute_checked("layer.newSolid", json!({"name": "Plate", "color": "#808080", "width": 8, "height": 8})).unwrap()["layer"].clone();
+    s.execute_checked("effect.apply", json!({"layer": plate, "effect": "Apply Color LUT"})).unwrap();
+    s.execute_checked("prop.set", json!({"layer": plate, "path": "effects/#1/lut", "value": base.to_string_lossy()})).unwrap();
+    let control = s.execute_checked("essential.addProperty", json!({"layer": plate, "path": "effects/#1/lut", "name": "LUT"})).unwrap()["controls"][0].clone();
+    s.execute_checked("comp.new", json!({"name": "Shot", "width": 8, "height": 8, "frameRate": 24, "duration": 1})).unwrap();
+    let shot = s.active_comp_id().unwrap();
+    let instance = s.execute_checked("layer.addItem", json!({"item": grade.0})).unwrap()["layer"].clone();
+    s.execute_checked("essential.set", json!({"layer": instance, "control": control, "value": overridden.to_string_lossy()})).unwrap();
+    let copy = s.execute_checked("layer.newSolid", json!({"name": "Copy", "color": "#00ff00", "width": 8, "height": 8})).unwrap()["layer"].clone();
+    s.execute_checked("effect.apply", json!({"layer": copy, "effect": "Set Channels"})).unwrap();
+    for i in 1..=3 {
+        s.execute_checked("prop.set", json!({"layer": copy, "path": format!("effects/#1/sourceLayer{i}"), "value": instance})).unwrap();
+    }
+    let centre = |s: &Session| {
+        let img = s.render(shot, Tick::ZERO, RenderOpts::default());
+        let p = img.get(i64::from(img.width / 2), i64::from(img.height / 2));
+        [p[0], p[1], p[0], p[1]]
+    };
+    assert_all(centre(&s), 0.0);
+    write(&overridden, WHITE, 2_000);
+    assert_all(centre(&s), 1.0);
+}

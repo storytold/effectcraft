@@ -171,6 +171,17 @@ impl Dependencies<'_> {
                         ItemKind::Comp(comp) => {
                             let time = ctx.source_time(layer);
                             time.0.hash(self.h);
+                            // The nested layers are walked without this instance's Essential
+                            // Properties overrides, which the render applies: a LUT file one of
+                            // them names is read too (#3493).
+                            for o in crate::fx_host::essential_overrides(ctx, layer) {
+                                if let effectcraft_keyframe::Value::Str(src) = &o.value
+                                    && let Some(path) = effectcraft_effects::lut_file(src)
+                                {
+                                    crate::reads::ReadFile::new(path, crate::reads::FileStamp::native(path).unwrap_or(crate::reads::FileStamp::Missing))
+                                        .hash(self.h);
+                                }
+                            }
                             let nested = EvalCtx::new(ctx.project, item, comp, time);
                             for child in &comp.layers {
                                 self.layer(&nested, child)?;
