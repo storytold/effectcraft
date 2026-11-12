@@ -18,7 +18,9 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         let uri = im.uri.as_deref()?;
         match uri.strip_prefix("data:") {
             Some(_) => None,
-            None => resolve(&uri_decode(uri)),
+            // craft-mesh decodes external image URIs while constructing the scene. Decode only
+            // once here; a second pass changes literal percent escapes in valid filenames.
+            None => resolve(uri),
         }
     })
 }

@@ -29,7 +29,9 @@ fn resolve_reference(resolve: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> O
 
 /// Parse OBJ text (and its MTL libraries and textures through `resolve`).
 pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Model> {
-    let mut library = |name: &str| resolve_reference(resolve, name);
+    // `craft-mesh` splits `mtllib` names and tries each complete library path itself. Applying
+    // texture-option fallback here first can mistake the last library for the whole directive.
+    let mut library = |name: &str| resolve(name);
     let scene = craft_mesh::obj::read(bytes, &limits(), &mut library).map_err(error)?;
     to_model(scene, MissingNormals::BySmoothing, &|im| resolve_reference(resolve, im.uri.as_deref()?.trim()))
 }

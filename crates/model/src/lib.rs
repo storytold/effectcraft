@@ -204,6 +204,9 @@ impl Primitive {
                 if !self.uvs.is_empty() {
                     p.uvs.push(self.uvs[i]);
                 }
+                if !self.tangents.is_empty() {
+                    p.tangents.push(self.tangents[i]);
+                }
                 if !self.joints.is_empty() {
                     p.joints.push(self.joints[i]);
                     p.weights.push(self.weights[i]);

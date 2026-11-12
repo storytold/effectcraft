@@ -55,7 +55,7 @@ fn doc_json(d: &TextDoc) -> TextDocument {
 
 /// A colour of a text document (`fc`, `sc`), 0..=1 or 0..=255.
 fn doc_color(c: Option<&Vec<f64>>, extra: &Map, key: &str) -> Option<[f32; 4]> {
-    let j = c.map(|c| json!(c)).or_else(|| extra.get(key).cloned())?;
+    let j = c.filter(|c| !c.is_empty()).map(|c| json!(c)).or_else(|| extra.get(key).cloned())?;
     anim::to_color(&j).map(|v| v.as_color())
 }
 

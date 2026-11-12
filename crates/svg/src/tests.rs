@@ -247,7 +247,7 @@ fn deep_nesting_errors_instead_of_overflowing_the_stack() {
         "<g>".repeat(1000),
         "<rect/>".repeat(1000)
     );
-    assert!(!craft_svg::guard::deeper_than(&s, 2) && craft_svg::guard::deeper_than(&s, 1));
+    assert!(!craft_svg::guard::deeper_than(&s, 3) && craft_svg::guard::deeper_than(&s, 2));
     assert!(crate::parse(s.as_bytes()).is_ok());
 }
 

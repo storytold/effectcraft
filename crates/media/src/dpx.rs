@@ -89,20 +89,27 @@ pub(crate) fn decode(path: &str, bytes: &[u8]) -> Result<Option<image::DynamicIm
     let Some(h) = info(path, bytes)? else { return Ok(None) };
     let (flip_x, flip_y) = h.flips().unwrap_or_default();
     let frame = craft_dpx::decode(bytes, &limits()).map_err(|e| error(path, e))?;
-    let samples = frame.samples_u16();
     let (w, ht, nc) = (h.width as usize, h.height as usize, h.layout.components());
-    let row_len = w * nc;
-    let mut out = vec![0u16; samples.len()];
-    for (y, row) in out.chunks_exact_mut(row_len).enumerate() {
-        let sy = if flip_y { ht - 1 - y } else { y };
-        let Some(line) = samples.get(sy * row_len..(sy + 1) * row_len) else { continue };
-        for (x, px) in row.chunks_exact_mut(nc).enumerate() {
-            let sx = if flip_x { w - 1 - x } else { x };
-            if let Some(src) = line.get(sx * nc..(sx + 1) * nc) {
-                px.copy_from_slice(src);
+    let row_len = w.checked_mul(nc).ok_or_else(|| MediaError::Decode(format!("{path}: image dimensions overflow")))?;
+    let mut out = frame.codes;
+    if flip_y {
+        for y in 0..ht / 2 {
+            for x in 0..row_len {
+                out.swap(y * row_len + x, (ht - 1 - y) * row_len + x);
             }
         }
     }
+    if flip_x {
+        for row in out.chunks_exact_mut(row_len) {
+            for x in 0..w / 2 {
+                let (a, b) = (x * nc, (w - 1 - x) * nc);
+                for c in 0..nc {
+                    row.swap(a + c, b + c);
+                }
+            }
+        }
+    }
+    out.iter_mut().for_each(|c| *c = craft_dpx::widen(*c, h.bits));
     let (w32, h32) = (h.width, h.height);
     let img = match h.layout {
         craft_dpx::Layout::Luma => image::ImageBuffer::from_raw(w32, h32, out).map(image::DynamicImage::ImageLuma16),

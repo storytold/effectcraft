@@ -532,7 +532,7 @@ fn repeater_tr_get(t: &RepeaterTransform) -> impl Fn(&str) -> Option<Json> + '_ 
 }
 
 /// Import Lottie shape items into shape contents groups.
-pub(crate) fn import_items<'a>(im: &mut Im, ids: &mut Ids, items: &mut dyn Iterator<Item = &'a Shape>) -> Vec<PropGroup> {
+pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &mut dyn Iterator<Item = &Shape>) -> Vec<PropGroup> {
     let mut out = vec![];
     for s in items {
         let x = &s.extra;

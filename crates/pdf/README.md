@@ -144,7 +144,7 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 ## Shared parser setup and bounds
 
 The workspace pins `craft-pdf` to `craft-libs` Git revision
-`4cb271b785b02e7aafd83ab91d3737f2939111fb`, with `default-features = false` and only the explicit `read`
+`091863e4a615f38743bfd5d6dc62a2e8f37cd5d5`, with `default-features = false` and only the explicit `read`
 feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves EffectCraft's
 font and asset policies. The shared parser does not change the supported drawing operators,
 image codecs, continuously rasterized SVG tree, editable shapes, or EPS interpreter.
