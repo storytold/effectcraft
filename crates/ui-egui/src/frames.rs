@@ -298,9 +298,6 @@ struct Cache {
     playhead: Option<Playhead>,
     /// Scale of the frame on screen (the newest urgent request): frames of other scales go first.
     scale: Option<u32>,
-    /// Frames whose render started before this are not kept: a source file they read changed
-    /// since ([`Frames::clear_stale`]).
-    stale_before: Option<web_time::Instant>,
 }
 
 impl Cache {
@@ -771,7 +768,7 @@ impl Frames {
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None, stale_before: None })),
+            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1406,16 +1403,6 @@ impl Frames {
         }
     }
 
-    /// Drop every frame, and the ones still rendering when they finish: a source file changed on
-    /// disk (a LUT file, #3493), and a render that started before may have read the old one.
-    pub fn clear_stale(&self) {
-        // (marked first: a frame finishing while the cache is emptied is refused, not kept)
-        if let Ok(mut c) = self.cache.lock() {
-            c.stale_before = Some(web_time::Instant::now());
-        }
-        self.clear();
-    }
-
     /// The playing preview's position (`None` when no preview plays): prefetch renders the
     /// frames it reaches first before the others, evictions spare the frames it shows next, and
     /// queued prefetch frames of its series it no longer reaches are dropped (#595).
@@ -1912,7 +1899,6 @@ impl Worker {
         }
         if let Ok(mut c) = self.cache.lock()
             && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
-            && c.stale_before.is_none_or(|at| t0 >= at)
         {
             c.insert_with(key, img, files, since);
         }

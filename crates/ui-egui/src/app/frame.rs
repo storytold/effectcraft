@@ -659,6 +659,8 @@ impl EffectcraftApp {
 
     /// A LUT file in use changed on disk (#3493): the frames kept were rendered with the old one.
     /// Renders read it again by themselves; the watcher wakes the interface when no render did.
+    /// The frame keys carry the generation ([`Self::frame_series`]), so the viewers show the
+    /// frames rendered again, and a frame still rendering with the old LUT is never asked for.
     fn tick_lut_files(&mut self, ctx: &egui::Context) {
         if self.lut_watcher.is_none() {
             let wake = ctx.clone();
@@ -667,7 +669,7 @@ impl EffectcraftApp {
         let generation = effectcraft_engine::lut_reload::generation();
         if generation != self.lut_generation {
             self.lut_generation = generation;
-            self.frames.clear_stale();
+            self.frames.clear();
         }
     }
 

@@ -16,6 +16,12 @@ pub fn generation() -> u64 {
     effectcraft_effects::lut_generation()
 }
 
+/// Stamp the LUT files in use now ([`effectcraft_effects::check_lut_files`]): the ones that
+/// changed are read again by the next render. Returns [`generation`].
+pub fn check() -> u64 {
+    effectcraft_effects::check_lut_files()
+}
+
 /// How often the LUT files in use are stamped.
 pub const INTERVAL: Duration = Duration::from_secs(2);
 
@@ -44,7 +50,7 @@ impl Watcher {
                 let mut seen = effectcraft_effects::lut_generation();
                 // (ends once the watcher, the only sender, is dropped)
                 while let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(every) {
-                    let now = effectcraft_effects::check_lut_files();
+                    let now = check();
                     if now != seen {
                         seen = now;
                         wake();
