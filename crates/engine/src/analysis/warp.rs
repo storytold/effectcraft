@@ -6,8 +6,9 @@
 //! analyzer (step 1 of 2, "Analyzing in background"); step 2 ("Stabilizing") derives the
 //! stabilization plan once to validate and cache the result. When the job finishes, the analysis is
 //! written into the effect's hidden Analysis parameter as one undo step, together with a key of
-//! what it was made from (the layer's source, In/Out, start, stretch and Time Remap; the key is
-//! `analysis::frames_key`'s, shared with the 3D Camera Tracker and Roto Brush). Edits that change
+//! what it was made from (the layer's source, In/Out, start, stretch and Time Remap, its masks and
+//! the effects above the Warp Stabilizer: `analysis::frames_key::analysis_key`, shared with the 3D
+//! Camera Tracker). Edits that change
 //! those clear the analysis (`invalidate`, run after every edit) and queue the effect for
 //! re-analysis, which frontends start with [`Session::poll_warp`] (After Effects re-analyses
 //! automatically too). Footage going offline is not such a change.
@@ -25,7 +26,7 @@ use effectcraft_time::Tick;
 use effectcraft_track::stabilize::{AnalyzeOpts, Analyzer, WarpAnalysis};
 use serde::Serialize;
 
-use crate::analysis::frames_key::{self, signature};
+use crate::analysis::frames_key;
 use crate::tracking::lock;
 use crate::{Event, Session};
 
@@ -71,7 +72,7 @@ pub struct WarpJob {
     pub comp: ItemId,
     pub layer: LayerId,
     pub effect: Uid,
-    /// The layer signature the analysis is made from.
+    /// What the analysis is made from (`frames_key::analysis_key`).
     key: String,
 }
 
@@ -126,7 +127,7 @@ pub(crate) fn invalidate(before: &Project, after: &mut Project) -> Vec<(ItemId, 
             let old_layer = before.comp(*cid).and_then(|bc| bc.layer(l.id));
             for g in fx.groups().filter(|g| is_warp(g)) {
                 let analysed = !str_of(g, ANALYSIS).is_empty();
-                if analysed && !frames_key::key_matches(after, *cid, l, &str_of(g, ANALYSIS_KEY), |s, _| s) {
+                if analysed && !frames_key::analysis_key_matches(before, after, *cid, l, g.uid, &str_of(g, ANALYSIS_KEY), |k| k) {
                     clear.push((*cid, l.id, g.uid));
                     todo.push((*cid, l.id, g.uid));
                 } else if !analysed && old_layer.and_then(|ol| ol.props.find_group(g.uid)).is_none() {
@@ -305,7 +306,7 @@ impl Session {
             detailed,
             times,
         };
-        let key = signature(&self.project, comp, l);
+        let key = frames_key::analysis_key(&self.project, comp, l, effect);
         if !wait && self.offloads() {
             drop(work);
             self.offload_analysis(crate::offload::WorkerJob::Warp { comp, layer, effect })?;

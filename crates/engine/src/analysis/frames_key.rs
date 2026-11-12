@@ -83,6 +83,53 @@ pub(crate) fn input_key_of(signature: String, layer: &Layer, uid: Uid) -> String
     hex(&t.0)
 }
 
+/// The first word of an [`analysis_key`]'s text: a later change to what it writes bumps it.
+const ANALYSIS_VERSION: &str = "analysis/1";
+
+/// What a Warp Stabilizer or 3D Camera Tracker, the instance `uid` of `layer`, analyses: its
+/// input, the layer's frames ([`signature`]) under its masks and the effects above it (#3535).
+/// The instance's own settings and the effects below it are not part of it.
+pub(crate) fn analysis_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
+    let mut t = Text::new();
+    t.word(ANALYSIS_VERSION);
+    t.word(&signature(p, comp, layer));
+    // The Effects switch turns the effects above on or off (it has none when it is the first).
+    if layer.effects().and_then(|fx| fx.groups().next()).is_some_and(|g| g.uid != uid) {
+        t.field("effectsSwitch", layer.switches.effects);
+    }
+    t.inputs_above(layer, uid);
+    hex(&t.0)
+}
+
+/// Whether `saved`, the key saved with the analysis of instance `uid` of `layer` in `after`, is
+/// for its current input ([`analysis_key`]). `key` makes the saved form from an input key or a
+/// frames signature (the tracker adds its Detailed Analysis).
+///
+/// Keys saved before #3535 hashed only the layer's frames ([`signature`], or a [`legacy`] one).
+/// Such a key is taken to be for the input the layer had when it was opened, and stays valid
+/// while each edit (from `before` to `after`) keeps the input: the first edit that changes it
+/// clears the analysis. A layer or instance new in `after` (pasted, opened) keeps such a key
+/// while its frames match.
+pub(crate) fn analysis_key_matches(
+    before: &Project,
+    after: &Project,
+    comp: ItemId,
+    layer: &Layer,
+    uid: Uid,
+    saved: &str,
+    key: impl Fn(String) -> String,
+) -> bool {
+    let now = analysis_key(after, comp, layer, uid);
+    if key(now.clone()) == saved {
+        return true;
+    }
+    let old = before.comp(comp).and_then(|c| c.layer(layer.id)).filter(|l| l.props.find_group(uid).is_some());
+    match old {
+        Some(old) => key_matches(before, comp, old, saved, |s, _| key(s)) && analysis_key(before, comp, old, uid) == now,
+        None => key_matches(after, comp, layer, saved, |s, _| key(s)),
+    }
+}
+
 /// Whether `saved`, a key saved with an analysis of `layer`, is for the layer's current frames.
 /// `key` makes such a key from a signature of the given era. A key an earlier release saved for
 /// the same frames matches too: keep it rather than rewrite it (analysing writes today's).
