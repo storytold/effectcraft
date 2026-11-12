@@ -228,7 +228,7 @@ impl Session {
         // models), and of what the new project's files decoded under an earlier project: the
         // media layer keys them by path, and the files may have changed since (#1070).
         for f in super::render::project_footage(&self.project).chain(super::render::project_footage(&p)) {
-            self.forget_decoded(f);
+            super::render::forget_files(self.footage.as_ref(), f);
         }
         self.drop_crypto_probe();
         self.layer_cache.clear();
