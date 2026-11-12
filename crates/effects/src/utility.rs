@@ -732,20 +732,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Past [`MAX_FOLLOWED_FILES`], the file just read is still followed.
+    /// Past [`MAX_FOLLOWED_FILES`], the file just read is still followed (a cache of its own:
+    /// the shared one's followed files belong to the other tests too).
     #[test]
     fn the_file_just_read_stays_followed_past_the_limit() {
-        let dir = std::env::temp_dir().join(format!("ec-fx-3493-many-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = LutCache::default();
         for i in 0..MAX_FOLLOWED_FILES + 8 {
-            let path = dir.join(format!("{i}.cube"));
-            std::fs::write(&path, identity_cube(2)).unwrap();
-            let src = path.to_string_lossy().into_owned();
-            assert!(load_lut(&src).is_some());
-            assert!(lut_cache().files.contains_key(&src), "{i}: the file just read");
+            let path = format!("/followed/{i}.cube");
+            c.read_file(&path, Some((1, None)));
+            assert!(c.files.contains_key(&path), "{i}: the file just read");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(c.files.len() <= MAX_FOLLOWED_FILES, "the others no longer cached are let go");
     }
 
     #[test]
