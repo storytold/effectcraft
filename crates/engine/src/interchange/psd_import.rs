@@ -196,7 +196,7 @@ fn footage_item(proj: &mut Project, cx: &mut Ctx, index: usize, name: &str) -> (
         missing: false,
         sequence: vec![],
         color_profile: None,
-        layer: Some(SourceLayer { index: index as u32, name: name.to_string(), layer_size: retain && !l.rect.is_empty(), ..Default::default() }),
+        layer: Some(SourceLayer { index: index as u32, name: name.to_string(), layer_size: retain && !l.rect.is_empty(), embedded: None, placed: false }),
         ..Default::default()
     };
     let id = proj.add_item(&format!("{name}/{file}"), Label::Lavender, Some(cx.folder), ItemKind::Footage(f));
@@ -255,14 +255,7 @@ fn smart_object_layer(proj: &mut Project, cx: &mut Ctx, comp: &Comp, index: usiz
         alpha: AlphaMode::Straight,
         loop_count: 1,
         codec: if effectcraft_psd::is_psd(data) { "PSD".into() } else { "PSD (embedded image)".into() },
-        layer: Some(SourceLayer {
-            index: index as u32,
-            name: name.to_string(),
-            layer_size: true,
-            embedded: Some(so.uuid.clone()),
-            placed: bake,
-            adjustment_white: false,
-        }),
+        layer: Some(SourceLayer { index: index as u32, name: name.to_string(), layer_size: true, embedded: Some(so.uuid.clone()), placed: bake }),
         ..Default::default()
     };
     let label = if file.is_empty() { name.to_string() } else { file };

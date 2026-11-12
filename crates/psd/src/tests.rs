@@ -160,15 +160,6 @@ fn text_effects_fill_and_adjustments() {
     assert_eq!(p.layers[4].adjustment, Some(Adjustment::Invert));
     assert_eq!(p.layers[5].adjustment, Some(Adjustment::BrightnessContrast { brightness: 20.0, contrast: -10.0, legacy: true }));
     assert_eq!(p.layers[6].adjustment, Some(Adjustment::Exposure { exposure: 1.5, offset: 0.0, gamma: 1.0 }));
-    // An adjustment layer has no pixels; asked to (an After Effects project's Photoshop layer,
-    // #3087) it covers the canvas in opaque white, where the adjustment applies. Otherwise (File
-    // > Import > Choose Layer) it stays transparent.
-    for canvas in [false, true] {
-        let adj = p.layer_pixels_opts(2, canvas, true).unwrap();
-        assert_eq!((adj.width, adj.height), (64, 32), "canvas {canvas}");
-        assert!(adj.data.iter().all(|px| *px == [1.0; 4]), "canvas {canvas}");
-    }
-    assert!(p.layer_pixels(2, true).unwrap().data.iter().all(|px| px[3] == 0.0));
     let vm = p.layers[7].vector_mask.as_ref().unwrap();
     assert_eq!(vm.subpaths.len(), 1);
     assert!(vm.subpaths[0].closed);
@@ -501,4 +492,30 @@ fn rle_composite_matches_the_raw_one() {
         assert_eq!(rle.composite().unwrap().data, raw.composite().unwrap().data, "{depth} bit");
         assert_eq!(rle.layer_pixels(2, true).unwrap().data, raw.layer_pixels(2, true).unwrap().data, "{depth} bit");
     }
+}
+
+#[test]
+fn packbits_packets_stop_at_the_row_end() {
+    // A 128-byte repeat and a 128-byte literal into 3-byte rows: the reserved row is never
+    // outgrown (capacity stays what was reserved).
+    for src in [vec![0x81u8, 7], {
+        let mut v = vec![0x7fu8];
+        v.extend([1u8; 128]);
+        v
+    }] {
+        let mut out = Vec::with_capacity(3);
+        unpack_bits(&src, 3, &mut out).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.capacity(), 3);
+    }
+}
+
+#[test]
+fn a_failed_inflate_reports_its_status_not_its_output() {
+    // A stream that inflates a megabyte of zeros, then breaks its checksum.
+    let mut z = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 1 << 20], 6);
+    let n = z.len();
+    z[n - 1] ^= 0xff;
+    let Err(Error::Invalid(msg)) = crate::limits::inflate(&z, 1 << 21) else { panic!("the checksum fails") };
+    assert!(msg.len() < 100, "{} bytes", msg.len());
 }

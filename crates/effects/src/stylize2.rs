@@ -612,7 +612,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "ec.stylize.scatter",
             "Scatter",
             vec![
-                p("amount", "Scatter Amount", num(0.0), slider(0.0, 127.0, 0.0, 127.0, 1)),
+                p("amount", "Scatter Amount", num(0.0), slider(0.0, 1000.0, 0.0, 127.0, 1)),
                 p("grain", "Grain", Value::Enum(0), popup(&["Both", "Horizontal", "Vertical"])),
                 p("randomizeEveryFrame", "Scatter Randomness", Value::Bool(false), ParamUi::Checkbox),
             ],

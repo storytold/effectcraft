@@ -14,8 +14,8 @@
 //! missing-footage placeholders). `docs/aep-import.md` has the full list.
 //!
 //! What does not arrive is **reported**, never dropped silently: [`ImportReport`] counts other
-//! effects (by match name; they arrive as placeholders with their parameters, so expressions
-//! reading them keep working, and render nothing) and unimported effect parameters, unusable masks, layer style
+//! effects (by match name; they arrive as placeholders that render nothing, with their parameters
+//! for expressions) and unimported effect parameters, unusable masks, layer style
 //! features, text layer features, shape items, unsupported blend modes and transform
 //! properties, simplified keyframes and unreadable data per [`LossCategory`]. By default the import
 //! is refused when anything would be lost ([`ImportOptions::allow_losses`] lifts that); a refusal

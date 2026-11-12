@@ -390,11 +390,6 @@ pub struct SourceLayer {
     /// as placed (warped and pinned to its corners) over the placed bounds in document space.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub placed: bool,
-    /// An adjustment layer (no pixels) shows opaque white over the document (or its mask), where
-    /// its effect applies: set for the Photoshop layers of an imported After Effects project
-    /// (#3087). EffectCraft's own Photoshop import makes adjustment layers solids instead.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub adjustment_white: bool,
 }
 
 fn one() -> u32 {

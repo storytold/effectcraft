@@ -458,8 +458,7 @@ fn shift_copy_offset(p: &mut effectcraft_project::Property, cx: &mut Cx<'_, '_>)
 }
 
 /// Reports a property whose only sampled value is the default 1. A record in the default state
-/// (`tdsb` 3) holds nothing to lose (docs/aep-format.md 3.4, state): a guide rectangle of #3087
-/// stores its Shape Direction so, holding 2.
+/// holds After Effects' default (docs/aep-format.md 3.4, state), so it holds nothing to lose.
 fn not_default(g: &AepGroup<'_, '_>, match_name: &str, what: &str, cx: &mut Cx<'_, '_>) {
     if let Some(PropNode::Property(p)) = g.get(match_name)
         && stored(&p)
@@ -469,8 +468,8 @@ fn not_default(g: &AepGroup<'_, '_>, match_name: &str, what: &str, cx: &mut Cx<'
     }
 }
 
-/// Reports a property whose only sampled value is 0 (a record in the default state, as above, holds
-/// nothing to lose).
+/// Reports a property whose only sampled value is 0 (a record in the default state, as above,
+/// holds nothing to lose).
 fn not_zero(g: &AepGroup<'_, '_>, match_name: &str, what: &str, cx: &mut Cx<'_, '_>) {
     if let Some(PropNode::Property(p)) = g.get(match_name)
         && stored(&p)
@@ -501,37 +500,35 @@ mod tests {
     use super::*;
     use crate::Chunk;
 
-    /// A rectangle whose Shape Direction record is in state `tdsb` and holds `value`.
-    fn rect(state: u32, value: f64) -> Chunk<'static> {
+    /// A group holding `match_name` as a one-component property in state `tdsb` with value `v`.
+    fn group_with(match_name: &str, tdsb: u32, v: f64) -> Chunk<'static> {
+        let mut name = match_name.as_bytes().to_vec();
+        name.resize(40, 0);
         let mut tdb4 = vec![0u8; 124];
-        tdb4[..4].copy_from_slice(&[0xdb, 0x99, 0, 1]);
-        let mut cdat = vec![0u8; 40];
-        cdat[..8].copy_from_slice(&value.to_be_bytes());
-        let mut tdmn = b"ADBE Vector Shape Direction".to_vec();
-        tdmn.resize(40, 0);
-        let mut end = b"ADBE Group End".to_vec();
-        end.resize(40, 0);
-        let record = Chunk::list(*b"tdbs", vec![Chunk::data(*b"tdsb", state.to_be_bytes().to_vec()), Chunk::data(*b"tdb4", tdb4), Chunk::data(*b"cdat", cdat)]);
-        Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), Chunk::data(*b"tdmn", tdmn), record, Chunk::data(*b"tdmn", end)])
+        tdb4[3] = 1;
+        let tdbs = Chunk::list(
+            *b"tdbs",
+            vec![Chunk::data(*b"tdsb", tdsb.to_be_bytes().to_vec()), Chunk::data(*b"tdb4", tdb4), Chunk::data(*b"cdat", v.to_be_bytes().to_vec())],
+        );
+        Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdmn", name), tdbs])
     }
 
-    fn shape_losses(chunk: &Chunk<'_>) -> Vec<String> {
-        let g = AepGroup::from_chunk(chunk).expect("a group");
-        let tm = TimeMap { timescale: 30, frame_duration: 1, rate: effectcraft_time::FrameRate::new(30, 1) };
-        let mut next = 1;
-        let mut ids = Ids(&mut next);
-        let mut col = Collector::default();
-        let mut cx = Cx { what: "C: 'S'", tm: &tm, ids: &mut ids, col: &mut col };
-        assert!(item("ADBE Vector Shape - Rect", &g, 0, &mut cx).is_some());
-        col.finish().losses.into_iter().flat_map(|l| l.details).collect()
+    fn reported(match_name: &str, tdsb: u32, v: f64, check: fn(&AepGroup<'_, '_>, &str, &str, &mut Cx<'_, '_>)) -> usize {
+        let chunk = group_with(match_name, tdsb, v);
+        let g = AepGroup::from_chunk(&chunk).unwrap();
+        let tm = TimeMap { timescale: 30, frame_duration: 1, rate: crate::import::time::frame_rate(30, 1).unwrap() };
+        let (mut next, mut col) = (1, Collector::default());
+        check(&g, match_name, "it", &mut Cx { what: "L", tm: &tm, ids: &mut Ids(&mut next), col: &mut col });
+        col.finish().losses.iter().map(|l| l.count).sum()
     }
 
-    /// #3087: a Shape Direction record in the default state (`tdsb` 3, a guide rectangle holding 2)
-    /// holds nothing to lose; a written one other than 1 is still reported.
+    /// #3087: a guide rectangle's Shape Direction recorded in the default state (`tdsb` 3, holding
+    /// 2) is After Effects' default and is no loss; written (`tdsb` 1) with 2, it is one.
     #[test]
-    fn shape_direction_in_the_default_state_is_no_loss() {
-        assert!(shape_losses(&rect(3, 2.0)).is_empty());
-        assert_eq!(shape_losses(&rect(1, 2.0)), ["C: 'S': shape direction not imported"]);
-        assert!(shape_losses(&rect(1, 1.0)).is_empty());
+    fn a_default_state_record_is_no_loss() {
+        assert_eq!(reported("ADBE Vector Shape Direction", 3, 2.0, not_default), 0);
+        assert_eq!(reported("ADBE Vector Shape Direction", 1, 2.0, not_default), 1);
+        assert_eq!(reported("ADBE Vector Grad HiLite Length", 3, 5.0, not_zero), 0);
+        assert_eq!(reported("ADBE Vector Grad HiLite Length", 1, 5.0, not_zero), 1);
     }
 }

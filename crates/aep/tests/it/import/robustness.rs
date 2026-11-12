@@ -620,8 +620,7 @@ fn bogus_effect_structure_is_reported_not_imported_blindly() {
         }
     }));
     let r = report_of(&bytes);
-    // Kept as a placeholder since #3087 (and reported).
-    assert_eq!(r.imported.effects, 1);
+    assert_eq!(r.imported.effects, 0);
     assert!(
         r.losses.iter().any(|l| l.category == effectcraft_aep::import::LossCategory::Effects && l.details.iter().any(|d| d.contains("XYZ Unknown"))),
         "{r:?}"

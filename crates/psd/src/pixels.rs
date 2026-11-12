@@ -37,7 +37,7 @@ impl Psd {
             PlaneStream::Rle(counts) => Cow::Owned(Self::unpack_plane(&counts, 0, r, rowb, h, budget)?),
             PlaneStream::Zip(mut v) => {
                 v.resize(size, 0);
-                self.zip_plane(comp, &mut v, 0, w, h)?;
+                self.zip_plane(comp, &mut v, 0, w, h, budget)?;
                 Cow::Owned(v)
             }
         })
@@ -90,7 +90,7 @@ impl Psd {
         Ok(match planes {
             PlaneStream::Raw => Cow::Borrowed(r.bytes(size)?),
             PlaneStream::Rle(counts) => Cow::Owned(Self::unpack_plane(counts, c, r, rowb, h, budget)?),
-            PlaneStream::Zip(v) => Cow::Borrowed(self.zip_plane(comp, v, c, w, h)?),
+            PlaneStream::Zip(v) => Cow::Borrowed(self.zip_plane(comp, v, c, w, h, budget)?),
         })
     }
 
@@ -106,11 +106,11 @@ impl Psd {
     }
 
     /// Plane `c` of the inflated ZIP data of consecutive planes, un-predicted in place (`comp` 3).
-    pub(crate) fn zip_plane<'v>(&self, comp: u16, v: &'v mut [u8], c: usize, w: usize, h: usize) -> Result<&'v [u8]> {
+    pub(crate) fn zip_plane<'v>(&self, comp: u16, v: &'v mut [u8], c: usize, w: usize, h: usize, budget: &mut Budget) -> Result<&'v [u8]> {
         let rowb = self.row_bytes(w);
         let plane = v.get_mut(c * rowb * h..(c + 1) * rowb * h).ok_or(Error::Truncated)?;
         if comp == 3 {
-            self.unpredict(plane, w, h);
+            self.unpredict(plane, w, h, budget)?;
         }
         Ok(plane)
     }
@@ -132,7 +132,8 @@ impl Psd {
         if self.depth == 1 { w.div_ceil(8) } else { w * self.bytes_per_sample() }
     }
 
-    pub(crate) fn unpredict(&self, v: &mut [u8], w: usize, h: usize) {
+    /// Undo ZIP prediction in place; the 32-bit scratch row is charged to `budget`.
+    pub(crate) fn unpredict(&self, v: &mut [u8], w: usize, h: usize, budget: &mut Budget) -> Result<()> {
         match self.depth {
             16 => {
                 for row in v.chunks_exact_mut(w * 2).take(h) {
@@ -145,8 +146,9 @@ impl Psd {
                 }
             }
             32 => {
-                // One scratch row for the whole plane.
-                let mut planar = vec![0u8; w * 4];
+                // One scratch row for the whole plane, charged: a wide, short layer passes the
+                // decode's peak check and would otherwise allocate it on top.
+                let mut planar = budget.filled(w.checked_mul(4).ok_or_else(|| too_large(w, h))?, 0u8)?;
                 #[cfg(test)]
                 counters::bump(&counters::SCRATCH);
                 for row in v.chunks_exact_mut(w * 4).take(h) {
@@ -161,6 +163,7 @@ impl Psd {
                         }
                     }
                 }
+                budget.release(planar.len() as u64);
             }
             _ => {
                 for row in v.chunks_exact_mut(w).take(h) {
@@ -170,6 +173,7 @@ impl Psd {
                 }
             }
         }
+        Ok(())
     }
 
     /// Hand every sample of `raw` (`w`×`h`, row-major, in order) to `f` as a float. Samples a short
@@ -284,34 +288,19 @@ impl Psd {
     /// One layer's pixels with its layer mask (and vector-less fill colour) applied to alpha.
     /// `canvas`: document-sized with the layer in place; otherwise the layer's own bounds.
     pub fn layer_pixels(&self, index: usize, canvas: bool) -> Result<Pixels> {
-        self.layer_pixels_opts(index, canvas, false)
-    }
-
-    /// [`Self::layer_pixels`]; with `adjustment_white` an adjustment layer (which has no pixels)
-    /// covers the canvas (or its mask) in opaque white instead of nothing: where its effect
-    /// applies when an After Effects project shows the layer as footage (#3087; what After
-    /// Effects itself draws for that footage is not sampled).
-    pub fn layer_pixels_opts(&self, index: usize, canvas: bool, adjustment_white: bool) -> Result<Pixels> {
-        self.layer_pixels_inner(index, canvas, DECODE_BUDGET, adjustment_white)
+        self.layer_pixels_with_budget(index, canvas, DECODE_BUDGET)
     }
 
     /// [`Self::layer_pixels`] with at most `limit` bytes live at once: the result (16 bytes a
     /// pixel) with the channels written straight into it, the CMYK black channel, the one channel
     /// being decoded, and the mask.
-    #[cfg(test)]
     pub(crate) fn layer_pixels_with_budget(&self, index: usize, canvas: bool, limit: u64) -> Result<Pixels> {
-        self.layer_pixels_inner(index, canvas, limit, false)
-    }
-
-    fn layer_pixels_inner(&self, index: usize, canvas: bool, limit: u64, adjustment_white: bool) -> Result<Pixels> {
         let mut budget = Budget::new(limit);
         let l = self.layers.get(index).ok_or_else(|| Error::Invalid(format!("no layer {index}")))?;
         let doc = Rect { top: 0, left: 0, bottom: self.height as i32, right: self.width as i32 };
-        // Fill layers often have no pixel data: they cover the canvas (or the mask). So does an
-        // adjustment layer when asked, in opaque white.
-        let solid = l.fill.or_else(|| l.adjustment.as_ref().filter(|_| adjustment_white).map(|_| [1.0; 3]));
+        // Fill layers often have no pixel data: they cover the canvas (or the mask).
         let fill_rect =
-            if solid.is_some() && !l.has_pixels() { l.mask.filter(|m| !m.rect.is_empty() && m.default_color == 0).map_or(doc, |m| m.rect) } else { l.rect };
+            if l.fill.is_some() && !l.has_pixels() { l.mask.filter(|m| !m.rect.is_empty() && m.default_color == 0).map_or(doc, |m| m.rect) } else { l.rect };
         let out_rect = if canvas {
             doc
         } else if fill_rect.is_empty() {
@@ -351,7 +340,7 @@ impl Psd {
             let (ys, oy) = span(src.top, sh, out_rect.top, oh);
             let (xs, ox) = span(src.left, sw, out_rect.left, ow);
             let dest = |y: usize, x: usize| (y as i64 - oy) as usize * ow + (x as i64 - ox) as usize;
-            let fill = solid.map(|c| c.map(|v| v as f32));
+            let fill = l.fill.map(|c| c.map(|v| v as f32));
             match fill {
                 Some(f) if !l.has_pixels() => {
                     for y in ys {
@@ -498,15 +487,17 @@ pub(crate) fn unpack_bits(src: &[u8], row: usize, out: &mut Vec<u8>) -> Result<(
     while i < src.len() && out.len() - start < row {
         let n = src[i] as i8;
         i += 1;
+        // A packet is written only up to the row's end, so the reserved plane never grows.
+        let room = row - (out.len() - start);
         if n >= 0 {
             let k = n as usize + 1;
             let s = src.get(i..i + k).ok_or(Error::Truncated)?;
-            out.extend_from_slice(s);
+            out.extend_from_slice(&s[..k.min(room)]);
             i += k;
         } else if n != -128 {
             let k = (1 - n as isize) as usize;
             let v = *src.get(i).ok_or(Error::Truncated)?;
-            out.extend(std::iter::repeat_n(v, k));
+            out.extend(std::iter::repeat_n(v, k.min(room)));
             i += 1;
         }
     }
