@@ -2825,6 +2825,28 @@ fn reveal_scroll(app: &mut EffectcraftApp, g: &Tl) {
     }
 }
 
+/// The modifiers of the wheel gesture in progress. egui keeps the modifiers each (smoothed)
+/// wheel gesture started with; using the live keys instead would turn the tail of an Alt+wheel
+/// into a graph pan as soon as Alt is released while the wheel is still settling.
+fn wheel_modifiers(ui: &egui::Ui) -> Option<egui::Modifiers> {
+    let id = egui::Id::unique("timeline-wheel-modifiers");
+    let latest = ui.input(|i| {
+        i.events.iter().rev().find_map(|e| match e {
+            egui::Event::MouseWheel { modifiers, .. } => Some(*modifiers),
+            _ => None,
+        })
+    });
+    if let Some(m) = latest {
+        ui.ctx().data_mut(|d| d.insert_temp(id, m));
+        Some(m)
+    } else if ui.input(|i| i.is_scrolling()) {
+        ui.ctx().data(|d| d.get_temp::<egui::Modifiers>(id))
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<egui::Modifiers>(id));
+        None
+    }
+}
+
 /// Mouse wheel and pinch over the rows: zoom time or scroll.
 fn wheel_zoom_scroll(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Tl) {
     let overflow = g.overflow;
@@ -2835,8 +2857,10 @@ fn wheel_zoom_scroll(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Tl) {
     let rows_rect = g.rows_rect;
     let max_scroll = g.max_scroll;
     let comp = g.comp.clone();
+    let wheel_mods = wheel_modifiers(ui);
     if ui.rect_contains_pointer(rows_rect) {
-        let (dy, dx, alt) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.alt));
+        let (dy, dx) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x));
+        let alt = wheel_mods.map_or_else(|| ui.input(|i| i.modifiers.alt), |m| m.alt);
         // Over the Graph Editor's plot the wheel belongs to the value axis: Ctrl/Cmd+wheel (or a
         // pinch) zooms it and a plain wheel pans it (graph.rs::wheel_nav). Leave Alt+wheel to the
         // time zoom below, and let a horizontal wheel/Shift+wheel pan time.
@@ -5049,8 +5073,10 @@ fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
             let (lo, hi) = app.ui.timeline.graph_range.unwrap_or((0.0, 100.0));
             let span = (hi - lo).max(1e-9);
             let dv = delta.y as f64 / plot.height().max(1.0) as f64 * span;
-            app.ui.timeline.graph_auto_zoom = false;
-            app.ui.timeline.graph_range = Some((lo + dv, hi + dv));
+            if let Some(range) = super::graph::valid_range(lo + dv, hi + dv) {
+                app.ui.timeline.graph_auto_zoom = false;
+                app.ui.timeline.graph_range = Some(range);
+            }
         } else {
             app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - delta.y).clamp(0.0, max_scroll);
         }
