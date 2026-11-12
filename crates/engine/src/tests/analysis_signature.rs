@@ -100,7 +100,7 @@ fn analyses_saved_by_0_24_survive_edits_that_keep_their_frames() {
 fn signature_text_is_pinned() {
     let s = open(ANALYSED_0_24);
     let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
-    let key = r#"frames/1;footage=1;footage;path="/tmp/effectcraft-3456-shake.mp4";kind=video;w=160;h=120;par=1.0;rate=12/1;nativeRate=none;duration=254016000000;video=true;audio=false;alpha=ignore;matte=[0.0, 0.0, 0.0];loop=1;codec="H.264 (High)";missing=false;frames=0;profile{rec709;};layer=none;fields=off;invertAlpha=false;linearLight=false;preserveRgb=false;cineon;log=false;points=[0.0, 1023.0, 95.0, 685.0, 1.7, 20.0];units=10bit;data=none;page=0;alphabetical=false;startTimecode=none;fileTimecode=none;placedPage=false;in=0;out=254016000000;start=0;stretch=100.0;timeRemap{prop="timeRemap";scalar=0.0;spatial=false;key=0;scalar=0.2;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;key=254016000000;scalar=1.0;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;expr=none;};compRate{rate=12/1;};"#;
+    let key = r#"frames/1;footage=1;footage;path="/tmp/effectcraft-3456-shake.mp4";kind=video;w=160;h=120;par=1.0;rate=12/1;nativeRate=none;duration=254016000000;video=true;audio=false;alpha=ignore;matte=[0.0, 0.0, 0.0];loop=1;codec="H.264 (High)";frames=0;profile{rec709;};layer=none;fields=off;invertAlpha=false;linearLight=false;preserveRgb=false;cineon;log=false;points=[0.0, 1023.0, 95.0, 685.0, 1.7, 20.0];units=10bit;data=none;page=0;alphabetical=false;startTimecode=none;fileTimecode=none;placedPage=false;in=0;out=254016000000;start=0;stretch=100.0;timeRemap{prop="timeRemap";scalar=0.0;spatial=false;key=0;scalar=0.2;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;key=254016000000;scalar=1.0;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;expr=none;};compRate{rate=12/1;};"#;
     assert_eq!(crate::analysis::frames_key::signature_text(&s.project, COMP, layer), key);
 }
 
@@ -143,6 +143,14 @@ fn todays_keys_survive_edits_that_keep_their_frames() {
     let mut s = open(&s.project.to_json());
     add_to_render_queue(&mut s);
     assert_eq!(saved(&s), before);
+    // Offline and back online (#3534).
+    for missing in [true, false] {
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = std::sync::Arc::make_mut(&mut s.project).item_mut(ItemId(1)).map(|i| &mut i.kind) {
+            f.missing = missing;
+        }
+        add_to_render_queue(&mut s);
+        assert_eq!(saved(&s), before);
+    }
     // Names and labels only show things.
     s.execute_checked("layer.rename", json!({"layer": CLIP.0, "name": "Renamed"})).unwrap();
     s.edit("rename", None, |p, _| {
@@ -157,6 +165,36 @@ fn todays_keys_survive_edits_that_keep_their_frames() {
     assert_eq!(saved(&s), before);
 
     // A real change still clears them.
+    s.execute_checked("file.interpretFootage", json!({"items": [1], "invertAlpha": true})).unwrap();
+    assert!(saved(&s).iter().all(|(data, _)| data.is_empty()));
+}
+
+/// Footage going offline (or coming back) is an observation, not an edit: the next edit keeps
+/// every analysis (#3534).
+#[test]
+fn offline_footage_keeps_analyses() {
+    let mut s = open(ANALYSED_0_24);
+    let before = saved(&s);
+    let missing = |s: &Session| matches!(&s.project.item(ItemId(1)).unwrap().kind, effectcraft_project::ItemKind::Footage(f) if f.missing);
+    // The fixture's footage path doesn't exist here: the check marks it missing.
+    let r = s.execute_checked("footage.check", json!({"wait": true})).unwrap();
+    assert_eq!(r["missing"], 1, "{r}");
+    assert!(missing(&s));
+    add_to_render_queue(&mut s);
+    assert_eq!(saved(&s), before);
+
+    // Saved and reopened while offline, then back online.
+    let mut s = open(&s.project.to_json());
+    assert!(missing(&s));
+    add_to_render_queue(&mut s);
+    assert_eq!(saved(&s), before);
+    if let Some(effectcraft_project::ItemKind::Footage(f)) = std::sync::Arc::make_mut(&mut s.project).item_mut(ItemId(1)).map(|i| &mut i.kind) {
+        f.missing = false;
+    }
+    add_to_render_queue(&mut s);
+    assert_eq!(saved(&s), before);
+
+    // A real change while offline still clears them.
     s.execute_checked("file.interpretFootage", json!({"items": [1], "invertAlpha": true})).unwrap();
     assert!(saved(&s).iter().all(|(data, _)| data.is_empty()));
 }

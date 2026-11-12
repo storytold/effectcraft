@@ -226,7 +226,9 @@ impl Text {
             premul_color,
             loop_count,
             codec,
-            missing,
+            // Whether the file is there is an observation (`footage.check`), not an edit: an
+            // offline file is the same footage, and its analyses stay valid (#3534).
+            missing: _,
             sequence,
             color_profile,
             layer,
@@ -276,7 +278,6 @@ impl Text {
         self.floats("matte", premul_color);
         self.field("loop", loop_count);
         self.str("codec", codec);
-        self.field("missing", missing);
         self.field("frames", sequence.len());
         for s in sequence {
             self.str("file", s);

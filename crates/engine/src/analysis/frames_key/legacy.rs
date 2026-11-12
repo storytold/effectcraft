@@ -6,16 +6,19 @@ use effectcraft_project::{Footage, ItemId, ItemKind, Layer, LayerSource, Project
 
 use super::fnv;
 
-/// The signatures a saved key of `layer` may have been made from. Before `Footage::placed_page`
-/// was added in 0.23, the footage text ended without that field.
+/// The signatures a saved key of `layer` may have been made from. The footage's availability is
+/// tried both ways: those releases hashed it, though it isn't part of the footage (#3534). Before
+/// `Footage::placed_page` was added in 0.23, the footage text ended without that field.
 pub(crate) fn signatures(p: &Project, comp: ItemId, layer: &Layer) -> Vec<String> {
     let src = match &layer.source {
         LayerSource::Footage { item } | LayerSource::Solid { item } | LayerSource::Comp { item } => match p.item(*item).map(|i| &i.kind) {
             Some(ItemKind::Footage(f)) => {
-                let mut out = Vec::with_capacity(2);
-                out.push(signature_with_source(p, comp, layer, &footage_text(f, f.missing, true)));
-                if matches!(layer.source, LayerSource::Footage { .. }) && !f.placed_page {
-                    out.push(signature_with_source(p, comp, layer, &footage_text(f, f.missing, false)));
+                let mut out = Vec::with_capacity(4);
+                for missing in [false, true] {
+                    out.push(signature_with_source(p, comp, layer, &footage_text(f, missing, true)));
+                    if matches!(layer.source, LayerSource::Footage { .. }) && !f.placed_page {
+                        out.push(signature_with_source(p, comp, layer, &footage_text(f, missing, false)));
+                    }
                 }
                 return out;
             }
