@@ -125,12 +125,14 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
             let pad = (fs - pcm_left.len() % fs) % fs + fs;
             pcm_left.extend(std::iter::repeat_n(0.0, pad));
         }
-        while pcm_left.len() >= fs {
-            let pkt = enc.encode_float(&pcm_left[..fs]);
-            pcm_left.drain(..fs);
+        // Packets are read in place and the encoded samples dropped once: draining each packet
+        // from the front would shift the rest of the batch's audio every 20 ms.
+        for packet in pcm_left.chunks_exact(fs) {
+            let pkt = enc.encode_float(packet);
             blocks.push(Block { ms: packets as i64 * 20, track: 2, key: true, data: pkt });
             packets += 1;
         }
+        pcm_left.drain(..pcm_left.len() / fs * fs);
     };
 
     let batch = batch_size();

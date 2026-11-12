@@ -2,7 +2,8 @@
 //! lookup tables (.cube).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
@@ -330,26 +331,165 @@ impl Lut {
     }
 }
 
-type LutCache = Mutex<HashMap<String, Option<Arc<Lut>>>>;
+/// A LUT file's size and modification time when it was read (`None`: inline text, or a file
+/// that could not be described). A file whose stamp moved is read again (#3493).
+type FileStamp = Option<(u64, Option<std::time::SystemTime>)>;
 
-/// Load (and cache) a LUT from inline `.cube` text or a file path.
+/// At most this many parsed LUTs (files and inline texts) are kept, and at most
+/// [`MAX_CACHED_BYTES`] of them; the least recently used go first.
+const MAX_CACHED_LUTS: usize = 64;
+const MAX_CACHED_BYTES: usize = 512 << 20;
+
+/// At most this many LUT files are followed by [`check_lut_files`] beyond the ones whose LUT is
+/// kept: the frames made with a LUT that left the cache are still dropped when its file changes.
+const MAX_FOLLOWED_FILES: usize = 1024;
+
+/// A parsed LUT (or the failure to parse one) and what it was read from.
+struct CachedLut {
+    stamp: FileStamp,
+    lut: Option<Arc<Lut>>,
+    used: u64,
+    /// The parsed tables and the parameter text, counted against [`MAX_CACHED_BYTES`].
+    bytes: usize,
+}
+
+/// [`load_lut`]'s cache, by parameter text, and the stamp each LUT file was last read with.
+#[derive(Default)]
+struct LutCache {
+    map: HashMap<String, CachedLut>,
+    files: HashMap<String, FileStamp>,
+    clock: u64,
+    bytes: usize,
+}
+
+impl LutCache {
+    /// Forget the LUT kept for `src`.
+    fn remove(&mut self, src: &str) {
+        if let Some(e) = self.map.remove(src) {
+            self.bytes = self.bytes.saturating_sub(e.bytes);
+        }
+    }
+
+    /// Note that the file at `path` was read with `stamp`: a different stamp than the last read's
+    /// means it changed on disk, and frames made before may show the old LUT.
+    fn read_file(&mut self, path: &str, stamp: FileStamp) {
+        if self.files.insert(path.to_string(), stamp).is_some_and(|old| old != stamp) {
+            GENERATION.fetch_add(1, Ordering::AcqRel);
+        }
+        if self.files.len() > MAX_FOLLOWED_FILES {
+            let map = &self.map;
+            self.files.retain(|p, _| p.as_str() == path || map.keys().any(|src| lut_file(src) == Some(p.as_str())));
+        }
+    }
+
+    /// Keep at most [`MAX_CACHED_LUTS`] LUTs and [`MAX_CACHED_BYTES`], always the one for `keep`.
+    fn evict(&mut self, keep: &str) {
+        while self.map.len() > MAX_CACHED_LUTS || (self.bytes > MAX_CACHED_BYTES && self.map.len() > 1) {
+            let Some(oldest) = self.map.iter().filter(|(k, _)| k.as_str() != keep).min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
+            self.remove(&oldest);
+        }
+    }
+}
+
+/// How often a LUT file was found changed on disk ([`lut_generation`]).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn lut_cache() -> std::sync::MutexGuard<'static, LutCache> {
+    static CACHE: OnceLock<Mutex<LutCache>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The stamp of the file at `path` now: one `metadata` call.
+fn file_stamp(path: &str) -> FileStamp {
+    std::fs::metadata(path).ok().map(|md| (md.len(), md.modified().ok()))
+}
+
+/// The parameters (paths in the effect's group) of `effect` that [`load_lut`] reads.
+pub fn lut_params(effect: &str) -> &'static [&'static str] {
+    match effect {
+        "ec.utility.applylut" => &["lut"],
+        "ec.color.lumetri" => &["basicCorrection/inputLutFile", "creative/lookFile"],
+        _ => &[],
+    }
+}
+
+/// The file a LUT parameter names; `None` for inline `.cube` text or an empty parameter.
+pub fn lut_file(src: &str) -> Option<&str> {
+    // `.cube` text always spans lines (a size header, then data rows); a path never does, even one
+    // whose file name contains `LUT_` (#3454). Trimmed, so a trailing newline is still a path.
+    let path = src.trim();
+    (!path.is_empty() && !path.contains('\n')).then_some(path)
+}
+
+/// Changes each time a LUT file [`load_lut`] read is found changed on disk (by [`load_lut`]
+/// itself or [`check_lut_files`]): frames made before then may show the old LUT.
+pub fn lut_generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+/// Look at every LUT file read (one `metadata` call each) and forget the LUTs of the ones that
+/// changed on disk since, so the next [`load_lut`] reads them again. Returns [`lut_generation`].
+pub fn check_lut_files() -> u64 {
+    let files: Vec<(String, FileStamp)> = lut_cache().files.iter().map(|(p, s)| (p.clone(), *s)).collect();
+    // (stamped without the lock: a file on a slow share must not hold up renders)
+    let changed: Vec<(String, FileStamp, FileStamp)> =
+        files.into_iter().filter_map(|(path, old)| Some(file_stamp(&path)).filter(|now| *now != old).map(|now| (path, old, now))).collect();
+    if !changed.is_empty() {
+        let mut c = lut_cache();
+        for (path, old, now) in changed {
+            // (a render that read the file meanwhile has noted its new stamp already)
+            if c.files.get(&path) == Some(&old) {
+                let stale: Vec<String> = c.map.keys().filter(|src| lut_file(src) == Some(path.as_str())).cloned().collect();
+                for src in stale {
+                    c.remove(&src);
+                }
+                c.read_file(&path, now);
+            }
+        }
+    }
+    lut_generation()
+}
+
+/// Load (and cache) a LUT from inline `.cube` text or a file path. A file is stamped (one
+/// `metadata` call) on every load and read again once its size or modification time moved, so a
+/// file edited, created, deleted or repaired on disk is followed; inline text is its own content.
+/// An edit that keeps both the size and the modification time can't be told apart.
 pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     if src.trim().is_empty() {
         return None;
     }
-    static CACHE: OnceLock<LutCache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
+    let file = lut_file(src);
+    let stamp = file.and_then(file_stamp);
     {
-        return v.clone();
+        let mut c = lut_cache();
+        c.clock += 1;
+        let now = c.clock;
+        if let Some(e) = c.map.get_mut(src)
+            && e.stamp == stamp
+        {
+            e.used = now;
+            return e.lut.clone();
+        }
     }
-    let inline = src.contains('\n') || src.contains("LUT_");
-    let parsed = if inline { parse_cube(src) } else { std::fs::read_to_string(src.trim()).ok().and_then(|t| parse_cube(&t)) }.map(Arc::new);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
+    // (read and parsed without the lock; a file written after it was stamped has a newer stamp,
+    // and is read again next time)
+    let lut = match file {
+        Some(path) => std::fs::read_to_string(path).ok().and_then(|t| parse_cube(&t)),
+        None => parse_cube(src),
     }
-    parsed
+    .map(Arc::new);
+    let tables = lut.as_ref().map_or(0, |l| l.d1.len().saturating_add(l.d3.len()).saturating_mul(std::mem::size_of::<[f32; 3]>()));
+    let bytes = tables.saturating_add(src.len());
+    let mut c = lut_cache();
+    if let Some(path) = file {
+        c.read_file(path, stamp);
+    }
+    c.remove(src);
+    let used = c.clock;
+    c.map.insert(src.to_string(), CachedLut { stamp, lut: lut.clone(), used, bytes });
+    c.bytes = c.bytes.saturating_add(bytes);
+    c.evict(src);
+    lut
 }
 
 fn apply_lut(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -482,6 +622,127 @@ mod tests {
         assert_eq!(out.img, img);
         let out = run("ec.utility.applylut", &[("lut", Value::Str("/nonexistent/path.cube".into()))], img.clone());
         assert_eq!(out.img, img);
+    }
+
+    /// #3454: a path containing `LUT_` was taken for `.cube` text and the file never loaded.
+    #[test]
+    fn a_path_whose_name_contains_lut_loads_the_file() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3454-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("LUT_x.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        assert!(load_lut(&path).is_some(), "{path}");
+        assert!(load_lut(&format!("{path}\r\n")).is_some(), "{path} with a trailing newline");
+        assert!(load_lut(&identity_cube(2)).is_some(), "inline text");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #3493: a LUT file was read once per process; an edited or newly created file never loaded.
+    #[test]
+    fn a_lut_file_is_read_again_once_it_changes() {
+        const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+        const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str, secs: u64| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let at = |src: &str| load_lut(src).map(|l| l.apply([0.5; 3]));
+        let edited = write("edited.cube", BLACK, 1_000);
+        assert_eq!(at(&edited), Some([0.0; 3]));
+        write("edited.cube", WHITE, 2_000);
+        assert_eq!(at(&edited), Some([1.0; 3]), "an edited file, same size");
+        let created = dir.join("created.cube").to_string_lossy().into_owned();
+        assert_eq!(at(&created), None);
+        write("created.cube", WHITE, 1_000);
+        assert_eq!(at(&created), Some([1.0; 3]), "a file created after a failed load");
+        let repaired = write("repaired.cube", "not a lut", 1_000);
+        assert_eq!(at(&repaired), None);
+        write("repaired.cube", WHITE, 2_000);
+        assert_eq!(at(&repaired), Some([1.0; 3]), "a repaired file");
+        std::fs::remove_file(&repaired).unwrap();
+        assert_eq!(at(&repaired), None, "a deleted file");
+        // Inline text is its own content: the same text is the same LUT.
+        let inline = load_lut(BLACK).unwrap();
+        assert!(Arc::ptr_eq(&inline, &load_lut(BLACK).unwrap()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file that changed is noticed without a render loading it, and the generation that tells
+    /// frames made before it apart moves.
+    #[test]
+    fn check_lut_files_forgets_a_changed_file() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grade.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let src = path.to_string_lossy().into_owned();
+        assert!(load_lut(&src).is_some());
+        let before = check_lut_files();
+        assert!(lut_cache().map.contains_key(&src), "an unchanged file stays");
+        std::fs::write(&path, identity_cube(3)).unwrap();
+        assert!(check_lut_files() > before);
+        assert!(!lut_cache().map.contains_key(&src), "a changed file is read again");
+        assert_eq!(load_lut(&src).map(|l| l.n3), Some(3));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The cache keeps at most [`MAX_CACHED_LUTS`] LUTs, the least recently used going first.
+    #[test]
+    fn the_lut_cache_is_bounded() {
+        // (text no other test loads: a load elsewhere would make it recently used)
+        let oldest = format!("TITLE \"bounded first\"\n{}", identity_cube(2));
+        let first = load_lut(&oldest).unwrap();
+        for i in 0..MAX_CACHED_LUTS + 8 {
+            let text = format!("TITLE \"bounded {i}\"\n{}", identity_cube(2));
+            assert!(load_lut(&text).is_some());
+            assert!(lut_cache().map.len() <= MAX_CACHED_LUTS);
+        }
+        assert!(!Arc::ptr_eq(&first, &load_lut(&oldest).unwrap()), "the oldest was let go");
+        let c = lut_cache();
+        assert_eq!(c.bytes, c.map.values().map(|e| e.bytes).sum::<usize>(), "the bytes kept add up");
+        assert!(c.bytes <= MAX_CACHED_BYTES);
+    }
+
+    /// A LUT file whose LUT left the cache is still followed: its frames are dropped when it
+    /// changes, though no render loads it again first.
+    #[test]
+    fn a_file_whose_lut_left_the_cache_is_still_followed() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-evicted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let src = path.to_string_lossy().into_owned();
+        assert!(load_lut(&src).is_some());
+        for i in 0..MAX_CACHED_LUTS + 8 {
+            assert!(load_lut(&format!("TITLE \"evict {i}\"\n{}", identity_cube(2))).is_some());
+        }
+        assert!(!lut_cache().map.contains_key(&src), "its LUT left the cache");
+        std::fs::write(&path, identity_cube(3)).unwrap();
+        check_lut_files();
+        assert_eq!(lut_cache().files.get(&src), Some(&file_stamp(&src)), "the change was noticed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Past [`MAX_FOLLOWED_FILES`], the file just read is still followed (a cache of its own:
+    /// the shared one's followed files belong to the other tests too).
+    #[test]
+    fn the_file_just_read_stays_followed_past_the_limit() {
+        let mut c = LutCache::default();
+        for i in 0..MAX_FOLLOWED_FILES + 8 {
+            let path = format!("/followed/{i}.cube");
+            c.read_file(&path, Some((1, None)));
+            assert!(c.files.contains_key(&path), "{i}: the file just read");
+        }
+        assert!(c.files.len() <= MAX_FOLLOWED_FILES, "the others no longer cached are let go");
     }
 
     #[test]

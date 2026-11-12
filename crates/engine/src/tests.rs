@@ -1,6 +1,7 @@
 mod add_item_options;
 mod aep_export;
 mod aep_import;
+mod analysis_signature;
 mod anim_presets;
 mod anim_tools;
 mod aux_footage;
@@ -27,8 +28,10 @@ mod key_metadata_order;
 mod key_time;
 mod keyframe_text;
 mod keylight;
+mod legacy_analysis_keys;
 mod limits;
 mod lottie;
+mod lut_files;
 mod m137;
 mod m145;
 mod markers;

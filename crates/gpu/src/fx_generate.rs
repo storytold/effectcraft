@@ -133,7 +133,7 @@ fn radial_fast(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 }
 
 fn camera_lens(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
-    let r = ctx.params.f("blurRadius").max(0.0) * b.scale;
+    let r = effectcraft_effects::camera_lens_radius(ctx, b.scale);
     if r < 0.5 {
         return Some(b);
     }

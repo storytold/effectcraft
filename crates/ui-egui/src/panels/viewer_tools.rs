@@ -981,12 +981,21 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     }
     app.auto.add_response("viewer.timecode", &resp, "Current time");
     crate::panels::toggle_time_display(app, &resp);
+    go_to_time_on_click(app, &resp);
     // Right: render time.
     let ms = app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0);
     if tr.max.x + 50.0 < bar.max.x {
         p.text(pos2(bar.max.x - 10.0, cy), Align2::RIGHT_CENTER, format!("{ms:.0} ms"), Tokens::ui(11.0), t.text_faint);
     }
     (tr.right() + 8.0 - bar.left()).max(bar.width())
+}
+
+/// A plain click on the time display opens Go to Time, as it does in After Effects; Ctrl/Cmd+click
+/// is [`crate::panels::toggle_time_display`] (#3373).
+fn go_to_time_on_click(app: &mut EffectcraftApp, resp: &egui::Response) {
+    if resp.clicked() && !resp.ctx.input(|i| i.modifiers.command) {
+        crate::panels::forms::open_form(app, "time.set", &json!({}));
+    }
 }
 
 #[cfg(test)]

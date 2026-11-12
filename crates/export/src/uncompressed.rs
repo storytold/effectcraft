@@ -7,7 +7,7 @@
 //! A R G B / R G B order, and each row is padded to an even number of bytes (only depth 24 at odd
 //! widths needs it).
 
-use filmcraft_isobmff::{CodecConfig, FourCc, SampleEntry, VideoParams};
+use craft_media::isobmff::{CodecConfig, FourCc, SampleEntry, VideoParams};
 
 use crate::encode::{Packet, VideoEncoder};
 use crate::{ExportError, Result};
