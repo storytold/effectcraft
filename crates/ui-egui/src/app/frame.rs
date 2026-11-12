@@ -153,6 +153,7 @@ impl EffectcraftApp {
                 }
                 effectcraft_engine::Event::PurgeCaches => {
                     self.frames.clear();
+                    crate::panels::project::forget_thumbnails(ctx);
                     // (frames made after it get keys of their own: see `Self::purge_stamp`)
                     self.purges = self.purges.wrapping_add(1);
                 }
