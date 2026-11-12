@@ -1035,24 +1035,30 @@ fn raster_pass(g: &PlacedGlyph, stroke: bool, paths: &[BezPath], m: &Mat3, rect:
 }
 
 fn blit(dst: &mut Image, src: &Image, at: [i64; 2], mode: BlendMode) {
-    for y in 0..src.height as i64 {
-        let ty = y + at[1];
-        if ty < 0 || ty >= dst.height as i64 {
-            continue;
+    use rayon::prelude::*;
+    let (dw, sw) = (dst.width.max(1) as usize, src.width.max(1) as usize);
+    let (dh, sh) = (dst.height as i64, src.height as i64);
+    // Rows are independent: each destination row blends its source row (pixel order within a
+    // row, and the order of passes, are as before).
+    dst.data.par_chunks_mut(dw).enumerate().for_each(|(ty, row)| {
+        let y = ty as i64 - at[1];
+        if y < 0 || y >= sh || ty as i64 >= dh {
+            return;
         }
-        for x in 0..src.width as i64 {
-            let tx = x + at[0];
-            if tx < 0 || tx >= dst.width as i64 {
+        let Some(srow) = src.data.get(y as usize * sw..(y as usize + 1) * sw) else { return };
+        for (x, s) in srow.iter().enumerate() {
+            let tx = x as i64 + at[0];
+            if tx < 0 || tx >= dw as i64 {
                 continue;
             }
-            let s = src.data[(y * src.width as i64 + x) as usize];
             if s[3] <= 0.0 && s[0] == 0.0 && s[1] == 0.0 && s[2] == 0.0 {
                 continue;
             }
-            let d = &mut dst.data[(ty * dst.width as i64 + tx) as usize];
-            *d = effectcraft_color::blend_pixel(mode, *d, s, 0.5);
+            if let Some(d) = row.get_mut(tx as usize) {
+                *d = effectcraft_color::blend_pixel(mode, *d, *s, 0.5);
+            }
         }
-    }
+    });
 }
 
 /// An opaque, unblurred fill pass: where such fills of one colour touch or overlap, compositing
@@ -1098,12 +1104,30 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
         Some(o) => passes(geom).into_iter().filter(|(gi, _)| *gi == o && geom.glyphs[*gi].xf.opacity > 0.0).map(|(gi, st)| (vec![gi], st)).collect(),
         None => runs(geom),
     };
-    for (run, stroke) in runs {
-        let Some(g) = run.first().map(|&gi| &geom.glyphs[gi]) else { continue };
+    // Each pass is rasterised on its own (in parallel: most of a text layer's time, one glyph
+    // after another on one core before), then composited in order as before, so the pixels
+    // are the same. Batches keep at most a few patches per thread alive at once.
+    use rayon::prelude::*;
+    let mode = if only.is_some() { BlendMode::Normal } else { geom.blend };
+    let batch = rayon::current_num_threads().max(1) * 2;
+    for chunk in runs.chunks(batch) {
+        let patches: Vec<Option<(Image, [i64; 2])>> = chunk.par_iter().map(|(run, stroke)| glyph_patch(geom, run, *stroke, to_px, s, only, (w, h))).collect();
+        for (patch, at) in patches.into_iter().flatten() {
+            blit(img, &patch, at, mode);
+        }
+    }
+}
+
+/// One pass of [`draw_glyphs`]: the patch of glyph run `run` (fill or `stroke`) and where it
+/// goes in a `size` image; `None` when it covers nothing there.
+fn glyph_patch(geom: &TextGeom, run: &[usize], stroke: bool, to_px: &Mat3, s: f64, only: Option<usize>, size: (i64, i64)) -> Option<(Image, [i64; 2])> {
+    let (w, h) = size;
+    {
+        let g = run.first().map(|&gi| &geom.glyphs[gi])?;
         // One glyph is drawn from its own outline; a run from its glyphs' outlines in layer
         // space, all wound the same way so overlaps add up instead of cancelling (NonZero).
         let local = Cow::Borrowed(std::slice::from_ref(&g.local));
-        let (paths, m, bold): (Cow<[BezPath]>, Mat3, f64) = match (only, run.as_slice()) {
+        let (paths, m, bold): (Cow<[BezPath]>, Mat3, f64) = match (only, run) {
             (Some(_), _) => (local, *to_px, g.bold),
             (None, [_]) => (local, *to_px * g.m2(), g.bold),
             (None, _) => {
@@ -1111,7 +1135,7 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
                 (Cow::Owned(run.iter().map(|&gi| wound(geom.glyphs[gi].path())).collect()), *to_px, g.bold_in_layer())
             }
         };
-        let Some(b) = effectcraft_path::bounds(&paths) else { continue };
+        let b = effectcraft_path::bounds(&paths)?;
         let blur = [g.xf.blur[0] * s, g.xf.blur[1] * s];
         // Stroke and bold grow the outline in the paths' space: under a non-uniform `m` they reach
         // further along one axis than the other.
@@ -1125,10 +1149,9 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
             ((r.y1 + py + pad).ceil() as i64).min(h),
         ];
         if rect[2] <= rect[0] || rect[3] <= rect[1] {
-            continue;
+            return None;
         }
-        let patch = raster_pass(g, stroke, &paths, &m, rect, blur, bold);
-        blit(img, &patch, [rect[0], rect[1]], if only.is_some() { BlendMode::Normal } else { geom.blend });
+        Some((raster_pass(g, stroke, &paths, &m, rect, blur, bold), [rect[0], rect[1]]))
     }
 }
 

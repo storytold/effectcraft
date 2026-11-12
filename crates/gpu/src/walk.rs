@@ -282,8 +282,6 @@ fn draw_resident_fx(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, can
     if !layer.switches.effects
         || layer.effects().is_none_or(|f| f.children.is_empty())
         || styles::active(ctx, layer)
-        || layer.preserve_transparency
-        || r.track_matte(ctx, layer).is_some()
         // Unchanged since the last frame: the cached result uploads once (the usual path).
         || r.layer_is_static(ctx, layer)
     {
@@ -291,14 +289,10 @@ fn draw_resident_fx(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, can
     }
     // The decoded footage picture itself when it is the layer's input (uploaded once per frame
     // and shared with every layer that shows it), else the cached input buffer.
-    let (src, offset, scale) = match picture(r, ctx, layer) {
-        Some(p) => {
-            if p.img.is_empty() {
-                return Some(Some(()));
-            }
-            let Some(src) = e.g.upload_picture(&p.img) else { return Some(None) };
-            (src, p.effect_offset, p.scale)
-        }
+    let (src, offset, scale) = match shared(e, r, ctx, layer) {
+        Some(Shared::Empty) => return Some(Some(())),
+        Some(Shared::Failed) => return Some(None),
+        Some(Shared::On(src, scale, offset)) => (src, offset, scale),
         None => {
             let input = r.layer_input(ctx, layer, 0)?;
             if input.img.is_empty() {
@@ -322,6 +316,15 @@ fn draw_resident_fx(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, can
     }
     // The placement only reads the buffer's size, offset and scale.
     let shape = Buf { img: Image { width: img.width, height: img.height, data: Vec::new() }, offset, scale };
+    // A track matte or Preserve Transparency: the effects' result stays on the device, is placed
+    // in isolation and matted there (as `composite_layer` does), instead of the layer taking the
+    // CPU path: an upload, the kernels, a readback, then another upload to place it.
+    if r.track_matte(ctx, layer).is_some() || layer.preserve_transparency {
+        let Some(iso) = place_src(e, r, ctx, layer, &shape, img, &e.zeros(canvas.width, canvas.height), BlendMode::Normal, 1.0, None) else {
+            return Some(None);
+        };
+        return Some(composite_iso(e, r, ctx, layer, iso, canvas, opacity));
+    }
     Some(place_src(e, r, ctx, layer, &shape, img, canvas, layer.blend_mode, opacity, pipe.levels).map(|c| *canvas = c))
 }
 
@@ -337,6 +340,45 @@ fn picture(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_ren
     r.footage_picture(ctx, layer)
 }
 
+/// [`picture`] for 8 bpc renders: the footage's 8-bit levels (`Renderer::footage_picture8`).
+fn picture8(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_render::FootagePicture8> {
+    if !SHARED_PICTURES.load(std::sync::atomic::Ordering::Relaxed) || r.profile.is_some() {
+        return None;
+    }
+    r.footage_picture8(ctx, layer)
+}
+
+/// A footage layer's source shared as the decoded picture ([`picture`]) or its 8-bit levels
+/// ([`picture8`]), uploaded once per frame.
+enum Shared {
+    /// No pixels: nothing to draw.
+    Empty,
+    /// The source on the device, at this buffer scale and effect-space offset.
+    On(GpuImage, f64, [f64; 2]),
+    /// The upload failed.
+    Failed,
+}
+
+/// The layer's source as a [`Shared`] picture; `None`: not this kind of layer (or the 8-bit
+/// levels couldn't go up: the usual path makes the same pixels).
+fn shared(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> Option<Shared> {
+    if let Some(p) = picture(r, ctx, layer) {
+        if p.img.is_empty() {
+            return Some(Shared::Empty);
+        }
+        return Some(match e.g.upload_picture(&p.img) {
+            Some(src) => Shared::On(src, p.scale, p.effect_offset),
+            None => Shared::Failed,
+        });
+    }
+    let p = picture8(r, ctx, layer)?;
+    if p.frame.width == 0 || p.frame.height == 0 {
+        return Some(Shared::Empty);
+    }
+    let src = e.upload_picture8(&p.frame)?;
+    Some(Shared::On(src, p.scale, p.effect_offset))
+}
+
 /// A footage layer without effects or layer styles whose source is the decoded picture as it
 /// is (`Renderer::footage_picture`) and needs no conversion to the blending space: placed
 /// straight from the picture's texture, uploaded once per frame and shared by every layer that
@@ -347,13 +389,13 @@ fn draw_picture(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas:
     if (layer.switches.effects && layer.effects().is_some_and(|f| !f.children.is_empty())) || styles::active(ctx, layer) || r.pipe().to_blend().is_some() {
         return None;
     }
-    let p = picture(r, ctx, layer)?;
-    if p.img.is_empty() {
-        return Some(Some(()));
-    }
-    let Some(src) = e.g.upload_picture(&p.img) else { return Some(None) };
+    let (src, scale) = match shared(e, r, ctx, layer)? {
+        Shared::Empty => return Some(Some(())),
+        Shared::Failed => return Some(None),
+        Shared::On(src, scale, _) => (src, scale),
+    };
     // The placement only reads the buffer's size, offset and scale.
-    let shape = Buf { img: Image { width: p.img.width, height: p.img.height, data: Vec::new() }, offset: [0.0; 2], scale: p.scale };
+    let shape = Buf { img: Image { width: src.width, height: src.height, data: Vec::new() }, offset: [0.0; 2], scale };
     Some(composite_src(e, r, ctx, layer, &shape, src, canvas, opacity))
 }
 

@@ -21,8 +21,8 @@ const STAGING_MIN: u64 = 1 << 20;
 /// Bytes of staging buffers that may exist at once (mapped and ready, or in flight).
 const STAGING_BUDGET: u64 = 192 << 20;
 
-struct Picture {
-    img: Weak<Image>,
+struct Picture<T> {
+    img: Weak<T>,
     tex: GpuImage,
     bytes: usize,
     last_use: u64,
@@ -32,19 +32,28 @@ struct Picture {
 /// source serves one `Arc` per (file, frame, size, colour curve) while it keeps the frame, and
 /// a new one when the file changed, so the same `Arc` means the same pixels. The `Weak` keeps
 /// the allocation, so a key cannot be reused by another picture while its entry exists.
-#[derive(Default)]
-pub(crate) struct Pictures {
-    map: HashMap<usize, Picture>,
+///
+/// `T` is the decoded form: a float [`Image`], or the footage's 8-bit levels
+/// (`effectcraft_render::disk_cache::Frame8`, expanded on the device, see
+/// `Enc::upload_picture8`).
+pub(crate) struct Pictures<T = Image> {
+    map: HashMap<usize, Picture<T>>,
     bytes: usize,
     clock: u64,
 }
 
-impl Pictures {
+impl<T> Default for Pictures<T> {
+    fn default() -> Self {
+        Pictures { map: HashMap::new(), bytes: 0, clock: 0 }
+    }
+}
+
+impl<T> Pictures<T> {
     /// The texture of `img` if it was uploaded and is still kept.
-    pub(crate) fn get(&mut self, img: &Arc<Image>) -> Option<GpuImage> {
+    pub(crate) fn get(&mut self, img: &Arc<T>) -> Option<GpuImage> {
         self.clock += 1;
         let now = self.clock;
-        let e = self.map.get_mut(&(Arc::as_ptr(img) as usize))?;
+        let e = self.map.get_mut(&(Arc::as_ptr(img) as *const () as usize))?;
         if !e.img.upgrade().is_some_and(|i| Arc::ptr_eq(&i, img)) {
             return None;
         }
@@ -56,9 +65,9 @@ impl Pictures {
     /// (nothing can ask for them again), then the least recently used over [`PICTURE_BUDGET`],
     /// never `img` itself. A dropped texture goes back to the pool once no open encoder can
     /// still read it.
-    pub(crate) fn insert(&mut self, img: &Arc<Image>, tex: GpuImage, budget: usize) {
-        let key = Arc::as_ptr(img) as usize;
-        let bytes = img.data.len().saturating_mul(16);
+    /// `bytes`: what `tex` holds on the device.
+    pub(crate) fn insert(&mut self, img: &Arc<T>, tex: GpuImage, bytes: usize, budget: usize) {
+        let key = Arc::as_ptr(img) as *const () as usize;
         self.clock += 1;
         let entry = Picture { img: Arc::downgrade(img), tex, bytes, last_use: self.clock };
         if let Some(old) = self.map.insert(key, entry) {

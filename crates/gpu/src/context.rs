@@ -28,7 +28,7 @@ const ENTRIES: &[&str] = &[
 /// (building all ~200 up front kept Chrome's GPU process busy past its watchdog, #1590, and
 /// FXC took over a minute, #613), and one that fails to build (a driver's shader compiler
 /// rejecting it) leaves its effects to the CPU instead of turning the whole compositor off.
-const EFFECT_ENTRIES: &[&str] = &["box_h", "box_v", "directional", "glow_bright", "glow_combine", "shadow_make", "shadow_combine", "pointwise"];
+const EFFECT_ENTRIES: &[&str] = &["box_h", "box_v", "directional", "glow_bright", "glow_combine", "shadow_make", "shadow_combine", "pointwise", "expand8"];
 
 /// Entry points that also bind group 1 (four read-only storage buffers; see
 /// [`Enc::dispatch_ext`]). Like the effect kernels, one that fails to build (FXC on DirectX 12
@@ -116,7 +116,10 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 const UPLOAD_BUDGET: usize = 1536 << 20;
 
 /// Working textures kept for reuse once their last image is dropped (bytes).
-const POOL_BUDGET: usize = 256 << 20;
+// 768 MB: six 4K working textures (127 MB each at RGBA f32). At 256 MB only two survived a
+// frame, so every 4K frame allocated (and zeroed) most of its intermediates again. Still capped
+// at a quarter of the device memory cap when it is known.
+const POOL_BUDGET: usize = 768 << 20;
 
 /// Frames after which a size the pool was not asked for is stale: only stale sizes are
 /// evicted to make room (see [`Pool::make_free`]).
@@ -700,6 +703,8 @@ pub struct GpuContext {
     uploads: Mutex<Uploads>,
     /// Uploaded footage pictures, shared by the layers that show them (see [`crate::upload`]).
     pictures: Mutex<crate::upload::Pictures>,
+    /// Uploaded 8-bit footage levels, expanded on the device ([`Enc::upload_picture8`]).
+    pictures8: Mutex<crate::upload::Pictures<effectcraft_render::disk_cache::Frame8>>,
     /// Reused staging buffers of large uploads (see [`crate::upload::Staging`]).
     upload_staging: crate::upload::Staging,
     upload_budget: std::sync::atomic::AtomicUsize,
@@ -1027,6 +1032,7 @@ impl GpuContext {
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
+            pictures8: Default::default(),
             upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
@@ -1579,6 +1585,7 @@ impl GpuContext {
             dummy_buf: self.dummy_buf.clone(),
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
+            pictures8: Default::default(),
             upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
@@ -1781,7 +1788,7 @@ impl GpuContext {
         }
         let tex = self.upload_image(img)?;
         if let Ok(mut p) = self.pictures.lock() {
-            p.insert(img, tex.clone(), crate::upload::PICTURE_BUDGET.min(self.upload_budget() / 4));
+            p.insert(img, tex.clone(), img.data.len().saturating_mul(16), crate::upload::PICTURE_BUDGET.min(self.upload_budget() / 4));
         }
         Some(tex)
     }
@@ -1802,6 +1809,9 @@ impl GpuContext {
     /// (the next render's pictures upload again; their textures come from the pool).
     pub fn trim_uploads(&self) {
         if let Ok(mut p) = self.pictures.lock() {
+            p.clear();
+        }
+        if let Ok(mut p) = self.pictures8.lock() {
             p.clear();
         }
         self.upload_staging.clear();
@@ -1871,6 +1881,9 @@ impl GpuContext {
         if let Ok(mut p) = self.pictures.lock() {
             p.clear();
         }
+        if let Ok(mut p) = self.pictures8.lock() {
+            p.clear();
+        }
         self.upload_staging.clear();
         if let Ok(mut p) = self.pool.lock() {
             p.clear();
@@ -1909,7 +1922,17 @@ pub(crate) struct Enc<'g> {
     owner: u64,
     /// `owner` is lent ([`Enc::lent`]) and outlives this `Enc`.
     lent: bool,
+    /// The uniform buffer the open encoder's dispatches take their parameters from, one
+    /// [`UNIFORM_STRIDE`] slot each, and the next free slot ([`Enc::uniform_slot`]).
+    uniforms: Option<(wgpu::Buffer, u64)>,
 }
+
+/// Bytes between two dispatches' parameter blocks in an [`Enc`]'s uniform buffer: the block
+/// (256 bytes) at WebGPU's largest permitted uniform offset alignment.
+const UNIFORM_STRIDE: u64 = 256;
+
+/// Parameter blocks per uniform buffer: [`Enc::dispatch_ext`] submits after this many.
+const UNIFORM_SLOTS: u64 = 256;
 
 /// Images bound to a compute kernel's source, optional auxiliary and output slots.
 pub(crate) struct KernelImages<'a> {
@@ -1937,7 +1960,7 @@ impl Drop for Enc<'_> {
 impl<'g> Enc<'g> {
     pub fn new(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.register()).unwrap_or(0);
-        Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: false }
+        Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: false, uniforms: None }
     }
 
     /// An `Enc` for self-contained work (an effect chain): once it is dropped, its working
@@ -1949,7 +1972,7 @@ impl<'g> Enc<'g> {
     /// effect's intermediates stayed allocated until the frame ended.
     pub(crate) fn lent(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.lend()).unwrap_or(0);
-        Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: true }
+        Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: true, uniforms: None }
     }
 
     /// `img` is used by this `Enc`: if another `Enc` made it, that one must not reuse it at once
@@ -2049,7 +2072,9 @@ impl<'g> Enc<'g> {
             self.missing = true;
             return;
         };
-        let ub = g.buffer_init(None, &p.bytes(), wgpu::BufferUsages::UNIFORM);
+        // The parameters go into the encoder's uniform buffer (one slot per dispatch) instead of
+        // a buffer of their own: a frame with many layers and effects made hundreds of buffers.
+        let (ub, offset) = self.uniform_slot(&p.bytes());
         let sv = src.texture.create_view(&Default::default());
         let av = aux.map(|a| a.texture.create_view(&Default::default()));
         let ov = out.texture.create_view(&Default::default());
@@ -2057,7 +2082,10 @@ impl<'g> Enc<'g> {
             label: None,
             layout: &g.bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &ub, offset, size: std::num::NonZeroU64::new(UNIFORM_STRIDE) }),
+                },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sv) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(av.as_ref().unwrap_or(&g.dummy_tex)) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&ov) },
@@ -2089,7 +2117,7 @@ impl<'g> Enc<'g> {
         }
         self.pending += 1;
         // Keep command buffers (and the transient textures they hold) bounded.
-        if self.pending >= 256 {
+        if self.pending as u64 >= UNIFORM_SLOTS {
             self.submit();
         }
     }
@@ -2131,6 +2159,87 @@ impl<'g> Enc<'g> {
     /// The last submission of this encoder's work (what a readback after it waits for).
     pub(crate) fn last_submission(&self) -> Option<wgpu::SubmissionIndex> {
         self.last_submit.clone()
+    }
+
+    /// Upload a footage frame's 8-bit levels (premultiplied RGBA8, `FootageSource::frame8`) once
+    /// while the footage source keeps them, expanded on the device into a working image that
+    /// every layer showing the frame shares: the same pixels, bit for bit, as the float buffer
+    /// `raster::expand_u8` makes of them on the CPU, from a quarter of the upload and without the
+    /// CPU's expansion pass or a float copy in the layer cache. `None`: empty, over the device's
+    /// texture size, the kernel is unavailable, or the device failed (the caller takes the usual
+    /// path).
+    pub(crate) fn upload_picture8(&mut self, frame: &Arc<effectcraft_render::disk_cache::Frame8>) -> Option<GpuImage> {
+        let g = self.g;
+        if let Some(t) = g.pictures8.lock().ok().and_then(|mut p| p.get(frame)) {
+            return Some(t);
+        }
+        let (w, h) = (frame.width, frame.height);
+        let n = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        if !g.fits(w, h) || frame.rgba.len() != n || !g.has_kernel("expand8") {
+            return None;
+        }
+        g.check_health().ok()?;
+        g.transfers.count(true, n);
+        let levels = g.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("footage levels {w}×{h}")),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // A texture of its own: the queue write runs before the open encoder's commands that
+        // read it, and no later upload can overwrite it first.
+        g.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &levels, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &frame.rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        // An upload's texture (not this encoder's), as `GpuContext::upload_image` takes: it
+        // outlives this frame in the picture cache.
+        let (mut out, _) = g.pooled(w, h, UPLOAD_OWNER);
+        let mut p = Params::default();
+        // The CPU-rounded 1/255 `expand_u8` multiplies by.
+        p.f[0] = [1.0 / 255.0, 0.0, 0.0, 0.0];
+        // (`has_kernel` above: the dispatch can't miss, and `take_missing` stays the effects')
+        self.pixels("expand8", &p, &GpuImage::new(levels, w, h), None, &out, None);
+        // Already on the 8 bpc grid: quantising it again is a no-op.
+        out.levels = Some(255.0);
+        if let Ok(mut pc) = g.pictures8.lock() {
+            pc.insert(frame, out.clone(), n.saturating_mul(4), crate::upload::PICTURE_BUDGET.min(g.upload_budget() / 4));
+        }
+        Some(out)
+    }
+
+    /// A uniform slot holding `bytes` (at most [`UNIFORM_STRIDE`]) for the next dispatch:
+    /// the buffer and the slot's offset. Each open encoder gets a buffer of its own, written
+    /// slot by slot; the queue applies the writes before the encoder's commands run, and no
+    /// slot is written twice while they can read it (a full buffer, or a new encoder, starts a
+    /// new one).
+    fn uniform_slot(&mut self, bytes: &[u8]) -> (wgpu::Buffer, u64) {
+        let fresh = self.enc.is_none() || self.uniforms.as_ref().is_none_or(|(_, n)| *n >= UNIFORM_SLOTS);
+        let (buffer, n) = match &mut self.uniforms {
+            Some(u) if !fresh => u,
+            slot => slot.insert((
+                self.g.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("kernel parameters"),
+                    size: UNIFORM_STRIDE * UNIFORM_SLOTS,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                0,
+            )),
+        };
+        let offset = *n * UNIFORM_STRIDE;
+        *n += 1;
+        let mut block = [0u8; UNIFORM_STRIDE as usize];
+        let len = bytes.len().min(block.len());
+        block[..len].copy_from_slice(&bytes[..len]);
+        self.g.queue.write_buffer(buffer, offset, &block);
+        (buffer.clone(), offset)
     }
 
     /// Submit recorded work.

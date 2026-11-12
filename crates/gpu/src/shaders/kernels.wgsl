@@ -182,6 +182,20 @@ fn quantize(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, quantize_px(textureLoad(src, p, 0), P.f[0].x, P.f[0].y));
 }
 
+// 8-bit footage levels (premultiplied RGBA8 bound as an rgba8unorm `src`) to the working
+// format: each level times f[0].x, the CPU-rounded 1/255 (raster::expand_u8, bit for bit). The
+// level is recovered exactly from the unorm value whatever the hardware's conversion rounding.
+@compute @workgroup_size(16, 16)
+fn expand8(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = out_dims();
+    let p = vec2<i32>(gid.xy);
+    if (p.x >= dims.x || p.y >= dims.y) {
+        return;
+    }
+    let level = floor(textureLoad(src, p, 0) * 255.0 + 0.5);
+    textureStore(out, p, level * P.f[0].x);
+}
+
 fn quantize_px(s: vec4<f32>, levels: f32, inv: f32) -> vec4<f32> {
     // Use the CPU-rounded reciprocal to avoid backend-dependent division.
     let a = floor(clamp(s.w, 0.0, 1.0) * levels + 0.5) * inv;
