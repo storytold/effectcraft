@@ -174,3 +174,25 @@ fn tab_and_shift_tab_cycle_selection() {
     h.run_steps(1);
     assert_eq!(h.state().dialog_state().fx_console.as_ref().map(|c| c.sel), Some(0));
 }
+    assert_eq!(h.state().dialog_state().fx_console.as_ref().map(|c| c.sel), Some(0));
+}
+
+#[test]
+/// The native menu bar takes Ctrl+Space before the console sees it, so running `app.fxConsole`
+/// again (no query) closes it; with a query it reopens with that query.
+fn fx_console_command_toggles_when_the_menu_bar_swallows_the_shortcut() {
+    let (mut h, _l) = harness();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.fxConsole", json!({})).unwrap();
+    h.run_steps(2);
+    assert!(open(&h), "first run opens it");
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.fxConsole", json!({})).unwrap();
+    h.run_steps(2);
+    assert!(!open(&h), "second run closes it");
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.fxConsole", json!({"query": "glow"})).unwrap();
+    h.run_steps(2);
+    assert!(open(&h), "a run with a query opens it");
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.fxConsole", json!({"query": "blur"})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().dialog_state().fx_console.as_ref().map(|c| c.query.as_str()), Some("blur"), "a query replaces the open console's text");
+}
