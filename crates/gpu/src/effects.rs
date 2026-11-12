@@ -201,6 +201,9 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     /// GBuf::cover, like `pad`: a bigger texture with the old one copied into place, no
     /// readback. A region the device can't allocate leaves the buffer as it is.
     fn cover(&mut self, size: [f64; 2]) {
+        // (`Renderer::run_effect_stack` only calls `cover` / `align` before the first effect, when
+        // the buffer is still on the device, so no CPU result is pending there today: this branch
+        // keeps the trait's contract if a caller ever grows the buffer between effects.)
         // A CPU result not uploaded yet: grow it there, unless the grown buffer wouldn't fit a
         // texture (the upload would fail and the result be lost: leave it as it is, as the
         // device path does).

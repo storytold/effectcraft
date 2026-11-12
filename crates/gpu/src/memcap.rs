@@ -180,9 +180,9 @@ fn cap_from_env(var: Option<&str>, device_type: wgpu::DeviceType, vram: Option<u
 }
 
 /// Discrete cards: 3 GiB, low enough to fire on 4–8 GB cards with headroom for the driver and
-/// desktop while leaving ~1 GiB above the default 1.5 GiB upload cache + 256 MB pool (larger
-/// cards can raise it with `EFFECTCRAFT_GPU_MEMCAP_MB`), and at most three quarters of the card's
-/// memory when it is known (`vram`), so a 2 GB card gets 1.5 GiB (#1487). Integrated and software
+/// desktop while leaving ~0.7 GiB above the default 1.5 GiB upload cache + 768 MB pool (the
+/// pool is also capped at a quarter of this cap; larger cards can raise it with
+/// `EFFECTCRAFT_GPU_MEMCAP_MB`), and at most three quarters of the card's memory when it is known (`vram`), so a 2 GB card gets 1.5 GiB (#1487). Integrated and software
 /// adapters share system memory: 2 GiB, whatever their carve-out.
 fn default_cap(t: wgpu::DeviceType, vram: Option<u64>) -> u64 {
     match t {
