@@ -134,26 +134,39 @@ fn readback_buf(r: crate::deferred::Readback) -> Option<Buf> {
 }
 
 /// An effect stack running on a GPU-resident image (adjustment layers): GPU chains stay on
-/// the device; CPU effects read the image back, run, and upload the result.
+/// the device; CPU effects read the image back and run. The result of a CPU effect stays on
+/// the CPU until a GPU step (or the end of the stack) needs it, so consecutive CPU effects
+/// cost one readback and one upload together, not one of each per effect.
 pub(crate) struct GpuFx<'e, 'g> {
     e: &'e mut Enc<'g>,
     b: Option<GBuf>,
+    /// A CPU effect's result not uploaded yet (then `b` is `None`).
+    host: Option<Buf>,
     levels: Option<f32>,
 }
 
 impl<'e, 'g> GpuFx<'e, 'g> {
     pub fn new(e: &'e mut Enc<'g>, img: GpuImage, offset: [f64; 2], scale: f64, levels: Option<f32>) -> Self {
-        GpuFx { e, b: Some(GBuf { img, offset, scale }), levels }
+        GpuFx { e, b: Some(GBuf { img, offset, scale }), host: None, levels }
+    }
+
+    /// Upload a pending CPU result ([`GpuFx::host`]); `b` is `None` when the upload failed.
+    fn upload_pending(&mut self) {
+        if let Some(out) = self.host.take() {
+            self.b = self.e.g.upload_image(&out.img).map(|img| GBuf { img, offset: out.offset, scale: out.scale });
+        }
     }
 
     /// The result: (image, offset, scale); `None` when a step failed.
-    pub fn finish(self) -> Option<(GpuImage, [f64; 2], f64)> {
+    pub fn finish(mut self) -> Option<(GpuImage, [f64; 2], f64)> {
+        self.upload_pending();
         self.b.map(|b| (b.img, b.offset, b.scale))
     }
 }
 
 impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     fn gpu(&mut self, steps: &[FxStep]) -> bool {
+        self.upload_pending();
         let Some(b) = &self.b else { return false };
         let mut cur = GBuf { img: b.img.clone(), offset: b.offset, scale: b.scale };
         self.e.take_missing();
@@ -174,15 +187,25 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     }
 
     fn cpu(&mut self, f: &mut dyn FnMut(Buf) -> Buf) {
-        let Some(b) = self.b.take() else { return };
-        let Some(img) = self.e.download(&b.img) else { return };
-        let out = f(Buf { img, offset: b.offset, scale: b.scale });
-        self.b = self.e.g.upload_image(&out.img).map(|img| GBuf { img, offset: out.offset, scale: out.scale });
+        let input = match self.host.take() {
+            Some(buf) => buf,
+            None => {
+                let Some(b) = self.b.take() else { return };
+                let Some(img) = self.e.download(&b.img) else { return };
+                Buf { img, offset: b.offset, scale: b.scale }
+            }
+        };
+        self.host = Some(f(input));
     }
 
     /// GBuf::cover, like `pad`: a bigger texture with the old one copied into place, no
     /// readback. A region the device can't allocate leaves the buffer as it is.
     fn cover(&mut self, size: [f64; 2]) {
+        // A CPU result not uploaded yet: grow it there.
+        if let Some(buf) = self.host.as_mut() {
+            buf.cover(size);
+            return;
+        }
         let Some(mut b) = self.b.take() else { return };
         let keep = (b.img.clone(), b.offset);
         if b.cover(self.e, size).is_none() {
@@ -194,6 +217,11 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     /// [`effectcraft_effects::Buf::align`] on the device: a texture grown left/top, the old one
     /// copied in. A size the device can't allocate leaves the buffer as it is.
     fn align(&mut self, size: [f64; 2]) {
+        // A CPU result not uploaded yet: grow it there.
+        if let Some(buf) = self.host.as_mut() {
+            buf.align(size);
+            return;
+        }
         let Some(b) = self.b.take() else { return };
         let out = match effectcraft_effects::align_plan(b.offset, b.scale, size, b.img.width, b.img.height) {
             Some((l, t)) if self.e.g.fits(b.img.width + l, b.img.height + t) => {

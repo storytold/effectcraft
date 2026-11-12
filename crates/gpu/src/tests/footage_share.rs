@@ -70,7 +70,7 @@ fn shared_scene(depth: BitDepth, layers: usize) -> (Scene, ItemId) {
 }
 
 /// The GPU frame with shared pictures on and off, and the number of uploads of each.
-fn render_both(g: &crate::Gpu, s: &Scene, src: &Kept, opts: RenderOpts, t: Tick) -> (Image, Image, u64, u64) {
+fn render_both(g: &crate::Gpu, s: &Scene, src: &dyn FootageSource, opts: RenderOpts, t: Tick) -> (Image, Image, u64, u64) {
     let mut r = Renderer::new(&s.p, src, RenderOpts { backend: Backend::Gpu, ..opts });
     r.accel = Some(g);
     let before = g.ctx.transfer_stats().uploads;
@@ -84,7 +84,7 @@ fn render_both(g: &crate::Gpu, s: &Scene, src: &Kept, opts: RenderOpts, t: Tick)
     (on, off.expect("the GPU renders the frame from per-layer copies"), uploads, copied)
 }
 
-fn check_cpu(label: &str, s: &Scene, src: &Kept, opts: RenderOpts, t: Tick, gpu_img: &Image) {
+fn check_cpu(label: &str, s: &Scene, src: &dyn FootageSource, opts: RenderOpts, t: Tick, gpu_img: &Image) {
     let cpu = Renderer::new(&s.p, src, RenderOpts { backend: Backend::Cpu, ..opts }).comp_frame_cpu(s.cid, t);
     let mut d = diff(&cpu, gpu_img, tolerance(s.p.settings.bit_depth));
     d.quantized = s.p.settings.bit_depth != BitDepth::Bpc32;
@@ -180,6 +180,107 @@ fn shared_pictures_do_not_change_the_frame() {
     }
 }
 
+/// [`Kept`] that also serves 8-bit levels (`FootageSource::frame8`) as the media pool does for
+/// 8-bit movies: `quantize_px_u8` of the float frame, the same `Arc` while kept.
+#[derive(Default)]
+struct Kept8 {
+    inner: Kept,
+    levels: Mutex<HashMap<(ItemId, u32, u32, i64), Arc<effectcraft_render::disk_cache::Frame8>>>,
+}
+
+impl FootageSource for Kept8 {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        self.inner.get(item, f, t, None)
+    }
+    fn frame_at_size(&self, item: ItemId, f: &Footage, t: Tick, width: u32, height: u32) -> Option<Arc<Image>> {
+        self.inner.get(item, f, t, Some((width, height)))
+    }
+    fn frame8(&self, item: ItemId, f: &Footage, t: Tick, _float: effectcraft_render::FloatCurve) -> Option<Arc<effectcraft_render::disk_cache::Frame8>> {
+        let i = f.frame_rate.frame_at(t);
+        let img = self.inner.get(item, f, t, None)?;
+        let mut m = self.levels.lock().unwrap();
+        let fr = m.entry((item, f.width, f.height, i)).or_insert_with(|| {
+            let rgba = img.data.iter().flat_map(|p| effectcraft_raster::quantize_px_u8(*p)).collect();
+            Arc::new(effectcraft_render::disk_cache::Frame8 { width: img.width, height: img.height, rgba })
+        });
+        Some(fr.clone())
+    }
+}
+
+/// The device expands 8-bit levels to exactly the floats `raster::expand_u8` makes: every
+/// level in every channel, bit for bit.
+#[test]
+fn expand8_matches_expand_u8_bit_for_bit() {
+    let Some(g) = gpu() else { return };
+    // 256 × 4 pixels: row r holds level x in channel r and 255 - x in the others.
+    let (w, h) = (256u32, 4u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for r in 0..h {
+        for x in 0..w {
+            let mut px = [255 - x as u8; 4];
+            px[r as usize] = x as u8;
+            rgba.extend_from_slice(&px);
+        }
+    }
+    let frame = Arc::new(effectcraft_render::disk_cache::Frame8 { width: w, height: h, rgba });
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let up = e.upload_picture8(&frame).expect("the 8-bit levels upload");
+    assert_eq!(up.levels, Some(255.0), "expanded levels are already quantised");
+    let back = e.download(&up).expect("readback");
+    let want: Vec<u32> = frame.rgba.as_chunks::<4>().0.iter().flat_map(|p| effectcraft_raster::expand_u8(*p)).map(f32::to_bits).collect();
+    let got: Vec<u32> = back.data.iter().flatten().map(|v| v.to_bits()).collect();
+    assert!(got == want, "expand8 differs from expand_u8");
+    // The same `Arc` is served from the cache: no second upload.
+    let again = e.upload_picture8(&frame).expect("cached");
+    assert!(again.texture == up.texture, "the same levels uploaded twice");
+}
+
+/// 8 bpc projects (the default): plain footage layers share the footage's 8-bit levels,
+/// uploaded once per frame at a quarter of the float bytes and expanded on the device, instead
+/// of a float copy per layer expanded on the CPU, kept in the layer cache and uploaded per
+/// layer. The frame is bit-identical to the per-layer path and matches the CPU.
+#[test]
+fn eight_bit_footage_uploads_levels_once() {
+    let Some(g) = gpu() else { return };
+    let src = Kept8::default();
+    let (s, _) = shared_scene(BitDepth::Bpc8, 3);
+    for k in 0..3 {
+        let t = Tick::from_seconds_f64(k as f64 / 30.0);
+        let bytes = g.ctx.transfer_stats().upload_bytes;
+        let mut r = Renderer::new(&s.p, &src, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(g);
+        let up_before = g.ctx.transfer_stats().uploads;
+        g.render(&r, s.cid, t).expect("the GPU renders the frame");
+        let uploads = g.ctx.transfer_stats().uploads - up_before;
+        let sent = g.ctx.transfer_stats().upload_bytes - bytes;
+        assert_eq!(uploads, 1, "frame {k}: three 8 bpc footage layers uploaded {uploads} times");
+        assert_eq!(sent, 97 * 61 * 4, "frame {k}: the 8-bit levels went up as {sent} bytes");
+        let (on, off, _, copied) = render_both(g, &s, &src, opts(), t);
+        assert_eq!(copied, 3, "frame {k}: per-layer copies upload once per layer");
+        assert!(on.data == off.data, "frame {k}: the shared 8-bit levels changed the frame");
+        check_cpu(&format!("8-bit levels frame {k}"), &s, &src, opts(), t, &on);
+    }
+    // With an effect: the levels are the effect chain's input on the device.
+    let (mut s, fid) = shared_scene(BitDepth::Bpc8, 2);
+    let mut fx = build::layer(&mut s.p, &s.comp, "Blurred", LayerSource::Footage { item: fid }, (97, 61), None);
+    set(&mut fx, "transform/position", v3(20.0, 20.0));
+    s.effect(&mut fx, "ec.blur.gaussian", &[("blurriness", n(3.0))]);
+    s.push(fx);
+    let t = Tick::from_seconds_f64(0.5);
+    let (on, off, _, _) = render_both(g, &s, &src, opts(), t);
+    assert!(on.data == off.data, "the shared 8-bit levels changed the frame with an effect input");
+    check_cpu("8-bit levels with an effect input", &s, &src, opts(), t, &on);
+    // Where they don't apply (16 / 32 bpc, half resolution, a mask) the frame is unchanged.
+    for depth in [BitDepth::Bpc16, BitDepth::Bpc32] {
+        let (s, _) = shared_scene(depth, 3);
+        let (on, off, _, _) = render_both(g, &s, &src, opts(), t);
+        assert!(on.data == off.data, "{depth:?}: an 8-bit source changed the frame");
+    }
+    let (s, _) = shared_scene(BitDepth::Bpc8, 3);
+    let (on, off, _, _) = render_both(g, &s, &src, RenderOpts { scale: 0.5, ..opts() }, t);
+    assert!(on.data == off.data, "half resolution: an 8-bit source changed the frame");
+}
+
 /// The picture cache keeps no texture of a picture the footage source dropped.
 #[test]
 fn picture_cache_drops_textures_of_dropped_pictures() {
@@ -230,4 +331,30 @@ fn staging_uploads_keep_pixels_and_reuse_buffers() {
     assert!(e.download(&up).expect("readback").data == img.data);
     let again = g.ctx.upload_image(&img).expect("upload after a clear");
     assert!(e.download(&again).expect("readback").data == img.data);
+}
+
+/// Layers with effects and a track matte or Preserve Transparency keep their effect stack on the
+/// device and still match the CPU in every bit depth.
+#[test]
+fn effect_layers_with_mattes_match_the_cpu() {
+    let Some(g) = gpu() else { return };
+    let src = Kept::default();
+    let t = Tick::from_seconds_f64(0.2);
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc16, BitDepth::Bpc32] {
+        let (mut s, _) = shared_scene(depth, 3);
+        let comp = s.p.comp_mut(s.cid).unwrap();
+        let matte = comp.layers[0].id;
+        comp.layers[1].track_matte = Some(TrackMatte { layer: matte, kind: MatteKind::Luma });
+        comp.layers[2].preserve_transparency = true;
+        let mut l1 = comp.layers[1].clone();
+        let mut l2 = comp.layers[2].clone();
+        s.effect(&mut l1, "ec.blur.gaussian", &[("blurriness", n(12.0))]);
+        s.effect(&mut l2, "ec.blur.gaussian", &[("blurriness", n(9.0))]);
+        let comp = s.p.comp_mut(s.cid).unwrap();
+        comp.layers[1] = l1;
+        comp.layers[2] = l2;
+        let (on, off, _, _) = render_both(g, &s, &src, opts(), t);
+        assert!(on.data == off.data, "{depth:?}: shared pictures changed the frame");
+        check_cpu(&format!("effects with matte and preserve transparency {depth:?}"), &s, &src, opts(), t, &on);
+    }
 }

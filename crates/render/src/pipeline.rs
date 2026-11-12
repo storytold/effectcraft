@@ -30,6 +30,17 @@ pub struct FootagePicture {
     pub effect_offset: [f64; 2],
 }
 
+/// A footage layer's source as the footage's 8-bit levels themselves (see
+/// [`Renderer::footage_picture8`]): its buffer in layer space is `frame` expanded
+/// ([`effectcraft_raster::expand_u8`]) at offset `[0, 0]` and `scale`; in effect space at
+/// `effect_offset`.
+#[derive(Clone, Debug)]
+pub struct FootagePicture8 {
+    pub frame: Arc<crate::disk_cache::Frame8>,
+    pub scale: f64,
+    pub effect_offset: [f64; 2],
+}
+
 /// How a decoded footage frame becomes a layer buffer ([`Renderer::footage_buf`]).
 enum FootageLayout {
     /// Its own pixels, at this buffer scale.
@@ -1154,6 +1165,55 @@ impl<'a> Renderer<'a> {
         let mut at = Buf { img: Image { width: 0, height: 0, data: Vec::new() }, offset: [0.0; 2], scale };
         at.rebase(ctx.effect_bounds(layer).1);
         Some(FootagePicture { img, scale, effect_offset: at.offset })
+    }
+
+    /// [`Renderer::footage_picture`] for 8 bpc renders: the footage's 8-bit levels
+    /// ([`FootageSource::frame8`]) that [`Renderer::footage_buf8`] expands into the layer's masked
+    /// source, bit for bit, handed over unexpanded so an accelerator can upload a quarter of the
+    /// bytes, expand them on the device and share them between the layers showing the frame,
+    /// with no float copy in the layer cache. The same layers as `footage_buf8` (plain footage at
+    /// Full size: no masks, colour profile, fields, Invert Alpha, linear light, Cineon or frame
+    /// blending) and, as `footage_picture`, not when the layer cache already holds the layer's
+    /// buffer. `None` otherwise, and when the source has no 8-bit frame.
+    pub fn footage_picture8(&self, ctx: &EvalCtx, layer: &Layer) -> Option<FootagePicture8> {
+        let LayerSource::Footage { item } = &layer.source else { return None };
+        if self.pipe.levels != Some(255.0) || !Self::prequantized_footage(layer) || frame_blend_mode(ctx, layer) != FrameBlend::Off {
+            return None;
+        }
+        let item = ctx.media_item(layer, *item);
+        let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
+        if !f.has_video || self.reduced_size(f.width, f.height).is_some() {
+            return None;
+        }
+        let pf = self.proxy_for(item).unwrap_or(f);
+        if self.pipe.media_in(pf).is_some()
+            || pf.fields != effectcraft_project::FieldOrder::Off
+            || pf.invert_alpha
+            || pf.linear_light_applies()
+            || pf.cineon_applies()
+        {
+            return None;
+        }
+        if let Some(cache) = self.cache {
+            let (scale, draft, blur) = (self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer));
+            let content = self.content_key(ctx, layer, cache::layer_key(ctx, layer, scale, draft, blur));
+            let input = self.content_key(ctx, layer, cache::input_key(ctx, layer, scale, draft, blur, 0));
+            if [content, input].into_iter().flatten().any(|k| cache.holds(k)) {
+                return None;
+            }
+        }
+        let frame = self.read(|| self.footage.frame8(item, pf, ctx.source_time(layer), self.pipe.float_curve(pf)))?;
+        // `footage_buf8` declines a frame whose bytes don't match its size; so does this.
+        let n = (frame.width as usize).checked_mul(frame.height as usize)?.checked_mul(4)?;
+        if frame.rgba.len() != n {
+            return None;
+        }
+        let k = if frame.width > 0 { f.width.max(1) as f64 / frame.width as f64 } else { 1.0 };
+        let scale = 1.0 / k;
+        // `layer_input`'s rebase into effect space (`Buf::rebase` of a buffer at the origin).
+        let mut at = Buf { img: Image { width: 0, height: 0, data: Vec::new() }, offset: [0.0; 2], scale };
+        at.rebase(ctx.effect_bounds(layer).1);
+        Some(FootagePicture8 { frame, scale, effect_offset: at.offset })
     }
 
     /// The size of `w` × `h` layer pixels in this render when it is reduced enough that footage
