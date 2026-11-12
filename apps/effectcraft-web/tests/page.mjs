@@ -8,6 +8,8 @@
 // - A lost WebGPU device: the page says so over the canvas and offers Save Project and Reload;
 //   the reload writes pending changes to browser storage first, and a failed write is reported
 //   instead of reloading (#225).
+// - Duplicate cancels the browser's bookmark action on the app canvas, while still delivering
+//   the key to the app; other chords and HTML inputs keep their browser behavior (#2495).
 // Exits non-zero on failure.
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
@@ -57,6 +59,30 @@ let reloads = 0;
 globalThis.location = { reload: () => reloads++ };
 
 const host = await import(pathToFileURL(join(here, "../js/host.js")));
+
+// #2495: prevent the browser default without swallowing the app's Duplicate key.
+const canvas = new EventTarget();
+const input = new EventTarget();
+host.installCanvasShortcuts(canvas);
+let delivered = 0;
+canvas.addEventListener("keydown", () => delivered++);
+const key = (target, properties) => {
+  const event = new Event("keydown", { cancelable: true });
+  Object.assign(event, { key: "d", ...properties });
+  target.dispatchEvent(event);
+  return event.defaultPrevented;
+};
+assert.equal(key(canvas, { ctrlKey: true }), true);
+assert.equal(key(canvas, { metaKey: true, key: "D" }), true);
+for (const properties of [{}, { ctrlKey: true, shiftKey: true }, { ctrlKey: true, altKey: true }, { ctrlKey: true, isComposing: true }, { ctrlKey: true, key: "r" }]) {
+  assert.equal(key(canvas, properties), false);
+}
+// Non-Latin layouts: the physical D key types "в", and eframe still reads it as D.
+assert.equal(key(canvas, { ctrlKey: true, key: "в", code: "KeyD" }), true);
+// Dvorak: the physical D key types "e", which is not Duplicate.
+assert.equal(key(canvas, { ctrlKey: true, key: "e", code: "KeyD" }), false);
+assert.equal(delivered, 9, "all keys still reach the app");
+assert.equal(key(input, { ctrlKey: true }), false, "an external HTML input keeps its shortcut");
 
 // #226: one readable and one unreadable file.
 const file = (name, read) => ({ name, webkitRelativePath: "", arrayBuffer: read });

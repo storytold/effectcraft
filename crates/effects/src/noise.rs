@@ -254,8 +254,14 @@ pub(crate) fn preview_compose(ctx: &EffectCtx, b: &mut Buf, orig: &Image) {
     });
 }
 
+/// How far the grain statistics read around a sample box: their high-pass subtracts a Gaussian
+/// of sigma 1.5, three box passes of radius 1 (`noise2::grain_stats_boxes`).
+const SAMPLE_REACH: usize = 3;
+
 /// Boxes (x, y, size in buffer px) where grain is sampled: the flattest of a grid of
-/// candidate boxes (real grain shows best where the picture has no detail).
+/// candidate boxes (real grain shows best where the picture has no detail). A box and the
+/// [`SAMPLE_REACH`] px around it are opaque: a transparent pixel there is black once
+/// unpremultiplied, and the high-pass would measure that edge as grain.
 pub(crate) fn sample_boxes(img: &Image, count: usize, size: usize) -> Vec<(usize, usize, usize)> {
     let (w, h) = (img.width as usize, img.height as usize);
     let size = size.clamp(3, w.min(h).max(3));
@@ -264,25 +270,46 @@ pub(crate) fn sample_boxes(img: &Image, count: usize, size: usize) -> Vec<(usize
     }
     let low = Plane::luma(img);
     let step = (size / 2).max(1);
-    let mut cands: Vec<(f32, usize, usize)> = Vec::new();
-    for y in (0..=h - size).step_by(step) {
-        for x in (0..=w - size).step_by(step) {
-            // Variance of the picture inside the box (the flattest boxes hold the least detail).
-            let (mut s, mut sq, mut n, mut opaque) = (0.0f32, 0.0f32, 0.0f32, true);
-            for yy in y..y + size {
-                for xx in x..x + size {
-                    let v = low.data[yy * w + xx];
-                    s += v;
-                    sq += v * v;
-                    n += 1.0;
-                    opaque &= img.data[yy * w + xx][3] > 0.5;
-                }
-            }
-            if opaque {
-                cands.push((sq / n - (s / n).powi(2), x, y));
-            }
+    // Transparent pixels (alpha 0.5 or less) in a summed-area table: `sat[y * (w + 1) + x]`
+    // counts them above and left of (x, y).
+    let sw = w + 1;
+    let mut sat = vec![0usize; sw * (h + 1)];
+    for y in 0..h {
+        let mut run = 0;
+        for x in 0..w {
+            let opaque = img.data[y * w + x][3] > 0.5;
+            run += usize::from(!opaque);
+            sat[(y + 1) * sw + x + 1] = sat[y * sw + x + 1] + run;
         }
     }
+    let sat = sat.as_slice();
+    // Candidate rows in parallel; the sort below is a total order (variance, y, x), so the
+    // result does not depend on the collection order.
+    let rows: Vec<usize> = (0..=h - size).step_by(step).collect();
+    let mut cands: Vec<(f32, usize, usize)> = rows
+        .par_iter()
+        .flat_map_iter(|&y| {
+            let data = low.data.as_slice();
+            (0..=w - size).step_by(step).filter_map(move |x| {
+                let (x0, y0) = (x.saturating_sub(SAMPLE_REACH), y.saturating_sub(SAMPLE_REACH));
+                let (x1, y1) = ((x + size + SAMPLE_REACH).min(w), (y + size + SAMPLE_REACH).min(h));
+                if sat[y1 * sw + x1] + sat[y0 * sw + x0] != sat[y0 * sw + x1] + sat[y1 * sw + x0] {
+                    return None;
+                }
+                // Variance of the picture inside the box (the flattest boxes hold the least detail).
+                let (mut s, mut sq, mut n) = (0.0f32, 0.0f32, 0.0f32);
+                for yy in y..y + size {
+                    for xx in x..x + size {
+                        let v = data[yy * w + xx];
+                        s += v;
+                        sq += v * v;
+                        n += 1.0;
+                    }
+                }
+                Some((sq / n - (s / n).powi(2), x, y))
+            })
+        })
+        .collect();
     cands.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
     cands.into_iter().take(count).map(|(_, x, y)| (x, y, size)).collect()
 }
@@ -343,9 +370,16 @@ fn quant(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * (NB - 1) as f32).round() as u16
 }
 
+/// Largest median window radius (buffer pixels) for Median, Median (Legacy), Dust & Scratches
+/// and the other median users. Radius goes to 255 in the UI; filling one (2r + 1)² window per
+/// row costs the square of the radius, so a project value far beyond it is held here (also
+/// keeping the window's pixel count well inside `u32` / `i32` on the GPU).
+pub const MEDIAN_MAX_RADIUS: usize = 512;
+
 /// Per-channel median over a (2r+1)² window of the premultiplied channels (values quantised to
 /// 512 levels in 0..1, edges repeated).
 pub(crate) fn median_image(img: &Image, r: usize) -> Image {
+    let r = r.min(MEDIAN_MAX_RADIUS);
     let (w, h) = (img.width as usize, img.height as usize);
     if r == 0 || w == 0 || h == 0 {
         return img.clone();
@@ -479,16 +513,7 @@ pub(crate) fn sampling_boxes(ctx: &EffectCtx, img: &Image, scale: f64) -> Vec<(u
 
 /// The grain level (0.5..2) measured in the sample boxes of `img`.
 fn grain_level(img: &Image, boxes: &[(usize, usize, usize)]) -> f32 {
-    let mut m = vec![false; img.data.len()];
-    let w = img.width as usize;
-    for &(x, y, s) in boxes {
-        for yy in y..y + s {
-            for xx in x..x + s {
-                m[yy * w + xx] = true;
-            }
-        }
-    }
-    let st = crate::noise2::grain_stats_masked(img, Some(&m));
+    let st = crate::noise2::grain_stats_boxes(img, boxes);
     let s = (st.std[0] + st.std[1] + st.std[2]) / 3.0;
     if boxes.is_empty() { 1.0 } else { (s / 0.02).clamp(0.5, 2.0) }
 }
@@ -741,10 +766,12 @@ pub fn specs() -> Vec<EffectSpec> {
     let hls_common = || {
         vec![
             p("noise", "Noise", Value::Enum(0), popup(&["Uniform", "Squared", "Grain"])),
-            p("hue", "Hue", num(0.0), pct()),
-            p("lightness", "Lightness", num(0.0), pct()),
-            p("saturation", "Saturation", num(0.0), pct()),
-            p("grainSize", "Grain Size", num(1.0), slider(0.1, 100.0, 0.5, 10.0, 2)),
+            // After Effects' valid ranges (#3483, #3484): the amounts go to 1000 %, Grain Size
+            // down to 0 (the renderer floors it at 0.1 px) and keeps its wider maximum.
+            p("hue", "Hue", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+            p("lightness", "Lightness", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+            p("saturation", "Saturation", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+            p("grainSize", "Grain Size", num(1.0), slider(0.0, 100.0, 0.5, 10.0, 2)),
         ]
     };
     let mut hls = hls_common();
@@ -854,6 +881,17 @@ mod tests {
     }
 
     #[test]
+    fn median_radius_is_capped() {
+        // A project's Radius far beyond the UI's 255 takes the capped window, not a
+        // (2r + 1)² fill per row (or an overflow) on a tiny image.
+        let mut img = Image::filled(4, 3, [0.2, 0.3, 0.4, 1.0]);
+        img.set(1, 1, [1.0, 1.0, 1.0, 1.0]);
+        let capped = median_image(&img, MEDIAN_MAX_RADIUS);
+        assert_eq!(median_image(&img, usize::MAX).data, capped.data);
+        assert_eq!(median_image(&img, MEDIAN_MAX_RADIUS + 1000).data, capped.data);
+    }
+
+    #[test]
     fn median_matches_brute_force() {
         let (w, h) = (9u32, 7u32);
         let mut img = Image::new(w, h);
@@ -929,6 +967,32 @@ mod tests {
         assert_ne!(a.img, b.img);
         let still = run("ec.noise.noisehls", &[], img.clone(), 0.0);
         assert_eq!(still.img, img);
+    }
+
+    /// #3483, #3484: amounts above 100 % keep adding noise, and Grain Size 0 renders (floored at
+    /// 0.1 px) with finite output, for both effects.
+    #[test]
+    fn noise_hls_takes_after_effects_ranges() {
+        let mut img = Image::new(16, 16);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = premul([0.6, 0.3, (i % 7) as f32 / 7.0], 1.0);
+        }
+        for id in ["ec.noise.noisehls", "ec.noise.noisehlsauto"] {
+            for (param, lo, hi) in [("hue", 0.0, 1000.0), ("lightness", 0.0, 1000.0), ("saturation", 0.0, 1000.0), ("grainSize", 0.0, 100.0)] {
+                let ui = &crate::find(id).unwrap().params.iter().find(|p| p.id == param).unwrap().ui;
+                assert!(matches!(ui, ParamUi::Slider { min, max, .. } if *min == lo && *max == hi), "{id} {param}: {ui:?}");
+            }
+            let at = |amount: f64, grain: f64| {
+                let vals =
+                    [("noise", Value::Enum(2)), ("hue", num(amount)), ("lightness", num(amount)), ("saturation", num(amount)), ("grainSize", num(grain))];
+                run(id, &vals, img.clone(), 0.0).img
+            };
+            let (low, high) = (at(100.0, 1.0), at(1000.0, 1.0));
+            assert_ne!(low, high, "{id}");
+            for out in [high, at(1000.0, 0.0)] {
+                assert!(out.data.iter().flatten().all(|v| v.is_finite() && (0.0..=1.0).contains(v)), "{id}");
+            }
+        }
     }
 
     #[test]

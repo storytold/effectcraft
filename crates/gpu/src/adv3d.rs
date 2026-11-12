@@ -77,7 +77,7 @@ fn buffer_bytes(count: u64, stride: u64, limit: u64) -> Option<u64> {
 /// Checking these before serialization bounds host packing as well as the GPU uploads.
 fn packed_bytes(counts: [u64; 6], uniform_limit: u64, storage_limit: u64, buffer_limit: u64) -> Option<[u64; 7]> {
     let mut sizes = [0; 7];
-    sizes[0] = buffer_bytes(40, 4, uniform_limit.min(buffer_limit))?;
+    sizes[0] = buffer_bytes(44, 4, uniform_limit.min(buffer_limit))?;
     for (index, (count, stride)) in counts.into_iter().zip([96, 16, 16, 80, 80, 4]).enumerate() {
         let size = count.checked_mul(stride)?.max(16);
         sizes[index + 1] = buffer_bytes(size, 1, storage_limit.min(buffer_limit))?;
@@ -164,11 +164,11 @@ mod capability_tests {
 
     #[test]
     fn packed_arrays_preflight_exact_strides_and_empty_padding() {
-        assert_eq!(packed_bytes([0; 6], 160, 16, 160), Some([160, 16, 16, 16, 16, 16, 16]));
-        assert_eq!(packed_bytes([2; 6], 160, 192, 192), Some([160, 192, 32, 32, 160, 160, 16]));
-        assert!(packed_bytes([0; 6], 159, 16, 160).is_none());
-        assert!(packed_bytes([0; 6], 160, 15, 160).is_none());
-        assert!(packed_bytes([2; 6], 160, 192, 191).is_none());
+        assert_eq!(packed_bytes([0; 6], 176, 16, 176), Some([176, 16, 16, 16, 16, 16, 16]));
+        assert_eq!(packed_bytes([2; 6], 176, 192, 192), Some([176, 192, 32, 32, 160, 160, 16]));
+        assert!(packed_bytes([0; 6], 175, 16, 176).is_none());
+        assert!(packed_bytes([0; 6], 176, 15, 176).is_none());
+        assert!(packed_bytes([2; 6], 176, 192, 191).is_none());
         for index in 0..6 {
             let mut counts = [0; 6];
             counts[index] = u64::MAX;
@@ -203,7 +203,7 @@ mod capability_tests {
         };
         for (scene, counts) in [(Scene::default(), [0; 6]), (scene, [1; 6])] {
             let actual = pack(&scene).map(|bytes| bytes.len() as u64);
-            assert_eq!(Some(actual), packed_bytes(counts, 160, 160, 160));
+            assert_eq!(Some(actual), packed_bytes(counts, 176, 176, 176));
         }
     }
 }
@@ -315,10 +315,25 @@ fn pack(s: &Scene) -> [Vec<u8>; 7] {
     globals.extend([s.eye[0], s.eye[1], s.eye[2], s.ortho as u32 as f32]);
     globals.extend([s.cam_fwd[0], s.cam_fwd[1], s.cam_fwd[2], s.lights.len() as f32]);
     globals.extend([s.ambient[0], s.ambient[1], s.ambient[2], s.env.is_some() as u32 as f32]);
-    let e = s.env.unwrap_or(effectcraft_render::three_d::adv::EnvInfo { radiance: 0, mips: 1, irradiance: 0, intensity: 0.0, rotation: 0.0 });
+    let e = s.env.unwrap_or(effectcraft_render::three_d::adv::EnvInfo {
+        radiance: 0,
+        mips: 1,
+        irradiance: 0,
+        intensity: 0.0,
+        rotation: 0.0,
+        sun: [0.0; 3],
+        key: 0.0,
+        shadow: -1,
+        shadow_darkness: 0.0,
+        shadow_diffusion: 0.0,
+    });
     globals.extend([e.radiance as f32, e.mips as f32, e.irradiance as f32, e.intensity]);
     let lit = !(s.lights.is_empty() && s.env.is_none() && s.ambient == [0.0; 3]);
-    globals.extend([e.rotation, lit as u32 as f32, 0.0, 0.0]);
+    // env2: rotation, any lighting (0/1), shadow map index (-1 none), shadow darkness.
+    globals.extend([e.rotation, lit as u32 as f32, e.shadow as f32, e.shadow_darkness]);
+    // The environment's dominant direction (its shadow's source), for the shadow bias slope,
+    // and its key fraction — how much of its light the shadow can remove (shade::env_shadow).
+    globals.extend([e.sun[0], e.sun[1], e.sun[2], e.key]);
     let mats = s.materials.iter().flat_map(|m| {
         let flags = (m.double_sided as u32)
             | (m.unlit as u32) << 1
@@ -474,7 +489,7 @@ fn raster_into(e: &mut Enc, s: &Scene) -> Option<(wgpu::Texture, wgpu::Texture)>
     let zout = tex(DEPTH_OUT, rt);
     let depth = tex(DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT);
     let (cv, zv, dv) = (color.create_view(&Default::default()), zout.create_view(&Default::default()), depth.create_view(&Default::default()));
-    let enc = e.encoder();
+    let enc = e.record(&[]);
     {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("adv3d"),
@@ -748,7 +763,7 @@ fn dispatch(e: &mut Enc, kernel: &str, u0: [u32; 4], f0: [f32; 4], b: Binds, gro
     }
     entries.push(wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(b.out.unwrap_or(&post.dummy_out)) });
     let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(kernel), layout: &post.bgl, entries: &entries });
-    let enc = e.encoder();
+    let enc = e.record(&[]);
     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(kernel), timestamp_writes: None });
     pass.set_pipeline(pipe);
     pass.set_bind_group(0, &bg, &[]);
@@ -784,9 +799,9 @@ fn read_buffer(e: &mut Enc, buf: &wgpu::Buffer, size: u64) -> Option<Vec<u8>> {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    e.encoder().copy_buffer_to_buffer(buf, 0, &rb, 0, size);
+    e.record(&[]).copy_buffer_to_buffer(buf, 0, &rb, 0, size);
     e.submit();
-    let out = e.g.read_buffer(&rb, row, row, 1).map_err(|e| log::error!("gpu 3d readback: {e}")).ok()?;
+    let out = e.g.read_buffer_after(&rb, e.last_submission(), row, row, 1).map_err(|e| log::error!("gpu 3d readback: {e}")).ok()?;
     Some(out)
 }
 
@@ -907,6 +922,7 @@ fn depth_of_field(e: &mut Enc, acc: &wgpu::Buffer, depth: &wgpu::Buffer, (w, h):
 
 /// The resolved run as an image in the canvas's encoding, composited over `canvas` when given.
 pub(crate) fn finish(e: &mut Enc, r: &Resolved, encode: bool, canvas: Option<&GpuImage>) -> GpuImage {
+    canvas.inspect(|c| e.uses(c));
     let out = e.image(r.width, r.height);
     let ov = out.texture.create_view(&Default::default());
     let cv = canvas.map(|c| c.texture.create_view(&Default::default()));
@@ -1008,7 +1024,7 @@ fn render_prepared_deferred(g: &GpuContext, d: &std::sync::Arc<crate::deferred::
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    e.encoder().copy_buffer_to_buffer(&r.depth, 0, &rb, 0, size);
+    e.record(&[]).copy_buffer_to_buffer(&r.depth, 0, &rb, 0, size);
     e.submit();
     let done = d.start(kz, w, h, [0.0; 2], 1.0);
     g.map_readback(&rb, row, row, 1, move |r| done(r.map_err(|e| log::error!("gpu depth readback: {e}")).ok()));
@@ -1065,6 +1081,7 @@ pub(crate) fn sky(e: &mut Enc, sky: &effectcraft_render::three_d::SkyDraw, canva
 /// Wireframe-quality layer outlines: `canvas` with `pixels` set to opaque white
 /// ([`effectcraft_render::Renderer::wireframe_pixels`]).
 pub(crate) fn wireframe(e: &mut Enc, canvas: &GpuImage, pixels: &[(u32, u32)]) -> GpuImage {
+    e.uses(canvas);
     let out = e.image(canvas.width, canvas.height);
     e.copy_into(canvas, &out, 0, 0);
     if pixels.is_empty() {

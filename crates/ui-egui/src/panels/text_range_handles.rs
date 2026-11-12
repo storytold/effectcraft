@@ -106,7 +106,7 @@ pub fn viewer_hook(
                 // A short grab zone around the triangle, so the line above doesn't steal the
                 // layer's scale handles.
                 let hr = Rect::from_two_pos(sp, sp + up * 8.0 + inward * 6.0).expand(3.0);
-                let id = egui::Id::new(("viewer-text-range", pr.uid));
+                let id = egui::Id::unique(("viewer-text-range", pr.uid));
                 let on_box_handle = ctx.pointer_latest_pos().is_some_and(|p| box_handles.iter().any(|c| c.distance(p) < 9.0));
                 let free = ctx.is_being_dragged(id) || !on_box_handle;
                 let resp = (interactive && free).then(|| ui.interact(hr, id, Sense::drag()));

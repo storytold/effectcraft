@@ -21,7 +21,7 @@
 
 use effectcraft_color::{ColorSpace, Conversion};
 use effectcraft_project::{Footage, HdrMode, ProjectSettings};
-use effectcraft_raster::Image;
+use effectcraft_raster::{Image, quantize_px};
 use rayon::prelude::*;
 
 /// The colour pipeline of a project (see the module docs).
@@ -117,6 +117,26 @@ impl Pipe {
         Conversion::new(ws, self.linear, self.out, false)
     }
 
+    /// The pipe without the HDR step (Clip), as [`crate::RenderOpts::skip_hdr_step`] renders
+    /// with: [`Pipe::output`] converts to the output space as it is.
+    pub fn without_hdr_step(self) -> Pipe {
+        Pipe { hdr: HdrMode::Clip, ..self }
+    }
+
+    /// The top-level frame of a [`Pipe::without_hdr_step`] render (output-encoded, straight colour)
+    /// → linear light in the output space's primaries: the output space's curve, or the Working
+    /// Gamma's when unmanaged (sRGB at 2.2, a pure 2.4 power curve at 2.4). The identity for a
+    /// linear output (ACES).
+    pub fn output_linear(&self) -> Conversion {
+        Conversion::linearize(self.output_linear_space())
+    }
+
+    /// The space whose primaries and white the frame of [`Pipe::output_linear`] is in: the output
+    /// space, or the Working Gamma's (sRGB or Rec. 709, the same primaries) when unmanaged.
+    pub fn output_linear_space(&self) -> ColorSpace {
+        if self.space.is_some() { self.out } else { self.curve() }
+    }
+
     /// Output with HDR compand / tone mapping (standard-dynamic-range outputs only): working
     /// space → linear output primaries, the HDR curve, then the output's encoding.
     pub fn output_hdr(&self) -> Option<(Option<Conversion>, HdrMode, Conversion)> {
@@ -131,6 +151,26 @@ impl Pipe {
             quantize_px(&mut p, l, 1.0 / l);
         }
         p
+    }
+
+    /// A copy of `src` converted by `c` and quantised to the bit depth, in one pass: one read and
+    /// one write of the frame instead of a copy, a conversion and a quantise pass (a 1080p float
+    /// frame is 33 MB, and these passes are limited by memory speed). The same pixels as
+    /// [`convert`] then [`Pipe::quantize`].
+    pub fn copy_converted(&self, src: &Image, c: Option<&Conversion>) -> Image {
+        let levels = self.levels;
+        let data = src
+            .data
+            .par_iter()
+            .map(|&p| {
+                let mut p = c.map_or(p, |c| convert_px(p, c));
+                if let Some(l) = levels {
+                    quantize_px(&mut p, l, 1.0 / l);
+                }
+                p
+            })
+            .collect();
+        Image { width: src.width, height: src.height, data }
     }
 
     /// Clamp and quantise to the bit depth (no-op in 32 bpc).
@@ -218,27 +258,6 @@ pub fn quantize(img: &mut Image, levels: f32) {
     quantize_rect(img, PxRect { x0: 0, y0: 0, x1: img.width, y1: img.height }, levels);
 }
 
-/// Clamp (colour ≤ alpha ≤ 1, NaN → 0) and round half up; values are non-negative after the
-/// clamp, so the integer conversion rounds like `round()` and vectorises.
-#[allow(clippy::manual_clamp)] // max/min map NaN to 0; clamp would keep NaN
-#[inline(always)]
-fn quantize_px(p: &mut [f32; 4], levels: f32, inv: f32) {
-    let a = round_half_up(p[3].max(0.0).min(1.0) * levels) * inv;
-    let hi = [a, a, a, a];
-    for c in 0..3 {
-        p[c] = round_half_up(p[c].max(0.0).min(hi[c]) * levels) * inv;
-    }
-    p[3] = a;
-}
-
-/// `v` (0..=65 535) rounded half up. The same either way; the fastest on each target: x86-64's
-/// baseline converts to integers in one instruction but has no `floor` (SSE4.1), while in wasm
-/// `floor` is one instruction and converting back from `u32` several (about 1.5× faster there).
-#[inline(always)]
-fn round_half_up(v: f32) -> f32 {
-    if cfg!(target_arch = "wasm32") { (v + 0.5).floor() } else { (v + 0.5) as u32 as f32 }
-}
-
 /// [`quantize`] restricted to a rectangle (already clamped to the image), row-parallel.
 fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
     if r.x0 >= r.x1 || r.y0 >= r.y1 {
@@ -248,7 +267,17 @@ fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
     let w = img.width as usize;
     let (x0, x1) = (r.x0 as usize, r.x1 as usize);
     img.data[r.y0 as usize * w..r.y1 as usize * w].par_chunks_mut(w).for_each(|row| {
-        for p in &mut row[x0..x1] {
+        // Runs of all-zero pixels (+0.0 in every channel) quantise to themselves: skip them a
+        // cache line at a time (sparse shape, precomp and glow buffers are mostly empty).
+        let (blocks, rest) = row[x0..x1].as_chunks_mut::<4>();
+        for b in blocks {
+            if b.as_flattened().iter().fold(0, |a, v| a | v.to_bits()) != 0 {
+                for p in b {
+                    quantize_px(p, levels, inv);
+                }
+            }
+        }
+        for p in rest {
             quantize_px(p, levels, inv);
         }
     });
@@ -256,14 +285,18 @@ fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
 
 /// Convert premultiplied pixels (on straight colour).
 pub fn convert(img: &mut Image, c: &Conversion) {
-    img.data.par_iter_mut().for_each(|p| {
-        let a = p[3];
-        if a <= 0.0 {
-            return;
-        }
-        let o = c.apply([p[0] / a, p[1] / a, p[2] / a]);
-        *p = [o[0] * a, o[1] * a, o[2] * a, a];
-    });
+    img.data.par_iter_mut().for_each(|p| *p = convert_px(*p, c));
+}
+
+/// [`convert`] of one pixel.
+#[inline]
+fn convert_px(p: [f32; 4], c: &Conversion) -> [f32; 4] {
+    let a = p[3];
+    if a <= 0.0 {
+        return p;
+    }
+    let o = c.apply([p[0] / a, p[1] / a, p[2] / a]);
+    [o[0] * a, o[1] * a, o[2] * a, a]
 }
 
 /// Compand: an exponential knee from 80%, approaching 1.0 (linear light, per channel).
@@ -307,6 +340,68 @@ pub fn output_hdr(img: &mut Image, to_linear: Option<Conversion>, mode: HdrMode,
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Skipping all-zero runs leaves every pixel as quantising it one by one does, bit for bit
+    /// (negative zeros and lone pixels in empty runs included).
+    #[test]
+    fn quantize_skips_only_zero_runs() {
+        let mut img = Image::new(23, 7);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = match i % 11 {
+                0 => [0.3, -0.2, 0.71, 0.9],
+                3 => [-0.0, 0.0, 0.0, 0.0],
+                5 => [0.0, 0.0, 0.0, -0.0],
+                7 => [1.7, 0.4, f32::NAN, 0.5],
+                _ => [0.0; 4],
+            };
+        }
+        for levels in [255.0f32, 32_768.0] {
+            let mut want = img.clone();
+            for p in &mut want.data {
+                quantize_px(p, levels, 1.0 / levels);
+            }
+            for r in [PxRect { x0: 0, y0: 0, x1: 23, y1: 7 }, PxRect { x0: 3, y0: 1, x1: 20, y1: 6 }] {
+                let mut got = img.clone();
+                quantize_rect(&mut got, r, levels);
+                for (i, (g, p)) in got.data.iter().zip(&img.data).enumerate() {
+                    let (x, y) = (i as u32 % 23, i as u32 / 23);
+                    let w = if x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1 { want.data[i] } else { *p };
+                    assert_eq!(g.map(f32::to_bits), w.map(f32::to_bits), "{levels} {r:?} px ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    /// The fused footage pass gives the pixels of a copy, a conversion and a quantise pass, bit
+    /// for bit, at every depth, with and without a conversion.
+    #[test]
+    fn copy_converted_is_convert_then_quantize() {
+        let mut img = Image::new(17, 5);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = match i % 7 {
+                0 => [0.3, -0.2, 0.71, 0.9],
+                1 => [-0.0, 0.0, 0.0, 0.0],
+                2 => [1.7, 0.4, f32::NAN, 0.5],
+                3 => [0.0; 4],
+                _ => [i as f32 / 90.0, 0.5, 0.25, 1.0],
+            };
+        }
+        for depth in [effectcraft_project::BitDepth::Bpc8, effectcraft_project::BitDepth::Bpc16, effectcraft_project::BitDepth::Bpc32] {
+            let pipe = Pipe::of(&ProjectSettings { bit_depth: depth, ..Default::default() });
+            for c in [None, Some(Conversion::linearize(ColorSpace::Srgb))] {
+                let mut want = img.clone();
+                if let Some(c) = &c {
+                    convert(&mut want, c);
+                }
+                pipe.quantize(&mut want);
+                let got = pipe.copy_converted(&img, c.as_ref());
+                let bits = |i: &Image| i.data.iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+                assert_eq!(bits(&got), bits(&want), "{depth:?} conversion {}", c.is_some());
+            }
+        }
+    }
+
     /// Both forms `round_half_up` picks between agree on everything quantising feeds it:
     /// 0..=levels, exact halves included.
     #[test]

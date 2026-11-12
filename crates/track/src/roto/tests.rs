@@ -65,7 +65,13 @@ pub(crate) fn frame_at(c: [f64; 2]) -> (Image, Vec<u8>) {
 }
 
 fn line(kind: StrokeKind, frame: i64, a: [f64; 2], b: [f64; 2], radius: f64) -> Stroke {
-    Stroke { kind, frame, radius, points: (0..=10).map(|k| [a[0] + (b[0] - a[0]) * k as f64 / 10.0, a[1] + (b[1] - a[1]) * k as f64 / 10.0]).collect() }
+    Stroke {
+        kind,
+        frame,
+        radius,
+        points: (0..=10).map(|k| [a[0] + (b[0] - a[0]) * k as f64 / 10.0, a[1] + (b[1] - a[1]) * k as f64 / 10.0]).collect(),
+        object: 0,
+    }
 }
 
 /// The strokes an artist would paint on frame `f`: one through the disk, one around it.
@@ -95,6 +101,21 @@ fn strokes_segment_the_base_frame() {
     assert!(bytes.len() < seg.w * seg.h / 4, "{} bytes", bytes.len());
     assert!(FrameSeg::from_bytes(&bytes[..bytes.len() - 1]).is_none());
     assert!(FrameSeg::from_bytes(b"nope").is_none());
+
+    // Untrusted plane dimensions and run lengths are rejected before allocation/resize.
+    let mut hostile = b"ECSG".to_vec();
+    hostile.extend_from_slice(&u32::MAX.to_le_bytes());
+    hostile.extend_from_slice(&u32::MAX.to_le_bytes());
+    hostile.extend_from_slice(&0u32.to_le_bytes());
+    assert!(FrameSeg::from_bytes(&hostile).is_none());
+    let mut overrun = bytes.clone();
+    let plane_at = 16 + u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    overrun[plane_at..plane_at + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert!(FrameSeg::from_bytes(&overrun).is_none());
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(FrameSeg::from_bytes(&trailing).is_none());
+    assert_eq!(FrameSeg::empty(usize::MAX, 2), FrameSeg::default());
 }
 
 #[test]
@@ -167,6 +188,28 @@ fn a_correction_stroke_fixes_a_bad_frame() {
     assert!(iou(&next.matte, &gt2) > 0.93);
 }
 
+/// A stroke corrects the ones painted before it: foreground over an earlier background stroke
+/// restores the area, and background over that removes it again.
+#[test]
+fn later_strokes_override_earlier_ones() {
+    let c = center(0);
+    let (img, gt) = frame_at(c);
+    let spot = [c[0], c[1] + 20.0];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let red = line(StrokeKind::Bg, 0, [spot[0] - 6.0, spot[1]], [spot[0] + 6.0, spot[1]], 6.0);
+    let green = Stroke { kind: StrokeKind::Fg, ..red.clone() };
+    let seg = |st: &[Stroke]| segment(&img, &st.iter().collect::<Vec<_>>(), None, &SegOpts::default(), 0.0);
+    let mut st = base_strokes(0);
+    st.push(red.clone());
+    assert_eq!(seg(&st).matte[i], 0, "background over the disk removes it");
+    st.push(green);
+    let restored = seg(&st);
+    assert_eq!(restored.matte[i], 1, "foreground over the background stroke restores it");
+    assert!(iou(&restored.matte, &gt) > 0.95, "IoU {}", iou(&restored.matte, &gt));
+    st.push(red);
+    assert_eq!(seg(&st).matte[i], 0, "background again removes it again");
+}
+
 /// A soft-edged disk (alpha ramp over `width` pixels) over a background.
 fn soft_frame(c: [f64; 2], width: f64, fg: [f32; 3], bg: [f32; 3]) -> (Image, Vec<f32>) {
     let mut img = Image::new(W, H);
@@ -194,6 +237,7 @@ fn ring(frame: i64, c: [f64; 2], r: f64, radius: f64) -> Stroke {
         frame,
         radius,
         points: (0..=48).map(|k| k as f64 / 48.0 * std::f64::consts::TAU).map(|a| [c[0] + r * a.cos(), c[1] + r * a.sin()]).collect(),
+        object: 0,
     }
 }
 
@@ -231,7 +275,7 @@ fn refine_edge_recovers_a_soft_edge_and_decontaminates() {
     assert!(frac as f64 > 0.6 * n as f64, "{frac}/{n} fractional");
     // Decontamination: edge pixels' colour is the foreground's, not a blue blend.
     let mut col = rgb.clone();
-    let map = decontaminate(&mut col, &a, &seg.refine, W as usize, H as usize, &p, 9.0, 1.0);
+    let map = decontaminate(&mut col, &a, &seg.refine, (W as usize, H as usize), &p, 9.0, 1.0);
     let (mut blue_before, mut blue_after, mut m) = (0.0f64, 0.0f64, 0usize);
     for i in 0..a.len() {
         if a[i] > 0.2 && a[i] < 0.8 {
@@ -248,6 +292,31 @@ fn refine_edge_recovers_a_soft_edge_and_decontaminates() {
     seg2.refine.iter_mut().for_each(|v| *v = 0);
     let a2 = matte_alpha(&rgb, &seg2, None, None, &p, 9.0, 1.0);
     assert!(a2.iter().zip(&seg.matte).all(|(x, y)| (*x - *y as f32).abs() < 1e-6));
+}
+
+/// Refine Edge strokes correct each other the same way: refine over an earlier erase restores
+/// the band there.
+#[test]
+fn later_refine_strokes_override_earlier_erases() {
+    let c = [100.0, 75.0];
+    let (img, _) = soft_frame(c, 10.0, [0.9, 0.25, 0.1], [0.1, 0.3, 0.9]);
+    let spot = [c[0] + R, c[1]];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let erase = Stroke { kind: StrokeKind::RefineErase, frame: 0, radius: 6.0, points: vec![spot], object: 0 };
+    let refine = Stroke { kind: StrokeKind::Refine, ..erase.clone() };
+    let band = |st: &[Stroke]| segment(&img, &st.iter().collect::<Vec<_>>(), None, &SegOpts::default(), 9.0).refine[i];
+    let mut st = vec![
+        line(StrokeKind::Fg, 0, [c[0] - 15.0, c[1]], [c[0] + 15.0, c[1]], 5.0),
+        line(StrokeKind::Bg, 0, [c[0] - 60.0, c[1] - 55.0], [c[0] + 60.0, c[1] - 55.0], 5.0),
+        ring(0, c, R, 9.0),
+    ];
+    assert_eq!(band(&st), 1);
+    st.push(erase.clone());
+    assert_eq!(band(&st), 0, "erase removes the band");
+    st.push(refine);
+    assert_eq!(band(&st), 1, "refine over the erase restores it");
+    st.push(erase);
+    assert_eq!(band(&st), 0, "erase again removes it again");
 }
 
 #[test]
@@ -327,7 +396,7 @@ fn roto_perf_1080p() {
     let mut seg2 = next.clone();
     let c = center(1);
     let ring: Vec<[f64; 2]> = (0..=64).map(|k| k as f64 / 64.0 * std::f64::consts::TAU).map(|t| [(c[0] + R * t.cos()) * s, (c[1] + R * t.sin()) * s]).collect();
-    let st = [Stroke { kind: StrokeKind::Refine, frame: 1, radius: 20.0, points: ring }];
+    let st = [Stroke { kind: StrokeKind::Refine, frame: 1, radius: 20.0, points: ring, object: 0 }];
     let r = rasterize(&st.iter().collect::<Vec<_>>(), &[StrokeKind::Refine], 1.0, 1920, 1080);
     seg2.refine = r.iter().map(|v| *v as u8).collect();
     let rgb = rgb_of(&b);
@@ -358,9 +427,8 @@ impl effectcraft_segment::MaskModel for FakeModel {
 }
 
 /// A grey bar on a two-tone background whose halves match the bar's halves: colour alone can't
-/// find its edge, a model can.
-#[test]
-fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
+/// find its edge, a model can. The frame, its truth and the bar's rectangle.
+fn bar_frame() -> (Image, Vec<u8>, [usize; 4]) {
     let (w, h) = (160usize, 100usize);
     let rect = [40, 30, 120, 70];
     let mut img = Image::new(w as u32, h as u32);
@@ -375,6 +443,12 @@ fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
             gt[y * w + x] = inside as u8;
         }
     }
+    (img, gt, rect)
+}
+
+#[test]
+fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
+    let (img, gt, rect) = bar_frame();
     let st = [line(StrokeKind::Fg, 0, [50.0, 50.0], [110.0, 50.0], 4.0)];
     let refs: Vec<&Stroke> = st.iter().collect();
     let opts = SegOpts::default();
@@ -433,20 +507,349 @@ fn mobilesam_segments_and_propagates_the_disk() {
 /// ignores it; a prior's box does not replace it.
 #[test]
 fn box_stroke_is_the_model_box_prompt() {
-    let fg = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: vec![[50.0, 40.0]] };
-    let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[80.0, 60.0], [20.0, 10.0]] };
-    let p = stroke_prompt(&[&fg, &bx], 0.5);
+    let fg = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: vec![[50.0, 40.0]], object: 0 };
+    let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[80.0, 60.0], [20.0, 10.0]], object: 0 };
+    let p = stroke_prompt(&[&fg, &bx], &[], 0.5, 0, 0);
     assert_eq!(p.bbox, Some([10.0, 5.0, 40.0, 30.0]));
     assert_eq!(p.points, vec![([25.0, 20.0], true)]);
     // Degenerate or non-finite boxes are no prompt.
     for pts in [vec![[20.0, 10.0]], vec![[20.0, 10.0], [20.0, 50.0]], vec![[f64::NAN, 10.0], [80.0, 60.0]]] {
         let b = Stroke { points: pts, ..bx.clone() };
-        assert_eq!(stroke_prompt(&[&fg, &b], 1.0).bbox, None);
+        assert_eq!(stroke_prompt(&[&fg, &b], &[], 1.0, 0, 0).bbox, None);
     }
     assert!(!StrokeKind::Box.is_segmentation());
     assert!(rasterize(&[&bx], &[StrokeKind::Fg, StrokeKind::Bg], 1.0, 100, 80).iter().all(|v| !v));
-    let mut q = stroke_prompt(&[&fg, &bx], 1.0);
+    let mut q = stroke_prompt(&[&fg, &bx], &[], 1.0, 0, 0);
     let soft: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 10) as u8 as f32).collect();
-    assert!(add_prior_prompt(&mut q, &soft, 100, 80));
+    assert!(add_prior_prompt(&mut q, &soft, &[], 100, 80));
     assert_eq!(q.bbox, Some([20.0, 10.0, 80.0, 60.0]));
+}
+
+/// A model is never prompted against the latest correction: stroke points that a later stroke
+/// of the other kind painted over are dropped, and the propagated matte's points and mask leave
+/// out what this frame's background strokes removed.
+#[test]
+fn model_prompts_follow_the_latest_stroke() {
+    let green = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 4.0, points: vec![[50.0, 40.0]], object: 0 };
+    let red = Stroke { kind: StrokeKind::Bg, ..green.clone() };
+    let (w, h) = (100, 80);
+    let prompt = |st: &[&Stroke]| stroke_prompt(st, &resolve(st, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h), 1.0, w, h).points;
+    assert_eq!(prompt(&[&green, &red]), vec![([50.0, 40.0], false)]);
+    assert_eq!(prompt(&[&green, &red, &green]), vec![([50.0, 40.0], true); 2]);
+    let soft: Vec<f32> = (0..w * h).map(|i| ((i % w) < 50) as u8 as f32).collect();
+    let erase = Stroke { kind: StrokeKind::Bg, frame: 0, radius: 15.0, points: vec![[25.0, 40.0]], object: 0 };
+    let hard = resolve(&[&erase], StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    let mut q = Prompt::default();
+    assert!(add_prior_prompt(&mut q, &soft, &hard, w, h));
+    assert!(!q.points.is_empty());
+    assert!(q.points.iter().all(|(p, fg)| *fg && owner(&hard, w, h, *p) != Some(HARD_BG)), "{:?}", q.points);
+    let mask = q.mask.unwrap();
+    assert!(hard.iter().zip(&mask).all(|(hd, m)| *hd != HARD_BG || *m == 0.0));
+}
+
+/// A stand-in model that counts its calls; its foreground is a fixed rectangle.
+struct CountingModel([usize; 4], std::sync::atomic::AtomicUsize);
+
+impl effectcraft_segment::MaskModel for CountingModel {
+    fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+        &effectcraft_segment::MOBILE_SAM
+    }
+    fn segment(&self, _: &[[f32; 3]], w: usize, h: usize, _: &Prompt) -> Result<Vec<f32>, String> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let [x0, y0, x1, y1] = self.0;
+        Ok((0..w * h).map(|i| ((i % w) >= x0 && (i % w) < x1 && (i / w) >= y0 && (i / w) < y1) as u8 as f32 * 0.98 + 0.01).collect())
+    }
+}
+
+/// A small background correction in the middle of a large foreground dot removes the only point
+/// sampled along the dot, but most of the dot is still foreground: the model is still prompted
+/// with it, from a point inside what is left. A dot painted over completely prompts nothing.
+#[test]
+fn a_correction_keeps_the_model_prompted_with_what_is_left() {
+    let (img, gt, rect) = bar_frame();
+    let (w, h) = (img.width as usize, img.height as usize);
+    let dot = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 15.0, points: vec![[80.0, 50.0]], object: 0 };
+    let tap = Stroke { kind: StrokeKind::Bg, radius: 2.0, ..dot.clone() };
+    let refs = [&dot, &tap];
+    let model = CountingModel(rect, Default::default());
+    let seg = segment_with(&img, &refs, None, &SegOpts::default(), 0.0, Some(&model));
+    assert_eq!(model.1.load(std::sync::atomic::Ordering::Relaxed), 1, "the model was prompted");
+    assert!(iou(&seg.matte, &gt) > 0.95, "IoU {}", iou(&seg.matte, &gt));
+    let hard = resolve(&refs, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    let fg: Vec<[f32; 2]> = stroke_prompt(&refs, &hard, 1.0, w, h).points.into_iter().filter(|p| p.1).map(|p| p.0).collect();
+    let [q] = fg.as_slice() else { panic!("one foreground point, got {fg:?}") };
+    let r = (q[0] - 80.0).hypot(q[1] - 50.0);
+    assert!(r > 5.0 && r < 13.0, "{q:?} sits inside what is left of the dot");
+    assert_eq!(hard[q[1] as usize * w + q[0] as usize], HARD_FG);
+    let cover = Stroke { radius: 16.0, ..tap };
+    let refs = [&dot, &cover];
+    let hard = resolve(&refs, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    assert!(stroke_prompt(&refs, &hard, 1.0, w, h).points.iter().all(|p| !p.1));
+}
+
+#[test]
+fn tracker_prompts_carry_a_handful_of_points() {
+    let st = base_strokes(0);
+    let refs: Vec<&Stroke> = st.iter().collect();
+    let p = tracker_prompt(&refs, 1.0, W as usize, H as usize);
+    let (fg, bg) = (p.points.iter().filter(|(_, f)| *f).count(), p.points.iter().filter(|(_, f)| !*f).count());
+    assert!((1..=TRACKER_FG_POINTS).contains(&fg) && (1..=TRACKER_BG_POINTS).contains(&bg), "{fg} fg, {bg} bg");
+    // a long, finely sampled stroke still gives at most the limit, and an empty one gives none
+    let long = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: (0..400).map(|i| [i as f64 * 0.4, 50.0]).collect(), object: 0 };
+    assert!(tracker_prompt(&[&long], 1.0, W as usize, H as usize).points.len() <= TRACKER_FG_POINTS);
+    assert!(tracker_prompt(&[], 1.0, W as usize, H as usize).points.is_empty());
+}
+
+/// Tracker clicks follow the same correction order as the classic matte and model prompts.
+#[test]
+fn tracker_prompts_follow_latest_corrections_and_keep_remaining_foreground() {
+    let (w, h) = (100, 80);
+    let green = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 15.0, points: vec![[50.0, 40.0]], object: 0 };
+    let red = Stroke { kind: StrokeKind::Bg, radius: 16.0, ..green.clone() };
+    for strokes in [&[&green, &red][..], &[&red, &green][..]] {
+        let classic = FrameSeg::empty(w, h);
+        for prompt in [tracker_prompt(strokes, 1.0, w, h), tracker_prompt_boxed(strokes, 1.0, &classic)] {
+            let expected = std::ptr::eq(strokes[1], &green);
+            assert_eq!(prompt.points.iter().any(|(_, fg)| *fg), expected, "{:?}", prompt.points);
+            let hard = resolve(strokes, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+            for (point, fg) in &prompt.points {
+                assert_eq!(owner(&hard, w, h, *point), Some(if *fg { HARD_FG } else { HARD_BG }));
+            }
+            assert!(!prompt.points.is_empty());
+        }
+    }
+    // A small correction removes the sampled centre, while most of the foreground dot remains.
+    let tap = Stroke { radius: 2.0, ..red };
+    let strokes = [&green, &tap];
+    let hard = resolve(&strokes, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    for prompt in [tracker_prompt(&strokes, 1.0, w, h), tracker_prompt_boxed(&strokes, 1.0, &FrameSeg::empty(w, h))] {
+        assert!(prompt.points.iter().any(|(_, fg)| *fg));
+        assert!(prompt.points.iter().any(|(_, fg)| !*fg));
+        for (point, fg) in &prompt.points {
+            assert_eq!(owner(&hard, w, h, *point), Some(if *fg { HARD_FG } else { HARD_BG }));
+        }
+        assert!(prompt.points.iter().filter(|(_, fg)| *fg).count() <= TRACKER_FG_POINTS);
+        assert!(prompt.points.iter().filter(|(_, fg)| !*fg).count() <= TRACKER_BG_POINTS);
+    }
+}
+
+#[test]
+fn tracked_segmentation_handles_absent_objects_and_bad_maps() {
+    let (img, gt) = frame_at(center(0));
+    let st = base_strokes(0);
+    let refs: Vec<&Stroke> = st.iter().collect();
+    let opts = SegOpts::default();
+    let n = (W * H) as usize;
+    // a good map (the true disk) reproduces it, with the strokes as constraints
+    let soft: Vec<f32> = gt.iter().map(|v| f32::from(*v)).collect();
+    let seg = segment_tracked(&img, &refs, soft, false, &opts, 0.0);
+    assert!(iou(&seg.matte, &gt) > 0.95);
+    // an absent object (no strokes on the frame) is an empty matte, whatever the map says
+    let none = segment_tracked(&img, &[], vec![1.0; n], true, &opts, 0.0);
+    assert_eq!(none.area(), 0);
+    assert_eq!(segment_tracked(&img, &[], vec![0.0; n], false, &opts, 0.0).area(), 0);
+    // a map of the wrong size is ignored: the strokes alone segment the frame
+    let wrong = segment_tracked(&img, &refs, vec![1.0; 3], false, &opts, 0.0);
+    assert!(iou(&wrong.matte, &gt) > 0.95);
+}
+
+#[test]
+fn tracker_prompts_carry_the_box_of_the_classic_matte() {
+    let (img, gt) = frame_at(center(0));
+    let st = base_strokes(0);
+    let refs: Vec<&Stroke> = st.iter().collect();
+    let classic = segment(&img, &refs, None, &SegOpts::default(), 0.0);
+    let p = tracker_prompt_boxed(&refs, 1.0, &classic);
+    let b = p.bbox.expect("a box");
+    let c = center(0);
+    // the box reaches the disk's edges, with a margin
+    assert!(b[0] <= (c[0] - R) as f32 && b[0] > (c[0] - R) as f32 - 12.0, "{b:?}");
+    assert!(b[2] >= (c[0] + R) as f32 && b[2] < (c[0] + R) as f32 + 12.0, "{b:?}");
+    assert!(b[1] <= (c[1] - R) as f32 && b[3] >= (c[1] + R) as f32, "{b:?}");
+    assert!(iou(&classic.matte, &gt) > 0.95);
+    // no matte, no box; a box the user drew wins
+    let none = tracker_prompt_boxed(&refs, 1.0, &FrameSeg::empty(W as usize, H as usize));
+    assert_eq!(none.bbox, None);
+    let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[10.0, 10.0], [50.0, 60.0]], object: 0 };
+    let mut with_box: Vec<&Stroke> = refs.clone();
+    with_box.push(&bx);
+    assert_eq!(tracker_prompt_boxed(&with_box, 1.0, &classic).bbox, Some([10.0, 10.0, 50.0, 60.0]));
+}
+
+#[test]
+fn strokes_carry_an_object_and_old_data_is_object_zero() {
+    // saved before objects existed: no field, and the field is not written for object 0
+    let old = r#"{"base":0,"span":[0,4],"strokes":[{"kind":"fg","frame":0,"radius":3.0,"points":[[1.0,2.0]]}]}"#;
+    let d = RotoData::from_json(old);
+    assert_eq!(d.strokes.first().map(|s| s.object), Some(0));
+    assert!(!d.to_json().contains("object"), "{}", d.to_json());
+    // the keys of existing projects do not change
+    let same = RotoData::from_json(&d.to_json());
+    assert_eq!(d.chain_keys(1), same.chain_keys(1));
+
+    let mut d = d;
+    d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[9.0, 9.0]], object: 2 }, 4, [0, 10]);
+    d.add(Stroke { kind: StrokeKind::Bg, frame: 0, radius: 3.0, points: vec![[0.0, 0.0]], object: 2 }, 4, [0, 10]);
+    d.add(Stroke { kind: StrokeKind::Refine, frame: 0, radius: 3.0, points: vec![[5.0, 5.0]], object: 0 }, 4, [0, 10]);
+    assert_eq!(d.objects(), vec![0, 2]);
+    assert!(d.to_json().contains("\"object\":2"));
+    assert_eq!(RotoData::from_json(&d.to_json()), d);
+    // an object's own strokes, plus the Refine Edge strokes that belong to the whole matte
+    assert_eq!(d.strokes_of(0, 2).len(), 3);
+    assert_eq!(d.strokes_of(0, 0).len(), 2);
+    assert!(d.strokes_of(0, 1).len() == 1);
+    // moving a stroke to another object changes the frame keys (the tracked frames are stale)
+    let before = d.chain_keys(1);
+    if let Some(s) = d.strokes.first_mut() {
+        s.object = 1;
+    }
+    assert_ne!(before, d.chain_keys(1));
+}
+
+#[test]
+fn the_union_of_objects_is_their_largest_extent() {
+    let seg = |cells: &[usize]| {
+        let mut s = FrameSeg::empty(4, 1);
+        for c in cells {
+            s.matte[*c] = 255;
+        }
+        s
+    };
+    let u = FrameSeg::union(vec![seg(&[0]), seg(&[2, 3]), seg(&[3])]);
+    assert_eq!(u.matte, vec![255, 0, 255, 255]);
+    assert_eq!(FrameSeg::union(vec![]).w, 0);
+    // a part of another size is ignored
+    let odd = FrameSeg::empty(2, 2);
+    assert_eq!(FrameSeg::union(vec![seg(&[1]), odd]).matte, vec![0, 255, 0, 0]);
+}
+
+#[test]
+fn a_stored_span_reaches_a_bounded_number_of_frames() {
+    // A project can store any span: the chain stops MAX_CHAIN frames either side of the base.
+    let d = RotoData { base: Some(0), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    let k = d.chain_keys(1);
+    assert_eq!(k.len() as i64, 2 * super::MAX_CHAIN + 1);
+    assert_eq!(k.keys().next(), Some(&-super::MAX_CHAIN));
+}
+
+#[test]
+fn in_span_matches_the_frames_that_have_keys_and_extreme_bases_do_not_overflow() {
+    let d = RotoData { base: Some(0), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    assert!(d.in_span(super::MAX_CHAIN) && !d.in_span(super::MAX_CHAIN + 1));
+    assert!(d.in_span(-super::MAX_CHAIN) && !d.in_span(-super::MAX_CHAIN - 1));
+    assert_eq!(d.source_of(super::MAX_CHAIN + 1), None);
+    assert!(d.chain_keys(1).keys().all(|f| d.in_span(*f)));
+    // A base at the end of i64: no forward frames, and no `base + 1` overflow.
+    let d = RotoData { base: Some(i64::MAX), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    let k = d.chain_keys(1);
+    assert_eq!(k.len() as i64, super::MAX_CHAIN + 1);
+    assert!(k.contains_key(&i64::MAX));
+}
+
+/// A scene for the band re-cut: `rgb` of a `w`×`h` frame where the foreground is `inside`, with
+/// a background that turns red left of `x = 30` (far from most shapes), and a soft prior that is
+/// `inside` shifted by (3, 2) px with an edge `soft_edge` px wide.
+fn band_scene(w: usize, h: usize, inside: &dyn Fn(f64, f64) -> f64, soft_edge: f64) -> (Vec<[f32; 3]>, Vec<f32>) {
+    let mut rgb = vec![[0.0f32; 3]; w * h];
+    let mut soft = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let a = inside(px, py).clamp(0.0, 1.0) as f32;
+            let f = fg_color(px, py);
+            let b = if px < 30.0 { [0.9, 0.1, 0.1] } else { bg_color(px, py) };
+            rgb[y * w + x] = [f[0] * a + b[0] * (1.0 - a), f[1] * a + b[1] * (1.0 - a), f[2] * a + b[2] * (1.0 - a)];
+            soft[y * w + x] = (inside(px - 3.0, py - 2.0) / soft_edge + 0.5).clamp(0.0, 1.0) as f32;
+        }
+    }
+    (rgb, soft)
+}
+
+#[test]
+fn band_crop_matches_the_full_frame() {
+    let (w, h) = (200usize, 150usize);
+    // Signed coverage: > 0.5 inside, falling off by 1 per pixel across the edge.
+    let disk = |cx: f64, cy: f64, r: f64| move |x: f64, y: f64| r + 0.5 - (x - cx).hypot(y - cy);
+    let mid = disk(120.0, 80.0, 30.0);
+    let corner = disk(185.0, 10.0, 28.0);
+    let donut = move |x: f64, y: f64| (40.0 + 0.5 - (x - 110.0).hypot(y - 75.0)).min((x - 110.0).hypot(y - 75.0) - 14.0 + 0.5);
+    let nothing = |_: f64, _: f64| -10.0;
+    let shapes: [(&str, &dyn Fn(f64, f64) -> f64, f32, f64); 8] = [
+        ("disk", &mid, 8.0, 1.0),
+        ("frame corner", &corner, 8.0, 1.0),
+        ("donut", &donut, 6.0, 1.0),
+        ("r = 2, soft edge", &mid, 2.0, 3.0),
+        // A prior edge wider than the band: the blur sees prior values outside it.
+        ("r = 2, wide soft edge", &mid, 2.0, 10.0),
+        ("r = 3, wide soft edge at the corner", &corner, 3.0, 14.0),
+        ("r = 12, soft edge", &mid, 12.0, 4.0),
+        ("no foreground", &nothing, 8.0, 1.0),
+    ];
+    let mut changed = 0;
+    for (name, inside, r, edge) in shapes {
+        let (rgb, soft) = band_scene(w, h, inside, edge);
+        let start: Vec<u8> = soft.iter().map(|v| (*v >= 0.5) as u8).collect();
+        let fitted = fit_models(&rgb, &start);
+        // Equal models leave the cut to the prior and the smoothness term, which makes it
+        // sensitive to the blurred prior.
+        for models in [None, Some((&fitted.0, &fitted.1)), Some((&fitted.1, &fitted.1))] {
+            let (mut full, mut crop) = (start.clone(), start.clone());
+            recut_band(&rgb, (w, h), &mut full, &soft, r, models, false);
+            recut_band(&rgb, (w, h), &mut crop, &soft, r, models, true);
+            let diff = full.iter().zip(&crop).filter(|(a, b)| a != b).count();
+            assert_eq!(diff, 0, "{name}, models {}: {diff} pixels differ", if models.is_some() { "given" } else { "fitted" });
+            changed += full.iter().zip(&start).filter(|(a, b)| a != b).count();
+        }
+    }
+    // The cut did move edges (the prior is offset from the shapes).
+    assert!(changed > 100, "{changed}");
+}
+
+/// Padded by the blur's reach, the crop blurs the prior exactly as the full frame does at every
+/// band pixel (up to the summation rounding of the box sums); a 1 px pad does not when the prior
+/// edge is wider than the band.
+#[test]
+fn band_rect_pad_covers_the_prior_blur() {
+    let (w, h) = (200usize, 150usize);
+    let mid = |x: f64, y: f64| 30.5 - (x - 120.0).hypot(y - 80.0);
+    let corner = |x: f64, y: f64| 28.5 - (x - 185.0).hypot(y - 10.0);
+    let cases: [(&dyn Fn(f64, f64) -> f64, f32, f64); 4] = [(&mid, 8.0, 1.0), (&mid, 2.0, 10.0), (&corner, 3.0, 14.0), (&mid, 12.0, 30.0)];
+    for (inside, r, edge) in cases {
+        let (_, soft) = band_scene(w, h, inside, edge);
+        let labels: Vec<u8> = soft.iter().map(|v| (*v >= 0.5) as u8).collect();
+        let sd = matting::signed_distance(&labels, w, h);
+        let sigma = (r as f64 / 4.0).max(1.0);
+        let full = matting::gauss(&soft, w, h, sigma);
+        let worst = |pad: usize| -> f32 {
+            let rect = band_rect(&sd, (w, h), r, pad).unwrap();
+            let [x0, y0, x1, y1] = rect;
+            let blurred = matting::gauss(&crop_of(&soft, w, rect), x1 - x0, y1 - y0, sigma);
+            let mut worst = 0.0f32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if sd[y * w + x].abs() <= r {
+                        worst = worst.max((blurred[(y - y0) * (x1 - x0) + x - x0] - full[y * w + x]).abs());
+                    }
+                }
+            }
+            worst
+        };
+        let reach = matting::gauss_reach(sigma);
+        assert!(worst(reach) < 1e-6, "r {r}, edge {edge}: {}", worst(reach));
+        if edge > 2.0 * r as f64 {
+            assert!(worst(1) > 1e-4, "r {r}, edge {edge}: a 1 px pad should differ, {}", worst(1));
+        }
+    }
+}
+
+#[test]
+fn propagate_survives_empty_frames() {
+    let opts = SegOpts::default();
+    for (w, h) in [(4u32, 0u32), (0, 4), (0, 0)] {
+        let img = Image::new(w, h);
+        let prev = FrameSeg::empty(w as usize, h as usize);
+        let next = propagate(&img, &prev, &img, &[], &opts, 0.0);
+        assert_eq!((next.w, next.h), (w as usize, h as usize));
+        assert!(next.matte.is_empty());
+    }
 }

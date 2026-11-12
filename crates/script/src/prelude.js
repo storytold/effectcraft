@@ -26,7 +26,7 @@ function __err(msg) {
 }
 function __num(v, what) {
   var n = Number(v);
-  if (typeof v === "boolean" || isNaN(n)) throw __err((what || "value") + " must be a number");
+  if (typeof v === "boolean" || Number.isNaN(n)) throw __err((what || "value") + " must be a number");
   return n;
 }
 function __str(v) {
@@ -43,11 +43,11 @@ if (typeof String.prototype.substr !== "function") {
       if (this === null || this === undefined) throw new TypeError("String.substr called on null or undefined");
       var text = String(this), n = text.length;
       var from = Number(start);
-      if (isNaN(from)) from = 0;
+      if (Number.isNaN(from)) from = 0;
       // ToIntegerOrInfinity, then clamp positive or negative offsets.
       from = from < 0 ? Math.max(n + Math.ceil(from), 0) : Math.min(Math.floor(from), n);
       var count = length === undefined ? n - from : Number(length);
-      if (isNaN(count) || count <= 0) return "";
+      if (Number.isNaN(count) || count <= 0) return "";
       return text.slice(from, from + count);
     },
     writable: true, configurable: true
@@ -98,6 +98,8 @@ var ImportAsType = __enum("ImportAsType", ["COMP_CROPPED_LAYERS", "FOOTAGE", "CO
 ImportAsType.COMPOSITION_CROPPED_LAYERS = ImportAsType.COMP_CROPPED_LAYERS;
 ImportAsType.COMPOSITION = ImportAsType.COMP;
 var TimeDisplayType = __enum("TimeDisplayType", ["FRAMES", "TIMECODE"], 2012);
+// After Effects' values (FC_START_0 = 2612), as in docsforadobe/Types-for-Adobe.
+var FramesCountType = __enum("FramesCountType", ["FC_START_0", "FC_START_1", "FC_TIMECODE_CONVERSION"], 2612);
 var LogType = __enum("LogType", ["ERRORS_ONLY", "ERRORS_AND_SETTINGS", "ERRORS_AND_PER_FRAME_INFO"], 3212);
 var KeyframeLabel = __enum("KeyframeLabel", ["NONE"], 0);
 
@@ -187,7 +189,12 @@ BridgeTalk.pump = function () { return false; };
 
 // ------------------------------------------------------------------ File / Folder
 
-function __join(a, b) { return a.replace(/[\/\\]+$/, "") + "/" + b; }
+function __trimPathSeparators(path) {
+  var end = path.length;
+  while (end > 0 && (path.charAt(end - 1) === "/" || path.charAt(end - 1) === "\\")) end--;
+  return path.slice(0, end);
+}
+function __join(a, b) { return __trimPathSeparators(a) + "/" + b; }
 
 function File(path) {
   if (!(this instanceof File)) return new File(path);
@@ -285,14 +292,42 @@ function Folder(path) {
   if (!(this instanceof Folder)) return new Folder(path);
   this.__path = path === undefined ? "" : __str(path);
 }
+
+// ECMAScript's legacy case canonicalisation (what a `/i` regular expression compares with): the
+// upper case form when it is one code unit, and not an ASCII letter for a non-ASCII one.
+function __canon(ch) {
+  var u = ch.toUpperCase();
+  if (u.length !== 1) return ch;
+  if (ch.charCodeAt(0) >= 128 && u.charCodeAt(0) < 128) return ch;
+  return u;
+}
+
+// A case-insensitive `*` / `?` file mask match in time bounded by mask × name length (a
+// regular expression of `.*` runs backtracks combinatorially on overlapping wildcards).
+function __globMatch(mask, name) {
+  // Wildcards run over the original name (lowercasing it can change its length: "İ" becomes
+  // two code units); literal characters compare one at a time, case-insensitively as `/i` does
+  // ("ς" and "σ" and "Σ" match each other).
+  var p = mask, s = name;
+  var i = 0, j = 0, star = -1, mark = 0;
+  while (j < s.length) {
+    if (i < p.length && (p[i] === "?" || p[i] === s[j] || __canon(p[i]) === __canon(s[j]))) { i++; j++; }
+    else if (i < p.length && p[i] === "*") { star = i++; mark = j; }
+    else if (star !== -1) { i = star + 1; j = ++mark; }
+    else return false;
+  }
+  while (i < p.length && p[i] === "*") i++;
+  return i === p.length;
+}
+
 Folder.prototype = {
   constructor: Folder,
   get fsName() { return this.__path; },
   get fullName() { return this.__path; },
   get absoluteURI() { return this.__path; },
-  get name() { return this.__path.replace(/[\/\\]+$/, "").split(/[\/\\]/).pop(); },
+  get name() { return __trimPathSeparators(this.__path).split(/[\/\\]/).pop(); },
   get displayName() { return this.name; },
-  get path() { var p = this.__path.replace(/[\/\\]+$/, "").split(/[\/\\]/); p.pop(); return p.join("/"); },
+  get path() { var p = __trimPathSeparators(this.__path).split(/[\/\\]/); p.pop(); return p.join("/"); },
   get parent() { return new Folder(this.path); },
   get exists() { return JSON.parse(__file("isDir", this.__path)) === true; },
   toString: function () { return this.__path; },
@@ -303,10 +338,7 @@ Folder.prototype = {
     var out = [];
     for (var i = 0; i < names.length; i++) {
       var n = names[i];
-      if (typeof mask === "string" && mask !== "*") {
-        var re = new RegExp("^" + mask.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$", "i");
-        if (!re.test(n.split(/[\/\\]/).pop())) continue;
-      }
+      if (typeof mask === "string" && mask !== "*" && !__globMatch(mask, n.split(/[\/\\]/).pop())) continue;
       var isDir = JSON.parse(__file("isDir", n));
       var f = isDir ? new Folder(n) : new File(n);
       if (typeof mask === "function" && !mask(f)) continue;
@@ -418,7 +450,7 @@ function __callable(o) {
   delete f.length;
   Object.setPrototypeOf(f, Object.getPrototypeOf(o));
   var keys = Object.keys(o);
-  for (var i = 0; i < keys.length; i++) f[keys[i]] = o[keys[i]];
+  for (const elem of keys) f[elem] = o[elem];
   var self = new Proxy(f, {
     get: __attr.get,
     apply: function (t, thisArg, args) { return self.property(args[0]); },
@@ -429,7 +461,7 @@ function __callable(o) {
 // 1-based collections with `[n]` access.
 var __coll = {
   get: function (t, k, r) {
-    if (typeof k === "string" && /^[0-9]+$/.test(k)) return t.__at(parseInt(k, 10));
+    if (typeof k === "string" && /^[0-9]+$/.test(k)) return t.__at(Number.parseInt(k, 10));
     return Reflect.get(t, k, r);
   },
 };
@@ -471,7 +503,7 @@ function MarkerValue(comment, chapter, url, frameTarget, cuePointName, params) {
 }
 MarkerValue.prototype.getParameters = function () {
   var o = {};
-  for (var i = 0; i < this.__params.length; i++) o[this.__params[i][0]] = this.__params[i][1];
+  for (const elem of this.__params) o[elem[0]] = elem[1];
   return o;
 };
 MarkerValue.prototype.setParameters = function (o) {
@@ -511,8 +543,8 @@ TextDocument.prototype = {
   set text(v) { this.__text = String(v); this.__textSet = true; },
   __style: function (k, d) {
     if (k in this.__changed) return this.__changed[k];
-    if (this.__base && this.__base.first && k in this.__base.first) return this.__base.first[k];
-    if (this.__base && this.__base.para && k in this.__base.para) return this.__base.para[k];
+    if (this.__base?.first && k in this.__base.first) return this.__base.first[k];
+    if (this.__base?.para && k in this.__base.para) return this.__base.para[k];
     return d;
   },
   __set: function (k, v) { this.__changed[k] = v; },
@@ -578,14 +610,14 @@ TextDocument.prototype = {
   },
   get tsume() { return this.__style("tsume", 0); },
   set tsume(v) { this.__set("tsume", __num(v)); },
-  get boxText() { return !!(this.__base && this.__base.box_size); },
+  get boxText() { return !!this.__base?.box_size; },
   get pointText() { return !this.boxText; },
-  get boxTextSize() { return this.__base && this.__base.box_size ? this.__base.box_size.slice() : undefined; },
+  get boxTextSize() { return this.__base?.box_size ? this.__base.box_size.slice() : undefined; },
   set boxTextSize(v) {
     var p = this.boxTextPos || [0, 0];
     this.__set("box", [p[0], p[1], v[0], v[1]]);
   },
-  get boxTextPos() { return this.__base && this.__base.box_size ? this.__base.box_pos.slice() : undefined; },
+  get boxTextPos() { return this.__base?.box_size ? this.__base.box_pos.slice() : undefined; },
   get startIndent() { return this.__style("indentLeft", 0); },
   set startIndent(v) { this.__set("indentLeft", __num(v)); },
   get endIndent() { return this.__style("indentRight", 0); },
@@ -621,8 +653,44 @@ TextDocument.prototype = {
 function __propOf(layer, info) {
   if (!info) return null;
   if (info.isLayer) return layer;
+  if (info.marker) return layer.marker;
+  if (info.absent) return __absentGroup(layer, info);
   if (info.kind === "group") return info.isMask ? new MaskPropertyGroup(layer, info.uid) : new PropertyGroup(layer, info.uid);
   return new Property(layer, info.uid);
+}
+
+// A top-level slot After Effects always has and this layer does not use yet (Layer Styles before
+// any style, Data, Sets…): an empty group, so loops over `numProperties` meet no null.
+function __absentGroup(layer, info) {
+  var g = {
+    __kind: "PropertyGroup",
+    get name() { return info.name; },
+    get matchName() { return info.matchName; },
+    get propertyIndex() { return info.index; },
+    get propertyDepth() { return 1; },
+    get propertyType() { return PropertyType.NAMED_GROUP; },
+    get parentProperty() { return layer; },
+    get numProperties() { return 0; },
+    get enabled() { return true; },
+    get active() { return layer.enabled; },
+    get canSetEnabled() { return false; },
+    get isModified() { return false; },
+    get isEffect() { return false; },
+    get isMask() { return false; },
+    get elided() { return false; },
+    get selected() { return false; },
+    property: function () { return null; },
+    propertyGroup: function (n) { return n === undefined || n === 1 ? layer : null; },
+    canAddProperty: function () { return false; },
+    addProperty: function (n) { throw __err("Can not add \"" + n + "\" to \"" + info.name + "\""); },
+    toString: function () { return "[object PropertyGroup]"; },
+  };
+  // Callable like any group: `layer.property(7)(1)` is `.property(1)`, null.
+  var f = function (k) { return g.property(k); };
+  delete f.name;
+  delete f.length;
+  for (const k of Object.getOwnPropertyNames(g)) Object.defineProperty(f, k, Object.getOwnPropertyDescriptor(g, k));
+  return f;
 }
 
 function PropertyBase() {}
@@ -663,7 +731,7 @@ PropertyBase.prototype = {
   get isMask() { return !!this.__info().isMask; },
   get selected() {
     var c = __get("item", { id: this.__layer.__comp }).selectedProperties;
-    for (var i = 0; i < c.length; i++) if (c[i][0] === this.__layer.__id && c[i][1] === this.__uid) return true;
+    for (const elem of c) if (elem[0] === this.__layer.__id && elem[1] === this.__uid) return true;
     return false;
   },
   set selected(v) {
@@ -727,9 +795,8 @@ PropertyGroup.prototype.addProperty = function (name) {
   } else if (r.kind === "animator") {
     uid = __call("layer.addTextAnimator", { comp: L.__comp, layer: L.__id, properties: [] }).animator;
   } else if (r.kind === "animatorProperty") {
-    var before = this.numProperties;
-    __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
-    return this.property(before + 1);
+    var added = __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
+    return this.property(added.index);
   } else if (r.kind === "selector") {
     var n0 = this.numProperties;
     __call("layer.addTextSelector", { comp: L.__comp, layer: L.__id, animator: r.animator, kind: r.selector });
@@ -840,7 +907,7 @@ Property.prototype.property = function () { return null; };
     i = __num(i, "keyIndex");
     // Only the key asked for: fetching the whole list made every key call linear (#814).
     var r = i >= 1 && Math.floor(i) === i ? __get("keys", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid, index: i - 1 }) : null;
-    if (!r || !r.key) throw __err("keyIndex " + i + " is out of range 1.." + (r ? r.count : this.numKeys));
+    if (!r?.key) throw __err("keyIndex " + i + " is out of range 1.." + (r ? r.count : this.numKeys));
     return r.key;
   };
   // Script value → engine JSON for `prop.set` / `prop.addKey`.
@@ -851,15 +918,21 @@ Property.prototype.property = function () { return null; };
       return __get("textdoc", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid, time: time, attrs: td.__attrs() });
     }
     if (t === "SHAPE") {
-      if (!v || !v.vertices) throw __err("value must be a Shape");
+      if (!v?.vertices) throw __err("value must be a Shape");
       var n = v.vertices.length;
-      function fit(a) { var o = []; for (var i = 0; i < n; i++) o.push(a && a[i] ? [a[i][0], a[i][1]] : [0, 0]); return o; }
+      function fit(a) { var o = []; for (var i = 0; i < n; i++) o.push(a?.[i] ? [a[i][0], a[i][1]] : [0, 0]); return o; }
       return { vertices: fit(v.vertices), in_tangents: fit(v.inTangents), out_tangents: fit(v.outTangents), closed: v.closed !== false };
     }
     if (t === "LAYER_INDEX") {
-      var idx = v && v.__id !== undefined ? v.index : __num(v);
+      var idx = v?.__id !== undefined ? v.index : __num(v);
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
+    }
+    // A string parameter (a LUT or look file, a text field) takes the text, or a File's path (#3395).
+    // A hidden one (Mesh Warp's mesh) stays refused by the key setters too, as by setValue.
+    if (info.type === "string") {
+      if (info.hidden) throw __err("\"" + info.name + "\" can not be set");
+      return __str(v);
     }
     if (info.type === "enum") return __num(v) - 1;
     if (info.type === "bool") return typeof v === "boolean" ? v : __num(v) !== 0;
@@ -869,8 +942,11 @@ Property.prototype.property = function () { return null; };
     }
     if (info.dims > 1) {
       if (!(v instanceof Array)) throw __err("value must be an array of " + info.dims + " numbers");
+      // After Effects rejects an array of the wrong length instead of truncating or broadcasting it
+      // (#1936). Two values for a 3-D property stay legal, as they are in After Effects: z is 0.
+      if (v.length !== info.dims && !(info.dims === 3 && v.length === 2)) throw __err("Array is not of the correct dimension");
       var o = [];
-      for (var d = 0; d < info.dims; d++) o.push(d < v.length ? __num(v[d]) : (d === 2 ? 0 : __num(v[v.length - 1])));
+      for (var d = 0; d < info.dims; d++) o.push(d < v.length ? __num(v[d]) : 0);
       return o;
     }
     if (v instanceof Array) throw __err("value must be a number, not an array");
@@ -1172,7 +1248,7 @@ Layer.prototype = {
   },
   get selectedProperties() {
     var c = this.containingComp.__info().selectedProperties, out = [];
-    for (var i = 0; i < c.length; i++) if (c[i][0] === this.__id) out.push(__propOf(this, __get("node", { comp: this.__comp, layer: this.__id, uid: c[i][1] })));
+    for (const elem of c) if (elem[0] === this.__id) out.push(__propOf(this, __get("node", { comp: this.__comp, layer: this.__id, uid: elem[1] })));
     return out;
   },
   get parent() { var p = this.__info().parent; return p === null ? null : __layer(this.__comp, p); },
@@ -1200,7 +1276,7 @@ Layer.prototype = {
     var before = this.containingComp.__info().layers;
     __call("edit.duplicate", this.__p());
     var after = this.containingComp.__info().layers;
-    for (var i = 0; i < after.length; i++) if (before.indexOf(after[i]) < 0) return __layer(this.__comp, after[i]);
+    for (const elem of after) if (before.indexOf(elem) < 0) return __layer(this.__comp, elem);
     return null;
   },
   copyToComp: function (comp) {
@@ -1301,7 +1377,14 @@ AVLayer.prototype.constructor = AVLayer;
   }
   P.sourcePointToComp = function (p) { return pointIn(this, p, true); };
   P.compPointToSource = function (p) { return pointIn(this, p, false); };
-  P.replaceSource = function () { throw __err("replaceSource is not supported yet"); };
+  // Replace the layer's source item, keeping every layer property (After Effects'
+  // AVLayer.replaceSource). `fixExpressions` is accepted for compatibility: only AV sources are
+  // replaced, so the property tree and the layer's name stay and expressions keep resolving.
+  P.replaceSource = function (newSource, fixExpressions) {
+    if (newSource?.__id === undefined) throw __err("replaceSource needs a project item");
+    __call("layer.replaceSource", { comp: this.__comp, layers: [this.__id], item: newSource.__id, fixExpressions: !!fixExpressions });
+    return null;
+  };
   P.openInViewer = function () { __call("layer.openLayer", this.__p1()); return null; };
 })();
 
@@ -1359,7 +1442,7 @@ LayerCollection.prototype = {
     return layer;
   },
   add: function (item, duration) {
-    if (!item || item.id === undefined) throw __err("add(): expected an item");
+    if (item?.id === undefined) throw __err("add(): expected an item");
     var l = this.__new(__call("layer.addItem", { comp: this.__comp, item: item.id, time: 0 }));
     return this.__dur(l, duration);
   },
@@ -1402,15 +1485,15 @@ LayerCollection.prototype = {
   },
   precompose: function (indices, name, moveAllAttributes) {
     var ids = this.__ids(), sel = [];
-    for (var i = 0; i < indices.length; i++) sel.push(ids[indices[i] - 1]);
+    for (const elem of indices) sel.push(ids[elem - 1]);
     var r = __call("layer.precompose", { comp: this.__comp, layers: sel, name: String(name), mode: moveAllAttributes === false ? "leave" : "move" });
     return __item(r.comp);
   },
   byName: function (name) {
     var ids = this.__ids();
-    for (var i = 0; i < ids.length; i++) {
-      var l = __get("layer", { comp: this.__comp, layer: ids[i] });
-      if (l.name === name) return __layer(this.__comp, ids[i]);
+    for (const elem of ids) {
+      var l = __get("layer", { comp: this.__comp, layer: elem });
+      if (l.name === name) return __layer(this.__comp, elem);
     }
     return null;
   },
@@ -1481,7 +1564,7 @@ Item.prototype = {
   get label() { return this.__info().label; },
   set label(v) { __call("project.setLabel", { items: [this.__id], label: __num(v, "label") }); },
   get parentFolder() { return __item(this.__info().parent); },
-  set parentFolder(f) { __call("project.move", { items: [this.__id], folder: f && f.__id ? f.__id : null }); },
+  set parentFolder(f) { __call("project.move", { items: [this.__id], folder: f?.__id ? f.__id : null }); },
   get selected() { return this.__info().selected; },
   set selected(v) {
     var selection = __get("project").selection;
@@ -1503,8 +1586,11 @@ function AVItem() {}
 AVItem.prototype = Object.create(Item.prototype);
 (function () {
   function def(name, get, set) { Object.defineProperty(AVItem.prototype, name, { get: get, set: set }); }
-  def("width", function () { return this.__info().width; }, function (v) { this.__settings({ width: Math.round(__num(v, "width")) }); });
-  def("height", function () { return this.__info().height; }, function (v) { this.__settings({ height: Math.round(__num(v, "height")) }); });
+  // `anchor: 0` (top left): After Effects' width and height setters resize the frame and leave the
+  // layers at their coordinates. Re-anchoring the old frame in the new one belongs to the
+  // Composition Settings dialog, which is what `comp.settings` defaults to (#1942).
+  def("width", function () { return this.__info().width; }, function (v) { this.__settings({ width: Math.round(__num(v, "width")), anchor: 0 }); });
+  def("height", function () { return this.__info().height; }, function (v) { this.__settings({ height: Math.round(__num(v, "height")), anchor: 0 }); });
   def("pixelAspect", function () { return this.__info().pixelAspect; }, function (v) { this.__settings({ pixelAspect: __num(v) }); });
   def("duration", function () { return this.__info().duration; }, function (v) { this.__settings({ duration: __num(v, "duration") }); });
   def("frameRate", function () { return this.__info().frameRate; }, function (v) { this.__settings({ frameRate: __num(v, "frameRate") }); });
@@ -1512,7 +1598,7 @@ AVItem.prototype = Object.create(Item.prototype);
   def("hasVideo", function () { return this.__info().hasVideo; });
   def("hasAudio", function () { return this.__info().hasAudio; });
   def("footageMissing", function () { return !!this.__info().footageMissing; });
-  def("useProxy", function () { var p = this.__info().proxy; return !!(p && p.enabled); }, function (v) {
+  def("useProxy", function () { var p = this.__info().proxy; return !!p?.enabled; }, function (v) {
     if (!this.__info().proxy) throw __err("\"" + this.name + "\" has no proxy");
     __call("file.useProxy", { item: this.__id, on: !!v });
   });
@@ -1549,9 +1635,9 @@ CompItem.prototype.constructor = CompItem;
   });
   def("activeCamera", function () {
     var ids = this.__info().layers;
-    for (var i = 0; i < ids.length; i++) {
-      var l = __get("layer", { comp: this.__id, layer: ids[i] });
-      if (l.kind === "camera" && l.enabled && l.active) return __layer(this.__id, ids[i]);
+    for (const elem of ids) {
+      var l = __get("layer", { comp: this.__id, layer: elem });
+      if (l.kind === "camera" && l.enabled && l.active) return __layer(this.__id, elem);
     }
     return null;
   });
@@ -1591,7 +1677,7 @@ CompItem.prototype.constructor = CompItem;
       if (a < 1 || a > ids.length || Math.floor(a) !== a) throw __err("layer index " + a + " is out of range 1.." + ids.length);
       return __layer(this.__id, ids[a - 1]);
     }
-    if (a && a.__id !== undefined && typeof b === "number") {
+    if (a?.__id !== undefined && typeof b === "number") {
       var j = a.index + b;
       return j >= 1 && j <= ids.length ? __layer(this.__id, ids[j - 1]) : null;
     }
@@ -1604,9 +1690,9 @@ CompItem.prototype.constructor = CompItem;
   P.__controllers = function () {
     var out = [];
     (function walk(list) {
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].kind === "property" || list[i].kind === "mirror" || list[i].kind === "media") out.push(list[i]);
-        if (list[i].children) walk(list[i].children);
+      for (const elem of list) {
+        if (elem.kind === "property" || elem.kind === "mirror" || elem.kind === "media") out.push(elem);
+        if (elem.children) walk(elem.children);
       }
     })(this.__eg().controls);
     return out;
@@ -1633,7 +1719,7 @@ CompItem.prototype.constructor = CompItem;
   P.saveFrameToPng = function (time, file) {
     var f = __str(file);
     if (!f) throw __err("saveFrameToPng: missing file");
-    __file("write", f, "");
+    __file("checkWrite", f);
     __call("comp.saveFrameAs", { comp: this.__id, path: f, time: __num(time, "time") });
   };
   P.openInEssentialGraphics = function () { __call("comp.openInEssentialGraphics", { comp: this.__id }); };
@@ -1643,8 +1729,8 @@ CompItem.prototype.constructor = CompItem;
     if (!/\.[A-Za-z0-9]+$/.test(f)) f += ".ectemplate";
     if (!overwrite && JSON.parse(__file("exists", f)) === true) return false;
     if (this.__controllers().length === 0) return false;
-    // The file gate applies to templates too.
-    __file("write", f, "");
+    // The file gate applies to templates too (checked without touching the file).
+    __file("checkWrite", f);
     __call("essential.exportTemplate", { comp: this.__id, path: f });
     return true;
   };
@@ -1687,7 +1773,8 @@ Object.defineProperty(FootageItem.prototype, "mainSource", {
     return this.__mainSource;
   },
 });
-FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f) }); };
+// replace() swaps in one file, even a numbered still (replaceWithSequence brings a run), as in After Effects.
+FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: false }); };
 FootageItem.prototype.replaceWithSequence = function (f, forceAlphabetical) {
   __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: true, alphabetical: !!forceAlphabetical });
 };
@@ -1717,7 +1804,7 @@ FolderItem.prototype.constructor = FolderItem;
   Object.defineProperty(P, "numItems", { get: function () { return new ItemCollection(this.__id).length; } });
   Object.defineProperty(P, "parentFolder", {
     get: function () { return this.__id === 0 ? null : __item(this.__info().parent); },
-    set: function (f) { __call("project.move", { items: [this.__id], folder: f && f.__id ? f.__id : null }); },
+    set: function (f) { __call("project.move", { items: [this.__id], folder: f?.__id ? f.__id : null }); },
   });
   P.item = function (i) {
     var v = new ItemCollection(this.__id).__at(__num(i, "index"));
@@ -1761,7 +1848,7 @@ RenderQueueItem.prototype = {
   constructor: RenderQueueItem,
   __info: function () {
     var l = __call("renderQueue.list", {}).items;
-    for (var i = 0; i < l.length; i++) if (l[i].id === this.__id) return l[i];
+    for (const elem of l) if (elem.id === this.__id) return elem;
     throw __err("the render queue item no longer exists");
   },
   get comp() { return __item(this.__info().comp); },
@@ -1797,7 +1884,7 @@ RenderQueueItem.prototype = {
     var before = __call("renderQueue.list", {}).items.map(function (i) { return i.id; });
     __call("renderQueue.duplicate", { item: this.__id });
     var after = __call("renderQueue.list", {}).items;
-    for (var i = 0; i < after.length; i++) if (before.indexOf(after[i].id) < 0) return new RenderQueueItem(after[i].id);
+    for (const elem of after) if (before.indexOf(elem.id) < 0) return new RenderQueueItem(elem.id);
     return null;
   },
   applyTemplate: function () {},
@@ -1884,6 +1971,14 @@ Project.prototype = {
   set workingGamma(v) { __call("file.projectSettings", { workingGamma: __num(v) }); },
   get timeDisplayType() { return this.__info().timeDisplayFrames ? TimeDisplayType.FRAMES : TimeDisplayType.TIMECODE; },
   set timeDisplayType(v) { __call("file.projectSettings", { timeDisplay: v === TimeDisplayType.FRAMES ? "frames" : "timecode" }); },
+  get framesCountType() { return this.__info().displayStartFrame === 1 ? FramesCountType.FC_START_1 : FramesCountType.FC_START_0; },
+  set framesCountType(v) {
+    if (v === FramesCountType.FC_TIMECODE_CONVERSION) throw __err("framesCountType: Timecode Conversion is not supported, use FC_START_0 or FC_START_1");
+    if (v !== FramesCountType.FC_START_0 && v !== FramesCountType.FC_START_1) throw __err("Bad framesCountType value " + v);
+    __call("file.projectSettings", { frameStart: v === FramesCountType.FC_START_1 ? 1 : 0 });
+  },
+  get displayStartFrame() { return this.__info().displayStartFrame; },
+  set displayStartFrame(v) { __call("file.projectSettings", { frameStart: __num(v) }); },
   get expressionEngine() { return "javascript-1.0"; },
   set expressionEngine(v) {},
   item: function (i) {
@@ -1922,9 +2017,9 @@ Project.prototype = {
       }
     }
     var r = __call("file.import", args);
-    if (r.errors && r.errors.length) throw __err(r.errors.join("; "));
+    if (r.errors?.length) throw __err(r.errors.join("; "));
     // Composition imports create several footage items, but callers need the comp.
-    return __item(r.comps && r.comps.length ? r.comps[0] : r.items[0]);
+    return __item(r.comps?.length ? r.comps[0] : r.items[0]);
   },
   importFileWithDialog: function () { return null; },
   importPlaceholder: function (name, w, h, rate, dur) {

@@ -9,8 +9,9 @@
 
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{Comp, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
-use effectcraft_render::{EvalCtx, source_size};
+use effectcraft_project::ae_order::{self, AeChild};
+use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
+use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
 
 /// A name-or-index argument (`layer("A")`, `layer(2)`, `effect(1)`).
@@ -272,6 +273,19 @@ fn node_resp(path: String, n: &Node, index: usize) -> Resp {
     ])
 }
 
+/// A top-level slot the layer has no node for, as group data: `@marker` (the markers, built by the
+/// prelude) or `@absent` (an empty group, as After Effects shows an unused slot).
+fn slot_resp(path: &str, s: &ae_order::AeSlot, index: usize) -> Resp {
+    Resp::List(vec![
+        Resp::Str(path.into()),
+        Resp::Bool(true),
+        Resp::Str(s.name.into()),
+        Resp::Str(s.match_name.into()),
+        Resp::Num(0.0),
+        Resp::Num(index as f64),
+    ])
+}
+
 fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
     match key {
         Key::Index(i) => usize::try_from(*i).ok().filter(|i| *i >= 1).and_then(|i| g.children.get(i - 1)),
@@ -283,6 +297,9 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 .find(|n| n.match_id() == m)
                 .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(name)))
                 .or_else(|| g.children.iter().find(|n| compact(n.name()) == c || compact(n.match_id()) == c))
+                // An effect by its After Effects match name, an imported placeholder's effect id
+                // (`effect("Pseudo/0.25")`; its match id is one path segment, `Pseudo_0_25`).
+                .or_else(|| g.children.iter().find(|n| matches!(n.as_group().map(|g| &g.kind), Some(GroupKind::Effect { effect }) if effect == name)))
         }
     }
 }
@@ -297,9 +314,21 @@ impl<'a> Resolver<'a> {
         }
         self.comp(c)?.layer(LayerId(l))
     }
+    /// The evaluation context for comp `c` at time `t` seconds, or `None` when the comp does not exist.
     fn ctx_at(&self, c: u64, t: f64) -> Option<EvalCtx<'a>> {
         let comp = self.comp(c)?;
-        Some(EvalCtx { project: self.ctx.project, comp_id: ItemId(c), comp, time: Tick::from_seconds_f64(t), expr: self.ctx.expr, footage: self.ctx.footage })
+        let same_comp = c == self.ctx.comp_id.0;
+        Some(EvalCtx {
+            project: self.ctx.project,
+            comp_id: ItemId(c),
+            comp,
+            time: Tick::from_seconds_f64(t),
+            expr: self.ctx.expr,
+            footage: self.ctx.footage,
+            property_overrides: if same_comp { self.ctx.property_overrides } else { &[] },
+            media_overrides: if same_comp { self.ctx.media_overrides } else { &[] },
+            reads: self.ctx.reads,
+        })
     }
     fn prop(&self, c: u64, l: u64, path: &str) -> Option<(&'a Layer, &'a Property)> {
         let layer = self.layer(c, l)?;
@@ -311,6 +340,61 @@ impl<'a> Resolver<'a> {
 
     pub fn resolve(&self, req: &Req) -> Resp {
         self.try_resolve(req).unwrap_or(Resp::Null)
+    }
+
+    /// Resolve an ancestor from its UID path while preserving child indexing.
+    fn ancestor(&self, comp: u64, layer: u64, path: &str, up: i64) -> Option<Resp> {
+        let l = self.layer(comp, layer)?;
+        // The node's full `@uid/@uid/…` path from the layer: its ancestors are its prefixes.
+        let uid = match self.prop(comp, layer, path) {
+            Some((_, p)) => p.uid,
+            None => l.props.node(path)?.uid(),
+        };
+        let full = l.props.path_of(uid)?;
+        let segs: Vec<&str> = full.split('/').collect();
+        let up = usize::try_from(up).ok().filter(|u| *u >= 1 && *u <= segs.len())?;
+        if up == segs.len() {
+            return Some(Resp::Str("layer".into()));
+        }
+        let keep = segs.len() - up;
+        let group_path = segs.get(..keep)?.join("/");
+        let parent = match keep {
+            1 => &l.props,
+            _ => l.props.group(&segs.get(..keep - 1)?.join("/"))?,
+        };
+        let uid = segs.get(keep - 1)?.strip_prefix('@')?.parse::<u64>().ok()?;
+        let index = parent.children.iter().position(|c| c.uid() == uid)?;
+        let n = parent.children.get(index)?;
+        // A top-level group's number is After Effects' (see `ae_order`).
+        let number = if keep == 1 { ae_order::ae_index(l, n.match_id()) } else { None }.unwrap_or(index + 1);
+        Some(node_resp(group_path, n, number))
+    }
+
+    /// A child of a layer (`group` empty) or of one of its groups, by name or 1-based number.
+    fn child(&self, comp: u64, layer: u64, group: &str, key: &Key) -> Option<Resp> {
+        let l = self.layer(comp, layer)?;
+        // A layer's numbers are After Effects' (Marker is 1, unused groups keep their slot), and so
+        // are its match names (`thisLayer("ADBE Effect Parade")`, as scripts such as Karton write).
+        let slot = match key {
+            Key::Index(i) => usize::try_from(*i).ok(),
+            Key::Name(name) => ae_order::ae_index_of_match_name(l, name),
+        };
+        if group.is_empty()
+            && ae_order::ae_slots(&l.source).is_some()
+            && let Some(i) = slot
+        {
+            return Some(match ae_order::ae_child(l, i)? {
+                AeChild::Node(n) => node_resp(format!("@{}", n.uid()), n, i),
+                AeChild::Marker => slot_resp("@marker", &ae_order::MARKER, 1),
+                AeChild::Absent(s) => slot_resp("@absent", s, i),
+            });
+        }
+        let g = if group.is_empty() { &l.props } else { l.props.group(group)? };
+        let n = find_child(g, key)?;
+        let index = if group.is_empty() { ae_order::ae_index(l, n.match_id()) } else { None }
+            .unwrap_or_else(|| g.children.iter().position(|c| c.uid() == n.uid()).unwrap_or(0) + 1);
+        let path = if group.is_empty() { format!("@{}", n.uid()) } else { format!("{group}/@{}", n.uid()) };
+        Some(node_resp(path, n, index))
     }
 
     fn try_resolve(&self, req: &Req) -> Option<Resp> {
@@ -346,7 +430,7 @@ impl<'a> Resolver<'a> {
             Req::LayerInfo { comp, layer } => {
                 let c = self.comp(*comp)?;
                 let l = self.layer(*comp, *layer)?;
-                let (mut w, mut h) = source_size(project, l);
+                let (mut w, mut h) = self.ctx_at(*comp, self.ctx.time.seconds())?.source_size(l);
                 if w == 0 || h == 0 {
                     (w, h) = (c.width, c.height);
                 }
@@ -365,38 +449,8 @@ impl<'a> Resolver<'a> {
                     Resp::Bool(l.switches.video),
                 ])
             }
-            Req::Child { comp, layer, group, key } => {
-                let l = self.layer(*comp, *layer)?;
-                let g = if group.is_empty() { &l.props } else { l.props.group(group)? };
-                let n = find_child(g, key)?;
-                let index = g.children.iter().position(|c| c.uid() == n.uid()).unwrap_or(0) + 1;
-                let path = if group.is_empty() { format!("@{}", n.uid()) } else { format!("{group}/@{}", n.uid()) };
-                node_resp(path, n, index)
-            }
-            Req::Ancestor { comp, layer, path, up } => {
-                let l = self.layer(*comp, *layer)?;
-                // The node's full `@uid/@uid/…` path from the layer: its ancestors are its prefixes.
-                let uid = match self.prop(*comp, *layer, path) {
-                    Some((_, p)) => p.uid,
-                    None => l.props.node(path)?.uid(),
-                };
-                let full = l.props.path_of(uid)?;
-                let segs: Vec<&str> = full.split('/').collect();
-                let up = usize::try_from(*up).ok().filter(|u| *u >= 1 && *u <= segs.len())?;
-                if up == segs.len() {
-                    return Some(Resp::Str("layer".into()));
-                }
-                let keep = segs.len() - up;
-                let group_path = segs.get(..keep)?.join("/");
-                let parent = match keep {
-                    1 => &l.props,
-                    _ => l.props.group(&segs.get(..keep - 1)?.join("/"))?,
-                };
-                let uid = segs.get(keep - 1)?.strip_prefix('@')?.parse::<u64>().ok()?;
-                let index = parent.children.iter().position(|c| c.uid() == uid)?;
-                let n = parent.children.get(index)?;
-                node_resp(group_path, n, index + 1)
-            }
+            Req::Child { comp, layer, group, key } => return self.child(*comp, *layer, group, key),
+            Req::Ancestor { comp, layer, path, up } => return self.ancestor(*comp, *layer, path, *up),
             Req::PropInfo { comp, layer, path } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let dims = prop_dims(l, p);
@@ -408,7 +462,10 @@ impl<'a> Resolver<'a> {
                         Some(g) => l.props.group(g)?,
                         None => &l.props,
                     };
-                    g.children.iter().position(|n| format!("@{}", n.uid()) == last).map(|i| i + 1)
+                    let i = g.children.iter().position(|n| format!("@{}", n.uid()) == last)?;
+                    // A top-level property (an enabled Time Remap) has After Effects' number.
+                    let top = if parent.is_none() { g.children.get(i).and_then(|n| ae_order::ae_index(l, n.match_id())) } else { None };
+                    Some(top.unwrap_or(i + 1))
                 });
                 Resp::List(vec![
                     Resp::Str(p.name.clone()),
@@ -464,7 +521,7 @@ impl<'a> Resolver<'a> {
                         }
                     }
                     _ => {
-                        let (w, h) = source_size(project, l);
+                        let (w, h) = ctx.source_size(l);
                         [0.0, 0.0, w as f64, h as f64]
                     }
                 };
@@ -498,7 +555,12 @@ impl<'a> Resolver<'a> {
             Req::SourceInfo { comp, layer } => {
                 let c = self.comp(*comp)?;
                 let l = self.layer(*comp, *layer)?;
-                let it = project.item(l.source.item()?)?;
+                let ctx = self.ctx_at(*comp, self.ctx.time.seconds())?;
+                let item = match &l.source {
+                    LayerSource::Footage { item } => ctx.media_item(l, *item),
+                    _ => l.source.item()?,
+                };
+                let it = project.item(item)?;
                 let (kind, aspect, frame, duration) = match &it.kind {
                     ItemKind::Comp(nc) => ("comp", nc.pixel_aspect, nc.frame_duration().seconds(), nc.duration.seconds()),
                     ItemKind::Footage(f) => ("footage", f.pixel_aspect, f.frame_rate.frame_duration().seconds(), f.duration.seconds()),
