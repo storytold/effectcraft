@@ -75,6 +75,10 @@ solid, a folder, a Levels and a Glow effect with expressions). Every After Effec
 the working space's ICC profile (HP sRGB IEC61966-2.1 for the default) in a JSON settings chunk;
 the one `Utf8` chunk of this file that held a profile was replaced by `{}`, and nothing else was
 changed. The tests in `tests/it/import/synthetic.rs` damage copies of it and need no other file.
+`tests/fixtures/text-synthetic.aep` is the other: made in After Effects 2026 the same way (working
+space None, nothing changed after the save), one composition with two text layers that hold a
+text animator's Stroke Opacity (static and keyed) and Source Text expressions (enabled and
+disabled); `tests/it/import/text_synthetic.rs` reads it (#3170).
 
 `tests/fixtures/ai-mask-3099.aep` (131 KB, #3099) is the second: four hand-written one-page PDFs
 named `.ai` with distinct page boxes, placed in a composition, one of them with two masks under a

@@ -26,7 +26,7 @@ use crate::import::props::{AnchorUnit, import_transform};
 use crate::import::report::{Collector, ImportReport, LossCategory};
 use crate::import::shapes::import_shapes;
 use crate::import::styles::import_layer_styles;
-use crate::import::text::{report_text_extras, text_doc};
+use crate::import::text::{import_source_text_expression, report_text_extras, text_doc};
 use crate::import::text_anim::import_animators;
 use crate::import::time::{TimeMap, frame_rate};
 
@@ -707,8 +707,8 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
     }
 }
 
-/// The Source Text of a text layer from its text document, and the reports of what is not
-/// imported.
+/// The Source Text of a text layer from its text document and its expression, and the reports
+/// of what is not imported.
 fn import_source_text(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, cx: &mut Ctx<'_>) {
     match layer.text_document() {
         Some(doc) => {
@@ -720,6 +720,7 @@ fn import_source_text(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, cx: &
         }
         None => cx.col.lose(LossCategory::DamagedData, format!("{what}: the text document is unreadable, the layer is imported with empty text")),
     }
+    import_source_text_expression(layer, l.props.prop_mut("text/sourceText"), what, &mut cx.col);
     report_text_extras(layer, what, &mut cx.col);
 }
 
