@@ -515,7 +515,6 @@ fn spawn(
     }
 }
 
-/// The notice kept next to `m`'s weights.
 /// Forget the lane's error if it is `id`'s: verified weights for that model are now in place, so
 /// a failed download or load of it no longer stands. Only retrying the chosen model cleared it,
 /// so after a failed download of a model that wasn't chosen yet, `models` kept reporting the
@@ -529,6 +528,7 @@ fn clear_error_of(lane: &Arc<Mutex<Status>>, id: &str) {
     });
 }
 
+/// The notice kept next to `m`'s weights.
 fn notice_path(dir: &Path, m: &ModelInfo) -> PathBuf {
     dir.join(format!("{}.NOTICE.txt", m.file_name))
 }
