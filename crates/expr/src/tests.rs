@@ -2025,6 +2025,7 @@ fn an_expression_cant_change_the_prelude_for_the_next() {
     }
 }
 
+mod ae_layer_order;
 mod property_group;
 
 /// Timing harness for the prelude's cost on the evaluation path. Ignored: it is a measurement, not
