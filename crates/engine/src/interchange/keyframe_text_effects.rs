@@ -273,6 +273,7 @@ pub(crate) const UNITS: &[(&str, &str, &str)] = &[
     ("ec.distort.wavewarp", "width", "percent"),
     ("ec.distort.wavewarp", "speed", "pixels"),
     ("ec.generate.fourcolor", "blend", "percent"),
+    ("ec.generate.fourcolor", "jitter", "percent"),
     ("ec.generate.advancedlightning", "coreSettings/coreRadius", ""),
     ("ec.generate.advancedlightning", "glowSettings/glowRadius", "percent"),
     ("ec.generate.advancedlightning", "alphaObstacle", "pixels"),

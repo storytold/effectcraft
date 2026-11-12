@@ -743,8 +743,6 @@ mod tests {
         ("ec.generate.beam", "endThickness", 3475),
         ("ec.generate.grid", "border", 3476),
         ("ec.stylize.scatter", "amount", 3477),
-        ("ec.generate.fourcolor", "blend", 3478),
-        ("ec.generate.fourcolor", "jitter", 3479),
         ("ec.color.changecolor", "hueTransform", 3480),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),

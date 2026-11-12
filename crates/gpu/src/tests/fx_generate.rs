@@ -167,6 +167,8 @@ fn generators() {
     effect_case("ec.generate.fourcolor", &[]);
     effect_case("ec.generate.fourcolor", &[("blend", n(40.0)), ("jitter", n(50.0)), ("opacity", n(80.0)), ("blendingMode", e(3))]);
     effect_case("ec.generate.fourcolor", &[("blend", n(600.0)), ("blendingMode", e(16)), ("positionsColors/point2", pt(30.0, 20.0))]);
+    // #3478, #3479: the top of After Effects' ranges.
+    effect_case("ec.generate.fourcolor", &[("blend", n(10000.0)), ("jitter", n(500.0))]);
 }
 
 #[test]

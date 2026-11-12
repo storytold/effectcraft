@@ -9,8 +9,9 @@ use serde_json::{Value, json};
 
 use crate::Session;
 
-/// (issue, effect, parameter path, lowest, highest): the ends of After Effects' valid range,
-/// in EffectCraft's units, each outside the range the effect accepted before the issue.
+/// (issue, effect, parameter path, lowest, highest): the ends of the range the effect now accepts,
+/// in EffectCraft's units: After Effects' valid range, or wider where EffectCraft already was.
+/// At least one end of each is outside the range accepted before the issue.
 #[rustfmt::skip]
 const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3487, "ec.color.levelsic", "rgb/rgbInBlack", -10000.0, 10000.0),
@@ -38,6 +39,8 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3489, "ec.color.levelsic", "alpha/alphaOutBlack", -10000.0, 10000.0),
     (3490, "ec.color.levelsic", "alpha/alphaOutWhite", -10000.0, 10000.0),
     (3491, "ec.color.levelsic", "alpha/alphaGamma", 0.0, 10.0),
+    (3478, "ec.generate.fourcolor", "blend", 1.0, 10000.0),
+    (3479, "ec.generate.fourcolor", "jitter", 0.0, 500.0),
 ];
 
 fn path(effect: &str, param: &str) -> String {
