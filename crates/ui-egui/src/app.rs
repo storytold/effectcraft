@@ -97,6 +97,8 @@ impl EffectcraftApp {
             gpu_failure_applied: None,
             footage_watcher: None,
             footage_watch_key: None,
+            lut_watcher: None,
+            lut_generation: effectcraft_engine::lut_reload::generation(),
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
             file_dialogs: FileDialogsUp::default(),

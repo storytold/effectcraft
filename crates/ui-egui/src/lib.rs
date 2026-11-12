@@ -373,6 +373,10 @@ pub struct EffectcraftApp {
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
     footage_watch_key: Option<(u64, String, bool)>,
+    /// The worker that stamps the LUT files in use ([`Self::tick_lut_files`], #3493).
+    lut_watcher: Option<effectcraft_engine::lut_reload::Watcher>,
+    /// The LUT generation the frames kept were rendered at ([`effectcraft_engine::lut_reload::generation`]).
+    lut_generation: u64,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,

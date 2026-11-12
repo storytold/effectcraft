@@ -128,7 +128,7 @@ impl EffectcraftApp {
             frame: 0,
             scale: (scale * 1000.0).round() as u32,
             view: self.view_hash(comp),
-            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp(),
+            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp() ^ self.lut_stamp(),
         }
     }
 
@@ -140,6 +140,13 @@ impl EffectcraftApp {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut h);
         h.finish() | 1
+    }
+
+    /// Changes when a LUT file in use changed on disk (#3493): the frame on screen and the ones
+    /// still rendering were made with the old LUT, so the new ones must not share their keys
+    /// (the viewers show a frame again only when its key changes). 0 until a LUT file changes.
+    fn lut_stamp(&self) -> u64 {
+        self.lut_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15)
     }
 
     /// The frame series the viewer of `comp` shows now (its scale, view and options, for the
@@ -236,5 +243,46 @@ impl EffectcraftApp {
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
         request(&self.frames, &self.render_source(), key, comp, t, opts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// #3493: the viewer shows the frame again once the LUT file it was graded with changes,
+    /// though its key was otherwise the same (same project revision, frame and options).
+    #[test]
+    fn the_viewer_shows_a_lut_file_changed_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let lut = dir.path().join("viewer.cube");
+        let write = |text: &str, secs: u64| {
+            std::fs::write(&lut, text).unwrap();
+            let f = std::fs::File::options().write(true).open(&lut).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+        };
+        write("LUT_1D_SIZE 2\n0 0 0\n0 0 0\n", 1_000);
+        let mut session = effectcraft_engine::Session::default();
+        session.execute("comp.new", serde_json::json!({"width": 64, "height": 36, "duration": 2})).unwrap();
+        session.execute("layer.newSolid", serde_json::json!({"color": "#808080"})).unwrap();
+        session.execute("effect.apply", serde_json::json!({"layer": 1, "effect": "Apply Color LUT"})).unwrap();
+        session.execute("prop.set", serde_json::json!({"layer": 1, "path": "effects/#1/lut", "value": lut.to_string_lossy()})).unwrap();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| crate::EffectcraftApp::new(session));
+        let centre = |h: &egui_kittest::Harness<'_, crate::EffectcraftApp>| {
+            h.state().viewer_image.as_ref().map(|img| img.pixels[img.pixels.len() / 2 + img.size[0] / 2].r())
+        };
+        let settle = |h: &mut egui_kittest::Harness<'_, crate::EffectcraftApp>, want: u8| {
+            for _ in 0..400 {
+                h.step();
+                if centre(h) == Some(want) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("the viewer shows {:?}, not {want}", centre(h));
+        };
+        settle(&mut harness, 0);
+        write("LUT_1D_SIZE 2\n1 1 1\n1 1 1\n", 2_000);
+        // (what the app's watcher does every two seconds)
+        effectcraft_engine::lut_reload::check();
+        settle(&mut harness, 255);
     }
 }

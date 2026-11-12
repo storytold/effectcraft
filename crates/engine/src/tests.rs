@@ -30,6 +30,7 @@ mod keylight;
 mod legacy_analysis_keys;
 mod limits;
 mod lottie;
+mod lut_files;
 mod m137;
 mod m145;
 mod markers;
