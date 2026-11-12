@@ -18,7 +18,7 @@ var selectorValue = [100, 100, 100];
 
 // Request ops (must match runtime.rs).
 var __COMP = 0, __COMPNAME = 1, __LAYER = 2, __LINFO = 3, __CHILD = 4, __PINFO = 5, __VALUE = 6, __XFORM = 7, __RECT = 8, __MARKERS = 9, __DOC = 10;
-var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15, __ANCESTOR = 16;
+var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15, __ANCESTOR = 16, __SRCTIME = 18;
 
 function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   time = t;
@@ -744,6 +744,11 @@ Layer.prototype = {
   fromCompVec: function (p, t) { return __m3v(this.__x(t)[1], __v(p)); },
   toWorldVec: function (p, t) { return __m4(this.__x(t)[2], __v(p), true); },
   fromWorldVec: function (p, t) { return __m4(this.__x(t)[3], __v(p), true); },
+  // The layer's source time at comp time `t` (default: now): Time Remap's value when enabled, else
+  // the layer time through its start and stretch, as the layer is drawn (`EvalCtx::source_time`).
+  sourceTime: function (t) {
+    return __h(__SRCTIME, this.__c, this.__l, t === undefined ? time : __v(t));
+  },
   sourceRectAtTime: function (t, includeExtents) {
     var r = __h(__RECT, this.__c, this.__l, t === undefined ? time : t, !!includeExtents);
     return { top: r[0], left: r[1], width: r[2], height: r[3] };

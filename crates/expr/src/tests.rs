@@ -2049,6 +2049,7 @@ fn an_expression_cant_change_the_prelude_for_the_next() {
 
 mod ae_layer_order;
 mod property_group;
+mod source_time;
 
 /// Timing harness for the prelude's cost on the evaluation path. Ignored: it is a measurement, not
 /// an assertion. `cargo test -p effectcraft-expr --release --lib bench_evaluation -- --ignored
