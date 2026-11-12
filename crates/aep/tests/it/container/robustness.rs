@@ -720,6 +720,7 @@ fn extreme_values_in_the_batch_3_fields() {
         file_size: 0,
         audio_sample_rate: None,
         is_sequence: true,
+        psd_layer: None,
     };
     for (num, den, rate) in [(3i64, 30i64, 30u32), (3, 0, 30), (-3, 30, 30), (i64::MAX, 1, u32::MAX), (i64::MIN, -1, u32::MAX), (1, i64::MAX, 1), (0, 1, 0)] {
         let f = Footage { duration: Some(Rational { num, den }), native_frame_rate: rate, ..base.clone() };

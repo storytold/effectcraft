@@ -378,6 +378,34 @@ struct Item {
     range: Range<usize>,
     rtl: bool,
     glyphs: Vec<ShapedGlyph>,
+    /// Whether the glyphs' clusters never decrease (`Some(true)`) or never increase
+    /// (`Some(false)`) along `glyphs`: the glyphs of a cluster range are then contiguous.
+    cluster_order: Option<bool>,
+}
+
+impl Item {
+    fn new(range: Range<usize>, rtl: bool, glyphs: Vec<ShapedGlyph>) -> Self {
+        let cluster_order = if glyphs.windows(2).all(|w| w[0].cluster <= w[1].cluster) {
+            Some(true)
+        } else if glyphs.windows(2).all(|w| w[0].cluster >= w[1].cluster) {
+            Some(false)
+        } else {
+            None
+        };
+        Self { range, rtl, glyphs, cluster_order }
+    }
+
+    /// The glyphs whose cluster lies in `run`, in glyph order, found by bisection when the clusters
+    /// are ordered (a line of a long paragraph otherwise scanned the whole item).
+    fn glyphs_in(&self, run: &Range<usize>) -> impl Iterator<Item = &ShapedGlyph> {
+        let g = &self.glyphs;
+        let (lo, hi) = match self.cluster_order {
+            Some(true) => (g.partition_point(|x| x.cluster < run.start), g.partition_point(|x| x.cluster < run.end)),
+            Some(false) => (g.partition_point(|x| x.cluster >= run.end), g.partition_point(|x| x.cluster >= run.start)),
+            None => (0, g.len()),
+        };
+        g[lo..hi].iter().filter(|x| run.contains(&x.cluster))
+    }
 }
 
 fn upper_single(c: char) -> char {
@@ -929,7 +957,7 @@ impl<'a> Para<'a> {
                 idx.reverse();
             }
             for k in idx {
-                for g in self.items[k].glyphs.iter().filter(|g| run.contains(&g.cluster)) {
+                for g in self.items[k].glyphs_in(&run) {
                     let st = &self.runs[g.run].1;
                     let x0 = pen;
                     pen += g.pre;
@@ -990,9 +1018,10 @@ impl<'a> Para<'a> {
             }
         }
         // end of line caret
-        let end_x = match self.chars.iter().rev().find(|c| c.0 < r.end && c.0 >= r.start) {
+        let last_char = self.chars.partition_point(|c| c.0 < r.end).checked_sub(1).and_then(|i| self.chars.get(i)).filter(|c| c.0 >= r.start);
+        let end_x = match last_char {
             Some(c) => {
-                let cs = cluster_starts.iter().rev().find(|s| **s <= c.0).copied();
+                let cs = cluster_starts.partition_point(|s| *s <= c.0).checked_sub(1).and_then(|i| cluster_starts.get(i)).copied();
                 match cs.and_then(|s| extents.get(&s)) {
                     Some(&(x0, x1, rtl)) => {
                         if rtl {
@@ -1095,7 +1124,7 @@ fn build_items(text: &str, chars: &[CharInfo], runs: &[(Range<usize>, TextStyle)
         let mut glyphs = shape_item(&sub, rtl, face, size, style, si, form);
         space_item(&mut glyphs, style, text, true);
         let end = if j < chars.len() { chars[j].0 } else { text.len() };
-        items.push(Item { range: chars[i].0..end, rtl, glyphs });
+        items.push(Item::new(chars[i].0..end, rtl, glyphs));
         i = j;
     }
     items

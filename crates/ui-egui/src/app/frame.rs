@@ -151,7 +151,11 @@ impl EffectcraftApp {
                         self.ui.status = e;
                     }
                 }
-                effectcraft_engine::Event::PurgeCaches => self.frames.clear(),
+                effectcraft_engine::Event::PurgeCaches => {
+                    self.frames.clear();
+                    // (frames made after it get keys of their own: see `Self::purge_stamp`)
+                    self.purges = self.purges.wrapping_add(1);
+                }
                 effectcraft_engine::Event::CopyImage { width, height, rgba } => {
                     if let Err(e) = copy_image(ctx, width, height, &rgba) {
                         self.ui.status = e;
