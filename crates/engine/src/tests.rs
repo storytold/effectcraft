@@ -14,6 +14,7 @@ mod crypto_pick;
 mod delete_keys;
 mod disk_cache;
 mod display_pass;
+mod effect_ranges;
 mod effects;
 mod essential;
 mod essential_more;

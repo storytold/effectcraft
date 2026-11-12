@@ -259,23 +259,12 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         Conv::Checkbox => Kind::EffectBool,
         // Handled above.
         Conv::LayerRef { .. } | Conv::Skip => return,
-        Conv::Percent { valid_max } => {
+        Conv::Percent { valid_max } | Conv::Plain { valid_max } | Conv::Factor { valid_max, .. } => {
             if !checked(valid_max, col) {
                 return;
             }
-            Kind::EffectNumber(100.0 / valid_max)
-        }
-        Conv::Plain { valid_max } => {
-            if !checked(valid_max, col) {
-                return;
-            }
-            Kind::EffectNumber(1.0)
-        }
-        Conv::Factor { valid_max, factor } => {
-            if !checked(valid_max, col) {
-                return;
-            }
-            Kind::EffectNumber(factor)
+            let Some(scale) = m.conv.number_scale() else { return };
+            Kind::EffectNumber(scale)
         }
     };
     // Grouped parameters are addressed by path (`master/exposure`).
