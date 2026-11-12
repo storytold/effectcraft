@@ -1650,6 +1650,8 @@ impl Inner {
         crate::exr_channels::count_decode(false);
         match crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes)) {
             Ok(img) => Ok(dynamic_to_image(&img, op)),
+            // Over the size limit: the layered fallback would allocate its planes anyway.
+            Err(e @ image::ImageError::Limits(_)) => Err(MediaError::Decode(format!("{path}: {e}"))),
             // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
             Err(e) => match crate::exr_channels::layered_image(&bytes) {
                 Some(img) => Ok(dynamic_to_image(&img, op)),

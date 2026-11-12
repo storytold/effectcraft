@@ -56,6 +56,29 @@ pub struct MediaOverride {
     pub(crate) item: ItemId,
 }
 
+/// The most pixels a solid layer's buffer holds (as the other layer buffers are held to).
+const MAX_SOLID_PIXELS: f64 = 16.0e6;
+
+/// The scale and whole-pixel size of a `width`×`height` solid rendered at `scale`, lowered until
+/// the rounded size (each side at least one pixel) is within [`MAX_SOLID_PIXELS`].
+pub(crate) fn solid_size(width: u32, height: u32, mut scale: f64) -> (f64, u32, u32) {
+    let size = |s: f64| (((width as f64 * s).ceil() as u32).max(1), ((height as f64 * s).ceil() as u32).max(1));
+    // Rounding up leaves an elongated solid over the cap after one step; each step shrinks the
+    // overshoot geometrically, so a few are enough.
+    for i in 0..64 {
+        let (w, h) = size(scale);
+        let area = w as f64 * h as f64;
+        if area <= MAX_SOLID_PIXELS {
+            break;
+        }
+        // The first step is the exact area ratio; later ones undershoot a little so rounding up
+        // cannot leave the size stuck just over the cap.
+        scale *= (MAX_SOLID_PIXELS / area).sqrt() * if i == 0 { 1.0 } else { 0.99 };
+    }
+    let (w, h) = size(scale);
+    (scale, w, h)
+}
+
 impl MediaOverride {
     /// A Media Replacement of `layer`'s footage by `item`.
     pub fn new(layer: LayerId, item: ItemId) -> Self {
@@ -757,6 +780,15 @@ impl<'a> Renderer<'a> {
             return;
         }
         let Some(fx) = layer.effects() else { return };
+        // The LUT files the stack reads go to this render's files: a frame on disk made with one
+        // that changed since is not used (#3493).
+        if let Some(log) = self.reads {
+            for g in fx.groups().take(limit).filter(|g| g.enabled) {
+                for f in super::reads::lut_files(ctx, layer, g) {
+                    log.note(f);
+                }
+            }
+        }
         let lt = layer.layer_time(ctx.time);
         let layer_size = ctx.effect_bounds(layer).0;
         // #659 / #1205: an authored layer's buffer spans only its painted content. Effects that
@@ -890,8 +922,9 @@ impl<'a> Renderer<'a> {
         match &layer.source {
             LayerSource::Solid { item } => {
                 let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
-                let w = ((sol.width as f64 * s).ceil() as u32).max(1);
-                let h = ((sol.height as f64 * s).ceil() as u32).max(1);
+                // One colour: a solid larger than MAX_SOLID_PIXELS is made at a lower scale (the
+                // buffer carries it) instead of allocating gigabytes for a uniform plane.
+                let (s, w, h) = solid_size(sol.width, sol.height, s);
                 if layer.switches.adjustment {
                     return Some(Buf { img: Image::filled(w, h, [1.0; 4]), offset: [0.0; 2], scale: s });
                 }

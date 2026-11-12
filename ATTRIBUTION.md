@@ -133,7 +133,9 @@ configuration from these Apache-2.0 projects:
 
 | Asset | Author | Source | Licence |
 |---|---|---|---|
+| `crates/engine/src/tests/fixtures/analysed-0.24.ecproj` | arnav-hiwarkar | Original work, synthetic project keyed by EffectCraft 0.24.1 | MIT OR Apache-2.0 |
 | `crates/engine/src/tests/fixtures/object-matte-0.22.ecproj` | lisn0 | Original work, synthetic project saved by EffectCraft 0.22.0 | MIT OR Apache-2.0 |
+| `crates/engine/src/tests/fixtures/tracked-0.22.ecproj` | arnav-hiwarkar | Original work, synthetic project saved by EffectCraft 0.22.0 | MIT OR Apache-2.0 |
 
 ## First-party brand marks
 

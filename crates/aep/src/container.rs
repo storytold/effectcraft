@@ -44,7 +44,7 @@ pub use camera::{CameraPosition, DEFAULT_CAMERA_ZOOM};
 pub use chunk::{AepFile, Body, Chunk, LIST, NESTED_IDS, Walk};
 pub use effects::{DefinitionSource, Effect, EffectDefinitions, EffectParam, LayerRef, ParamKind, ParamValue};
 pub use error::AepError;
-pub use footage::{Footage, SequenceInfo};
+pub use footage::{Footage, PsdLayer, SequenceInfo};
 pub use header::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Quality, Rational, Renderer};
 pub use keys::{ExpressionFlags, Interpolation, KeyEase, KeyframeKind, SpatialKey};
 pub use masks::{Mask, MaskAtom, MaskMode, PathVertex, ShapePath};

@@ -26,9 +26,10 @@ use effectcraft_track::camtrack::linalg::{self, Similarity, V3};
 use effectcraft_track::camtrack::{AnalyzeOpts, CameraSolve, CameraTracks, SolveSettings, Target, TrackAnalyzer};
 use serde::Serialize;
 
+use crate::analysis::frames_key::{self, signature};
 use crate::offload::JobKind;
 use crate::tracking::lock;
-use crate::warp::{analysis_times, signature};
+use crate::warp::analysis_times;
 use crate::{Event, Session};
 
 /// Live analysis progress (serde for agents / the control channel).
@@ -124,8 +125,17 @@ fn str_of(g: &PropGroup, m: &str) -> String {
 
 /// What a tracker's tracks are made from: the layer's frames and Detailed Analysis.
 fn tracks_key(project: &Project, cid: ItemId, l: &Layer, g: &PropGroup) -> String {
+    tracks_key_of(signature(project, cid, l), g)
+}
+
+fn tracks_key_of(signature: String, g: &PropGroup) -> String {
     let detailed = effectcraft_effects::warp_stab::param(&static_params(g), "advanced/detailedAnalysis").is_some_and(Value::as_bool);
-    format!("{}{}", signature(project, cid, l), if detailed { "+detailed" } else { "" })
+    format!("{signature}{}", if detailed { "+detailed" } else { "" })
+}
+
+/// Whether the tracker's saved tracks are made from the layer's current frames and settings.
+fn tracks_match(project: &Project, cid: ItemId, l: &Layer, g: &PropGroup) -> bool {
+    frames_key::key_matches(project, cid, l, &str_of(g, TRACKS_KEY), |s, _| tracks_key_of(s, g))
 }
 
 /// Parameters of an instance from static values (the tracker's settings are not animated).
@@ -165,7 +175,7 @@ pub(crate) fn invalidate(before: &Project, after: &mut Project) -> Vec<(ItemId, 
             let old_layer = before.comp(*cid).and_then(|bc| bc.layer(l.id));
             for g in fx.groups().filter(|g| is_tracker(g)) {
                 let tracked = !str_of(g, TRACKS).is_empty();
-                if tracked && str_of(g, TRACKS_KEY) != tracks_key(after, *cid, l, g) {
+                if tracked && !tracks_match(after, *cid, l, g) {
                     clears.push((*cid, l.id, g.uid, true));
                     todo.push((*cid, l.id, g.uid));
                 } else if tracked && str_of(g, SOLVE_KEY) != ct::solve_key(&ct::settings(&static_params(g))) {
@@ -325,7 +335,7 @@ impl Session {
         let key = tracks_key(&self.project, comp, l, g);
         let settings = ct::settings(&params);
         let solve_key = ct::solve_key(&settings);
-        let tracks = ct::tracks(&params).filter(|_| str_of(g, TRACKS_KEY) == key);
+        let tracks = ct::tracks(&params).filter(|_| tracks_match(&self.project, comp, l, g));
         let n = times.len();
         let work = CamWork {
             project: self.project.clone(),
