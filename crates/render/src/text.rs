@@ -1038,11 +1038,16 @@ fn blit(dst: &mut Image, src: &Image, at: [i64; 2], mode: BlendMode) {
     use rayon::prelude::*;
     let (dw, sw) = (dst.width.max(1) as usize, src.width.max(1) as usize);
     let (dh, sh) = (dst.height as i64, src.height as i64);
+    // Only the destination rows the patch covers: [first, end).
+    let first = at[1].clamp(0, dh);
+    let end = at[1].saturating_add(sh).clamp(first, dh);
+    let Some(rows) = dst.data.get_mut(first as usize * dw..end as usize * dw) else { return };
     // Rows are independent: each destination row blends its source row (pixel order within a
     // row, and the order of passes, are as before).
-    dst.data.par_chunks_mut(dw).enumerate().for_each(|(ty, row)| {
-        let y = ty as i64 - at[1];
-        if y < 0 || y >= sh || ty as i64 >= dh {
+    rows.par_chunks_mut(dw).enumerate().for_each(|(i, row)| {
+        let ty = first + i as i64;
+        let y = ty - at[1];
+        if y < 0 || y >= sh {
             return;
         }
         let Some(srow) = src.data.get(y as usize * sw..(y as usize + 1) * sw) else { return };

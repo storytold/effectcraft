@@ -802,3 +802,15 @@ fn text_notes_the_font_files_it_draws_with() {
     assert!(files.is_complete(), "{files:?}");
     assert_eq!(files.get(&font.to_string_lossy()), Some(stamp), "{files:?}");
 }
+
+/// `blit` visits only the rows a patch covers; a patch cut by the top, the bottom, the sides, or
+/// wholly outside the image blends exactly the overlap.
+#[test]
+fn blit_blends_only_the_overlap() {
+    let patch = Image::filled(4, 4, [1.0, 1.0, 1.0, 1.0]);
+    for (at, want) in [([-2i64, -2i64], 4usize), ([2, 2], 16), ([4, 4], 4), ([6, 6], 0), ([-9, 0], 0), ([0, -9], 0), ([0, 0], 16), ([i64::MAX, i64::MAX], 0)] {
+        let mut dst = Image::new(6, 6);
+        super::blit(&mut dst, &patch, at, effectcraft_color::BlendMode::Normal);
+        assert_eq!(dst.data.iter().filter(|p| p[3] > 0.0).count(), want, "patch at {at:?}");
+    }
+}

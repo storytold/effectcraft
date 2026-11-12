@@ -201,9 +201,15 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     /// GBuf::cover, like `pad`: a bigger texture with the old one copied into place, no
     /// readback. A region the device can't allocate leaves the buffer as it is.
     fn cover(&mut self, size: [f64; 2]) {
-        // A CPU result not uploaded yet: grow it there.
+        // A CPU result not uploaded yet: grow it there, unless the grown buffer wouldn't fit a
+        // texture (the upload would fail and the result be lost: leave it as it is, as the
+        // device path does).
         if let Some(buf) = self.host.as_mut() {
-            buf.cover(size);
+            let fits =
+                effectcraft_effects::cover_plan(buf.offset, buf.scale, size, buf.img.width, buf.img.height).is_none_or(|(_, _, w, h)| self.e.g.fits(w, h));
+            if fits {
+                buf.cover(size);
+            }
             return;
         }
         let Some(mut b) = self.b.take() else { return };
@@ -217,9 +223,13 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     /// [`effectcraft_effects::Buf::align`] on the device: a texture grown left/top, the old one
     /// copied in. A size the device can't allocate leaves the buffer as it is.
     fn align(&mut self, size: [f64; 2]) {
-        // A CPU result not uploaded yet: grow it there.
+        // A CPU result not uploaded yet: grow it there if the grown buffer fits a texture.
         if let Some(buf) = self.host.as_mut() {
-            buf.align(size);
+            let fits = effectcraft_effects::align_plan(buf.offset, buf.scale, size, buf.img.width, buf.img.height)
+                .is_none_or(|(l, t)| self.e.g.fits(buf.img.width + l, buf.img.height + t));
+            if fits {
+                buf.align(size);
+            }
             return;
         }
         let Some(b) = self.b.take() else { return };
