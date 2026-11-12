@@ -930,8 +930,8 @@ pub fn specs() -> Vec<EffectSpec> {
             vec![
                 p("completion", "Transition Completion", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
                 p("direction", "Direction", num(90.0), ParamUi::Angle),
-                p("width", "Width", num(30.0), slider(2.0, 1000.0, 2.0, 200.0, 0)),
-                p("feather", "Feather", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                p("width", "Width", num(30.0), slider(1.0, 32000.0, 2.0, 200.0, 0)),
+                p("feather", "Feather", num(0.0), slider(0.0, 32000.0, 0.0, 100.0, 1)),
             ],
             venetian,
         ),

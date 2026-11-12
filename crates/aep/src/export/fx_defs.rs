@@ -736,8 +736,6 @@ mod tests {
         ("ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 3470),
         ("ec.distort.transform", "scaleHeight", 3471),
         ("ec.distort.transform", "scaleWidth", 3471),
-        ("ec.transition.venetian", "width", 3472),
-        ("ec.transition.venetian", "feather", 3473),
         ("ec.transition.radialwipe", "feather", 3474),
         ("ec.generate.beam", "startThickness", 3475),
         ("ec.generate.beam", "endThickness", 3475),
