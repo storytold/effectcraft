@@ -258,6 +258,7 @@ fn fp2_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
 // 3 CC Overbrights, 4 Color Link (alpha), 5 Color Link (blend), 6 CC Composite.
 
 // utility::Cineon::log_to_lin; c = (offset, knee, white, gamma), r = (internal black, white).
+// Version 1 takes the saved Gamma, where 1.7 gives linear output.
 fn fp2_log_to_lin(v: f32, c: vec4<f32>, r: vec2<f32>, version_2: bool) -> f32 {
     let code = v * 1023.0;
     let exposure = pow(10.0, (code - c.z) * 0.002 / 0.6);
@@ -266,7 +267,7 @@ fn fp2_log_to_lin(v: f32, c: vec4<f32>, r: vec2<f32>, version_2: bool) -> f32 {
         let root_offset = pow(c.x, 1.0 / max(c.w, 0.001));
         lin = max((pow(exposure, 1.0 / max(c.w, 0.001)) - root_offset) / max(1.0 - root_offset, 1e-6), 0.0);
     } else {
-        lin = powz(max((exposure - c.x) / max(1.0 - c.x, 1e-6), 0.0), 1.0 / max(c.w, 0.001));
+        lin = powz(max((exposure - c.x) / max(1.0 - c.x, 1e-6), 0.0), 1.7 / max(c.w, 0.01));
     }
     let k = c.y;
     if (k < 1.0 && lin > k) {
@@ -290,7 +291,7 @@ fn fp2_lin_to_log(v: f32, c: vec4<f32>, r: vec2<f32>, version_2: bool) -> f32 {
         let root_offset = pow(c.x, 1.0 / max(c.w, 0.001));
         exposure = powz(max(lin, 0.0) * (1.0 - root_offset) + root_offset, max(c.w, 0.001));
     } else {
-        exposure = powz(max(lin, 0.0), max(c.w, 0.001)) * (1.0 - c.x) + c.x;
+        exposure = powz(max(lin, 0.0), max(c.w, 0.01) / 1.7) * (1.0 - c.x) + c.x;
     }
     let code = c.z + log(max(exposure, 1e-9)) * 0.4342944819032518 * 0.6 / 0.002;
     return code / 1023.0;

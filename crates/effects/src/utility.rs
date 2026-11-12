@@ -102,6 +102,7 @@ pub(crate) struct Cineon {
     pub white: f32,
     pub ib: f32,
     pub iw: f32,
+    /// Version 2: [`cineon_gamma`]. Version 1: the saved Gamma, where 1.7 gives linear output.
     pub gamma: f32,
     pub rolloff: f32,
     pub version_2: bool,
@@ -127,7 +128,8 @@ impl Cineon {
             }
             lin
         } else {
-            effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.0, self.gamma, self.rolloff)
+            // Version 1 keeps its earlier arithmetic, so saved instances render the same bits.
+            effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.7, self.gamma, self.rolloff)
         };
         self.ib + (self.iw - self.ib) * lin
     }
@@ -145,7 +147,7 @@ impl Cineon {
             let root_offset = off.powf(1.0 / self.gamma.max(0.001));
             (lin.max(0.0) * (1.0 - root_offset) + root_offset).max(0.0).powf(self.gamma.max(0.001))
         } else {
-            lin.max(0.0).powf(self.gamma.max(0.001)) * (1.0 - off) + off
+            lin.max(0.0).powf(self.gamma.max(0.01) / 1.7) * (1.0 - off) + off
         };
         let code = self.white + exposure.max(1e-9).log10() * 0.6 / 0.002;
         code / 1023.0
@@ -170,16 +172,17 @@ pub fn cineon_gamma(params: &Params) -> f64 {
 }
 
 fn cineon(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let version_2 = ctx.params.f("version") >= 2.0;
     let c = Cineon {
         black: ctx.params.f("tenBitBlackPoint") as f32,
         white: ctx.params.f("tenBitWhitePoint") as f32,
         ib: ctx.params.f("internalBlackPoint") as f32,
         iw: ctx.params.f("internalWhitePoint") as f32,
-        gamma: cineon_gamma(ctx.params) as f32,
+        gamma: if version_2 { cineon_gamma(ctx.params) } else { ctx.params.f("gamma") } as f32,
         rolloff: ctx.params.f("highlightRolloff") as f32,
-        version_2: ctx.params.f("version") >= 2.0,
+        version_2,
     };
-    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.0, rolloff: c.rolloff, version_2: false };
+    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: c.rolloff, version_2: false };
     let kind = ctx.params.e("conversionType");
     b.img.map_straight(|v| {
         v.map(|x| match kind {
@@ -791,7 +794,7 @@ mod tests {
         assert!((v1(3.4) - v2).abs() > 1e-3, "{} vs {v2}", v1(3.4));
         // Version 1 limited the saved Gamma to 0.01: Gamma 0 raised the linear value to 170.
         let code = 684.0 / 1023.0;
-        let base = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.0, rolloff: 0.0, version_2: false }.log_to_lin(code);
+        let base = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: 0.0, version_2: false }.log_to_lin(code);
         let mut img = Image::new(1, 1);
         img.set(0, 0, [code, code, code, 1.0]);
         let zero = run("ec.utility.cineon", &[("version", num(1.0)), ("gamma", num(0.0)), ("highlightRolloff", num(0.0))], img).img.data[0][0];
@@ -831,8 +834,9 @@ mod tests {
         assert!((linear.convert(400.0 / 1023.0) - 0.10251).abs() < 1e-4);
     }
 
-    /// Saved version 1 Cineon Converter effects retain their previous values at Gamma 1.7 and
-    /// Gamma 2.4, for all three conversion types.
+    /// Saved version 1 Cineon Converter effects give the same bits as the converter before the
+    /// Version parameter (`log_to_lin` and `lin_to_log` below), at the default and custom black
+    /// and white points, for several Gammas and all three conversion types.
     #[test]
     fn cineon_converter_output_is_unchanged() {
         fn log_to_lin(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
@@ -857,27 +861,35 @@ mod tests {
             lin = lin.max(0.0).powf(gamma.max(0.01) / 1.7);
             (white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002) / 1023.0
         }
-        let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
-        for gamma in [None, Some(2.4)] {
-            for kind in 0..3 {
-                let mut img = Image::new(codes.len() as u32, 1);
-                for (x, code) in codes.iter().enumerate() {
-                    let v = code / 1023.0;
-                    img.set(x as u32, 0, [v, v, v, 1.0]);
-                }
-                let g = gamma.unwrap_or(1.7);
-                let vals = [("version", num(1.0)), ("conversionType", Value::Enum(kind)), ("gamma", num(g))];
-                let out = run("ec.utility.cineon", &vals, img);
-                let g = g as f32;
-                for (x, code) in codes.iter().enumerate() {
-                    let v = code / 1023.0;
-                    let want = match kind {
-                        0 => lin_to_log(v, g, 20.0, 95.0, 685.0),
-                        1 => log_to_lin(v, g, 20.0, 95.0, 685.0),
-                        _ => lin_to_log(log_to_lin(v, g, 20.0, 95.0, 685.0), 1.7, 20.0, 95.0, 685.0),
-                    };
-                    let got = out.img.data[x][0];
-                    assert!((want - got).abs() < 1e-6, "gamma {g}, type {kind}, code {code}: {want} vs {got}");
+        let codes = [0.0f32, 95.0, 120.0, 250.0, 400.0, 560.0, 685.0, 700.0, 800.0, 1023.0];
+        for (black, white) in [(95.0f32, 685.0f32), (120.0, 700.0)] {
+            for g in [1.7, 1.0, 2.4, 0.6, 3.4, 0.0] {
+                for kind in 0..3 {
+                    let mut img = Image::new(codes.len() as u32, 1);
+                    for (x, code) in codes.iter().enumerate() {
+                        let v = code / 1023.0;
+                        img.set(x as u32, 0, [v, v, v, 1.0]);
+                    }
+                    let vals = [
+                        ("version", num(1.0)),
+                        ("conversionType", Value::Enum(kind)),
+                        ("gamma", num(g)),
+                        ("tenBitBlackPoint", num(f64::from(black))),
+                        ("tenBitWhitePoint", num(f64::from(white))),
+                    ];
+                    let out = run("ec.utility.cineon", &vals, img);
+                    let g = g as f32;
+                    for (x, code) in codes.iter().enumerate() {
+                        let v = code / 1023.0;
+                        let want = match kind {
+                            0 => lin_to_log(v, g, 20.0, black, white),
+                            1 => log_to_lin(v, g, 20.0, black, white),
+                            _ => lin_to_log(log_to_lin(v, g, 20.0, black, white), 1.7, 20.0, 95.0, 685.0),
+                        };
+                        let got = out.img.data[x][0];
+                        // Bit for bit: a saved version 1 instance renders exactly as before.
+                        assert_eq!(want.to_bits(), got.to_bits(), "points {black}-{white}, gamma {g}, type {kind}, code {code}: {want} vs {got}");
+                    }
                 }
             }
         }
