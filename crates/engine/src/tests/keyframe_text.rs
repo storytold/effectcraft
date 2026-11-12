@@ -497,4 +497,12 @@ fn widened_effect_ranges_keep_their_keyframe_text_units() {
     let text = copy_props(&mut s, l, &["effects/#1/blend", "effects/#1/jitter"]);
     assert_eq!(unit_of(&text, "Blend"), "percent");
     assert_eq!(unit_of(&text, "Jitter"), "percent");
+    for fx in ["ec.noise.noisehls", "ec.noise.noisehlsauto"] {
+        let (mut s, l) = session();
+        s.execute("effect.apply", json!({"layer": l.0, "effect": fx})).unwrap();
+        let text = copy_props(&mut s, l, &["effects/#1/hue", "effects/#1/lightness", "effects/#1/saturation", "effects/#1/grainSize"]);
+        for (name, unit) in [("Hue", "percent"), ("Lightness", "percent"), ("Saturation", "percent"), ("Grain Size", "")] {
+            assert_eq!(unit_of(&text, name), unit, "{fx} {name}");
+        }
+    }
 }

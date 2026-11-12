@@ -41,6 +41,14 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3491, "ec.color.levelsic", "alpha/alphaGamma", 0.0, 10.0),
     (3478, "ec.generate.fourcolor", "blend", 1.0, 10000.0),
     (3479, "ec.generate.fourcolor", "jitter", 0.0, 500.0),
+    (3483, "ec.noise.noisehls", "hue", 0.0, 1000.0),
+    (3483, "ec.noise.noisehls", "lightness", 0.0, 1000.0),
+    (3483, "ec.noise.noisehls", "saturation", 0.0, 1000.0),
+    (3484, "ec.noise.noisehls", "grainSize", 0.0, 100.0),
+    (3483, "ec.noise.noisehlsauto", "hue", 0.0, 1000.0),
+    (3483, "ec.noise.noisehlsauto", "lightness", 0.0, 1000.0),
+    (3483, "ec.noise.noisehlsauto", "saturation", 0.0, 1000.0),
+    (3484, "ec.noise.noisehlsauto", "grainSize", 0.0, 100.0),
 ];
 
 fn path(effect: &str, param: &str) -> String {
