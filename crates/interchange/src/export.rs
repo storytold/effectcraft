@@ -365,7 +365,7 @@ impl Exporter<'_> {
         let mut clip = media_clip(fp::MediaRef::File { path: path.clone() }, info);
         clip.offline = f.missing;
         let bin = self.bin(it.and_then(|i| i.parent));
-        let id = self.fp.add_item(&name, fp::Label::Iris, fp::ItemKind::Media(clip), bin);
+        let id = self.fp.add_item(&name, fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), bin);
         self.media.insert(path, id);
         id
     }
@@ -384,7 +384,7 @@ impl Exporter<'_> {
                 Some(b)
             }
         };
-        let id = self.fp.add_item(name, fp::Label::Violet, fp::ItemKind::Media(clip), bin);
+        let id = self.fp.add_item(name, fp::Label::Violet, fp::ItemKind::Media(Box::new(clip)), bin);
         self.media.insert(r.path.clone(), id);
         id
     }
@@ -405,7 +405,7 @@ impl Exporter<'_> {
         );
         let clip = media_clip(fp::MediaRef::Generator(Generator::ColorMatte { color: [color[0], color[1], color[2], 1.0] }), info);
         let bin = self.bin(it.and_then(|i| i.parent));
-        let id = self.fp.add_item(&name, fp::Label::Rose, fp::ItemKind::Media(clip), bin);
+        let id = self.fp.add_item(&name, fp::Label::Rose, fp::ItemKind::Media(Box::new(clip)), bin);
         self.media.insert(key, id);
         id
     }

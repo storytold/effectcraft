@@ -75,7 +75,7 @@ fn still(p: &mut fp::Project, path: &str) -> fp::ItemId {
         identity: None,
     };
     let name = path.rsplit('/').next().unwrap().to_string();
-    p.add_item(&name, fp::Label::Iris, fp::ItemKind::Media(clip), None)
+    p.add_item(&name, fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), None)
 }
 
 /// V1: red for 2 s; V2: blue at 50 % opacity and 50 % scale; a cross dissolve from red to green

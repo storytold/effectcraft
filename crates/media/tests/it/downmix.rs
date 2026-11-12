@@ -14,6 +14,16 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/media")
 }
 
+/// Where a fixture is written before it is renamed into place. Unique per call: tests running as
+/// threads of one process share its id, and two of them asking for the same fixture before it exists
+/// must not write the same staging file.
+fn staging_path(out: &Path, name: &str, ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    out.with_file_name(format!("tmp-{}-{call}-{name}", std::process::id())).with_extension(ext)
+}
+
 /// A fixture with `layout`'s channels `names` (join order) each carrying its own sine, encoded
 /// with `codec_args`. `None` when ffmpeg is missing or cannot make it.
 fn fixture(name: &str, layout: &str, names: &[&str], freqs: &[u32], codec_args: &[&str]) -> Option<PathBuf> {
@@ -27,7 +37,7 @@ fn fixture(name: &str, layout: &str, names: &[&str], freqs: &[u32], codec_args: 
     }
     std::fs::create_dir_all(fixtures()).ok()?;
     let ext = out.extension()?.to_string_lossy().to_string();
-    let tmp = out.with_file_name(format!("tmp-{}-{name}", std::process::id())).with_extension(ext);
+    let tmp = staging_path(&out, name, &ext);
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
     let mut map = String::new();
@@ -194,6 +204,38 @@ fn aac_entry(bytes: &[u8]) -> Option<(Vec<u8>, u32)> {
         craft_media::isobmff::CodecConfig::Aac(a) => Some((a.asc.clone(), e.audio.as_ref()?.channels)),
         _ => None,
     })
+}
+
+/// A copy of the MP4 `p` whose `ac-3` sample entry names 2 channels, as ISO BMFF requires for AC-3:
+/// the real layout is in the `dac3` box. (ffmpeg writes the real count, which hides the bug.)
+fn ac3_entry_naming_two(p: &Path) -> PathBuf {
+    let mut bytes = std::fs::read(p).expect("read");
+    // the `ac-3` entry's channelcount follows its 6 reserved bytes, data reference index and
+    // 8 reserved bytes
+    let at = bytes.windows(4).position(|w| w == b"ac-3").expect("an ac-3 sample entry") + 4 + 6 + 2 + 8;
+    bytes[at..at + 2].copy_from_slice(&2u16.to_be_bytes());
+    let out = p.with_extension("entry2.mp4");
+    std::fs::write(&out, bytes).expect("write");
+    out
+}
+
+/// Two fixtures asked for at once in one process do not share a staging file.
+#[test]
+fn staging_files_are_unique_per_call() {
+    let out = fixtures().join("dm51.ac3.mp4");
+    assert_ne!(staging_path(&out, "dm51.ac3.mp4", "mp4"), staging_path(&out, "dm51.ac3.mp4", "mp4"));
+}
+
+/// AC-3 5.1 in MP4 with the spec's 2-channel sample entry keeps the centre and surrounds (#1547).
+#[test]
+fn ac3_mp4_with_a_stereo_sample_entry_still_mixes_all_six_channels() {
+    let Some(c) = cases().into_iter().find(|c| c.file == "dm51.ac3.mp4") else { return };
+    let Some(p) = fixture(c.file, c.layout, c.names, &FREQS[..c.names.len()], c.codec) else { return };
+    let two = ac3_entry_naming_two(&p);
+    let file = craft_media::isobmff::open(std::fs::read(&two).expect("read").as_slice()).expect("open");
+    let named = file.tracks.iter().flat_map(|t| &t.entries).find_map(|e| e.audio.as_ref().map(|a| a.channels));
+    assert_eq!(named, Some(2), "the copy's sample entry names 2 channels");
+    check(&c, &two);
 }
 
 fn check(c: &Case, p: &Path) {

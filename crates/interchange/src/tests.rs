@@ -60,7 +60,7 @@ fn media(p: &mut fp::Project, name: &str, path: &str, kind: filmcraft_media::Med
         proxy: None,
         identity: None,
     };
-    p.add_item(name, fp::Label::Iris, fp::ItemKind::Media(clip), bin)
+    p.add_item(name, fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), bin)
 }
 
 fn rate() -> filmcraft_time::FrameRate {
