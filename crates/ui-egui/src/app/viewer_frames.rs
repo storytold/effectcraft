@@ -285,4 +285,54 @@ mod tests {
         effectcraft_engine::lut_reload::check();
         settle(&mut harness, 255);
     }
+
+    /// #3539: a still re-saved at the same size and reloaded as changed on disk keeps the project
+    /// as it was (same revision and content key); the viewers showed the old picture, the new
+    /// frame having the key of the one on screen. A reload's purge gives the frames new keys, once.
+    #[test]
+    fn the_viewers_show_a_still_reloaded_at_the_same_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("still.png");
+        let save = |rgb: [u8; 3]| image::RgbaImage::from_pixel(64, 36, image::Rgba([rgb[0], rgb[1], rgb[2], 255])).save(&png).unwrap();
+        save([255, 0, 0]);
+        let mut session = effectcraft_host::session();
+        session.execute("comp.new", serde_json::json!({"width": 64, "height": 36, "duration": 2})).unwrap();
+        let cid = session.active_comp_id().unwrap();
+        let item = session.execute("file.import", serde_json::json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].clone();
+        session.execute("layer.addItem", serde_json::json!({"item": item})).unwrap();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| crate::EffectcraftApp::new(session));
+        let centre = |h: &egui_kittest::Harness<'_, crate::EffectcraftApp>| {
+            h.state().viewer_image.as_ref().map(|img| img.pixels[img.pixels.len() / 2 + img.size[0] / 2].r())
+        };
+        let settle = |h: &mut egui_kittest::Harness<'_, crate::EffectcraftApp>, want: u8| {
+            for _ in 0..400 {
+                h.step();
+                if centre(h) == Some(want) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("the viewer shows {:?}, not {want}", centre(h));
+        };
+        settle(&mut harness, 255);
+        // (every viewer, passive ones too, asks for its frame by this key)
+        let key = |h: &egui_kittest::Harness<'_, crate::EffectcraftApp>| h.state().frame_key(cid, 0, 1.0);
+        let before = key(&harness);
+        harness.step();
+        assert_eq!(key(&harness), before, "no purge, the same key: nothing is uploaded again");
+        // Reload Footage Changed on Disk: the app's watcher saw the file's stamp move.
+        let path = png.to_string_lossy().into_owned();
+        let stamps = |n| vec![(path.clone(), Some((n, u128::from(n))))];
+        effectcraft_engine::footage_reload::apply_stamps(&mut harness.state_mut().session, stamps(1)).unwrap();
+        save([0, 0, 255]);
+        let revision = harness.state().session.revision;
+        let reloaded = effectcraft_engine::footage_reload::apply_stamps(&mut harness.state_mut().session, stamps(2)).unwrap();
+        assert_eq!(reloaded["files"], 1, "{reloaded}");
+        assert_eq!(harness.state().session.revision, revision, "the project is as it was");
+        settle(&mut harness, 0);
+        let after = key(&harness);
+        assert_ne!(after, before, "the reloaded frame has a key of its own");
+        harness.step();
+        assert_eq!(key(&harness), after, "one new key per purge");
+    }
 }
