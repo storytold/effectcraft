@@ -205,20 +205,19 @@ fn ocio_files_render_again_from_warm_caches() {
         "OCIO Color Space Transform",
         &[("config", json!(1)), ("configFile", json!(config.to_string_lossy())), ("sourceName", json!("graded")), ("destinationName", json!("lin"))],
     );
-    assert_all(colours(&s, file), 0.0);
-    assert_all(colours(&s, custom), 0.0);
-    // (the first key of a config's layer can't know the LUTs it names before it is read)
-    assert_all(colours(&s, custom), 0.0);
-    let misses = s.layer_cache.stats().misses;
-    assert_all(colours(&s, file), 0.0);
-    assert_all(colours(&s, custom), 0.0);
-    assert_eq!(s.layer_cache.stats().misses, misses, "unchanged files keep the cached layers");
+    // A render notes the LUT the config names (a frame on disk is made of it too).
     let log = ReadLog::new();
     let mut r = s.renderer(RenderOpts::default());
     r.reads = Some(&log);
     let _ = r.comp_frame(custom.1, Tick::ZERO);
     let files = log.into_files();
     assert!(files.get(&grade.to_string_lossy()).is_some(), "the render notes the config's LUT: {files:?}");
+    assert_all(colours(&s, file), 0.0);
+    assert_all(colours(&s, custom), 0.0);
+    let misses = s.layer_cache.stats().misses;
+    assert_all(colours(&s, file), 0.0);
+    assert_all(colours(&s, custom), 0.0);
+    assert_eq!(s.layer_cache.stats().misses, misses, "unchanged files keep the cached layers");
     let generation = effectcraft_effects::lut_generation();
     write(&lut, WHITE, 2_000);
     assert_all(colours(&s, file), 1.0);

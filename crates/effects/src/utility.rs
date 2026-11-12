@@ -359,9 +359,15 @@ pub fn lut_file(src: &str) -> Option<&str> {
 }
 
 /// The files a [`lut_params`] parameter set to `src` reads: the ones its cached result was read
-/// from (an OCIO config's also the LUTs it names, and the places it looked for missing ones), else
-/// the file it names.
+/// from (an OCIO config's also the LUTs it names, and the places it looked for missing ones; an
+/// `.ocio` config not read yet is read), else the file it names.
 pub fn lut_files(src: &str) -> Vec<String> {
+    // A config not read yet is read now: the LUTs it names are its files from the first render.
+    if crate::ocio_config::cached_files(src).is_none()
+        && lut_file(src).is_some_and(|p| std::path::Path::new(p).extension().is_some_and(|e| e.eq_ignore_ascii_case("ocio")))
+    {
+        let _ = crate::ocio_config::load_config(src);
+    }
     crate::ocio_config::cached_files(src)
         .or_else(|| crate::ocio::cached_files(src))
         .or_else(|| file_cache::lock(LUTS.get()).files(src))

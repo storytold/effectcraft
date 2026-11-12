@@ -465,9 +465,10 @@ fn check_lut_files_notices_a_configs_lut() {
     let config = dir.join("config.ocio");
     std::fs::write(&config, "ocio_profile_version: 2\ncolorspaces:\n  - !<ColorSpace>\n    name: lin\n  - !<ColorSpace>\n    name: graded\n    to_reference: !<FileTransform> {src: watched.cube}\n").unwrap();
     let src = config.to_string_lossy().into_owned();
-    assert!(load_config(&src).is_ok());
+    // A config not read yet is read: its files name its LUT from the first render on.
     let files = crate::lut_files(&src);
     assert!(files.contains(&lut.to_string_lossy().into_owned()), "{files:?}");
+    assert!(load_config(&src).is_ok());
     let before = crate::check_lut_files();
     assert!(cached_files(&src).is_some(), "an unchanged config stays");
     std::fs::write(&lut, "LUT_1D_SIZE 3\n0 0 0\n0.5 0.5 0.5\n1 1 1\n").unwrap();
