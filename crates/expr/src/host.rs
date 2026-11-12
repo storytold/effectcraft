@@ -10,7 +10,7 @@
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
 use effectcraft_project::ae_order::{self, AeChild};
-use effectcraft_project::{Comp, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
+use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
 
@@ -297,6 +297,9 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 .find(|n| n.match_id() == m)
                 .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(name)))
                 .or_else(|| g.children.iter().find(|n| compact(n.name()) == c || compact(n.match_id()) == c))
+                // An effect by its After Effects match name, an imported placeholder's effect id
+                // (`effect("Pseudo/0.25")`; its match id is one path segment, `Pseudo_0_25`).
+                .or_else(|| g.children.iter().find(|n| matches!(n.as_group().map(|g| &g.kind), Some(GroupKind::Effect { effect }) if effect == name)))
         }
     }
 }
