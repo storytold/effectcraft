@@ -284,6 +284,8 @@ function bezier() {
 function seedRandom(offset, timeless) {
   __seed = offset;
   __timeless = !!timeless;
+  // Each call restarts the sequence, so the same seed gives the same numbers again within one evaluation.
+  __rc = 0;
 }
 
 function __r01() {
