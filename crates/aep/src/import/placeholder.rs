@@ -8,11 +8,12 @@
 //! The values keep After Effects' units, the ones its expressions read: sliders and angles as
 //! stored, points in layer pixels, colours RGBA 0..1, checkboxes on / off, popups as EffectCraft's
 //! 0-based items over the file's items in order (expressions read them 1-based, as After Effects
-//! does). Layer parameters name their layer. Paths and arbitrary data are not kept (reported when
-//! they hold something).
+//! does). Layer parameters name their layer (their keys and expression are reported). Paths and
+//! arbitrary data are not kept (reported when they hold something).
 //!
 //! The parameters a placeholder holds are bounded per import ([`MAX_COST`]): definitions can be
-//! shared by many instances, so a small file could otherwise ask for very many properties.
+//! shared by many instances, so a small file could otherwise ask for very many properties. Once
+//! the budget is spent, later effects without a counterpart are reported without a placeholder.
 
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
@@ -44,8 +45,6 @@ pub(crate) fn placeholder(
     let here = format!("{}: '{}' effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
     for p in params.iter().filter(|p| !carries_nothing(p)) {
         if col.placeholder_cost >= MAX_COST {
-            // Once the budget is spent nothing more is built (definitions shared by many instances
-            // would otherwise still be walked item by item).
             col.lose(LossCategory::Effects, format!("{here}: parameters past the import's {MAX_COST} placeholder parameters not kept"));
             break;
         }
@@ -65,8 +64,14 @@ pub(crate) fn placeholder(
         }
         let cost = col.placeholder_cost.saturating_add(items).saturating_add(1);
         if cost > MAX_COST {
-            col.lose(LossCategory::Effects, format!("{here}: parameter {label} not kept (past the import's {MAX_COST} placeholder parameters)"));
-            continue;
+            // The budget is spent: nothing more is built, here or in later effects (definitions
+            // shared by many instances would otherwise still be walked item by item).
+            col.lose(
+                LossCategory::Effects,
+                format!("{here}: parameter {label} and the ones after it not kept (past the import's {MAX_COST} placeholder parameters)"),
+            );
+            col.placeholder_cost = MAX_COST;
+            break;
         }
         col.placeholder_cost = cost;
         let mut prop = Property::new(ids.alloc(), &param_id(p), p.name.trim(), default).with_ui(ui);

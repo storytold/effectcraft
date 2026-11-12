@@ -92,6 +92,12 @@ pub(crate) fn import_effects<'f, 'a>(
             }
             continue;
         }
+        if found.is_none() && col.placeholder_cost >= crate::import::placeholder::MAX_COST {
+            // The import's placeholder budget is spent: the definitions (shared by many instances)
+            // are not read again. Its own line: grouped, it would read as kept.
+            col.lose(LossCategory::Effects, format!("{lost}, not kept (past the import's placeholder parameters)"));
+            continue;
+        }
         let params = defs.params(&fx);
         report_records_without_definition(&fx, &params, cx, &shown, col);
         let Some((map, spec)) = found else {

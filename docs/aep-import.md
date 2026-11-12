@@ -325,14 +325,16 @@ parameter gets the file's value:
   in After Effects, each with its value, keys and expression, in the units After Effects'
   expressions read (sliders and angles as stored, points in layer pixels, colours, checkboxes,
   popups over the file's items with separators, read 1-based; layer parameters name their layer,
-  without a record the layer itself as for Layer Control),
+  without a record the layer itself as for Layer Control, and their keys and expression are
+  reported),
   so expressions that read them (`effect("Settings")("Speed")`) keep working. A parameter's id is
   its match name (`CC Cylinder-0003`), or `param<index>` when that name is no path segment (a
   pseudo effect's `Pseudo/0.25-0001`). Paths and arbitrary data are not kept; a popup whose
   definition is borrowed, or whose default slot holds no item, and that has no value record takes
   its first item (reported). One import keeps at
   most 200 000 placeholder parameters and popup items (a popup at most 1024 items); the rest is
-  reported. A placeholder is still reported in `effects` and counted in
+  reported, and once that is spent a later effect without a counterpart arrives without a
+  placeholder (reported). A placeholder is still reported in `effects` and counted in
   `imported.placeholderEffects`; .aep export reports it and leaves it out.
 
 ## What is reported

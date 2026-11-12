@@ -153,6 +153,56 @@ fn a_hostile_placeholder_stays_bounded() {
     assert!(losses(&r, LossCategory::Effects, "Big Fx").iter().any(|d| d.contains("placeholder parameters")));
 }
 
+/// Two instances of an effect whose parameters fill the import's budget: the first keeps what fits
+/// and stops at the first parameter past it; the second is reported without a placeholder (its
+/// shared definitions are not read again).
+#[test]
+fn an_effect_past_the_spent_budget_gets_no_placeholder() {
+    let items: &'static [&'static str] = Box::leak((0..1000).map(|i| &*Box::leak(format!("I{i}").into_boxed_str())).collect::<Vec<_>>().into_boxed_slice());
+    let fx = Fx { match_name: "Big Fx", name: "Big", defs: (0..300).map(|_| popup("P", 1, items)).collect(), values: vec![], data: vec![], keys: vec![] };
+    let bytes = twice(&bytes_with(&fx), "Big Fx");
+    let mut project = effectcraft_project::Project::default();
+    let none = |_: &str| false;
+    let r = effectcraft_aep::import::import(
+        &mut project,
+        &bytes,
+        &effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) },
+    )
+    .unwrap();
+    let placeholders: Vec<usize> = project
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .filter_map(|l| l.props.sub("effects"))
+        .flat_map(|fx| fx.children.iter().filter_map(|n| n.as_group()).filter(|g| g.match_id == "Big Fx").map(|g| g.props().count()).collect::<Vec<_>>())
+        .collect();
+    // 199 popups of 1000 items (1001 each) fit in 200 000; the 200th stops the first instance.
+    assert_eq!(placeholders, [199]);
+    let found = losses(&r, LossCategory::Effects, "Big Fx");
+    assert_eq!(found.iter().filter(|d| d.contains("and the ones after it not kept")).count(), 1, "{found:?}");
+    assert!(found.iter().any(|d| d.contains("not kept (past the import's placeholder parameters)")), "{found:?}");
+}
+
+/// `bytes` with the layer's instance of `match_name` (its `tdmn` and `sspc`) repeated after it.
+fn twice(bytes: &[u8], match_name: &str) -> Vec<u8> {
+    let mut file = parse(bytes).unwrap();
+    let mut done = 0;
+    edit(&mut file.chunks, false, &mut |c, in_project_copy| {
+        let Body::List { children, .. } = &mut c.body else { return };
+        if in_project_copy {
+            return;
+        }
+        let Some(at) = children.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(match_name.as_bytes())))
+        else {
+            return;
+        };
+        let pair: Vec<Chunk<'_>> = children[at..at + 2].to_vec();
+        children.splice(at + 2..at + 2, pair);
+        done += 1;
+    });
+    assert_eq!(done, 1, "one instance");
+    write(&file).unwrap()
+}
+
 /// `bytes` with the expression `text` on the parameter record `param` (enabled: `tdb4` byte 120
 /// 1, docs/aep-format.md 3.6).
 fn with_expression(bytes: &[u8], param: &str, text: &str) -> Vec<u8> {
