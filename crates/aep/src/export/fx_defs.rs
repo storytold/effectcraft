@@ -736,8 +736,6 @@ mod tests {
         ("ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 3470),
         ("ec.distort.transform", "scaleHeight", 3471),
         ("ec.distort.transform", "scaleWidth", 3471),
-        ("ec.generate.beam", "startThickness", 3475),
-        ("ec.generate.beam", "endThickness", 3475),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
         ("ec.noise.fractal", "subSettings/subInfluence", 3485),

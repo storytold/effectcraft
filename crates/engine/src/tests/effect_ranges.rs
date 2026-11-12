@@ -55,6 +55,8 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3473, "ec.transition.venetian", "feather", 0.0, 32000.0),
     (3474, "ec.transition.radialwipe", "feather", 0.0, 32000.0),
     (3477, "ec.stylize.scatter", "amount", 0.0, 1000.0),
+    (3475, "ec.generate.beam", "startThickness", 0.0, 4000.0),
+    (3475, "ec.generate.beam", "endThickness", 0.0, 4000.0),
 ];
 
 fn path(effect: &str, param: &str) -> String {
