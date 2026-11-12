@@ -1409,10 +1409,11 @@ impl Frames {
     /// Drop every frame, and the ones still rendering when they finish: a source file changed on
     /// disk (a LUT file, #3493), and a render that started before may have read the old one.
     pub fn clear_stale(&self) {
-        self.clear();
+        // (marked first: a frame finishing while the cache is emptied is refused, not kept)
         if let Ok(mut c) = self.cache.lock() {
             c.stale_before = Some(web_time::Instant::now());
         }
+        self.clear();
     }
 
     /// The playing preview's position (`None` when no preview plays): prefetch renders the

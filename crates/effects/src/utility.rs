@@ -335,24 +335,63 @@ impl Lut {
 /// that could not be described). A file whose stamp moved is read again (#3493).
 type FileStamp = Option<(u64, Option<std::time::SystemTime>)>;
 
-/// At most this many LUTs (files and inline texts) are kept; the least recently used goes first.
-const MAX_CACHED_LUTS: usize = 32;
+/// At most this many parsed LUTs (files and inline texts) are kept, and at most
+/// [`MAX_CACHED_BYTES`] of them; the least recently used go first.
+const MAX_CACHED_LUTS: usize = 64;
+const MAX_CACHED_BYTES: usize = 512 << 20;
+
+/// At most this many LUT files are followed by [`check_lut_files`] beyond the ones whose LUT is
+/// kept: the frames made with a LUT that left the cache are still dropped when its file changes.
+const MAX_FOLLOWED_FILES: usize = 1024;
 
 /// A parsed LUT (or the failure to parse one) and what it was read from.
 struct CachedLut {
     stamp: FileStamp,
     lut: Option<Arc<Lut>>,
     used: u64,
+    /// The parsed tables and the parameter text, counted against [`MAX_CACHED_BYTES`].
+    bytes: usize,
 }
 
-/// [`load_lut`]'s cache, by parameter text.
+/// [`load_lut`]'s cache, by parameter text, and the stamp each LUT file was last read with.
 #[derive(Default)]
 struct LutCache {
     map: HashMap<String, CachedLut>,
+    files: HashMap<String, FileStamp>,
     clock: u64,
+    bytes: usize,
 }
 
-/// How often a cached LUT file was found changed on disk ([`lut_generation`]).
+impl LutCache {
+    /// Forget the LUT kept for `src`.
+    fn remove(&mut self, src: &str) {
+        if let Some(e) = self.map.remove(src) {
+            self.bytes = self.bytes.saturating_sub(e.bytes);
+        }
+    }
+
+    /// Note that the file at `path` was read with `stamp`: a different stamp than the last read's
+    /// means it changed on disk, and frames made before may show the old LUT.
+    fn read_file(&mut self, path: &str, stamp: FileStamp) {
+        if self.files.insert(path.to_string(), stamp).is_some_and(|old| old != stamp) {
+            GENERATION.fetch_add(1, Ordering::AcqRel);
+        }
+        if self.files.len() > MAX_FOLLOWED_FILES {
+            let map = &self.map;
+            self.files.retain(|p, _| map.keys().any(|src| lut_file(src) == Some(p.as_str())));
+        }
+    }
+
+    /// Keep at most [`MAX_CACHED_LUTS`] LUTs and [`MAX_CACHED_BYTES`], always the one for `keep`.
+    fn evict(&mut self, keep: &str) {
+        while self.map.len() > MAX_CACHED_LUTS || (self.bytes > MAX_CACHED_BYTES && self.map.len() > 1) {
+            let Some(oldest) = self.map.iter().filter(|(k, _)| k.as_str() != keep).min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
+            self.remove(&oldest);
+        }
+    }
+}
+
+/// How often a LUT file was found changed on disk ([`lut_generation`]).
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn lut_cache() -> std::sync::MutexGuard<'static, LutCache> {
@@ -388,17 +427,25 @@ pub fn lut_generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
 }
 
-/// Look at every LUT file in the cache (one `metadata` call each) and forget the ones that changed
-/// on disk since they were read, so the next [`load_lut`] reads them again. Returns
-/// [`lut_generation`].
+/// Look at every LUT file read (one `metadata` call each) and forget the LUTs of the ones that
+/// changed on disk since, so the next [`load_lut`] reads them again. Returns [`lut_generation`].
 pub fn check_lut_files() -> u64 {
-    let files: Vec<(String, FileStamp)> = lut_cache().map.iter().filter_map(|(src, e)| Some((lut_file(src)?.to_string(), e.stamp))).collect();
+    let files: Vec<(String, FileStamp)> = lut_cache().files.iter().map(|(p, s)| (p.clone(), *s)).collect();
     // (stamped without the lock: a file on a slow share must not hold up renders)
-    let changed: Vec<String> = files.into_iter().filter(|(path, stamp)| file_stamp(path) != *stamp).map(|(path, _)| path).collect();
+    let changed: Vec<(String, FileStamp, FileStamp)> =
+        files.into_iter().filter_map(|(path, old)| Some(file_stamp(&path)).filter(|now| *now != old).map(|now| (path, old, now))).collect();
     if !changed.is_empty() {
         let mut c = lut_cache();
-        c.map.retain(|src, _| lut_file(src).is_none_or(|p| !changed.iter().any(|c| c == p)));
-        GENERATION.fetch_add(1, Ordering::AcqRel);
+        for (path, old, now) in changed {
+            // (a render that read the file meanwhile has noted its new stamp already)
+            if c.files.get(&path) == Some(&old) {
+                let stale: Vec<String> = c.map.keys().filter(|src| lut_file(src) == Some(path.as_str())).cloned().collect();
+                for src in stale {
+                    c.remove(&src);
+                }
+                c.read_file(&path, now);
+            }
+        }
     }
     lut_generation()
 }
@@ -413,19 +460,17 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     }
     let file = lut_file(src);
     let stamp = file.and_then(file_stamp);
-    let seen = {
+    {
         let mut c = lut_cache();
         c.clock += 1;
         let now = c.clock;
-        match c.map.get_mut(src) {
-            Some(e) if e.stamp == stamp => {
-                e.used = now;
-                return e.lut.clone();
-            }
-            Some(e) => Some(e.stamp),
-            None => None,
+        if let Some(e) = c.map.get_mut(src)
+            && e.stamp == stamp
+        {
+            e.used = now;
+            return e.lut.clone();
         }
-    };
+    }
     // (read and parsed without the lock; a file written after it was stamped has a newer stamp,
     // and is read again next time)
     let lut = match file {
@@ -433,16 +478,17 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
         None => parse_cube(src),
     }
     .map(Arc::new);
+    let tables = lut.as_ref().map_or(0, |l| l.d1.len().saturating_add(l.d3.len()).saturating_mul(std::mem::size_of::<[f32; 3]>()));
+    let bytes = tables.saturating_add(src.len());
     let mut c = lut_cache();
-    if seen.is_some_and(|s| s != stamp) {
-        GENERATION.fetch_add(1, Ordering::AcqRel);
+    if let Some(path) = file {
+        c.read_file(path, stamp);
     }
+    c.remove(src);
     let used = c.clock;
-    c.map.insert(src.to_string(), CachedLut { stamp, lut: lut.clone(), used });
-    while c.map.len() > MAX_CACHED_LUTS {
-        let Some(oldest) = c.map.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
-        c.map.remove(&oldest);
-    }
+    c.map.insert(src.to_string(), CachedLut { stamp, lut: lut.clone(), used, bytes });
+    c.bytes = c.bytes.saturating_add(bytes);
+    c.evict(src);
     lut
 }
 
@@ -656,6 +702,29 @@ mod tests {
             assert!(lut_cache().map.len() <= MAX_CACHED_LUTS);
         }
         assert!(!Arc::ptr_eq(&first, &load_lut(&identity_cube(2)).unwrap()), "the oldest was let go");
+        let c = lut_cache();
+        assert_eq!(c.bytes, c.map.values().map(|e| e.bytes).sum::<usize>(), "the bytes kept add up");
+        assert!(c.bytes <= MAX_CACHED_BYTES);
+    }
+
+    /// A LUT file whose LUT left the cache is still followed: its frames are dropped when it
+    /// changes, though no render loads it again first.
+    #[test]
+    fn a_file_whose_lut_left_the_cache_is_still_followed() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3493-evicted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let src = path.to_string_lossy().into_owned();
+        assert!(load_lut(&src).is_some());
+        for i in 0..MAX_CACHED_LUTS + 8 {
+            assert!(load_lut(&format!("TITLE \"evict {i}\"\n{}", identity_cube(2))).is_some());
+        }
+        assert!(!lut_cache().map.contains_key(&src), "its LUT left the cache");
+        std::fs::write(&path, identity_cube(3)).unwrap();
+        check_lut_files();
+        assert_eq!(lut_cache().files.get(&src), Some(&file_stamp(&src)), "the change was noticed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
