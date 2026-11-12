@@ -11,8 +11,9 @@
 //! does). Layer parameters name their layer (their keys and expression are reported). Paths and
 //! arbitrary data are not kept (reported when they hold something).
 //!
-//! The parameters a placeholder holds are bounded per import ([`MAX_COST`]): definitions can be
-//! shared by many instances, so a small file could otherwise ask for very many properties. Once
+//! The parameters placeholders walk, kept or not, and their popup items (by name length) are
+//! bounded per import ([`MAX_COST`]): definitions can be shared by many instances, so a small file
+//! could otherwise ask for very many properties. Once
 //! the budget is spent, later effects without a counterpart are reported without a placeholder.
 
 use effectcraft_keyframe::Value;
@@ -24,11 +25,15 @@ use crate::import::props::{Kind, import_expression, import_keys};
 use crate::import::report::{Collector, LossCategory};
 use crate::{Effect as AepEffect, EffectParam, ParamKind, ParamValue};
 
-/// Most placeholder properties and popup items one import creates.
+/// Most placeholder parameters (kept or not) and popup items one import walks.
 pub(crate) const MAX_COST: usize = 200_000;
 
 /// Most items read from one placeholder popup.
 const MAX_POPUP_ITEMS: usize = 1024;
+
+/// A popup item costs one more for each of these bytes in its name, so the names kept stay
+/// bounded too.
+const NAME_BYTES: usize = 16;
 
 /// The placeholder of `fx`, with `params` (its parameter definitions) as properties.
 pub(crate) fn placeholder(
@@ -45,26 +50,33 @@ pub(crate) fn placeholder(
     let mut group = ids.group(&segment(fx.match_name()), shown);
     group.kind = GroupKind::Effect { effect: fx.match_name().to_string() };
     let here = format!("{}: '{}' effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
-    for p in params.iter().filter(|p| !carries_nothing(p)) {
+    for p in params {
+        // Every parameter walked counts, kept or not: a definition shared by many instances is
+        // otherwise walked again for each one.
+        if carries_nothing(p) {
+            col.placeholder_cost = col.placeholder_cost.saturating_add(1).min(MAX_COST);
+            continue;
+        }
         if col.placeholder_cost >= MAX_COST {
             col.lose(LossCategory::Effects, format!("{here}: parameters past the import's {MAX_COST} placeholder parameters not kept"));
             break;
         }
         let label = param_label(p);
         let Some((kind, ui, default)) = shape(p, cx.size) else {
+            col.placeholder_cost = col.placeholder_cost.saturating_add(1);
             if p.stored().is_some() {
                 col.lose(LossCategory::Effects, format!("{here}: parameter {label} not kept (type {:?})", p.kind));
             }
             continue;
         };
-        let items = match &ui {
-            ParamUi::Popup { options } => options.len(),
-            _ => 0,
+        let (items, names) = match &ui {
+            ParamUi::Popup { options } => (options.len(), options.iter().map(|o| 1 + o.len() / NAME_BYTES).fold(0, usize::saturating_add)),
+            _ => (0, 0),
         };
         if p.kind == ParamKind::Popup && popup_len(p).is_some_and(|n| n > items) {
             col.lose(LossCategory::Effects, format!("{here}: parameter {label}: the items past the first {MAX_POPUP_ITEMS} not kept"));
         }
-        let cost = col.placeholder_cost.saturating_add(items).saturating_add(1);
+        let cost = col.placeholder_cost.saturating_add(names).saturating_add(1);
         if cost > MAX_COST {
             // The budget is spent: nothing more is built, here or in later effects (definitions
             // shared by many instances would otherwise still be walked item by item).

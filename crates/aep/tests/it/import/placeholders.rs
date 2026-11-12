@@ -190,6 +190,29 @@ fn an_effect_past_the_spent_budget_gets_no_placeholder() {
     assert!(found.iter().any(|d| d.contains("kept without rendering") && !d.contains("more like it")), "the kept instance alone: {found:?}");
 }
 
+/// Parameters a placeholder does not keep (markers, arbitrary data) still spend the budget: a
+/// definition of very many of them, shared by many instances, is not walked again for each one.
+#[test]
+fn parameters_not_kept_still_spend_the_budget() {
+    let defs = (0..200_000).map(|i| other(if i % 2 == 0 { K::NoData } else { K::ArbitraryData }, "X", Default::None)).collect();
+    let fx = Fx { match_name: "Odd Fx", name: "Odd", defs, values: vec![], data: vec![], keys: vec![] };
+    let (_, r) = import_bytes(&twice(&bytes_with(&fx), "Odd Fx"), "Odd Fx");
+    let found = losses(&r, LossCategory::Effects, "Odd Fx");
+    assert!(found.iter().any(|d| d.contains("not kept (past the import's placeholder parameters)")), "{found:?}");
+}
+
+/// Long popup item names spend the budget by their length, so the names kept stay bounded.
+#[test]
+fn long_popup_item_names_spend_the_budget() {
+    let long = "x".repeat(1600);
+    let items: &'static [&'static str] =
+        Box::leak((0..1024).map(|i| &*Box::leak(format!("{long}{i}").into_boxed_str())).collect::<Vec<_>>().into_boxed_slice());
+    let fx = Fx { match_name: "Long Fx", name: "Long", defs: vec![popup("A", 1, items), popup("B", 1, items)], values: vec![], data: vec![], keys: vec![] };
+    let (g, r) = placeholder_of(&fx);
+    assert_eq!(g.props().count(), 1);
+    assert!(losses(&r, LossCategory::Effects, "Long Fx").iter().any(|d| d.contains("placeholder parameters")));
+}
+
 /// `bytes` with the layer's instance of `match_name` (its `tdmn` and `sspc`) repeated after it.
 fn twice(bytes: &[u8], match_name: &str) -> Vec<u8> {
     let mut file = parse(bytes).unwrap();

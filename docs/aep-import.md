@@ -333,7 +333,8 @@ parameter gets the file's value:
   pseudo effect's `Pseudo/0.25-0001`). Paths and arbitrary data are not kept; a popup whose
   definition is borrowed, or whose default slot holds no item, and that has no value record takes
   its first item (reported). One import keeps at
-  most 200 000 placeholder parameters and popup items (a popup at most 1024 items); the rest is
+  most 200 000 placeholder parameters and popup items (a popup at most 1024 items; parameters it
+  does not keep count, and an item one more per 16 bytes of its name); the rest is
   reported, and once that is spent a later effect without a counterpart arrives without a
   placeholder (reported). A placeholder is still reported in `effects` and counted in
   `imported.placeholderEffects`; .aep export reports it and leaves it out.
