@@ -190,6 +190,9 @@ pub struct Playback {
     pub caching: bool,
     /// Resolution override while playing (pixel step), `None` = the viewer's.
     pub res: Option<u32>,
+    /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: the lower render
+    /// scale this play stepped down to, and when (seconds). See `step_down`.
+    pub adaptive: Option<(f64, f64)>,
     /// Include Overlays / Include Layer Controls.
     pub overlays: bool,
     pub layer_controls: bool,
@@ -203,6 +206,8 @@ pub struct Playback {
     /// sound plays it goes on through frames that aren't cached, and the picture drops frames to
     /// follow it (#2473).
     pub audio_held: bool,
+    /// The project last checked for a silent preview that became audible (#2104).
+    pub silent_project: Option<Arc<effectcraft_engine::project::Project>>,
     /// Starting a preview with sound (#947): the playhead stays on the first frame while the
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently
@@ -217,6 +222,14 @@ pub struct Playback {
     pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
+    /// The rate the silent clock advances at (comp frames per second, at most `fps`; 0 = the
+    /// frame rate): below real time while frames arrive slower than that, so a first playback
+    /// shows them evenly instead of in bursts between freezes (see `pace_for`).
+    pub pace: f64,
+    /// Played frames the paced clock owes (fractional), `Some` while it runs below real time.
+    pub pace_acc: Option<f64>,
+    /// When the silent clock last ran (seconds), for the pace.
+    pub paced_at: Option<f64>,
 }
 
 impl Playback {
@@ -360,6 +373,12 @@ pub struct EffectcraftApp {
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
     footage_watch_key: Option<(u64, String, bool)>,
+    /// The worker that stamps the LUT files in use ([`Self::tick_lut_files`], #3493).
+    lut_watcher: Option<effectcraft_engine::lut_reload::Watcher>,
+    /// The LUT generation the frames kept were rendered at ([`effectcraft_engine::lut_reload::generation`]).
+    lut_generation: u64,
+    /// How many times the caches were purged ([`Self::purge_stamp`]).
+    purges: u64,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,
@@ -390,8 +409,8 @@ pub struct EffectcraftApp {
     applied_prefs: Option<(u64, Option<bool>)>,
     /// A previous run that didn't exit cleanly (shown by `Dialog::Recovery`).
     pub recovery: Option<effectcraft_engine::autosave::Recovery>,
-    /// Docked groups laid out last frame: (active panel, group rect) — `~` maximizes the one
-    /// under the pointer.
+    /// Panels drawn last frame, docked and floating: (panel, body rect). `~` maximizes the one
+    /// under the pointer; Effect Controls' arrow keys work only while it is on screen.
     pub(crate) dock_rects: Vec<(PanelKind, egui::Rect)>,
     /// The floating panels' OS windows that drew a panel last frame; one that is gone releases
     /// its IME state.

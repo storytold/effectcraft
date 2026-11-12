@@ -23,6 +23,12 @@
 //! Libraries, Bridge, Media Encoder, Behance, Creative Cloud…) are intentionally absent; the
 //! Essential Graphics workspace uses the Properties panel and the Essential Graphics panel, whose
 //! templates use EffectCraft's own open `.ectemplate` format.
+//!
+//! Where EffectCraft has entries After Effects lacks, After Effects' entries keep their order and
+//! the others get a fixed place. File ▸ Import: the project imports sit together where After
+//! Effects has Adobe Premiere Pro Project…, in alphabetical order and named in full (Adobe After
+//! Effects Project…, Adobe Premiere Pro Project…, EffectCraft Project…); the formats only
+//! EffectCraft imports follow a separator at the end, in alphabetical order (#3103).
 
 use std::sync::OnceLock;
 
@@ -314,6 +320,7 @@ pub fn checked(s: &Session, command: &str, params: &Value) -> Option<bool> {
     let layer = s.state.selected_layers.first().and_then(|l| comp.layer(*l));
     let pstr = |k: &str| params.get(k).and_then(Value::as_str);
     match command {
+        "path.toggleClosed" => crate::cmd::paths::selected_paths_closed(s),
         "layer.setBlendMode" => {
             let want = effectcraft_color::BlendMode::from_name(pstr("mode")?)?;
             Some(layer?.blend_mode == want)
@@ -577,14 +584,15 @@ File
   Import
     File... | file.import
     Multiple Files... | file.importMultiple
+    Adobe After Effects Project... | file.importAep
     Adobe Premiere Pro Project... | file.importTimeline
     EffectCraft Project... | file.importProject
+    Vanishing Point (.vpe)... | file.importVanishingPoint
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
-    After Effects Project... | file.importAep
-    Lottie... | file.importLottie
-    Vanishing Point (.vpe)... | file.importVanishingPoint
+    ---
     Essential Graphics Template... | essential.importTemplate
+    Lottie... | file.importLottie
   Import Recent Footage
     @dynamic:recentFootage
     ---
@@ -592,7 +600,7 @@ File
   Export
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
-    After Effects Project... | file.exportAep
+    Adobe After Effects Project... | file.exportAep
     Lottie JSON... | file.exportLottie
     Essential Graphics Template... | essential.exportTemplate
   ---
@@ -822,7 +830,7 @@ Layer
     Hide Locked Masks | layer.mask.hideLocked
   Mask and Shape Path
     RotoBezier | path.rotoBezier
-    Closed | mask.setClosed
+    Closed | path.toggleClosed
     Convert To Bezier Path | path.convertToBezier
     Set First Vertex | path.setFirstVertex
     Free Transform Points | path.freeTransform

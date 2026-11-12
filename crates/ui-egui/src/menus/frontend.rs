@@ -502,6 +502,15 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             return run_engine(app, ctx, "window.assignWorkspaceShortcut", q);
         }
         "file.interpretFootage" => {
+            // A background import finishing while another dialog waits (the After Effects losses
+            // prompt of the same drop) does not replace it: that dialog's work would be lost. The
+            // footage keeps the default interpretation; the note says where to change it.
+            if app.dialog.is_some() {
+                app.ui.status =
+                    crate::i18n::tr("Imported footage has an unlabeled alpha channel: choose how to interpret it in File ▸ Interpret Footage ▸ Main…")
+                        .to_string();
+                return Ok(Value::Null);
+            }
             // Import ▸ Interpret Unlabeled Alpha As: Ask User.
             if let Some(i) = p.get("item").and_then(Value::as_u64) {
                 app.session.state.project_selection = vec![effectcraft_engine::project::ItemId(i)];
@@ -601,7 +610,8 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
 pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
     enum Ask {
         Folder,
-        Import,
+        /// Footage, or a file with one of these extensions.
+        Import(&'static [&'static str]),
         OpenProject,
         Save(std::borrow::Cow<'static, str>),
         Open(&'static [&'static str]),
@@ -617,7 +627,9 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         path.with_file_name(format!("{stem}{suffix}.{ext}")).to_string_lossy().into_owned().into()
     };
     let (key, ask) = match id {
-        "file.import" | "file.importMultiple" => ("paths", Ask::Import),
+        // Projects too, as After Effects' File… takes an .aep: they import as projects
+        // (`run_with_picked`, and `file.import` for EffectCraft projects).
+        "file.import" | "file.importMultiple" => ("paths", Ask::Import(&["aep", "aepx", "ecproj", "ecprojx"])),
         "file.open" => ("path", Ask::OpenProject),
         "file.save" if app.session.path.is_none() => ("path", Ask::Save(project_as("", "ecproj"))),
         "file.saveAs" => ("path", Ask::Save(project_as("", "ecproj"))),
@@ -644,7 +656,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
         "effect.plugins.install" if params.get("folder").is_none() && params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
         "effect.helpers.load" => ("path", Ask::Folder),
-        "file.replaceFootage" => ("path", Ask::Import),
+        "file.replaceFootage" => ("path", Ask::Import(&[])),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
         // An open XML project gets ` copy` too: the copy never writes over the open file.
@@ -672,6 +684,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
     let footage = |more: &[&'static str]| effectcraft_project::VIDEO_EXTENSIONS.iter().chain(more).copied().collect::<Vec<_>>();
+    let importable = |more: &[&'static str]| footage(MEDIA).into_iter().chain(more.iter().copied()).collect::<Vec<_>>();
     // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
     // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
     // window and aborted the app (#511); Linux: the desktop portal's answer never gets pumped,
@@ -680,7 +693,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let request = match ask {
             Ask::Folder => crate::FileDialog::Folder,
-            Ask::Import => crate::FileDialog::Open { exts: footage(MEDIA).iter().map(|e| e.to_string()).collect(), many: key == "paths" },
+            Ask::Import(more) => crate::FileDialog::Open { exts: importable(more).iter().map(|e| e.to_string()).collect(), many: key == "paths" },
             Ask::OpenProject => crate::FileDialog::OpenProject,
             Ask::Open(exts) => crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: false },
             Ask::OpenFootage(more) => crate::FileDialog::Open { exts: footage(more).iter().map(|e| e.to_string()).collect(), many: false },
@@ -702,9 +715,9 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
             let Some(f) = app.hooks.pick_folder.as_ref() else { return Some(Err("no folder dialog available (pass `folder`)".into())) };
             f().map(Value::from)
         }
-        Ask::Import => {
+        Ask::Import(more) => {
             let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `paths`)".into())) };
-            picked_value(key, f(&footage(MEDIA)))
+            picked_value(key, f(&importable(more)))
         }
         Ask::OpenProject => {
             let Some(f) = app.hooks.pick_open_project.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
@@ -758,7 +771,8 @@ pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
         .map(|e| match (e.get("file").and_then(Value::as_str), e.get("error").and_then(Value::as_str)) {
             (Some(file), Some(error)) => format!("{file}: {error}"),
             (_, Some(error)) => error.to_string(),
-            _ => e.to_string(),
+            // A plain message (`file.import`'s errors) reads as itself, not as quoted JSON.
+            _ => e.as_str().map_or_else(|| e.to_string(), str::to_string),
         })
         .collect();
     let mut msg = parts.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
@@ -770,6 +784,14 @@ pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
 
 /// Run command `id` with the path picked for it in parameter `key`.
 fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value, v: Value) -> Result<Value, String> {
+    if matches!(id, "file.import" | "file.importMultiple")
+        && let Some(picked) = v.as_array()
+        && picked.iter().filter_map(Value::as_str).any(effectcraft_engine::commands::is_aep_path)
+    {
+        let (aep, rest): (Vec<String>, Vec<String>) =
+            picked.iter().filter_map(Value::as_str).map(str::to_string).partition(|p| effectcraft_engine::commands::is_aep_path(p));
+        return import_picked_with_aep(app, id, key, params, aep, rest);
+    }
     let mut p = params.as_object().cloned().unwrap_or_default();
     p.insert(key.to_string(), v);
     // Picked files import in the background, with the Importing card showing progress (#270).
@@ -777,10 +799,13 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
         p.insert("background".into(), Value::Bool(true));
     }
     // Photoshop files ask how to import them first; numbered stills whether to import them as an
-    // image sequence.
+    // image sequence. Not while the losses prompt of an After Effects project picked with them
+    // shows: one dialog at a time, so they import with the defaults.
     let picked = Value::Object(p.clone());
-    if id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)
-        || matches!(id, "file.import" | "file.importMultiple") && crate::panels::forms::open_import_sequence(app, &picked)
+    let asking = crate::panels::aep_losses::asking(app);
+    if !asking
+        && (id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)
+            || matches!(id, "file.import" | "file.importMultiple") && crate::panels::forms::open_import_sequence(app, &picked))
     {
         return Ok(json!({"dialog": id}));
     }
@@ -802,6 +827,62 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     }
     leave_home_if_opened(app, before, r.is_ok());
     r
+}
+
+/// Import After Effects projects dropped or picked together, as File ▸ Import ▸ Adobe After
+/// Effects Project… does each: one that would lose parts asks first (the losses prompt), and the
+/// ones after it wait in its queue until it is answered (`panels::aep_losses`). Returns the errors
+/// of those that could not be imported; each names its file.
+pub(crate) fn import_aep_projects(app: &mut EffectcraftApp, paths: Vec<String>) -> Vec<String> {
+    let mut errors = Vec::new();
+    // An unanswered prompt's projects go first.
+    let mut paths = crate::panels::aep_losses::take_unanswered(app).into_iter().chain(paths);
+    while let Some(path) = paths.next() {
+        if crate::panels::aep_losses::asking(app) {
+            let queue = &mut app.dialog_state.aep_losses.queue;
+            queue.push(path);
+            queue.extend(paths);
+            break;
+        }
+        if let Err(e) = run_with_picked(app, "file.importAep", "path", &json!({}), json!(path)) {
+            errors.push(e);
+        }
+    }
+    errors
+}
+
+/// File ▸ Import ▸ File… with After Effects projects picked: they import first, as projects
+/// ([`import_aep_projects`]), then the other files as footage. Their errors lead the result's
+/// `errors` and the status line (callers of the blocking dialog drop the result), or the message
+/// when the footage import failed.
+fn import_picked_with_aep(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value, aep: Vec<String>, rest: Vec<String>) -> Result<Value, String> {
+    let errors = import_aep_projects(app, aep);
+    let r = if !rest.is_empty() {
+        run_with_picked(app, id, key, params, json!(rest))
+    } else if crate::panels::aep_losses::asking(app) {
+        Ok(json!({"dialog": "aepLosses"}))
+    } else {
+        Ok(json!({}))
+    };
+    if errors.is_empty() {
+        return r;
+    }
+    match r {
+        Ok(mut result) => {
+            if !result.is_object() {
+                result = json!({"result": result});
+            }
+            let own = result.get("errors").and_then(Value::as_array).cloned().unwrap_or_default();
+            result["errors"] = Value::Array(errors.into_iter().map(Value::from).chain(own).collect());
+            show_result_errors(app, &result);
+            Ok(result)
+        }
+        Err(e) => {
+            let message = format!("{}; {e}", errors.join("; "));
+            app.ui.status = message.clone();
+            Err(message)
+        }
+    }
 }
 
 /// View ▸ Zoom In / Zoom Out: the next standard magnification (as a share of screen pixels, so

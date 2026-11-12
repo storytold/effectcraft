@@ -281,7 +281,7 @@ mod tests {
         let json = serde_json::to_string(&collected()).unwrap();
         assert_eq!(
             json,
-            r#"{"exported":{"folders":0,"compositions":0,"solids":0,"layers":2,"solidLayers":0,"nullLayers":0,"adjustmentLayers":0,"properties":0,"keyframes":0,"expressions":0,"masks":0,"precompLayers":0,"effects":0,"footage":0,"footageLayers":0,"textLayers":0,"markers":0,"cameras":0,"lights":0,"shapeLayers":0,"timeRemaps":0,"textAnimators":0,"layerStyles":0},"losses":[{"category":"effects","count":2,"details":["fx 1","fx 2"]},{"category":"rounded_times","count":1,"details":["time 1"]}],"limitations":["limit"]}"#
+            r#"{"exported":{"folders":0,"compositions":0,"solids":0,"layers":2,"solidLayers":0,"nullLayers":0,"adjustmentLayers":0,"properties":0,"keyframes":0,"expressions":0,"masks":0,"precompLayers":0,"effects":0,"footage":0,"footageLayers":0,"textLayers":0,"markers":0,"cameras":0,"lights":0,"shapeLayers":0,"timeRemaps":0,"textAnimators":0,"layerStyles":0},"losses":[{"category":"effects","count":2,"details":["fx 1","fx 2"],"unlisted":0},{"category":"rounded_times","count":1,"details":["time 1"],"unlisted":0}],"limitations":["limit"]}"#
         );
         let back: ExportReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, collected());

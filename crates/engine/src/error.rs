@@ -15,6 +15,10 @@ pub enum EngineError {
     Project(#[from] effectcraft_project::ProjectError),
     #[error("{0}")]
     Other(String),
+    /// Refused because parts would be lost in a conversion; nothing changed. `losses` names them,
+    /// `advice` how to go on (`file.importAep` / `file.exportAep` without `allowLosses`).
+    #[error("{losses} ({advice})")]
+    Refused { losses: String, advice: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

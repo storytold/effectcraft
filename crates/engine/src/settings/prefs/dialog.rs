@@ -92,6 +92,7 @@ pub fn pages() -> Vec<Page> {
                 s("general.showToolTips", "Show Tool Tips", B, true),
                 s("general.viewerWheelScrubbing", "Scrub Composition Frames with Mouse Wheel", B, true),
                 s("general.createLayersAtCompStart", "Create Layers at Composition Start Time", B, true),
+                s("general.fitNewLayersToWorkArea", "Fit New Layers to Work Area", B, true),
                 s("general.switchesAffectNestedComps", "Switches Affect Nested Comps", B, true),
                 s("general.defaultSpatialLinear", "Default Spatial Interpolation to Linear", B, true),
                 s("general.preserveConstantVertexCount", "Preserve Constant Vertex and Feather Point Count when Editing Masks", B, true),
@@ -170,6 +171,7 @@ pub fn pages() -> Vec<Page> {
             title: "Previews",
             items: vec![
                 s("previews.adaptiveResolutionLimit", "Adaptive Resolution Limit", Kind::Choice(ON_OFF_RES), true),
+                s("previews.adaptivePlayback", "Lower Resolution When Playback Can't Keep Up", B, true),
                 s("previews.showInternalWireframes", "Show Internal Wireframes", B, true),
                 s("previews.cacheFramesWhenIdle", "Cache Frames When Idle", B, true),
                 s("previews.fastPreviews", "Fast Previews (Draft 3D, Faster Effects)", B, true),

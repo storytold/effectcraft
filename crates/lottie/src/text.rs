@@ -310,7 +310,8 @@ pub(crate) fn import_text(im: &mut Im, ids: &mut Ids, t: &Json, tg: &mut PropGro
             st.value = Value::Text(Box::new(first.clone()));
         }
         if docs.len() > 1 {
-            st.keys = docs.iter().map(|(f, d)| effectcraft_keyframe::Keyframe::new(im.tb.tick(*f), Value::Text(Box::new(d.clone()))).hold()).collect();
+            // Moved into the keys, not cloned: the documents are not kept twice.
+            st.keys = docs.into_iter().map(|(f, d)| effectcraft_keyframe::Keyframe::new(im.tb.tick(f), Value::Text(Box::new(d))).hold()).collect();
         }
     }
     if let Some(m) = t.get("m")

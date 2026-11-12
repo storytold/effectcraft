@@ -506,8 +506,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "文件..."),
     ("file.importMultiple", "Multiple Files...", "多个文件..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 项目..."),
-    ("file.importAep", "After Effects Project...", "After Effects 项目..."),
-    ("file.exportAep", "After Effects Project...", "After Effects 项目..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects 项目..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects 项目..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 项目..."),
     ("file.importPlaceholder", "Placeholder...", "占位符..."),
     ("file.importSolid", "Solid...", "纯色..."),
@@ -701,7 +701,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "隐藏锁定的蒙版"),
     ("", "Mask and Shape Path", "蒙版和形状路径"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "已关闭"),
+    ("path.toggleClosed", "Closed", "已关闭"),
     ("path.convertToBezier", "Convert To Bezier Path", "转换为贝塞尔曲线路径"),
     ("path.setFirstVertex", "Set First Vertex", "设置第一个顶点"),
     ("path.freeTransform", "Free Transform Points", "自由变换点"),
@@ -1146,8 +1146,8 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fil..."),
     ("file.importMultiple", "Multiple Files...", "Flera filer..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
-    ("file.importAep", "After Effects Project...", "After Effects-projekt..."),
-    ("file.exportAep", "After Effects Project...", "After Effects-projekt..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-projekt..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
     ("file.importSolid", "Solid...", "Enfärgad..."),
@@ -1339,7 +1339,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Dölj låsta masker"),
     ("", "Mask and Shape Path", "Mask- och formbana"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Sluten"),
+    ("path.toggleClosed", "Closed", "Sluten"),
     ("path.convertToBezier", "Convert To Bezier Path", "Konvertera till Bezierbana"),
     ("path.setFirstVertex", "Set First Vertex", "Ange första hörnpunkt"),
     ("path.freeTransform", "Free Transform Points", "Fri transformering av punkter"),
@@ -1788,8 +1788,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "檔案..."),
     ("file.importMultiple", "Multiple Files...", "多個檔案..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 專案..."),
-    ("file.importAep", "After Effects Project...", "After Effects 專案..."),
-    ("file.exportAep", "After Effects Project...", "After Effects 專案..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects 專案..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects 專案..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 專案..."),
     ("file.importPlaceholder", "Placeholder...", "預留位置..."),
     ("file.importSolid", "Solid...", "純色..."),
@@ -1983,7 +1983,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "隱藏鎖定的遮色片"),
     ("", "Mask and Shape Path", "遮色片和形狀路徑"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "封閉"),
+    ("path.toggleClosed", "Closed", "封閉"),
     ("path.convertToBezier", "Convert To Bezier Path", "轉換為貝茲路徑"),
     ("path.setFirstVertex", "Set First Vertex", "設定第一個頂點"),
     ("path.freeTransform", "Free Transform Points", "自由變換點"),
@@ -2427,8 +2427,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ファイル..."),
     ("file.importMultiple", "Multiple Files...", "複数のファイル..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Proプロジェクト..."),
-    ("file.importAep", "After Effects Project...", "After Effectsプロジェクト..."),
-    ("file.exportAep", "After Effects Project...", "After Effectsプロジェクト..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effectsプロジェクト..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effectsプロジェクト..."),
     ("file.importPlaceholder", "Placeholder...", "プレースホルダー..."),
     ("file.importSolid", "Solid...", "平面..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -2622,7 +2622,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "ロックしたマスクを非表示"),
     ("", "Mask and Shape Path", "マスクとシェイプのパス"),
     ("path.rotoBezier", "RotoBezier", "ロトベジェ"),
-    ("mask.setClosed", "Closed", "閉じたパス"),
+    ("path.toggleClosed", "Closed", "閉じたパス"),
     ("path.convertToBezier", "Convert To Bezier Path", "ベジェパスに変換"),
     ("path.setFirstVertex", "Set First Vertex", "最初の頂点を設定"),
     ("path.freeTransform", "Free Transform Points", "ポイントを自由変形"),
@@ -3069,8 +3069,8 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Кілька файлів..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проєкт Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Проєкт After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Проєкт After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Проєкт Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Проєкт Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проєкт EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заповнювач..."),
     ("file.importSolid", "Solid...", "Суцільний колір..."),
@@ -3264,7 +3264,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Приховати заблоковані маски"),
     ("", "Mask and Shape Path", "Контур маски та фігури"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Замкнений"),
+    ("path.toggleClosed", "Closed", "Замкнений"),
     ("path.convertToBezier", "Convert To Bezier Path", "Перетворити на контур Безьє"),
     ("path.setFirstVertex", "Set First Vertex", "Задати першу вершину"),
     ("path.freeTransform", "Free Transform Points", "Вільне трансформування точок"),
@@ -3712,8 +3712,8 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Archivo..."),
     ("file.importMultiple", "Multiple Files...", "Varios archivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Proyecto de Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Proyecto de After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Proyecto de After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Proyecto de Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Proyecto de Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Proyecto de EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Marcador de posición..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -3907,7 +3907,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ocultar máscaras bloqueadas"),
     ("", "Mask and Shape Path", "Trazado de máscara y de forma"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Cerrado"),
+    ("path.toggleClosed", "Closed", "Cerrado"),
     ("path.convertToBezier", "Convert To Bezier Path", "Convertir en trazado Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Establecer primer vértice"),
     ("path.freeTransform", "Free Transform Points", "Transformar puntos libremente"),
@@ -4353,8 +4353,8 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Arquivo..."),
     ("file.importMultiple", "Multiple Files...", "Vários arquivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projeto do Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projeto do After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projeto do After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projeto do Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projeto do Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projeto do EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espaço reservado..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -4548,7 +4548,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ocultar máscaras bloqueadas"),
     ("", "Mask and Shape Path", "Caminho da máscara e da forma"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Fechado"),
+    ("path.toggleClosed", "Closed", "Fechado"),
     ("path.convertToBezier", "Convert To Bezier Path", "Converter em caminho Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Definir primeiro vértice"),
     ("path.freeTransform", "Free Transform Points", "Pontos de transformação livre"),
@@ -5002,8 +5002,8 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Несколько файлов..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проект Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Проект After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Проект After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Проект Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Проект Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проект EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заполнитель..."),
     ("file.importSolid", "Solid...", "Сплошной цвет..."),
@@ -5196,7 +5196,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Скрыть заблокированные маски"),
     ("", "Mask and Shape Path", "Контур маски и фигуры"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Замкнутый"),
+    ("path.toggleClosed", "Closed", "Замкнутый"),
     ("path.convertToBezier", "Convert To Bezier Path", "Преобразовать в кривую Безье"),
     ("path.setFirstVertex", "Set First Vertex", "Задать первую вершину"),
     ("path.freeTransform", "Free Transform Points", "Свободное трансформирование точек"),
@@ -5643,8 +5643,8 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fichier..."),
     ("file.importMultiple", "Multiple Files...", "Plusieurs fichiers..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projet Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projet After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projet After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projet Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projet Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projet EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espace réservé..."),
     ("file.importSolid", "Solid...", "Solide..."),
@@ -5837,7 +5837,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Masquer les masques verrouillés"),
     ("", "Mask and Shape Path", "Trajectoire de masque et de forme"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Fermé"),
+    ("path.toggleClosed", "Closed", "Fermé"),
     ("path.convertToBezier", "Convert To Bezier Path", "Convertir en trajectoire Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Définir le premier sommet"),
     ("path.freeTransform", "Free Transform Points", "Transformation libre des points"),
@@ -6284,8 +6284,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Datei..."),
     ("file.importMultiple", "Multiple Files...", "Mehrere Dateien..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-Projekt..."),
-    ("file.importAep", "After Effects Project...", "After Effects-Projekt..."),
-    ("file.exportAep", "After Effects Project...", "After Effects-Projekt..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-Projekt..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-Projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-Projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platzhalter..."),
     ("file.importSolid", "Solid...", "Farbfläche..."),
@@ -6478,7 +6478,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Gesperrte Masken ausblenden"),
     ("", "Mask and Shape Path", "Masken- und Formpfad"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Geschlossen"),
+    ("path.toggleClosed", "Closed", "Geschlossen"),
     ("path.convertToBezier", "Convert To Bezier Path", "In Bézier-Pfad konvertieren"),
     ("path.setFirstVertex", "Set First Vertex", "Ersten Scheitelpunkt festlegen"),
     ("path.freeTransform", "Free Transform Points", "Punkte frei transformieren"),
@@ -6925,8 +6925,8 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Plik..."),
     ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projekt After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
     ("file.importSolid", "Solid...", "Plansza..."),
@@ -7118,7 +7118,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ukryj zablokowane maski"),
     ("", "Mask and Shape Path", "Ścieżka maski i kształtu"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Zamknięta"),
+    ("path.toggleClosed", "Closed", "Zamknięta"),
     ("path.convertToBezier", "Convert To Bezier Path", "Konwertuj na ścieżkę Béziera"),
     ("path.setFirstVertex", "Set First Vertex", "Ustaw pierwszy wierzchołek"),
     ("path.freeTransform", "Free Transform Points", "Swobodne przekształcanie punktów"),
@@ -7563,8 +7563,8 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Soubor..."),
     ("file.importMultiple", "Multiple Files...", "Více souborů..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projekt After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Zástupný záznam..."),
     ("file.importSolid", "Solid...", "Plná vrstva..."),
@@ -7758,7 +7758,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Skrýt zamknuté masky"),
     ("", "Mask and Shape Path", "Cesta masky a tvaru"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Uzavřená"),
+    ("path.toggleClosed", "Closed", "Uzavřená"),
     ("path.convertToBezier", "Convert To Bezier Path", "Převést na Bézierovu cestu"),
     ("path.setFirstVertex", "Set First Vertex", "Nastavit první vrchol"),
     ("path.freeTransform", "Free Transform Points", "Volně transformovat body"),
@@ -8201,8 +8201,8 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ფაილი..."),
     ("file.importMultiple", "Multiple Files...", "რამდენიმე ფაილი..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-ს პროექტი..."),
-    ("file.importAep", "After Effects Project...", "After Effects-ის პროექტი..."),
-    ("file.exportAep", "After Effects Project...", "After Effects-ის პროექტი..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-ის პროექტი..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-ის პროექტი..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-ის პროექტი..."),
     ("file.importPlaceholder", "Placeholder...", "ჩანაცვლების ობიექტი..."),
     ("file.importSolid", "Solid...", "სოლიდი..."),
@@ -8395,7 +8395,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "ჩაკეტილი ნიღბების დამალვა"),
     ("", "Mask and Shape Path", "ნიღაბი და ფიგურის ტრაექტორია"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "შეკრული"),
+    ("path.toggleClosed", "Closed", "შეკრული"),
     ("path.convertToBezier", "Convert To Bezier Path", "ბეზიეს ტრაექტორიად გარდაქმნა"),
     ("path.setFirstVertex", "Set First Vertex", "პირველი წვეროს დაყენება"),
     ("path.freeTransform", "Free Transform Points", "წერტილების თავისუფალი გარდაქმნა"),
@@ -9208,7 +9208,8 @@ mod tests {
         assert!(!japanese(&app));
     }
 
-    /// File ▸ Import ▸ After Effects Project… has its row in every menu catalog.
+    /// File ▸ Import / Export ▸ Adobe After Effects Project… has its row in every menu catalog,
+    /// under the label the menu draws (a row under an older label would fall back to English).
     #[test]
     fn the_aep_import_and_export_entries_are_in_every_menu_catalog() {
         for (code, catalog) in [
@@ -9227,7 +9228,8 @@ mod tests {
             ("sv", SWEDISH),
         ] {
             for id in ["file.importAep", "file.exportAep"] {
-                assert!(catalog.iter().any(|(command, _, _)| *command == id), "{code} has no {id} row");
+                let drawn = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == id).map(|(_, e)| e.label.clone()).unwrap_or_default();
+                assert!(catalog.iter().any(|(command, english, _)| *command == id && *english == drawn), "{code} has no {id} row for {drawn:?}");
             }
         }
     }
@@ -9306,12 +9308,16 @@ mod tests {
             alt_shortcuts: Vec::new(),
         };
         let new_comp = menu_entry("comp.new", "New Composition...");
+        let closed_path = menu_entry("path.toggleClosed", "Closed");
         let undo = menu_entry("edit.undo", "Undo");
         for code in CATALOG_CODES {
             app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
             let drawn = entry(&app, &new_comp, new_comp.label.clone());
             assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
             assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+            let closed_label = entry(&app, &closed_path, closed_path.label.clone());
+            assert_eq!(closed_label, label(&app, "path.toggleClosed", "Closed"), "{code}");
+            assert_ne!(closed_label, closed_path.label, "{code}: Closed is drawn in English");
         }
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
         assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");

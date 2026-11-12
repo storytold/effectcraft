@@ -809,7 +809,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "Change Color",
             vec![
                 p("view", "View", Value::Enum(0), popup(&["Corrected Layer", "Color Correction Mask"])),
-                p("hueTransform", "Hue Transform", num(0.0), slider(-360.0, 360.0, -180.0, 180.0, 1)),
+                p("hueTransform", "Hue Transform", num(0.0), slider(-1800.0, 1800.0, -180.0, 180.0, 1)),
                 p("lightnessTransform", "Lightness Transform", num(0.0), bipolar()),
                 p("saturationTransform", "Saturation Transform", num(0.0), bipolar()),
                 p("colorToChange", "Color To Change", col(0.8, 0.2, 0.2), ParamUi::Color),
