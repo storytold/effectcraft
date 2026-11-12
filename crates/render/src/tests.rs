@@ -2002,3 +2002,17 @@ fn a_copy_of_an_overridden_clip_is_not_served_the_keyed_clips_pixels() {
     assert_same(&render(&keyed, Some(&cache)), &render(&keyed, None), "the keyed clip's copy");
     assert_same(&render(&overridden, Some(&cache)), &render(&overridden, None), "the overridden clip's copy");
 }
+
+#[test]
+fn elongated_solids_stay_within_the_pixel_cap_after_rounding() {
+    use crate::pipeline::solid_size;
+    // 1 × 100 million at full scale: rounding up used to leave 40 million pixels.
+    for (w, h) in [(1u32, 100_000_000u32), (100_000_000, 1), (u32::MAX, u32::MAX), (1, u32::MAX)] {
+        let (s, pw, ph) = solid_size(w, h, 1.0);
+        assert!(s > 0.0 && f64::from(pw) * f64::from(ph) <= 16.0e6, "{w}x{h} -> {pw}x{ph} at {s}");
+    }
+    // A solid within the cap keeps its scale; an over-cap square is lowered by the exact ratio.
+    assert_eq!(solid_size(4000, 4000, 1.0), (1.0, 4000, 4000));
+    let (s, pw, ph) = solid_size(5000, 5000, 1.0);
+    assert!((s - 0.8).abs() < 0.01 && pw * ph <= 16_000_000);
+}

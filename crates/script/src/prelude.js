@@ -653,8 +653,44 @@ TextDocument.prototype = {
 function __propOf(layer, info) {
   if (!info) return null;
   if (info.isLayer) return layer;
+  if (info.marker) return layer.marker;
+  if (info.absent) return __absentGroup(layer, info);
   if (info.kind === "group") return info.isMask ? new MaskPropertyGroup(layer, info.uid) : new PropertyGroup(layer, info.uid);
   return new Property(layer, info.uid);
+}
+
+// A top-level slot After Effects always has and this layer does not use yet (Layer Styles before
+// any style, Data, Sets…): an empty group, so loops over `numProperties` meet no null.
+function __absentGroup(layer, info) {
+  var g = {
+    __kind: "PropertyGroup",
+    get name() { return info.name; },
+    get matchName() { return info.matchName; },
+    get propertyIndex() { return info.index; },
+    get propertyDepth() { return 1; },
+    get propertyType() { return PropertyType.NAMED_GROUP; },
+    get parentProperty() { return layer; },
+    get numProperties() { return 0; },
+    get enabled() { return true; },
+    get active() { return layer.enabled; },
+    get canSetEnabled() { return false; },
+    get isModified() { return false; },
+    get isEffect() { return false; },
+    get isMask() { return false; },
+    get elided() { return false; },
+    get selected() { return false; },
+    property: function () { return null; },
+    propertyGroup: function (n) { return n === undefined || n === 1 ? layer : null; },
+    canAddProperty: function () { return false; },
+    addProperty: function (n) { throw __err("Can not add \"" + n + "\" to \"" + info.name + "\""); },
+    toString: function () { return "[object PropertyGroup]"; },
+  };
+  // Callable like any group: `layer.property(7)(1)` is `.property(1)`, null.
+  var f = function (k) { return g.property(k); };
+  delete f.name;
+  delete f.length;
+  for (const k of Object.getOwnPropertyNames(g)) Object.defineProperty(f, k, Object.getOwnPropertyDescriptor(g, k));
+  return f;
 }
 
 function PropertyBase() {}

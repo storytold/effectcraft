@@ -9,7 +9,8 @@
 
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{Comp, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
+use effectcraft_project::ae_order::{self, AeChild};
+use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
 
@@ -272,6 +273,19 @@ fn node_resp(path: String, n: &Node, index: usize) -> Resp {
     ])
 }
 
+/// A top-level slot the layer has no node for, as group data: `@marker` (the markers, built by the
+/// prelude) or `@absent` (an empty group, as After Effects shows an unused slot).
+fn slot_resp(path: &str, s: &ae_order::AeSlot, index: usize) -> Resp {
+    Resp::List(vec![
+        Resp::Str(path.into()),
+        Resp::Bool(true),
+        Resp::Str(s.name.into()),
+        Resp::Str(s.match_name.into()),
+        Resp::Num(0.0),
+        Resp::Num(index as f64),
+    ])
+}
+
 fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
     match key {
         Key::Index(i) => usize::try_from(*i).ok().filter(|i| *i >= 1).and_then(|i| g.children.get(i - 1)),
@@ -283,6 +297,9 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 .find(|n| n.match_id() == m)
                 .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(name)))
                 .or_else(|| g.children.iter().find(|n| compact(n.name()) == c || compact(n.match_id()) == c))
+                // An effect by its After Effects match name, an imported placeholder's effect id
+                // (`effect("Pseudo/0.25")`; its match id is one path segment, `Pseudo_0_25`).
+                .or_else(|| g.children.iter().find(|n| matches!(n.as_group().map(|g| &g.kind), Some(GroupKind::Effect { effect }) if effect == name)))
         }
     }
 }
@@ -348,7 +365,36 @@ impl<'a> Resolver<'a> {
         let uid = segs.get(keep - 1)?.strip_prefix('@')?.parse::<u64>().ok()?;
         let index = parent.children.iter().position(|c| c.uid() == uid)?;
         let n = parent.children.get(index)?;
-        Some(node_resp(group_path, n, index + 1))
+        // A top-level group's number is After Effects' (see `ae_order`).
+        let number = if keep == 1 { ae_order::ae_index(l, n.match_id()) } else { None }.unwrap_or(index + 1);
+        Some(node_resp(group_path, n, number))
+    }
+
+    /// A child of a layer (`group` empty) or of one of its groups, by name or 1-based number.
+    fn child(&self, comp: u64, layer: u64, group: &str, key: &Key) -> Option<Resp> {
+        let l = self.layer(comp, layer)?;
+        // A layer's numbers are After Effects' (Marker is 1, unused groups keep their slot), and so
+        // are its match names (`thisLayer("ADBE Effect Parade")`, as scripts such as Karton write).
+        let slot = match key {
+            Key::Index(i) => usize::try_from(*i).ok(),
+            Key::Name(name) => ae_order::ae_index_of_match_name(l, name),
+        };
+        if group.is_empty()
+            && ae_order::ae_slots(&l.source).is_some()
+            && let Some(i) = slot
+        {
+            return Some(match ae_order::ae_child(l, i)? {
+                AeChild::Node(n) => node_resp(format!("@{}", n.uid()), n, i),
+                AeChild::Marker => slot_resp("@marker", &ae_order::MARKER, 1),
+                AeChild::Absent(s) => slot_resp("@absent", s, i),
+            });
+        }
+        let g = if group.is_empty() { &l.props } else { l.props.group(group)? };
+        let n = find_child(g, key)?;
+        let index = if group.is_empty() { ae_order::ae_index(l, n.match_id()) } else { None }
+            .unwrap_or_else(|| g.children.iter().position(|c| c.uid() == n.uid()).unwrap_or(0) + 1);
+        let path = if group.is_empty() { format!("@{}", n.uid()) } else { format!("{group}/@{}", n.uid()) };
+        Some(node_resp(path, n, index))
     }
 
     fn try_resolve(&self, req: &Req) -> Option<Resp> {
@@ -403,14 +449,7 @@ impl<'a> Resolver<'a> {
                     Resp::Bool(l.switches.video),
                 ])
             }
-            Req::Child { comp, layer, group, key } => {
-                let l = self.layer(*comp, *layer)?;
-                let g = if group.is_empty() { &l.props } else { l.props.group(group)? };
-                let n = find_child(g, key)?;
-                let index = g.children.iter().position(|c| c.uid() == n.uid()).unwrap_or(0) + 1;
-                let path = if group.is_empty() { format!("@{}", n.uid()) } else { format!("{group}/@{}", n.uid()) };
-                node_resp(path, n, index)
-            }
+            Req::Child { comp, layer, group, key } => return self.child(*comp, *layer, group, key),
             Req::Ancestor { comp, layer, path, up } => return self.ancestor(*comp, *layer, path, *up),
             Req::PropInfo { comp, layer, path } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
@@ -423,7 +462,10 @@ impl<'a> Resolver<'a> {
                         Some(g) => l.props.group(g)?,
                         None => &l.props,
                     };
-                    g.children.iter().position(|n| format!("@{}", n.uid()) == last).map(|i| i + 1)
+                    let i = g.children.iter().position(|n| format!("@{}", n.uid()) == last)?;
+                    // A top-level property (an enabled Time Remap) has After Effects' number.
+                    let top = if parent.is_none() { g.children.get(i).and_then(|n| ae_order::ae_index(l, n.match_id())) } else { None };
+                    Some(top.unwrap_or(i + 1))
                 });
                 Resp::List(vec![
                     Resp::Str(p.name.clone()),

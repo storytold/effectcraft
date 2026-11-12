@@ -1,6 +1,6 @@
 //! A fully wired [`Session`]: footage decoding through `effectcraft-media` (FilmCraft's codecs),
 //! the media importer, the expression engine, JavaScript scripting (`effectcraft-script`) and
-//! Render Queue export through `effectcraft-export` (FilmCraft's encoders). Frontends (desktop,
+//! Render Queue export through `effectcraft-export` (craft-libs' encoders). Frontends (desktop,
 //! CLI, MCP, web) start here.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
