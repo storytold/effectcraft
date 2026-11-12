@@ -294,6 +294,10 @@ fn levels_ic_stays_finite_over_the_whole_range() {
         let out = run("ec.color.levelsic", &img, &lv);
         assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{ib} {iw} {ob} {ow}: {:?}", out.data[0]);
     }
+    // The bound only stops the overflow: an HDR value that was finite before keeps its level
+    // (gamma 0.1 at 4 x Input White: 4^10).
+    let bright = run("ec.color.levelsic", &Image::filled(1, 1, [4.0, 4.0, 4.0, 1.0]), &[("rgb/rgbGamma", num(0.1)), ("clipToOutputWhite", Value::Enum(0))]);
+    assert_eq!(bright.data[0][0], 4.0f32.powf(10.0));
     // Gamma 0 is the limit of a small gamma: below Input White the curve goes to 0.
     let dark = run("ec.color.levelsic", &Image::filled(1, 1, [0.5, 0.5, 0.5, 1.0]), &[("rgb/rgbGamma", num(0.0))]);
     assert!(dark.data[0][0] < 1e-6, "{:?}", dark.data[0]);
