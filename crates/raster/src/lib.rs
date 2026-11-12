@@ -223,9 +223,11 @@ impl Image {
         let mut out = Image::new(self.width + 2 * eff, self.height + 2 * eff);
         let ow = out.width as usize;
         let w = self.width as usize;
-        for (y, src) in self.data.chunks_exact(w.max(1)).take(self.height as usize).enumerate() {
+        // `chunks`, not `chunks_exact`: a short image's last, partial row keeps the pixels it
+        // has (the ones `get` reads).
+        for (y, src) in self.data.chunks(w.max(1)).take(self.height as usize).enumerate() {
             let o = (y + eff as usize) * ow + eff as usize;
-            if let Some(dst) = out.data.get_mut(o..o + w) {
+            if let Some(dst) = out.data.get_mut(o..o + src.len()) {
                 dst.copy_from_slice(src);
             }
         }
@@ -549,6 +551,10 @@ mod tests {
         assert_eq!(short.get(0, 0), [1.0; 4]);
         let p = short.padded(1);
         assert_eq!((p.width, p.height), (6, 6));
+        // The partial last row keeps its pixel, as `get` reads it.
+        assert_eq!(short.get(0, 1), [1.0; 4]);
+        assert_eq!(p.get(1, 2), [1.0; 4]);
+        assert_eq!(p.get(2, 2), [0.0; 4]);
     }
 
     #[test]

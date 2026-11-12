@@ -512,13 +512,13 @@ fn vr_denoise(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if level <= 0.0 {
         return b;
     }
-    // Capped at the frame's side: an expression-driven Noise Level (1e4+) asked for a padded
-    // buffer of tens of GB, an allocation failure that aborts the process.
-    let side = b.img.width.max(b.img.height).max(1) as usize;
-    let r = (((1.0 + level * 4.0) * b.scale).max(1.0) as usize).min(side);
+    // Radii are capped: an expression-driven Noise Level (1e4+) asked for a padded buffer and
+    // guided-filter planes of many GB, an allocation failure that aborts the process. The
+    // slider's range (0..100) gives at most 5 px per unit of scale, far below the cap.
+    let r = (((1.0 + level * 4.0) * b.scale).max(1.0) as usize).min(MAX_DENOISE_RADIUS);
     if ctx.params.e("noiseType") == 1 {
         // Salt-and-pepper speckles: a median removes isolated outliers outright.
-        let mr = ((level * 3.0 * b.scale).round() as usize).clamp(1, side);
+        let mr = ((level * 3.0 * b.scale).round() as usize).clamp(1, MAX_DENOISE_RADIUS);
         b.img = per_eye(&b.img, layout(ctx), |e, _| crate::noise::median_image(e, mr));
         return b;
     }
@@ -527,7 +527,8 @@ fn vr_denoise(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b.img = per_eye(&b.img, layout(ctx), |e, _| {
         // Guided filter (self-guided, per channel) on a frame padded with wrapped / pole-continued
         // pixels so the seam and poles are filtered like any other place.
-        let pad = r * 2 + 1;
+        // The pad `wrap_pad` applies (it clamps), so the crop below starts where the frame is.
+        let pad = wrap_pad_amount(r * 2 + 1);
         let padded = wrap_pad(e, pad);
         let guide = crate::util::Plane::luma(&padded);
         let ch = crate::util::split(&padded);
@@ -548,13 +549,22 @@ fn vr_denoise(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Pad an equirectangular image by `pad` pixels: wrapped columns, pole-continued rows.
+/// Largest VR Denoise filter radius in buffer pixels (see `vr_denoise`).
+const MAX_DENOISE_RADIUS: usize = 64;
+
+/// The pad [`wrap_pad`] applies for a requested `pad`.
+pub fn wrap_pad_amount(pad: usize) -> usize {
+    pad.min(effectcraft_raster::MAX_PADDED_SIDE as usize / 2)
+}
+
+/// Pad an equirectangular image by [`wrap_pad_amount`]`(pad)` pixels: wrapped columns,
+/// pole-continued rows.
 pub fn wrap_pad(img: &Image, pad: usize) -> Image {
     // An empty frame has nothing to wrap (`clamp(0, h - 1)` below would panic).
     if img.is_empty() {
         return img.clone();
     }
-    let pad = pad.min(effectcraft_raster::MAX_PADDED_SIDE as usize / 2);
+    let pad = wrap_pad_amount(pad);
     let (w, h) = (img.width as i64, img.height as i64);
     let p = pad as i64;
     let mut out = Image::new((w + 2 * p) as u32, (h + 2 * p) as u32);
@@ -1358,6 +1368,20 @@ mod tests {
         let n: Vec<_> =
             (0..4).map(|t| run_fx("ec.vr.fractalnoise", &[("fractalType", Value::Enum(t))], img.clone(), 0.0, EffectEnv::default()).img.data).collect();
         assert!(n[0] != n[1] && n[1] != n[2] && n[2] != n[3]);
+    }
+
+    /// Fail-before: a Noise Level far past the slider (an expression) sized the padding and the
+    /// guided filter's planes by it, many GB on a 4K frame (an allocation abort). The radius is
+    /// capped; slider values are unchanged.
+    #[test]
+    fn denoise_with_a_hostile_noise_level_stays_bounded() {
+        let img = sphere_img(64, 32);
+        for t in [0, 1] {
+            let out = run_fx("ec.vr.denoise", &[("noiseLevel", Value::Scalar(1.0e9)), ("noiseType", Value::Enum(t))], img.clone(), 0.0, EffectEnv::default());
+            assert_eq!((out.img.width, out.img.height), (64, 32));
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()));
+        }
+        assert_eq!(super::wrap_pad_amount(usize::MAX), effectcraft_raster::MAX_PADDED_SIDE as usize / 2);
     }
 
     #[test]
