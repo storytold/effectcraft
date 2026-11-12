@@ -85,7 +85,7 @@ recursive band splitting, greedy PVQ search. Not implemented: transient frames, 
 pitch post-filter, intensity stereo, dynamic allocation, VBR. All-zero CELT frames become 3-byte
 silence packets.
 
-## Measured (tests in `tests/`, FilmCraft decoder)
+## Measured (tests in `tests/`, craft-audio's Opus decoder)
 
 Synthetic speech (glottal pulses 100–200 Hz through three moving formants, syllable envelopes,
 pauses) and music (three-note harmonic chords); waveform SNR against the input band-limited to
@@ -129,8 +129,8 @@ stage-1/2 codebooks and prediction weights, gain, pitch, contour, LTP and pulse 
 weights) and the decoder-side normative arithmetic the encoder must reproduce bit-exactly (CELT
 allocation; SILK NLSF dequantisation and stabilisation, NLSF → LPC conversion, `log2lin`, the
 fixed-point division/inverse helpers and the LPC analysis filter) are mirrored from FilmCraft's
-first-party, spec-derived `filmcraft-opus` decoder (MIT OR Apache-2.0), which is also the
-round-trip oracle in `tests/` and `crates/export/tests/it/opus_roundtrip.rs` (ffmpeg is a second,
+first-party, spec-derived `filmcraft-opus` decoder (MIT OR Apache-2.0). That decoder, now
+`craft_audio::opus` in craft-libs, is also the round-trip oracle in `tests/` and `crates/export/tests/it/opus_roundtrip.rs` (ffmpeg is a second,
 external oracle when installed). All encoder-side analysis and search (pitch, LPC, NLSF and
 LTP search, noise feedback, rate control, stereo prediction, the decimator) is our own design.
 No third-party encoder or decoder source (libopus or otherwise) was consulted.

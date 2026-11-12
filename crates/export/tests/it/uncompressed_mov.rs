@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use craft_media::isobmff::TrackKind;
 use effectcraft_color::Label;
 use effectcraft_export::render_queue::{AudioFormat, AudioOutput, Channels, OutputFormat, OutputModule, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, export};
@@ -15,7 +16,6 @@ use effectcraft_media::MediaPool;
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, Project, Solid, build};
 use effectcraft_render::FootageSource;
 use effectcraft_time::{FrameRate, Tick};
-use filmcraft_isobmff::TrackKind;
 
 const W: u32 = 33;
 const H: u32 = 20;
@@ -103,7 +103,7 @@ fn reference_frames(p: &Project, cid: ItemId, footage: &dyn FootageSource, om: &
 /// The frames as stored in the movie, unpacked to RGBA (rows padded to even bytes).
 fn stored_frames(path: &Path, alpha: bool) -> Vec<Vec<u8>> {
     let bytes = std::fs::read(path).expect("read movie");
-    let mov = filmcraft_isobmff::open(bytes.as_slice()).expect("demux");
+    let mov = craft_media::isobmff::open(bytes.as_slice()).expect("demux");
     assert!(mov.is_quicktime);
     let t = mov.tracks.iter().find(|t| t.kind == TrackKind::Video).expect("video track");
     let e = &t.entries[0];
@@ -204,7 +204,7 @@ fn uncompressed_with_pcm_audio() {
     let path = d.join("comp.mov");
     assert!(run(&p, cid, &pool, &om, &path).audio);
     let bytes = std::fs::read(&path).expect("read");
-    let mov = filmcraft_isobmff::open(bytes.as_slice()).expect("demux");
+    let mov = craft_media::isobmff::open(bytes.as_slice()).expect("demux");
     let a = mov.tracks.iter().find(|t| t.kind == TrackKind::Audio).expect("audio track");
     assert_eq!(a.timescale, 48_000);
     // 0.6 s of audio at 48 kHz.
