@@ -119,8 +119,22 @@ pub fn drop_folder(project: &effectcraft_engine::project::Project, row: Option<I
     if it.is_folder() { Some(it.id) } else { it.parent }
 }
 
+/// A Project panel thumbnail: (the revision it shows, its texture).
+#[derive(Clone)]
+struct Thumb(u64, egui::TextureHandle);
+
 /// A thumbnail being rendered off the UI thread: (revision, result slot).
-type PendingThumb = (u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+#[derive(Clone)]
+struct PendingThumb(u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+
+/// Let go of every Project panel thumbnail and the renders in flight for them (a cache purge, or
+/// a project closed: the next project's item ids can be the closed one's).
+pub fn forget_thumbnails(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove_by_type::<Thumb>();
+        d.remove_by_type::<PendingThumb>();
+    });
+}
 
 /// Thumbnail of a comp (its current time) or footage (first frame), cached per item/revision.
 /// Rendered on a background thread (inline on wasm32): until the new one lands the previous
@@ -129,19 +143,19 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
     let key = egui::Id::unique(("proj-thumb", it.id.0));
     let pkey = egui::Id::unique(("proj-thumb-pending", it.id.0));
     let rev = app.session.revision;
-    let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(key));
-    let mut tex = cached.as_ref().map(|(_, t)| t.clone());
-    let have = cached.as_ref().map(|(r, _)| *r);
+    let cached: Option<Thumb> = ctx.data(|d| d.get_temp(key));
+    let mut tex = cached.as_ref().map(|Thumb(_, t)| t.clone());
+    let have = cached.as_ref().map(|Thumb(r, _)| *r);
     // A finished render: upload it.
     let pending: Option<PendingThumb> = ctx.data(|d| d.get_temp(pkey));
-    if let Some((prev, slot)) = &pending {
+    if let Some(PendingThumb(prev, slot)) = &pending {
         let done = slot.lock().ok().and_then(|mut s| s.take());
         match done {
             Some(Some((w, h, px))) => {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
                 let t = ctx.load_texture(format!("proj-thumb-{}", it.id.0), ci, egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| {
-                    d.insert_temp(key, (*prev, t.clone()));
+                    d.insert_temp(key, Thumb(*prev, t.clone()));
                     d.remove::<PendingThumb>(pkey);
                 });
                 tex = Some(t);
@@ -179,7 +193,7 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
             return tex;
         }
     }
-    ctx.data_mut(|d| d.insert_temp::<PendingThumb>(pkey, (rev, slot)));
+    ctx.data_mut(|d| d.insert_temp(pkey, PendingThumb(rev, slot)));
     ctx.request_repaint();
     tex
 }
@@ -1502,6 +1516,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// #2042: closing the project drops the Project panel's thumbnails (and renders in flight),
+    /// so their textures go with it and an item of the next project with a closed one's id never
+    /// shows the closed project's picture.
+    #[test]
+    fn closing_the_project_forgets_its_thumbnails() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let (key, pkey) = (egui::Id::unique(("proj-thumb", 1u64)), egui::Id::unique(("proj-thumb-pending", 1u64)));
+        let tex = ctx.load_texture("t", egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255; 4]), egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| {
+            d.insert_temp(key, Thumb(app.session.revision, tex));
+            d.insert_temp(pkey, PendingThumb(app.session.revision, Arc::default()));
+        });
+        app.session.execute("file.closeProject", serde_json::json!({})).unwrap();
+        app.handle_events(&ctx);
+        assert!(ctx.data(|d| d.get_temp::<Thumb>(key)).is_none(), "the closed project's thumbnail is kept");
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_none(), "a closed project's render is awaited");
     }
 
     /// Long names show in full: the Name column fits them (it stopped at 260 points with "…")
