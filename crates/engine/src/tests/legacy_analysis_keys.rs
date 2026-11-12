@@ -50,7 +50,7 @@ fn analyses_saved_by_0_22_survive_edits_that_keep_their_frames() {
     for (len, _, key) in &before {
         assert!(*len > 0);
         // The key predates Footage::placed_page, so it isn't today's signature.
-        assert_ne!(key, &crate::warp::signature(&s.project, COMP, layer));
+        assert_ne!(key, &crate::analysis::frames_key::signature(&s.project, COMP, layer));
     }
 
     // Adding to the render queue edits the project, as `effectcraft-cli render` does.
@@ -122,6 +122,6 @@ fn footage_signature_text_is_pinned() {
         ..Footage::default()
     };
     let fields = r#"path: "clip.mp4", kind: Video, width: 160, height: 120, pixel_aspect: 1.0, frame_rate: FrameRate { num: 30, den: 1 }, native_rate: None, duration: Tick(0), has_video: false, has_audio: false, alpha: Straight, premul_color: [0.0, 0.0, 0.0], loop_count: 1, codec: "", missing: false, sequence: [], color_profile: None, layer: None, fields: Off, invert_alpha: true, linear_light: false, preserve_rgb: false, cineon: CineonSettings { log_conversion: false, converted_black: 0.0, converted_white: 1023.0, black: 95.0, white: 685.0, gamma: 1.7, rolloff: 20.0, units: TenBit }, data: None, page: 2, alphabetical: false, start_timecode: None, file_timecode: None, markers: []"#;
-    assert_eq!(crate::warp::footage_text(&f, true), format!("Footage {{ {fields}, placed_page: true }}"));
-    assert_eq!(crate::warp::footage_text(&f, false), format!("Footage {{ {fields} }}"));
+    assert_eq!(crate::analysis::frames_key::legacy::footage_text(&f, false, true), format!("Footage {{ {fields}, placed_page: true }}"));
+    assert_eq!(crate::analysis::frames_key::legacy::footage_text(&f, false, false), format!("Footage {{ {fields} }}"));
 }
