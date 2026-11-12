@@ -128,7 +128,7 @@ impl EffectcraftApp {
             frame: 0,
             scale: (scale * 1000.0).round() as u32,
             view: self.view_hash(comp),
-            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp() ^ self.lut_stamp(),
+            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp() ^ self.lut_stamp() ^ self.purge_stamp(),
         }
     }
 
@@ -147,6 +147,14 @@ impl EffectcraftApp {
     /// (the viewers show a frame again only when its key changes). 0 until a LUT file changes.
     fn lut_stamp(&self) -> u64 {
         self.lut_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
+
+    /// Changes when the caches are purged (Event::PurgeCaches: footage reloaded, Purge): the
+    /// frames on screen and the ones still rendering may show the files as they were, and a reload
+    /// that changes no metadata keeps the project's revision, so the new frames must not share
+    /// their keys (#3539; the viewers show a frame again only when its key changes). 0 until then.
+    fn purge_stamp(&self) -> u64 {
+        self.purges.wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
     }
 
     /// The frame series the viewer of `comp` shows now (its scale, view and options, for the

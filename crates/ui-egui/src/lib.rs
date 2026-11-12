@@ -377,6 +377,8 @@ pub struct EffectcraftApp {
     lut_watcher: Option<effectcraft_engine::lut_reload::Watcher>,
     /// The LUT generation the frames kept were rendered at ([`effectcraft_engine::lut_reload::generation`]).
     lut_generation: u64,
+    /// How many times the caches were purged ([`Self::purge_stamp`]).
+    purges: u64,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,
