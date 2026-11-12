@@ -2444,6 +2444,19 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Partial Hebrew UI catalog, authored against English source strings.
 const HEBREW: &[(&str, &str)] = &[
+    ("Home", "בית"),
+    ("Learn", "למידה"),
+    ("LEARN", "למידה"),
+    (
+        "Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me.",
+        "מדריכים מעשיים בתוך EffectCraft. בצעו כל שלב בעצמכם, או לחצו על ״הצג לי״.",
+    ),
+    ("Show me", "הצג לי"),
+    ("More tutorials", "מדריכים נוספים"),
+    ("Tutorial complete", "המדריך הושלם"),
+    ("Close tutorial", "סגירת המדריך"),
+    ("steps", "שלבים"),
+    ("Nice work. Pick another tutorial on the Home screen's Learn tab.", "כל הכבוד! בחרו מדריך נוסף בכרטיסיית ״למידה״ שבמסך הבית."),
     ("Pre-compose", "יצירת קומפוזיציית ביניים"),
     ("Leave all attributes in \"{}\"", "השארת כל המאפיינים ב־\u{2068}\"{}\"\u{2069}"),
     (
@@ -2646,6 +2659,59 @@ const HEBREW: &[(&str, &str)] = &[
     ("New Duration:", "משך חדש:"),
     ("Open a composition to see its scopes", "פתיחת קומפוזיציה כדי להציג את טווחי המדידה"),
     ("Open a composition to track motion.", "פתח קומפוזיציה כדי לעקוב אחר תנועה."),
+    ("Start", "התחלה"),
+    ("Resume", "המשך"),
+    ("{} min", "{} דק׳"),
+    ("Step {} of {}: {}", "שלב {} מתוך {}: {}"),
+    ("Animate a title", "הנפשת כותרת"),
+    (
+        "Make a composition, type a title and fly it in with two position keyframes and an easy ease.",
+        "יוצרים קומפוזיציה, מוסיפים כותרת ומנפישים את כניסתה באמצעות שתי נקודות מפתח וריכוך תנועה.",
+    ),
+    ("Track and attach", "מעקב והצמדה"),
+    (
+        "Follow a moving element with the point tracker, then hang a null on the track and parent a layer to it.",
+        "עוקבים אחר רכיב בתנועה, מחברים אובייקט ריק למסלול המעקב ומשייכים אליו שכבה.",
+    ),
+    ("Make a 3D scene", "יצירת סצנה בתלת־ממד"),
+    (
+        "Turn flat layers into 3D, light them, add a camera and look at the scene from outside the frame.",
+        "הופכים שכבות דו־ממדיות לתלת־ממד, מוסיפים תאורה ומצלמה ובוחנים את הסצנה מחוץ למסגרת.",
+    ),
+    ("Make a composition", "יצירת קומפוזיציה"),
+    ("Type a title", "הקלדת כותרת"),
+    ("Start the animation", "התחלת ההנפשה"),
+    ("Move in time", "מעבר לנקודת זמן"),
+    ("Set the end position", "קביעת מיקום הסיום"),
+    ("Smooth it out", "ריכוך התנועה"),
+    ("Watch it", "צפייה בתוצאה"),
+    ("Open the demo", "פתיחת פרויקט הדגמה"),
+    ("Pick what to track", "בחירת הרכיב למעקב"),
+    ("Add a track point", "הוספת נקודת מעקב"),
+    ("Analyze", "ניתוח התנועה"),
+    ("Make a null to carry the motion", "יצירת אובייקט ריק לנשיאת התנועה"),
+    ("Point the track at the null", "קישור מסלול המעקב לאובייקט הריק"),
+    ("Apply", "החלת המעקב"),
+    ("Attach a layer", "הצמדת שכבה"),
+    ("Add a floor", "הוספת רצפה"),
+    ("Make it 3D", "המרה לתלת־ממד"),
+    ("Lay it down", "השכבת הרצפה"),
+    ("Light it", "הוספת תאורה"),
+    ("Add a camera", "הוספת מצלמה"),
+    ("Step outside the camera", "יציאה מתצוגת המצלמה"),
+    ("See past the frame", "צפייה מעבר למסגרת"),
+    (
+        "Everything you animate lives in a composition. Choose Composition ▸ New Composition (Cmd+N) and keep the HD 1920×1080 settings.",
+        "כל ההנפשות נמצאות בקומפוזיציה. בחרו קומפוזיציה ▸ קומפוזיציה חדשה (Cmd+N) והשאירו רזולוציית HD של 1920×1080.",
+    ),
+    (
+        "We'll track the moving lower third in the demo project. Open it from Home ▸ Open Demo Project (or File ▸ Open Demo Project).",
+        "נעקוב אחר רצועת הכותרת התחתונה הנעה בפרויקט ההדגמה. פתחו דרך בית ▸ פתיחת פרויקט הדגמה (או קובץ ▸ פתיחת פרויקט הדגמה).",
+    ),
+    (
+        "Choose Composition ▸ New Composition. Any size works; 1920×1080 is a good start.",
+        "בחרו קומפוזיציה ▸ קומפוזיציה חדשה. אפשר להשתמש בכל גודל; 1920×1080 היא נקודת פתיחה טובה.",
+    ),
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -10528,6 +10594,37 @@ mod tests {
         }
         set_current("en");
         assert_eq!(tr("New Composition From Footage"), "New Composition From Footage");
+    }
+
+    /// The Native Home and Learn tutorial journey remains navigable in Hebrew.
+    #[test]
+    fn hebrew_native_home_and_learn_tutorial_journey_is_localized() {
+        let learn = include_str!("../panels/learn.rs");
+        let home_header = include_str!("../header.rs");
+        set_current("he");
+        for (english, hebrew) in [
+            ("Home", "בית"),
+            ("Learn", "למידה"),
+            ("LEARN", "למידה"),
+            (
+                "Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me.",
+                "מדריכים מעשיים בתוך EffectCraft. בצעו כל שלב בעצמכם, או לחצו על ״הצג לי״.",
+            ),
+            ("Show me", "הצג לי"),
+            ("More tutorials", "מדריכים נוספים"),
+            ("Tutorial complete", "המדריך הושלם"),
+            ("Close tutorial", "סגירת המדריך"),
+            ("steps", "שלבים"),
+            ("Nice work. Pick another tutorial on the Home screen's Learn tab.", "כל הכבוד! בחרו מדריך נוסף בכרטיסיית ״למידה״ שבמסך הבית."),
+        ] {
+            let native_source = if english == "Home" { home_header } else { learn };
+            assert!(native_source.contains(&format!("{english:?}")), "No Native callsite for {english}");
+            assert_eq!(tr(english), hebrew, "Learn workflow: {english}");
+        }
+        assert_eq!(tr("Next"), "הבא");
+        set_current("en");
+        assert_eq!(tr("Learn"), "Learn");
+        assert_eq!(tr("Show me"), "Show me");
     }
 
     /// The Native Home welcome, community rail, recent-file filter, relative dates and
