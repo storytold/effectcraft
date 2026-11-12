@@ -167,6 +167,13 @@ pub struct Session {
     pub journal: Vec<(String, Value)>,
     /// Processed-layer pixels reused across frames and edits (content-keyed, never stale).
     pub layer_cache: Arc<LayerCache>,
+    /// Set when this project closes ([`Session::replace_project`]), then replaced by a fresh flag
+    /// for the next one: work started for the project off the UI thread (Project panel
+    /// thumbnails) stops reading its footage and lets go of what it read, so it can't fill the
+    /// shared caches with a closed project's frames. Public only so that other crates can build a
+    /// `Session { .. }`.
+    #[doc(hidden)]
+    pub project_closed: Arc<std::sync::atomic::AtomicBool>,
     /// The last Cryptomatte pick probe (see [`Session::crypto_probe_job`]). Public only so that
     /// other crates can build a `Session { .. }`; its type is crate-private.
     #[doc(hidden)]
@@ -351,6 +358,7 @@ impl Default for Session {
             events: vec![],
             journal: vec![],
             layer_cache: Arc::new(LayerCache::default()),
+            project_closed: Default::default(),
             crypto_probe: Default::default(),
             disk_cache: None,
             pending_disk_drops: Default::default(),

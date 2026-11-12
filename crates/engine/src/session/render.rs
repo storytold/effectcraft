@@ -1,3 +1,7 @@
+use std::sync::atomic::Ordering;
+
+use effectcraft_render::{CancellableFootage, FootageSource};
+
 use super::{EngineError, Image, ItemId, RenderOpts, Renderer, Result, Session, ThumbnailJob, Tick, Value, commands};
 
 impl Session {
@@ -77,9 +81,12 @@ impl Session {
     /// A Project panel thumbnail of an item (a comp at `t`, footage at its first frame), longest
     /// side at most `max_side`, as a job that owns everything it reads: frontends run it off the
     /// UI thread (a big comp takes far longer than a frame). `None` for items without pixels.
+    /// Once the project closes ([`Session::replace_project`]) the job reads no more and answers
+    /// `None`, after letting go of what it read meanwhile: a thread that started late or decoded
+    /// through Close can't fill the shared caches with the closed project's frames.
     pub fn thumbnail_job(&self, item: ItemId, t: Tick, max_side: u32) -> Option<ThumbnailJob> {
         let it = self.project.item(item)?;
-        let footage = self.footage.clone();
+        let (footage, closed) = (self.footage.clone(), self.project_closed.clone());
         match &it.kind {
             effectcraft_project::ItemKind::Comp(c) => {
                 let (project, expr, cache) = (self.project.clone(), self.expr.clone(), self.layer_cache.clone());
@@ -93,21 +100,38 @@ impl Session {
                 };
                 let bg = c.background;
                 Some(Box::new(move || {
-                    let mut r = Renderer::new(&project, footage.as_ref(), opts);
+                    if closed.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    let src = CancellableFootage { inner: footage.as_ref(), cancel: closed.clone() };
+                    let mut r = Renderer::new(&project, &src, opts);
                     r.expr = expr.as_deref();
                     r.cache = Some(&cache);
                     let img = r.comp_frame(item, t);
+                    if closed.load(Ordering::SeqCst) {
+                        project_footage(&project).for_each(|f| forget_files(footage.as_ref(), f));
+                        cache.clear();
+                        return None;
+                    }
                     Some((img.width, img.height, img.to_rgba8_over(bg)))
                 }))
             }
             effectcraft_project::ItemKind::Footage(f) if f.has_video => {
                 let f = f.clone();
                 Some(Box::new(move || {
+                    if closed.load(Ordering::SeqCst) {
+                        return None;
+                    }
                     // Vector footage is drawn at the thumbnail's size: its declared size can be a
                     // 16384² canvas, gigabytes of pixels to point-sample down to a few dozen.
                     let scale = (max_side.max(1) as f64 / f.width.max(f.height).max(1) as f64).min(1.0);
-                    let src = footage.vector_frame(item, &f, scale).or_else(|| footage.frame(item, &f, Tick(0)))?;
-                    let img = effectcraft_render::cineon_frame(src, &f);
+                    let read = CancellableFootage { inner: footage.as_ref(), cancel: closed.clone() };
+                    let src = read.vector_frame(item, &f, scale).or_else(|| read.frame(item, &f, Tick(0)));
+                    if closed.load(Ordering::SeqCst) {
+                        forget_files(footage.as_ref(), &f);
+                        return None;
+                    }
+                    let img = effectcraft_render::cineon_frame(src?, &f);
                     // Point-sample down to at most `max_side` on the long side (a drawn size one
                     // pixel over it, from rounding, is shrunk by that pixel, not halved).
                     let (long, max) = (u64::from(img.width.max(img.height)), u64::from(max_side.max(1)));
@@ -119,7 +143,7 @@ impl Session {
                         for x in 0..w {
                             let (sx, sy) = (u64::from(x) * u64::from(img.width) / u64::from(w), u64::from(y) * u64::from(img.height) / u64::from(h));
                             let i = ((sy * u64::from(img.width) + sx) * 4) as usize;
-                            px.extend_from_slice(&full[i..i + 4]);
+                            px.extend_from_slice(full.get(i..i + 4)?);
                         }
                     }
                     Some((w, h, px))
@@ -145,9 +169,7 @@ impl Session {
     /// Make the media layer and the layer cache let go of what they decoded from `footage`'s
     /// files (it keys frames by path, so an overwritten file would keep showing its old pixels).
     pub(crate) fn forget_decoded(&self, footage: &effectcraft_project::Footage) {
-        for p in std::iter::once(&footage.path).chain(&footage.sequence) {
-            self.footage.forget(p);
-        }
+        forget_files(self.footage.as_ref(), footage);
         self.layer_cache.clear();
         self.drop_crypto_probe();
     }
@@ -190,4 +212,22 @@ pub(crate) fn aux_footage(project: &effectcraft_project::Project) -> Vec<String>
     paths.sort_unstable();
     paths.dedup();
     paths
+}
+
+/// Make `src` let go of what it decoded from `footage`'s files (its file, or a sequence's).
+fn forget_files(src: &dyn FootageSource, footage: &effectcraft_project::Footage) {
+    for p in std::iter::once(&footage.path).chain(&footage.sequence) {
+        src.forget(p);
+    }
+}
+
+/// Every footage `project` shows: its footage items and the proxies of its items.
+pub(crate) fn project_footage(project: &effectcraft_project::Project) -> impl Iterator<Item = &effectcraft_project::Footage> {
+    project.items.values().flat_map(|it| {
+        let own = match &it.kind {
+            effectcraft_project::ItemKind::Footage(f) => Some(f),
+            _ => None,
+        };
+        own.into_iter().chain(it.proxy.as_deref().map(|px| &px.footage))
+    })
 }

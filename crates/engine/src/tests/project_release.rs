@@ -62,6 +62,21 @@ fn replacing_project_releases_old_footage() {
     assert!(s.drain_events().contains(&Event::PurgeCaches));
 }
 
+#[test]
+fn closing_a_project_releases_its_proxies() {
+    let mut s = Session::default();
+    let src = Arc::new(Recording::default());
+    s.footage = src.clone();
+    let mut p = with_footage(&Project::default(), "old", "/old.mp4");
+    let item = p.items.values_mut().next().unwrap();
+    let footage = Footage { path: "/old-proxy.mov".into(), ..Default::default() };
+    item.proxy = Some(Box::new(effectcraft_project::Proxy { footage, enabled: true }));
+    s.replace_project(p, None);
+    src.0.lock().unwrap().clear();
+    s.execute("file.closeProject", json!({})).unwrap();
+    assert!(src.0.lock().unwrap().contains(&"/old-proxy.mov".to_string()), "{:?}", src.0.lock().unwrap());
+}
+
 /// A footage source with a memory cache, like the media pool: a frame read keeps its file's
 /// entry until the file is forgotten. With a gate, the first read waits for the test.
 #[derive(Default)]
