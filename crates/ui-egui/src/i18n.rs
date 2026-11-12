@@ -506,6 +506,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "文件..."),
     ("file.importMultiple", "Multiple Files...", "多个文件..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 项目..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects 项目..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects 项目..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 项目..."),
     ("file.importPlaceholder", "Placeholder...", "占位符..."),
     ("file.importSolid", "Solid...", "纯色..."),
@@ -699,7 +701,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "隐藏锁定的蒙版"),
     ("", "Mask and Shape Path", "蒙版和形状路径"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "已关闭"),
+    ("path.toggleClosed", "Closed", "已关闭"),
     ("path.convertToBezier", "Convert To Bezier Path", "转换为贝塞尔曲线路径"),
     ("path.setFirstVertex", "Set First Vertex", "设置第一个顶点"),
     ("path.freeTransform", "Free Transform Points", "自由变换点"),
@@ -873,6 +875,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "全部移除"),
     ("effect.manage", "Manage Effects...", "管理效果..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "加载效果插件..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "通过辅助程序加载插件..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "扫描效果辅助程序"),
     ("", "Animation", "动画"),
     ("anim.savePreset", "Save Animation Preset...", "保存动画预设..."),
     ("anim.applyPreset", "Apply Animation Preset...", "将动画预设应用于..."),
@@ -1050,7 +1054,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "基本图形"),
     ("window.panel", "Info", "信息"),
     ("help.inAppTutorials", "Learn", "学习"),
-    ("window.panel", "Lumetri Scopes", "Lumetri 范围"),
+    ("window.panel", "Video Scopes", "视频示波器"),
     ("window.panel", "Mask Interpolation", "蒙版插值"),
     ("window.panel", "Media Browser", "媒体浏览器"),
     ("window.panel", "Metadata", "元数据"),
@@ -1142,6 +1146,8 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fil..."),
     ("file.importMultiple", "Multiple Files...", "Flera filer..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-projekt..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
     ("file.importSolid", "Solid...", "Enfärgad..."),
@@ -1333,7 +1339,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Dölj låsta masker"),
     ("", "Mask and Shape Path", "Mask- och formbana"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Sluten"),
+    ("path.toggleClosed", "Closed", "Sluten"),
     ("path.convertToBezier", "Convert To Bezier Path", "Konvertera till Bezierbana"),
     ("path.setFirstVertex", "Set First Vertex", "Ange första hörnpunkt"),
     ("path.freeTransform", "Free Transform Points", "Fri transformering av punkter"),
@@ -1507,6 +1513,8 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Ta bort alla"),
     ("effect.manage", "Manage Effects...", "Hantera effekter..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Läs in effektplugin..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Läs in plugin via hjälpprogram..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Sök efter effekthjälpprogram"),
     ("", "Animation", "Animering"),
     ("anim.savePreset", "Save Animation Preset...", "Spara animeringsförinställning..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Använd animeringsförinställning..."),
@@ -1682,7 +1690,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Grundläggande grafik"),
     ("window.panel", "Info", "Info"),
     ("help.inAppTutorials", "Learn", "Lär dig"),
-    ("window.panel", "Lumetri Scopes", "Lumetri-scope"),
+    ("window.panel", "Video Scopes", "Videoskop"),
     ("window.panel", "Mask Interpolation", "Maskinterpolering"),
     ("window.panel", "Media Browser", "Mediebläddrare"),
     ("window.panel", "Metadata", "Metadata"),
@@ -1780,6 +1788,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "檔案..."),
     ("file.importMultiple", "Multiple Files...", "多個檔案..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 專案..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects 專案..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects 專案..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 專案..."),
     ("file.importPlaceholder", "Placeholder...", "預留位置..."),
     ("file.importSolid", "Solid...", "純色..."),
@@ -1973,7 +1983,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "隱藏鎖定的遮色片"),
     ("", "Mask and Shape Path", "遮色片和形狀路徑"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "封閉"),
+    ("path.toggleClosed", "Closed", "封閉"),
     ("path.convertToBezier", "Convert To Bezier Path", "轉換為貝茲路徑"),
     ("path.setFirstVertex", "Set First Vertex", "設定第一個頂點"),
     ("path.freeTransform", "Free Transform Points", "自由變換點"),
@@ -2147,6 +2157,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "全部移除"),
     ("effect.manage", "Manage Effects...", "管理效果..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "載入效果外掛程式..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "透過輔助程式載入外掛程式..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "掃描效果輔助程式"),
     ("", "Animation", "動畫"),
     ("anim.savePreset", "Save Animation Preset...", "儲存動畫預設集..."),
     ("anim.applyPreset", "Apply Animation Preset...", "套用動畫預設集..."),
@@ -2324,7 +2336,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "基本圖形"),
     ("window.panel", "Info", "資訊"),
     ("help.inAppTutorials", "Learn", "學習"),
-    ("window.panel", "Lumetri Scopes", "Lumetri 示波器"),
+    ("window.panel", "Video Scopes", "視訊示波器"),
     ("window.panel", "Mask Interpolation", "遮色片插補"),
     ("window.panel", "Media Browser", "媒體瀏覽器"),
     ("window.panel", "Metadata", "中繼資料"),
@@ -2415,6 +2427,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ファイル..."),
     ("file.importMultiple", "Multiple Files...", "複数のファイル..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Proプロジェクト..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effectsプロジェクト..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effectsプロジェクト..."),
     ("file.importPlaceholder", "Placeholder...", "プレースホルダー..."),
     ("file.importSolid", "Solid...", "平面..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -2608,7 +2622,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "ロックしたマスクを非表示"),
     ("", "Mask and Shape Path", "マスクとシェイプのパス"),
     ("path.rotoBezier", "RotoBezier", "ロトベジェ"),
-    ("mask.setClosed", "Closed", "閉じたパス"),
+    ("path.toggleClosed", "Closed", "閉じたパス"),
     ("path.convertToBezier", "Convert To Bezier Path", "ベジェパスに変換"),
     ("path.setFirstVertex", "Set First Vertex", "最初の頂点を設定"),
     ("path.freeTransform", "Free Transform Points", "ポイントを自由変形"),
@@ -2782,6 +2796,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "すべてを削除"),
     ("effect.manage", "Manage Effects...", "エフェクトを管理..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "エフェクトプラグインを読み込み..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "ヘルパー経由でプラグインを読み込み..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "エフェクトヘルパーをスキャン"),
     ("", "Animation", "アニメーション"),
     ("anim.savePreset", "Save Animation Preset...", "アニメーションプリセットを保存..."),
     ("anim.applyPreset", "Apply Animation Preset...", "アニメーションプリセットを適用..."),
@@ -2959,7 +2975,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "エッセンシャルグラフィックス"),
     ("window.panel", "Info", "情報"),
     ("help.inAppTutorials", "Learn", "学習"),
-    ("window.panel", "Lumetri Scopes", "Lumetriスコープ"),
+    ("window.panel", "Video Scopes", "ビデオスコープ"),
     ("window.panel", "Mask Interpolation", "マスク補間"),
     ("window.panel", "Media Browser", "メディアブラウザー"),
     ("window.panel", "Metadata", "メタデータ"),
@@ -3053,6 +3069,8 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Кілька файлів..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проєкт Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Проєкт Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Проєкт Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проєкт EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заповнювач..."),
     ("file.importSolid", "Solid...", "Суцільний колір..."),
@@ -3246,7 +3264,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Приховати заблоковані маски"),
     ("", "Mask and Shape Path", "Контур маски та фігури"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Замкнений"),
+    ("path.toggleClosed", "Closed", "Замкнений"),
     ("path.convertToBezier", "Convert To Bezier Path", "Перетворити на контур Безьє"),
     ("path.setFirstVertex", "Set First Vertex", "Задати першу вершину"),
     ("path.freeTransform", "Free Transform Points", "Вільне трансформування точок"),
@@ -3420,6 +3438,8 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Вилучити все"),
     ("effect.manage", "Manage Effects...", "Керування ефектами..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Завантажити плагін ефекту..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Завантажити плагіни через помічника..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Шукати помічників ефектів"),
     ("", "Animation", "Анімація"),
     ("anim.savePreset", "Save Animation Preset...", "Зберегти набір анімації..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Застосувати набір анімації..."),
@@ -3597,7 +3617,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Основна графіка"),
     ("window.panel", "Info", "Інформація"),
     ("help.inAppTutorials", "Learn", "Навчання"),
-    ("window.panel", "Lumetri Scopes", "Вимірювачі Lumetri"),
+    ("window.panel", "Video Scopes", "Відеоскопи"),
     ("window.panel", "Mask Interpolation", "Інтерполяція маски"),
     ("window.panel", "Media Browser", "Браузер медіа"),
     ("window.panel", "Metadata", "Метадані"),
@@ -3692,6 +3712,8 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Archivo..."),
     ("file.importMultiple", "Multiple Files...", "Varios archivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Proyecto de Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Proyecto de Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Proyecto de Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Proyecto de EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Marcador de posición..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -3885,7 +3907,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ocultar máscaras bloqueadas"),
     ("", "Mask and Shape Path", "Trazado de máscara y de forma"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Cerrado"),
+    ("path.toggleClosed", "Closed", "Cerrado"),
     ("path.convertToBezier", "Convert To Bezier Path", "Convertir en trazado Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Establecer primer vértice"),
     ("path.freeTransform", "Free Transform Points", "Transformar puntos libremente"),
@@ -4059,6 +4081,8 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Quitar todo"),
     ("effect.manage", "Manage Effects...", "Administrar efectos..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Cargar complemento de efecto..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Cargar complementos mediante asistente..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Buscar asistentes de efectos"),
     ("", "Animation", "Animación"),
     ("anim.savePreset", "Save Animation Preset...", "Guardar ajuste preestablecido de animación..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Aplicar ajuste preestablecido de animación..."),
@@ -4236,7 +4260,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Gráficos esenciales"),
     ("window.panel", "Info", "Información"),
     ("help.inAppTutorials", "Learn", "Aprender"),
-    ("window.panel", "Lumetri Scopes", "Ámbitos de Lumetri"),
+    ("window.panel", "Video Scopes", "Monitores de vídeo"),
     ("window.panel", "Mask Interpolation", "Interpolación de máscara"),
     ("window.panel", "Media Browser", "Navegador de medios"),
     ("window.panel", "Metadata", "Metadatos"),
@@ -4329,6 +4353,8 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Arquivo..."),
     ("file.importMultiple", "Multiple Files...", "Vários arquivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projeto do Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projeto do Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projeto do Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projeto do EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espaço reservado..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -4522,7 +4548,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ocultar máscaras bloqueadas"),
     ("", "Mask and Shape Path", "Caminho da máscara e da forma"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Fechado"),
+    ("path.toggleClosed", "Closed", "Fechado"),
     ("path.convertToBezier", "Convert To Bezier Path", "Converter em caminho Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Definir primeiro vértice"),
     ("path.freeTransform", "Free Transform Points", "Pontos de transformação livre"),
@@ -4696,6 +4722,8 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Remover todos"),
     ("effect.manage", "Manage Effects...", "Gerenciar efeitos..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Carregar plug-in de efeito..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Carregar plug-ins por meio do auxiliar..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Procurar auxiliares de efeitos"),
     ("", "Animation", "Animação"),
     ("anim.savePreset", "Save Animation Preset...", "Salvar predefinição de animação..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Aplicar predefinição de animação..."),
@@ -4873,7 +4901,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Gráficos essenciais"),
     ("window.panel", "Info", "Informações"),
     ("help.inAppTutorials", "Learn", "Aprender"),
-    ("window.panel", "Lumetri Scopes", "Escopos Lumetri"),
+    ("window.panel", "Video Scopes", "Escopos de vídeo"),
     ("window.panel", "Mask Interpolation", "Interpolação de máscara"),
     ("window.panel", "Media Browser", "Navegador de mídia"),
     ("window.panel", "Metadata", "Metadados"),
@@ -4974,6 +5002,8 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Несколько файлов..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проект Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Проект Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Проект Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проект EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заполнитель..."),
     ("file.importSolid", "Solid...", "Сплошной цвет..."),
@@ -5166,7 +5196,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Скрыть заблокированные маски"),
     ("", "Mask and Shape Path", "Контур маски и фигуры"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Замкнутый"),
+    ("path.toggleClosed", "Closed", "Замкнутый"),
     ("path.convertToBezier", "Convert To Bezier Path", "Преобразовать в кривую Безье"),
     ("path.setFirstVertex", "Set First Vertex", "Задать первую вершину"),
     ("path.freeTransform", "Free Transform Points", "Свободное трансформирование точек"),
@@ -5340,6 +5370,8 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Удалить все"),
     ("effect.manage", "Manage Effects...", "Управление эффектами..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Загрузить плагин эффектов..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Загрузить плагины через помощника..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Найти помощников эффектов"),
     ("", "Animation", "Анимация"),
     ("anim.savePreset", "Save Animation Preset...", "Сохранить заготовку анимации..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Применить заготовку анимации..."),
@@ -5512,7 +5544,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Основная графика"),
     ("window.panel", "Info", "Информация"),
     ("help.inAppTutorials", "Learn", "Обучение"),
-    ("window.panel", "Lumetri Scopes", "Измерители Lumetri"),
+    ("window.panel", "Video Scopes", "Видеоскопы"),
     ("window.panel", "Mask Interpolation", "Интерполяция маски"),
     ("window.panel", "Media Browser", "Обозреватель медиа"),
     ("window.panel", "Metadata", "Метаданные"),
@@ -5611,6 +5643,8 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fichier..."),
     ("file.importMultiple", "Multiple Files...", "Plusieurs fichiers..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projet Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projet Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projet Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projet EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espace réservé..."),
     ("file.importSolid", "Solid...", "Solide..."),
@@ -5803,7 +5837,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Masquer les masques verrouillés"),
     ("", "Mask and Shape Path", "Trajectoire de masque et de forme"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Fermé"),
+    ("path.toggleClosed", "Closed", "Fermé"),
     ("path.convertToBezier", "Convert To Bezier Path", "Convertir en trajectoire Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Définir le premier sommet"),
     ("path.freeTransform", "Free Transform Points", "Transformation libre des points"),
@@ -5977,6 +6011,8 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Tout supprimer"),
     ("effect.manage", "Manage Effects...", "Gérer les effets..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Charger un plug-in d'effet..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Charger des plug-ins via un assistant..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Rechercher les assistants d'effets"),
     ("", "Animation", "Animation"),
     ("anim.savePreset", "Save Animation Preset...", "Enregistrer une animation prédéfinie..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Appliquer une animation prédéfinie..."),
@@ -6149,7 +6185,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Graphiques essentiels"),
     ("window.panel", "Info", "Informations"),
     ("help.inAppTutorials", "Learn", "Apprentissage"),
-    ("window.panel", "Lumetri Scopes", "Oscilloscopes Lumetri"),
+    ("window.panel", "Video Scopes", "Oscilloscopes vidéo"),
     ("window.panel", "Mask Interpolation", "Interpolation de masque"),
     ("window.panel", "Media Browser", "Navigateur multimédia"),
     ("window.panel", "Metadata", "Métadonnées"),
@@ -6248,6 +6284,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Datei..."),
     ("file.importMultiple", "Multiple Files...", "Mehrere Dateien..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-Projekt..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-Projekt..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-Projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-Projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platzhalter..."),
     ("file.importSolid", "Solid...", "Farbfläche..."),
@@ -6440,7 +6478,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Gesperrte Masken ausblenden"),
     ("", "Mask and Shape Path", "Masken- und Formpfad"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Geschlossen"),
+    ("path.toggleClosed", "Closed", "Geschlossen"),
     ("path.convertToBezier", "Convert To Bezier Path", "In Bézier-Pfad konvertieren"),
     ("path.setFirstVertex", "Set First Vertex", "Ersten Scheitelpunkt festlegen"),
     ("path.freeTransform", "Free Transform Points", "Punkte frei transformieren"),
@@ -6614,6 +6652,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Alle entfernen"),
     ("effect.manage", "Manage Effects...", "Effekte verwalten..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Effekt-Plug-in laden..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Plug-ins über Hilfsprogramm laden..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Nach Effekt-Hilfsprogrammen suchen"),
     ("", "Animation", "Animation"),
     ("anim.savePreset", "Save Animation Preset...", "Animationsvorgabe speichern..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Animationsvorgabe anwenden..."),
@@ -6786,7 +6826,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Essential-Grafik"),
     ("window.panel", "Info", "Info"),
     ("help.inAppTutorials", "Learn", "Lernen"),
-    ("window.panel", "Lumetri Scopes", "Lumetri-Scopes"),
+    ("window.panel", "Video Scopes", "Videoskope"),
     ("window.panel", "Mask Interpolation", "Maskeninterpolation"),
     ("window.panel", "Media Browser", "Medienbrowser"),
     ("window.panel", "Metadata", "Metadaten"),
@@ -6885,6 +6925,8 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Plik..."),
     ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
     ("file.importSolid", "Solid...", "Plansza..."),
@@ -7076,7 +7118,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ukryj zablokowane maski"),
     ("", "Mask and Shape Path", "Ścieżka maski i kształtu"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Zamknięta"),
+    ("path.toggleClosed", "Closed", "Zamknięta"),
     ("path.convertToBezier", "Convert To Bezier Path", "Konwertuj na ścieżkę Béziera"),
     ("path.setFirstVertex", "Set First Vertex", "Ustaw pierwszy wierzchołek"),
     ("path.freeTransform", "Free Transform Points", "Swobodne przekształcanie punktów"),
@@ -7250,6 +7292,8 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Usuń wszystkie"),
     ("effect.manage", "Manage Effects...", "Zarządzaj efektami..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Wczytaj wtyczkę efektu..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Wczytaj wtyczki przez program pomocniczy..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Wyszukaj programy pomocnicze efektów"),
     ("", "Animation", "Animacja"),
     ("anim.savePreset", "Save Animation Preset...", "Zapisz ustawienie animacji..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Zastosuj ustawienie animacji..."),
@@ -7420,7 +7464,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Essential Graphics"),
     ("window.panel", "Info", "Informacje"),
     ("help.inAppTutorials", "Learn", "Nauka"),
-    ("window.panel", "Lumetri Scopes", "Zakresy Lumetri"),
+    ("window.panel", "Video Scopes", "Wskaźniki wideo"),
     ("window.panel", "Mask Interpolation", "Interpolacja maski"),
     ("window.panel", "Media Browser", "Przeglądarka multimediów"),
     ("window.panel", "Metadata", "Metadane"),
@@ -7519,6 +7563,8 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Soubor..."),
     ("file.importMultiple", "Multiple Files...", "Více souborů..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Zástupný záznam..."),
     ("file.importSolid", "Solid...", "Plná vrstva..."),
@@ -7712,7 +7758,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Skrýt zamknuté masky"),
     ("", "Mask and Shape Path", "Cesta masky a tvaru"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Uzavřená"),
+    ("path.toggleClosed", "Closed", "Uzavřená"),
     ("path.convertToBezier", "Convert To Bezier Path", "Převést na Bézierovu cestu"),
     ("path.setFirstVertex", "Set First Vertex", "Nastavit první vrchol"),
     ("path.freeTransform", "Free Transform Points", "Volně transformovat body"),
@@ -7886,6 +7932,8 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "Odstranit vše"),
     ("effect.manage", "Manage Effects...", "Spravovat efekty..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "Načíst zásuvný modul efektu..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "Načíst zásuvné moduly přes pomocný program..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "Vyhledat pomocné programy efektů"),
     ("", "Animation", "Animace"),
     ("anim.savePreset", "Save Animation Preset...", "Uložit přednastavení animace..."),
     ("anim.applyPreset", "Apply Animation Preset...", "Použít přednastavení animace..."),
@@ -8058,7 +8106,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Základní grafika"),
     ("window.panel", "Info", "Informace"),
     ("help.inAppTutorials", "Learn", "Výuka"),
-    ("window.panel", "Lumetri Scopes", "Měřicí přístroje Lumetri"),
+    ("window.panel", "Video Scopes", "Videoskopy"),
     ("window.panel", "Mask Interpolation", "Interpolace masek"),
     ("window.panel", "Media Browser", "Prohlížeč médií"),
     ("window.panel", "Metadata", "Metadata"),
@@ -8153,6 +8201,8 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ფაილი..."),
     ("file.importMultiple", "Multiple Files...", "რამდენიმე ფაილი..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-ს პროექტი..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-ის პროექტი..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-ის პროექტი..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-ის პროექტი..."),
     ("file.importPlaceholder", "Placeholder...", "ჩანაცვლების ობიექტი..."),
     ("file.importSolid", "Solid...", "სოლიდი..."),
@@ -8345,7 +8395,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "ჩაკეტილი ნიღბების დამალვა"),
     ("", "Mask and Shape Path", "ნიღაბი და ფიგურის ტრაექტორია"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "შეკრული"),
+    ("path.toggleClosed", "Closed", "შეკრული"),
     ("path.convertToBezier", "Convert To Bezier Path", "ბეზიეს ტრაექტორიად გარდაქმნა"),
     ("path.setFirstVertex", "Set First Vertex", "პირველი წვეროს დაყენება"),
     ("path.freeTransform", "Free Transform Points", "წერტილების თავისუფალი გარდაქმნა"),
@@ -8519,6 +8569,8 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("effect.removeAll", "Remove All", "ყველას წაშლა"),
     ("effect.manage", "Manage Effects...", "ეფექტების მართვა..."),
     ("effect.plugins.load", "Load Effect Plug-in...", "ეფექტის პლაგინის ჩატვირთვა..."),
+    ("effect.helpers.load", "Load Plug-ins Through Helper...", "პლაგინების ჩატვირთვა დამხმარე პროგრამით..."),
+    ("effect.helpers.scan", "Scan for Effect Helpers", "ეფექტის დამხმარე პროგრამების ძიება"),
     ("", "Animation", "ანიმაცია"),
     ("anim.savePreset", "Save Animation Preset...", "ანიმაციის პრესეტის შენახვა..."),
     ("anim.applyPreset", "Apply Animation Preset...", "ანიმაციის პრესეტის გამოყენება..."),
@@ -8696,7 +8748,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "ძირითადი გრაფიკა"),
     ("window.panel", "Info", "ინფორმაცია"),
     ("help.inAppTutorials", "Learn", "სწავლა"),
-    ("window.panel", "Lumetri Scopes", "Lumetri Scopes"),
+    ("window.panel", "Video Scopes", "ვიდეოსკოპები"),
     ("window.panel", "Mask Interpolation", "ნიღბის ინტერპოლაცია"),
     ("window.panel", "Media Browser", "მედიის ბრაუზერი"),
     ("window.panel", "Metadata", "მეტამონაცემები"),
@@ -8746,6 +8798,21 @@ mod tests {
     use effectcraft_engine::menus::{MenuNode, TREE, parse};
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn renamed_menu_translations_do_not_reintroduce_vendor_names() {
+        for code in CATALOG_CODES {
+            set_current(code);
+            for (id, source) in [("window.panel", "Video Scopes")] {
+                let rendered = command_label(id, source);
+                let label = rendered.to_lowercase();
+                for mark in ["lumetri", "mercury"] {
+                    assert!(!label.contains(mark), "{code}: {id} -> {rendered}");
+                }
+            }
+        }
+        set_current("en");
+    }
 
     /// The four options at the foot of the header's workspace menu say what After Effects says,
     /// read from its workspace button on 2026-10-31: reset, save over this one, save a copy, then
@@ -9141,6 +9208,32 @@ mod tests {
         assert!(!japanese(&app));
     }
 
+    /// File ▸ Import / Export ▸ Adobe After Effects Project… has its row in every menu catalog,
+    /// under the label the menu draws (a row under an older label would fall back to English).
+    #[test]
+    fn the_aep_import_and_export_entries_are_in_every_menu_catalog() {
+        for (code, catalog) in [
+            ("zh-hans", SIMPLIFIED_CHINESE),
+            ("zh-hant", TRADITIONAL_CHINESE),
+            ("ja", JAPANESE),
+            ("uk", UKRAINIAN),
+            ("es", SPANISH),
+            ("pt-br", PORTUGUESE),
+            ("ru", RUSSIAN),
+            ("fr", FRENCH),
+            ("de", GERMAN),
+            ("cs", CZECH),
+            ("pl", POLISH),
+            ("ka", GEORGIAN),
+            ("sv", SWEDISH),
+        ] {
+            for id in ["file.importAep", "file.exportAep"] {
+                let drawn = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == id).map(|(_, e)| e.label.clone()).unwrap_or_default();
+                assert!(catalog.iter().any(|(command, english, _)| *command == id && *english == drawn), "{code} has no {id} row for {drawn:?}");
+            }
+        }
+    }
+
     #[test]
     fn every_translated_entry_keeps_the_english_shape() {
         for (code, catalog) in [
@@ -9215,12 +9308,16 @@ mod tests {
             alt_shortcuts: Vec::new(),
         };
         let new_comp = menu_entry("comp.new", "New Composition...");
+        let closed_path = menu_entry("path.toggleClosed", "Closed");
         let undo = menu_entry("edit.undo", "Undo");
         for code in CATALOG_CODES {
             app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
             let drawn = entry(&app, &new_comp, new_comp.label.clone());
             assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
             assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+            let closed_label = entry(&app, &closed_path, closed_path.label.clone());
+            assert_eq!(closed_label, label(&app, "path.toggleClosed", "Closed"), "{code}");
+            assert_ne!(closed_label, closed_path.label, "{code}: Closed is drawn in English");
         }
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
         assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");

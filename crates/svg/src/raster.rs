@@ -69,7 +69,10 @@ pub fn try_rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Result<Image,
 
 /// Render `doc`, returning the image drawn so far and the first budget refusal, if any.
 fn render(doc: &Doc, w: u32, h: u32, m: Affine) -> (Image, Option<RasterError>) {
+    // Nested knockout and non-isolated groups draw their children more than once; the number of
+    // node draws is bounded by a multiple of the tree's size, past which drawing stops.
     let mut budget = SurfaceBudget::new();
+    budget.draws_left = node_count(&doc.root).saturating_mul(MAX_DRAWS_PER_NODE).max(MIN_DRAWS);
     let Some(mut img) = budget.image(w, h, None) else { return (Image::default(), budget.refusal) };
     draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
     (img, budget.refusal)
@@ -90,6 +93,26 @@ const MAX_IMAGE_RENDER_WORK: usize = 256 * 1024 * 1024;
 /// composites plus the region area of each fill, stroke, image and clip. Region restriction keeps
 /// small items near zero; this stops many large items from adding up to hours of work.
 const MAX_PIXEL_WORK: u64 = 1 << 31;
+
+/// How many times each node of a document may be drawn, on average, in one rasterisation.
+const MAX_DRAWS_PER_NODE: usize = 64;
+const MIN_DRAWS: usize = 100_000;
+
+/// The nodes in `g`'s tree, `g` included.
+fn node_count(g: &Group) -> usize {
+    let mut n = 0usize;
+    let mut stack = vec![g];
+    while let Some(g) = stack.pop() {
+        n = n.saturating_add(1);
+        for c in &g.children {
+            match c {
+                Node::Group(cg) => stack.push(cg),
+                _ => n = n.saturating_add(1),
+            }
+        }
+    }
+    n
+}
 
 /// A pixel rectangle on the canvas, half-open: `x0..x1` by `y0..y1`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +246,8 @@ struct SurfaceBudget {
     limit_bytes: usize,
     /// The first refusal of this render, if any.
     refusal: Option<RasterError>,
+    /// Node draws left (see [`MAX_DRAWS_PER_NODE`]).
+    draws_left: usize,
 }
 
 impl SurfaceBudget {
@@ -242,6 +267,7 @@ impl SurfaceBudget {
             pixel_work_limit: MAX_PIXEL_WORK,
             limit_bytes: MAX_LIVE_SURFACE_BYTES,
             refusal: None,
+            draws_left: usize::MAX,
         }
     }
 
@@ -861,6 +887,14 @@ fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
 }
 
 fn draw_node(n: &Node, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
+    let Some(left) = budget.draws_left.checked_sub(1) else {
+        budget.refuse(RasterError::WorkLimit("node draws"));
+        return;
+    };
+    budget.draws_left = left;
+    if left == 0 {
+        log::warn!("svg: draw budget reached, the rest of the drawing is skipped");
+    }
     match n {
         Node::Group(g) => draw_group(g, m, opacity, dst, budget),
         Node::Shape(s) => {

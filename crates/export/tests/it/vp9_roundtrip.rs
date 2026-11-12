@@ -1,7 +1,7 @@
-//! The VP9 intra encoder (`effectcraft-vp9enc`) round-trips through FilmCraft's VP9 decoder (and
+//! The VP9 intra encoder (`craft_video::vp9`) round-trips through FilmCraft's VP9 decoder (and
 //! ffmpeg as an external oracle when installed): sizes, lossless exactness, PSNR.
 
-use effectcraft_vp9enc::{EncoderConfig, Vp9Encoder};
+use craft_video::vp9::{EncoderConfig, Vp9Encoder};
 use filmcraft_vp9::{Decoder, Plane};
 
 fn plane_u8(p: &Plane) -> Vec<u8> {
@@ -130,8 +130,8 @@ fn ffmpeg_decodes_our_stream() {
     ivf.extend_from_slice(&(frame.len() as u32).to_le_bytes());
     ivf.extend_from_slice(&0u64.to_le_bytes());
     ivf.extend_from_slice(&frame);
-    let dir = std::env::temp_dir().join(format!("effectcraft-vp9-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let guard = tempfile::tempdir().unwrap();
+    let dir = guard.path().to_path_buf();
     let path = dir.join("a.ivf");
     std::fs::write(&path, &ivf).unwrap();
     let out = std::process::Command::new("ffmpeg")
@@ -291,8 +291,8 @@ fn ffmpeg_matches(w: usize, h: usize, frames: &[Vec<u8>], recon: &[[Vec<u8>; 3]]
         ivf.extend_from_slice(&(t as u64).to_le_bytes());
         ivf.extend_from_slice(f);
     }
-    let dir = std::env::temp_dir().join(format!("effectcraft-vp9-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let guard = tempfile::Builder::new().prefix(&format!("effectcraft-vp9-{name}-")).tempdir().unwrap();
+    let dir = guard.path().to_path_buf();
     let path = dir.join("a.ivf");
     std::fs::write(&path, &ivf).unwrap();
     let out = std::process::Command::new("ffmpeg")

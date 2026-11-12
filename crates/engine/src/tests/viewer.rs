@@ -8,7 +8,7 @@ use effectcraft_time::Tick;
 use serde_json::json;
 
 use crate::Session;
-use crate::viewer::{Channel, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, SnapKind, SnapSource, SnapTarget, display_transform, snap};
+use crate::viewer::{Channel, DisplayPass, FrameEncoding, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, PassCurve, SnapKind, SnapSource, SnapTarget, snap};
 
 fn comp() -> Session {
     let mut s = Session::default();
@@ -58,6 +58,62 @@ fn snap_lines_snap_axes_independently_and_priority_breaks_ties() {
     let t3 =
         [SnapTarget::point([0.0, 3.0], PRI_LAYER, SnapSource::Layer(LayerId(2))), SnapTarget::point([3.0, 0.0], PRI_VERTEX, SnapSource::Vertex(LayerId(3)))];
     assert_eq!(snap(&[[0.0, 0.0]], &t3, 5.0).unwrap().hits[0].source, SnapSource::Vertex(LayerId(3)));
+}
+
+/// #2855: an edge midpoint lies on its edge line, so one line nearer than the point must not win
+/// and leave the other axis free. Two lines do win when together they are nearer.
+#[test]
+fn snap_point_beats_one_line_and_loses_only_to_two_nearer_lines() {
+    let src = SnapSource::Layer(LayerId(1));
+    let mid = SnapTarget::point([100.0, 50.0], PRI_LAYER, src);
+    let top = SnapTarget::hline(50.0, PRI_LAYER, src);
+    // The line alone is nearer (1 against √10), and the point still snaps both axes.
+    let s = snap(&[[103.0, 51.0]], &[top, mid], 5.0).unwrap();
+    assert_eq!(s.at, [100.0, 50.0]);
+    assert_eq!(s.delta, [-3.0, -1.0]);
+    assert_eq!(s.hits, [mid]);
+    // Lines through the point itself tie with it: the point.
+    let centre = SnapTarget::vline(100.0, PRI_LAYER, src);
+    assert_eq!(snap(&[[103.0, 51.0]], &[top, centre, mid], 5.0).unwrap().hits, [mid]);
+    // Two lines together nearer than the point: both snap.
+    let far = SnapTarget::point([101.0, 55.0], PRI_LAYER, src);
+    let v = SnapTarget::vline(102.0, PRI_GUIDE, SnapSource::Guide);
+    let h = SnapTarget::hline(52.0, PRI_GUIDE, SnapSource::Guide);
+    let s = snap(&[[103.0, 51.0]], &[v, h, far], 5.0).unwrap();
+    assert_eq!(s.at, [102.0, 52.0]);
+    assert_eq!(s.hits, [v, h]);
+}
+
+/// #2855: an unrotated layer's centre lines follow its edges' span rule, reach the outer comp
+/// through a collapsed precomp layer, and a rotated layer keeps its points only.
+#[test]
+fn layer_centre_lines_follow_the_edges() {
+    use crate::viewer::{SnapFeatures, SnapOptions, targets};
+    let mut s = comp();
+    // A 100×50 solid moved off the comp's centre lines: x 70–170, y 55–105, centre (120, 80).
+    let a = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 100, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [120, 80, 0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |s: &Session, f: SnapFeatures| {
+        let comp = s.project.comp(cid).unwrap().clone();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, Tick::ZERO);
+        targets(&ctx, &[], SnapOptions { layers: true, features: f, guides: false, grid: false, grid_spacing: 0.0 })
+    };
+    let lines = |t: &[SnapTarget], l: LayerId| {
+        let of = |kind: SnapKind, i: usize, c: f64| t.iter().find(|t| t.kind == kind && t.source == SnapSource::Layer(l) && t.pos[i] == c).map(|t| t.span);
+        (of(SnapKind::VLine, 0, 120.0), of(SnapKind::HLine, 1, 80.0))
+    };
+    assert_eq!(lines(&at(&s, SnapFeatures::default()), LayerId(a)), (Some(None), Some(None)));
+    let off = SnapFeatures { edges_extended: false, ..Default::default() };
+    assert_eq!(lines(&at(&s, off), LayerId(a)), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Through a collapsed precomp layer (it fills the comp, unmoved, so the numbers stay).
+    s.execute("layer.precompose", json!({"layers": [a], "name": "Inner"})).unwrap();
+    let pre = s.active_comp().unwrap().layers[0].id;
+    s.execute("layer.setSwitch", json!({"layers": [pre.0], "switch": "collapse", "value": true})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Rotated: no lines at all.
+    s.execute("prop.set", json!({"layer": pre.0, "path": "transform/rotation", "value": 30})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (None, None));
 }
 
 #[test]
@@ -169,15 +225,19 @@ fn snapping_options_command_sets_and_toggles() {
 
 // ---------------------------------------------------------------- channels, exposure, snapshot
 
+/// The display pass on 8-bit frames (sRGB, no HDR step): Show Channel and exposure.
+fn display_rgba8(px: [u8; 4], channel: Channel, colorized: bool, stops: f32) -> [u8; 4] {
+    let encoding = FrameEncoding { curve: PassCurve::Srgb, hdr: effectcraft_project::HdrMode::Clip };
+    let mut v = [px];
+    DisplayPass::new(channel, colorized, stops, encoding, None).apply_rgba8(&mut v);
+    v[0]
+}
+
 #[test]
 fn channel_and_exposure_pixel_transforms() {
     // Premultiplied: straight (200, 100, 50) at 50% alpha.
     let px = [100u8, 50, 25, 128];
-    let run = |c: Channel, col: bool, stops: f32| {
-        let mut v = [px];
-        display_transform(&mut v, c, col, stops);
-        v[0]
-    };
+    let run = |c: Channel, col: bool, stops: f32| display_rgba8(px, c, col, stops);
     assert_eq!(run(Channel::Rgb, false, 0.0), px);
     assert_eq!(run(Channel::Red, false, 0.0), [100, 100, 100, 255]);
     assert_eq!(run(Channel::Green, true, 0.0), [0, 50, 0, 255]);
@@ -186,13 +246,13 @@ fn channel_and_exposure_pixel_transforms() {
     let st = run(Channel::RgbStraight, false, 0.0);
     assert!((st[0] as i32 - 199).abs() <= 1 && (st[1] as i32 - 100).abs() <= 1 && st[3] == 255, "{st:?}");
     // +1 stop doubles linear light: sRGB 50% gray → about 69%; -1 stop darkens; 0 is identity.
-    let mut g = [[128u8, 128, 128, 255]];
-    display_transform(&mut g, Channel::Rgb, false, 1.0);
-    assert!((174..=178).contains(&g[0][0]), "{:?}", g[0]);
-    let mut g = [[128u8, 128, 128, 255]];
-    display_transform(&mut g, Channel::Rgb, false, -1.0);
-    assert!((92..=96).contains(&g[0][0]), "{:?}", g[0]);
-    assert_eq!(crate::viewer::exposure_lut(0.0)[200], 200);
+    let g = display_rgba8([128, 128, 128, 255], Channel::Rgb, false, 1.0);
+    assert!((174..=178).contains(&g[0]), "{g:?}");
+    let g = display_rgba8([128, 128, 128, 255], Channel::Rgb, false, -1.0);
+    assert!((92..=96).contains(&g[0]), "{g:?}");
+    for v in 0..=255u8 {
+        assert_eq!(display_rgba8([v, v, v, 255], Channel::Rgb, false, 0.0), [v, v, v, 255]);
+    }
     // Exposure applies to a single channel too, and keeps alpha untouched in RGB.
     assert!(run(Channel::Red, false, 1.0)[0] > 100);
     assert_eq!(run(Channel::Rgb, false, 2.0)[3], 128);
@@ -284,6 +344,263 @@ fn region_of_interest_renders_and_crops() {
 fn shape_path(s: &Session, lid: u64, uid: u64) -> effectcraft_keyframe::ShapePath {
     let l = layer(s, lid);
     l.props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone()
+}
+
+#[test]
+fn toggle_closed_respects_path_and_vertex_selection() {
+    let mut s = comp();
+    let a = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let lid = a["layer"].as_u64().unwrap();
+    let a = a["path"].as_u64().unwrap();
+    let b = s.execute("shape.newPath", json!({"layer": lid, "vertices": [[10, 10], [90, 10], [90, 90]], "closed": true})).unwrap()["path"].as_u64().unwrap();
+    let leaf = layer(&s, lid).props.find_group(a).unwrap().get("path").unwrap().uid;
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(lid), leaf)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, lid, a).closed);
+    assert!(shape_path(&s, lid, b).closed, "an unselected sibling stays closed");
+    s.state.selected_props = vec![(LayerId(lid), b)];
+    s.state.selected_vertices = vec![crate::VertexRef { layer: LayerId(lid), mask: a, index: 1 }];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(shape_path(&s, lid, a).closed, "selected points and properties both describe target paths");
+    assert!(shape_path(&s, lid, b).closed);
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(lid), a), (LayerId(lid), leaf), (LayerId(lid), b)];
+    let r = s.execute("path.toggleClosed", json!({})).unwrap();
+    assert_eq!(r["paths"], json!(2));
+    assert!(!shape_path(&s, lid, a).closed);
+    assert!(!shape_path(&s, lid, b).closed);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(shape_path(&s, lid, a).closed);
+    assert!(shape_path(&s, lid, b).closed, "all paths undo in one step");
+    s.execute("mask.setClosed", json!({"layer": lid, "mask": a, "closed": false})).unwrap();
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(false), "a mixed selection is unchecked");
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(shape_path(&s, lid, a).closed);
+    assert!(shape_path(&s, lid, b).closed, "a mixed selection closes all paths");
+    s.state.selected_props.clear();
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, lid, a).closed);
+    assert!(!shape_path(&s, lid, b).closed, "layer selection addresses all editable paths");
+}
+
+#[test]
+fn toggle_closed_combines_property_and_shape_group_selections() {
+    let mut s = comp();
+    let a = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let (lid, a_path) = (a["layer"].as_u64().unwrap(), a["path"].as_u64().unwrap());
+    let b = s.execute("shape.newPath", json!({"layer": lid, "vertices": [[10, 10], [90, 10], [90, 90]], "closed": true})).unwrap();
+    let (b_path, b_group) = (b["path"].as_u64().unwrap(), b["group"].as_u64().unwrap());
+    let c_path =
+        s.execute("shape.newPath", json!({"layer": lid, "vertices": [[20, 20], [80, 20], [80, 80]], "closed": true})).unwrap()["path"].as_u64().unwrap();
+    s.execute("prop.select", json!({"layer": lid, "prop": a_path})).unwrap();
+    s.execute("prop.select", json!({"layer": lid, "prop": b_group, "add": true})).unwrap();
+    assert!(s.state.selected_vertices.iter().all(|v| v.mask == a_path), "only the selected path group implies selected vertices");
+    assert!(!s.state.selected_vertices.is_empty());
+    assert!(s.state.selected_props.contains(&(LayerId(lid), b_group)));
+    let result = s.execute("path.toggleClosed", json!({})).unwrap();
+    assert_eq!(result["paths"], json!(2));
+    assert!(!shape_path(&s, lid, a_path).closed);
+    assert!(!shape_path(&s, lid, b_path).closed, "the added shape group is included alongside implied vertices");
+    assert!(shape_path(&s, lid, c_path).closed, "unselected sibling stays unchanged");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(shape_path(&s, lid, a_path).closed);
+    assert!(shape_path(&s, lid, b_path).closed, "both selected paths undo together");
+    assert!(shape_path(&s, lid, c_path).closed);
+}
+
+#[test]
+fn toggle_closed_ignores_selections_retained_on_other_layers() {
+    let mut s = comp();
+    let a = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let (a_layer, a_path) = (a["layer"].as_u64().unwrap(), a["path"].as_u64().unwrap());
+    let b_layer = s.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.state.selected_vertices.iter().any(|v| v.layer == LayerId(a_layer)), "insertion retains old vertices");
+    assert!(!s.is_enabled("path.toggleClosed"));
+    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+    assert!(shape_path(&s, a_layer, a_path).closed);
+
+    let b_path =
+        s.execute("shape.newPath", json!({"layer": b_layer, "vertices": [[0, 0], [50, 0], [50, 50]], "closed": true})).unwrap()["path"].as_u64().unwrap();
+    s.execute("prop.select", json!({"layer": b_layer, "prop": b_path})).unwrap();
+    s.execute("layer.selectNext", json!({})).unwrap();
+    assert_eq!(s.state.selected_layers, vec![LayerId(a_layer)]);
+    assert!(s.state.selected_vertices.iter().any(|v| v.layer == LayerId(b_layer)), "navigation retains old vertices");
+    assert!(s.state.selected_props.contains(&(LayerId(b_layer), b_path)));
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(true));
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, a_layer, a_path).closed);
+    assert!(shape_path(&s, b_layer, b_path).closed, "the deselected layer stays unchanged");
+    s.execute("layer.selectPrevious", json!({})).unwrap();
+    assert_eq!(s.state.selected_layers, vec![LayerId(b_layer)]);
+    s.execute("prop.select", json!({"layer": b_layer, "path": "transform/position"})).unwrap();
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(true), "a non-path property falls back to the layer's paths");
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, b_layer, b_path).closed);
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("layer.selectNext", json!({})).unwrap();
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(shape_path(&s, a_layer, a_path).closed, "a property retained on another layer cannot block this layer");
+    assert!(shape_path(&s, b_layer, b_path).closed);
+}
+
+#[test]
+fn toggle_closed_falls_back_from_stale_selection_and_rejects_locked_or_pathless_layers() {
+    let mut s = comp();
+    let r = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let (lid, uid) = (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap());
+    let before = s.project.clone();
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(lid), u64::MAX)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, lid, uid).closed, "a stale property selection falls back to the layer's paths");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.same_content(&before));
+    s.state.selected_props.clear();
+    s.state.selected_vertices = vec![crate::VertexRef { layer: LayerId(lid), mask: uid, index: usize::MAX }];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, lid, uid).closed, "a stale vertex selection falls back to the layer's paths");
+    s.execute("edit.undo", json!({})).unwrap();
+    s.state.selected_vertices.clear();
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().switches.locked = true;
+    assert!(!s.is_enabled("path.toggleClosed"));
+    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+    assert!(shape_path(&s, lid, uid).closed);
+    s.execute("layer.newShape", json!({"kind": "rect"})).unwrap();
+    s.state.selected_props.clear();
+    assert!(!s.is_enabled("path.toggleClosed"));
+    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+}
+
+#[test]
+fn toggle_closed_handles_masks_and_preserves_explicit_set_closed() {
+    let mut s = comp();
+    let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let uid = s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    let path = |s: &Session| layer(s, lid).props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    let original = path(&s);
+    let other = s.execute("mask.new", json!({"layer": lid, "vertices": [[10, 10], [90, 10], [90, 90]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    let other_closed = |s: &Session| layer(s, lid).props.find_group(other).unwrap().get("path").unwrap().value.as_path().unwrap().closed;
+    let feather = layer(&s, lid).props.find_group(uid).unwrap().get("feather").unwrap().uid;
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(lid), feather)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!path(&s).closed, "selecting Mask Feather selects its mask");
+    assert!(other_closed(&s), "an unselected mask stays closed");
+    assert!(layer(&s, lid).props.find_group(uid).unwrap().get("path").unwrap().keys.is_empty(), "a static path gains no keyframe");
+    s.state.selected_props = vec![(LayerId(lid), uid)];
+    s.execute("mask.setClosed", json!({"layer": lid, "mask": uid})).unwrap();
+    assert_eq!(path(&s), original, "explicit API still defaults to closed");
+    s.execute("mask.setClosed", json!({"layer": lid, "mask": uid, "closed": false})).unwrap();
+    assert!(!path(&s).closed);
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert_eq!(path(&s), original);
+    let cid = s.active_comp_id().unwrap();
+    let g = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().props.find_group_mut(uid).unwrap();
+    if let effectcraft_project::GroupKind::Mask { locked, .. } = &mut g.kind {
+        *locked = true;
+    }
+    assert!(!s.is_enabled("path.toggleClosed"));
+    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+    assert_eq!(path(&s), original);
+    assert!(other_closed(&s), "a selected locked mask does not fall back to its unlocked siblings");
+}
+
+#[test]
+fn toggle_closed_recomputes_roto_bezier_tangents() {
+    let mut s = comp();
+    let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let uid =
+        s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100], [0, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    s.execute("path.rotoBezier", json!({"layer": lid, "value": true})).unwrap();
+    let path = |s: &Session| layer(s, lid).props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    let closed = path(&s);
+    assert_ne!(closed.out_tangents[0], [0.0; 2], "a closed RotoBezier path has tangents at every vertex");
+    s.state.selected_props = vec![(LayerId(lid), uid)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    let open = path(&s);
+    assert!(!open.closed);
+    assert_eq!((open.in_tangents[0], open.out_tangents[3]), ([0.0; 2], [0.0; 2]), "open ends lose their automatic tangents");
+    assert_ne!(open.out_tangents[1], [0.0; 2]);
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert_eq!(path(&s), closed, "reclosing restores the closed RotoBezier tangents");
+}
+
+#[test]
+fn toggle_closed_fits_short_tangent_lists() {
+    let mut s = comp();
+    let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let uid = s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let layer_mut = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    let prop = layer_mut.props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
+    let KV::Path(path) = &mut prop.value else { panic!("not a path") };
+    // A file can store fewer tangents than vertices (#1250).
+    path.in_tangents.clear();
+    path.out_tangents.truncate(1);
+    s.state.selected_props = vec![(LayerId(lid), uid)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    let path = layer(&s, lid).props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    assert!(!path.closed);
+    assert_eq!((path.in_tangents.len(), path.out_tangents.len()), (3, 3));
+}
+
+#[test]
+fn toggle_closed_edits_layer_time_and_roundtrips() {
+    use effectcraft_keyframe::Keyframe;
+    let mut s = comp();
+    let r = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let (lid, uid) = (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap());
+    let cid = s.active_comp_id().unwrap();
+    let original = shape_path(&s, lid, uid);
+    let second = Tick::from_seconds_f64(1.0);
+    let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    layer.start_time = second;
+    layer.stretch = 200.0;
+    let prop = layer.props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
+    prop.keys = vec![Keyframe::new(Tick::ZERO, KV::Path(original.clone())), Keyframe::new(second, KV::Path(original.clone()))];
+    let keys = prop.keys.clone();
+    s.execute("time.set", json!({"time": 3.0})).unwrap();
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    let prop = s.project.comp(cid).unwrap().layer(LayerId(lid)).unwrap().props.find_group(uid).unwrap().get("path").unwrap();
+    assert_eq!(prop.keys.len(), 2);
+    assert_eq!(prop.keys[0], keys[0], "the other keyframe is untouched");
+    let mut opened = original;
+    opened.closed = false;
+    assert_eq!(prop.value_at(second), KV::Path(opened.clone()));
+    assert!(prop.value_at(Tick::from_seconds_f64(0.5)).as_path().unwrap().closed, "the earlier segment keeps its closedness");
+    let bytes = serde_json::to_vec(&*s.project).unwrap();
+    let restored: effectcraft_project::Project = serde_json::from_slice(&bytes).unwrap();
+    let prop = restored.comp(cid).unwrap().layer(LayerId(lid)).unwrap().props.find_group(uid).unwrap().get("path").unwrap();
+    assert_eq!(prop.value_at(second), KV::Path(opened));
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(true));
+    s.execute("time.set", json!({"time": 3.0})).unwrap();
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(false));
+}
+
+#[test]
+fn toggle_closed_rejects_excessive_group_nesting_without_an_edit() {
+    use effectcraft_project::build::{self, Ids};
+    let mut s = comp();
+    let r = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
+    let lid = LayerId(r["layer"].as_u64().unwrap());
+    let cid = s.active_comp_id().unwrap();
+    let project = std::sync::Arc::make_mut(&mut s.project);
+    let mut next = project.next_id;
+    let contents = project.comp_mut(cid).unwrap().layer_mut(lid).unwrap().props.sub_mut("contents").unwrap();
+    let node = contents.children.first_mut().unwrap();
+    let mut nested = node.as_group().unwrap().clone();
+    for _ in 0..130 {
+        nested = build::shape_group(&mut Ids(&mut next), "Nested", vec![nested]);
+    }
+    *node = effectcraft_project::Node::Group(nested);
+    project.next_id = next;
+    let before = s.project.clone();
+    assert!(!s.is_enabled("path.toggleClosed"));
+    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+    assert!(s.project.same_content(&before));
 }
 
 #[test]

@@ -22,12 +22,11 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     use effectcraft_engine::preview::{PlayFrom, PreviewRange, PreviewResolution, PreviewShortcut};
     let t = app.tokens;
     let ctx = ui.ctx().clone();
-    let p = ui.painter().with_clip_rect(rect);
     // The panel scrolls when it is shorter than its controls (the default workspace shows just
     // the transport row, as in After Effects).
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("preview-scroll"), rect);
-    let panel_clip = ui.clip_rect();
-    ui.set_clip_rect(rect.intersect(panel_clip));
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     let y = rect.min.y + 12.0 - scroll.offset;
     let bw = 30.0;
     let total = bw * 5.0 + 16.0;
@@ -241,7 +240,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Some(pl) => pl,
             None => effectcraft_engine::preview::plan(&o, &c, app.session.time()),
         };
-        let cached_set = app.frames.cached_frames(&app.shown_series(cid));
+        let cached_set = app.frames.cached_frames(&app.preview_series(cid, &o));
         let total = pl.frames().count();
         let cached = pl.frames().filter(|f| cached_set.binary_search(f).is_ok()).count();
         let bar = Rect::from_min_size(pos2(rect.min.x + 12.0, yy), vec2(rect.width() - 24.0, 6.0));
@@ -251,7 +250,6 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let status = if app.playback.playing && app.playback.caching { " — caching before playback" } else { "" };
         p.text(pos2(bar.min.x, bar.max.y + 12.0), Align2::LEFT_CENTER, format!("{cached} / {total} frames cached{status}"), Tokens::ui(11.0), t.text_faint);
     }
-    ui.set_clip_rect(panel_clip);
     let content = yy + 30.0 - (rect.min.y - scroll.offset);
     scroll.end(ui, &mut app.auto, "preview.scroll", content, &t);
 }
@@ -392,7 +390,6 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 /// state runs `edit.history.goto`, reporting a failure in `app.ui.status`.
 pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
     // The branching history (EffectCraft's History panel): every state, branches indented under
     // the state they grew from; click any state to go there (`edit.history.goto`).
     let nodes = app.session.history_tree();
@@ -400,6 +397,8 @@ pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let cur = nodes.iter().position(|n| n.current).unwrap_or(0);
     let scroll_id = egui::Id::unique("history-scroll");
     let mut scroll = widgets::PanelScroll::begin(ui, scroll_id, rect);
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     // The current state scrolls into view when it changes (undo, redo, a new step).
     if ui.data(|d| d.get_temp::<usize>(scroll_id.with("current"))) != Some(cur) {
         ui.data_mut(|d| d.insert_temp(scroll_id.with("current"), cur));
@@ -452,9 +451,10 @@ pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 /// draws nothing without an active comp.
 pub fn markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
     let Some(c) = app.session.active_comp_arc() else { return };
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("markers-scroll"), rect);
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     let mut y = rect.min.y + 8.0 - scroll.offset;
     if c.markers.is_empty() {
         p.text(rect.center(), Align2::CENTER_CENTER, tr("No composition markers"), Tokens::ui(12.0), t.text_faint);

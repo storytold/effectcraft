@@ -3,6 +3,17 @@ use super::config;
 /// Host services (file access) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// [`Services::read_file`] for a copy that must not load an unbounded file: more than `max`
+    /// bytes is an error. The native one opens the file once, reads its size from that handle and
+    /// reads through a [`std::io::Read::take`] limit, so a file grown or swapped after the check
+    /// still cannot read past `max`.
+    fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
+        let bytes = self.read_file(path)?;
+        if bytes.len() as u64 > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
+        }
+        Ok(bytes)
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()>;
     /// Whether a file exists (the background footage check after open).
     fn exists(&self, path: &str) -> bool {
@@ -65,6 +76,26 @@ impl Services for FsServices {
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
+    fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let file = std::fs::File::open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{path} is not a file")));
+        }
+        if meta.len() > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
+        // The size above came from this handle, and the read is capped too: a file that grows
+        // after the check still cannot read past `max`. Saturating, so `u64::MAX` cannot overflow.
+        file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")));
+        }
+        Ok(bytes)
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         config::atomic_write(std::path::Path::new(path), data)
     }
@@ -75,6 +106,11 @@ pub trait Importer: Send + Sync {
     /// Probe one file and return footage metadata. Image sequences are the engine's
     /// ([`sequence`]): it groups numbered stills and probes their first file here.
     fn probe(&self, path: &str) -> std::result::Result<effectcraft_project::Footage, String>;
+    /// [`probe`](Self::probe), and what the import left out of the file (a 3D model's textures
+    /// over the limits), which the import shows the user.
+    fn probe_noting(&self, path: &str) -> std::result::Result<(effectcraft_project::Footage, Option<String>), String> {
+        self.probe(path).map(|f| (f, None))
+    }
     /// A footage file's bytes are now at `path` (extracted from a template): hosts whose media
     /// layer reads from memory (the browser) register them; file-based ones need nothing.
     fn register(&self, _path: &str, _data: &[u8]) {}
@@ -97,6 +133,19 @@ mod tests {
         let f = dir.join(format!("ec-services-read-{}.txt", std::process::id()));
         std::fs::write(&f, b"data").unwrap();
         assert_eq!(FsServices.read_file(&f.to_string_lossy()).unwrap(), b"data");
+        let _ = std::fs::remove_file(f);
+    }
+
+    /// The limit is inclusive and cannot overflow: `u64::MAX` reads the file, one byte too many
+    /// is an error, and nothing past it is read.
+    #[test]
+    fn fs_services_bounded_read_stops_at_the_limit() {
+        let f = std::env::temp_dir().join(format!("ec-services-bounded-{}.txt", std::process::id()));
+        std::fs::write(&f, b"data").unwrap();
+        let p = f.to_string_lossy().to_string();
+        assert_eq!(FsServices.read_file_bounded(&p, u64::MAX).unwrap(), b"data");
+        assert_eq!(FsServices.read_file_bounded(&p, 4).unwrap(), b"data");
+        assert!(FsServices.read_file_bounded(&p, 3).is_err());
         let _ = std::fs::remove_file(f);
     }
 }

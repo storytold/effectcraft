@@ -179,6 +179,14 @@ fn lut_files_parse_and_interpolate() {
     assert!((o[0] - 0.25).abs() < 1e-6 && (o[1] - 0.4).abs() < 1e-6, "{o:?}");
     let inv = x.apply(o, 2, true, "");
     assert!((inv[0] - 0.5).abs() < 1e-4, "{inv:?}");
+    // A .csp whose header claims a huge or fractional table is refused before anything is reserved.
+    let head = "CSPLUTV100\n{k}\n\n2\n0 1\n0 1\n2\n0 1\n0 1\n2\n0 1\n0 1\n\n";
+    for (k, size) in [("3D", "100000 100000 100000"), ("3D", "130 130 130"), ("3D", "2.5 2.5 2.5"), ("1D", "4000000000000")] {
+        let text = head.replace("{k}", k) + size + "\n0 0 0\n";
+        assert!(parse_file(&text, "csp").is_none(), "{k} {size}");
+    }
+    // A short file that claims a valid size is refused once its rows run out.
+    assert!(parse_file(&(head.replace("{k}", "3D") + "129 129 129\n0 0 0\n"), "csp").is_none());
     // CDL collection: pick by id.
     let ccc = r#"<ColorCorrectionCollection><ColorCorrection id="a"><SOPNode><Slope>2 2 2</Slope><Offset>0 0 0</Offset><Power>1 1 1</Power></SOPNode></ColorCorrection>
             <ColorCorrection id='b'><SOPNode><Slope>0.5 0.5 0.5</Slope></SOPNode><SatNode><Saturation>1</Saturation></SatNode></ColorCorrection></ColorCorrectionCollection>"#;
@@ -310,4 +318,121 @@ fn color_stabilizer_matches_the_reference_frame() {
     vals2.push(("sampleSize", num(1.0)));
     let b = run_fx("ec.color.colorstabilizer", &vals2, lifted, 0.0, env);
     assert!((b.img.get(5, 20)[0] - reference.get(5, 20)[0]).abs() < 0.01);
+}
+
+/// After Effects 2026's 320 × 180 test card from our importer samples (2026-11-05): a black to
+/// white ramp across, six 40 px colour squares at y 45 and a white 30 px square moving from
+/// x 20 to 300 at y 130 over 2 s.
+fn stabilizer_card(t: f64) -> Image {
+    let mut img = Image::new(320, 180);
+    let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0], [1.0, 0.0, 1.0]];
+    let mover = 20.0 + 140.0 * t;
+    for y in 0..180 {
+        for x in 0..320 {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let mut c = [(cx / 320.0) as f32; 3];
+            for (i, col) in cols.iter().enumerate() {
+                if (cx - (30.0 + 52.0 * i as f64)).abs() < 20.0 && (cy - 45.0).abs() < 20.0 {
+                    c = col.map(|v| v as f32);
+                }
+            }
+            if (cx - mover).abs() < 15.0 && (cy - 130.0).abs() < 15.0 {
+                c = [1.0; 3];
+            }
+            img.set(x, y, [c[0], c[1], c[2], 1.0]);
+        }
+    }
+    img
+}
+
+/// The sample's keyframed points: Black Point (64, 90) → (151, 99) and Mid Point (160, 90) →
+/// (188, 122) over the first second, White Point at (256, 90), Stabilize Levels.
+struct KeyedCard;
+impl EffectHost for KeyedCard {
+    fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+        None
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+        Some(Buf { img: stabilizer_card(t), offset: [0.0; 2], scale: 1.0 })
+    }
+    fn params_at(&self, t: f64) -> Option<crate::Params> {
+        let mut p = crate::Params { values: Default::default() };
+        let k = t.clamp(0.0, 1.0);
+        let lerp = |a: [f64; 2], b: [f64; 2]| Value::Vec2([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]);
+        p.values.insert("blackPoint".into(), lerp([64.0, 90.0], [151.0, 99.0]));
+        p.values.insert("midPoint".into(), lerp([160.0, 90.0], [188.0, 122.0]));
+        p.values.insert("whitePoint".into(), Value::Vec2([256.0, 90.0]));
+        Some(p)
+    }
+}
+
+/// #3125: with keyframed sample points After Effects samples the reference frame where the
+/// points were at the reference time, so a static card is corrected. Its render at 0.5 s (Black
+/// Point at (107.5, 94.5)) is a Levels map of the ramp: `out = a + b·v` with b 1.2935..1.2965
+/// and a −0.2365..−0.2350 (fitted on our 26-level export). EffectCraft sampled both frames at
+/// the current points and left the card unchanged.
+#[test]
+fn color_stabilizer_samples_the_reference_at_the_points_reference_positions() {
+    let host = KeyedCard;
+    let env = EffectEnv { host: Some(&host), ..Default::default() };
+    let p = host.params_at(0.5).unwrap();
+    let mut vals: Vec<(&str, Value)> = ["blackPoint", "midPoint", "whitePoint"].iter().map(|id| (*id, p.values[*id].clone())).collect();
+    vals.push(("stabilize", Value::Enum(1)));
+    vals.push(("sampleSize", num(3.0)));
+    vals.push(("referenceFrame", num(0.0)));
+    let out = run_fx("ec.color.colorstabilizer", &vals, stabilizer_card(0.5), 0.5, env);
+    // The ramp row between the squares: fit out = a + b·v from two far-apart pixels.
+    let v = |x: i64| (x as f64 + 0.5) / 320.0;
+    let o = |x: i64| out.img.get(x, 90)[0] as f64;
+    let b = (o(240) - o(80)) / (v(240) - v(80));
+    let a = o(80) - b * v(80);
+    assert!((b - 1.295).abs() < 0.005, "slope {b}");
+    assert!((a + 0.2357).abs() < 0.005, "offset {a}");
+    // Every ramp pixel of that row follows the line (no clamping in 32 bpc).
+    for x in (0..320).step_by(7) {
+        assert!((o(x) - (a + b * v(x))).abs() < 1e-3, "x {x}");
+    }
+}
+
+/// Writes `text` to `dir/name` with modification time `secs` (so an edit within the file system's
+/// time resolution still moves the stamp), returning the path.
+fn write_dated(dir: &std::path::Path, name: &str, text: &str, secs: u64) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    let f = std::fs::File::options().write(true).open(&path).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// #3538: OCIO File Transform read a file once per process; an edited, created, repaired or
+/// deleted file was never followed.
+#[test]
+fn an_ocio_transform_file_is_read_again_once_it_changes() {
+    const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+    const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+    let dir = std::env::temp_dir().join(format!("ec-fx-3538-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let at = |src: &str| load_file(src).map(|x| x.apply([0.5; 3], 1, false, ""));
+    let edited = write_dated(dir.as_path(), "edited.cube", BLACK, 1_000);
+    assert_eq!(at(&edited), Some([0.0; 3]));
+    write_dated(dir.as_path(), "edited.cube", WHITE, 2_000);
+    assert_eq!(at(&edited), Some([1.0; 3]), "an edited file, same size");
+    let created = dir.as_path().join("created.cube").to_string_lossy().into_owned();
+    assert_eq!(at(&created), None);
+    write_dated(dir.as_path(), "created.cube", WHITE, 1_000);
+    assert_eq!(at(&created), Some([1.0; 3]), "a file created after a failed load");
+    let repaired = write_dated(dir.as_path(), "repaired.cube", "not a lut", 1_000);
+    assert_eq!(at(&repaired), None);
+    write_dated(dir.as_path(), "repaired.cube", WHITE, 2_000);
+    assert_eq!(at(&repaired), Some([1.0; 3]), "a repaired file");
+    std::fs::remove_file(&repaired).unwrap();
+    assert_eq!(at(&repaired), None, "a deleted file");
+    // Inline text is its own content: the same text is the same transform.
+    let inline = load_file(BLACK).unwrap();
+    assert!(Arc::ptr_eq(&inline, &load_file(BLACK).unwrap()));
+    std::fs::remove_dir_all(&dir).unwrap();
 }

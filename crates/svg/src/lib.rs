@@ -672,7 +672,14 @@ struct Parser<'a, 'i> {
     gradient_work: usize,
     /// Set when gradient work passed [`MAX_GRADIENT_WORK`].
     gradient_work_exceeded: bool,
+    /// Path elements and gradient stops kept so far, `<use>` copies and repeated gradient
+    /// references included; past [`MAX_RETAINED`] the import errs.
+    retained: std::cell::Cell<usize>,
 }
+
+/// The most path elements and gradient stops an import keeps: a complex path reused many times,
+/// or a gradient with many stops referenced by many shapes, is copied for each use.
+const MAX_RETAINED: usize = 8_000_000;
 
 fn is_svg_ns(n: &roxmltree::Node) -> bool {
     n.is_element()
@@ -695,6 +702,13 @@ impl<'a, 'i> Parser<'a, 'i> {
             }
         }
         out
+    }
+
+    /// Charge `n` kept path elements or gradient stops; false once [`MAX_RETAINED`] is passed.
+    fn charge_retained(&self, n: usize) -> bool {
+        let r = self.retained.get().saturating_add(n);
+        self.retained.set(r);
+        r <= MAX_RETAINED
     }
 
     /// Charge `n` units of CSS work; false once the budget is spent.
@@ -1058,6 +1072,10 @@ impl<'a, 'i> Parser<'a, 'i> {
             }
         }
         if let Some(src) = source {
+            // Charged before the stops are read: every reference reads and keeps them again.
+            if !self.charge_retained(src.children().filter(|c| c.is_element()).count()) {
+                return None;
+            }
             let mut last = 0.0f64;
             for s in src.children().filter(|c| c.is_element() && c.tag_name().name() == "stop") {
                 let stop_work = s.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add);
@@ -1454,6 +1472,11 @@ impl<'a, 'i> Parser<'a, 'i> {
                     _ => (None, None),
                 };
                 let Some(geom) = self.geometry(n, &st, path_data, points) else { return };
+                if let Geom::Path(p) = &geom
+                    && !self.charge_retained(p.elements().len())
+                {
+                    return;
+                }
                 let fill = if matches!(tag, "line") { None } else { st.fill.as_ref().and_then(|p| self.resolve_paint(p, &st)) };
                 let (fill, fill_alpha) = match fill {
                     Some((p, a)) => (Some(p), a),
@@ -1808,6 +1831,7 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         gradient_cache: HashMap::new(),
         gradient_work: 0,
         gradient_work_exceeded: false,
+        retained: std::cell::Cell::new(0),
     };
     let st = Style::default();
     let pct_or = |name: &str, axis: char, def: f64| -> f64 {
@@ -1856,6 +1880,9 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     }
     if p.gradient_work_exceeded {
         return Err(Error::Xml(format!("resolving its gradients exceeds the {MAX_GRADIENT_WORK}-unit work budget")));
+    }
+    if p.retained.get() > MAX_RETAINED {
+        return Err(Error::Xml(format!("its paths and gradients, with their copies, hold more than {MAX_RETAINED} elements")));
     }
     if p.css_work.get() > MAX_CSS_WORK {
         // Never a silently unstyled drawing.

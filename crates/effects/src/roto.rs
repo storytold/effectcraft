@@ -9,7 +9,8 @@
 //! neighbouring frames with [`crate::EffectHost::self_at`]). Undo, redo and reopening a project
 //! therefore never see stale mattes. Behind the memory cache an optional [`SegStore`] (the
 //! persistent disk cache, set by the engine) keeps computed segmentations across restarts. **Freeze** stores the final mattes in the hidden **Frozen**
-//! parameter ([`FrozenCache`]); they are used while their key still matches.
+//! parameter ([`FrozenCache`]); they are used while their key still matches, whichever model the
+//! session has (a session without the model that froze them uses them as they are).
 //!
 //! Rendering: binary segmentation → Roto Brush Matte (Shift Edge, Reduce Chatter, Feather,
 //! Contrast) → Refine Edge matting inside the Refine Edge band (guided filter + closed-form
@@ -242,6 +243,11 @@ fn seed_with(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> u6
     h
 }
 
+/// Show Object: 0 shows every object, N object N alone.
+fn show_object_of(params: &Params) -> u32 {
+    f(params, "rotoBrushMatte/object").round().clamp(0.0, 32.0) as u32
+}
+
 /// The layer frame shown at layer time `t` seconds.
 pub fn frame_of(t: f64, fps: f64) -> i64 {
     (t * fps + 1e-6).floor() as i64
@@ -372,10 +378,22 @@ pub fn purge() {
     c.bytes = 0;
 }
 
+/// The pixel size of the layer-space grid at `scale` (`round(size · scale)`, at least 1).
+fn grid_size(layer_size: [f64; 2], scale: f64) -> (u32, u32) {
+    (((layer_size[0] * scale).round() as u32).max(1), ((layer_size[1] * scale).round() as u32).max(1))
+}
+
+/// The full-resolution layer grid frozen mattes are stored at. A frozen cache claiming any
+/// other size did not come from freezing this layer and is not decoded.
+pub fn frozen_grid(layer_size: [f64; 2]) -> [usize; 2] {
+    let (w, h) = grid_size(layer_size, 1.0);
+    [w as usize, h as usize]
+}
+
 /// The layer-space grid (`round(size · scale)` pixels) of a buffer.
 pub fn layer_grid(buf: &Buf, layer_size: [f64; 2]) -> Image {
     let s = if buf.scale > 0.0 { buf.scale } else { 1.0 };
-    let (w, h) = (((layer_size[0] * s).round() as u32).max(1), ((layer_size[1] * s).round() as u32).max(1));
+    let (w, h) = grid_size(layer_size, s);
     let (ox, oy) = (buf.offset[0].round() as i64, buf.offset[1].round() as i64);
     let mut img = Image::new(w, h);
     img.rows_mut().for_each(|(y, row)| {
@@ -415,7 +433,7 @@ impl Chain {
         let data = data(params);
         let keys = data.chain_keys(seed(params, layer_size, fps));
         let saved = saved_for(params, &data, layer_size, fps);
-        let show_object = f(params, "rotoBrushMatte/object").round().clamp(0.0, 32.0) as u32;
+        let show_object = show_object_of(params);
         Chain { refine_radius: data.refine_radius(), data, keys, opts: seg_opts(params, scale), model: model_for(params), saved, show_object }
     }
 
@@ -929,7 +947,8 @@ fn needs_neighbours(mp: &MatteParams) -> bool {
 // ------------------------------------------------------------------ Freeze
 
 /// Frozen mattes (Freeze): the final 8-bit alpha and the Refine Edge band of every frame of
-/// the span at full resolution, valid while `key` matches [`frozen_key`].
+/// the span at full resolution, valid while `key` matches [`frozen_key`] under the session's model or
+/// any other Roto Brush model.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FrozenCache {
@@ -959,19 +978,33 @@ impl FrozenCache {
     }
 }
 
-/// What frozen mattes depend on: every chain key and the matte settings.
+/// What frozen mattes depend on: every chain key (the session's model is in their seed) and the matte settings.
 pub fn frozen_key(params: &Params, layer_size: [f64; 2], fps: f64) -> String {
-    let ch = Chain::new(params, layer_size, fps, 1.0);
+    frozen_key_with(params, layer_size, fps, model_for(params).map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+}
+
+/// [`frozen_key`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: none).
+fn frozen_key_with(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> String {
     let mut h = 0xcbf2_9ce4_8422_2325;
-    for (f, k) in &ch.keys {
+    for (f, k) in &data(params).chain_keys(seed_with(params, layer_size, fps, model)) {
         fnv(&mut h, &f.to_le_bytes());
         fnv(&mut h, &k.to_le_bytes());
     }
     fnv(&mut h, format!("{:?}", matte_params(params)).as_bytes());
-    if ch.show_object != 0 {
-        fnv(&mut h, &ch.show_object.to_le_bytes());
+    let show_object = show_object_of(params);
+    if show_object != 0 {
+        fnv(&mut h, &show_object.to_le_bytes());
     }
     format!("{h:016x}")
+}
+
+/// Whether frozen mattes still apply: their key matches under the session's model, or under the model that froze
+/// them, which this session may not have loaded (a fresh headless render). Frozen mattes need no segmentation.
+fn frozen_applies(fc: &FrozenCache, params: &Params, layer_size: [f64; 2], fps: f64) -> bool {
+    fc.key == frozen_key(params, layer_size, fps)
+        || std::iter::once(effectcraft_segment::CLASSICAL)
+            .chain(effectcraft_segment::MODELS.iter().filter(|m| m.task == effectcraft_segment::Task::Mask).map(|m| m.id))
+            .any(|id| fc.key == frozen_key_with(params, layer_size, fps, id))
 }
 
 /// Whether the instance is frozen (has frozen mattes).
@@ -1191,8 +1224,11 @@ pub fn freeze_frame(alpha: &[f32], band: &[u8]) -> FrozenFrame {
 fn matte_for(ctx: &EffectCtx, f: i64, img: &Arc<Image>, scale: f64) -> Option<(Vec<f32>, Vec<u8>, f64)> {
     let (w, h) = (img.width as usize, img.height as usize);
     // Frozen mattes.
+    // Only the layer's own full-resolution grid: a project cannot make a tiny layer decode (and
+    // convert to floats) planes as large as the RLE allows. Any other size falls through to a computed matte.
     if let Some(fc) = frozen(ctx.params)
-        && fc.key == frozen_key(ctx.params, ctx.layer_size, ctx.fps())
+        && frozen_applies(&fc, ctx.params, ctx.layer_size, ctx.fps())
+        && fc.size == frozen_grid(ctx.layer_size)
         && let Some(fr) = fc.frames.get(&f)
     {
         let [fw, fh] = fc.size;
@@ -1295,17 +1331,23 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
 
 /// The final matte of the effect at layer frame `f` on the full-resolution layer grid of
 /// `input` (the effect's input buffer at scale 1), computing what is missing. For Freeze and
-/// the Layer panel overlays.
+/// the Layer panel overlays. A frame of `frozen` (the instance's frozen mattes, from
+/// [`applying_frozen`]) keeps its frozen matte, so freezing again in a session without the model
+/// that froze it does not replace that model's matte.
 pub fn frame_matte(
     params: &Params,
     layer_size: [f64; 2],
     fps: f64,
     f: i64,
+    frozen: Option<&FrozenCache>,
     frame: &mut dyn FnMut(i64) -> Option<Arc<Image>>,
     cancel: &dyn Fn() -> bool,
 ) -> Option<(Vec<f32>, Vec<u8>)> {
     let chain = Chain::new(params, layer_size, fps, 1.0);
     let img = frame(f)?;
+    if let Some(kept) = frozen.and_then(|fc| frozen_frame_matte(fc, f, img.width as usize, img.height as usize)) {
+        return Some(kept);
+    }
     let seg = chain.ensure(f, frame, cancel)?;
     let mp = matte_params(params);
     let (mut prev, mut next) = (None, None);
@@ -1319,6 +1361,25 @@ pub fn frame_matte(
     }
     let alpha = final_alpha(&img, &seg, prev.as_deref(), next.as_deref(), &mp, chain.refine_radius, 1.0);
     Some((alpha, seg.refine.clone()))
+}
+
+/// The instance's frozen mattes while they apply ([`frozen_applies`]): the frames a second Freeze keeps. A Freeze job
+/// resolves them once, since this hashes the whole frozen cache.
+pub fn applying_frozen(params: &Params, layer_size: [f64; 2], fps: f64) -> Option<Arc<FrozenCache>> {
+    let fc = frozen(params)?;
+    frozen_applies(&fc, params, layer_size, fps).then_some(fc)
+}
+
+/// Frame `f`'s alpha and band in `fc` on a `w`×`h` grid, when it was frozen at that size.
+fn frozen_frame_matte(fc: &FrozenCache, f: i64, w: usize, h: usize) -> Option<(Vec<f32>, Vec<u8>)> {
+    let fr = fc.frames.get(&f)?;
+    if fc.size != [w, h] {
+        return None;
+    }
+    let n = w.checked_mul(h).filter(|n| *n > 0 && *n <= rle::MAX_PLANE_BYTES)?;
+    let alpha = rle::decode_bounded(&fr.a, n).filter(|a| a.len() == n)?;
+    let band = rle::decode_bounded(&fr.b, n).filter(|b| b.len() == n)?;
+    Some((alpha.iter().map(|v| f32::from(*v) / 255.0).collect(), band))
 }
 
 #[cfg(test)]
@@ -1361,6 +1422,33 @@ mod tests {
         let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
         params.values.insert(STROKES.into(), Value::Str(d.to_json()));
         params
+    }
+
+    #[test]
+    fn mismatched_frozen_size_falls_back_to_a_computed_matte() {
+        let mut d = RotoData::default();
+        d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[35.0, 40.0], [45.0, 40.0]], object: 0 }, 20, [0, 24]);
+        let mut params = params_with(&d);
+        let fc =
+            FrozenCache { key: frozen_key(&params, [100.0, 80.0], 25.0), size: [10, 8], frames: BTreeMap::from([(5, freeze_frame(&[1.0; 80], &[0; 80]))]) };
+        let host = Seq;
+        let render = |params: &Params| {
+            let ctx = EffectCtx {
+                params,
+                time: 5.0 / 25.0 + 0.001,
+                layer_size: [100.0, 80.0],
+                seed: 1,
+                adjustment: false,
+                env: EffectEnv { host: Some(&host), frame_rate: 25.0, ..Default::default() },
+            };
+            crate::apply(&specs()[0], &ctx, Buf { img: frame(5.0 / 25.0 + 0.001), offset: [0.0; 2], scale: 1.0 }).img
+        };
+        let computed = render(&params);
+        params.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        let out = render(&params);
+        assert!(out.data[(40 * 100 + 50) as usize][3] > 0.5, "the disk is missing from the output");
+        // The cache's all-opaque matte would leave the background opaque too; the fallback must match a render with no cache.
+        assert!(out.data == computed.data, "the mismatched frozen cache was used");
     }
 
     #[test]
@@ -1409,6 +1497,50 @@ mod tests {
         };
         let o = crate::apply(&specs()[0], &ctx, Buf { img: frame(0.3), offset: [0.0; 2], scale: 1.0 }).img;
         assert!(o.data.iter().all(|p| p[3] == 0.0));
+    }
+
+    /// Mattes frozen with a model render as frozen in a session that has another model or none (a fresh headless
+    /// render), instead of being segmented again with the classic engine.
+    #[test]
+    fn frozen_mattes_survive_a_session_without_their_model() {
+        let mut d = RotoData::default();
+        d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[35.0, 40.0], [45.0, 40.0]], object: 0 }, 2, [0, 5]);
+        let mut params = params_with(&d);
+        params.values.insert(INPUT_KEY.into(), Value::Str("frozen-without-the-model".into()));
+        let size = [100.0, 80.0];
+        assert!(model_for(&params).is_none(), "this session has no model");
+        // the frozen matte is the left half of the layer: no segmentation of the disk gives it
+        let alpha: Vec<f32> = (0..100 * 80).map(|i| f32::from(u8::from(i % 100 < 50))).collect();
+        let mut fc = FrozenCache { key: frozen_key_with(&params, size, 25.0, effectcraft_segment::SAM2_TINY.id), size: [100, 80], ..Default::default() };
+        fc.frames.insert(0, freeze_frame(&alpha, &[0; 100 * 80]));
+        assert_ne!(fc.key, frozen_key(&params, size, 25.0));
+        params.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        let host = Seq;
+        let ctx = EffectCtx {
+            params: &params,
+            time: 0.001,
+            layer_size: size,
+            seed: 1,
+            adjustment: false,
+            env: EffectEnv { host: Some(&host), frame_rate: 25.0, ..Default::default() },
+        };
+        let out = crate::apply(&specs()[0], &ctx, Buf { img: frame(0.0), offset: [0.0; 2], scale: 1.0 }).img;
+        let a = |x: usize, y: usize| out.data[y * 100 + x][3];
+        assert!(a(10, 70) > 0.99 && a(90, 10) < 0.01, "the frozen matte is used: {} at (10, 70), {} at (90, 10)", a(10, 70), a(90, 10));
+        // freezing again in this session keeps the frozen matte instead of segmenting with the classic engine
+        let mut get = |g: i64| Some(Arc::new(frame(g as f64 / 25.0)));
+        let kept = applying_frozen(&params, size, 25.0).expect("the frozen mattes apply");
+        let (matte, band) = frame_matte(&params, size, 25.0, 0, Some(&kept), &mut get, &|| false).expect("frame 0's matte");
+        assert_eq!((matte, band.len()), (alpha.clone(), 100 * 80), "a second Freeze keeps the frozen frame");
+        let segmented = frame_matte(&params, size, 25.0, 1, Some(&kept), &mut get, &|| false);
+        assert!(segmented.is_some_and(|(a, _)| a[40 * 100 + 10] < 0.01), "a frame with none is segmented");
+        // a stroke edited after the freeze still makes it stale, whatever the model
+        let mut moved = d.clone();
+        moved.strokes[0].points[0] = [36.0, 40.0];
+        let mut edited = params.clone();
+        edited.values.insert(STROKES.into(), Value::Str(moved.to_json()));
+        assert!(!frozen_applies(&fc, &edited, size, 25.0));
+        assert!(applying_frozen(&edited, size, 25.0).is_none(), "a second Freeze then segments every frame");
     }
 
     /// A stand-in tracker for two objects: object 0 is the moving disk, object 1 a fixed square. It records how many
@@ -1888,6 +2020,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Frozen mattes are only decoded at the size the freeze pass stores: the layer grid at
+    /// full resolution.
+    #[test]
+    fn frozen_grid_is_the_full_resolution_layer_grid() {
+        for size in [[100.0, 80.0], [99.6, 0.2], [1.0, 1.0]] {
+            let buf = Buf { img: Image::new(3, 3), offset: [0.0; 2], scale: 1.0 };
+            let g = layer_grid(&buf, size);
+            assert_eq!(frozen_grid(size), [g.width as usize, g.height as usize]);
+        }
+        assert_eq!(frozen_grid([100.0, 80.0]), [100, 80]);
     }
 
     #[test]

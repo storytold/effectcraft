@@ -92,8 +92,25 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
 
 /// Parse page `index` of a PDF (EPS files have one page).
 pub fn parse_page(bytes: &[u8], index: usize) -> Result<Doc, Error> {
+    parse_page_framed(bytes, index, Framing::Viewer)
+}
+
+/// Which region of a PDF page becomes the document, and whether `/Rotate` turns it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Framing {
+    /// As a PDF viewer shows the page: its CropBox (else MediaBox), turned by `/Rotate`.
+    #[default]
+    Viewer,
+    /// As After Effects places a PDF or `.ai` as footage: the page's ArtBox clipped to the
+    /// CropBox (else MediaBox) when it has one, else the CropBox, else the MediaBox, with
+    /// `/Rotate` ignored (measured in After Effects 2026 with own files, #3099).
+    Placed,
+}
+
+/// [`parse_page`] with the page framed as `framing` says (EPS files are their bounding box).
+pub fn parse_page_framed(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     match sniff(bytes) {
-        Some(Format::Pdf) => parse_pdf(bytes, index),
+        Some(Format::Pdf) => parse_pdf(bytes, index, framing),
         Some(Format::Eps) => parse_eps(bytes),
         None => Err(Error::NotVector),
     }
@@ -142,17 +159,22 @@ fn finish(nodes: Vec<Node>, flags: Vec<bool>, skipped: Vec<String>, width: f64, 
     Doc { width, height, root, skipped }
 }
 
-fn parse_pdf(bytes: &[u8], index: usize) -> Result<Doc, Error> {
+/// Page `index` of a PDF framed as `framing` says, as a document in points (y down).
+fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     let file = object::File::parse(bytes)?;
     let pages = page::pages(&file);
     if pages.is_empty() {
         return Err(Error::NoPages);
     }
     let pg = pages.get(index).ok_or(Error::PageOutOfRange(index))?;
-    let [x0, y0, x1, y1] = pg.bbox;
+    let (frame, rotate) = match framing {
+        Framing::Viewer => (pg.bbox, pg.rotate),
+        Framing::Placed => (pg.art.unwrap_or(pg.bbox), 0),
+    };
+    let [x0, y0, x1, y1] = frame;
     let (w, h) = (x1 - x0, y1 - y0);
     // Default user space (y up) → document pixels (y down), with the page's /Rotate.
-    let (to_doc, dw, dh) = match pg.rotate {
+    let (to_doc, dw, dh) = match rotate {
         90 => (Affine::new([0.0, 1.0, 1.0, 0.0, -y0, -x0]), h, w),
         180 => (Affine::new([-1.0, 0.0, 0.0, 1.0, x1, -y0]), w, h),
         270 => (Affine::new([0.0, -1.0, -1.0, 0.0, y1, x1]), h, w),

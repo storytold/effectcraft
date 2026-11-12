@@ -101,6 +101,7 @@ pub(crate) fn run_chain(e: &mut Enc, chain: &[FxStep], buf: &Buf, levels: Option
     e.take_missing();
     for step in chain {
         b = apply(e, step.spec.id, &step.ctx, b)?;
+        e.mem_gate();
         if e.take_missing() {
             return None;
         }
@@ -158,6 +159,7 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
         self.e.take_missing();
         for step in steps {
             let Some(next) = apply(self.e, step.spec.id, &step.ctx, cur) else { return false };
+            self.e.mem_gate();
             // A kernel the device couldn't build: the effects render on the CPU (#613).
             if self.e.take_missing() {
                 return false;
@@ -272,7 +274,9 @@ pub(crate) fn box_passes(e: &mut Enc, img: &GpuImage, rx: &[usize], ry: &[usize]
     let mut cur = img.clone();
     let passes = rx.iter().map(|&r| (false, r)).chain(ry.iter().map(|&r| (true, r))).filter(|p| p.1 > 0);
     for (vertical, r) in passes {
-        let block = if vertical { (4 * r).clamp(32, 256) } else { 256 } as u32;
+        // Vertical sums restart every `block` rows as the CPU's do; a row is one running sum, as
+        // on the CPU (restarting it rounds differently).
+        let block = if vertical { (4 * r).clamp(32, 256) as u32 } else { cur.width.max(1) };
         let (lines, n) = if vertical { (cur.width, cur.height) } else { (cur.height, cur.width) };
         let mut p = Params::default();
         p.u[0] = [r as u32, repeat as u32, block, 0];

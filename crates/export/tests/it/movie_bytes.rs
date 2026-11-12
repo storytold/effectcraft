@@ -95,8 +95,13 @@ fn export_bytes(format: OutputFormat, name: &str) -> Vec<u8> {
 fn h264_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::H264, "/out/pinned.mp4");
     // FilmCraft 09aaf9b's encoder lists its settings in the first frame's user-data SEI (211
-    // bytes where 0.1.1's name took 50): 161 bytes more than the FilmCraft 2c5ba7a pin.
-    assert_eq!((data.len(), fnv1a(&data)), (104_341, 17_655_680_090_264_218_914), "H.264 MP4");
+    // bytes where 0.1.1's name took 50): 161 bytes more than the FilmCraft 2c5ba7a pin. The encoder's
+    // version string "0.8.0" -> "0.12.0" in that SEI adds one more byte (and one to the size fields).
+    // craft-video's encoder (craft-libs) is that encoder at a later FilmCraft revision than the
+    // d5ead4b pin: it names itself "craft-h264enc 0.1.0" in the SEI (5 bytes fewer), and with these
+    // settings its packets match the pin's for the first ten frames and differ after (24 bytes more
+    // in all, with the size fields).
+    assert_eq!((data.len(), fnv1a(&data)), (104_366, 4_413_091_804_733_884_658), "H.264 MP4");
 }
 
 #[test]

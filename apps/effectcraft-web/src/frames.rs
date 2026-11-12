@@ -473,10 +473,13 @@ pub async fn worker_frame(json: String) {
         g.settled().await;
         replies = SERVER.with(|c| c.borrow_mut().as_mut().map(|s| s.resume()).unwrap_or_default());
     }
+    // The source files the frame read, kept with its entry (checked by the page before use); a
+    // frame whose files can't all be named is not stored (#3184).
+    let (files, virtual_id) = SERVER.with(|c| c.borrow_mut().as_mut().map(|s| (s.take_files(), s.virtual_id().cloned())).unwrap_or_default());
     for (r, px) in replies {
         post_reply(&r, px.as_deref());
-        if let (FrameReply::Frame { width, height, .. }, Some(px), Some(key)) = (&r, &px, &disk) {
-            let entry = effectcraft_engine::render::disk_cache::frame_entry(*width, *height, px);
+        if let (FrameReply::Frame { width, height, .. }, Some(px), Some(key), Some(files)) = (&r, &px, &disk, &files) {
+            let Some(entry) = effectcraft_engine::render::disk_cache::frame_entry(*width, *height, px, files, virtual_id.as_deref()) else { continue };
             let name = format!("{key}.ecc");
             match JsFuture::from(crate::diskcache::cache_write(&name, js_sys::Uint8Array::from(&entry[..]))).await {
                 Ok(n) => post_reply(&FrameReply::Stored { key: key.clone(), bytes: n.as_f64().unwrap_or(entry.len() as f64) as u64, layer: false }, None),
