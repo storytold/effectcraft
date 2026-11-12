@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-svg = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-path = { workspace = true }

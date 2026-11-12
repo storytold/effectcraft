@@ -394,7 +394,7 @@ fn path(g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) -> Option<PropGroup> {
         return None;
     };
     let shapes: Vec<Option<AepPath>> =
-        oms.child_list(b"omks").map(|k| k.children().iter().filter(|c| c.is_list(b"shap")).map(AepPath::from_chunk).collect()).unwrap_or_default();
+        oms.child_list(b"omks").map(|k| k.children().filter(|c| c.is_list(b"shap")).map(AepPath::from_chunk).collect()).unwrap_or_default();
     let first = match shapes.first() {
         Some(Some(s)) => to_path(s, (1, 1)),
         Some(None) => Err("its path is unreadable"),

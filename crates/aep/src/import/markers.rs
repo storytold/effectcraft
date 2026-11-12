@@ -11,7 +11,7 @@
 //! EffectCraft's `timeRemap` property (seconds, keys in layer time) at the top of the layer's
 //! properties, where the engine's Enable Time Remapping puts it.
 
-use crate::{Chunk, CueType, Layer as AepLayer, Marker as AepMarker, PropNode, Property as AepProp};
+use crate::{CueType, Layer as AepLayer, Marker as AepMarker, PropNode, Property as AepProp};
 use effectcraft_color::Label;
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
@@ -23,12 +23,12 @@ use crate::import::report::{Collector, LossCategory};
 use crate::import::time::TimeMap;
 
 /// The time scale of the marker list below `holder` (the layer, or the composition's `SecL`).
-fn marker_scale(holder: &Chunk<'_>) -> Option<u32> {
+fn marker_scale(holder: craft_aep::Node<'_, '_>) -> Option<u32> {
     holder.find_list(b"mrst")?.child_list(b"tdbs").and_then(AepProp::from_chunk)?.time_scale().filter(|s| *s != 0)
 }
 
 /// The markers of a layer (`holder` = the layer chunk) or a composition (`holder` = its `SecL`).
-pub(crate) fn import_markers(list: Vec<AepMarker>, holder: &Chunk<'_>, what: &str, tm: &TimeMap, col: &mut Collector) -> Vec<Marker> {
+pub(crate) fn import_markers(list: Vec<AepMarker>, holder: craft_aep::Node<'_, '_>, what: &str, tm: &TimeMap, col: &mut Collector) -> Vec<Marker> {
     let scale = marker_scale(holder).unwrap_or(tm.timescale);
     let mut out: Vec<Marker> = Vec::with_capacity(list.len());
     for m in list {

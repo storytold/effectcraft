@@ -23,7 +23,7 @@ pub(crate) const CODEC: &str = "WebP";
 
 /// Whether `bytes` start like a WebP file.
 pub(crate) fn is_webp(bytes: &[u8]) -> bool {
-    bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
+    craft_webp::is_webp(bytes)
 }
 
 /// What the chunk headers of an animated WebP say.
@@ -35,46 +35,11 @@ struct Header {
     delays: Vec<u32>,
 }
 
-fn u24(b: &[u8]) -> Option<u32> {
-    match b {
-        [a, b, c, ..] => Some(u32::from(*a) | u32::from(*b) << 8 | u32::from(*c) << 16),
-        _ => None,
-    }
-}
-
 /// Read the `VP8X` header and the `ANMF` frame headers. `None` when the file isn't an animated
 /// WebP. A truncated tail keeps the frames before it.
 fn header(bytes: &[u8]) -> Option<Header> {
-    if !is_webp(bytes) {
-        return None;
-    }
-    let riff = bytes.get(4..8).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)?;
-    let end = usize::try_from(riff).ok()?.saturating_add(8).min(bytes.len());
-    let (mut at, mut canvas, mut delays) = (12usize, None, Vec::new());
-    while delays.len() < MAX_FRAMES {
-        let Some(head) = bytes.get(at..at.saturating_add(8)).filter(|_| at.saturating_add(8) <= end) else { break };
-        let size = head.get(4..8).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)?;
-        let size = usize::try_from(size).ok()?;
-        let body_end = at.saturating_add(8).saturating_add(size);
-        let Some(body) = bytes.get(at.saturating_add(8)..body_end).filter(|_| body_end <= end) else { break };
-        match head.get(0..4) {
-            Some(b"VP8X") => {
-                let flags = *body.first()?;
-                if flags & 0x02 == 0 {
-                    // No animation flag: a still.
-                    return None;
-                }
-                let w = u24(body.get(4..)?)?.saturating_add(1);
-                let h = u24(body.get(7..)?)?.saturating_add(1);
-                canvas = Some((w, h, flags & 0x10 != 0));
-            }
-            Some(b"ANMF") if body.len() >= 16 => delays.push(u24(body.get(12..)?)?),
-            _ => {}
-        }
-        at = body_end.saturating_add(size & 1);
-    }
-    let (width, height, alpha) = canvas?;
-    Some(Header { width, height, alpha, delays })
+    let info = craft_webp::scan(bytes, MAX_FRAMES).filter(|i| i.animated)?;
+    Some(Header { width: info.width, height: info.height, alpha: info.alpha, delays: info.frames.iter().map(|f| f.duration_ms).collect() })
 }
 
 /// The delay of a frame in milliseconds. Browsers show delays of 10 ms or less (that encoders

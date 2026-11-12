@@ -1,31 +1,11 @@
 use super::{HashMap, Rc, is_white};
 
 /// The PostScript section of an EPS file (DOS EPS binary header handled) and its bounding box
-/// (`%%HiResBoundingBox` preferred).
+/// (`%%HiResBoundingBox` preferred), read with `craft-eps`: the header comments, and the trailer
+/// for a box deferred with `(atend)`. A binary header that points outside the file is refused.
 pub fn eps_parts(bytes: &[u8]) -> Option<(&[u8], [f64; 4])> {
-    let ps = if bytes.starts_with(&[0xC5, 0xD0, 0xD3, 0xC6]) && bytes.len() >= 12 {
-        let off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-        let len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
-        bytes.get(off..off.checked_add(len)?.min(bytes.len()))?
-    } else {
-        bytes
-    };
-    let find_box = |key: &[u8]| -> Option<[f64; 4]> {
-        let mut from = 0;
-        while let Some(p) = ps[from..].windows(key.len()).position(|w| w == key) {
-            let s = from + p + key.len();
-            let e = ps[s..].iter().position(|c| matches!(c, b'\n' | b'\r')).map_or(ps.len(), |q| s + q);
-            let v: Vec<f64> = String::from_utf8_lossy(&ps[s..e]).split_whitespace().filter_map(|t| t.parse().ok()).collect();
-            if v.len() == 4 && v[2] > v[0] && v[3] > v[1] {
-                return Some([v[0], v[1], v[2], v[3]]);
-            }
-            // A rejected comment is done with: the scan goes on past its line, not over it again.
-            from = e;
-        }
-        None
-    };
-    let bbox = find_box(b"%%HiResBoundingBox:").or_else(|| find_box(b"%%BoundingBox:"))?;
-    Some((ps, bbox))
+    let ps = craft_eps::sections(bytes).ok()?.postscript;
+    Some((ps, craft_eps::Comments::read(ps).page_box()?))
 }
 
 pub(super) fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {

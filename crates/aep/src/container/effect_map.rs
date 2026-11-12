@@ -4,8 +4,8 @@
 //! Plain data; the evidence for each row is in `docs/aep-format.md` 3.7 and the case numbers in
 //! the comments. The importer reads a file through it, the exporter writes the inverse.
 
-use crate::container::effects::ParamKind;
 use ParamKind as K;
+use craft_aep::ParamKind;
 
 /// How a stored parameter value becomes an EffectCraft value.
 #[derive(Clone, Copy, Debug, PartialEq)]
