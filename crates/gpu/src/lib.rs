@@ -58,6 +58,7 @@ mod bokeh;
 mod classic3d;
 mod context;
 pub mod deferred;
+mod diagnostics;
 mod effects;
 mod fx_color;
 mod fx_depth;
@@ -91,6 +92,7 @@ mod yuv;
 use std::sync::Arc;
 
 pub use context::{GpuContext, GpuImage, TransferStats};
+pub use diagnostics::{ScopedError, ScopedErrorObserver};
 use effectcraft_effects::Buf;
 use effectcraft_project::ItemId;
 use effectcraft_raster::Image;
@@ -126,6 +128,7 @@ impl std::error::Error for FrameError {}
 /// The GPU compositor (cheap to clone; one device shared by all clones).
 #[derive(Clone)]
 pub struct Gpu {
+    scoped_observations: Arc<diagnostics::ScopedObservations>,
     ctx: Arc<GpuContext>,
     /// Backend::Auto's per-comp CPU / GPU timings.
     auto: Arc<effectcraft_render::AutoPick>,
@@ -162,7 +165,7 @@ impl Gpu {
     }
 
     pub fn from_context(ctx: GpuContext) -> Gpu {
-        Gpu { ctx: Arc::new(ctx), auto: Default::default(), declined: Default::default() }
+        Gpu { ctx: Arc::new(ctx), auto: Default::default(), declined: Default::default(), scoped_observations: Default::default() }
     }
 
     /// A device of its own without blocking, with deferred readbacks (a browser worker, see
@@ -171,6 +174,13 @@ impl Gpu {
         let mut ctx = GpuContext::request().await?;
         ctx.set_deferred(true);
         Ok(Gpu::from_context(ctx))
+    }
+
+    /// Install a host's fixed-category observer before rendering. It is called at most once
+    /// per category across all clones, outside device/renderer locks. Returns false if already
+    /// registered. The observer must remain brief and must not perform GPU work.
+    pub fn set_scoped_error_observer(&self, observer: ScopedErrorObserver) -> bool {
+        self.scoped_observations.install(observer)
     }
 
     /// [`Gpu::request_deferred`] blocking (tests of the browser worker's path, natively).
@@ -316,6 +326,9 @@ impl Gpu {
             let validation = pollster::block_on(validation.pop());
             let internal = pollster::block_on(internal.pop());
             let oom = pollster::block_on(oom.pop());
+            // Preserve the typed scope observations before FrameError::Memory combines OOM
+            // and internal errors. An internal error alone is not evidence of actual OOM.
+            self.scoped_observations.report_scopes(oom.is_some(), internal.is_some(), validation.is_some());
             let memory = oom.is_some() || internal.is_some();
             // The allocation failure first: a validation error is often its consequence.
             let errors: Vec<String> = [oom, internal, validation].into_iter().flatten().map(|e| e.to_string()).collect();

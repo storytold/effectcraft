@@ -8,7 +8,7 @@ $end = $source.IndexOf('$Msi = @{}', $start)
 if ($start -lt 0 -or $end -le $start) { throw 'Could not locate the legacy source transformation.' }
 # Run the test harness's exact source-producing block, with only scratch outputs.
 $block = $source.Substring($start, $end - $start).Replace('$PSScriptRoot', ("'" + $PSScriptRoot.Replace("'", "''") + "'"))
-Invoke-Expression $block
+. ([scriptblock]::Create($block))
 [xml]$legacy = Get-Content -Raw $LegacyWxs
 $ns = New-Object Xml.XmlNamespaceManager($legacy.NameTable)
 $ns.AddNamespace('w', 'http://wixtoolset.org/schemas/v4/wxs')

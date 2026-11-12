@@ -23,6 +23,7 @@ mod lumetri;
 mod markers;
 mod masks;
 mod mattes;
+mod placeholders;
 mod puppet;
 mod resaved_defaults;
 mod robustness;

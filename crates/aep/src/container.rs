@@ -49,7 +49,7 @@ pub use effects::{DefinitionSource, Effect, EffectDefinitions, EffectParam, Laye
 #[cfg(test)]
 pub(crate) use effects::Pard;
 pub use error::AepError;
-pub use footage::{Footage, SequenceInfo};
+pub use footage::{Footage, PsdLayer, SequenceInfo};
 pub use header::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Quality, Rational, Renderer};
 pub use index::{Node, NodeWalk, Nodes, TreeIndex};
 pub use keys::{ExpressionFlags, Interpolation, KeyEase, KeyframeKind, SpatialKey};

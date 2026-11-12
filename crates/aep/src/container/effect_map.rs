@@ -38,6 +38,19 @@ pub enum Conv {
     Skip,
 }
 
+impl Conv {
+    /// For a number (`Percent`, `Plain`, `Factor`): what a stored value is multiplied by to give
+    /// the value here. `None` for every other conversion.
+    pub fn number_scale(self) -> Option<f64> {
+        match self {
+            Conv::Percent { valid_max } => Some(100.0 / valid_max),
+            Conv::Plain { .. } => Some(1.0),
+            Conv::Factor { factor, .. } => Some(factor),
+            _ => None,
+        }
+    }
+}
+
 // After Effects' popup items as the corpus stores them (`pdnm`).
 /// 368.
 pub const RAMP_SHAPE: &[&str] = &["Linear Ramp", "Radial Ramp"];
@@ -1142,8 +1155,12 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 
 /// The key a popup item is matched by between the two programs: trimmed, lower case, and
 /// Set Matte's "Red Channel" ... "Alpha Channel" are EffectCraft's "Red" ... "Alpha" (904 E24).
+///
+/// Lower case is Unicode's, not only ASCII's: After Effects stores popup items in its UI
+/// language, so an item can start with a capital outside ASCII (French "Écran"), and its key must
+/// be the same as for the same word in lower case.
 pub fn popup_key(item: &str) -> String {
-    popup_stem(item).to_ascii_lowercase()
+    popup_stem(item).chars().flat_map(char::to_lowercase).collect()
 }
 
 /// [`popup_key`] before the lower-casing, borrowed: `item` trimmed, without a final ` channel`
@@ -1161,7 +1178,29 @@ const SUFFIX: &[u8] = b" channel";
 
 /// Whether two popup items have the same [`popup_key`], without building either key.
 pub(crate) fn popup_keys_match(a: &str, b: &str) -> bool {
-    popup_stem(a).eq_ignore_ascii_case(popup_stem(b))
+    popup_stem(a).chars().flat_map(char::to_lowercase).eq(popup_stem(b).chars().flat_map(char::to_lowercase))
+}
+
+/// The English [`popup_key`] a non-English After Effects popup item name stands for, when this
+/// table knows it; `None` otherwise. EffectCraft's own popup options are English only, so a
+/// project saved by an After Effects set to another UI language never matches them by name and
+/// the parameter falls back to its default (observed on a real "Niveaux" project, French After
+/// Effects 2026 26.0.0x67: Levels' Channel and Clip to Output Black / White). Add an entry only
+/// from a confirmed After Effects label, never a guess at a whole menu's translation.
+pub fn popup_alias(key: &str) -> Option<&'static str> {
+    Some(match key {
+        // French: Levels' Channel popup (`ADBE Easy Levels2-0001`). "Alpha" is the same word in
+        // both languages, so it needs no entry.
+        "rvb" => "rgb",
+        "rouge" => "red",
+        "vert" => "green",
+        "bleu" => "blue",
+        // French: Levels' Clip to Output Black / White popups (`-0008`, `-0009`).
+        "activé" => "on",
+        "désactivé" => "off",
+        "désactivé pour la couleur 32 bpc" => "off for 32 bpc color",
+        _ => return None,
+    })
 }
 
 /// The table row of an After Effects match name.
@@ -1188,7 +1227,7 @@ mod tests {
 
     /// The key as it was built before the borrowed form (the reference for the differential test).
     fn old_key(item: &str) -> String {
-        let s = item.trim().to_ascii_lowercase();
+        let s = item.trim().to_lowercase();
         s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
     }
 
@@ -1206,12 +1245,14 @@ mod tests {
             " channel",
             "x channel",
             "Xchannel",
-            "Ä channel",
-            "Grün Channel",
-            "é",
-            "Ünit  channel",
+            "\u{c4} channel",
+            "Gr\u{fc}n Channel",
+            "\u{e9}",
+            "\u{dc}nit  channel",
             "a channel channel",
             "Luminance",
+            "\u{c9}CRAN",
+            "\u{e9}cran",
         ];
         for a in items {
             assert_eq!(popup_key(a), old_key(a), "{a:?}");
@@ -1219,5 +1260,14 @@ mod tests {
                 assert_eq!(popup_keys_match(a, b), old_key(a) == old_key(b), "{a:?} {b:?}");
             }
         }
+    }
+
+    /// A capital outside ASCII has the same key as its lower case; ASCII keys are unchanged.
+    #[test]
+    fn popup_key_lowers_non_ascii_capitals() {
+        assert_eq!(popup_key("\u{c9}CRAN"), popup_key("\u{e9}cran"));
+        assert_eq!(popup_key(" D\u{e9}sactiv\u{e9} "), "d\u{e9}sactiv\u{e9}");
+        assert_eq!(popup_key("Off for 32 bpc Color"), "off for 32 bpc color");
+        assert_eq!(popup_key("Red Channel"), "red");
     }
 }

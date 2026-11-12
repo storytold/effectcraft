@@ -39,10 +39,24 @@ fn quad_area(q: &[[f64; 2]; 4]) -> f64 {
     (0..4).map(|i| q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1]).sum::<f64>().abs() / 2.0
 }
 
-/// The layer a press at a comp point acts on, selected (Shift toggles the topmost layer). As in
+/// The layer a drag from a comp point acts on, selected (Shift toggles the topmost layer). As in
 /// After Effects, a selected layer under the point comes before the layers in front of it, so it
-/// can be dragged where they cover it; otherwise the topmost layer (#230).
+/// can be dragged where they cover it; otherwise the topmost layer (#230). Clicks use
+/// [`click_pick`], except a Puppet tool click while no layer has pins, which uses this so a pin
+/// can go on a selected layer behind others.
 pub(crate) fn pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool) -> Option<LayerId> {
+    pick_layer(app, ectx, cpt, toggle, true)
+}
+
+/// The layer a click (press and release without a drag) at a comp point acts on: always the
+/// topmost layer, selected unless it already is (Shift toggles it). Only a drag goes to a selected
+/// layer behind others ([`pick`]), so a click can still select a layer in front of it (#1535).
+/// The viewer doesn't call it for a click on a shown path, which stays on the path's layer.
+pub(crate) fn click_pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool) -> Option<LayerId> {
+    pick_layer(app, ectx, cpt, toggle, false)
+}
+
+fn pick_layer(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool, prefer_selected: bool) -> Option<LayerId> {
     if toggle {
         let hit = layer_at(ectx, cpt)?.id;
         let _ = app.session.execute("layer.select", json!({"layers": [hit.0], "toggle": true}));
@@ -50,7 +64,8 @@ pub(crate) fn pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], togg
     }
     let selected = &app.session.state.selected_layers;
     let hits: Vec<LayerId> = layers_at(ectx, cpt).map(|l| l.id).collect();
-    let hit = *hits.iter().find(|id| selected.contains(id)).or(hits.first())?;
+    let preferred = if prefer_selected { hits.iter().find(|id| selected.contains(id)) } else { None };
+    let hit = *preferred.or(hits.first())?;
     if !selected.contains(&hit) {
         let _ = app.session.execute("layer.select", json!({"layers": [hit.0]}));
     }

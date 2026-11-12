@@ -1376,6 +1376,28 @@ fn checkbox_and_dropdown_results() {
     assert_close!(f.ev(f.b, ROT, "effect('Dropdown Menu Control')('Menu') * 10", 0.0).unwrap().as_f64(), 10.0);
 }
 
+/// An effect EffectCraft does not have (an imported After Effects placeholder, #3087) is read by
+/// name like any other: its parameters by their names, a popup 1-based. It is also found by its
+/// After Effects match name, its effect id (the group's match id is one path segment).
+#[test]
+fn an_unknown_effects_parameters_are_read_by_name() {
+    let mut f = fx();
+    let g = group_push(&mut f.p, |ids| {
+        let mut g = ids.group("Pseudo_0_25", "Settings");
+        g.kind = effectcraft_project::GroupKind::Effect { effect: "Pseudo/0.25".into() };
+        g.children.push(ids.prop("param1", "Speed", Value::Scalar(3.0)).into());
+        g.children.push(ids.prop("param2", "Mode", Value::Enum(1)).into());
+        g
+    });
+    f.layer_mut(f.b).props.sub_mut("effects").unwrap().children.push(g.into());
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')('Speed') * 2", 0.0).unwrap().as_f64(), 6.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')('Mode') * 10", 0.0).unwrap().as_f64(), 20.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')(1)", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "thisLayer('Effects')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "thisLayer('ADBE Effect Parade')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+}
+
 #[test]
 fn syntax_error_reports_line() {
     let f = fx();
@@ -2025,6 +2047,7 @@ fn an_expression_cant_change_the_prelude_for_the_next() {
     }
 }
 
+mod ae_layer_order;
 mod property_group;
 
 /// Timing harness for the prelude's cost on the evaluation path. Ignored: it is a measurement, not
@@ -2068,5 +2091,31 @@ fn bench_evaluation() {
             best = best.min(start.elapsed().as_nanos() / u128::from(iters));
         }
         println!("BENCH {best:>9} ns/eval  {label} (min of 3 x {iters})");
+    }
+}
+
+/// Viewport clipping must never affect layer-space expression reads (#1388).
+#[test]
+fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {
+    let mut p = Project::default();
+    let comp = Comp::new(100, 100, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    let mut layer = build::layer(&mut p, &comp, "Shape", LayerSource::Shape, (100, 100), None);
+    let mut next = p.next_id;
+    let mut ids = build::Ids(&mut next);
+    let rect = build::shape_rect(&mut ids, [40.0, 40.0], [0.0, 0.0], 0.0);
+    let fill = build::shape_fill(&mut ids, [1.0, 0.0, 0.0, 1.0]);
+    let group = build::shape_group(&mut ids, "Box", vec![rect, fill]);
+    layer.props.sub_mut("contents").unwrap().children.push(group.into());
+    p.next_id = next;
+    layer.switches.three_d = true;
+    layer.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, -300.0]);
+    let cid = p.add_item("C", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+    p.comp_mut(cid).unwrap().layers.push(layer);
+    let comp = p.comp(cid).unwrap();
+    let layer = &comp.layers[0];
+    let ctx = EvalCtx::new(&p, cid, comp, Tick::ZERO);
+    for post in [false, true] {
+        let pixel = crate::sample::sample_image(ctx, cid, layer, [0.0, 0.0], [0.5, 0.5], post, 0.0).unwrap();
+        assert!(pixel[0] > 0.99 && pixel[3] > 0.99, "postEffect={post}: {pixel:?}");
     }
 }

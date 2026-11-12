@@ -319,15 +319,19 @@ impl Prober {
             return f.map(|footage| Probed { name, footage, ask_alpha: false, warning: None }).map_err(fail);
         }
         let importer = self.importer.as_ref().ok_or_else(|| fail("media import is not available in this build".into()))?;
-        let mut f = crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?;
-        let mut warning = None;
+        // What the file's own import left out (a model's textures over the limits) is a warning too.
+        let (mut f, mut warning) = match src {
+            Source::File(_) => importer.probe_noting(path).map_err(fail)?,
+            _ => (crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?, None),
+        };
         // Settings ▸ Import ▸ Report Missing Frames (numbered sequences).
         if f.kind == FootageKind::Sequence
             && !f.alphabetical
             && self.report_missing_frames
             && let Some(gaps) = crate::sequence::missing_report(&f.sequence)
         {
-            warning = Some(format!("{name}: {gaps} (the previous frame is held)"));
+            let gaps = format!("{name}: {gaps} (the previous frame is held)");
+            warning = Some(warning.map_or(gaps.clone(), |w| format!("{w}; {gaps}")));
         }
         // Settings ▸ Import ▸ Interpret Unlabeled Alpha As: images only (a 3D model renders its
         // own alpha, and audio and data have none).
@@ -404,12 +408,26 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     let mut comps = vec![];
     let mut items = vec![];
     let mut errors = vec![];
-    // EffectCraft projects import as projects, as After Effects imports an .aep.
-    let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    // EffectCraft projects import as projects, as After Effects imports an .aep; so do After
+    // Effects projects, refused when parts of them cannot come over. The app asks about those
+    // before it gets here (`panels::aep_losses`); a script or agent gets the refusal.
+    let (project_paths, paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    let (aep_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::is_aep_path(x));
     let mut projects = vec![];
     for path in project_paths {
         match s.execute("file.importProject", json!({"path": path})) {
             Ok(r) => projects.push(r),
+            Err(e) => errors.push(format!("{path}: {e}")),
+        }
+    }
+    for path in aep_paths {
+        match s.execute("file.importAep", json!({"path": path})) {
+            Ok(r) => projects.push(r),
+            // `file.import` has no `allowLosses`: point at the entry that lists the losses, and at
+            // the command that takes the consent.
+            Err(EngineError::Refused { losses, .. }) => errors.push(format!(
+                "{path}: {losses}; File ▸ Import ▸ Adobe After Effects Project… lists them and can import the rest (`file.importAep` with `allowLosses`)"
+            )),
             Err(e) => errors.push(format!("{path}: {e}")),
         }
     }
