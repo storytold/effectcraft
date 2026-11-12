@@ -1178,6 +1178,15 @@ fn seed_random_restarts_the_sequence() {
     assert_ne!(f.num("seedRandom(7, true); random() - random()", 0.0), 0.0);
 }
 
+/// `thisComp.shutterAngle` / `shutterPhase` read the composition's motion blur settings (they were
+/// undefined, so the expression result was not a number).
+#[test]
+fn comp_shutter_attributes() {
+    let f = fx();
+    assert_eq!(f.num("thisComp.shutterAngle", 0.0), 180.0);
+    assert_eq!(f.num("thisComp.shutterPhase", 0.0), -90.0);
+}
+
 #[test]
 fn gauss_random_distribution() {
     let f = fx();

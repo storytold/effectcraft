@@ -30,7 +30,8 @@ pub fn secs(t: f64) -> Secs {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Req {
-    /// `[name, width, height, duration, frameDuration, numLayers, pixelAspect, displayStart, bgColor]`.
+    /// `[name, width, height, duration, frameDuration, numLayers, pixelAspect, displayStart, bgColor,
+    /// shutterAngle, shutterPhase]`.
     CompInfo { comp: u64 },
     /// Comp item id or null.
     CompByName { name: String },
@@ -413,6 +414,8 @@ impl<'a> Resolver<'a> {
                     Resp::Num(c.pixel_aspect),
                     Resp::Num(c.display_start.seconds()),
                     Resp::nums([c.background[0] as f64, c.background[1] as f64, c.background[2] as f64, 1.0]),
+                    Resp::Num(c.shutter_angle),
+                    Resp::Num(c.shutter_phase),
                 ])
             }
             Req::CompByName { name } => {

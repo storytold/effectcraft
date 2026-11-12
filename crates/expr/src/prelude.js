@@ -529,6 +529,8 @@ Comp.prototype = {
   get pixelAspect() { return this.__info[6]; },
   get displayStartTime() { return this.__info[7]; },
   get bgColor() { return this.__info[8]; },
+  get shutterAngle() { return this.__info[9]; },
+  get shutterPhase() { return this.__info[10]; },
   get marker() { return new Markers(this.__c, -1); },
   // The topmost enabled camera active at the current time.
   get activeCamera() {
