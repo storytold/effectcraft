@@ -265,7 +265,9 @@ pub struct ViewerState {
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
-    /// A property scrub (Effect Controls, Timeline) or a Timeline drag of the playhead, keys or layer bars is in progress (Adaptive Resolution); cleared once the primary button is up.
+    /// A drag outside the viewer changed the frame on screen: a property scrub in Effect Controls,
+    /// or any Timeline or Properties drag ([`crate::panels::drag_preview`]). Adaptive Resolution
+    /// draws a draft until the primary button is up, which clears it.
     #[serde(skip)]
     pub property_interacting: bool,
     /// Extended Viewer: the comp-space region the viewer renders this frame (comp frame plus
