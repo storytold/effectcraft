@@ -588,15 +588,27 @@ pub fn snap_time(candidates: &[f64], t: f64, tolerance: f64) -> f64 {
 
 /// Times the current-time indicator snaps to (comp seconds).
 fn snap_candidates(comp: &Comp, rows: &[Row]) -> Vec<f64> {
+    snap_targets(comp, rows, &[], false)
+}
+
+/// [`snap_candidates`] without the `edited` layers' In / Out points; when `moving` them, without
+/// their markers and keys either (those move along).
+fn snap_targets(comp: &Comp, rows: &[Row], edited: &[u64], moving: bool) -> Vec<f64> {
+    let skip = |l: LayerId, contents: bool| edited.contains(&l.0) && (moving || !contents);
     let mut v = vec![0.0, comp.work_area.0.seconds(), comp.work_area.1.seconds(), comp.duration.seconds()];
     v.extend(comp.markers.iter().map(|m| m.time.seconds()));
     for l in &comp.layers {
-        v.push(l.in_point.seconds());
-        v.push(l.out_point.seconds());
-        v.extend(l.markers.iter().map(|m| l.comp_time(m.time).seconds()));
+        if !skip(l.id, false) {
+            v.push(l.in_point.seconds());
+            v.push(l.out_point.seconds());
+        }
+        if !skip(l.id, true) {
+            v.extend(l.markers.iter().map(|m| l.comp_time(m.time).seconds()));
+        }
     }
     for r in rows {
         if let RowKind::Prop { uid } = r.kind
+            && !skip(r.layer, true)
             && let Some(l) = comp.layer(r.layer)
             && let Some(p) = l.props.find(uid)
         {
@@ -3473,44 +3485,85 @@ fn layer_quick_offset_begin(ui: &mut egui::Ui, g: &Rw, rc: &RowCtx<'_>, body: &e
     ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id)
 }
 
-/// Moving and trimming a layer bar by whole frames.
+/// One layer bar drag: the layers it edits, the pointer's travel (px), the grabbed layer's moving
+/// ends and the snap targets when it started (comp seconds), and the whole frames sent so far.
+#[derive(Clone)]
+struct BarDrag {
+    edited: Vec<u64>,
+    px: f64,
+    ends: Vec<f64>,
+    targets: Arc<[f64]>,
+    sent: i64,
+}
+
+/// The whole frames a bar drag of `px` moves its ends by: truncated as the pointer goes, or with
+/// `shift`, the move that puts one of `ends` on the nearest target within 8 px of the pointer
+/// (#1828). Measured from the pointer, never the snapped result, so dragging on lets go. The
+/// move stays whole frames, so an end off the frame grid lands within half a frame of its target.
+fn bar_drag_frames(px: f64, pps: f64, fd: f64, ends: &[f64], targets: &[f64], shift: bool) -> i64 {
+    let secs = px / pps;
+    let snapped = shift
+        .then(|| {
+            ends.iter()
+                .flat_map(|e| targets.iter().map(move |t| t - e))
+                .filter(|d| ((d - secs) * pps).abs() <= 8.0)
+                .min_by(|a, b| (a - secs).abs().total_cmp(&(b - secs).abs()))
+        })
+        .flatten();
+    // `as` saturates (NaN → 0), so a zero frame duration or zoom can't panic.
+    snapped.map_or((secs / fd).trunc() as i64, |d| (d / fd).round() as i64)
+}
+
+/// Moving and trimming a layer bar by whole frames; Shift snaps its ends to the current time,
+/// markers, keys, the work area and other layers' In / Out points, as in After Effects (#1828).
 fn layer_bar_drag(g: &mut Rw, rc: &RowCtx<'_>, bars: &BarResps, quick: bool) {
     let BarResps { body, lin, lout } = bars;
-    let pps = g.tl.pps;
-    let fd = g.tl.fd;
     let ctx = g.tl.ctx.clone();
-    let actions = &mut g.tl.actions;
-    let selected = &g.selected;
-    let ui_actions = &mut g.ui_actions;
     let layer = rc.layer;
     let drag_key = format!("bar-{}", layer.id.0);
     for (resp, kind) in [(&body, "move"), (&lin, "in"), (&lout, "out")] {
         if kind == "move" && quick {
             continue;
         }
+        let id = egui::Id::unique(("bar-drag", layer.id.0, kind));
         if resp.dragged() {
-            let acc_id = egui::Id::unique(("bar-acc", layer.id.0, kind));
-            let mut acc: f32 = ctx.data(|d| d.get_temp(acc_id).unwrap_or(0.0));
-            acc += resp.drag_delta().x;
-            let frames = ((acc as f64 / pps) / fd).trunc() as i64;
-            if frames != 0 {
-                acc -= (frames as f64 * fd * pps) as f32;
-                let d = frames as f64 * fd;
-                // Moving or trimming a selected layer acts on the whole
-                // selection; each layer trims from its own in/out point.
-                let targets = json!(edited_layers(layer.id, selected));
-                let params = match kind {
-                    "move" => json!({"layers": targets, "delta": d, "merge": drag_key}),
-                    "in" => json!({"layers": targets, "inDelta": d, "merge": drag_key}),
-                    _ => json!({"layers": targets, "outDelta": d, "merge": drag_key}),
+            let shift = ctx.input(|i| i.modifiers.shift);
+            // Moving or trimming a selected layer acts on the whole selection as it is when the
+            // drag starts; each layer trims from its own in/out point. A Shift-drag on an
+            // unselected bar adds it to the selection (`layer_bar_hits`) and moves them all.
+            let start = || {
+                let mut edited = edited_layers(layer.id, &g.selected);
+                if kind == "move" && shift && !g.selected.contains(&layer.id) {
+                    edited.extend(g.selected.iter().map(|l| l.0));
+                }
+                let (i, o) = (layer.in_point.seconds(), layer.out_point.seconds());
+                let ends = match kind {
+                    "move" => vec![i, o],
+                    "in" => vec![i],
+                    _ => vec![o],
                 };
-                actions.push(("layer.timing".into(), params));
+                let mut targets = snap_targets(&g.tl.comp, &g.tl.rows, &edited, kind == "move");
+                targets.push(g.tl.time.seconds());
+                BarDrag { edited, px: 0.0, ends, targets: targets.into(), sent: 0 }
+            };
+            let mut drag = ctx.data(|d| d.get_temp::<BarDrag>(id)).filter(|_| !resp.drag_started()).unwrap_or_else(start);
+            drag.px += f64::from(resp.drag_delta().x);
+            let frames = bar_drag_frames(drag.px, g.tl.pps, g.tl.fd, &drag.ends, &drag.targets, shift);
+            if frames != drag.sent {
+                let d = frames.saturating_sub(drag.sent) as f64 * g.tl.fd;
+                drag.sent = frames;
+                let params = match kind {
+                    "move" => json!({"layers": drag.edited, "delta": d, "merge": drag_key}),
+                    "in" => json!({"layers": drag.edited, "inDelta": d, "merge": drag_key}),
+                    _ => json!({"layers": drag.edited, "outDelta": d, "merge": drag_key}),
+                };
+                g.tl.actions.push(("layer.timing".into(), params));
             }
-            ctx.data_mut(|d| d.insert_temp(acc_id, acc));
+            ctx.data_mut(|d| d.insert_temp(id, drag));
         }
         if resp.drag_stopped() {
-            ctx.data_mut(|d| d.remove::<f32>(egui::Id::unique(("bar-acc", layer.id.0, kind))));
-            ui_actions.push(UiAct::EndMerge);
+            ctx.data_mut(|d| d.remove::<BarDrag>(id));
+            g.ui_actions.push(UiAct::EndMerge);
         }
     }
 }

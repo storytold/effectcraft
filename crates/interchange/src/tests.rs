@@ -787,3 +787,98 @@ fn deeply_nested_documents_error_instead_of_overflowing_the_stack() {
     assert_eq!(super::import::xml_depth(b"<a><!-- <b><b> --><c x='>'/><![CDATA[<d>]]><e></e></a>"), 2);
     assert_eq!(super::import::json_depth(br#"{"a": "[[[{{", "b": [[1], {"c": "\\\"["}]}"#), 3);
 }
+
+/// A hostile project: footage in a folder whose parents loop back to it. Export walked the
+/// folder's parents recursively and never reached the cache insert, so the stack ran out.
+#[test]
+fn export_survives_a_folder_parent_cycle() {
+    let (mut p, cid) = ae_project();
+    let a = p.add_item("A", effectcraft_color::Label::None, None, ItemKind::Folder);
+    let b = p.add_item("B", effectcraft_color::Label::None, Some(a), ItemKind::Folder);
+    p.items.get_mut(&a).unwrap().parent = Some(b);
+    let footage: Vec<ItemId> = p.items.values().filter(|i| matches!(i.kind, ItemKind::Footage(_))).map(|i| i.id).collect();
+    for f in footage {
+        p.items.get_mut(&f).unwrap().parent = Some(a);
+    }
+    let out = export(&p, cid, &ExportOptions::default(), &HashMap::new()).unwrap();
+    assert!(out.warnings.iter().any(|w| w.contains("contains itself")), "{:?}", out.warnings);
+}
+
+/// Precomps that use each other, and a chain of comps that each use the next one twice: the
+/// audio check recursed forever on the first and 2^depth times on the second.
+#[test]
+fn export_audio_check_ends_on_precomp_cycles_and_shared_chains() {
+    let mut p = Project::default();
+    let a = footage_item(&mut p, "/media/a.mov");
+    let comp = || Comp::new(W, H, FrameRate::new(25, 1), t(2.0));
+    // A chain of 60 comps, each using the next twice; the last one is silent footage.
+    let mut next = {
+        let mut c = comp();
+        let l = effectcraft_project::build::layer(&mut p, &c, "a", LayerSource::Footage { item: a }, (W, H), None);
+        c.layers.push(l);
+        comp_item(&mut p, "Leaf", c)
+    };
+    for i in 0..60 {
+        let mut c = comp();
+        for n in 0..2 {
+            let l = effectcraft_project::build::layer(&mut p, &c, &format!("use {n}"), LayerSource::Comp { item: next }, (W, H), None);
+            c.layers.push(l);
+        }
+        next = comp_item(&mut p, &format!("Chain {i}"), c);
+    }
+    let started = std::time::Instant::now();
+    export(&p, next, &ExportOptions::default(), &HashMap::new()).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "{:?}", started.elapsed());
+    // Two comps nesting each other.
+    let x = comp_item(&mut p, "X", comp());
+    let mut y = comp();
+    let l = effectcraft_project::build::layer(&mut p, &y, "x", LayerSource::Comp { item: x }, (W, H), None);
+    y.layers.push(l);
+    let y = comp_item(&mut p, "Y", y);
+    let mut xc = comp();
+    let l = effectcraft_project::build::layer(&mut p, &xc, "y", LayerSource::Comp { item: y }, (W, H), None);
+    xc.layers.push(l);
+    if let Some(ItemKind::Comp(c)) = p.items.get_mut(&x).map(|i| &mut i.kind) {
+        *c = Arc::new(xc);
+    }
+    export(&p, x, &ExportOptions::default(), &HashMap::new()).unwrap();
+}
+
+/// A flat edit with many clips and many transitions: each clip finds its own transitions (it
+/// scanned every transition of the track per clip), and they still extend and fade it.
+#[test]
+fn import_finds_each_clips_transitions_without_scanning_the_track() {
+    let mut p = fp::Project::new("Flat");
+    let a = media(&mut p, "a.png", "/media/a.mov", filmcraft_media::MediaKind::Movie, true, false, None);
+    let settings = fp::SequenceSettings { width: W, height: H, frame_rate: rate(), ..Default::default() };
+    let main = p.new_sequence("Main", settings, 1, 0, None);
+    const N: usize = 500;
+    let mut items = Vec::with_capacity(N);
+    let mut transitions = Vec::with_capacity(N);
+    for i in 0..N {
+        let ti = item(&mut p, a, fp::TrackKind::Video, i as f64 * 0.4, 0.0, 0.4);
+        if let Some(prev) = items.last().map(|x: &fp::TrackItem| x.id) {
+            transitions.push(fp::Transition {
+                id: fp::TransitionId(p.alloc_id()),
+                effect: fp::find_effect("cross_dissolve").unwrap().instance(),
+                start: secs(i as f64 * 0.4 - 0.08),
+                duration: secs(0.16),
+                from: Some(prev),
+                to: Some(ti.id),
+                align: fp::TransitionAlign::CenterAtCut,
+                reverse: false,
+            });
+        }
+        items.push(ti);
+    }
+    let seq = p.sequence_mut(main).unwrap();
+    seq.video_tracks[0].items = items;
+    seq.video_tracks[0].transitions = transitions;
+    let (bytes, _) = fc::export(&p, main, fc::Format::Otio, &Default::default()).unwrap();
+    let (q, r) = import_doc(&bytes, "Flat.otio", &mut probe);
+    let m = q.comp(r.comps[0]).unwrap();
+    assert_eq!(m.layers.len(), N);
+    // A middle clip reaches over both of its transitions' handles.
+    let mid = m.layers.iter().find(|l| near(l.in_point, t(100.0 - 0.08))).expect("clip 250 extended into its incoming transition");
+    assert!(near(mid.out_point, t(100.4 + 0.08)), "{}", mid.out_point.seconds());
+}

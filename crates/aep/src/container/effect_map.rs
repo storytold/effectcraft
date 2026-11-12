@@ -1142,9 +1142,35 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 
 /// The key a popup item is matched by between the two programs: trimmed, lower case, and
 /// Set Matte's "Red Channel" ... "Alpha Channel" are EffectCraft's "Red" ... "Alpha" (904 E24).
+///
+/// Lower case is Unicode's, not only ASCII's: After Effects stores popup items in its UI
+/// language, so an item can start with a capital outside ASCII (French "Écran"), and its key must
+/// be the same as for the same word in lower case.
 pub fn popup_key(item: &str) -> String {
-    let s = item.trim().to_ascii_lowercase();
+    let s = item.trim().to_lowercase();
     s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+}
+
+/// The English [`popup_key`] a non-English After Effects popup item name stands for, when this
+/// table knows it; `None` otherwise. EffectCraft's own popup options are English only, so a
+/// project saved by an After Effects set to another UI language never matches them by name and
+/// the parameter falls back to its default (observed on a real "Niveaux" project, French After
+/// Effects 2026 26.0.0x67: Levels' Channel and Clip to Output Black / White). Add an entry only
+/// from a confirmed After Effects label, never a guess at a whole menu's translation.
+pub fn popup_alias(key: &str) -> Option<&'static str> {
+    Some(match key {
+        // French: Levels' Channel popup (`ADBE Easy Levels2-0001`). "Alpha" is the same word in
+        // both languages, so it needs no entry.
+        "rvb" => "rgb",
+        "rouge" => "red",
+        "vert" => "green",
+        "bleu" => "blue",
+        // French: Levels' Clip to Output Black / White popups (`-0008`, `-0009`).
+        "activé" => "on",
+        "désactivé" => "off",
+        "désactivé pour la couleur 32 bpc" => "off for 32 bpc color",
+        _ => return None,
+    })
 }
 
 /// The table row of an After Effects match name.
@@ -1164,3 +1190,17 @@ pub const HUE_SATURATION_MASTER: [&str; 3] = ["hue", "saturation", "lightness"];
 /// The EffectCraft parameters Levels' RGB channel values (`Extra::Levels`) go to, in the order of
 /// the data (input black, input white, gamma, output black, output white: 512-516).
 pub const LEVELS_RGB: [&str; 5] = ["inBlack", "inWhite", "gamma", "outBlack", "outWhite"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A capital outside ASCII has the same key as its lower case; ASCII keys are unchanged.
+    #[test]
+    fn popup_key_lowers_non_ascii_capitals() {
+        assert_eq!(popup_key("ÉCRAN"), popup_key("écran"));
+        assert_eq!(popup_key(" Désactivé "), "désactivé");
+        assert_eq!(popup_key("Off for 32 bpc Color"), "off for 32 bpc color");
+        assert_eq!(popup_key("Red Channel"), "red");
+    }
+}

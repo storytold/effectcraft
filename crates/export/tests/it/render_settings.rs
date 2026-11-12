@@ -389,8 +389,8 @@ fn wav_and_aiff_channels_and_formats() {
 #[test]
 fn cancelled_export_removes_only_files_it_opened() {
     use effectcraft_export::ExportError;
-    let dir = std::env::temp_dir().join(format!("ec-cancel-owned-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let guard = tempfile::tempdir().unwrap();
+    let dir = guard.path().to_path_buf();
     let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
     struct Overflow;
     impl StorageQuota for Overflow {
