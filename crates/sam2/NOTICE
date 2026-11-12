@@ -1,0 +1,11 @@
+EffectCraft SAM 2 (effectcraft-sam2)
+Copyright the EffectCraft contributors.
+
+This crate is a Rust port of the SAM 2 implementation in Hugging Face `transformers`
+(`models/sam2` and `models/sam2_video`), Copyright 2025 The HuggingFace Inc. team, which in turn
+implements "SAM 2: Segment Anything in Images and Videos" by Meta AI (facebookresearch/sam2).
+Both are licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+
+Each ported source file states that it is a modified work (Apache-2.0 section 4(b)).
+Model weights are not part of this crate; they are downloaded by the user from the official
+`facebook/sam2.1-hiera-*` repositories (Apache-2.0).

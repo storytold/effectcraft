@@ -17,7 +17,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use rayon::prelude::*;
 
-use crate::generate::{fade, lattice};
+use crate::generate::lattice;
 use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, num, p, popup, slider};
 
 /// Fractal Type options (shared by both effects).
@@ -59,6 +59,11 @@ pub const BLEND_NONE: u32 = 0;
 pub const BLEND_NORMAL: u32 = 1;
 /// Index of "Soft Linear" in [`NOISE_TYPES`] (the default, and the GPU path's interpolation).
 pub const NOISE_SOFT_LINEAR: u32 = 2;
+
+/// Lattice cell of Fractal / Turbulent Noise in pixels per percent of Scale: After Effects 2026
+/// draws Block noise at Scale 100 in 66.67 px cells (and Soft Linear noise has the matching
+/// correlation length), not 100 px.
+pub const NOISE_CELL: f64 = 2.0 / 3.0;
 
 fn spec(id: &'static str, name: &'static str, params: Vec<ParamSpec>, render: crate::RenderFn) -> EffectSpec {
     EffectSpec { id, name, category: "Noise & Grain", params, render, gpu: false, float: true }
@@ -139,7 +144,7 @@ fn bspline(t: f32) -> [f32; 3] {
 }
 
 /// 3D value noise in about 0..1 with the given [`NOISE_TYPES`] interpolation in x and y (the
-/// evolution axis z always fades smoothly).
+/// evolution axis z always interpolates linearly, so evolution moves at a constant rate).
 ///
 /// Soft Linear is linear interpolation softened by a one-cell box filter, which is the quadratic
 /// B-spline: smooth like Spline from 9 lattice values instead of 16. A fade between two values
@@ -149,7 +154,7 @@ pub fn typed_noise(x: f32, y: f32, z: f32, seed: u32, noise_type: u32) -> f32 {
     // Soft Linear's taps are centred on the nearest lattice point, the others start at the cell's.
     let h = if noise_type == NOISE_SOFT_LINEAR { 0.5 } else { 0.0 };
     let (x0, y0, z0) = ((x + h).floor(), (y + h).floor(), z.floor());
-    let (tx, ty, fz) = (x + h - x0, y + h - y0, fade(z - z0));
+    let (tx, ty, fz) = (x + h - x0, y + h - y0, z - z0);
     let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let slice = |dz: i32| -> f32 {
@@ -236,7 +241,7 @@ impl Fractal {
             overflow: pr.e("overflow"),
             invert: pr.b("invert"),
             rot: rot.sin_cos(),
-            size: [(sw * b.scale).max(1.0) as f32, (sh * b.scale).max(1.0) as f32],
+            size: [(sw * NOISE_CELL * b.scale).max(1.0) as f32, (sh * NOISE_CELL * b.scale).max(1.0) as f32],
             origin: [ox as f32, oy as f32],
             center: [cx as f32, cy as f32],
             perspective: pr.b("transform/perspectiveOffset"),
@@ -333,7 +338,7 @@ impl Fractal {
 }
 
 /// Fractal / Turbulent Noise resolved for the GPU kernel (effectcraft-gpu `fx_noise`): the
-/// per-pixel constants and, per octave, the terms [`Fractal::raw`] computes before touching the
+/// per-pixel constants and, per octave, the terms `Fractal::raw` computes before touching the
 /// pixel, in the same f32 order.
 pub struct FractalGpu {
     pub kind: u32,
@@ -406,12 +411,17 @@ pub fn fractal_gpu(ctx: &EffectCtx, offset: [f64; 2], scale: f64, turbulent: boo
         sub_rotation: fr.sub_rotation != 0.0,
         norm,
         octaves,
-        mode: match ctx.params.get("blendingMode").map(Value::as_enum).unwrap_or(BLEND_NONE) {
-            BLEND_NONE => None,
-            m => Some(BLEND_MODES.get(m as usize).and_then(|l| BlendMode::from_name(l)).unwrap_or(BlendMode::Normal)),
-        },
+        mode: blend_mode(ctx.params.get("blendingMode").map(Value::as_enum).unwrap_or(BLEND_NONE)),
         opacity: (ctx.params.f("opacity") as f32 / 100.0).clamp(0.0, 1.0),
         blend: ctx.params.f("blend") as f32 / 100.0,
+    }
+}
+
+/// Resolve a Blending Mode index: None → `None`, unknown → Normal.
+fn blend_mode(m: u32) -> Option<BlendMode> {
+    match m {
+        BLEND_NONE => None,
+        m => Some(BLEND_MODES.get(m as usize).and_then(|l| BlendMode::from_name(l)).unwrap_or(BlendMode::Normal)),
     }
 }
 
@@ -431,14 +441,11 @@ pub fn overflow(v: f32, mode: u32) -> f32 {
 /// Composite grey noise `val` over the original pixel by Blending Mode, Opacity and (ours) Blend
 /// With Original. The noise stays inside the layer's alpha, so a masked solid shows it only within
 /// its masks (#939).
-pub(crate) fn composite(orig: [f32; 4], val: f32, opacity: f32, mode: u32, blend_orig: f32) -> [f32; 4] {
+pub(crate) fn composite(orig: [f32; 4], val: f32, opacity: f32, mode: Option<BlendMode>, blend_orig: f32) -> [f32; 4] {
     let src = [val * opacity, val * opacity, val * opacity, opacity];
     let out = match mode {
-        BLEND_NONE => src,
-        m => {
-            let bm = BLEND_MODES.get(m as usize).and_then(|l| BlendMode::from_name(l)).unwrap_or(BlendMode::Normal);
-            blend_pixel(bm, orig, src, 0.5)
-        }
+        None => src,
+        Some(bm) => blend_pixel(bm, orig, src, 0.5),
     };
     let k = 1.0 - blend_orig;
     [0, 1, 2, 3].map(|c| orig[c] * blend_orig + out[c] * orig[3] * k)
@@ -447,7 +454,7 @@ pub(crate) fn composite(orig: [f32; 4], val: f32, opacity: f32, mode: u32, blend
 fn render(ctx: &EffectCtx, mut b: Buf, turbulent: bool) -> Buf {
     let fr = Fractal::from_params(ctx, &b, turbulent);
     let opacity = (ctx.params.f("opacity") as f32 / 100.0).clamp(0.0, 1.0);
-    let mode = ctx.params.get("blendingMode").map(Value::as_enum).unwrap_or(BLEND_NONE);
+    let mode = blend_mode(ctx.params.get("blendingMode").map(Value::as_enum).unwrap_or(BLEND_NONE));
     let blend = ctx.params.f("blend") as f32 / 100.0;
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
@@ -474,6 +481,20 @@ mod tests {
 
     fn run(id: &str, vals: &[(&str, Value)]) -> Image {
         run_fx(id, vals, Image::filled(40, 24, [0.2, 0.4, 0.6, 1.0]), 0.0, EffectEnv::default()).img
+    }
+
+    /// Evolution moves the noise at a constant rate: no ease in or out within a revolution.
+    #[test]
+    fn evolution_is_linear() {
+        for noise_type in [0, 1, 2, 3] {
+            let a = typed_noise(0.3, 0.7, 0.0, 5, noise_type);
+            let b = typed_noise(0.3, 0.7, 1.0, 5, noise_type);
+            for z in [0.25, 0.5, 0.75] {
+                let want = a + (b - a) * z;
+                let got = typed_noise(0.3, 0.7, z, 5, noise_type);
+                assert!((got - want).abs() < 1e-4, "type {noise_type} z {z}: {got} vs {want}");
+            }
+        }
     }
 
     /// A Fractal Noise saved before the twirl-downs existed: flat ids move into their groups and
@@ -519,12 +540,32 @@ mod tests {
 
     #[test]
     fn noise_types_differ_and_block_is_piecewise_constant() {
-        let a = run("ec.noise.fractal", &[("noiseType", Value::Enum(0)), ("complexity", num(1.0)), ("transform/scale", num(10.0))]);
-        // Block noise: neighbours inside one 10 px cell share a value.
+        let a = run("ec.noise.fractal", &[("noiseType", Value::Enum(0)), ("complexity", num(1.0)), ("transform/scale", num(15.0))]);
+        // Block noise: neighbours inside one 10 px cell (Scale 15) share a value.
         assert_eq!(a.get(4, 4), a.get(5, 5));
         let others: Vec<Image> = (1..4).map(|t| run("ec.noise.fractal", &[("noiseType", Value::Enum(t)), ("transform/scale", num(10.0))])).collect();
         assert_ne!(others[0], others[1]);
         assert_ne!(others[1], others[2]);
+    }
+
+    /// After Effects 2026 (R9): Block noise at Scale 100, Complexity 1 changes value every
+    /// 66.67 px along a row.
+    #[test]
+    fn block_noise_cells_are_two_thirds_of_scale_as_in_after_effects() {
+        let img = run_fx(
+            "ec.noise.fractal",
+            &[("noiseType", Value::Enum(0)), ("complexity", num(1.0)), ("blendingMode", Value::Enum(BLEND_NONE))],
+            Image::filled(400, 8, [0.0, 0.0, 0.0, 1.0]),
+            0.0,
+            EffectEnv::default(),
+        )
+        .img;
+        let changes: Vec<i64> = (1..400).filter(|&x| img.get(x, 4) != img.get(x - 1, 4)).collect();
+        assert!(changes.len() >= 4, "{changes:?}");
+        for w in changes.windows(2) {
+            let d = (w[1] - w[0]) as f64;
+            assert!((d - 200.0 / 3.0).abs() <= 1.0, "cell width {d}: {changes:?}");
+        }
     }
 
     #[test]
@@ -664,5 +705,35 @@ mod tests {
             }
         }
         assert!(axis / diag < 1.15, "gradient along the axes / along the diagonals: {}", axis / diag);
+    }
+
+    /// The base composite, resolving the Blending Mode by name on every call, kept only to prove
+    /// the hoisted lookup changes nothing.
+    fn old_composite(orig: [f32; 4], val: f32, opacity: f32, mode: u32, blend_orig: f32) -> [f32; 4] {
+        let src = [val * opacity, val * opacity, val * opacity, opacity];
+        let out = match mode {
+            BLEND_NONE => src,
+            m => {
+                let bm = BLEND_MODES.get(m as usize).and_then(|l| BlendMode::from_name(l)).unwrap_or(BlendMode::Normal);
+                blend_pixel(bm, orig, src, 0.5)
+            }
+        };
+        let k = 1.0 - blend_orig;
+        [0, 1, 2, 3].map(|c| orig[c] * blend_orig + out[c] * orig[3] * k)
+    }
+
+    #[test]
+    fn resolved_blend_matches_per_pixel_lookup() {
+        for m in (0..BLEND_MODES.len() as u32).chain([24, 999]) {
+            for orig in [[0.2, 0.4, 0.6, 1.0], [0.9, 0.1, 0.5, 0.5], [0.0, 0.0, 0.0, 0.0]] {
+                for val in [0.0, 0.3, 0.75, 1.0] {
+                    for (op, bl) in [(1.0, 0.0), (0.6, 0.25)] {
+                        assert_eq!(composite(orig, val, op, blend_mode(m), bl), old_composite(orig, val, op, m, bl), "mode {m}");
+                    }
+                }
+            }
+        }
+        assert_eq!(blend_mode(BLEND_NONE), None);
+        assert_eq!(blend_mode(999), Some(BlendMode::Normal));
     }
 }

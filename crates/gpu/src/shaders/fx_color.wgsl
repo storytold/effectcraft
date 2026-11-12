@@ -100,11 +100,36 @@ fn fxc_sc_weights(c0: vec3<f32>) -> array<f32, 9> {
     return w;
 }
 
+// Black & White's Tint (effects::color_fx::bw_tint): the tint's hue and saturation at the
+// gray's luminosity (Color blend, weights 0.3 / 0.59 / 0.11, channels clipped toward the gray).
+// The weights are effects::BW_TINT_LUMA (checked by the test shader_constants_match_the_cpu).
+fn fxc_bw_tint(tint: vec3<f32>, gray: f32) -> vec3<f32> {
+    if (!(gray > 0.0)) {
+        return vec3<f32>(0.0);
+    }
+    if (gray >= 1.0) {
+        return vec3<f32>(gray);
+    }
+    let w = vec3<f32>(0.3, 0.59, 0.11);
+    let c = tint + vec3<f32>(gray - dot(tint, w));
+    let l = dot(c, w);
+    let n = min(min(c.x, c.y), c.z);
+    let x = max(max(c.x, c.y), c.z);
+    var o = c;
+    if (n < 0.0 && l - n > 1e-9) {
+        o = vec3<f32>(l) + (o - vec3<f32>(l)) * l / (l - n);
+    }
+    if (x > 1.0 && x - l > 1e-9) {
+        o = vec3<f32>(l) + (o - vec3<f32>(l)) * (1.0 - l) / (x - l);
+    }
+    return o;
+}
+
 // u[0].x = op:
 //  1 Color Balance   f[0] = shadows, f[1] = midtones, f[2] = highlights; u[0].y = preserve luminosity
 //  2 Vibrance        f[0] = (vibrance, saturation)
 //  3 Black & White   f[0] = (reds, yellows, greens, cyans), f[1] = (blues, magentas);
-//                    u[0].y = tint; f[2] = (tint hue, tint saturation)
+//                    u[0].y = tint; f[2] = tint colour
 //  4 Tritone         f[0] = highlights, f[1] = midtones, f[2] = shadows; f[3].x = 1 − blend
 //  5 Colorama        u[0].y = phase mode, u[0].z = interpolate; f[0] = (cycles, shift, 1 − blend)
 //  6 Channel Mixer   f[0..3] = output rows (r, g, b, const); u[0].y = monochrome
@@ -159,7 +184,7 @@ fn fxc_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let gray = max(mn + (mx - mn) * wt, 0.0);
                 var o = vec3<f32>(gray);
                 if (P.u[0].y != 0u) {
-                    o = hsl_to_rgb(P.f[2].x, P.f[2].y, min(gray, 1.0));
+                    o = fxc_bw_tint(P.f[2].xyz, gray);
                 }
                 px = vec4<f32>(o * a, a);
             }
@@ -167,7 +192,9 @@ fn fxc_point(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 4u: {
             if (a > 0.0) {
                 let c = px.xyz / a;
-                let l = clamp(luminance(c), 0.0, 1.0);
+                // Rec. 601 weights, as effects::color_fx::tritone: effects::LUMA_601 (checked by
+                // the test shader_constants_match_the_cpu).
+                let l = clamp(dot(c, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
                 var t: vec3<f32>;
                 if (l < 0.5) {
                     t = fxc_mix(P.f[2].xyz, P.f[1].xyz, l * 2.0);

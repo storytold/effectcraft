@@ -1,0 +1,248 @@
+{
+  "format": "effectcraft.animationPresets/1",
+  "notes": "Original EffectCraft behavior presets (MIT OR Apache-2.0), written from scratch. Each one drives a transform property or opacity with a time-based expression built on the property's own value, so the motion runs for the layer's whole duration and still follows the property's keyframes. Apply to any layer; no effects are added.",
+  "presets": [
+    {
+      "id": "wiggleSoft",
+      "name": "Soft Wiggle",
+      "category": "Behaviors",
+      "description": "The layer wanders gently around its position.",
+      "layer": {
+        "expr": {
+          "transform/position": "var w = wiggle(1.2, 30); [w[0], w[1]]"
+        }
+      }
+    },
+    {
+      "id": "shake",
+      "name": "Shake",
+      "category": "Behaviors",
+      "description": "A fast, tight shake of the layer's position.",
+      "layer": {
+        "expr": {
+          "transform/position": "var w = wiggle(14, 12); [w[0], w[1]]"
+        }
+      }
+    },
+    {
+      "id": "floatUpDown",
+      "name": "Float",
+      "category": "Behaviors",
+      "description": "The layer bobs up and down like it floats on water.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(0), value[1]+(Math.sin(time*2)*18)]"
+        }
+      }
+    },
+    {
+      "id": "sway",
+      "name": "Sway",
+      "category": "Behaviors",
+      "description": "The layer sways left and right.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(Math.sin(time*1.6)*40), value[1]+(0)]"
+        }
+      }
+    },
+    {
+      "id": "orbit",
+      "name": "Orbit",
+      "category": "Behaviors",
+      "description": "The layer travels round a circle around its position.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(Math.cos(time*2)*80), value[1]+(Math.sin(time*2)*80)]"
+        }
+      }
+    },
+    {
+      "id": "figureEight",
+      "name": "Figure Eight",
+      "category": "Behaviors",
+      "description": "The layer traces a figure eight around its position.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(Math.sin(time*1.5)*100), value[1]+(Math.sin(time*3)*45)]"
+        }
+      }
+    },
+    {
+      "id": "bouncingBall",
+      "name": "Bouncing Ball",
+      "category": "Behaviors",
+      "description": "The layer bounces up from its position again and again.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(0), value[1]+(-Math.abs(Math.sin(time*3.2))*140)]"
+        }
+      }
+    },
+    {
+      "id": "driftRight",
+      "name": "Drift Right",
+      "category": "Behaviors",
+      "description": "The layer drifts steadily to the right.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(time*40), value[1]+(0)]"
+        }
+      }
+    },
+    {
+      "id": "driftDiagonal",
+      "name": "Drift Diagonal",
+      "category": "Behaviors",
+      "description": "The layer drifts slowly down and to the right.",
+      "layer": {
+        "expr": {
+          "transform/position": "[value[0]+(time*30), value[1]+(time*18)]"
+        }
+      }
+    },
+    {
+      "id": "pendulum",
+      "name": "Pendulum",
+      "category": "Behaviors",
+      "description": "The layer swings like a pendulum.",
+      "layer": {
+        "expr": {
+          "transform/rotation": "value + Math.sin(time*2.4)*25"
+        }
+      }
+    },
+    {
+      "id": "wobble",
+      "name": "Wobble",
+      "category": "Behaviors",
+      "description": "The layer rotates with an irregular wobble.",
+      "layer": {
+        "expr": {
+          "transform/rotation": "wiggle(2, 10)"
+        }
+      }
+    },
+    {
+      "id": "spinSlow",
+      "name": "Spin Slow",
+      "category": "Behaviors",
+      "description": "The layer rotates once every ten seconds.",
+      "layer": {
+        "expr": {
+          "transform/rotation": "value + time*36"
+        }
+      }
+    },
+    {
+      "id": "spinFast",
+      "name": "Spin Fast",
+      "category": "Behaviors",
+      "description": "The layer rotates twice a second.",
+      "layer": {
+        "expr": {
+          "transform/rotation": "value + time*720"
+        }
+      }
+    },
+    {
+      "id": "pulse",
+      "name": "Pulse",
+      "category": "Behaviors",
+      "description": "The layer swells and shrinks smoothly.",
+      "layer": {
+        "expr": {
+          "transform/scale": "[value[0]*(1+0.12*Math.sin(time*4)), value[1]*(1+0.12*Math.sin(time*4))]"
+        }
+      }
+    },
+    {
+      "id": "heartbeat",
+      "name": "Heartbeat",
+      "category": "Behaviors",
+      "description": "Two quick beats, then a rest, repeating every second.",
+      "layer": {
+        "expr": {
+          "transform/scale": "var t = time % 1; var b = t < 0.3 ? Math.sin(t/0.3*Math.PI) : (t < 0.6 ? 0.7*Math.sin((t-0.3)/0.3*Math.PI) : 0); var k = 1 + 0.2*b; [value[0]*k, value[1]*k]"
+        }
+      }
+    },
+    {
+      "id": "breathe",
+      "name": "Breathe",
+      "category": "Behaviors",
+      "description": "The layer slowly grows and settles back.",
+      "layer": {
+        "expr": {
+          "transform/scale": "[value[0]*(1+0.06*Math.sin(time*1.1)), value[1]*(1+0.06*Math.sin(time*1.1))]"
+        }
+      }
+    },
+    {
+      "id": "rubberBand",
+      "name": "Rubber Band",
+      "category": "Behaviors",
+      "description": "Width and height stretch against each other.",
+      "layer": {
+        "expr": {
+          "transform/scale": "[value[0]*(1+0.15*Math.sin(time*5)), value[1]*(1-0.15*Math.sin(time*5))]"
+        }
+      }
+    },
+    {
+      "id": "jitterScale",
+      "name": "Jitter Scale",
+      "category": "Behaviors",
+      "description": "The layer's size jitters randomly.",
+      "layer": {
+        "expr": {
+          "transform/scale": "var w = wiggle(8, 6); [w[0], w[1]]"
+        }
+      }
+    },
+    {
+      "id": "blink",
+      "name": "Blink",
+      "category": "Behaviors",
+      "description": "The layer switches on and off twice a second.",
+      "layer": {
+        "expr": {
+          "transform/opacity": "(Math.floor(time*4) % 2 === 0) ? value : 0"
+        }
+      }
+    },
+    {
+      "id": "strobe",
+      "name": "Strobe",
+      "category": "Behaviors",
+      "description": "The layer flashes on for a few frames each beat.",
+      "layer": {
+        "expr": {
+          "transform/opacity": "((time*6) % 1 < 0.25) ? value : 0"
+        }
+      }
+    },
+    {
+      "id": "flicker",
+      "name": "Flicker",
+      "category": "Behaviors",
+      "description": "The layer's opacity flickers like a failing lamp.",
+      "layer": {
+        "expr": {
+          "transform/opacity": "var w = wiggle(14, 45); Math.max(0, Math.min(100, w))"
+        }
+      }
+    },
+    {
+      "id": "fadePulse",
+      "name": "Fade Pulse",
+      "category": "Behaviors",
+      "description": "Opacity breathes between full and a third.",
+      "layer": {
+        "expr": {
+          "transform/opacity": "value*(0.67+0.33*Math.sin(time*2.5))"
+        }
+      }
+    }
+  ]
+}

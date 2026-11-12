@@ -1,6 +1,6 @@
-//! Key Light — a full screen-colour keyer with the controls of After Effects' bundled
+//! Screen Color Key — a full screen-colour keyer with the controls of After Effects' bundled
 //! "Keylight (1.2)" (that name is a trademark of its vendor, so the effect is registered as
-//! **Key Light**; `lookup("Keylight (1.2)")` finds it through [`KEYLIGHT_ALIASES`]).
+//! **Screen Color Key**; `lookup("Keylight (1.2)")` finds it through [`KEYLIGHT_ALIASES`]).
 //!
 //! The method is the textbook *screen difference* key, written from the public description of
 //! the controls:
@@ -31,7 +31,7 @@ use crate::util::{Plane, gauss_plane, morph_frac, point_in_poly, premul, unpremu
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
 
 /// Other names the effect answers to in [`crate::lookup`].
-pub const KEYLIGHT_ALIASES: &[&str] = &["Keylight (1.2)", "Keylight"];
+pub const KEYLIGHT_ALIASES: &[&str] = &["Keylight (1.2)", "Keylight", "Key Light"];
 
 pub const VIEWS: [&str; 11] = [
     "Source",
@@ -463,7 +463,7 @@ pub fn specs() -> Vec<EffectSpec> {
     let cc = |id: &'static str, name: &'static str| p(id, name, num(0.0), slider(-100.0, 100.0, -100.0, 100.0, 1));
     vec![EffectSpec {
         id: "ec.keying.keylight",
-        name: "Key Light",
+        name: "Screen Color Key",
         category: "Keying",
         params: vec![
             p("view", "View", Value::Enum(10), popup(&VIEWS)),
@@ -622,7 +622,7 @@ mod tests {
         let spec = crate::find("ec.keying.keylight").unwrap();
         let mut next = 1;
         let mut ids = Ids(&mut next);
-        let mut g = crate::instantiate(spec, &mut ids, "Key Light", [10.0, 10.0]);
+        let mut g = crate::instantiate(spec, &mut ids, "Screen Color Key", [10.0, 10.0]);
         // Flatten it the way older versions saved it.
         let mut flat = vec![];
         g.walk_mut(&mut |p| flat.push(p.clone()));

@@ -123,7 +123,7 @@ pub fn matte_alpha(
             q[j] = if band[j] { q[j].clamp(0.0, 1.0) } else { cp[j] };
         }
         if p.higher_quality {
-            q = matting::closed_form(&cimg, &q, &outside, cw, ch, 1, 1e-5 * (1.0 + p.smooth.max(0.0)) as f32, 50);
+            q = matting::closed_form(&cimg, &q, &outside, (cw, ch), 1, 1e-5 * (1.0 + p.smooth.max(0.0)) as f32, 50);
         }
         // Refine Edge Matte adjustments.
         if p.smooth > 1.0 {
@@ -177,7 +177,8 @@ pub fn matte_alpha(
 /// Decontaminate edge colours of `rgb` in place for the matte `alpha` (see
 /// [`matting::decontaminate`]); returns the decontamination map. `band`: the Refine Edge band
 /// (pixels where decontamination always applies).
-pub fn decontaminate(rgb: &mut [[f32; 3]], alpha: &[f32], band: &[u8], w: usize, h: usize, p: &MatteParams, band_radius: f64, scale: f64) -> Vec<f32> {
+pub fn decontaminate(rgb: &mut [[f32; 3]], alpha: &[f32], band: &[u8], size: (usize, usize), p: &MatteParams, band_radius: f64, scale: f64) -> Vec<f32> {
+    let (w, h) = size;
     if !p.decontaminate {
         return vec![0.0; w * h];
     }

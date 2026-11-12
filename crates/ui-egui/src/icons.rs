@@ -48,6 +48,8 @@ pub enum Icon {
     Speaker,
     Solo,
     Lock,
+    /// An open padlock: the shackle lifted clear of the body on the right.
+    LockOpen,
     Shy,
     Collapse,
     Quality,
@@ -110,6 +112,8 @@ pub enum Icon {
     Fullscreen,
     Channel,
     Exposure,
+    /// Stroke width: three bars, thin to thick.
+    StrokeWidth,
     // links
     Chat,
     Globe,
@@ -159,6 +163,14 @@ impl Pen16<'_> {
     }
     fn dot(&self, x: f32, y: f32, r: f32) {
         self.painter.circle_filled(self.p(x, y), r * self.s(), self.color);
+    }
+    /// A filled dot in its own colour, for the icons that are coloured in After Effects too (the
+    /// channel picker's red, green and blue). The tint's alpha is kept, so a dimmed button stays
+    /// dimmed.
+    fn dot_colored(&self, x: f32, y: f32, r: f32, color: Color32) {
+        // `gamma_multiply` keeps the premultiplied channels consistent, so a dimmed tint dims the
+        // circle instead of darkening it twice.
+        self.painter.circle_filled(self.p(x, y), r * self.s(), color.gamma_multiply(self.color.a() as f32 / 255.0));
     }
     fn rect(&self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let r = Rect::from_min_max(self.p(x0, y0), self.p(x1, y1));
@@ -402,6 +414,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(8.0, 7.0, 3.0, 180.0, 360.0);
             pen.dot(8.0, 10.5, 1.0);
         }
+        LockOpen => {
+            pen.rect(3.5, 7.0, 12.5, 14.0);
+            pen.arc(8.0, 4.0, 3.0, 180.0, 360.0);
+            pen.line(&[(5.0, 4.0), (5.0, 7.0)]);
+            pen.dot(8.0, 10.5, 1.0);
+        }
         Shy => {
             pen.circle(8.0, 8.0, 5.8);
             pen.dot(6.0, 7.0, 0.8);
@@ -540,6 +558,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             pen.circle(8.0, 8.0, 4.2);
         }
+        StrokeWidth => {
+            pen.rect_fill(2.5, 3.0, 13.5, 3.75);
+            pen.rect_fill(2.5, 6.5, 13.5, 8.0);
+            pen.rect_fill(2.5, 10.5, 13.5, 13.0);
+        }
         Hamburger => {
             for y in [4.5, 8.0, 11.5] {
                 pen.line(&[(3.0, y), (13.0, y)]);
@@ -638,9 +661,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(6.0, 14.0), (2.0, 14.0), (2.0, 10.0)]);
         }
         Channel => {
-            pen.circle(6.0, 6.5, 3.6);
-            pen.circle(10.0, 6.5, 3.6);
-            pen.circle(8.0, 10.0, 3.6);
+            // After Effects draws this one in colour: red, green and blue, as the channels it picks
+            // between. The circles keep the geometry this icon already had; only their fill changes.
+            pen.dot_colored(6.0, 6.5, 3.6, Color32::from_rgb(226, 58, 58));
+            pen.dot_colored(10.0, 6.5, 3.6, Color32::from_rgb(58, 200, 88));
+            pen.dot_colored(8.0, 10.0, 3.6, Color32::from_rgb(64, 120, 235));
         }
         Exposure => {
             pen.circle(8.0, 8.0, 5.5);
@@ -720,6 +745,12 @@ pub fn keyframe(
     painter.extend(keyframe_shapes(center, size, left, right, fill));
 }
 
+/// The screen rect a [`keyframe`] glyph covers, read off the shapes it draws.
+pub fn keyframe_bounds(center: Pos2, size: f32, left: effectcraft_engine::keyframe::KeyHalf, right: effectcraft_engine::keyframe::KeyHalf) -> Rect {
+    // Any opaque fill: a transparent shape would report no bounds.
+    egui::Shape::Vec(keyframe_shapes(center, size, left, right, Color32::WHITE)).visual_bounding_rect()
+}
+
 /// The halves of a [`keyframe`] glyph. Flat, without a dark outline (as in After Effects), so
 /// keys that overlap read as one shape instead of a tangle of borders (#284); the hairline in
 /// the fill colour closes the seam between the halves.
@@ -784,6 +815,23 @@ mod tests {
                 })
                 .collect();
             assert!(turns.iter().all(|t| *t < 0.0) || turns.iter().all(|t| *t > 0.0), "{piece:?} is not convex: {turns:?}");
+        }
+    }
+
+    /// Each half reaches as far as it is drawn, plus the hairline around it, and the halves are
+    /// independent (a key can come in linear and go out on hold).
+    #[test]
+    fn keyframe_bounds_follow_each_half() {
+        let c = egui::pos2(100.0, 50.0);
+        let r = 5.5;
+        // (half, how far it reaches sideways, how far up and down)
+        let extents = [(H::Linear, r, r), (H::Hold, r * 0.8, r * 0.8), (H::Bezier, r * 0.75, r), (H::Auto, r * 0.8, r * 0.8)];
+        for (l, lx, ly) in extents {
+            for (rt, rx, ry) in extents {
+                let b = super::keyframe_bounds(c, 11.0, l, rt);
+                let want = egui::Rect::from_min_max(c - egui::vec2(lx, ly.max(ry)), c + egui::vec2(rx, ly.max(ry))).expand(0.25);
+                assert!(b.min.distance(want.min) < 1e-3 && b.max.distance(want.max) < 1e-3, "{l:?}/{rt:?}: {b:?}, want {want:?}");
+            }
         }
     }
 

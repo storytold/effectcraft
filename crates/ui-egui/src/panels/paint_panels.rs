@@ -36,11 +36,21 @@ fn number(
     let t = app.tokens;
     p.text(pos2(x, y + 9.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), if enabled { t.text_dim } else { t.text_faint });
     let lw = p.layout_no_wrap(label.to_string(), Tokens::ui(11.5), t.text).size().x;
-    let (r, nv, _) = widgets::hot_number_at(ui, pos2(x + lw + 6.0, y), egui::Id::new(("paint-num", key)), v, 0.5, range, 0, suffix, &t);
+    let (r, nv, _) = widgets::hot_number_at(
+        ui,
+        pos2(x + lw + 6.0, y),
+        egui::Id::unique(("paint-num", key)),
+        v,
+        &widgets::HotSpec { speed: 0.5, range, decimals: 0, suffix },
+        &t,
+    );
     app.auto.add(key, r, label);
     nv.filter(|_| enabled)
 }
 
+/// A label at `x`, `y` and, to its right, a dropdown over `options` with `cur` selected. The
+/// dropdown only opens while `enabled`; otherwise only its label is dimmed. Returns the index
+/// picked from the open menu, if any.
 #[allow(clippy::too_many_arguments)]
 fn popup_row(
     app: &mut EffectcraftApp,
@@ -58,18 +68,74 @@ fn popup_row(
     let t = app.tokens;
     p.text(pos2(x, y + 10.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), if enabled { t.text_dim } else { t.text_faint });
     let r = Rect::from_min_size(pos2(x + 70.0, y), vec2((w - 70.0).max(60.0), 20.0));
-    let pop = egui::Id::new(("paint-pop", key));
-    if widgets::dropdown(ui, r, options.get(cur).map(String::as_str).unwrap_or(""), &t, egui::Id::new(("paint-dd", key))).clicked() && enabled {
+    let pop = egui::Id::unique(("paint-pop", key));
+    if widgets::dropdown(ui, r, options.get(cur).map(String::as_str).unwrap_or(""), &t, egui::Id::unique(("paint-dd", key))).clicked() && enabled {
         widgets::open_popup(ui, pop);
     }
     app.auto.add(key, r, label);
     widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(cur))
 }
 
+/// The RGB components of an RGBA paint colour as `f32`, for the swatches and the colour picker.
 fn rgb(c: [f64; 4]) -> [f32; 3] {
     [c[0] as f32, c[1] as f32, c[2] as f32]
 }
 
+/// The swap-colours icon: one arrow right above one arrow left.
+fn paint_swap_icon(p: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.0, color);
+    let (left, right) = (rect.left() + 2.0, rect.right() - 2.0);
+    let (top, bottom) = (rect.top() + 3.0, rect.bottom() - 3.0);
+    p.arrow(pos2(left, top), vec2(right - left, 0.0), stroke);
+    p.arrow(pos2(right, bottom), vec2(left - right, 0.0), stroke);
+}
+
+/// The foreground-over-background swatches (each opens a colour popup) with Swap and Reset.
+fn colour_swatches(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, x0: f32, y: f32, color: [f64; 4], background: [f64; 4]) {
+    let t = app.tokens;
+    let fg = Rect::from_min_size(pos2(x0, y), vec2(26.0, 20.0));
+    let bg = Rect::from_min_size(pos2(x0 + 14.0, y + 10.0), vec2(26.0, 20.0));
+    widgets::swatch(ui, bg, [background[0] as f32, background[1] as f32, background[2] as f32, 1.0], egui::Id::unique("paint-bg"), &t);
+    let bresp = ui.interact(Rect::from_min_max(pos2(fg.max.x, bg.min.y), bg.max), egui::Id::unique("paint-bg-hit"), Sense::click());
+    if bresp.clicked() {
+        widgets::open_popup(ui, egui::Id::unique("paint-bg-pop"));
+    }
+    if widgets::swatch(ui, fg, [color[0] as f32, color[1] as f32, color[2] as f32, 1.0], egui::Id::unique("paint-fg"), &t).clicked() {
+        widgets::open_popup(ui, egui::Id::unique("paint-fg-pop"));
+    }
+    app.auto.add("paint.color", fg, "Foreground color");
+    app.auto.add("paint.background", bg, "Background color");
+    let mut fc = rgb(color);
+    if crate::widgets::color_popup(ui, egui::Id::unique("paint-fg-pop"), fg.left_bottom(), &mut fc) {
+        set(app, json!({"color": [fc[0], fc[1], fc[2], 1.0]}));
+    }
+    let mut bc = rgb(background);
+    if crate::widgets::color_popup(ui, egui::Id::unique("paint-bg-pop"), bg.left_bottom(), &mut bc) {
+        set(app, json!({"background": [bc[0], bc[1], bc[2], 1.0]}));
+    }
+    let swap = Rect::from_min_size(pos2(x0 + 46.0, y), vec2(18.0, 14.0));
+    let sresp = ui.interact(swap, egui::Id::unique("paint-swap"), Sense::click());
+    // Two arrows (foreground over background): drawn, so the icon does not depend on a font
+    // carrying U+21C4 (the bundled fonts do not).
+    paint_swap_icon(p, swap, if sresp.hovered() { t.text } else { t.text_dim });
+    app.auto.add("paint.swapColors", swap, "Swap colors");
+    if sresp.on_hover_text(tr("Swap Paint Colors (X)")).clicked() {
+        set(app, json!({"color": background, "background": color}));
+    }
+    let reset = Rect::from_min_size(pos2(x0 + 46.0, y + 18.0), vec2(18.0, 14.0));
+    let rresp = ui.interact(reset, egui::Id::unique("paint-reset-colors"), Sense::click());
+    p.rect_filled(Rect::from_min_size(reset.min + vec2(4.0, 3.0), vec2(7.0, 6.0)), 0.0, Color32::WHITE);
+    p.rect_stroke(Rect::from_min_size(reset.min + vec2(8.0, 6.0), vec2(7.0, 6.0)), 0.0, Stroke::new(1.0, t.text_dim), StrokeKind::Inside);
+    app.auto.add("paint.resetColors", reset, "Default colors");
+    if rresp.on_hover_text(tr("Set Paint Colors to Black and White (D)")).clicked() {
+        set(app, json!({"color": [1.0, 1.0, 1.0, 1.0], "background": [0.0, 0.0, 0.0, 1.0]}));
+    }
+}
+
+/// The Paint panel: opacity and flow, foreground/background colours with swap and reset, mode,
+/// channels, duration, erase mode and the Clone Stamp options. Every change is sent as a
+/// `paint.options` command. Mode and Channels are disabled for the Eraser; Erase is enabled
+/// only for it. The Clone Options heading is dimmed for other tools, but its controls stay enabled.
 pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
@@ -89,41 +155,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += 28.0;
     // Colour swatches (foreground over background) with swap / reset.
-    let fg = Rect::from_min_size(pos2(x0, y), vec2(26.0, 20.0));
-    let bg = Rect::from_min_size(pos2(x0 + 14.0, y + 10.0), vec2(26.0, 20.0));
-    widgets::swatch(ui, bg, [o.background[0] as f32, o.background[1] as f32, o.background[2] as f32, 1.0], egui::Id::new("paint-bg"), &t);
-    let bresp = ui.interact(Rect::from_min_max(pos2(fg.max.x, bg.min.y), bg.max), egui::Id::new("paint-bg-hit"), Sense::click());
-    if bresp.clicked() {
-        widgets::open_popup(ui, egui::Id::new("paint-bg-pop"));
-    }
-    if widgets::swatch(ui, fg, [o.color[0] as f32, o.color[1] as f32, o.color[2] as f32, 1.0], egui::Id::new("paint-fg"), &t).clicked() {
-        widgets::open_popup(ui, egui::Id::new("paint-fg-pop"));
-    }
-    app.auto.add("paint.color", fg, "Foreground color");
-    app.auto.add("paint.background", bg, "Background color");
-    let mut fc = rgb(o.color);
-    if crate::widgets::color_popup(ui, egui::Id::new("paint-fg-pop"), fg.left_bottom(), &mut fc) {
-        set(app, json!({"color": [fc[0], fc[1], fc[2], 1.0]}));
-    }
-    let mut bc = rgb(o.background);
-    if crate::widgets::color_popup(ui, egui::Id::new("paint-bg-pop"), bg.left_bottom(), &mut bc) {
-        set(app, json!({"background": [bc[0], bc[1], bc[2], 1.0]}));
-    }
-    let swap = Rect::from_min_size(pos2(x0 + 46.0, y), vec2(18.0, 14.0));
-    let sresp = ui.interact(swap, egui::Id::new("paint-swap"), Sense::click());
-    p.text(swap.center(), Align2::CENTER_CENTER, "⇄", Tokens::ui(12.0), if sresp.hovered() { t.text } else { t.text_dim });
-    app.auto.add("paint.swapColors", swap, "Swap colors");
-    if sresp.on_hover_text(tr("Swap Paint Colors (X)")).clicked() {
-        set(app, json!({"color": o.background, "background": o.color}));
-    }
-    let reset = Rect::from_min_size(pos2(x0 + 46.0, y + 18.0), vec2(18.0, 14.0));
-    let rresp = ui.interact(reset, egui::Id::new("paint-reset-colors"), Sense::click());
-    p.rect_filled(Rect::from_min_size(reset.min + vec2(4.0, 3.0), vec2(7.0, 6.0)), 0.0, Color32::WHITE);
-    p.rect_stroke(Rect::from_min_size(reset.min + vec2(8.0, 6.0), vec2(7.0, 6.0)), 0.0, Stroke::new(1.0, t.text_dim), StrokeKind::Inside);
-    app.auto.add("paint.resetColors", reset, "Default colors");
-    if rresp.on_hover_text(tr("Set Paint Colors to Black and White (D)")).clicked() {
-        set(app, json!({"color": [1.0, 1.0, 1.0, 1.0], "background": [0.0, 0.0, 0.0, 1.0]}));
-    }
+    colour_swatches(app, ui, &p, x0, y, o.color, o.background);
     y += 40.0;
 
     // Mode / Channels / Duration.
@@ -146,12 +178,9 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let (r, nv, _) = widgets::hot_number_at(
             ui,
             pos2(x0 + w - 52.0, y + 1.0),
-            egui::Id::new("paint-custom-frames"),
+            egui::Id::unique("paint-custom-frames"),
             o.custom_frames as f64,
-            0.2,
-            (1.0, 10000.0),
-            0,
-            " f",
+            &widgets::HotSpec { speed: 0.2, range: (1.0, 10000.0), decimals: 0, suffix: " f" },
             &t,
         );
         app.auto.add("paint.customFrames", r, "Custom duration (frames)");
@@ -174,7 +203,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(pos2(x0, y + 10.0), Align2::LEFT_CENTER, tr("Preset:"), Tokens::ui(11.5), t.text_dim);
     for i in 1..=5u32 {
         let r = Rect::from_min_size(pos2(x0 + 56.0 + (i - 1) as f32 * 26.0, y), vec2(22.0, 20.0));
-        let resp = ui.interact(r, egui::Id::new(("clone-preset", i)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("clone-preset", i)), Sense::click());
         let on = o.clone_preset == i;
         p.rect_filled(
             r,
@@ -210,7 +239,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             .enumerate()
     {
         let r = Rect::from_min_size(pos2(x0 + i as f32 * (w / 2.0), y), vec2(18.0, 20.0));
-        if widgets::checkbox(ui, r, on, &t, egui::Id::new(key)).clicked() {
+        if widgets::checkbox(ui, r, on, &t, egui::Id::unique(key)).changed() {
             set(app, json!({k: !on}));
         }
         p.text(pos2(r.max.x + 4.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
@@ -220,7 +249,14 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let off = o.clone_offset.unwrap_or([0.0, 0.0]);
     p.text(pos2(x0, y + 9.0), Align2::LEFT_CENTER, tr("Offset:"), Tokens::ui(11.5), t.text_dim);
     for (d, v) in off.iter().enumerate() {
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(x0 + 56.0 + d as f32 * 64.0, y), egui::Id::new(("clone-off", d)), *v, 1.0, (-1e5, 1e5), 0, "", &t);
+        let (r, nv, _) = widgets::hot_number_at(
+            ui,
+            pos2(x0 + 56.0 + d as f32 * 64.0, y),
+            egui::Id::unique(("clone-off", d)),
+            *v,
+            &widgets::HotSpec { speed: 1.0, range: (-1e5, 1e5), decimals: 0, suffix: "" },
+            &t,
+        );
         app.auto.add(&format!("paint.cloneOffset.{d}"), r, "Clone offset");
         if let Some(nv) = nv {
             let mut no = off;
@@ -237,7 +273,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += 26.0;
     let r = Rect::from_min_size(pos2(x0, y), vec2(18.0, 20.0));
-    if widgets::checkbox(ui, r, o.show_overlay, &t, egui::Id::new("paint.showOverlay")).clicked() {
+    if widgets::checkbox(ui, r, o.show_overlay, &t, egui::Id::unique("paint.showOverlay")).changed() {
         set(app, json!({"showOverlay": !o.show_overlay}));
     }
     app.auto.add("paint.showOverlay", r, "Clone Source Overlay");
@@ -246,7 +282,7 @@ pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         set(app, json!({"overlayOpacity": nv}));
     }
     let dr = Rect::from_min_size(pos2(x0 + w - 18.0, y), vec2(18.0, 20.0));
-    if widgets::checkbox(ui, dr, o.overlay_difference, &t, egui::Id::new("paint.overlayDifference")).clicked() {
+    if widgets::checkbox(ui, dr, o.overlay_difference, &t, egui::Id::unique("paint.overlayDifference")).changed() {
         set(app, json!({"overlayDifference": !o.overlay_difference}));
     }
     app.auto.add("paint.overlayDifference", dr, "Difference mode overlay");
@@ -275,6 +311,9 @@ fn tip_preview(p: &egui::Painter, r: Rect, diameter: f64, angle: f64, roundness:
     }
 }
 
+/// The Brushes panel: a grid of built-in brush presets (each runs `paint.brushPreset`), a tip
+/// preview, diameter/angle/roundness/hardness/spacing fields and the size/opacity/flow pressure
+/// options. Values are sent as `paint.options` commands and failures land in `app.ui.status`.
 pub fn brushes(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
@@ -287,7 +326,7 @@ pub fn brushes(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let cols = ((w / cell).floor() as usize).max(1);
     for (i, tip) in BRUSH_PRESETS.iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + (i % cols) as f32 * cell, y + (i / cols) as f32 * cell), vec2(cell - 2.0, cell - 2.0));
-        let resp = ui.interact(r, egui::Id::new(("brush-preset", i)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("brush-preset", i)), Sense::click());
         let on = o.preset == Some(i);
         p.rect_filled(
             r,
@@ -332,7 +371,14 @@ pub fn brushes(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Spacing (checkbox in AE turns spacing on; we always space dabs, so it shows the value).
     p.text(pos2(x0, y + 9.0), Align2::LEFT_CENTER, tr("Spacing:"), Tokens::ui(11.5), t.text_dim);
     let _ = r;
-    let (sr, nv, _) = widgets::hot_number_at(ui, pos2(x0 + 58.0, y), egui::Id::new("brushes-spacing"), o.spacing, 0.5, (1.0, 1000.0), 0, " %", &t);
+    let (sr, nv, _) = widgets::hot_number_at(
+        ui,
+        pos2(x0 + 58.0, y),
+        egui::Id::unique("brushes-spacing"),
+        o.spacing,
+        &widgets::HotSpec { speed: 0.5, range: (1.0, 1000.0), decimals: 0, suffix: " %" },
+        &t,
+    );
     app.auto.add("brushes.spacing", sr, "Spacing");
     if let Some(nv) = nv {
         set(app, json!({"spacing": nv}));

@@ -1,0 +1,8 @@
+asset: tracked-0.22.ecproj
+title: One clip with an analysed Warp Stabilizer and 3D Camera Tracker from EffectCraft 0.22.0
+author: arnav-hiwarkar
+source: original work
+license: MIT OR Apache-2.0
+license-file: ../../../../../LICENSE-MIT
+added: 2026-11-12 by arnav-hiwarkar
+notes: Saved by the released 0.22.0 CLI after importing a generated 160x120, 12-frame shaking crop of an ffmpeg testsrc2 pattern, applying both effects and analysing them. The source path is a generic test path; the video is not needed by the tests, which only check that the saved analyses are kept or cleared.

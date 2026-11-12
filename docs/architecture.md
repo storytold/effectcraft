@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (crate table checked against `crates/`: effect count 306, VP9 inter frames) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-29 · **Change:** minor (SAM 2 crate added to the layer table) · **Target:** Adobe After Effects 2026
 
 EffectCraft is a stack of small Rust crates. The engine knows nothing about the user interface;
 the egui frontend, the command-line tool and the MCP server all sit on top of the same `Session`
@@ -18,10 +18,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L0 | `time` | `Tick` (254 016 000 000 per second), rational frame rates incl. NTSC, SMPTE and drop-frame timecode |
 | L0 | `geom` | Vectors, matrices, quaternions, the layer transform (anchor, position, scale, orientation, rotation) |
 | L0 | `color` | sRGB and linear, HSL/HSV, luminance, the 38 blend modes, label colors |
-| L0 | `vp9enc` | VP9 encoder (profile 0, 8-bit 4:2:0, key and inter frames with motion search, loop filter and rate control; lossless at quality 100) for WebM export, from the VP9 bitstream specification |
 | L0 | `opusenc` | Opus encoder: RFC 6716 SILK (NB/MB/WB), hybrid (SWB/FB) and CELT (FB) modes chosen by bitrate and application (audio / voice), 48 kHz 20 ms packets, mono/stereo, and the RFC 7845 `OpusHead`, for WebM export audio |
-| L0 | `hevcenc` | HEVC (H.265) encoder from ITU-T H.265: Main / Main 10 4:2:0, IDR + P slices (quarter-pel motion, merge/AMVP), CABAC, deblocking, bitrate or constant-QP rate control, for MP4 (`hvc1`) export |
-| L0 | `av1enc` | AV1 encoder from the AV1 bitstream specification: Main profile 8/10-bit 4:2:0, key + inter frames (quarter-pel motion), deblocking, for MP4 (`av01`) and WebM export |
 | L1 | `raster` | Premultiplied float images, sampling, affine and projective warps, blurs, compositing (parallel with rayon) |
 | L1 | `keyframe` | Animated values, keyframes with temporal ease and spatial Bezier, roving, hold, velocity |
 | L1 | `segment` | Swappable trained models for Roto Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
@@ -37,11 +34,14 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `render` | Evaluation and compositing: sources, masks, effects, transforms, 3D, motion blur, mattes, blending, layer cache, audio mixdown |
 | L3 | `media` | Footage decoding (FilmCraft's pure-Rust codecs), image sequences, Photoshop and SVG stills, frame cache |
 | L3 | `expr` | The expression engine (JavaScript via boa) with the After Effects object model |
-| L3 | `export` | Render queue encoding: H.264, HEVC and AV1 MP4, ProRes, WebM (VP9 + alpha or AV1, Opus), PNG/JPEG/TIFF/EXR sequences, GIF, WAV/AIFF |
+| L3 | `export` | Render queue encoding: H.264, HEVC and AV1 MP4, ProRes, WebM (VP9 + alpha or AV1, Opus), PNG/JPEG/TIFF/EXR/Targa sequences, GIF, WAV/AIFF |
 | L3 | `gpu` | The GPU compositor and GPU effects on wgpu compute shaders (Metal, Vulkan, Direct3D 12, WebGPU), checked against the CPU renderer |
+| L3 | `sam2` | SAM 2.1 image segmentation and video object tracking for Roto Brush, with candle CPU inference and optional wgpu acceleration; native only, empty on wasm32, with user-installed weights |
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
+| L3 | `aep` | After Effects projects in one crate (like `lottie`): `container` reads and writes the `.aep` container (RIFX `Egg!`) as a lossless chunk tree with a byte-identical round trip, bounded for hostile input, reads the `.aepx` XML form into the same tree, and has a typed view of items, layers, properties, effects, masks, shapes, text, markers, footage, cameras, lights and layer styles, from our own observations of generated files ([aep-format.md](aep-format.md)); `import` maps the typed view into a project (items, settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text, shapes, cameras, lights, mattes, markers, time remapping, layer styles, the effects of a shared table, footage) with a report of everything not imported ([aep-import.md](aep-import.md)); `export` builds every chunk in code (prototypes in the layout After Effects writes, cloned and edited only at verified fields) for the same scope, with a report of everything not exported, verified by opening the output in After Effects ([aep-export.md](aep-export.md)) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
-| L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
+| L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (WebAssembly ABI v1 and v2, the latter with neighbouring frames; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
+| L3 | `helper-host` | External effect helpers: finds helper programs, runs each as a child process and registers its effects (plug-in API 2) over a versioned pipe + shared-file protocol; a crashing helper is an error on the effect, never a crash ([external-helpers.md](external-helpers.md), [ADR 0001](adr/0001-external-effect-helpers.md)). Native only |
 | L4 | `engine` | `Session`: project, branching undo history, editor state, the command registry and menus, the ScriptUI window model (`scriptui`) |
 | L4 | `script` | Scripting: JavaScript (boa) with an After Effects-style object model (`app.project`, comps, layers, properties, render queue) and ScriptUI (dialogs, palettes, dockable panels; script-host threads so dialogs block `show()`), whose edits run engine commands; AE match names |
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
@@ -118,7 +118,7 @@ are not rewritten, so an expression that computes an effect point on a shape or 
 other values may need `+ [thisComp.width / 2, thisComp.height / 2]`. Effects that use the layer
 bounds (edge pinning, wipes, Offset, generators) now cover the whole comp-sized bounds instead of
 their bottom-right quarter. Tracking data of effects that analyse footage (Warp Stabilizer, 3D
-Camera Tracker, Mocha shape) is left as it is: footage has a source rectangle, whose effect space
+Camera Tracker, Tracked Shape Matte) is left as it is: footage has a source rectangle, whose effect space
 did not change.
 
 ## 4. Rendering
@@ -158,9 +158,22 @@ comp to Advanced 3D in the same undo step, as in After Effects. Shading is physi
 GGX specular, Smith–Schlick geometry, Schlick Fresnel, Lambert diffuse, after Karis 2013):
 parallel, spot and point lights with After Effects' falloffs, ambient lights, image-based
 light from an Environment light whose Source (or the comp's Environment Layer, Layer ▸
-Environment Layer) is an equirectangular image (cosine irradiance map; roughness-indexed mip
-chain with the split-sum environment BRDF fit), and percentage-closer-filtered shadow maps
-(spot: perspective, parallel: orthographic over the scene, point: six cube faces). Cards keep
+Environment Layer, or a default studio environment — bright above and toward the initial
+camera, dark below and behind, at a dim 0.3 mean level — of the light's colour × intensity
+when there is neither) is an equirectangular image (cosine irradiance map; roughness-indexed
+mip chain with the split-sum environment BRDF fit), and percentage-closer-filtered shadow maps
+(spot: perspective, parallel: orthographic over the scene, point: six cube faces, environment:
+one orthographic from the image's dominant bright region — none only when the image lacks a
+sufficiently strong dominant direction (a uniform one, or opposing bright regions that
+cancel) — the region weighted by the light's colour, so a coloured light shadows from the
+regions it actually lights (opposing red and blue regions cancel to a white light, but a red
+light's shadow comes from the red one) — occluding only the image's directional key fraction of
+the light, so the shadow stays partial like After Effects' area-light shadows, with a soft
+default penumbra of at least eight pixels or four map texels). A Source or Environment Layer
+that fails to render — a deleted layer, missing footage — lights nothing: no silent fallback
+to the default studio environment. An Environment light only lights Advanced 3D comps,
+so adding one (or changing a light's type to it) switches a Classic 3D comp to Advanced 3D,
+as model layers do. Cards keep
 Material Options (Accepts Lights/Shadows, Casts Shadows On/Only, Ambient, Diffuse, Specular);
 models and primitives add Base Color, Metallic, Roughness, Emissive. Rasterisation runs at 2×2
 supersampling with a reversed-Z depth buffer; opaque triangles resolve visibility first, the
@@ -204,15 +217,63 @@ instead of skipping pixels (Viewer Zoom Quality More Accurate): GPU frames carry
 sampled trilinearly, CPU frames go up averaged down by the whole factor that leaves about one
 texel per screen pixel.
 
+32 bpc projects keep **half-float frames** on the desktop (`frames::F16Frame`, 8 bytes a pixel:
+the RAM preview holds half as many as of 8-bit frames). They are rendered without Project
+Settings ▸ HDR (`RenderOpts::skip_hdr_step`), so the values above 1.0 stay. The viewer's
+**display pass** (`engine::viewer::DisplayPass`; on the GPU `ui-egui/src/display_gpu.rs` +
+`display_gpu.wgsl`) then turns a frame into what the panel shows, in this order: decode with the
+output space's curve, the viewer's exposure in linear light, the HDR step the frame was rendered
+without (Compand / Tone Map), encode, clamp to 0..1, the display colour conversion (Use Display
+Color Management, Simulate Output, LUT profiles), Show Channel, premultiply, round to 8 bits.
+So exposure reaches the full float range, and tone mapping and the monitor conversion see the
+exposed light. The pass runs on egui-wgpu's device (it needs no GPU compositor) into one RGBA8
+texture with mips per viewer slot (main viewer, snapshot, each passive viewer: about 110 MB of
+video memory per slot for a 4K frame, input included); without a device the same steps run on
+the CPU (`DisplayPass::pixel`, which is also the shader's test reference). 8 and 16 bpc frames
+stay 8-bit with the HDR step applied when rendered; they go through the same pass when exposure,
+a channel view or a display conversion applies, else they are drawn as they are. Panels that
+read the viewer's pixels as 8-bit (Video Preview, keyers, thumbnails) get the half-float frame
+converted on demand with the HDR step and without the exposure; the Info panel shows the
+frame's float values. The browser keeps 8-bit frames for now (its frame workers send RGBA8).
+
 A persistent **disk cache** (`render::disk_cache`, Settings ▸ Media & Disk Cache) backs both
-the layer cache and the viewer's RAM preview: layer buffers that were slow to render and every
-preview frame are written (LZ4, atomic rename, checksummed) under 128-bit content keys — the
-comp's content hash (the comp, what it uses, footage file size and time) plus frame, scale and
-view for frames; the layer key salted with the footage fingerprint for layers — so entries
-survive restarts and never go stale. LRU eviction keeps it under the size limit; Edit ▸ Purge
-empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue. In the
-browser the frames live in the Origin Private File System: frame workers write them, the page
-keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
+the layer cache and the viewer's RAM preview: layer buffers that were slow to render, every
+preview frame and Roto Brush / Object Matte segmentations are written (LZ4, atomic rename,
+checksummed) and survive restarts. The design (#3184):
+
+- **Keys from memory.** A frame's key is its comp's content key plus frame, scale, view and
+  render options; the content key hashes the project settings and the items the comp can draw
+  (its layers but those that can't change the picture, nested comps, footage with its settings
+  and paths, solids, Media Replacement footage, proxies: `Project::pixel_reach`). Expressions
+  among them add what they can read: every layer of their comps, the markers, the comps and
+  footage they name with literal names (`comp("Name")`, `footage("Name")`, and which items have
+  those names), or the whole project when they compute a name or reach items another way
+  (`expression_reach`). An edit to anything else keeps the key. A layer buffer's key is the
+  layer cache's content key (which names the footage it uses with its paths) and the renderer
+  version. Nothing here looks at a file, and nothing ever scans the project's files.
+- **File lists checked on hit.** Every frame and layer entry keeps the source files it was
+  made of, with the size and modification time they were read with (the browser: size and
+  content hash). An entry is used only while they are unchanged: one `metadata` call per listed
+  file when it is read. A changed, missing or unreadable file, a damaged entry or an older
+  format is a miss; the entry is deleted and the frame renders again and replaces it.
+- **Incomplete lists stay in memory.** A frame or buffer whose files can't all be named (a
+  source that doesn't say what it read, more than 4096 files) is shown but never written.
+- **Reload Footage drops entries.** File ▸ Reload Footage deletes the frame and layer entries
+  whose lists name the item's files (the writer thread reads each entry's list, not its
+  pixels), so a file replaced by one with the same size and time is read again. A reload while
+  the cache is off is remembered for the session and applied when it is switched on, before it
+  is read. A render already under way offers entries made of the files as they were: each
+  render takes the cache's drop generation before it reads, and an entry listing a file dropped
+  after that is refused (`DiskCache::drop_generation`); the frame is shown, never stored.
+- **Edits keep what they can't change.** RAM frames outside an edit's dirty spans are kept
+  (`Project::dirty_spans`), and their disk entries are linked to the comp's new key.
+
+Frame entries are 8-bit RGBA, or for 32 bpc viewer frames half floats with their bytes shuffled
+into planes before LZ4 (the entry header's format byte tells them apart; the render options in
+the key keep the two kinds apart). LRU eviction keeps the cache under the size limit; Edit ▸
+Purge empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue.
+In the browser the frames live in the Origin Private File System: frame workers write them, the
+page keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
 
 **Deferred readbacks** (`effectcraft-gpu` `deferred`): where a readback can't be waited for (WebGPU
 in a browser worker) a frame renders in passes. `Accelerator::frame_begin` / `pass_begin` /
@@ -243,7 +304,10 @@ the layer body. Interior styles are clipped to the layer: they blend onto its co
 shape and keep its alpha, so an anti-aliased edge mixes the style and the background only. Layer
 opacity fades the whole stack; Knockout and the R/G/B channel switches apply at composite time. Styled pixels are cached separately from the layer content, so editing a style
 reuses the cached source/masks/effects. Global Light is one setting per comp, mirrored into every
-layer's Blending Options and kept in step after each edit.
+layer's Blending Options and kept in step after each edit. Blending Options can be edited in the Layer Style dialog
+before any style is added: the first change creates the Layer Styles group with Blending Options
+only (`layer.style.add` with `blendingOptions`), in the same undo step as the change. Removing
+the last style keeps the group when its Advanced Blending is not at the defaults.
 
 **Paint and Puppet** are effects whose instances carry nested groups. Paint (`effects::paint`)
 holds Brush / Clone / Eraser strokes (Path, Stroke Options, Transform, hidden Duration span);
@@ -264,7 +328,7 @@ before conversion (a quarter of the conversions; the result differs from convert
 in blocks where colours clip) and resampled from there, as other frames are from full size.
 
 **GPU compositor** (`crates/gpu`; Project Settings ▸ Video Rendering and Effects ▸ Mercury GPU
-Acceleration, the default, or Mercury Software Only; `render.backend`). The CPU renderer is the
+Acceleration, the default, or Software Rendering; `render.backend`). The CPU renderer is the
 reference and keeps rendering layer content (sources, masks, CPU effects, layer styles) into the
 layer cache. The render crate defines an `Accelerator` trait; `effectcraft_gpu::Gpu` implements it
 on wgpu compute shaders. `RenderOpts::backend` picks `Cpu`, `Gpu` or `Auto` (an accelerator
@@ -273,10 +337,13 @@ whichever compositor measured faster for it (`render::auto::AutoPick`, kept by t
 per comp, output scale and path (readback or viewer display) it averages CPU and GPU frame times
 (warm-up on both sides, the fastest warm-up frame starting the average, single stalls capped),
 picks the GPU unless the CPU is clearly faster, and re-measures the other side every 48 frames.
-Render Queue jobs don't use Auto: every frame of a job renders on the project's renderer (the
-GPU compositor with Mercury GPU Acceleration), so runs of a render don't differ by timing.
 Light comps (a few small layers, which the CPU composites only within their bounds) then stay on
-the CPU instead of paying for full-frame passes and a readback. A GPU frame walks the comp like
+the CPU instead of paying for full-frame passes and a readback. Render Queue jobs don't use
+Auto per frame: a job renders every frame on one compositor, never a mix (#3335). A GPU
+Acceleration job with an accelerator times both on its first frames
+(`export::pipeline::Cx::probe`, jobs of 12 frames or more) and keeps the faster, the CPU only
+when clearly faster; `EFFECTCRAFT_RQ_RENDERER=gpu|cpu` fixes the choice, and readback-deferred
+accelerators (the web) render on the project's renderer. A GPU frame walks the comp like
 `draw_comp`: cached layer buffers are uploaded once per buffer, then transformed with the CPU's
 sampling (nearest, bilinear, Catmull-Rom bicubic, the same minification pre-filter), motion-blur
 sub-samples are accumulated, and track mattes, Preserve Transparency, layer style passes,
@@ -303,16 +370,16 @@ Preserve Transparency / blend kernels (a 3D track matte renders solo through the
 Environment Light Background layers draw their sky in a kernel (`adv_sky`, from
 `Renderer::sky_draw`) before the rest of the run, in Classic and Advanced 3D comps. Wireframe
 outlines draw on the GPU from the CPU's pixel list (`Renderer::wireframe_pixels`). GPU effects
-(`effects::GPU_EFFECTS`, 280 of them: blurs, colour correction, keying incl. Key Light, mattes,
-channel, stylize, distortion and warps (Warp, Bezier Warp, Smear, Reshape, CC Bend It, CC Page
-Turn, CC Bender, CC Blobbylize), Cartoon, bevels, shapes, the transitions (CC light family, CC
-transitions, Block Dissolve), perspective (Radial Shadow, CC Cylinder / Sphere / Spotlight /
+(`effects::GPU_EFFECTS`, 280 of them: blurs, colour correction, keying incl. Screen Color Key, mattes,
+channel, stylize, distortion and warps (Warp, Bezier Warp, Smear, Reshape, Two-Point Bend, CC Page
+Turn, Flexible Bend, Organic Displacement), Cartoon, bevels, shapes, the transitions (CC light family, CC
+transitions, Block Dissolve), perspective (Radial Shadow, Cylinder Wrap / Sphere / Spotlight /
 Environment, 3D Glasses), generators, noise, grain, text (Numbers, Timecode), time, 3D Channel (aux channels as an
 extra texture), Immersive Video, colour management (colour programs from
 `effects::color_program`, LUTs in a storage buffer) and the simulations' render passes (the
 simulation stays on the CPU and hands its plan — sprites, pieces, blobs, grids — to a tiled
-rasteriser; the particle effects too, `gpu::fx_particles`: CC Particle World / Systems II,
-Particle Playground with its Layer Map frames in one atlas, CC Ball Action, CC Pixel Polly, CC
+rasteriser; the particle effects too, `gpu::fx_particles`: Particle Emitter 3D / Systems II,
+Particle Playground with its Layer Map frames in one atlas, Ball Grid, Pixel Shatter, CC
 Scatterize; plans too large for one item table draw in several passes over the previous one),
 and the geometry generators (Lightning, Advanced Lightning, Radio Waves, Stroke, Scribble,
 Vegas, Write-on, Audio Spectrum / Waveform, Basic / Path Text: bolts, strokes, waves, audio
@@ -323,7 +390,7 @@ as kernels, in one module per family (`gpu::fx_*` with `shaders/fx_*.wgsl`); con
 effects run as one chain with one upload and one readback. Statistics that need the whole frame
 (Auto Levels / Contrast / Color, Equalize, Shadow/Highlight, Color Stabilizer, Remove Grain's
 noise level) are measured on the CPU from one readback and applied on the GPU; effects reading
-other frames (Echo, Posterize Time, Time Difference, Time Displacement, CC Force Motion Blur, CC
+other frames (Echo, Posterize Time, Time Difference, Time Displacement, Temporal Motion Blur, CC
 Wide Time, Pixel Motion Blur, Timewarp) upload the frames the host renders (`time_frames`) and
 combine them on the GPU; Time Displacement's per-pixel times and Timewarp's motion vectors
 (`time_fx::timewarp_plan`) are computed on the CPU. Numbers and Timecode rasterise their glyph
@@ -345,7 +412,15 @@ as NaNs (a kernel that skips pixels fails the oracle) and validation errors pani
 (`ui-egui::frames`); headless renders, the CLI (unless `--gpu`) and CI use the CPU. Outside
 tests, device errors are logged rather than fatal. A viewer frame that runs out of video memory
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
-the RAM preview keeps half as many GPU frames from then on. A frame whose render panics is
+the RAM preview keeps half as many GPU frames from then on. However many frame threads the viewer
+runs, at most two of them start GPU render attempts at once. Shared-pool workers use the CPU
+when both slots are busy rather than blocking Rayon helpers; dedicated single-thread preview
+lanes wait for admission and remain on the GPU, so
+working-texture pressure is bounded by concurrent attempts rather than the thread count (#3028).
+A single large frame or retained frames can still exceed the available video memory. The same guard catches a frame's
+validation errors (an invalid texture, often left by a failed allocation): that frame renders on
+the CPU and the kept textures are freed, but the compositor stays on and, with no allocation
+failure before it, the RAM preview keeps its GPU frames (#1319). A frame whose render panics is
 rendered again on the CPU or released, never left in progress. Native readbacks and timing waits
 share a finite deadline; failure retires pending readbacks exactly once, and late results are
 discarded. The desktop executable and browser page own their shared device's error/loss handlers and forward
@@ -356,18 +431,25 @@ to the preview cache. Scoped allocation failures retain the adaptive budget/CPU 
 
 **Recovery boundary:** the host installs handlers through eframe's CreationContext, after egui's
 presentation pipelines but before EffectCraft's pipelines. This does not cover that earlier egui
-startup window. eframe 0.36.2 supports lost-surface recreation, not replacing its live device and
+startup window. eframe 0.37 supports lost-surface recreation, not replacing its live device and
 all presentation resources. Device loss therefore requires restarting the presentation backend;
 CPU compositing alone cannot restore that display. No automatic restart or persistent safe-mode
 sentinel is implemented here. Browser scope futures are not synchronously awaited; the browser page
 forwards shared-device errors, while owned worker devices install their own handlers. On the web
 (WebGPU) the GPU composites viewer frames; steps that need a readback fall back to the CPU (the
 Info panel's pixel readout reads GPU frames back asynchronously). **GPU particles**
-(`effects::psim`, `gpu::particles`): CC Particle World, CC Particle Systems II and Particle
+(`effects::psim`, `gpu::particles`): Particle Emitter 3D, Particle Emitter 2D and Particle
 Playground cannons without interacting forces evolve every particle independently, so the GPU
 backend (reached through `EffectHost::particles` when the GPU compositor is active) simulates one
 particle per invocation from the CPU's birth schedule and keeps per-key state checkpoints on the
 GPU, like `SimCache`; the CPU simulation stays the oracle (tests compare ids and positions).
+Particle Emitter 3D, Particle Emitter 2D and Liquid Particles sample their Birth Rate at every
+step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of its own time;
+the rate is left out of the simulation key, and a checkpoint is resumed only with the same rate history (the CPU state's `hist`, the GPU
+checkpoint's births). The rate's keyframes are read at the step's exact layer time
+(`EvalCtx::value_at_layer_time`; mapping it to comp time and back rounds under a fractional
+stretch), a rate without keyframes or an expression isn't sampled, and a layer of one of them with
+expressions isn't layer cached (its key can't see what an expression returned at earlier times).
 `effectcraft-cli bench --gpu` reports CPU vs GPU ms/frame, speed-up, Auto's ms/frame, pixel
 agreement and the steady-state upload / readback MB per frame for every comp plus an
 adjustment-layer comp.
@@ -380,7 +462,14 @@ inputs in 32 bpc. With a working space (sRGB, Rec. 709, Rec. 2020, Display P3; m
 from the published primaries), footage is converted from its colour profile (stream metadata or
 Interpret Footage, else sRGB) and the top-level comp is converted to the sRGB display. Linearize
 Working Space runs everything in linear light; Blend Colors Using 1.0 Gamma linearises only for
-blending. Layer cache keys include these settings.
+blending. Layer cache keys include these settings. Project Settings ▸ HDR (compand / tone
+mapping) is the last top-level step, for standard-dynamic-range displays and outputs; OpenEXR
+renders (sequences and ProEXR) skip it (`RenderOpts::skip_hdr_step`) and decode the frame with the
+output space's own curve (`Pipe::output_linear`), so they hold linear light in the output space's
+primaries; unmanaged projects decode with the Working Gamma's curve (sRGB at 2.2, a pure 2.4 power
+curve at 2.4). Every OpenEXR file (sequences and ProEXR) names those primaries and the white point in its
+`chromaticities` attribute (`ColorSpace::exr_chromaticities`; Rec. 709 / sRGB primaries for the default
+and for unmanaged projects, Rec. 2100 PQ and HLG as BT.2020, the ACES spaces with the ACES white). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
 
 **Frame blending**: footage and precomp layers whose source time falls between source frames
 (rate conform, stretch, remap) blend the two neighbouring frames, by cross-fade (Frame Mix) or by
@@ -391,7 +480,10 @@ hierarchical block-matching optical flow and a bidirectional warp (Pixel Motion,
 its nested layers straight into the parent with concatenated transforms (one resample), so
 nested blend modes and adjustment layers act on the parent's layers; nested 3D layers use the
 parent's camera and lights and, when the precomp layer is 3D, are depth-sorted with the parent's
-3D run. Masks, effects or styles force a flattened render. Text layers are always rasterised at
+3D run. Essential Properties overrides (properties, Font and Media Replacement) travel with the
+collapsed context and are applied while the nested layers are evaluated, so they do not force a
+flattened render or clip at the precomp's frame. Masks, effects or styles force a flattened
+render. Text layers are always rasterised at
 their on-screen scale, as text is vector in After Effects; on shape layers and vector footage the
 switch is Continuously Rasterize and does the same. Quality: Draft samples
 nearest-neighbour, Wireframe draws the layer bounds. Slip edit (`layer.slip`, Alt+PageUp/Down,
@@ -458,8 +550,10 @@ effects crate, hence the `effects → track` edge.
 `essential` field lists its exposed controls (properties, Media Replacement, groups, comments).
 Every precomp layer of such a comp gets an Essential Properties group (`GroupKind::Essential`,
 children `eg<control id>`), kept in step by `Session::edit`; editing a child overrides it for
-that instance. The renderer draws an instance with overrides from a copy of the project with the
-overridden source properties set (`essential::with_overrides`). Templates are `.ectemplate`
+that instance. A collapsed instance carries its property, Font and Media Replacement overrides
+into the nested render context (`Collapsed`, `EvalCtx::{property_overrides, media_overrides}`);
+other instances are drawn from a copy of the project with the overridden source properties set
+(`essential::with_overrides`). Templates are `.ectemplate`
 ZIPs: `manifest.json` (controls), `project.ecproj` (the comp and its dependencies), `media/…` and
 `poster.png`; importing offsets every id past the project's (`essential::offset_ids`).
 **Responsive Design — Time**: a time-stretched precomp maps time piecewise so its protected
@@ -540,7 +634,7 @@ Unix milliseconds. The layer's Start Time becomes `dataStart + videoStart − fi
 (`videoStart` given, or the file's creation date on the desktop; reduced to a time of day when
 the data has no dates).
 
-**Lumetri Scopes** (`raster::scopes`) are density plots of the viewer frame (rendered over the
+**Video Scopes** (`raster::scopes`) are density plots of the viewer frame (rendered over the
 comp background) with BT.601 / BT.709 / BT.2020 luma and colour-difference coefficients.
 
 ## 5. Expressions

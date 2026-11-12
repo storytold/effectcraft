@@ -312,6 +312,33 @@ impl Layer {
     pub fn can_have_styles(&self) -> bool {
         self.source.is_av() && !self.switches.adjustment
     }
+    /// Do the layer's styles change its pixels: the group on, and a style on or Advanced
+    /// Blending away from its defaults (animated counts as changed).
+    pub fn styles_change_pixels(&self) -> bool {
+        self.layer_styles()
+            .filter(|g| g.enabled && self.can_have_styles())
+            .is_some_and(|g| g.groups().any(|s| s.enabled && s.match_id != BLENDING) || g.sub(BLENDING).is_some_and(|bo| !blending_is_default(bo)))
+    }
+}
+
+/// Is Advanced Blending of this Blending Options group at its defaults (no keys, no
+/// expression)? Global Light is the comp's and doesn't count.
+pub fn blending_is_default(bo: &PropGroup) -> bool {
+    let mut next = 0;
+    let fresh = blending_options(&mut Ids(&mut next), &GlobalLight::default());
+    let (Some(adv), Some(def)) = (bo.sub("advancedBlending"), fresh.sub("advancedBlending")) else { return true };
+    def.props().all(|d| adv.get(&d.match_id).is_none_or(|p| same_anim(p, d)))
+}
+
+/// Give `layer` its Layer Styles group (Blending Options only, after Transform) when it has none.
+/// Returns the Blending Options group's uid.
+pub fn add_blending_options(layer: &mut Layer, ids: &mut Ids, gl: &GlobalLight) -> Option<u64> {
+    if layer.props.sub(GROUP).is_none() {
+        let g = layer_styles(ids, gl);
+        let at = layer.props.children.iter().position(|c| c.match_id() == "transform").map(|i| i + 1).unwrap_or(layer.props.children.len());
+        layer.props.children.insert(at, g.into());
+    }
+    Some(layer.props.sub(GROUP)?.sub(BLENDING)?.uid)
 }
 
 /// Add style `id` to `layer` (creating the Layer Styles group after Transform when missing).
@@ -319,9 +346,7 @@ impl Layer {
 pub fn add_style(layer: &mut Layer, ids: &mut Ids, id: &str, gl: &GlobalLight, enabled: bool) -> Option<u64> {
     let order = STYLES.iter().position(|s| s.0 == id)?;
     if layer.props.sub(GROUP).is_none() {
-        let g = layer_styles(ids, gl);
-        let at = layer.props.children.iter().position(|c| c.match_id() == "transform").map(|i| i + 1).unwrap_or(layer.props.children.len());
-        layer.props.children.insert(at, g.into());
+        add_blending_options(layer, ids, gl);
     }
     let ls = layer.props.sub_mut(GROUP)?;
     if let Some(g) = ls.sub(id) {
@@ -470,7 +495,7 @@ mod tests {
         let mut ids = Ids(&mut p.next_id);
         add_style(&mut a, &mut ids, "dropShadow", &gl, true);
         add_style(&mut b, &mut ids, "bevelEmboss", &gl, true);
-        comp.layers = vec![a, b];
+        comp.layers = vec![a, b].into();
         comp.layers[1].props.sub_mut(GROUP).unwrap().sub_mut(BLENDING).unwrap().get_mut("globalLightAngle").unwrap().value = Value::Scalar(45.0);
         assert!(needs_sync(&comp));
         sync_comp(&mut comp);

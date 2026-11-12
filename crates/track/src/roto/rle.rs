@@ -17,6 +17,10 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    base64_decode_bounded(s, usize::MAX)
+}
+
+fn base64_decode_bounded(s: &str, max_bytes: usize) -> Option<Vec<u8>> {
     let val = |c: u8| -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => (c - b'A') as u32,
@@ -27,13 +31,25 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
             _ => return None,
         })
     };
-    let bytes: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
-    if !bytes.len().is_multiple_of(4) {
+    let significant = s.bytes().filter(|c| !c.is_ascii_whitespace()).count();
+    let max_encoded = max_bytes.checked_add(2).and_then(|n| n.checked_div(3)).and_then(|n| n.checked_mul(4)).unwrap_or(usize::MAX);
+    if !significant.is_multiple_of(4) || significant > max_encoded {
         return None;
     }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(significant).ok()?;
+    bytes.extend(s.bytes().filter(|c| !c.is_ascii_whitespace()));
+    let decoded_len = bytes.len().checked_div(4)?.checked_mul(3)?;
+    if decoded_len > max_bytes.saturating_add(2) {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(decoded_len.min(max_bytes)).ok()?;
     for c in bytes.chunks(4) {
         let pad = c.iter().rev().take_while(|b| **b == b'=').count();
+        if pad > 2 || c[..4 - pad].contains(&b'=') {
+            return None;
+        }
         let mut n = 0u32;
         for (i, b) in c.iter().enumerate() {
             n |= if *b == b'=' { 0 } else { val(*b)? } << (18 - 6 * i);
@@ -96,36 +112,66 @@ pub fn encode(values: &[u8]) -> String {
     base64_encode(&out)
 }
 
-/// Decode [`encode`]'s output (None when malformed).
-pub fn decode(s: &str) -> Option<Vec<u8>> {
-    let data = base64_decode(s)?;
-    let mut pos = 0;
-    let n = get(&data, &mut pos)? as usize;
-    if n > 1 << 30 {
+/// Decode [`encode`]'s output (None when malformed or larger than the caller's validated plane).
+pub fn decode_bounded(s: &str, max_len: usize) -> Option<Vec<u8>> {
+    let encoded_limit = max_len.saturating_mul(16).saturating_add(128);
+    if s.len() > encoded_limit {
         return None;
     }
-    let mut out = Vec::with_capacity(n);
+    // An alternating byte plane takes at most one value byte and a ten-byte varint per
+    // pixel, plus the declared-length varint.
+    let decoded_limit = max_len.saturating_mul(11).saturating_add(10);
+    let data = base64_decode_bounded(s, decoded_limit)?;
+    let mut pos = 0;
+    let n = usize::try_from(get(&data, &mut pos)?).ok()?;
+    if n > max_len {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(n).ok()?;
     while out.len() < n {
         let v = *data.get(pos)?;
         pos += 1;
-        let run = get(&data, &mut pos)? as usize;
-        if out.len() + run > n {
+        let run = usize::try_from(get(&data, &mut pos)?).ok()?;
+        let next = out.len().checked_add(run)?;
+        if run == 0 || next > n {
             return None;
         }
-        out.resize(out.len() + run, v);
+        out.resize(next, v);
     }
     Some(out)
 }
+
+/// Decode [`encode`]'s output, capped at the standard matte-plane limit.
+pub fn decode(s: &str) -> Option<Vec<u8>> {
+    decode_bounded(s, MAX_PLANE_BYTES)
+}
+
+/// Maximum frozen matte plane size (256 MiB at one byte per pixel).
+pub const MAX_PLANE_BYTES: usize = 256 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn refuses_oversized_and_zero_runs_before_expansion() {
+        let mut declared = Vec::new();
+        put(&mut declared, 1024);
+        declared.extend_from_slice(&[255, 0x80, 0x08]); // 1024-byte run
+        assert!(decode_bounded(&base64_encode(&declared), 16).is_none());
+        let mut zero_run = Vec::new();
+        put(&mut zero_run, 1);
+        zero_run.extend_from_slice(&[0, 0]);
+        assert!(decode_bounded(&base64_encode(&zero_run), 16).is_none());
+        assert!(decode_bounded(&"A".repeat(100_000), 16).is_none());
+    }
+
+    #[test]
     fn round_trips() {
         for n in [0usize, 1, 2, 3, 4, 5, 100, 1000] {
             let v: Vec<u8> = (0..n).map(|i| ((i / 7) % 3) as u8 * 100).collect();
-            assert_eq!(decode(&encode(&v)).unwrap(), v);
+            assert_eq!(decode(&encode(&v)).unwrap(), v, "RLE n={n}");
             let raw: Vec<u8> = (0..n).map(|i| (i * 31) as u8).collect();
             assert_eq!(base64_decode(&base64_encode(&raw)).unwrap(), raw);
         }

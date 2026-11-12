@@ -421,7 +421,12 @@ impl RenderSettings {
     /// The output frame rate: the Frame Rate override, unless the comp preserves its frame rate
     /// (Composition Settings ▸ Preserve frame rate when nested or in render queue).
     pub fn rate(&self, comp: &Comp) -> FrameRate {
-        if comp.preserve_frame_rate { comp.frame_rate } else { self.frame_rate.unwrap_or(comp.frame_rate) }
+        if comp.preserve_frame_rate {
+            return comp.frame_rate;
+        }
+        // A saved override is held to the supported rates, as a comp's own rate is: its frame count
+        // is the export's work.
+        self.frame_rate.map_or(comp.frame_rate, |r| crate::limits::frame_rate(r, comp.frame_rate))
     }
     /// First output-rate frame starting at or after `t`.
     fn ceil_frame(r: FrameRate, t: Tick) -> i64 {
@@ -442,9 +447,18 @@ impl RenderSettings {
     pub fn frame_time(&self, comp: &Comp, i: u64) -> Tick {
         self.rate(comp).tick_of(self.first_frame(comp) + i as i64)
     }
-    pub fn output_size(&self, comp: &Comp) -> (u32, u32) {
+    pub fn effective_scale(&self, comp: &Comp) -> f64 {
         let s = self.resolution.clamp(0.01, 4.0);
-        (((comp.width as f64 * s).round() as u32).max(1), ((comp.height as f64 * s).round() as u32).max(1))
+        let max = f64::from(crate::limits::MAX_SIZE);
+        s.min(max / f64::from(comp.width.max(1))).min(max / f64::from(comp.height.max(1)))
+    }
+    pub fn output_size(&self, comp: &Comp) -> (u32, u32) {
+        let s = self.effective_scale(comp);
+        // The scale is clamped so neither side exceeds the comp limit, keeping the aspect
+        // ratio: a 30 000 px side at 4x renders at 1x instead of cropping to a corner.
+        let w = ((comp.width as f64 * s).round() as u32).max(1);
+        let h = ((comp.height as f64 * s).round() as u32).max(1);
+        (w, h)
     }
     pub fn resolution_label(&self) -> &'static str {
         match self.resolution {
@@ -471,6 +485,8 @@ impl RenderSettings {
             TimeSpan::Custom { start, end } => format!("Custom ({:.3}s – {:.3}s)", start.seconds(), end.seconds()),
         };
         let rate = match (self.frame_rate, comp) {
+            // A saved override outside the supported rates renders at the clamped one: say so.
+            (Some(r), Some(c)) if self.rate(c) != r => format!("{:.3} fps (renders at {:.3})", r.as_f64(), self.rate(c).as_f64()),
             (Some(r), _) => format!("{:.3} fps", r.as_f64()),
             (None, Some(c)) => format!("Use comp's frame rate ({:.3})", c.frame_rate.as_f64()),
             (None, None) => "Use comp's frame rate".into(),
@@ -509,6 +525,9 @@ pub enum OutputFormat {
     TiffSequence,
     /// OpenEXR sequence (32-bit float, linear light).
     ExrSequence,
+    /// Targa sequence: uncompressed 24-bit RGB or 32-bit RGB + Alpha (8 alpha bits), top-left
+    /// origin.
+    TargaSequence,
     /// Animated GIF.
     Gif,
     /// WebM: VP9 video (alpha with RGB + Alpha) + Opus audio.
@@ -528,7 +547,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub const ALL: [OutputFormat; 13] = [
+    pub const ALL: [OutputFormat; 14] = [
         OutputFormat::H264,
         OutputFormat::Hevc,
         OutputFormat::Av1,
@@ -539,6 +558,7 @@ impl OutputFormat {
         OutputFormat::JpegSequence,
         OutputFormat::TiffSequence,
         OutputFormat::ExrSequence,
+        OutputFormat::TargaSequence,
         OutputFormat::Gif,
         OutputFormat::Wav,
         OutputFormat::Aiff,
@@ -552,6 +572,7 @@ impl OutputFormat {
             OutputFormat::JpegSequence => "JPEG Sequence",
             OutputFormat::TiffSequence => "TIFF Sequence",
             OutputFormat::ExrSequence => "OpenEXR Sequence",
+            OutputFormat::TargaSequence => "Targa Sequence",
             OutputFormat::Gif => "Animated GIF",
             OutputFormat::WebM => "WebM (VP9 + Opus)",
             OutputFormat::Wav => "WAV",
@@ -569,6 +590,7 @@ impl OutputFormat {
             OutputFormat::JpegSequence => "jpg",
             OutputFormat::TiffSequence => "tif",
             OutputFormat::ExrSequence => "exr",
+            OutputFormat::TargaSequence => "tga",
             OutputFormat::Gif => "gif",
             OutputFormat::WebM => "webm",
             OutputFormat::Wav => "wav",
@@ -577,7 +599,10 @@ impl OutputFormat {
         }
     }
     pub fn is_sequence(self) -> bool {
-        matches!(self, OutputFormat::PngSequence | OutputFormat::JpegSequence | OutputFormat::TiffSequence | OutputFormat::ExrSequence)
+        matches!(
+            self,
+            OutputFormat::PngSequence | OutputFormat::JpegSequence | OutputFormat::TiffSequence | OutputFormat::ExrSequence | OutputFormat::TargaSequence
+        )
     }
     pub fn is_movie(self) -> bool {
         matches!(self, OutputFormat::H264 | OutputFormat::ProRes | OutputFormat::Uncompressed | OutputFormat::WebM | OutputFormat::Hevc | OutputFormat::Av1)
@@ -603,7 +628,7 @@ impl OutputFormat {
         if matches!(self, OutputFormat::H264 | OutputFormat::Hevc) { (even(w), even(h)) } else { (w, h) }
     }
     /// Parse a format name: `h264`, `mp4`, `prores`, `mov`, `uncompressed`, `png`, `jpeg`/`jpg`,
-    /// `tiff`/`tif`, `exr`, `gif`, or a label.
+    /// `tiff`/`tif`, `exr`, `tga`/`targa`, `gif`, or a label.
     pub fn from_name(s: &str) -> Option<OutputFormat> {
         let n = s.trim().to_ascii_lowercase().replace([' ', '.', '-', '_'], "");
         Some(match n.as_str() {
@@ -616,6 +641,7 @@ impl OutputFormat {
             "jpg" | "jpeg" | "jpegsequence" => OutputFormat::JpegSequence,
             "tif" | "tiff" | "tiffsequence" => OutputFormat::TiffSequence,
             "exr" | "openexr" | "openexrsequence" => OutputFormat::ExrSequence,
+            "tga" | "targa" | "targasequence" => OutputFormat::TargaSequence,
             "gif" | "animatedgif" => OutputFormat::Gif,
             "webm" | "vp9" | "webmvp9opus" => OutputFormat::WebM,
             "wav" | "wave" => OutputFormat::Wav,
@@ -760,6 +786,27 @@ pub struct Crop {
     pub right: i32,
 }
 
+/// The largest side of a frame an output module writes (Resize is capped there too).
+pub const MAX_OUTPUT_SIDE: i32 = 30_000;
+
+/// Crop edges `a`/`b` of one axis of `side` pixels: padding is taken back only as far as keeps
+/// the result within [`MAX_OUTPUT_SIDE`], so a mixed pair that stays inside the cap is kept as
+/// saved. Each edge is also bounded (what the larger of the side and the cap allows), so the
+/// arithmetic on them cannot overflow.
+fn bound_edges(a: i32, b: i32, side: i32) -> (i32, i32) {
+    let hi = side.max(MAX_OUTPUT_SIDE);
+    let (mut a, mut b) = (a.clamp(-MAX_OUTPUT_SIDE, hi), b.clamp(-MAX_OUTPUT_SIDE, hi));
+    let excess = i64::from(side) - i64::from(a) - i64::from(b) - i64::from(MAX_OUTPUT_SIDE);
+    if excess > 0 {
+        // Only padding (negative edges) grows the side: take back as much of it as needed.
+        let excess = i32::try_from(excess).unwrap_or(i32::MAX);
+        let from_a = excess.min(-a.min(0));
+        a += from_a;
+        b += (excess - from_a).min(-b.min(0));
+    }
+    (a, b)
+}
+
 impl Crop {
     /// Edges `(top, left, bottom, right)` in pixels of a `w`×`h` frame rendered at `scale`.
     pub fn edges(&self, w: u32, h: u32, scale: f64) -> (i32, i32, i32, i32) {
@@ -769,17 +816,25 @@ impl Crop {
         if self.use_roi
             && let Some([x, y, rw, rh]) = self.roi
         {
-            // The quad arrives unvalidated (control channel or a hand-edited project):
-            // clamp like the sibling edge fields (plus/minus 20 000) and subtract
-            // without overflow.
-            let conv = |v: f64| v.round().clamp(-20_000.0, 20_000.0) as i32;
-            let l = conv(x * scale);
-            let t = conv(y * scale);
-            let r = (w as i32).saturating_sub(conv((x + rw) * scale));
-            let b = (h as i32).saturating_sub(conv((y + rh) * scale));
-            return (t, l, b, r);
+            // The quad arrives unvalidated (control channel or a hand-edited project). As in
+            // After Effects, the region of interest lies inside the frame: each converted edge
+            // is clamped to [0, w] / [0, h] (inf clamps to a side, NaN converts to 0), and the
+            // far edge never passes the near one. Every edge then lies inside the frame, so the
+            // crop can't be larger than the frame and no subtraction can overflow.
+            let (wi, hi) = (i32::try_from(w).unwrap_or(i32::MAX), i32::try_from(h).unwrap_or(i32::MAX));
+            let conv = |v: f64, side: i32| v.round().clamp(0.0, f64::from(side)) as i32;
+            let l = conv(x * scale, wi);
+            let t = conv(y * scale, hi);
+            let r = conv((x + rw) * scale, wi).max(l);
+            let b = conv((y + rh) * scale, hi).max(t);
+            return (t, l, hi - b, wi - r);
         }
-        (self.top, self.left, self.bottom, self.right)
+        // Negative edges pad the frame: keep each padded side within the largest frame an
+        // output module writes, or a few saved integers ask for a canvas of gigapixels.
+        let (wi, hi) = (i32::try_from(w).unwrap_or(i32::MAX), i32::try_from(h).unwrap_or(i32::MAX));
+        let (t, b) = bound_edges(self.top, self.bottom, hi);
+        let (l, r) = bound_edges(self.left, self.right, wi);
+        (t, l, b, r)
     }
 }
 
@@ -870,6 +925,141 @@ impl ProResProfile {
             let l = p.label().to_ascii_lowercase().replace(' ', "");
             l == n || l.trim_start_matches("appleprores") == n.trim_start_matches("appleprores") || format!("{p:?}").to_ascii_lowercase() == n
         })
+    }
+}
+
+/// OpenEXR sequence compression. Every method writes scan lines, in blocks of the method's own
+/// height (1 line for None, RLE and ZIPS; 16 for ZIP and PXR24; 32 for PIZ, B44, B44A and DWAA;
+/// 256 for DWAB).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExrCompression {
+    None,
+    Rle,
+    /// ZIP, one scan line per block.
+    Zips,
+    /// ZIP, 16 scan lines per block.
+    #[default]
+    Zip,
+    Piz,
+    /// Lossy for 32-bit float (rounded to 24 bits), lossless for half float.
+    Pxr24,
+    /// Lossy for half float; 32-bit float channels are stored uncompressed.
+    B44,
+    /// B44 that also packs flat areas smaller; lossy for half float, 32-bit float is stored uncompressed.
+    B44a,
+    /// Lossy DCT, 32 scan lines per block.
+    Dwaa,
+    /// Lossy DCT, 256 scan lines per block.
+    Dwab,
+}
+
+impl ExrCompression {
+    pub const ALL: [ExrCompression; 10] = [
+        ExrCompression::None,
+        ExrCompression::Rle,
+        ExrCompression::Zips,
+        ExrCompression::Zip,
+        ExrCompression::Piz,
+        ExrCompression::Pxr24,
+        ExrCompression::B44,
+        ExrCompression::B44a,
+        ExrCompression::Dwaa,
+        ExrCompression::Dwab,
+    ];
+    /// The parameter value (`exrCompression`).
+    pub fn name(self) -> &'static str {
+        match self {
+            ExrCompression::None => "none",
+            ExrCompression::Rle => "rle",
+            ExrCompression::Zips => "zips",
+            ExrCompression::Zip => "zip",
+            ExrCompression::Piz => "piz",
+            ExrCompression::Pxr24 => "pxr24",
+            ExrCompression::B44 => "b44",
+            ExrCompression::B44a => "b44a",
+            ExrCompression::Dwaa => "dwaa",
+            ExrCompression::Dwab => "dwab",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ExrCompression::None => "None",
+            ExrCompression::Rle => "RLE",
+            ExrCompression::Zips => "ZIPS (1 scan line)",
+            ExrCompression::Zip => "ZIP (16 scan lines)",
+            ExrCompression::Piz => "PIZ",
+            ExrCompression::Pxr24 => "PXR24",
+            ExrCompression::B44 => "B44",
+            ExrCompression::B44a => "B44A",
+            ExrCompression::Dwaa => "DWAA",
+            ExrCompression::Dwab => "DWAB",
+        }
+    }
+    /// Whether the written samples can differ from the rendered ones at `depth` (half float is
+    /// already rounded from the 32-bit render; that rounding is not counted here).
+    pub fn is_lossy(self, depth: ExrBitDepth) -> bool {
+        match self {
+            ExrCompression::None | ExrCompression::Rle | ExrCompression::Zips | ExrCompression::Zip | ExrCompression::Piz => false,
+            ExrCompression::Pxr24 => depth == ExrBitDepth::Float,
+            ExrCompression::B44 | ExrCompression::B44a => depth == ExrBitDepth::Half,
+            ExrCompression::Dwaa | ExrCompression::Dwab => true,
+        }
+    }
+    /// Whether the method leaves the samples uncompressed at `depth` (B44 and B44A pack only half
+    /// floats).
+    pub fn stores_uncompressed(self, depth: ExrBitDepth) -> bool {
+        self == ExrCompression::None || (matches!(self, ExrCompression::B44 | ExrCompression::B44a) && depth == ExrBitDepth::Float)
+    }
+    /// Parse a compression name: `none`/`uncompressed`, `rle`, `zips`/`zip1` (Nuke's "Zip (1
+    /// scanline)"), `zip`/`zip16`,
+    /// `piz`, `pxr24`, `b44`, `b44a`, `dwaa`, `dwab` (any case).
+    pub fn from_name(s: &str) -> Option<ExrCompression> {
+        let n = s.to_ascii_lowercase().replace([' ', '-', '_', '(', ')'], "");
+        match n.as_str() {
+            "uncompressed" | "off" => Some(ExrCompression::None),
+            "zip1" | "zips1scanline" | "zip1scanline" | "zip1scanlines" => Some(ExrCompression::Zips),
+            "zip16" | "zip16scanlines" => Some(ExrCompression::Zip),
+            _ => ExrCompression::ALL.into_iter().find(|c| c.name() == n),
+        }
+    }
+}
+
+/// OpenEXR sequence sample type: 16-bit half float (the usual VFX interchange) or 32-bit float.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExrBitDepth {
+    Half,
+    #[default]
+    Float,
+}
+
+impl ExrBitDepth {
+    pub const ALL: [ExrBitDepth; 2] = [ExrBitDepth::Half, ExrBitDepth::Float];
+    /// The parameter value (`exrBitDepth`).
+    pub fn name(self) -> &'static str {
+        match self {
+            ExrBitDepth::Half => "half",
+            ExrBitDepth::Float => "float",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ExrBitDepth::Half => "16-bit Half Float",
+            ExrBitDepth::Float => "32-bit Float",
+        }
+    }
+    pub fn bits(self) -> u32 {
+        match self {
+            ExrBitDepth::Half => 16,
+            ExrBitDepth::Float => 32,
+        }
+    }
+    /// Parse `half`/`16`/`f16` or `float`/`32`/`f32` (any case).
+    pub fn from_name(s: &str) -> Option<ExrBitDepth> {
+        match s.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
+            "half" | "16" | "f16" | "16bit" | "halffloat" | "16bithalffloat" => Some(ExrBitDepth::Half),
+            "float" | "32" | "f32" | "32bit" | "full" | "fullfloat" | "32bitfloat" => Some(ExrBitDepth::Float),
+            _ => None,
+        }
     }
 }
 
@@ -1043,6 +1233,10 @@ pub struct OutputModule {
     /// Movies: frames between key frames (0 = automatic, two seconds).
     pub keyframe_interval: u32,
     pub prores_profile: ProResProfile,
+    /// OpenEXR sequence: compression (scan lines).
+    pub exr_compression: ExrCompression,
+    /// OpenEXR sequence: half or 32-bit float samples.
+    pub exr_bit_depth: ExrBitDepth,
     pub crop: Crop,
     pub resize: Resize,
     pub audio: AudioOutput,
@@ -1077,6 +1271,8 @@ impl Default for OutputModule {
             webm_bitrate: false,
             keyframe_interval: 0,
             prores_profile: ProResProfile::Hq,
+            exr_compression: ExrCompression::Zip,
+            exr_bit_depth: ExrBitDepth::Float,
             crop: Crop::default(),
             resize: Resize::default(),
             audio: AudioOutput::Auto,
@@ -1108,15 +1304,15 @@ impl OutputModule {
             // Width rules; height follows the cropped frame's aspect.
             rh = ((rw as f64 * ch as f64 / cw as f64).round() as u32).max(1);
         }
-        rw = rw.min(30_000);
-        rh = rh.min(30_000);
+        rw = rw.min(MAX_OUTPUT_SIDE as u32);
+        rh = rh.min(MAX_OUTPUT_SIDE as u32);
         (rw, rh)
     }
     /// The written frame size of an item (Render Settings resolution, Crop, Resize, codec
     /// rounding).
     pub fn output_size(&self, comp: &Comp, settings: &RenderSettings) -> (u32, u32) {
         let (w, h) = settings.output_size(comp);
-        let (w, h) = self.frame_size(w, h, settings.resolution.clamp(0.01, 4.0));
+        let (w, h) = self.frame_size(w, h, settings.effective_scale(comp));
         self.format.coded_size(w, h)
     }
     /// Every setting as `(label, value)` lines (render logs).
@@ -1133,6 +1329,10 @@ impl OutputModule {
         match self.format {
             OutputFormat::H264 => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
             OutputFormat::ProRes => v.push(("Codec", self.prores_profile.label().into())),
+            OutputFormat::ExrSequence => {
+                v.push(("Compression", self.exr_compression_label()));
+                v.push(("Bit Depth", self.exr_bit_depth.label().into()));
+            }
             OutputFormat::WebM if self.webm_bitrate => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
             OutputFormat::WebM | OutputFormat::JpegSequence => v.push(("Quality", self.quality.to_string())),
             _ => {}
@@ -1193,6 +1393,18 @@ impl OutputModule {
         }
         self.output = format!("{stem}.{}", format.extension());
     }
+    /// The OpenEXR compression's label, marked when it is lossy at the module's bit depth or, for
+    /// B44 / B44A at 32-bit float, stores the samples uncompressed.
+    pub fn exr_compression_label(&self) -> String {
+        let (c, d) = (self.exr_compression, self.exr_bit_depth);
+        if c.is_lossy(d) {
+            format!("{} (lossy)", c.label())
+        } else if c != ExrCompression::None && c.stores_uncompressed(d) {
+            format!("{} (uncompressed at float)", c.label())
+        } else {
+            c.label().into()
+        }
+    }
     /// Whether this module can write alpha (the format can, and WebM uses VP9).
     pub fn supports_alpha(&self) -> bool {
         self.format.supports_alpha() && !(self.format == OutputFormat::WebM && self.webm_codec == WebmVideoCodec::Av1)
@@ -1224,6 +1436,7 @@ impl OutputModule {
                 if self.channels == Channels::Rgba && !self.prores_profile.is_4444() { "Apple ProRes 4444" } else { self.prores_profile.label() }
             ),
             OutputFormat::Hevc | OutputFormat::Av1 => format!("{} · {}", self.format.label(), self.codec_summary()),
+            OutputFormat::ExrSequence => format!("{} · {} · {} · {ch}", self.format.label(), self.exr_compression_label(), self.exr_bit_depth.label()),
             OutputFormat::WebM if self.webm_codec == WebmVideoCodec::Av1 => {
                 format!("WebM (AV1 + Opus {} kbps) · {}", self.opus_bitrate_kbps, self.codec_summary())
             }
@@ -1455,39 +1668,165 @@ pub fn expand_template(template: &str, format: OutputFormat, v: &TemplateVars) -
 /// Replace the first run of `#` (optionally in brackets, `[####]`) with the zero-padded frame
 /// number. Paths without a run get `_NNNNN` before the extension.
 pub fn sequence_path(path: &str, frame: i64) -> String {
+    let (before, width, after) = sequence_parts(path);
+    format!("{before}{frame:0width$}{after}")
+}
+
+/// A sequence output path around its frame number: what comes before it, how many digits it is
+/// padded to and what comes after (`out/a_[#####].png` → `out/a_`, 5, `.png`).
+pub fn sequence_parts(path: &str) -> (String, usize, String) {
     if let Some(start) = path.find('#') {
         let len = path[start..].chars().take_while(|c| *c == '#').count();
         let (mut a, mut b) = (start, start + len);
-        if a > 0 && path.as_bytes()[a - 1] == b'[' && path.as_bytes().get(b) == Some(&b']') {
+        if a > 0 && path.as_bytes().get(a - 1) == Some(&b'[') && path.as_bytes().get(b) == Some(&b']') {
             a -= 1;
             b += 1;
         }
-        return format!("{}{:0width$}{}", &path[..a], frame, &path[b..], width = len);
+        return (path[..a].to_string(), len, path[b..].to_string());
     }
     let p = std::path::Path::new(path);
     match p.extension() {
-        Some(ext) => format!("{}_{frame:05}.{}", p.with_extension("").to_string_lossy(), ext.to_string_lossy()),
-        None => format!("{path}_{frame:05}"),
+        Some(ext) => (format!("{}_", p.with_extension("").to_string_lossy()), 5, format!(".{}", ext.to_string_lossy())),
+        None => (format!("{path}_"), 5, String::new()),
     }
+}
+
+/// The frame number `candidate` is the file of, when `path` (a sequence output path) writes it:
+/// the inverse of [`sequence_path`].
+pub fn sequence_frame(path: &str, candidate: &str) -> Option<i64> {
+    let (before, width, after) = sequence_parts(path);
+    let digits = candidate.strip_prefix(before.as_str())?.strip_suffix(after.as_str())?;
+    let frame: i64 = digits.parse().ok()?;
+    (format!("{frame:0width$}") == digits).then_some(frame)
+}
+
+/// `template` with `_n` added to the name: before the frame-number run of a sequence, else before
+/// the extension (`[compName].[fileExtension]` → `[compName]_1.[fileExtension]`,
+/// `[compName]_[#####].[fileExtension]` → `[compName]_1_[#####].[fileExtension]`).
+pub fn numbered_template(template: &str, n: u32) -> String {
+    let at = match template.find('#') {
+        Some(hash) => {
+            // The run's `[`, then the separator that sets it off from the name.
+            let run = if template[..hash].ends_with('[') { hash - 1 } else { hash };
+            if template[..run].ends_with(['_', '-', '.', ' ']) { run - 1 } else { run }
+        }
+        None => {
+            let name = template.rfind(['/', '\\']).map_or(0, |i| i + 1);
+            template[name..].rfind('.').map_or(template.len(), |i| name + i)
+        }
+    };
+    format!("{}_{n}{}", &template[..at], &template[at..])
 }
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
+    let mut s: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
+    // At most a file name's worth (255 UTF-8 bytes, whole characters only): a template repeating
+    // a long name token must not expand to gigabytes. A cut name ends in a hash of the whole
+    // name so long names that share a prefix stay distinct.
+    if s.len() > 255 {
+        // shortcut: 64-bit FNV-1a, not collision-resistant against crafted names; use a real hash if names become untrusted keys.
+        let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let mut end = 255 - 17;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str(&format!("-{hash:016x}"));
+    }
+    // `.` and `..` would name the folder itself or its parent when the token is a path component.
+    if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crop_padding_stays_within_the_largest_output_frame() {
+        use super::*;
+        let crop = |top, left, bottom, right| Crop { enabled: true, top, left, bottom, right, ..Default::default() };
+        let m = |c: Crop| OutputModule { crop: c, ..Default::default() };
+        // Saved edges padding by billions of pixels: the frame stops at the cap.
+        assert_eq!(m(crop(i32::MIN, i32::MIN, i32::MIN, i32::MIN)).frame_size(100, 50, 1.0), (30_000, 30_000));
+        assert_eq!(m(crop(-20_000, 0, -20_000, -1)).frame_size(100, 50, 1.0), (101, 30_000));
+        // Ordinary crops and pads are unchanged.
+        assert_eq!(crop(1, -2, 3, 4).edges(100, 50, 1.0), (1, -2, 3, 4));
+        // A mixed pair beyond the side that still ends within the cap is kept as saved (50 px).
+        assert_eq!(crop(0, 150, 0, -100).edges(100, 50, 1.0), (0, 150, 0, -100));
+        assert_eq!(m(crop(0, 150, 0, -100)).frame_size(100, 50, 1.0), (50, 50));
+        assert_eq!(m(crop(10, 10, 10, 10)).frame_size(100, 50, 1.0), (80, 30));
+        assert_eq!(m(crop(i32::MAX, 0, 0, 0)).frame_size(100, 50, 1.0), (100, 1));
+    }
+
     use super::*;
+
+    #[test]
+    fn sanitize_limits_the_name_in_bytes() {
+        // 255 two-byte characters are cut to whole characters plus a 17-byte hash suffix.
+        let s = sanitize(&"é".repeat(255));
+        assert!(s.len() <= 255 && s.len() > 235, "{}", s.len());
+        assert!(s.starts_with("éé") && s.is_char_boundary(s.len() - 17));
+        // Names that share their first 255 bytes stay distinct, and a name that fits is untouched.
+        let (a, b) = (sanitize(&format!("{}A", "界".repeat(85))), sanitize(&format!("{}B", "界".repeat(85))));
+        assert_ne!(a, b);
+        assert!(a.len() <= 255 && b.len() <= 255);
+        assert_eq!(sanitize(&"n".repeat(255)), "n".repeat(255));
+        assert_eq!(sanitize(&"é".repeat(127)), "é".repeat(127));
+    }
 
     #[test]
     fn templates_and_sequences() {
         let v = TemplateVars { comp_name: "Main/Title", project_name: "P", width: 1920, height: 1080, frame_rate: 29.97, start_frame: 0, end_frame: 9 };
         assert_eq!(expand_template(DEFAULT_TEMPLATE, OutputFormat::H264, &v), "Main_Title.mp4");
+        // A dot-only name is not a parent-folder component; a long one is cut to a file name.
+        for name in ["..", "."] {
+            let v = TemplateVars { comp_name: name, ..v };
+            assert_eq!(expand_template("out/[compName]/x.[fileExtension]", OutputFormat::Gif, &v), format!("out/{}/x.gif", "_".repeat(name.len())));
+        }
+        let long = "n".repeat(100_000);
+        let v2 = TemplateVars { comp_name: &long, ..v };
+        assert_eq!(expand_template(&"[compName]".repeat(100), OutputFormat::Gif, &v2).len(), 255 * 100);
         assert_eq!(expand_template("[compName]_[width]x[height]@[frameRate].[fileExtension]", OutputFormat::Gif, &v), "Main_Title_1920x1080@29.97.gif");
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");
         assert_eq!(sequence_path("a.png", 3), "a_00003.png");
+    }
+
+    /// `sequence_frame` reads back what `sequence_path` writes, and nothing else.
+    #[test]
+    fn sequence_frames_read_back() {
+        for path in ["out/a_[#####].png", "a###.tif", "a.png", "/x/[compName]/shot_[##].exr", "noext", "dir.v2/clip"] {
+            for frame in [0, 7, 42, 99_999, 123_456, -3] {
+                assert_eq!(sequence_frame(path, &sequence_path(path, frame)), Some(frame), "{path} {frame}");
+            }
+        }
+        let (before, width, after) = sequence_parts("out/a_[#####].png");
+        assert_eq!((before.as_str(), width, after.as_str()), ("out/a_", 5, ".png"));
+        let (before, width, after) = sequence_parts("a.png");
+        assert_eq!((before.as_str(), width, after.as_str()), ("a_", 5, ".png"));
+        // Other numbers, other widths, other names are not frames of the sequence.
+        assert_eq!(sequence_frame("a_[#####].png", "a_0042.png"), None, "padded to four");
+        assert_eq!(sequence_frame("a_[####].png", "a_+042.png"), None, "a sign is not padding");
+        assert_eq!(sequence_frame("a_[#####].png", "a_00042.jpg"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "b_00042.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_00x42.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_99999999999999999999.png"), None, "too big for a frame number");
+    }
+
+    #[test]
+    fn numbered_templates() {
+        assert_eq!(numbered_template(DEFAULT_TEMPLATE, 1), "[compName]_1.[fileExtension]");
+        assert_eq!(numbered_template(DEFAULT_SEQUENCE_TEMPLATE, 2), "[compName]_2_[#####].[fileExtension]");
+        assert_eq!(numbered_template("[compName]_frame.[fileExtension]", 3), "[compName]_frame_3.[fileExtension]");
+        assert_eq!(numbered_template("out/[compName]###.png", 1), "out/[compName]_1###.png");
+        assert_eq!(numbered_template("my.dir/clip", 4), "my.dir/clip_4", "a dot in a folder is not an extension");
+        assert_eq!(numbered_template("clip.v2.mov", 1), "clip.v2_1.mov");
+        assert_eq!(numbered_template("", 1), "_1");
+        assert_eq!(numbered_template("#", 1), "_1#");
+        assert_eq!(numbered_template("[#]", 1), "_1[#]");
+        // A numbered default is still a default: it expands to the numbered name.
+        let v = TemplateVars { comp_name: "footage", project_name: "P", width: 64, height: 36, frame_rate: 30.0, start_frame: 0, end_frame: 29 };
+        assert_eq!(expand_template(&numbered_template(DEFAULT_TEMPLATE, 1), OutputFormat::H264, &v), "footage_1.mp4");
     }
 
     #[test]
@@ -1595,6 +1934,22 @@ mod tests {
         assert_eq!(p.sample(&c, 3), FrameSample::Progressive(Tick::from_seconds_f64(0.12)));
     }
 
+    /// A saved Frame Rate override outside the supported rates is clamped, so a short comp cannot
+    /// ask for billions of output frames.
+    #[test]
+    fn frame_rate_override_is_held_to_the_supported_rates() {
+        let c = Comp::new(64, 48, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let s = |r| RenderSettings { frame_rate: Some(r), time_span: TimeSpan::LengthOfComp, ..Default::default() };
+        let huge = s(FrameRate::new(1_000_000_000_000, 1));
+        assert_eq!(huge.rate(&c).as_f64(), crate::limits::MAX_FPS);
+        assert!(huge.frame_count(&c) <= 2001, "{}", huge.frame_count(&c));
+        assert_eq!(s(FrameRate::new(0, 1)).rate(&c), c.frame_rate);
+        assert_eq!(s(FrameRate::new(60, 1)).rate(&c), FrameRate::new(60, 1));
+        let shown = |r| s(r).describe(Some(&c)).into_iter().find(|l| l.0 == "Frame Rate").map(|l| l.1).unwrap_or_default();
+        assert!(shown(FrameRate::new(1_000_000_000_000, 1)).contains("renders at 1000.000"), "{}", shown(FrameRate::new(1_000_000_000_000, 1)));
+        assert_eq!(shown(FrameRate::new(60, 1)), "60.000 fps");
+    }
+
     #[test]
     fn crop_and_resize_sizes() {
         let c = Comp::new(1920, 1080, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
@@ -1649,8 +2004,8 @@ mod tests {
 
     #[test]
     fn hostile_roi_cannot_overflow_crop_math() {
-        // `-1e12` saturates to `i32::MIN` on conversion: `w as i32 - l` must saturate,
-        // not overflow, and still yield a usable (degenerate) frame size.
+        // `-1e12` is clamped into the frame on conversion: it must not overflow and must still
+        // yield a usable (degenerate) frame size.
         let c = Comp::new(1920, 1080, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
         let rs = RenderSettings::default();
         let mut m = OutputModule::for_format(OutputFormat::PngSequence);
@@ -1661,6 +2016,66 @@ mod tests {
         m.crop = Crop { enabled: true, use_roi: true, roi: Some([100.0, 50.0, 800.0, 400.0]), ..Default::default() };
         let half = RenderSettings { resolution: 0.5, ..Default::default() };
         assert_eq!(m.output_size(&c, &half), (400, 200));
+    }
+
+    #[test]
+    fn output_size_never_exceeds_the_comp_limit() {
+        // The effective scale is clamped so neither side exceeds the limit (exporter
+        // `w * h * 4` would overflow at 120 000 px sides); the pipeline renders at the
+        // same scale, so it never requests a frame larger than this reports.
+        let rs = RenderSettings { resolution: 4.0, ..Default::default() };
+        let m = OutputModule::for_format(OutputFormat::PngSequence);
+        let square = Comp::new(30_000, 30_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(rs.effective_scale(&square), 1.0);
+        assert_eq!(rs.output_size(&square), (30_000, 30_000));
+        assert_eq!(m.output_size(&square, &rs), (30_000, 30_000));
+        // Wide comps keep their aspect ratio instead of clamping each side on its own.
+        let wide = Comp::new(30_000, 15_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(rs.effective_scale(&wide), 1.0);
+        assert_eq!(rs.output_size(&wide), (30_000, 15_000));
+        assert_eq!(m.output_size(&wide, &rs), (30_000, 15_000));
+        // A mid-size comp renders at the largest scale that still fits.
+        let mid = Comp::new(20_000, 10_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(mid.width as f64 * rs.effective_scale(&mid), 30_000.0);
+        assert_eq!(rs.output_size(&mid), (30_000, 15_000));
+    }
+
+    #[test]
+    fn valid_wide_roi_endpoints_are_preserved() {
+        // A supported 30 000 x 100 frame at scale 1: ROI [10000, 0, 20000, 100] spans x 10 000..30 000
+        // and must give 20 000 x 100 (the absolute right edge 30 000 exceeds the old +/-20 000 clamp).
+        let c = Comp::new(30_000, 100, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        let rs = RenderSettings::default();
+        let mut m = OutputModule::for_format(OutputFormat::PngSequence);
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([10_000.0, 0.0, 20_000.0, 100.0]), ..Default::default() };
+        assert_eq!(m.output_size(&c, &rs), (20_000, 100));
+        assert_eq!(m.crop.edges(30_000, 100, 1.0), (0, 10_000, 0, 0));
+        // Scale 4.0 pushes a valid edge to 120 000 px (30 000 x 4); the left edge 40 000 and the
+        // right edge 120 000 are both beyond 20 000 and must survive.
+        assert_eq!(m.crop.edges(120_000, 400, 4.0), (0, 40_000, 0, 0));
+        assert_eq!(m.frame_size(120_000, 400, 4.0), (80_000, 400));
+        // Hostile quads stay inside the frame: never empty, never larger than the frame, so the
+        // export can't be asked for an unbounded crop (an ROI reaching far outside the comp
+        // used to pad the frame instead).
+        let (fw, fh) = (1920, 1080);
+        let hostile = [
+            [1e300, 1e300, 1e300, 1e300],
+            [-1e300, -1e300, 1e300, 1e300],
+            [-1e6, -1e6, 2e6 + 1920.0, 2e6 + 1080.0],
+            [-1e12, -1e12, -1e12, -1e12],
+            [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN],
+            [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY],
+        ];
+        for roi in hostile {
+            m.crop.roi = Some(roi);
+            let (t, l, b, r) = m.crop.edges(fw, fh, 1.0);
+            assert!([t, l, b, r].iter().all(|e| *e >= 0), "{roi:?}: an edge pads the frame: {:?}", (t, l, b, r));
+            let (w, h) = m.frame_size(fw, fh, 1.0);
+            assert!((1..=fw).contains(&w) && (1..=fh).contains(&h), "{roi:?}: {w}x{h} is outside 1x1..={fw}x{fh}");
+        }
+        // An ROI covering more than the frame is the whole frame.
+        m.crop.roi = Some([-1e6, -1e6, 2e6 + 1920.0, 2e6 + 1080.0]);
+        assert_eq!(m.frame_size(fw, fh, 1.0), (fw, fh));
     }
 
     #[test]
@@ -1678,6 +2093,28 @@ mod tests {
         m.channels = Channels::Rgba;
         m.set_format(f);
         assert_eq!((m.output.as_str(), m.channels), ("/out/Comp 1.mov", Channels::Rgba));
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap().format, f);
+    }
+
+    #[test]
+    fn targa_sequence_format() {
+        let f = OutputFormat::from_name("tga").unwrap();
+        assert_eq!(f, OutputFormat::TargaSequence);
+        assert_eq!(OutputFormat::from_name(&format!("{f:?}")), Some(f));
+        assert_eq!(OutputFormat::from_name("Targa"), Some(f));
+        assert_eq!(OutputFormat::from_name("Targa Sequence"), Some(f));
+        assert_eq!(OutputFormat::from_path("/out/shot_00001.TGA"), Some(f));
+        assert!(OutputFormat::ALL.contains(&f));
+        assert!(f.is_sequence() && f.supports_alpha() && !f.supports_audio() && !f.is_movie());
+        assert_eq!((f.label(), f.extension()), ("Targa Sequence", "tga"));
+        assert_eq!(f.coded_size(3, 5), (3, 5));
+        // A movie name becomes a numbered sequence; RGB + Alpha survives the switch.
+        let mut m = OutputModule::for_format(OutputFormat::ProRes);
+        m.output = "/out/Comp 1.mov".into();
+        m.channels = Channels::Rgba;
+        m.set_format(f);
+        assert_eq!((m.output.as_str(), m.channels), ("/out/Comp 1_[#####].tga", Channels::Rgba));
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap().format, f);
     }
@@ -1718,5 +2155,46 @@ mod tests {
         // Older projects (no codec fields) load with the defaults.
         let old: OutputModule = serde_json::from_str(r#"{"format":"H264","bitrate_kbps":5000}"#).unwrap();
         assert_eq!((old.codec, old.webm_codec, old.opus_bitrate_kbps), (VideoCodecOptions::default(), WebmVideoCodec::Vp9, 192));
+    }
+
+    /// OpenEXR compression and bit depth (#2911): names parse, lossy methods are marked for the
+    /// depth they lose data at, and modules saved before the settings existed load as ZIP, 32-bit
+    /// float (what those projects rendered).
+    #[test]
+    fn exr_compression_and_bit_depth() {
+        for c in ExrCompression::ALL {
+            assert_eq!(ExrCompression::from_name(c.name()), Some(c));
+            assert_eq!(ExrCompression::from_name(&c.name().to_ascii_uppercase()), Some(c));
+        }
+        assert_eq!(ExrCompression::from_name("uncompressed"), Some(ExrCompression::None));
+        assert_eq!(ExrCompression::from_name("zip16"), Some(ExrCompression::Zip));
+        assert_eq!(ExrCompression::from_name("ZIP1"), Some(ExrCompression::Zips));
+        assert_eq!(ExrCompression::from_name("Zip (1 scanline)"), Some(ExrCompression::Zips));
+        assert_eq!(ExrCompression::from_name("Zip (16 scanlines)"), Some(ExrCompression::Zip));
+        assert_eq!(ExrCompression::from_name("htj2k"), None);
+        assert_eq!(ExrBitDepth::from_name("16"), Some(ExrBitDepth::Half));
+        assert_eq!(ExrBitDepth::from_name("Half"), Some(ExrBitDepth::Half));
+        assert_eq!(ExrBitDepth::from_name("f32"), Some(ExrBitDepth::Float));
+        assert_eq!(ExrBitDepth::from_name("8"), None);
+        let lossy = |d| ExrCompression::ALL.into_iter().filter(|c| c.is_lossy(d)).map(ExrCompression::name).collect::<Vec<_>>();
+        assert_eq!(lossy(ExrBitDepth::Float), ["pxr24", "dwaa", "dwab"]);
+        assert_eq!(lossy(ExrBitDepth::Half), ["b44", "b44a", "dwaa", "dwab"]);
+
+        let mut m = OutputModule::for_format(OutputFormat::ExrSequence);
+        assert_eq!((m.exr_compression, m.exr_bit_depth), (ExrCompression::Zip, ExrBitDepth::Float));
+        assert_eq!(m.summary(), "OpenEXR Sequence · ZIP (16 scan lines) · 32-bit Float · RGB");
+        m.exr_compression = ExrCompression::Dwaa;
+        m.exr_bit_depth = ExrBitDepth::Half;
+        assert!(m.describe().contains(&("Compression", "DWAA (lossy)".to_string())), "{:?}", m.describe());
+        assert!(m.describe().contains(&("Bit Depth", "16-bit Half Float".to_string())));
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap(), m);
+        m.exr_compression = ExrCompression::B44a;
+        m.exr_bit_depth = ExrBitDepth::Float;
+        assert_eq!(m.exr_compression_label(), "B44A (uncompressed at float)");
+        m.exr_bit_depth = ExrBitDepth::Half;
+        assert_eq!(m.exr_compression_label(), "B44A (lossy)");
+        let old: OutputModule = serde_json::from_str(r#"{"format":"ExrSequence","channels":"Rgba"}"#).unwrap();
+        assert_eq!((old.exr_compression, old.exr_bit_depth), (ExrCompression::Zip, ExrBitDepth::Float));
     }
 }

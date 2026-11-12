@@ -12,8 +12,10 @@
 //! Layer is chosen; the colouring runs here.
 
 use effectcraft_color::BlendMode;
-use effectcraft_effects::EffectCtx;
+use effectcraft_effects::{Buf, EffectCtx};
 use effectcraft_raster::Image;
+
+use rayon::prelude::*;
 
 use crate::context::{Enc, GpuImage, Params};
 use crate::effects::{GBuf, box_passes, gaussian_blur};
@@ -213,6 +215,8 @@ fn composite_mode(m: u32) -> BlendMode {
     }
 }
 
+/// The per-pixel effects of `fp2_point` (Cineon, HDR Compander and Highlight Compression, CC
+/// Overbrights, CC Composite, Color Link): their parameters packed for the kernel, or `None`.
 fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let pr = ctx.params;
     let mut p = Params::default();
@@ -236,11 +240,12 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         }
         "ec.utility.hdrcompression" => {
             let t = (pr.f("amount") / 100.0).clamp(0.0, 1.0) as f32;
-            if t <= 0.0 {
+            // A NaN Amount keeps the layer, as on the CPU.
+            if t <= 0.0 || !t.is_finite() {
                 return Some(b);
             }
             p.u[0][0] = 2;
-            p.f[0][0] = 1.0 - 0.5 * t;
+            p.f[0][0] = t;
         }
         "ec.utility.ccoverbrights" => {
             p.u[0] = [3, pr.e("channel"), 0, 0];
@@ -380,14 +385,24 @@ fn clamp_plane(e: &mut Enc, pl: &GpuImage, lo: f32, hi: f32) -> GpuImage {
 // ---------------------------------------------------------------- CC HexTile / CC Mr. Smoothie (stylize3)
 
 fn hextile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
-    let r = (ctx.params.f("radius") * b.scale).max(0.5);
-    let c = b.to_px(ctx.params.v2("center"));
-    let (sn, cs) = ctx.params.f("rotate").to_radians().sin_cos();
-    let mut p = Params::default();
-    p.u[0][0] = ctx.params.e("render");
-    p.f[0] = [c.0 as f32, c.1 as f32, r as f32, (ctx.params.f("smearing") / 100.0).clamp(0.0, 1.0) as f32];
-    p.f[1] = [sn as f32, cs as f32, 0.0, 0.0];
-    run(e, "fp2_hextile", &p, b, None, None)
+    let count = (b.img.width as usize).checked_mul(b.img.height as usize)?;
+    if count.checked_mul(8)? > e.g.device.limits().max_storage_buffer_binding_size as usize {
+        return None;
+    }
+    let geometry = effectcraft_effects::HexTile::new(
+        ctx,
+        &Buf { img: Image { width: b.img.width, height: b.img.height, data: vec![] }, offset: b.offset, scale: b.scale },
+    );
+    let stride = (b.img.width as usize).checked_mul(2)?.max(2);
+    let mut coords = vec![0.0; count.checked_mul(2)?];
+    coords.par_chunks_mut(stride).enumerate().for_each(|(y, row)| {
+        for (x, xy) in row.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let (sx, sy) = geometry.source_at(x as u32, y as u32);
+            *xy = [sx as f32, sy as f32];
+        }
+    });
+    let data = e.data(&coords);
+    run(e, "fp2_hextile", &Params::default(), b, None, Some(&data))
 }
 
 fn smoothie(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {

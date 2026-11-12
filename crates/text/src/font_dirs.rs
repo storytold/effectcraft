@@ -150,7 +150,9 @@ impl Reader<'_> {
             let mut files: Vec<PathBuf> = rd
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".conf") && n.starts_with(|c: char| c.is_ascii_digit())))
+                .filter(|p| {
+                    p.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|n| n.ends_with(".conf") && n.starts_with(|c: char| c.is_ascii_digit()))
+                })
                 .collect();
             files.sort();
             for f in files {

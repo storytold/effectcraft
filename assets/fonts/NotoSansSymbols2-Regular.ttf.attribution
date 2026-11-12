@@ -1,0 +1,8 @@
+asset:        NotoSansSymbols2-Regular.ttf
+title:        Noto Sans Symbols 2 Regular (chrome symbols such as ✔ and ▣)
+author:       The Noto Project Authors
+source:       https://github.com/notofonts/symbols (Google Fonts commit 47d54ca1ebb14fd864695f1d39dc734f39017c33, file ofl/notosanssymbols2/NotoSansSymbols2-Regular.ttf)
+license:      OFL-1.1
+license-file: assets/fonts/OFL-NotoSansSymbols2.txt
+added:        2026-10-24 by @skylartaylor
+notes:        Unmodified font file, sha256 7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21. Embedded with include_bytes! in crates/ui-egui/src/theme.rs as the last UI fallback so every family can draw the chrome symbols (U+2714 ✔, U+25A3 ▣) that Inter, Inter Medium, Inter SemiBold and JetBrains Mono lack.

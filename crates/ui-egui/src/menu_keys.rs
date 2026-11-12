@@ -10,7 +10,7 @@
 //! shortcuts and the panels don't see them (Space must not start a preview).
 
 use egui::containers::menu::{MenuState, SubMenu, find_menu_root};
-use egui::{Context, Event, Id, Key, Modifiers, Popup, Pos2, Response, Ui};
+use egui::{Context, Event, Id, Key, Modifiers, Popup, Pos2, Rect, Response, Ui};
 
 /// An entry of an open menu as drawn this frame.
 #[derive(Clone, Copy)]
@@ -39,6 +39,12 @@ pub struct Nav {
     tops: Vec<(Id, Id)>,
     /// Open menus by depth: the top-level menu, then each open submenu.
     levels: Vec<Level>,
+    /// The titles and open menus drawn this frame: a press outside them is an outside press,
+    /// which closes the menu (native behaviour; the press itself still reaches what's under it).
+    rects: Vec<Rect>,
+    /// A title press opened (or kept) the menu this frame: releasing the button over an entry
+    /// chooses it (After Effects' press-and-browse).
+    browsing: bool,
 }
 
 /// What to highlight once a menu opened from the keyboard has been drawn: the first entry of the
@@ -54,23 +60,63 @@ struct KeyOpened {
     pointer: Option<Pos2>,
 }
 
+/// The temp-data id of the [`FirstEntry`] depth to highlight after a keyboard-opened menu is
+/// first drawn.
 fn pending_id() -> Id {
-    Id::new("menu-keys-first")
+    Id::unique("menu-keys-first")
 }
+
+/// The temp-data id of the [`KeyOpened`] record: submenus opened from the keyboard and the
+/// pointer position they were opened at.
 fn opened_id() -> Id {
-    Id::new("menu-keys-opened")
+    Id::unique("menu-keys-opened")
 }
+
+/// The temp-data id of the flag saying the menu bar currently holds the keyboard.
 fn active_id() -> Id {
-    Id::new("menu-keys-active")
+    Id::unique("menu-keys-active")
 }
+
+/// The temp-data id of the `(armed, held)` Alt-key state used to detect an Alt tap.
 fn alt_id() -> Id {
-    Id::new("menu-keys-alt")
+    Id::unique("menu-keys-alt")
 }
 
 impl Nav {
     /// A top-level menu button of the bar.
     pub fn top(&mut self, button: &Response) {
         self.tops.push((button.id, Popup::default_response_id(button)));
+    }
+
+    /// The rect `rect` (a menu title or an open menu) holds, so a press there doesn't close.
+    pub fn cover(&mut self, rect: Rect) {
+        self.rects.push(rect);
+    }
+
+    /// Whether `pos` is inside a title or menu drawn this frame.
+    pub fn covers(&self, pos: Pos2) -> bool {
+        self.rects.iter().any(|r| r.contains(pos))
+    }
+
+    /// A title press is in progress (its button still held): see [`Nav::browsing`].
+    pub fn set_browsing(&mut self) {
+        self.browsing = true;
+    }
+
+    /// Whether the menu bar is mid press-and-browse (a title was pressed this pointer-down and
+    /// hasn't been released yet): releasing over an entry then chooses it.
+    pub fn browsing(&self) -> bool {
+        self.browsing
+    }
+
+    /// The popup of the open top-level menu (only one can be open), if any.
+    pub fn open_popup(&self, ctx: &Context) -> Option<Id> {
+        self.tops.iter().find(|(_, p)| Popup::is_id_open(ctx, *p)).map(|(_, p)| *p)
+    }
+
+    /// The position in the bar of the open top-level menu, if any.
+    pub fn open_index(&self, ctx: &Context) -> Option<usize> {
+        self.tops.iter().position(|(_, p)| Popup::is_id_open(ctx, *p))
     }
 
     /// An entry drawn at `depth` (0: a top-level menu) in the menu `ui`. Hovering an entry moves
@@ -81,7 +127,7 @@ impl Nav {
         }
         let Some(level) = self.levels.get_mut(depth) else { return };
         if level.menu.is_none() {
-            level.menu = Some(find_menu_root(ui).id);
+            level.menu = Some(find_menu_root(ui).scope_id);
             level.sizing = ui.is_sizing_pass();
         }
         level.rows.push(Row { id: r.id, enabled: r.enabled(), submenu });

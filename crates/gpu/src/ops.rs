@@ -32,37 +32,23 @@ pub fn half(e: &mut Enc, src: &GpuImage) -> GpuImage {
     out
 }
 
-/// `raster::composite_warp` (and, with `accumulate = Some(weight)`, `accumulate_warp`): draw
-/// `src` transformed by `m` (src pixels → dst pixels) onto `dst`.
-pub fn warp(
-    e: &mut Enc,
-    dst: &GpuImage,
-    src: &GpuImage,
-    m: &Mat3,
-    sampling: Sampling,
-    mode: BlendMode,
-    opacity: f32,
-    seed: u32,
-    accumulate: Option<f32>,
-) -> GpuImage {
-    warp_q(e, dst, src, m, sampling, mode, opacity, seed, accumulate, None)
+/// Sampling and blending policy for a transformed GPU image.
+pub struct WarpOptions {
+    pub sampling: Sampling,
+    pub mode: BlendMode,
+    pub opacity: f32,
+    pub seed: u32,
+}
+
+/// Draw `src` transformed by `m` onto `dst`, or accumulate it with a sample weight.
+pub fn warp(e: &mut Enc, dst: &GpuImage, src: &GpuImage, m: &Mat3, opts: WarpOptions, accumulate: Option<f32>) -> GpuImage {
+    warp_q(e, dst, src, m, opts, accumulate, None)
 }
 
 /// [`warp`], clamping and quantising the result to `levels` (8/16 bpc: the comp after a layer,
 /// in the same pass).
-#[allow(clippy::too_many_arguments)]
-pub fn warp_q(
-    e: &mut Enc,
-    dst: &GpuImage,
-    src: &GpuImage,
-    m: &Mat3,
-    sampling: Sampling,
-    mode: BlendMode,
-    opacity: f32,
-    seed: u32,
-    accumulate: Option<f32>,
-    levels: Option<f32>,
-) -> GpuImage {
+pub fn warp_q(e: &mut Enc, dst: &GpuImage, src: &GpuImage, m: &Mat3, opts: WarpOptions, accumulate: Option<f32>, levels: Option<f32>) -> GpuImage {
+    let WarpOptions { sampling, mode, opacity, seed } = opts;
     if src.width == 0 || src.height == 0 || opacity <= 0.0 {
         return dst.clone();
     }

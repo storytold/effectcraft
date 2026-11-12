@@ -1,5 +1,5 @@
-//! Stylize effects, batch 3: CC Block Load, CC Burn Film, CC Glass, CC HexTile, CC Mr. Smoothie
-//! and CC Plastic.
+//! Stylize effects, batch 3: Block Reveal, Film Burn, Glass Relief, Hexagonal Tiles, Palette Map
+//! and Plastic Shading.
 //!
 //! Written from the public descriptions of what these effects do (progressive block loading,
 //! burning film, bump-mapped glass / plastic surfaces lit by an effect light, hexagonal tiling,
@@ -27,7 +27,7 @@ fn pt(x: f64, y: f64) -> Value {
     Value::Vec2([x, y])
 }
 
-// ------------------------------------------------------------------ CC Block Load
+// ------------------------------------------------------------------ Block Reveal
 
 /// Mean colour of every `s`×`s` block (grid of `ceil(w/s)`×`ceil(h/s)`).
 fn block_means(img: &Image, s: usize) -> (usize, usize, Vec<Px>) {
@@ -135,7 +135,7 @@ fn block_load(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Burn Film
+// ------------------------------------------------------------------ Film Burn
 
 fn burn_film(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let burn = (ctx.params.f("burn") / 100.0).clamp(0.0, 1.0) as f32;
@@ -180,7 +180,7 @@ fn burn_film(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 const BUMP_PROPS: [&str; 6] = ["Red", "Green", "Blue", "Alpha", "Luminance", "Lightness"];
 
-/// The bump-map layer parameter: CC Glass's Bump Map, CC Plastic's Bump Layer.
+/// The bump-map layer parameter: Glass Relief's Bump Map, Plastic Shading's Bump Layer.
 pub fn bump_layer_id(ctx: &EffectCtx) -> &'static str {
     if ctx.params.get("bumpLayer").is_some() { "bumpLayer" } else { "bumpMap" }
 }
@@ -208,7 +208,7 @@ fn height_field(ctx: &EffectCtx, b: &Buf) -> Plane {
     pl
 }
 
-/// The effect light and surface of CC Glass / CC Plastic (shared with the GPU compositor).
+/// The effect light and surface of Glass Relief / Plastic Shading (shared with the GPU compositor).
 pub struct BumpLight {
     pub intensity: f32,
     pub color: [f32; 3],
@@ -342,7 +342,7 @@ fn plastic(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC HexTile
+// ------------------------------------------------------------------ Hexagonal Tiles
 
 /// Axial hex cell (pointy-top) containing (x, y) for circumradius `r`; returns the cell centre
 /// and integer cell coordinates.
@@ -351,7 +351,7 @@ fn hex_cell(x: f64, y: f64, r: f64) -> ((f64, f64), (i64, i64)) {
     let rr = (2.0 / 3.0 * y) / r;
     // Cube rounding.
     let (cx, cz) = (q, rr);
-    let cy = -cx - cz;
+    let cy = (-3f64.sqrt() / 3.0 * x - y / 3.0) / r;
     let (mut rx, ry, mut rz) = (cx.round(), cy.round(), cz.round());
     let (dx, dy, dz) = ((rx - cx).abs(), (ry - cy).abs(), (rz - cz).abs());
     if dx > dy && dx > dz {
@@ -364,39 +364,61 @@ fn hex_cell(x: f64, y: f64, r: f64) -> ((f64, f64), (i64, i64)) {
     ((px, py), (rx as i64, rz as i64))
 }
 
+/// Stable f64 hex-cell selection and source geometry for CPU and GPU renders.
+pub struct HexTile {
+    r: f64,
+    c: (f64, f64),
+    sn: f64,
+    cs: f64,
+    smear: f64,
+    mode: u32,
+}
+impl HexTile {
+    /// No image pixels are read; only buffer geometry and parameters are used.
+    pub fn new(ctx: &EffectCtx, b: &Buf) -> Self {
+        let r = (ctx.params.f("radius") * b.scale).max(0.5);
+        let c = b.to_px(ctx.params.v2("center"));
+        let rot = ctx.params.f("rotate").to_radians();
+        let (sn, cs) = rot.sin_cos();
+        let smear = (ctx.params.f("smearing") / 100.0).clamp(0.0, 1.0);
+        let mode = ctx.params.e("render");
+        Self { r, c, sn, cs, smear, mode }
+    }
+    /// Bilinear source position at a buffer pixel centre.
+    pub fn source_at(&self, x: u32, y: u32) -> (f64, f64) {
+        let Self { r, c: (cx, cy), sn, cs, smear, mode } = *self;
+        let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+        // Into the rotated tiling frame.
+        let (u, v) = (dx * cs + dy * sn, -dx * sn + dy * cs);
+        let ((hx, hy), (qi, ri)) = hex_cell(u, v, r);
+        let (mut lu, lv) = (u - hx, v - hy);
+        let odd = (qi + ri).rem_euclid(2) == 1;
+        match mode {
+            1 if odd => lu = -lu,
+            2 if odd => lu = -lu,
+            _ => {}
+        }
+        let lv = if mode == 2 && odd { -lv } else { lv };
+        // Every tile shows the hexagon around the centre point.
+        let (ox, oy) = (lu * cs - lv * sn, lu * sn + lv * cs);
+        let (tx, ty) = (cx + ox, cy + oy);
+        let (sx, sy) = (tx + (x as f64 + 0.5 - tx) * smear, ty + (y as f64 + 0.5 - ty) * smear);
+        (sx, sy)
+    }
+}
 fn hextile(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let r = (ctx.params.f("radius") * b.scale).max(0.5);
-    let (cx, cy) = b.to_px(ctx.params.v2("center"));
-    let rot = ctx.params.f("rotate").to_radians();
-    let (sn, cs) = rot.sin_cos();
-    let smear = (ctx.params.f("smearing") / 100.0).clamp(0.0, 1.0);
-    let mode = ctx.params.e("render");
+    let geometry = HexTile::new(ctx, &b);
     let src = b.img.clone();
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
-            let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
-            // Into the rotated tiling frame.
-            let (u, v) = (dx * cs + dy * sn, -dx * sn + dy * cs);
-            let ((hx, hy), (qi, ri)) = hex_cell(u, v, r);
-            let (mut lu, lv) = (u - hx, v - hy);
-            let odd = (qi + ri).rem_euclid(2) == 1;
-            match mode {
-                1 if odd => lu = -lu,
-                2 if odd => lu = -lu,
-                _ => {}
-            }
-            let lv = if mode == 2 && odd { -lv } else { lv };
-            // Every tile shows the hexagon around the centre point.
-            let (ox, oy) = (lu * cs - lv * sn, lu * sn + lv * cs);
-            let (tx, ty) = (cx + ox, cy + oy);
-            let (sx, sy) = (tx + (x as f64 + 0.5 - tx) * smear, ty + (y as f64 + 0.5 - ty) * smear);
+            let (sx, sy) = geometry.source_at(x as u32, y as u32);
             *px = src.sample_bilinear_clamped(sx, sy);
         }
     });
     b
 }
 
-// ------------------------------------------------------------------ CC Mr. Smoothie
+// ------------------------------------------------------------------ Palette Map
 
 const SMOOTHIE_PROPS: [&str; 8] = ["Red", "Green", "Blue", "Alpha", "Luminance", "Lightness", "Hue", "Saturation"];
 
@@ -496,7 +518,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.stylize.ccblockload",
-            "CC Block Load",
+            "Block Reveal",
             vec![
                 p("completion", "Completion", num(0.0), pct()),
                 p("scanlines", "Scanlines", Value::Bool(true), ParamUi::Checkbox),
@@ -508,7 +530,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccburnfilm",
-            "CC Burn Film",
+            "Film Burn",
             vec![
                 p("burn", "Burn", num(0.0), pct()),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -516,10 +538,10 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             burn_film,
         ),
-        spec("ec.stylize.ccglass", "CC Glass", glass_p, glass),
+        spec("ec.stylize.ccglass", "Glass Relief", glass_p, glass),
         spec(
             "ec.stylize.cchextile",
-            "CC HexTile",
+            "Hexagonal Tiles",
             vec![
                 p("render", "Render", Value::Enum(0), popup(&["Normal", "Mirrored", "Rotated"])),
                 p("radius", "Radius", num(50.0), slider(1.0, 4000.0, 2.0, 500.0, 1)),
@@ -531,7 +553,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccmrsmoothie",
-            "CC Mr. Smoothie",
+            "Palette Map",
             vec![
                 p("flowLayer", "Flow Layer", Value::Layer(None), ParamUi::Layer),
                 p("property", "Property", Value::Enum(4), popup(&SMOOTHIE_PROPS)),
@@ -543,7 +565,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             smoothie,
         ),
-        spec("ec.stylize.ccplastic", "CC Plastic", plastic_p, plastic),
+        spec("ec.stylize.ccplastic", "Plastic Shading", plastic_p, plastic),
     ]
 }
 

@@ -72,6 +72,9 @@ fn property_group_reaches_the_layer() {
     assert_close!(f.num("thisProperty.propertyGroup(2).name == 'A' ? 1 : 0", 0.0), 1.0);
     assert_close!(f.num("thisProperty.propertyGroup(2).index", 0.0), 1.0);
     assert_close!(f.num("thisProperty.propertyGroup(1).propertyGroup(1).name == 'A' ? 1 : 0", 0.0), 1.0);
+    // The layer it reaches is the same object as `thisLayer`.
+    assert_close!(f.num("thisLayer('transform').propertyGroup(1) === thisLayer ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("thisProperty.propertyGroup(2) === thisLayer ? 1 : 0", 0.0), 1.0);
     let s = staggered();
     assert_close!(s.shape_num(SCALE_2, "thisProperty.propertyGroup(4).name == 'Shape' ? 1 : 0"), 1.0);
 }

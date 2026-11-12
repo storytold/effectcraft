@@ -254,6 +254,42 @@ impl Default for LkOpts {
     }
 }
 
+/// Bilinear taps shared by every pixel of a `(2r+1)²` window centred at `c`: the fractional
+/// offset is the same for the whole window, and the column/row indices are clamped like
+/// [`Plane::at`] (edges repeated). Row indices are pre-multiplied by the plane width.
+#[derive(Default)]
+struct Taps {
+    xs: Vec<[usize; 2]>,
+    ys: Vec<[usize; 2]>,
+    t: [f32; 2],
+}
+
+impl Taps {
+    fn set(&mut self, p: &Plane, c: [f64; 2], r: i32) {
+        debug_assert_eq!(p.ch, 1);
+        let (fx, fy) = (c[0] - 0.5, c[1] - 0.5);
+        let (x0, y0) = (fx.floor(), fy.floor());
+        self.t = [(fx - x0) as f32, (fy - y0) as f32];
+        const FAR: f64 = (1u64 << 40) as f64;
+        let (xi, yi) = (x0.clamp(-FAR, FAR) as isize, y0.clamp(-FAR, FAR) as isize);
+        let (wm, hm) = (p.w as isize - 1, p.h as isize - 1);
+        let r = r as isize;
+        self.xs.clear();
+        self.ys.clear();
+        self.xs.extend((-r..=r).map(|d| [(xi + d).clamp(0, wm) as usize, (xi + d + 1).clamp(0, wm) as usize]));
+        self.ys.extend((-r..=r).map(|d| [(yi + d).clamp(0, hm) as usize * p.w, (yi + d + 1).clamp(0, hm) as usize * p.w]));
+    }
+}
+
+/// [`Plane::sample`]'s bilinear form on pre-resolved taps.
+#[inline(always)]
+fn bilerp(d: &[f32], x: [usize; 2], y: [usize; 2], t: [f32; 2]) -> f32 {
+    let (a, b, c, e) = (d[y[0] + x[0]], d[y[0] + x[1]], d[y[1] + x[0]], d[y[1] + x[1]]);
+    let top = a + (b - a) * t[0];
+    let bot = c + (e - c) * t[0];
+    top + (bot - top) * t[1]
+}
+
 fn lk_point(a: &GrayPyramid, b: &GrayPyramid, p: [f64; 2], guess: [f64; 2], o: &LkOpts) -> Option<[f64; 2]> {
     let top = a.levels.len().min(b.levels.len()).checked_sub(1)?;
     let r = o.radius;
@@ -263,7 +299,7 @@ fn lk_point(a: &GrayPyramid, b: &GrayPyramid, p: [f64; 2], guess: [f64; 2], o: &
     let mut win = vec![0.0f32; ((2 * r + 1) * (2 * r + 1)) as usize];
     let mut wgx = win.clone();
     let mut wgy = win.clone();
-    let mut v1 = [0.0f32];
+    let mut taps = Taps::default();
     for l in (0..=top).rev() {
         let s = (1u32 << l) as f64;
         let (ia, ib) = (&a.levels[l], &b.levels[l]);
@@ -274,15 +310,12 @@ fn lk_point(a: &GrayPyramid, b: &GrayPyramid, p: [f64; 2], guess: [f64; 2], o: &
         }
         let (mut gxx, mut gxy, mut gyy) = (0.0f64, 0.0f64, 0.0f64);
         let mut k = 0;
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let (x, y) = (c[0] + dx as f64, c[1] + dy as f64);
-                ia.sample(x, y, &mut v1);
-                win[k] = v1[0];
-                gx.sample(x, y, &mut v1);
-                wgx[k] = v1[0];
-                gy.sample(x, y, &mut v1);
-                wgy[k] = v1[0];
+        taps.set(ia, c, r);
+        for &y in &taps.ys {
+            for &x in &taps.xs {
+                win[k] = bilerp(&ia.data, x, y, taps.t);
+                wgx[k] = bilerp(&gx.data, x, y, taps.t);
+                wgy[k] = bilerp(&gy.data, x, y, taps.t);
                 let (ix, iy) = (wgx[k] as f64, wgy[k] as f64);
                 gxx += ix * ix;
                 gxy += ix * iy;
@@ -300,10 +333,10 @@ fn lk_point(a: &GrayPyramid, b: &GrayPyramid, p: [f64; 2], guess: [f64; 2], o: &
         for _ in 0..o.iterations {
             let (mut bx, mut by) = (0.0f64, 0.0f64);
             let mut k = 0;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    ib.sample(c[0] + g[0] + v[0] + dx as f64, c[1] + g[1] + v[1] + dy as f64, &mut v1);
-                    let diff = (win[k] - v1[0]) as f64;
+            taps.set(ib, [c[0] + g[0] + v[0], c[1] + g[1] + v[1]], r);
+            for &y in &taps.ys {
+                for &x in &taps.xs {
+                    let diff = (win[k] - bilerp(&ib.data, x, y, taps.t)) as f64;
                     bx += diff * wgx[k] as f64;
                     by += diff * wgy[k] as f64;
                     k += 1;
@@ -397,6 +430,87 @@ mod tests {
         im
     }
 
+    /// The per-pixel `Plane::sample` implementation `lk_point` replaced, kept as the oracle.
+    fn lk_point_ref(a: &GrayPyramid, b: &GrayPyramid, p: [f64; 2], guess: [f64; 2], o: &LkOpts) -> Option<[f64; 2]> {
+        let top = a.levels.len().min(b.levels.len()).checked_sub(1)?;
+        let r = o.radius;
+        let n = ((2 * r + 1) * (2 * r + 1)) as f64;
+        let s0 = (1u32 << top) as f64;
+        let mut g = [guess[0] / s0, guess[1] / s0];
+        let mut win = vec![0.0f32; ((2 * r + 1) * (2 * r + 1)) as usize];
+        let mut wgx = win.clone();
+        let mut wgy = win.clone();
+        let mut v1 = [0.0f32];
+        for l in (0..=top).rev() {
+            let s = (1u32 << l) as f64;
+            let (ia, ib) = (&a.levels[l], &b.levels[l]);
+            let (gx, gy) = &a.grads[l];
+            let c = [p[0] / s, p[1] / s];
+            if c[0] < -1.0 || c[1] < -1.0 || c[0] > ia.w as f64 + 1.0 || c[1] > ia.h as f64 + 1.0 {
+                return None;
+            }
+            let (mut gxx, mut gxy, mut gyy) = (0.0f64, 0.0f64, 0.0f64);
+            let mut k = 0;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let (x, y) = (c[0] + dx as f64, c[1] + dy as f64);
+                    ia.sample(x, y, &mut v1);
+                    win[k] = v1[0];
+                    gx.sample(x, y, &mut v1);
+                    wgx[k] = v1[0];
+                    gy.sample(x, y, &mut v1);
+                    wgy[k] = v1[0];
+                    let (ix, iy) = (wgx[k] as f64, wgy[k] as f64);
+                    gxx += ix * ix;
+                    gxy += ix * iy;
+                    gyy += iy * iy;
+                    k += 1;
+                }
+            }
+            let det = gxx * gyy - gxy * gxy;
+            let tr = 0.5 * (gxx + gyy);
+            let mineig = (tr - (0.25 * (gxx - gyy).powi(2) + gxy * gxy).sqrt()) / n;
+            if mineig < o.min_eigen || det.abs() < 1e-18 {
+                return None;
+            }
+            let mut v = [0.0f64; 2];
+            for _ in 0..o.iterations {
+                let (mut bx, mut by) = (0.0f64, 0.0f64);
+                let mut k = 0;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        ib.sample(c[0] + g[0] + v[0] + dx as f64, c[1] + g[1] + v[1] + dy as f64, &mut v1);
+                        let diff = (win[k] - v1[0]) as f64;
+                        bx += diff * wgx[k] as f64;
+                        by += diff * wgy[k] as f64;
+                        k += 1;
+                    }
+                }
+                let nx = (gyy * bx - gxy * by) / det;
+                let ny = (gxx * by - gxy * bx) / det;
+                v[0] += nx;
+                v[1] += ny;
+                if !(v[0].is_finite() && v[1].is_finite()) {
+                    return None;
+                }
+                if nx * nx + ny * ny < o.epsilon * o.epsilon {
+                    break;
+                }
+            }
+            if l > 0 {
+                g = [2.0 * (g[0] + v[0]), 2.0 * (g[1] + v[1])];
+            } else {
+                g = [g[0] + v[0], g[1] + v[1]];
+            }
+        }
+        let q = [p[0] + g[0], p[1] + g[1]];
+        let l0 = &b.levels[0];
+        if q[0] < 0.0 || q[1] < 0.0 || q[0] > l0.w as f64 || q[1] > l0.h as f64 {
+            return None;
+        }
+        Some(q)
+    }
+
     #[test]
     fn klt_recovers_a_shift() {
         let a = GrayPyramid::from_image(&img(0.0, 0.0), [0.0; 2], 1, 3);
@@ -409,6 +523,35 @@ mod tests {
         let mut errs: Vec<f64> = good.iter().map(|d| ((d[0] - 6.3).powi(2) + (d[1] + 4.2).powi(2)).sqrt()).collect();
         errs.sort_by(f64::total_cmp);
         assert!(errs[errs.len() / 2] < 0.1, "median error {}", errs[errs.len() / 2]);
+    }
+
+    #[test]
+    fn window_taps_match_per_pixel_sampling_bit_for_bit() {
+        let a = GrayPyramid::from_image(&img(0.0, 0.0), [0.0; 2], 1, 3);
+        let b = GrayPyramid::from_image(&img(6.3, -4.2), [0.0; 2], 1, 3);
+        let mut pts = vec![];
+        for y in (-3..125).step_by(3) {
+            for x in (-3..165).step_by(3) {
+                pts.push([x as f64 + 0.37 * ((x * 7 + y) % 3) as f64, y as f64 + 0.5 * ((x + y * 5) % 2) as f64]);
+            }
+        }
+        pts.extend([[0.0, 0.0], [160.0, 120.0], [80.0, 60.0], [0.5, 0.5], [159.5, 119.5]]);
+        let (mut tracked, mut lost) = (0, 0);
+        for (i, p) in pts.iter().enumerate() {
+            for o in [LkOpts::default(), LkOpts { radius: 3, iterations: 5, ..Default::default() }] {
+                let g = [(i % 5) as f64 - 2.0, (i % 3) as f64 - 1.0];
+                let (new, old) = (lk_point(&a, &b, *p, g, &o), lk_point_ref(&a, &b, *p, g, &o));
+                match (new, old) {
+                    (Some(n), Some(o)) => {
+                        assert_eq!([n[0].to_bits(), n[1].to_bits()], [o[0].to_bits(), o[1].to_bits()], "{p:?}");
+                        tracked += 1;
+                    }
+                    (None, None) => lost += 1,
+                    (n, o) => panic!("{p:?}: {n:?} vs {o:?}"),
+                }
+            }
+        }
+        assert!(tracked > 500 && lost > 0, "{tracked} tracked, {lost} lost");
     }
 
     #[test]

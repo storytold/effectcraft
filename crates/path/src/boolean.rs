@@ -5,7 +5,7 @@
 //! MIT OR Apache-2.0), reworked to take and return kurbo paths directly.
 //!
 //! Inputs are closed implicitly (a filled open path is painted as if closed). The sweep splits
-//! curves at intersections and y-extrema; [`tidy_segments`] re-joins pieces that came from one
+//! curves at intersections and y-extrema; `tidy_segments` re-joins pieces that came from one
 //! input curve (exactly) or one smooth run (by least-squares refit), so results carry roughly as
 //! few vertices as the inputs. Output contours are simple and consistently oriented (holes wind
 //! opposite to their outer contour), so they fill the same under either fill rule.
@@ -26,23 +26,18 @@ pub(crate) fn inside(rule: FillRule, w: i32) -> bool {
     }
 }
 
-/// Winding numbers for an arbitrary number of input paths (tag = input index).
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Multi(Vec<i32>);
+/// Winding numbers for an arbitrary number of input paths (tag = input index), stored sparsely:
+/// the nonzero `(tag, winding)` pairs in tag order. A segment's winding names only its own path,
+/// so the topology's per-segment copies stay small however many paths take part (a dense
+/// vector up to each segment's tag would grow with the square of the path count).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Multi(Vec<(usize, i32)>);
 
 impl Multi {
     fn get(&self, i: usize) -> i32 {
-        self.0.get(i).copied().unwrap_or(0)
+        self.0.binary_search_by_key(&i, |e| e.0).map_or(0, |k| self.0[k].1)
     }
 }
-
-impl PartialEq for Multi {
-    fn eq(&self, other: &Self) -> bool {
-        let n = self.0.len().max(other.0.len());
-        (0..n).all(|i| self.get(i) == other.get(i))
-    }
-}
-impl Eq for Multi {}
 
 impl std::ops::Add for Multi {
     type Output = Multi;
@@ -54,26 +49,51 @@ impl std::ops::Add for Multi {
 
 impl std::ops::AddAssign for Multi {
     fn add_assign(&mut self, rhs: Self) {
-        if self.0.len() < rhs.0.len() {
-            self.0.resize(rhs.0.len(), 0);
+        if rhs.0.is_empty() {
+            return;
         }
-        for (a, b) in self.0.iter_mut().zip(rhs.0) {
-            *a += b;
+        // Merge the two tag-ordered lists, dropping windings that cancel to zero (so equal
+        // windings have equal representations).
+        let (a, b) = (std::mem::take(&mut self.0), rhs.0);
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() || j < b.len() {
+            let e = match (a.get(i), b.get(j)) {
+                (Some(&x), Some(&y)) if x.0 == y.0 => {
+                    i += 1;
+                    j += 1;
+                    (x.0, x.1 + y.1)
+                }
+                (Some(&x), Some(&y)) if x.0 < y.0 => {
+                    i += 1;
+                    x
+                }
+                (Some(&x), None) => {
+                    i += 1;
+                    x
+                }
+                (_, Some(&y)) => {
+                    j += 1;
+                    y
+                }
+                (None, None) => break,
+            };
+            if e.1 != 0 {
+                out.push(e);
+            }
         }
+        self.0 = out;
     }
 }
 
 impl WindingNumber for Multi {
     type Tag = usize;
     fn single(tag: usize, positive: bool) -> Self {
-        let mut v = vec![0; tag + 1];
-        v[tag] = if positive { 1 } else { -1 };
-        Multi(v)
+        Multi(vec![(tag, if positive { 1 } else { -1 })])
     }
     fn of_tag(&self, tag: usize) -> Self {
-        let mut v = vec![0; tag + 1];
-        v[tag] = self.get(tag);
-        Multi(v)
+        let w = self.get(tag);
+        Multi(if w == 0 { Vec::new() } else { vec![(tag, w)] })
     }
 }
 
@@ -250,6 +270,9 @@ pub(crate) fn to_seg(s: PathSeg) -> Seg {
     }
 }
 
+/// Most segments `tidy_segments` merges into one.
+const MAX_MERGE_RUN: usize = 64;
+
 /// Merge segments of a closed loop that were split from one curve (or collinear lines) back
 /// together, dropping degenerate pieces.
 fn tidy_segments(segs: Vec<Seg>, tidy: &Tidy) -> Vec<Seg> {
@@ -284,7 +307,9 @@ fn tidy_segments(segs: Vec<Seg>, tidy: &Tidy) -> Vec<Seg> {
     while i < n {
         let mut cur = segs[i];
         let mut j = i + 1;
-        while j < n && mergeable(&segs[j - 1], &segs[j]) {
+        // Each attempt re-checks the whole run, so a run is capped: a long chain of redundant
+        // pieces costs linear, not quadratic, work and leaves at most a few extra joints.
+        while j < n && j - i < MAX_MERGE_RUN && mergeable(&segs[j - 1], &segs[j]) {
             match try_merge(&segs[i..=j], tidy) {
                 Some(m) => {
                     cur = m;
@@ -381,5 +406,48 @@ pub fn filled_area(path: &BezPath, rule: FillRule) -> f64 {
     match normalize_contours(path, rule) {
         Some(c) => c.contours().map(|ct| ct.path.area()).sum::<f64>().abs(),
         None => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparse_windings_add_and_restrict() {
+        let a = Multi::single(3, true) + Multi::single(1000, false);
+        assert_eq!((a.get(3), a.get(1000), a.get(7)), (1, -1, 0));
+        // Only nonzero entries are stored, whatever the tag.
+        assert_eq!(a.0.len(), 2);
+        assert_eq!(a.of_tag(1000), Multi::single(1000, false));
+        assert_eq!(a.of_tag(5), Multi::default());
+        // Windings that cancel compare equal to none at all.
+        assert_eq!(a.clone() + Multi::single(3, false) + Multi::single(1000, true), Multi::default());
+    }
+
+    #[test]
+    fn many_paths_union_keeps_each_square() {
+        let squares: Vec<(BezPath, FillRule)> =
+            (0..400).map(|i| (kurbo::Rect::new(i as f64 * 3.0, 0.0, i as f64 * 3.0 + 2.0, 2.0).to_path(0.1), FillRule::NonZero)).collect();
+        let out = boolean_n(&squares, |m| m.iter().any(|&x| x));
+        assert_eq!(out.elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count(), 400);
+        assert!((out.area().abs() - 400.0 * 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn long_collinear_runs_merge_in_bounded_pieces() {
+        // A square whose top edge is split into thousands of collinear pieces.
+        let n: usize = 5000;
+        let mut segs: Vec<Seg> = (0..n).map(|k| Seg::line(Point::new(k as f64, 0.0), Point::new(k as f64 + 1.0, 0.0))).collect();
+        let w = n as f64;
+        segs.push(Seg::line(Point::new(w, 0.0), Point::new(w, w)));
+        segs.push(Seg::line(Point::new(w, w), Point::new(0.0, w)));
+        segs.push(Seg::line(Point::new(0.0, w), Point::new(0.0, 0.0)));
+        let out = tidy_segments(segs, &Tidy::free(DEFAULT_PRECISION));
+        // The top edge comes back as n / MAX_MERGE_RUN straight pieces on the same line.
+        assert!(out.len() <= n.div_ceil(MAX_MERGE_RUN) + 3, "{}", out.len());
+        assert!(out.iter().all(|s| s.line));
+        let top: f64 = out.iter().filter(|s| s.c.p0.y == 0.0 && s.c.p3.y == 0.0).map(|s| s.c.p3.x - s.c.p0.x).sum();
+        assert_eq!(top, w);
     }
 }

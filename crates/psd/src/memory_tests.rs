@@ -28,10 +28,11 @@ impl Psd {
             }
             2 | 3 => {
                 let rest = r.bytes(r.remaining())?;
-                let mut v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, rowb * h).map_err(|e| Error::Invalid(format!("zip: {e:?}")))?;
+                let mut v =
+                    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
                 v.resize(rowb * h, 0);
                 if comp == 3 {
-                    self.unpredict(&mut v, w, h);
+                    self.unpredict(&mut v, w, h, &mut Budget::new(u64::MAX))?;
                 }
                 v
             }
@@ -128,11 +129,12 @@ impl Psd {
             }
             2 | 3 => {
                 let rest = r.bytes(r.remaining())?;
-                let v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, want * rowb * h).map_err(|e| Error::Invalid(format!("zip: {e:?}")))?;
+                let v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, want * rowb * h)
+                    .map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
                 for (c, p) in planes.iter_mut().enumerate().take(want) {
                     let mut plane = v.get(c * rowb * h..(c + 1) * rowb * h).ok_or(Error::Truncated)?.to_vec();
                     if comp == 3 {
-                        self.unpredict(&mut plane, w, h);
+                        self.unpredict(&mut plane, w, h, &mut Budget::new(u64::MAX))?;
                     }
                     *p = Some(self.ref_samples(&plane, w, h));
                 }

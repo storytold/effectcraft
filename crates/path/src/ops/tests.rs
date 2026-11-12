@@ -293,6 +293,18 @@ fn wiggle_is_deterministic_and_time_varying() {
 }
 
 #[test]
+fn wiggle_survives_an_absurd_speed_or_time() {
+    // `t` far past i64 saturates the lattice index at i64::MAX, and the neighbours' `+ 1`, `+ 2` used to overflow.
+    let s = [sq(0.0, 0.0, 100.0)];
+    for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::MAX, f64::MIN, 1e300, 9.3e18] {
+        let by_speed = wiggle(&s, &WiggleParams { speed: v, ..Default::default() }, 1.0);
+        let by_time = wiggle(&s, &WiggleParams::default(), v);
+        let by_phase = wiggle(&s, &WiggleParams { phase_deg: v, ..Default::default() }, 0.0);
+        assert_eq!((by_speed.len(), by_time.len(), by_phase.len()), (1, 1, 1), "wiggle with {v}");
+    }
+}
+
+#[test]
 fn wiggle_displacement_is_bounded() {
     let mut l = BezPath::new();
     l.move_to((0.0, 0.0));
@@ -315,6 +327,38 @@ fn wiggle_full_correlation_translates() {
     assert!(close(area(&r), 10000.0, 1e-6));
     let zero = wiggle(&s, &WiggleParams { size: 0.0, ..w }, 1.0);
     assert_eq!(zero[0], s[0]);
+}
+
+/// Spatial Phase moves the pattern of displacements along the path: 360° is once around, and a
+/// whole number of points' worth gives each point the displacement of the point that far ahead.
+#[test]
+fn wiggle_spatial_phase_moves_the_pattern_along_the_path() {
+    let s = [sq(0.0, 0.0, 100.0)];
+    let w = WiggleParams { detail: 3.0, correlation: 0.0, smooth: false, ..Default::default() };
+    // Displacements are proportional to Size: twice the size less once the size.
+    let disp = |w: WiggleParams| -> Vec<Vec2> {
+        let a = on_curve(&wiggle(&s, &w, 0.4)[0]);
+        let b = on_curve(&wiggle(&s, &WiggleParams { size: w.size * 2.0, ..w }, 0.4)[0]);
+        a.iter().zip(&b).map(|(a, b)| *b - *a).take(16).collect()
+    };
+    let d0 = disp(w);
+    let n = d0.len();
+    assert_eq!(n, 16);
+    for k in [1, 5] {
+        let dk = disp(WiggleParams { spatial_phase_deg: 360.0 * k as f64 / n as f64, ..w });
+        for j in 0..n {
+            let e = d0[(j + k) % n];
+            assert!(close(dk[j].x, e.x, 1e-9) && close(dk[j].y, e.y, 1e-9), "{k} ahead, point {j}: {:?} vs {e:?}", dk[j]);
+        }
+    }
+    // Whole turns either way leave the path as it is.
+    let base = wiggle(&s, &w, 0.4);
+    assert_eq!(wiggle(&s, &WiggleParams { spatial_phase_deg: 360.0, ..w }, 0.4), base);
+    assert_eq!(wiggle(&s, &WiggleParams { spatial_phase_deg: -720.0, ..w }, 0.4), base);
+    // Half a point ahead, the displacements change and stay within Size.
+    let half = disp(WiggleParams { spatial_phase_deg: 180.0 / n as f64, ..w });
+    assert!(half.iter().zip(&d0).any(|(h, d)| (*h - *d).hypot() > 1e-3));
+    assert!(half.iter().all(|h| h.x.abs() <= 10.0 + 1e-9 && h.y.abs() <= 10.0 + 1e-9));
 }
 
 // ---------------------------------------------------------------- merge / booleans

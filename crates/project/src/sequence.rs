@@ -37,14 +37,21 @@ pub fn frame_number(path: &str) -> Option<i64> {
 }
 
 /// The After Effects name of a numbered sequence: `shot_[0001-0250].png`. `None` when the first
-/// file isn't numbered.
+/// file isn't numbered. Files that are only a number (`0001.png`) take their folder's name in
+/// front, `plate [0001-0250].png`, so sequences from several folders don't all read the same
+/// (#2019).
 pub fn sequence_name(files: &[String]) -> Option<String> {
     let (first, last) = (files.first()?, files.last()?);
-    let name = |p: &str| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string();
+    let mut parts = first.rsplit(['/', '\\']);
+    let first_name = parts.next().unwrap_or(first);
+    let folder = parts.next().filter(|f| !f.is_empty() && !f.ends_with(':'));
     let (prefix, a) = split_frame_number(stem_of(first))?;
     let (_, b) = split_frame_number(stem_of(last))?;
-    let first_name = name(first);
     let ext = first_name.rsplit_once('.').map(|(_, e)| format!(".{e}")).unwrap_or_default();
+    let prefix = match folder {
+        Some(f) if prefix.is_empty() => format!("{f} "),
+        _ => prefix.to_string(),
+    };
     Some(format!("{prefix}[{a}-{b}]{ext}"))
 }
 
@@ -107,6 +114,22 @@ impl Footage {
         self.sequence.get(k).filter(|p| frame_number(p) == Some(n)).map(String::as_str)
     }
 
+    /// The file an image sequence shows at its frame `i`, holding the last existing file across a
+    /// gap in the numbering (After Effects 2026: files 1, 2, 4, 5 show frame 2 at frame 3).
+    /// `None` only when no file precedes the frame (or there are no files).
+    pub fn sequence_file_held(&self, i: i64) -> Option<&str> {
+        if let Some(p) = self.sequence_file(i) {
+            return Some(p);
+        }
+        let first = self.numbered()?;
+        let k = self.first_file_from(first.saturating_add(i));
+        // The preceding number, then the file `sequence_file` picks for it (the first with that
+        // number), so files sharing a number (`shot_0002`, `shot_002`) don't switch at a gap.
+        let prev = self.file_number(k.checked_sub(1)?)?;
+        let j = self.first_file_from(prev);
+        self.sequence.get(j).filter(|p| frame_number(p) == Some(prev)).map(String::as_str)
+    }
+
     /// Set an image sequence's duration to its frames at its frame rate (after its files or
     /// frame rate changed).
     pub fn sync_sequence_duration(&mut self) {
@@ -125,6 +148,17 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_holds_the_file_shown_for_the_preceding_number() {
+        let mut f = seq(&[]);
+        f.sequence = ["a_0001.png", "a_0002.png", "a_002.png", "a_0005.png"].map(String::from).to_vec();
+        assert_eq!(f.sequence_file(1), Some("a_0002.png"));
+        // Frames 3 and 4 (numbers 3, 4) hold what number 2 shows: the first file with it.
+        assert_eq!(f.sequence_file_held(2), Some("a_0002.png"));
+        assert_eq!(f.sequence_file_held(3), Some("a_0002.png"));
+        assert_eq!(f.sequence_file_held(4), Some("a_0005.png"));
+    }
+
+    #[test]
     fn numbers_and_names() {
         assert_eq!(split_frame_number("shot_0012"), Some(("shot_", "0012")));
         assert_eq!(split_frame_number("shot"), None);
@@ -135,6 +169,13 @@ mod tests {
         let files: Vec<String> = ["/s/fx_0998.png", "/s/fx_1002.png"].map(String::from).to_vec();
         assert_eq!(sequence_name(&files).as_deref(), Some("fx_[0998-1002].png"));
         assert_eq!(sequence_name(&["/s/a.png".to_string()]), None);
+        // #2019: frames that are only a number take their folder's name.
+        let plain: Vec<String> = ["/shots/plate/0001.png", "/shots/plate/0250.png"].map(String::from).to_vec();
+        assert_eq!(sequence_name(&plain).as_deref(), Some("plate [0001-0250].png"));
+        let windows: Vec<String> = ["C:\\shots\\bg\\001.exr", "C:\\shots\\bg\\010.exr"].map(String::from).to_vec();
+        assert_eq!(sequence_name(&windows).as_deref(), Some("bg [001-010].exr"));
+        assert_eq!(sequence_name(&["0001.png".to_string(), "0002.png".to_string()]).as_deref(), Some("[0001-0002].png"));
+        assert_eq!(sequence_name(&["C:\\0001.png".to_string()]).as_deref(), Some("[0001-0001].png"));
     }
 
     #[test]

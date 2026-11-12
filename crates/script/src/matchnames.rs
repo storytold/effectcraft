@@ -90,6 +90,44 @@ pub fn stroke_dash(name: &str) -> Option<&'static str> {
 
 const TEXT_ANIMATOR: &[(&str, &str)] = &[("selectors", "ADBE Text Selectors"), ("properties", "ADBE Text Animator Properties")];
 
+/// Animator property ids and their stable After Effects scripting names. Shared by lookup,
+/// `.matchName`, and `addProperty` so the same property has one name in every direction.
+pub const TEXT_ANIMATOR_PROPERTIES: &[(&str, &str)] = &[
+    ("anchor", "ADBE Text Anchor Point 3D"),
+    ("position", "ADBE Text Position 3D"),
+    ("scale", "ADBE Text Scale 3D"),
+    ("skew", "ADBE Text Skew"),
+    ("rotation", "ADBE Text Rotation"),
+    ("opacity", "ADBE Text Opacity"),
+    ("fillColor", "ADBE Text Fill Color"),
+    ("fillHue", "ADBE Text Fill Hue"),
+    ("fillSaturation", "ADBE Text Fill Saturation"),
+    ("fillBrightness", "ADBE Text Fill Brightness"),
+    ("fillOpacity", "ADBE Text Fill Opacity"),
+    ("strokeColor", "ADBE Text Stroke Color"),
+    ("strokeHue", "ADBE Text Stroke Hue"),
+    ("strokeSaturation", "ADBE Text Stroke Saturation"),
+    ("strokeBrightness", "ADBE Text Stroke Brightness"),
+    ("strokeOpacity", "ADBE Text Stroke Opacity"),
+    ("strokeWidth", "ADBE Text Stroke Width"),
+    ("tracking", "ADBE Text Tracking Amount"),
+    ("lineAnchor", "ADBE Text Line Anchor"),
+    ("lineSpacing", "ADBE Text Line Spacing"),
+    ("characterOffset", "ADBE Text Character Offset"),
+    ("characterValue", "ADBE Text Character Replace"),
+    ("blur", "ADBE Text Blur"),
+];
+
+/// Companion properties that exist below an animator but are not kinds `addProperty` accepts:
+/// they come with Tracking (Track Type), Skew (Skew Axis) and per-character 3D Rotation
+/// (X and Y Rotation). Lookup and `.matchName` know them; `addProperty` does not.
+pub const TEXT_ANIMATOR_COMPANIONS: &[(&str, &str)] = &[
+    ("trackingType", "ADBE Text Track Type"),
+    ("skewAxis", "ADBE Text Skew Axis"),
+    ("rotationX", "ADBE Text Rotation X"),
+    ("rotationY", "ADBE Text Rotation Y"),
+];
+
 const TEXT_SELECTORS: &[(&str, &str)] =
     &[("rangeSelector", "ADBE Text Selector"), ("wigglySelector", "ADBE Text Wiggly Selector"), ("expressionSelector", "ADBE Text Expressible Selector")];
 
@@ -111,7 +149,7 @@ const LIGHT: &[(&str, &str)] = &[
     ("falloff", "ADBE Light Falloff Type"),
     ("radius", "ADBE Light Falloff Start"),
     ("falloffDistance", "ADBE Light Falloff Distance"),
-    ("castsShadows", "ADBE Light Casts Shadows"),
+    ("castsShadows", "ADBE Casts Shadows"),
     ("shadowDarkness", "ADBE Light Shadow Darkness"),
     ("shadowDiffusion", "ADBE Light Shadow Diffusion"),
 ];
@@ -147,6 +185,7 @@ pub const SHAPE_ITEMS: &[(&str, &str)] = &[
     ("trim", "ADBE Vector Filter - Trim"),
     ("twist", "ADBE Vector Filter - Twist"),
     ("wiggle", "ADBE Vector Filter - Roughen"),
+    ("wiggler", "ADBE Vector Filter - Wiggler"),
     ("zigzag", "ADBE Vector Filter - Zigzag"),
 ];
 
@@ -208,7 +247,29 @@ const SHAPE_PROPS: &[(&str, &str, &str)] = &[
     ("pucker", "amount", "ADBE Vector PuckerBloat Amount"),
     ("twist", "angle", "ADBE Vector Twist Angle"),
     ("twist", "center", "ADBE Vector Twist Center"),
+    ("wiggler", "speed", "ADBE Vector Xform Temporal Freq"),
+    ("wiggler", "correlation", "ADBE Vector Correlation"),
+    ("wiggler", "phase", "ADBE Vector Temporal Phase"),
+    ("wiggler", "spatialPhase", "ADBE Vector Spatial Phase"),
+    ("wiggler", "seed", "ADBE Vector Random Seed"),
+    ("wiggler", "transform", "ADBE Vector Wiggler Transform"),
     ("merge", "mode", "ADBE Vector Merge Type"),
+    ("offset", "amount", "ADBE Vector Offset Amount"),
+    ("offset", "join", "ADBE Vector Offset Line Join"),
+    ("offset", "miter", "ADBE Vector Offset Miter Limit"),
+    ("offset", "copies", "ADBE Vector Offset Copies"),
+    ("offset", "copyOffset", "ADBE Vector Offset Copy Offset"),
+    ("zigzag", "size", "ADBE Vector Zigzag Size"),
+    ("zigzag", "ridges", "ADBE Vector Zigzag Detail"),
+    ("zigzag", "points", "ADBE Vector Zigzag Points"),
+    ("wiggle", "size", "ADBE Vector Roughen Size"),
+    ("wiggle", "detail", "ADBE Vector Roughen Detail"),
+    ("wiggle", "points", "ADBE Vector Roughen Points"),
+    ("wiggle", "speed", "ADBE Vector Temporal Freq"),
+    ("wiggle", "correlation", "ADBE Vector Correlation"),
+    ("wiggle", "phase", "ADBE Vector Temporal Phase"),
+    ("wiggle", "spatialPhase", "ADBE Vector Spatial Phase"),
+    ("wiggle", "seed", "ADBE Vector Random Seed"),
 ];
 
 /// Effects: our effect id → AE match name (the documented ones; the rest keep our id).
@@ -248,12 +309,12 @@ pub const EFFECTS: &[(&str, &str)] = &[
     ("ec.color.changetocolor", "ADBE Change To Color"),
     ("ec.color.colorama", "APC Colorama"),
     ("ec.color.leavecolor", "ADBE Leave Color"),
-    ("ec.color.photofilter", "ADBE Photo Filter"),
+    ("ec.color.photofilter", "ADBE PhotoFilterPS"),
     ("ec.color.vibrance", "ADBE Vibrance"),
     ("ec.color.lumetri", "ADBE Lumetri"),
-    ("ec.color.shadowhighlight", "ADBE Shadow/Highlight"),
-    ("ec.color.selectivecolor", "ADBE Selective Color"),
-    ("ec.color.gammapedestalgain", "ADBE Gamma/Pedestal/Gain"),
+    ("ec.color.shadowhighlight", "ADBE ShadowHighlight"),
+    ("ec.color.selectivecolor", "ADBE SelectiveColor"),
+    ("ec.color.gammapedestalgain", "ADBE Gamma/Pedestal/Gain2"),
     ("ec.color.equalize", "ADBE Equalize"),
     ("ec.color.autocontrast", "ADBE AutoContrast"),
     ("ec.color.autolevels", "ADBE AutoLevels"),
@@ -290,15 +351,15 @@ pub const EFFECTS: &[(&str, &str)] = &[
     ("ec.generate.grid", "ADBE Grid"),
     ("ec.generate.checkerboard", "ADBE Checkerboard"),
     ("ec.generate.circle", "ADBE Circle"),
-    ("ec.generate.ellipse", "ADBE Ellipse"),
+    ("ec.generate.ellipse", "ADBE ELLIPSE"),
     ("ec.generate.cellpattern", "ADBE Cell Pattern"),
     ("ec.generate.lensflare", "ADBE Lens Flare"),
-    ("ec.generate.vegas", "ADBE Vegas"),
-    ("ec.generate.writeon", "ADBE Write On"),
+    ("ec.generate.vegas", "APC Vegas"),
+    ("ec.generate.writeon", "ADBE Write-on"),
     ("ec.generate.audiospectrum", "ADBE AudSpect"),
     ("ec.generate.audiowaveform", "ADBE AudWave"),
     ("ec.generate.beam", "ADBE Laser"),
-    ("ec.generate.radiowaves", "ADBE Radio Waves"),
+    ("ec.generate.radiowaves", "APC Radio Waves"),
     ("ec.generate.scribble", "ADBE Scribble Fill"),
     ("ec.generate.paintbucket", "ADBE Paint Bucket"),
     ("ec.key.colorkey", "ADBE Color Key"),
@@ -310,12 +371,12 @@ pub const EFFECTS: &[(&str, &str)] = &[
     ("ec.key.spill", "ADBE Spill2"),
     ("ec.matte.simplechoker", "ADBE Simple Choker"),
     ("ec.matte.mattechoker", "ADBE Matte Choker"),
-    ("ec.noise.noise", "ADBE Noise"),
+    ("ec.noise.noise", "ADBE Noise2"),
     ("ec.noise.fractal", "ADBE Fractal Noise"),
     ("ec.noise.median", "ADBE Median"),
     ("ec.noise.addgrain", "VISINF Grain Implant"),
     ("ec.noise.dustscratches", "ADBE Dust & Scratches"),
-    ("ec.noise.turbulent", "ADBE Turbulent Noise"),
+    ("ec.noise.turbulent", "ADBE AIF Perlin Noise 3D"),
     ("ec.perspective.dropshadow", "ADBE Drop Shadow"),
     ("ec.perspective.radialshadow", "ADBE Radial Shadow"),
     ("ec.perspective.bevelalpha", "ADBE Bevel Alpha"),
@@ -340,32 +401,73 @@ pub const EFFECTS: &[(&str, &str)] = &[
     ("ec.time.echo", "ADBE Echo"),
     ("ec.time.posterizetime", "ADBE Posterize Time"),
     ("ec.time.timedisplacement", "ADBE Time Displacement"),
-    ("ec.time.timedifference", "ADBE Time Difference"),
-    ("ec.time.pixelmotionblur", "ADBE Pixel Motion Blur"),
+    ("ec.time.timedifference", "ADBE Difference"),
+    ("ec.time.pixelmotionblur", "ADBE OFMotionBlur"),
     ("ec.time.timewarp", "ADBE Timewarp"),
     ("ec.transition.linearwipe", "ADBE Linear Wipe"),
     ("ec.transition.radialwipe", "ADBE Radial Wipe"),
     ("ec.transition.venetian", "ADBE Venetian Blinds"),
     ("ec.transition.blockdissolve", "ADBE Block Dissolve"),
     ("ec.transition.gradientwipe", "ADBE Gradient Wipe"),
-    ("ec.transition.iriswipe", "ADBE Iris Wipe"),
+    ("ec.transition.iriswipe", "ADBE IRIS_WIPE"),
     ("ec.utility.applylut", "ADBE Apply Color LUT2"),
     ("ec.utility.cineon", "ADBE Cineon Converter2"),
-    ("ec.utility.growbounds", "ADBE Grow Bounds"),
+    ("ec.utility.growbounds", "ADBE GROW BOUNDS"),
 ];
 
 fn find<'a>(t: &'a [(&str, &'a str)], k: &str) -> Option<&'a str> {
     t.iter().find(|(a, _)| *a == k).map(|(_, b)| *b)
 }
 
+/// Effect match names that resolve to one of our effects but are not the name we emit (#3113):
+/// After Effects' hidden obsolete versions (`ADBE Noise`, `ADBE Photo Filter`), which its
+/// `addProperty` still accepts, and the names earlier EffectCraft versions emitted by mistake,
+/// which scripts written against them may use. Lookup only: `effect()` gives the `EFFECTS` name.
+const LEGACY_EFFECTS: &[(&str, &str)] = &[
+    ("ADBE Noise", "ec.noise.noise"),
+    ("ADBE Photo Filter", "ec.color.photofilter"),
+    ("ADBE Shadow/Highlight", "ec.color.shadowhighlight"),
+    ("ADBE Selective Color", "ec.color.selectivecolor"),
+    ("ADBE Gamma/Pedestal/Gain", "ec.color.gammapedestalgain"),
+    ("ADBE Vegas", "ec.generate.vegas"),
+    ("ADBE Write On", "ec.generate.writeon"),
+    ("ADBE Radio Waves", "ec.generate.radiowaves"),
+    ("ADBE Turbulent Noise", "ec.noise.turbulent"),
+    ("ADBE Time Difference", "ec.time.timedifference"),
+    ("ADBE Pixel Motion Blur", "ec.time.pixelmotionblur"),
+    ("ADBE Iris Wipe", "ec.transition.iriswipe"),
+];
+
 /// AE match name of an effect id (falls back to the id).
 pub fn effect(id: &str) -> String {
     find(EFFECTS, id).map(str::to_string).unwrap_or_else(|| id.to_string())
 }
 
-/// Our effect id for an AE effect match name.
+/// Our effect id for an AE effect match name (or a legacy one, see `LEGACY_EFFECTS`).
 pub fn effect_from_match(m: &str) -> Option<&'static str> {
-    EFFECTS.iter().find(|(_, b)| b.eq_ignore_ascii_case(m)).map(|(a, _)| *a)
+    EFFECTS
+        .iter()
+        .find(|(_, b)| b.eq_ignore_ascii_case(m))
+        .map(|(a, _)| *a)
+        .or_else(|| LEGACY_EFFECTS.iter().find(|(b, _)| b.eq_ignore_ascii_case(m)).map(|(_, a)| *a))
+}
+
+/// The current match name for a legacy name a script may still use: a `LEGACY_EFFECTS` effect
+/// name, one of its parameters (`ADBE Noise-0001` → `ADBE Noise2-0001`), or the light's Casts
+/// Shadows under its earlier name. `None` when `name` is not a legacy name.
+pub fn current_name(name: &str) -> Option<String> {
+    if name == "ADBE Light Casts Shadows" {
+        return Some("ADBE Casts Shadows".into());
+    }
+    let legacy = |m: &str| LEGACY_EFFECTS.iter().find(|(b, _)| b.eq_ignore_ascii_case(m)).map(|(_, id)| effect(id));
+    if let Some(m) = legacy(name) {
+        return Some(m);
+    }
+    let (fx, n) = name.rsplit_once('-')?;
+    if n.len() != 4 || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    legacy(fx).map(|m| format!("{m}-{n}"))
 }
 
 /// Our shape item kind (`layer.addShapeItem`) for an AE match name, our match id or a display
@@ -393,6 +495,7 @@ pub fn shape_kind(name: &str) -> Option<&'static str> {
         "twist" => "twist",
         "zigzag" => "zigzag",
         "wigglepaths" => "wiggle",
+        "wiggletransform" => "wiggler",
         "mergepaths" => "merge",
         _ => return None,
     })
@@ -479,6 +582,9 @@ pub fn node(chain: &[&Node]) -> String {
         "text" if pid == "animators" => "ADBE Text Animator".into(),
         "text" if pid == "selectors" => find(TEXT_SELECTORS, id).map(str::to_string).unwrap_or_else(own),
         "text" if pid == "rangeSelector" => find(TEXT_RANGE_SELECTOR, id).map(str::to_string).unwrap_or_else(own),
+        "text" if pid == "properties" && chain.len() == 5 && chain.get(1).is_some_and(|n| n.match_id() == "animators") => {
+            find(TEXT_ANIMATOR_PROPERTIES, id).or_else(|| find(TEXT_ANIMATOR_COMPANIONS, id)).map(str::to_string).unwrap_or_else(own)
+        }
         "text" if grand.map(|g| g.match_id()) == Some("animators") => find(TEXT_ANIMATOR, id).map(str::to_string).unwrap_or_else(own),
         "cameraOptions" => find(CAMERA, id).map(str::to_string).unwrap_or_else(own),
         "lightOptions" => find(LIGHT, id).map(str::to_string).unwrap_or_else(own),
@@ -508,6 +614,56 @@ pub fn node(chain: &[&Node]) -> String {
 mod tests {
     use super::*;
 
+    /// After Effects 26.2's `app.effects` (first-party match names and categories), #3113.
+    const AE_EFFECTS: &str = include_str!("../tests/fixtures/ae-effect-match-names.tsv");
+
+    fn ae_effects() -> Vec<(&'static str, &'static str)> {
+        AE_EFFECTS.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).map(|l| l.split_once('\t').unwrap_or((l, ""))).collect()
+    }
+
+    /// #3113: every effect match name we emit is one After Effects lists (case matters: its
+    /// `addProperty("ADBE Ellipse")` fails), and the current version, not a hidden obsolete one,
+    /// unless After Effects only has that one.
+    #[test]
+    fn effect_names_are_after_effects_names() {
+        let ae = ae_effects();
+        // Obsolete in After Effects without a current replacement (Puppet is added by its tool).
+        let only_obsolete = ["ADBE Color Key", "ADBE Luma Key", "ADBE FreePin3"];
+        for (id, m) in EFFECTS {
+            let Some((_, cat)) = ae.iter().find(|(n, _)| n == m) else { panic!("{id}: After Effects has no effect {m:?}") };
+            assert!(!cat.contains("Obsolete") || only_obsolete.contains(m), "{id}: {m:?} is After Effects' obsolete version");
+        }
+        assert_eq!(effect("ec.noise.noise"), "ADBE Noise2");
+        assert_eq!(effect("ec.time.pixelmotionblur"), "ADBE OFMotionBlur");
+        assert_eq!(effect("ec.generate.ellipse"), "ADBE ELLIPSE");
+        assert_eq!(effect("ec.color.photofilter"), "ADBE PhotoFilterPS");
+    }
+
+    /// #3113: the names earlier versions emitted (and After Effects' obsolete ones) still resolve,
+    /// but none shadows a current name.
+    #[test]
+    fn legacy_effect_names_still_resolve() {
+        for (old, id) in LEGACY_EFFECTS {
+            assert_eq!(effect_from_match(old), Some(*id));
+            assert!(!EFFECTS.iter().any(|(_, m)| m.eq_ignore_ascii_case(old)), "{old} is a current name");
+            assert_eq!(current_name(old), Some(effect(id)));
+        }
+        assert_eq!(effect_from_match("ADBE Pixel Motion Blur"), Some("ec.time.pixelmotionblur"));
+        assert_eq!(current_name("ADBE Noise-0001").as_deref(), Some("ADBE Noise2-0001"));
+        assert_eq!(current_name("ADBE Light Casts Shadows").as_deref(), Some("ADBE Casts Shadows"));
+        assert_eq!(current_name("ADBE Noise2-0001"), None);
+        assert_eq!(current_name("ADBE Noise-01"), None);
+        assert_eq!(current_name("ADBE Gaussian Blur 2"), None);
+    }
+
+    #[test]
+    fn light_casts_shadows_is_after_effects_name() {
+        let n = |m: &str| Node::from(effectcraft_project::PropGroup::new(1, m, m));
+        let (light, mat, casts) = (n("lightOptions"), n("materialOptions"), n("castsShadows"));
+        assert_eq!(node(&[&light, &casts]), "ADBE Casts Shadows");
+        assert_eq!(node(&[&mat, &casts]), "ADBE Casts Shadows");
+    }
+
     #[test]
     fn effect_names_round_trip() {
         for (id, m) in EFFECTS {
@@ -527,6 +683,30 @@ mod tests {
         assert_eq!(shape_kind("Trim Paths"), Some("trim"));
         assert_eq!(shape_kind("ADBE Vector Graphic - Fill"), Some("fill"));
         assert_eq!(shape_kind("nope"), None);
+    }
+
+    #[test]
+    fn text_animator_property_names_are_canonical_and_scoped() {
+        let n = |m: &str| Node::from(effectcraft_project::PropGroup::new(1, m, m));
+        let (text, animators, animator, properties) = (n("text"), n("animators"), n("animator"), n("properties"));
+        for (id, name) in TEXT_ANIMATOR_PROPERTIES {
+            let prop = n(id);
+            assert_eq!(node(&[&text, &animators, &animator, &properties, &prop]), *name);
+            assert_eq!(node(&[&properties, &prop]), *id, "an unrelated Properties group keeps its own ids");
+        }
+    }
+
+    /// #1063: the companions an animator property brings (Track Type, Skew Axis, X / Y Rotation)
+    /// have their After Effects names too, though `addProperty` does not accept them.
+    #[test]
+    fn text_animator_companions_have_after_effects_names() {
+        let n = |m: &str| Node::from(effectcraft_project::PropGroup::new(1, m, m));
+        let (text, animators, animator, properties) = (n("text"), n("animators"), n("animator"), n("properties"));
+        for (id, name) in TEXT_ANIMATOR_COMPANIONS {
+            let prop = n(id);
+            assert_eq!(node(&[&text, &animators, &animator, &properties, &prop]), *name);
+            assert!(!TEXT_ANIMATOR_PROPERTIES.iter().any(|(k, m)| k == id || m == name), "{id} is not an addProperty kind");
+        }
     }
 
     #[test]
