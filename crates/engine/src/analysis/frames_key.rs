@@ -88,7 +88,7 @@ pub(crate) fn input_key_of(signature: String, layer: &Layer, uid: Uid) -> String
     let mut t = Text::new();
     t.word(VERSION);
     t.word(&signature);
-    t.inputs_above(layer, uid);
+    t.inputs_above(layer, uid, true);
     hex(&t.0)
 }
 
@@ -107,7 +107,8 @@ pub(crate) fn analysis_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -
     if layer.effects().and_then(|fx| fx.groups().next()).is_some_and(|g| g.uid != uid) {
         t.field("effectsSwitch", layer.switches.effects);
     }
-    t.inputs_above(layer, uid);
+    // While it is off the renderer skips the whole effect stack: the effects above draw nothing.
+    t.inputs_above(layer, uid, layer.switches.effects);
     t.precomp(p, comp, layer);
     hex(&t.0)
 }
@@ -392,14 +393,16 @@ impl Text {
 
     /// The layer's masks and the effects above the instance `uid`: what the effect's input is
     /// made of besides the layer's frames.
-    fn inputs_above(&mut self, layer: &Layer, uid: Uid) {
+    /// `effects`: whether to write the effects (a Roto Brush Input Key always does: frozen mattes
+    /// hash the saved key, so it keeps its text).
+    fn inputs_above(&mut self, layer: &Layer, uid: Uid, effects: bool) {
         if let Some(m) = layer.masks() {
             self.word("masks");
             self.group(m, 0);
         }
         if let Some(fx) = layer.effects() {
             self.word("effects");
-            for g in fx.groups().take_while(|g| g.uid != uid) {
+            for g in fx.groups().take_while(|g| effects && g.uid != uid) {
                 self.group(g, 0);
             }
         }

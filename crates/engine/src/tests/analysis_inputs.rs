@@ -107,6 +107,13 @@ fn masks_and_effects_above(saved: Saved) {
     assert_eq!(analysed(&s), [true, true]);
     // The Effects switch turns the Warp Stabilizer (above the tracker) off.
     check(&mut s, "layer.setSwitch", json!({"layers": [CLIP.0], "switch": "effects", "value": false}), [true, false]);
+    // While it is off, the effects above draw nothing: editing them keeps the analyses.
+    run(&mut s, "layer.setSwitch", json!({"layers": [CLIP.0], "switch": "effects", "value": false}));
+    analyse(&mut s, saved);
+    check(&mut s, "prop.set", json!({"layer": CLIP.0, "path": "effects/#1/stabilization/smoothness", "value": 20}), [true, true]);
+    run(&mut s, "layer.setSwitch", json!({"layers": [CLIP.0], "switch": "effects", "value": true}));
+    assert_eq!(analysed(&s), [true, false]);
+    analyse(&mut s, saved);
 
     // An effect moved above the Warp Stabilizer is part of both inputs, and its settings too.
     s.edit("blur first", None, |p, _| {
