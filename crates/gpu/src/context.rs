@@ -2206,6 +2206,11 @@ impl<'g> Enc<'g> {
         p.f[0] = [1.0 / 255.0, 0.0, 0.0, 0.0];
         // (`has_kernel` above: the dispatch can't miss, and `take_missing` stays the effects')
         self.pixels("expand8", &p, &GpuImage::new(levels, w, h), None, &out, None);
+        // Submitted before the texture is shared: the cache outlives this encoder, and an
+        // encoder dropped unsubmitted (a frame that fails after this layer and falls back to
+        // the CPU) would discard the dispatch and leave later frames, or another thread, a
+        // never-written texture.
+        self.submit();
         // Already on the 8 bpc grid: quantising it again is a no-op.
         out.levels = Some(255.0);
         if let Ok(mut pc) = g.pictures8.lock() {

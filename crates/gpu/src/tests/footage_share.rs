@@ -235,6 +235,28 @@ fn expand8_matches_expand_u8_bit_for_bit() {
     assert!(again.texture == up.texture, "the same levels uploaded twice");
 }
 
+/// The expanded levels are submitted before they are cached: an encoder dropped without
+/// submitting (a frame that falls back to the CPU) must not leave the next frame a texture the
+/// dispatch never wrote.
+#[test]
+fn expanded_levels_survive_an_unsubmitted_encoder() {
+    let Some(g) = gpu() else { return };
+    let (w, h) = (64u32, 48u32);
+    let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8 | 1).collect();
+    let frame = Arc::new(effectcraft_render::disk_cache::Frame8 { width: w, height: h, rgba });
+    {
+        let mut e = crate::context::Enc::new(&g.ctx);
+        e.upload_picture8(&frame).expect("the 8-bit levels upload");
+        // dropped here without the caller ever submitting
+    }
+    let mut e = crate::context::Enc::new(&g.ctx);
+    let again = e.upload_picture8(&frame).expect("served from the cache");
+    let back = e.download(&again).expect("readback");
+    let want: Vec<u32> = frame.rgba.as_chunks::<4>().0.iter().flat_map(|p| effectcraft_raster::expand_u8(*p)).map(f32::to_bits).collect();
+    let got: Vec<u32> = back.data.iter().flatten().map(|v| v.to_bits()).collect();
+    assert!(got == want, "the cached texture was never written");
+}
+
 /// 8 bpc projects (the default): plain footage layers share the footage's 8-bit levels,
 /// uploaded once per frame at a quarter of the float bytes and expanded on the device, instead
 /// of a float copy per layer expanded on the CPU, kept in the layer cache and uploaded per
