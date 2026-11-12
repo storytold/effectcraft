@@ -558,16 +558,19 @@ fn fit_from_face(face: &Face, topo: &Topology, offset: [f64; 2]) -> Option<FaceF
 fn nearest_skin(skin: &[bool], size: (usize, usize), center: (usize, usize), radius: i64) -> Option<(usize, usize)> {
     let (w, h) = size;
     let (ci, cj) = center;
+    // The radius comes from mask geometry: past the window's larger side every ring is outside it.
+    let radius = radius.min(w.max(h) as i64 + 1);
     for r in 0..radius {
         for dj in -r..=r {
-            for di in -r..=r {
-                if di.abs() != r && dj.abs() != r {
-                    continue;
-                }
+            // Only the ring's own pixels: the full rows at the top and bottom, the two ends between.
+            let step = if dj.abs() == r { 1 } else { (2 * r).max(1) };
+            let mut di = -r;
+            while di <= r {
                 let (i, j) = (ci as i64 + di, cj as i64 + dj);
                 if i >= 0 && j >= 0 && (i as usize) < w && (j as usize) < h && skin[j as usize * w + i as usize] {
                     return Some((i as usize, j as usize));
                 }
+                di += step;
             }
         }
     }
@@ -1186,6 +1189,16 @@ pub fn measure(l: &[[f64; 2]; N], reference_height: f64) -> [f64; 14] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_skin_search_stays_within_the_window_for_a_huge_radius() {
+        let mut skin = vec![false; 64 * 64];
+        skin[60 * 64 + 5] = true;
+        // A radius from hostile mask geometry costs no more than one that covers the window.
+        assert_eq!(nearest_skin(&skin, (64, 64), (32, 32), i64::MAX), Some((5, 60)));
+        assert_eq!(nearest_skin(&skin, (64, 64), (5, 60), 3), Some((5, 60)));
+        assert_eq!(nearest_skin(&skin, (64, 64), (0, 0), 10), None);
+    }
 
     /// Pearson correlation.
     fn corr(a: &[f64], b: &[f64]) -> f64 {

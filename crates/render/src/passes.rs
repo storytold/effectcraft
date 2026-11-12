@@ -86,10 +86,10 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
         } else if opts.roi.is_none()
             && let Some(pick) = a.auto_pick()
         {
-            let key = AutoKey::new(comp, opts.scale, false);
-            let gpu = pick.choose(key);
-            opts.backend = if gpu { Backend::Gpu } else { Backend::Cpu };
-            auto = Some((key, gpu));
+            // (a frame cancelled or panicking between passes drops it: ended unmeasured)
+            let ticket = pick.ticket(AutoKey::new(comp, opts.scale, false));
+            opts.backend = if ticket.gpu() { Backend::Gpu } else { Backend::Cpu };
+            auto = Some(ticket);
         }
     }
     let t0 = web_time::Instant::now();
@@ -98,8 +98,8 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     } else {
         in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame(comp, t)).await.value
     };
-    if let (Some((key, chose)), Some(pick)) = (auto, a.auto_pick()) {
-        pick.record(key, chose, t0.elapsed().as_secs_f64() * 1e3);
+    if let Some(t) = auto {
+        t.record(t0.elapsed().as_secs_f64() * 1e3);
     }
     img
 }

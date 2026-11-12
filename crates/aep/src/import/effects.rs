@@ -34,7 +34,7 @@
 //! import. Hue/Saturation's master values and Levels' values are arbitrary data, decoded by the
 //! reader (444-446, 512-516).
 
-use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, ParamMap, popup_key};
+use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, ParamMap, popup_alias, popup_key};
 use crate::{
     CryptomatteData, CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, ExtractorChannels, HueSaturationData,
     Layer as AepLayer, LayerRef, LevelsData, MeshData, ParamKind, ParamValue,
@@ -83,11 +83,11 @@ pub(crate) fn import_effects<'f, 'a>(
         }
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
         let Some(map) = EFFECTS.iter().find(|m| m.match_name == fx.match_name()) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
+            col.lose_unmapped_effect(fx.match_name(), format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
             continue;
         };
         let Some(spec) = effectcraft_effects::find(map.effect) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
+            col.lose_unmapped_effect(fx.match_name(), format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
             continue;
         };
         if defs.source(&fx) == DefinitionSource::Missing {
@@ -413,8 +413,8 @@ pub(crate) fn resolve_layer_refs(
     }
 }
 
-/// The EffectCraft item of each file item (by name, ignoring case and separators); `None` when
-/// the parameter here is not a popup.
+/// The EffectCraft item of each file item (by name, ignoring case and separators, and a known
+/// non-English name for it, [`popup_alias`]); `None` when the parameter here is not a popup.
 fn popup_mapping(file_items: &[String], ui: &ParamUi) -> Option<Vec<Option<u32>>> {
     let ParamUi::Popup { options } = ui else { return None };
     let norm = popup_key;
@@ -425,7 +425,12 @@ fn popup_mapping(file_items: &[String], ui: &ParamUi) -> Option<Vec<Option<u32>>
                 if item.trim() == "(-" {
                     return None;
                 }
-                options.iter().position(|o| norm(o) == norm(item)).and_then(|i| u32::try_from(i).ok())
+                let key = norm(item);
+                options
+                    .iter()
+                    .position(|o| norm(o) == key)
+                    .or_else(|| popup_alias(&key).and_then(|a| options.iter().position(|o| norm(o) == a)))
+                    .and_then(|i| u32::try_from(i).ok())
             })
             .collect(),
     )

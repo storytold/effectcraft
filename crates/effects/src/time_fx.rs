@@ -565,7 +565,8 @@ impl PixelMotion {
         let px = |id: &str| (g(id, 0.0).max(0.0) * scale).round() as u32;
         PixelMotion {
             tile,
-            window: ((g("tuning/blockSize", 8.0).max(4.0)) * scale).round().max(4.0) as u32,
+            // Block Size is declared 4..64; a project can store any number.
+            window: ((g("tuning/blockSize", 8.0).clamp(4.0, 64.0)) * scale).round().max(4.0) as u32,
             global_smoothness: g("tuning/smoothing/globalSmoothness", 0.5).clamp(0.0, 1.0) as f32,
             local_smoothness: g("tuning/smoothing/localSmoothness", 0.5).clamp(0.0, 1.0) as f32,
             iterations: g("tuning/smoothing/smoothingIterations", 20.0).clamp(0.0, 200.0) as u32,

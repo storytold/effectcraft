@@ -13,6 +13,8 @@ const FUEL_BASE: u64 = 50_000_000;
 const FUEL_PER_PIXEL: u64 = 20_000;
 /// The most linear memory a plug-in instance may have (a 4K float frame is ~130 MB).
 const MAX_MEMORY: usize = 1 << 30;
+/// The most elements one table of a plug-in may hold.
+const MAX_TABLE_ELEMENTS: usize = 1 << 16;
 /// The longest manifest read.
 const MAX_MANIFEST: i32 = 1 << 20;
 
@@ -84,7 +86,10 @@ fn err(e: impl std::fmt::Display) -> String {
 
 /// Instantiate `module` in a fresh, limited store and read its memory and allocator.
 fn begin(engine: &Engine, module: &Module) -> Result<Pending, String> {
-    let mut store = Store::new(engine, StoreLimitsBuilder::new().memory_size(MAX_MEMORY).instances(1).build());
+    // One memory and a few small tables: a module declaring many of them would otherwise make
+    // the host allocate and initialise each before an export or fuel check could refuse it.
+    let limits = StoreLimitsBuilder::new().memory_size(MAX_MEMORY).memories(1).tables(4).table_elements(MAX_TABLE_ELEMENTS).instances(1).build();
+    let mut store = Store::new(engine, limits);
     store.limiter(|l| l);
     store.set_fuel(FUEL_BASE).map_err(err)?;
     let linker = Linker::<StoreLimits>::new(engine);
