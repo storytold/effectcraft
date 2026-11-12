@@ -39,6 +39,7 @@ mod keying2;
 pub mod keylight;
 mod matte;
 
+mod file_cache;
 pub mod migrate;
 mod misc;
 pub mod mocha_shape;
@@ -123,13 +124,14 @@ pub use channel3d::{
     crypto_layer_name, crypto_layer_named, extractor_aux_channel, extractor_own_channel, id_color, is_extractor_copy, matte_only_px, reads_aux,
     selection_hashes,
 };
+pub use file_cache::{check_lut_files, lut_generation};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
     CausticsSetup, FoamDisc, FoamEnv, FoamPlan, Piece, PiecePlan, PieceTex, PixelPlan, WavePlan, Waves, caustics_setup, foam_full_plan, piece_plan, pixel_plan,
     wave_world_plan,
 };
-pub use utility::{Lut, check_lut_files, load_lut, lut_file, lut_generation, lut_params};
+pub use utility::{Lut, load_lut, lut_file, lut_files, lut_params};
 pub use vr::{equi_dir as vr_equi_dir, rotation as vr_rotation};
 
 /// Effect categories in Effects & Presets order.

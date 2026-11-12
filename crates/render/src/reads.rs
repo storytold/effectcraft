@@ -65,19 +65,30 @@ impl ReadFile {
     }
 }
 
-/// The LUT files effect `g` of `layer` reads at the context time (Apply Color LUT, Lumetri's
-/// Input LUT and Look), each with its identity now. A layer's cache key holds them and a render
+/// The files effect `g` of `layer` reads at the context time (Apply Color LUT, Lumetri's Input
+/// LUT and Look, OCIO File Transform, a custom OCIO config and its LUTs: see
+/// [`effectcraft_effects::lut_params`]), each with its identity now. A layer's cache key holds them and a render
 /// notes them, so what was made with a file that changed since is not used (#3493).
 pub(crate) fn lut_files(ctx: &crate::EvalCtx, layer: &effectcraft_project::Layer, g: &effectcraft_project::PropGroup) -> Vec<ReadFile> {
     let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return Vec::new() };
     effectcraft_effects::lut_params(effect)
         .iter()
         .filter_map(|param| match ctx.value(layer, g.prop(param)?) {
-            effectcraft_keyframe::Value::Str(src) => {
-                let path = effectcraft_effects::lut_file(&src)?;
-                Some(ReadFile::new(path, FileStamp::native(path).unwrap_or(FileStamp::Missing)))
-            }
+            effectcraft_keyframe::Value::Str(src) => Some(source_files(&src)),
             _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The files a file parameter set to `src` reads (an OCIO config's also the LUTs it names, #3538),
+/// each with its identity now.
+pub(crate) fn source_files(src: &str) -> Vec<ReadFile> {
+    effectcraft_effects::lut_files(src)
+        .into_iter()
+        .map(|path| {
+            let stamp = FileStamp::native(&path).unwrap_or(FileStamp::Missing);
+            ReadFile::new(path, stamp)
         })
         .collect()
 }

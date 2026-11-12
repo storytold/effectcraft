@@ -186,3 +186,42 @@ fn an_overridden_lut_file_renders_again() {
     write(&overridden, WHITE, 2_000);
     assert_all(centre(&s), 1.0);
 }
+
+/// #3538: OCIO File Transform and a custom OCIO config (and the LUT it names) follow their files
+/// through warm layer caches, and a render notes the config's LUT for the disk cache.
+#[test]
+fn ocio_files_render_again_from_warm_caches() {
+    let dir = tempfile::tempdir().unwrap();
+    let (lut, config, grade) = (dir.path().join("file.cube"), dir.path().join("config.ocio"), dir.path().join("luts/grade.cube"));
+    std::fs::create_dir_all(dir.path().join("luts")).unwrap();
+    write(&lut, BLACK, 1_000);
+    write(&grade, BLACK, 1_000);
+    let text = "ocio_profile_version: 2\nsearch_path: luts\nroles:\n  scene_linear: lin\ncolorspaces:\n  - !<ColorSpace>\n    name: lin\n  - !<ColorSpace>\n    name: graded\n    to_reference: !<FileTransform> {src: grade.cube, interpolation: linear}\n";
+    write(&config, text, 1_000);
+    let mut s = session(None);
+    let file = shot(&mut s, "OCIO File Transform", &[("file", json!(lut.to_string_lossy()))]);
+    let custom = shot(
+        &mut s,
+        "OCIO Color Space Transform",
+        &[("config", json!(1)), ("configFile", json!(config.to_string_lossy())), ("sourceName", json!("graded")), ("destinationName", json!("lin"))],
+    );
+    // A render notes the LUT the config names (a frame on disk is made of it too).
+    let log = ReadLog::new();
+    let mut r = s.renderer(RenderOpts::default());
+    r.reads = Some(&log);
+    let _ = r.comp_frame(custom.1, Tick::ZERO);
+    let files = log.into_files();
+    assert!(files.get(&grade.to_string_lossy()).is_some(), "the render notes the config's LUT: {files:?}");
+    assert_all(colours(&s, file), 0.0);
+    assert_all(colours(&s, custom), 0.0);
+    let misses = s.layer_cache.stats().misses;
+    assert_all(colours(&s, file), 0.0);
+    assert_all(colours(&s, custom), 0.0);
+    assert_eq!(s.layer_cache.stats().misses, misses, "unchanged files keep the cached layers");
+    let generation = effectcraft_effects::lut_generation();
+    write(&lut, WHITE, 2_000);
+    assert_all(colours(&s, file), 1.0);
+    write(&grade, WHITE, 2_000);
+    assert_all(colours(&s, custom), 1.0);
+    assert!(effectcraft_effects::lut_generation() > generation, "the viewer's frames made before are dropped");
+}
