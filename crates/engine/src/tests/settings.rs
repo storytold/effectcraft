@@ -788,6 +788,26 @@ fn context_shortcuts_on_the_same_keys_conflict() {
     assert!(t.conflicts(b, "F9").iter().any(|c| c.key == "test.paint" && !c.overrides));
 }
 
+/// A preset repeating one binding many times lists it once, and conflicts stay bounded.
+#[test]
+fn repeated_bindings_are_one_binding() {
+    let mut s = Session::default();
+    s.set_ui_commands(vec![
+        crate::shortcuts::UiCommand { id: "test.a".into(), label: "A".into(), shortcut: Some("F9".into()), scope: Some("Timeline".into()) },
+        crate::shortcuts::UiCommand { id: "test.b".into(), label: "B".into(), shortcut: Some("F9".into()), scope: Some("Timeline".into()) },
+    ]);
+    let mut t = s.shortcuts().clone();
+    t.keys.insert("test.a".into(), vec!["F9".into(); 10_000]);
+    assert_eq!(t.bindings().iter().filter(|(_, b)| b.key == "test.a").count(), 1);
+    assert_eq!(t.all_conflicts().iter().filter(|(a, c)| a == "test.a" && c.key == "test.b").count(), 1);
+    // Many commands on one key: the listing stops at its cap.
+    for i in 0..200 {
+        t.bindables.push(crate::shortcuts::Bindable { key: format!("test.many{i}"), ..t.find("test.b").unwrap().clone() });
+        t.keys.insert(format!("test.many{i}"), vec!["F9".into()]);
+    }
+    assert_eq!(t.all_conflicts().len(), crate::shortcuts::MAX_CONFLICTS);
+}
+
 // ---------------------------------------------------------------- auto-save / recovery
 
 /// The names in `d`, sorted.

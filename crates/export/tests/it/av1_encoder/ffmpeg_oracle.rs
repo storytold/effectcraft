@@ -2,12 +2,12 @@
 //! bit for bit. Skipped when `ffmpeg` (with libdav1d) is not installed. ffmpeg's native `av1`
 //! decoder only drives hardware decoders, so it is not used.
 
-use crate::common;
+use super::common;
 
 use std::process::Command;
 
 use common::*;
-use effectcraft_av1enc::{Encoder, EncoderConfig, Packet, RateControl};
+use craft_video::av1::{Encoder, EncoderConfig, Packet, RateControl};
 
 fn have_libdav1d() -> bool {
     let Ok(out) = Command::new("ffmpeg").args(["-hide_banner", "-decoders"]).output() else {
@@ -53,12 +53,12 @@ fn check(name: &str, cfg: EncoderConfig, pics: &[Pic]) -> Vec<u32> {
     let mut recons = Vec::new();
     let mut levels = Vec::new();
     for p in pics {
-        packets.push(enc.encode(&p.frame()));
+        packets.push(enc.encode(&p.frame()).expect("encode"));
         recons.push(enc.last_reconstruction().expect("reconstruction"));
         levels.push(enc.last_loop_filter_level().expect("level"));
     }
-    let dir = std::env::temp_dir().join(format!("effectcraft-av1enc-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let guard = tempfile::tempdir().expect("temp dir");
+    let dir = guard.path().to_path_buf();
     let input = dir.join("in.ivf");
     let output = dir.join("out.yuv");
     std::fs::write(&input, ivf(w, h, &packets)).expect("write ivf");

@@ -1130,6 +1130,22 @@ mod tests {
         assert_eq!(at, 19, "displayed 00020 with frames starting at 1");
     }
 
+    /// In a comp that starts 1 s before 0, Go to Time at frame 12 opens on the negative time the
+    /// viewer shows, and OK without editing it stays on frame 12 (it used to jump to frame 0).
+    #[test]
+    fn go_to_time_ok_keeps_a_negative_displayed_time() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 36, "frameRate": 24, "duration": 4, "startTime": -1})).unwrap();
+        app.session.execute("time.set", json!({"frame": 12})).unwrap();
+        assert!(open_form(&mut app, "time.set", &json!({})));
+        let f = &app.dialog_state.form;
+        assert!(matches!(&f.fields[0].kind, FieldKind::Text(t) if t == "-0:00:00:12"), "{:?}", f.fields[0]);
+        let (command, params) = (f.command.clone(), f.params());
+        app.session.execute(&command, params).unwrap();
+        let at = app.session.active_comp().unwrap().frame_rate.frame_at(app.session.time());
+        assert_eq!(at, 12, "OK on the unedited time stays put");
+    }
+
     /// File ▸ Export ▸ Adobe Premiere Pro Project… opens a form that says it writes Final Cut Pro
     /// XML; its fields register automation ids and OK runs `file.exportTimeline`.
     #[test]
