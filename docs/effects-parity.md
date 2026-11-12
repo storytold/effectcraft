@@ -1,6 +1,6 @@
 # Effects parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (effect colour labels; earlier change: parameter count and closed issue references re-audited against `upstream/main` 470ea7a3 and the generated effects.md) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-11 · **Change:** minor (counts re-measured from the registry at `origin/main` 4ac6cdb2: 308 effects, 2,988 visible parameters (3,039 with hidden ones), 280 on the GPU; the quality ratings are the 12 October ones; earlier change: minor (effect colour labels; earlier change: parameter count and closed issue references re-audited against `upstream/main` 470ea7a3 and the generated effects.md)) · **Target:** Adobe After Effects 2026
 
 Effects are the deepest single area of After Effects. This page separates the four questions
 that a single "306 of 306" hides: does each effect exist, does it run fast, does it look like
@@ -11,10 +11,10 @@ After Effects', and does the preset library exist. The per-effect catalogue is t
 
 | Question | Value | Kind |
 |---|---|---|
-| Effects present | **306** registered, 3,017 parameters; all of After Effects' effects by name (298 at the M9.11 count) plus Obsolete and our own | Measured: registry, [effects.md](effects.md). After Effects 26.5's `Plug-ins/Effects` holds 306 `.plugin` bundles in 231 entries (one bundle can hold several effects, so this is a cross-check, not a match) |
+| Effects present | **308** registered, 2,988 parameters (the visible count `effects.md` gives; 3,017 on 12 October; `effect.list` also returns hidden bookkeeping parameters and totals 3,039); all of After Effects' effects by name (298 at the M9.11 count) plus Obsolete and our own | Measured: registry, [effects.md](effects.md). After Effects 26.5's `Plug-ins/Effects` holds 306 `.plugin` bundles in 231 entries (one bundle can hold several effects, so this is a cross-check, not a match) |
 | Parameter names, order, popups, units, defaults | aligned in M9.12 | Agent-checked against After Effects' documentation, not against a live dump |
-| On the GPU | **280** (92%) | Measured: registry flags; GPU vs CPU agreement tested per effect |
-| 32-bit float, no clamping | 306 | Measured: registry flags |
+| On the GPU | **280** (91%) | Measured: registry flags; GPU vs CPU agreement tested per effect |
+| 32-bit float, no clamping | 308 | Measured: registry flags |
 | **Rendered output matches After Effects** | **partly measured** | Some colour effects are checked against After Effects 2026 renders of our own test projects: Tint, Tritone, Black & White, Exposure, Levels, Curves, Luma Key, Extract, 4-Color Gradient and Fill within 1–3/255, Brightness & Contrast up to 6.2/255 (Color Correction, Generate and Keying rows below); Radial Blur, Glow, Venetian Blinds, Radial Wipe, Fractal / Turbulent Noise and Transform are checked the same way (rows below); every other effect is unmeasured. `effectcraft_effects::fidelity::compare_frames` exists for the corpus ([fidelity/README.md](fidelity/README.md)); simulation effects are pinned by golden hashes of our own output (M13.27) |
 | Animation presets | **76** original presets (8 text-animator, 23 Transitions, 23 Backgrounds, 22 Behaviors) against After Effects' **621** `.ffx` presets | Measured: `crates/engine/presets/text_animators.json`, `crates/engine/presets/transitions.json`, `crates/engine/presets/backgrounds.json`, `crates/engine/presets/behaviors.json`; the After Effects `Presets` folder |
 | 26.x additions | Curl Noise (26.3) present (#463 open); effect colour labels (26.5) present in Effect Controls only, not in the Timeline; the rebuilt Effect Controls (26.5) missing | Release notes |
@@ -26,7 +26,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 
 | Category | Effects | On the GPU | Known differences or bugs |
 |---|---:|---:|---|
-| 3D Channel | 8 | 8 | Cryptomatte's GPU path is slow (#473; the Selection is picked in the viewer with an eyedropper, quoted names with commas fixed); multi-layer EXR: one decode per frame for the picture and the channels, cache softly bounded at 1 GB (#474; holding channels as f16 is still to do) |
+| 3D Channel | 9 | 8 | Cryptomatte's GPU path is slow (#473; the Selection is picked in the viewer with an eyedropper, quoted names with commas fixed); multi-layer EXR: one decode per frame for the picture and the channels, cache softly bounded at 1 GB (#474; holding channels as f16 is still to do) |
 | Audio | 13 | 0 | CPU by design (applied in the mixdown) |
 | Blur & Sharpen | 16 | 15 | Radial Blur keeps the layer edges as After Effects 2026 (713 now pixel-identical); Gaussian Blur interaction and output to be measured first ([fidelity/ae-2026-acceptance.md](fidelity/ae-2026-acceptance.md)) |
 | Channel | 13 | 13 | — |
@@ -36,7 +36,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 | Generate | 26 | 25 | 4-Color Gradient's Blend matches After Effects 2026 (weights 1 / (d² + Blend²)); Fill's Opacity is the filled layer's opacity, as After Effects 2026 renders it (with a Fill Mask it still mixes with the original, not measured); Fractal on the CPU (needs f64); #526 (Reset) and #536 (Write-on marks) are closed |
 | Immersive Video | 12 | 12 | — |
 | Keying | 12 | 12 | Luma Key and Extract key on Rec. 601 luminance, as After Effects 2026; Key Cleaner approximated; #533 (wire-removal Frame Offset) is closed |
-| Matte | 6 | 4 | Mocha shape reads our documented JSON, not Mocha's format |
+| Matte | 7 | 4 | Mocha shape reads our documented JSON, not Mocha's format |
 | Noise & Grain | 13 | 12 | Fractal / Turbulent Noise lattice matches After Effects 2026 (Scale 100 = 66.7 px cells); the noise values themselves differ (seeds) and Soft Linear contrast is about 20 % lower than AE's; Curl Noise (#463); Match Grain on the CPU |
 | Obsolete | 9 | 9 | Luma Key matches After Effects 2026 on a grey ramp (hard cut, Tolerance only for Similar / Dissimilar) |
 | Paint | 1 | 0 | Tablet pressure not read ([hardware-parity.md](hardware-parity.md)) |
@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Counts re-measured from the registry: 308 effects (3D Channel 9, Matte 7), 2,988 visible parameters (3,039 with hidden ones), 280 on the GPU; quality ratings left as of 12 October |
 | 2026-10-19 | minor | Glow (original colours): bright pass per channel, 8 × (value − threshold + 0.061), measured against After Effects 2026 (CPU and GPU) |
 | 2026-10-19 | minor | Glow (colour channels): the glow covers the layer's blurred alpha, blur σ = 0.384 × radius, measured against After Effects 2026 renders (CPU and GPU) |
 | 2026-10-19 | minor | Radial Blur repeats the edge instead of sampling transparency outside the layer, measured against After Effects 2026 renders (CPU; Radial Blur has no GPU path) |

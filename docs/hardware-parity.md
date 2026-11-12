@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (Content-Aware Fill's PatchMatch and flow search on the GPU) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-11-11 · **Change:** minor (11 November: hardware decode and encode say what the maintainers decided on 5 November (#819, #498); #504 marked closed; the hours are the 12 October estimates; earlier change: minor (Content-Aware Fill's PatchMatch and flow search on the GPU)) · **Target:** Adobe After Effects 2026
 
 Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
@@ -18,21 +18,21 @@ monitors are missing, and two GPU start-up failures are open.
 | CPU fallback and device-loss recovery | yes | yes | yes; Windows ARM64 Adreno panic after device loss (#591, closed) | yes | yes (#225 fixed) | Out of video memory falls back to the CPU (#106) |
 | GPU detection and choice | GPU info, renderer choice | Backend Auto per comp | "GPU isn't being detected" (#596, closed); Intel HD 5500 fix unverified (#198) | yes | yes | No settings page listing adapters yet |
 | Multi-core rendering | Multi-Frame Rendering | rayon pools; preview scheduler sized to the render pool | same | same | Web Workers, one engine per worker | No benchmark against Multi-Frame Rendering |
-| Hardware video decode | H.264 / HEVC / ProRes (Apple silicon) | none (software, FilmCraft) | none | none | none | FilmCraft has VideoToolbox, Media Foundation/DXVA and VA-API paths to borrow (gap 15) |
-| Hardware video encode | H.264 / HEVC via VideoToolbox, NVENC, Quick Sync (render queue and Media Encoder) | none | none | none | none | #498 asks for NVENC (answered: Nvidia's SDK needs FFI, which the no-`unsafe` rule forbids; open PR #819 adds hardware decoding); our software encoders are slower and lack B-frames |
+| Hardware video decode | H.264 / HEVC / ProRes (Apple silicon) | none (software, FilmCraft) | none | none | none | FilmCraft has VideoToolbox, Media Foundation/DXVA and VA-API paths, but a maintainer decision of 5 November keeps OS and driver FFI out of the shipped binary even inside a FilmCraft crate (#819 closed; gap 15) |
+| Hardware video encode | H.264 / HEVC via VideoToolbox, NVENC, Quick Sync (render queue and Media Encoder) | none | none | none | none | #498 asks for NVENC (answered: Nvidia's SDK needs FFI, which the no-`unsafe` rule forbids; the 5 November decision on #819 applies the same rule to hardware decoding); our software encoders are slower and lack B-frames |
 | Video output devices | Mercury Transmit to AJA, Blackmagic, second display | second preview window only (Video Preview) | same | same | — | No SDI/HDMI device output |
 | HDR display | HDR monitoring on EDR / HDR displays | tone-mapped SDR view; no EDR output | no HDR output | no | no | Colour engine handles HDR maths (Rec. 2100 PQ/HLG output files) |
 | Pen tablets (pressure, tilt) | yes, for Paint and Roto | Brushes panel has pressure options, but no tablet pressure is read | same | same | same | Paint strokes store pressure per vertex; input never fills it |
 | Multiple monitors | panels and windows across screens | panels move into their own native windows on any screen (Move Panel to New Window; desktop builds) | same | same (#486) | — | gap 20 |
 | Touch / trackpad gestures | pinch zoom in viewers | Composition and Layer viewers: two-finger scroll pans, pinch zooms around the pointer (Alt + scroll and the mouse wheel zoom too); Timeline pinch zooms time | two-finger scroll pans once it moves diagonally (a pixel-precise wheel keeps zooming); pinch arrives as Ctrl + scroll and zooms | same | same | No rotate or swipe gestures; tested in `ui_viewer_trackpad.rs` (UI logic, not on hardware) |
-| Audio hardware | Core Audio / ASIO / WASAPI, device choice, latency | cpal output; preview sound late after a start offset (#504 open; #554 closed) | cpal | cpal (ALSA) | Web Audio | No input or device latency settings |
+| Audio hardware | Core Audio / ASIO / WASAPI, device choice, latency | cpal output; preview sound late after a start offset (#504 and #554 closed; #3176, sound about 2 s late, open) | cpal | cpal (ALSA) | Web Audio | No input or device latency settings |
 | Machine learning acceleration | Apple Neural Engine / GPU for Object Matte, Roto Brush 3 | CPU inference (pure Rust, rayon) | CPU | CPU | CPU | No GPU inference for MobileSAM or MediaPipe |
 | Memory management | RAM reserve, disk cache | RAM Reserved, Reduce Cache When Low on Memory, disk cache | same | same | OPFS disk cache | good |
 
 ## Estimate
 
 **≈ 60–120 h**: Direct3D 12 and adapter start-up fixes 6–12 h; hardware decode on three platforms
-20–35 h and encode 15–30 h (borrowing FilmCraft's work); multiple monitors 10–20 h; tablet pressure
+20–35 h and encode 15–30 h (borrowing FilmCraft's work; blocked by the 5 November decision on FFI, gap 15); multiple monitors 10–20 h; tablet pressure
 4–8 h; HDR output 8–15 h. Needs Windows and Linux GPUs we don't have locally, and a human for
 the Adreno and Intel cases.
 
@@ -40,6 +40,7 @@ the Adreno and Intel cases.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Hardware decode and encode rows say the maintainers decided on 5 November to keep OS and driver FFI out of the shipped binary (#819 closed, #498); #504 marked closed, #3176 added |
 | 2026-10-29 | minor | Content-Aware Fill's PatchMatch and flow block matching run on the GPU (`FillBackend`/`Accelerator::inpaint`, `effectcraft_gpu::inpaint`) |
 | 2026-10-12 | minor | #591, #596 and #554 marked closed; #498 answer and open PR #819 |
 | 2026-10-10 | major | First hardware parity document |
