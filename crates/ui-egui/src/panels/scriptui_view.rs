@@ -329,13 +329,28 @@ fn image_texture(ctx: &egui::Context, img: &ImageRef, services: &dyn Services) -
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
         return cached;
     }
-    let tex = img.bytes(services).and_then(|b| image::load_from_memory(&b).ok()).map(|d| {
+    let tex = img.bytes(services).and_then(|b| decode_ui_image(&b)).map(|d| {
         let rgba = d.to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
         ctx.load_texture(format!("scriptui-image-{}", img.name), ci, egui::TextureOptions::LINEAR)
     });
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
     tex
+}
+
+/// The largest side of a ScriptUI image (icons and banners are far smaller).
+const MAX_UI_IMAGE_SIDE: u32 = 4096;
+
+/// A ScriptUI image decoded within [`MAX_UI_IMAGE_SIDE`] per side and a matching allocation
+/// limit, checked from the header before the pixels (and their RGBA copy) are allocated.
+fn decode_ui_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_alloc = Some(u64::from(MAX_UI_IMAGE_SIDE) * u64::from(MAX_UI_IMAGE_SIDE) * 16);
+    r.limits(limits);
+    r.decode().ok()
 }
 
 /// An image control's or icon button's image, fitted (aspect kept) and centred in `r`.

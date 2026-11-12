@@ -20,7 +20,10 @@ pub fn rasterize(doc: &Doc, w: u32, h: u32, scale: f64) -> Image {
 
 /// Rasterise `doc` with `m` mapping document pixels to image pixels.
 pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
-    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES };
+    // Nested knockout and non-isolated groups draw their children more than once; the number of
+    // node draws is bounded by a multiple of the tree's size, past which drawing stops.
+    let draws_left = node_count(&doc.root).saturating_mul(MAX_DRAWS_PER_NODE).max(MIN_DRAWS);
+    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES, draws_left };
     let Some(mut img) = budget.image(w, h, None) else { return Image::default() };
     draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
     img
@@ -29,9 +32,31 @@ pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
 /// Bound the simultaneously live offscreen image surfaces created by nested groups.
 const MAX_LIVE_SURFACE_BYTES: usize = 512 * 1024 * 1024;
 
+/// How many times each node of a document may be drawn, on average, in one rasterisation.
+const MAX_DRAWS_PER_NODE: usize = 64;
+const MIN_DRAWS: usize = 100_000;
+
+/// The nodes in `g`'s tree, `g` included.
+fn node_count(g: &Group) -> usize {
+    let mut n = 0usize;
+    let mut stack = vec![g];
+    while let Some(g) = stack.pop() {
+        n = n.saturating_add(1);
+        for c in &g.children {
+            match c {
+                Node::Group(cg) => stack.push(cg),
+                _ => n = n.saturating_add(1),
+            }
+        }
+    }
+    n
+}
+
 struct SurfaceBudget {
     live_bytes: usize,
     limit_bytes: usize,
+    /// Node draws left (see [`MAX_DRAWS_PER_NODE`]).
+    draws_left: usize,
 }
 
 impl SurfaceBudget {
@@ -394,6 +419,11 @@ fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
 }
 
 fn draw_node(n: &Node, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
+    let Some(left) = budget.draws_left.checked_sub(1) else { return };
+    budget.draws_left = left;
+    if left == 0 {
+        log::warn!("svg: draw budget reached, the rest of the drawing is skipped");
+    }
     match n {
         Node::Group(g) => draw_group(g, m, opacity, dst, budget),
         Node::Shape(s) => {

@@ -43,7 +43,9 @@ pub fn display_duration(s: &Session, comp: &Comp, len: Tick) -> String {
 }
 
 /// Parse a time typed in the project's Time Display Style (relative `+n`/`-n` from frame
-/// `current`) into a comp frame.
+/// `current`) into a comp frame. In Timecode style, in a comp whose Start Timecode is negative, a
+/// `-` before a timecode with separators (`-0:00:00:12`, `-1.00`) is the sign of a displayed time,
+/// not a step back; a bare `-n` still steps back.
 pub fn parse_display_time(s: &Session, comp: &Comp, text: &str, current: i64) -> std::result::Result<i64, String> {
     let fr = comp.frame_rate;
     let st = &s.project.settings;
@@ -53,6 +55,20 @@ pub fn parse_display_time(s: &Session, comp: &Comp, text: &str, current: i64) ->
             effectcraft_time::parse_feet_frames(text, pf, current + start).map(|f| f - start).map_err(|e| e.0)
         }
         None => {
+            // A comp whose Start Timecode is negative shows the times before 0 with a `-`
+            // (`-0:00:00:12`), so there a `-` before a timecode with separators is the sign of a
+            // displayed time and typing what the display shows lands on the frame it shows. A bare
+            // `-n` still moves n frames back.
+            if st.time_display == TimeDisplayStyle::Timecode
+                && comp.display_start < Tick::ZERO
+                && let Some(body) = text.trim().strip_prefix('-').map(str::trim_start)
+                && body.contains([':', ';', '.', ','])
+                && !body.starts_with(['+', '-'])
+            {
+                let drop_frame = fr.supports_drop_frame() && body.contains(';');
+                let shown = effectcraft_time::parse_timecode(body, fr, drop_frame, current).map_err(|e| e.0)?;
+                return Ok(shown.saturating_neg().saturating_sub(fr.frame_at(comp.display_start)));
+            }
             // The Timeline shows non-drop timecode (`:`), so typed `:`/`.` text is read as non-drop
             // too; only explicit `;` fields mean drop-frame (#890).
             let drop_frame = fr.supports_drop_frame() && text.contains(';');
