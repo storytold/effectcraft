@@ -30,6 +30,10 @@ fn split_width_moves_the_divider_and_none_resets_it() {
     h.run_steps(3);
     let wide = split_x(&h).expect("the divider is registered");
     assert!(wide > auto, "a wider split moves the divider right ({wide} vs {auto})");
+    h.state_mut().ui.timeline.split_w = Some(0.0);
+    h.run_steps(3);
+    let narrow = split_x(&h).expect("the divider is registered");
+    assert!(narrow < wide && narrow <= auto, "a narrow split moves the divider left, never past the minimum ({narrow} vs {auto})");
     h.state_mut().ui.timeline.split_w = Some(f32::NAN);
     h.run_steps(3);
     assert!(split_x(&h).is_some_and(|x| x.is_finite()), "a NaN width does not break the layout");
