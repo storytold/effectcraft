@@ -374,6 +374,7 @@ fn toggle_closed_respects_path_and_vertex_selection() {
     assert!(shape_path(&s, lid, a).closed);
     assert!(shape_path(&s, lid, b).closed, "all paths undo in one step");
     s.execute("mask.setClosed", json!({"layer": lid, "mask": a, "closed": false})).unwrap();
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(false), "a mixed selection is unchecked");
     s.execute("path.toggleClosed", json!({})).unwrap();
     assert!(shape_path(&s, lid, a).closed);
     assert!(shape_path(&s, lid, b).closed, "a mixed selection closes all paths");
@@ -477,6 +478,7 @@ fn toggle_closed_handles_masks_and_preserves_explicit_set_closed() {
     s.state.selected_props = vec![(LayerId(lid), uid)];
     s.execute("path.toggleClosed", json!({})).unwrap();
     assert!(!path(&s).closed);
+    assert!(layer(&s, lid).props.find_group(uid).unwrap().get("path").unwrap().keys.is_empty(), "a static path gains no keyframe");
     s.execute("mask.setClosed", json!({"layer": lid, "mask": uid})).unwrap();
     assert_eq!(path(&s), original, "explicit API still defaults to closed");
     s.execute("mask.setClosed", json!({"layer": lid, "mask": uid, "closed": false})).unwrap();
@@ -491,6 +493,26 @@ fn toggle_closed_handles_masks_and_preserves_explicit_set_closed() {
     assert!(!s.is_enabled("path.toggleClosed"));
     assert!(s.execute("path.toggleClosed", json!({})).is_err());
     assert_eq!(path(&s), original);
+}
+
+#[test]
+fn toggle_closed_recomputes_roto_bezier_tangents() {
+    let mut s = comp();
+    let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let uid =
+        s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100], [0, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    s.execute("path.rotoBezier", json!({"layer": lid, "value": true})).unwrap();
+    let path = |s: &Session| layer(s, lid).props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    let closed = path(&s);
+    assert_ne!(closed.out_tangents[0], [0.0; 2], "a closed RotoBezier path has tangents at every vertex");
+    s.state.selected_props = vec![(LayerId(lid), uid)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    let open = path(&s);
+    assert!(!open.closed);
+    assert_eq!((open.in_tangents[0], open.out_tangents[3]), ([0.0; 2], [0.0; 2]), "open ends lose their automatic tangents");
+    assert_ne!(open.out_tangents[1], [0.0; 2]);
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert_eq!(path(&s), closed, "reclosing restores the closed RotoBezier tangents");
 }
 
 #[test]
