@@ -56,7 +56,8 @@ pub enum LossCategory {
     /// Layers that could not be imported for another reason (unknown layer type, missing or
     /// unsupported source, precomposition loop).
     UnsupportedLayers,
-    /// Project items of a kind that is not imported.
+    /// Project items of a kind that is not imported, and items made from a Photoshop layer
+    /// without pixels (they show the merged image).
     UnsupportedItems,
     /// Data that could not be read (damaged headers, unreadable keyframes).
     DamagedData,
