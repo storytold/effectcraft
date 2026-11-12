@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::warp_stab::{self, ANALYSIS, ANALYSIS_KEY};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Project, PropGroup, Uid};
+use effectcraft_project::{Footage, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Project, PropGroup, Uid};
 use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
@@ -112,7 +112,7 @@ fn fnv(s: &str) -> u64 {
 pub fn signature(p: &Project, comp: ItemId, layer: &Layer) -> String {
     let src = match &layer.source {
         LayerSource::Footage { item } | LayerSource::Solid { item } | LayerSource::Comp { item } => match p.item(*item).map(|i| &i.kind) {
-            Some(ItemKind::Footage(f)) => format!("{f:?}"),
+            Some(ItemKind::Footage(f)) => footage_text(f, true),
             Some(ItemKind::Solid(s)) => format!("{s:?}"),
             Some(ItemKind::Comp(c)) => format!("{}x{}@{:?}/{:?}", c.width, c.height, c.frame_rate, c.duration),
             _ => String::new(),
@@ -122,14 +122,108 @@ pub fn signature(p: &Project, comp: ItemId, layer: &Layer) -> String {
     signature_with_source(p, comp, layer, &src)
 }
 
+/// Whether `saved`, a key an analysis of `layer` was saved with, is for the layer's current frames.
+/// `key` makes such a key from a signature. A key made from the signature an earlier release wrote
+/// for the same frames matches too: keep it rather than rewrite it (analysing writes today's).
+pub(crate) fn key_matches(p: &Project, comp: ItemId, layer: &Layer, saved: &str, key: impl Fn(String) -> String) -> bool {
+    key(signature(p, comp, layer)) == saved || signature_before_placed_page(p, comp, layer).is_some_and(|s| key(s) == saved)
+}
+
 /// Before `Footage::placed_page` was added in 0.23, the persisted signature hashed the
-/// same Debug representation without that last field. Only ordinary footage can match it.
-pub(crate) fn signature_before_placed_page(p: &Project, comp: ItemId, layer: &Layer) -> Option<String> {
+/// same footage text without that last field. Only ordinary footage can match it.
+fn signature_before_placed_page(p: &Project, comp: ItemId, layer: &Layer) -> Option<String> {
     let LayerSource::Footage { item } = &layer.source else { return None };
     let ItemKind::Footage(footage) = &p.item(*item)?.kind else { return None };
-    let src = format!("{footage:?}");
-    let old = src.strip_suffix(", placed_page: false }")?;
-    Some(signature_with_source(p, comp, layer, &format!("{old} }}")))
+    if footage.placed_page {
+        return None;
+    }
+    Some(signature_with_source(p, comp, layer, &footage_text(footage, false)))
+}
+
+/// A footage item in a signature: its fields as `Debug` wrote them in 0.23, the text saved
+/// analysis keys were hashed from (without `placed_page` before 0.23). It is written out here so
+/// that a new `Footage` field doesn't change every signature and drop every saved analysis.
+pub(crate) fn footage_text(f: &Footage, placed_page: bool) -> String {
+    format!("{:?}", FootageText { f, placed_page })
+}
+
+struct FootageText<'a> {
+    f: &'a Footage,
+    placed_page: bool,
+}
+
+impl std::fmt::Debug for FootageText<'_> {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Every field is named, so a new one doesn't compile until it is decided here. A new field
+        // that changes the frames goes last, written only when it isn't its default, so keys saved
+        // before it still match. A new field that doesn't change the frames stays out.
+        let Footage {
+            path,
+            kind,
+            width,
+            height,
+            pixel_aspect,
+            frame_rate,
+            native_rate,
+            duration,
+            has_video,
+            has_audio,
+            alpha,
+            premul_color,
+            loop_count,
+            codec,
+            missing,
+            sequence,
+            color_profile,
+            layer,
+            fields,
+            invert_alpha,
+            linear_light,
+            preserve_rgb,
+            cineon,
+            data,
+            page,
+            alphabetical,
+            start_timecode,
+            file_timecode,
+            markers,
+            placed_page,
+        } = self.f;
+        let mut d = out.debug_struct("Footage");
+        d.field("path", path)
+            .field("kind", kind)
+            .field("width", width)
+            .field("height", height)
+            .field("pixel_aspect", pixel_aspect)
+            .field("frame_rate", frame_rate)
+            .field("native_rate", native_rate)
+            .field("duration", duration)
+            .field("has_video", has_video)
+            .field("has_audio", has_audio)
+            .field("alpha", alpha)
+            .field("premul_color", premul_color)
+            .field("loop_count", loop_count)
+            .field("codec", codec)
+            .field("missing", missing)
+            .field("sequence", sequence)
+            .field("color_profile", color_profile)
+            .field("layer", layer)
+            .field("fields", fields)
+            .field("invert_alpha", invert_alpha)
+            .field("linear_light", linear_light)
+            .field("preserve_rgb", preserve_rgb)
+            .field("cineon", cineon)
+            .field("data", data)
+            .field("page", page)
+            .field("alphabetical", alphabetical)
+            .field("start_timecode", start_timecode)
+            .field("file_timecode", file_timecode)
+            .field("markers", markers);
+        if self.placed_page {
+            d.field("placed_page", placed_page);
+        }
+        d.finish()
+    }
 }
 
 fn signature_with_source(p: &Project, comp: ItemId, layer: &Layer, src: &str) -> String {
@@ -169,11 +263,10 @@ pub(crate) fn invalidate(before: &Project, after: &mut Project) -> Vec<(ItemId, 
             if !fx.groups().any(is_warp) {
                 continue;
             }
-            let sig = signature(after, *cid, l);
             let old_layer = before.comp(*cid).and_then(|bc| bc.layer(l.id));
             for g in fx.groups().filter(|g| is_warp(g)) {
                 let analysed = !str_of(g, ANALYSIS).is_empty();
-                if analysed && str_of(g, ANALYSIS_KEY) != sig {
+                if analysed && !key_matches(after, *cid, l, &str_of(g, ANALYSIS_KEY), |s| s) {
                     clear.push((*cid, l.id, g.uid));
                     todo.push((*cid, l.id, g.uid));
                 } else if !analysed && old_layer.and_then(|ol| ol.props.find_group(g.uid)).is_none() {

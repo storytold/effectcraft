@@ -222,12 +222,6 @@ pub fn input_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
     input_key_with_signature(crate::warp::signature(p, comp, layer), layer, uid)
 }
 
-/// Recognize the input key serialized before 0.23 without re-keying its frozen matte.
-fn input_key_before_placed_page(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> Option<String> {
-    let signature = crate::warp::signature_before_placed_page(p, comp, layer)?;
-    Some(input_key_with_signature(signature, layer, uid))
-}
-
 fn input_key_with_signature(mut s: String, layer: &Layer, uid: Uid) -> String {
     if let Some(m) = layer.masks() {
         s.push_str(&format!("{m:?}"));
@@ -258,7 +252,7 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
                 let old = before.comp(*cid).and_then(|bc| bc.layer(l.id)).and_then(|ol| ol.props.find_group(g.uid));
                 let saved_key = str_of(g, INPUT_KEY);
                 // Keep a matching old key: the frozen cache itself also hashes that key.
-                if saved_key != key && input_key_before_placed_page(after, *cid, l, g.uid).as_deref() != Some(saved_key.as_str()) {
+                if !crate::warp::key_matches(after, *cid, l, &saved_key, |s| input_key_with_signature(s, l, g.uid)) {
                     set.push((*cid, l.id, g.uid, key));
                     todo.push((*cid, l.id, g.uid));
                 } else if old.is_none_or(|o| guard_of(o) != guard_of(g)) {
