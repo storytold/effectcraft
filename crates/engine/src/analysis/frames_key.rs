@@ -9,7 +9,7 @@
 //! doesn't change keys. Of the layer and of a precomp, only the fields named in `layer_frames` are
 //! read (a precomp's contents are #3535). The
 //! text leaves out observations (whether footage is available) and data that never changes pixels
-//! (names, labels, UI hints, markers), so they never drop saved analyses (#3534, #3536).
+//! (colour labels, UI hints, markers), so they never drop saved analyses (#3534, #3536).
 //!
 //! Keys saved by 0.22–0.24 hashed derived `Debug` text instead. [`legacy`] still recognises
 //! them, and a matching saved key is kept rather than rewritten: frozen Roto Brush mattes and
@@ -348,13 +348,15 @@ impl Text {
     }
 
     fn group(&mut self, g: &PropGroup, depth: usize) {
-        // The uid, name and colour label identify and label the group; they never change pixels.
-        let PropGroup { uid: _, match_id, name: _, kind, enabled, label: _, children } = g;
+        // Expressions find effects and groups by name (`effect("Blur")`, `propertyGroup(1).name`).
+        // The uid and colour label never change pixels.
+        let PropGroup { uid: _, match_id, name, kind, enabled, label: _, children } = g;
         if depth >= MAX_DEPTH {
             self.word("tooDeep");
             return;
         }
         self.str("group", match_id);
+        self.str("name", name);
         self.group_kind(kind);
         self.field("enabled", enabled);
         for c in children {
@@ -415,24 +417,16 @@ impl Text {
     }
 
     fn property(&mut self, pr: &Property) {
-        // The uid, name and UI hints identify and show the property; the 2D/3D-only and
-        // hold-only flags say where and how it can be edited, not what it evaluates to.
-        let Property {
-            uid: _,
-            match_id,
-            name: _,
-            value,
-            keys,
-            expr,
-            ui: _,
-            spatial,
-            hold_only: _,
-            three_d_only: _,
-            two_d_only: _,
-            shown_dims: _,
-            static_only: _,
-        } = pr;
+        // Expressions read the name (`thisProperty.name`) and seed `random`/`wiggle` with the
+        // uid: the uid is written for a property with an expression. UI hints and the 2D/3D-only
+        // and hold-only flags say where and how it can be edited, not what it evaluates to.
+        let Property { uid, match_id, name, value, keys, expr, ui: _, spatial, hold_only: _, three_d_only: _, two_d_only: _, shown_dims: _, static_only: _ } =
+            pr;
         self.str("prop", match_id);
+        self.str("name", name);
+        if expr.is_some() {
+            self.field("uid", uid);
+        }
         self.value(value);
         self.field("spatial", spatial);
         for k in keys {

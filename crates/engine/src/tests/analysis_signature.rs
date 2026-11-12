@@ -100,7 +100,7 @@ fn analyses_saved_by_0_24_survive_edits_that_keep_their_frames() {
 fn signature_text_is_pinned() {
     let s = open(ANALYSED_0_24);
     let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
-    let key = r#"frames/1;footage=1;footage;path="/tmp/effectcraft-3456-shake.mp4";kind=video;w=160;h=120;par=1.0;rate=12/1;nativeRate=none;duration=254016000000;video=true;audio=false;alpha=ignore;matte=[0.0, 0.0, 0.0];loop=1;codec="H.264 (High)";frames=0;profile{rec709;};layer=none;fields=off;invertAlpha=false;linearLight=false;preserveRgb=false;cineon;log=false;points=[0.0, 1023.0, 95.0, 685.0, 1.7, 20.0];units=10bit;data=none;page=0;alphabetical=false;startTimecode=none;fileTimecode=none;placedPage=false;in=0;out=254016000000;start=0;stretch=100.0;timeRemap{prop="timeRemap";scalar=0.0;spatial=false;key=0;scalar=0.2;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;key=254016000000;scalar=1.0;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;expr=none;};compRate{rate=12/1;};"#;
+    let key = r#"frames/1;footage=1;footage;path="/tmp/effectcraft-3456-shake.mp4";kind=video;w=160;h=120;par=1.0;rate=12/1;nativeRate=none;duration=254016000000;video=true;audio=false;alpha=ignore;matte=[0.0, 0.0, 0.0];loop=1;codec="H.264 (High)";frames=0;profile{rec709;};layer=none;fields=off;invertAlpha=false;linearLight=false;preserveRgb=false;cineon;log=false;points=[0.0, 1023.0, 95.0, 685.0, 1.7, 20.0];units=10bit;data=none;page=0;alphabetical=false;startTimecode=none;fileTimecode=none;placedPage=false;in=0;out=254016000000;start=0;stretch=100.0;timeRemap{prop="timeRemap";name="Time Remap";scalar=0.0;spatial=false;key=0;scalar=0.2;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;key=254016000000;scalar=1.0;interp=linear/linear;continuous=false;autoBezier=false;spatialIn=[0.0, 0.0, 0.0];spatialOut=[0.0, 0.0, 0.0];spatialAuto=true;spatialContinuous=false;roving=false;muted=false;expr=none;};compRate{rate=12/1;};"#;
     assert_eq!(crate::analysis::frames_key::signature_text(&s.project, COMP, layer), key);
 }
 
@@ -151,17 +151,26 @@ fn todays_keys_survive_edits_that_keep_their_frames() {
         add_to_render_queue(&mut s);
         assert_eq!(saved(&s), before);
     }
-    // Names and labels only show things.
-    s.execute_checked("layer.rename", json!({"layer": CLIP.0, "name": "Renamed"})).unwrap();
-    s.edit("rename", None, |p, _| {
+    // Colour labels and footage markers only show things.
+    s.edit("label", None, |p, _| {
         let l = p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap();
-        l.props.find_group_mut(82).unwrap().name = "Soft".into();
+        l.props.find_group_mut(82).unwrap().label = Some(effectcraft_color::Label::Yellow);
         if let Some(effectcraft_project::ItemKind::Footage(f)) = p.item_mut(ItemId(1)).map(|i| &mut i.kind) {
             f.markers.push(effectcraft_project::Marker::default());
         }
         Ok(())
     })
     .unwrap();
+    assert_eq!(saved(&s), before);
+    // Expressions find effects by name: renaming the effect above the Roto Brush is a change for it.
+    s.edit("rename", None, |p, _| {
+        p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap().props.find_group_mut(82).unwrap().name = "Soft".into();
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(saved(&s)[..2], before[..2]);
+    assert_eq!(saved(&s)[2].0, "");
+    s.execute_checked("edit.undo", json!({})).unwrap();
     assert_eq!(saved(&s), before);
 
     // A real change still clears them.
@@ -233,4 +242,23 @@ fn keys_saved_by_0_24_while_offline_still_match() {
         add_to_render_queue(&mut s);
         assert_eq!(roto(&s), ("saved frozen".into(), ROTO_INPUT_0_24_OFFLINE.into()));
     }
+}
+
+/// Expressions seed `random` and `wiggle` with the property's uid: a Time Remap with an expression
+/// keys its uid (a duplicated layer gets new uids), one without doesn't.
+#[test]
+fn an_expression_keys_its_property_uid() {
+    let s = open(ANALYSED_0_24);
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap().clone();
+    let text = |l: &effectcraft_project::Layer| crate::analysis::frames_key::signature_text(&s.project, COMP, l);
+    let renumbered = |l: &effectcraft_project::Layer| {
+        let mut l = l.clone();
+        l.props.get_mut("timeRemap").unwrap().uid += 1000;
+        l
+    };
+    assert_eq!(text(&renumbered(&layer)), text(&layer));
+    let mut with_expr = layer.clone();
+    with_expr.props.get_mut("timeRemap").unwrap().expr =
+        Some(effectcraft_project::Expression { text: "seedRandom(0, true); random(0, 1)".into(), enabled: true });
+    assert_ne!(text(&renumbered(&with_expr)), text(&with_expr));
 }
