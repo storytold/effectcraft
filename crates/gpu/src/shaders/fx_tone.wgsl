@@ -40,7 +40,9 @@ fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     if (clip_w) {
         t = min(t, 1.0);
     }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, max(data[o + 2u], 0.01));
+    // color2::LEVELS_IC_CURVE_LIMIT keeps the curve finite.
+    let curve = clamp(fxt_gamma(t, max(data[o + 2u], 0.01)), -1e6, 1e6);
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * curve;
 }
 
 // color_fx::level (data offset o: ib, iw, g, ob, ow, clip black, clip white).

@@ -29,6 +29,17 @@ fn levels_and_gamma() {
     );
     effect_case("ec.color.levelsic", &[("green/greenInBlack", n(0.2)), ("green/greenInWhite", n(0.6)), ("clipToOutputWhite", e(0))]);
     effect_case("ec.color.levelsic", &[("alpha/alphaOutBlack", n(0.3))]);
+    // #3487-#3491: the ends of the valid ranges, the curve bounded where gamma 0 would overflow.
+    effect_case(
+        "ec.color.levelsic",
+        &[
+            ("rgb/rgbInWhite", n(0.2)),
+            ("rgb/rgbGamma", n(0.0)),
+            ("red/redOutBlack", n(-10000.0)),
+            ("blue/blueOutWhite", n(10000.0)),
+            ("clipToOutputWhite", e(0)),
+        ],
+    );
     effect_case("ec.color.levels", &[("redInBlack", n(0.1)), ("greenGamma", n(1.5)), ("blueOutWhite", n(0.7)), ("inWhite", n(0.9))]);
     effect_case("ec.color.levels", &[("alphaInWhite", n(0.6)), ("redInWhite", n(0.5)), ("redClipToOutputWhite", e(0))]);
     effect_case("ec.color.gammapedestalgain", &[("redGamma", n(1.4)), ("greenPedestal", n(0.1)), ("blueGain", n(0.8))]);
