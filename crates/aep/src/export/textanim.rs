@@ -89,6 +89,7 @@ const PROPS: &[(&str, &str, Conv, Layout)] = &[
     ("opacity", "ADBE Text Opacity", c_scalar, Layout::One),
     ("fillColor", "ADBE Text Fill Color", c_color, Layout::Color),
     ("strokeColor", "ADBE Text Stroke Color", c_color, Layout::Color),
+    ("strokeOpacity", "ADBE Text Stroke Opacity", c_scalar, Layout::One),
     ("strokeWidth", "ADBE Text Stroke Width", c_scalar, Layout::One),
     ("tracking", "ADBE Text Tracking Amount", c_scalar, Layout::One),
     ("lineSpacing", "ADBE Text Line Spacing", c_vec2, Layout::Size),

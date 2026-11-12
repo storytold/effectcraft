@@ -181,6 +181,15 @@ mod tests {
     use super::*;
     use crate::container::{AepFile, Body, Chunk, parse, write};
 
+    /// Asserts the two destination projects are structurally equal and serialize identically (layers,
+    /// properties and values included, which `ImportResult` does not carry). Nothing is normalized:
+    /// the import is deterministic, ids and timestamps included.
+    fn same_project(a: &Project, b: &Project, name: &str) {
+        assert!(a == b, "{name}: the imported projects differ through the index");
+        let (ja, jb) = (serde_json::to_string(a).ok(), serde_json::to_string(b).ok());
+        assert!(ja.is_some() && ja == jb, "{name}: the serialized projects differ through the index");
+    }
+
     /// Imports `bytes` through the owned chunk tree and through the index: the same project, report
     /// and settings, or the same error.
     fn both(bytes: &[u8], name: &str) {
@@ -188,9 +197,11 @@ mod tests {
         let options = ImportOptions { allow_losses: true, ..ImportOptions::new(&exists) };
         match (parse(bytes), TreeIndex::parse(bytes)) {
             (Ok(file), Ok(index)) => {
-                let a = import_root(&mut Project::default(), Root::from(&file), &options);
-                let b = import_root(&mut Project::default(), Root::from(&index), &options);
+                let (mut pa, mut pb) = (Project::default(), Project::default());
+                let a = import_root(&mut pa, Root::from(&file), &options);
+                let b = import_root(&mut pb, Root::from(&index), &options);
                 assert!(a == b, "{name}: the import differs through the index");
+                same_project(&pa, &pb, name);
             }
             (Err(a), Err(b)) => assert_eq!(a, b, "{name}"),
             (a, b) => panic!("{name}: {:?} vs {:?}", a.err(), b.err()),
@@ -253,9 +264,11 @@ mod tests {
     fn both_aepx(bytes: &[u8], name: &str) -> Result<ImportResult, AepImportError> {
         let exists = |_: &str| true;
         let options = ImportOptions { allow_losses: true, ..ImportOptions::new(&exists) };
-        let a = crate::read_aepx(bytes).map_err(AepImportError::from).and_then(|file| import_root(&mut Project::default(), Root::from(&file), &options));
-        let b = import(&mut Project::default(), bytes, &options);
+        let (mut pa, mut pb) = (Project::default(), Project::default());
+        let a = crate::read_aepx(bytes).map_err(AepImportError::from).and_then(|file| import_root(&mut pa, Root::from(&file), &options));
+        let b = import(&mut pb, bytes, &options);
         assert!(a == b, "{name}: the .aepx import differs through the index");
+        same_project(&pa, &pb, name);
         b
     }
 
