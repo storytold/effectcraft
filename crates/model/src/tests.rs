@@ -682,4 +682,3 @@ fn gltf_buffer_less_accessors_share_one_zero_budget() {
     let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3);
     assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_ok());
 }
-

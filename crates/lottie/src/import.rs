@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use craft_lottie::model::{Asset, Effect, Layer as LottieLayer, LayerContent, Mask, Transform};
+use craft_lottie::{Animated, Animation, Json};
 use effectcraft_color::Label;
 use effectcraft_keyframe::{ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
@@ -10,8 +12,6 @@ use effectcraft_project::{
     AlphaMode, AutoOrient, Comp, Footage, FootageKind, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Marker, MatteKind, Node, ParamUi, Project,
     PropGroup, Property, Solid, TrackMatte,
 };
-use craft_lottie::model::{Asset, Effect, Layer as LottieLayer, LayerContent, Mask, Transform};
-use craft_lottie::{Animated, Animation, Json};
 use effectcraft_time::{FrameRate, Tick};
 
 use crate::anim::{self, Im, import_animated, import_prop};
@@ -283,8 +283,12 @@ fn transform(im: &Im, ks: &Transform, tr: &mut PropGroup, next: &mut u64) {
         // Separated dimensions: X/Y/Z Position after Position.
         let at = tr.children.iter().position(|c| c.match_id() == "position").map(|i| i + 1).unwrap_or(tr.children.len());
         let base = tr.get("position").map(|p| p.value.as_vec3()).unwrap_or([0.0; 3]);
-        for (d, (j, m, name)) in
-            dims.iter().zip([("positionX", "X Position"), ("positionY", "Y Position"), ("positionZ", "Z Position")]).map(|(j, (m, n))| (j, m, n)).enumerate().rev()
+        for (d, (j, m, name)) in dims
+            .iter()
+            .zip([("positionX", "X Position"), ("positionY", "Y Position"), ("positionZ", "Z Position")])
+            .map(|(j, (m, n))| (j, m, n))
+            .enumerate()
+            .rev()
         {
             let mut pr = Property::new(*next, m, name, Value::Scalar(base[d])).with_ui(ParamUi::Number);
             *next += 1;

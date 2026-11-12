@@ -294,7 +294,7 @@ pub(crate) fn to_vec3(j: &Json, z: f64) -> Option<Value> {
 
 pub(crate) fn to_color(j: &Json) -> Option<Value> {
     // Some files use 0–255: `craft_lottie::color` divides those.
-    craft_lottie::color(j).map(|c| Value::Color(c.map(|x| x as f32)))
+    craft_lottie::color(j).map(Value::Color)
 }
 
 pub(crate) fn to_bool(j: &Json) -> Option<Value> {

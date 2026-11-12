@@ -49,7 +49,7 @@ pub(crate) fn perr(s: impl Into<String>) -> ModelError {
 }
 
 /// Texture coordinate wrapping (glTF sampler wrap modes).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Wrap {
     #[default]
     Repeat,

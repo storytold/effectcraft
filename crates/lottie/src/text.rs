@@ -1,7 +1,9 @@
 //! Text layers ↔ Lottie text data (`t`: document keys `d`, animators `a`, more options `m`),
 //! and text converted to glyph shapes.
 
-use craft_lottie::model::{Font, Map, Path, Shape, ShapeKind, TextAlign, TextData, TextDocKey, TextDocs, TextDocument, TextFollowPath, TextRange, TextSelector, TextStyle};
+use craft_lottie::model::{
+    Font, Map, Path, Shape, ShapeKind, TextAlign, TextData, TextDocKey, TextDocs, TextDocument, TextFollowPath, TextRange, TextSelector, TextStyle,
+};
 use craft_lottie::{Animated, Json};
 use effectcraft_keyframe::{Justify, TextDoc, Value};
 use effectcraft_project::build::{self, Ids};

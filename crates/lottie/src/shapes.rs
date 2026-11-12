@@ -626,7 +626,16 @@ pub(crate) fn import_items<'a>(im: &mut Im, ids: &mut Ids, items: &mut dyn Itera
             ShapeKind::GradientFill(gf) => {
                 let radial = int(gf.gradient_type, x, "t") == Some(2);
                 let mut g = build::shape_gradient_fill(ids, radial, [0.0, 0.0], [100.0, 0.0], Gradient::default());
-                gradient_common(im, &mut g, gf.opacity.as_ref(), gf.start.as_ref(), gf.end.as_ref(), gf.highlight_length.as_ref(), gf.highlight_angle.as_ref(), gf.colors.as_ref());
+                gradient_common(
+                    im,
+                    &mut g,
+                    gf.opacity.as_ref(),
+                    gf.start.as_ref(),
+                    gf.end.as_ref(),
+                    gf.highlight_length.as_ref(),
+                    gf.highlight_angle.as_ref(),
+                    gf.colors.as_ref(),
+                );
                 if int(gf.rule, x, "r") == Some(2) {
                     set_enum(&mut g, "rule", 1);
                 }
@@ -636,7 +645,16 @@ pub(crate) fn import_items<'a>(im: &mut Im, ids: &mut Ids, items: &mut dyn Itera
             ShapeKind::GradientStroke(gs) => {
                 let radial = int(gs.gradient_type, x, "t") == Some(2);
                 let mut g = build::shape_gradient_stroke(ids, radial, [0.0, 0.0], [100.0, 0.0], Gradient::default(), 2.0);
-                gradient_common(im, &mut g, gs.opacity.as_ref(), gs.start.as_ref(), gs.end.as_ref(), gs.highlight_length.as_ref(), gs.highlight_angle.as_ref(), gs.colors.as_ref());
+                gradient_common(
+                    im,
+                    &mut g,
+                    gs.opacity.as_ref(),
+                    gs.start.as_ref(),
+                    gs.end.as_ref(),
+                    gs.highlight_length.as_ref(),
+                    gs.highlight_angle.as_ref(),
+                    gs.colors.as_ref(),
+                );
                 let fields = StrokeIn {
                     width: gs.width.as_ref(),
                     cap: int(gs.cap, x, "lc"),

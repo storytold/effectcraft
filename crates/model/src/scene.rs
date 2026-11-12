@@ -229,7 +229,8 @@ fn mesh(m: &cm::Mesh, materials: &[Material], missing: MissingNormals) -> Mesh {
                 continue;
             }
             for c in t {
-                let key = cm::Corner { position: c.position, normal: if normals { c.normal } else { cm::NONE }, uv: if uvs.is_some() { c.uv } else { cm::NONE } };
+                let key =
+                    cm::Corner { position: c.position, normal: if normals { c.normal } else { cm::NONE }, uv: if uvs.is_some() { c.uv } else { cm::NONE } };
                 let next = p.positions.len() as u32;
                 let id = *ids.entry(key).or_insert_with(|| {
                     let at = c.position as usize;

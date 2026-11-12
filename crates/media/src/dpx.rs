@@ -73,11 +73,8 @@ pub(crate) fn probe(path: &str, bytes: &[u8]) -> Result<Option<Footage>> {
     let alpha = h.layout.has_alpha();
     let mut f = crate::probe::still_footage(path, h.width, h.height, image::ImageFormat::Png, alpha);
     f.alpha = if alpha { AlphaMode::Straight } else { AlphaMode::Ignore };
-    f.pixel_aspect = h
-        .pixel_aspect
-        .map(|(x, y)| f64::from(x) / f64::from(y))
-        .filter(|a| (0.1..=10.0).contains(a) && h.kind == craft_dpx::Kind::Dpx)
-        .unwrap_or(1.0);
+    f.pixel_aspect =
+        h.pixel_aspect.map(|(x, y)| f64::from(x) / f64::from(y)).filter(|a| (0.1..=10.0).contains(a) && h.kind == craft_dpx::Kind::Dpx).unwrap_or(1.0);
     let name = if h.kind == craft_dpx::Kind::Dpx { "DPX" } else { "Cineon" };
     f.codec = format!("{name} {}-bit {}", h.bits, layout_name(&h));
     let t = transfer(&h);
@@ -172,7 +169,9 @@ mod tests {
             assert!(decode("t.dpx", good.get(..n).expect("cut")).is_err(), "{n}");
         }
         // huge, zero, Y'CbCr, unsupported depth, transposed
-        for (w, h, d, bits, p, o) in [(u32::MAX, u32::MAX, 50, 10, 1, 0), (0, 4, 50, 10, 1, 0), (4, 4, 102, 10, 1, 0), (4, 4, 50, 32, 0, 0), (4, 4, 50, 10, 1, 5)] {
+        for (w, h, d, bits, p, o) in
+            [(u32::MAX, u32::MAX, 50, 10, 1, 0), (0, 4, 50, 10, 1, 0), (4, 4, 102, 10, 1, 0), (4, 4, 50, 32, 0, 0), (4, 4, 50, 10, 1, 5)]
+        {
             let mut b = dpx_header(w, h, d, bits, p, o);
             b.extend(std::iter::repeat_n(0, 64));
             assert!(probe("h.dpx", &b).is_err() && decode("h.dpx", &b).is_err(), "{w}x{h} {d} {bits} {p} {o}");
