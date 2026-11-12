@@ -127,6 +127,11 @@ struct Thumb(u64, egui::TextureHandle);
 #[derive(Clone)]
 struct PendingThumb(u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
 
+/// The Project panel's thumbnail texture of `item`, once its render has landed.
+pub fn cached_thumbnail(ctx: &egui::Context, item: ItemId) -> Option<egui::TextureHandle> {
+    ctx.data(|d| d.get_temp::<Thumb>(egui::Id::unique(("proj-thumb", item.0)))).map(|Thumb(_, t)| t)
+}
+
 /// Let go of every Project panel thumbnail and the renders in flight for them (a cache purge, or
 /// a project closed: the next project's item ids can be the closed one's).
 pub fn forget_thumbnails(ctx: &egui::Context) {

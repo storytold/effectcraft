@@ -64,9 +64,7 @@ fn comp_thumbnail_renders_off_the_ui_thread() {
     let mut landed = false;
     for _ in 0..400 {
         h.step();
-        if h.state().auto.find("project.thumbnail").is_some()
-            && h.ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::unique(("proj-thumb", main.0)))).is_some()
-        {
+        if h.state().auto.find("project.thumbnail").is_some() && effectcraft_ui_egui::panels::project::cached_thumbnail(&h.ctx, main).is_some() {
             landed = true;
             break;
         }
