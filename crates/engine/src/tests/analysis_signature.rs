@@ -262,3 +262,54 @@ fn an_expression_keys_its_property_uid() {
         Some(effectcraft_project::Expression { text: "seedRandom(0, true); random(0, 1)".into(), enabled: true });
     assert_ne!(text(&renumbered(&with_expr)), text(&with_expr));
 }
+
+/// Non-default values of the types the key writes are written as their fixed words (#3536).
+#[test]
+fn nested_values_are_written_as_fixed_words() {
+    use effectcraft_project::{
+        AlphaMode, CineonUnits, FieldOrder, FootageKind, GroupKind, ItemKind, LayerSource, MaskMode, MaskMotionBlur, Solid, SourceLayer,
+    };
+    let mut s = open(ANALYSED_0_24);
+    let p = std::sync::Arc::make_mut(&mut s.project);
+    if let Some(ItemKind::Footage(f)) = p.item_mut(ItemId(1)).map(|i| &mut i.kind) {
+        f.kind = FootageKind::Sequence;
+        f.sequence = vec!["a_0001.png".into(), "a_0002.png".into()];
+        f.alpha = AlphaMode::Premultiplied;
+        f.premul_color = [0.5, 0.25, 1.0];
+        f.fields = FieldOrder::UpperFirst;
+        f.cineon.units = CineonUnits::Float;
+        f.cineon.log_conversion = true;
+        f.color_profile = Some(effectcraft_color::ColorSpace::DisplayP3);
+        f.layer = Some(SourceLayer { index: 3, name: "Sky".into(), layer_size: true, embedded: Some("id-7".into()), placed: true });
+        f.native_rate = Some(effectcraft_time::FrameRate { num: 30000, den: 1001 });
+        f.start_timecode = Some(42);
+        f.data = Some("{\"k\":1}".into());
+    }
+    let layer = p.comp(COMP).unwrap().layer(CLIP).unwrap().clone();
+    let text = crate::analysis::frames_key::signature_text(p, COMP, &layer);
+    let footage = text.split(";in=").next().unwrap();
+    assert_eq!(
+        footage,
+        r#"frames/1;footage=1;footage;path="/tmp/effectcraft-3456-shake.mp4";kind=sequence;w=160;h=120;par=1.0;rate=12/1;nativeRate{rate=30000/1001;};duration=254016000000;video=true;audio=false;alpha=premultiplied;matte=[0.5, 0.25, 1.0];loop=1;codec="H.264 (High)";frames=2;file="a_0001.png";file="a_0002.png";profile{p3;};layer{index=3;layerSize=true;embedded{id="id-7";};placed=true;};fields=upper;invertAlpha=false;linearLight=false;preserveRgb=false;cineon;log=true;points=[0.0, 1023.0, 95.0, 685.0, 1.7, 20.0];units=float;data{text="{\"k\":1}";};page=0;alphabetical=false;startTimecode{frame=42;};fileTimecode=none;placedPage=false"#
+    );
+
+    let solid = p.add_item("Solid", Default::default(), None, ItemKind::Solid(Solid { color: [1.0, 0.5, 0.0], width: 64, height: 48, pixel_aspect: 2.0 }));
+    let mut on_solid = layer.clone();
+    on_solid.source = LayerSource::Solid { item: solid };
+    let text = crate::analysis::frames_key::signature_text(p, COMP, &on_solid);
+    assert_eq!(text.split(";in=").next().unwrap(), format!("frames/1;solid={};solid;color=[1.0, 0.5, 0.0];w=64;h=48;par=2.0", solid.0));
+
+    // Every mask mode and motion blur setting gives its own Input Key.
+    let mask = layer.masks().unwrap().groups().next().unwrap().uid;
+    let mut keys = std::collections::BTreeSet::new();
+    for mode in MaskMode::ALL {
+        for blur in [MaskMotionBlur::SameAsLayer, MaskMotionBlur::On, MaskMotionBlur::Off] {
+            let mut l = layer.clone();
+            if let GroupKind::Mask { mode: m, motion_blur, .. } = &mut l.props.find_group_mut(mask).unwrap().kind {
+                (*m, *motion_blur) = (mode, blur);
+            }
+            keys.insert(crate::analysis::frames_key::input_key(p, COMP, &l, ROTO));
+        }
+    }
+    assert_eq!(keys.len(), MaskMode::ALL.len() * 3);
+}
