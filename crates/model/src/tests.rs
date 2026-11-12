@@ -120,6 +120,22 @@ fn obj_without_normals_gets_them() {
 }
 
 #[test]
+fn obj_mixed_authored_normals_keep_flat_missing_corners() {
+    let src = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nvn 0 1 0\ns off\nf 1//1 2 3\nf 1 3 4\n";
+    let m = obj::parse(src, &|_| None).unwrap();
+    let corners: Vec<_> = m.meshes[0]
+        .primitives
+        .iter()
+        .flat_map(|p| p.positions.iter().zip(&p.normals))
+        .filter(|(position, _)| **position == [0.0, 1.0, 0.0])
+        .map(|(_, normal)| *normal)
+        .collect();
+    assert!(corners.contains(&[0.0, 0.0, 1.0]), "{corners:?}");
+    assert!(corners.contains(&[1.0, 0.0, 0.0]), "{corners:?}");
+    assert!(m.meshes[0].primitives.iter().any(|p| p.normals.contains(&[0.0, 1.0, 0.0])));
+}
+
+#[test]
 fn obj_textures_from_another_machine_find_the_file_next_to_the_model() {
     // No committed media: the material file and its textures are written by the test itself.
     let d = std::env::temp_dir().join(format!("ec-obj-sibling-{}", std::process::id()));

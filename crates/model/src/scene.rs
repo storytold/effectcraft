@@ -219,46 +219,53 @@ pub(crate) fn to_model(scene: cm::Scene, missing: MissingNormals, image: &dyn Fn
 fn mesh(m: &cm::Mesh, materials: &[Material], missing: MissingNormals, adapter_bytes: &mut u64) -> Result<Mesh> {
     let skinned = !m.joints.is_empty() && m.joints.len() == m.positions.len() && m.weights.len() == m.positions.len();
     let uv_set = m.uv_sets.first();
-    let smooth = smooth_normals(m, missing);
-    // Include temporary hash keys and the peak duplicate produced by flat-normal expansion.
+    // Include temporary hash keys, smoothing maps and the peak duplicate produced by
+    // flat-normal expansion.
     // Account against the whole scene before building any primitive arrays.
     let projected = m
         .parts
         .iter()
         .try_fold(0u64, |sum, part| {
-            let has_normals = part.corners.iter().any(|c| (c.normal as usize) < m.normals.len());
-            let vertices =
-                if missing == MissingNormals::Flat && !has_normals { (part.triangle_count() as u64).checked_mul(3)? } else { part.corners.len() as u64 };
-            sum.checked_add(vertices.checked_mul(64)?)
+            let has_missing = part.corners.iter().any(|c| (c.normal as usize) >= m.normals.len());
+            let flat = missing == MissingNormals::Flat || (missing == MissingNormals::BySmoothing && part.smoothing == 0);
+            let vertices = if flat && has_missing { (part.triangle_count() as u64).checked_mul(3)? } else { part.corners.len() as u64 };
+            let bytes_per_vertex = if missing == MissingNormals::Flat { 64 } else { 128 };
+            sum.checked_add(vertices.checked_mul(bytes_per_vertex)?)
         })
         .ok_or_else(|| ModelError::Parse("expanded mesh size overflow".into()))?;
     *adapter_bytes = adapter_bytes.checked_add(projected).ok_or_else(|| ModelError::Parse("expanded mesh size overflow".into()))?;
     if *adapter_bytes > (2u64 << 30) {
         return Err(ModelError::Parse("expanded mesh data exceeds the 2 GiB import limit".into()));
     }
+    let smooth = smooth_normals(m, missing);
     let mut primitives = vec![];
     for part in &m.parts {
         let normals = part.corners.iter().any(|c| (c.normal as usize) < m.normals.len());
         let tangents = part.has_tangents && m.tangents.len() == m.positions.len();
         let uvs = uv_set.filter(|set| part.corners.iter().any(|c| (c.uv as usize) < set.len()));
+        let flat_missing = missing == MissingNormals::BySmoothing && part.smoothing == 0;
         let mut authored_normals = vec![];
-        let mut ids: HashMap<cm::Corner, u32> = HashMap::new();
+        let mut ids: HashMap<(cm::Corner, Option<usize>), u32> = HashMap::new();
         let mut p = Primitive { material: part.material.filter(|&i| i < materials.len()), ..Primitive::default() };
-        for t in part.triangles() {
+        for (face, t) in part.triangles().enumerate() {
             if t.iter().any(|c| c.position as usize >= m.positions.len()) {
                 continue;
             }
+            let flat_face_normal = (normals && flat_missing).then(|| face_normal(m, t));
             for c in t {
                 let has_normal = (c.normal as usize) < m.normals.len();
                 let has_uv = uvs.is_some_and(|set| (c.uv as usize) < set.len());
-                let key = cm::Corner { position: c.position, normal: if has_normal { c.normal } else { cm::NONE }, uv: if has_uv { c.uv } else { cm::NONE } };
+                let key = (
+                    cm::Corner { position: c.position, normal: if has_normal { c.normal } else { cm::NONE }, uv: if has_uv { c.uv } else { cm::NONE } },
+                    (!has_normal && flat_face_normal.is_some()).then_some(face),
+                );
                 let next = p.positions.len() as u32;
                 let id = *ids.entry(key).or_insert_with(|| {
                     let at = c.position as usize;
                     p.positions.push(m.positions.get(at).copied().unwrap_or_default().map(|x| x as f32));
                     if normals {
                         let authored = m.normals.get(c.normal as usize).copied().map(|n| n.map(|x| x as f32));
-                        let fallback = smooth.get(&(c.position, part.material, smooth_group(part, missing))).copied();
+                        let fallback = flat_face_normal.or_else(|| smooth.get(&(c.position, part.material, smooth_group(part, missing))).copied());
                         authored_normals.push(authored.or(fallback));
                         p.normals.push(authored.or(fallback).unwrap_or([0.0, 0.0, 1.0]));
                     } else if let Some(n) = smooth.get(&(c.position, part.material, smooth_group(part, missing))) {
@@ -314,6 +321,15 @@ fn smooth_group(part: &cm::Part, missing: MissingNormals) -> u32 {
         MissingNormals::BySmoothing => part.smoothing,
         MissingNormals::Flat => 0,
     }
+}
+
+fn face_normal(m: &cm::Mesh, tri: [cm::Corner; 3]) -> [f32; 3] {
+    let [a, b, c] = tri.map(|corner| m.positions.get(corner.position as usize).copied().unwrap_or_default());
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 0.0 { n.map(|x| (x / len) as f32) } else { [0.0, 0.0, 1.0] }
 }
 
 /// Area weighted generated normals across parts with the same material and smoothing state.
