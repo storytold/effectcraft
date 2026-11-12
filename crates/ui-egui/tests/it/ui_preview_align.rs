@@ -104,13 +104,14 @@ fn playback_follows_the_shortcut_options() {
     assert_eq!(h.state().session.time(), Tick::from_seconds_f64(7.0));
     assert!(h.state().overlays_visible());
 
-    // Spacebar with Full Screen: the viewer is maximized while it plays.
+    // Spacebar with Full Screen: only the video shows while it plays (#2861).
     set(&mut h, json!({"shortcut": "spacebar", "fullScreen": true, "skip": 2}));
     invoke(&mut h, "playback.toggle", json!({}));
-    assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition));
+    assert!(h.state().full_screen.is_some_and(|f| f.from_preview));
+    assert_eq!(h.state().ui.maximized, None);
     assert_eq!(h.state().playback.plan.unwrap().step, 3);
     invoke(&mut h, "playback.toggle", json!({}));
-    assert_eq!(h.state().ui.maximized, None);
+    assert_eq!(h.state().full_screen, None);
 
     // Shift+Spacebar from the keyboard plays with its own options.
     let ev = Event::Key { key: egui::Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };

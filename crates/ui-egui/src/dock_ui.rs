@@ -8,7 +8,7 @@
 
 use crate::state::UiState;
 use craft_ui::docking::{
-    Action, Divider, DockArea, DockCommand, DockContent, DockError, DockEvent, DockStyle, FloatSpace, Floating, Hit, Node, ResizeEdge, UiDock,
+    Action, Divider, DockArea, DockCommand, DockContent, DockError, DockEvent, DockStyle, FloatSpace, Floating, Hit, Layout, Node, ResizeEdge, UiDock,
 };
 use egui::{Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
@@ -523,6 +523,27 @@ impl EffectcraftApp {
         let hits = DockArea::<PanelKind>::hit_rects(&ctx, area_id());
         self.register_dock_hits(&hits);
         panels::panel_menu_popup(self, ui);
+    }
+
+    /// The passes that draw no workspace ([`EffectcraftApp::full_screen`]): the floating panels'
+    /// OS windows close, because egui keeps only the viewports a pass shows, and showing them
+    /// would leave palettes above the video and able to take Escape. Their places are in the
+    /// layout, so they reopen there. The area still runs, empty: craft-ui forgets the windows
+    /// only when it sees them gone, and a window it remembers opens where it first opened.
+    pub(crate) fn hide_dock_area(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        struct NoPanels;
+        impl DockContent<PanelKind> for NoPanels {
+            fn body(&mut self, _ui: &mut egui::Ui, _panel: &PanelKind) {}
+        }
+        let ctx = ui.ctx().clone();
+        let style = dock_style(ui, &self.tokens);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("effectcraft-dock-area"));
+        let _ = DockArea::new(area_id()).show_content(&mut child, &Layout::default(), &style, &mut NoPanels);
+        self.unpublished_viewports.clear();
+        for viewport in std::mem::take(&mut self.native_viewports) {
+            panels::viewer_text::end_viewport(self, &ctx, viewport);
+        }
+        drop_menu_of_closed_window(&ctx, &self.native_viewports);
     }
 
     /// Keys and dropped files that reach a floating panel's own OS window go to the main

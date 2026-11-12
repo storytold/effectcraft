@@ -403,6 +403,13 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         if app.dialog.is_some() {
             continue;
         }
+        // Full Screen hides the menus, and only macOS binds a key to leave it. A text field or
+        // menu with the keyboard returned above; the viewer's text editor ended on entry.
+        if key == egui::Key::Escape && !mods.any() && app.full_screen.is_some() {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+            app.escape_full_screen();
+            continue;
+        }
         // Enter in the Project panel renames the selected item (handled by the panel).
         // In Effects & Presets and the Render Queue Enter applies or opens the row (handled by the
         // panel), not the layer rename.

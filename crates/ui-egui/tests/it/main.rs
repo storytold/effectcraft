@@ -40,6 +40,7 @@ mod ui_flowchart_keyboard;
 mod ui_font_search;
 mod ui_form_fit;
 mod ui_frame_step;
+mod ui_full_screen;
 mod ui_fx_editors;
 mod ui_gpu;
 mod ui_gradient_editor;

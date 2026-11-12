@@ -329,10 +329,20 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(maximized));
             json!({"maximized": maximized})
         }
+        // The mode reaches the window in `sync_full_screen`. Without a comp there is no video to
+        // show, and a window the OS took full screen just leaves it: only the window changes.
         "view.fullScreen" => {
             let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
-            json!(!full)
+            if app.full_screen.is_some() {
+                app.exit_full_screen();
+                json!(false)
+            } else if !full && app.full_screen_possible() {
+                app.enter_full_screen(false);
+                json!(true)
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+                json!(!full)
+            }
         }
         "window.panel" => {
             let name = p.get("panel").and_then(Value::as_str).unwrap_or_default();

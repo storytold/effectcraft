@@ -172,6 +172,34 @@ pub(crate) struct DialogAnswer {
     pub paths: Vec<String>,
 }
 
+/// The Full Screen mode: what to put back when it ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FullScreen {
+    /// The viewer's zoom and pan to go back to: `None` is Fit.
+    pub saved_zoom: Option<f32>,
+    pub saved_pan: [f32; 2],
+    /// The size of the viewer's panel those were set in, once Full Screen shows.
+    pub panel: Option<egui::Vec2>,
+    pub saved_focus: PanelKind,
+    /// A preview's Full Screen option started it, so that preview's end ends it.
+    pub from_preview: bool,
+}
+
+/// The OS window's state around [`FullScreen`], which `frame` reconciles with the window (the
+/// mode also changes where there is no `egui::Context`, as in `stop`).
+#[derive(Clone, Copy, Debug)]
+struct FullScreenWindow {
+    /// It was full screen already, and stays so afterwards.
+    was_full_screen: bool,
+    /// It went full screen maximized and hasn't been un-maximized yet (see `sync_full_screen`).
+    still_maximized: bool,
+    /// Windows: its window commands haven't run yet. A pass is painted before they do, so this one
+    /// would lay the video out in the old client area, under the title bar.
+    waiting: bool,
+    /// It has reported being full screen: reporting otherwise now means the OS took it out.
+    seen_full_screen: bool,
+}
+
 #[derive(Default)]
 pub struct Playback {
     pub playing: bool,
@@ -196,8 +224,6 @@ pub struct Playback {
     /// Include Overlays / Include Layer Controls.
     pub overlays: bool,
     pub layer_controls: bool,
-    /// Full Screen: the maximized panel to restore when the preview stops.
-    pub restore_max: Option<Option<PanelKind>>,
     /// Audio-only previews: the frame under the audible sample (the current time stays put).
     pub audio_frame: Option<i64>,
     /// The preview's sound waits for frames: a preview whose start gave up on frames that weren't
@@ -269,6 +295,14 @@ impl Playback {
 pub struct EffectcraftApp {
     pub session: Session,
     pub ui: UiState,
+    /// View ▸ Enter Full Screen or a preview with Full Screen on: only the video shows. Not saved
+    /// with the workspace or preferences.
+    pub full_screen: Option<FullScreen>,
+    /// What the OS window was when it went full screen for [`Self::full_screen`].
+    full_screen_window: Option<FullScreenWindow>,
+    /// The window's OS animations are off for Full Screen, until this pass (see
+    /// `full_screen_transitions`).
+    transitions_off_until: Option<u64>,
     workspace_store: workspace_state::WorkspaceStore,
     pub tokens: Tokens,
     pub auto: automation::Registry,
