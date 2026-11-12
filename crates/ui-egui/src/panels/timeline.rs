@@ -2836,14 +2836,28 @@ fn wheel_zoom_scroll(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Tl) {
     let max_scroll = g.max_scroll;
     let comp = g.comp.clone();
     if ui.rect_contains_pointer(rows_rect) {
-        let (dy, dx, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.alt));
+        let (dy, dx, alt) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.alt));
+        // Over the Graph Editor's plot the wheel belongs to the value axis: Ctrl/Cmd+wheel (or a
+        // pinch) zooms it and a plain wheel pans it (graph.rs::wheel_nav). Leave Alt+wheel to the
+        // time zoom below, and let a horizontal wheel/Shift+wheel pan time.
+        if app.ui.timeline.graph_editor {
+            let graph_area = Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max);
+            let plot = super::graph::plot_rect(graph_area);
+            if !alt && ui.rect_contains_pointer(plot) {
+                super::graph::wheel_nav(app, ui, plot);
+                if dx.abs() > 0.0 && app.ui.timeline.pps.is_some() {
+                    app.ui.timeline.start = (app.ui.timeline.start - dx as f64 / pps).max(0.0);
+                }
+                return;
+            }
+        }
         // Ctrl/Cmd+wheel and a trackpad pinch reach egui as a zoom factor rather than a scroll
         // (#428); like Alt+wheel they zoom time.
         let pinch = ui.input(|i| i.zoom_delta()) as f64;
         let at_x = ui.input(|i| i.pointer.hover_pos()).map(|p| p.x).unwrap_or(graph_x0);
         if (pinch - 1.0).abs() > 1e-4 {
             set_zoom(&mut app.ui.timeline, &comp, tm.pps * pinch, fit_pps, tm.t(at_x), (at_x - tm.x0) as f64);
-        } else if zoom && dy.abs() > 0.0 {
+        } else if alt && dy.abs() > 0.0 {
             // Alt+wheel zooms around the pointer, out until the whole comp shows.
             set_zoom(&mut app.ui.timeline, &comp, tm.pps * (dy as f64 / 200.0).exp(), fit_pps, tm.t(at_x), (at_x - tm.x0) as f64);
         } else {
@@ -5026,7 +5040,20 @@ fn hand_tool_pan(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
     }
     if pan {
         let delta = ui.input(|i| i.pointer.delta());
-        app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - delta.y).clamp(0.0, max_scroll);
+        // A pan that began on the Graph Editor's plot moves its value axis, not the layer
+        // outline (the outline keeps its own scroll wheel). The time axis pans either way.
+        let graph_area = Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max);
+        let plot = super::graph::plot_rect(graph_area);
+        let over_graph = app.ui.timeline.graph_editor && ui.input(|i| i.pointer.press_origin()).is_some_and(|p| plot.contains(p));
+        if over_graph {
+            let (lo, hi) = app.ui.timeline.graph_range.unwrap_or((0.0, 100.0));
+            let span = (hi - lo).max(1e-9);
+            let dv = delta.y as f64 / plot.height().max(1.0) as f64 * span;
+            app.ui.timeline.graph_auto_zoom = false;
+            app.ui.timeline.graph_range = Some((lo + dv, hi + dv));
+        } else {
+            app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - delta.y).clamp(0.0, max_scroll);
+        }
         if app.ui.timeline.pps.is_some() {
             let start = app.ui.timeline.start;
             let last = (comp.duration.seconds() - (tm.t(graph_x1) - tm.start)).max(start).max(0.0);
