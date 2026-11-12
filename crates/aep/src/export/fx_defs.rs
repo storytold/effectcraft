@@ -707,3 +707,141 @@ pub(crate) static FX_DEFS: &[FxDef] = &[
         p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
     ]),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::container::effect_map::by_match_name;
+    use effectcraft_project::ParamUi;
+
+    /// Effect parameters whose hard range (`ParamUi::Slider` min..max, which `prop.set` and the
+    /// value editors clamp to) is still narrower than After Effects' recorded valid range, each
+    /// with the open issue that tracks it: (effect, parameter, issue). Remove a row when its
+    /// issue is fixed; the test fails on a row that is no longer needed.
+    #[rustfmt::skip]
+    const KNOWN_NARROWER: &[(&str, &str, u32)] = &[
+        ("ec.blur.gaussian", "blurriness", 3460),
+        ("ec.blur.fastbox", "radius", 3461),
+        ("ec.blur.channel", "redBlurriness", 3462),
+        ("ec.blur.channel", "greenBlurriness", 3462),
+        ("ec.blur.channel", "blueBlurriness", 3462),
+        ("ec.blur.channel", "alphaBlurriness", 3462),
+        ("ec.obsolete.gaussianlegacy", "blurriness", 3463),
+        ("ec.perspective.dropshadow", "softness", 3464),
+        ("ec.blur.compound", "maximumBlur", 3465),
+        ("ec.blur.sharpen", "amount", 3466),
+        ("ec.blur.radial", "amount", 3467),
+        ("ec.blur.ccradial", "amount", 3468),
+        ("ec.distort.turbulentdisplace", "amount", 3469),
+        ("ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 3470),
+        ("ec.distort.transform", "scaleHeight", 3471),
+        ("ec.distort.transform", "scaleWidth", 3471),
+        ("ec.transition.venetian", "width", 3472),
+        ("ec.transition.venetian", "feather", 3473),
+        ("ec.transition.radialwipe", "feather", 3474),
+        ("ec.generate.beam", "startThickness", 3475),
+        ("ec.generate.beam", "endThickness", 3475),
+        ("ec.generate.grid", "border", 3476),
+        ("ec.stylize.scatter", "amount", 3477),
+        ("ec.generate.fourcolor", "blend", 3478),
+        ("ec.generate.fourcolor", "jitter", 3479),
+        ("ec.color.changecolor", "hueTransform", 3480),
+        ("ec.time.pixelmotionblur", "shutterAngle", 3481),
+        ("ec.time.pixelmotionblur", "shutterSamples", 3482),
+        ("ec.noise.noisehls", "hue", 3483),
+        ("ec.noise.noisehls", "lightness", 3483),
+        ("ec.noise.noisehls", "saturation", 3483),
+        ("ec.noise.noisehls", "grainSize", 3484),
+        ("ec.noise.fractal", "subSettings/subInfluence", 3485),
+        ("ec.noise.fractal", "subSettings/subScaling", 3486),
+        ("ec.color.levelsic", "rgb/rgbInBlack", 3487),
+        ("ec.color.levelsic", "red/redInBlack", 3487),
+        ("ec.color.levelsic", "green/greenInBlack", 3487),
+        ("ec.color.levelsic", "blue/blueInBlack", 3487),
+        ("ec.color.levelsic", "alpha/alphaInBlack", 3487),
+        ("ec.color.levelsic", "rgb/rgbInWhite", 3488),
+        ("ec.color.levelsic", "red/redInWhite", 3488),
+        ("ec.color.levelsic", "green/greenInWhite", 3488),
+        ("ec.color.levelsic", "blue/blueInWhite", 3488),
+        ("ec.color.levelsic", "alpha/alphaInWhite", 3488),
+        ("ec.color.levelsic", "rgb/rgbOutBlack", 3489),
+        ("ec.color.levelsic", "red/redOutBlack", 3489),
+        ("ec.color.levelsic", "green/greenOutBlack", 3489),
+        ("ec.color.levelsic", "blue/blueOutBlack", 3489),
+        ("ec.color.levelsic", "alpha/alphaOutBlack", 3489),
+        ("ec.color.levelsic", "rgb/rgbOutWhite", 3490),
+        ("ec.color.levelsic", "red/redOutWhite", 3490),
+        ("ec.color.levelsic", "green/greenOutWhite", 3490),
+        ("ec.color.levelsic", "blue/blueOutWhite", 3490),
+        ("ec.color.levelsic", "alpha/alphaOutWhite", 3490),
+        ("ec.color.levelsic", "rgb/rgbGamma", 3491),
+        ("ec.color.levelsic", "red/redGamma", 3491),
+        ("ec.color.levelsic", "green/greenGamma", 3491),
+        ("ec.color.levelsic", "blue/blueGamma", 3491),
+        ("ec.color.levelsic", "alpha/alphaGamma", 3491),
+        ("ec.distort.ccpowerpin", "expandTop", 3492),
+        ("ec.distort.ccpowerpin", "expandLeft", 3492),
+        ("ec.distort.ccpowerpin", "expandRight", 3492),
+        ("ec.distort.ccpowerpin", "expandBottom", 3492),
+    ];
+
+    /// `a` is at most `b`, allowing for the `f32` the recorded bounds were read from.
+    fn at_most(a: f64, b: f64) -> bool {
+        a <= b + 1e-6 * a.abs().max(b.abs()).max(1.0)
+    }
+
+    /// Every effect parameter the .aep table maps to a recorded After Effects definition accepts
+    /// at least After Effects' valid range, converted to EffectCraft's units the way the importer
+    /// converts values (`Conv::number_scale`). Only `ParamUi::Slider` limits values (`prop.set`,
+    /// the Effect Controls and Timeline editors); other controls take any number. A mapping with
+    /// a declared narrower range (`ParamMap::limit`) must match the effect's range instead.
+    #[test]
+    fn effect_hard_ranges_cover_recorded_after_effects_ranges() {
+        let mut problems = Vec::new();
+        let mut narrower = Vec::new();
+        for fx in FX_DEFS {
+            let Some(map) = by_match_name(fx.match_name) else { continue };
+            let Some(spec) = effectcraft_effects::find(map.effect) else {
+                problems.push(format!("{}: no effect {}", fx.match_name, map.effect));
+                continue;
+            };
+            for pm in map.params {
+                let Some(scale) = pm.conv.number_scale() else { continue };
+                let at = format!("{} {}", map.effect, pm.target);
+                let Some(ps) = spec.params.iter().find(|p| p.id == pm.target) else {
+                    problems.push(format!("{at}: not a parameter of the effect"));
+                    continue;
+                };
+                // Other controls take any number.
+                let ParamUi::Slider { min, max, .. } = &ps.ui else { continue };
+                let Some(def) = fx.params.get(pm.index) else {
+                    problems.push(format!("{at}: no recorded definition at parT {}", pm.index));
+                    continue;
+                };
+                let (Some(lo), Some(hi)) = (def.valid_min, def.valid_max) else {
+                    problems.push(format!("{at}: no recorded valid range"));
+                    continue;
+                };
+                let (lo, hi) = (lo * scale, hi * scale);
+                if let Some(limit) = pm.limit {
+                    if limit != (*min, *max) {
+                        problems.push(format!("{at}: declared limit {limit:?} is not the effect's range {min}..{max}"));
+                    }
+                } else if !(at_most(*min, lo) && at_most(hi, *max)) {
+                    narrower.push((map.effect, pm.target, format!("{at}: {min}..{max} excludes After Effects' {lo}..{hi}")));
+                }
+            }
+        }
+        for (effect, param, why) in &narrower {
+            if !KNOWN_NARROWER.iter().any(|(e, p, _)| e == effect && p == param) {
+                problems.push(why.clone());
+            }
+        }
+        for (effect, param, issue) in KNOWN_NARROWER {
+            if !narrower.iter().any(|(e, p, _)| e == effect && p == param) {
+                problems.push(format!("{effect} {param}: covers After Effects' range now (or is not mapped); remove it from KNOWN_NARROWER (#{issue})"));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+}
