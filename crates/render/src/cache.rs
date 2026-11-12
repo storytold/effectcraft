@@ -230,6 +230,11 @@ impl LayerCache {
     /// used. (A render that started before a drop may publish its buffer after the drop's
     /// purge, Reload Footage clearing the cache while the buffer was being written: the check
     /// here, not the order of the two, keeps it from being served.)
+    /// Whether a buffer is kept in memory under `key` (a peek: no hit, no miss, no disk read).
+    pub(crate) fn holds(&self, key: u64) -> bool {
+        self.kept(key, false).is_some()
+    }
+
     fn kept(&self, key: u64, hit: bool) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
         let found = {
             let mut g = self.inner.lock().ok()?;
@@ -356,10 +361,11 @@ pub trait LayerStore: Send + Sync {
     /// mid-render). An entry whose files changed, or damaged, is a miss and is dropped, so the
     /// buffer rendered again replaces it. `virtual_id` names files served from memory.
     fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)>;
-    /// Keep a buffer that was slow to render, with the source files it was made of. `since`: the
+    /// Keep a buffer that was slow to render, with the source files it was made of (shared, so
+    /// a store can encode it off the render thread). `since`: the
     /// [`LayerStore::drop_generation`] when its render started (a buffer made of a file dropped
     /// after that is refused).
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, since: u64);
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64);
     /// How many times files were dropped from the store (File ▸ Reload Footage,
     /// [`crate::disk_cache::DiskCache::drop_files`]); `0` for a store that never drops.
     fn drop_generation(&self) -> u64 {
@@ -535,7 +541,7 @@ impl LayerStore for PrefetchStore {
     }
 
     /// Queues the layer for writing to the persistent store the first time `key` is seen.
-    fn put_layer(&self, key: u128, buf: &Buf, files: &EntryFiles, _since: u64) {
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, _since: u64) {
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
             s.writes.push((key, crate::disk_cache::layer_entry(buf, files)));
@@ -978,7 +984,7 @@ mod shared_insert_tests {
         assert!(store.get_layer(5, Some(&two)).is_none());
         assert!(!store.has(5));
         assert_eq!(store.take_misses(), [5]);
-        store.put_layer(5, &buf(), &EntryFiles::of(&files, Some(&two)).unwrap(), 0);
+        store.put_layer(5, &Arc::new(buf()), &EntryFiles::of(&files, Some(&two)).unwrap(), 0);
         assert_eq!(store.take_writes().len(), 1, "written over the changed entry");
         // Through the layer cache: a hit reports its files; incomplete lists are not queued.
         let cache = LayerCache::default();
@@ -1060,7 +1066,7 @@ mod shared_insert_tests {
         fn get_layer(&self, key: u128, virtual_id: Option<crate::disk_cache::VirtualFileId<'_>>) -> Option<(Arc<Buf>, crate::reads::ReadFiles)> {
             super::LayerStore::get_layer(&*self.dc, key, virtual_id)
         }
-        fn put_layer(&self, key: u128, buf: &Buf, files: &crate::disk_cache::EntryFiles, since: u64) {
+        fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &crate::disk_cache::EntryFiles, since: u64) {
             self.arrived.wait();
             self.go_on.wait();
             super::LayerStore::put_layer(&*self.dc, key, buf, files, since);

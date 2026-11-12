@@ -446,3 +446,40 @@ fn at_rule_blocks_are_skipped_by_brace_depth() {
     assert_eq!(sheet.rules.len(), 1);
     assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
 }
+
+#[test]
+fn gradient_stops_copied_past_the_budget_are_refused() {
+    // 4,000 stops referenced by 2,100 shapes would keep 8.4 million stops.
+    let stops: String = (0..4000).map(|i| format!("<stop offset=\"{}\" stop-color=\"red\"/>", i as f64 / 4000.0)).collect();
+    let rects = "<rect width=\"1\" height=\"1\" fill=\"url(#g)\"/>".repeat(2100);
+    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"g\">{stops}</linearGradient></defs>{rects}</svg>");
+    assert!(matches!(parse(svg.as_bytes()), Err(Error::Xml(e)) if e.contains("gradients")));
+}
+
+#[test]
+fn nested_knockout_groups_stop_at_the_draw_budget() {
+    // Each knockout level draws its children twice and each non-isolated level twice more:
+    // 30 nested levels would be 4^30 draws. The draw budget ends it.
+    let mut g = Group::new("leaf");
+    g.children.push(Node::Shape(Shape {
+        name: "s".into(),
+        geom: Geom::Rect { x: 0.0, y: 0.0, w: 4.0, h: 4.0, rx: 0.0, ry: 0.0 },
+        transform: Affine::IDENTITY,
+        fill: Some(Paint::Color([1.0, 0.0, 0.0])),
+        fill_opacity: 1.0,
+        fill_rule: FillRule::NonZero,
+        stroke: None,
+        opacity: 1.0,
+    }));
+    for _ in 0..30 {
+        let mut p = Group::new("k");
+        p.knockout = true;
+        p.isolated = false;
+        p.children.push(Node::Group(g));
+        g = p;
+    }
+    let doc = Doc { width: 4.0, height: 4.0, root: g, skipped: vec![] };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(rasterize(&doc, 4, 4, 1.0).width).ok());
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(20)).expect("rendering finishes"), 4);
+}

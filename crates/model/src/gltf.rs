@@ -11,12 +11,14 @@
 //! `KHR_lights_punctual` lights (directional, point, spot). Sparse accessors and morph targets
 //! are ignored.
 
+use std::collections::HashMap;
 use std::{cell::Cell, sync::Arc};
 
 use serde_json::Value;
 
 use crate::{
-    AlphaMode, Animation, Channel, ChannelPath, Interp, Mat4, Material, Mesh, Model, ModelError, Node, Primitive, Result, Skin, TexRef, Texture, Wrap, perr,
+    AlphaMode, Animation, Channel, ChannelPath, Interp, MAX_IMPORT_TEXTURE_PIXELS, Mat4, Material, Mesh, Model, ModelError, Node, Primitive, Result, Skin,
+    TexRef, Texture, Wrap, perr,
 };
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
@@ -352,19 +354,41 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
 
     // Images → textures (decoded once per image; samplers set the wrap modes).
     let mut images: Vec<Option<Arc<Texture>>> = vec![];
-    for im in arr(&j, "images") {
-        let data = if let Some(u) = im.get("uri").and_then(Value::as_str) {
-            load_uri(u, resolve).ok()
-        } else if let Some(bv) = idx(im, "bufferView") {
-            arr(&j, "bufferViews").get(bv).and_then(|v| {
-                let b = d.buffers.get(idx(v, "buffer").unwrap_or(0))?;
-                let o = idx(v, "byteOffset").unwrap_or(0);
-                b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
-            })
-        } else {
-            None
+    // Images naming one source decode once, and all of them within one pixel budget.
+    let mut image_of: HashMap<String, Option<Arc<Texture>>> = HashMap::new();
+    let mut pixels_left = MAX_IMPORT_TEXTURE_PIXELS;
+    let mut warnings: Vec<String> = vec![];
+    for (n, im) in arr(&j, "images").iter().enumerate() {
+        let (uri, view) = (im.get("uri").and_then(Value::as_str), idx(im, "bufferView"));
+        let key = match (uri, view) {
+            (Some(u), _) => format!("uri:{u}"),
+            (None, Some(bv)) => format!("bufferView:{bv}"),
+            (None, None) => {
+                images.push(None);
+                continue;
+            }
         };
-        images.push(data.and_then(|b| Texture::decode(&b).ok()).map(Arc::new));
+        let image = image_of.entry(key).or_insert_with(|| {
+            let data = if let Some(u) = uri {
+                load_uri(u, resolve).ok()
+            } else {
+                arr(&j, "bufferViews").get(view.unwrap_or(usize::MAX)).and_then(|v| {
+                    let b = d.buffers.get(idx(v, "buffer").unwrap_or(0))?;
+                    let o = idx(v, "byteOffset").unwrap_or(0);
+                    b.get(o..o.checked_add(idx(v, "byteLength").unwrap_or(0))?).map(<[u8]>::to_vec)
+                })
+            };
+            match data.map(|b| Texture::decode_within(&b, &mut pixels_left)) {
+                Some(Ok(t)) => Some(Arc::new(t)),
+                Some(Err(e)) => {
+                    log::warn!("model: glTF image {n} left out: {e}");
+                    warnings.push(format!("image {n} left out: {e}"));
+                    None
+                }
+                None => None,
+            }
+        });
+        images.push(image.clone());
     }
     let wrap = |v: u64| match v {
         33071 => Wrap::Clamp,
@@ -373,18 +397,45 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
     };
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut tex_map: Vec<Option<usize>> = vec![];
+    // One texture per decoded image and wrapping: repeated references share it instead of copying
+    // the pixels. The image is keyed by its allocation, so image entries naming the same file
+    // (which share one decode) also share their wrap variants.
+    let mut texture_of: HashMap<(usize, [Wrap; 2]), usize> = HashMap::new();
     for t in arr(&j, "textures") {
         let Some(img) = idx(t, "source").and_then(|s| images.get(s).cloned().flatten()) else {
             tex_map.push(None);
             continue;
         };
+        let src = Arc::as_ptr(&img) as usize;
         let samp = idx(t, "sampler").and_then(|s| arr(&j, "samplers").get(s));
         let ws = samp.and_then(|s| s.get("wrapS")).and_then(Value::as_u64).unwrap_or(10497);
         let wt = samp.and_then(|s| s.get("wrapT")).and_then(Value::as_u64).unwrap_or(10497);
         let w = [wrap(ws), wrap(wt)];
-        let tex = if img.wrap == w { img } else { Arc::new(Texture { wrap: w, ..(*img).clone() }) };
-        tex_map.push(Some(textures.len()));
-        textures.push(tex);
+        let i = match texture_of.get(&(src, w)) {
+            Some(&i) => i,
+            None => {
+                let tex = if img.wrap == w {
+                    img
+                } else {
+                    // A wrap variant copies the pixels, so it is charged to the import budget too;
+                    // one that does not fit is left out like an undecodable image.
+                    let cost = u64::from(img.width) * u64::from(img.height);
+                    if cost > pixels_left {
+                        warnings.push(format!(
+                            "a texture with another wrap mode left out: the model's textures would hold more than {MAX_IMPORT_TEXTURE_PIXELS} pixels"
+                        ));
+                        tex_map.push(None);
+                        continue;
+                    }
+                    pixels_left -= cost;
+                    Arc::new(Texture { wrap: w, ..(*img).clone() })
+                };
+                textures.push(tex);
+                texture_of.insert((src, w), textures.len() - 1);
+                textures.len() - 1
+            }
+        };
+        tex_map.push(Some(i));
     }
     let tref = |v: Option<&Value>| -> Option<TexRef> {
         let v = v?;
@@ -536,7 +587,7 @@ pub(crate) fn parse_with_budget(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<V
         .and_then(|e| e.get("KHR_lights_punctual"))
         .map(|e| arr(e, "lights").iter().enumerate().map(|(i, l)| light(l, i)).collect())
         .unwrap_or_default();
-    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights })
+    Ok(Model { meshes, nodes, roots, materials, textures, skins, animations, cameras, lights, warnings })
 }
 
 fn name_or(v: &Value, d: String) -> String {

@@ -802,3 +802,12 @@ fn text_notes_the_font_files_it_draws_with() {
     assert!(files.is_complete(), "{files:?}");
     assert_eq!(files.get(&font.to_string_lossy()), Some(stamp), "{files:?}");
 }
+
+#[test]
+fn selector_evaluations_are_counted_across_the_layer_not_timed() {
+    let b = SelectorBudget(std::cell::Cell::new(3));
+    // Taken by any animator's selectors in turn; the fourth finds none, and stays none.
+    assert!([b.take(), b.take(), b.take()].iter().all(|t| *t));
+    assert!(!b.take() && !b.take());
+    assert_eq!(SelectorBudget::new().0.get(), MAX_SELECTOR_EVALS);
+}

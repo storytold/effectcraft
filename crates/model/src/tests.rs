@@ -433,6 +433,58 @@ fn contours_group_into_outlines_by_nesting() {
 }
 
 #[test]
+fn overlapping_contours_keep_every_container_in_their_depth() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // C's first vertex lies inside both A and B, which overlap without nesting: C is two deep,
+    // an outer contour, not a hole cut out of B.
+    let g = group_contours(vec![rect(0.0, 0.0, 10.0, 10.0), rect(5.0, -2.0, 13.0, 8.0), rect(9.0, 1.0, 12.0, 2.0)]);
+    assert_eq!(g.len(), 3);
+    assert_eq!(g.iter().map(|o| o.holes.len()).sum::<usize>(), 0);
+}
+
+#[test]
+fn a_contour_inside_a_hole_takes_the_innermost_outline_not_the_hole() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // A and B overlap; C lies in A only (a hole of A); D lies in A, B and C (three deep, a hole).
+    // The smallest container of D is the hole C, which has no outline of its own: D goes to B.
+    let g = group_contours(vec![rect(0.0, 0.0, 10.0, 10.0), rect(5.0, -2.0, 13.0, 8.0), rect(1.0, 1.0, 9.0, 9.0), rect(6.0, 2.0, 7.0, 3.0)]);
+    assert_eq!(g.len(), 2);
+    assert_eq!(g.iter().map(|o| o.holes.len()).collect::<Vec<_>>(), [1, 1], "C is a hole of A, D a hole of B (not dropped)");
+}
+
+#[test]
+fn a_hole_whose_outline_is_deeper_than_it_is_still_attached() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // D is three deep and its innermost outline A four deep: A's slot must exist before D is attached.
+    let a = rect(0.0, 0.0, 10.0, 10.0);
+    let g = group_contours(vec![
+        a.clone(),
+        rect(-1.0, -1.0, 20.0, 20.0),
+        rect(-2.0, -2.0, 25.0, 25.0),
+        rect(5.0, 5.0, 6.0, 6.0),
+        rect(-100.0, -100.0, 3.0, 3.0),
+        rect(-0.5, -1000.0, 0.5, 1000.0),
+    ]);
+    let o = g.iter().find(|o| o.outer == a).expect("A is an outline");
+    assert_eq!(o.holes.len(), 1, "D is a hole of A");
+}
+
+#[test]
+fn gltf_images_naming_one_file_share_their_wrap_variants() {
+    let png = {
+        let img = image::RgbaImage::from_fn(2, 2, |x, y| if (x + y) % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    // Two image entries with one URI share a decode; two textures clamp it, so they share one copy.
+    let doc = br#"{"asset":{"version":"2.0"},"images":[{"uri":"t.png"},{"uri":"t.png"}],
+        "samplers":[{"wrapS":33071,"wrapT":33071}],"textures":[{"source":0,"sampler":0},{"source":1,"sampler":0}]}"#;
+    let m = gltf::parse(doc, &|u| (u == "t.png").then(|| png.clone())).unwrap();
+    assert_eq!(m.textures.len(), 1, "one clamped copy for both textures");
+}
+
+#[test]
 fn gltf_cameras_and_punctual_lights() {
     let doc = r#"{
         "asset": {"version": "2.0"},
@@ -730,4 +782,103 @@ fn gltf_strip_expansion_is_charged_to_the_read_budget() {
     assert_eq!(m.meshes[0].primitives[0].indices.len(), 2994);
     let e = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 5000).err().unwrap_or_else(|| panic!("imported"));
     assert!(e.to_string().contains("more than 5000 components"), "{e}");
+}
+
+#[test]
+fn texture_decoding_is_charged_to_the_import_budget() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let mut left = 4;
+    assert_eq!(Texture::decode_within(&png, &mut left).unwrap().data.len(), 4);
+    assert_eq!(left, 0);
+    assert!(matches!(Texture::decode_within(&png, &mut left), Err(ModelError::Unsupported(_))));
+}
+
+#[test]
+fn obj_repeated_material_libraries_and_textures_load_once() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let mtl = b"newmtl A\nmap_Kd t.png\nnewmtl B\nmap_Kd t.png\n".to_vec();
+    let src = b"mtllib m.mtl\nmtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl A\nf 1 2 3\nusemtl B\nf 1 2 3\nusemtl A\nf 1 2 3\n";
+    let m = obj::parse(src, &|name| match name {
+        "m.mtl" => Some(mtl.clone()),
+        "t.png" => Some(png.clone()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(m.materials.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert_eq!(m.textures.len(), 1);
+    assert_eq!(m.meshes[0].primitives.iter().map(|p| (p.material, p.triangle_count())).collect::<Vec<_>>(), [(Some(0), 2), (Some(1), 1)]);
+}
+
+#[test]
+fn gltf_textures_naming_one_image_share_it() {
+    let doc = String::from_utf8(fixture("quad.gltf")).unwrap();
+    // Three textures of one image: the fixture's sampler, the same sampler again, no sampler.
+    let doc = doc.replace(
+        "\"textures\": [\n  {\n   \"source\": 0,\n   \"sampler\": 0\n  }\n ]",
+        "\"textures\": [{\"source\": 0, \"sampler\": 0}, {\"source\": 0, \"sampler\": 0}, {\"source\": 0}]",
+    );
+    let m = gltf::parse(doc.as_bytes(), &|_| None).unwrap();
+    assert_eq!(m.textures.len(), 2);
+    assert_eq!(m.textures[0].wrap, [Wrap::Clamp, Wrap::Repeat]);
+    assert_eq!(m.textures[1].wrap, [Wrap::Repeat, Wrap::Repeat]);
+}
+
+#[test]
+fn instances_of_one_skin_share_its_joint_matrices() {
+    let p = mesh(PrimitiveKind::Plane, &PrimParams { size: [2.0, 2.0, 0.0], ..Default::default() });
+    let mut m = Model::single(Mesh { name: "s".into(), primitives: vec![p] }, vec![Material::default()]);
+    m.nodes[0].skin = Some(0);
+    m.nodes.push(Node { mesh: Some(0), skin: Some(0), ..Node::default() });
+    m.roots = vec![0, 1];
+    m.skins.push(Skin { joints: vec![0], inverse_bind: vec![Mat4::IDENTITY] });
+    let inst = m.instances(None, 0.0);
+    assert_eq!(inst.len(), 2);
+    assert!(Arc::ptr_eq(inst[0].joints.as_ref().unwrap(), inst[1].joints.as_ref().unwrap()));
+}
+
+#[test]
+fn contour_grouping_is_bounded() {
+    let sq = |x: f64, y: f64, s: f64| vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]];
+    let n = extrude::MAX_CONTOURS + 1;
+    let cs: Vec<Vec<[f64; 2]>> = (0..n).map(|i| sq(i as f64 * 2.0, 0.0, 1.0)).collect();
+    let g = group_contours(cs);
+    assert_eq!(g.len(), extrude::MAX_CONTOURS);
+    assert!(g.iter().all(|o| o.holes.is_empty()));
+}
+
+/// A texture the import leaves out (too large, or not an image) is named in `Model::warnings`,
+/// which the import shows the user; the model still loads.
+#[test]
+fn left_out_textures_are_reported_as_import_warnings() {
+    // A 24-bit BMP header claiming 9000×9000 (81 MP, over one texture's limit) over no pixel data.
+    let mut big = b"BM".to_vec();
+    big.extend_from_slice(&[0; 8]);
+    big.extend_from_slice(&54u32.to_le_bytes());
+    big.extend_from_slice(&40u32.to_le_bytes());
+    big.extend_from_slice(&9000u32.to_le_bytes());
+    big.extend_from_slice(&9000u32.to_le_bytes());
+    big.extend_from_slice(&[1, 0, 24, 0]);
+    big.extend_from_slice(&[0; 24]);
+    let mtl = b"newmtl A\nmap_Kd big.bmp\nnewmtl B\nmap_Kd junk.png\nnewmtl C\nmap_Kd gone.png\n".to_vec();
+    let src = b"mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl A\nf 1 2 3\n";
+    let m = obj::parse(src, &|name| match name {
+        "m.mtl" => Some(mtl.clone()),
+        "big.bmp" => Some(big.clone()),
+        "junk.png" => Some(b"not an image".to_vec()),
+        _ => None,
+    })
+    .unwrap();
+    assert!(m.textures.is_empty());
+    let all = m.warnings.join("|");
+    assert!(all.contains("big.bmp") && all.contains("junk.png") && all.contains("gone.png"), "{all}");
 }
