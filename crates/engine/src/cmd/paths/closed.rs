@@ -120,6 +120,8 @@ pub(super) fn toggle_closed(s: &mut Session, _: &Value) -> Result<Value> {
             if path.closed == closed {
                 continue;
             }
+            // As `mask.setClosed`: a path read from a file may have fewer tangents than vertices (#1250).
+            path.fit_tangents();
             path.closed = closed;
             if roto {
                 super::roto_smooth(&mut path);

@@ -528,6 +528,25 @@ fn toggle_closed_recomputes_roto_bezier_tangents() {
 }
 
 #[test]
+fn toggle_closed_fits_short_tangent_lists_like_set_closed() {
+    let mut s = comp();
+    let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let uid = s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let layer_mut = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    let prop = layer_mut.props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
+    let KV::Path(path) = &mut prop.value else { panic!("not a path") };
+    // A file can store fewer tangents than vertices (#1250).
+    path.in_tangents.clear();
+    path.out_tangents.truncate(1);
+    s.state.selected_props = vec![(LayerId(lid), uid)];
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    let path = layer(&s, lid).props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    assert!(!path.closed);
+    assert_eq!((path.in_tangents.len(), path.out_tangents.len()), (3, 3));
+}
+
+#[test]
 fn toggle_closed_edits_layer_time_and_roundtrips() {
     use effectcraft_keyframe::Keyframe;
     let mut s = comp();
