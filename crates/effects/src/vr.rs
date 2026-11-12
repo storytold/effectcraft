@@ -512,10 +512,13 @@ fn vr_denoise(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if level <= 0.0 {
         return b;
     }
-    let r = ((1.0 + level * 4.0) * b.scale).max(1.0) as usize;
+    // Capped at the frame's side: an expression-driven Noise Level (1e4+) asked for a padded
+    // buffer of tens of GB, an allocation failure that aborts the process.
+    let side = b.img.width.max(b.img.height).max(1) as usize;
+    let r = (((1.0 + level * 4.0) * b.scale).max(1.0) as usize).min(side);
     if ctx.params.e("noiseType") == 1 {
         // Salt-and-pepper speckles: a median removes isolated outliers outright.
-        let mr = ((level * 3.0 * b.scale).round() as usize).max(1);
+        let mr = ((level * 3.0 * b.scale).round() as usize).clamp(1, side);
         b.img = per_eye(&b.img, layout(ctx), |e, _| crate::noise::median_image(e, mr));
         return b;
     }
@@ -547,6 +550,11 @@ fn vr_denoise(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 /// Pad an equirectangular image by `pad` pixels: wrapped columns, pole-continued rows.
 pub fn wrap_pad(img: &Image, pad: usize) -> Image {
+    // An empty frame has nothing to wrap (`clamp(0, h - 1)` below would panic).
+    if img.is_empty() {
+        return img.clone();
+    }
+    let pad = pad.min(effectcraft_raster::MAX_PADDED_SIDE as usize / 2);
     let (w, h) = (img.width as i64, img.height as i64);
     let p = pad as i64;
     let mut out = Image::new((w + 2 * p) as u32, (h + 2 * p) as u32);
@@ -1147,6 +1155,13 @@ pub fn specs() -> Vec<EffectSpec> {
 
 #[cfg(test)]
 mod tests {
+    /// Fail-before: `wrap_pad` of an empty frame panicked in `clamp(0, -1)`.
+    #[test]
+    fn wrap_pad_survives_empty_frames() {
+        let empty = effectcraft_raster::Image::new(4, 0);
+        assert!(super::wrap_pad(&empty, 3).is_empty());
+    }
+
     use super::*;
     use crate::{EffectEnv, run_fx};
 

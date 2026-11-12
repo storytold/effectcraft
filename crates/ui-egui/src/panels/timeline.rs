@@ -2624,7 +2624,8 @@ fn ruler_scrub(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Tl) {
                 tm.start = app.ui.timeline.start;
                 ui.ctx().request_repaint();
             }
-            x = x.clamp(tm.x0, graph_x1);
+            // A Timeline narrower than its layer columns has `graph_x1 < x0`: `clamp` would panic.
+            x = x.clamp(tm.x0, graph_x1.max(tm.x0));
         }
         let mut secs = tm.t(x).max(0.0);
         // Shift-drag: snap to keyframes, in/out points, markers and the work area (8 px).
