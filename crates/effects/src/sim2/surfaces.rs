@@ -522,3 +522,8 @@ fn wave_world_impl(ctx: &EffectCtx, b: &Buf, plan_only: bool) -> Result<Image, W
         Ok(plan.finish(Buf { img: Image::new(bw, bh), offset: b.offset, scale: b.scale }).img)
     }
 }
+
+/// Drop the Wave World checkpoints (Edit ▸ Purge).
+pub(crate) fn purge() {
+    WAVE_CACHE.clear();
+}

@@ -36,6 +36,9 @@ pub mod rewrite;
 mod runtime;
 mod sample;
 
+/// Forget the pixels `sampleImage` kept (Edit ▸ Purge, closing a project).
+pub use sample::purge as purge_sampled;
+
 use effectcraft_keyframe::Value;
 use effectcraft_project::{ItemId, Layer, LayerId, Project, Property};
 use effectcraft_render::{EvalCtx, ExprHost};

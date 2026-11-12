@@ -576,6 +576,11 @@ impl<S: Clone> SimCache<S> {
         SimCache { inner: std::sync::Mutex::new(Vec::new()), cap }
     }
 
+    /// Drop every checkpoint (Edit ▸ Purge): the next run simulates from scratch.
+    pub fn clear(&self) {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    }
+
     /// State after `target` steps (at most [`MAX_SIM_STEPS`]). `init` builds step 0;
     /// `step(state, i)` advances from step `i` to `i + 1`.
     pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {

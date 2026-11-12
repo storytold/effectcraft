@@ -866,6 +866,9 @@ fn purge_caches(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if matches!(what.as_str(), "all" | "image" | "memory" | "memoryAndDisk") {
         effectcraft_effects::roto::purge();
+        // The pixels `sampleImage()` expressions kept (up to 512 MB).
+        effectcraft_expr::purge_sampled();
+        effectcraft_effects::purge_sims();
     }
     // The viewers' RAM preview goes with the memory purges (and the 3D one, whose renders it
     // holds); purging the disk cache or the snapshot leaves it.

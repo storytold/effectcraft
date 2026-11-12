@@ -16,12 +16,12 @@ use crate::sim::{Acc, Post, Shape, Sprite, SpritePlan, h, hs, pct, pt, raster, s
 use crate::util::{Plane, SimCache, gauss_plane, layer_or_self, params_key, unpremul};
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
 
-mod foam;
+pub(crate) mod foam;
 mod pieces;
 mod pixels;
 mod registry;
 mod shatter;
-mod surfaces;
+pub(crate) mod surfaces;
 
 pub(crate) use foam::foam_plan;
 #[cfg(test)]

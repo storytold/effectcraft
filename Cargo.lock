@@ -1556,6 +1556,7 @@ dependencies = [
  "effectcraft-aep",
  "effectcraft-color",
  "effectcraft-effects",
+ "effectcraft-expr",
  "effectcraft-geom",
  "effectcraft-interchange",
  "effectcraft-keyframe",
