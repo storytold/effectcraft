@@ -147,18 +147,30 @@ fn registry() -> MutexGuard<'static, Vec<&'static dyn ForgetFile>> {
 }
 
 thread_local! {
-    /// The files read by the loads running on this thread, innermost last.
-    static READING: RefCell<Vec<Files>> = const { RefCell::new(Vec::new()) };
+    /// The loads running on this thread, innermost last: the files each read, and the bytes of
+    /// the cached results it holds (a config holds the LUTs its `FileTransform`s loaded).
+    static READING: RefCell<Vec<(Files, usize)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Note that the running load read (or looked for) `path`, stamped `stamp`.
 pub(crate) fn note_file(path: &str, stamp: FileStamp) {
     READING.with(|r| {
         if let Ok(mut r) = r.try_borrow_mut()
-            && let Some(top) = r.last_mut()
+            && let Some((top, _)) = r.last_mut()
             && !top.iter().any(|(p, _)| p == path)
         {
             top.push((path.to_string(), stamp));
+        }
+    });
+}
+
+/// Note that the running load holds a cached result of `bytes`.
+fn note_bytes(bytes: usize) {
+    READING.with(|r| {
+        if let Ok(mut r) = r.try_borrow_mut()
+            && let Some((_, held)) = r.last_mut()
+        {
+            *held = held.saturating_add(bytes);
         }
     });
 }
@@ -172,17 +184,18 @@ impl Reading {
     fn start() -> Reading {
         READING.with(|r| {
             if let Ok(mut r) = r.try_borrow_mut() {
-                r.push(Vec::new());
+                r.push((Vec::new(), 0));
             }
         });
         Reading { popped: false }
     }
 
-    fn pop() -> Option<Files> {
+    fn pop() -> Option<(Files, usize)> {
         READING.with(|r| r.try_borrow_mut().ok().and_then(|mut r| r.pop()))
     }
 
-    fn files(mut self) -> Files {
+    /// The files the load read, and the bytes of the cached results it holds.
+    fn finish(mut self) -> (Files, usize) {
         self.popped = true;
         Self::pop().unwrap_or_default()
     }
@@ -230,23 +243,27 @@ pub(crate) fn cached<V: Clone>(cache: &Mutex<SourceCache<V>>, src: &str, load: i
             && e.files == files
         {
             e.used = now;
-            let value = e.value.clone();
+            let (value, bytes) = (e.value.clone(), e.bytes);
             drop(c);
-            // (an enclosing load depends on these files too)
+            // (an enclosing load depends on these files too, and holds this result)
             for (p, s) in &files {
                 note_file(p, *s);
             }
+            note_bytes(bytes);
             return value;
         }
     }
     let reading = Reading::start();
     let (value, size) = load();
-    let files = reading.files();
+    let (files, held) = reading.finish();
     follow(&files, stale);
     for (p, s) in &files {
         note_file(p, *s);
     }
-    let bytes = size.saturating_add(src.len());
+    // (what it holds counts against this cache's bound too: another cache letting go of it
+    // frees nothing while this result keeps it)
+    let bytes = size.saturating_add(held).saturating_add(src.len());
+    note_bytes(bytes);
     let mut c = lock(cache);
     c.clock += 1;
     let used = c.clock;
@@ -400,16 +417,20 @@ mod tests {
             note_missing("/nested/outer-own.cube");
             let inner = cached(INNER.get(), "inner", || {
                 note_missing("/nested/inner.cube");
-                (7, 0)
+                (7, 100)
             });
             (inner, 0)
         });
         assert_eq!(v, 7);
         let files = lock(OUTER.get()).files("outer").unwrap();
+        let held = |src: &str| lock(OUTER.get()).map.get(src).map(|e| e.bytes);
+        // ("inner" is 5 bytes, its result 100: "outer" holds it, on a load and on a hit alike)
+        assert_eq!(held("outer"), Some(100 + 5 + "outer".len()), "the result an enclosing load holds counts");
         assert_eq!(files, vec!["/nested/outer-own.cube".to_string(), "/nested/inner.cube".to_string()]);
         // A hit on the inner result still reports its files to a new enclosing load.
         let w = cached(OUTER.get(), "outer 2", || (cached(INNER.get(), "inner", || (0, 0)), 0));
         assert_eq!(w, 7);
         assert_eq!(lock(OUTER.get()).files("outer 2").unwrap(), vec!["/nested/inner.cube".to_string()]);
+        assert_eq!(held("outer 2"), Some(100 + 5 + "outer 2".len()));
     }
 }
