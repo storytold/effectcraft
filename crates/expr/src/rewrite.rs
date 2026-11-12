@@ -815,12 +815,24 @@ fn too_deep() -> String {
     format!("Error: expression is nested too deeply (more than {MAX_NESTING} levels of brackets, or too long a chain of operators)")
 }
 
+/// Every JavaScript line terminator as `\n`: `\r\n`, a lone `\r`, U+2028 and U+2029. After
+/// Effects stores expressions with `\r` line breaks (Mac line endings), so a `// comment` in an
+/// expression from a project file would otherwise run to the end of the text and swallow every
+/// line after it. Each line break stays one line break, so error line numbers don't move.
+pub(crate) fn line_breaks_as_newlines(src: &str) -> String {
+    if !src.contains(['\r', '\u{2028}', '\u{2029}']) {
+        return src.to_string();
+    }
+    src.replace("\r\n", "\n").replace(['\r', '\u{2028}', '\u{2029}'], "\n")
+}
+
 /// Rewrite an expression's source for array-aware arithmetic. Line breaks are preserved.
 /// An expression nested deeper than [`MAX_NESTING`] becomes a `throw` of that error.
 pub fn rewrite(src: &str) -> String {
     if over_rewrite_limit(src) {
         return throw_too_large();
     }
+    let src = &line_breaks_as_newlines(src);
     let (toks, tail) = tokenize(src);
     if too_nested(&toks) {
         return throw_too_deep();
@@ -873,6 +885,15 @@ mod tests {
         assert_eq!(n(&rewrite("x = a ? b + 1 : c")), n("x = a ? __add(b,  1) : c"));
         assert_eq!(n(&rewrite("if (a) -b; else c")), n("if (a) __neg(b); else c"));
         assert_eq!(n(&rewrite("return -x")), n("return __neg(x)"));
+    }
+
+    #[test]
+    fn carriage_return_line_breaks_end_line_comments() {
+        // After Effects' own line breaks (`\r`): the comment ends at each one.
+        let out = rewrite("fps = 12.5; // rate\rposterizeTime(fps); // here\rvalueAtTime(time)");
+        assert!(out.contains("posterizeTime(fps)") && out.contains("valueAtTime(time)"), "{out}");
+        assert_eq!(out.lines().count(), 3);
+        assert_eq!(rewrite("a\r\nb\u{2028}c\u{2029}d").lines().count(), 4);
     }
 
     #[test]
