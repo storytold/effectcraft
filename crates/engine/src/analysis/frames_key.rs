@@ -1,5 +1,6 @@
-//! What an analysis of a layer is made from, as one key shared by the Warp Stabilizer, the 3D
-//! Camera Tracker and Roto Brush / Object Matte.
+//! What an analysis of a layer is made from. One writer keys the Warp Stabilizer and the 3D
+//! Camera Tracker ([`analysis_key`]: frames, masks, effects above, a precomp's contents) and Roto
+//! Brush / Object Matte ([`input_key`]: frames, masks, effects above).
 //!
 //! The key hashes a text this module writes field by field. The source item (footage and its
 //! settings, solid), the Time Remap property, the masks and effect groups (their properties,
@@ -9,7 +10,8 @@
 //! the layer's frames, left out (with a reason) if it doesn't. Renaming a field or variant doesn't
 //! change keys. Of the analysed layer itself, only the fields named in `layer_frames` and
 //! [`analysis_key`] are read. The text leaves out observations (whether footage is available) and
-//! data that never changes pixels (colour labels, UI hints, markers), so they never drop saved
+//! data that never changes pixels (colour labels, UI hints, markers but a comp's timing markers;
+//! only expressions read the others), so they never drop saved
 //! analyses (#3534, #3536).
 //!
 //! Keys saved by 0.22–0.24 hashed derived `Debug` text instead. [`legacy`] still recognises
@@ -510,7 +512,8 @@ impl Text {
             preserve_transparency,
             track_matte,
             parent,
-            // Layer markers annotate it; Lock Markers protects them.
+            // Layer markers annotate it (only expressions read them, as for the analysed layer);
+            // Lock Markers protects them.
             markers: _,
             markers_locked: _,
             auto_orient,
@@ -549,7 +552,8 @@ impl Text {
     }
 
     fn switches(&mut self, s: &Switches) {
-        // Lock and Shy only protect and hide the layer in the Timeline.
+        // Lock and Shy only protect and hide the layer in the Timeline. Audio is written (as are
+        // the Audio group and audio effects, in the property tree): a waveform effect can draw it.
         let Switches { video, audio, solo, locked: _, shy: _, collapse, quality, sampling, effects, frame_blend, motion_blur, adjustment, three_d, guide } = s;
         self.field("switches", format_args!("{video}/{audio}/{solo}/{collapse}/{effects}/{motion_blur}/{adjustment}/{three_d}/{guide}"));
         self.form("quality", quality);
@@ -558,7 +562,7 @@ impl Text {
     }
 
     /// A comp's protected markers with a duration: they set its timing (Responsive Design).
-    /// Other markers annotate it.
+    /// Other markers annotate it; only expressions read them.
     fn timing_markers(&mut self, markers: &[Marker]) {
         for m in markers.iter().filter(|m| m.protected && m.duration > Tick::ZERO) {
             self.tick("timingMarker", m.time);

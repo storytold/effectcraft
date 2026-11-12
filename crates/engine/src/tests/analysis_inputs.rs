@@ -15,7 +15,7 @@ const CLIP: LayerId = LayerId(3);
 const WARP: u64 = 26;
 const TRACKER: u64 = 54;
 
-/// `tracked-0.22.ecproj`'s clip with a mask and, in order, a Warp Stabilizer, a 3D Camera
+/// `analysed-0.24.ecproj`: the clip of `tracked-0.22.ecproj` with a mask and, in order, a Warp Stabilizer, a 3D Camera
 /// Tracker, a Gaussian Blur and a Roto Brush.
 const ANALYSED: &str = include_str!("fixtures/analysed-0.24.ecproj");
 
