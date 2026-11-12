@@ -322,6 +322,11 @@ impl ErrorToast {
         self.reported_status.as_deref().is_some_and(|reported| status == reported || status.strip_prefix(reported).is_some_and(|rest| rest.starts_with("; ")))
     }
 
+    /// Pair the details with `status`, a later status line that reports the same errors.
+    fn restate(&mut self, status: &str) {
+        self.reported_status = Some(Self::bounded_text([status]));
+    }
+
     fn message_at(&mut self, foreground_status: bool, now: f64) -> Option<&str> {
         if self.shown_at.is_none() && !foreground_status {
             // Only the first standalone display starts the timer. Later statuses cannot

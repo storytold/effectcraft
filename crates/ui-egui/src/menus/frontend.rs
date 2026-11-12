@@ -759,7 +759,7 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
     match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        Ok(result) => show_result_errors(app, &result),
+        Ok(result) => show_command_result_errors(app, &answer.command, &result),
         Err(e) => app.ui.status = e,
     }
 }
@@ -785,6 +785,27 @@ pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
         msg.push_str(&format!("; +{} more", parts.len() - 3));
     }
     app.ui.status = msg;
+}
+
+/// [`show_result_errors`] for the result of command `id`. An import has already queued its
+/// details with the shorter status `report_import_errors` set; this status reports the same
+/// errors in its place, so the details move to it and dismissing it still acknowledges them.
+pub(crate) fn show_command_result_errors(app: &mut EffectcraftApp, id: &str, result: &Value) {
+    show_result_errors_after_import(app, matches!(id, "file.import" | "file.importMultiple"), result);
+}
+
+/// [`show_result_errors`]; when `reported` is set, `report_import_errors` has just queued the
+/// details of the import whose result this is, last, with the status shown before this call.
+fn show_result_errors_after_import(app: &mut EffectcraftApp, reported: bool, result: &Value) {
+    let previous = app.ui.status.clone();
+    show_result_errors(app, result);
+    if reported
+        && app.ui.status != previous
+        && let Some(toast) = app.error_toasts.back_mut().filter(|toast| toast.reported_by(&previous))
+    {
+        app.ui.status = crate::ErrorToast::bounded_text([app.ui.status.as_str()]);
+        toast.restate(&app.ui.status);
+    }
 }
 
 /// Run command `id` with the path picked for it in parameter `key`.
@@ -881,8 +902,9 @@ fn import_picked_with_aep(app: &mut EffectcraftApp, id: &str, key: &str, params:
                 result = json!({"result": result});
             }
             let own = result.get("errors").and_then(Value::as_array).cloned().unwrap_or_default();
+            let reported = !own.is_empty();
             result["errors"] = Value::Array(errors.into_iter().map(Value::from).chain(own).collect());
-            show_result_errors(app, &result);
+            show_result_errors_after_import(app, reported, &result);
             Ok(result)
         }
         Err(e) => {

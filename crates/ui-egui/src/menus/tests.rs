@@ -775,6 +775,35 @@ fn bundle_result_errors_show_compactly_in_the_status_line() {
     assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
 }
 
+/// A picked or menu import reports its errors twice: `report_import_errors` queues the details
+/// with a short status, and the command's result then writes the longer status. Dismissing that
+/// status still acknowledges the queued details, also when After Effects project errors lead it.
+/// Another command's errors do not take over an import's details, even with the same text.
+#[test]
+fn an_import_status_rewritten_by_its_result_still_acknowledges_its_details() {
+    let long = format!("first failed file {}", "x".repeat(20_000));
+    for first in ["first failed file", "first failed file\nwith a second line", long.as_str()] {
+        let import = json!({"errors": [first, "second failed file"]});
+        let with_aep = json!({"errors": ["project.aep: cannot read it", first, "second failed file"]});
+        for result in [&import, &with_aep] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            app.report_import_errors("file.import", &import);
+            super::frontend::show_command_result_errors(&mut app, "file.import", result);
+            assert!(app.ui.status.contains("first failed file"), "{}", app.ui.status);
+            assert_eq!(app.error_toasts.len(), 1);
+            assert!(app.error_toasts.back().unwrap().reported_by(&app.ui.status), "{first:.40}: {:.80}", app.ui.status);
+        }
+    }
+    let import = json!({"errors": ["first failed file", "second failed file"]});
+    for other in [json!({"errors": [{"file": "a.wasm", "error": "does not load"}]}), import.clone()] {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.report_import_errors("file.import", &import);
+        super::frontend::show_command_result_errors(&mut app, "effect.installBundle", &other);
+        assert!(!app.ui.status.contains("(and"), "{}", app.ui.status);
+        assert!(!app.error_toasts.back().unwrap().reported_by(&app.ui.status), "{}", app.ui.status);
+    }
+}
+
 /// Effect ▸ Install Effect Plug-in… picks its dialog by params: a bundle asks for a folder,
 /// a plain install asks for a `.wasm`, and with both given inline nothing asks at all.
 #[test]
