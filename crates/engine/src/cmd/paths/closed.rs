@@ -1,7 +1,7 @@
 //! The selection-aware Closed menu action. Explicit edits retain `mask.setClosed`'s API.
 
 use effectcraft_keyframe::Value as KV;
-use effectcraft_project::{GroupKind, Layer, LayerId, PropGroup, Uid};
+use effectcraft_project::{GroupKind, Layer, LayerId, Node, PropGroup, Uid};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -14,6 +14,7 @@ struct Target {
     layer: LayerId,
     route: Vec<usize>,
     closed: bool,
+    editable: bool,
 }
 
 struct Selection {
@@ -30,58 +31,66 @@ fn group_at_mut<'a>(mut group: &'a mut PropGroup, route: &[usize]) -> Option<&'a
     Some(group)
 }
 
+/// The selected paths on the selected layers, else every path of those layers (as the other
+/// Mask and Shape Path commands do). Locked layers and masks count as matches, so selecting one
+/// never falls back to its siblings, and are then left out.
 fn targets(s: &Session) -> Result<Vec<Target>> {
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
+    let on_selected = |lid: &LayerId| s.state.selected_layers.contains(lid);
     // Layer navigation and insertion can retain point/property selections on other layers.
     let selection = Selection {
-        vertices: s.state.selected_vertices.iter().filter(|v| s.state.selected_layers.contains(&v.layer)).copied().collect(),
-        props: s.state.selected_props.iter().filter(|(lid, _)| s.state.selected_layers.contains(lid)).copied().collect(),
+        vertices: s.state.selected_vertices.iter().filter(|v| on_selected(&v.layer)).copied().collect(),
+        props: s.state.selected_props.iter().filter(|(lid, _)| on_selected(lid)).copied().collect(),
         time: s.time(),
     };
-    let whole_layers = selection.vertices.is_empty() && selection.props.is_empty();
     let mut targets = Vec::new();
-    for layer in comp.layers.iter() {
-        let selected_layer = if whole_layers {
-            s.state.selected_layers.contains(&layer.id)
-        } else {
-            selection.vertices.iter().any(|v| v.layer == layer.id) || selection.props.iter().any(|(lid, _)| *lid == layer.id)
-        };
-        if !selected_layer || layer.switches.locked {
-            continue;
+    for whole_layers in [false, true] {
+        for layer in comp.layers.iter().filter(|l| on_selected(&l.id)) {
+            collect(&selection, layer, &layer.props, &mut Vec::new(), whole_layers, layer.switches.locked, &mut targets)?;
         }
-        collect(&selection, layer, &layer.props, &mut Vec::new(), whole_layers, &mut targets)?;
+        if !targets.is_empty() {
+            break;
+        }
     }
+    targets.retain(|target| target.editable);
     if targets.is_empty() {
         return Err(bad("path.toggleClosed", "select an unlocked mask or Bezier shape path"));
     }
     Ok(targets)
 }
 
-fn collect(selection: &Selection, layer: &Layer, group: &PropGroup, route: &mut Vec<usize>, inherited: bool, targets: &mut Vec<Target>) -> Result<()> {
+fn collect(
+    selection: &Selection,
+    layer: &Layer,
+    group: &PropGroup,
+    route: &mut Vec<usize>,
+    inherited: bool,
+    locked: bool,
+    targets: &mut Vec<Target>,
+) -> Result<()> {
     if route.len() > MAX_DEPTH {
         return Err(bad("path.toggleClosed", "path group nesting exceeds 128 levels"));
     }
-    if matches!(group.kind, GroupKind::Mask { locked: true, .. }) {
-        return Ok(());
-    }
+    let locked = locked || matches!(group.kind, GroupKind::Mask { locked: true, .. });
     let selected = inherited || selection.props.contains(&(layer.id, group.uid));
     if super::super::mask::is_path_group(group)
         && let Some(prop) = group.get("path")
         && let KV::Path(path) = prop.value_at(layer.layer_time(selection.time))
     {
-        // Property selection also selects its points; both describe the selected paths.
+        // Selecting any of a path group's properties (Mask Path, Feather, Opacity…) or its points
+        // selects the path.
         let selected = selected
-            || selection.props.contains(&(layer.id, prop.uid))
+            || group.children.iter().any(|c| matches!(c, Node::Prop(p) if selection.props.contains(&(layer.id, p.uid))))
             || selection.vertices.iter().any(|v| v.layer == layer.id && v.mask == group.uid && v.index < path.vertices.len());
         if selected {
-            targets.push(Target { layer: layer.id, route: route.clone(), closed: path.closed });
+            targets.push(Target { layer: layer.id, route: route.clone(), closed: path.closed, editable: !locked });
         }
         return Ok(());
     }
     for (index, child) in group.children.iter().enumerate() {
         let Some(child) = child.as_group() else { continue };
         route.push(index);
-        collect(selection, layer, child, route, selected, targets)?;
+        collect(selection, layer, child, route, selected, locked, targets)?;
         route.pop();
     }
     Ok(())

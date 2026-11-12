@@ -434,7 +434,10 @@ fn toggle_closed_ignores_selections_retained_on_other_layers() {
     s.execute("layer.selectPrevious", json!({})).unwrap();
     assert_eq!(s.state.selected_layers, vec![LayerId(b_layer)]);
     s.execute("prop.select", json!({"layer": b_layer, "path": "transform/position"})).unwrap();
-    assert!(!s.is_enabled("path.toggleClosed"), "a non-path property does not select sibling paths");
+    assert_eq!(crate::menus::checked(&s, "path.toggleClosed", &json!({})), Some(true), "a non-path property falls back to the layer's paths");
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, b_layer, b_path).closed);
+    s.execute("edit.undo", json!({})).unwrap();
     s.execute("layer.selectNext", json!({})).unwrap();
     s.execute("path.toggleClosed", json!({})).unwrap();
     assert!(shape_path(&s, a_layer, a_path).closed, "a property retained on another layer cannot block this layer");
@@ -442,20 +445,22 @@ fn toggle_closed_ignores_selections_retained_on_other_layers() {
 }
 
 #[test]
-fn toggle_closed_rejects_locked_stale_and_nonpath_selection() {
+fn toggle_closed_falls_back_from_stale_selection_and_rejects_locked_or_pathless_layers() {
     let mut s = comp();
     let r = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
     let (lid, uid) = (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap());
     let before = s.project.clone();
     s.state.selected_vertices.clear();
     s.state.selected_props = vec![(LayerId(lid), u64::MAX)];
-    assert!(!s.is_enabled("path.toggleClosed"));
-    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, lid, uid).closed, "a stale property selection falls back to the layer's paths");
+    s.execute("edit.undo", json!({})).unwrap();
     assert!(s.project.same_content(&before));
     s.state.selected_props.clear();
     s.state.selected_vertices = vec![crate::VertexRef { layer: LayerId(lid), mask: uid, index: usize::MAX }];
-    assert!(!s.is_enabled("path.toggleClosed"));
-    assert!(s.execute("path.toggleClosed", json!({})).is_err());
+    s.execute("path.toggleClosed", json!({})).unwrap();
+    assert!(!shape_path(&s, lid, uid).closed, "a stale vertex selection falls back to the layer's paths");
+    s.execute("edit.undo", json!({})).unwrap();
     s.state.selected_vertices.clear();
     let cid = s.active_comp_id().unwrap();
     std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().switches.locked = true;
@@ -475,10 +480,16 @@ fn toggle_closed_handles_masks_and_preserves_explicit_set_closed() {
     let uid = s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
     let path = |s: &Session| layer(s, lid).props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
     let original = path(&s);
-    s.state.selected_props = vec![(LayerId(lid), uid)];
+    let other = s.execute("mask.new", json!({"layer": lid, "vertices": [[10, 10], [90, 10], [90, 90]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
+    let other_closed = |s: &Session| layer(s, lid).props.find_group(other).unwrap().get("path").unwrap().value.as_path().unwrap().closed;
+    let feather = layer(&s, lid).props.find_group(uid).unwrap().get("feather").unwrap().uid;
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(lid), feather)];
     s.execute("path.toggleClosed", json!({})).unwrap();
-    assert!(!path(&s).closed);
+    assert!(!path(&s).closed, "selecting Mask Feather selects its mask");
+    assert!(other_closed(&s), "an unselected mask stays closed");
     assert!(layer(&s, lid).props.find_group(uid).unwrap().get("path").unwrap().keys.is_empty(), "a static path gains no keyframe");
+    s.state.selected_props = vec![(LayerId(lid), uid)];
     s.execute("mask.setClosed", json!({"layer": lid, "mask": uid})).unwrap();
     assert_eq!(path(&s), original, "explicit API still defaults to closed");
     s.execute("mask.setClosed", json!({"layer": lid, "mask": uid, "closed": false})).unwrap();
@@ -493,6 +504,7 @@ fn toggle_closed_handles_masks_and_preserves_explicit_set_closed() {
     assert!(!s.is_enabled("path.toggleClosed"));
     assert!(s.execute("path.toggleClosed", json!({})).is_err());
     assert_eq!(path(&s), original);
+    assert!(other_closed(&s), "a selected locked mask does not fall back to its unlocked siblings");
 }
 
 #[test]
