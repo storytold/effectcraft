@@ -456,11 +456,11 @@ fn toggle_key_selected(s: &mut Session, p: &Value) -> Result<Value> {
         return toggle_key(s, p);
     }
     let cid = prop_ref(s, p, "prop.toggleKey")?.0;
-    super::app_more::grouped(s, "Add/Remove Keyframe", |s| {
+    let run = |s: &mut Session| {
         let added = toggle_key(s, p)?;
         let want = added.as_bool().unwrap_or(true);
         for (olid, ouid) in twins {
-            let _ = with_prop(s, "Add/Remove Keyframe", None, cid, olid, ouid, |pr, lt| {
+            let _ = with_prop(s, "Add/Remove Keyframe", merge_p(p), cid, olid, ouid, |pr, lt| {
                 if key_at(&pr.keys, lt).is_some() != want {
                     toggle_key_at(pr, lt);
                 }
@@ -468,7 +468,8 @@ fn toggle_key_selected(s: &mut Session, p: &Value) -> Result<Value> {
             });
         }
         Ok(added)
-    })
+    };
+    if merge_p(p).is_some() { run(s) } else { super::app_more::grouped(s, "Add/Remove Keyframe", run) }
 }
 
 fn set(s: &mut Session, p: &Value) -> Result<Value> {
@@ -611,7 +612,14 @@ fn add_key(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn toggle_key(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "prop.toggleKey")?;
-    with_prop(s, "Add/Remove Keyframe", None, cid, lid, uid, |pr, lt| Ok(json!(toggle_key_at(pr, lt))))
+    let want = b_p(p, "value");
+    with_prop(s, "Add/Remove Keyframe", merge_p(p), cid, lid, uid, |pr, lt| {
+        let target = want.unwrap_or_else(|| key_at(&pr.keys, lt).is_none());
+        if key_at(&pr.keys, lt).is_some() != target {
+            toggle_key_at(pr, lt);
+        }
+        Ok(json!(target))
+    })
 }
 
 /// Add a keyframe at layer time `lt` (true), or remove the one there (false).
@@ -1459,7 +1467,15 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("prop.toggleAnimation", "Toggle Stopwatch", [], None, "{layer?, path|prop, value?, merge?, selected?}", has_layers, toggle_anim_selected),
         cmd!("prop.addKey", "Add Keyframe", [], None, "{layer?, path|prop, time? (layer s by default), timeBase?: layer|comp, value?}", has_layers, add_key),
-        cmd!("prop.toggleKey", "Add or Remove Keyframe at Current Time", [], None, "{layer?, path|prop, selected?}", has_layers, toggle_key_selected),
+        cmd!(
+            "prop.toggleKey",
+            "Add or Remove Keyframe at Current Time",
+            [],
+            None,
+            "{layer?, path|prop, value? (true: add, false: remove; omitted: toggle), merge?, selected?}",
+            has_layers,
+            toggle_key_selected
+        ),
         cmd!(
             "keys.toggleTransform",
             "Add or Remove Transform Keyframe",

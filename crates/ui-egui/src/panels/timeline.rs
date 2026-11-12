@@ -4101,7 +4101,37 @@ fn prop_key_navigator(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, r
         {
             ui_actions.push(UiAct::SetTime(layer.comp_time(k.time)));
         }
-        if ui.interact(mid, egui::Id::unique(("kmid", uid)), Sense::click()).clicked() {
+        let enabled = ui.is_enabled() && !layer.switches.locked;
+        let resp = ui.interact(mid, egui::Id::unique(("kmid", uid)), if enabled { Sense::click_and_drag() } else { Sense::hover() });
+        resp.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, at_key, format!("{}: {} ({})", tr("Add or remove keyframe"), prop.name, layer.name))
+        });
+        widgets::focus_outline(ui, &resp, &t);
+        // #3439: paint the first diamond's new state across the other diamonds, like
+        // stopwatches. Stay in the diamond column so a detour over values edits no keys.
+        let crossed = ui.input(|i| {
+            i.pointer.interact_pos().is_some_and(|b| {
+                let a = b - i.pointer.delta();
+                if mid.contains(a) || mid.contains(b) {
+                    return true;
+                }
+                let direction = b - a;
+                let length = direction.length();
+                mid.intersects(Rect::from_two_pos(a, b))
+                    && length > 0.0
+                    && length.is_finite()
+                    && mid.intersects_ray(a, direction / length)
+                    && mid.intersects_ray(b, -direction / length)
+            })
+        });
+        if enabled && crossed {
+            if let Some((value, merge)) = switch_gesture(ui, &resp, mid, "keyframe", at_key) {
+                actions.push(("prop.toggleKey".into(), json!({"layer": layer.id.0, "prop": uid, "value": value, "merge": merge})));
+            } else if resp.clicked() && (!resp.clicked_by(egui::PointerButton::Primary) || ui.input(|i| i.pointer.primary_pressed())) {
+                // Keyboard/accessibility activation, or a press and release in one pass.
+                actions.push(("prop.toggleKey".into(), json!({"layer": layer.id.0, "prop": uid})));
+            }
+        } else if enabled && resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary) {
             actions.push(("prop.toggleKey".into(), json!({"layer": layer.id.0, "prop": uid})));
         }
         app.auto.add(&format!("timeline.prop.{uid}.addKey"), mid, "Add or remove keyframe");

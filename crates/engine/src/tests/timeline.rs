@@ -1606,3 +1606,56 @@ fn convert_expression_to_keyframes_refuses_a_zero_frame_duration() {
     assert!(e.contains("frame duration"), "{e}");
     assert!(prop(&s, l, "transform/rotation").keys.is_empty());
 }
+
+/// #3439: explicit key states and a shared merge token drive the Timeline gesture headlessly.
+#[test]
+fn keyframe_button_gesture_is_idempotent_and_undoes_at_layer_time() {
+    use effectcraft_time::FrameRate;
+    for rate in [FrameRate::FPS_24, FrameRate::FPS_29_97, FrameRate::FPS_60] {
+        let (mut s, a) = setup();
+        s.execute("comp.settings", json!({"frameRate": rate.as_f64()})).unwrap();
+        s.execute("layer.timing", json!({"layers": [a], "start": 1})).unwrap();
+        s.execute("layer.timeStretch", json!({"layers": [a], "percent": 200})).unwrap();
+        let at = rate.tick_of(75);
+        s.execute("time.set", json!({"time": at.seconds()})).unwrap();
+        let before = s.project.clone();
+        let undo = s.history.undo.len();
+        for path in ["transform/opacity", "transform/rotation", "transform/opacity"] {
+            assert_eq!(s.execute("prop.toggleKey", json!({"layer": a, "path": path, "value": true, "merge": "key-drag"})).unwrap(), true);
+            let p = prop(&s, a, path);
+            assert_eq!(p.keys.len(), 1);
+            assert_eq!(p.keys[0].time, s.active_comp().unwrap().layer(effectcraft_project::LayerId(a)).unwrap().layer_time(at));
+        }
+        assert_eq!(s.history.undo.len(), undo + 1);
+        let added = s.project.clone();
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.project, before);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(s.project, added);
+        for path in ["transform/opacity", "transform/rotation", "transform/opacity"] {
+            assert_eq!(s.execute("prop.toggleKey", json!({"layer": a, "path": path, "value": false, "merge": "key-remove"})).unwrap(), false);
+            assert!(prop(&s, a, path).keys.is_empty());
+        }
+        assert_eq!(s.history.undo.len(), undo + 2);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.project, added);
+    }
+}
+
+#[test]
+fn keyframe_button_gesture_merges_selected_property_changes() {
+    let (mut s, a) = setup();
+    let b = s.execute("layer.newSolid", json!({"color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
+    let before = s.project.clone();
+    let undo = s.history.undo.len();
+    for path in ["transform/opacity", "transform/rotation", "transform/opacity"] {
+        s.execute("prop.toggleKey", json!({"layer": a, "path": path, "value": true, "selected": true, "merge": "selected-key-drag"})).unwrap();
+        for layer in [a, b] {
+            assert_eq!(prop(&s, layer, path).keys.len(), 1);
+        }
+    }
+    assert_eq!(s.history.undo.len(), undo + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.project, before);
+}
