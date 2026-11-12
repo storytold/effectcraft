@@ -386,6 +386,10 @@ pub struct TimelineState {
     /// Horizontal scroll of the outline columns (pixels) when they are wider than the pane.
     #[serde(default)]
     pub outline_scroll: f32,
+    /// Width of the layer columns set by dragging the divider next to the time graph; `None`
+    /// follows the visible columns.
+    #[serde(default)]
+    pub split_w: Option<f32>,
     pub show_modes: bool,
     pub graph_editor: bool,
     pub search: String,
@@ -479,6 +483,7 @@ impl Default for TimelineState {
             scroll_y: 0.0,
             columns_w: 560.0,
             outline_scroll: 0.0,
+            split_w: None,
             show_modes: false,
             graph_editor: false,
             search: String::new(),

@@ -1777,6 +1777,31 @@ struct KeyHit<'a> {
     this_key: serde_json::Value,
 }
 
+/// Narrowest the layer columns get; the header controls need this much room.
+const MIN_LEFT_W: f32 = 420.0;
+
+/// The divider between the layer columns and the time graph: drag it to give the columns or the
+/// graph more room, double-click to follow the visible columns again.
+fn split_handle(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
+    let tl = &g.tl;
+    let hit = Rect::from_min_max(pos2(tl.graph_x0 - 4.0, tl.rect.min.y), pos2(tl.graph_x0 + 3.0, tl.rect.max.y - tl.footer_h));
+    let resp = ui.interact(hit, egui::Id::new("timeline-split"), Sense::click_and_drag());
+    app.auto.add("timeline.split", hit, "Timeline divider");
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if resp.double_clicked() {
+        app.ui.timeline.split_w = None;
+    } else if resp.dragged() {
+        let max_left = (tl.rect.width() * 0.72).max(MIN_LEFT_W);
+        app.ui.timeline.split_w = Some((tl.left_w + resp.drag_delta().x).clamp(MIN_LEFT_W, max_left));
+        ui.ctx().request_repaint();
+    }
+    if resp.hovered() || resp.dragged() {
+        tl.p.line_segment([pos2(tl.graph_x0 - 1.0, tl.rect.min.y), pos2(tl.graph_x0 - 1.0, tl.rect.max.y - tl.footer_h)], Stroke::new(2.0, tl.t.accent));
+    }
+}
+
 /// Computes this frame's layout: zoom, scroll and the panel's regions.
 fn layout(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, cid: ItemId, comp: &Arc<Comp>) -> Tl {
     let t = app.tokens;
@@ -1790,7 +1815,9 @@ fn layout(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, cid: ItemId, comp
     let colhdr_h = 22.0;
     let footer_h = 24.0;
     let vis = Vis::of(&app.ui.timeline);
-    let left_w = (vis.fixed() + 190.0).clamp(420.0, (rect.width() * 0.72).max(420.0));
+    // The divider next to the time graph sets the width when dragged ([`split_handle`]).
+    let max_left = (rect.width() * 0.72).max(MIN_LEFT_W);
+    let left_w = app.ui.timeline.split_w.map_or(vis.fixed() + 190.0, |w| if w.is_finite() { w } else { MIN_LEFT_W }).clamp(MIN_LEFT_W, max_left);
     // Columns wider than the pane scroll horizontally (Shift+wheel / trackpad over the outline,
     // or the scroll bar above the footer); the name column keeps its minimum width.
     let natural_w = vis.fixed() + 190.0;
@@ -2020,6 +2047,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     comp_markers_ui(app, ui, g);
     hand_tool_pan(app, ui, g);
     drop_targets(app, ui, g);
+    split_handle(app, ui, g);
     let Rw { tl, ui_actions, .. } = rw;
     apply_ui_acts(app, &tl.comp, ui_actions);
     apply_actions(app, ui, &tl.ctx, tl.actions);

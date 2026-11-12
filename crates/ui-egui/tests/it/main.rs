@@ -119,6 +119,7 @@ mod ui_web_job_gpu;
 mod ui_web_offload;
 mod ui_window_title;
 mod ui_workflow_selection;
+mod ui_timeline_split;
 mod ui_workspace_focus;
 mod viewer_geometry;
 mod viewer_passive_display;
