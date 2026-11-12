@@ -218,6 +218,29 @@ fn retirement_reaches_existing_workers_and_keeps_cpu_frames_and_completion_live(
     assert!(frames.queue.lock().unwrap().running.is_empty());
 }
 
+/// #3493: a LUT file changed on disk drops the frames kept, and a frame whose render started
+/// before is not kept when it finishes (it may have read the old file); one started after is.
+#[test]
+fn clear_stale_drops_kept_frames_and_ones_rendering() {
+    let frames = Frames::default();
+    let worker = frames.worker();
+    let kept = key(1, 0, 0);
+    insert(&frames, kept);
+    let (late, fresh) = (key(1, 1, 0), key(1, 2, 0));
+    let started = web_time::Instant::now();
+    frames.clear_stale();
+    assert!(!frames.is_cached(&kept));
+    for k in [late, fresh] {
+        frames.inflight.lock().unwrap().insert(k);
+        frames.queue.lock().unwrap().running.insert(k);
+    }
+    worker.finish_key(late, false, img(), None, None, started);
+    assert!(!frames.is_cached(&late), "a render started before the change");
+    worker.finish_key(fresh, false, img(), None, None, web_time::Instant::now());
+    assert!(frames.is_cached(&fresh), "a render started after it");
+    assert_eq!(frames.inflight(), 0, "both jobs are released");
+}
+
 fn key(content: u64, frame: i64, opts: u64) -> FrameKey {
     FrameKey { revision: content, content, comp: 1, frame, scale: 1000, view: 0, opts }
 }

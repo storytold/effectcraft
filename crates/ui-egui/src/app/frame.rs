@@ -654,6 +654,21 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         self.tick_footage_reload(ctx);
+        self.tick_lut_files(ctx);
+    }
+
+    /// A LUT file in use changed on disk (#3493): the frames kept were rendered with the old one.
+    /// Renders read it again by themselves; the watcher wakes the interface when no render did.
+    fn tick_lut_files(&mut self, ctx: &egui::Context) {
+        if self.lut_watcher.is_none() {
+            let wake = ctx.clone();
+            self.lut_watcher = effectcraft_engine::lut_reload::Watcher::start(move || wake.request_repaint());
+        }
+        let generation = effectcraft_engine::lut_reload::generation();
+        if generation != self.lut_generation {
+            self.lut_generation = generation;
+            self.frames.clear_stale();
+        }
     }
 
     /// One background worker tracks source availability and optional content reloads. It wakes
