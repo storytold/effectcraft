@@ -1020,7 +1020,13 @@ impl<'a> Renderer<'a> {
                 {
                     log.mark_unkeyed();
                 }
-                Some(self.authored(text::render_in(&self.with_reads(ctx), layer, self.raster_scale(ctx, layer), self.edited(layer), self.raster_clip(ctx, layer))))
+                Some(self.authored(text::render_in(
+                    &self.with_reads(ctx),
+                    layer,
+                    self.raster_scale(ctx, layer),
+                    self.edited(layer),
+                    self.raster_clip(ctx, layer),
+                )))
             }
             LayerSource::Shape => layer
                 .props
