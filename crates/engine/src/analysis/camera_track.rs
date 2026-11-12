@@ -334,7 +334,7 @@ impl Session {
         let key = tracks_key(&self.project, comp, l, g);
         let settings = ct::settings(&params);
         let solve_key = ct::solve_key(&settings);
-        let tracks = ct::tracks(&params).filter(|_| str_of(g, TRACKS_KEY) == key);
+        let tracks = ct::tracks(&params).filter(|_| tracks_match(&self.project, comp, l, g));
         let n = times.len();
         let work = CamWork {
             project: self.project.clone(),

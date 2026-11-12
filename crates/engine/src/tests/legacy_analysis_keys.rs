@@ -1,7 +1,7 @@
 //! Warp Stabilizer and 3D Camera Tracker analyses saved by an earlier release keep matching
 //! their footage after an edit that doesn't change it (#3456), and a real change still clears them.
 
-use effectcraft_effects::camera_tracker::{TRACKS, TRACKS_KEY};
+use effectcraft_effects::camera_tracker::{SOLVE, TRACKS, TRACKS_KEY};
 use effectcraft_effects::warp_stab::{ANALYSIS, ANALYSIS_KEY};
 use effectcraft_keyframe::Value;
 use effectcraft_project::{ItemId, LayerId, Project};
@@ -75,6 +75,26 @@ fn analyses_saved_by_0_22_survive_edits_that_keep_their_frames() {
     assert!(cleared(&s));
     s.execute_checked("edit.undo", json!({})).unwrap();
     assert_eq!(saved(&s), before);
+}
+
+/// Solving again reuses the 0.22 tracks rather than tracking the (here offline) footage again.
+#[test]
+fn camera_tracker_solves_again_from_tracks_saved_by_0_22() {
+    let mut s = open(include_str!("fixtures/tracked-0.22.ecproj"));
+    let tracks = saved(&s)[1].clone();
+    let solve = |s: &Session| {
+        let g = s.project.comp(COMP).unwrap().layer(CLIP).unwrap().props.find_group(TRACKER).unwrap();
+        crate::camera_track::static_params(g).get(SOLVE).cloned().unwrap()
+    };
+    // Another solve method, and back, clears the solve and keeps the tracks.
+    for method in [1, 0] {
+        s.execute_checked("prop.set", json!({"layer": CLIP.0, "path": "effects/#2/advanced/solveMethod", "value": method})).unwrap();
+    }
+    assert_eq!(solve(&s), Value::Str(String::new()));
+    assert_eq!(saved(&s)[1], tracks);
+    s.execute_checked("camera.analyze", json!({"layer": CLIP.0, "effect": TRACKER, "wait": true})).unwrap();
+    assert!(matches!(solve(&s), Value::Str(v) if !v.is_empty()));
+    assert_eq!(saved(&s)[1], tracks);
 }
 
 /// The footage text analysis keys are hashed from, as 0.23 saved it. A new `Footage` field must
