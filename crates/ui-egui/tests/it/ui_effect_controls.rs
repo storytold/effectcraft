@@ -194,7 +194,7 @@ fn effect_header_arrows_work_wherever_effect_controls_is_on_screen() {
             h.state_mut().toggle_maximize(PanelKind::Composition);
             assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition), "the frame was maximized from its Composition tab");
         }
-        // The moved tab is the front one; clicking it focuses it.
+        // The moved tab is the front one; focus it as a click on it would.
         h.state_mut().ui.focused = PanelKind::EffectControls;
         h.state_mut().session.state.selected_props = vec![(lid, fx)];
         h.run_steps(3);
@@ -259,6 +259,9 @@ fn effect_header_arrows_leave_viewer_text_editing_alone() {
     assert!(h.state().session.state.text_edit.is_some(), "the text is still being edited");
     header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
     assert!(h.state().ui.fx_closed.is_empty(), "the text edit owns the arrows");
+    h.state_mut().session.state.text_edit = None;
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![fx], "with the edit over, Left collapses the effect");
 }
 
 #[test]
