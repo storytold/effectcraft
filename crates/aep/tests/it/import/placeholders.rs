@@ -109,6 +109,24 @@ fn a_pseudo_effect_is_kept_with_its_parameter_names() {
     assert_eq!(path.as_deref().and_then(|p| layer.prop(p)).map(|p| p.name.as_str()), Some("Speed"), "{path:?}");
 }
 
+/// A float slider keeps its valid range and slider range, so Effect Controls drags and clamps it
+/// as After Effects does; a range that is not a range stays a plain number.
+#[test]
+fn a_float_slider_keeps_its_range() {
+    let fx = Fx {
+        match_name: "Pseudo/r",
+        name: "Rig",
+        defs: vec![slider(K::FloatSlider, "Speed", 1.0, (-10.0, 100.0)), slider(K::FloatSlider, "Odd", 1.0, (5.0, 1.0))],
+        values: vec![],
+        data: vec![],
+        keys: vec![],
+    };
+    let (g, _) = placeholder_of(&fx);
+    let ui = |id: &str| g.prop(id).map(|p| p.ui.clone());
+    assert_eq!(ui("param1"), Some(ParamUi::Slider { min: -10.0, max: 100.0, slider_min: -10.0, slider_max: 100.0, decimals: 2 }));
+    assert_eq!(ui("param2"), Some(ParamUi::Number));
+}
+
 /// A popup whose definition is borrowed (the project copy) and has no value record: its default
 /// slot holds another copy's selection, so the first item is used and that is reported.
 #[test]

@@ -324,7 +324,7 @@ parameter gets the file's value:
   is that name as one path segment, `Pseudo_0_25`). Like a missing plug-in it renders nothing and is listed by Find Missing
   Effects. It holds the effect's parameters flat (without the twirl-down group markers), named as
   in After Effects, each with its value, keys and expression, in the units After Effects'
-  expressions read (sliders and angles as stored, points in layer pixels, colours, checkboxes,
+  expressions read (sliders and angles as stored, a float slider with its range, points in layer pixels, colours, checkboxes,
   popups over the file's items with separators, read 1-based; layer parameters name their layer,
   without a record the layer itself as for Layer Control, and their keys and expression are
   reported),

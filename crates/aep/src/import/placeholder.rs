@@ -111,7 +111,7 @@ pub(crate) fn placeholder(
 /// parameter), its control and its value until one is read. `None` for a type that is not kept.
 fn shape(p: &EffectParam<'_, '_>, size: (u32, u32)) -> Option<(Option<Kind>, ParamUi, Value)> {
     let (kind, ui, default) = match p.kind {
-        ParamKind::IntSlider | ParamKind::FixedSlider | ParamKind::FloatSlider => (Kind::EffectNumber(1.0), ParamUi::Number, Value::Scalar(0.0)),
+        ParamKind::IntSlider | ParamKind::FixedSlider | ParamKind::FloatSlider => (Kind::EffectNumber(1.0), slider_ui(p), Value::Scalar(0.0)),
         ParamKind::Angle => (Kind::EffectNumber(1.0), ParamUi::Angle, Value::Scalar(0.0)),
         ParamKind::Checkbox => (Kind::EffectBool, ParamUi::Checkbox, Value::Bool(false)),
         ParamKind::Color => (Kind::EffectColor, ParamUi::Color, Value::Color([0.0, 0.0, 0.0, 1.0])),
@@ -129,6 +129,17 @@ fn shape(p: &EffectParam<'_, '_>, size: (u32, u32)) -> Option<(Option<Kind>, Par
         _ => return None,
     };
     Some((Some(kind), ui, default))
+}
+
+/// A slider's control: a float slider's valid range and drag range when they are ranges (only a
+/// float slider's are decoded), else a plain number.
+fn slider_ui(p: &EffectParam<'_, '_>) -> ParamUi {
+    match (p.valid_min(), p.valid_max(), p.slider_range()) {
+        (Some(min), Some(max), Some((smin, smax))) if [min, max, smin, smax].iter().all(|v| v.is_finite()) && min <= max && smin <= smax => {
+            ParamUi::Slider { min, max, slider_min: smin.clamp(min, max), slider_max: smax.clamp(min, max), decimals: 2 }
+        }
+        _ => ParamUi::Number,
+    }
 }
 
 /// How many items a popup has: the file's names, else the count in its definition.
