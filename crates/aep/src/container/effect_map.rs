@@ -141,6 +141,13 @@ pub enum Extra {
     Curves,
     /// Mesh Warp's Distortion Mesh (965, 985, `MeshData`).
     MeshWarp,
+    /// Lumetri Color: every parameter goes through its own table, keyed by match name
+    /// (`import/lumetri.rs`, 1200).
+    Lumetri,
+    /// EXtractoR's Channel Info (`ExtractorChannels`): the channels by name.
+    Extractor,
+    /// IDentifier's Channel Info (`identifier_channel_type`): the chosen channel by name.
+    Identifier,
     /// The Cryptomatte plug-in: the layer and selection in its Settings data
     /// (`CryptomatteData`), Output split over EffectCraft's Display and Matte Only; every
     /// parameter is handled by the importer's Cryptomatte step, none by the table.
@@ -361,6 +368,8 @@ pub const SHUTTER_CONTROL: &[&str] = &["Manual", "Automatic"];
 pub const ECHO_OPERATOR: &[&str] = &["Add", "Maximum", "Minimum", "Screen", "Composite In Back", "Composite In Front", "Blend"];
 /// Color Stabilizer's Stabilize (`colstab-02`, `colstab-03`; the fresh default is Levels).
 pub const STABILIZE: &[&str] = &["Brightness", "Levels", "Curves"];
+/// IDentifier's Display (`identifier-04` ... `identifier-06`, `1300-thirdparty.aep`).
+pub const IDENTIFIER_DISPLAY: &[&str] = &["Colors", "Luma Matte", "Alpha Matte", "Raw"];
 
 /// The effects the importer converts.
 pub const EFFECTS: &[EffectMap] = &[
@@ -532,6 +541,9 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
         extra: Extra::MeshWarp,
     },
+    // Lumetri Color (1200): the parameters are mapped by match name, not by `parT` index
+    // (`import/lumetri.rs`).
+    EffectMap { match_name: "ADBE Lumetri", effect: "ec.color.lumetri", params: &[], extra: Extra::Lumetri },
     // The Cryptomatte plug-in (docs/aep-format.md 3.7): 1 Settings data, 2 Output, 3 Selection
     // Mode, imported by the Cryptomatte step (`Extra::Cryptomatte`).
     EffectMap { match_name: "Cryptomatte", effect: "ec.3d.cryptomatte", params: &[], extra: Extra::Cryptomatte },
@@ -1076,6 +1088,40 @@ pub const EFFECTS: &[EffectMap] = &[
             pm(5, K::FixedSlider, "sampleSize", Conv::Plain { valid_max: 50.0 }),
         ],
     ),
+    // CC Color Neutralizer (importer block 2026-11-05, `ccneutral-*`): Pinning and Blend w.
+    // Original are float sliders in percent (valid 0..100). After Effects' correction is the Red /
+    // Green / Blue slider of each range (3-5, 9-11, 15-17; the Unbalance colours are pickers that
+    // set them and keep no record), then View (22) and Black / White Point (23, 24):
+    // EffectCraft's CC Color Neutralizer has none of them, so they are reported when stored.
+    fx(
+        "CS Color Neutralizer",
+        "ec.color.cccolorneutralizer",
+        &[pm(19, K::FloatSlider, "pinning", Conv::Plain { valid_max: 100.0 }), pm(20, K::FloatSlider, "blendWOriginal", Conv::Plain { valid_max: 100.0 })],
+    ),
+    // EXtractoR (`extractor-*`): 1 Channel Info (arbitrary data, `Extra::Extractor`), 2 / 6 the
+    // Process group, Black and White Point float sliders (valid ±3.4e38, the float32 range),
+    // UnMult. EffectCraft's Clip has no counterpart and stays off.
+    EffectMap {
+        match_name: "EXtractoR",
+        effect: "ec.3d.extractor",
+        params: &[
+            pm(3, K::FloatSlider, "blackPoint", Conv::Plain { valid_max: F32_MAX }),
+            pm(4, K::FloatSlider, "whitePoint", Conv::Plain { valid_max: F32_MAX }),
+            pm(5, K::Checkbox, "unMult", Conv::Checkbox),
+        ],
+        extra: Extra::Extractor,
+    },
+    // IDentifier (`identifier-*`): 1 Channel Info (arbitrary data, `Extra::Identifier`), 2 Display,
+    // 3 ID an integer slider (valid 0..2 147 483 647).
+    EffectMap {
+        match_name: "IDentifier",
+        effect: "ec.3d.identifier",
+        params: &[
+            pm(2, K::Popup, "display", Conv::Popup { default: 1, items: IDENTIFIER_DISPLAY }),
+            pm(3, K::IntSlider, "id", Conv::Plain { valid_max: 2_147_483_647.0 }),
+        ],
+        extra: Extra::Identifier,
+    },
     // Layer Control (076, 220, 320, 321): the default is the owning layer, None is unset.
     fx("ADBE Layer Control", "ec.control.layer", &[pm(1, K::Layer, "layer", Conv::LayerRef { own: true })]),
     fx("ADBE Slider Control", "ec.control.slider", &[pm(1, K::FloatSlider, "slider", Conv::Plain { valid_max: 1_000_000.0 })]),
@@ -1089,14 +1135,42 @@ pub const EFFECTS: &[EffectMap] = &[
 pub const EXPOSURE: Conv = Conv::Plain { valid_max: 100.0 };
 pub const OFFSET: Conv = Conv::Plain { valid_max: 2.0 };
 pub const GAMMA: Conv = Conv::Plain { valid_max: 10.0 };
+/// The largest float32, the valid maximum of EXtractoR's Black and White Point.
+pub const F32_MAX: f64 = f32::MAX as f64;
 /// The valid maximum of Glow's A & B Midpoint (16.16 of 0.99, 427).
 pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 
 /// The key a popup item is matched by between the two programs: trimmed, lower case, and
 /// Set Matte's "Red Channel" ... "Alpha Channel" are EffectCraft's "Red" ... "Alpha" (904 E24).
+///
+/// Lower case is Unicode's, not only ASCII's: After Effects stores popup items in its UI
+/// language, so an item can start with a capital outside ASCII (French "Écran"), and its key must
+/// be the same as for the same word in lower case.
 pub fn popup_key(item: &str) -> String {
-    let s = item.trim().to_ascii_lowercase();
+    let s = item.trim().to_lowercase();
     s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+}
+
+/// The English [`popup_key`] a non-English After Effects popup item name stands for, when this
+/// table knows it; `None` otherwise. EffectCraft's own popup options are English only, so a
+/// project saved by an After Effects set to another UI language never matches them by name and
+/// the parameter falls back to its default (observed on a real "Niveaux" project, French After
+/// Effects 2026 26.0.0x67: Levels' Channel and Clip to Output Black / White). Add an entry only
+/// from a confirmed After Effects label, never a guess at a whole menu's translation.
+pub fn popup_alias(key: &str) -> Option<&'static str> {
+    Some(match key {
+        // French: Levels' Channel popup (`ADBE Easy Levels2-0001`). "Alpha" is the same word in
+        // both languages, so it needs no entry.
+        "rvb" => "rgb",
+        "rouge" => "red",
+        "vert" => "green",
+        "bleu" => "blue",
+        // French: Levels' Clip to Output Black / White popups (`-0008`, `-0009`).
+        "activé" => "on",
+        "désactivé" => "off",
+        "désactivé pour la couleur 32 bpc" => "off for 32 bpc color",
+        _ => return None,
+    })
 }
 
 /// The table row of an After Effects match name.
@@ -1116,3 +1190,17 @@ pub const HUE_SATURATION_MASTER: [&str; 3] = ["hue", "saturation", "lightness"];
 /// The EffectCraft parameters Levels' RGB channel values (`Extra::Levels`) go to, in the order of
 /// the data (input black, input white, gamma, output black, output white: 512-516).
 pub const LEVELS_RGB: [&str; 5] = ["inBlack", "inWhite", "gamma", "outBlack", "outWhite"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A capital outside ASCII has the same key as its lower case; ASCII keys are unchanged.
+    #[test]
+    fn popup_key_lowers_non_ascii_capitals() {
+        assert_eq!(popup_key("ÉCRAN"), popup_key("écran"));
+        assert_eq!(popup_key(" Désactivé "), "désactivé");
+        assert_eq!(popup_key("Off for 32 bpc Color"), "off for 32 bpc color");
+        assert_eq!(popup_key("Red Channel"), "red");
+    }
+}

@@ -260,14 +260,14 @@ fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
     }
 }
 
-/// Key Light's Screen Colour eyedropper picks from the effect's input: the shown frame is
+/// Screen Color Key's Screen Colour eyedropper picks from the effect's input: the shown frame is
 /// already keyed (the default screen colour takes most of a green), so sampling it would miss.
 #[test]
 fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Key", "width": 320, "height": 180, "frameRate": 30, "duration": 1})).unwrap();
     let screen = s.execute("layer.newSolid", json!({"name": "Screen", "color": "#30b050"})).unwrap()["layer"].as_u64().unwrap();
-    let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Key Light"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Screen Color Key"})).unwrap()["effects"][0].as_u64().unwrap();
     let prop = layer(&s, screen).effects().unwrap().groups().find(|g| g.uid == fx).and_then(|g| g.get("screenColour")).map(|p| p.uid).unwrap();
     s.state.selected_layers = vec![LayerId(screen)];
     let mut app = EffectcraftApp::new(s);
@@ -295,7 +295,7 @@ fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
 fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
     let (app, x) = app();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
-    let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Lumetri Color"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Color Grading"})).unwrap()["effects"][0].as_u64().unwrap();
     // Only this effect open, so its header is on screen.
     let l = layer(&h.state().session, x.small);
     let others: Vec<u64> = l.effects().unwrap().groups().map(|g| g.uid).filter(|u| *u != fx).collect();

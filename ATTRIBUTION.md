@@ -64,7 +64,7 @@ and licence texts are in [`NOTICE`](NOTICE).
 | `crates/model/tests/fixtures/cube.obj` | EffectCraft contributors | Original work: Wavefront OBJ test fixture (unit cube, two materials) | MIT OR Apache-2.0 |
 | `crates/model/tests/fixtures/cube.mtl` | EffectCraft contributors | Original work: MTL test fixture (materials of cube.obj) | MIT OR Apache-2.0 |
 
-One small After Effects test project of `crates/aep` is in this repository: `crates/aep/tests/fixtures/synthetic.aep` (original work, made with After Effects 2026 from own data, working space None, the embedded colour profile removed; MIT OR Apache-2.0, with its `.attribution` sidecar). The other After Effects test projects of `crates/aep` are not in this repository. They are original work of an EffectCraft contributor, generated with After Effects 2026 as own test data (MIT OR Apache-2.0, each file with its `.attribution` sidecar); they are in [storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus) with their sidecars, fetched by `cargo xtask aep-corpus` (commit-pinned, SHA-256-verified), and the tests read them only from the folder named by `EFFECTCRAFT_AEP_FIXTURES` (opt-in). Their embedded colour profiles are replaced by stubs made with `crates/aep/examples/stubicc.rs` (a header and a description, no colour data), so no vendor profile data is in them.
+Two small After Effects test projects of `crates/aep` are in this repository: `crates/aep/tests/fixtures/synthetic.aep` (original work, made with After Effects 2026 from own data, working space None, the embedded colour profile removed; MIT OR Apache-2.0, with its `.attribution` sidecar) and `crates/aep/tests/fixtures/ai-mask-3099.aep` (original work, made with After Effects 2026 from four hand-written one-page PDFs named `.ai`, footage paths and host name neutralised, the embedded colour profiles replaced by stubs made with `crates/aep/examples/stubicc.rs`; MIT OR Apache-2.0, with its `.attribution` sidecar). The other After Effects test projects of `crates/aep` are not in this repository. They are original work of an EffectCraft contributor, generated with After Effects 2026 as own test data (MIT OR Apache-2.0, each file with its `.attribution` sidecar); they are in [storytold/effectcraft-corpus](https://github.com/storytold/effectcraft-corpus) with their sidecars, fetched by `cargo xtask aep-corpus` (commit-pinned, SHA-256-verified), and the tests read them only from the folder named by `EFFECTCRAFT_AEP_FIXTURES` (opt-in). Their embedded colour profiles are replaced by stubs made with `crates/aep/examples/stubicc.rs` (a header and a description, no colour data), so no vendor profile data is in them.
 
 ## Screenshots
 
@@ -99,7 +99,7 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
   (sidecars `.attribution`).
 - Bundled extension (ScriptUI panel) with its twelve built-in ease presets:
   `extensions/scriptui-panels/Ease Presets.jsx` (sidecar `.attribution`).
-- Example effect plug-in: `examples/plugins/posterize-bands` (plug-in API v1, WebAssembly).
+- Example effect plug-in: `examples/plugins/posterize-bands` (WebAssembly ABI 1).
 
 ## Trained models (optional downloads, not bundled)
 
@@ -128,6 +128,12 @@ configuration from these Apache-2.0 projects:
   LLC, https://github.com/google-ai-edge/mediapipe, Apache-2.0).
 - `crates/segment/src/mobilesam.rs` follows the MobileSAM, TinyViT and Segment Anything
   architectures and their Apache-2.0 reference code.
+
+## Frozen matte regression fixture
+
+| Asset | Author | Source | Licence |
+|---|---|---|---|
+| `crates/engine/src/tests/fixtures/object-matte-0.22.ecproj` | lisn0 | Original work, synthetic project saved by EffectCraft 0.22.0 | MIT OR Apache-2.0 |
 
 ## First-party brand marks
 

@@ -2,7 +2,7 @@
 //!
 //! | Format | Container / files | Video | Alpha | Audio |
 //! |---|---|---|---|---|
-//! | H.264 | MP4 | FilmCraft H.264 High, 8-bit 4:2:0 BT.709 limited, VBR | no | AAC-LC (FilmCraft), mono/stereo |
+//! | H.264 | MP4 | `craft_video::h264` High, 8-bit 4:2:0 BT.709 limited, VBR | no | AAC-LC (`craft_audio::aac`), mono/stereo |
 //! | ProRes | QuickTime MOV | FilmCraft ProRes 422 Proxy/LT/422/HQ, 10-bit; 4444/4444 XQ 4:4:4 | 4444 (16-bit alpha coding) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | Uncompressed | QuickTime MOV (`raw `) | 8-bit RGB (depth 24, rows padded to even bytes) or ARGB (depth 32) | RGB + Alpha (straight or premultiplied) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | PNG / JPEG / TIFF sequence | one file per frame | 8-bit | PNG, TIFF | — |
@@ -10,9 +10,9 @@
 //! | Targa sequence | one file per frame | uncompressed 8-bit: 24-bit RGB, 32-bit RGB + Alpha (8 alpha bits), 8-bit grey for Alpha; top-left origin | yes (straight or premultiplied) | — |
 //! | Animated GIF | GIF89a | 256-colour palette per frame (NeuQuant) | 1-bit | — |
 //! | Animated WebP | RIFF WebP (`VP8X` + `ANIM` + `ANMF`) | lossy VP8 key frames (`effectcraft-vp8enc`, quality 1–100) or lossless `VP8L`; each frame only the area that changed, held frames merged | 8-bit (lossless `ALPH` beside lossy frames) | — |
-//! | WebM | WebM (Matroska) | VP9 profile 0 (`effectcraft-vp9enc`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`effectcraft-av1enc`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
-//! | HEVC | MP4 (`hvc1`) | `effectcraft-hevcenc` Main / Main 10 4:2:0, I + P slices, bitrate or constant quality, level, key-frame interval | no | AAC-LC (FilmCraft) |
-//! | AV1 | MP4 (`av01`) | `effectcraft-av1enc` Main 8/10-bit 4:2:0, key + inter frames | no | AAC-LC (FilmCraft) |
+//! | WebM | WebM (Matroska) | VP9 profile 0 (`craft_video::vp9`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`craft_video::av1`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
+//! | HEVC | MP4 (`hvc1`) | `craft_video::hevc` Main / Main 10 4:2:0, I + P slices, bitrate or constant quality, level, key-frame interval | no | AAC-LC (`craft_audio::aac`) |
+//! | AV1 | MP4 (`av01`) | `craft_video::av1` Main 8/10-bit 4:2:0, key + inter frames | no | AAC-LC (`craft_audio::aac`) |
 //! | WAV / AIFF | RIFF WAVE / AIFF (AIFF-C for float) | — | — | PCM 16/24-bit or 32-bit float, mono/stereo (audio only) |
 //!
 //! Every frame goes through the internal `pipeline` module: the Render Settings overrides (Effects, Solo Switches,
@@ -55,6 +55,7 @@ pub use effectcraft_project::render_queue;
 pub use effectcraft_project::render_queue::StorageQuota;
 pub use out::Sink;
 pub(crate) use pipeline::Cx;
+pub use pipeline::{CACHE_BUDGET, GPU_INFLIGHT_MAX, RENDERER_ENV, auto_gpu_frames, pick_renderer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
@@ -109,6 +110,45 @@ pub struct JobOptions<'a> {
     pub storage: Option<&'a dyn StorageQuota>,
     /// Overflow folders, in order.
     pub overflow: Vec<String>,
+    /// Layer caches shared by the consecutive jobs of a Render Queue run (#3335): the job
+    /// renders through them instead of fresh ones, and leaves the accelerator's pooled working
+    /// textures for the next job (whoever holds the caches calls
+    /// [`effectcraft_render::Accelerator::render_end`] after the last one). `None`: the job
+    /// starts cold and trims the pool when it ends, as a one-off export does.
+    pub caches: Option<JobCaches<'a>>,
+    /// The compositor of the job's frames (`Backend::Gpu` or `Backend::Cpu`; `Auto` counts as unset), shared by the output modules of
+    /// one queue item: when it holds a choice the job renders on it; otherwise the job stores
+    /// the compositor it chose there, so the item's other output modules encode the same
+    /// frames. `None`: the job decides alone.
+    pub renderer: Option<&'a std::sync::Mutex<Option<effectcraft_render::Backend>>>,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
+    /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+    pub gpu_frames: Option<usize>,
+    /// Reads the bytes of memory the system can hand out now (`None`: unknown), for Auto's CPU
+    /// frames in flight (#1615): read at most once per job, when a job renders on the CPU after
+    /// a GPU frame measured a frame's working memory. `None`: CPU frames are capped only by
+    /// `EFFECTCRAFT_CPU_INFLIGHT`.
+    pub free_memory: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
+}
+
+/// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,
+/// because a buffer an effect made on the GPU is not the CPU's, and neither may stand in for
+/// the other.
+#[derive(Clone, Copy)]
+pub struct JobCaches<'a> {
+    pub gpu: &'a effectcraft_render::LayerCache,
+    pub cpu: &'a effectcraft_render::LayerCache,
+}
+
+/// The compositor a job's frames render on: the GPU's (GPU Acceleration, with an
+/// accelerator) or the CPU's frame-parallel one (Software Rendering). The whole job renders
+/// on one of them, never a mix: the two differ slightly. A GPU project with an accelerator
+/// measures both on its first frames and renders the job on the faster (#3335); the choice is
+/// in the render log. `EFFECTCRAFT_RQ_RENDERER=gpu|cpu|auto` overrides the measurement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JobRenderer {
+    Gpu,
+    Cpu,
 }
 
 /// Progress after a batch of frames.
@@ -178,7 +218,8 @@ pub fn export(job: &Job, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<
 pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
     let t0 = Instant::now();
     let cx = Cx::new(job);
-    let render = RenderEnd(job.accel);
+    // A job of a Render Queue run leaves the pooled working textures warm for the next one.
+    let render = RenderEnd(job.accel.filter(|_| job.options.caches.is_none()));
     let mut r = export_with(&cx, progress, t0).await;
     drop(render);
     if matches!(r, Err(ExportError::Cancelled)) {

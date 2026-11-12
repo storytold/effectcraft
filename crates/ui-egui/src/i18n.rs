@@ -506,8 +506,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "文件..."),
     ("file.importMultiple", "Multiple Files...", "多个文件..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 项目..."),
-    ("file.importAep", "After Effects Project...", "After Effects 项目..."),
-    ("file.exportAep", "After Effects Project...", "After Effects 项目..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects 项目..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects 项目..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 项目..."),
     ("file.importPlaceholder", "Placeholder...", "占位符..."),
     ("file.importSolid", "Solid...", "纯色..."),
@@ -1054,7 +1054,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "基本图形"),
     ("window.panel", "Info", "信息"),
     ("help.inAppTutorials", "Learn", "学习"),
-    ("window.panel", "Lumetri Scopes", "Lumetri 范围"),
+    ("window.panel", "Video Scopes", "视频示波器"),
     ("window.panel", "Mask Interpolation", "蒙版插值"),
     ("window.panel", "Media Browser", "媒体浏览器"),
     ("window.panel", "Metadata", "元数据"),
@@ -1146,8 +1146,8 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fil..."),
     ("file.importMultiple", "Multiple Files...", "Flera filer..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-projekt..."),
-    ("file.importAep", "After Effects Project...", "After Effects-projekt..."),
-    ("file.exportAep", "After Effects Project...", "After Effects-projekt..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-projekt..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platshållare..."),
     ("file.importSolid", "Solid...", "Enfärgad..."),
@@ -1690,7 +1690,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Grundläggande grafik"),
     ("window.panel", "Info", "Info"),
     ("help.inAppTutorials", "Learn", "Lär dig"),
-    ("window.panel", "Lumetri Scopes", "Lumetri-scope"),
+    ("window.panel", "Video Scopes", "Videoskop"),
     ("window.panel", "Mask Interpolation", "Maskinterpolering"),
     ("window.panel", "Media Browser", "Mediebläddrare"),
     ("window.panel", "Metadata", "Metadata"),
@@ -1788,8 +1788,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "檔案..."),
     ("file.importMultiple", "Multiple Files...", "多個檔案..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 專案..."),
-    ("file.importAep", "After Effects Project...", "After Effects 專案..."),
-    ("file.exportAep", "After Effects Project...", "After Effects 專案..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects 專案..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects 專案..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft 專案..."),
     ("file.importPlaceholder", "Placeholder...", "預留位置..."),
     ("file.importSolid", "Solid...", "純色..."),
@@ -2336,7 +2336,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "基本圖形"),
     ("window.panel", "Info", "資訊"),
     ("help.inAppTutorials", "Learn", "學習"),
-    ("window.panel", "Lumetri Scopes", "Lumetri 示波器"),
+    ("window.panel", "Video Scopes", "視訊示波器"),
     ("window.panel", "Mask Interpolation", "遮色片插補"),
     ("window.panel", "Media Browser", "媒體瀏覽器"),
     ("window.panel", "Metadata", "中繼資料"),
@@ -2427,8 +2427,8 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ファイル..."),
     ("file.importMultiple", "Multiple Files...", "複数のファイル..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Proプロジェクト..."),
-    ("file.importAep", "After Effects Project...", "After Effectsプロジェクト..."),
-    ("file.exportAep", "After Effects Project...", "After Effectsプロジェクト..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effectsプロジェクト..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effectsプロジェクト..."),
     ("file.importPlaceholder", "Placeholder...", "プレースホルダー..."),
     ("file.importSolid", "Solid...", "平面..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -2975,7 +2975,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "エッセンシャルグラフィックス"),
     ("window.panel", "Info", "情報"),
     ("help.inAppTutorials", "Learn", "学習"),
-    ("window.panel", "Lumetri Scopes", "Lumetriスコープ"),
+    ("window.panel", "Video Scopes", "ビデオスコープ"),
     ("window.panel", "Mask Interpolation", "マスク補間"),
     ("window.panel", "Media Browser", "メディアブラウザー"),
     ("window.panel", "Metadata", "メタデータ"),
@@ -3069,8 +3069,8 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Кілька файлів..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проєкт Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Проєкт After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Проєкт After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Проєкт Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Проєкт Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проєкт EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заповнювач..."),
     ("file.importSolid", "Solid...", "Суцільний колір..."),
@@ -3617,7 +3617,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Основна графіка"),
     ("window.panel", "Info", "Інформація"),
     ("help.inAppTutorials", "Learn", "Навчання"),
-    ("window.panel", "Lumetri Scopes", "Вимірювачі Lumetri"),
+    ("window.panel", "Video Scopes", "Відеоскопи"),
     ("window.panel", "Mask Interpolation", "Інтерполяція маски"),
     ("window.panel", "Media Browser", "Браузер медіа"),
     ("window.panel", "Metadata", "Метадані"),
@@ -3712,8 +3712,8 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Archivo..."),
     ("file.importMultiple", "Multiple Files...", "Varios archivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Proyecto de Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Proyecto de After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Proyecto de After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Proyecto de Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Proyecto de Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Proyecto de EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Marcador de posición..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -4260,7 +4260,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Gráficos esenciales"),
     ("window.panel", "Info", "Información"),
     ("help.inAppTutorials", "Learn", "Aprender"),
-    ("window.panel", "Lumetri Scopes", "Ámbitos de Lumetri"),
+    ("window.panel", "Video Scopes", "Monitores de vídeo"),
     ("window.panel", "Mask Interpolation", "Interpolación de máscara"),
     ("window.panel", "Media Browser", "Navegador de medios"),
     ("window.panel", "Metadata", "Metadatos"),
@@ -4353,8 +4353,8 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Arquivo..."),
     ("file.importMultiple", "Multiple Files...", "Vários arquivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projeto do Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projeto do After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projeto do After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projeto do Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projeto do Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projeto do EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espaço reservado..."),
     ("file.importSolid", "Solid...", "Sólido..."),
@@ -4901,7 +4901,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Gráficos essenciais"),
     ("window.panel", "Info", "Informações"),
     ("help.inAppTutorials", "Learn", "Aprender"),
-    ("window.panel", "Lumetri Scopes", "Escopos Lumetri"),
+    ("window.panel", "Video Scopes", "Escopos de vídeo"),
     ("window.panel", "Mask Interpolation", "Interpolação de máscara"),
     ("window.panel", "Media Browser", "Navegador de mídia"),
     ("window.panel", "Metadata", "Metadados"),
@@ -5002,8 +5002,8 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Несколько файлов..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проект Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Проект After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Проект After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Проект Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Проект Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Проект EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заполнитель..."),
     ("file.importSolid", "Solid...", "Сплошной цвет..."),
@@ -5544,7 +5544,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Основная графика"),
     ("window.panel", "Info", "Информация"),
     ("help.inAppTutorials", "Learn", "Обучение"),
-    ("window.panel", "Lumetri Scopes", "Измерители Lumetri"),
+    ("window.panel", "Video Scopes", "Видеоскопы"),
     ("window.panel", "Mask Interpolation", "Интерполяция маски"),
     ("window.panel", "Media Browser", "Обозреватель медиа"),
     ("window.panel", "Metadata", "Метаданные"),
@@ -5643,8 +5643,8 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fichier..."),
     ("file.importMultiple", "Multiple Files...", "Plusieurs fichiers..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projet Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projet After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projet After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projet Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projet Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projet EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espace réservé..."),
     ("file.importSolid", "Solid...", "Solide..."),
@@ -6185,7 +6185,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Graphiques essentiels"),
     ("window.panel", "Info", "Informations"),
     ("help.inAppTutorials", "Learn", "Apprentissage"),
-    ("window.panel", "Lumetri Scopes", "Oscilloscopes Lumetri"),
+    ("window.panel", "Video Scopes", "Oscilloscopes vidéo"),
     ("window.panel", "Mask Interpolation", "Interpolation de masque"),
     ("window.panel", "Media Browser", "Navigateur multimédia"),
     ("window.panel", "Metadata", "Métadonnées"),
@@ -6284,8 +6284,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Datei..."),
     ("file.importMultiple", "Multiple Files...", "Mehrere Dateien..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-Projekt..."),
-    ("file.importAep", "After Effects Project...", "After Effects-Projekt..."),
-    ("file.exportAep", "After Effects Project...", "After Effects-Projekt..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-Projekt..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-Projekt..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-Projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platzhalter..."),
     ("file.importSolid", "Solid...", "Farbfläche..."),
@@ -6826,7 +6826,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Essential-Grafik"),
     ("window.panel", "Info", "Info"),
     ("help.inAppTutorials", "Learn", "Lernen"),
-    ("window.panel", "Lumetri Scopes", "Lumetri-Scopes"),
+    ("window.panel", "Video Scopes", "Videoskope"),
     ("window.panel", "Mask Interpolation", "Maskeninterpolation"),
     ("window.panel", "Media Browser", "Medienbrowser"),
     ("window.panel", "Metadata", "Metadaten"),
@@ -6925,8 +6925,8 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Plik..."),
     ("file.importMultiple", "Multiple Files...", "Wiele plików..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projekt After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Element zastępczy..."),
     ("file.importSolid", "Solid...", "Plansza..."),
@@ -7464,7 +7464,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Essential Graphics"),
     ("window.panel", "Info", "Informacje"),
     ("help.inAppTutorials", "Learn", "Nauka"),
-    ("window.panel", "Lumetri Scopes", "Zakresy Lumetri"),
+    ("window.panel", "Video Scopes", "Wskaźniki wideo"),
     ("window.panel", "Mask Interpolation", "Interpolacja maski"),
     ("window.panel", "Media Browser", "Przeglądarka multimediów"),
     ("window.panel", "Metadata", "Metadane"),
@@ -7563,8 +7563,8 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Soubor..."),
     ("file.importMultiple", "Multiple Files...", "Více souborů..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
-    ("file.importAep", "After Effects Project...", "Projekt After Effects..."),
-    ("file.exportAep", "After Effects Project...", "Projekt After Effects..."),
+    ("file.importAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Projekt Adobe After Effects..."),
     ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Zástupný záznam..."),
     ("file.importSolid", "Solid...", "Plná vrstva..."),
@@ -8106,7 +8106,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "Základní grafika"),
     ("window.panel", "Info", "Informace"),
     ("help.inAppTutorials", "Learn", "Výuka"),
-    ("window.panel", "Lumetri Scopes", "Měřicí přístroje Lumetri"),
+    ("window.panel", "Video Scopes", "Videoskopy"),
     ("window.panel", "Mask Interpolation", "Interpolace masek"),
     ("window.panel", "Media Browser", "Prohlížeč médií"),
     ("window.panel", "Metadata", "Metadata"),
@@ -8201,8 +8201,8 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "ფაილი..."),
     ("file.importMultiple", "Multiple Files...", "რამდენიმე ფაილი..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-ს პროექტი..."),
-    ("file.importAep", "After Effects Project...", "After Effects-ის პროექტი..."),
-    ("file.exportAep", "After Effects Project...", "After Effects-ის პროექტი..."),
+    ("file.importAep", "Adobe After Effects Project...", "Adobe After Effects-ის პროექტი..."),
+    ("file.exportAep", "Adobe After Effects Project...", "Adobe After Effects-ის პროექტი..."),
     ("file.importProject", "EffectCraft Project...", "EffectCraft-ის პროექტი..."),
     ("file.importPlaceholder", "Placeholder...", "ჩანაცვლების ობიექტი..."),
     ("file.importSolid", "Solid...", "სოლიდი..."),
@@ -8748,7 +8748,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Essential Graphics", "ძირითადი გრაფიკა"),
     ("window.panel", "Info", "ინფორმაცია"),
     ("help.inAppTutorials", "Learn", "სწავლა"),
-    ("window.panel", "Lumetri Scopes", "Lumetri Scopes"),
+    ("window.panel", "Video Scopes", "ვიდეოსკოპები"),
     ("window.panel", "Mask Interpolation", "ნიღბის ინტერპოლაცია"),
     ("window.panel", "Media Browser", "მედიის ბრაუზერი"),
     ("window.panel", "Metadata", "მეტამონაცემები"),
@@ -8798,6 +8798,21 @@ mod tests {
     use effectcraft_engine::menus::{MenuNode, TREE, parse};
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn renamed_menu_translations_do_not_reintroduce_vendor_names() {
+        for code in CATALOG_CODES {
+            set_current(code);
+            for (id, source) in [("window.panel", "Video Scopes")] {
+                let rendered = command_label(id, source);
+                let label = rendered.to_lowercase();
+                for mark in ["lumetri", "mercury"] {
+                    assert!(!label.contains(mark), "{code}: {id} -> {rendered}");
+                }
+            }
+        }
+        set_current("en");
+    }
 
     /// The four options at the foot of the header's workspace menu say what After Effects says,
     /// read from its workspace button on 2026-10-31: reset, save over this one, save a copy, then
@@ -9193,7 +9208,8 @@ mod tests {
         assert!(!japanese(&app));
     }
 
-    /// File ▸ Import ▸ After Effects Project… has its row in every menu catalog.
+    /// File ▸ Import / Export ▸ Adobe After Effects Project… has its row in every menu catalog,
+    /// under the label the menu draws (a row under an older label would fall back to English).
     #[test]
     fn the_aep_import_and_export_entries_are_in_every_menu_catalog() {
         for (code, catalog) in [
@@ -9212,7 +9228,8 @@ mod tests {
             ("sv", SWEDISH),
         ] {
             for id in ["file.importAep", "file.exportAep"] {
-                assert!(catalog.iter().any(|(command, _, _)| *command == id), "{code} has no {id} row");
+                let drawn = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == id).map(|(_, e)| e.label.clone()).unwrap_or_default();
+                assert!(catalog.iter().any(|(command, english, _)| *command == id && *english == drawn), "{code} has no {id} row for {drawn:?}");
             }
         }
     }

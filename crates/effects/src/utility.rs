@@ -344,7 +344,9 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     {
         return v.clone();
     }
-    let inline = src.contains('\n') || src.contains("LUT_");
+    // `.cube` text always spans lines (a size header, then data rows); a path never does, even one
+    // whose file name contains `LUT_` (#3454). Trimmed, as the path is, so a trailing newline is a path.
+    let inline = src.trim().contains('\n');
     let parsed = if inline { parse_cube(src) } else { std::fs::read_to_string(src.trim()).ok().and_then(|t| parse_cube(&t)) }.map(Arc::new);
     if let Ok(mut m) = cache.lock() {
         m.insert(src.to_string(), parsed.clone());
@@ -365,7 +367,7 @@ pub fn specs() -> Vec<EffectSpec> {
         spec("ec.utility.growbounds", "Grow Bounds", vec![p("pixels", "Pixels", num(0.0), slider(0.0, 4000.0, 0.0, 500.0, 0))], grow_bounds),
         spec(
             "ec.utility.ccoverbrights",
-            "CC Overbrights",
+            "Out-of-Range Display",
             vec![
                 p("channel", "Channel", Value::Enum(0), popup(&["Max RGB", "Red", "Green", "Blue", "Alpha", "Luminance"])),
                 p("highlightColor", "Highlight Color", col(1.0, 0.0, 0.0), ParamUi::Color),
@@ -482,6 +484,20 @@ mod tests {
         assert_eq!(out.img, img);
         let out = run("ec.utility.applylut", &[("lut", Value::Str("/nonexistent/path.cube".into()))], img.clone());
         assert_eq!(out.img, img);
+    }
+
+    /// #3454: a path containing `LUT_` was taken for `.cube` text and the file never loaded.
+    #[test]
+    fn a_path_whose_name_contains_lut_loads_the_file() {
+        let dir = std::env::temp_dir().join(format!("ec-fx-3454-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("LUT_x.cube");
+        std::fs::write(&path, identity_cube(2)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        assert!(load_lut(&path).is_some(), "{path}");
+        assert!(load_lut(&format!("{path}\r\n")).is_some(), "{path} with a trailing newline");
+        assert!(load_lut(&identity_cube(2)).is_some(), "inline text");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

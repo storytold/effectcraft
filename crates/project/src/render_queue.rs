@@ -421,7 +421,12 @@ impl RenderSettings {
     /// The output frame rate: the Frame Rate override, unless the comp preserves its frame rate
     /// (Composition Settings ▸ Preserve frame rate when nested or in render queue).
     pub fn rate(&self, comp: &Comp) -> FrameRate {
-        if comp.preserve_frame_rate { comp.frame_rate } else { self.frame_rate.unwrap_or(comp.frame_rate) }
+        if comp.preserve_frame_rate {
+            return comp.frame_rate;
+        }
+        // A saved override is held to the supported rates, as a comp's own rate is: its frame count
+        // is the export's work.
+        self.frame_rate.map_or(comp.frame_rate, |r| crate::limits::frame_rate(r, comp.frame_rate))
     }
     /// First output-rate frame starting at or after `t`.
     fn ceil_frame(r: FrameRate, t: Tick) -> i64 {
@@ -480,6 +485,8 @@ impl RenderSettings {
             TimeSpan::Custom { start, end } => format!("Custom ({:.3}s – {:.3}s)", start.seconds(), end.seconds()),
         };
         let rate = match (self.frame_rate, comp) {
+            // A saved override outside the supported rates renders at the clamped one: say so.
+            (Some(r), Some(c)) if self.rate(c) != r => format!("{:.3} fps (renders at {:.3})", r.as_f64(), self.rate(c).as_f64()),
             (Some(r), _) => format!("{:.3} fps", r.as_f64()),
             (None, Some(c)) => format!("Use comp's frame rate ({:.3})", c.frame_rate.as_f64()),
             (None, None) => "Use comp's frame rate".into(),
@@ -785,6 +792,27 @@ pub struct Crop {
     pub right: i32,
 }
 
+/// The largest side of a frame an output module writes (Resize is capped there too).
+pub const MAX_OUTPUT_SIDE: i32 = 30_000;
+
+/// Crop edges `a`/`b` of one axis of `side` pixels: padding is taken back only as far as keeps
+/// the result within [`MAX_OUTPUT_SIDE`], so a mixed pair that stays inside the cap is kept as
+/// saved. Each edge is also bounded (what the larger of the side and the cap allows), so the
+/// arithmetic on them cannot overflow.
+fn bound_edges(a: i32, b: i32, side: i32) -> (i32, i32) {
+    let hi = side.max(MAX_OUTPUT_SIDE);
+    let (mut a, mut b) = (a.clamp(-MAX_OUTPUT_SIDE, hi), b.clamp(-MAX_OUTPUT_SIDE, hi));
+    let excess = i64::from(side) - i64::from(a) - i64::from(b) - i64::from(MAX_OUTPUT_SIDE);
+    if excess > 0 {
+        // Only padding (negative edges) grows the side: take back as much of it as needed.
+        let excess = i32::try_from(excess).unwrap_or(i32::MAX);
+        let from_a = excess.min(-a.min(0));
+        a += from_a;
+        b += (excess - from_a).min(-b.min(0));
+    }
+    (a, b)
+}
+
 impl Crop {
     /// Edges `(top, left, bottom, right)` in pixels of a `w`×`h` frame rendered at `scale`.
     pub fn edges(&self, w: u32, h: u32, scale: f64) -> (i32, i32, i32, i32) {
@@ -807,7 +835,12 @@ impl Crop {
             let b = conv((y + rh) * scale, hi).max(t);
             return (t, l, hi - b, wi - r);
         }
-        (self.top, self.left, self.bottom, self.right)
+        // Negative edges pad the frame: keep each padded side within the largest frame an
+        // output module writes, or a few saved integers ask for a canvas of gigapixels.
+        let (wi, hi) = (i32::try_from(w).unwrap_or(i32::MAX), i32::try_from(h).unwrap_or(i32::MAX));
+        let (t, b) = bound_edges(self.top, self.bottom, hi);
+        let (l, r) = bound_edges(self.left, self.right, wi);
+        (t, l, b, r)
     }
 }
 
@@ -1283,8 +1316,8 @@ impl OutputModule {
             // Width rules; height follows the cropped frame's aspect.
             rh = ((rw as f64 * ch as f64 / cw as f64).round() as u32).max(1);
         }
-        rw = rw.min(30_000);
-        rh = rh.min(30_000);
+        rw = rw.min(MAX_OUTPUT_SIDE as u32);
+        rh = rh.min(MAX_OUTPUT_SIDE as u32);
         (rw, rh)
     }
     /// The written frame size of an item (Render Settings resolution, Crop, Resize, codec
@@ -1707,17 +1740,71 @@ pub fn numbered_template(template: &str, n: u32) -> String {
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
+    let mut s: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
+    // At most a file name's worth (255 UTF-8 bytes, whole characters only): a template repeating
+    // a long name token must not expand to gigabytes. A cut name ends in a hash of the whole
+    // name so long names that share a prefix stay distinct.
+    if s.len() > 255 {
+        // shortcut: 64-bit FNV-1a, not collision-resistant against crafted names; use a real hash if names become untrusted keys.
+        let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let mut end = 255 - 17;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str(&format!("-{hash:016x}"));
+    }
+    // `.` and `..` would name the folder itself or its parent when the token is a path component.
+    if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crop_padding_stays_within_the_largest_output_frame() {
+        use super::*;
+        let crop = |top, left, bottom, right| Crop { enabled: true, top, left, bottom, right, ..Default::default() };
+        let m = |c: Crop| OutputModule { crop: c, ..Default::default() };
+        // Saved edges padding by billions of pixels: the frame stops at the cap.
+        assert_eq!(m(crop(i32::MIN, i32::MIN, i32::MIN, i32::MIN)).frame_size(100, 50, 1.0), (30_000, 30_000));
+        assert_eq!(m(crop(-20_000, 0, -20_000, -1)).frame_size(100, 50, 1.0), (101, 30_000));
+        // Ordinary crops and pads are unchanged.
+        assert_eq!(crop(1, -2, 3, 4).edges(100, 50, 1.0), (1, -2, 3, 4));
+        // A mixed pair beyond the side that still ends within the cap is kept as saved (50 px).
+        assert_eq!(crop(0, 150, 0, -100).edges(100, 50, 1.0), (0, 150, 0, -100));
+        assert_eq!(m(crop(0, 150, 0, -100)).frame_size(100, 50, 1.0), (50, 50));
+        assert_eq!(m(crop(10, 10, 10, 10)).frame_size(100, 50, 1.0), (80, 30));
+        assert_eq!(m(crop(i32::MAX, 0, 0, 0)).frame_size(100, 50, 1.0), (100, 1));
+    }
+
     use super::*;
+
+    #[test]
+    fn sanitize_limits_the_name_in_bytes() {
+        // 255 two-byte characters are cut to whole characters plus a 17-byte hash suffix.
+        let s = sanitize(&"é".repeat(255));
+        assert!(s.len() <= 255 && s.len() > 235, "{}", s.len());
+        assert!(s.starts_with("éé") && s.is_char_boundary(s.len() - 17));
+        // Names that share their first 255 bytes stay distinct, and a name that fits is untouched.
+        let (a, b) = (sanitize(&format!("{}A", "界".repeat(85))), sanitize(&format!("{}B", "界".repeat(85))));
+        assert_ne!(a, b);
+        assert!(a.len() <= 255 && b.len() <= 255);
+        assert_eq!(sanitize(&"n".repeat(255)), "n".repeat(255));
+        assert_eq!(sanitize(&"é".repeat(127)), "é".repeat(127));
+    }
 
     #[test]
     fn templates_and_sequences() {
         let v = TemplateVars { comp_name: "Main/Title", project_name: "P", width: 1920, height: 1080, frame_rate: 29.97, start_frame: 0, end_frame: 9 };
         assert_eq!(expand_template(DEFAULT_TEMPLATE, OutputFormat::H264, &v), "Main_Title.mp4");
+        // A dot-only name is not a parent-folder component; a long one is cut to a file name.
+        for name in ["..", "."] {
+            let v = TemplateVars { comp_name: name, ..v };
+            assert_eq!(expand_template("out/[compName]/x.[fileExtension]", OutputFormat::Gif, &v), format!("out/{}/x.gif", "_".repeat(name.len())));
+        }
+        let long = "n".repeat(100_000);
+        let v2 = TemplateVars { comp_name: &long, ..v };
+        assert_eq!(expand_template(&"[compName]".repeat(100), OutputFormat::Gif, &v2).len(), 255 * 100);
         assert_eq!(expand_template("[compName]_[width]x[height]@[frameRate].[fileExtension]", OutputFormat::Gif, &v), "Main_Title_1920x1080@29.97.gif");
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");
@@ -1865,6 +1952,22 @@ mod tests {
         assert_eq!(s.sample(&c, 3), FrameSample::Fields { first: Tick::from_seconds_f64(0.12), second: Tick::from_seconds_f64(0.14), upper_first: false });
         let p = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
         assert_eq!(p.sample(&c, 3), FrameSample::Progressive(Tick::from_seconds_f64(0.12)));
+    }
+
+    /// A saved Frame Rate override outside the supported rates is clamped, so a short comp cannot
+    /// ask for billions of output frames.
+    #[test]
+    fn frame_rate_override_is_held_to_the_supported_rates() {
+        let c = Comp::new(64, 48, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let s = |r| RenderSettings { frame_rate: Some(r), time_span: TimeSpan::LengthOfComp, ..Default::default() };
+        let huge = s(FrameRate::new(1_000_000_000_000, 1));
+        assert_eq!(huge.rate(&c).as_f64(), crate::limits::MAX_FPS);
+        assert!(huge.frame_count(&c) <= 2001, "{}", huge.frame_count(&c));
+        assert_eq!(s(FrameRate::new(0, 1)).rate(&c), c.frame_rate);
+        assert_eq!(s(FrameRate::new(60, 1)).rate(&c), FrameRate::new(60, 1));
+        let shown = |r| s(r).describe(Some(&c)).into_iter().find(|l| l.0 == "Frame Rate").map(|l| l.1).unwrap_or_default();
+        assert!(shown(FrameRate::new(1_000_000_000_000, 1)).contains("renders at 1000.000"), "{}", shown(FrameRate::new(1_000_000_000_000, 1)));
+        assert_eq!(shown(FrameRate::new(60, 1)), "60.000 fps");
     }
 
     #[test]

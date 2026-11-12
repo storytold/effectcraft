@@ -521,6 +521,21 @@ fn zero_time_stretch_is_not_imported() {
 }
 
 #[test]
+fn a_time_stretch_past_9900_percent_is_held_to_it() {
+    // `sr` 1e300 was imported as 1e302 % (#3247); the sign of a reversed layer is kept.
+    for (sr, want) in [(1e300, 9900.0), (-1e300, -9900.0), (99.0, 9900.0)] {
+        let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [],
+            "layers": [{"ty": 1, "ind": 1, "sc": "#ff0000", "sw": 20, "sh": 20, "sr": sr, "ip": 0, "op": 30, "st": 0, "ks": {}}]});
+        let mut q = Project::default();
+        let imp = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap();
+        let l = &q.comp(imp.comp).unwrap().layers[0];
+        assert_eq!(l.stretch, want, "sr {sr}");
+        let warned = imp.warnings.iter().any(|w| w.contains("time stretch"));
+        assert_eq!(warned, sr != 99.0, "sr {sr}: {:?}", imp.warnings);
+    }
+}
+
+#[test]
 fn embedded_glyphs_are_reported_when_dropped() {
     let glyph = |ch: &str, fam: &str| json!({"ch": ch, "size": 100, "style": "Regular", "w": 60, "fFamily": fam, "data": {"shapes": []}});
     let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [], "layers": [],
@@ -710,7 +725,7 @@ fn effects_expressions_and_warnings() {
 #[test]
 fn images_embed_as_base64_and_come_back() {
     let (mut p, cid) = setup();
-    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5];
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5];
     let fid = p.add_item(
         "pic.png",
         Label::Lavender,
@@ -758,6 +773,17 @@ fn images_embed_as_base64_and_come_back() {
     let ItemKind::Footage(f) = &q.item(item).unwrap().kind else { panic!() };
     assert_eq!((f.width, f.height), (64, 32));
     assert!(f.path.starts_with("/tmp/image_") && f.path.ends_with(".png"), "{}", f.path);
+}
+
+#[test]
+fn image_signatures_are_matched_in_full() {
+    use crate::export::image_mime;
+    assert_eq!(image_mime(b"\x89PNG\r\n\x1a\n\0"), Some("image/png"));
+    assert_eq!(image_mime(b"GIF89a\0"), Some("image/gif"));
+    assert_eq!(image_mime(b"GIF87a\0"), Some("image/gif"));
+    // Near matches (a prefix of the signature, or text that starts with it) are not images.
+    assert_eq!(image_mime(b"\x89PNG\x01\x02\x03\x04"), None);
+    assert_eq!(image_mime(b"GIF8 is a text file"), None);
 }
 
 #[test]
@@ -969,4 +995,70 @@ fn per_corner_roundness_exports_equal_radii_and_warns_when_mixed() {
     let (_, _, warnings, json) = roundtrip(&p, cid, &ExportOptions::default());
     assert_eq!(rc(&json)["r"]["k"], json!(5.0));
     assert!(!warnings.iter().any(|w| w.contains("per-corner")), "{warnings:?}");
+}
+
+#[test]
+fn many_layers_and_precomps_import_with_their_parents_and_sizes() {
+    // 5 000 null layers each parented to the previous, and 2 000 empty precomp assets: the
+    // relationship and size passes index the layers instead of searching them per layer. (Each
+    // has its own name: `Comp::unique_layer_name` numbering one repeated name is a separate cost.)
+    let n = 5_000;
+    let layers: Vec<Json> = (1..=n).map(|i| json!({"ty": 3, "nm": format!("N{i}"), "ind": i, "parent": i - 1, "ip": 0, "op": 30, "st": 0, "ks": {}})).collect();
+    let mut assets: Vec<Json> = (0..2_000).map(|i| json!({"id": format!("c{i}"), "layers": []})).collect();
+    assets.push(json!({"id": "last", "layers": []}));
+    let mut layers = layers;
+    layers.push(json!({"ty": 0, "ind": n + 1, "refId": "last", "w": 50, "h": 40, "ip": 0, "op": 30, "st": 0, "ks": {}}));
+    let doc = json!({"w": 200, "h": 120, "fr": 30, "ip": 0, "op": 30, "assets": assets, "layers": layers});
+    let mut q = Project::default();
+    let nc = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().comp;
+    let c = q.comp(nc).unwrap();
+    assert_eq!(c.layers.len(), n as usize + 1);
+    assert_eq!(c.layers.get(0).unwrap().parent, None);
+    assert_eq!(c.layers.get(1).unwrap().parent, Some(c.layers.get(0).unwrap().id));
+    let LayerSource::Comp { item } = c.layers.get(n as usize).unwrap().source else { panic!("not a precomp") };
+    let pc = q.comp(item).unwrap();
+    assert_eq!((pc.width, pc.height), (50, 40));
+}
+
+#[test]
+fn deeply_nested_shape_groups_and_long_font_names_import() {
+    let mut g = json!({"ty": "rc", "s": {"a": 0, "k": [10, 10]}, "p": {"a": 0, "k": [0, 0]}, "r": {"a": 0, "k": 0}});
+    // 50 levels: each is two levels of JSON, within serde_json's recursion limit of 128.
+    for _ in 0..50 {
+        g = json!({"ty": "gr", "it": [g, {"ty": "tr", "o": {"a": 0, "k": 100}}]});
+    }
+    let family = "F".repeat(100_000);
+    let keys: Vec<Json> = (0..50).map(|i| json!({"t": i, "s": {"t": "x", "f": "A", "s": 10}})).collect();
+    let doc = json!({"w": 200, "h": 120, "fr": 30, "ip": 0, "op": 60,
+    "fonts": {"list": [{"fName": "A", "fFamily": family, "fStyle": "Regular"}]},
+    "layers": [
+        {"ty": 4, "ind": 1, "ip": 0, "op": 60, "st": 0, "ks": {}, "shapes": [g]},
+        {"ty": 5, "ind": 2, "ip": 0, "op": 60, "st": 0, "ks": {}, "t": {"d": {"k": keys}}}
+    ]});
+    let mut q = Project::default();
+    let nc = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().comp;
+    let c = q.comp(nc).unwrap();
+    let st = c.layers.get(1).unwrap().props.prop("text/sourceText").unwrap();
+    assert_eq!(st.keys.len(), 50);
+    let Value::Text(d) = &st.keys[0].value else { panic!("not text") };
+    assert_eq!(d.font.len(), 256);
+}
+
+/// A footage item called a still whose file is not an image is not embedded.
+#[test]
+fn only_image_bytes_are_embedded() {
+    let (mut p, cid) = setup();
+    let fid = p.add_item(
+        "secret.png",
+        Label::Lavender,
+        None,
+        ItemKind::Footage(Footage { path: "/virtual/secret.png".into(), kind: FootageKind::Still, width: 8, height: 8, has_video: true, ..Default::default() }),
+    );
+    let c = comp(&p, cid);
+    let l = build::layer(&mut p, &c, "secret.png", LayerSource::Footage { item: fid }, (8, 8), None);
+    push(&mut p, cid, l);
+    let read = |path: &str| (path == "/virtual/secret.png").then(|| b"root:x:0:0:root:/root:/bin/sh\n".to_vec());
+    let res = export_comp(&p, cid, &ExportOptions::default(), &read).unwrap();
+    assert!(res.json["assets"].as_array().is_none_or(|a| a.is_empty()), "{}", res.json["assets"]);
+    assert!(res.warnings.iter().any(|w| w.contains("not a PNG")), "{:?}", res.warnings);
 }

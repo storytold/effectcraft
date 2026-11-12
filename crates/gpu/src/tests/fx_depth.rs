@@ -288,4 +288,7 @@ fn extractor() {
     );
     case("ec.3d.extractor", &[("red", Value::Str("A".into())), ("blackPoint", n(0.2)), ("whitePoint", n(0.8)), ("clip", on())]);
     case("ec.3d.extractor", &[("green", Value::Str("".into())), ("alpha", Value::Str("nothing".into()))]);
+    // `(copy)` reads the input's own channel, not the footage's R plane of aux_scene.
+    let copy = || Value::Str(effectcraft_effects::EXTRACTOR_COPY.into());
+    case("ec.3d.extractor", &[("red", copy()), ("green", Value::Str("Coverage".into())), ("alpha", copy())]);
 }

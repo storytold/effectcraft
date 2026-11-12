@@ -159,7 +159,8 @@ pub struct PreviewPreset {
     pub pre_roll: f64,
     pub post_roll: f64,
     pub play_from: PlayFrom,
-    /// Frames per second; `None` = Auto (the comp's rate).
+    /// Composition frames played per second; `None` = Auto (the comp's rate).
+    /// An override changes preview speed, including the audio's speed and pitch.
     pub frame_rate: Option<f64>,
     /// Frames skipped between the frames played (0 = every frame).
     pub skip: u32,

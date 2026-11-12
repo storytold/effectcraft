@@ -744,7 +744,11 @@ fn stop(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 fn list(s: &mut Session, _: &Value) -> Result<Value> {
-    s.poll_render();
+    // The suspended script's frontend applies post-render edits before resuming it. A
+    // control inspection must not apply those edits while the undo-group guard is active.
+    if s.script_ui.render_host.is_none() {
+        s.poll_render();
+    }
     let items: Vec<Value> = s.project.render_queue.iter().enumerate().map(|(k, i)| item_json(s, i, k)).collect();
     Ok(json!({"items": items, "rendering": s.is_rendering(), "progress": s.render_progress()}))
 }
@@ -869,6 +873,10 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
         storage: s.storage_quota.as_deref(),
         label: "Save Current Preview".into(),
         nested_switches: s.prefs.general.switches_affect_nested_comps,
+
+        caches: None,
+        renderer: None,
+        gpu_frames: s.prefs.memory.gpu_frames(),
     };
     let r = exporter.export(&job, &mut |_, _| true).map_err(EngineError::Other)?;
     s.toast(format!("Saved preview to {}", r.path));

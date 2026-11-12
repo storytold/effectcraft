@@ -1,6 +1,6 @@
 //! Lottie document → EffectCraft compositions (the inverse of [`crate::export`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use effectcraft_color::Label;
@@ -16,6 +16,9 @@ use serde_json::Value as Json;
 use crate::anim::{self, Im, import_prop};
 use crate::export::{fx_by_id, fx_by_type, fx_params, mask_mode_from};
 use crate::{LottieError, Timebase, shapes, text};
+
+/// Longest font family or style name kept (each text key using the font holds a copy).
+const MAX_FONT_NAME_CHARS: usize = 256;
 
 /// An embedded image asset handed to the caller to store (the returned path becomes the
 /// footage item's file).
@@ -129,9 +132,12 @@ pub fn import(
         Ctx { im: Im { tb, warnings: vec![] }, assets: BTreeMap::new(), fonts: vec![], store, base_dir, items: vec![], folder: None, name: name.clone() };
     if let Some(list) = doc.get("fonts").and_then(|f| f.get("list")).and_then(Json::as_array) {
         for fo in list {
+            // Every text key referring to the font copies its family and style: keep them to
+            // a font name's length.
+            let short = |v: &str| v.chars().take(MAX_FONT_NAME_CHARS).collect::<String>();
             let n = s(fo, "fName").unwrap_or("").to_string();
-            let fam = s(fo, "fFamily").unwrap_or(&n).to_string();
-            let st = s(fo, "fStyle").unwrap_or("Regular").to_string();
+            let fam = short(s(fo, "fFamily").unwrap_or(&n));
+            let st = short(s(fo, "fStyle").unwrap_or("Regular"));
             cx.fonts.push((n, fam, st));
         }
     }
@@ -150,11 +156,12 @@ pub fn import(
     let duration = tb.tick(op);
     // Pass 1: asset items (precomps empty for now, images stored).
     let assets = doc.get("assets").and_then(Json::as_array).cloned().unwrap_or_default();
+    let layer_sizes = precomp_layer_sizes(&doc, &assets);
     for a in &assets {
         let Some(id) = s(a, "id") else { continue };
         if a.get("layers").is_some() {
             let folder = cx.folder(project);
-            let layer = precomp_layer_size(&doc, &assets, id);
+            let layer = layer_sizes.get(id).copied();
             let aw = f(a, "w").map(|v| v as u32).or(layer.map(|l| l.0)).unwrap_or(w);
             let ah = f(a, "h").map(|v| v as u32).or(layer.map(|l| l.1)).unwrap_or(h);
             let arate = f(a, "fr").map(FrameRate::from_f64).unwrap_or(rate);
@@ -255,17 +262,20 @@ pub fn import(
     Ok(ImportResult { comp: id, items: cx.items, warnings: cx.im.warnings })
 }
 
-/// The `w`/`h` of the first precomp layer, in the main comp or in any asset, that shows asset `id`.
-/// lottie-spec gives a precomposition asset no size: the layer's `w`/`h` are its clipping rect.
-fn precomp_layer_size(doc: &Json, assets: &[Json], id: &str) -> Option<(u32, u32)> {
+/// By asset id, the `w`/`h` of the first precomp layer, in the main comp or in any asset, that
+/// shows it. lottie-spec gives a precomposition asset no size: the layer's `w`/`h` are its
+/// clipping rect. One pass over all layers, not one per asset.
+fn precomp_layer_sizes<'a>(doc: &'a Json, assets: &'a [Json]) -> HashMap<&'a str, (u32, u32)> {
+    let mut out = HashMap::new();
     let lists = doc.get("layers").into_iter().chain(assets.iter().filter_map(|a| a.get("layers")));
-    lists.filter_map(Json::as_array).flatten().find_map(|l| {
-        if l.get("ty").and_then(Json::as_u64) != Some(0) || s(l, "refId") != Some(id) {
-            return None;
+    for l in lists.filter_map(Json::as_array).flatten() {
+        if l.get("ty").and_then(Json::as_u64) != Some(0) {
+            continue;
         }
-        let (lw, lh) = f(l, "w").zip(f(l, "h"))?;
-        Some((lw.round().max(1.0) as u32, lh.round().max(1.0) as u32))
-    })
+        let (Some(id), Some((lw, lh))) = (s(l, "refId"), f(l, "w").zip(f(l, "h"))) else { continue };
+        out.entry(id).or_insert((lw.round().max(1.0) as u32, lh.round().max(1.0) as u32));
+    }
+    out
 }
 
 fn transform(im: &Im, ks: &Json, tr: &mut PropGroup, next: &mut u64) {
@@ -411,8 +421,8 @@ fn layer_source(cx: &mut Ctx, project: &mut Project, comp: &Comp, j: &Json) -> O
 fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[Json]) {
     let tb = cx.im.tb;
     let mut by_ind: BTreeMap<i64, LayerId> = BTreeMap::new();
-    // (layer id, parent ind, matte: (kind, explicit tp ind), json position)
-    let mut pending: Vec<(LayerId, Option<i64>, Option<(MatteKind, Option<i64>)>, usize)> = vec![];
+    // (layer id, its index in `comp.layers`, parent ind, matte: (kind, explicit tp ind), json position)
+    let mut pending: Vec<(LayerId, usize, Option<i64>, Option<(MatteKind, Option<i64>)>, usize)> = vec![];
     let mut pos_ind: Vec<Option<i64>> = vec![];
     for (ji, j) in layers.iter().enumerate() {
         let ind = j.get("ind").and_then(Json::as_i64);
@@ -431,7 +441,12 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         // Below 1 % (or 0) the layer time divides by ~0, and layer.timeStretch refuses it too.
         let sr = f(j, "sr").unwrap_or(1.0);
         l.stretch = if sr.is_finite() && sr.abs() >= 0.01 {
-            sr * 100.0
+            // Past ±9900 % too (#3247): the largest stretch a layer supports, sign kept.
+            let pct = effectcraft_project::limits::stretch(sr * 100.0);
+            if pct.to_bits() != (sr * 100.0).to_bits() {
+                cx.im.warn(format!("{name}: a time stretch of {} % is not supported ({pct} % used)", sr * 100.0));
+            }
+            pct
         } else {
             cx.im.warn(format!("{name}: a time stretch of {} % is not supported (100 % used)", sr * 100.0));
             100.0
@@ -458,8 +473,8 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         let mut ids = Ids(&mut next);
         match &source {
             LayerSource::Shape => {
-                let items = j.get("shapes").and_then(Json::as_array).cloned().unwrap_or_default();
-                let groups = shapes::import_items(&mut cx.im, &mut ids, &items);
+                let mut items = j.get("shapes").and_then(Json::as_array).into_iter().flatten();
+                let groups = shapes::import_items(&mut cx.im, &mut ids, &mut items);
                 if let Some(c) = l.props.sub_mut("contents") {
                     c.children.extend(groups.into_iter().map(Node::Group));
                 }
@@ -502,10 +517,10 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
             _ => None,
         }
         .map(|k| (k, j.get("tp").and_then(Json::as_i64)));
-        pending.push((l.id, parent, matte, ji));
+        pending.push((l.id, comp.layers.len(), parent, matte, ji));
         comp.layers.push(l);
     }
-    for (id, parent, matte, ji) in pending {
+    for (id, at, parent, matte, ji) in pending {
         let parent_id = parent.and_then(|p| by_ind.get(&p).copied()).filter(|p| *p != id);
         let matte_id = matte.and_then(|(k, tp)| {
             let target = match tp {
@@ -515,7 +530,7 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
             };
             target.filter(|t| *t != id).map(|t| TrackMatte { layer: t, kind: k })
         });
-        if let Some(l) = comp.layer_mut(id) {
+        if let Some(l) = comp.layers.get_mut(at) {
             l.parent = parent_id;
             l.track_matte = matte_id;
         }

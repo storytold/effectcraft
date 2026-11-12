@@ -75,6 +75,9 @@ const REFUSED: &[&str] = &[
     "library.preview",
 ];
 
+/// Most numbered folders `check_render_folder` inspects for one output; more are refused.
+const MAX_NUMBERED_FOLDERS: usize = 4096;
+
 /// Commands that read files named by these parameters.
 const READS: &[(&str, &[&str])] = &[
     ("file.open", &["path"]),
@@ -143,6 +146,8 @@ const WRITES: &[(&str, &[&str])] = &[
     ("shortcuts.export", &["path"]),
     ("renderQueue.add", &["output", "path"]),
     ("file.exportTimeline", &["path"]),
+    ("journal.export", &["path"]),
+    ("help.exportRepro", &["path"]),
     // `path` / `output` may also be a file-name template, as for render.preRender.
     ("file.createProxy", &["path", "output"]),
 ];
@@ -200,6 +205,80 @@ impl Confinement {
         if self.roots(access).any(|r| real.starts_with(r)) { Ok(real) } else { Err(denied("it is outside the automation roots")) }
     }
 
+    /// A render output's folder holds no symbolic link that leads outside the write roots. An
+    /// image sequence is written to numbered names (`out_[#####].png` → `out_00001.png`, and a
+    /// sequence output without `#` gets `_00001` too) that the check of its template never
+    /// resolved, and each frame file is created through whatever link already sits at its name,
+    /// truncating the file it points to. A link that can't be resolved counts as outside: the
+    /// render would create its target. When the frame number is in a folder name, the same goes for
+    /// each existing numbered folder and the folder it holds the frames in.
+    fn check_render_folder(&self, output: &str) -> Result<()> {
+        let real = self.check(output, Access::Write)?;
+        if let Some(dir) = real.parent() {
+            self.check_no_outward_links(dir, output)?;
+        }
+        // The frame number may sit in a folder name (`shots_[##]/f_[#####].png`): the folders the
+        // frames go to are the numbered ones that exist, which the template's own parent is not.
+        let (before, _, after) = effectcraft_engine::project::render_queue::sequence_parts(output);
+        let sep = ['/', '\\'];
+        let Some((dir_tail, rest)) = after.split_once(sep) else { return Ok(()) };
+        let (parent, prefix) = before.rsplit_once(sep).unwrap_or(("", &before));
+        // A parent that doesn't exist has no numbered folders; one that can't be listed might.
+        let scan = if parent.is_empty() { Path::new("/") } else { Path::new(parent) };
+        let entries = match std::fs::read_dir(scan) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::BadArgs(format!("cannot render to `{output}`: its numbered folders in `{}` can't be checked: {e}", scan.display()))),
+        };
+        let mut seen = 0;
+        for e in entries {
+            let e =
+                e.map_err(|e| Error::BadArgs(format!("cannot render to `{output}`: its numbered folders in `{}` can't be checked: {e}", scan.display())))?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(digits) = name.strip_prefix(prefix).and_then(|n| n.strip_suffix(dir_tail)) else { continue };
+            if !digits.strip_prefix('-').unwrap_or(digits).bytes().all(|b| b.is_ascii_digit()) || digits.is_empty() {
+                continue;
+            }
+            seen += 1;
+            if seen > MAX_NUMBERED_FOLDERS {
+                return Err(Error::BadArgs(format!("cannot render to `{output}`: more than {MAX_NUMBERED_FOLDERS} numbered folders already exist to check")));
+            }
+            // The numbered folder itself may be a link out; `check` resolves every existing part.
+            let frame_file = e.path().join(rest);
+            let frame_file = frame_file.to_string_lossy();
+            self.check(&frame_file, Access::Write)?;
+            if let Some(dir) = Path::new(&*frame_file).parent().and_then(resolve) {
+                self.check_no_outward_links(&dir, output)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `dir` holds no symbolic link that leads outside the write roots.
+    fn check_no_outward_links(&self, dir: &Path, output: &str) -> Result<()> {
+        // A folder that does not exist yet holds no link; one that can't be listed might.
+        let cannot = |e: std::io::Error| Error::BadArgs(format!("cannot render to `{output}`: its folder `{}` can't be checked for links: {e}", dir.display()));
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(cannot(e)),
+        };
+        for e in entries {
+            let e = e.map_err(cannot)?;
+            if !e.file_type().map_err(cannot)?.is_symlink() {
+                continue;
+            }
+            let link = e.path();
+            if !link.canonicalize().is_ok_and(|r| self.write.iter().any(|w| r.starts_with(w))) {
+                return Err(Error::BadArgs(format!(
+                    "cannot render to `{output}`: its folder holds `{}`, a link that leads outside the automation write roots, where a numbered frame could be written",
+                    link.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Check engine command `id` with `params` before it runs. Returns what must still be looked
     /// up and passed to [`Confinement::check_lookup`] for commands that write implicitly.
     pub fn check_command(&self, id: &str, params: &Value) -> Result<Vec<Lookup>> {
@@ -219,6 +298,12 @@ impl Confinement {
             for step in params.get("steps").and_then(Value::as_array).into_iter().flatten() {
                 let Some(inner) = step.get("command").or_else(|| step.get("id")).and_then(Value::as_str) else { continue };
                 let inner_params = step.get("params").cloned().unwrap_or(Value::Null);
+                // A whole `params` given as a `$N` reference becomes an earlier step's result
+                // only as the batch runs, so none of its file paths would have been checked
+                // (`essential.templateInfo` returns a manifest naming any file at all).
+                if !matches!(inner_params, Value::Null | Value::Object(_)) {
+                    return Err(Error::BadArgs(format!("`{inner}` in a batch: `params` must be an object while file access is confined")));
+                }
                 let named = keys_of(READS, inner).or_else(|| keys_of(WRITES, inner)).unwrap_or(&[]);
                 let mixed = keys_of(MIXED_WRITES, inner).unwrap_or(&[]);
                 // A step's `$N` reference is resolved only as the batch runs: never for a file.
@@ -256,6 +341,9 @@ impl Confinement {
                     Some(s) => {
                         gave_a_file |= v.is_string();
                         self.check(s, access)?;
+                        if QUEUES_AN_OUTPUT.contains(&id) || id.starts_with("renderQueue.") {
+                            self.check_render_folder(s)?;
+                        }
                     }
                     None => return Err(Error::BadArgs(format!("`{id}`: `{key}` must be a path"))),
                 }
@@ -279,6 +367,11 @@ impl Confinement {
         // An entry of a recent list by index is a path the agent didn't give.
         if matches!(id, "file.openRecent" | "file.importRecent" | "anim.applyRecentPreset") && !given {
             return Err(Error::BadArgs(format!("`{id}`: give `path` while file access is confined")));
+        }
+        // The default repro destination is the settings store, not an automation write root.
+        // Require a single explicit path so missing, null or array parameters cannot bypass it.
+        if id == "help.exportRepro" && params.get("path").and_then(Value::as_str).is_none() {
+            return Err(Error::BadArgs("`help.exportRepro`: give `path` inside an automation write root while file access is confined".into()));
         }
         let mut lookups = vec![];
         // An output the agent did not name is derived from where the project sits: the Default
@@ -314,10 +407,14 @@ impl Confinement {
                 let items = found.get("items").or(Some(found)).and_then(Value::as_array).cloned().unwrap_or_default();
                 for it in items.iter().filter(|it| it.get("render").and_then(Value::as_bool) != Some(false)) {
                     let extra = it.get("extraOutputs").and_then(Value::as_array).into_iter().flatten().map(|o| o.get("outputPath"));
-                    for p in std::iter::once(it.get("outputPath")).chain(extra).chain([it.get("logPath")]).flatten() {
+                    for p in std::iter::once(it.get("outputPath")).chain(extra).flatten() {
                         if let Some(p) = p.as_str() {
                             self.check(p, Access::Write)?;
+                            self.check_render_folder(p)?;
                         }
+                    }
+                    if let Some(p) = it.get("logPath").and_then(Value::as_str) {
+                        self.check(p, Access::Write)?;
                     }
                 }
                 Ok(())
@@ -346,32 +443,64 @@ impl ConfinedFootage {
     fn inside(&self, f: &Footage) -> bool {
         std::iter::once(&f.path).chain(&f.sequence).filter(|p| !p.is_empty()).all(|p| self.confinement.check(p, Access::Read).is_ok())
     }
+
+    /// [`Self::inside`] for a read: a refused one is counted on this thread, so the render
+    /// [`recording`](FootageSource::recording) it can't list what it made without the footage.
+    fn readable(&self, f: &Footage) -> bool {
+        let inside = self.inside(f);
+        if !inside {
+            let _ = REFUSED_READS.try_with(|n| n.set(n.get().wrapping_add(1)));
+        }
+        inside
+    }
+}
+
+thread_local! {
+    /// Footage reads refused on this thread (see [`ConfinedFootage::readable`]).
+    static REFUSED_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of reads this thread has refused for lying outside the allowed roots.
+fn refused_reads() -> u64 {
+    REFUSED_READS.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 impl FootageSource for ConfinedFootage {
+    /// The frame from the inner source, or `None` when the footage lies outside the allowed roots.
     fn frame(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame(item, footage, t)).flatten()
+        self.readable(footage).then(|| self.inner.frame(item, footage, t)).flatten()
     }
+    /// The frame scaled to `width` by `height`, or `None` when the footage lies outside the allowed roots.
     fn frame_at_size(&self, item: ItemId, footage: &Footage, t: Tick, width: u32, height: u32) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
+        self.readable(footage).then(|| self.inner.frame_at_size(item, footage, t, width, height)).flatten()
     }
+    /// The frame with an explicit size and float curve, or `None` when the footage lies outside the allowed roots.
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
+        self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
     }
+    /// The frame as 8-bit levels, or `None` when the footage lies outside the allowed roots.
+    fn frame8(&self, item: ItemId, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<effectcraft_engine::render::disk_cache::Frame8>> {
+        self.readable(footage).then(|| self.inner.frame8(item, footage, t, float)).flatten()
+    }
+    /// The footage audio from the inner source, or `None` when the footage lies outside the allowed roots.
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        self.inside(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
+        self.readable(footage).then(|| self.inner.audio(item, footage, t, frames, rate)).flatten()
     }
+    /// The auxiliary channels of the footage frame, or `None` when the footage lies outside the allowed roots.
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
-        self.inside(footage).then(|| self.inner.aux(item, footage, t)).flatten()
+        self.readable(footage).then(|| self.inner.aux(item, footage, t)).flatten()
     }
+    /// Forwards the auxiliary footage paths to the inner source.
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
     }
+    /// The 3D model for the footage, or `None` when the footage lies outside the allowed roots.
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {
-        self.inside(footage).then(|| self.inner.model(item, footage)).flatten()
+        self.readable(footage).then(|| self.inner.model(item, footage)).flatten()
     }
+    /// The rasterised vector footage at `scale`, or `None` when the footage lies outside the allowed roots.
     fn vector_frame(&self, item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
-        self.inside(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
+        self.readable(footage).then(|| self.inner.vector_frame(item, footage, scale)).flatten()
     }
     /// Says why footage outside the roots shows nothing, so the agent can act on it.
     fn problem(&self, footage: &Footage) -> Option<String> {
@@ -392,14 +521,28 @@ impl FootageSource for ConfinedFootage {
     fn set_conform_folder(&self, folder: Option<PathBuf>) {
         self.inner.set_conform_folder(folder)
     }
+    /// The inner source's cache budget.
     fn cache_budget(&self) -> Option<usize> {
         self.inner.cache_budget()
     }
+    /// Runs `f` under the inner source's cancel flag.
     fn cancellable(&self, cancel: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
         self.inner.cancellable(cancel, f)
     }
+    /// Whether the inner source has been called off.
     fn called_off(&self) -> bool {
         self.inner.called_off()
+    }
+    /// The files read inside the roots, as the inner source notes them. Footage outside reads
+    /// nothing, and what is made without it can't be listed by its files: a refused read makes
+    /// the list incomplete, so it never outlives the session in a disk cache (another session
+    /// with other roots would read the footage).
+    fn recording(&self, reads: &effectcraft_engine::render::reads::ReadLog, f: &mut dyn FnMut()) {
+        let refused = refused_reads();
+        self.inner.recording(reads, f);
+        if refused_reads() != refused {
+            reads.mark_incomplete();
+        }
     }
 }
 
@@ -593,6 +736,55 @@ mod tests {
         }
     }
 
+    /// Footage outside the roots shows nothing: a render that asked for it can't be listed by its
+    /// files (#3184), or a disk cache would keep the empty picture for a session with other
+    /// roots. Reads inside the roots record as the inner source tells.
+    #[test]
+    fn a_refused_footage_read_makes_the_render_unlisted() {
+        use effectcraft_engine::render::reads::{FileStamp, ReadFile, ReadLog};
+        /// Reads every file, noting it.
+        struct Noting;
+        impl FootageSource for Noting {
+            /// Returns a 1x1 frame and notes the footage path it was asked for.
+            fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+                NOTED.with(|n| n.borrow_mut().push(f.path.clone()));
+                Some(Arc::new(Image::new(1, 1)))
+            }
+            /// Runs `f`, then reports every path noted meanwhile to `reads` as a file with a missing stamp.
+            fn recording(&self, reads: &ReadLog, f: &mut dyn FnMut()) {
+                f();
+                for p in NOTED.with(|n| std::mem::take(&mut *n.borrow_mut())) {
+                    reads.note(ReadFile::new(p, FileStamp::Missing));
+                }
+            }
+        }
+        thread_local! {
+            static NOTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        // (a fresh directory, removed when the test ends, panicking or not)
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let (inside, outside) = (base.join("in"), base.join("elsewhere"));
+        for d in [&inside, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&inside), &[]).unwrap();
+        let src = ConfinedFootage::new(Arc::new(Noting), c);
+        let footage = |d: &std::path::Path| Footage { path: d.join("a.png").to_string_lossy().into_owned(), ..Default::default() };
+        let read = |f: &Footage| {
+            let log = ReadLog::new();
+            let mut got = None;
+            src.recording(&log, &mut || got = src.frame(ItemId(1), f, Tick::ZERO));
+            (got.is_some(), log.into_files())
+        };
+        let (shown, files) = read(&footage(&inside));
+        assert!(shown && files.is_complete() && files.len() == 1, "inside the roots: {files:?}");
+        let (shown, files) = read(&footage(&outside));
+        assert!(!shown && !files.is_complete(), "outside the roots: {files:?}");
+        // The next render on the thread is not affected.
+        assert!(read(&footage(&inside)).1.is_complete());
+    }
+
     #[test]
     fn relative_and_outside_paths_of_newly_listed_commands_are_refused() {
         let base = std::env::temp_dir().join(format!("ec-confine-1243-{}", std::process::id()));
@@ -655,6 +847,112 @@ mod tests {
         ] {
             assert!(c.check_command("effect.plugins.install", &params).is_err(), "{params}");
         }
+    }
+
+    #[test]
+    fn a_batch_step_whose_params_are_a_reference_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-batch-ref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (read, write) = (base.join("in"), base.join("out"));
+        for d in [&read, &write] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap();
+        let info = read.join("t.ectemplate").to_string_lossy().into_owned();
+        // Step 2's params are step 1's result, which can name any `path`.
+        let steps = serde_json::json!({"steps": [
+            {"command": "essential.templateInfo", "params": {"path": info}},
+            {"command": "file.saveAs", "params": "$1"},
+        ]});
+        let e = c.check_command("engine.batch", &steps).unwrap_err().to_string();
+        assert!(e.contains("must be an object"), "{e}");
+        for params in [serde_json::json!("$1.manifest"), serde_json::json!(["$1"]), serde_json::json!(7)] {
+            let steps = serde_json::json!({"steps": [{"command": "file.saveAs", "params": params}]});
+            assert!(c.check_command("engine.batch", &steps).is_err(), "{params}");
+        }
+        // Object params (or none) are checked as before.
+        let saved = write.join("p.ecproj").to_string_lossy().into_owned();
+        let steps = serde_json::json!({"steps": [{"command": "file.saveAs", "params": {"path": saved}}, {"command": "edit.undo"}]});
+        assert!(c.check_command("engine.batch", &steps).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_render_folder_with_a_link_out_of_the_write_roots_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-seq-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+        for d in [&read, &write, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap();
+        let template = write.join("frames_[#####].png").to_string_lossy().into_owned();
+        let add = serde_json::json!({"output": template});
+        let queue = serde_json::json!({"items": [{"outputPath": template}]});
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
+        assert!(c.check_lookup(&Lookup::RenderOutputs, &queue).is_ok());
+        // A link inside the write root is fine.
+        std::os::unix::fs::symlink(write.join("kept.png"), write.join("frames_00002.png")).unwrap();
+        std::fs::write(write.join("kept.png"), b"x").unwrap();
+        assert!(c.check_lookup(&Lookup::RenderOutputs, &queue).is_ok());
+        // Frame 1's name leads outside: rendering would truncate that file.
+        std::os::unix::fs::symlink(outside.join("victim"), write.join("frames_00001.png")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_err());
+        assert!(c.check_command("render.preRender", &add).is_err());
+        let e = c.check_lookup(&Lookup::RenderOutputs, &queue).unwrap_err().to_string();
+        assert!(e.contains("frames_00001.png"), "{e}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_render_folder_that_cannot_be_listed_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("ec-confine-seq-nolist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let write = base.join("out");
+        std::fs::create_dir_all(&write).unwrap();
+        let c = Confinement::new(&[], std::slice::from_ref(&write)).unwrap();
+        let template = write.join("frames_[#####].png").to_string_lossy().into_owned();
+        let add = serde_json::json!({"output": template});
+        // Writable and searchable but not listable: a link in it could not be seen.
+        std::fs::set_permissions(&write, std::fs::Permissions::from_mode(0o300)).unwrap();
+        // A user who can list it anyway (root) sees no difference to test.
+        if std::fs::read_dir(&write).is_err() {
+            assert!(c.check_command("renderQueue.add", &add).is_err());
+        }
+        std::fs::set_permissions(&write, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn numbered_render_folders_with_links_out_of_the_write_roots_are_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-seq-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (write, outside) = (base.join("out"), base.join("elsewhere"));
+        for d in [&write, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(&[], std::slice::from_ref(&write)).unwrap();
+        let template = write.join("shot_[###]/f_[#####].png").to_string_lossy().into_owned();
+        let add = serde_json::json!({"output": template});
+        assert!(c.check_command("renderQueue.add", &add).is_ok(), "no numbered folder exists yet");
+        // A numbered folder inside the roots holding a link out is refused.
+        std::fs::create_dir(write.join("shot_001")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
+        std::os::unix::fs::symlink(outside.join("victim"), write.join("shot_001/f_00001.png")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_err());
+        std::fs::remove_file(write.join("shot_001/f_00001.png")).unwrap();
+        // A numbered folder that is itself a link out is refused.
+        std::os::unix::fs::symlink(&outside, write.join("shot_002")).unwrap();
+        assert!(c.check_command("render.preRender", &add).is_err());
+        // Unrelated names are left alone.
+        std::fs::remove_file(write.join("shot_002")).unwrap();
+        std::os::unix::fs::symlink(&outside, write.join("shot_notes")).unwrap();
+        assert!(c.check_command("renderQueue.add", &add).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

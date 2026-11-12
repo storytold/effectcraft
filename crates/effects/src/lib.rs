@@ -23,6 +23,8 @@ mod color3;
 mod color_fx;
 pub mod controls;
 pub mod crypto_select;
+#[cfg(test)]
+mod display_names;
 mod distort;
 mod distort2;
 mod distort3;
@@ -36,6 +38,7 @@ mod keying;
 mod keying2;
 pub mod keylight;
 mod matte;
+
 pub mod migrate;
 mod misc;
 pub mod mocha_shape;
@@ -95,14 +98,14 @@ pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
 pub use stylize2::strobe_on;
 // CPU helpers the GPU kernels share (effectcraft-gpu).
-pub use blur2::{camera_lens_plain, camera_lens_spans, radial_fast_pad};
+pub use blur2::{CAMERA_LENS_MAX_RADIUS, camera_lens_plain, camera_lens_radius, camera_lens_spans, radial_fast_pad};
 pub use generate::{four_color_softening, gen_mode};
 pub use generate2::pattern_kind as cell_pattern_kind;
 pub use generate2::{BoltSeg, Contour, Ghost, RadioPlan, Wave, flare_ghosts, lightning_segments, radio_plan};
 pub use generate3::{
     Coverage, MarksPlan, PaintPlan, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
 };
-pub use noise::GrainLook;
+pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
 pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
@@ -116,8 +119,9 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{
-    CRYPTO_LAYERS, CryptoAux, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
-    crypto_layer_name, crypto_layer_named, id_color, matte_only_px, reads_aux, selection_hashes,
+    CRYPTO_LAYERS, CryptoAux, EXTRACTOR_COPY, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
+    crypto_layer_name, crypto_layer_named, extractor_aux_channel, extractor_own_channel, id_color, is_extractor_copy, matte_only_px, reads_aux,
+    selection_hashes,
 };
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
@@ -447,7 +451,9 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
 /// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
 /// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
 /// skips the renderer's cover of the whole layer rectangle (#1205).
-pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace"];
+/// Drop Shadow also pads by its distance and softness on both CPU and GPU: covering the
+/// layer rectangle first only inflates working images on highly scaled text and shapes (#3357).
+pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.dropshadow"];
 
 /// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
 /// of the resampling pyramid used for downscaled layers.
@@ -559,7 +565,7 @@ pub trait EffectHost: Sync {
     }
     /// Parameter `id` (a [`flatten_params`] id such as `birthRate`) of effect `effect_index` in
     /// the layer's stack (the running effect's [`EffectEnv::effect_index`]) at another **layer
-    /// time**: CC Particle World samples its Birth Rate at every step it simulates (#1373).
+    /// time**: Particle Emitter 3D samples its Birth Rate at every step it simulates (#1373).
     /// `None` when unavailable.
     fn param_at(&self, _effect_index: usize, _id: &str, _layer_time: f64) -> Option<Value> {
         None
@@ -775,8 +781,82 @@ pub fn categories() -> Vec<&'static str> {
     v
 }
 
-/// After Effects' third-party display names of effects we register under a generic name.
-const ALIASES: &[(&str, &[&str])] = &[("ec.keying.keylight", keylight::KEYLIGHT_ALIASES)];
+/// Legacy display names accepted for saved scripts and searches. Never display these as
+/// native feature names; stable effect IDs and external format match names stay unchanged.
+const ALIASES: &[(&str, &[&str])] = &[
+    ("ec.sim.ccballaction", &["CC Ball Action"]),
+    ("ec.distort.ccbendit", &["CC Bend It"]),
+    ("ec.distort.ccbender", &["CC Bender"]),
+    ("ec.distort.ccblobbylize", &["CC Blobbylize"]),
+    ("ec.stylize.ccblockload", &["CC Block Load"]),
+    ("ec.sim.ccbubbles", &["CC Bubbles"]),
+    ("ec.stylize.ccburnfilm", &["CC Burn Film"]),
+    ("ec.color.cccolorneutralizer", &["CC Color Neutralizer"]),
+    ("ec.color.cccoloroffset", &["CC Color Offset"]),
+    ("ec.channel.cccomposite", &["CC Composite"]),
+    ("ec.blur.cccross", &["CC Cross Blur"]),
+    ("ec.perspective.cccylinder", &["CC Cylinder"]),
+    ("ec.sim.ccdrizzle", &["CC Drizzle"]),
+    ("ec.perspective.ccenvironment", &["CC Environment"]),
+    ("ec.distort.ccflomotion", &["CC Flo Motion"]),
+    ("ec.time.ccforcemotionblur", &["CC Force Motion Blur"]),
+    ("ec.stylize.ccglass", &["CC Glass"]),
+    ("ec.transition.ccglasswipe", &["CC Glass Wipe"]),
+    ("ec.generate.ccgluegun", &["CC Glue Gun"]),
+    ("ec.transition.ccgridwipe", &["CC Grid Wipe"]),
+    ("ec.distort.ccgriddler", &["CC Griddler"]),
+    ("ec.sim.cchair", &["CC Hair"]),
+    ("ec.stylize.cchextile", &["CC HexTile"]),
+    ("ec.transition.ccimagewipe", &["CC Image Wipe"]),
+    ("ec.transition.ccjaws", &["CC Jaws"]),
+    ("ec.stylize.cckaleida", &["CC Kaleida"]),
+    ("ec.color.cckernel", &["CC Kernel"]),
+    ("ec.distort.cclens", &["CC Lens"]),
+    ("ec.generate.cclightburst", &["CC Light Burst 2.5"]),
+    ("ec.generate.cclightrays", &["CC Light Rays"]),
+    ("ec.generate.cclightsweep", &["CC Light Sweep"]),
+    ("ec.transition.cclightwipe", &["CC Light Wipe"]),
+    ("ec.transition.cclinesweep", &["CC Line Sweep"]),
+    ("ec.sim.ccmrmercury", &["CC Mr. Mercury"]),
+    ("ec.stylize.ccmrsmoothie", &["CC Mr. Smoothie"]),
+    ("ec.utility.ccoverbrights", &["CC Overbrights"]),
+    ("ec.distort.ccpageturn", &["CC Page Turn"]),
+    ("ec.sim.ccparticlesystems2", &["CC Particle Systems II"]),
+    ("ec.sim.ccparticleworld", &["CC Particle World"]),
+    ("ec.sim.ccpixelpolly", &["CC Pixel Polly"]),
+    ("ec.stylize.ccplastic", &["CC Plastic"]),
+    ("ec.distort.ccpowerpin", &["CC Power Pin"]),
+    ("ec.blur.ccradial", &["CC Radial Blur"]),
+    ("ec.blur.ccradialfast", &["CC Radial Fast Blur"]),
+    ("ec.transition.ccradialscalewipe", &["CC Radial ScaleWipe"]),
+    ("ec.sim.ccrainfall", &["CC Rainfall"]),
+    ("ec.stylize.ccrepetile", &["CC RepeTile"]),
+    ("ec.distort.ccripplepulse", &["CC Ripple Pulse"]),
+    ("ec.transition.ccscalewipe", &["CC Scale Wipe"]),
+    ("ec.sim.ccscatterize", &["CC Scatterize"]),
+    ("ec.key.ccsimplewireremoval", &["CC Simple Wire Removal"]),
+    ("ec.distort.ccslant", &["CC Slant"]),
+    ("ec.distort.ccsmear", &["CC Smear"]),
+    ("ec.sim.ccsnowfall", &["CC Snowfall"]),
+    ("ec.perspective.ccsphere", &["CC Sphere"]),
+    ("ec.distort.ccsplit", &["CC Split"]),
+    ("ec.distort.ccsplit2", &["CC Split 2"]),
+    ("ec.perspective.ccspotlight", &["CC Spotlight"]),
+    ("ec.sim.ccstarburst", &["CC Star Burst"]),
+    ("ec.generate.ccthreads", &["CC Threads"]),
+    ("ec.stylize.ccthreshold", &["CC Threshold"]),
+    ("ec.stylize.ccthresholdrgb", &["CC Threshold RGB"]),
+    ("ec.distort.cctiler", &["CC Tiler"]),
+    ("ec.color.cctoner", &["CC Toner"]),
+    ("ec.transition.cctwister", &["CC Twister"]),
+    ("ec.blur.ccvector", &["CC Vector Blur"]),
+    ("ec.stylize.ccvignette", &["CC Vignette"]),
+    ("ec.transition.ccwarpomatic", &["CC WarpoMatic"]),
+    ("ec.time.ccwidetime", &["CC Wide Time"]),
+    ("ec.color.lumetri", &["Lumetri Color"]),
+    ("ec.obsolete.mochashape", &["Mocha shape", "mocha shape"]),
+    ("ec.keying.keylight", keylight::KEYLIGHT_ALIASES),
+];
 
 /// Other names effect `id` answers to (in [`lookup`] and searches).
 pub fn aliases(id: &str) -> &'static [&'static str] {
@@ -860,7 +940,7 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
 /// effects without their own table.
 pub const PARAM_GROUPS: &[(&str, &str)] = &[
     // Color Correction: Exposure, Levels (Individual Controls), Change to Color, Colorama,
-    // Shadow/Highlight, Lumetri Color.
+    // Shadow/Highlight, Color Grading.
     ("master", "Master"),
     ("rgb", "RGB"),
     ("red", "Red"),
@@ -989,7 +1069,7 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("particleExploder", "Particle Exploder"),
     ("affects", "Affects"),
     ("options", "Options"),
-    // Keying, Matte, Obsolete (Key Light's groups are in `keylight::GROUPS`).
+    // Keying, Matte, Obsolete (Screen Color Key's groups are in `keylight::GROUPS`).
     ("ultraSettings", "Ultra Settings"),
     ("additionalForeground", "Additional Foreground"),
     ("additionalBackground", "Additional Background"),
@@ -1074,7 +1154,7 @@ fn nested_group<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&
 }
 
 /// Effects the GPU compositor (`effectcraft-gpu`) implements with the CPU effect's semantics
-/// (Mercury GPU Acceleration; the Effects & Presets GPU badge). Expression controls are
+/// (GPU Acceleration; the Effects & Presets GPU badge). Expression controls are
 /// pass-throughs and count as GPU effects too.
 pub const GPU_EFFECTS: &[&str] = &[
     "ec.blur.gaussian",
@@ -1436,7 +1516,7 @@ pub const TIME_DEPENDENT: &[&str] = &[
 pub fn is_time_dependent(id: &str) -> bool {
     // Simulations replay from layer time 0, so every frame differs even when the defaults
     // happen to look static at the test's two sample times.
-    id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id)
+    id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id) || (!id.starts_with("ec.") && plugin::reads_other_times(id))
 }
 
 /// Does effect `id` read its own parameters at earlier times (the stepped particle systems sample
@@ -1494,7 +1574,7 @@ mod tests {
         assert_eq!(grow_sides(lo, hi, 20, 10), Some([0, 0, 30, 20]));
     }
 
-    /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
+    /// #2261: a 20 × 20 layer with Fast Radial Blur's Center far away grows to at most 16 Mpx;
     /// big layers may still grow to four times their area, and small pads are untouched.
     #[test]
     fn padded_buffers_stay_within_the_budget() {

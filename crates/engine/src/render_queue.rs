@@ -14,6 +14,7 @@ use effectcraft_project::render_queue::{OutputFormat, OutputModule, PostRenderAc
 use effectcraft_project::{ItemId, ItemKind, LayerSource, Project};
 use effectcraft_render::{ExprHost, FootageSource};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{Event, Session};
 
@@ -33,6 +34,42 @@ pub struct ExportJob<'a> {
     pub label: String,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     pub nested_switches: bool,
+    /// The layer caches of the Render Queue run this job belongs to (#3335): consecutive jobs
+    /// start warm, and the run trims the accelerator's pooled textures once at its end. `None`:
+    /// a one-off export (its own caches, trimmed when it ends).
+    pub caches: Option<&'a RunCaches>,
+    /// The compositor the queue item's output modules render on (#3335): the first module
+    /// chooses (measuring a GPU project's first frames) and stores it here, the others follow.
+    pub renderer: Option<&'a Mutex<Option<effectcraft_render::Backend>>>,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, `None` for Auto.
+    pub gpu_frames: Option<usize>,
+}
+
+/// What the jobs of one Render Queue run keep between them (#3335): a layer cache per
+/// compositor (a buffer an effect made on the GPU is not the CPU's), together at the budget
+/// each job's single cache had before.
+pub struct RunCaches {
+    pub gpu: effectcraft_render::LayerCache,
+    pub cpu: effectcraft_render::LayerCache,
+}
+
+impl Default for RunCaches {
+    fn default() -> Self {
+        let half = effectcraft_render::LayerCache::default().budget() / 2;
+        RunCaches { gpu: effectcraft_render::LayerCache::new(half), cpu: effectcraft_render::LayerCache::new(half) }
+    }
+}
+
+/// Calls [`effectcraft_render::Accelerator::render_end`] when a Render Queue run ends, however
+/// it ends (done, failed, stopped, panicked): its jobs leave the pooled textures to each other.
+struct RunEnd<'a>(Option<&'a dyn effectcraft_render::Accelerator>);
+
+impl Drop for RunEnd<'_> {
+    fn drop(&mut self) {
+        if let Some(a) = self.0 {
+            a.render_end();
+        }
+    }
 }
 
 /// What an export wrote.
@@ -113,6 +150,14 @@ pub struct JobShared {
     pub cancel: AtomicBool,
     pub state: Mutex<JobState>,
     pub updates: Mutex<Vec<ItemUpdate>>,
+    /// A waiting control request retains its own items across requeue/removal/project edits.
+    reply: Mutex<Option<RenderReply>>,
+}
+
+#[derive(Default)]
+struct RenderReply {
+    items: Vec<Value>,
+    finished: bool,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -120,6 +165,48 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl JobShared {
+    /// Retain the requesting command's items before the UI can edit or replace the queue.
+    pub fn retain_reply_items(&self, items: Vec<Value>) {
+        *lock(&self.reply) = Some(RenderReply { items, finished: false });
+    }
+
+    /// Whether completion and post-render actions have been applied to this run.
+    pub fn reply_finished(&self) -> bool {
+        lock(&self.reply).as_ref().is_some_and(|reply| reply.finished)
+    }
+
+    /// Final items for this run, independent of the current project and any later render.
+    pub fn completed_items(&self) -> Option<Vec<Value>> {
+        lock(&self.reply).as_ref().filter(|reply| reply.finished).map(|reply| reply.items.clone())
+    }
+
+    fn update_reply(&self, updates: &[ItemUpdate]) {
+        let mut reply = lock(&self.reply);
+        let Some(reply) = reply.as_mut() else { return };
+        for update in updates {
+            let id = match update {
+                ItemUpdate::Started { id, .. } | ItemUpdate::Finished { id, .. } => *id,
+            };
+            let Some(item) = reply.items.iter_mut().find(|item| item["id"].as_u64() == Some(id)).and_then(Value::as_object_mut) else { continue };
+            match update {
+                ItemUpdate::Started { unix, .. } => {
+                    item.insert("status".into(), json!(RenderStatus::Rendering));
+                    item.insert("statusLabel".into(), json!(RenderStatus::Rendering.label()));
+                    item.insert("started".into(), json!(unix));
+                    item.insert("render_time".into(), Value::Null);
+                }
+                ItemUpdate::Finished { status, seconds, output, .. } => {
+                    item.insert("status".into(), json!(status));
+                    item.insert("statusLabel".into(), json!(status.label()));
+                    item.insert("render_time".into(), json!(seconds));
+                    if let Some(output) = output {
+                        item.insert("last_output".into(), json!(output));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> JobState {
         lock(&self.state).clone()
     }
@@ -161,6 +248,8 @@ struct Work {
     items: Vec<Vec<(RenderQueueItem, String)>>,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     nested_switches: bool,
+    /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once.
+    gpu_frames: Option<usize>,
 }
 
 /// Where a relative render output goes when there is no default folder and the project is unsaved:
@@ -260,6 +349,7 @@ pub(crate) async fn run_items(
         storage: s.storage_quota.clone(),
         items,
         nested_switches: s.prefs.general.switches_affect_nested_comps,
+        gpu_frames: s.prefs.memory.gpu_frames(),
     };
     run_work(work, shared, notify).await;
 }
@@ -270,6 +360,8 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         let mut s = lock(&shared.state);
         s.items_total = w.items.len();
     }
+    let caches = RunCaches::default();
+    let _run_end = RunEnd(w.accel.as_deref());
     for (k, modules) in w.items.iter().enumerate() {
         let Some((item, _)) = modules.first() else { continue };
         if shared.cancel.load(Ordering::Relaxed) {
@@ -290,6 +382,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         // Every output module encodes the same frames (Composition ▸ Add Output Module); the
         // first module's file is the item's output.
         let mut r: Result<ExportResult, String> = Err("no output module".into());
+        let renderer = Mutex::new(None);
         for (mi, (mitem, path)) in modules.iter().enumerate() {
             let name = w.project.item(mitem.comp).map(|i| i.name.clone()).unwrap_or_default();
             let index = w.project.render_queue.iter().position(|i| i.id == mitem.id).map_or(0, |i| i + 1);
@@ -303,6 +396,9 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 storage: w.storage.as_deref(),
                 label: format!("#{index} {name} (output module {})", mi + 1),
                 nested_switches: w.nested_switches,
+                caches: Some(&caches),
+                renderer: Some(&renderer),
+                gpu_frames: w.gpu_frames,
             };
             let rr = w
                 .exporter
@@ -563,6 +659,7 @@ impl Session {
             storage: self.storage_quota.clone(),
             items,
             nested_switches: self.prefs.general.switches_affect_nested_comps,
+            gpu_frames: self.prefs.memory.gpu_frames(),
         };
         let shared = Arc::new(JobShared::default());
         if wait {
@@ -630,8 +727,11 @@ impl Session {
     pub fn poll_render(&mut self) -> bool {
         self.drain_remote_render();
         let Some(job) = &self.render_job else { return false };
-        let updates = std::mem::take(&mut *lock(&job.shared.updates));
+        // Observe completion before draining updates so a worker finishing between the two
+        // reads cannot leave its final item statuses behind when this job is removed.
         let finished = job.is_finished();
+        let updates = std::mem::take(&mut *lock(&job.shared.updates));
+        job.shared.update_reply(&updates);
         let changed = !updates.is_empty();
         let mut post: Vec<(u64, String)> = vec![];
         if changed {
@@ -663,6 +763,7 @@ impl Session {
             }
             self.bump();
         }
+        let mut completed = None;
         if finished && let Some(mut job) = self.render_job.take() {
             if let Some(t) = job.thread.take() {
                 let _ = t.join();
@@ -689,11 +790,17 @@ impl Session {
                 self.events.push(Event::Frontend { command: "renderQueue.notify".into(), params: serde_json::json!({"message": msg, "error": failed > 0}) });
             }
             self.events.push(Event::Toast { message: msg, error: failed > 0 });
+            completed = Some(job.shared);
         }
         for (id, path) in post {
             if let Err(e) = self.post_render_action(id, &path) {
                 self.events.push(Event::Toast { message: format!("Post-render action: {e}"), error: true });
             }
+        }
+        if let Some(shared) = completed
+            && let Some(reply) = lock(&shared.reply).as_mut()
+        {
+            reply.finished = true;
         }
         changed || finished
     }

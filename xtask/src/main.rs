@@ -1,4 +1,4 @@
-//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|aep-corpus|wasm|web|ico|ci>`.
+//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus|wasm|web|ico|ci>`.
 //!
 //! - `layers`: enforces the dependency layering of `docs/architecture.md` §1 (downward-only edges,
 //!   listed same-layer edges, no UI/OS crates below L5).
@@ -6,19 +6,24 @@
 //!   and the web app.
 //! - `web [--dev] [--serve PORT]`: build the web app (`apps/effectcraft-web`) into
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
+//! - `lock-patches`: `Cargo.lock` records no unused `[patch]` entry (the Nix build cannot vendor one).
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
 //! - `aep-corpus [--dir DIR]`: fetch the After Effects test corpus at the commit pinned in
 //!   `crates/aep/tests/fixtures/corpus.lock`, verify every file's SHA-256, install into `corpus/aep`.
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
 //! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
-//!   PDF dependency policy, layers, assets, wasm. Everything builds in the dev profile.
+//!   PDF dependency policy, lock patches, layers, assets, wasm. Everything builds in the dev profile.
+//! - `ci --affected [--base REV] [--dry-run]`: the same gates for only the crates the change since
+//!   REV (default: the merge-base with `main`) can affect; see `affected.rs` and docs/testing.md.
 //! - `bench [--bin CLI] [--quick] [--compare OLD.jsonl] …`: render benchmark of generated scenarios
 //!   (memory, CPU, wall time) into `target/bench/results.jsonl` (`bench.rs`, docs/testing.md).
 
 mod aep_corpus;
+mod affected;
 mod bench;
 mod ico;
+mod lock_patches;
 mod pdf_deps;
 mod version;
 
@@ -31,12 +36,9 @@ const LAYERS: &[(&str, u8)] = &[
     ("time", 0),
     ("geom", 0),
     ("color", 0),
-    ("vp9enc", 0),
     ("vp8enc", 0),
     ("testkit", 0),
     ("opusenc", 0),
-    ("hevcenc", 0),
-    ("av1enc", 0),
     ("raster", 1),
     ("keyframe", 1),
     ("path", 1),
@@ -479,34 +481,73 @@ fn audio_backend() -> Result<(), String> {
 ///
 /// Each run goes ahead when an earlier one fails; the error names every run that failed.
 fn tests() -> Result<(), String> {
+    let nextest = Command::new(env!("CARGO")).args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success());
+    tests_for(&[], nextest, true, true)
+}
+
+/// Keep the full and affected gates on the same test runner, including GPU isolation and the
+/// translation report. An empty package list selects the whole workspace.
+fn tests_for(packages: &[String], nextest: bool, has_lib: bool, doctests: bool) -> Result<(), String> {
     let cargo = env!("CARGO");
-    let targets = ["--workspace", "--lib", "--bins", "--tests", "--no-fail-fast"];
-    let nextest = Command::new(cargo).args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success());
-    let mut runs = Vec::new();
-    if nextest {
-        runs.push(run(Command::new(cargo).args(["nextest", "run"]).args(targets).args(["-E", "not package(effectcraft-gpu)"])));
-        // effectcraft-gpu's tests share one device, so they run in one libtest process: the
-        // binary nextest just built (`cargo test -p effectcraft-gpu` would rebuild ~2 minutes).
-        runs.push(lib_test_binary("effectcraft-gpu").and_then(|mut c| run(&mut c)));
-    } else {
+    let selection = test_selection(packages);
+    let includes = |name: &str| packages.is_empty() || packages.iter().any(|p| p == name);
+    if !nextest {
         println!("cargo-nextest not found, running cargo test (install: cargo install cargo-nextest --locked)");
-        runs.push(run(Command::new(cargo).arg("test").args(targets)));
+    }
+    let mut runs = vec![run(&mut test_command(packages, nextest, has_lib))];
+    if nextest && includes("effectcraft-gpu") {
+        // GPU tests share one device, so reuse the selected build in one libtest process.
+        runs.push(lib_test_binary("effectcraft-gpu", &selection).and_then(|mut c| run(&mut c)));
     }
     // The test runs above hide a passing test's output, so the always-passing report runs again
     // with --nocapture, from the binary already built.
-    runs.push(lib_test_binary("effectcraft-ui-egui").and_then(|mut c| run(c.args(["missing_translations_report", "--nocapture"]))));
-    runs.push(run(Command::new(cargo).args(["test", "--workspace", "--doc", "--no-fail-fast"])));
+    if includes("effectcraft-ui-egui") {
+        runs.push(lib_test_binary("effectcraft-ui-egui", &selection).and_then(|mut c| run(c.args(["missing_translations_report", "--nocapture"]))));
+    }
+    if doctests {
+        runs.push(run(Command::new(cargo).arg("test").args(&selection).args(["--doc", "--no-fail-fast"])));
+    }
     let failed: Vec<String> = runs.into_iter().filter_map(Result::err).collect();
     if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
 }
 
+/// Select library tests only when the selected packages contain a library; bin-only package
+/// sets otherwise fail before running any tests. The full workspace always has library targets.
+fn test_command(packages: &[String], nextest: bool, has_lib: bool) -> Command {
+    let mut c = Command::new(env!("CARGO"));
+    if nextest {
+        c.args(["nextest", "run"]);
+        // A selected package can have no tests, or only GPU tests that run separately.
+        if !packages.is_empty() {
+            c.arg("--no-tests=pass");
+        }
+    } else {
+        c.arg("test");
+    }
+    c.args(test_selection(packages));
+    if packages.is_empty() || has_lib {
+        c.arg("--lib");
+    }
+    c.args(["--bins", "--tests", "--no-fail-fast"]);
+    if nextest {
+        c.args(["-E", "not package(effectcraft-gpu)"]);
+    }
+    c
+}
+
+fn test_selection(packages: &[String]) -> Vec<String> {
+    if packages.is_empty() { vec!["--workspace".into()] } else { packages.iter().flat_map(|p| ["-p".into(), p.clone()]).collect() }
+}
+
 /// A command running `package`'s lib test binary from the test build above, the way `cargo test`
-/// runs it (from the package directory), found with `--no-run` and the same workspace selection
+/// runs it (from the package directory), found with `--no-run` and the same package selection
 /// so nothing rebuilds: `cargo test -p <package>` resolves features for that package alone and
 /// recompiles much of the workspace.
-fn lib_test_binary(package: &str) -> Result<Command, String> {
+fn lib_test_binary(package: &str, selection: &[String]) -> Result<Command, String> {
     let out = Command::new(env!("CARGO"))
-        .args(["test", "--workspace", "--lib", "--bins", "--tests", "--no-run", "--message-format=json-render-diagnostics"])
+        .arg("test")
+        .args(selection)
+        .args(["--lib", "--bins", "--tests", "--no-run", "--message-format=json-render-diagnostics"])
         .stderr(std::process::Stdio::inherit())
         .output()
         .map_err(|e| format!("cargo test --no-run: {e}"))?;
@@ -535,12 +576,13 @@ type Stage = fn() -> Result<(), String>;
 
 /// Every stage runs even when an earlier one fails, so one run reports all the problems.
 fn ci() -> Result<(), String> {
-    let stages: [(&str, Stage); 8] = [
+    let stages: [(&str, Stage); 9] = [
         ("audio backend", audio_backend),
         ("fmt", || run(Command::new(env!("CARGO")).args(["fmt", "--check"]))),
         ("clippy", || run(Command::new(env!("CARGO")).args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
         ("tests", tests),
         ("pdf-deps", || pdf_deps::run(&root())),
+        ("lock-patches", || lock_patches::run(&root())),
         ("layers", layers),
         ("assets", assets),
         ("wasm", wasm),
@@ -556,8 +598,12 @@ fn main() -> ExitCode {
         "wasm" => wasm(),
         "assets" => assets(),
         "pdf-deps" => pdf_deps::run(&root()),
+        "lock-patches" => lock_patches::run(&root()),
         "aep-corpus" => aep_corpus::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
-        "ci" => ci(),
+        "ci" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            if rest.iter().any(|a| a == "--affected") { affected::run(&root(), &rest) } else { ci() }
+        }
         "audio-backend" => audio_backend(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
@@ -569,7 +615,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|lock-patches|aep-corpus [--dir DIR]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci [--affected [--base REV] [--dry-run]]|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -582,7 +628,7 @@ fn main() -> ExitCode {
 
 /// The workspace root (the parent of `xtask/`).
 pub fn root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask has a parent dir").to_path_buf()
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 #[cfg(all(test, target_os = "linux"))]

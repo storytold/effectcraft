@@ -19,10 +19,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L0 | `geom` | Vectors, matrices, quaternions, the layer transform (anchor, position, scale, orientation, rotation) |
 | L0 | `color` | sRGB and linear, HSL/HSV, luminance, the 38 blend modes, label colors |
 | L0 | `vp8enc` | VP8 key-frame encoder (the lossy picture of WebP images and animation frames: 16×16 and B_PRED intra modes by rate–distortion cost, per-frame token probability updates), from RFC 6386 |
-| L0 | `vp9enc` | VP9 encoder (profile 0, 8-bit 4:2:0, key and inter frames with motion search, loop filter and rate control; lossless at quality 100) for WebM export, from the VP9 bitstream specification |
 | L0 | `opusenc` | Opus encoder: RFC 6716 SILK (NB/MB/WB), hybrid (SWB/FB) and CELT (FB) modes chosen by bitrate and application (audio / voice), 48 kHz 20 ms packets, mono/stereo, and the RFC 7845 `OpusHead`, for WebM export audio |
-| L0 | `hevcenc` | HEVC (H.265) encoder from ITU-T H.265: Main / Main 10 4:2:0, IDR + P slices (quarter-pel motion, merge/AMVP), CABAC, deblocking, bitrate or constant-QP rate control, for MP4 (`hvc1`) export |
-| L0 | `av1enc` | AV1 encoder from the AV1 bitstream specification: Main profile 8/10-bit 4:2:0, key + inter frames (quarter-pel motion), deblocking, for MP4 (`av01`) and WebM export |
 | L1 | `raster` | Premultiplied float images, sampling, affine and projective warps, blurs, compositing (parallel with rayon) |
 | L1 | `keyframe` | Animated values, keyframes with temporal ease and spatial Bezier, roving, hold, velocity |
 | L1 | `segment` | Swappable trained models for Roto Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
@@ -44,7 +41,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
 | L3 | `aep` | After Effects projects in one crate (like `lottie`): `container` reads and writes the `.aep` container (RIFX `Egg!`) as a lossless chunk tree with a byte-identical round trip, bounded for hostile input, reads the `.aepx` XML form into the same tree, and has a typed view of items, layers, properties, effects, masks, shapes, text, markers, footage, cameras, lights and layer styles, from our own observations of generated files ([aep-format.md](aep-format.md)); `import` maps the typed view into a project (items, settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text, shapes, cameras, lights, mattes, markers, time remapping, layer styles, the effects of a shared table, footage) with a report of everything not imported ([aep-import.md](aep-import.md)); `export` builds every chunk in code (prototypes in the layout After Effects writes, cloned and edited only at verified fields) for the same scope, with a report of everything not exported, verified by opening the output in After Effects ([aep-export.md](aep-export.md)) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
-| L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
+| L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (WebAssembly ABI v1 and v2, the latter with neighbouring frames; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
 | L3 | `helper-host` | External effect helpers: finds helper programs, runs each as a child process and registers its effects (plug-in API 2) over a versioned pipe + shared-file protocol; a crashing helper is an error on the effect, never a crash ([external-helpers.md](external-helpers.md), [ADR 0001](adr/0001-external-effect-helpers.md)). Native only |
 | L4 | `engine` | `Session`: project, branching undo history, editor state, the command registry and menus, the ScriptUI window model (`scriptui`) |
 | L4 | `script` | Scripting: JavaScript (boa) with an After Effects-style object model (`app.project`, comps, layers, properties, render queue) and ScriptUI (dialogs, palettes, dockable panels; script-host threads so dialogs block `show()`), whose edits run engine commands; AE match names |
@@ -122,7 +119,7 @@ are not rewritten, so an expression that computes an effect point on a shape or 
 other values may need `+ [thisComp.width / 2, thisComp.height / 2]`. Effects that use the layer
 bounds (edge pinning, wipes, Offset, generators) now cover the whole comp-sized bounds instead of
 their bottom-right quarter. Tracking data of effects that analyse footage (Warp Stabilizer, 3D
-Camera Tracker, Mocha shape) is left as it is: footage has a source rectangle, whose effect space
+Camera Tracker, Tracked Shape Matte) is left as it is: footage has a source rectangle, whose effect space
 did not change.
 
 ## 4. Rendering
@@ -241,16 +238,43 @@ converted on demand with the HDR step and without the exposure; the Info panel s
 frame's float values. The browser keeps 8-bit frames for now (its frame workers send RGBA8).
 
 A persistent **disk cache** (`render::disk_cache`, Settings ▸ Media & Disk Cache) backs both
-the layer cache and the viewer's RAM preview: layer buffers that were slow to render and every
-preview frame are written (LZ4, atomic rename, checksummed) under 128-bit content keys — the
-comp's content hash (the comp, what it uses, footage file size and time) plus frame, scale and
-view for frames; the layer key salted with the footage fingerprint for layers — so entries
-survive restarts and never go stale. Frame entries are 8-bit RGBA, or for 32 bpc viewer frames
-half floats with their bytes shuffled into planes before LZ4 (the entry header's format byte
-tells them apart; the render options in the key keep the two kinds apart). LRU eviction keeps it under the size limit; Edit ▸ Purge
-empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue. In the
-browser the frames live in the Origin Private File System: frame workers write them, the page
-keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
+the layer cache and the viewer's RAM preview: layer buffers that were slow to render, every
+preview frame and Roto Brush / Object Matte segmentations are written (LZ4, atomic rename,
+checksummed) and survive restarts. The design (#3184):
+
+- **Keys from memory.** A frame's key is its comp's content key plus frame, scale, view and
+  render options; the content key hashes the project settings and the items the comp can draw
+  (its layers but those that can't change the picture, nested comps, footage with its settings
+  and paths, solids, Media Replacement footage, proxies: `Project::pixel_reach`). Expressions
+  among them add what they can read: every layer of their comps, the markers, the comps and
+  footage they name with literal names (`comp("Name")`, `footage("Name")`, and which items have
+  those names), or the whole project when they compute a name or reach items another way
+  (`expression_reach`). An edit to anything else keeps the key. A layer buffer's key is the
+  layer cache's content key (which names the footage it uses with its paths) and the renderer
+  version. Nothing here looks at a file, and nothing ever scans the project's files.
+- **File lists checked on hit.** Every frame and layer entry keeps the source files it was
+  made of, with the size and modification time they were read with (the browser: size and
+  content hash). An entry is used only while they are unchanged: one `metadata` call per listed
+  file when it is read. A changed, missing or unreadable file, a damaged entry or an older
+  format is a miss; the entry is deleted and the frame renders again and replaces it.
+- **Incomplete lists stay in memory.** A frame or buffer whose files can't all be named (a
+  source that doesn't say what it read, more than 4096 files) is shown but never written.
+- **Reload Footage drops entries.** File ▸ Reload Footage deletes the frame and layer entries
+  whose lists name the item's files (the writer thread reads each entry's list, not its
+  pixels), so a file replaced by one with the same size and time is read again. A reload while
+  the cache is off is remembered for the session and applied when it is switched on, before it
+  is read. A render already under way offers entries made of the files as they were: each
+  render takes the cache's drop generation before it reads, and an entry listing a file dropped
+  after that is refused (`DiskCache::drop_generation`); the frame is shown, never stored.
+- **Edits keep what they can't change.** RAM frames outside an edit's dirty spans are kept
+  (`Project::dirty_spans`), and their disk entries are linked to the comp's new key.
+
+Frame entries are 8-bit RGBA, or for 32 bpc viewer frames half floats with their bytes shuffled
+into planes before LZ4 (the entry header's format byte tells them apart; the render options in
+the key keep the two kinds apart). LRU eviction keeps the cache under the size limit; Edit ▸
+Purge empties it, `cache.diskStats` reports it, and the timeline draws disk-only frames in blue.
+In the browser the frames live in the Origin Private File System: frame workers write them, the
+page keeps the index (`DiskIndex`) and reads hits ([web.md](web.md#disk-cache)).
 
 **Deferred readbacks** (`effectcraft-gpu` `deferred`): where a readback can't be waited for (WebGPU
 in a browser worker) a frame renders in passes. `Accelerator::frame_begin` / `pass_begin` /
@@ -305,7 +329,7 @@ before conversion (a quarter of the conversions; the result differs from convert
 in blocks where colours clip) and resampled from there, as other frames are from full size.
 
 **GPU compositor** (`crates/gpu`; Project Settings ▸ Video Rendering and Effects ▸ Mercury GPU
-Acceleration, the default, or Mercury Software Only; `render.backend`). The CPU renderer is the
+Acceleration, the default, or Software Rendering; `render.backend`). The CPU renderer is the
 reference and keeps rendering layer content (sources, masks, CPU effects, layer styles) into the
 layer cache. The render crate defines an `Accelerator` trait; `effectcraft_gpu::Gpu` implements it
 on wgpu compute shaders. `RenderOpts::backend` picks `Cpu`, `Gpu` or `Auto` (an accelerator
@@ -314,10 +338,13 @@ whichever compositor measured faster for it (`render::auto::AutoPick`, kept by t
 per comp, output scale and path (readback or viewer display) it averages CPU and GPU frame times
 (warm-up on both sides, the fastest warm-up frame starting the average, single stalls capped),
 picks the GPU unless the CPU is clearly faster, and re-measures the other side every 48 frames.
-Render Queue jobs don't use Auto: every frame of a job renders on the project's renderer (the
-GPU compositor with Mercury GPU Acceleration), so runs of a render don't differ by timing.
 Light comps (a few small layers, which the CPU composites only within their bounds) then stay on
-the CPU instead of paying for full-frame passes and a readback. A GPU frame walks the comp like
+the CPU instead of paying for full-frame passes and a readback. Render Queue jobs don't use
+Auto per frame: a job renders every frame on one compositor, never a mix (#3335). A GPU
+Acceleration job with an accelerator times both on its first frames
+(`export::pipeline::Cx::probe`, jobs of 12 frames or more) and keeps the faster, the CPU only
+when clearly faster; `EFFECTCRAFT_RQ_RENDERER=gpu|cpu` fixes the choice, and readback-deferred
+accelerators (the web) render on the project's renderer. A GPU frame walks the comp like
 `draw_comp`: cached layer buffers are uploaded once per buffer, then transformed with the CPU's
 sampling (nearest, bilinear, Catmull-Rom bicubic, the same minification pre-filter), motion-blur
 sub-samples are accumulated, and track mattes, Preserve Transparency, layer style passes,
@@ -344,16 +371,16 @@ Preserve Transparency / blend kernels (a 3D track matte renders solo through the
 Environment Light Background layers draw their sky in a kernel (`adv_sky`, from
 `Renderer::sky_draw`) before the rest of the run, in Classic and Advanced 3D comps. Wireframe
 outlines draw on the GPU from the CPU's pixel list (`Renderer::wireframe_pixels`). GPU effects
-(`effects::GPU_EFFECTS`, 280 of them: blurs, colour correction, keying incl. Key Light, mattes,
-channel, stylize, distortion and warps (Warp, Bezier Warp, Smear, Reshape, CC Bend It, CC Page
-Turn, CC Bender, CC Blobbylize), Cartoon, bevels, shapes, the transitions (CC light family, CC
-transitions, Block Dissolve), perspective (Radial Shadow, CC Cylinder / Sphere / Spotlight /
+(`effects::GPU_EFFECTS`, 280 of them: blurs, colour correction, keying incl. Screen Color Key, mattes,
+channel, stylize, distortion and warps (Warp, Bezier Warp, Smear, Reshape, Two-Point Bend, CC Page
+Turn, Flexible Bend, Organic Displacement), Cartoon, bevels, shapes, the transitions (CC light family, CC
+transitions, Block Dissolve), perspective (Radial Shadow, Cylinder Wrap / Sphere / Spotlight /
 Environment, 3D Glasses), generators, noise, grain, text (Numbers, Timecode), time, 3D Channel (aux channels as an
 extra texture), Immersive Video, colour management (colour programs from
 `effects::color_program`, LUTs in a storage buffer) and the simulations' render passes (the
 simulation stays on the CPU and hands its plan — sprites, pieces, blobs, grids — to a tiled
-rasteriser; the particle effects too, `gpu::fx_particles`: CC Particle World / Systems II,
-Particle Playground with its Layer Map frames in one atlas, CC Ball Action, CC Pixel Polly, CC
+rasteriser; the particle effects too, `gpu::fx_particles`: Particle Emitter 3D / Systems II,
+Particle Playground with its Layer Map frames in one atlas, Ball Grid, Pixel Shatter, CC
 Scatterize; plans too large for one item table draw in several passes over the previous one),
 and the geometry generators (Lightning, Advanced Lightning, Radio Waves, Stroke, Scribble,
 Vegas, Write-on, Audio Spectrum / Waveform, Basic / Path Text: bolts, strokes, waves, audio
@@ -364,7 +391,7 @@ as kernels, in one module per family (`gpu::fx_*` with `shaders/fx_*.wgsl`); con
 effects run as one chain with one upload and one readback. Statistics that need the whole frame
 (Auto Levels / Contrast / Color, Equalize, Shadow/Highlight, Color Stabilizer, Remove Grain's
 noise level) are measured on the CPU from one readback and applied on the GPU; effects reading
-other frames (Echo, Posterize Time, Time Difference, Time Displacement, CC Force Motion Blur, CC
+other frames (Echo, Posterize Time, Time Difference, Time Displacement, Temporal Motion Blur, CC
 Wide Time, Pixel Motion Blur, Timewarp) upload the frames the host renders (`time_frames`) and
 combine them on the GPU; Time Displacement's per-pixel times and Timewarp's motion vectors
 (`time_fx::timewarp_plan`) are computed on the CPU. Numbers and Timecode rasterise their glyph
@@ -386,7 +413,12 @@ as NaNs (a kernel that skips pixels fails the oracle) and validation errors pani
 (`ui-egui::frames`); headless renders, the CLI (unless `--gpu`) and CI use the CPU. Outside
 tests, device errors are logged rather than fatal. A viewer frame that runs out of video memory
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
-the RAM preview keeps half as many GPU frames from then on. The same guard catches a frame's
+the RAM preview keeps half as many GPU frames from then on. However many frame threads the viewer
+runs, at most two of them start GPU render attempts at once. Shared-pool workers use the CPU
+when both slots are busy rather than blocking Rayon helpers; dedicated single-thread preview
+lanes wait for admission and remain on the GPU, so
+working-texture pressure is bounded by concurrent attempts rather than the thread count (#3028).
+A single large frame or retained frames can still exceed the available video memory. The same guard catches a frame's
 validation errors (an invalid texture, often left by a failed allocation): that frame renders on
 the CPU and the kept textures are freed, but the compositor stays on and, with no allocation
 failure before it, the RAM preview keeps its GPU frames (#1319). A frame whose render panics is
@@ -407,12 +439,12 @@ sentinel is implemented here. Browser scope futures are not synchronously awaite
 forwards shared-device errors, while owned worker devices install their own handlers. On the web
 (WebGPU) the GPU composites viewer frames; steps that need a readback fall back to the CPU (the
 Info panel's pixel readout reads GPU frames back asynchronously). **GPU particles**
-(`effects::psim`, `gpu::particles`): CC Particle World, CC Particle Systems II and Particle
+(`effects::psim`, `gpu::particles`): Particle Emitter 3D, Particle Emitter 2D and Particle
 Playground cannons without interacting forces evolve every particle independently, so the GPU
 backend (reached through `EffectHost::particles` when the GPU compositor is active) simulates one
 particle per invocation from the CPU's birth schedule and keeps per-key state checkpoints on the
 GPU, like `SimCache`; the CPU simulation stays the oracle (tests compare ids and positions).
-CC Particle World, CC Particle Systems II and CC Mr. Mercury sample their Birth Rate at every
+Particle Emitter 3D, Particle Emitter 2D and Liquid Particles sample their Birth Rate at every
 step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of its own time;
 the rate is left out of the simulation key, and a checkpoint is resumed only with the same rate history (the CPU state's `hist`, the GPU
 checkpoint's births). The rate's keyframes are read at the step's exact layer time
@@ -603,7 +635,7 @@ Unix milliseconds. The layer's Start Time becomes `dataStart + videoStart − fi
 (`videoStart` given, or the file's creation date on the desktop; reduced to a time of day when
 the data has no dates).
 
-**Lumetri Scopes** (`raster::scopes`) are density plots of the viewer frame (rendered over the
+**Video Scopes** (`raster::scopes`) are density plots of the viewer frame (rendered over the
 comp background) with BT.601 / BT.709 / BT.2020 luma and colour-difference coefficients.
 
 ## 5. Expressions
