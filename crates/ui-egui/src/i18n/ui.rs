@@ -2446,9 +2446,15 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 const HEBREW: &[(&str, &str)] = &[
     ("Pre-compose", "יצירת קומפוזיציית ביניים"),
     ("Leave all attributes in \"{}\"", "השארת כל המאפיינים ב־\u{2068}\"{}\"\u{2069}"),
-    ("Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.", "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"{}\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית."),
+    (
+        "Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.",
+        "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"{}\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית.",
+    ),
     ("Move all attributes into the new composition", "העברת כל המאפיינים לקומפוזיציה החדשה"),
-    ("Use this option to place the currently selected layers together into a new intermediate composition.", "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה."),
+    (
+        "Use this option to place the currently selected layers together into a new intermediate composition.",
+        "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה.",
+    ),
     ("Adjust composition duration to the time span of the selected layers", "התאמת משך הקומפוזיציה לטווח הזמן של השכבות שנבחרו"),
     ("New Composition From Footage", "קומפוזיציה חדשה מקובץ מדיה"),
     ("Search project", "חיפוש בפרויקט"),
@@ -10681,18 +10687,21 @@ mod tests {
         for (english, expected) in [
             ("Pre-compose", "יצירת קומפוזיציית ביניים"),
             ("Move all attributes into the new composition", "העברת כל המאפיינים לקומפוזיציה החדשה"),
-            ("Use this option to place the currently selected layers together into a new intermediate composition.", "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה."),
+            (
+                "Use this option to place the currently selected layers together into a new intermediate composition.",
+                "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה.",
+            ),
             ("Adjust composition duration to the time span of the selected layers", "התאמת משך הקומפוזיציה לטווח הזמן של השכבות שנבחרו"),
         ] {
             assert_eq!(tr(english), expected, "Pre-compose: {english}");
         }
         let file = "clip_01.mov";
+        assert_eq!(tr_args("Leave all attributes in \"{}\"", &[&file]), "השארת כל המאפיינים ב־\u{2068}\"clip_01.mov\"\u{2069}");
         assert_eq!(
-            tr_args("Leave all attributes in \"{}\"", &[&file]),
-            "השארת כל המאפיינים ב־\u{2068}\"clip_01.mov\"\u{2069}"
-        );
-        assert_eq!(
-            tr_args("Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.", &[&file]),
+            tr_args(
+                "Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.",
+                &[&file]
+            ),
             "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"clip_01.mov\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית."
         );
         set_current("en");
