@@ -619,7 +619,8 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
 }
 
 /// The scroll area a docked ScriptUI panel shows its `window`-sized window in, at most `dock`
-/// big, with the app's solid bars (#269). `body` draws the window in the rect it is given.
+/// big, with the app's scroll style (solid bars, #269). `body` draws the window in the rect it is
+/// given.
 fn panel_scroll<R>(
     ui: &mut egui::Ui,
     salt: impl std::hash::Hash + std::fmt::Debug,
@@ -638,8 +639,10 @@ fn panel_scroll<R>(
 /// The fit is decided from the window and the dock, not from what the scroll area has left. A
 /// solid bar, once shown, takes its width from the viewport, so a window that exactly fills its
 /// dock was "too large" for the narrower viewport and its bars never went away (#2796). The fit
-/// rounds the dock up to the whole pixel, as egui's scroll area does, because the script is told
-/// its dock's size rounded (#2585) and its window can be a fraction of a pixel bigger.
+/// rounds the dock up to the whole point, as egui's scroll area does, because the script is told
+/// its dock's size rounded (#2585) and its window can be a fraction of a point bigger. A window
+/// that overflows only one way still gets both bars: the first one's width hides the edge of a
+/// window laid out at the dock's full size, and the second one scrolls to it.
 fn panel_bars(dock: egui::Vec2, window: egui::Vec2) -> egui::scroll_area::ScrollBarVisibility {
     use egui::scroll_area::ScrollBarVisibility;
     if window.x <= dock.x.ceil() && window.y <= dock.y.ceil() { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::VisibleWhenNeeded }
