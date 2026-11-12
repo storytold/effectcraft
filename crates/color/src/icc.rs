@@ -325,6 +325,9 @@ pub struct Clut {
     pub data: Vec<f32>,
 }
 
+/// Most interpolating inputs [`Clut::eval`] combines (ICC allows 15).
+pub const MAX_CLUT_INPUTS: usize = 16;
+
 impl Clut {
     /// Multilinear interpolation at `x` (0..1 per input).
     pub fn eval(&self, x: &[f64]) -> Vec<f64> {
@@ -334,26 +337,40 @@ impl Clut {
         let mut s = self.outputs;
         for i in (0..n).rev() {
             stride[i] = s;
-            s *= self.grid[i].max(1);
+            // Saturating: a table with enough axes to overflow cannot hold its data anyway, and a
+            // saturated offset reads nothing (zero) instead of panicking.
+            s = s.saturating_mul(self.grid[i].max(1));
         }
         let mut frac = vec![0.0; n];
         let mut step = vec![0usize; n];
         for i in 0..n {
             let g = self.grid[i].max(1);
             let f = x.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0) * (g - 1) as f64;
-            let k = (f.floor() as usize).min(g.saturating_sub(2));
+            let mut k = (f.floor() as usize).min(g.saturating_sub(2));
             frac[i] = if g > 1 { f - k as f64 } else { 0.0 };
             step[i] = if g > 1 { stride[i] } else { 0 };
-            base += k * stride[i];
+            // The last grid point is a corner of its own, not an interpolation toward the next.
+            if frac[i] >= 1.0 {
+                k += 1;
+                frac[i] = 0.0;
+            }
+            base = base.saturating_add(k.saturating_mul(stride[i]));
         }
         let mut out = vec![0.0; self.outputs];
-        for corner in 0..(1usize << n) {
+        // Only the axes that interpolate have two corners: a singleton axis, or one sampled on a
+        // grid point, contributes its lower corner alone. ICC tables have at most 15 inputs; a
+        // table built with more interpolating axes than that evaluates to zero.
+        let active: Vec<usize> = (0..n).filter(|&i| step[i] != 0 && frac[i] != 0.0).collect();
+        if active.len() > MAX_CLUT_INPUTS {
+            return out;
+        }
+        for corner in 0..(1usize << active.len()) {
             let mut w = 1.0;
             let mut off = base;
-            for i in 0..n {
-                if corner >> i & 1 == 1 {
+            for (bit, &i) in active.iter().enumerate() {
+                if corner >> bit & 1 == 1 {
                     w *= frac[i];
-                    off += step[i];
+                    off = off.saturating_add(step[i]);
                 } else {
                     w *= 1.0 - frac[i];
                 }
@@ -362,7 +379,7 @@ impl Clut {
                 continue;
             }
             for (o, v) in out.iter_mut().enumerate() {
-                *v += w * self.data.get(off + o).copied().unwrap_or(0.0) as f64;
+                *v += w * self.data.get(off.saturating_add(o)).copied().unwrap_or(0.0) as f64;
             }
         }
         out
@@ -1050,6 +1067,31 @@ mod tests {
         }
         // A matrix/TRC profile still parses as one.
         assert!(matches!(parse_profile(&write_matrix_profile("m", P709, D65, 2.2)).unwrap(), Profile::Matrix(_)));
+    }
+
+    #[test]
+    fn clut_corners_count_only_interpolating_axes() {
+        // 64 singleton axes and one interpolating one: two corners, not 2^65.
+        let mut grid = vec![1; 64];
+        grid.push(2);
+        let c = Clut { grid, outputs: 1, data: vec![0.0, 1.0] };
+        let mut x = vec![0.5; 64];
+        x.push(0.25);
+        assert!((c.eval(&x)[0] - 0.25).abs() < 1e-9);
+        // On grid points nothing interpolates.
+        let c = Clut { grid: vec![2; 40], outputs: 1, data: vec![] };
+        assert_eq!(c.eval(&[1.0; 40]), vec![0.0]);
+        // More interpolating axes than ICC allows: zero, at once.
+        assert_eq!(c.eval(&[0.5; 40]), vec![0.0]);
+        // The last grid point of every axis is that table entry, however many axes there are.
+        let mut data = vec![0.0; 1 << 17];
+        data[(1 << 17) - 1] = 0.75;
+        let c = Clut { grid: vec![2; 17], outputs: 1, data };
+        assert!((c.eval(&[1.0; 17])[0] - 0.75).abs() < 1e-9);
+        // Strides that overflow usize (64 two-point axes) read nothing instead of panicking.
+        let c = Clut { grid: vec![2; 64], outputs: 1, data: vec![] };
+        assert_eq!(c.eval(&[1.0; 64]), vec![0.0]);
+        assert_eq!(c.eval(&[0.5; 64]), vec![0.0]);
     }
 
     #[test]

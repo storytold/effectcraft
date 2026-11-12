@@ -276,8 +276,8 @@ pub(super) fn wat_plugin(id: &str, api: i32, render: &str) -> String {
 
 #[test]
 fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
-    let dir = std::env::temp_dir().join(format!("effectcraft-host-plugins-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let guard = tempfile::tempdir().unwrap();
+    let dir = guard.path().to_path_buf();
     let files = [
         ("a-good.wasm", wat_plugin("org.test.host.good", 1, "i32.const 0").into_bytes()),
         ("b-garbage.wasm", b"\0asm\x01\0\0\0garbage".to_vec()),

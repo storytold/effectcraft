@@ -157,6 +157,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<Anim> {
         return Err(MediaError::Unsupported(format!("animated WebP of {} frames of {}×{} is too large to hold in memory", h.delays.len(), h.width, h.height)));
     }
     let dec = WebPDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("WebP: {e}")))?;
+    // The budget above used the canvas this file's header scan found; the decoder must agree, or
+    // a second VP8X header could make it allocate a far larger canvas.
+    if image::ImageDecoder::dimensions(&dec) != (h.width, h.height) {
+        return Err(MediaError::Decode("WebP: conflicting canvas sizes".into()));
+    }
     let (mut frames, mut delays, mut size) = (Vec::new(), Vec::new(), 0usize);
     for frame in dec.into_frames() {
         let frame = match frame {
@@ -325,5 +330,21 @@ mod tests {
         bytes[27..30].copy_from_slice(&u24(16383));
         let e = super::load(&bytes).err().unwrap();
         assert!(e.to_string().contains("too large"), "{e}");
+    }
+
+    #[test]
+    fn conflicting_canvas_headers_are_refused() {
+        // The first VP8X claims 16384×16384; a second one, which the header scan keeps, 1×1.
+        let mut bytes = webp(1, 1, &[(RED, 50); 2]);
+        bytes[24..27].copy_from_slice(&u24(16383));
+        bytes[27..30].copy_from_slice(&u24(16383));
+        let mut small = vec![0x12, 0, 0, 0];
+        small.extend_from_slice(&u24(0));
+        small.extend_from_slice(&u24(0));
+        let second = chunk(b"VP8X", &small);
+        bytes.splice(30..30, second.iter().copied());
+        let riff = u32::try_from(bytes.len() - 8).unwrap();
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(super::load(&bytes).is_err());
     }
 }

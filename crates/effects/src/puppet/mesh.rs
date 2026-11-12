@@ -614,11 +614,72 @@ pub fn triangulate(outline: &[[f64; 2]], opts: &MeshOpts) -> Mesh {
     Mesh { verts, tris, outline: poly }
 }
 
+/// The Expansion range the outline honours, in layer pixels (the property's slider range). A
+/// project file can store any number; outside this range it is clamped, so the padded grid
+/// below stays a few hundred pixels larger than the buffer.
+pub const EXPANSION_RANGE: (f64, f64) = (-100.0, 200.0);
+/// Most buffer pixels of padding the outline grid takes on each side (Expansion × buffer scale).
+const MAX_PAD: f64 = 4096.0;
+/// Most cells the padded outline grid may have (it is expanded with two `f64` distance buffers).
+const MAX_GRID_CELLS: usize = 1 << 25;
+/// Most the alpha is shrunk by, per axis, to make the padded grid fit; a layer needing more has no
+/// outline.
+const MAX_DOWNSAMPLE: usize = 8;
+
 /// The outline of the alpha region under `seed` (buffer pixels → layer space via `scale` and
-/// `offset`), expanded by `expansion` layer pixels.
+/// `offset`), expanded by `expansion` layer pixels (clamped to [`EXPANSION_RANGE`]). When the
+/// padded grid would pass [`MAX_PAD`] or [`MAX_GRID_CELLS`] (a high-scale layer with a large
+/// Expansion), the alpha is traced at a coarser resolution instead of being skipped.
 pub fn outline(alpha: &[f32], w: usize, h: usize, scale: f64, offset: [f64; 2], seed: [f64; 2], expansion: f64) -> Vec<[f64; 2]> {
-    // Pad so expansion can grow past the buffer edge.
-    let pad = (expansion.max(0.0) * scale).ceil() as usize + 2;
+    let expansion = if expansion.is_finite() { expansion.clamp(EXPANSION_RANGE.0, EXPANSION_RANGE.1) } else { 0.0 };
+    if alpha.len() < w.saturating_mul(h) {
+        return vec![];
+    }
+    let want = (expansion.max(0.0) * scale).ceil();
+    if !want.is_finite() {
+        return vec![];
+    }
+    for k in 1..=MAX_DOWNSAMPLE {
+        let pad = (want / k as f64).ceil();
+        let (kw, kh) = (w.div_ceil(k), h.div_ceil(k));
+        let fits = pad <= MAX_PAD && {
+            let pad = pad as usize + 2;
+            kw.checked_add(2 * pad).zip(kh.checked_add(2 * pad)).and_then(|(pw, ph)| pw.checked_mul(ph)).is_some_and(|c| c <= MAX_GRID_CELLS)
+        };
+        if !fits {
+            continue;
+        }
+        if k == 1 {
+            return outline_padded(alpha, [w, h], scale, offset, seed, expansion, pad as usize + 2);
+        }
+        let small = shrink(alpha, w, h, k);
+        let kf = k as f64;
+        return outline_padded(&small, [kw, kh], scale / kf, [offset[0] / kf, offset[1] / kf], seed, expansion, pad as usize + 2);
+    }
+    vec![]
+}
+
+/// `alpha` (`w × h`) with every `k × k` block averaged into one pixel.
+fn shrink(alpha: &[f32], w: usize, h: usize, k: usize) -> Vec<f32> {
+    let (kw, kh) = (w.div_ceil(k), h.div_ceil(k));
+    let mut out = vec![0.0f32; kw * kh];
+    for y in 0..kh {
+        for x in 0..kw {
+            let (x1, y1) = (((x + 1) * k).min(w), ((y + 1) * k).min(h));
+            let (mut sum, mut n) = (0.0f32, 0u32);
+            for yy in y * k..y1 {
+                for xx in x * k..x1 {
+                    sum += alpha[yy * w + xx];
+                    n += 1;
+                }
+            }
+            out[y * kw + x] = sum / n.max(1) as f32;
+        }
+    }
+    out
+}
+
+fn outline_padded(alpha: &[f32], [w, h]: [usize; 2], scale: f64, offset: [f64; 2], seed: [f64; 2], expansion: f64, pad: usize) -> Vec<[f64; 2]> {
     let (pw, ph) = (w + 2 * pad, h + 2 * pad);
     let mut on = vec![false; pw * ph];
     for y in 0..h {
