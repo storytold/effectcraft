@@ -9,6 +9,7 @@ pub mod crypto_pick;
 pub mod delete_items;
 pub mod dialogs;
 pub mod dialogs_3d;
+pub(crate) mod drag_preview;
 pub mod effect_controls;
 pub mod effects_presets;
 pub mod essential;

@@ -67,6 +67,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr("Select a layer to see its properties"), Tokens::ui(12.0), t.text_faint);
         return;
     };
+    let watch = super::drag_preview::DragWatch::begin(app);
     let project = app.session.project.clone();
     let expr = app.session.expr.clone();
     let now = app.session.time();
@@ -190,6 +191,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.status = e;
         }
     }
+    watch.end(app, &ctx);
 }
 
 fn section_header(app: &mut EffectcraftApp, p: &egui::Painter, x0: f32, w: f32, y: f32, title: &str, auto: &str) {

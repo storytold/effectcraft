@@ -1963,6 +1963,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         return;
     };
     let Some(comp) = app.session.project.comp_arc(cid) else { return };
+    let watch = super::drag_preview::DragWatch::begin(app);
     let mut tl = layout(app, ui, rect, cid, &comp);
     let g = &mut tl;
     if !ui.input(|i| i.pointer.primary_down()) {
@@ -2022,7 +2023,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     drop_targets(app, ui, g);
     let Rw { tl, ui_actions, .. } = rw;
     apply_ui_acts(app, &tl.comp, ui_actions);
-    apply_actions(app, ui, &tl.ctx, tl.actions);
+    apply_actions(app, &tl.ctx, tl.actions);
+    watch.end(app, &tl.ctx);
 }
 
 /// Applies the UI-only changes the frame collected (twirls, time, ending an undo merge).
@@ -2081,11 +2083,7 @@ fn apply_ui_acts(app: &mut EffectcraftApp, comp: &Comp, ui_actions: Vec<UiAct>) 
 }
 
 /// Runs the commands the frame collected through [`crate::menus::invoke`].
-fn apply_actions(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, actions: Vec<(String, serde_json::Value)>) {
-    if ui.input(|i| i.pointer.primary_down()) && actions.iter().any(|(id, _)| id == "prop.set") {
-        app.ui.viewer.property_interacting = true;
-        ctx.request_repaint();
-    }
+fn apply_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(String, serde_json::Value)>) {
     for (id, params) in actions {
         if id == "__endMerge" {
             app.session.history.merge_key = None;
