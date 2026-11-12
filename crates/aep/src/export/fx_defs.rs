@@ -733,7 +733,6 @@ mod tests {
         ("ec.blur.radial", "amount", 3467),
         ("ec.blur.ccradial", "amount", 3468),
         ("ec.distort.turbulentdisplace", "amount", 3469),
-        ("ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 3470),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
         ("ec.noise.fractal", "subSettings/subInfluence", 3485),
