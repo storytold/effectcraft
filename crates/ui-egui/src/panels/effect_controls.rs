@@ -36,6 +36,7 @@ mod viewer;
 
 pub(crate) use common::gesture_key;
 pub use common::{choose_files_after_apply, reveal_applied};
+pub(crate) use panel::handle_disclosure_key;
 pub use panel::{show, start_rename};
 pub(crate) use rows::toggle_pick;
 pub use viewer::viewer_hook;

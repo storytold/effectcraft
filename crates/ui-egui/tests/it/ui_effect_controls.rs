@@ -90,6 +90,180 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
     h.step();
 }
 
+fn header_arrow_harness() -> (Harness<'static, EffectcraftApp>, LayerId, [(u64, u64); 3]) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Disclosure", "width": 32, "height": 18, "frameRate": 30, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"name": "Controls", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let mut effects = [(0, 0); 3];
+    for pair in &mut effects {
+        let fx = s.execute("effect.apply", json!({"layers": [lid], "effect": "Point Control"})).unwrap()["effects"][0].as_u64().unwrap();
+        let prop = layer(&s, lid).props.find_group(fx).unwrap().get("point").unwrap().uid;
+        *pair = (fx, prop);
+    }
+    s.state.selected_props.clear();
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    h.run_steps(4);
+    (h, LayerId(lid), effects)
+}
+
+fn header_arrow_key(h: &mut Harness<'_, EffectcraftApp>, key: egui::Key, modifiers: egui::Modifiers) {
+    h.key_press_modifiers(modifiers, key);
+    h.run_steps(2);
+}
+
+#[test]
+fn effect_header_arrows_collapse_and_expand_without_editing_the_document() {
+    let (mut h, lid, [(fx, prop), (_, other), _]) = header_arrow_harness();
+    let at = rect_of(&h, &format!("effectControls.effect.{fx}.name")).center();
+    click(&mut h, at);
+    assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)]);
+    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let time = h.state().session.time();
+    let undo = h.state().session.history.undo.len();
+    let redo = h.state().session.history.redo.len();
+    for key in [egui::Key::ArrowLeft, egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::ArrowRight] {
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), key == egui::Key::ArrowRight);
+        assert!(h.state().auto.find(&format!("effectControls.row.{other}")).is_some(), "unselected effect stays open");
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)]);
+        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project);
+        assert_eq!(h.state().session.time(), time);
+        assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), (undo, redo));
+    }
+}
+
+#[test]
+fn effect_header_arrows_only_disclose_selected_headers_on_the_displayed_layer() {
+    let (mut h, lid, [(first, _), (second, _), (third, prop)]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, first), (lid, second), (LayerId(0), third), (lid, u64::MAX)];
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![first, second]);
+    assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some());
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty());
+
+    // A parameter selection, stale header, or header on another layer must still fall through.
+    h.state_mut().session.state.selected_props = vec![(lid, prop), (LayerId(0), first), (lid, u64::MAX)];
+    let before = serde_json::to_value(&h.state().session.project).unwrap();
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty());
+    assert_ne!(serde_json::to_value(&h.state().session.project).unwrap(), before, "the existing layer nudge still runs");
+}
+
+#[test]
+fn effect_header_arrows_ignore_hidden_panels_with_stale_focus() {
+    // A maximized frame hides every other frame and every floating window, so a floating Effect
+    // Controls is hidden too.
+    for hidden in ["closed", "maximized", "floating under maximized", "home"] {
+        let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        match hidden {
+            "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
+            "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
+            "floating under maximized" => {
+                h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+                h.state_mut().toggle_maximize(PanelKind::Composition);
+            }
+            _ => h.state_mut().ui.start_screen = true,
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls, "{hidden}: stale focus is preserved");
+        assert!(h.state().auto.find("panel.EffectControls").is_none(), "{hidden}: Effect Controls is hidden");
+        let x = |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3()[0];
+        let before = x(&h);
+        header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert!(h.state().ui.fx_closed.is_empty(), "{hidden}: hidden effects keep their disclosure state");
+        assert!(x(&h) < before, "{hidden}: Left still nudges the layer");
+    }
+}
+
+#[test]
+fn effect_header_arrows_work_wherever_effect_controls_is_on_screen() {
+    for place in ["floating", "tab of a maximized frame"] {
+        let (mut h, lid, [(fx, prop), _, _]) = header_arrow_harness();
+        h.state_mut().toggle_maximize(PanelKind::EffectControls);
+        if place == "floating" {
+            h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+        } else {
+            let placement = craft_ui::docking::Placement::Tab { before: None };
+            h.state_mut().apply_dock(craft_ui::docking::Action::Move { panel: PanelKind::EffectControls, anchor: PanelKind::Composition, placement }).unwrap();
+            h.state_mut().toggle_maximize(PanelKind::Composition);
+            assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition), "the frame was maximized from its Composition tab");
+        }
+        // The moved tab is the front one; focus it as a click on it would.
+        h.state_mut().ui.focused = PanelKind::EffectControls;
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        h.run_steps(3);
+        assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), "{place}: Effect Controls is on screen");
+        header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_none(), "{place}: Left collapses");
+        header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), "{place}: Right expands");
+    }
+}
+
+#[test]
+fn effect_header_arrows_preserve_modified_shortcuts_and_keyboard_ownership() {
+    let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, fx)];
+    let time = h.state().session.time();
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::COMMAND);
+    assert!(h.state().session.time() > time, "Cmd/Ctrl+Right still advances a frame");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().session.time(), time);
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::SHIFT);
+    assert!(h.state().ui.fx_closed.is_empty(), "Shift+Left does not collapse effects");
+    h.state_mut().ui.focused = PanelKind::Composition;
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "another panel owns the arrows");
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "a dialog owns the arrows");
+    h.state_mut().dialog = None;
+    h.run_steps(3);
+    let at = rect_of(&h, &format!("effectControls.effect.{fx}.name")).center();
+    h.event(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(egui::Popup::is_any_open(&h.ctx), "the effect context menu is open");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "the context menu owns the arrows");
+    header_arrow_key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    h.run_steps(3);
+    assert!(!egui::Popup::is_any_open(&h.ctx), "Escape closed the context menu");
+    double_click(&mut h, at);
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("effectControls.effect.{fx}.nameEdit")).is_some(), "the rename field is open");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "Left moves the text caret instead of collapsing");
+    assert!(h.state().auto.find(&format!("effectControls.effect.{fx}.nameEdit")).is_some());
+}
+
+#[test]
+fn effect_header_arrows_leave_viewer_text_editing_alone() {
+    let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+    let text = h.state_mut().session.execute("layer.newText", json!({"text": "abcdef"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("text.edit", json!({"layer": text, "caret": 3})).unwrap();
+    h.state_mut().session.state.selected_layers = vec![lid];
+    h.state_mut().session.state.selected_props = vec![(lid, fx)];
+    h.state_mut().show_panel(PanelKind::EffectControls);
+    h.run_steps(2);
+    assert!(h.state().session.state.text_edit.is_some(), "the text is still being edited");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "the text edit owns the arrows");
+    h.state_mut().session.state.text_edit = None;
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![fx], "with the edit over, Left collapses the effect");
+}
+
 #[test]
 fn effect_controls_widgets_register_automation_ids() {
     let (app, x) = app();
