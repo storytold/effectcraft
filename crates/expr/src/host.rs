@@ -459,7 +459,10 @@ impl<'a> Resolver<'a> {
                         Some(g) => l.props.group(g)?,
                         None => &l.props,
                     };
-                    g.children.iter().position(|n| format!("@{}", n.uid()) == last).map(|i| i + 1)
+                    let i = g.children.iter().position(|n| format!("@{}", n.uid()) == last)?;
+                    // A top-level property (an enabled Time Remap) has After Effects' number.
+                    let top = if parent.is_none() { g.children.get(i).and_then(|n| ae_order::ae_index(l, n.match_id())) } else { None };
+                    Some(top.unwrap_or(i + 1))
                 });
                 Resp::List(vec![
                     Resp::Str(p.name.clone()),

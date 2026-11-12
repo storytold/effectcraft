@@ -5,6 +5,7 @@
 //! every linked colour rendered near-black.
 
 use super::*;
+use effectcraft_project::Property;
 
 /// The fixture with a Slider Control (value 7) on layer "Shape".
 fn with_shape_slider() -> Fx {
@@ -83,4 +84,15 @@ fn top_level_groups_by_after_effects_match_name() {
     assert_close!(f.num("thisComp.layer('A')('ADBE Transform Group')('Position')[0]", 0.0), 50.0);
     assert_close!(f.num("thisComp.layer('A')('ADBE Marker').numKeys", 0.0), 2.0);
     assert_close!(f.num("thisComp.layer('A')('ADBE Effect Parade').propertyIndex", 0.0), 5.0);
+}
+
+#[test]
+fn an_enabled_time_remap_is_number_two() {
+    // Enabled Time Remap is a property at the top of the tree; After Effects numbers it 2.
+    let mut f = fx();
+    let uid = f.p.next_id;
+    f.p.next_id += 1;
+    f.layer_mut(f.a).props.children.insert(0, Property::new(uid, "timeRemap", "Time Remap", Value::Scalar(0.0)).into());
+    assert_close!(f.num("thisComp.layer('A')('Time Remap').propertyIndex", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer('A')(2).propertyIndex", 0.0), 2.0);
 }

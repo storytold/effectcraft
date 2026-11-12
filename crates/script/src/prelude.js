@@ -685,7 +685,12 @@ function __absentGroup(layer, info) {
     addProperty: function (n) { throw __err("Can not add \"" + n + "\" to \"" + info.name + "\""); },
     toString: function () { return "[object PropertyGroup]"; },
   };
-  return g;
+  // Callable like any group: `layer.property(7)(1)` is `.property(1)`, null.
+  var f = function (k) { return g.property(k); };
+  delete f.name;
+  delete f.length;
+  for (const k of Object.getOwnPropertyNames(g)) Object.defineProperty(f, k, Object.getOwnPropertyDescriptor(g, k));
+  return f;
 }
 
 function PropertyBase() {}

@@ -104,3 +104,18 @@ fn walking_every_property_meets_no_null() {
     );
     assert_eq!(o.result, json!(true));
 }
+
+#[test]
+fn an_unused_slot_is_the_same_by_number_and_match_name_and_callable() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("M", 200, 200, 1, 2, 30);
+        var l = c.layers.addSolid([1, 1, 1], "S", 200, 200, 1);
+        var byName = l.property("ADBE Layer Styles"), byNumber = l.property(7);
+        [byName !== null && byName.matchName, byName !== null && byName.numProperties, byNumber.propertyIndex, l.property(7)(1), l(12).name]
+        "#,
+    );
+    assert_eq!(o.result, json!(["ADBE Layer Styles", 0, 7, null, "Data"]));
+}

@@ -478,12 +478,18 @@ fn child(s: &Session, a: &J) -> R {
     let uid = u(a, "uid").unwrap_or(0);
     let g: &PropGroup = if uid == 0 || uid == l.props.uid { &l.props } else { l.props.find_group(uid).ok_or("not a property group")? };
     let key = a.get("key").cloned().unwrap_or(J::Null);
+    // A layer's numbers and match names are After Effects' (Marker is 1, unused groups keep their
+    // slot and resolve to the same empty group by number or by match name).
+    let slot = match &key {
+        J::Number(n) => Some(n.as_u64().and_then(|i| usize::try_from(i).ok())),
+        J::String(name) => ae_order::ae_index_of_match_name(l, name).map(Some),
+        _ => None,
+    };
     if std::ptr::eq(g, &l.props)
-        && let J::Number(n) = &key
         && ae_order::ae_slots(&l.source).is_some()
+        && let Some(slot) = slot
     {
-        // A layer's numbers are After Effects' (Marker is 1, unused groups keep their slot).
-        let Some(i) = n.as_u64().and_then(|i| usize::try_from(i).ok()) else { return Ok(J::Null) };
+        let Some(i) = slot else { return Ok(J::Null) };
         return match ae_order::ae_child(l, i) {
             Some(AeChild::Node(n)) => node_json(c, l, n.uid()),
             Some(AeChild::Marker) => Ok(json!({"marker": true})),
