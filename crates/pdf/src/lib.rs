@@ -142,10 +142,12 @@ pub fn page_count(bytes: &[u8]) -> usize {
 }
 
 /// The PDF a VectorCraft document carries: [`Error::NoCarriedPdf`] when it was saved without
-/// Create PDF-Compatible File.
+/// Create PDF-Compatible File. The preview is not read, so a damaged preview does not stop the
+/// import.
 fn carried_pdf(bytes: &[u8]) -> Result<Vec<u8>, Error> {
-    let renditions = craft_doc::renditions(bytes, &carried_limits()).map_err(|e| Error::Read(format!("VectorCraft document: {e}")))?;
-    let pdf = renditions.into_iter().find(|r| r.kind == craft_doc::RenditionKind::Pdf).ok_or(Error::NoCarriedPdf)?;
+    let pdf = craft_doc::rendition(bytes, craft_doc::RenditionKind::Pdf, &carried_limits())
+        .map_err(|e| Error::Read(format!("VectorCraft document: {e}")))?
+        .ok_or(Error::NoCarriedPdf)?;
     if sniff(&pdf.bytes) != Some(Format::Pdf) {
         return Err(Error::Read("VectorCraft document: its PDF member is not a PDF".into()));
     }

@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use craft_vectorcraft_format::{BLOB_MAGIC, File, INLINE_MAX};
+use craft_vectorcraft_format::{BLOB_MAGIC, File, INLINE_MAX, Image};
 
 use crate::write::pdf;
 use crate::*;
@@ -34,9 +34,15 @@ fn artboards_pdf(pad: bool) -> Vec<u8> {
 /// A `.vectorcraft` file of `version` holding an empty document and `carried` as its `pdf`
 /// member, gzip-compressed when `gzip` is set (Use Compression).
 fn vectorcraft(carried: Option<&[u8]>, version: u32, gzip: bool) -> Vec<u8> {
+    vectorcraft_with_preview(carried, None, version, gzip)
+}
+
+/// [`vectorcraft`] with `preview` as the file's `preview` member.
+fn vectorcraft_with_preview(carried: Option<&[u8]>, preview: Option<Image>, version: u32, gzip: bool) -> Vec<u8> {
     let mut file = File::new(serde_json::json!({"artboards": [], "layers": []}));
     file.version = version;
     file.generator = Some("VectorCraft 0.1.0".into());
+    file.preview = preview;
     let mut tail = file.tail();
     file.pdf = carried.map(|b| tail.image("application/pdf", b, false));
     let mut out = serde_json::to_vec(&file).unwrap();
@@ -86,6 +92,26 @@ fn a_vectorcraft_document_without_a_pdf_names_create_pdf_compatible_file() {
         let e = parse(&file).err();
         assert_eq!(e, Some(Error::NoCarriedPdf));
         assert!(e.map(|e| e.to_string()).unwrap_or_default().contains("Create PDF-Compatible File"));
+    }
+}
+
+#[test]
+fn a_damaged_preview_does_not_stop_the_carried_pdf_from_reading() {
+    let mut not_base64 = Image::default();
+    not_base64.mime = "image/png".into();
+    not_base64.data = "not base64!".into();
+    let mut past_the_end = Image::default();
+    past_the_end.mime = "image/png".into();
+    past_the_end.blob = Some([u64::MAX / 2, 16]);
+    for (preview, what) in [(not_base64, "not base64"), (past_the_end, "past the end")] {
+        for (version, gzip, pad) in [(3, false, false), (4, false, true), (4, true, true)] {
+            let carried = artboards_pdf(pad);
+            let file = vectorcraft_with_preview(Some(&carried), Some(preview.clone()), version, gzip);
+            let case = format!("{what}, version {version}, gzip {gzip}");
+            assert_eq!(page_count(&file), 2, "{case}");
+            let doc = parse(&file).unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(layer_names(&doc), vec!["Background", "Art"], "{case}");
+        }
     }
 }
 
