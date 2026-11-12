@@ -391,7 +391,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("corner", "Corner", pt(0.1, 0.1), ParamUi::Point),
                 p("width", "Width", num(64.0), slider(1.0, 4000.0, 1.0, 400.0, 1)),
                 p("height", "Height", num(64.0), slider(1.0, 4000.0, 1.0, 400.0, 1)),
-                p("border", "Border", num(2.0), slider(0.0, 400.0, 0.0, 40.0, 1)),
+                p("border", "Border", num(2.0), slider(0.0, 2000.0, 0.0, 40.0, 1)),
                 p("feather/featherWidth", "Width", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 1)),
                 p("feather/featherHeight", "Height", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 1)),
                 p("invertGrid", "Invert Grid", Value::Bool(false), ParamUi::Checkbox),

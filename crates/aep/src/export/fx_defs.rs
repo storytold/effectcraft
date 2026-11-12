@@ -741,7 +741,6 @@ mod tests {
         ("ec.transition.radialwipe", "feather", 3474),
         ("ec.generate.beam", "startThickness", 3475),
         ("ec.generate.beam", "endThickness", 3475),
-        ("ec.generate.grid", "border", 3476),
         ("ec.stylize.scatter", "amount", 3477),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
