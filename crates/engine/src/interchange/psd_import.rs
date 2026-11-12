@@ -3,8 +3,8 @@
 //!
 //! Every pixel layer becomes a footage item that names its layer (`Footage::layer`), placed in
 //! a composition the size of the document. Groups become precomps (pass-through groups collapse
-//! so their blend modes act on the layers below, like Photoshop); type layers become editable
-//! text layers; layer masks are baked into the layer's alpha and vector masks become masks;
+//! so their blend modes act on the layers below, like Photoshop); type and smart-object layers keep their saved raster previews when available
+//! (text can be converted explicitly); layer masks are baked into the layer's alpha and vector masks become masks;
 //! layer effects map to Layer Styles; adjustment layers become adjustment layers with the
 //! matching effect (best effort); clipped layers preserve the transparency underneath. Smart
 //! objects whose file is embedded become footage of that file (an embedded Photoshop document's
@@ -116,12 +116,11 @@ pub fn import(proj: &mut Project, psd: &Psd, path: &str, name: &str, retain: boo
     if flattened > 0 {
         cx.warnings.push(format!("{flattened} group(s) nested deeper than {} levels were flattened into their parent", effectcraft_psd::MAX_GROUP_DEPTH));
     }
-    let comp =
-        if psd.layers.is_empty() && !psd.warnings.is_empty() { flattened_comp(proj, &mut cx, name) } else { build_comp(proj, &mut cx, name, &tree, None) };
+    let comp = if psd.layers.is_empty() { flattened_comp(proj, &mut cx, name) } else { build_comp(proj, &mut cx, name, &tree, None) };
     PsdImport { comp, folder, items: cx.items, warnings: cx.warnings }
 }
 
-/// The layers could not be read: the merged image as the composition's only layer.
+/// A flattened document, or unreadable layers: keep the merged image instead of an empty comp.
 fn flattened_comp(proj: &mut Project, cx: &mut Ctx, name: &str) -> ItemId {
     let cid = proj.add_item(name, Label::Sandstone, None, ItemKind::Comp(Arc::new(new_comp(cx))));
     cx.items.push(cid);
@@ -285,12 +284,20 @@ fn build_layer(proj: &mut Project, cx: &mut Ctx, comp: &Comp, n: &Node) -> Optio
     };
     let pl = cx.psd.layers[index].clone();
     let name = if pl.name.is_empty() { format!("Layer {}", index + 1) } else { pl.name.clone() };
+    // A rectangle and compression-only channel headers do not contain a saved preview.
+    // Keep the embedded/type fallback for those files instead of importing empty pixels.
+    let has_preview = pl.has_pixels() && pl.channels.iter().any(|channel| channel.id >= 0 && channel.len > 2);
     let mut layer = if let Some(children) = children {
         let sub = build_comp(proj, cx, &name, children, Some(cx.folder));
         let mut l = build::layer(proj, comp, &name, LayerSource::Comp { item: sub }, (comp.width, comp.height), None);
         // Pass-through groups composite their layers straight into the parent.
         l.switches.collapse = pl.blend_key() == "pass";
         l
+    } else if has_preview && (pl.text.is_some() || pl.smart_object.is_some()) {
+        // Photoshop saves a raster preview even when fonts or linked/embedded resources are
+        // unavailable. Rebuilding type or the embedded file discards that appearance. Keep
+        // the preview in document space; Convert to Editable Text remains an explicit action.
+        raster_layer(proj, cx, comp, index, &name)
     } else if let Some(t) = &pl.text {
         text_layer(proj, comp, &name, t)
     } else if let Some(adj) = &pl.adjustment {
@@ -300,12 +307,7 @@ fn build_layer(proj: &mut Project, cx: &mut Ctx, comp: &Comp, n: &Node) -> Optio
     } else if let Some(l) = pl.smart_object.as_ref().and_then(|_| smart_object_layer(proj, cx, comp, index, &name)) {
         l
     } else if pl.has_pixels() || pl.fill.is_some() {
-        let (item, size) = footage_item(proj, cx, index, &name);
-        let mut l = build::layer(proj, comp, &name, LayerSource::Footage { item }, size, None);
-        if cx.retain && !pl.rect.is_empty() {
-            set_vec2(&mut l, "transform/position", [pl.rect.left as f64 + size.0 as f64 / 2.0, pl.rect.top as f64 + size.1 as f64 / 2.0]);
-        }
-        l
+        raster_layer(proj, cx, comp, index, &name)
     } else {
         // Empty layers have nothing to show.
         return None;
@@ -359,9 +361,23 @@ fn build_layer(proj: &mut Project, cx: &mut Ctx, comp: &Comp, n: &Node) -> Optio
     Some(layer)
 }
 
+/// A saved preview is already transformed by Photoshop, including placed smart objects.
+fn raster_layer(proj: &mut Project, cx: &mut Ctx, comp: &Comp, index: usize, name: &str) -> Layer {
+    let (item, size) = footage_item(proj, cx, index, name);
+    let mut layer = build::layer(proj, comp, name, LayerSource::Footage { item }, size, None);
+    if cx.retain
+        && let Some(pl) = cx.psd.layers.get(index).filter(|p| !p.rect.is_empty())
+    {
+        set_vec2(&mut layer, "transform/position", [pl.rect.left as f64 + size.0 as f64 / 2.0, pl.rect.top as f64 + size.1 as f64 / 2.0]);
+    }
+    layer
+}
+
 /// Where layer space's origin sits in document pixels.
 fn layer_origin(pl: &effectcraft_psd::Layer, retain: bool, layer: &Layer) -> [f64; 2] {
-    if let Some(t) = &pl.text {
+    if matches!(layer.source, LayerSource::Text)
+        && let Some(t) = &pl.text
+    {
         return [t.transform[4], t.transform[5]];
     }
     if matches!(layer.source, LayerSource::Footage { .. }) && retain && !pl.rect.is_empty() {

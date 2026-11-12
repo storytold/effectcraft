@@ -293,8 +293,8 @@ fn psd_smart_object_imports_its_embedded_document() {
     let quad = [[40.0, 4.0], [40.0, 44.0], [20.0, 44.0], [20.0, 4.0]];
     d.layers = vec![
         WLayer::solid("Back", Rect::new(0, 0, 64, 48), [0.0, 0.0, 0.0, 1.0]),
-        // Placeholder pixels (grey) that the embedded file replaces.
-        WLayer::solid("Placed", Rect::new(20, 4, 20, 40), [0.5, 0.5, 0.5, 1.0]).with_block(smart_object_block("so-1", quad, [20.0, 10.0])),
+        // Without a saved preview, the embedded source and its placement are still used.
+        WLayer::pixels("Placed", Rect::new(20, 4, 20, 40), vec![]).with_block(smart_object_block("so-1", quad, [20.0, 10.0])),
     ];
     d.linked = vec![("so-1".into(), "inner.psd".into(), *b"8BPS", inner_bytes)];
     let path = tmp("smart.psd");
@@ -420,13 +420,13 @@ fn psd_smart_objects_with_perspective_and_warp_bake_as_placed() {
     let warp = warp_descriptor("warpArc", 50.0, 0.0, 0.0, [0.0, 0.0, 20.0, 10.0], None);
     d.layers = vec![
         WLayer::solid("Back", Rect::new(0, 0, 64, 48), [0.0, 0.0, 0.0, 1.0]),
-        WLayer::solid("Pinned", Rect::new(20, 4, 24, 40), [0.5, 0.5, 0.5, 1.0]).with_block(smart_object_block_warped("so-1", trap, [20.0, 10.0], None)),
+        WLayer::pixels("Pinned", Rect::new(20, 4, 24, 40), vec![]).with_block(smart_object_block_warped("so-1", trap, [20.0, 10.0], None)),
     ];
     d.linked = vec![("so-1".into(), "inner.psd".into(), *b"8BPS", inner_bytes.clone())];
     let mut d2 = WDoc::new(64, 48);
     d2.layers = vec![
         WLayer::solid("Back", Rect::new(0, 0, 64, 48), [0.0, 0.0, 0.0, 1.0]),
-        WLayer::solid("Arc", Rect::new(20, 10, 40, 20), [0.5, 0.5, 0.5, 1.0]).with_block(smart_object_block_warped(
+        WLayer::pixels("Arc", Rect::new(20, 10, 40, 20), vec![]).with_block(smart_object_block_warped(
             "so-2",
             [[20.0, 10.0], [60.0, 10.0], [60.0, 30.0], [20.0, 30.0]],
             [20.0, 10.0],
@@ -948,5 +948,42 @@ fn ai_composition_retains_layer_sizes_and_positions() {
         let frame = s.footage.frame(ids[0], f, Tick::ZERO).unwrap();
         assert_eq!((frame.width, frame.height), (40, 20));
         assert!(frame.get(39, 10)[0] > 0.99, "reload invalidates cached pixels");
+    }
+}
+
+#[test]
+fn psd_missing_font_and_unreadable_smart_object_render_their_saved_colors() {
+    let mut doc = WDoc::new(24, 20);
+    doc.linked = vec![("render-cached".into(), "unavailable.pdf".into(), *b"PDF ", b"not a decodable PDF".to_vec())];
+    doc.layers = vec![
+        WLayer::solid("Background", Rect::new(0, 0, 24, 20), [0.0, 0.0, 0.25, 1.0]),
+        WLayer::solid("Type", Rect::new(2, 2, 8, 6), [0.9, 0.05, 0.05, 1.0]).with_block(text_block(
+            "Text",
+            [200.0, 300.0],
+            "UnavailableMotionerFont-Regular",
+            80.0,
+            [1.0; 3],
+            0,
+        )),
+        WLayer::solid("Smart", Rect::new(13, 3, 6, 8), [0.05, 0.9, 0.05, 1.0]).with_block(smart_object_block(
+            "render-cached",
+            [[13.0, 3.0], [19.0, 3.0], [19.0, 11.0], [13.0, 11.0]],
+            [6.0, 8.0],
+        )),
+    ];
+    let path = tmp("motioner-cached-render.psd");
+    std::fs::write(&path, write(&doc)).unwrap();
+    for mode in ["composition", "compositionLayerSizes"] {
+        let mut session = effectcraft_host::session();
+        let r = session.execute("file.import", json!({"path":path,"importAs":mode})).unwrap();
+        assert_eq!(r["errors"], json!([]), "{r}");
+        let cid = session.active_comp_id().unwrap();
+        let image = session.render(cid, effectcraft_time::Tick::ZERO, RenderOpts::default());
+        let red = image.data[4 * 24 + 5];
+        let green = image.data[6 * 24 + 15];
+        let blue = image.data[15 * 24 + 20];
+        assert!(red[0] > red[1] * 3.0 && red[0] > 0.3, "cached text: {red:?}, {mode}");
+        assert!(green[1] > green[0] * 3.0 && green[1] > 0.3, "cached smart object: {green:?}, {mode}");
+        assert!(blue[2] > blue[0] + 0.02, "background: {blue:?}, {mode}");
     }
 }

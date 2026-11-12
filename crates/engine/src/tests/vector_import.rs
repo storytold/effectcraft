@@ -438,3 +438,98 @@ fn a_vector_thumbnail_one_pixel_over_is_not_halved() {
     assert_eq!((w, h), (63, 63));
     assert_eq!(px.len(), 63 * 63 * 4);
 }
+
+/// A missing font must not replace the pixels Photoshop already saved for a type layer.
+#[test]
+fn psd_cached_type_keeps_saved_appearance_without_the_font() {
+    for retain in [false, true] {
+        let mut doc = WDoc::new(24, 20);
+        doc.layers.push(WLayer::solid("Cached title", Rect::new(4, 3, 8, 6), [0.8, 0.1, 0.2, 1.0]).with_block(text_block(
+            "TITLE",
+            [200.0, 300.0],
+            "UnavailableMotionerFont-Regular",
+            80.0,
+            [1.0; 3],
+            0,
+        )));
+        let bytes = write(&doc);
+        let psd = effectcraft_psd::Psd::parse(bytes).unwrap();
+        let mut project = effectcraft_project::Project::default();
+        let imported = crate::psd_import::import(
+            &mut project,
+            &psd,
+            "cached.psd",
+            "Cached",
+            retain,
+            effectcraft_time::FrameRate::default(),
+            effectcraft_time::Tick::from_seconds_f64(5.0),
+        );
+        let comp = project.comp(imported.comp).unwrap();
+        let layer = &comp.layers[0];
+        let LayerSource::Footage { item } = layer.source else { panic!("saved pixels, not substitute-font text") };
+        let ItemKind::Footage(f) = &project.item(item).unwrap().kind else { panic!("footage") };
+        let source = f.layer.as_ref().unwrap();
+        assert!(source.embedded.is_none());
+        assert_eq!(source.layer_size, retain);
+        assert_eq!(layer.props.prop("transform/position").unwrap().value.as_vec2(), if retain { [8.0, 6.0] } else { [12.0, 10.0] });
+        let px = psd.layer_pixels(source.index as usize, !retain).unwrap();
+        assert!(px.data.iter().any(|p| p[0] > 0.7 && p[1] < 0.2 && p[3] == 1.0));
+        // The source metadata is still present for the existing explicit text conversion.
+        assert!(crate::psd_import::editable_text(&mut project.clone(), comp, layer, &psd, source.index as usize).is_some());
+    }
+}
+
+#[test]
+fn psd_without_layer_records_imports_the_merged_image() {
+    let mut doc = WDoc::new(8, 6);
+    doc.composite = Some(vec![[0.2, 0.7, 0.1, 1.0]; 48]);
+    let psd = effectcraft_psd::Psd::parse(write(&doc)).unwrap();
+    assert!(psd.layers.is_empty() && psd.warnings.is_empty());
+    let mut project = effectcraft_project::Project::default();
+    let imported = crate::psd_import::import(
+        &mut project,
+        &psd,
+        "flat.psd",
+        "Flat",
+        false,
+        effectcraft_time::FrameRate::default(),
+        effectcraft_time::Tick::from_seconds_f64(5.0),
+    );
+    let comp = project.comp(imported.comp).unwrap();
+    assert_eq!(comp.layers.len(), 1);
+    let LayerSource::Footage { item } = comp.layers[0].source else { panic!("merged image") };
+    let ItemKind::Footage(f) = &project.item(item).unwrap().kind else { panic!("footage") };
+    assert!(f.layer.is_none());
+    assert!(psd.composite().unwrap().data.iter().all(|p| p[1] > 0.6));
+}
+
+#[test]
+fn psd_smart_object_uses_cached_pixels_instead_of_an_unreadable_embedded_file() {
+    let mut doc = WDoc::new(20, 20);
+    doc.linked = vec![("cached-smart".into(), "missing.pdf".into(), *b"PDF ", b"unreadable embedded file".to_vec())];
+    doc.layers.push(WLayer::solid("Smart", Rect::new(2, 4, 6, 8), [0.2, 0.8, 0.1, 1.0]).with_block(smart_object_block(
+        "cached-smart",
+        [[2.0, 4.0], [8.0, 4.0], [8.0, 12.0], [2.0, 12.0]],
+        [6.0, 8.0],
+    )));
+    let psd = effectcraft_psd::Psd::parse(write(&doc)).unwrap();
+    assert!(psd.layers[0].smart_object.is_some());
+    let mut project = effectcraft_project::Project::default();
+    let imported = crate::psd_import::import(
+        &mut project,
+        &psd,
+        "smart.psd",
+        "Smart",
+        true,
+        effectcraft_time::FrameRate::default(),
+        effectcraft_time::Tick::from_seconds_f64(5.0),
+    );
+    let layer = &project.comp(imported.comp).unwrap().layers[0];
+    let LayerSource::Footage { item } = layer.source else { panic!("cached footage") };
+    let ItemKind::Footage(f) = &project.item(item).unwrap().kind else { panic!("footage") };
+    let source = f.layer.as_ref().unwrap();
+    assert!(source.embedded.is_none());
+    assert!(!source.placed);
+    assert_eq!((f.width, f.height), (6, 8));
+    assert_eq!(layer.props.prop("transform/position").unwrap().value.as_vec2(), [5.0, 8.0]);
+}
