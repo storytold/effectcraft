@@ -100,6 +100,13 @@ fn a_pseudo_effect_is_kept_with_its_parameter_names() {
     assert_eq!(g.prop("param1").map(|p| (p.name.as_str(), p.value.clone())), Some(("Speed", Value::Scalar(4.0))));
     assert_eq!(g.prop("param2").map(|p| (p.name.as_str(), p.value.clone())), Some(("Mode", Value::Enum(1))));
     assert_eq!(losses(&r, LossCategory::Effects, "Pseudo/0.25").len(), 1);
+    // The effect id stays the match name (Find Missing Effects, expressions); the group's match id
+    // is one path segment, so a match path (keyframe paste, pick whip) finds its parameters again.
+    assert_eq!(g.kind, GroupKind::Effect { effect: "Pseudo/0.25".into() });
+    let speed = g.prop("param1").map(|p| p.uid);
+    let layer = PropGroup::new(0, "layer", "Layer").with(PropGroup::new(0, "effects", "Effects").with(g));
+    let path = speed.and_then(|u| layer.match_path_of(u));
+    assert_eq!(path.as_deref().and_then(|p| layer.prop(p)).map(|p| p.name.as_str()), Some("Speed"), "{path:?}");
 }
 
 /// A popup whose definition is borrowed (the project copy) and has no value record: its default

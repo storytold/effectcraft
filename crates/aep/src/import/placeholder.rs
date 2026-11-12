@@ -40,7 +40,9 @@ pub(crate) fn placeholder(
     refs: &mut Vec<PendingLayerRef>,
     col: &mut Collector,
 ) -> PropGroup {
-    let mut group = ids.group(fx.match_name(), shown);
+    // The effect id is the match name; the group's match id is one segment of a property path
+    // (a pseudo effect's `Pseudo/0.25` would be cut apart), so match paths find its parameters.
+    let mut group = ids.group(&segment(fx.match_name()), shown);
     group.kind = GroupKind::Effect { effect: fx.match_name().to_string() };
     let here = format!("{}: '{}' effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
     for p in params.iter().filter(|p| !carries_nothing(p)) {
@@ -126,8 +128,18 @@ fn popup_len(p: &EffectParam<'_, '_>) -> Option<usize> {
 /// third-party effect's `CC Cylinder-0003`), else `param<index>` (a pseudo effect's
 /// `Pseudo/0.25-0001`: `/` and `.` separate path segments). Expressions also find it by its name.
 fn param_id(p: &EffectParam<'_, '_>) -> String {
-    let plain = !p.match_name.is_empty() && p.match_name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'));
-    if plain { p.match_name.clone() } else { format!("param{}", p.index) }
+    if !p.match_name.is_empty() && p.match_name.chars().all(plain) { p.match_name.clone() } else { format!("param{}", p.index) }
+}
+
+/// Whether `c` can stand in one segment of a property path (`/`, `.`, `#` and `@` mean more).
+fn plain(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, ' ' | '-' | '_')
+}
+
+/// `name` as one segment of a property path: other characters become `_` (`Pseudo/0.25` is
+/// `Pseudo_0_25`).
+fn segment(name: &str) -> String {
+    name.chars().map(|c| if plain(c) { c } else { '_' }).collect()
 }
 
 /// Sets `prop` from `p`: its expression, then its keys or its value (the record, else the `pard`
