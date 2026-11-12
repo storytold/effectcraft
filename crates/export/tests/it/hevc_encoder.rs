@@ -1,7 +1,7 @@
 //! Round trips through the filmcraft-hevc decoder and (when installed) ffmpeg: decoded pictures must
 //! equal the encoder's own reconstruction bit-exactly.
 
-use effectcraft_hevcenc::{Encoder, EncoderConfig, Frame, Profile, RateControl};
+use craft_video::hevc::{Encoder, EncoderConfig, Frame, Profile, RateControl};
 use std::process::Command;
 
 struct Pic {
@@ -74,7 +74,7 @@ fn encode(cfg: EncoderConfig, pics: &[Pic]) -> Run {
     let mut enc = Encoder::new(cfg).unwrap();
     let mut run = Run { packets: vec![], keys: vec![], recons: vec![], hvcc: enc.hvcc(), sets: enc.parameter_sets(), psnr_y: vec![] };
     for p in pics {
-        let pkt = enc.encode(&p.frame());
+        let pkt = enc.encode(&p.frame()).expect("encode");
         let rec = enc.last_reconstruction().unwrap().clone();
         run.psnr_y.push(psnr(&p.y, &rec[0], bd));
         run.packets.push(pkt.data);
@@ -393,7 +393,7 @@ fn hvcc_layout() {
 }
 
 /// Speed / size / quality report on ffmpeg-generated 1080p test content:
-/// `cargo test -p effectcraft-hevcenc --test roundtrip bench_1080p -- --ignored --nocapture`
+/// `cargo test -p effectcraft-export --test it hevc_encoder::bench_1080p -- --ignored --nocapture`
 /// (`HEVCENC_BENCH_SRC` selects another lavfi source).
 #[test]
 #[ignore]
@@ -424,7 +424,7 @@ fn bench_1080p() {
         let mut enc = Encoder::new(cfg(w as u32, h as u32, qp, 30, Profile::Main)).unwrap();
         for (i, p) in pics.iter().enumerate() {
             let t = std::time::Instant::now();
-            let pkt = enc.encode(&p.frame());
+            let pkt = enc.encode(&p.frame()).expect("encode");
             let dt = t.elapsed();
             let rec = enc.last_reconstruction().unwrap();
             eprintln!(

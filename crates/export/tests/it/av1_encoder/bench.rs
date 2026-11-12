@@ -1,13 +1,13 @@
 //! Speed / efficiency measurements on ffmpeg-generated test sources (ignored by default):
-//! `cargo test -p effectcraft-av1enc --test it bench:: -- --ignored --nocapture`.
+//! `cargo test -p effectcraft-export --test it av1_encoder::bench:: -- --ignored --nocapture`.
 
-use crate::common;
+use super::common;
 
 use std::process::Command;
 use std::time::Instant;
 
 use common::*;
-use effectcraft_av1enc::{Encoder, EncoderConfig, RateControl};
+use craft_video::av1::{Encoder, EncoderConfig, RateControl};
 
 /// Raw 8-bit 4:2:0 frames of an ffmpeg lavfi source, or None without ffmpeg.
 fn lavfi(src: &str, w: usize, h: usize, frames: usize) -> Option<Vec<Pic>> {
@@ -52,7 +52,7 @@ fn run(name: &str, pics: &[Pic], rate: RateControl, keyint: u32) {
     let mut sizes = Vec::new();
     for p in pics {
         let t = Instant::now();
-        let pkt = enc.encode(&p.frame());
+        let pkt = enc.encode(&p.frame()).expect("encode");
         let dt = t.elapsed().as_secs_f64();
         if pkt.keyframe {
             t_key += dt;
