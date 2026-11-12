@@ -1395,6 +1395,7 @@ fn an_unknown_effects_parameters_are_read_by_name() {
     assert_close!(f.ev(f.b, ROT, "effect('Settings')(1)", 0.0).unwrap().as_f64(), 3.0);
     assert_close!(f.ev(f.b, ROT, "effect('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
     assert_close!(f.ev(f.b, ROT, "thisLayer('Effects')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "thisLayer('ADBE Effect Parade')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
 }
 
 #[test]
