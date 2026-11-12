@@ -370,12 +370,16 @@ impl<'a> Resolver<'a> {
     /// A child of a layer (`group` empty) or of one of its groups, by name or 1-based number.
     fn child(&self, comp: u64, layer: u64, group: &str, key: &Key) -> Option<Resp> {
         let l = self.layer(comp, layer)?;
+        // A layer's numbers are After Effects' (Marker is 1, unused groups keep their slot), and so
+        // are its match names (`thisLayer("ADBE Effect Parade")`, as scripts such as Karton write).
+        let slot = match key {
+            Key::Index(i) => usize::try_from(*i).ok(),
+            Key::Name(name) => ae_order::ae_index_of_match_name(l, name),
+        };
         if group.is_empty()
-            && let Key::Index(i) = key
             && ae_order::ae_slots(&l.source).is_some()
+            && let Some(i) = slot
         {
-            // A layer's numbers are After Effects' (Marker is 1, unused groups keep their slot).
-            let i = usize::try_from(*i).ok()?;
             return Some(match ae_order::ae_child(l, i)? {
                 AeChild::Node(n) => node_resp(format!("@{}", n.uid()), n, i),
                 AeChild::Marker => slot_resp("@marker", &ae_order::MARKER, 1),

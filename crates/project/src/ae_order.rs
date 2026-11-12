@@ -131,3 +131,9 @@ pub fn ae_index(layer: &Layer, match_id: &str) -> Option<usize> {
 pub fn ae_count(layer: &Layer) -> Option<usize> {
     ae_slots(&layer.source).map(<[AeSlot]>::len)
 }
+
+/// After Effects' 1-based number for the top-level slot with this After Effects match name
+/// (`ADBE Effect Parade`), when the layer kind has one.
+pub fn ae_index_of_match_name(layer: &Layer, match_name: &str) -> Option<usize> {
+    ae_slots(&layer.source)?.iter().position(|s| s.match_name == match_name).map(|i| i + 1)
+}

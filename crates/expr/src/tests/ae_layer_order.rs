@@ -73,3 +73,14 @@ fn property_index_of_a_top_level_group_is_after_effects() {
     assert_close!(f.num("thisComp.layer('A')('Transform').propertyIndex", 0.0), 6.0);
     assert_close!(f.num("thisComp.layer('Shape')('Contents').propertyIndex", 0.0), 2.0);
 }
+
+#[test]
+fn top_level_groups_by_after_effects_match_name() {
+    // Karton's expressions: thisLayer("ADBE Effect Parade")("…").
+    let f = with_shape_slider();
+    assert_close!(f.num("thisComp.layer('A')('ADBE Effect Parade')('Slider Control')('Slider')", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer('Shape')('ADBE Effect Parade')(1)(1)", 0.0), 7.0);
+    assert_close!(f.num("thisComp.layer('A')('ADBE Transform Group')('Position')[0]", 0.0), 50.0);
+    assert_close!(f.num("thisComp.layer('A')('ADBE Marker').numKeys", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer('A')('ADBE Effect Parade').propertyIndex", 0.0), 5.0);
+}
