@@ -27,11 +27,23 @@ fn box_h_into(src: &[Px], out: &mut [Px], w: usize, r: usize, repeat: bool) {
                 row[i as usize]
             }
         };
+        // The starting window: the pixels inside the row once each, and the repeated edge pixels
+        // counted rather than visited (a radius far past the row would otherwise loop over it).
         let mut acc = [0.0f32; 4];
-        for i in -(r as isize)..=(r as isize) {
-            let p = get(i);
+        let inside = r.min(w - 1);
+        for p in &row[..=inside] {
             for c in 0..4 {
                 acc[c] += p[c];
+            }
+        }
+        if repeat {
+            let (left, right) = (r as f32, (r - inside) as f32);
+            for c in 0..4 {
+                acc[c] += row[0][c] * left;
+                // A zero count adds nothing (0 * NaN would be NaN).
+                if right > 0.0 {
+                    acc[c] += row[w - 1][c] * right;
+                }
             }
         }
         for x in 0..w {
@@ -65,14 +77,27 @@ fn box_v_into(src: &[Px], out: &mut [Px], w: usize, h: usize, r: usize, repeat: 
     out.par_chunks_mut(w * block).enumerate().for_each(|(bi, chunk)| {
         let ya = (bi * block) as isize;
         let mut acc = vec![[0.0f32; 4]; w];
-        for i in ya - r as isize..=ya + r as isize {
-            if let Some(rw) = row(i) {
-                for (a, p) in acc.iter_mut().zip(rw) {
-                    for c in 0..4 {
-                        a[c] += p[c];
-                    }
+        // The starting window: rows inside the image once each, the repeated edge rows counted.
+        let (lo, hi) = (ya - r as isize, ya + r as isize);
+        let add = |acc: &mut [Px], rw: &[Px], k: f32| {
+            // A zero count adds nothing (0 * NaN would be NaN).
+            if k == 0.0 {
+                return;
+            }
+            for (a, p) in acc.iter_mut().zip(rw) {
+                for c in 0..4 {
+                    a[c] += p[c] * k;
                 }
             }
+        };
+        for i in lo.max(0)..=hi.min(h as isize - 1) {
+            add(&mut acc, &src[i as usize * w..(i as usize + 1) * w], 1.0);
+        }
+        if repeat {
+            let above = (-lo).max(0) as f32;
+            let below = (hi - (h as isize - 1)).max(0) as f32;
+            add(&mut acc, &src[0..w], above);
+            add(&mut acc, &src[(h - 1) * w..h * w], below);
         }
         for (yy, o) in chunk.chunks_mut(w).enumerate() {
             let y = ya + yy as isize;
@@ -358,6 +383,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_non_finite_edge_pixel_outside_every_window_is_not_counted() {
+        // 9 wide, radius 1: the last pixel is in no window of the first pixels; likewise the last row.
+        let mut src = vec![[1.0f32; 4]; 81];
+        src[80] = [f32::NAN; 4];
+        let mut out = vec![[0.0f32; 4]; 81];
+        box_h_into(&src, &mut out, 9, 1, true);
+        assert!(out[0].iter().all(|v| v.is_finite()), "{:?}", out[0]);
+        box_v_into(&src, &mut out, 9, 9, 1, true);
+        assert!(out[0].iter().all(|v| v.is_finite()), "{:?}", out[0]);
+    }
+
+    #[test]
+    fn box_windows_count_repeated_edges_and_take_any_radius() {
+        // Against a window summed pixel by pixel, for radii inside and far past the image.
+        let (w, h) = (7usize, 5usize);
+        let src: Vec<Px> = (0..w * h).map(|i| [i as f32, (i % 3) as f32, 1.0, 0.5]).collect();
+        let at = |x: isize, y: isize, repeat: bool| -> Px {
+            if !repeat && (x < 0 || y < 0 || x >= w as isize || y >= h as isize) {
+                return [0.0; 4];
+            }
+            src[y.clamp(0, h as isize - 1) as usize * w + x.clamp(0, w as isize - 1) as usize]
+        };
+        for repeat in [true, false] {
+            for r in [1usize, 3, 6, 9, 40] {
+                let (mut hx, mut vx) = (vec![[0.0; 4]; w * h], vec![[0.0; 4]; w * h]);
+                box_h_into(&src, &mut hx, w, r, repeat);
+                box_v_into(&src, &mut vx, w, h, r, repeat);
+                for y in 0..h as isize {
+                    for x in 0..w as isize {
+                        let (mut eh, mut ev) = ([0.0f32; 4], [0.0f32; 4]);
+                        for d in -(r as isize)..=r as isize {
+                            for c in 0..4 {
+                                eh[c] += at(x + d, y, repeat)[c];
+                                ev[c] += at(x, y + d, repeat)[c];
+                            }
+                        }
+                        let n = (2 * r + 1) as f32;
+                        let i = y as usize * w + x as usize;
+                        for c in 0..4 {
+                            assert!((hx[i][c] - eh[c] / n).abs() < 1e-3, "h r={r} repeat={repeat}");
+                            assert!((vx[i][c] - ev[c] / n).abs() < 1e-3, "v r={r} repeat={repeat}");
+                        }
+                    }
+                }
+            }
+        }
+        // A radius of 2^40 finishes at once.
+        let mut out = vec![[0.0; 4]; w * h];
+        box_h_into(&src, &mut out, w, 1 << 40, true);
+        box_v_into(&src, &mut out.clone(), w, h, 1 << 40, true);
     }
 
     #[test]

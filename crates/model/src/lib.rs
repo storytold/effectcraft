@@ -46,7 +46,7 @@ pub(crate) fn perr(s: impl Into<String>) -> ModelError {
 }
 
 /// Texture coordinate wrapping (glTF sampler wrap modes).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Wrap {
     #[default]
     Repeat,
@@ -64,14 +64,40 @@ pub struct Texture {
     pub wrap: [Wrap; 2],
 }
 
+/// Most pixels one texture may hold (8192 × 8192: 1 GiB as float RGBA).
+pub const MAX_TEXTURE_PIXELS: u64 = 1 << 26;
+/// Most pixels the textures of one import may hold together (8 GiB as float RGBA: thirty-two 4K
+/// maps). A texture past it is left out and the import says so (`Model::warnings`).
+pub const MAX_IMPORT_TEXTURE_PIXELS: u64 = 1 << 29;
+
 impl Texture {
     pub fn solid(c: [f32; 4]) -> Texture {
         Texture { width: 1, height: 1, data: vec![c], wrap: [Wrap::Repeat; 2] }
     }
+    /// The pixel size an image claims, read from its header without decoding it.
+    pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+        let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| perr(format!("image: {e}")))?;
+        reader.into_dimensions().map_err(|e| perr(format!("image: {e}")))
+    }
     /// Decode a PNG or JPEG.
     pub fn decode(bytes: &[u8]) -> Result<Texture> {
-        let img = image::load_from_memory(bytes).map_err(|e| perr(format!("image: {e}")))?.to_rgba32f();
+        Self::decode_within(bytes, &mut MAX_IMPORT_TEXTURE_PIXELS.clone())
+    }
+    /// [`decode`](Self::decode), of at most [`MAX_TEXTURE_PIXELS`], taking the pixels from `pixels_left`, an import's remaining
+    /// texture budget, before the image is decoded.
+    pub fn decode_within(bytes: &[u8], pixels_left: &mut u64) -> Result<Texture> {
+        let err = |e: image::ImageError| perr(format!("image: {e}"));
+        let (w, h) = Self::dimensions(bytes)?;
+        let pixels = w as u64 * h as u64;
+        if pixels > MAX_TEXTURE_PIXELS {
+            return Err(ModelError::Unsupported(format!("a {w}×{h} texture (at most {MAX_TEXTURE_PIXELS} pixels)")));
+        }
+        if pixels > *pixels_left {
+            return Err(ModelError::Unsupported(format!("a {w}×{h} texture: the model's textures would hold more than {MAX_IMPORT_TEXTURE_PIXELS} pixels")));
+        }
+        let img = image::load_from_memory(bytes).map_err(err)?.to_rgba32f();
         let (w, h) = (img.width(), img.height());
+        *pixels_left -= pixels;
         let data = img.pixels().map(|p| p.0).collect();
         Ok(Texture { width: w, height: h, data, wrap: [Wrap::Repeat; 2] })
     }
@@ -512,6 +538,8 @@ pub struct Model {
     pub cameras: Vec<ModelCamera>,
     /// Punctual lights embedded in the file (glTF `KHR_lights_punctual`).
     pub lights: Vec<ModelLight>,
+    /// Parts of the file the import left out (textures over the limits), for the user.
+    pub warnings: Vec<String>,
 }
 
 /// A camera embedded in a model file.
@@ -570,8 +598,9 @@ pub struct Instance<'m> {
     pub mesh: &'m Mesh,
     /// Node → model space.
     pub world: Mat4,
-    /// Skinned meshes: joint matrices (model space, `joint_world × inverse_bind`).
-    pub joints: Option<Vec<Mat4>>,
+    /// Skinned meshes: joint matrices (model space, `joint_world × inverse_bind`), shared by
+    /// the instances of one skin.
+    pub joints: Option<Arc<Vec<Mat4>>>,
 }
 
 impl Model {
@@ -622,6 +651,8 @@ impl Model {
         let mut seen = vec![false; self.nodes.len()];
         let mut stack: Vec<usize> = self.roots.clone();
         let mut out = vec![];
+        // The pose is one for the whole scene, so every instance of a skin shares its matrices.
+        let mut joints_of: std::collections::HashMap<usize, Arc<Vec<Mat4>>> = std::collections::HashMap::new();
         while let Some(i) = stack.pop() {
             if i >= self.nodes.len() || seen[i] {
                 continue;
@@ -629,12 +660,19 @@ impl Model {
             seen[i] = true;
             let n = &self.nodes[i];
             if let Some(m) = n.mesh.and_then(|m| self.meshes.get(m)) {
-                let joints = n.skin.and_then(|s| self.skins.get(s)).map(|s| {
-                    s.joints
-                        .iter()
-                        .enumerate()
-                        .map(|(k, &j)| world.get(j).copied().unwrap_or(Mat4::IDENTITY) * s.inverse_bind.get(k).copied().unwrap_or(Mat4::IDENTITY))
-                        .collect()
+                let joints = n.skin.and_then(|si| self.skins.get(si).map(|s| (si, s))).map(|(si, s)| {
+                    joints_of
+                        .entry(si)
+                        .or_insert_with(|| {
+                            Arc::new(
+                                s.joints
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(k, &j)| world.get(j).copied().unwrap_or(Mat4::IDENTITY) * s.inverse_bind.get(k).copied().unwrap_or(Mat4::IDENTITY))
+                                    .collect(),
+                            )
+                        })
+                        .clone()
                 });
                 // Skinned vertices are placed by their joints alone (glTF: the node transform of
                 // a skinned mesh is ignored).

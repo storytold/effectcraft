@@ -378,10 +378,22 @@ pub fn purge() {
     c.bytes = 0;
 }
 
+/// The pixel size of the layer-space grid at `scale` (`round(size · scale)`, at least 1).
+fn grid_size(layer_size: [f64; 2], scale: f64) -> (u32, u32) {
+    (((layer_size[0] * scale).round() as u32).max(1), ((layer_size[1] * scale).round() as u32).max(1))
+}
+
+/// The full-resolution layer grid frozen mattes are stored at. A frozen cache claiming any
+/// other size did not come from freezing this layer and is not decoded.
+pub fn frozen_grid(layer_size: [f64; 2]) -> [usize; 2] {
+    let (w, h) = grid_size(layer_size, 1.0);
+    [w as usize, h as usize]
+}
+
 /// The layer-space grid (`round(size · scale)` pixels) of a buffer.
 pub fn layer_grid(buf: &Buf, layer_size: [f64; 2]) -> Image {
     let s = if buf.scale > 0.0 { buf.scale } else { 1.0 };
-    let (w, h) = (((layer_size[0] * s).round() as u32).max(1), ((layer_size[1] * s).round() as u32).max(1));
+    let (w, h) = grid_size(layer_size, s);
     let (ox, oy) = (buf.offset[0].round() as i64, buf.offset[1].round() as i64);
     let mut img = Image::new(w, h);
     img.rows_mut().for_each(|(y, row)| {
@@ -1212,8 +1224,11 @@ pub fn freeze_frame(alpha: &[f32], band: &[u8]) -> FrozenFrame {
 fn matte_for(ctx: &EffectCtx, f: i64, img: &Arc<Image>, scale: f64) -> Option<(Vec<f32>, Vec<u8>, f64)> {
     let (w, h) = (img.width as usize, img.height as usize);
     // Frozen mattes.
+    // Only the layer's own full-resolution grid: a project cannot make a tiny layer decode (and
+    // convert to floats) planes as large as the RLE allows. Any other size falls through to a computed matte.
     if let Some(fc) = frozen(ctx.params)
         && frozen_applies(&fc, ctx.params, ctx.layer_size, ctx.fps())
+        && fc.size == frozen_grid(ctx.layer_size)
         && let Some(fr) = fc.frames.get(&f)
     {
         let [fw, fh] = fc.size;
@@ -1407,6 +1422,33 @@ mod tests {
         let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
         params.values.insert(STROKES.into(), Value::Str(d.to_json()));
         params
+    }
+
+    #[test]
+    fn mismatched_frozen_size_falls_back_to_a_computed_matte() {
+        let mut d = RotoData::default();
+        d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[35.0, 40.0], [45.0, 40.0]], object: 0 }, 20, [0, 24]);
+        let mut params = params_with(&d);
+        let fc =
+            FrozenCache { key: frozen_key(&params, [100.0, 80.0], 25.0), size: [10, 8], frames: BTreeMap::from([(5, freeze_frame(&[1.0; 80], &[0; 80]))]) };
+        let host = Seq;
+        let render = |params: &Params| {
+            let ctx = EffectCtx {
+                params,
+                time: 5.0 / 25.0 + 0.001,
+                layer_size: [100.0, 80.0],
+                seed: 1,
+                adjustment: false,
+                env: EffectEnv { host: Some(&host), frame_rate: 25.0, ..Default::default() },
+            };
+            crate::apply(&specs()[0], &ctx, Buf { img: frame(5.0 / 25.0 + 0.001), offset: [0.0; 2], scale: 1.0 }).img
+        };
+        let computed = render(&params);
+        params.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        let out = render(&params);
+        assert!(out.data[(40 * 100 + 50) as usize][3] > 0.5, "the disk is missing from the output");
+        // The cache's all-opaque matte would leave the background opaque too; the fallback must match a render with no cache.
+        assert!(out.data == computed.data, "the mismatched frozen cache was used");
     }
 
     #[test]
@@ -1978,6 +2020,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Frozen mattes are only decoded at the size the freeze pass stores: the layer grid at
+    /// full resolution.
+    #[test]
+    fn frozen_grid_is_the_full_resolution_layer_grid() {
+        for size in [[100.0, 80.0], [99.6, 0.2], [1.0, 1.0]] {
+            let buf = Buf { img: Image::new(3, 3), offset: [0.0; 2], scale: 1.0 };
+            let g = layer_grid(&buf, size);
+            assert_eq!(frozen_grid(size), [g.width as usize, g.height as usize]);
+        }
+        assert_eq!(frozen_grid([100.0, 80.0]), [100, 80]);
     }
 
     #[test]

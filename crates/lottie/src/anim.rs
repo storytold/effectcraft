@@ -21,6 +21,9 @@ use serde_json::{Value as Json, json};
 
 use crate::Timebase;
 
+/// Most distinct warnings an import or export reports.
+const MAX_WARNINGS: usize = 200;
+
 /// Export state shared by the whole document.
 pub(crate) struct Ex {
     pub tb: Timebase,
@@ -31,7 +34,8 @@ pub(crate) struct Ex {
 impl Ex {
     pub fn warn(&mut self, w: impl Into<String>) {
         let w = w.into();
-        if !self.warnings.contains(&w) {
+        // Each warning is looked for among the earlier ones: past a screenful, more add nothing.
+        if self.warnings.len() < MAX_WARNINGS && !self.warnings.contains(&w) {
             self.warnings.push(w);
         }
     }
@@ -46,7 +50,8 @@ pub(crate) struct Im {
 impl Im {
     pub fn warn(&mut self, w: impl Into<String>) {
         let w = w.into();
-        if !self.warnings.contains(&w) {
+        // Each warning is looked for among the earlier ones: past a screenful, more add nothing.
+        if self.warnings.len() < MAX_WARNINGS && !self.warnings.contains(&w) {
             self.warnings.push(w);
         }
     }

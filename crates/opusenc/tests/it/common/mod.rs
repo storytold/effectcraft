@@ -124,9 +124,9 @@ pub fn encode(mut enc: OpusEncoder, planar: &[Vec<f32>]) -> (OpusEncoder, Vec<Ve
     (enc, packets)
 }
 
-/// Decodes with filmcraft-opus, drops the pre-skip and returns planar channels (full length).
+/// Decodes with craft-audio, drops the pre-skip and returns planar channels (full length).
 pub fn decode(head: &[u8], packets: &[Vec<u8>]) -> Vec<Vec<f32>> {
-    let mut dec = filmcraft_opus::Decoder::new(head).expect("OpusHead");
+    let mut dec = craft_audio::opus::Decoder::new(head).expect("OpusHead");
     dec.set_trim_pre_skip(true);
     let mut out: Vec<Vec<f32>> = vec![Vec::new(); dec.channels()];
     for p in packets {
