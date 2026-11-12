@@ -215,7 +215,7 @@ pub(crate) fn aux_footage(project: &effectcraft_project::Project) -> Vec<String>
 }
 
 /// Make `src` let go of what it decoded from `footage`'s files (its file, or a sequence's).
-fn forget_files(src: &dyn FootageSource, footage: &effectcraft_project::Footage) {
+pub(crate) fn forget_files(src: &dyn FootageSource, footage: &effectcraft_project::Footage) {
     for p in std::iter::once(&footage.path).chain(&footage.sequence) {
         src.forget(p);
     }

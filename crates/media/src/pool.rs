@@ -423,7 +423,9 @@ impl MediaPool {
         lock(&self.inner.problems).clear();
     }
 
-    /// Forget a file (after it changed on disk, or to retry a file that failed to open).
+    /// Forget a file (after it changed on disk or its project closed, or to retry a file that
+    /// failed to open). A decode of any file in flight meanwhile keeps nothing (see
+    /// [`CacheState::forgets`]).
     pub fn forget(&self, path: &str) {
         lock(&self.inner.sources).remove(path);
         lock(&self.inner.models).remove(path);
@@ -1228,9 +1230,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    /// #2042: a read queued before its file was forgotten (a read-ahead of a closed project's
-    /// movie, started from the frame before) decodes nothing and keeps nothing; a read asked
-    /// after the forget decodes and keeps its frame.
+    /// #2042: a read queued before its file was forgotten (as a read-ahead of a closed project's
+    /// movie is, by the read of the frame before) decodes nothing and keeps nothing; a read asked
+    /// after the forget decodes and keeps its frame. (A still stands in for the movie.)
     #[test]
     fn reads_queued_before_a_forget_keep_nothing() {
         let mut png = std::io::Cursor::new(Vec::new());

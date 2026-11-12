@@ -132,20 +132,23 @@ fn held_thumbnail_jobs_cannot_refill_the_closed_projects_caches() {
 }
 
 #[test]
-fn a_thumbnail_reading_through_close_lets_go_of_what_it_read() {
-    let (mut s, src, item, _) = old_project();
-    let (entered, entered_rx) = std::sync::mpsc::channel();
-    let (go, go_rx) = std::sync::mpsc::channel();
-    *src.gate.lock().unwrap() = Some((entered, go_rx));
-    let job = s.thumbnail_job(item, Tick(0), 16).unwrap();
-    let running = std::thread::spawn(job);
-    // The job is decoding the closed project's still when the project closes.
-    entered_rx.recv().unwrap();
-    s.execute("file.closeProject", json!({})).unwrap();
-    go.send(()).unwrap();
-    let shown = running.join().unwrap();
-    assert!(src.cached.lock().unwrap().is_empty(), "the frame decoded through Close was kept");
-    assert!(shown.is_none(), "a closed project's thumbnail isn't shown");
+fn thumbnails_reading_through_close_let_go_of_what_they_read() {
+    for which in ["footage", "comp"] {
+        let (mut s, src, item, comp) = old_project();
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel();
+        *src.gate.lock().unwrap() = Some((entered, go_rx));
+        let job = s.thumbnail_job(if which == "comp" { comp } else { item }, Tick(0), 16).unwrap();
+        let running = std::thread::spawn(job);
+        // The job is decoding the closed project's still when the project closes.
+        entered_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        s.execute("file.closeProject", json!({})).unwrap();
+        go.send(()).unwrap();
+        let shown = running.join().unwrap();
+        assert!(src.cached.lock().unwrap().is_empty(), "{which}: the frame decoded through Close was kept");
+        assert_eq!(s.layer_cache.stats().entries, 0, "{which}: the closed project's layers were kept");
+        assert!(shown.is_none(), "{which}: a closed project's thumbnail isn't shown");
+    }
 }
 
 #[test]
