@@ -1,0 +1,13 @@
+// comp.new / comp.settings took a frameRate of 0 (or below 0.0005) as a 0/1 rate: the next
+// frame-duration computation divided by zero and killed the process with the unsaved project
+// (fixed in 780419c, "Compositions: reject zero and negative frame rates instead of panicking").
+{"start": "new"}
+{"command": "comp.new", "params": {"name": "Zero", "frameRate": 0}, "expect_error": "frameRate"}
+{"command": "comp.new", "params": {"name": "Tiny", "frameRate": 0.0001}, "expect_error": "frameRate"}
+{"command": "comp.new", "params": {"name": "Negative", "frameRate": -24}, "expect_error": "frameRate"}
+{"command": "comp.new", "params": {"name": "Main", "width": 320, "height": 180, "frameRate": 30, "duration": 1}}
+{"command": "comp.settings", "params": {"frameRate": 0}, "expect_error": "frameRate"}
+{"expect": {"query": "comp.info", "pointer": "/frameRate", "equals": 30}}
+{"command": "layer.newSolid", "params": {"color": "#ff0000"}}
+{"command": "time.set", "params": {"time": 0.5}}
+{"expect_no_error": true}

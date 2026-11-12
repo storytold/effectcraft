@@ -331,3 +331,17 @@ fn background_pre_render_movies_are_checked_again_before_publication() {
         assert!(listing(&f.dir).iter().all(|name| !name.starts_with(".effectcraft-prerender-")));
     }
 }
+
+/// Footage files sharing a name are numbered from that name (`3_a.mov`, not `3_2_a.mov`).
+#[test]
+fn collect_files_numbers_repeated_names_from_the_name() {
+    let mut f = collecting("collect-repeated", "a.mov");
+    for d in ["in2", "in3"] {
+        std::fs::create_dir_all(f.path(d)).unwrap();
+        f.footage(&format!("{d}/a.mov"));
+    }
+    collect(&mut f).unwrap();
+    let mut names = listing(&f.path("out/(Footage)"));
+    names.sort();
+    assert_eq!(names, ["2_a.mov", "3_a.mov", "a.mov"]);
+}

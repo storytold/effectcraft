@@ -202,6 +202,8 @@ pub(crate) fn fractal(e: &mut Enc, ctx: &EffectCtx, b: GBuf, turbulent: bool) ->
 
 /// noise::median_image (of the straight colour with alpha 1 when `straight`).
 pub(crate) fn median_image(e: &mut Enc, img: &GpuImage, r: usize, straight: bool) -> GpuImage {
+    // As on the CPU: the window's radius is capped, so its first fill stays bounded.
+    let r = r.min(effectcraft_effects::MEDIAN_MAX_RADIUS);
     let q = run(e, "fxn_quant", &with_u0([straight as u32, 0, 0, 0]), img, None, None);
     // Preserve the CPU's rounded level / 511 values before the strict Dust & Scratches
     // threshold. GPU division (even residual-corrected) may differ by one ulp.
@@ -601,6 +603,8 @@ fn minimax(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 
 // ---------------------------------------------------------------- Echo / Posterize Time (time_fx.rs)
 
+/// Echo on the GPU (`time_fx::echo`): the frames fetched on the CPU, folded in order by
+/// `fxn_echo` into two ping-pong images, then `fxn_echo_fin` clamps the result.
 fn echo(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let n = ctx.params.f("numberOfEchoes").round().clamp(0.0, 255.0) as usize;
     let dt = ctx.params.f("echoTime");
@@ -620,8 +624,7 @@ fn echo(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         e.pixels("fxn_echo", &p, a, Some(&frame), o, None);
         acc.swap(0, 1);
     }
-    let mut p = with_u0([op, 0, 0, 0]);
-    p.f[0][0] = (n + 1) as f32;
+    let p = with_u0([op, 0, 0, 0]);
     let img = run(e, "fxn_echo_fin", &p, &acc[0], None, None);
     Some(GBuf { img, offset: grid.offset, scale: grid.scale })
 }
