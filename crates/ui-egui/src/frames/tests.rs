@@ -3325,18 +3325,19 @@ fn gpu_render_slots_never_block_rayon_helpers() {
     assert_eq!(*slots.busy.lock().unwrap(), 0);
 }
 
-/// Dedicated preview lanes have one protected thread and can wait without creating the
-/// shared-pool helper dependency cycle. They must keep rendering on a healthy GPU.
+/// A lane's drain thread can wait without creating the shared-pool helper dependency cycle,
+/// and must keep rendering on a healthy GPU; the lane's other threads ([`LANE_WIDTH`] wide)
+/// help with its frame and never wait.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
     let slots = GpuRenderSlots::new();
     let first = slots.acquire(2);
     let second = slots.acquire(2);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(LANE_WIDTH).build().unwrap();
     let (started, ready) = std::sync::mpsc::channel();
     let (tx, rx) = std::sync::mpsc::channel();
-    let (early, admitted) = std::thread::scope(|scope| {
+    let (early, admitted, helper) = std::thread::scope(|scope| {
         scope.spawn(|| {
             pool.install(|| {
                 let _drain = Draining::enter(Some(0)).unwrap();
@@ -3347,13 +3348,19 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
             });
         });
         ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        // Another thread of the same lane, while its drain thread waits: it declines.
+        let (htx, hrx) = std::sync::mpsc::channel();
+        let (pool, slots) = (&pool, &slots);
+        scope.spawn(move || pool.install(|| htx.send(slots.for_render(2).is_none()).unwrap()));
+        let helper = hrx.recv_timeout(std::time::Duration::from_secs(2));
         let early = rx.recv_timeout(std::time::Duration::from_millis(100));
         drop((first, second));
         let admitted = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
-        (early, admitted)
+        (early, admitted, helper)
     });
     assert!(early.is_err(), "busy dedicated lane must wait instead of falling back to CPU");
     assert_eq!(admitted, Ok(true));
+    assert_eq!(helper, Ok(true), "a lane's helper thread must not wait on GPU permits");
     pool.install(|| {
         assert!(!DRAINING.get());
         assert!(!DRAINING_LANE.get());
@@ -3365,4 +3372,52 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
         assert!(!DRAINING.get());
         assert!(!DRAINING_LANE.get());
     });
+}
+
+#[test]
+fn effect_detection_answers_each_comp_once() {
+    // Sixteen levels, each comp holding eight layers of the one below and no effects: 8^16 walks
+    // without a memo. Answered at once.
+    use effectcraft_engine::project::{Comp, ItemKind, LayerSource, build};
+    use effectcraft_engine::time::{FrameRate, Tick};
+    let mut p = Project::default();
+    let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+    let mut below = p.add_item("C", effectcraft_engine::color::Label::Sandstone, None, ItemKind::Comp(base.clone().into()));
+    for _ in 0..16 {
+        let layers: Vec<_> = (0..8).map(|_| build::layer(&mut p, &base, "a", LayerSource::Comp { item: below }, (0, 0), None)).collect();
+        let mut c = base.clone();
+        c.layers = layers.into();
+        below = p.add_item("C", effectcraft_engine::color::Label::Sandstone, None, ItemKind::Comp(c.into()));
+    }
+    let start = std::time::Instant::now();
+    assert!(!comp_has_effects(&p, below));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn an_effect_found_by_a_short_route_is_not_hidden_by_a_deep_one() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    let mut s = Session::default();
+    let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    let comp = |s: &mut Session| ItemId(id(s.execute("comp.new", json!({"name": "C", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
+    let nest = |s: &mut Session, outer: ItemId, inner: ItemId| {
+        s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0, "time": 0.0})).unwrap();
+    };
+    // `fx` holds a layer with an effect; seventeen comps stack above it, one level too many to be found.
+    let fx = comp(&mut s);
+    let l = id(s.execute("layer.newSolid", json!({"comp": fx.0, "color": "#ff0000"})).unwrap(), "layer");
+    s.execute("effect.apply", json!({"comp": fx.0, "layers": [l], "effect": "ec.vr.converter"})).unwrap();
+    let mut chain = fx;
+    for _ in 0..17 {
+        let up = comp(&mut s);
+        nest(&mut s, up, chain);
+        chain = up;
+    }
+    assert!(!comp_has_effects(&s.project, chain), "too deep to be found");
+    // A root that nests the chain first and `fx` directly after it.
+    let root = comp(&mut s);
+    nest(&mut s, root, chain);
+    nest(&mut s, root, fx);
+    assert!(comp_has_effects(&s.project, root));
 }

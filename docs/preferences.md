@@ -37,6 +37,7 @@ Commands (CLI, MCP, control channel):
 - `general.showToolTips`: Show Tool Tips
 - `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
+- `general.fitNewLayersToWorkArea`: Fit New Layers to Work Area (off by default). On: new text, solid, shape, null and adjustment layers start at the work area start and end at its end, ahead of Create Layers at Composition Start Time. Footage and compositions keep their own length.
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
 - `startup.offerCrashRecovery`: Offer to Open the Latest Auto-Save After a Crash
@@ -52,10 +53,20 @@ Commands (CLI, MCP, control channel):
 - `autoSave.saveOnRenderStart`: Save When Starting Render Queue
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
-  Adaptive Resolution drops to while you drag; a playing preview keeps the viewer's resolution)
+  Adaptive Resolution drops to while you drag, and the lowest a playing preview steps down to)
+- `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. Off by default (without it a first play renders
+  at the viewer's resolution at the rate frames arrive, and a looping preview plays its later loops
+  from the cache in real time, as in After Effects; with it the play stays lowered). A
+  preview at Resolution Auto that plays under 80 % of its frame rate (frames render slower than
+  that, so it plays them at the rate they arrive rather than freezing between them) steps
+  down a resolution (half the scale after two seconds, a quarter two seconds later if still slow,
+  no lower than the Adaptive Resolution Limit) for the rest of that play; stopping goes back to the viewer's resolution, and Cache
+  Frames When Idle fills it in. An explicit Resolution (the comp's or the Preview panel's) is
+  kept as set
 - `previews.cacheFramesWhenIdle`: Cache Frames When Idle (Composition ▸ Preview): after a second
   without input or edits, the viewer renders the work area into the RAM preview in the
-  background, from the current time on, until it is cached or the budget is full
+  background, from the current time on, until it is cached or the budget is full. On by default,
+  as in After Effects, so the first playback of a comp left alone for a second is already cached
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
 - `appearance.appearanceMode`: Appearance Mode (`auto` / `dark` / `light`). `auto` (Sync with System) follows the operating system's light or dark appearance while the app runs: on Linux the desktop app reads the XDG desktop portal (`org.freedesktop.appearance` `color-scheme`) once and then listens for its `SettingChanged` signal on a worker thread, repainting only when the value changes (nothing polls); `gsettings` runs at most once at start-up, by absolute path, when the portal gives no answer. Elsewhere it uses what the window system reports. With no answer it shows the dark theme. New installs stay `dark`; Sync with System is opt-in. The Tools bar's appearance button (a monitor, sun or moon) cycles Sync with System, Light and Dark (`view.theme.toggle`, Next Appearance Mode).
 - `appearance.darkTheme`: Dark Theme (`dark` / `darker`), shown in dark appearance
@@ -89,7 +100,20 @@ Commands (CLI, MCP, control channel):
   one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
-  `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+  `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting. A job on GPU
+  Acceleration that renders on the CPU (it measured the CPU faster, or the GPU stopped) fits
+  its CPU frames in flight into half the memory the system has free, at the size a GPU frame
+  measured, from 1 to one per thread; the app log names the count. Other CPU renders (Software
+  Rendering projects) keep one frame per thread in flight, so their memory grows with the core
+  count. Set `EFFECTCRAFT_CPU_INFLIGHT` to a whole number of frames (at least 1) to cap the
+  frames in flight of every Render Queue render and export, `effectcraft-cli render` included
+  ([#1615](https://github.com/storytold/effectcraft/issues/1615)); previews don't read it. One
+  exception: while a job on GPU Acceleration times both compositors on its first frames, it
+  renders them under the cap but keeps them all (up to 12) until it has chosen. That timing
+  picks the compositor that a job of 12 frames or more renders every frame on (the render log
+  names it and why). `EFFECTCRAFT_RQ_RENDERER` set to `gpu` or `cpu` skips it and renders on
+  that compositor; `auto` (the default) measures. A queue item's later output modules reuse its
+  first one's choice, and Software Rendering projects always render on the CPU.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles

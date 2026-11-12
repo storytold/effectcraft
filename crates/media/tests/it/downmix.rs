@@ -174,7 +174,7 @@ fn each_channel_reaches_stereo_at_its_bs775_gain() {
 fn whole_pce_entry(p: &Path, channels: usize) -> PathBuf {
     let mut bytes = std::fs::read(p).expect("read");
     let Some((asc, 2)) = aac_entry(&bytes) else { return p.to_path_buf() };
-    if channels <= 2 || filmcraft_aac::AudioSpecificConfig::parse(&asc).map(|a| a.channel_config).ok() != Some(0) {
+    if channels <= 2 || craft_audio::aac::AudioSpecificConfig::parse(&asc).map(|a| a.channel_config).ok() != Some(0) {
         return p.to_path_buf();
     }
     // the `mp4a` entry's channelcount follows its 6 reserved bytes, data reference index and
@@ -189,9 +189,9 @@ fn whole_pce_entry(p: &Path, channels: usize) -> PathBuf {
 
 /// The AudioSpecificConfig and sample entry channel count of an MP4's first AAC track.
 fn aac_entry(bytes: &[u8]) -> Option<(Vec<u8>, u32)> {
-    let file = filmcraft_isobmff::open(bytes).ok()?;
+    let file = craft_media::isobmff::open(bytes).ok()?;
     file.tracks.iter().flat_map(|t| &t.entries).find_map(|e| match &e.codec {
-        filmcraft_isobmff::CodecConfig::Aac(a) => Some((a.asc.clone(), e.audio.as_ref()?.channels)),
+        craft_media::isobmff::CodecConfig::Aac(a) => Some((a.asc.clone(), e.audio.as_ref()?.channels)),
         _ => None,
     })
 }

@@ -220,6 +220,56 @@ fn disc(out: &mut BezPath, c: Point, r: f64) {
     }
 }
 
+/// `path` with each curve whose extent is over 10⁷ × `tol` replaced by lines flattened at 10⁻⁷ of
+/// that extent. `None` when a coordinate is not finite.
+fn coarsen_huge(path: &BezPath, tol: f64) -> Option<BezPath> {
+    use kurbo::Shape as _;
+    let mut out = BezPath::new();
+    let (mut cur, mut start) = (Point::ZERO, Point::ZERO);
+    for el in path.elements() {
+        let seg = match *el {
+            PathEl::MoveTo(p) => {
+                (cur, start) = (p, p);
+                out.push(*el);
+                continue;
+            }
+            PathEl::LineTo(p) => {
+                cur = p;
+                out.push(*el);
+                continue;
+            }
+            PathEl::ClosePath => {
+                cur = start;
+                out.push(*el);
+                continue;
+            }
+            PathEl::QuadTo(_, p) | PathEl::CurveTo(_, _, p) => {
+                let mut one = BezPath::new();
+                one.move_to(cur);
+                one.push(*el);
+                (one, p)
+            }
+        };
+        let (one, end) = seg;
+        let bb = one.bounding_box();
+        let extent = bb.width().max(bb.height());
+        if !extent.is_finite() {
+            return None;
+        }
+        if extent * 1e-7 > tol {
+            kurbo::flatten(one.elements().iter().copied(), extent * 1e-7, |e| {
+                if let PathEl::LineTo(p) = e {
+                    out.line_to(p);
+                }
+            });
+        } else {
+            out.push(*el);
+        }
+        cur = end;
+    }
+    Some(out)
+}
+
 /// Outline of a tapered / waved stroke (local space; `res_scale` = device/local scale).
 pub fn outline(paths: &[BezPath], style: &StrokeStyle, res_scale: f64) -> Option<BezPath> {
     if style.width <= 0.0 {
@@ -230,7 +280,11 @@ pub fn outline(paths: &[BezPath], style: &StrokeStyle, res_scale: f64) -> Option
     let half = style.width / 2.0;
     for path in paths {
         // Fine enough for the width profile: ½ device pixel, at most ~20 000 samples per path.
-        let rough = flatten(path, 0.1 / rs, f64::INFINITY);
+        // Curves with huge extents are first cut into lines at a tolerance of 10⁻⁷ of their own
+        // extent, so none subdivides into billions of points before the step below applies;
+        // every other segment (small curves in a large path included) keeps the ½-pixel tolerance.
+        let Some(path) = coarsen_huge(path, 0.1 / rs) else { continue };
+        let rough = flatten(&path, 0.1 / rs, f64::INFINITY);
         for poly0 in rough {
             let len0 = poly0.len();
             if len0 <= 0.0 {
@@ -395,5 +449,38 @@ mod tests {
         assert!(m.data.iter().all(|v| *v <= 1.0001));
         let area: f32 = m.data.iter().sum();
         assert!(area > 240.0 * 6.0 * 0.8 && area < 240.0 * 6.0 * 1.05, "{area}");
+    }
+
+    /// A curve with enormous coordinates is approximated within a bounded number of points.
+    #[test]
+    fn huge_coordinates_do_not_explode_the_first_approximation() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((1e13, 0.0), (-1e13, 1e13), (1e13, 1e13));
+        let st = StrokeStyle {
+            width: 4.0,
+            taper: Some(Taper { percent: true, start_len: 50.0, end_len: 50.0, start_width: 0.0, end_width: 0.0, start_ease: 0.0, end_ease: 0.0 }),
+            ..Default::default()
+        };
+        let t = std::time::Instant::now();
+        let o = outline(&[p], &st, 1.0).unwrap();
+        assert!(o.elements().len() < 200_000, "{}", o.elements().len());
+        assert!(t.elapsed().as_secs() < 20);
+    }
+
+    /// Small curves keep their shape in a path that also has a huge segment.
+    #[test]
+    fn small_curves_survive_a_huge_segment() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((100.0, 0.0), (0.0, 100.0), (0.0, 0.0));
+        p.line_to((1e10, 0.0));
+        let c = coarsen_huge(&p, 0.1).unwrap();
+        assert_eq!(c.elements().len(), p.elements().len(), "nothing here is huge enough to cut");
+        let mut q = BezPath::new();
+        q.move_to((0.0, 0.0));
+        q.curve_to((1e13, 0.0), (-1e13, 1e13), (1e13, 1e13));
+        let c = coarsen_huge(&q, 0.1).unwrap();
+        assert!(c.elements().iter().skip(1).all(|e| matches!(e, PathEl::LineTo(_))) && c.elements().len() < 10_000);
     }
 }
