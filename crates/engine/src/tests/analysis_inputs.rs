@@ -126,3 +126,72 @@ fn masks_and_effects_above(saved: Saved) {
     assert_eq!(analysed(&s), [true, true]);
     check(&mut s, "prop.set", json!({"layer": CLIP.0, "path": "masks/#1/expansion", "value": 3}), [false, false]);
 }
+#[test]
+fn a_precomps_contents_are_part_of_the_input() {
+    for saved in [Saved::Input, Saved::Frames] {
+        precomp_contents(saved);
+    }
+}
+
+fn precomp_contents(saved: Saved) {
+    let mut s = open(ANALYSED);
+    // Pre-compose the clip, leaving its masks and effects on the precomp layer.
+    let r = run(&mut s, "layer.precompose", json!({"layers": [CLIP.0], "mode": "leave"}));
+    let inner = ItemId(r["comp"].as_u64().unwrap());
+    let inner_layer = |s: &Session, comp: ItemId| s.project.comp(comp).unwrap().layers[0].id.0;
+    let clip = inner_layer(&s, inner);
+    analyse(&mut s, saved);
+    // Edits inside the precomp change the frames.
+    check(&mut s, "prop.set", json!({"comp": inner.0, "layer": clip, "path": "transform/opacity", "value": 50}), [false, false]);
+    check(&mut s, "effect.apply", json!({"comp": inner.0, "layers": [clip], "effect": "ec.blur.gaussian"}), [false, false]);
+    check(&mut s, "layer.timing", json!({"comp": inner.0, "layers": [clip], "out": 0.25}), [false, false]);
+    // A name, label or comment inside it doesn't.
+    run(&mut s, "layer.rename", json!({"comp": inner.0, "layer": clip, "name": "Inner"}));
+    assert_eq!(analysed(&s), [true, true]);
+
+    // A precomp inside the precomp: its contents too.
+    let r = run(&mut s, "layer.precompose", json!({"comp": inner.0, "layers": [clip], "mode": "leave"}));
+    let deeper = ItemId(r["comp"].as_u64().unwrap());
+    assert_eq!(analysed(&s), [false, false], "pre-composing inside the precomp changes its contents");
+    analyse(&mut s, saved);
+    let clip = inner_layer(&s, deeper);
+    check(&mut s, "prop.set", json!({"comp": deeper.0, "layer": clip, "path": "transform/opacity", "value": 50}), [false, false]);
+
+    // Saved and reopened, they still match, and an edit inside still clears them.
+    let mut s = open(&s.project.to_json());
+    run(&mut s, "renderQueue.add", json!({"comp": COMP.0, "format": "png", "output": "frame.png"}));
+    assert_eq!(analysed(&s), [true, true]);
+    check(&mut s, "prop.set", json!({"comp": deeper.0, "layer": clip, "path": "transform/opacity", "value": 50}), [false, false]);
+}
+
+/// Precomps used many times, nested deeply or (in a broken project) in a cycle are keyed in
+/// bounded time, and an edit deep inside still changes the key.
+#[test]
+fn shared_deep_and_cyclic_precomps_are_keyed_in_bounded_time() {
+    use effectcraft_color::Label;
+    use effectcraft_project::{ItemKind, LayerSource};
+    let mut s = open(ANALYSED);
+    let r = run(&mut s, "layer.precompose", json!({"layers": [CLIP.0], "mode": "leave"}));
+    let inner = ItemId(r["comp"].as_u64().unwrap());
+    let mut p = (*s.project).clone();
+    let template = p.comp(inner).unwrap().clone();
+    // 40 comps, each drawing the next one twice (2^40 paths if each were walked), the last
+    // drawing the first.
+    let ids: Vec<ItemId> = (0..40).map(|i| p.add_item(&format!("Nest {i}"), Label::default(), None, ItemKind::Comp(template.clone().into()))).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let next = ids[(i + 1) % ids.len()];
+        let mut layer = template.layers[0].clone();
+        layer.source = LayerSource::Comp { item: next };
+        let c = p.comp_mut(*id).unwrap();
+        c.layers.push(layer.clone());
+        layer.id = LayerId(layer.id.0 + 1000);
+        c.layers.push(layer);
+    }
+    p.comp_mut(inner).unwrap().layers[0].source = LayerSource::Comp { item: ids[0] };
+    let key = |p: &Project| crate::analysis::frames_key::analysis_key(p, COMP, p.comp(COMP).unwrap().layer(CLIP).unwrap(), WARP);
+    let start = std::time::Instant::now();
+    let before = key(&p);
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+    p.comp_mut(ids[10]).unwrap().background = [1.0, 0.0, 0.0];
+    assert_ne!(key(&p), before);
+}
