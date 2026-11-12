@@ -5,6 +5,7 @@
 use effectcraft_engine::Session;
 use effectcraft_engine::color::Label;
 use effectcraft_keyframe::{Interp, TextDoc, Value as KV};
+use effectcraft_project::ae_order::{self, AeChild};
 use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, ParamUi, PropGroup};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
@@ -85,6 +86,7 @@ fn project(s: &Session) -> J {
         "workingSpace": p.settings.working_space.map(|w| format!("{w:?}")).unwrap_or_default(),
         "workingGamma": if p.settings.working_gamma_24() { 2.4 } else { 2.2 },
         "timeDisplayFrames": p.settings.time_display == effectcraft_project::TimeDisplayStyle::Frames,
+        "displayStartFrame": p.settings.frame_start,
         "renderQueue": p.render_queue.len(),
         "revision": s.revision,
     })
@@ -317,7 +319,8 @@ fn indexed_parade(g: &PropGroup) -> bool {
 
 fn node_json(c: &Comp, l: &Layer, uid: u64) -> R {
     if uid == 0 || uid == l.props.uid {
-        let n = l.props.children.len();
+        // After Effects' count (every slot, used or not); 3D model layers count their own groups.
+        let n = ae_order::ae_count(l).unwrap_or(l.props.children.len());
         return Ok(json!({
             "uid": l.props.uid, "kind": "group", "name": l.name, "matchName": matchnames::layer(&l.source), "matchId": "layer",
             "index": c.index_of(l.id).unwrap_or(0), "depth": 0, "parent": null, "isLayer": true, "numProperties": n,
@@ -328,7 +331,8 @@ fn node_json(c: &Comp, l: &Layer, uid: u64) -> R {
     let ch = chain(l, uid).ok_or("the property no longer exists (it was deleted)")?;
     let node = *ch.last().ok_or("bad property")?;
     let parent_group: &PropGroup = if ch.len() >= 2 { ch[ch.len() - 2].as_group().ok_or("bad tree")? } else { &l.props };
-    let index = parent_group.children.iter().position(|x| x.uid() == uid).map(|i| i + 1).unwrap_or(0);
+    let top = if ch.len() == 1 { ae_order::ae_index(l, node.match_id()) } else { None };
+    let index = top.unwrap_or_else(|| parent_group.children.iter().position(|x| x.uid() == uid).map(|i| i + 1).unwrap_or(0));
     let parent_uid = if ch.len() >= 2 { ch[ch.len() - 2].uid() } else { l.props.uid };
     let match_name = matchnames::node(&ch);
     let instance_parent = indexed_parade(parent_group) && ch.len() >= 2 || (ch.len() == 2 && ch[0].match_id() == "contents");
@@ -450,6 +454,9 @@ fn find_child<'a>(l: &'a Layer, g: &'a PropGroup, k: &str, depth: u8) -> Option<
     g.children
         .iter()
         .find(|n| chain_of(n) == k)
+        .or_else(|| matchnames::current_name(k).and_then(|m| g.children.iter().find(|n| chain_of(n) == m)))
+        // Match names that changed only in case (`ADBE Ellipse` is now `ADBE ELLIPSE`, #3113).
+        .or_else(|| g.children.iter().find(|n| chain_of(n).eq_ignore_ascii_case(k)))
         .or_else(|| g.children.iter().find(|n| n.name() == k))
         .or_else(|| g.children.iter().find(|n| n.match_id() == k))
         .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(k)))
@@ -471,6 +478,25 @@ fn child(s: &Session, a: &J) -> R {
     let uid = u(a, "uid").unwrap_or(0);
     let g: &PropGroup = if uid == 0 || uid == l.props.uid { &l.props } else { l.props.find_group(uid).ok_or("not a property group")? };
     let key = a.get("key").cloned().unwrap_or(J::Null);
+    // A layer's numbers and match names are After Effects' (Marker is 1, unused groups keep their
+    // slot and resolve to the same empty group by number or by match name).
+    let slot = match &key {
+        J::Number(n) => Some(n.as_u64().and_then(|i| usize::try_from(i).ok())),
+        J::String(name) => ae_order::ae_index_of_match_name(l, name).map(Some),
+        _ => None,
+    };
+    if std::ptr::eq(g, &l.props)
+        && ae_order::ae_slots(&l.source).is_some()
+        && let Some(slot) = slot
+    {
+        let Some(i) = slot else { return Ok(J::Null) };
+        return match ae_order::ae_child(l, i) {
+            Some(AeChild::Node(n)) => node_json(c, l, n.uid()),
+            Some(AeChild::Marker) => Ok(json!({"marker": true})),
+            Some(AeChild::Absent(s)) => Ok(json!({"absent": true, "name": s.name, "matchName": s.match_name, "index": i})),
+            None => Ok(J::Null),
+        };
+    }
     let found = match &key {
         J::Number(n) => n.as_u64().and_then(|i| g.children.get((i as usize).checked_sub(1)?)),
         J::String(k) => find_child(l, g, k, NESTED_CHILD_DEPTH),
@@ -742,36 +768,12 @@ fn resolve_add(s: &Session, a: &J) -> R {
 /// A text animator property (`layer.addTextAnimatorProperty` key) from an After Effects match
 /// name or a display name.
 fn text_animator_property(name: &str) -> Option<&'static str> {
-    const AE: &[(&str, &str)] = &[
-        ("ADBE Text Anchor Point 3D", "anchor"),
-        ("ADBE Text Position 3D", "position"),
-        ("ADBE Text Scale 3D", "scale"),
-        ("ADBE Text Skew", "skew"),
-        ("ADBE Text Rotation", "rotation"),
-        ("ADBE Text Opacity", "opacity"),
-        ("ADBE Text Fill Color", "fillColor"),
-        ("ADBE Text Fill Hue", "fillHue"),
-        ("ADBE Text Fill Saturation", "fillSaturation"),
-        ("ADBE Text Fill Brightness", "fillBrightness"),
-        ("ADBE Text Fill Opacity", "fillOpacity"),
-        ("ADBE Text Stroke Color", "strokeColor"),
-        ("ADBE Text Stroke Hue", "strokeHue"),
-        ("ADBE Text Stroke Saturation", "strokeSaturation"),
-        ("ADBE Text Stroke Brightness", "strokeBrightness"),
-        ("ADBE Text Stroke Opacity", "strokeOpacity"),
-        ("ADBE Text Stroke Width", "strokeWidth"),
-        ("ADBE Text Tracking Amount", "tracking"),
-        ("ADBE Text Line Anchor", "lineAnchor"),
-        ("ADBE Text Line Spacing", "lineSpacing"),
-        ("ADBE Text Character Offset", "characterOffset"),
-        ("ADBE Text Character Replace", "characterValue"),
-        ("ADBE Text Blur", "blur"),
-    ];
-    if let Some((_, k)) = AE.iter().find(|(m, _)| m.eq_ignore_ascii_case(name)) {
+    let table = matchnames::TEXT_ANIMATOR_PROPERTIES;
+    if let Some((k, _)) = table.iter().find(|(_, m)| m.eq_ignore_ascii_case(name)) {
         return Some(k);
     }
     let n = loose(name);
-    AE.iter().map(|(_, k)| *k).find(|k| loose(k) == n || (n == "anchorpoint" && *k == "anchor") || (n == "trackingamount" && *k == "tracking"))
+    table.iter().map(|(k, _)| *k).find(|k| loose(k) == n || (n == "anchorpoint" && *k == "anchor") || (n == "trackingamount" && *k == "tracking"))
 }
 
 /// `app.findMenuCommandId(name)`: 1-based index of the command whose label matches (menu items

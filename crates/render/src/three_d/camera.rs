@@ -37,7 +37,8 @@ pub struct Dof {
 impl Dof {
     /// Circle-of-confusion diameter (comp pixels) for a point at camera depth `z`.
     pub fn coc(&self, z: f64) -> f64 {
-        if z <= NEAR || self.focus <= 0.0 {
+        // No defocus can be measured against a non-finite focus or depth, so it counts as in focus.
+        if !z.is_finite() || z <= NEAR || !self.focus.is_finite() || self.focus <= 0.0 {
             return 0.0;
         }
         self.aperture * (z - self.focus).abs() / z * self.blur_level
@@ -116,12 +117,15 @@ pub fn basis_view(eye: Vec3, forward: Vec3, down_hint: Vec3) -> Mat4 {
     Mat4([[r.x, r.y, r.z, 0.0], [d.x, d.y, d.z, 0.0], [f.x, f.y, f.z, 0.0], [0.0, 0.0, 0.0, 1.0]]) * Mat4::translate(-eye)
 }
 
-/// Orientation angles (degrees, AE order X→Y→Z with Z = 0) that point +z along `dir`.
+/// Orientation angles (degrees, [`Mat4::orientation`]'s order) that point +z along `dir` with
+/// the layer's x axis kept level (no roll): the pitch about x, then the turn about the world's
+/// vertical axis, written as Orientation.
 pub fn orientation_for(dir: Vec3) -> [f64; 3] {
     let d = dir.normalize();
-    let x = (-d.y).clamp(-1.0, 1.0).asin().to_degrees();
-    let y = d.x.atan2(d.z).to_degrees();
-    [norm360(x), norm360(y), 0.0]
+    let pitch = (-d.y).clamp(-1.0, 1.0).asin().to_degrees();
+    let yaw = d.x.atan2(d.z).to_degrees();
+    let o = (Mat4::rotate_y(yaw) * Mat4::rotate_x(pitch)).orientation_angles();
+    [norm360(o.x), norm360(o.y), norm360(o.z)]
 }
 
 fn norm360(a: f64) -> f64 {
@@ -176,7 +180,7 @@ pub fn layer_rotation(ctx: &EvalCtx, layer: &Layer) -> Mat4 {
     let rx = ctx.f(layer, tr, "rotationX", 0.0);
     let ry = ctx.f(layer, tr, "rotationY", 0.0);
     let rz = ctx.f(layer, tr, "rotation", 0.0);
-    Mat4::orientation(Vec3::from(o)) * Mat4::rotate_z(rz) * Mat4::rotate_y(ry) * Mat4::rotate_x(rx)
+    Mat4::orientation(Vec3::from(o)) * Mat4::rotation_xyz(rx, ry, rz)
 }
 
 /// World matrix of a layer's parent chain (identity when unparented).
@@ -241,6 +245,53 @@ fn path_tangent(ctx: &EvalCtx, layer: &Layer) -> Option<Vec3> {
         .filter(|k| **k <= ctx.time)
         .find_map(|&k| dir(pos(k) - pos(k - dt)))
         .or_else(|| keys.iter().filter(|k| **k > ctx.time).find_map(|&k| dir(pos(k + dt) - pos(k))))
+        .or_else(|| {
+            // An expression has no keys to fall back on: sample it instead.
+            let expr = dims.iter().any(|m| tr.get(m).is_some_and(|p| p.has_expression()));
+            expr.then(|| sampled_tangent(ctx, layer, &pos, dt, true).or_else(|| sampled_tangent(ctx, layer, &pos, dt, false))).flatten()
+        })
+}
+
+/// Samples spent on each phase of [`sampled_tangent`]: it runs per layer per frame.
+const MOTION_SEARCH_STEPS: u32 = 12;
+
+/// Direction of the motion nearest to the context time, before it (`earlier`) or after it, for a
+/// position with no keyframes to fall back on (an expression). Steps 1, 2, 4, ... frames away
+/// (within the layer's in/out points) until the position differs from the current one, then
+/// bisects down to `dt` the moment the motion stopped (or started), so the heading kept is the
+/// one at the end of the motion whichever frame is shown.
+fn sampled_tangent(ctx: &EvalCtx, layer: &Layer, pos: &dyn Fn(effectcraft_time::Tick) -> Vec3, dt: effectcraft_time::Tick, earlier: bool) -> Option<Vec3> {
+    let here = pos(ctx.time);
+    let moved = |t| (pos(t) - here).length() > 1e-9;
+    let limit = if earlier { layer.in_point.min(ctx.time) } else { layer.out_point.max(ctx.time) };
+    let mut step = ctx.comp.frame_duration().max(dt);
+    let (mut still, mut away) = (ctx.time, None);
+    for _ in 0..MOTION_SEARCH_STEPS {
+        let t = if earlier { (ctx.time - step).max(limit) } else { (ctx.time + step).min(limit) };
+        if moved(t) {
+            away = Some(t);
+            break;
+        }
+        still = t;
+        if t == limit {
+            break;
+        }
+        step = step + step;
+    }
+    let mut away = away?;
+    for _ in 0..MOTION_SEARCH_STEPS {
+        if (still - away).abs() <= dt {
+            break;
+        }
+        let mid = away + (still - away).mul_ratio(1, 2);
+        if moved(mid) {
+            away = mid;
+        } else {
+            still = mid;
+        }
+    }
+    let d = if earlier { here - pos(away) } else { pos(away) - here };
+    (d.length() > 1e-9 && d.length().is_finite()).then(|| d.normalize())
 }
 
 /// Auto-Orient ▸ Orient Along Path for 2D layers: extra Z rotation in degrees.
@@ -249,6 +300,13 @@ pub fn auto_orient_2d(ctx: &EvalCtx, layer: &Layer) -> f64 {
         return 0.0;
     }
     path_tangent(ctx, layer).map(|t| t.y.atan2(t.x).to_degrees()).unwrap_or(0.0)
+}
+
+/// The most camera-facing layers whose parents are evaluated inside one another.
+const MAX_ORIENT_NESTING: usize = 8;
+
+thread_local! {
+    static ORIENT_NESTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether `id` is `layer` or one of its parents.
@@ -285,8 +343,27 @@ pub fn auto_orient_3d(ctx: &EvalCtx, layer: &Layer, pos: Vec3) -> Option<Mat4> {
             if ctx.comp.active_camera(ctx.time).is_some_and(|c| in_parent_chain(ctx, c, layer.id)) {
                 return None;
             }
+            // The parent's world matrix evaluates the parent's own orientation: a parent cycle
+            // of camera-facing layers would recurse without end, and a chain of them is walked
+            // again from every link. Past MAX_ORIENT_NESTING the layer keeps its Orientation.
+            let nesting = ORIENT_NESTING.with(|n| n.get());
+            if nesting >= MAX_ORIENT_NESTING {
+                return None;
+            }
+            // Restored when this scope ends, a panic unwinding through it included (the CPU retry
+            // after one must not start with a raised count).
+            struct Restore(usize);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    ORIENT_NESTING.with(|n| n.set(self.0));
+                }
+            }
+            ORIENT_NESTING.with(|n| n.set(nesting + 1));
+            let restore = Restore(nesting);
+            let parent = parent_world(ctx, layer);
+            drop(restore);
             let eye = active_camera(ctx).eye;
-            let e = parent_world(ctx, layer).inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
+            let e = parent.inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
             let d = pos - e;
             (d.length() > 1e-9).then(|| basis_rotation(d, vec3(0.0, 1.0, 0.0)))
         }
@@ -313,22 +390,27 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
     let (eye, fwd, down) = layer_frame(ctx, cam);
     let opts = cam.props.sub("cameraOptions");
     let zoom = opts.map(|g| ctx.f(cam, g, "zoom", 1000.0)).unwrap_or(1000.0).max(1e-3);
-    let dof = opts.filter(|g| ctx.b(cam, g, "dof")).map(|g| Dof {
-        focus: ctx.f(cam, g, "focusDistance", zoom),
-        aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
-        blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
-        iris: super::bokeh::Iris {
-            sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),
-            rotation: ctx.f(cam, g, "irisRotation", 0.0),
-            roundness: ctx.f(cam, g, "irisRoundness", 0.0) / 100.0,
-            aspect: ctx.f(cam, g, "irisAspectRatio", 1.0).max(0.01),
-            fringe: ctx.f(cam, g, "irisDiffractionFringe", 0.0).max(0.0) / 100.0,
-        },
-        highlight: super::bokeh::Highlight {
-            gain: ctx.f(cam, g, "highlightGain", 0.0).clamp(0.0, 100.0) / 100.0,
-            threshold: ctx.f(cam, g, "highlightThreshold", 255.0).clamp(0.0, 255.0) / 255.0,
-            saturation: ctx.f(cam, g, "highlightSaturation", 0.0).clamp(0.0, 100.0) / 100.0,
-        },
+    let dof = opts.filter(|g| ctx.b(cam, g, "dof")).map(|g| {
+        // A non-finite Focus Distance would make every blur radius non-finite; use the value the
+        // property defaults to (the zoom plane) instead.
+        let focus = ctx.f(cam, g, "focusDistance", zoom);
+        Dof {
+            focus: if focus.is_finite() { focus } else { zoom },
+            aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
+            blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
+            iris: super::bokeh::Iris {
+                sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),
+                rotation: ctx.f(cam, g, "irisRotation", 0.0),
+                roundness: ctx.f(cam, g, "irisRoundness", 0.0) / 100.0,
+                aspect: ctx.f(cam, g, "irisAspectRatio", 1.0).max(0.01),
+                fringe: ctx.f(cam, g, "irisDiffractionFringe", 0.0).max(0.0) / 100.0,
+            },
+            highlight: super::bokeh::Highlight {
+                gain: ctx.f(cam, g, "highlightGain", 0.0).clamp(0.0, 100.0) / 100.0,
+                threshold: ctx.f(cam, g, "highlightThreshold", 255.0).clamp(0.0, 255.0) / 255.0,
+                saturation: ctx.f(cam, g, "highlightSaturation", 0.0).clamp(0.0, 100.0) / 100.0,
+            },
+        }
     });
     CameraState { view: basis_view(eye, fwd, down), eye, zoom, ortho: false, dof }
 }
@@ -408,7 +490,7 @@ impl View3D {
         }
     }
     pub fn from_id(s: &str) -> Option<View3D> {
-        let k: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let k: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
         View3D::ALL.into_iter().find(|v| v.id().eq_ignore_ascii_case(&k) || v.label().replace(' ', "").eq_ignore_ascii_case(&k))
     }
     pub fn is_ortho(self) -> bool {

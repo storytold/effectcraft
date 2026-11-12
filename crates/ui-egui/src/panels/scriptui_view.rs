@@ -15,7 +15,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, ve
 use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
-use crate::dock::PanelKind;
+use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::theme::Tokens;
 
 enum Act {
@@ -26,6 +26,8 @@ enum Act {
     Close(u32),
     /// A mouse event (`scriptui.mouse` parameters without window and widget).
     Mouse(u32, u32, Value),
+    /// A docked panel's new size (`scriptui.resize`).
+    Resize(u32, [f32; 2]),
 }
 
 fn rect_of(origin: egui::Pos2, b: [f64; 4]) -> Rect {
@@ -51,7 +53,7 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
             let tw = (tab.text.chars().count() as f32 * 7.0 + 20.0).max(48.0);
             let hr = Rect::from_min_size(pos2(x, r.min.y), vec2(tw, 22.0));
             let active = i == w.active_tab;
-            let resp = ui.interact(hr, egui::Id::new(("sui-tab", win, tab.id)), Sense::click());
+            let resp = ui.interact(hr, egui::Id::unique(("sui-tab", win, tab.id)), Sense::click());
             ui.painter().rect_filled(
                 hr,
                 3.0,
@@ -81,12 +83,17 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
     }
 }
 
+/// Draws ScriptUI widget `w` of window `win` at its bounds offset by `origin`, registering it for
+/// automation, and recurses into containers. Widgets with an `onDraw` handler are painted by the
+/// script (replacing the default look, or on top of it when it called `drawOSControl()`) while
+/// buttons, checkboxes and radios still take clicks. Edits and clicks are appended to `acts` for
+/// [`perform`]; while a field or slider is in use its live value lives in egui temp data.
 fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, win: u32, w: &Widget, acts: &mut Vec<Act>) {
     let t = app.tokens;
     let services = app.session.services.clone();
     let rect = rect_of(origin, w.bounds);
     register(app, win, w, rect);
-    let id = egui::Id::new(("sui", win, w.id));
+    let id = egui::Id::unique(("sui", win, w.id));
     let tip = |r: egui::Response| if w.help_tip.is_empty() { r } else { r.on_hover_text(&w.help_tip) };
     // onDraw: the script paints the control. Without drawOSControl() its paint replaces the
     // default look (buttons and toggles still respond to clicks); with it, it goes on top.
@@ -209,7 +216,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let mut pick: Option<usize> = None;
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                    egui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
+                    craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
                             if it == "-" {
                                 ui.separator();
@@ -256,20 +263,22 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
     }
 }
 
+/// A draw-list colour (`None` is the theme colour). Script colours are display (sRGB) values
+/// in 0..1, as in After Effects, not linear light: `[43/255, 43/255, 43/255, 1]` is RGB 43.
+fn draw_color(c: &Option<[f32; 4]>, theme: Color32) -> Color32 {
+    c.map_or(theme, super::gradient_editor::to_color32)
+}
+
 /// Paint an onDraw draw list in `rect` (control coordinates → screen).
 fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &dyn Services) {
     let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    let col = |c: &Option<[f32; 4]>, theme: Color32| match c {
-        Some(c) => egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]).into(),
-        None => theme,
-    };
     let at = |x: f64, y: f64| rect.min + vec2(x as f32, y as f32);
     for op in ops {
         match op {
             DrawOp::Fill { color, path } => {
                 // Any path shape (concave, self-intersecting, with holes): non-zero winding
                 // triangles, not egui's convex-only polygon fill.
-                let c = col(color, t.field_bg);
+                let c = draw_color(color, t.field_bg);
                 let mut mesh = egui::Mesh::default();
                 for tri in PathSeg::fill_triangles(path, 48, false) {
                     let base = mesh.vertices.len() as u32;
@@ -283,14 +292,14 @@ fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &
                 }
             }
             DrawOp::Stroke { color, width, path } => {
-                let s = Stroke::new(*width as f32, col(color, t.text));
+                let s = Stroke::new(*width as f32, draw_color(color, t.text));
                 for (pts, closed) in PathSeg::polylines(path, 48) {
                     let pts: Vec<egui::Pos2> = pts.iter().map(|q| at(q[0], q[1])).collect();
                     p.add(if closed { egui::Shape::closed_line(pts, s) } else { egui::Shape::line(pts, s) });
                 }
             }
             DrawOp::Text { text, color, x, y, size, .. } => {
-                p.text(at(*x, *y), Align2::LEFT_TOP, text, Tokens::ui(*size as f32), col(color, t.text));
+                p.text(at(*x, *y), Align2::LEFT_TOP, text, Tokens::ui(*size as f32), draw_color(color, t.text));
             }
             DrawOp::Image { image, x, y, w, h } => {
                 let tex = image.as_ref().and_then(|i| image_texture(ui.ctx(), i, services));
@@ -316,17 +325,32 @@ fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &
 /// A ScriptUIImage as a texture (decoded once and kept; `None` when it can't be read or
 /// decoded).
 fn image_texture(ctx: &egui::Context, img: &ImageRef, services: &dyn Services) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new(("scriptui-image", img));
+    let id = egui::Id::unique(("scriptui-image", img));
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
         return cached;
     }
-    let tex = img.bytes(services).and_then(|b| image::load_from_memory(&b).ok()).map(|d| {
+    let tex = img.bytes(services).and_then(|b| decode_ui_image(&b)).map(|d| {
         let rgba = d.to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
         ctx.load_texture(format!("scriptui-image-{}", img.name), ci, egui::TextureOptions::LINEAR)
     });
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
     tex
+}
+
+/// The largest side of a ScriptUI image (icons and banners are far smaller).
+const MAX_UI_IMAGE_SIDE: u32 = 4096;
+
+/// A ScriptUI image decoded within [`MAX_UI_IMAGE_SIDE`] per side and a matching allocation
+/// limit, checked from the header before the pixels (and their RGBA copy) are allocated.
+fn decode_ui_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_alloc = Some(u64::from(MAX_UI_IMAGE_SIDE) * u64::from(MAX_UI_IMAGE_SIDE) * 16);
+    r.limits(limits);
+    r.decode().ok()
 }
 
 /// An image control's or icon button's image, fitted (aspect kept) and centred in `r`.
@@ -382,13 +406,17 @@ fn wants_mouse(w: &Widget, depth: usize) -> bool {
 /// same control; it replaces the plain click the control reported, so a checkbox toggles once).
 /// Only events a listener wants are sent; none while `active` is false (a modal dialog is up).
 fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
-    let id = egui::Id::new(("sui-mouse", win));
+    let id = egui::Id::unique(("sui-mouse", win));
     if !wants_mouse(root, 0) {
         ui.data_mut(|d| d.remove::<MouseTrack>(id));
         return;
     }
     let mut st: MouseTrack = ui.data(|d| d.get_temp(id)).unwrap_or_default();
-    let (latest, events, mods, time) = ui.input(|i| (i.pointer.latest_pos(), i.events.clone(), i.modifiers, i.time));
+    let (latest, events, mods, time, held) = ui.input(|i| {
+        let held = |b: egui::PointerButton, bit: u8| if i.pointer.button_down(b) { bit } else { 0 };
+        let held = held(egui::PointerButton::Primary, 1) | held(egui::PointerButton::Secondary, 2) | held(egui::PointerButton::Middle, 4);
+        (i.pointer.latest_pos(), i.events.clone(), i.modifiers, i.time, held)
+    });
     let ctx = ui.ctx();
     let layer = ui.layer_id();
     let target = |p: egui::Pos2| -> Option<&Widget> {
@@ -407,7 +435,7 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             w.id,
             json!({
                 "type": ty, "x": p.x - at.x, "y": p.y - at.y, "screenX": p.x, "screenY": p.y,
-                "button": button, "detail": detail,
+                "button": button, "buttons": held, "detail": detail,
                 "altKey": mods.alt, "ctrlKey": mods.ctrl, "shiftKey": mods.shift, "metaKey": mods.mac_cmd,
             }),
         ));
@@ -424,10 +452,15 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
         }
         st.hover = now_id;
     }
-    if let Some((w, p)) = now
-        && st.at != Some(p)
-    {
-        send(w, "mousemove", p, 0, 0, acts);
+    // While a button is held, the control it was pressed on keeps getting the moves, inside or
+    // outside the window, as in After Effects (#2584).
+    let captured = st.down.and_then(|(c, _)| root.find(c));
+    if let Some(p) = latest.filter(|p| st.at != Some(*p)) {
+        match (captured, now) {
+            (Some(c), _) => send(c, "mousemove", p, 0, 0, acts),
+            (None, Some((w, _))) => send(w, "mousemove", p, 0, 0, acts),
+            (None, None) => {}
+        }
     }
     st.at = latest;
     // Presses and releases.
@@ -439,7 +472,9 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             egui::PointerButton::Secondary => 2,
             _ => continue,
         };
-        let Some(w) = target(*pos) else {
+        // A release goes to the control the button was pressed on, wherever the pointer is.
+        let pressed_on = st.down.filter(|(_, db)| !*pressed && *db == b).and_then(|(c, _)| root.find(c));
+        let Some(w) = pressed_on.or_else(|| target(*pos)) else {
             if !pressed {
                 st.down = None;
             }
@@ -453,7 +488,8 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             send(w, "mousedown", *pos, b, st.clicks, acts);
         } else {
             send(w, "mouseup", *pos, b, st.clicks, acts);
-            if st.down == Some((w.id, b)) && b == 0 && w.enabled && w.mouse.iter().any(|m| m == "click") {
+            let over = target(*pos).is_some_and(|t| t.id == w.id);
+            if over && st.down == Some((w.id, b)) && b == 0 && w.enabled && w.mouse.iter().any(|m| m == "click") {
                 // The click with the pointer's details, after mousedown / mouseup, in place of
                 // the plain click the control reported.
                 acts.retain(|a| !matches!(a, Act::Click(aw, ac) if *aw == win && *ac == w.id));
@@ -471,6 +507,9 @@ fn snug(r: Rect, text: &str) -> Rect {
     Rect::from_min_size(r.min, vec2(w, r.height()))
 }
 
+/// Runs the actions collected while drawing a ScriptUI window as `scriptui.*` commands, in order.
+/// A reply carrying an `error` becomes a toast with the script's message; otherwise a non-empty
+/// `output` becomes the status line (its last line). Command failures also go to `app.ui.status`.
 fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
     for a in acts {
         let (cmd, p) = match a {
@@ -478,6 +517,7 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
             Act::Set(w, id, v) => ("scriptui.set", json!({"window": w, "widget": id, "value": v})),
             Act::Changing(w, id, v) => ("scriptui.set", json!({"window": w, "widget": id, "value": v, "changing": true})),
             Act::Close(w) => ("scriptui.close", json!({"window": w})),
+            Act::Resize(w, [x, y]) => ("scriptui.resize", json!({"window": w, "size": [x, y]})),
             Act::Mouse(w, id, mut v) => {
                 if let Some(o) = v.as_object_mut() {
                     o.insert("window".into(), json!(w));
@@ -490,7 +530,7 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
             Ok(r) => {
                 if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
                     let msg = e["message"].as_str().unwrap_or("script error").to_string();
-                    app.toast = Some((msg, ctx.input(|i| i.time)));
+                    app.toast = Some((msg, app.now()));
                 } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
                     app.ui.status = o.lines().last().unwrap_or_default().to_string();
                 }
@@ -512,7 +552,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let blocked = windows.iter().any(|w| w.modal);
     if blocked {
         // A modal dialog blocks the app behind it, as in After Effects.
-        let r = egui::Area::new(egui::Id::new("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+        let r = egui::Area::new(egui::Id::unique("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(90));
         });
@@ -523,7 +563,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         let mut open = true;
         let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
-            .id(egui::Id::new(("scriptui-window", w.id)))
+            .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
             .collapsible(false)
             .resizable(false)
@@ -546,7 +586,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     perform(app, ctx, acts);
 }
 
-/// A dockable ScriptUI panel's content (Window ▸ <panel>.jsx).
+/// A dockable ScriptUI panel's content (Window ▸ `<panel>.jsx`).
 pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     let t = app.tokens;
     let Some(mut w) = app.session.script_ui.window(id).cloned() else {
@@ -560,15 +600,52 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     // A modal script dialog blocks the panels too.
     let modal = app.session.script_ui.windows.iter().any(|w| w.modal);
     let mut acts = vec![];
-    let content = rect;
-    egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
+    // The script learns its dock's size when it changes (#2585), as After Effects tells a
+    // docked panel: its window takes the size and onResize runs.
+    let dock = [rect.width().round(), rect.height().round()];
+    let told = egui::Id::unique(("scriptui-dock-size", id));
+    if ui.data(|d| d.get_temp::<[f32; 2]>(told)) != Some(dock) && dock[0] >= 1.0 && dock[1] >= 1.0 {
+        ui.data_mut(|d| d.insert_temp(told, dock));
+        acts.push(Act::Resize(id, dock));
+    }
+    let window = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
+    panel_scroll(ui, ("scriptui-panel", id), rect.size(), window, |ui, r| {
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();
     perform(app, &ctx, acts);
+}
+
+/// The scroll area a docked ScriptUI panel shows its `window`-sized window in, at most `dock`
+/// big, with the app's scroll style (solid bars, #269). `body` draws the window in the rect it is
+/// given.
+fn panel_scroll<R>(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    dock: egui::Vec2,
+    window: egui::Vec2,
+    body: impl FnOnce(&mut egui::Ui, Rect) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    egui::ScrollArea::both().id_salt(salt).max_width(dock.x).max_height(dock.y).scroll_bar_visibility(panel_bars(dock, window)).show(ui, |ui| {
+        let (r, _) = ui.allocate_exact_size(window, Sense::hover());
+        body(ui, r)
+    })
+}
+
+/// Whether a docked panel's scroll bars may show: never while its window fits the dock.
+///
+/// The fit is decided from the window and the dock, not from what the scroll area has left. A
+/// solid bar, once shown, takes its width from the viewport, so a window that exactly fills its
+/// dock was "too large" for the narrower viewport and its bars never went away (#2796). The fit
+/// rounds the dock up to the whole point, as egui's scroll area does, because the script is told
+/// its dock's size rounded (#2585) and its window can be a fraction of a point bigger. A window
+/// that overflows only one way still gets both bars: the first one's width hides the edge of a
+/// window laid out at the dock's full size, and the second one scrolls to it.
+fn panel_bars(dock: egui::Vec2, window: egui::Vec2) -> egui::scroll_area::ScrollBarVisibility {
+    use egui::scroll_area::ScrollBarVisibility;
+    if window.x <= dock.x.ceil() && window.y <= dock.y.ceil() { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::VisibleWhenNeeded }
 }
 
 /// Tab title of a script panel.
@@ -579,16 +656,119 @@ pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
 /// Close the dock panels whose script window has gone (the script closed it, or a saved
 /// workspace from an earlier run).
 pub fn sync_panels(app: &mut EffectcraftApp) {
-    let mut all = vec![];
-    app.ui.dock.panels(&mut all);
-    for f in &app.ui.floating {
-        all.extend(f.panels.iter().copied());
-    }
-    for p in all {
+    for p in app.ui.dock.panels() {
         if let PanelKind::ScriptPanel(id) = p
             && app.session.script_ui.window(id).is_none()
         {
             app.close_panel(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOCK: egui::Vec2 = egui::vec2(300.0, 200.0);
+
+    /// Twelve frames of a ScriptUI panel docked in `dock`, with the app's solid scroll bars
+    /// (#269): its window is `first` big on the first frame and `then` big after that. The last
+    /// frame's scroll output (viewport and content size).
+    fn panel_frames(dock: egui::Vec2, first: egui::Vec2, then: egui::Vec2) -> (Rect, egui::Vec2) {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
+        let mut last = (Rect::NOTHING, egui::Vec2::ZERO);
+        for frame in 0..12 {
+            let window = if frame == 0 { first } else { then };
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(f64::from(frame) * 0.1), predicted_dt: 0.1, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut panel = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(egui::Pos2::ZERO, dock)));
+                let o = panel_scroll(&mut panel, "panel-test", dock, window, |_, _| ());
+                last = (o.inner_rect, o.content_size);
+            });
+            // Nothing paints these frames, and egui expects their texture uploads to be consumed.
+            out.textures_delta.clear();
+        }
+        last
+    }
+
+    /// #2796: a solid bar, once shown, took its width from the viewport, so a window that exactly
+    /// fills its dock stayed "too large" for what was left and kept its bars for good. A window
+    /// that overflowed for one frame (a dock dragged smaller before the script learns its size)
+    /// and then fits gets the whole dock back.
+    #[test]
+    fn a_panel_whose_window_fits_hides_its_bars() {
+        let (viewport, _) = panel_frames(DOCK, DOCK + vec2(40.0, 40.0), DOCK);
+        assert_eq!(viewport.size(), DOCK, "the bars go away once the window fits");
+    }
+
+    /// The script is told its dock's size rounded (#2585), so in a dock a fraction of a pixel
+    /// smaller its window is that fraction bigger. That still fits.
+    #[test]
+    fn a_panel_in_a_fractional_dock_hides_its_bars() {
+        let dock = vec2(299.6, 199.6);
+        let (viewport, _) = panel_frames(dock, dock + vec2(40.0, 40.0), DOCK);
+        // egui snaps rects to 1/32 of a point; a bar would take 10 points.
+        assert!((viewport.size() - dock).length() < 0.05, "a window within the whole pixel fits ({viewport:?})");
+    }
+
+    /// #269 holds: a window bigger than its dock keeps solid bars that take their room from the
+    /// panel, and scrolls.
+    #[test]
+    fn a_panel_whose_window_is_too_big_keeps_its_solid_bars() {
+        let big = DOCK + vec2(120.0, 80.0);
+        let (viewport, content) = panel_frames(DOCK, big, big);
+        let bar = egui::style::ScrollStyle::solid().allocated_width();
+        assert_eq!(viewport.size(), DOCK - vec2(bar, bar), "solid bars on both axes");
+        assert_eq!(content, big, "the whole window is scrollable");
+    }
+
+    #[test]
+    fn panel_bars_only_show_for_a_window_bigger_than_its_dock() {
+        use egui::scroll_area::ScrollBarVisibility::{AlwaysHidden, VisibleWhenNeeded};
+        assert_eq!(panel_bars(DOCK, DOCK), AlwaysHidden);
+        assert_eq!(panel_bars(vec2(299.4, 199.4), DOCK), AlwaysHidden);
+        assert_eq!(panel_bars(DOCK, DOCK + vec2(1.0, 0.0)), VisibleWhenNeeded);
+        assert_eq!(panel_bars(DOCK, DOCK + vec2(0.0, 1.0)), VisibleWhenNeeded);
+    }
+
+    /// Script colours are sRGB, not linear: `#2B2B2B` drew as RGB 114 when read as linear light.
+    #[test]
+    fn draw_colours_are_srgb() {
+        let v = 43.0 / 255.0;
+        assert_eq!(draw_color(&Some([v, v, v, 1.0]), Color32::RED), Color32::from_rgb(43, 43, 43));
+        let orange = [242.0 / 255.0, 140.0 / 255.0, 40.0 / 255.0, 1.0];
+        assert_eq!(draw_color(&Some(orange), Color32::RED), Color32::from_rgb(242, 140, 40));
+        assert_eq!(draw_color(&None, Color32::RED), Color32::RED, "no colour is the theme colour");
+    }
+
+    /// fillPath, strokePath and drawString all paint the script's colour as sRGB.
+    #[test]
+    fn paint_draw_paints_srgb_colours() {
+        let v = 43.0 / 255.0;
+        let color = Some([v, v, v, 1.0]);
+        let path = vec![PathSeg::R { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }];
+        let ops = [
+            DrawOp::Fill { color, path: path.clone() },
+            DrawOp::Stroke { color, width: 1.0, path },
+            DrawOp::Text { text: "Hi".into(), color, x: 0.0, y: 0.0, size: 12.0, style: String::new() },
+        ];
+        let t = Tokens::for_kind(crate::theme::ThemeKind::Dark);
+        let mut out = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+            paint_draw(ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 50.0)), &ops, &t, &effectcraft_engine::FsServices);
+        });
+        out.textures_delta.clear();
+        let want = Color32::from_rgb(43, 43, 43);
+        let (mut fill, mut stroke, mut text) = (false, false, false);
+        for s in out.shapes {
+            match s.shape {
+                egui::Shape::Mesh(m) => fill |= m.vertices.iter().all(|v| v.color == want),
+                egui::Shape::Path(p) => stroke |= matches!(p.stroke.color, egui::epaint::ColorMode::Solid(c) if c == want),
+                egui::Shape::Text(t) => text |= t.fallback_color == want,
+                _ => {}
+            }
+        }
+        assert!(fill && stroke && text, "fill {fill}, stroke {stroke}, text {text}");
     }
 }

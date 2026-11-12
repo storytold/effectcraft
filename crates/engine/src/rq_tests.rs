@@ -67,11 +67,11 @@ fn add_configure_render() {
     let r = s.execute("renderQueue.setOutputModule", json!({"item": id, "format": "png", "channels": "rgba"})).unwrap();
     assert!(r["outputPath"].as_str().unwrap().ends_with("_[#####].png"), "{r}");
     assert!(s.execute("renderQueue.setOutputModule", json!({"item": id, "format": "jpeg", "channels": "rgba"})).is_err());
-    let r = s.execute("renderQueue.setOutput", json!({"item": id, "path": crate::tests_stubs::tmp_out("rq/out.mov")})).unwrap();
+    let r = s.execute("renderQueue.setOutput", json!({"item": id, "path": crate::tests::stubs::tmp_out("rq/out.mov")})).unwrap();
     assert_eq!(r["output"]["format"], "ProRes", "Output To with .mov switches to ProRes");
-    assert_eq!(std::path::Path::new(r["outputPath"].as_str().unwrap()), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")));
+    assert_eq!(std::path::Path::new(r["outputPath"].as_str().unwrap()), std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/out.mov")));
     // A second item that fails, a third that is unqueued.
-    let b = s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/fail.gif")})).unwrap();
+    let b = s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests::stubs::tmp_out("rq/fail.gif")})).unwrap();
     let c = s.execute("renderQueue.add", json!({"output": "/tmp/rq/skip.mp4"})).unwrap();
     s.execute("renderQueue.setRender", json!({"item": c["item"], "render": false})).unwrap();
     assert_eq!(s.project.render_queue[2].status.label(), "Unqueued");
@@ -79,12 +79,12 @@ fn add_configure_render() {
     assert_eq!(r["items"].as_array().unwrap().len(), 2);
     assert_eq!(
         ex.log.lock().unwrap().iter().map(std::path::PathBuf::from).collect::<Vec<_>>(),
-        [std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/fail.gif"))]
+        [std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/out.mov")), std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/fail.gif"))]
     );
     let q = &s.project.render_queue;
     assert_eq!(q[0].status.label(), "Done");
     assert!(q[0].started.is_some() && q[0].render_time.is_some());
-    assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")));
+    assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), std::path::PathBuf::from(crate::tests::stubs::tmp_out("rq/out.mov")));
     assert_eq!(q[1].status, RenderStatus::Failed("boom".into()));
     assert_eq!(q[2].status.label(), "Unqueued");
     let events = s.drain_events();
@@ -117,6 +117,25 @@ fn persists_in_project_file() {
 }
 
 #[test]
+fn targa_sequence_output_module() {
+    let (mut s, _) = rq_session();
+    let a = s.execute("renderQueue.add", json!({"format": "tga", "output": "/out/[compName]_[#####].tga", "channels": "rgba"})).unwrap();
+    let om = &s.project.render_queue[0].output;
+    assert_eq!((format!("{:?}", om.format), om.channels.label()), ("TargaSequence".to_string(), "RGB + Alpha"));
+    assert!(a["outputPath"].as_str().unwrap().ends_with("_[#####].tga"), "{a}");
+    // Uncompressed: an 18-byte header and 4 bytes a pixel with alpha, 3 without.
+    assert_eq!(crate::render_queue::bytes_per_frame(om, 7, 4, 10.0), 18.0 + 7.0 * 4.0 * 4.0);
+    s.execute("renderQueue.setOutputModule", json!({"index": 1, "channels": "rgb"})).unwrap();
+    assert_eq!(crate::render_queue::bytes_per_frame(&s.project.render_queue[0].output, 7, 4, 10.0), 18.0 + 7.0 * 4.0 * 3.0);
+    let f = s.execute("renderQueue.formats", json!({})).unwrap();
+    let tga = f["formats"].as_array().unwrap().iter().find(|f| f["id"] == "TargaSequence").cloned();
+    assert_eq!(
+        tga,
+        Some(json!({"id": "TargaSequence", "label": "Targa Sequence", "extension": "tga", "sequence": true, "alpha": true, "audio": false, "available": true}))
+    );
+}
+
+#[test]
 fn failure_toast_names_the_first_reason() {
     struct Failing;
     impl Exporter for Failing {
@@ -130,8 +149,8 @@ fn failure_toast_names_the_first_reason() {
     }
     let mut s = demo();
     s.exporter = Some(Arc::new(Failing));
-    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/first.gif")})).unwrap();
-    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/second.gif")})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests::stubs::tmp_out("rq/first.gif")})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests::stubs::tmp_out("rq/second.gif")})).unwrap();
     s.execute("renderQueue.render", json!({})).unwrap();
     let events = s.drain_events();
     let toast = events.iter().find_map(|e| if let Event::Toast { message, error: true } = e { Some(message.as_str()) } else { None });
@@ -186,7 +205,7 @@ fn without_exporter() {
     s.execute("renderQueue.add", json!({})).unwrap();
     assert!(!s.is_enabled("renderQueue.render"));
     let f = s.execute("renderQueue.formats", json!({})).unwrap();
-    assert_eq!(f["formats"].as_array().unwrap().len(), 13);
+    assert_eq!(f["formats"].as_array().unwrap().len(), 14);
     assert_eq!(f["formats"][0]["available"], false);
 }
 
@@ -228,4 +247,93 @@ fn locked_resize_uses_height_for_height_only_output_module_updates() {
     let item = &s.project.render_queue[0];
     let comp = s.project.comp(item.comp).unwrap();
     assert_eq!(item.output.output_size(comp, &item.settings), (32, 32), "explicit width retains precedence");
+}
+
+#[test]
+fn a_queue_run_keeps_its_jobs_warm() {
+    // #3335: every job started with a fresh layer cache and trimmed the GPU's texture pool when
+    // it ended, so each item's first frames were cold. A run's jobs share its caches; the pool is
+    // trimmed once, when the run ends; an item's output modules share one compositor choice.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Recorder(Mutex<Vec<(Option<usize>, Option<usize>)>>);
+    impl Exporter for Recorder {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            let caches = job.caches.map(|c| c as *const _ as usize);
+            let slot = job.renderer.map(|r| {
+                // The first module chooses; the second sees its choice.
+                r.lock().unwrap().get_or_insert(effectcraft_render::Backend::Cpu);
+                r as *const _ as usize
+            });
+            self.0.lock().unwrap().push((caches, slot));
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    #[derive(Default)]
+    struct Ends(AtomicUsize);
+    impl effectcraft_render::Accelerator for Ends {
+        fn name(&self) -> String {
+            "ends".into()
+        }
+        fn comp_frame(&self, _: &effectcraft_render::Renderer, _: effectcraft_project::ItemId, _: effectcraft_time::Tick) -> Option<effectcraft_raster::Image> {
+            None
+        }
+        fn supports_effect(&self, _: &str) -> bool {
+            false
+        }
+        fn effects(&self, _: &[effectcraft_render::FxStep], _: &effectcraft_effects::Buf, _: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+        fn render_end(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Recorder(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    let ends = Arc::new(Ends::default());
+    s.accel = Some(ends.clone());
+    s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out("rq/warm_a.mp4")})).unwrap();
+    s.execute("render.addOutputModule", json!({"format": "png"})).unwrap();
+    s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out("rq/warm_b.mp4")})).unwrap();
+    s.execute("renderQueue.render", json!({})).unwrap();
+    let jobs = ex.0.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 3, "{jobs:?}");
+    assert!(jobs.iter().all(|(c, r)| c.is_some() && r.is_some()), "{jobs:?}");
+    assert!(jobs.iter().all(|(c, _)| *c == jobs[0].0), "every job of the run shares its caches");
+    assert_eq!(jobs[0].1, jobs[1].1, "an item's output modules share one choice");
+    assert_eq!(ends.0.load(Ordering::SeqCst), 1, "the pool is trimmed once, after the run");
+}
+
+#[test]
+fn the_gpu_frames_setting_reaches_every_render_queue_job() {
+    // #3335: Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once is Auto (`None`) or 1–3.
+    struct Seen(Mutex<Vec<Option<usize>>>);
+    impl Exporter for Seen {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            self.0.lock().unwrap().push(job.gpu_frames);
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Seen(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    assert_eq!(s.prefs.memory.gpu_frames_in_flight, "auto");
+    let pages = crate::settings::prefs::pages_json();
+    assert!(pages.to_string().contains("memory.gpuFramesInFlight"), "the Memory & CPU page lists it");
+    for (value, want) in [("auto", None), ("1", Some(1)), ("2", Some(2)), ("3", Some(3))] {
+        s.execute("prefs.set", json!({"key": "memory.gpuFramesInFlight", "value": value})).unwrap();
+        assert_eq!(s.prefs.memory.gpu_frames(), want, "{value}");
+        s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out(&format!("rq/frames_{value}.mp4"))})).unwrap();
+        s.execute("renderQueue.render", json!({})).unwrap();
+        assert_eq!(ex.0.lock().unwrap().last().copied(), Some(want), "{value}");
+    }
+    // A hand-edited settings file's nonsense is Auto.
+    s.prefs.memory.gpu_frames_in_flight = "9".into();
+    assert_eq!(s.prefs.memory.gpu_frames(), None);
 }

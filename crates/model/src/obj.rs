@@ -9,23 +9,74 @@
 //! Phong exponent `Ns` (`sqrt(2 / (Ns + 2))`) and metallic 0; `map_Kd`, `map_Ke`,
 //! `map_Bump`/`bump`/`norm` load base colour, emissive and normal textures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::{AlphaMode, Material, Mesh, Model, Primitive, Result, TexRef, Texture, perr};
+use crate::{AlphaMode, MAX_IMPORT_TEXTURE_PIXELS, Material, Mesh, Model, Primitive, Result, TexRef, Texture, perr};
 
-/// Parse MTL text into named materials (textures appended to `textures`).
-pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>) -> Vec<Material> {
+/// The last component of a referenced path, treating `\` as a separator too: a path from a
+/// machine of another kind (`C:\textures\checker.png`) still finds `checker.png` next to the
+/// model (#1274). `None` when the name carries no path at all.
+fn sibling_name(name: &str) -> Option<&str> {
+    let file = name.rsplit(['/', '\\']).next()?;
+    (!file.is_empty() && file.len() < name.len()).then_some(file)
+}
+
+/// A material reference resolved against the model's folder: the name as written (a name
+/// containing spaces is one name), then its file name (an absolute path from another machine,
+/// #1274), then the final token (the options convention, `-bm 1 file.png`).
+fn resolve_reference(resolve: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> Option<Vec<u8>> {
+    let mut tried: Vec<&str> = vec![];
+    for candidate in [name, sibling_name(name).unwrap_or(name), name.split_whitespace().last().unwrap_or(name)] {
+        if tried.contains(&candidate) {
+            continue;
+        }
+        tried.push(candidate);
+        if let Some(b) = resolve(candidate) {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// The textures an OBJ import has decoded, by reference, and the pixels it may still decode.
+pub struct TextureCache {
+    loaded: HashMap<String, Option<usize>>,
+    pixels_left: u64,
+    /// Textures left out, for the user.
+    pub warnings: Vec<String>,
+}
+
+impl Default for TextureCache {
+    fn default() -> Self {
+        TextureCache { loaded: HashMap::new(), pixels_left: MAX_IMPORT_TEXTURE_PIXELS, warnings: vec![] }
+    }
+}
+
+/// Parse MTL text into named materials (textures appended to `textures`, decoded once per
+/// reference through `cache`).
+pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>, cache: &mut TextureCache) -> Vec<Material> {
     let mut out: Vec<Material> = vec![];
-    let mut loaded: HashMap<String, Option<usize>> = HashMap::new();
+    let TextureCache { loaded, pixels_left, warnings } = cache;
     let mut tex = |name: &str, textures: &mut Vec<Arc<Texture>>| -> Option<TexRef> {
-        // Options (`-bm 1 file.png`): the file name is the last token.
-        let file = name.split_whitespace().last()?.to_string();
-        let t = *loaded.entry(file.clone()).or_insert_with(|| {
-            let b = resolve(&file)?;
-            let t = Texture::decode(&b).ok()?;
-            textures.push(Arc::new(t));
-            Some(textures.len() - 1)
+        let key = name.trim().to_string();
+        let t = *loaded.entry(key.clone()).or_insert_with(|| {
+            let Some(b) = resolve_reference(resolve, &key) else {
+                log::warn!("model: texture `{key}` was not found next to the model");
+                warnings.push(format!("texture `{key}` was not found next to the model"));
+                return None;
+            };
+            match Texture::decode_within(&b, pixels_left) {
+                Ok(t) => {
+                    textures.push(Arc::new(t));
+                    Some(textures.len() - 1)
+                }
+                Err(e) => {
+                    log::warn!("model: cannot decode texture `{key}`: {e}");
+                    warnings.push(format!("texture `{key}` left out: {e}"));
+                    None
+                }
+            }
         });
         t.map(|texture| TexRef { texture, uv_set: 0 })
     };
@@ -117,9 +168,13 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
     let mut vt: Vec<[f32; 2]> = vec![];
     let mut vn: Vec<[f32; 3]> = vec![];
     let mut materials: Vec<Material> = vec![];
+    let mut material_of: HashMap<String, usize> = HashMap::new();
     let mut textures: Vec<Arc<Texture>> = vec![];
+    let mut cache = TextureCache::default();
+    let mut libraries: HashSet<String> = HashSet::new();
     // One primitive per material, in order of first use.
     let mut prims: Vec<(Option<usize>, Primitive, HashMap<Key, u32>, Vec<bool>)> = vec![];
+    let mut prim_of: HashMap<Option<usize>, usize> = HashMap::new();
     let mut current: Option<usize> = None;
     let mut smooth = 0u32;
     let mut flat_id = 1u32 << 31;
@@ -147,22 +202,33 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             }
             "mtllib" => {
                 let name = line["mtllib".len()..].trim();
-                for file in std::iter::once(name).chain(name.split_whitespace()) {
+                // A library named again is already loaded.
+                if !libraries.insert(name.to_string()) {
+                    continue;
+                }
+                let mut found = false;
+                for file in std::iter::once(name).chain(name.split_whitespace()).chain(sibling_name(name)) {
                     if let Some(b) = resolve(file) {
-                        let mut ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures);
-                        materials.append(&mut ms);
+                        let ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures, &mut cache);
+                        for m in ms {
+                            material_of.entry(m.name.clone()).or_insert(materials.len());
+                            materials.push(m);
+                        }
+                        found = true;
                         break;
                     }
+                }
+                if !found && !name.is_empty() {
+                    log::warn!("model: material library `{name}` was not found next to the model");
                 }
             }
             "usemtl" => {
                 let name = line["usemtl".len()..].trim();
-                current = materials.iter().position(|m| m.name == name);
-                if current.is_none() {
+                current = Some(*material_of.entry(name.to_string()).or_insert_with(|| {
                     // Unknown material: a named grey default.
                     materials.push(Material { name: name.to_string(), metallic: 0.0, roughness: 0.5, base_color: [0.8, 0.8, 0.8, 1.0], ..Material::default() });
-                    current = Some(materials.len() - 1);
-                }
+                    materials.len() - 1
+                }));
             }
             "f" => {
                 if rest.len() < 3 {
@@ -195,13 +261,10 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
                 } else {
                     smooth
                 };
-                let slot = match prims.iter().position(|p| p.0 == current) {
-                    Some(i) => i,
-                    None => {
-                        prims.push((current, Primitive { material: current, ..Default::default() }, HashMap::new(), vec![]));
-                        prims.len() - 1
-                    }
-                };
+                let slot = *prim_of.entry(current).or_insert_with(|| {
+                    prims.push((current, Primitive { material: current, ..Default::default() }, HashMap::new(), vec![]));
+                    prims.len() - 1
+                });
                 let (_, prim, map, need) = &mut prims[slot];
                 let mut ids = vec![];
                 for (vi, ti, ni) in refs {
@@ -251,7 +314,9 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         }
         mesh.primitives.push(p);
     }
-    Ok(Model::single(mesh, materials).with_textures(textures))
+    let mut model = Model::single(mesh, materials).with_textures(textures);
+    model.warnings = cache.warnings;
+    Ok(model)
 }
 
 impl Model {

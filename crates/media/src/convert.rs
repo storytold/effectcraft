@@ -7,8 +7,9 @@
 //! are encoded in the file. Alpha follows the footage's [`AlphaMode`] interpretation.
 
 use effectcraft_project::{AlphaMode, Footage};
-use effectcraft_raster::{Image, Px};
+use effectcraft_raster::{Image, Px, quantize_px_u8};
 use effectcraft_render::FloatCurve;
+use effectcraft_render::disk_cache::Frame8;
 use filmcraft_color::{Matrix, Range};
 use filmcraft_frame::{Chroma, PixelData, VideoFrame};
 use rayon::prelude::*;
@@ -80,14 +81,7 @@ pub(crate) fn frame_to_image_in(f: &VideoFrame, op: AlphaOp, mut buf: Vec<Px>) -
         return img;
     }
     match &f.data {
-        PixelData::Rgba8(d) => {
-            img.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-                let src = &d[y * w * 4..(y + 1) * w * 4];
-                for (o, s) in row.iter_mut().zip(src.as_chunks::<4>().0.iter()) {
-                    *o = op.apply([U8[s[0] as usize], U8[s[1] as usize], U8[s[2] as usize]], U8[s[3] as usize]);
-                }
-            });
-        }
+        PixelData::Rgba8(d) => convert_rgba8(&mut img.data, d, w, op, |p| p),
         PixelData::RgbaF32(d) => {
             // linear premultiplied → encoded premultiplied
             img.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
@@ -103,15 +97,78 @@ pub(crate) fn frame_to_image_in(f: &VideoFrame, op: AlphaOp, mut buf: Vec<Px>) -
         PixelData::Yuv8 { planes, chroma, alpha } => {
             let yuv = Yuv::new(f.color.matrix, f.color.range, 8);
             let amax = 255.0;
-            convert_yuv(&mut img, w, h, *chroma, [&planes[0][..], &planes[1][..], &planes[2][..]], alpha.as_deref().map(|a| &a[..]), amax, &yuv, op);
+            convert_yuv(
+                &mut img.data,
+                YuvSource {
+                    size: (w, h),
+                    chroma: *chroma,
+                    planes: [&planes[0][..], &planes[1][..], &planes[2][..]],
+                    alpha: alpha.as_deref().map(|a| &a[..]),
+                    amax,
+                },
+                &yuv,
+                op,
+                |p| p,
+            );
         }
         PixelData::Yuv16 { planes, chroma, bits, alpha } => {
             let yuv = Yuv::new(f.color.matrix, f.color.range, *bits);
             let amax = ((1u32 << *bits) - 1) as f32;
-            convert_yuv(&mut img, w, h, *chroma, [&planes[0][..], &planes[1][..], &planes[2][..]], alpha.as_deref().map(|a| &a[..]), amax, &yuv, op);
+            convert_yuv(
+                &mut img.data,
+                YuvSource {
+                    size: (w, h),
+                    chroma: *chroma,
+                    planes: [&planes[0][..], &planes[1][..], &planes[2][..]],
+                    alpha: alpha.as_deref().map(|a| &a[..]),
+                    amax,
+                },
+                &yuv,
+                op,
+                |p| p,
+            );
         }
     }
     img
+}
+
+/// An 8-bit frame as [`frame_to_image_in`] converts it and an 8 bpc render then quantises it
+/// ([`effectcraft_raster::quantize_px`]), kept as the 8-bit levels: expanded with
+/// [`effectcraft_raster::expand_u8`] it is that quantised image to the bit, in a quarter of
+/// the memory. `None` for frames with more than 8 bits (10/12-bit Y'CbCr, float).
+pub(crate) fn frame_to_rgba8(f: &VideoFrame, op: AlphaOp) -> Option<Frame8> {
+    let (w, h) = (f.width as usize, f.height as usize);
+    let mut px = vec![[0u8; 4]; w * h];
+    if w > 0 && h > 0 {
+        match &f.data {
+            PixelData::Rgba8(d) => convert_rgba8(&mut px, d, w, op, quantize_px_u8),
+            PixelData::Yuv8 { planes, chroma, alpha } => convert_yuv(
+                &mut px,
+                YuvSource {
+                    size: (w, h),
+                    chroma: *chroma,
+                    planes: [&planes[0][..], &planes[1][..], &planes[2][..]],
+                    alpha: alpha.as_deref().map(|a| &a[..]),
+                    amax: 255.0,
+                },
+                &Yuv::new(f.color.matrix, f.color.range, 8),
+                op,
+                quantize_px_u8,
+            ),
+            PixelData::RgbaF32(_) | PixelData::Yuv16 { .. } => return None,
+        }
+    }
+    Some(Frame8 { width: f.width, height: f.height, rgba: px.into_flattened() })
+}
+
+/// Straight or premultiplied 8-bit RGBA into `out` (one `O` per pixel, made by `store`).
+fn convert_rgba8<O: Send>(out: &mut [O], d: &[u8], w: usize, op: AlphaOp, store: impl Fn(Px) -> O + Sync) {
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let Some(src) = d.get(y * w * 4..(y + 1) * w * 4) else { return };
+        for (o, s) in row.iter_mut().zip(src.as_chunks::<4>().0.iter()) {
+            *o = store(op.apply([U8[s[0] as usize], U8[s[1] as usize], U8[s[2] as usize]], U8[s[3] as usize]));
+        }
+    });
 }
 
 /// A movie frame turned the way its file says it is shown ([`crate::probe::video_turn`]:
@@ -280,13 +337,23 @@ fn centred(i: usize, n: usize) -> (usize, usize) {
     (c, o)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn convert_yuv<T: Sample>(img: &mut Image, w: usize, h: usize, chroma: Chroma, planes: [&[T]; 3], alpha: Option<&[T]>, amax: f32, k: &Yuv, op: AlphaOp) {
+/// Borrowed YUV planes and the geometry/range needed to interpret their samples.
+struct YuvSource<'a, T> {
+    size: (usize, usize),
+    chroma: Chroma,
+    planes: [&'a [T]; 3],
+    alpha: Option<&'a [T]>,
+    amax: f32,
+}
+
+/// Y'CbCr into `out` (one `O` per pixel, made by `store` from the converted pixel).
+fn convert_yuv<T: Sample, O: Send>(out: &mut [O], source: YuvSource<'_, T>, k: &Yuv, op: AlphaOp, store: impl Fn(Px) -> O + Sync) {
+    let YuvSource { size: (w, h), chroma, planes, alpha, amax } = source;
     let (sx, sy) = chroma.shifts();
     let cw = w.div_ceil(1 << sx);
     let ch = h.div_ceil(1 << sy);
     let inv_amax = 1.0 / amax;
-    img.data.par_chunks_mut(w).enumerate().for_each_init(
+    out.par_chunks_mut(w).enumerate().for_each_init(
         || (vec![0f32; cw], vec![0f32; cw], vec![0f32; w], vec![0f32; w]),
         |(uc, vc, uf, vf), (y, row)| {
             // vertical chroma interpolation into normalised rows (Cb, Cr in −0.5..0.5)
@@ -326,13 +393,13 @@ fn convert_yuv<T: Sample>(img: &mut Image, w: usize, h: usize, chroma: Chroma, p
                 None => {
                     for (x, o) in row.iter_mut().enumerate() {
                         let c = rgb(x);
-                        *o = [c[0], c[1], c[2], 1.0];
+                        *o = store([c[0], c[1], c[2], 1.0]);
                     }
                 }
                 Some(al) => {
                     let arow = &al[y * w..y * w + w];
                     for (x, o) in row.iter_mut().enumerate() {
-                        *o = op.apply(rgb(x), (arow[x].f() * inv_amax).clamp(0.0, 1.0));
+                        *o = store(op.apply(rgb(x), (arow[x].f() * inv_amax).clamp(0.0, 1.0)));
                     }
                 }
             }
@@ -345,30 +412,20 @@ fn convert_yuv<T: Sample>(img: &mut Image, w: usize, h: usize, chroma: Chroma, p
 pub(crate) fn dynamic_to_image(img: &image::DynamicImage, op: AlphaOp) -> Image {
     use image::DynamicImage as D;
     let (w, h) = (img.width(), img.height());
+    if let D::ImageRgb32F(_) | D::ImageRgba32F(_) = img {
+        let px = img.to_rgba32f();
+        let raw = px.as_raw();
+        return float_to_image(w, h, op, |i| {
+            let s = &raw[i * 4..i * 4 + 4];
+            [s[0], s[1], s[2], s[3]]
+        });
+    }
     let mut out = Image::new(w, h);
     let wu = w as usize;
     if wu == 0 || h == 0 {
         return out;
     }
     match img {
-        D::ImageRgb32F(_) | D::ImageRgba32F(_) => {
-            let px = img.to_rgba32f();
-            let raw = px.as_raw();
-            let premul = op.mode == AlphaMode::Premultiplied;
-            out.data.par_chunks_mut(wu).enumerate().for_each(|(y, row)| {
-                for (x, o) in row.iter_mut().enumerate() {
-                    let s = &raw[(y * wu + x) * 4..(y * wu + x) * 4 + 4];
-                    let a = s[3];
-                    let c = if premul {
-                        let inv = if a > 0.0 { 1.0 / a } else { 0.0 };
-                        [op.float(s[0] * inv) * a, op.float(s[1] * inv) * a, op.float(s[2] * inv) * a]
-                    } else {
-                        [op.float(s[0]), op.float(s[1]), op.float(s[2])]
-                    };
-                    *o = op.apply(c, a.clamp(0.0, 1.0));
-                }
-            });
-        }
         D::ImageLuma16(_) | D::ImageLumaA16(_) | D::ImageRgb16(_) | D::ImageRgba16(_) => {
             let px = img.to_rgba16();
             let raw = px.as_raw();
@@ -391,6 +448,32 @@ pub(crate) fn dynamic_to_image(img: &image::DynamicImage, op: AlphaOp) -> Image 
             });
         }
     }
+    out
+}
+
+/// Float RGBA (linear light, alpha straight or premultiplied as the footage says), `px(i)` for
+/// pixel `i` in rows, to an [`Image`]: how [`dynamic_to_image`] converts float stills, also used
+/// for OpenEXR pictures made from decoded channel planes without an interleaved copy (#474).
+pub(crate) fn float_to_image(w: u32, h: u32, op: AlphaOp, px: impl Fn(usize) -> [f32; 4] + Sync) -> Image {
+    let mut out = Image::new(w, h);
+    let wu = w as usize;
+    if wu == 0 || h == 0 {
+        return out;
+    }
+    let premul = op.mode == AlphaMode::Premultiplied;
+    out.data.par_chunks_mut(wu).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            let s = px(y * wu + x);
+            let a = s[3];
+            let c = if premul {
+                let inv = if a > 0.0 { 1.0 / a } else { 0.0 };
+                [op.float(s[0] * inv) * a, op.float(s[1] * inv) * a, op.float(s[2] * inv) * a]
+            } else {
+                [op.float(s[0]), op.float(s[1]), op.float(s[2])]
+            };
+            *o = op.apply(c, a.clamp(0.0, 1.0));
+        }
+    });
     out
 }
 
@@ -503,6 +586,43 @@ mod tests {
         let img = image::DynamicImage::ImageRgba32F(image::ImageBuffer::from_raw(1, 1, vec![0.2140, 1.0, 4.0, 1.0]).expect("buf"));
         let p = dynamic_to_image(&img, AlphaOp::new(AlphaMode::Premultiplied, [0.0; 3])).data[0];
         assert!((p[0] - 0.5).abs() < 1e-3 && (p[1] - 1.0).abs() < 1e-5 && p[2] > 1.5, "{p:?}");
+    }
+
+    /// The 8-bit levels of a frame expand to the float frame quantised to 8 bpc, bit for bit:
+    /// 4:2:0 and 4:4:4 Y'CbCr with and without alpha, and RGBA, under every alpha interpretation.
+    #[test]
+    fn rgba8_levels_are_the_quantised_float_frame() {
+        let (w, h) = (37usize, 18usize);
+        let noise = |n: usize, seed: usize| Arc::new((0..n).map(|i| ((i * 7919 + seed * 104_729) % 256) as u8).collect::<Vec<u8>>());
+        let frame = |data| VideoFrame {
+            width: w as u32,
+            height: h as u32,
+            data,
+            color: filmcraft_color::ColorInfo::REC709,
+            par: (1, 1),
+            pts: filmcraft_time::Tick::ZERO,
+        };
+        let yuv = |chroma: Chroma, alpha: bool| {
+            let n = w.div_ceil(1 << chroma.shifts().0) * h.div_ceil(1 << chroma.shifts().1);
+            frame(PixelData::Yuv8 { planes: [noise(w * h, 1), noise(n, 2), noise(n, 3)], chroma, alpha: alpha.then(|| noise(w * h, 4)) })
+        };
+        let frames = [yuv(Chroma::C420, false), yuv(Chroma::C420, true), yuv(Chroma::C444, true), frame(PixelData::Rgba8(noise(w * h * 4, 5)))];
+        for f in &frames {
+            for mode in [AlphaMode::Straight, AlphaMode::Premultiplied, AlphaMode::Ignore] {
+                let op = AlphaOp::new(mode, [0.2, 0.5, 0.9]);
+                let q8 = frame_to_rgba8(f, op).expect("8-bit");
+                let mut want = frame_to_image(f, op);
+                for p in &mut want.data {
+                    effectcraft_raster::quantize_px(p, 255.0, 1.0 / 255.0);
+                }
+                assert_eq!((q8.width, q8.height), (want.width, want.height));
+                for (got, want) in q8.rgba.as_chunks::<4>().0.iter().zip(&want.data) {
+                    assert_eq!(effectcraft_raster::expand_u8(*got).map(f32::to_bits), want.map(f32::to_bits));
+                }
+            }
+        }
+        let wide = frame(PixelData::RgbaF32(Arc::new(vec![0.5; w * h * 4])));
+        assert!(frame_to_rgba8(&wide, AlphaOp::new(AlphaMode::Straight, [0.0; 3])).is_none());
     }
 
     /// `cargo test -p effectcraft-media --lib bench -- --ignored --nocapture`

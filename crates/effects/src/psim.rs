@@ -85,21 +85,27 @@ pub trait ParticleSim: Send + Sync {
 /// (the CPU step's `carry` arithmetic, exactly). `None` when more than `cap` would be born (the
 /// CPU drops births at its live-particle cap, which an independent simulation can't know).
 pub fn births(rate: f64, steps: u64, cap: usize) -> Option<Vec<u32>> {
-    let per = rate / SPS;
-    if per * steps as f64 > cap as f64 + 2.0 {
+    if rate / SPS * steps as f64 > cap as f64 + 2.0 {
         return None;
     }
+    births_at(steps, cap, |_| rate)
+}
+
+/// [`births`] with the rate of each step, `rate(i)` particles per second during step `i` (a
+/// keyframed Birth Rate, #1373).
+pub fn births_at(steps: u64, cap: usize, rate: impl Fn(u64) -> f64) -> Option<Vec<u32>> {
     let mut out = Vec::new();
     let mut carry = 0.0f64;
     for i in 0..steps {
-        carry += per;
+        carry += rate(i) / SPS;
         let n = carry.floor() as u32;
         carry -= n as f64;
-        for _ in 0..n {
-            out.push(i as u32);
+        if n as usize > cap.saturating_sub(out.len()) {
+            return None;
         }
+        out.extend(std::iter::repeat_n(i as u32, n as usize));
     }
-    (out.len() <= cap).then_some(out)
+    Some(out)
 }
 
 /// Steps per second of the stepped simulations.

@@ -8,6 +8,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod analysis_cache;
 pub mod audio_fx;
 mod blur2;
 mod blur3;
@@ -21,6 +22,9 @@ mod color2;
 mod color3;
 mod color_fx;
 pub mod controls;
+pub mod crypto_select;
+#[cfg(test)]
+mod display_names;
 mod distort;
 mod distort2;
 mod distort3;
@@ -34,6 +38,8 @@ mod keying;
 mod keying2;
 pub mod keylight;
 mod matte;
+
+mod file_cache;
 pub mod migrate;
 mod misc;
 pub mod mocha_shape;
@@ -70,14 +76,14 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub use card3d::{CompLight, CompScene};
-pub use color_fx::{COLORAMA_PRESETS, ColoramaPalette};
 pub use color_fx::{
-    HUESAT_CHANNELS, HUESAT_RANGES, LEVELS_CHANNELS, PHOTO_FILTER_CUSTOM, PHOTO_FILTERS, exposure_settings, fill_uses_masks, huesat_ranges_identity,
-    levels_channel_ids, levels_channel_settings, levels_channels_identity, levels_clip,
+    BW_TINT_LUMA, EXPOSURE_LINEAR_GAMMA, HUESAT_CHANNELS, HUESAT_RANGES, LEVELS_CHANNELS, LUMA_601, PHOTO_FILTER_CUSTOM, PHOTO_FILTERS, exposure_settings,
+    fill_uses_masks, huesat_ranges_identity, levels_channel_ids, levels_channel_settings, levels_channels_identity, levels_clip,
 };
+pub use color_fx::{COLORAMA_PRESETS, ColoramaPalette};
 pub use color2::{Curve, auto_correct_settings, color_link_mode, color_link_sample, equalize_tables, luma_clip_points, shadow_highlight_amounts};
 pub use color3::OffsetCurve;
-pub use distort::transform_shutter;
+pub use distort::{transform_grow, transform_matrix_px, transform_shutter};
 pub use distort2::{MAGNIFY_MODES, bezier_grid, parse_mesh};
 pub use distort3::{RESHAPE_POINTS, ReshapeSetup, SmearSetup, cc_smear_pad, reshape_setup, smear_setup, warp_inverse_map};
 pub use distort4::liquify_mesh;
@@ -85,39 +91,47 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
-pub use misc::{INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation};
+pub use misc::{
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, linear_wipe_axis, linear_wipe_sigma, radial_wipe_sigma,
+    radial_wipe_wedge, venetian_cover, venetian_origin,
+};
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
 pub use stylize2::strobe_on;
 // CPU helpers the GPU kernels share (effectcraft-gpu).
-pub use blur2::{camera_lens_plain, camera_lens_spans};
-pub use generate::gen_mode;
+pub use blur2::{CAMERA_LENS_MAX_RADIUS, camera_lens_plain, camera_lens_radius, camera_lens_spans, radial_fast_pad};
+pub use generate::{four_color_jitter, four_color_softening, gen_mode};
 pub use generate2::pattern_kind as cell_pattern_kind;
 pub use generate2::{BoltSeg, Contour, Ghost, RadioPlan, Wave, flare_ghosts, lightning_segments, radio_plan};
 pub use generate3::{
     Coverage, MarksPlan, PaintPlan, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
 };
-pub use noise::GrainLook;
+pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
-pub use transition::place_layer;
+pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
-pub use noise3::{FractalGpu, fractal_gpu};
-pub use stylize3::{BumpLight, bump_layer_id};
+pub use noise3::{FractalGpu, NOISE_CELL, fractal_gpu};
+pub use stylize3::{BumpLight, HexTile, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
 // effectcraft-gpu fx_tone.
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
-pub use channel3d::{CRYPTO_LAYERS, crypto_aux_image, id_color, selection_hashes};
+pub use channel3d::{
+    CRYPTO_LAYERS, CryptoAux, EXTRACTOR_COPY, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
+    crypto_layer_name, crypto_layer_named, extractor_aux_channel, extractor_own_channel, id_color, is_extractor_copy, matte_only_px, reads_aux,
+    selection_hashes,
+};
+pub use file_cache::{check_lut_files, lut_generation};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
-pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, drizzle_drops, mercury_blobs, sprite_plan};
+pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
     CausticsSetup, FoamDisc, FoamEnv, FoamPlan, Piece, PiecePlan, PieceTex, PixelPlan, WavePlan, Waves, caustics_setup, foam_full_plan, piece_plan, pixel_plan,
     wave_world_plan,
 };
-pub use utility::{Lut, load_lut};
+pub use utility::{Lut, load_lut, lut_file, lut_files, lut_params};
 pub use vr::{equi_dir as vr_equi_dir, rotation as vr_rotation};
 
 /// Effect categories in Effects & Presets order.
@@ -286,15 +300,183 @@ impl Buf {
         self.offset[0] += origin[0] * self.scale;
         self.offset[1] += origin[1] * self.scale;
     }
-    /// Grow by `pad` transparent pixels on every side.
-    pub fn pad(&mut self, pad: u32) {
-        if pad == 0 {
+    /// Grow by transparent pixels: `sides` = left, top, right, bottom. Content keeps its place.
+    pub fn pad_sides(&mut self, sides: [u32; 4]) {
+        let [l, t, r, b] = sides;
+        if l == 0 && t == 0 && r == 0 && b == 0 {
             return;
         }
-        self.img = self.img.padded(pad);
-        self.offset[0] += pad as f64;
-        self.offset[1] += pad as f64;
+        let (Some(w), Some(h)) = (self.img.width.checked_add(l).and_then(|v| v.checked_add(r)), self.img.height.checked_add(t).and_then(|v| v.checked_add(b)))
+        else {
+            return;
+        };
+        let mut out = Image::new(w, h);
+        let (sw, ow) = (self.img.width as usize, w as usize);
+        for y in 0..self.img.height as usize {
+            let at = (y + t as usize) * ow + l as usize;
+            let (Some(src), Some(dst)) = (self.img.data.get(y * sw..(y + 1) * sw), out.data.get_mut(at..at + sw)) else { continue };
+            dst.copy_from_slice(src);
+        }
+        self.img = out;
+        self.offset[0] += l as f64;
+        self.offset[1] += t as f64;
     }
+    /// Grow by `left` and `top` transparent pixels on those sides only.
+    pub fn grow_left_top(&mut self, left: u32, top: u32) {
+        self.pad_sides([left, top, 0, 0]);
+    }
+    /// Give the buffer the pixel-grid phase (modulo [`GRID_ALIGN`]) that [`Buf::cover`] of
+    /// `size` would, by growing left/top only ([`align_plan`]). A downscaled layer is resampled
+    /// through a pyramid whose 2x2 blocks follow the buffer's grid, so a buffer that starts at
+    /// its content's corner instead of the cover's resamples to different pixels (#1205).
+    pub fn align(&mut self, size: [f64; 2]) {
+        if let Some((l, t)) = align_plan(self.offset, self.scale, size, self.img.width, self.img.height) {
+            self.grow_left_top(l, t);
+        }
+    }
+    /// Grow by `pad` transparent pixels on every side, within [`pad_within_budget`] and as
+    /// clamped by [`Image::effective_pad`].
+    pub fn pad(&mut self, pad: u32) {
+        let eff = self.img.effective_pad(pad_within_budget(self.img.width, self.img.height, pad));
+        if eff == 0 {
+            return;
+        }
+        self.img = self.img.padded(eff);
+        self.offset[0] += eff as f64;
+        self.offset[1] += eff as f64;
+    }
+}
+
+/// The most pixels a `w` × `h` effect buffer may grow to: 16 Mpx (256 MiB of f32 RGBA) or four
+/// times its own area, whichever is larger. Shared by every effect that grows its buffer.
+fn pixel_budget(w: f64, h: f64) -> f64 {
+    const MIN_BUDGET: f64 = 16_777_216.0;
+    MIN_BUDGET.max(4.0 * w * h)
+}
+
+/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
+/// [`pixel_budget`]: a small layer far from an effect's centre can't ask for gigabytes (#2261).
+/// Shared with the GPU path.
+pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
+    let (w, h) = (f64::from(w), f64::from(h));
+    let budget = pixel_budget(w, h);
+    if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
+        return pad;
+    }
+    // (w + 2p)(h + 2p) = budget, solved for p.
+    let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
+    (p.floor().max(0.0) as u32).min(pad)
+}
+
+/// The most pixels on a side that [`grow_sides`] grows a buffer to.
+const MAX_GROWN_SIDE: f64 = 16384.0;
+
+/// The transparent pixels to add (left, top, right, bottom; for [`Buf::pad_sides`]) so a
+/// `width` × `height` buffer also spans the pixel box `lo`..`hi`, in the buffer's own coordinates.
+/// When the full growth would pass [`MAX_GROWN_SIDE`] or the [`pixel_budget`], every side is cut
+/// by the same factor instead of giving up, so the picture shrinks smoothly rather than popping.
+/// `None` when the buffer already spans the box, or the box is not finite.
+pub fn grow_sides(lo: [f64; 2], hi: [f64; 2], width: u32, height: u32) -> Option<[u32; 4]> {
+    if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    let (w, h) = (f64::from(width), f64::from(height));
+    let want = |v: f64| v.clamp(0.0, MAX_GROWN_SIDE);
+    let [l, t] = [want(-lo[0].floor()), want(-lo[1].floor())];
+    let [r, b] = [want(hi[0].ceil() - w), want(hi[1].ceil() - h)];
+    let (sx, sy) = (l + r, t + b);
+    if sx == 0.0 && sy == 0.0 {
+        return None;
+    }
+    let mut f = 1.0_f64;
+    if sx > 0.0 {
+        f = f.min((MAX_GROWN_SIDE - w).max(0.0) / sx);
+    }
+    if sy > 0.0 {
+        f = f.min((MAX_GROWN_SIDE - h).max(0.0) / sy);
+    }
+    let budget = pixel_budget(w, h);
+    if (w + sx * f) * (h + sy * f) > budget {
+        // (w + sx·f)(h + sy·f) = budget, solved for f.
+        let (a, bq, c) = (sx * sy, w * sy + h * sx, w * h - budget);
+        let q = if a > 0.0 { (-bq + (bq * bq - 4.0 * a * c).max(0.0).sqrt()) / (2.0 * a) } else { -c / bq };
+        f = f.min(q);
+    }
+    let f = if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 };
+    let sides = [l, t, r, b].map(|v| (v * f).floor() as u32);
+    sides.iter().any(|&v| v != 0).then_some(sides)
+}
+
+/// The pixel box (min, max) enclosing the four points of a quad.
+pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
+    let f = |i: usize, init: f64, g: fn(f64, f64) -> f64| q.iter().fold(init, |a, p| g(a, p[i]));
+    ([f(0, f64::INFINITY, f64::min), f(1, f64::INFINITY, f64::min)], [f(0, f64::NEG_INFINITY, f64::max), f(1, f64::NEG_INFINITY, f64::max)])
+}
+
+/// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
+/// `(width, height, offset)`. Output Width / Height grow (or crop) the layer rectangle about its
+/// centre, on adjustment layers too, where the rectangle is the comp's and starts at the comp
+/// origin in the buffer below (After Effects; a Transform after it brings the tiles into view,
+/// #1727). An adjustment at 100 % keeps the buffer it was given; one whose frame would pass
+/// 16 384 pixels a side does too.
+pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), scale: f64) -> (u32, u32, [f64; 2]) {
+    let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
+    let (pw, ph) = (ctx.params.f("outputWidth"), ctx.params.f("outputHeight"));
+    let ow = (lw * pw / 100.0).max(1.0 / scale);
+    let oh = (lh * ph / 100.0).max(1.0 / scale);
+    let (nw, nh) = ((ow * scale).round().max(1.0), (oh * scale).round().max(1.0));
+    let grow = [(ow - lw) * 0.5 * scale, (oh - lh) * 0.5 * scale];
+    if !ctx.adjustment {
+        return (nw as u32, nh as u32, grow);
+    }
+    // The grown rectangle's top-left in the buffer below, on whole pixels so the result lines
+    // up with the comp again when the stack ends.
+    let (x0, y0) = ((offset[0] - grow[0]).round(), (offset[1] - grow[1]).round());
+    let fits = [x0, y0, nw, nh].iter().all(|v| v.is_finite()) && nw <= 16384.0 && nh <= 16384.0;
+    if (pw == 100.0 && ph == 100.0) || !fits {
+        return (size.0, size.1, offset);
+    }
+    (nw as u32, nh as u32, [offset[0] - x0, offset[1] - y0])
+}
+
+/// Where an adjustment stack's result (comp origin at `offset`, `size` pixels) lies on the canvas
+/// it came from (comp origin at `canvas_offset`): the result pixel at canvas pixel (0, 0).
+/// `None` when it already is the canvas, frame for frame.
+pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u32), canvas: (u32, u32)) -> Option<(i64, i64)> {
+    let (dx, dy) = ((offset[0] - canvas_offset[0]).round(), (offset[1] - canvas_offset[1]).round());
+    if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0 && size == canvas) {
+        return None;
+    }
+    Some((dx as i64, dy as i64))
+}
+
+/// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
+/// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
+/// skips the renderer's cover of the whole layer rectangle (#1205).
+/// Drop Shadow also pads by its distance and softness on both CPU and GPU: covering the
+/// layer rectangle first only inflates working images on highly scaled text and shapes (#3357).
+pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.dropshadow"];
+
+/// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
+/// of the resampling pyramid used for downscaled layers.
+pub const GRID_ALIGN: u32 = 64;
+
+/// Left/top growth giving a buffer [`cover_plan`]'s grid phase modulo [`GRID_ALIGN`]; `None`
+/// when there is nothing to add.
+pub fn align_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, height: u32) -> Option<(u32, u32)> {
+    let (dx, dy, _, _) = cover_plan(offset, scale, size, width, height)?;
+    let (l, t) = (dx % GRID_ALIGN, dy % GRID_ALIGN);
+    (l != 0 || t != 0).then_some((l, t))
+}
+
+/// Padding for an effect that moves pixels up to `want` past the content (not an adjustment
+/// layer): `want`, capped at what reaches the layer rectangle, in whole [`GRID_ALIGN`] steps so
+/// the grid phase stays. 0 once the buffer covers the layer.
+pub fn cover_pad(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f64, want: u32) -> u32 {
+    if ctx.adjustment {
+        return 0;
+    }
+    want.min(util::layer_cover_pad(ctx, size, offset, scale)).div_ceil(GRID_ALIGN) * GRID_ALIGN
 }
 
 /// Where [`Buf::cover`] would take a buffer: shift its pixels by `(dx, dy)` and resize it to
@@ -383,6 +565,18 @@ pub trait EffectHost: Sync {
     fn params_at(&self, _layer_time: f64) -> Option<Params> {
         None
     }
+    /// Parameter `id` (a [`flatten_params`] id such as `birthRate`) of effect `effect_index` in
+    /// the layer's stack (the running effect's [`EffectEnv::effect_index`]) at another **layer
+    /// time**: Particle Emitter 3D samples its Birth Rate at every step it simulates (#1373).
+    /// `None` when unavailable.
+    fn param_at(&self, _effect_index: usize, _id: &str, _layer_time: f64) -> Option<Value> {
+        None
+    }
+    /// Parameter `id` of effect `effect_index` has one value at every time (no keyframes, no
+    /// expression), so sampling it over time can be skipped. `false` when unknown.
+    fn param_is_static(&self, _effect_index: usize, _id: &str) -> bool {
+        false
+    }
     /// A particle simulation backend (GPU particles; see [`psim`]). `None` = simulate on the
     /// CPU.
     fn particles(&self) -> Option<&dyn psim::ParticleSim> {
@@ -406,10 +600,18 @@ pub struct EffectEnv<'a> {
     pub working_space: Option<effectcraft_color::ColorSpace>,
     /// Working-space pixels are linear light (Linearize Working Space).
     pub working_linear: bool,
+    /// The project works in 32 bpc float (Levels' "Off for 32 bpc Color" clips only below it).
+    pub float_depth: bool,
     /// The composition's shutter (angle and phase in degrees, samples per frame) when both the
     /// comp's and the layer's motion blur switches are on (Transform's Use Composition's
     /// Shutter Angle).
     pub shutter: Option<(f64, f64, u32)>,
+    /// The layer's source time range in **layer time** seconds as (first, end): the layer time of
+    /// the first source frame and the time just past the last one (so the source lasts
+    /// `end - first` seconds and its last frame starts one frame before `end`). `None` when the
+    /// source has no duration (stills, solids, text, shapes) or the renderer does not know it.
+    /// Retimers clamp their source requests to it.
+    pub layer_span: Option<(f64, f64)>,
 }
 
 /// What an effect gets to render with.
@@ -459,6 +661,15 @@ pub struct EffectSpec {
     pub gpu: bool,
     /// Supports 32 bpc float (badge).
     pub float: bool,
+}
+
+impl EffectSpec {
+    /// True when this effect grows its own buffer (blur/glow margins, Repeat Edge
+    /// [`Buf::cover`], displacement [`cover_pad`]) so a stack of only these can skip the
+    /// renderer's full-layer cover and keep the pyramid grid phase (#1205).
+    pub fn skips_cover(&self) -> bool {
+        SKIPS_COVER.contains(&self.id)
+    }
 }
 
 pub(crate) fn p(id: &'static str, name: &'static str, default: Value, ui: ParamUi) -> ParamSpec {
@@ -572,8 +783,82 @@ pub fn categories() -> Vec<&'static str> {
     v
 }
 
-/// After Effects' third-party display names of effects we register under a generic name.
-const ALIASES: &[(&str, &[&str])] = &[("ec.keying.keylight", keylight::KEYLIGHT_ALIASES)];
+/// Legacy display names accepted for saved scripts and searches. Never display these as
+/// native feature names; stable effect IDs and external format match names stay unchanged.
+const ALIASES: &[(&str, &[&str])] = &[
+    ("ec.sim.ccballaction", &["CC Ball Action"]),
+    ("ec.distort.ccbendit", &["CC Bend It"]),
+    ("ec.distort.ccbender", &["CC Bender"]),
+    ("ec.distort.ccblobbylize", &["CC Blobbylize"]),
+    ("ec.stylize.ccblockload", &["CC Block Load"]),
+    ("ec.sim.ccbubbles", &["CC Bubbles"]),
+    ("ec.stylize.ccburnfilm", &["CC Burn Film"]),
+    ("ec.color.cccolorneutralizer", &["CC Color Neutralizer"]),
+    ("ec.color.cccoloroffset", &["CC Color Offset"]),
+    ("ec.channel.cccomposite", &["CC Composite"]),
+    ("ec.blur.cccross", &["CC Cross Blur"]),
+    ("ec.perspective.cccylinder", &["CC Cylinder"]),
+    ("ec.sim.ccdrizzle", &["CC Drizzle"]),
+    ("ec.perspective.ccenvironment", &["CC Environment"]),
+    ("ec.distort.ccflomotion", &["CC Flo Motion"]),
+    ("ec.time.ccforcemotionblur", &["CC Force Motion Blur"]),
+    ("ec.stylize.ccglass", &["CC Glass"]),
+    ("ec.transition.ccglasswipe", &["CC Glass Wipe"]),
+    ("ec.generate.ccgluegun", &["CC Glue Gun"]),
+    ("ec.transition.ccgridwipe", &["CC Grid Wipe"]),
+    ("ec.distort.ccgriddler", &["CC Griddler"]),
+    ("ec.sim.cchair", &["CC Hair"]),
+    ("ec.stylize.cchextile", &["CC HexTile"]),
+    ("ec.transition.ccimagewipe", &["CC Image Wipe"]),
+    ("ec.transition.ccjaws", &["CC Jaws"]),
+    ("ec.stylize.cckaleida", &["CC Kaleida"]),
+    ("ec.color.cckernel", &["CC Kernel"]),
+    ("ec.distort.cclens", &["CC Lens"]),
+    ("ec.generate.cclightburst", &["CC Light Burst 2.5"]),
+    ("ec.generate.cclightrays", &["CC Light Rays"]),
+    ("ec.generate.cclightsweep", &["CC Light Sweep"]),
+    ("ec.transition.cclightwipe", &["CC Light Wipe"]),
+    ("ec.transition.cclinesweep", &["CC Line Sweep"]),
+    ("ec.sim.ccmrmercury", &["CC Mr. Mercury"]),
+    ("ec.stylize.ccmrsmoothie", &["CC Mr. Smoothie"]),
+    ("ec.utility.ccoverbrights", &["CC Overbrights"]),
+    ("ec.distort.ccpageturn", &["CC Page Turn"]),
+    ("ec.sim.ccparticlesystems2", &["CC Particle Systems II"]),
+    ("ec.sim.ccparticleworld", &["CC Particle World"]),
+    ("ec.sim.ccpixelpolly", &["CC Pixel Polly"]),
+    ("ec.stylize.ccplastic", &["CC Plastic"]),
+    ("ec.distort.ccpowerpin", &["CC Power Pin"]),
+    ("ec.blur.ccradial", &["CC Radial Blur"]),
+    ("ec.blur.ccradialfast", &["CC Radial Fast Blur"]),
+    ("ec.transition.ccradialscalewipe", &["CC Radial ScaleWipe"]),
+    ("ec.sim.ccrainfall", &["CC Rainfall"]),
+    ("ec.stylize.ccrepetile", &["CC RepeTile"]),
+    ("ec.distort.ccripplepulse", &["CC Ripple Pulse"]),
+    ("ec.transition.ccscalewipe", &["CC Scale Wipe"]),
+    ("ec.sim.ccscatterize", &["CC Scatterize"]),
+    ("ec.key.ccsimplewireremoval", &["CC Simple Wire Removal"]),
+    ("ec.distort.ccslant", &["CC Slant"]),
+    ("ec.distort.ccsmear", &["CC Smear"]),
+    ("ec.sim.ccsnowfall", &["CC Snowfall"]),
+    ("ec.perspective.ccsphere", &["CC Sphere"]),
+    ("ec.distort.ccsplit", &["CC Split"]),
+    ("ec.distort.ccsplit2", &["CC Split 2"]),
+    ("ec.perspective.ccspotlight", &["CC Spotlight"]),
+    ("ec.sim.ccstarburst", &["CC Star Burst"]),
+    ("ec.generate.ccthreads", &["CC Threads"]),
+    ("ec.stylize.ccthreshold", &["CC Threshold"]),
+    ("ec.stylize.ccthresholdrgb", &["CC Threshold RGB"]),
+    ("ec.distort.cctiler", &["CC Tiler"]),
+    ("ec.color.cctoner", &["CC Toner"]),
+    ("ec.transition.cctwister", &["CC Twister"]),
+    ("ec.blur.ccvector", &["CC Vector Blur"]),
+    ("ec.stylize.ccvignette", &["CC Vignette"]),
+    ("ec.transition.ccwarpomatic", &["CC WarpoMatic"]),
+    ("ec.time.ccwidetime", &["CC Wide Time"]),
+    ("ec.color.lumetri", &["Lumetri Color"]),
+    ("ec.obsolete.mochashape", &["Mocha shape", "mocha shape"]),
+    ("ec.keying.keylight", keylight::KEYLIGHT_ALIASES),
+];
 
 /// Other names effect `id` answers to (in [`lookup`] and searches).
 pub fn aliases(id: &str) -> &'static [&'static str] {
@@ -657,7 +942,7 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
 /// effects without their own table.
 pub const PARAM_GROUPS: &[(&str, &str)] = &[
     // Color Correction: Exposure, Levels (Individual Controls), Change to Color, Colorama,
-    // Shadow/Highlight, Lumetri Color.
+    // Shadow/Highlight, Color Grading.
     ("master", "Master"),
     ("rgb", "RGB"),
     ("red", "Red"),
@@ -786,7 +1071,7 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("particleExploder", "Particle Exploder"),
     ("affects", "Affects"),
     ("options", "Options"),
-    // Keying, Matte, Obsolete (Key Light's groups are in `keylight::GROUPS`).
+    // Keying, Matte, Obsolete (Screen Color Key's groups are in `keylight::GROUPS`).
     ("ultraSettings", "Ultra Settings"),
     ("additionalForeground", "Additional Foreground"),
     ("additionalBackground", "Additional Background"),
@@ -871,7 +1156,7 @@ fn nested_group<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&
 }
 
 /// Effects the GPU compositor (`effectcraft-gpu`) implements with the CPU effect's semantics
-/// (Mercury GPU Acceleration; the Effects & Presets GPU badge). Expression controls are
+/// (GPU Acceleration; the Effects & Presets GPU badge). Expression controls are
 /// pass-throughs and count as GPU effects too.
 pub const GPU_EFFECTS: &[&str] = &[
     "ec.blur.gaussian",
@@ -1233,7 +1518,14 @@ pub const TIME_DEPENDENT: &[&str] = &[
 pub fn is_time_dependent(id: &str) -> bool {
     // Simulations replay from layer time 0, so every frame differs even when the defaults
     // happen to look static at the test's two sample times.
-    id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id)
+    id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id) || (!id.starts_with("ec.") && plugin::reads_other_times(id))
+}
+
+/// Does effect `id` read its own parameters at earlier times (the stepped particle systems sample
+/// their Birth Rate at every step, #1373)? Caches keyed on the current values can't see what an
+/// expression returned then.
+pub fn reads_param_history(id: &str) -> bool {
+    matches!(id, "ec.sim.ccparticleworld" | "ec.sim.ccparticlesystems2" | "ec.sim.ccmrmercury")
 }
 
 /// Run an effect on a buffer.
@@ -1260,11 +1552,66 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 mod tests {
     use super::*;
 
+    /// #1938: Corner Pin's growth spans the pinned quad, and past the side cap or the pixel
+    /// budget it is cut by one factor instead of being dropped.
+    #[test]
+    fn grow_sides_spans_the_box_and_clamps_instead_of_giving_up() {
+        let area = |w: u32, h: u32, s: [u32; 4]| (u64::from(w) + u64::from(s[0]) + u64::from(s[2])) * (u64::from(h) + u64::from(s[1]) + u64::from(s[3]));
+        assert_eq!(grow_sides([-3.5, 2.0], [30.0, 40.2], 20, 10), Some([4, 0, 10, 31]));
+        assert_eq!(grow_sides([1.0, 1.0], [19.0, 9.0], 20, 10), None, "already inside");
+        assert_eq!(grow_sides([f64::NAN, 0.0], [30.0, 40.0], 20, 10), None);
+        assert_eq!(grow_sides([0.0, 0.0], [f64::INFINITY, 40.0], 20, 10), None);
+        // A pin near (16000, 16000) on a small layer: cut to the budget, still growing, in the same ratio.
+        let s = grow_sides([0.0, 0.0], [16000.0, 16000.0], 20, 10).unwrap();
+        assert!(s[2] > 1000 && s[3] > 1000 && area(20, 10, s) <= 1 << 24, "{s:?}");
+        // An absurdly far pin is still bounded and still grows.
+        let s = grow_sides([-1e12, -1e12], [1e12, 1e12], 1920, 1080).unwrap();
+        assert!(s.iter().all(|&v| v > 0) && area(1920, 1080, s) <= 1 << 24, "{s:?}");
+        assert!(1920 + u64::from(s[0]) + u64::from(s[2]) <= 16384);
+        // A layer already past the side cap does not grow.
+        assert_eq!(grow_sides([0.0, 0.0], [20000.0, 100.0], 17000, 50), None);
+        // A degenerate quad (all four points equal) grows to its point only.
+        let q = [[50.0, 30.0]; 4];
+        let (lo, hi) = quad_bounds(&q);
+        assert_eq!(grow_sides(lo, hi, 20, 10), Some([0, 0, 30, 20]));
+    }
+
+    /// #2261: a 20 × 20 layer with Fast Radial Blur's Center far away grows to at most 16 Mpx;
+    /// big layers may still grow to four times their area, and small pads are untouched.
+    #[test]
+    fn padded_buffers_stay_within_the_budget() {
+        let area = |w: u32, h: u32, p: u32| (u64::from(w) + 2 * u64::from(p)) * (u64::from(h) + 2 * u64::from(p));
+        let far = radial_fast_pad((6500.0, 6500.0), 20, 20, 0.8);
+        assert_eq!(far, 4096, "the effect asks for its full pad");
+        let mut b = Buf { img: Image::new(20, 20), offset: [0.0; 2], scale: 1.0 };
+        b.pad(far);
+        assert!(area(20, 20, 0) < area(b.img.width, b.img.height, 0) && area(b.img.width, b.img.height, 0) <= 1 << 24, "{}x{}", b.img.width, b.img.height);
+        assert_eq!(b.offset, [f64::from((b.img.width - 20) / 2); 2], "the content keeps its place");
+        let p = pad_within_budget(3840, 2160, 4096);
+        assert!(p > 1000 && area(3840, 2160, p) <= 4 * 3840 * 2160 && area(3840, 2160, p + 1) > 4 * 3840 * 2160);
+        assert_eq!(pad_within_budget(640, 360, 200), 200);
+        assert_eq!(pad_within_budget(20, 20, 0), 0);
+    }
+
     #[test]
     fn run_fx_passthrough() {
         let img = Image::filled(4, 3, [0.5, 0.25, 0.125, 1.0]);
         let out = run_fx("ec.control.slider", &[("slider", num(3.0))], img.clone(), 0.0, EffectEnv::default());
         assert_eq!(out.img.data, img.data);
+    }
+
+    #[test]
+    fn pad_offset_follows_the_clamped_pad() {
+        // Image::padded clamps a hostile pad to keep each side within MAX_PADDED_SIDE; the offset
+        // must move by the pad actually applied, or the content drifts from its layer position.
+        let mut img = Image::new(29_990, 2);
+        img.set(0, 0, [1.0, 0.0, 0.0, 1.0]);
+        let mut buf = Buf { img, offset: [3.0, 4.0], scale: 1.0 };
+        buf.pad(u32::MAX);
+        // Width binds: (MAX_PADDED_SIDE - 29 990) / 2 = 5.
+        assert_eq!(buf.offset, [8.0, 9.0]);
+        let (x, y) = buf.to_px([-3.0, -4.0]);
+        assert_eq!(buf.img.get(x as i64, y as i64), [1.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -1450,5 +1797,25 @@ mod tests {
         let g = instantiate(find("ec.noise.matchgrain").unwrap(), &mut Ids(&mut next), "Match Grain", [10.0, 10.0]);
         assert_eq!(g.get("noiseSourceLayerSource").map(|p| p.value.clone()), Some(Value::Enum(0)));
         assert_eq!(g.props().filter(|p| p.match_id == "noiseSourceLayerSource").count(), 1);
+    }
+
+    #[test]
+    fn align_plan_is_cover_shift_mod_grid() {
+        // Content inset from the layer origin: pixel 0 maps to layer (50, 30).
+        let offset = [-50.0, -30.0];
+        let scale = 1.0;
+        let size = [1920.0, 1080.0];
+        let (dx, dy, _, _) = cover_plan(offset, scale, size, 80, 40).unwrap();
+        assert_eq!((dx, dy), (50, 30));
+        assert_eq!(align_plan(offset, scale, size, 80, 40), Some((50, 30)));
+        assert_eq!(align_plan([-64.0, -128.0], 1.0, size, 80, 40), None);
+    }
+
+    #[test]
+    fn known_margin_effects_skip_cover_and_twirl_does_not() {
+        for id in SKIPS_COVER {
+            assert!(find(id).expect(id).skips_cover(), "{id}");
+        }
+        assert!(!find("ec.distort.twirl").unwrap().skips_cover());
     }
 }

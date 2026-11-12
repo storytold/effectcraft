@@ -6,6 +6,15 @@
 
 use std::collections::HashMap;
 
+const MAX_ARCHIVE_BYTES: usize = 1 << 30;
+const MAX_PICKLE_OPS: usize = 4_000_000;
+const MAX_TENSORS: usize = 1_000_000;
+const MAX_TENSOR_ELEMENTS: usize = 1 << 28;
+const MAX_ENTRY_BYTES: usize = 1 << 30;
+const MAX_PICKLE_NODES: usize = 4_000_000;
+const MAX_TOTAL_ELEMENTS: usize = 1 << 29;
+const MAX_TENSOR_DIMS: usize = 64;
+
 /// A tensor read from a checkpoint: its shape and its values as f32 (row-major, contiguous).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tensor {
@@ -38,6 +47,9 @@ struct Entry {
 
 /// The entries of a zip archive by name.
 fn zip_entries(b: &[u8]) -> Result<HashMap<String, Entry>> {
+    if b.len() > MAX_ARCHIVE_BYTES {
+        return Err("checkpoint exceeds the 1024 MiB archive limit".into());
+    }
     // End of central directory: the last `PK\x05\x06` (a comment may follow it).
     let eocd =
         (0..b.len().saturating_sub(21)).rev().find(|&i| b.get(i..i + 4) == Some(b"PK\x05\x06")).ok_or("not a zip archive (no end of central directory)")?;
@@ -96,7 +108,14 @@ fn read_entry<'a>(b: &'a [u8], e: &Entry) -> Result<std::borrow::Cow<'a, [u8]>> 
     match e.method {
         0 => Ok(std::borrow::Cow::Borrowed(raw)),
         8 => {
-            miniz_oxide::inflate::decompress_to_vec_with_limit(raw, e.size.max(1)).map(std::borrow::Cow::Owned).map_err(|e| format!("bad deflate data: {e:?}"))
+            // Deflate expands at most about 1032:1, so a stated size past that is not this entry's.
+            if e.size > MAX_ENTRY_BYTES || e.size > e.stored.saturating_mul(1032).saturating_add(64) {
+                return Err("zip entry exceeds the size limit".into());
+            }
+            // The status only: the error's partial output can be as large as the entry.
+            miniz_oxide::inflate::decompress_to_vec_with_limit(raw, e.size.max(1))
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| format!("bad deflate data: {:?}", e.status))
         }
         m => Err(format!("unsupported zip compression {m}")),
     }
@@ -142,7 +161,74 @@ fn int_list(o: &Obj) -> Option<Vec<usize>> {
     }
 }
 
+/// Nodes in `o`, stopping once the count passes `budget`.
+fn nodes(o: &Obj, budget: usize) -> usize {
+    let kids: Vec<&Obj> = match o {
+        Obj::Tuple(v) | Obj::List(v) => v.iter().collect(),
+        Obj::Dict(v) => v.iter().flat_map(|(k, x)| [k, x]).collect(),
+        // A string counts one node per 64 bytes it holds (a vector one per 8 elements): copies
+        // are charged for everything they own, not as one object.
+        Obj::Str(s) => return 1 + s.len() / 64,
+        Obj::Global(a, b) | Obj::Storage(a, b) => return 1 + (a.len() + b.len()) / 64,
+        Obj::Tensor { dtype, key, size, stride, .. } => return 1 + (dtype.len() + key.len()) / 64 + (size.len() + stride.len()) / 8,
+        _ => return 1,
+    };
+    let mut n = 1;
+    for k in kids {
+        if n > budget {
+            break;
+        }
+        n += nodes(k, budget - n);
+    }
+    n
+}
+
+fn tensor_element_count(name: &str, offset: usize, size: &[usize], stride: &[usize], values_len: usize) -> Result<usize> {
+    if size.len() != stride.len() || size.len() > MAX_TENSOR_DIMS {
+        return Err(format!("{name}: invalid tensor dimensionality"));
+    }
+    let n = size
+        .iter()
+        .try_fold(1usize, |n, &dim| n.checked_mul(dim))
+        .filter(|n| *n <= MAX_TENSOR_ELEMENTS)
+        .ok_or_else(|| format!("{name}: tensor exceeds the element limit"))?;
+    if n == 0 {
+        return Ok(0);
+    }
+    let mut max_at = offset;
+    for (&dim, &step) in size.iter().zip(stride) {
+        max_at = max_at
+            .checked_add((dim - 1).checked_mul(step).ok_or_else(|| format!("{name}: tensor stride overflow"))?)
+            .ok_or_else(|| format!("{name}: tensor offset overflow"))?;
+    }
+    if max_at >= values_len {
+        return Err(format!("{name}: data out of range"));
+    }
+    Ok(n)
+}
+
 /// Run the pickle program and return its result.
+/// A memoized object, charged against the clone budget (memo reuse can otherwise grow trees exponentially).
+fn memo_get(memo: &HashMap<u64, Obj>, k: u64, cloned: &mut usize) -> Result<Obj> {
+    let o = memo.get(&k).ok_or("pickle: bad memo")?;
+    *cloned = cloned.saturating_add(nodes(o, MAX_PICKLE_NODES));
+    if *cloned > MAX_PICKLE_NODES {
+        return Err("pickle exceeds the object limit".into());
+    }
+    Ok(o.clone())
+}
+
+/// A copy of the stack top to memoize, charged against the clone budget like a memo read: a
+/// program memoizing one large object many times keeps a copy each time.
+fn memo_put(stack: &[Obj], cloned: &mut usize) -> Result<Obj> {
+    let o = stack.last().ok_or("pickle stack underflow")?;
+    *cloned = cloned.saturating_add(nodes(o, MAX_PICKLE_NODES));
+    if *cloned > MAX_PICKLE_NODES {
+        return Err("pickle exceeds the object limit".into());
+    }
+    Ok(o.clone())
+}
+
 fn unpickle(p: &[u8]) -> Result<Obj> {
     let mut stack: Vec<Obj> = Vec::new();
     let mut memo: HashMap<u64, Obj> = HashMap::new();
@@ -166,7 +252,10 @@ fn unpickle(p: &[u8]) -> Result<Obj> {
         *i += n + 1;
         Ok(s)
     };
+    let mut op_count = 0usize;
+    let mut cloned = 0usize;
     loop {
+        op_count = op_count.checked_add(1).filter(|n| *n <= MAX_PICKLE_OPS).ok_or("pickle exceeds the opcode limit")?;
         let op = *p.get(i).ok_or("truncated pickle")?;
         i += 1;
         match op {
@@ -241,23 +330,23 @@ fn unpickle(p: &[u8]) -> Result<Obj> {
             }
             b'q' => {
                 let k = take(&mut i, 1)?[0] as u64;
-                memo.insert(k, stack.last().cloned().ok_or("pickle stack underflow")?);
+                memo.insert(k, memo_put(&stack, &mut cloned)?);
             }
             b'r' => {
                 let s = take(&mut i, 4)?;
-                memo.insert(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64, stack.last().cloned().ok_or("pickle stack underflow")?);
+                memo.insert(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64, memo_put(&stack, &mut cloned)?);
             }
             0x94 => {
                 let k = memo.len() as u64;
-                memo.insert(k, stack.last().cloned().ok_or("pickle stack underflow")?);
+                memo.insert(k, memo_put(&stack, &mut cloned)?);
             }
             b'h' => {
                 let k = take(&mut i, 1)?[0] as u64;
-                stack.push(memo.get(&k).cloned().ok_or("pickle: bad memo")?);
+                stack.push(memo_get(&memo, k, &mut cloned)?);
             }
             b'j' => {
                 let s = take(&mut i, 4)?;
-                stack.push(memo.get(&(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64)).cloned().ok_or("pickle: bad memo")?);
+                stack.push(memo_get(&memo, u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64, &mut cloned)?);
             }
             b't' => {
                 let items = pop_mark(&mut stack)?;
@@ -290,9 +379,10 @@ fn unpickle(p: &[u8]) -> Result<Obj> {
                 stack.push(match f {
                     Obj::Global(m, n) if m == "torch._utils" && n == "_rebuild_tensor_v2" => {
                         match (args.first(), args.get(1), args.get(2).and_then(int_list), args.get(3).and_then(int_list)) {
-                            (Some(Obj::Storage(dtype, key)), Some(Obj::Int(off)), Some(size), Some(stride)) => {
-                                Obj::Tensor { dtype: dtype.clone(), key: key.clone(), offset: usize::try_from(*off).unwrap_or(0), size, stride }
-                            }
+                            (Some(Obj::Storage(dtype, key)), Some(Obj::Int(off)), Some(size), Some(stride)) => match usize::try_from(*off) {
+                                Ok(offset) => Obj::Tensor { dtype: dtype.clone(), key: key.clone(), offset, size, stride },
+                                Err(_) => Obj::Other,
+                            },
                             _ => Obj::Other,
                         }
                     }
@@ -337,13 +427,21 @@ fn unpickle(p: &[u8]) -> Result<Obj> {
     }
 }
 
-/// Element bytes and conversion of a storage dtype.
-fn to_f32(dtype: &str, bytes: &[u8]) -> Option<Vec<f32>> {
+/// Bytes per element of a float storage dtype.
+fn elem_size(dtype: &str) -> Option<usize> {
     match dtype {
-        "FloatStorage" => Some(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()),
-        "HalfStorage" => Some(bytes.as_chunks::<2>().0.iter().map(|c| half_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect()),
-        "BFloat16Storage" => Some(bytes.as_chunks::<2>().0.iter().map(|c| f32::from_bits((u16::from_le_bytes([c[0], c[1]]) as u32) << 16)).collect()),
+        "FloatStorage" => Some(4),
+        "HalfStorage" | "BFloat16Storage" => Some(2),
         _ => None,
+    }
+}
+
+/// Element `i` of a storage (`i` must be below `bytes.len() / elem_size`).
+fn elem_f32(dtype: &str, bytes: &[u8], i: usize) -> f32 {
+    match dtype {
+        "FloatStorage" => f32::from_le_bytes([bytes[4 * i], bytes[4 * i + 1], bytes[4 * i + 2], bytes[4 * i + 3]]),
+        "HalfStorage" => half_to_f32(u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]])),
+        _ => f32::from_bits((u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]) as u32) << 16),
     }
 }
 
@@ -382,22 +480,42 @@ pub fn read(bytes: &[u8]) -> Result<Weights> {
         Some((_, Obj::Dict(inner))) => inner.clone(),
         _ => dict,
     };
+    if dict.len() > MAX_TENSORS {
+        return Err("checkpoint exceeds the tensor count limit".into());
+    }
     let mut storages: HashMap<String, std::borrow::Cow<[u8]>> = HashMap::new();
     let mut out = Weights::new();
+    let mut total = 0usize;
+    let mut inflated = 0usize;
     for (k, v) in dict {
         let (Obj::Str(name), Obj::Tensor { dtype, key, offset, size, stride }) = (k, v) else { continue };
         if !storages.contains_key(&key) {
             let e = entries.get(&format!("{prefix}data/{key}")).ok_or_else(|| format!("missing storage {key}"))?;
+            if e.method == 8 {
+                inflated = inflated.saturating_add(e.size);
+                if inflated > MAX_ENTRY_BYTES {
+                    return Err("checkpoint exceeds the decompressed storage limit".into());
+                }
+            }
             storages.insert(key.clone(), read_entry(bytes, e)?);
         }
-        let Some(values) = storages.get(&key).and_then(|b| to_f32(&dtype, b)) else { continue };
-        let n: usize = size.iter().product();
-        // Gather (any strides) into a contiguous row-major tensor.
-        let mut data = Vec::with_capacity(n);
+        let (Some(esz), Some(values)) = (elem_size(&dtype), storages.get(&key)) else { continue };
+        // Check hostile stride math before allocating or indexing the backing storage.
+        let n = tensor_element_count(&name, offset, &size, &stride, values.len() / esz)?;
+        total = total.saturating_add(n);
+        if total > MAX_TOTAL_ELEMENTS {
+            return Err("checkpoint exceeds the total element limit".into());
+        }
+        let mut data = Vec::new();
+        data.try_reserve_exact(n).map_err(|_| format!("{name}: tensor allocation failed"))?;
         let mut idx = vec![0usize; size.len()];
         for _ in 0..n {
-            let at = offset + idx.iter().zip(&stride).map(|(i, s)| i * s).sum::<usize>();
-            data.push(*values.get(at).ok_or_else(|| format!("{name}: data out of range"))?);
+            let at = idx
+                .iter()
+                .zip(&stride)
+                .try_fold(offset, |at, (i, s)| i.checked_mul(*s).and_then(|v| at.checked_add(v)))
+                .ok_or_else(|| format!("{name}: tensor offset overflow"))?;
+            data.push(elem_f32(&dtype, values, at));
             for d in (0..idx.len()).rev() {
                 idx[d] += 1;
                 if idx[d] < size[d] {
@@ -491,6 +609,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_tensor_shape_overflow_and_invalid_strides() {
+        assert!(tensor_element_count("bad", 0, &[usize::MAX, 2], &[1, 1], 16).is_err());
+        assert!(tensor_element_count("bad", 0, &[2, 2], &[usize::MAX, 1], 16).is_err());
+        assert!(tensor_element_count("bad", 0, &[2, 2], &[1], 16).is_err());
+        assert!(tensor_element_count("bad", usize::MAX, &[2], &[1], 16).is_err());
+        assert_eq!(tensor_element_count("empty", 0, &[0, usize::MAX], &[0, 0], 0), Ok(0));
+    }
+
+    #[test]
     fn damaged_files_are_errors() {
         assert!(read(b"not a zip").is_err());
         let pkl = pickle();
@@ -501,5 +628,35 @@ mod tests {
         assert!(read(&file).is_err());
         assert_eq!(half_to_f32(0x3c00), 1.0);
         assert_eq!(half_to_f32(0xc000), -2.0);
+    }
+
+    #[test]
+    fn memoizing_a_long_string_again_and_again_runs_out_of_the_budget() {
+        // A 1 MiB string memoized 300 times would keep 300 MiB of copies.
+        let mut p = vec![0x80, 2, b'X'];
+        p.extend_from_slice(&(1u32 << 20).to_le_bytes());
+        p.extend(std::iter::repeat_n(b'a', 1 << 20));
+        p.extend(std::iter::repeat_n(0x94, 300));
+        p.push(b'.');
+        assert!(unpickle(&p).is_err_and(|e| e.contains("object limit")));
+    }
+
+    #[test]
+    fn every_owned_field_is_charged_to_the_clone_budget() {
+        let long = || "a".repeat(1 << 20);
+        let budget = MAX_PICKLE_NODES;
+        // A one-byte module with a 1 MiB name (and the same for storages and tensors).
+        assert!(nodes(&Obj::Global("m".into(), long()), budget) >= (1 << 20) / 64);
+        assert!(nodes(&Obj::Storage("m".into(), long()), budget) >= (1 << 20) / 64);
+        let t = Obj::Tensor { dtype: "m".into(), key: long(), offset: 0, size: vec![1; 4096], stride: vec![1; 4096] };
+        assert!(nodes(&t, budget) >= (1 << 20) / 64 + 1024);
+        // Small ones stay cheap.
+        assert_eq!(nodes(&Obj::Global("a".into(), "b".into()), budget), 1);
+    }
+
+    #[test]
+    fn an_entry_stating_more_than_deflate_can_expand_to_is_refused() {
+        let e = Entry { data: 0, size: 1 << 29, stored: 4, method: 8 };
+        assert!(read_entry(&[0u8; 4], &e).is_err_and(|m| m.contains("size limit")));
     }
 }
