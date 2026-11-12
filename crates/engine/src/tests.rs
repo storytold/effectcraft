@@ -29,6 +29,7 @@ mod keyframe_text;
 mod keylight;
 mod limits;
 mod lottie;
+mod lut_files;
 mod m137;
 mod m145;
 mod markers;

@@ -33,6 +33,8 @@ impl Dependencies<'_> {
         {
             for g in fx.groups().take(limit.unwrap_or(usize::MAX)).filter(|g| g.enabled) {
                 self.group(ctx, layer, g, 0)?;
+                // A LUT file edited on disk changes the pixels without an edit (#3493).
+                crate::reads::lut_files(ctx, layer, g).hash(self.h);
             }
         }
         self.other_times = previous;
