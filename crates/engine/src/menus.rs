@@ -320,6 +320,7 @@ pub fn checked(s: &Session, command: &str, params: &Value) -> Option<bool> {
     let layer = s.state.selected_layers.first().and_then(|l| comp.layer(*l));
     let pstr = |k: &str| params.get(k).and_then(Value::as_str);
     match command {
+        "path.toggleClosed" => crate::cmd::paths::selected_paths_closed(s),
         "layer.setBlendMode" => {
             let want = effectcraft_color::BlendMode::from_name(pstr("mode")?)?;
             Some(layer?.blend_mode == want)
@@ -829,7 +830,7 @@ Layer
     Hide Locked Masks | layer.mask.hideLocked
   Mask and Shape Path
     RotoBezier | path.rotoBezier
-    Closed | mask.setClosed
+    Closed | path.toggleClosed
     Convert To Bezier Path | path.convertToBezier
     Set First Vertex | path.setFirstVertex
     Free Transform Points | path.freeTransform
