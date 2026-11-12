@@ -122,9 +122,16 @@ pub fn signature(p: &Project, comp: ItemId, layer: &Layer) -> String {
     signature_with_source(p, comp, layer, &src)
 }
 
+/// Whether `saved`, a key an analysis of `layer` was saved with, is for the layer's current frames.
+/// `key` makes such a key from a signature. A key made from the signature an earlier release wrote
+/// for the same frames matches too: keep it rather than rewrite it (analysing writes today's).
+pub(crate) fn key_matches(p: &Project, comp: ItemId, layer: &Layer, saved: &str, key: impl Fn(String) -> String) -> bool {
+    key(signature(p, comp, layer)) == saved || signature_before_placed_page(p, comp, layer).is_some_and(|s| key(s) == saved)
+}
+
 /// Before `Footage::placed_page` was added in 0.23, the persisted signature hashed the
-/// same Debug representation without that last field. Only ordinary footage can match it.
-pub(crate) fn signature_before_placed_page(p: &Project, comp: ItemId, layer: &Layer) -> Option<String> {
+/// same footage text without that last field. Only ordinary footage can match it.
+fn signature_before_placed_page(p: &Project, comp: ItemId, layer: &Layer) -> Option<String> {
     let LayerSource::Footage { item } = &layer.source else { return None };
     let ItemKind::Footage(footage) = &p.item(*item)?.kind else { return None };
     if footage.placed_page {
@@ -256,11 +263,10 @@ pub(crate) fn invalidate(before: &Project, after: &mut Project) -> Vec<(ItemId, 
             if !fx.groups().any(is_warp) {
                 continue;
             }
-            let sig = signature(after, *cid, l);
             let old_layer = before.comp(*cid).and_then(|bc| bc.layer(l.id));
             for g in fx.groups().filter(|g| is_warp(g)) {
                 let analysed = !str_of(g, ANALYSIS).is_empty();
-                if analysed && str_of(g, ANALYSIS_KEY) != sig {
+                if analysed && !key_matches(after, *cid, l, &str_of(g, ANALYSIS_KEY), |s| s) {
                     clear.push((*cid, l.id, g.uid));
                     todo.push((*cid, l.id, g.uid));
                 } else if !analysed && old_layer.and_then(|ol| ol.props.find_group(g.uid)).is_none() {

@@ -1,6 +1,82 @@
 //! Warp Stabilizer and 3D Camera Tracker analyses saved by an earlier release keep matching
 //! their footage after an edit that doesn't change it (#3456), and a real change still clears them.
 
+use effectcraft_effects::camera_tracker::{TRACKS, TRACKS_KEY};
+use effectcraft_effects::warp_stab::{ANALYSIS, ANALYSIS_KEY};
+use effectcraft_keyframe::Value;
+use effectcraft_project::{ItemId, LayerId, Project};
+use serde_json::json;
+
+use crate::Session;
+
+const FOOTAGE: ItemId = ItemId(1);
+const COMP: ItemId = ItemId(2);
+const CLIP: LayerId = LayerId(3);
+const WARP: u64 = 26;
+const TRACKER: u64 = 54;
+
+/// The analysis (as its length and a hash: it's long) and key of the Warp Stabilizer and the
+/// 3D Camera Tracker.
+fn saved(s: &Session) -> [(usize, u64, String); 2] {
+    use std::hash::{Hash, Hasher};
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let get = |uid: u64, data: &str, key: &str| {
+        let params = crate::camera_track::static_params(layer.props.find_group(uid).unwrap());
+        let text = |id: &str| match params.get(id) {
+            Some(Value::Str(s)) => s.clone(),
+            other => panic!("{id}: {other:?}"),
+        };
+        let analysis = text(data);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        analysis.hash(&mut h);
+        (analysis.len(), h.finish(), text(key))
+    };
+    [get(WARP, ANALYSIS, ANALYSIS_KEY), get(TRACKER, TRACKS, TRACKS_KEY)]
+}
+
+fn open(json: &str) -> Session {
+    let mut s = Session::default();
+    s.replace_project(Project::from_json(json).unwrap(), None);
+    s.open_comp(COMP);
+    s
+}
+
+#[test]
+fn analyses_saved_by_0_22_survive_edits_that_keep_their_frames() {
+    // Saved by the released 0.22.0 CLI after analysing both effects; its footage is offline here.
+    let mut s = open(include_str!("fixtures/tracked-0.22.ecproj"));
+    let before = saved(&s);
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    for (len, _, key) in &before {
+        assert!(*len > 0);
+        // The key predates Footage::placed_page, so it isn't today's signature.
+        assert_ne!(key, &crate::warp::signature(&s.project, COMP, layer));
+    }
+
+    // Adding to the render queue edits the project, as `effectcraft-cli render` does.
+    s.execute_checked("renderQueue.add", json!({"comp": COMP.0, "format": "png", "output": "frame.png"})).unwrap();
+    assert_eq!(saved(&s), before);
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&s), before);
+
+    // Saved and reopened (by this version), the old keys are kept and still match.
+    let mut s = open(&s.project.to_json());
+    s.execute_checked("renderQueue.add", json!({"comp": COMP.0, "format": "png", "output": "frame.png"})).unwrap();
+    assert_eq!(saved(&s), before);
+
+    // Other frames, from other timing or a reinterpreted footage item: both analyses are
+    // cleared, and undo brings them back.
+    let cleared = |s: &Session| saved(s).iter().all(|(len, _, key)| *len == 0 && key.is_empty());
+    s.execute_checked("layer.timing", json!({"layer": CLIP.0, "out": 0.5})).unwrap();
+    assert!(cleared(&s));
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&s), before);
+    s.execute_checked("file.interpretFootage", json!({"items": [FOOTAGE.0], "invertAlpha": true})).unwrap();
+    assert!(cleared(&s));
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&s), before);
+}
+
 /// The footage text analysis keys are hashed from, as 0.23 saved it. A new `Footage` field must
 /// not change it (or every saved analysis is dropped again).
 #[test]
