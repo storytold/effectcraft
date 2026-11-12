@@ -26,9 +26,10 @@ use effectcraft_track::camtrack::linalg::{self, Similarity, V3};
 use effectcraft_track::camtrack::{AnalyzeOpts, CameraSolve, CameraTracks, SolveSettings, Target, TrackAnalyzer};
 use serde::Serialize;
 
+use crate::analysis::frames_key::{self, signature};
 use crate::offload::JobKind;
 use crate::tracking::lock;
-use crate::warp::{analysis_times, signature};
+use crate::warp::analysis_times;
 use crate::{Event, Session};
 
 /// Live analysis progress (serde for agents / the control channel).
@@ -134,7 +135,7 @@ fn tracks_key_of(signature: String, g: &PropGroup) -> String {
 
 /// Whether the tracker's saved tracks are made from the layer's current frames and settings.
 fn tracks_match(project: &Project, cid: ItemId, l: &Layer, g: &PropGroup) -> bool {
-    crate::warp::key_matches(project, cid, l, &str_of(g, TRACKS_KEY), |s| tracks_key_of(s, g))
+    frames_key::key_matches(project, cid, l, &str_of(g, TRACKS_KEY), |s, _| tracks_key_of(s, g))
 }
 
 /// Parameters of an instance from static values (the tracker's settings are not animated).
