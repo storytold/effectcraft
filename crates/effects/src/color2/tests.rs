@@ -270,6 +270,39 @@ fn levels_ic_clip_popups() {
     assert!(run("ec.color.levelsic", &img, &off).data[0][0] > 1.5);
 }
 
+/// #3487-#3491: over After Effects' valid ranges (levels ±10000, gamma from 0) the output stays
+/// finite: gamma 0 renders as 0.01, whose curve on an HDR value overflows `f32` unbounded.
+#[test]
+fn levels_ic_stays_finite_over_the_whole_range() {
+    let img = Image::filled(2, 2, [3.0, 0.5, -2.0, 1.0]);
+    for (ib, iw, ob, ow) in [
+        (0.0, 1.0, 0.0, 1.0),
+        (0.0, 1.0, 1.0, 1.0),
+        (-10000.0, 10000.0, -10000.0, 10000.0),
+        (10000.0, -10000.0, 10000.0, -10000.0),
+        (0.0, 1e-3, -10000.0, 10000.0),
+    ] {
+        let lv = [
+            ("rgb/rgbInBlack", num(ib)),
+            ("rgb/rgbInWhite", num(iw)),
+            ("rgb/rgbGamma", num(0.0)),
+            ("rgb/rgbOutBlack", num(ob)),
+            ("rgb/rgbOutWhite", num(ow)),
+            ("clipToOutputBlack", Value::Enum(0)),
+            ("clipToOutputWhite", Value::Enum(0)),
+        ];
+        let out = run("ec.color.levelsic", &img, &lv);
+        assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{ib} {iw} {ob} {ow}: {:?}", out.data[0]);
+    }
+    // The bound only stops the overflow: an HDR value that was finite before keeps its level
+    // (gamma 0.1 at 4 x Input White: 4^10).
+    let bright = run("ec.color.levelsic", &Image::filled(1, 1, [4.0, 4.0, 4.0, 1.0]), &[("rgb/rgbGamma", num(0.1)), ("clipToOutputWhite", Value::Enum(0))]);
+    assert_eq!(bright.data[0][0], 4.0f32.powf(10.0));
+    // Gamma 0 is the limit of a small gamma: below Input White the curve goes to 0.
+    let dark = run("ec.color.levelsic", &Image::filled(1, 1, [0.5, 0.5, 0.5, 1.0]), &[("rgb/rgbGamma", num(0.0))]);
+    assert!(dark.data[0][0] < 1e-6, "{:?}", dark.data[0]);
+}
+
 /// A host whose other layers and other frames are a fixed image.
 struct ImgHost(Image);
 impl crate::EffectHost for ImgHost {

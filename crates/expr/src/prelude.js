@@ -495,6 +495,8 @@ function __mod(a, d) { return ((a % d) + d) % d; }
 function __child(c, l, group, key) {
   var info = __h(__CHILD, c, l, group, key);
   if (info === null) return undefined;
+  // `thisLayer(1)` is the layer's markers, as in After Effects (see `ae_order`).
+  if (group === '' && info[0] === '@marker') return new Markers(c, l);
   return info[1] ? __mkGroup(c, l, info) : __mkProp(c, l, info[0]);
 }
 
