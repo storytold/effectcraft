@@ -158,24 +158,42 @@ fn work_area_drag_keeps_full_resolution() {
     release(&mut f.h, from);
 }
 
+/// Markers are pixels only to the expressions that read them (#1083): moving one keeps Full.
+#[test]
+fn marker_drag_keeps_full_resolution() {
+    let mut f = fixture("adaptive");
+    f.h.state_mut().session.execute("comp.addMarker", json!({"time": 2.0})).unwrap();
+    f.h.run_steps(3);
+    let from = rect(&f.h, "timeline.marker.0").center();
+    let before = f.h.state().session.active_comp().unwrap().markers[0].time;
+    hold(&mut f.h, from, from + vec2(80.0, 0.0));
+    assert_ne!(f.h.state().session.active_comp().unwrap().markers[0].time, before, "the marker moved");
+    assert!(!draft(&f.h), "a marker no expression reads changes no pixels");
+    release(&mut f.h, from);
+}
+
 #[test]
 fn timeline_click_keeps_full_resolution() {
     let mut f = fixture("adaptive");
     let point = rect(&f.h, "timeline.ruler").center();
+    let before = f.h.state().session.time();
     f.h.input_mut().events.push(Event::PointerMoved(point));
     f.h.step();
     f.h.input_mut().events.push(Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     f.h.run_steps(3);
+    assert_ne!(f.h.state().session.time(), before, "the click moved the playhead");
     assert!(!draft(&f.h));
     release(&mut f.h, point);
 }
 
+/// The drag is still noted, but Fast Previews Off never lowers the resolution.
 #[test]
 fn fast_previews_off_keeps_full_resolution() {
     let mut f = fixture("off");
     let ruler = rect(&f.h, "timeline.ruler");
     let from = pos2(ruler.min.x + 40.0, ruler.max.y - 3.0);
     hold(&mut f.h, from, from + vec2(200.0, 0.0));
+    assert!(f.h.state().ui.viewer.property_interacting);
     assert!(!draft(&f.h));
     release(&mut f.h, from);
 }
