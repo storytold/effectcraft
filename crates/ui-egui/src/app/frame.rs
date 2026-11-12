@@ -47,6 +47,10 @@ impl EffectcraftApp {
                     self.job_waiters.push((w, reply));
                     ctx.request_repaint();
                 }
+                control::Outcome::AwaitScript(host) => {
+                    self.script_waiters.push((host, reply));
+                    ctx.request_repaint();
+                }
                 control::Outcome::Screenshot { path, target } => {
                     // A covered or minimized window presents no frames (macOS skips its redraws), so
                     // a screenshot would never arrive and nothing would tick its timeout. The
@@ -70,11 +74,16 @@ impl EffectcraftApp {
         if self.job_waiters.is_empty() {
             return;
         }
-        self.session.poll_render();
-        self.session.poll_offload();
+        let script_busy = self.session.script_ui.render_host.is_some();
+        if !script_busy {
+            self.session.poll_render();
+            self.session.poll_offload();
+        }
         let waiters = std::mem::take(&mut self.job_waiters);
         for (w, reply) in waiters {
-            if w.pending(self) {
+            // Completed native snapshots are immutable, so even a later suspended script
+            // cannot delay their replies. Other completions can edit its open undo group.
+            if (script_busy && w.render.is_none()) || w.pending(self) {
                 self.job_waiters.push((w, reply));
             } else {
                 let v = w.finish(self);
@@ -84,6 +93,42 @@ impl EffectcraftApp {
         if !self.job_waiters.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// A suspended script still owns its undo groups. Only its render, inspection and Stop
+    /// run until the continuation reaches its next real script boundary; no scheduled callback
+    /// or background analysis may edit the document in the middle of the group.
+    fn tick_script_render(&mut self, ctx: &egui::Context) {
+        let Some(host) = self.session.script_ui.render_host else { return };
+        let result = match self.session.script_ui.poll_render {
+            Some(poll) => poll(&mut self.session),
+            None => {
+                self.session.script_ui.render_host = None;
+                Some(json!({"ok": false, "error": {"message": "The script render waiter is unavailable."}}))
+            }
+        };
+        if let Some(result) = result {
+            if let Some(message) = result["error"]["message"].as_str() {
+                self.ui.status = message.to_string();
+            } else if let Some(output) = result["output"].as_str().filter(|s| !s.is_empty()) {
+                self.ui.status = output.lines().last().unwrap_or(output).to_string();
+            }
+            self.script_waiters.retain(|(id, reply)| {
+                if *id == host {
+                    let _ = reply.send(json!({"ok": true, "result": result}));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        // Do not interpret a close as permission to abandon the still-running script. Once
+        // Stop finishes it, the normal unsaved-changes prompt can handle a new close request.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        self.drain_control(ctx, self.now);
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
     // ---------------------------------------------------------------- frame
@@ -134,6 +179,10 @@ impl EffectcraftApp {
             // On macOS the app quits through `-[NSApplication terminate:]` instead of closing the
             // window while AppKit's run loop is running (#341).
             craft_quit::on_close_request(ctx);
+            return;
+        }
+        if self.session.script_ui.render_host.is_some() {
+            self.tick_script_render(ctx);
             return;
         }
         // Focus comes from the fresh viewport copy; a full pass's `InputState::focused` is only a
@@ -195,8 +244,20 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.run_script_tasks(ctx);
+        if self.session.script_ui.render_host.is_some() {
+            self.tick_script_render(ctx);
+            return;
+        }
         self.run_dialog_answers();
+        if self.session.script_ui.render_host.is_some() {
+            self.tick_script_render(ctx);
+            return;
+        }
         self.handle_events(ctx);
+        if self.session.script_ui.render_host.is_some() {
+            self.tick_script_render(ctx);
+            return;
+        }
         if let Some(rx) = self.command_inbox.take() {
             while let Ok(id) = rx.try_recv() {
                 if let Err(e) = menus::invoke(self, ctx, &id, json!({})) {
@@ -204,6 +265,10 @@ impl EffectcraftApp {
                 }
             }
             self.command_inbox = Some(rx);
+        }
+        if self.session.script_ui.render_host.is_some() {
+            self.tick_script_render(ctx);
+            return;
         }
         // A close request (the window's button, Quit, `app.quit`) must be answered while hidden.
         // An answered file dialog can change the project, so the answers above run first. The host
@@ -227,6 +292,12 @@ impl EffectcraftApp {
             self.advance_playback(ctx, scale, now, active, cid);
         }
         self.drain_control(ctx, now);
+        // A clean project may have passed the close guard before a control script created
+        // unsaved edits and suspended. Cancel that same tick's close before the host handles it.
+        if self.session.script_ui.render_host.is_some() {
+            self.tick_script_render(ctx);
+            return;
+        }
         // Screenshot completion, deadlines and issuance are app-side work: the callback only
         // stores pixels and wakes this viewport.
         self.tick_screenshots(ctx);
@@ -375,6 +446,23 @@ impl EffectcraftApp {
     /// The panels, menus, dialogs and overlays of one pass.
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.session.script_ui.render_host.is_some() {
+            self.auto.begin_frame();
+            ui.vertical_centered(|ui| {
+                ui.add_space(32.0);
+                ui.heading("Rendering script");
+                ui.label("The script will continue when rendering finishes. Editing is paused to preserve its undo group.");
+                if let Some(progress) = self.session.render_progress() {
+                    ui.label(format!("{} / {} frames", progress.done, progress.total));
+                }
+                let stop = ui.button("Stop Render");
+                self.auto.add("scriptRender.stop", stop.rect, "Stop Render");
+                if stop.clicked() {
+                    self.session.stop_render();
+                }
+            });
+            return;
+        }
         // Only a viewer that draws in *this* pass records a scale: a closed viewer, the Home
         // screen or another comp must stop idle prefetch at a stale scale.
         self.last_viewer_scale = None;
@@ -566,26 +654,30 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         self.tick_footage_reload(ctx);
+        self.tick_lut_files(ctx);
     }
 
-    /// Settings ▸ Import ▸ Reload Footage Changed on Disk: a worker thread stamps the footage
-    /// files (every two seconds while the window is in front, and as soon as it comes back to
-    /// the front after saving in another app) and wakes this frame only when a stamp changed;
-    /// the changed files are reloaded here. Nothing here asks for a repaint: an idle app with
-    /// unchanged footage stays asleep.
+    /// A LUT file in use changed on disk (#3493): the frames kept were rendered with the old one.
+    /// Renders read it again by themselves; the watcher wakes the interface when no render did.
+    /// The frame keys carry the generation ([`Self::frame_series`]), so the viewers show the
+    /// frames rendered again, and a frame still rendering with the old LUT is never asked for.
+    fn tick_lut_files(&mut self, ctx: &egui::Context) {
+        if self.lut_watcher.is_none() {
+            let wake = ctx.clone();
+            self.lut_watcher = effectcraft_engine::lut_reload::Watcher::start(move || wake.request_repaint());
+        }
+        let generation = effectcraft_engine::lut_reload::generation();
+        if generation != self.lut_generation {
+            self.lut_generation = generation;
+            self.frames.clear();
+        }
+    }
+
+    /// One background worker tracks source availability and optional content reloads. It wakes
+    /// the UI only for changes; availability remains enabled when automatic reload is off.
     fn tick_footage_reload(&mut self, ctx: &egui::Context) {
         use effectcraft_engine::footage_reload;
-        if let Some(stamps) = self.footage_watcher.as_ref().and_then(footage_reload::Watcher::take)
-            && let Err(e) = footage_reload::apply_stamps(&mut self.session, stamps)
-        {
-            self.ui.status = e.to_string();
-        }
-        let off = self.session.prefs.import.auto_reload_footage == "off" || self.session.project.items.is_empty();
-        if off {
-            if let Some(w) = &mut self.footage_watcher {
-                w.set_watched(Default::default());
-            }
-            self.footage_watch_key = None;
+        if self.session.project.items.is_empty() && self.footage_watcher.is_none() {
             return;
         }
         if self.footage_watcher.is_none() {
@@ -595,10 +687,22 @@ impl EffectcraftApp {
         let Some(watcher) = &mut self.footage_watcher else { return };
         watcher.set_focused(self.focused);
         // Which files are watched follows the project and the preference, not the frame.
-        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone());
+        let key = (self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some());
         if self.footage_watch_key.as_ref() != Some(&key) {
             self.footage_watch_key = Some(key);
-            watcher.set_watched(footage_reload::watched(&self.session));
+            watcher.update(&self.session);
+        }
+        let before = self.session.revision;
+        if let Some(scan) = watcher.take() {
+            match scan.apply(&mut self.session) {
+                Ok(result) if result.get("stale").and_then(serde_json::Value::as_bool) == Some(true) => watcher.recheck(),
+                Err(e) => self.ui.status = e.to_string(),
+                _ => {}
+            }
+        }
+        if self.session.revision != before {
+            self.footage_watch_key = Some((self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some()));
+            watcher.update(&self.session);
         }
     }
 }

@@ -21,6 +21,9 @@ use serde_json::{Value as Json, json};
 
 use crate::Timebase;
 
+/// Most distinct warnings an import or export reports.
+const MAX_WARNINGS: usize = 200;
+
 /// Export state shared by the whole document.
 pub(crate) struct Ex {
     pub tb: Timebase,
@@ -31,7 +34,8 @@ pub(crate) struct Ex {
 impl Ex {
     pub fn warn(&mut self, w: impl Into<String>) {
         let w = w.into();
-        if !self.warnings.contains(&w) {
+        // Each warning is looked for among the earlier ones: past a screenful, more add nothing.
+        if self.warnings.len() < MAX_WARNINGS && !self.warnings.contains(&w) {
             self.warnings.push(w);
         }
     }
@@ -46,7 +50,8 @@ pub(crate) struct Im {
 impl Im {
     pub fn warn(&mut self, w: impl Into<String>) {
         let w = w.into();
-        if !self.warnings.contains(&w) {
+        // Each warning is looked for among the earlier ones: past a screenful, more add nothing.
+        if self.warnings.len() < MAX_WARNINGS && !self.warnings.contains(&w) {
             self.warnings.push(w);
         }
     }
@@ -150,11 +155,15 @@ fn segment_ease(keys: &[Keyframe], i: usize, spatial: bool) -> (Vec<f64>, Vec<f6
             let side = |k: &Keyframe, out: bool| {
                 let interp = if out { k.out_interp } else { k.in_interp };
                 let list = if out { &k.out_ease } else { &k.in_ease };
-                if interp == Interp::Bezier { list.first().copied().unwrap_or_default() } else { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } }
+                if interp == Interp::Bezier {
+                    list.first().copied().unwrap_or_default()
+                } else {
+                    Ease { speed: 1.0 / dur, influence: kf::LINEAR_SIDE_INFLUENCE }
+                }
             };
             (1.0, Some(side(a, true)), Some(side(b, false)))
         };
-        let lin = Ease { speed: dv / dur, influence: 1.0 / 3.0 };
+        let lin = Ease { speed: dv / dur, influence: kf::LINEAR_SIDE_INFLUENCE };
         let (eo, ei) = (eo.unwrap_or(lin), ei.unwrap_or(lin));
         // Crossing time handles must retain the independently specified influences.
         let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));

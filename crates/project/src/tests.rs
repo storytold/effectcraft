@@ -146,6 +146,18 @@ fn unique_names_and_cycles() {
     let c = p.comp(cid).unwrap();
     assert_eq!(c.unique_layer_name("Red Solid 1"), "Red Solid 2");
     assert_eq!(c.unique_layer_name("Shape Layer 1"), "Shape Layer 1");
+    // A suffix written another way (`02`) is not the number taken.
+    let mut d = c.clone();
+    for n in ["Red Solid 02", "Red Solid 3"] {
+        let mut l = d.layers[0].clone();
+        l.name = n.into();
+        d.layers.push(l);
+    }
+    assert_eq!(d.unique_layer_name("Red Solid 1"), "Red Solid 2");
+    // Digits that end a word stay in the stem.
+    let mut e = c.clone();
+    e.layers[0].name = "v-b1.mp4".into();
+    assert_eq!(e.unique_layer_name("v-b1.mp4"), "v-b1.mp4 2");
     assert!(p.comp_contains(cid, cid));
 }
 
@@ -490,4 +502,36 @@ fn plug_in_effects_read_other_frames() {
     assert!(crate::reads_other_frames("org.example.glow"));
     assert!(crate::reads_other_frames("ec.time.echo"));
     assert!(!crate::reads_other_frames("ec.blur.gaussian"));
+}
+
+/// An item whose parent is a composition (or an item that is not there) lists under no folder, and
+/// the AEP export lost it without a word (review finding): opening such a file moves it to the top
+/// level and says so; a parent that is a folder stays.
+#[test]
+fn an_item_inside_a_non_folder_moves_to_the_top_level_when_a_project_is_opened() {
+    let mut p = Project::default();
+    let folder = p.add_item("Folder", Default::default(), None, ItemKind::Folder);
+    let comp = p.add_item(
+        "Comp",
+        Default::default(),
+        None,
+        ItemKind::Comp(std::sync::Arc::new(Comp::new(64, 36, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0)))),
+    );
+    let inside_folder = p.add_item("Fine", Default::default(), Some(folder), ItemKind::Folder);
+    let inside_comp = p.add_item("Inside comp", Default::default(), None, ItemKind::Folder);
+    let orphan = p.add_item("Orphan", Default::default(), None, ItemKind::Folder);
+    if let Some(i) = p.item_mut(inside_comp) {
+        i.parent = Some(comp);
+    }
+    if let Some(i) = p.item_mut(orphan) {
+        i.parent = Some(crate::ItemId(9_999));
+    }
+    let (q, notes) = Project::from_json_repaired(&p.to_json()).expect("opens");
+    assert_eq!(q.item(inside_folder).and_then(|i| i.parent), Some(folder));
+    assert_eq!(q.item(inside_comp).and_then(|i| i.parent), None);
+    assert_eq!(q.item(orphan).and_then(|i| i.parent), None);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes.iter().all(|n| n.contains("not a folder")), "{notes:?}");
+    // Nothing to repair in a sound project.
+    assert!(Project::from_json_repaired(&q.to_json()).expect("opens").1.is_empty());
 }

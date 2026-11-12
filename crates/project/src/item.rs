@@ -8,12 +8,18 @@ use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Ti
 /// another layer of the same name. A number set off by a space is a counter and is replaced
 /// (`Red Solid 1` → `Red Solid 2`, `shot 2` → `shot 3`); digits that end a word belong to the
 /// name and stay (`v-b1.mp4` → `v-b1.mp4 2`, `clip2.mov` → `clip2.mov 2`).
-pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+/// `base` without a trailing ` N`: digits are dropped only when a space separates them from a
+/// nonempty stem, so `v-b1.mp4` and `Layer1` keep theirs.
+pub(crate) fn name_stem(base: &str) -> &str {
     let head = base.trim_end_matches(|c: char| c.is_ascii_digit());
-    let stem = match head.strip_suffix(' ') {
+    match head.strip_suffix(' ') {
         Some(stem) if head.len() < base.len() && !stem.trim_end().is_empty() => stem.trim_end(),
         _ => base.trim_end(),
-    };
+    }
+}
+
+pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let stem = name_stem(base);
     (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
 }
 
@@ -55,6 +61,13 @@ pub struct Item {
 }
 
 impl Item {
+    /// Whether an external original or proxy is known to be offline, even if the other can
+    /// still provide a preview. Generated items and embedded data have no external dependency.
+    pub fn has_missing_footage(&self) -> bool {
+        let missing = |f: &crate::Footage| f.missing && !f.path.is_empty() && f.kind != FootageKind::Data;
+        matches!(&self.kind, ItemKind::Footage(f) if missing(f)) || self.proxy.as_ref().is_some_and(|p| missing(&p.footage))
+    }
+
     pub fn type_name(&self) -> &'static str {
         match &self.kind {
             ItemKind::Folder => "Folder",
@@ -393,6 +406,17 @@ impl Project {
         for item in p.items.values_mut() {
             limits::repair_item(item, &mut notes);
         }
+        // An item inside a composition, a solid or footage (or inside an item that is not there) is
+        // in no folder: it would not be listed under any parent. It moves to the top level.
+        let folders: std::collections::BTreeSet<ItemId> = p.items.values().filter(|i| i.is_folder()).map(|i| i.id).collect();
+        for item in p.items.values_mut() {
+            if let Some(parent) = item.parent
+                && !folders.contains(&parent)
+            {
+                notes.push(format!("{}: its parent is not a folder, moved to the top level", item.name));
+                item.parent = None;
+            }
+        }
         Ok((p, notes))
     }
 }
@@ -427,5 +451,34 @@ impl Heard {
         self.audio_exprs |= o.audio_exprs;
         self.layers.extend(o.layers.iter().copied());
         self
+    }
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_status_tracks_original_and_proxy_independently() {
+        let footage = crate::Footage { path: "/original.png".into(), ..Default::default() };
+        let mut item = Item {
+            id: ItemId(1),
+            name: "Plate".into(),
+            label: Label::None,
+            comment: String::new(),
+            parent: None,
+            kind: ItemKind::Footage(footage.clone()),
+            proxy: None,
+        };
+        assert!(!item.has_missing_footage());
+        item.proxy = Some(Box::new(Proxy { footage: crate::Footage { path: "/proxy.png".into(), missing: true, ..footage.clone() }, enabled: false }));
+        assert!(item.has_missing_footage(), "unused missing proxies still need repair");
+        item.proxy.as_mut().unwrap().footage.missing = false;
+        assert!(!item.has_missing_footage());
+        if let ItemKind::Footage(f) = &mut item.kind {
+            f.missing = true;
+        }
+        item.proxy.as_mut().unwrap().enabled = true;
+        assert!(item.has_missing_footage(), "a working proxy does not make the original available");
     }
 }

@@ -167,12 +167,28 @@ function normalize(a) {
   return l === 0 ? a.map(function () { return 0; }) : div(a, l);
 }
 
+// Orientation that points the layer's z axis at `at` with its x axis kept level, in the
+// Orientation order (Rx · Ry · Rz) and wrapped to [0, 360), as After Effects returns it.
 function lookAt(from, at) {
   var d = normalize(sub(__v(at), __v(from)));
   var x = d[0], y = d[1], z = d[2] || 0;
-  var rx = -Math.asin(Math.max(-1, Math.min(1, y))) * 180 / Math.PI;
-  var ry = Math.atan2(x, z) * 180 / Math.PI;
-  return [rx, ry, 0];
+  var p = Math.asin(Math.max(-1, Math.min(1, -y)));
+  var w = Math.atan2(x, z);
+  var cw = Math.cos(w), sw = Math.sin(w), cp = Math.cos(p), sp = Math.sin(p);
+  // The rotation Ry(w) · Rx(p), written as Orientation angles.
+  var oy = Math.asin(Math.max(-1, Math.min(1, sw * cp)));
+  var ox, oz;
+  if (Math.sqrt(cw * cw + sw * sw * sp * sp) > 1e-9) {
+    ox = Math.atan2(sp, cw * cp);
+    oz = Math.atan2(-sw * sp, cw);
+  } else {
+    ox = Math.atan2(cw * sp, cp);
+    oz = 0;
+  }
+  return [ox, oy, oz].map(function (r) {
+    var a = ((r * 180 / Math.PI) % 360 + 360) % 360;
+    return a >= 360 - 1e-9 || Math.abs(a) < 1e-9 ? 0 : a;
+  });
 }
 
 function degreesToRadians(d) { return d * Math.PI / 180; }
@@ -218,7 +234,7 @@ function __cubicBezier(curve) {
     x1 = curve[0]; y1 = curve[1]; x2 = curve[2]; y2 = curve[3];
   }
   if (typeof x1 !== 'number' || typeof y1 !== 'number' || typeof x2 !== 'number' || typeof y2 !== 'number' ||
-      !isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) {
+      !Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
     return __lin;
   }
   x1 = Math.max(0, Math.min(1, x1));
@@ -402,8 +418,8 @@ function hslToRgb(c) {
 function hexToRgb(hex) {
   var s = String(hex).replace(/^#|^0x/i, '');
   if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
-  var n = parseInt(s.slice(0, 6), 16);
-  var a = s.length >= 8 ? parseInt(s.slice(6, 8), 16) / 255 : 1;
+  var n = Number.parseInt(s.slice(0, 6), 16);
+  var a = s.length >= 8 ? Number.parseInt(s.slice(6, 8), 16) / 255 : 1;
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a];
 }
 
@@ -486,7 +502,7 @@ function __child(c, l, group, key) {
 // it (default 1), the layer at the top (#1619).
 function __ancestor(c, l, path, countUp) {
   var n = countUp === undefined ? 1 : __v(countUp);
-  if (typeof n !== 'number' || !(n >= 1) || !isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
+  if (typeof n !== 'number' || !(n >= 1) || !Number.isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
   n = Math.floor(n);
   var info = __h(__ANCESTOR, c, l, path, n);
   if (info === 'layer') return __layer(c, l);

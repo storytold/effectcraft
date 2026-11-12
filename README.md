@@ -129,17 +129,13 @@ or into the Timeline, between layers and at the time you point to.
 
 308 built-in effects across its categories, each with its parameter names, order and
 defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, a full
-color-grading panel…), distort (Warp, Bulge, Turbulent Displace, CC Power Pin…), generate (Fractal Noise,
+color-grading panel…), distort (Warp, Bulge, Turbulent Displace, Perspective Pin…), generate (Fractal Noise,
 Gradient Ramp, Stroke, Write-on, Audio Spectrum…), keying, matte, noise and grain, perspective,
-**simulation** (CC Particle World, CC Rainfall, Shatter, Card Dance, Caustics, Wave World…),
-stylize (Glow, CC Glass…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
+**simulation** (Particle Emitter 3D, Rainfall, Shatter, Card Dance, Caustics, Wave World…),
+stylize (Glow, Glass Relief…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
 **audio** (Reverb, Parametric EQ, Delay, Stereo Mixer…), text, transitions, utility and expression
 controls. All nine **Layer Styles** (Drop Shadow, Inner/Outer Glow, Bevel and Emboss, Satin,
 overlays, Stroke) with Global Light. Preview plays audio in sync, with meters and waveforms.
-
-<p align="center">
-  <img src="docs/images/effectcraft-effects.png" alt="A CC Particle World burst with Glow, and the Effect Controls panel listing the particle system's parameters" width="100%">
-</p>
 
 ## 3D
 
@@ -160,7 +156,7 @@ MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, 
 rendering with 3:2 pulldown, effect/solo/guide/depth overrides, crop, region of interest and
 resize, Render Settings and Output Module templates with defaults, post-render actions, storage
 overflow and render logs. The same queue runs from the command line. Every encoder is pure
-Rust (FilmCraft's H.264, ProRes and AAC; EffectCraft's own VP9, AV1, HEVC and Opus); there is no
+Rust (craft-libs' H.264, ProRes, HEVC, VP9, AV1 and AAC; EffectCraft's own Opus); there is no
 FFmpeg inside.
 
 **Lottie** goes both ways: File ▸ Export ▸ Lottie JSON… writes a composition (precomps, shape,

@@ -172,6 +172,7 @@ fn evaluate_out(
         footage: ctx.footage,
         property_overrides: ctx.property_overrides,
         media_overrides: ctx.media_overrides,
+        reads: ctx.reads,
     };
     let comp = ctx.comp_id.0;
     let path = layer.props.path_of(prop.uid).unwrap_or_else(|| format!("@{}", prop.uid));

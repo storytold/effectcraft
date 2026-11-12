@@ -30,6 +30,8 @@ pub struct Outcome {
     /// The script is waiting in a modal ScriptUI dialog's `show()` (it goes on when the dialog
     /// closes; see [`crate::dispatch_ui`]).
     pub waiting: bool,
+    /// The native frontend owns the session while this host waits for its render worker.
+    pub render_host: Option<u32>,
 }
 
 /// An uncaught script error.
@@ -55,6 +57,9 @@ impl Outcome {
         if self.waiting {
             j["waiting"] = json!(true);
         }
+        if let Some(host) = self.render_host {
+            j["renderHost"] = json!(host);
+        }
         j
     }
 }
@@ -74,13 +79,16 @@ pub(crate) struct Active {
     /// Running on a script-host thread: modal dialogs hand the session back to the caller
     /// through this link while they wait.
     pub(crate) link: Option<crate::ui::Link>,
+    /// Captured at invocation start: the frontend resets its opt-in when the caller returns.
+    pub(crate) yield_renders: bool,
     /// The files `$.evalFile` is evaluating, outermost first.
     pub(crate) loading: Vec<std::path::PathBuf>,
 }
 
 impl Active {
     pub(crate) fn new(session: Session, name: &str, host: u32) -> Active {
-        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![] }
+        let yield_renders = session.script_ui.yield_renders;
+        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, yield_renders, loading: vec![] }
     }
 }
 
@@ -130,6 +138,13 @@ fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         return Err(throw("scripts can't run scripts"));
     }
     let keys = params.as_object_mut().and_then(|o| o.remove("__keys"));
+    let yield_render = id == "renderQueue.render"
+        && params.get("wait").and_then(J::as_bool).unwrap_or(true)
+        && with_active(|a| Ok(a.yield_renders && a.link.is_some())).unwrap_or(false);
+    if yield_render {
+        let object = params.as_object_mut().ok_or_else(|| throw("renderQueue.render needs an object of parameters"))?;
+        object.insert("wait".into(), json!(false));
+    }
     let r = with_active(|a| {
         Ok(match &keys {
             Some(k) => exec_on_keys(&mut a.session, &id, params, k),
@@ -137,7 +152,10 @@ fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         })
     });
     match r {
-        Ok(Ok(v)) => Ok(js_str(&v.to_string())),
+        Ok(Ok(v)) => {
+            let v = if yield_render { crate::ui::wait_for_render(ctx, v).map_err(throw)? } else { v };
+            Ok(js_str(&v.to_string()))
+        }
         Ok(Err(e)) | Err(e) => Err(throw(e)),
     }
 }
@@ -409,6 +427,8 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
                 let p = p.to_string_lossy();
                 Ok(json!(if op == "exists" { s.services.exists(&p) } else { s.services.is_dir(&p) }))
             }
+            // The write gate alone, with no side effect on the file (export wrappers).
+            "checkWrite" => check_access(s, &path, true).map(|_| json!(true)),
             "read" | "readBinary" => {
                 let p = check_access(s, &path, false)?;
                 let bytes = s.services.read_file(&p.to_string_lossy()).map_err(|e| format!("Unable to read {path}: {e}"))?;
@@ -512,8 +532,33 @@ fn native_eval_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     r
 }
 
+/// Host hooks: code a script compiles at run time (`eval`, `new Function`, …) passes the same
+/// nesting check as the script itself, since the parser recurses per level and a deep string
+/// built at run time would overflow the stack.
+struct Hooks;
+
+impl boa_engine::context::HostHooks for Hooks {
+    fn ensure_can_compile_strings(
+        &self,
+        _realm: boa_engine::realm::Realm,
+        parameters: &[JsString],
+        body: &JsString,
+        _direct: bool,
+        _context: &mut Context,
+    ) -> JsResult<()> {
+        let mut code: String = parameters.iter().map(|p| p.to_std_string_escaped()).collect::<Vec<_>>().join(",");
+        // With no parameters (`eval`) the body is the source as it stands, so a leading `#!` line
+        // is still its first line; with parameters it sits inside a function, where it is no comment.
+        if !parameters.is_empty() {
+            code.push('\n');
+        }
+        code.push_str(&body.to_std_string_escaped());
+        check_nesting(&code).map_err(|e| JsNativeError::syntax().with_message(e).into())
+    }
+}
+
 pub(crate) fn new_context() -> Result<Context, String> {
-    let mut ctx = Context::default();
+    let mut ctx = boa_engine::context::ContextBuilder::new().host_hooks(std::rc::Rc::new(Hooks)).build().map_err(|e| e.to_string())?;
     let limits = ctx.runtime_limits_mut();
     limits.set_loop_iteration_limit(200_000_000);
     limits.set_recursion_limit(2000);
@@ -718,6 +763,10 @@ pub fn run(session: &mut Session, req: &ScriptRequest) -> Outcome {
     };
     let Some(x) = expanded else { return run_expanded(session, req) };
     let mut out = run_expanded(session, &ScriptRequest { code: &x.code, name: req.name, console: req.console });
+    if let Some(host) = out.render_host {
+        crate::ui::keep_render_source_map(host, x);
+        return out;
+    }
     if let Some(e) = out.error.as_mut() {
         x.locate(e);
     }
@@ -747,19 +796,129 @@ fn run_expanded(session: &mut Session, req: &ScriptRequest) -> Outcome {
 /// 8 MiB thread such as the Script Console's, so deeper scripts are rejected up front.
 pub const MAX_NESTING: usize = 96;
 
-/// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, template literals
-/// and comments are skipped).
+/// Skip template-literal text from `*i` (just past a backtick or an interpolation's `}`). Returns
+/// true when it stopped past a `${` (code follows), false at the closing backtick or the end.
+fn skip_template_text(b: &[u8], i: &mut usize) -> bool {
+    while let Some(&d) = b.get(*i) {
+        match d {
+            b'\\' => *i += 2,
+            b'`' => {
+                *i += 1;
+                return false;
+            }
+            b'$' if b.get(*i + 1) == Some(&b'{') => {
+                *i += 2;
+                return true;
+            }
+            _ => *i += 1,
+        }
+    }
+    false
+}
+
+/// Whether a `/` after the last significant byte `prev` (at `at` in `b`) starts a regular
+/// expression literal rather than dividing: after an operator, an opening bracket, a separator,
+/// a keyword that takes an expression, or at the start. After a name, a number, a string or a
+/// closing bracket it divides (a regular expression after `)` is the one case this misreads).
+/// `after_dot`: the word ending at `at` follows a `.` (a property name, never a keyword); a `++`
+/// or `--` before the `/` is a postfix update, so it divides.
+fn regex_may_start(b: &[u8], prev: u8, at: usize, after_dot: bool) -> bool {
+    match prev {
+        0 => true,
+        b'+' | b'-' if at > 0 && b.get(at - 1) == Some(&prev) => false,
+        b'(' | b',' | b'=' | b':' | b'[' | b'!' | b'&' | b'|' | b'?' | b'{' | b';' | b'+' | b'-' | b'*' | b'%' | b'<' | b'>' | b'~' | b'^' => true,
+        _ if after_dot => false,
+        c if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' => {
+            let start = (0..=at).rev().find(|&k| !b.get(k).is_some_and(|d| d.is_ascii_alphanumeric() || *d == b'_' || *d == b'$')).map_or(0, |k| k + 1);
+            let word = b.get(start..=at).unwrap_or_default();
+            [&b"return"[..], b"typeof", b"instanceof", b"in", b"of", b"new", b"delete", b"void", b"throw", b"case", b"do", b"else", b"yield", b"await"]
+                .contains(&word)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the `.` at `at` is a property access: not the decimal point of a number (`1.`, `12.`)
+/// that ends there. A number written `1.5.x` has a fraction before the dot, so that dot accesses.
+fn dot_is_property(b: &[u8], at: usize) -> bool {
+    let word = |d: u8| d.is_ascii_alphanumeric() || d == b'_' || d == b'$';
+    let start = (0..at).rev().find(|&k| !b.get(k).is_some_and(|d| word(*d))).map_or(0, |k| k + 1);
+    let before = b.get(start..at).unwrap_or_default();
+    let integer = !before.is_empty() && before.iter().all(u8::is_ascii_digit);
+    // `1.5.x`: digits that follow another `.` are a fraction.
+    !(integer && !(start > 0 && b.get(start - 1) == Some(&b'.')))
+}
+
+/// Skip a regular expression literal that starts at `b[*i]` (a `/`), to its closing `/` (flags
+/// follow as ordinary letters). A `/` inside a class `[…]` or after a backslash does not end it,
+/// and neither a quote nor a backtick inside it starts a string; a line break ends it.
+fn skip_regex(b: &[u8], i: &mut usize) {
+    *i += 1;
+    let mut class = false;
+    while let Some(&d) = b.get(*i) {
+        match d {
+            b'\\' => *i += 1,
+            b'[' => class = true,
+            b']' => class = false,
+            b'/' if !class => return,
+            b'\n' => return,
+            _ => {}
+        }
+        *i += 1;
+    }
+}
+
+/// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, regular expression
+/// literals, template literal text and comments are skipped; the code inside `${…}`
+/// interpolations is checked).
 pub fn check_nesting(code: &str) -> Result<(), String> {
     let b = code.as_bytes();
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
+    // The last significant byte (not space or comment), and where it is.
+    let (mut prev, mut prev_at) = (0u8, 0usize);
+    // A `#!` line at the very start is a comment (Boa reads it so): its text is not scanned.
+    if b.starts_with(b"#!") {
+        i = b.iter().position(|d| *d == b'\n').unwrap_or(b.len());
+    }
+    // Whether the word that ends at `prev_at` came right after a `.` token (comments and
+    // whitespace between them do not matter).
+    let mut word_after_dot = false;
+    // The bracket depth of each open `${`, to tell its closing `}` from an inner one.
+    let mut interpolations: Vec<usize> = vec![];
     while let Some(&c) = b.get(i) {
         match c {
+            b'`' => {
+                i += 1;
+                if skip_template_text(b, &mut i) {
+                    depth += 1;
+                    max = max.max(depth);
+                    interpolations.push(depth);
+                    (prev, prev_at) = (b'{', i - 1);
+                } else {
+                    (prev, prev_at) = (b'`', i.saturating_sub(1));
+                }
+                continue;
+            }
+            b'}' if interpolations.last() == Some(&depth) => {
+                interpolations.pop();
+                depth -= 1;
+                i += 1;
+                if skip_template_text(b, &mut i) {
+                    depth += 1;
+                    max = max.max(depth);
+                    interpolations.push(depth);
+                    (prev, prev_at) = (b'{', i - 1);
+                } else {
+                    (prev, prev_at) = (b'`', i.saturating_sub(1));
+                }
+                continue;
+            }
             b'(' | b'[' | b'{' => {
                 depth += 1;
                 max = max.max(depth);
             }
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            b'"' | b'\'' | b'`' => {
+            b'"' | b'\'' => {
                 // Skip to the closing quote (escapes skip a byte).
                 i += 1;
                 while let Some(&d) = b.get(i) {
@@ -775,15 +934,28 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
                 while b.get(i).is_some_and(|d| *d != b'\n') {
                     i += 1;
                 }
+                continue;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 i += 2;
                 while i < b.len() && !(b.get(i) == Some(&b'*') && b.get(i + 1) == Some(&b'/')) {
                     i += 1;
                 }
-                i += 1;
+                i += 2;
+                continue;
             }
+            b'/' if regex_may_start(b, prev, prev_at, word_after_dot) => skip_regex(b, &mut i),
             _ => {}
+        }
+        if !c.is_ascii_whitespace() {
+            let word = |d: u8| d.is_ascii_alphanumeric() || d == b'_' || d == b'$';
+            // A word starts where the byte before it is not a word byte (white space and comments
+            // end a word too): it is a property name when a `.` that is not part of a number
+            // comes right before it.
+            if word(c) && (i == 0 || !b.get(i - 1).is_some_and(|d| word(*d))) {
+                word_after_dot = prev == b'.' && dot_is_property(b, prev_at);
+            }
+            (prev, prev_at) = (c, i);
         }
         i += 1;
     }
@@ -856,6 +1028,44 @@ mod nesting_tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.result, serde_json::json!(2));
         assert!(check_nesting(&("(".repeat(MAX_NESTING) + &")".repeat(MAX_NESTING))).is_ok());
+    }
+
+    #[test]
+    fn regular_expression_literals_are_skipped_not_read_as_strings_or_templates() {
+        let deep = |n: usize| format!("{}1{}", "(".repeat(n), ")".repeat(n));
+        // A backtick, a quote or a slash inside a class in a regular expression opens nothing, so
+        // the deep expression after it is still counted.
+        for re in ["/`/", "/\"/", "/'/", "/[/]/", "/\\//"] {
+            assert!(check_nesting(&format!("`x${{ {re}.test('x') ? {} : 0 }}`", deep(5000))).is_err(), "{re} in an interpolation");
+            assert!(check_nesting(&format!("x = {re}.test(y) ? {} : 0", deep(5000))).is_err(), "{re}");
+            assert!(check_nesting(&format!("x = {re}.test(y) ? {} : 0", deep(10))).is_ok(), "{re} shallow");
+        }
+        // Division is not a regular expression: what follows it is still scanned.
+        assert!(check_nesting(&format!("a = 4 / 2; b = {}", deep(5000))).is_err());
+        assert!(check_nesting(&format!("a = (4) / 2 / 3; b = {}", deep(5000))).is_err());
+        // After a keyword that takes an expression a slash starts a regular expression.
+        assert!(check_nesting(&format!("typeof /`/ ; {}", deep(5000))).is_err());
+        // A postfix update or a property named like a keyword is followed by a division, not a
+        // regular expression (the deep brackets after it must still be counted).
+        for head in ["i++ /", "i-- /", "obj.in /", "obj . in /", "obj . /* c */ in /", "obj.\n  typeof /", "a1.in /", "1.5.in /"] {
+            assert!(check_nesting(&format!("x = {head} {} / 2", deep(5000))).is_err(), "{head}");
+        }
+        // A keyword after a property name is still a keyword (`obj.in in /re/`), and the dot of a
+        // number does not make the word after it a property (`1. in /re/`): the regular expression
+        // is skipped, so the backtick inside it opens nothing and the brackets after it count.
+        for head in ["obj.in in", "1. in", "12. typeof"] {
+            assert!(check_nesting(&format!("x = {head} /`/; y = {}", deep(5000))).is_err(), "{head}");
+        }
+    }
+
+    #[test]
+    fn template_interpolations_are_checked_but_template_text_is_not() {
+        let deep = |n: usize| format!("`a${{{}1{}}}b`", "(".repeat(n), ")".repeat(n));
+        assert!(check_nesting(&deep(5000)).is_err());
+        assert!(check_nesting(&deep(10)).is_ok());
+        // Brackets in the literal text, and a nested template, are fine; depth carries across `}`.
+        assert!(check_nesting(&format!("`{} ${{ `x${{1+(2)}}y` }} {}`", "(".repeat(500), "{".repeat(500))).is_ok());
+        assert!(check_nesting(&format!("`${{1}}${{{}2{}}}`", "[".repeat(MAX_NESTING), "]".repeat(MAX_NESTING))).is_err());
     }
 
     /// A canonical drive path and a lexical one compare once the `\\?\` prefix is gone; a UNC

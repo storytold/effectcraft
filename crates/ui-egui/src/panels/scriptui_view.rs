@@ -329,13 +329,28 @@ fn image_texture(ctx: &egui::Context, img: &ImageRef, services: &dyn Services) -
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
         return cached;
     }
-    let tex = img.bytes(services).and_then(|b| image::load_from_memory(&b).ok()).map(|d| {
+    let tex = img.bytes(services).and_then(|b| decode_ui_image(&b)).map(|d| {
         let rgba = d.to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
         ctx.load_texture(format!("scriptui-image-{}", img.name), ci, egui::TextureOptions::LINEAR)
     });
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
     tex
+}
+
+/// The largest side of a ScriptUI image (icons and banners are far smaller).
+const MAX_UI_IMAGE_SIDE: u32 = 4096;
+
+/// A ScriptUI image decoded within [`MAX_UI_IMAGE_SIDE`] per side and a matching allocation
+/// limit, checked from the header before the pixels (and their RGBA copy) are allocated.
+fn decode_ui_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_alloc = Some(u64::from(MAX_UI_IMAGE_SIDE) * u64::from(MAX_UI_IMAGE_SIDE) * 16);
+    r.limits(limits);
+    r.decode().ok()
 }
 
 /// An image control's or icon button's image, fitted (aspect kept) and centred in `r`.
@@ -593,15 +608,44 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         ui.data_mut(|d| d.insert_temp(told, dock));
         acts.push(Act::Resize(id, dock));
     }
-    let content = rect;
-    egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
+    let window = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
+    panel_scroll(ui, ("scriptui-panel", id), rect.size(), window, |ui, r| {
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();
     perform(app, &ctx, acts);
+}
+
+/// The scroll area a docked ScriptUI panel shows its `window`-sized window in, at most `dock`
+/// big, with the app's scroll style (solid bars, #269). `body` draws the window in the rect it is
+/// given.
+fn panel_scroll<R>(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    dock: egui::Vec2,
+    window: egui::Vec2,
+    body: impl FnOnce(&mut egui::Ui, Rect) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    egui::ScrollArea::both().id_salt(salt).max_width(dock.x).max_height(dock.y).scroll_bar_visibility(panel_bars(dock, window)).show(ui, |ui| {
+        let (r, _) = ui.allocate_exact_size(window, Sense::hover());
+        body(ui, r)
+    })
+}
+
+/// Whether a docked panel's scroll bars may show: never while its window fits the dock.
+///
+/// The fit is decided from the window and the dock, not from what the scroll area has left. A
+/// solid bar, once shown, takes its width from the viewport, so a window that exactly fills its
+/// dock was "too large" for the narrower viewport and its bars never went away (#2796). The fit
+/// rounds the dock up to the whole point, as egui's scroll area does, because the script is told
+/// its dock's size rounded (#2585) and its window can be a fraction of a point bigger. A window
+/// that overflows only one way still gets both bars: the first one's width hides the edge of a
+/// window laid out at the dock's full size, and the second one scrolls to it.
+fn panel_bars(dock: egui::Vec2, window: egui::Vec2) -> egui::scroll_area::ScrollBarVisibility {
+    use egui::scroll_area::ScrollBarVisibility;
+    if window.x <= dock.x.ceil() && window.y <= dock.y.ceil() { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::VisibleWhenNeeded }
 }
 
 /// Tab title of a script panel.
@@ -624,6 +668,70 @@ pub fn sync_panels(app: &mut EffectcraftApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DOCK: egui::Vec2 = egui::vec2(300.0, 200.0);
+
+    /// Twelve frames of a ScriptUI panel docked in `dock`, with the app's solid scroll bars
+    /// (#269): its window is `first` big on the first frame and `then` big after that. The last
+    /// frame's scroll output (viewport and content size).
+    fn panel_frames(dock: egui::Vec2, first: egui::Vec2, then: egui::Vec2) -> (Rect, egui::Vec2) {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
+        let mut last = (Rect::NOTHING, egui::Vec2::ZERO);
+        for frame in 0..12 {
+            let window = if frame == 0 { first } else { then };
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(f64::from(frame) * 0.1), predicted_dt: 0.1, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut panel = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(egui::Pos2::ZERO, dock)));
+                let o = panel_scroll(&mut panel, "panel-test", dock, window, |_, _| ());
+                last = (o.inner_rect, o.content_size);
+            });
+            // Nothing paints these frames, and egui expects their texture uploads to be consumed.
+            out.textures_delta.clear();
+        }
+        last
+    }
+
+    /// #2796: a solid bar, once shown, took its width from the viewport, so a window that exactly
+    /// fills its dock stayed "too large" for what was left and kept its bars for good. A window
+    /// that overflowed for one frame (a dock dragged smaller before the script learns its size)
+    /// and then fits gets the whole dock back.
+    #[test]
+    fn a_panel_whose_window_fits_hides_its_bars() {
+        let (viewport, _) = panel_frames(DOCK, DOCK + vec2(40.0, 40.0), DOCK);
+        assert_eq!(viewport.size(), DOCK, "the bars go away once the window fits");
+    }
+
+    /// The script is told its dock's size rounded (#2585), so in a dock a fraction of a pixel
+    /// smaller its window is that fraction bigger. That still fits.
+    #[test]
+    fn a_panel_in_a_fractional_dock_hides_its_bars() {
+        let dock = vec2(299.6, 199.6);
+        let (viewport, _) = panel_frames(dock, dock + vec2(40.0, 40.0), DOCK);
+        // egui snaps rects to 1/32 of a point; a bar would take 10 points.
+        assert!((viewport.size() - dock).length() < 0.05, "a window within the whole pixel fits ({viewport:?})");
+    }
+
+    /// #269 holds: a window bigger than its dock keeps solid bars that take their room from the
+    /// panel, and scrolls.
+    #[test]
+    fn a_panel_whose_window_is_too_big_keeps_its_solid_bars() {
+        let big = DOCK + vec2(120.0, 80.0);
+        let (viewport, content) = panel_frames(DOCK, big, big);
+        let bar = egui::style::ScrollStyle::solid().allocated_width();
+        assert_eq!(viewport.size(), DOCK - vec2(bar, bar), "solid bars on both axes");
+        assert_eq!(content, big, "the whole window is scrollable");
+    }
+
+    #[test]
+    fn panel_bars_only_show_for_a_window_bigger_than_its_dock() {
+        use egui::scroll_area::ScrollBarVisibility::{AlwaysHidden, VisibleWhenNeeded};
+        assert_eq!(panel_bars(DOCK, DOCK), AlwaysHidden);
+        assert_eq!(panel_bars(vec2(299.4, 199.4), DOCK), AlwaysHidden);
+        assert_eq!(panel_bars(DOCK, DOCK + vec2(1.0, 0.0)), VisibleWhenNeeded);
+        assert_eq!(panel_bars(DOCK, DOCK + vec2(0.0, 1.0)), VisibleWhenNeeded);
+    }
 
     /// Script colours are sRGB, not linear: `#2B2B2B` drew as RGB 114 when read as linear light.
     #[test]

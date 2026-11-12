@@ -5,7 +5,7 @@
 use effectcraft_color::Label;
 use effectcraft_keyframe::Value as KV;
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{ItemKind, LayerSource, Solid};
+use effectcraft_project::{ItemKind, LayerSource, MatteKind, Solid, TrackMatte};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, bad, has_layers, layers_p, str_p};
@@ -13,6 +13,8 @@ use crate::{EngineError, Result, Session, cmd};
 
 const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|instance3d";
 
+/// Layer ▸ Create (`layer.create`): the `op` ([`OPS`]) on the given or selected layers; returns
+/// the created layer ids and what was skipped.
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let op = str_p(p, "op").ok_or_else(|| bad("layer.create", format!("missing `op` ({OPS})")))?;
     let (cid, lids) = layers_p(s, p)?;
@@ -99,8 +101,11 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
                     continue;
                 };
                 let bytes = s.services.read_file(&f.path).map_err(|e| EngineError::Other(format!("cannot read {}: {e}", f.path)))?;
-                let doc = crate::vector::vector_doc(&f.path, &bytes, f.layer.as_ref(), f.page)
+                // In the source layer's pixels, as the footage is drawn (a placed page of an After
+                // Effects project fills the stored size, #3099).
+                let doc = crate::vector::footage_doc(&f, &bytes)
                     .unwrap_or_else(|| Err(format!("{}: not a vector file", f.path)))
+                    .map(|d| crate::vector::fitted_to_footage(d, &f))
                     .map_err(EngineError::Other)?;
                 // Images become footage layers (PNG files written next to the source and
                 // imported), parented to the shape layer below it.
@@ -123,7 +128,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
                     // Without images: one shape layer. With images: the shapes between them
                     // in layers of their own, so the stack keeps the document's paint order.
                     let segments = if image_items.is_empty() { vec![doc.clone()] } else { crate::vector::split_at_images(&doc) };
-                    let top = crate::vector::shapes_from_vector(proj, &comp, &src, segments.last().unwrap_or(&doc));
+                    let mut top = crate::vector::shapes_from_vector(proj, &comp, &src, segments.last().unwrap_or(&doc));
                     // Top to bottom: the last segment, image n, segment n − 1, … image 1, segment 0.
                     let mut stack = vec![];
                     for k in (0..segments.len().saturating_sub(1)).rev() {
@@ -140,9 +145,25 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
                         sl.name = format!("{} {}", top.name, k + 1);
                         stack.push(sl);
                     }
+                    // A placed page shows only its frame (the footage's raster ends there): every
+                    // layer made from it takes a hidden frame layer as its track matte (#3099).
+                    let matte = crate::vector::frame_matte(proj, &comp, &src, &f);
+                    if let Some(m) = &matte {
+                        let tm = Some(TrackMatte { layer: m.id, kind: MatteKind::Alpha });
+                        top.track_matte = tm;
+                        for l in &mut stack {
+                            l.track_matte = tm;
+                        }
+                    }
                     let mut ids = vec![top.id];
                     ids.extend(stack.iter().filter(|l| matches!(l.source, LayerSource::Shape)).map(|l| l.id));
-                    // Each directly above the source: the top layer first.
+                    // The frame matte is made too (last: the selection stays on the top layer).
+                    ids.extend(matte.as_ref().map(|m| m.id));
+                    // Each directly above the source: the frame matte (when there is one) above
+                    // all, then the top layer first.
+                    if let Some(m) = matte {
+                        insert_above(proj, cid, lid, m, true)?;
+                    }
                     insert_above(proj, cid, lid, top, true)?;
                     for l in stack {
                         insert_above(proj, cid, lid, l, true)?;

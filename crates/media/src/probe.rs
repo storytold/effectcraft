@@ -134,12 +134,12 @@ fn trim_to_edits(f: &mut Footage, shown: Option<Tick>) {
 /// How long the video track's edit list shows its media (`elst` segments, movie timescale):
 /// `None` without edits, or with an empty edit (a delayed start keeps the reader's duration).
 fn video_shown(bytes: &[u8]) -> Option<Tick> {
-    let file = filmcraft_isobmff::open(bytes).ok()?;
-    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    let file = craft_media::isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty())?;
     edits_shown(&t.edits, file.timescale)
 }
 
-fn edits_shown(edits: &[filmcraft_isobmff::Edit], timescale: u32) -> Option<Tick> {
+fn edits_shown(edits: &[craft_media::isobmff::Edit], timescale: u32) -> Option<Tick> {
     if edits.is_empty() || timescale == 0 || edits.iter().any(|e| e.media_time < 0) {
         return None;
     }
@@ -303,8 +303,8 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
 /// containers have none. FilmCraft turns the frames of a pure 0/90/180/270° header itself, so this
 /// is only the quarter turn nearest to a header it does not turn.
 pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
-    let Ok(file) = filmcraft_isobmff::open(bytes) else { return Orientation::NoTransforms };
-    let Some(track) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video) else {
+    let Ok(file) = craft_media::isobmff::open(bytes) else { return Orientation::NoTransforms };
+    let Some(track) = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video) else {
         return Orientation::NoTransforms;
     };
     // A pure rotation is already applied by FilmCraft's decoder (frames and size come out
@@ -329,8 +329,8 @@ pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
 /// median reads as 30.303 or 58.824 fps. `None` for other containers and for movies the median
 /// reads right.
 fn video_rate(bytes: &[u8]) -> Option<FrameRate> {
-    let file = filmcraft_isobmff::open(bytes).ok()?;
-    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    let file = craft_media::isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty())?;
     averaged_rate(t.timescale, t.samples.iter().take(240).map(|s| s.duration))
 }
 
@@ -368,7 +368,7 @@ mod tests {
     /// 1000 timescale), though its media runs a frame longer; empty edits and no edits leave it.
     #[test]
     fn the_edit_list_trims_a_movie_to_the_frames_it_shows() {
-        let edit = |segment_duration, media_time| filmcraft_isobmff::Edit { segment_duration, media_time, media_rate: 0x0001_0000 };
+        let edit = |segment_duration, media_time| craft_media::isobmff::Edit { segment_duration, media_time, media_rate: 0x0001_0000 };
         let shown = edits_shown(&[edit(3000, 1024)], 1000);
         assert_eq!(shown, Some(Tick::from_units(3, 1)));
         let mut f = Footage { kind: FootageKind::Video, duration: Tick::from_units(76, 25), ..Footage::default() };
