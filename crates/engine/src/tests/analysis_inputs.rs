@@ -145,9 +145,16 @@ fn precomp_contents(saved: Saved) {
     check(&mut s, "prop.set", json!({"comp": inner.0, "layer": clip, "path": "transform/opacity", "value": 50}), [false, false]);
     check(&mut s, "effect.apply", json!({"comp": inner.0, "layers": [clip], "effect": "ec.blur.gaussian"}), [false, false]);
     check(&mut s, "layer.timing", json!({"comp": inner.0, "layers": [clip], "out": 0.25}), [false, false]);
-    // A name, label or comment inside it doesn't.
-    run(&mut s, "layer.rename", json!({"comp": inner.0, "layer": clip, "name": "Inner"}));
+    // A label or comment inside it doesn't. A name does: expressions find layers by name.
+    s.edit("label", None, |p, _| {
+        let l = p.comp_mut(inner).unwrap().layer_mut(LayerId(clip)).unwrap();
+        l.label = effectcraft_color::Label::Pink;
+        l.comment = "a note".into();
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(analysed(&s), [true, true]);
+    check(&mut s, "layer.rename", json!({"comp": inner.0, "layer": clip, "name": "Inner"}), [false, false]);
 
     // A precomp inside the precomp: its contents too.
     let r = run(&mut s, "layer.precompose", json!({"comp": inner.0, "layers": [clip], "mode": "leave"}));

@@ -9,7 +9,7 @@
 //! the layer's frames, left out (with a reason) if it doesn't. Renaming a field or variant doesn't
 //! change keys. Of the analysed layer itself, only the fields named in `layer_frames` and
 //! [`analysis_key`] are read. The text leaves out observations (whether footage is available) and
-//! data that never changes pixels (names, labels, UI hints, markers), so they never drop saved
+//! data that never changes pixels (colour labels, UI hints, markers), so they never drop saved
 //! analyses (#3534, #3536).
 //!
 //! Keys saved by 0.22–0.24 hashed derived `Debug` text instead. [`legacy`] still recognises
@@ -494,11 +494,11 @@ impl Text {
     fn nested_layer(&mut self, p: &Project, l: &Layer, depth: usize, seen: &mut HashSet<ItemId>) {
         let Layer {
             id,
-            // Names, labels and comments only show the layer. (An expression can find a layer
-            // by its name, as it can an effect, which the key leaves out too.)
-            name: _,
+            name,
+            // Whether the name follows the Source Text changes nothing until the name changes.
             name_follows_text: _,
             source,
+            // Labels and comments only show the layer.
             label: _,
             comment: _,
             start_time,
@@ -519,6 +519,8 @@ impl Text {
             props,
         } = l;
         self.field("layer", id.0);
+        // Expressions find layers by name (`thisComp.layer("Clip")`), as they find effects.
+        self.str("name", name);
         self.layer_source(source);
         if let Some(item) = source.item() {
             match p.item(item).map(|i| &i.kind) {
@@ -571,13 +573,15 @@ impl Text {
     }
 
     fn group(&mut self, g: &PropGroup, depth: usize) {
-        // The uid, name and colour label identify and label the group; they never change pixels.
-        let PropGroup { uid: _, match_id, name: _, kind, enabled, label: _, children } = g;
+        // Expressions find effects and groups by name (`effect("Blur")`, `propertyGroup(1).name`).
+        // The uid and colour label never change pixels.
+        let PropGroup { uid: _, match_id, name, kind, enabled, label: _, children } = g;
         if depth >= MAX_DEPTH {
             self.word("tooDeep");
             return;
         }
         self.str("group", match_id);
+        self.str("name", name);
         self.group_kind(kind);
         self.field("enabled", enabled);
         for c in children {
@@ -638,24 +642,16 @@ impl Text {
     }
 
     fn property(&mut self, pr: &Property) {
-        // The uid, name and UI hints identify and show the property; the 2D/3D-only and
-        // hold-only flags say where and how it can be edited, not what it evaluates to.
-        let Property {
-            uid: _,
-            match_id,
-            name: _,
-            value,
-            keys,
-            expr,
-            ui: _,
-            spatial,
-            hold_only: _,
-            three_d_only: _,
-            two_d_only: _,
-            shown_dims: _,
-            static_only: _,
-        } = pr;
+        // Expressions read the name (`thisProperty.name`) and seed `random`/`wiggle` with the
+        // uid: the uid is written for a property with an expression. UI hints and the 2D/3D-only
+        // and hold-only flags say where and how it can be edited, not what it evaluates to.
+        let Property { uid, match_id, name, value, keys, expr, ui: _, spatial, hold_only: _, three_d_only: _, two_d_only: _, shown_dims: _, static_only: _ } =
+            pr;
         self.str("prop", match_id);
+        self.str("name", name);
+        if expr.is_some() {
+            self.field("uid", uid);
+        }
         self.value(value);
         self.field("spatial", spatial);
         for k in keys {
