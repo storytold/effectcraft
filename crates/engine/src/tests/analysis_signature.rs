@@ -198,3 +198,39 @@ fn offline_footage_keeps_analyses() {
     s.execute_checked("file.interpretFootage", json!({"items": [1], "invertAlpha": true})).unwrap();
     assert!(saved(&s).iter().all(|(data, _)| data.is_empty()));
 }
+
+/// A key 0.24.1 saved while the footage was offline (it hashed the availability) matches too,
+/// online or offline. 0.24.1 gave the Roto Brush this Input Key when the fixture's footage went
+/// offline and an edit cleared the other two analyses.
+#[test]
+fn keys_saved_by_0_24_while_offline_still_match() {
+    const ROTO_INPUT_0_24_OFFLINE: &str = "6183fdd46b514259";
+    let mut s = open(ANALYSED_0_24);
+    s.edit("offline", None, |p, _| {
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = p.item_mut(ItemId(1)).map(|i| &mut i.kind) {
+            f.missing = true;
+        }
+        let l = p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap();
+        // What 0.24.1's edit cleared then.
+        use effectcraft_effects::camera_tracker::{AVERAGE_ERROR, METHOD_USED, SOLVE, SOLVE_KEY};
+        for (uid, id) in
+            [(WARP, ANALYSIS), (WARP, ANALYSIS_KEY), (TRACKER, SOLVE), (TRACKER, SOLVE_KEY), (TRACKER, METHOD_USED), (TRACKER, TRACKS), (TRACKER, TRACKS_KEY)]
+        {
+            l.props.find_group_mut(uid).unwrap().prop_mut(id).unwrap().value = Value::Str(String::new());
+        }
+        l.props.find_group_mut(TRACKER).unwrap().prop_mut(AVERAGE_ERROR).unwrap().value = Value::Scalar(0.0);
+        let g = l.props.find_group_mut(ROTO).unwrap();
+        g.get_mut(INPUT_KEY).unwrap().value = Value::Str(ROTO_INPUT_0_24_OFFLINE.into());
+        Ok(())
+    })
+    .unwrap();
+    let roto = |s: &Session| saved(s)[2].clone();
+    assert_eq!(roto(&s), ("saved frozen".into(), ROTO_INPUT_0_24_OFFLINE.into()));
+    for missing in [true, false] {
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = std::sync::Arc::make_mut(&mut s.project).item_mut(ItemId(1)).map(|i| &mut i.kind) {
+            f.missing = missing;
+        }
+        add_to_render_queue(&mut s);
+        assert_eq!(roto(&s), ("saved frozen".into(), ROTO_INPUT_0_24_OFFLINE.into()));
+    }
+}

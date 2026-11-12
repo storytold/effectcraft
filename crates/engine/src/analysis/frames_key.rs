@@ -1,10 +1,13 @@
 //! What an analysis of a layer is made from, as one key shared by the Warp Stabilizer, the 3D
 //! Camera Tracker and Roto Brush / Object Matte.
 //!
-//! The key hashes a text this module writes field by field. Every struct and enum it writes is
-//! destructured or matched in full, and each variant is written as a fixed word. A new field or
-//! variant doesn't compile until it is decided here: written if it changes the layer's frames,
-//! left out (with a reason) if it doesn't. Renaming a field or variant doesn't change keys. The
+//! The key hashes a text this module writes field by field. The source item (footage and its
+//! settings, solid), the Time Remap property and the masks and effect groups (their properties,
+//! keyframes and values) are destructured or matched in full, and each variant is written as a
+//! fixed word: a new field or variant doesn't compile until it is decided here, written if it
+//! changes the layer's frames, left out (with a reason) if it doesn't. Renaming a field or variant
+//! doesn't change keys. Of the layer and of a precomp, only the fields named in `layer_frames` are
+//! read (a precomp's contents are #3535). The
 //! text leaves out observations (whether footage is available) and data that never changes pixels
 //! (names, labels, UI hints, markers), so they never drop saved analyses (#3534, #3536).
 //!
