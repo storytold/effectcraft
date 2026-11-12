@@ -67,10 +67,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = pollster::block_on(
-        instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }),
-    )?;
+    // wgpu's environment variables apply (`WGPU_BACKEND`, `WGPU_POWER_PREF`, ...), as for SAM 2's own instance
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+    let power_preference = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance);
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference, ..Default::default() }))?;
     println!("adapter: {:?}", adapter.get_info().name);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() }))?;
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(SHADER.into()) });

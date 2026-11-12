@@ -36,6 +36,12 @@ const MAX_ARRAY_BYTES: usize = 1 << 30;
 /// wire type) plus the meshes built from them (#1234).
 const MAX_IMPORT_BYTES: usize = 1 << 31;
 
+/// Most pixels one texture may hold (8192 × 8192) and all the textures of one import together
+/// (2^29: 8 GiB as float RGBA, thirty-two 4K maps). A texture past a limit is left out and the
+/// import says so.
+const MAX_TEXTURE_PIXELS: u64 = 1 << 26;
+const MAX_TEXTURE_IMPORT_PIXELS: u64 = 1 << 29;
+
 /// What is left of an import's memory budget.
 struct Budget(std::cell::Cell<usize>);
 
@@ -230,7 +236,7 @@ impl Bin<'_> {
         }
         let mut out = vec![];
         while *pos < end {
-            match self.record(pos, depth)? {
+            match self.record(pos, end, depth)? {
                 Some(n) => out.push(n),
                 None => break,
             }
@@ -238,8 +244,9 @@ impl Bin<'_> {
         Ok(out)
     }
 
-    /// One node record; `None` for the null record that closes a list.
-    fn record(&self, pos: &mut usize, depth: usize) -> Result<Option<FbxNode>> {
+    /// One node record ending within `limit` (the enclosing record's end); `None` for the null
+    /// record that closes a list.
+    fn record(&self, pos: &mut usize, limit: usize, depth: usize) -> Result<Option<FbxNode>> {
         let start = *pos;
         let end = Self::to_usize(self.offset(pos)?)?;
         let nprops = self.offset(pos)?;
@@ -248,7 +255,9 @@ impl Bin<'_> {
         if end == 0 && nprops == 0 && plen == 0 && nlen == 0 {
             return Ok(None);
         }
-        if end <= start || end > self.d.len() {
+        // A child reaching past its parent would be parsed again once the parent's end is
+        // restored.
+        if end <= start || end > limit.min(self.d.len()) {
             return Err(perr(format!("FBX: bad record end {end} at byte {start}")));
         }
         let name = String::from_utf8_lossy(self.take(pos, nlen)?).into_owned();
@@ -302,7 +311,8 @@ impl Bin<'_> {
                 let data = sub.take(pos, clen)?;
                 let raw = match enc {
                     0 => data.to_vec(),
-                    1 => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, want).map_err(|e| perr(format!("FBX: array zlib: {e:?}")))?,
+                    // The status only: the error's Debug form prints what was decompressed.
+                    1 => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, want).map_err(|e| perr(format!("FBX: array zlib: {:?}", e.status)))?,
                     e => return Err(perr(format!("FBX: unknown array encoding {e}"))),
                 };
                 let raw = raw.get(..want).ok_or_else(|| perr("FBX: array shorter than its length"))?;
@@ -334,7 +344,7 @@ fn read_binary(bytes: &[u8], budget: &Budget) -> Result<(u32, Vec<FbxNode>)> {
     let bin = Bin { d: bytes, wide: version >= 7500, budget };
     let mut nodes = vec![];
     while pos < bytes.len() {
-        match bin.record(&mut pos, 0) {
+        match bin.record(&mut pos, bytes.len(), 0) {
             Ok(Some(n)) => nodes.push(n),
             Ok(None) => break,
             // A damaged tail (footer, padding) after complete sections is ignored.
@@ -651,6 +661,7 @@ fn build_mesh(name: &str, geom: &FbxNode, materials: &[usize], with_normal_maps:
 
     type Key = (u32, [u32; 3], [u32; 2]);
     let mut prims: Vec<(Option<usize>, Primitive, HashMap<Key, u32>, Vec<bool>)> = vec![];
+    let mut prim_of: HashMap<Option<usize>, usize> = HashMap::new();
     let mut corners: Vec<(usize, usize)> = vec![];
     let mut poly = 0usize;
     for (pv, &raw) in pvi.iter().enumerate() {
@@ -671,13 +682,10 @@ fn build_mesh(name: &str, geom: &FbxNode, materials: &[usize], with_normal_maps:
             materials.get(usize::try_from(k).ok()?).copied()
         });
         let slot = slot.or_else(|| materials.first().copied());
-        let at = match prims.iter().position(|p| p.0 == slot) {
-            Some(i) => i,
-            None => {
-                prims.push((slot, Primitive { material: slot, ..Default::default() }, HashMap::new(), vec![]));
-                prims.len() - 1
-            }
-        };
+        let at = *prim_of.entry(slot).or_insert_with(|| {
+            prims.push((slot, Primitive { material: slot, ..Default::default() }, HashMap::new(), vec![]));
+            prims.len() - 1
+        });
         let Some((_, prim, map, need)) = prims.get_mut(at) else { continue };
         let mut ids = Vec::with_capacity(poly_corners.len());
         for &(pv, v) in &poly_corners {
@@ -816,6 +824,12 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
             links.push((a, b, e.str_at(3)));
         }
     }
+    // The same links by parent, so each object finds its children without scanning them all.
+    let mut children_of: HashMap<i64, Vec<(i64, Option<&str>)>> = HashMap::new();
+    for &(a, b, prop) in &links {
+        children_of.entry(b).or_default().push((a, prop));
+    }
+    let children_of = |id: i64| children_of.get(&id).map(Vec::as_slice).unwrap_or_default().iter().copied();
 
     let model_ids: Vec<i64> = objects.children.iter().filter(|o| o.name == "Model").filter_map(|o| o.prop(0)?.as_i64()).collect();
     let mut node_of: HashMap<i64, usize> = HashMap::new();
@@ -851,43 +865,91 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     let mut textures: Vec<Arc<Texture>> = vec![];
     let mut material_of: HashMap<i64, usize> = HashMap::new();
     let mut texture_of: HashMap<i64, Option<usize>> = HashMap::new();
-    let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Option<usize> {
+    // Decoded images by the source actually used (embedded Video id, else the resolved file
+    // name): Texture objects aliasing one image share its pixels instead of each keeping a copy.
+    let mut image_of: HashMap<(Option<i64>, String), Option<usize>> = HashMap::new();
+    // Textures have their own allowance (pixels, as `Texture::decode_within` counts them); the
+    // memory budget is for the file's own records.
+    let mut texture_pixels_left = MAX_TEXTURE_IMPORT_PIXELS;
+    let mut warnings: Vec<String> = vec![];
+    // Ok(None): no usable image (the material goes untextured). Err: the memory budget ran out.
+    let mut load_texture = |tid: i64, textures: &mut Vec<Arc<Texture>>| -> Result<Option<usize>> {
         if let Some(t) = texture_of.get(&tid) {
-            return *t;
+            return Ok(*t);
         }
-        let t = (|| {
-            let tex = by_id.get(&tid)?;
-            let embedded = links.iter().filter(|l| l.1 == tid && kind(l.0) == Some("Video")).find_map(|l| {
-                let content = by_id.get(&l.0)?.child("Content")?;
-                match content.props.first()? {
-                    Prop::Bytes(b) if !b.is_empty() => Some(b.clone()),
-                    Prop::Str(_) => {
-                        let s: String = content.props.iter().filter_map(Prop::as_str).collect();
-                        base64(&s).filter(|b| !b.is_empty())
-                    }
-                    _ => None,
+        let Some(tex) = by_id.get(&tid) else {
+            texture_of.insert(tid, None);
+            return Ok(None);
+        };
+        let videos: Vec<i64> = children_of(tid).filter(|l| kind(l.0) == Some("Video")).map(|l| l.0).collect();
+        let files: Vec<String> = ["RelativeFilename", "FileName"].iter().filter_map(|k| Some(tex.child(k)?.str_at(0)?.replace('\\', "/"))).collect();
+        let embedded = videos.iter().find_map(|&v| {
+            let content = by_id.get(&v)?.child("Content")?;
+            let bytes = match content.props.first()? {
+                Prop::Bytes(b) if !b.is_empty() => Some(b.clone()),
+                Prop::Str(_) => {
+                    let s: String = content.props.iter().filter_map(Prop::as_str).collect();
+                    base64(&s).filter(|b| !b.is_empty())
                 }
-            });
-            let bytes = embedded.or_else(|| {
-                ["RelativeFilename", "FileName"].iter().find_map(|k| {
-                    let f = tex.child(k)?.str_at(0)?.replace('\\', "/");
-                    resolve(&f).or_else(|| resolve(f.rsplit('/').next()?))
-                })
-            })?;
-            let t = Texture::decode(&bytes).ok()?;
-            textures.push(Arc::new(t));
-            Some(textures.len() - 1)
-        })();
+                _ => None,
+            }?;
+            Some(((Some(v), String::new()), bytes))
+        });
+        let source = embedded.or_else(|| {
+            files.iter().find_map(|f| {
+                let g = resolve(f).map(|b| (f.clone(), b)).or_else(|| {
+                    let base = f.rsplit('/').next()?;
+                    Some((base.to_string(), resolve(base)?))
+                })?;
+                Some(((None, g.0), g.1))
+            })
+        });
+        let t = match source {
+            None => None,
+            Some((key, bytes)) => match image_of.get(&key) {
+                Some(i) => *i,
+                None => {
+                    // Charge the decoded size before decoding, so a small file claiming huge
+                    // dimensions is refused before its pixels are allocated. A texture past the
+                    // limits is left out (the material goes untextured) and the import says so.
+                    let loaded = Texture::dimensions(&bytes).and_then(|(w, h)| {
+                        let pixels = u64::from(w) * u64::from(h);
+                        if pixels > MAX_TEXTURE_PIXELS {
+                            return Err(perr(format!("a {w}×{h} texture (at most {MAX_TEXTURE_PIXELS} pixels)")));
+                        }
+                        if pixels > texture_pixels_left {
+                            return Err(perr(format!("a {w}×{h} texture: the model's textures would hold more than {MAX_TEXTURE_IMPORT_PIXELS} pixels")));
+                        }
+                        let t = Texture::decode(&bytes)?;
+                        texture_pixels_left -= pixels;
+                        Ok(t)
+                    });
+                    let i = match loaded {
+                        Ok(t) => {
+                            textures.push(Arc::new(t));
+                            Some(textures.len() - 1)
+                        }
+                        Err(e) => {
+                            log::warn!("model: FBX texture left out: {e}");
+                            warnings.push(format!("texture left out: {e}"));
+                            None
+                        }
+                    };
+                    image_of.insert(key, i);
+                    i
+                }
+            },
+        };
         texture_of.insert(tid, t);
-        t
+        Ok(t)
     };
-    let mut material_index = |mid: i64, materials: &mut Vec<Material>, textures: &mut Vec<Arc<Texture>>| -> Option<usize> {
+    let mut material_index = |mid: i64, materials: &mut Vec<Material>, textures: &mut Vec<Arc<Texture>>| -> Result<Option<usize>> {
         if let Some(&m) = material_of.get(&mid) {
-            return Some(m);
+            return Ok(Some(m));
         }
-        let node = by_id.get(&mid)?;
+        let Some(node) = by_id.get(&mid) else { return Ok(None) };
         let mut m = material(short_name(node.str_at(1).unwrap_or("")), node);
-        for &(tid, _, prop) in links.iter().filter(|l| l.1 == mid && kind(l.0) == Some("Texture")) {
+        for (tid, prop) in children_of(mid).filter(|l| kind(l.0) == Some("Texture")) {
             let slot = match prop {
                 Some("DiffuseColor") => &mut m.base_color_tex,
                 Some("NormalMap") => &mut m.normal_tex,
@@ -895,7 +957,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
                 _ => continue,
             };
             if slot.is_none() {
-                *slot = load_texture(tid, textures).map(|texture| TexRef { texture, uv_set: 0 });
+                *slot = load_texture(tid, textures)?.map(|texture| TexRef { texture, uv_set: 0 });
             }
         }
         if m.emissive_tex.is_some() && m.emissive == [0.0; 3] {
@@ -903,7 +965,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
         }
         materials.push(m);
         material_of.insert(mid, materials.len() - 1);
-        Some(materials.len() - 1)
+        Ok(Some(materials.len() - 1))
     };
 
     // One mesh per Model with Mesh geometry (material slots are per Model). Models instancing the
@@ -912,10 +974,12 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     let mut mesh_of: HashMap<(i64, Vec<usize>), usize> = HashMap::new();
     for &id in &model_ids {
         let Some(&ni) = node_of.get(&id) else { continue };
-        let Some(gid) = links.iter().find(|l| l.1 == id && kind(l.0) == Some("Geometry")).map(|l| l.0) else { continue };
+        let Some(gid) = children_of(id).find(|l| kind(l.0) == Some("Geometry")).map(|l| l.0) else { continue };
         let Some(geom) = by_id.get(&gid) else { continue };
-        let mats: Vec<usize> =
-            links.iter().filter(|l| l.1 == id && kind(l.0) == Some("Material")).filter_map(|l| material_index(l.0, &mut materials, &mut textures)).collect();
+        let mut mats: Vec<usize> = vec![];
+        for (mid, _) in children_of(id).filter(|l| kind(l.0) == Some("Material")) {
+            mats.extend(material_index(mid, &mut materials, &mut textures)?);
+        }
         let name = nodes.get(ni).map(|n| n.name.clone()).unwrap_or_default();
         let mesh_index = match mesh_of.get(&(gid, mats.clone())) {
             Some(&i) => i,
@@ -947,7 +1011,7 @@ fn parse_within(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>, limit: 
     if meshes.is_empty() {
         return Err(perr("FBX file without meshes"));
     }
-    Ok(Model { meshes, nodes, roots: vec![0], materials, textures, ..Model::default() })
+    Ok(Model { meshes, nodes, roots: vec![0], materials, textures, warnings, ..Model::default() })
 }
 
 #[cfg(test)]

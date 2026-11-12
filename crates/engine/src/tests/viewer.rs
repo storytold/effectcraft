@@ -8,7 +8,7 @@ use effectcraft_time::Tick;
 use serde_json::json;
 
 use crate::Session;
-use crate::viewer::{Channel, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, SnapKind, SnapSource, SnapTarget, display_transform, snap};
+use crate::viewer::{Channel, DisplayPass, FrameEncoding, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, PassCurve, SnapKind, SnapSource, SnapTarget, snap};
 
 fn comp() -> Session {
     let mut s = Session::default();
@@ -58,6 +58,62 @@ fn snap_lines_snap_axes_independently_and_priority_breaks_ties() {
     let t3 =
         [SnapTarget::point([0.0, 3.0], PRI_LAYER, SnapSource::Layer(LayerId(2))), SnapTarget::point([3.0, 0.0], PRI_VERTEX, SnapSource::Vertex(LayerId(3)))];
     assert_eq!(snap(&[[0.0, 0.0]], &t3, 5.0).unwrap().hits[0].source, SnapSource::Vertex(LayerId(3)));
+}
+
+/// #2855: an edge midpoint lies on its edge line, so one line nearer than the point must not win
+/// and leave the other axis free. Two lines do win when together they are nearer.
+#[test]
+fn snap_point_beats_one_line_and_loses_only_to_two_nearer_lines() {
+    let src = SnapSource::Layer(LayerId(1));
+    let mid = SnapTarget::point([100.0, 50.0], PRI_LAYER, src);
+    let top = SnapTarget::hline(50.0, PRI_LAYER, src);
+    // The line alone is nearer (1 against √10), and the point still snaps both axes.
+    let s = snap(&[[103.0, 51.0]], &[top, mid], 5.0).unwrap();
+    assert_eq!(s.at, [100.0, 50.0]);
+    assert_eq!(s.delta, [-3.0, -1.0]);
+    assert_eq!(s.hits, [mid]);
+    // Lines through the point itself tie with it: the point.
+    let centre = SnapTarget::vline(100.0, PRI_LAYER, src);
+    assert_eq!(snap(&[[103.0, 51.0]], &[top, centre, mid], 5.0).unwrap().hits, [mid]);
+    // Two lines together nearer than the point: both snap.
+    let far = SnapTarget::point([101.0, 55.0], PRI_LAYER, src);
+    let v = SnapTarget::vline(102.0, PRI_GUIDE, SnapSource::Guide);
+    let h = SnapTarget::hline(52.0, PRI_GUIDE, SnapSource::Guide);
+    let s = snap(&[[103.0, 51.0]], &[v, h, far], 5.0).unwrap();
+    assert_eq!(s.at, [102.0, 52.0]);
+    assert_eq!(s.hits, [v, h]);
+}
+
+/// #2855: an unrotated layer's centre lines follow its edges' span rule, reach the outer comp
+/// through a collapsed precomp layer, and a rotated layer keeps its points only.
+#[test]
+fn layer_centre_lines_follow_the_edges() {
+    use crate::viewer::{SnapFeatures, SnapOptions, targets};
+    let mut s = comp();
+    // A 100×50 solid moved off the comp's centre lines: x 70–170, y 55–105, centre (120, 80).
+    let a = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 100, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [120, 80, 0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |s: &Session, f: SnapFeatures| {
+        let comp = s.project.comp(cid).unwrap().clone();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, Tick::ZERO);
+        targets(&ctx, &[], SnapOptions { layers: true, features: f, guides: false, grid: false, grid_spacing: 0.0 })
+    };
+    let lines = |t: &[SnapTarget], l: LayerId| {
+        let of = |kind: SnapKind, i: usize, c: f64| t.iter().find(|t| t.kind == kind && t.source == SnapSource::Layer(l) && t.pos[i] == c).map(|t| t.span);
+        (of(SnapKind::VLine, 0, 120.0), of(SnapKind::HLine, 1, 80.0))
+    };
+    assert_eq!(lines(&at(&s, SnapFeatures::default()), LayerId(a)), (Some(None), Some(None)));
+    let off = SnapFeatures { edges_extended: false, ..Default::default() };
+    assert_eq!(lines(&at(&s, off), LayerId(a)), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Through a collapsed precomp layer (it fills the comp, unmoved, so the numbers stay).
+    s.execute("layer.precompose", json!({"layers": [a], "name": "Inner"})).unwrap();
+    let pre = s.active_comp().unwrap().layers[0].id;
+    s.execute("layer.setSwitch", json!({"layers": [pre.0], "switch": "collapse", "value": true})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (Some(Some([55.0, 105.0])), Some(Some([70.0, 170.0]))));
+    // Rotated: no lines at all.
+    s.execute("prop.set", json!({"layer": pre.0, "path": "transform/rotation", "value": 30})).unwrap();
+    assert_eq!(lines(&at(&s, off), pre), (None, None));
 }
 
 #[test]
@@ -169,15 +225,19 @@ fn snapping_options_command_sets_and_toggles() {
 
 // ---------------------------------------------------------------- channels, exposure, snapshot
 
+/// The display pass on 8-bit frames (sRGB, no HDR step): Show Channel and exposure.
+fn display_rgba8(px: [u8; 4], channel: Channel, colorized: bool, stops: f32) -> [u8; 4] {
+    let encoding = FrameEncoding { curve: PassCurve::Srgb, hdr: effectcraft_project::HdrMode::Clip };
+    let mut v = [px];
+    DisplayPass::new(channel, colorized, stops, encoding, None).apply_rgba8(&mut v);
+    v[0]
+}
+
 #[test]
 fn channel_and_exposure_pixel_transforms() {
     // Premultiplied: straight (200, 100, 50) at 50% alpha.
     let px = [100u8, 50, 25, 128];
-    let run = |c: Channel, col: bool, stops: f32| {
-        let mut v = [px];
-        display_transform(&mut v, c, col, stops);
-        v[0]
-    };
+    let run = |c: Channel, col: bool, stops: f32| display_rgba8(px, c, col, stops);
     assert_eq!(run(Channel::Rgb, false, 0.0), px);
     assert_eq!(run(Channel::Red, false, 0.0), [100, 100, 100, 255]);
     assert_eq!(run(Channel::Green, true, 0.0), [0, 50, 0, 255]);
@@ -186,13 +246,13 @@ fn channel_and_exposure_pixel_transforms() {
     let st = run(Channel::RgbStraight, false, 0.0);
     assert!((st[0] as i32 - 199).abs() <= 1 && (st[1] as i32 - 100).abs() <= 1 && st[3] == 255, "{st:?}");
     // +1 stop doubles linear light: sRGB 50% gray → about 69%; -1 stop darkens; 0 is identity.
-    let mut g = [[128u8, 128, 128, 255]];
-    display_transform(&mut g, Channel::Rgb, false, 1.0);
-    assert!((174..=178).contains(&g[0][0]), "{:?}", g[0]);
-    let mut g = [[128u8, 128, 128, 255]];
-    display_transform(&mut g, Channel::Rgb, false, -1.0);
-    assert!((92..=96).contains(&g[0][0]), "{:?}", g[0]);
-    assert_eq!(crate::viewer::exposure_lut(0.0)[200], 200);
+    let g = display_rgba8([128, 128, 128, 255], Channel::Rgb, false, 1.0);
+    assert!((174..=178).contains(&g[0]), "{g:?}");
+    let g = display_rgba8([128, 128, 128, 255], Channel::Rgb, false, -1.0);
+    assert!((92..=96).contains(&g[0]), "{g:?}");
+    for v in 0..=255u8 {
+        assert_eq!(display_rgba8([v, v, v, 255], Channel::Rgb, false, 0.0), [v, v, v, 255]);
+    }
     // Exposure applies to a single channel too, and keeps alpha untouched in RGB.
     assert!(run(Channel::Red, false, 1.0)[0] > 100);
     assert_eq!(run(Channel::Rgb, false, 2.0)[3], 128);

@@ -1,4 +1,4 @@
-//! Commands behind the Progress, Media Browser, Metadata and Lumetri Scopes panels.
+//! Commands behind the Progress, Media Browser, Metadata and Video Scopes panels.
 
 use effectcraft_project::ItemId;
 use effectcraft_raster::Image;
@@ -159,7 +159,7 @@ fn project_comment(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-// ---------------------------------------------------------------- Lumetri Scopes
+// ---------------------------------------------------------------- Video Scopes
 
 /// The comp frame the scopes read (the viewer's image: over the comp background), at most
 /// `max_side` pixels on the long side.
@@ -257,7 +257,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("project.setProjectComment", "Project Comment", [], None, "{comment}", always, project_comment),
         query!(
             "scopes.analyze",
-            "Lumetri Scopes",
+            "Video Scopes",
             "{comp?, time?|frame?, scope?: waveformRgb|waveformLuma|waveformYc|vectorscopeYuv|vectorscopeHls|histogram|paradeRgb|paradeYuv, standard?: rec601|rec709|rec2020, float?, clamp?, size?}",
             scopes_analyze
         ),

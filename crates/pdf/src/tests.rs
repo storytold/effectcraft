@@ -112,6 +112,86 @@ fn pdf_forms_rotation_cmyk_and_alpha() {
     assert_eq!(img.get(30, 30)[3], 0.0, "form clipped to its bounding box");
 }
 
+/// A one-page PDF with a MediaBox [0 0 420 220], `pages` added to the /Pages node and `page` to
+/// the page: grey over the media box, a blue 20 × 10 marker at PDF (64, 54).
+fn boxes_pdf(pages: &str, page: &str) -> Vec<u8> {
+    let content = "0.5 g 0 0 420 220 re f 0 0 1 rg 64 54 20 10 re f";
+    pdf(
+        &[
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
+            (2, format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {pages} >>"), None),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 220] {page} /Contents 4 0 R >>"), None),
+            (4, "<< >>".to_string(), Some(content.as_bytes().to_vec())),
+        ],
+        1,
+    )
+}
+
+/// The first page of `bytes` framed as After Effects places it.
+fn placed(bytes: &[u8]) -> Doc {
+    parse_page_framed(bytes, 0, Framing::Placed).unwrap()
+}
+
+/// #3099: After Effects 2026 places a .ai or PDF as footage by the page's ArtBox and shows only
+/// that region (a page with MediaBox 420 × 220, CropBox 410 × 210, TrimBox 380 × 180 and ArtBox
+/// [60 50 300.6 170.4] imports as 241 × 121). `Framing::Placed` frames it so; the viewer framing
+/// (the default, used by File ▸ Import) stays the CropBox.
+#[test]
+fn placed_framing_is_the_art_box() {
+    let bytes = boxes_pdf("/CropBox [5 5 415 215]", "/TrimBox [20 20 400 200] /ArtBox [60 50 300.6 170.4]");
+    let doc = placed(&bytes);
+    assert!((doc.width - 240.6).abs() < 1e-9 && (doc.height - 120.4).abs() < 1e-9, "{} × {}", doc.width, doc.height);
+    assert_eq!(doc.pixel_size(), (241, 121));
+    // The art box's top-left corner is the document's origin: the marker (PDF x 64..84, y 54..64)
+    // is at x 4..24, y 106.4..116.4 from the top.
+    let (w, h) = doc.pixel_size();
+    let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
+    let marker = img.get(10, 110);
+    assert!(marker[2] > 0.99 && marker[0] < 0.01, "{marker:?}");
+    assert!(img.get(30, 110)[2] < 0.6, "{:?}", img.get(30, 110));
+    let viewer = parse(&bytes).unwrap();
+    assert_eq!((viewer.width, viewer.height), (410.0, 210.0), "the viewer framing is unchanged");
+}
+
+/// The ArtBox is clipped to the crop box (ISO 32000-1 §14.11.2); one that keeps no area there,
+/// a degenerate or unreadable one, or one on the /Pages node (not inherited, table 30) leaves the
+/// crop box (else the media box).
+#[test]
+fn placed_framing_clips_the_art_box_and_falls_back() {
+    let size = |pages: &str, page: &str| {
+        let d = placed(&boxes_pdf(pages, page));
+        (d.width, d.height)
+    };
+    let crop = "/CropBox [5 5 415 215]";
+    assert_eq!(size(crop, "/ArtBox [-100 -100 1000 1000]"), (410.0, 210.0), "larger than the page");
+    assert_eq!(size(crop, "/ArtBox [300 100 900 900]"), (115.0, 115.0), "partly outside");
+    let (w, h) = size(crop, "/ArtBox [300.6 170.4 60 50]");
+    assert!((w - 240.6).abs() < 1e-9 && (h - 120.4).abs() < 1e-9, "corners in any order: {w} × {h}");
+    // Finite corners whose span is not.
+    let big = format!("1{}", "0".repeat(308));
+    let unreadable = [format!("/ArtBox [-{big} 50 {big} 170]")];
+    for page in ["/ArtBox [500 300 600 400]", "/ArtBox [60 50 60 170]", "/ArtBox [60 50 300]"].map(String::from).iter().chain(&unreadable) {
+        assert_eq!(size(crop, page), (410.0, 210.0), "{page}");
+    }
+    assert_eq!(size("/ArtBox [60 50 300 170]", ""), (420.0, 220.0), "an ArtBox on /Pages is not inherited");
+    // A crop box that is not a box leaves the media box.
+    assert_eq!(size("", &format!("/CropBox [-{big} 5 {big} 215]")), (420.0, 220.0));
+}
+
+/// After Effects ignores /Rotate on placed footage (a page [100 50 400 150] with /Rotate 90
+/// imports as 300 × 100, drawn unturned); the viewer framing turns it.
+#[test]
+fn placed_framing_ignores_rotate() {
+    let bytes = boxes_pdf("", "/Rotate 90");
+    let doc = placed(&bytes);
+    assert_eq!((doc.width, doc.height), (420.0, 220.0));
+    // Unturned: the marker at PDF (64..84, 54..64) is at x 64..84, y 156..166 from the top.
+    let img = effectcraft_svg::rasterize(&doc, 420, 220, 1.0);
+    assert!(img.get(70, 160)[2] > 0.99, "{:?}", img.get(70, 160));
+    let viewer = parse(&bytes).unwrap();
+    assert_eq!((viewer.width, viewer.height), (220.0, 420.0));
+}
+
 const EPS: &str = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n%%EndComments\n\
 /m {moveto} bind def /l {lineto} bind def\n\
 /cm { 6 array astore concat } bind def\n\
@@ -668,6 +748,63 @@ fn tiling_patterns_coloured_and_uncoloured() {
     assert_eq!(at(115, 15)[3], 0.0);
 }
 
+/// A pattern cell nests under the page's open clipping groups and the pattern's own groups, and
+/// the render tree stays within the group depth limit that counts all of them.
+#[test]
+fn a_pattern_cell_counts_the_groups_it_is_nested_in() {
+    fn depth(g: &effectcraft_svg::Group) -> usize {
+        1 + g.children.iter().filter_map(|c| if let effectcraft_svg::Node::Group(g) = c { Some(depth(g)) } else { None }).max().unwrap_or(0)
+    }
+    let clips = "0 0 200 100 re W n ".repeat(250);
+    let cell = format!("{} 1 0 0 rg 0 0 10 10 re f", "0 0 20 20 re W n ".repeat(250)).into_bytes();
+    let bytes = page_pdf(
+        &format!("{clips} /Pattern cs /P1 scn 0 0 100 100 re f"),
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >>".into(), Some(cell))],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(depth(&doc.root) <= 260, "{}", depth(&doc.root));
+    assert!(doc.skipped.iter().any(|s| s == "group nesting limit"), "{:?}", doc.skipped);
+}
+
+/// A pattern whose `Pattern` and `Tile` wrappers would pass the depth limit is skipped, not built
+/// past it.
+#[test]
+fn a_pattern_whose_wrappers_pass_the_depth_limit_is_skipped() {
+    let clips = "0 0 200 100 re W n ".repeat(255);
+    let bytes = page_pdf(
+        &format!("{clips} /Pattern cs /P1 scn 0 0 100 100 re f"),
+        "/Pattern << /P1 10 0 R >>",
+        vec![(
+            10,
+            "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >>".into(),
+            Some(b"0 0 10 10 re f".to_vec()),
+        )],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(doc.skipped.iter().any(|s| s == "group nesting limit"), "{:?}", doc.skipped);
+}
+
+/// A soft mask replacing another is nested under what is open once the old one has closed, so
+/// groups inside the old mask don't count against the new mask's content.
+#[test]
+fn a_replaced_soft_mask_does_not_count_against_the_new_one() {
+    let form = |n: &str| {
+        (
+            n.parse().unwrap(),
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceGray >> >>".to_string(),
+            Some(format!("{} 1 g 0 0 100 100 re f", "0 0 200 100 re W n ".repeat(250)).into_bytes()),
+        )
+    };
+    let bytes = page_pdf(
+        &format!("/GS1 gs {} /GS2 gs 1 0 0 rg 0 0 200 100 re f", "0 0 200 100 re W n ".repeat(250)),
+        "/ExtGState << /GS1 << /SMask << /S /Luminosity /G 10 0 R >> >> /GS2 << /SMask << /S /Luminosity /G 11 0 R >> >> >>",
+        vec![form("10"), form("11")],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(doc.skipped.iter().all(|s| s != "group nesting limit"), "{:?}", doc.skipped);
+}
+
 /// Build isolated interpreter objects without presenting a function or colour space as a
 /// document catalog. Complete-document parsing is covered by the page and reader fixtures.
 fn object_file(objs: Objs) -> object::File {
@@ -985,6 +1122,35 @@ fn a_fanning_out_reference_graph_is_refused_within_the_budget() {
         .map(|i| (i, format!("[{}]", format!("{} 0 R ", i + 1).repeat(32)), None))
         .chain([(8, "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>".into(), None)])
         .collect();
+    assert_eq!(read_function(objs), color::Func::Unsupported);
+}
+
+#[test]
+fn a_sampled_function_shorter_than_its_table_is_refused() {
+    // 4,096 8-bit samples declared, ten bytes given: the missing ones are not made up.
+    let f = "<< /FunctionType 0 /Domain [0 1] /Size [4096] /Range [0 1] /BitsPerSample 8 >>";
+    assert_eq!(read_function(vec![(1, f.into(), Some(vec![7; 10]))]), color::Func::Unsupported);
+    assert_ne!(read_function(vec![(1, f.into(), Some(vec![7; 4096]))]), color::Func::Unsupported);
+}
+
+#[test]
+fn a_calculator_program_past_the_operator_limit_is_refused() {
+    let f = "<< /FunctionType 4 /Domain [0 1] /Range [0 1] >>";
+    let long = format!("{{ {} }}", "1 pop ".repeat(3000));
+    assert_eq!(read_function(vec![(1, f.into(), Some(long.into_bytes()))]), color::Func::Unsupported);
+    assert_ne!(read_function(vec![(1, f.into(), Some(b"{ 1 exch sub }".to_vec()))]), color::Func::Unsupported);
+}
+
+#[test]
+fn copies_of_a_function_are_charged_for_its_coefficients() {
+    // A stitching function listing one object 1,000 times, whose coefficient arrays hold 2,000
+    // values: each copy is charged its values, so the budget refuses it instead of copying
+    // two million values.
+    let c = format!("[{}]", "0.5 ".repeat(1000));
+    let objs: Objs = vec![
+        (1, format!("<< /FunctionType 3 /Domain [0 1] /Functions [{}] >>", "2 0 R ".repeat(1000)), None),
+        (2, format!("<< /FunctionType 2 /Domain [0 1] /C0 {c} /C1 {c} /N 1 >>"), None),
+    ];
     assert_eq!(read_function(objs), color::Func::Unsupported);
 }
 

@@ -29,7 +29,13 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   the app's existing object model. References retain object and generation numbers. A bounded
   compatibility repair recovers referenced objects from object streams when damaged xrefs omit
   them; every recovery or unresolved reference is reported in `Doc::skipped` (up to 64 messages).
-  The existing page tree preserves inherited resources, MediaBox / CropBox and `/Rotate`.
+  The existing page tree preserves inherited resources, MediaBox / CropBox and `/Rotate`. A page
+  is its CropBox (else MediaBox), turned by `/Rotate` (`Framing::Viewer`, the default). Footage
+  from an After Effects project is framed as After Effects places a PDF or `.ai`
+  (`Framing::Placed`, `parse_page_framed`): the page's own ArtBox clipped to the CropBox (else
+  MediaBox) when it has one, else the CropBox, else the MediaBox, with `/Rotate` ignored
+  (measured in After Effects 2026 with own files, #3099). Not measured: a CropBox without an
+  ArtBox, files saved by Illustrator itself, `.pdf` names.
   Content/image filters remain app-owned: Flate (with PNG predictors), LZW, ASCIIHex, ASCII85,
   RunLength and CCITTFax. Encrypted files remain refused; `page_count` returns zero when the
   reader refuses a document.
@@ -138,7 +144,7 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 ## Shared parser setup and bounds
 
 The workspace pins `craft-pdf` to `craft-libs` Git revision
-`92d392cff132eaf53e13afff77f38b5c11b73aa0`, with `default-features = false` and only the explicit `read`
+`e7c3dda7f3e339dd2c8d40fc4eb405472be1a1e4`, with `default-features = false` and only the explicit `read`
 feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves EffectCraft's
 font and asset policies. The shared parser does not change the supported drawing operators,
 image codecs, continuously rasterized SVG tree, editable shapes, or EPS interpreter.

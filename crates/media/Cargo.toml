@@ -22,9 +22,8 @@ effectcraft-pdf = { workspace = true }
 effectcraft-model = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
-filmcraft-aac = { workspace = true }
-filmcraft-isobmff = { workspace = true }
-filmcraft-matroska = { workspace = true }
+craft-audio = { workspace = true }
+craft-media = { workspace = true }
 filmcraft-mpegts = { workspace = true }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
@@ -36,3 +35,8 @@ rayon = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# (tests render comps that read layers through effects; already a dependency of effectcraft-render)
+effectcraft-effects = { workspace = true }

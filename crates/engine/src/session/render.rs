@@ -36,6 +36,13 @@ impl Session {
         commands::crypto_probe_job(self, p)
     }
 
+    /// The coverage of Cryptomatte ID `hash` (as `effect.cryptomatteAt` reports it, parsed) over
+    /// the layer of params `p`, at most `max_side` samples on the long side, from the kept probe:
+    /// `None` until [`Session::crypto_probe_job`] has built it.
+    pub fn crypto_coverage(&self, p: &Value, hash: u32, max_side: usize) -> Option<commands::CryptoCoverage> {
+        commands::crypto_coverage(self, p, hash, max_side)
+    }
+
     /// Let go of the kept Cryptomatte probe (and its aux channels), and cancel a build in
     /// flight: the eyedropper was disarmed. Edits, footage changes and Open / New do it too.
     pub fn drop_crypto_probe(&self) {
@@ -96,15 +103,22 @@ impl Session {
             effectcraft_project::ItemKind::Footage(f) if f.has_video => {
                 let f = f.clone();
                 Some(Box::new(move || {
-                    let img = effectcraft_render::cineon_frame(footage.frame(item, &f, Tick(0))?, &f);
-                    // Point-sample down to at most `max_side` on the long side.
-                    let step = (img.width.max(img.height) as f32 / max_side.max(1) as f32).ceil().max(1.0) as u32;
-                    let (w, h) = (img.width.div_ceil(step), img.height.div_ceil(step));
+                    // Vector footage is drawn at the thumbnail's size: its declared size can be a
+                    // 16384² canvas, gigabytes of pixels to point-sample down to a few dozen.
+                    let scale = (max_side.max(1) as f64 / f.width.max(f.height).max(1) as f64).min(1.0);
+                    let src = footage.vector_frame(item, &f, scale).or_else(|| footage.frame(item, &f, Tick(0)))?;
+                    let img = effectcraft_render::cineon_frame(src, &f);
+                    // Point-sample down to at most `max_side` on the long side (a drawn size one
+                    // pixel over it, from rounding, is shrunk by that pixel, not halved).
+                    let (long, max) = (u64::from(img.width.max(img.height)), u64::from(max_side.max(1)));
+                    let fit = |side: u32| if long <= max { side } else { ((u64::from(side) * max + long / 2) / long).max(1) as u32 };
+                    let (w, h) = (fit(img.width), fit(img.height));
                     let full = img.to_rgba8();
                     let mut px = Vec::with_capacity((w * h * 4) as usize);
                     for y in 0..h {
                         for x in 0..w {
-                            let i = (((y * step) * img.width + x * step) * 4) as usize;
+                            let (sx, sy) = (u64::from(x) * u64::from(img.width) / u64::from(w), u64::from(y) * u64::from(img.height) / u64::from(h));
+                            let i = ((sy * u64::from(img.width) + sx) * 4) as usize;
                             px.extend_from_slice(&full[i..i + 4]);
                         }
                     }
@@ -137,4 +151,43 @@ impl Session {
         self.layer_cache.clear();
         self.drop_crypto_probe();
     }
+
+    /// Tell the footage source which files effects read the channels of ([`aux_footage`]), so
+    /// it can decode their pictures and channels at once from the first frame (#474). Called with
+    /// every project change ([`Session::bump`]); the set is only sent when it changed, or after
+    /// [`Session::replace_project`] cleared what was sent.
+    pub(crate) fn refresh_aux_footage(&mut self) {
+        let paths = aux_footage(&self.project);
+        if self.aux_footage.as_ref() != Some(&paths) {
+            self.footage.set_aux_footage(&paths);
+            self.aux_footage = Some(paths);
+        }
+    }
+}
+
+/// The files (each footage item's [`effectcraft_project::Footage::path`], sorted, once each) of
+/// the footage layers that have an enabled effect reading their channels
+/// ([`effectcraft_effects::reads_aux`]), with the layer's Effects switch on. Several items can
+/// use one file: it stays in while any of them is read.
+pub(crate) fn aux_footage(project: &effectcraft_project::Project) -> Vec<String> {
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource};
+    let mut paths: Vec<String> = project
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .filter(|l| l.switches.effects)
+        .filter(|l| {
+            l.effects()
+                .is_some_and(|fx| fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::reads_aux(effect))))
+        })
+        .filter_map(|l| match &l.source {
+            LayerSource::Footage { item } => match &project.item(*item)?.kind {
+                ItemKind::Footage(f) if !f.path.is_empty() => Some(f.path.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
 }

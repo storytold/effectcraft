@@ -19,7 +19,26 @@ impl PathMeasure {
         let mut closed = false;
         let mut started = false;
         let mut done = false;
-        kurbo::flatten(path.iter(), 0.05, |el| {
+        // The tolerance grows with the path's size (0.05 for ordinary layer-sized paths): a
+        // path with huge coordinates would otherwise flatten into hundreds of millions of points.
+        // Only the first subpath is measured, so only it sets the tolerance and gets flattened.
+        let mut first = BezPath::new();
+        for el in path.iter() {
+            if matches!(el, PathEl::MoveTo(_)) && !first.elements().is_empty() {
+                break;
+            }
+            first.push(el);
+            if matches!(el, PathEl::ClosePath) {
+                break;
+            }
+        }
+        // A non-finite coordinate (an infinite control point too) measures nothing.
+        if !first.is_finite() {
+            return PathMeasure::default();
+        }
+        let bbox = kurbo::Shape::bounding_box(&first);
+        let size = bbox.width().max(bbox.height());
+        kurbo::flatten(first.iter(), 0.05_f64.max(size * 1e-6), |el| {
             if done {
                 return;
             }
@@ -127,6 +146,38 @@ pub fn arc_positions(xs: &[f64], line: [f64; 2], align: u8, length: f64, first_m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_curve_flattens_into_a_bounded_number_of_points() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((1e15, 0.0), (1e15, 1e15), (0.0, 1e15));
+        let m = PathMeasure::new(&p, false);
+        assert!(m.pts.len() < 100_000, "{}", m.pts.len());
+        assert!(m.length() > 1e15);
+        // Non-finite coordinates measure nothing.
+        let mut q = BezPath::new();
+        q.move_to((0.0, 0.0));
+        q.curve_to((f64::INFINITY, 0.0), (1.0, 1.0), (2.0, 0.0));
+        assert_eq!(PathMeasure::new(&q, false).pts.len(), 0);
+        // Even with finite endpoints, an infinite control point is refused before flattening.
+        let mut r = BezPath::new();
+        r.move_to((0.0, 0.0));
+        r.curve_to((f64::INFINITY, f64::INFINITY), (f64::INFINITY, 0.0), (1.0, 0.0));
+        assert_eq!(PathMeasure::new(&r, false).pts.len(), 0);
+    }
+
+    #[test]
+    fn a_distant_second_subpath_does_not_coarsen_the_first() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
+        p.move_to((1e9, 1e9));
+        p.line_to((1e9 + 1.0, 1e9));
+        let m = PathMeasure::new(&p, false);
+        assert!(m.pts.len() > 10, "{}", m.pts.len());
+        assert!(m.length() > 150.0, "{}", m.length());
+    }
 
     #[test]
     fn measures_a_line_and_a_circle() {

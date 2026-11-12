@@ -1,5 +1,5 @@
 //! Generate effects, batch 2: Cell Pattern (Worley), Ellipse, Lens Flare, Beam, Radio Waves,
-//! Advanced Lightning, CC Light Rays, CC Light Burst 2.5, CC Light Sweep.
+//! Advanced Lightning, Light Rays, Radial Light Burst, Light Sweep.
 //!
 //! All designs are original procedural renderings written from the public descriptions of what
 //! each effect produces.
@@ -897,7 +897,7 @@ fn advanced_lightning(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Light Rays / Burst
+// ---------------------------------------------------------------- Light Rays / Burst
 
 const RAY_STEPS: usize = 32;
 
@@ -1007,7 +1007,7 @@ fn light_burst(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Light Sweep
+// ---------------------------------------------------------------- Light Sweep
 
 fn light_sweep(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = b.to_px(ctx.params.v2("center"));
@@ -1111,8 +1111,8 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("endPoint", "Ending Point", pt(0.75, 0.5), ParamUi::Point),
                 p("length", "Length", num(25.0), pct()),
                 p("time", "Time", num(0.0), pct()),
-                p("startThickness", "Starting Thickness", num(8.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
-                p("endThickness", "Ending Thickness", num(8.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+                p("startThickness", "Starting Thickness", num(8.0), slider(0.0, 4000.0, 0.0, 100.0, 1)),
+                p("endThickness", "Ending Thickness", num(8.0), slider(0.0, 4000.0, 0.0, 100.0, 1)),
                 p("softness", "Softness", num(20.0), pct()),
                 p("insideColor", "Inside Color", col(1.0, 1.0, 1.0), ParamUi::Color),
                 p("outsideColor", "Outside Color", col(0.4, 0.4, 1.0), ParamUi::Color),
@@ -1192,7 +1192,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.cclightrays",
-            "CC Light Rays",
+            "Light Rays",
             vec![
                 p("intensity", "Intensity", num(100.0), slider(0.0, 600.0, 0.0, 200.0, 1)),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -1207,7 +1207,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.cclightburst",
-            "CC Light Burst 2.5",
+            "Radial Light Burst",
             vec![
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
                 p("intensity", "Intensity", num(100.0), slider(0.0, 600.0, 0.0, 200.0, 1)),
@@ -1220,7 +1220,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.cclightsweep",
-            "CC Light Sweep",
+            "Light Sweep",
             vec![
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
                 p("direction", "Direction", num(-30.0), ang()),

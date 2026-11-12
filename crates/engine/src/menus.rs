@@ -23,6 +23,12 @@
 //! Libraries, Bridge, Media Encoder, Behance, Creative Cloud…) are intentionally absent; the
 //! Essential Graphics workspace uses the Properties panel and the Essential Graphics panel, whose
 //! templates use EffectCraft's own open `.ectemplate` format.
+//!
+//! Where EffectCraft has entries After Effects lacks, After Effects' entries keep their order and
+//! the others get a fixed place. File ▸ Import: the project imports sit together where After
+//! Effects has Adobe Premiere Pro Project…, in alphabetical order and named in full (Adobe After
+//! Effects Project…, Adobe Premiere Pro Project…, EffectCraft Project…); the formats only
+//! EffectCraft imports follow a separator at the end, in alphabetical order (#3103).
 
 use std::sync::OnceLock;
 
@@ -578,13 +584,15 @@ File
   Import
     File... | file.import
     Multiple Files... | file.importMultiple
+    Adobe After Effects Project... | file.importAep
     Adobe Premiere Pro Project... | file.importTimeline
     EffectCraft Project... | file.importProject
+    Vanishing Point (.vpe)... | file.importVanishingPoint
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
-    Lottie... | file.importLottie
-    Vanishing Point (.vpe)... | file.importVanishingPoint
+    ---
     Essential Graphics Template... | essential.importTemplate
+    Lottie... | file.importLottie
   Import Recent Footage
     @dynamic:recentFootage
     ---
@@ -592,6 +600,7 @@ File
   Export
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
+    Adobe After Effects Project... | file.exportAep
     Lottie JSON... | file.exportLottie
     Essential Graphics Template... | essential.exportTemplate
   ---
@@ -861,6 +870,16 @@ Layer
     Flip Vertical | layer.transform {"op":"flipV"}
     Center In View | layer.transform {"op":"center"} | Cmd+Home
     Center Anchor Point in Layer Content | layer.centerAnchor
+    Quick Set Anchor
+      Top Left | layer.quickSetAnchor {"point":"topLeft"}
+      Top | layer.quickSetAnchor {"point":"top"}
+      Top Right | layer.quickSetAnchor {"point":"topRight"}
+      Left | layer.quickSetAnchor {"point":"left"}
+      Center | layer.quickSetAnchor {"point":"center"}
+      Right | layer.quickSetAnchor {"point":"right"}
+      Bottom Left | layer.quickSetAnchor {"point":"bottomLeft"}
+      Bottom | layer.quickSetAnchor {"point":"bottom"}
+      Bottom Right | layer.quickSetAnchor {"point":"bottomRight"}
     Fit to Comp | layer.transform {"op":"fit"} | Cmd+Alt+F
     Fit to Comp Width | layer.transform {"op":"fitWidth"} | Cmd+Alt+Shift+H
     Fit to Comp Height | layer.transform {"op":"fitHeight"} | Cmd+Alt+Shift+G
@@ -1007,6 +1026,7 @@ Layer
     Duplicate and Assign Material | material.duplicateAssign
   Auto-trace... | layer.autoTrace
   Pre-compose... | layer.precompose
+  Un-precompose | layer.unprecompose
   Scene Edit Detection... | layer.sceneEditDetection
 Effect
   Effect Controls | window.panel {"panel":"effectControls"} | F3, Cmd+Shift+T
@@ -1015,6 +1035,11 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Install Effect Plug-in... | effect.plugins.install
+  Install Effect Plug-in Bundle (Folder)... | effect.plugins.install {"bundle": true}
+  Load Plug-ins Through Helper... | effect.helpers.load
+  Scan for Effect Helpers | effect.helpers.scan
+  Plug-in Library... | prefs.open {"page":"library"}
   ---
   @effects
 Animation
@@ -1246,7 +1271,7 @@ Window
   Essential Graphics | window.panel {"panel":"essentialGraphics"}
   Info | window.panel {"panel":"info"} | Cmd+2
   Learn | help.inAppTutorials
-  Lumetri Scopes | window.panel {"panel":"lumetriScopes"}
+  Video Scopes | window.panel {"panel":"lumetriScopes"}
   Mask Interpolation | window.panel {"panel":"maskInterpolation"}
   Media Browser | window.panel {"panel":"mediaBrowser"}
   Metadata | window.panel {"panel":"metadata"}

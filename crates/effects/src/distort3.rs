@@ -1,5 +1,5 @@
-//! Distort effects, batch 3: CC Bender, CC Blobbylize, CC Power Pin, CC Ripple Pulse, CC Slant,
-//! CC Smear, CC Split, CC Split 2, Smear and Reshape (mask driven), Twirl (Legacy), Warp (the
+//! Distort effects, batch 3: Flexible Bend, Organic Displacement, Perspective Pin, Pulsed Ripple, Slant,
+//! Directional Smear, Split Warp, Dual Split Warp, Smear and Reshape (mask driven), Twirl (Legacy), Warp (the
 //! fifteen warp styles) and Detail-preserving Upscale.
 //!
 //! All warps are inverse mapped: every output pixel finds the source point that lands on it.
@@ -59,7 +59,7 @@ fn elastic_exp(i: u32) -> f64 {
     [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.5][(i as usize).min(7)]
 }
 
-// ---------------------------------------------------------------- CC Bender
+// ---------------------------------------------------------------- Flexible Bend
 
 fn cc_bender(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let amount = ctx.params.f("amount") / 100.0;
@@ -107,7 +107,7 @@ fn norm3(v: [f64; 3]) -> [f64; 3] {
     [v[0] / l, v[1] / l, v[2] / l]
 }
 
-/// f32 normal/dot helpers for the CC Blobbylize lighting pass. The GPU kernel runs in f32;
+/// f32 normal/dot helpers for the Organic Displacement lighting pass. The GPU kernel runs in f32;
 /// matching its precision here keeps specular highlights within the CPU/GPU parity tolerance.
 fn norm3f(v: [f32; 3]) -> [f32; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
@@ -118,7 +118,7 @@ fn dot3f(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-// ---------------------------------------------------------------- CC Blobbylize
+// ---------------------------------------------------------------- Organic Displacement
 
 fn cc_blobbylize(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let soft = ctx.params.f("softness").max(0.0) * b.scale;
@@ -221,7 +221,7 @@ fn cc_blobbylize(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Power Pin
+// ---------------------------------------------------------------- Perspective Pin
 
 fn cc_power_pin(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (lw, lh) = (ctx.layer_size[0].max(1.0), ctx.layer_size[1].max(1.0));
@@ -304,7 +304,7 @@ fn cc_power_pin(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Ripple Pulse
+// ---------------------------------------------------------------- Pulsed Ripple
 
 fn cc_ripple_pulse(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let level = ctx.params.f("pulseLevel") / 100.0;
@@ -350,7 +350,7 @@ fn cc_ripple_pulse(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Slant
+// ---------------------------------------------------------------- Slant
 
 fn cc_slant(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let k = ctx.params.f("slant") / 100.0;
@@ -375,7 +375,7 @@ fn cc_slant(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Smear
+// ---------------------------------------------------------------- Directional Smear
 
 fn cc_smear(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let reach = ctx.params.f("reach") / 100.0;
@@ -403,7 +403,7 @@ fn cc_smear(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 /// The transparent pixels to add on every side of a buffer `size` pixels big (with `offset` and
-/// `scale`) for CC Smear: it moves pixels by up to Reach × From→To, and they may move out to the
+/// `scale`) for Directional Smear: it moves pixels by up to Reach × From→To, and they may move out to the
 /// layer bounds. A text or shape layer's buffer ends at its content while its bounds are
 /// comp-sized, so the smear was cut off at the content's box (#659).
 pub fn cc_smear_pad(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f64) -> u32 {
@@ -417,7 +417,7 @@ pub fn cc_smear_pad(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f6
     (moved.min(4096.0) as u32).min(crate::util::layer_cover_pad(ctx, size, offset, scale))
 }
 
-// ---------------------------------------------------------------- CC Split / CC Split 2
+// ---------------------------------------------------------------- Split Warp / Dual Split Warp
 
 fn split_impl(ctx: &EffectCtx, mut b: Buf, s1: f64, s2: f64) -> Buf {
     if s1 == 0.0 && s2 == 0.0 {
@@ -913,7 +913,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.distort.ccbender",
-            "CC Bender",
+            "Flexible Bend",
             vec![
                 p("amount", "Amount", num(0.0), slider(-200.0, 200.0, -100.0, 100.0, 1)),
                 p("style", "Style", Value::Enum(0), popup(&["Bend", "Marilyn", "Sharp", "Boxer"])),
@@ -925,7 +925,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccblobbylize",
-            "CC Blobbylize",
+            "Organic Displacement",
             vec![
                 p("blobLayer", "Blob Layer", Value::Layer(None), ParamUi::Layer),
                 p("property", "Property", Value::Enum(0), popup(&crate::util::SRC_NAMES[..8])),
@@ -947,7 +947,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccpowerpin",
-            "CC Power Pin",
+            "Perspective Pin",
             vec![
                 p("topLeft", "Top Left", pt(0.0, 0.0), ParamUi::Point),
                 p("topRight", "Top Right", pt(1.0, 0.0), ParamUi::Point),
@@ -964,7 +964,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccripplepulse",
-            "CC Ripple Pulse",
+            "Pulsed Ripple",
             vec![
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
                 p("pulseLevel", "Pulse Level (animate)", num(0.0), slider(-1000.0, 1000.0, -100.0, 100.0, 1)),
@@ -976,7 +976,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccslant",
-            "CC Slant",
+            "Slant",
             vec![
                 p("slant", "Slant", num(0.0), slider(-1000.0, 1000.0, -100.0, 100.0, 1)),
                 p("stretching", "Stretching", Value::Bool(false), ParamUi::Checkbox),
@@ -987,7 +987,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccsmear",
-            "CC Smear",
+            "Directional Smear",
             vec![
                 p("from", "From", pt(0.35, 0.5), ParamUi::Point),
                 p("to", "To", pt(0.65, 0.5), ParamUi::Point),
@@ -998,7 +998,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccsplit",
-            "CC Split",
+            "Split Warp",
             vec![
                 p("pointA", "Point A", pt(0.25, 0.5), ParamUi::Point),
                 p("pointB", "Point B", pt(0.75, 0.5), ParamUi::Point),
@@ -1008,7 +1008,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccsplit2",
-            "CC Split 2",
+            "Dual Split Warp",
             vec![
                 p("pointA", "Point A", pt(0.25, 0.5), ParamUi::Point),
                 p("pointB", "Point B", pt(0.75, 0.5), ParamUi::Point),
