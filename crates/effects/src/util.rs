@@ -551,6 +551,9 @@ pub fn params_key_except(ctx: &crate::EffectCtx, b: &crate::Buf, salt: u64, skip
 pub struct SimCache<S> {
     inner: std::sync::Mutex<Vec<SimEntry<S>>>,
     cap: usize,
+    /// Raised by [`SimCache::clear`] (under the lock): a run that started before it doesn't
+    /// put its checkpoints back.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 struct SimEntry<S> {
@@ -573,12 +576,15 @@ const MAX_SIM_CHECKPOINTS: usize = 256;
 
 impl<S: Clone> SimCache<S> {
     pub const fn new(cap: usize) -> SimCache<S> {
-        SimCache { inner: std::sync::Mutex::new(Vec::new()), cap }
+        SimCache { inner: std::sync::Mutex::new(Vec::new()), cap, generation: std::sync::atomic::AtomicU64::new(0) }
     }
 
-    /// Drop every checkpoint (Edit ▸ Purge): the next run simulates from scratch.
+    /// Drop every checkpoint (Edit ▸ Purge): the next run simulates from scratch, and runs in
+    /// progress keep their result but don't store their checkpoints.
     pub fn clear(&self) {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        g.clear();
     }
 
     /// State after `target` steps (at most [`MAX_SIM_STEPS`]). `init` builds step 0;
@@ -601,13 +607,15 @@ impl<S: Clone> SimCache<S> {
     ) -> std::sync::Arc<S> {
         use std::sync::Arc;
         let target = target.min(MAX_SIM_STEPS);
-        let start = {
+        let (start, generation) = {
             let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let generation = self.generation.load(std::sync::atomic::Ordering::Relaxed);
             let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
-            g.iter_mut().find(|e| e.key == key).and_then(|e| {
+            let start = g.iter_mut().find(|e| e.key == key).and_then(|e| {
                 e.used = tick;
                 e.checkpoints.iter().filter(|(s, st)| *s <= target && valid(*s, st)).max_by_key(|(s, _)| *s).map(|(s, st)| (*s, st.clone()))
-            })
+            });
+            (start, generation)
         };
         let had_start = start.is_some();
         let (mut i, mut st) = match start {
@@ -635,6 +643,10 @@ impl<S: Clone> SimCache<S> {
         let out = Arc::new(st);
         fresh.push((target, out.clone()));
         let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Purged while this ran: return the state, store nothing.
+        if self.generation.load(std::sync::atomic::Ordering::Relaxed) != generation {
+            return out;
+        }
         let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
         let idx = match g.iter().position(|e| e.key == key) {
             Some(ix) => ix,
@@ -954,5 +966,28 @@ mod tests {
         let p = Plane { w: 4, h: 3, data: vec![0.5; 12] };
         let g = gauss_plane(&p, 1e300, 1e300);
         assert!(g.data.iter().all(|v| (v - 0.5).abs() < 1e-4), "{:?}", g.data);
+    }
+
+    /// A Purge while a simulation runs: the run still returns its state, but its checkpoints
+    /// are not stored afterwards (they would hold the memory the Purge freed).
+    #[test]
+    fn sim_cache_runs_overlapping_a_purge_store_nothing() {
+        let c: SimCache<u64> = SimCache::new(2);
+        let out = c.run(
+            1,
+            40,
+            || 0,
+            |s, _| {
+                *s += 1;
+                if *s == 10 {
+                    c.clear();
+                }
+            },
+        );
+        assert_eq!(*out, 40);
+        assert!(c.inner.lock().unwrap().is_empty(), "a run that overlapped a purge stored its checkpoints");
+        // The next run stores as usual.
+        c.run(1, 40, || 0, |s, _| *s += 1);
+        assert!(!c.inner.lock().unwrap().is_empty());
     }
 }

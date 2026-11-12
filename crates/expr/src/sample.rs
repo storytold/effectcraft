@@ -26,7 +26,10 @@ struct Sampled {
     scale: f64,
 }
 
-type Key = (usize, u64, u64, u64, bool, u64);
+/// (project, footage source, comp, layer, time, post-effects, layer fingerprint). The footage
+/// source is part of it: contexts without one draw footage transparent, and the cache is shared
+/// by every thread and render.
+type Key = (usize, usize, u64, u64, u64, bool, u64);
 
 type Entry = (Option<Sampled>, Arc<ReadFiles>);
 
@@ -52,10 +55,14 @@ impl Cache {
     }
 
     /// Keep `e` under `key`; then drop the least recently used entries (never this one) while
-    /// over the byte or entry budget.
+    /// over the byte or entry budget. An entry larger than the whole budget is not kept (the
+    /// layer renders again when sampled again).
     fn insert(&mut self, key: Key, e: Entry, max_bytes: usize) {
         self.clock += 1;
         let bytes = e.0.as_ref().map_or(0, |s| s.img.data.len().saturating_mul(16));
+        if bytes > max_bytes {
+            return;
+        }
         if let Some((_, old, _)) = self.map.insert(key, (e, bytes, self.clock)) {
             self.bytes = self.bytes.saturating_sub(old);
         }
@@ -107,7 +114,8 @@ fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Opti
     if depth >= MAX_DEPTH {
         return None;
     }
-    let key: Key = (ctx.project as *const _ as usize, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer));
+    let source = ctx.footage.map_or(0, |f| f as *const dyn effectcraft_render::FootageSource as *const () as usize);
+    let key: Key = (ctx.project as *const _ as usize, source, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer));
     let note = |files: &ReadFiles| {
         if let Some(log) = ctx.reads {
             log.note_all(files);
@@ -196,7 +204,7 @@ mod cache_tests {
     #[test]
     fn sampled_buffers_stay_within_the_byte_budget() {
         let mut c = Cache::default();
-        let key = |i: u64| (0usize, 1u64, 2u64, i, true, 3u64);
+        let key = |i: u64| (0usize, 0usize, 1u64, 2u64, i, true, 3u64);
         // 64×64 px = 64 KiB each; a budget of four.
         let budget = 4 * 64 * 64 * 16;
         for i in 0..10 {
@@ -209,9 +217,13 @@ mod cache_tests {
         }
         assert!(c.get(&key(9)).is_some(), "the newest entry was dropped");
         assert!(c.get(&key(1)).is_none(), "a stale entry was kept");
-        // One entry bigger than the budget is still kept (it is the newest).
+        // An entry bigger than the whole budget is not kept, and evicts nothing.
+        let before = c.map.len();
         c.insert(key(99), entry(256, 256), budget);
-        assert!(c.get(&key(99)).is_some());
-        assert_eq!(c.map.len(), 1);
+        assert!(c.get(&key(99)).is_none());
+        assert_eq!(c.map.len(), before);
+        // The same layer through another footage source is another entry.
+        let other = (0usize, 7usize, 1u64, 2u64, 9u64, true, 3u64);
+        assert!(c.get(&other).is_none());
     }
 }
