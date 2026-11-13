@@ -1372,7 +1372,11 @@ fn paint_pattern(dst: &mut Image, cov: &Mask, region: Region, pattern: &Pattern,
         fallback_paint(dst, budget);
         return;
     }
+    // The tile's content is a tree of its own, drawn on a fresh transparent tile: what is known
+    // of the enclosing groups (all Normal) says nothing about the backdrop inside it.
+    let plain = std::mem::replace(&mut budget.plain, false);
     draw_group(&pattern.content, content_to_tile, 1.0, &mut tile, budget);
+    budget.plain = plain;
     let shader = Shader::Pattern(pattern, &tile, device_to_pattern);
     paint_shader(dst, cov, region, &shader, opacity);
     budget.release(&tile);

@@ -1220,6 +1220,40 @@ fn a_blend_mode_inside_a_clip_group_reaches_the_backdrop() {
     assert!(near(px(&img, 2, 10), [0.0, 0.0, 1.0, 1.0], 1e-3), "{:?}", px(&img, 2, 10));
 }
 
+/// A pattern tile is a tree of its own: a clip group inside it that blends (Multiply) against the
+/// tile's backdrop must not be drawn as a plain clip just because the pattern fill sits inside an
+/// outer plain clipping group. Red multiplied over the tile's blue is black inside the inner clip.
+#[test]
+fn a_pattern_inside_a_plain_clip_group_keeps_its_own_backdrop_analysis() {
+    let mut multiply = Group::new("Multiply");
+    multiply.blend = BlendMode::Multiply;
+    multiply.children = vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0])];
+    let mut content = Group::new("tile");
+    content.children = vec![
+        solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0]),
+        clip_group(kurbo::Rect::new(8.0, 8.0, 12.0, 12.0), vec![Node::Group(multiply)]),
+    ];
+    let pattern = Pattern {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+        pattern_units: PatternUnits::UserSpaceOnUse,
+        content_units: PatternUnits::UserSpaceOnUse,
+        transform: Affine::IDENTITY,
+        content: std::sync::Arc::new(content),
+        render_complexity: 4,
+        fallback: None,
+    };
+    let Node::Shape(mut filled) = solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [0.0; 3]) else { return };
+    filled.fill = Some(Paint::Pattern(pattern));
+    let doc = doc_of(20.0, 20.0, vec![clip_group(kurbo::Rect::new(2.0, 2.0, 18.0, 18.0), vec![Node::Shape(filled)])]);
+    let img = rasterize(&doc, 20, 20, 1.0);
+    assert!(near(px(&img, 10, 10), [0.0, 0.0, 0.0, 1.0], 1e-3), "inner clip {:?}", px(&img, 10, 10));
+    assert!(near(px(&img, 4, 10), [0.0, 0.0, 1.0, 1.0], 1e-3), "tile backdrop {:?}", px(&img, 4, 10));
+    assert!(px(&img, 0, 10)[3] < 1e-3, "outside the outer clip {:?}", px(&img, 0, 10));
+}
+
 /// A stroke reaches past its path's bounds by half its width: a horizontal line (a path
 /// without height) stroked 4 px wide covers 4 rows, and its butt caps end at the path's ends.
 #[test]
