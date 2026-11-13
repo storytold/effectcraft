@@ -9,8 +9,13 @@ use crate::{Error, Result};
 
 /// Most frames one sheet holds.
 pub const MAX_CELLS: usize = 64;
-/// Longest side of a sheet in pixels. It bounds the sheet's memory (at most 256 MiB of RGBA).
-pub const MAX_SIDE: u32 = 8192;
+/// Longest side of a sheet in pixels: under 8000, the most some MCP clients accept on a side.
+/// It also bounds the sheet's memory (at most 225 MiB of RGBA).
+pub const MAX_SIDE: u32 = 7680;
+/// Default longest side of each cell. MCP clients scale big images down before a model sees
+/// them, so larger cells mostly add bytes: 64 cells in the default grid are then at most 2560
+/// pixels on a side.
+pub const CELL_SIDE: u32 = 320;
 
 /// Where the cells of a sheet go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +216,8 @@ mod tests {
         assert!(Layout::new(MAX_CELLS + 1, None, (10, 10)).is_err());
         assert!(Layout::new(MAX_CELLS, None, (10, 10)).is_ok());
         assert!(Layout::new(1, None, (MAX_SIDE, MAX_SIDE)).is_ok());
+        assert!(Layout::new(1, None, (8000, 1)).is_err(), "some MCP clients refuse an image 8000 pixels wide");
+        assert!(Layout::new(1, None, (1, 8000)).is_err(), "or tall");
         assert!(Layout::new(2, Some(2), (MAX_SIDE, 1)).is_err(), "too wide");
         assert!(Layout::new(2, Some(1), (1, MAX_SIDE)).is_err(), "too tall");
         assert!(Layout::new(2, Some(2), (u32::MAX, 1)).is_err(), "no overflow");

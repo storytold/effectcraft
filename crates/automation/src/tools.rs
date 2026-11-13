@@ -416,16 +416,18 @@ fn add_keyframe(b: &mut Backend, a: &Value) -> Result<Reply> {
 }
 
 fn render_frame(b: &mut Backend, a: &Value) -> Result<Reply> {
-    let max_side = get(a, "max_side").and_then(Value::as_u64).unwrap_or(960) as u32;
+    let max_side = get(a, "max_side").and_then(Value::as_u64).map(|m| m as u32);
     let transparent = get(a, "transparent").and_then(Value::as_bool).unwrap_or(false);
     let path = get(a, "path").and_then(Value::as_str);
     let comp = get(a, "comp");
     if let Some(times) = get(a, "times") {
+        let max_side = max_side.unwrap_or(sheet::CELL_SIDE);
         return contact_sheet(b, a, times, FrameArgs { comp, max_side, transparent, path });
     }
     if get(a, "columns").is_some() || get(a, "labels").is_some() {
         return Err(Error::BadArgs("`columns` and `labels` lay out a contact sheet: give `times`".into()));
     }
+    let max_side = max_side.unwrap_or(960);
     let time = get(a, "time").and_then(Value::as_f64);
     let f = match path {
         Some(path) => b.render_to_file(comp, time, max_side, transparent, path)?,
@@ -474,18 +476,21 @@ fn contact_sheet(b: &mut Backend, a: &Value, times: &Value, f: FrameArgs) -> Res
         None => None,
         Some(c) => Some(c.as_u64().filter(|c| *c >= 1).ok_or_else(|| Error::BadArgs(format!("`columns` must be a whole number of at least 1, not {c}")))?),
     };
-    let labels = get(a, "labels").and_then(Value::as_bool).unwrap_or(true);
+    let labels = match get(a, "labels") {
+        None => true,
+        Some(l) => l.as_bool().ok_or_else(|| Error::BadArgs(format!("`labels` must be true or false, not {l}")))?,
+    };
     // The destination is checked before anything renders, as a single frame's is.
     let out = f.path.map(|p| b.composed_output(p)).transpose()?;
     let first = times.first().ok_or_else(|| Error::BadArgs(EMPTY_TIMES.into()))?;
-    let frame = b.render_pixels(f.comp, Some(*first), f.max_side, f.transparent)?;
+    let frame = b.render_pixels(f.comp, *first, f.max_side, f.transparent)?;
     let mut sheet = sheet::Sheet::new(sheet::Layout::new(times.len(), columns, frame.image.dimensions())?, f.transparent, labels);
     sheet.place(0, &frame.image, frame.time);
     let mut rendered = vec![json!(frame.time)];
     // The other cells show the comp the first one did, even if the active comp changes meanwhile.
     let pinned = frame.comp.is_u64().then(|| frame.comp.clone());
     for (i, t) in times.iter().enumerate().skip(1) {
-        let next = b.render_pixels(pinned.as_ref().or(f.comp), Some(*t), f.max_side, f.transparent)?;
+        let next = b.render_pixels(pinned.as_ref().or(f.comp), *t, f.max_side, f.transparent)?;
         sheet.place(i, &next.image, next.time);
         rendered.push(json!(next.time));
     }
@@ -834,7 +839,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "render_frame",
-        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). With `times` (up to 64 comp times) it renders each and returns ONE contact-sheet PNG tiling them in that order: `columns` (default near-square), `max_side` per cell, `labels` (default true) draws each cell's time; the metadata gives comp, times, columns, rows, cellWidth, cellHeight, width and height. `path` also writes the PNG (or sheet) to disk; `inline: false` returns only the metadata. Use it to check your work, and `times` to check motion in one call.",
+        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). With `times` (up to 64 comp times) it renders each and returns ONE contact-sheet PNG tiling them in that order: `columns` (default near-square), `max_side` per cell (default 320), `labels` (default true) draws each cell's time; the metadata gives comp, times, columns, rows, cellWidth, cellHeight, width and height. `path` also writes the PNG (or sheet) to disk; `inline: false` returns only the metadata. Use it to check your work, and `times` to check motion in one call.",
         bridge_only: false,
         schema: || {
             schema(
@@ -844,7 +849,7 @@ static TOOLS: &[ToolDef] = &[
                     "times": times_s(),
                     "columns": columns_s(),
                     "labels": labels_s(),
-                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size); with `times`, of each cell."},
+                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size); with `times`, of each cell (default 320)."},
                     "path": {"type": "string", "description": "Also write the PNG (with `times`, the contact sheet) here."},
                     "inline": {"type": "boolean", "description": "Include the image in the reply (default true)."},
                     "transparent": {"type": "boolean", "description": "Keep the frame's alpha (RGBA PNG, as an RGB + Alpha render writes it) instead of compositing over the comp's background colour."}
@@ -1054,7 +1059,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "render_preview",
-        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). With `times` (up to 64 comp times) it renders each and returns ONE contact-sheet PNG tiling them in that order: `columns` (default near-square), `max_side` per cell, `labels` (default true) draws each cell's time; the metadata gives comp, times, columns, rows, cellWidth, cellHeight, width and height. Use it to check your work, and `times` to check motion in one call.",
+        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). With `times` (up to 64 comp times) it renders each and returns ONE contact-sheet PNG tiling them in that order: `columns` (default near-square), `max_side` per cell (default 320), `labels` (default true) draws each cell's time; the metadata gives comp, times, columns, rows, cellWidth, cellHeight, width and height. Use it to check your work, and `times` to check motion in one call.",
         bridge_only: false,
         schema: || {
             schema(
@@ -1064,7 +1069,7 @@ static TOOLS: &[ToolDef] = &[
                     "times": times_s(),
                     "columns": columns_s(),
                     "labels": labels_s(),
-                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size); with `times`, of each cell."},
+                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size); with `times`, of each cell (default 320)."},
                     "transparent": {"type": "boolean", "description": "Keep the frame's alpha (RGBA PNG, as an RGB + Alpha render writes it) instead of compositing over the comp's background colour."}
                 }),
                 &[],

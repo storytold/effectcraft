@@ -504,6 +504,11 @@ fn fake_render_frame(session: &Session, params: &Value) -> Value {
 /// A fake desktop control channel: answers `engine.execute` from a real session, and canned
 /// `render.frame` / `ui.screenshot` replies.
 fn fake_app() -> u16 {
+    fake_app_with(fake_render_frame)
+}
+
+/// [`fake_app`], answering `render.frame` with `render_frame`.
+fn fake_app_with(render_frame: fn(&Session, &Value) -> Value) -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -518,7 +523,7 @@ fn fake_app() -> u16 {
                     Ok(v) => json!({"ok": true, "result": v}),
                     Err(e) => json!({"ok": false, "error": e.to_string()}),
                 },
-                "render.frame" => fake_render_frame(&session, p),
+                "render.frame" => render_frame(&session, p),
                 "ui.screenshot" => {
                     let png = crate::encode_png(8, 8, vec![128; 256], 0).unwrap();
                     std::fs::write(p["path"].as_str().unwrap(), png).unwrap();
@@ -1985,6 +1990,8 @@ fn contact_sheet_arguments_are_checked() {
         (json!({"times": [0, 1], "columns": 1.5}), "at least 1"),
         (json!({"columns": 2}), "give `times`"),
         (json!({"labels": false}), "give `times`"),
+        (json!({"times": [0, 1], "labels": "no"}), "`labels` must be true or false"),
+        (json!({"times": [0, 1], "labels": 0}), "`labels` must be true or false"),
     ] {
         for tool in ["render_frame", "render_preview"] {
             let (c, err) = call(&mut s, tool, args.clone());
@@ -1992,11 +1999,31 @@ fn contact_sheet_arguments_are_checked() {
             assert!(err && text.contains(want), "{tool} {args}: {text}");
         }
     }
-    // A sheet over 8192 pixels on a side is refused, not allocated.
+    // A sheet over `sheet::MAX_SIDE` (7680) pixels on a side is refused, not allocated.
     call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "Wide", "width": 3000, "height": 8}}));
     let (c, err) = call(&mut s, "render_frame", json!({"comp": "Wide", "times": [0, 0, 0], "columns": 3, "max_side": 0}));
     let text = c[0]["text"].as_str().unwrap();
-    assert!(err && text.contains("over 8192 pixels"), "{text}");
+    assert!(err && text.contains("over 7680 pixels"), "{text}");
+}
+
+/// With `times`, cells default to 320 pixels on their longest side, so 64 frames of a 16:9 comp
+/// make a sheet 2560 pixels wide, not 7680; a single frame still defaults to 960.
+#[test]
+fn contact_sheet_cells_default_to_320_pixels() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "HD", "width": 1280, "height": 720}}));
+    for tool in ["render_frame", "render_preview"] {
+        let (c, err) = call(&mut s, tool, json!({"times": [0, 1, 2, 3]}));
+        assert!(!err, "{tool}: {c:?}");
+        let (sheet, info) = image_reply(&c);
+        assert_eq!((info["cellWidth"].as_u64(), info["cellHeight"].as_u64()), (Some(320), Some(180)), "{tool}");
+        assert_eq!(sheet.dimensions(), (640, 360), "{tool}");
+        // An explicit `max_side` still sets each cell.
+        let (sheet, info) = image_reply(&call(&mut s, tool, json!({"times": [0, 1], "max_side": 640})).0);
+        assert_eq!((info["cellWidth"].as_u64(), sheet.dimensions()), (Some(640), (1280, 360)), "{tool}");
+        let (frame, _) = image_reply(&call(&mut s, tool, json!({"time": 0})).0);
+        assert_eq!(frame.dimensions(), (960, 540), "{tool}: a single frame keeps its default");
+    }
 }
 
 /// Without `times` the reply is the single frame it always was.
@@ -2070,4 +2097,18 @@ fn bridged_contact_sheet_comes_back_inline() {
     let text = c[0]["text"].as_str().unwrap();
     assert!(err && text.contains("headless"), "{text}");
     assert!(!out.exists());
+}
+
+/// A bridged cell keeps the time it was asked for when the app's reply leaves `time` out, so its
+/// label and the metadata never claim 0 s.
+#[test]
+fn bridged_contact_sheet_keeps_the_times_asked_for() {
+    let port = fake_app_with(|session, p| {
+        let mut reply = fake_render_frame(session, p);
+        reply["result"].as_object_mut().unwrap().remove("time");
+        reply
+    });
+    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    let info = call_json(&mut s, "render_frame", json!({"times": [1.5, 0.25, 3], "inline": false}));
+    assert_eq!(info["times"], json!([1.5, 0.25, 3.0]));
 }

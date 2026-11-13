@@ -140,22 +140,24 @@ impl Backend {
         self.render_output(comp, time, max_side, transparent, Some(&absolute.to_string_lossy()))
     }
 
-    /// [`Backend::render_with`] as pixels instead of a PNG, longest side at most `max_side`
-    /// (0 = full size).
-    pub fn render_pixels(&mut self, comp: Option<&Value>, time: Option<f64>, max_side: u32, transparent: bool) -> Result<Pixels> {
+    /// [`Backend::render_with`] at comp time `time` seconds, as pixels instead of a PNG, longest
+    /// side at most `max_side` (0 = full size).
+    pub fn render_pixels(&mut self, comp: Option<&Value>, time: f64, max_side: u32, transparent: bool) -> Result<Pixels> {
         match &mut self.target {
             Target::Headless(s) => {
                 let cid = s.resolve_comp(comp).map_err(|_| no_comp(comp))?;
-                let t = time.map(Tick::from_seconds_f64).unwrap_or_else(|| s.time());
+                let t = Tick::from_seconds_f64(time);
                 let (w, h, rgba) = s.render_rgba8_alpha(cid, t, max_side, transparent)?;
                 let image = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| Error::Other("bad image buffer".into()))?;
                 Ok(Pixels { image: fit(image, max_side), comp: json!(cid.0), time: t.seconds() })
             }
             Target::Bridge(b) => {
-                let r = b.call("render.frame", frame_params(comp, time, max_side, transparent))?;
+                let r = b.call("render.frame", frame_params(comp, Some(time), max_side, transparent))?;
                 let raw = frame_png(&r)?;
                 let image = image::load_from_memory(&raw).map_err(|e| Error::Other(format!("png: {e}")))?.to_rgba8();
-                Ok(Pixels { image: fit(image, max_side), comp: r["comp"].clone(), time: r["time"].as_f64().unwrap_or(0.0) })
+                // The time the app rendered, or the time asked for when its reply leaves it out.
+                let time = r["time"].as_f64().unwrap_or(time);
+                Ok(Pixels { image: fit(image, max_side), comp: r["comp"].clone(), time })
             }
         }
     }
