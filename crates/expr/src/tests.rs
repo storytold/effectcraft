@@ -1287,6 +1287,10 @@ fn paragraph_settings_read_and_write_after_effects_names() {
     let d = doc(&f, "text.sourceText.style.setDirection('right-to-left').setJustification('justifyLastRight')");
     assert_eq!(d.direction, effectcraft_keyframe::Direction::Rtl);
     assert_eq!(s("text.sourceText.style.setJustification('alignRight').justification"), "alignRight");
+    // Every accepted alias reads back as After Effects' name; an inherited name isn't one.
+    assert_eq!(s("text.sourceText.style.setJustification('CENTER_JUSTIFY').justification"), "alignCenter");
+    assert_eq!(s("text.sourceText.style.setJustification('justifyAll').justification"), "justifyFull");
+    assert_eq!(s("String(text.sourceText.style.setJustification('toString').justification)"), "toString");
 }
 
 #[test]

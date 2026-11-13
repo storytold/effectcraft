@@ -987,11 +987,21 @@ var __mkProp = (function (P) {
 // attributes at, and the setter calls made on it ([key, value, start, count]). Setters return
 // new objects; returning a style from a Source Text expression applies it.
 
-// After Effects' names for a paragraph's justification, which its expressions read and write.
+// After Effects' names for a paragraph's justification, which its expressions read and write,
+// from every spelling `Justify::parse` accepts (case, '_', '-' and spaces ignored).
 var __AE_JUSTIFY = {
-  left: 'alignLeft', center: 'alignCenter', right: 'alignRight',
-  justifyLeft: 'justifyLastLeft', justifyCenter: 'justifyLastCenter', justifyRight: 'justifyLastRight', justifyAll: 'justifyFull',
+  left: 'alignLeft', leftjustify: 'alignLeft', alignleft: 'alignLeft',
+  center: 'alignCenter', centre: 'alignCenter', centerjustify: 'alignCenter', aligncenter: 'alignCenter',
+  right: 'alignRight', rightjustify: 'alignRight', alignright: 'alignRight',
+  justify: 'justifyLastLeft', justifyleft: 'justifyLastLeft', justifylastleft: 'justifyLastLeft', fulljustifylastlineleft: 'justifyLastLeft',
+  justifycenter: 'justifyLastCenter', justifylastcenter: 'justifyLastCenter', fulljustifylastlinecenter: 'justifyLastCenter',
+  justifyright: 'justifyLastRight', justifylastright: 'justifyLastRight', fulljustifylastlineright: 'justifyLastRight',
+  justifyall: 'justifyFull', justifyfull: 'justifyFull', fulljustifylastlinefull: 'justifyFull', fulljustify: 'justifyFull',
 };
+function __aeJustify(v) {
+  var k = String(v).toLowerCase().replace(/[_ -]/g, '');
+  return Object.prototype.hasOwnProperty.call(__AE_JUSTIFY, k) ? __AE_JUSTIFY[k] : String(v);
+}
 
 function __TextStyle(doc, idx, ops, empty) { this.__d = doc; this.__i = idx; this.__ops = ops; this.__empty = empty; }
 
@@ -1068,7 +1078,7 @@ __TextStyle.prototype = {
   get kerningType() { var k = this.__get('kerning'); return typeof k === 'number' ? 'manual' : k; },
   get kerning() { var k = this.__get('kerning'); return typeof k === 'number' ? k : 0; },
   get isLigature() { return this.__get('ligatures'); },
-  get justification() { var j = this.__get('justify', true); return __AE_JUSTIFY[j] || j; },
+  get justification() { return __aeJustify(this.__get('justify', true)); },
   get firstLineIndent() { return this.__get('indentFirst', true); },
   get startIndent() { return this.__get('indentLeft', true); },
   get endIndent() { return this.__get('indentRight', true); },
@@ -1105,7 +1115,7 @@ __TextStyle.prototype = {
   setKerningType: __styleSetter('kerning', function (v) { v = String(v).toLowerCase(); return v === 'manual' ? 0 : v; }),
   setKerning: __styleSetter('kerning', Number),
   setLigature: __styleSetter('ligatures', Boolean),
-  setJustification: __styleSetter('justify', function (v) { return String(v); }),
+  setJustification: __styleSetter('justify', __aeJustify),
   setFirstLineIndent: __styleSetter('indentFirst'),
   setStartIndent: __styleSetter('indentLeft'),
   setEndIndent: __styleSetter('indentRight'),
