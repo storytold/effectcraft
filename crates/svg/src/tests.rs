@@ -1126,7 +1126,9 @@ fn gradient_stops_shared_across_references_are_not_charged_per_copy() {
 #[test]
 fn nested_knockout_groups_stop_at_the_draw_budget() {
     // Each knockout level draws its children twice and each non-isolated level twice more:
-    // 30 nested levels would be 4^30 draws. The draw budget ends it.
+    // 30 nested levels would be 4^30 draws. The draw budget ends it. The wait is long because the
+    // budget is a count of draws, not time: the render took 1 s on a quiet CI machine and over 20 s
+    // on a loaded one, and 4^30 draws would never finish at all.
     let mut g = Group::new("leaf");
     g.children.push(Node::Shape(Shape {
         name: "s".into(),
@@ -1148,5 +1150,5 @@ fn nested_knockout_groups_stop_at_the_draw_budget() {
     let doc = Doc { width: 4.0, height: 4.0, root: g, skipped: vec![] };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || tx.send(rasterize(&doc, 4, 4, 1.0).width).ok());
-    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(20)).expect("rendering finishes"), 4);
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(120)).expect("rendering finishes"), 4);
 }
