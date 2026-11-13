@@ -785,6 +785,8 @@ var __GroupProto = {
 
 var __groupHandler = {
   get: function (t, k) {
+    // A mask's Invert switch (an effect's own parameter named Invert is a child, so only masks answer here).
+    if (k === 'invert' && typeof t.__info[6] === 'boolean') return t.__info[6];
     if (typeof k !== 'string' || k in t) return t[k];
     return __child(t.__c, t.__l, t.__p, k);
   },
@@ -938,6 +940,8 @@ Prop.prototype = {
   inTangents: function (t) { return this.valueAtTime(t === undefined ? time : t).inTangents(); },
   outTangents: function (t) { return this.valueAtTime(t === undefined ? time : t).outTangents(); },
   isClosed: function () { return this.value.isClosed(); },
+  // PathProperty.createPath(points, inTangents, outTangents, isClosed): the same as the global createPath.
+  createPath: function (points, inTangents, outTangents, isClosed) { return createPath(points, inTangents, outTangents, isClosed); },
   pointOnPath: function (pct, t) { return this.valueAtTime(t === undefined ? time : t).pointOnPath(pct); },
   tangentOnPath: function (pct, t) { return this.valueAtTime(t === undefined ? time : t).tangentOnPath(pct); },
   normalOnPath: function (pct, t) { return this.valueAtTime(t === undefined ? time : t).normalOnPath(pct); },
