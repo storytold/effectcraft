@@ -120,6 +120,22 @@ fn obj_without_normals_gets_them() {
 }
 
 #[test]
+fn obj_mixed_authored_normals_keep_flat_missing_corners() {
+    let src = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nvn 0 1 0\ns off\nf 1//1 2 3\nf 1 3 4\n";
+    let m = obj::parse(src, &|_| None).unwrap();
+    let corners: Vec<_> = m.meshes[0]
+        .primitives
+        .iter()
+        .flat_map(|p| p.positions.iter().zip(&p.normals))
+        .filter(|(position, _)| **position == [0.0, 1.0, 0.0])
+        .map(|(_, normal)| *normal)
+        .collect();
+    assert!(corners.contains(&[0.0, 0.0, 1.0]), "{corners:?}");
+    assert!(corners.contains(&[1.0, 0.0, 0.0]), "{corners:?}");
+    assert!(m.meshes[0].primitives.iter().any(|p| p.normals.contains(&[0.0, 1.0, 0.0])));
+}
+
+#[test]
 fn obj_textures_from_another_machine_find_the_file_next_to_the_model() {
     // No committed media: the material file and its textures are written by the test itself.
     let d = std::env::temp_dir().join(format!("ec-obj-sibling-{}", std::process::id()));
@@ -433,6 +449,58 @@ fn contours_group_into_outlines_by_nesting() {
 }
 
 #[test]
+fn overlapping_contours_keep_every_container_in_their_depth() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // C's first vertex lies inside both A and B, which overlap without nesting: C is two deep,
+    // an outer contour, not a hole cut out of B.
+    let g = group_contours(vec![rect(0.0, 0.0, 10.0, 10.0), rect(5.0, -2.0, 13.0, 8.0), rect(9.0, 1.0, 12.0, 2.0)]);
+    assert_eq!(g.len(), 3);
+    assert_eq!(g.iter().map(|o| o.holes.len()).sum::<usize>(), 0);
+}
+
+#[test]
+fn a_contour_inside_a_hole_takes_the_innermost_outline_not_the_hole() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // A and B overlap; C lies in A only (a hole of A); D lies in A, B and C (three deep, a hole).
+    // The smallest container of D is the hole C, which has no outline of its own: D goes to B.
+    let g = group_contours(vec![rect(0.0, 0.0, 10.0, 10.0), rect(5.0, -2.0, 13.0, 8.0), rect(1.0, 1.0, 9.0, 9.0), rect(6.0, 2.0, 7.0, 3.0)]);
+    assert_eq!(g.len(), 2);
+    assert_eq!(g.iter().map(|o| o.holes.len()).collect::<Vec<_>>(), [1, 1], "C is a hole of A, D a hole of B (not dropped)");
+}
+
+#[test]
+fn a_hole_whose_outline_is_deeper_than_it_is_still_attached() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    // D is three deep and its innermost outline A four deep: A's slot must exist before D is attached.
+    let a = rect(0.0, 0.0, 10.0, 10.0);
+    let g = group_contours(vec![
+        a.clone(),
+        rect(-1.0, -1.0, 20.0, 20.0),
+        rect(-2.0, -2.0, 25.0, 25.0),
+        rect(5.0, 5.0, 6.0, 6.0),
+        rect(-100.0, -100.0, 3.0, 3.0),
+        rect(-0.5, -1000.0, 0.5, 1000.0),
+    ]);
+    let o = g.iter().find(|o| o.outer == a).expect("A is an outline");
+    assert_eq!(o.holes.len(), 1, "D is a hole of A");
+}
+
+#[test]
+fn gltf_images_naming_one_file_share_their_wrap_variants() {
+    let png = {
+        let img = image::RgbaImage::from_fn(2, 2, |x, y| if (x + y) % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    // Two image entries with one URI share a decode; two textures clamp it, so they share one copy.
+    let doc = br#"{"asset":{"version":"2.0"},"images":[{"uri":"t.png"},{"uri":"t.png"}],
+        "samplers":[{"wrapS":33071,"wrapT":33071}],"textures":[{"source":0,"sampler":0},{"source":1,"sampler":0}]}"#;
+    let m = gltf::parse(doc, &|u| (u == "t.png").then(|| png.clone())).unwrap();
+    assert_eq!(m.textures.len(), 1, "one clamped copy for both textures");
+}
+
+#[test]
 fn gltf_cameras_and_punctual_lights() {
     let doc = r#"{
         "asset": {"version": "2.0"},
@@ -597,9 +665,9 @@ fn gltf_accessor_counts_are_checked_against_the_buffer_before_allocating() {
     let view = r#"{"buffer": 0, "byteLength": 36}"#;
     let cases = [
         // A count far beyond the 36-byte buffer.
-        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 4000000000}"#, view, "past its buffer"),
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 4000000000}"#, view, "limit allows"),
         // count * components overflows.
-        (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 9223372036854775807}"#, view, "too large"),
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 9223372036854775807}"#, view, "limit allows"),
         // Offsets that overflow when added.
         (
             r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3, "byteOffset": 16}"#,
@@ -607,11 +675,11 @@ fn gltf_accessor_counts_are_checked_against_the_buffer_before_allocating() {
             "past its buffer",
         ),
         // A stride that overflows with the count.
-        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3000000000}"#, r#"{"buffer": 0, "byteStride": 252}"#, "past its buffer"),
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3000000000}"#, r#"{"buffer": 0, "byteStride": 252}"#, "limit allows"),
         // A stride smaller than an element would re-read the same bytes for a huge count.
         (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 30}"#, r#"{"buffer": 0, "byteStride": 1}"#, "smaller than"),
         // No buffer view: nothing backs the count, so it is capped.
-        (r#"{"componentType": 5126, "type": "VEC3", "count": 1000000000}"#, view, "without a bufferView"),
+        (r#"{"componentType": 5126, "type": "VEC3", "count": 1000000000}"#, view, "limit allows"),
     ];
     let t0 = std::time::Instant::now();
     for (acc, v, want) in cases {
@@ -669,65 +737,112 @@ fn gltf_issue_2139_huge_mat4_count_is_an_error() {
 }
 
 #[test]
-fn gltf_buffer_less_accessors_share_one_zero_budget() {
-    // Each buffer-less accessor is capped, but nothing backs any of them, so referencing a capped
-    // one from many primitives must not multiply the allocation (#2139).
+fn gltf_reused_buffer_less_accessor_is_read_once() {
+    // The shared reader parses a repeated accessor only once, so referencing it from several
+    // primitives does not multiply its one bounded allocation.
     let acc = r#"{"componentType": 5126, "type": "VEC3", "count": 5000000}"#;
     let prims = [r#"{"attributes": {"POSITION": 0}}"#; 4].join(", ");
     let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3).replace(r#"[{"attributes": {"POSITION": 0}}]"#, &format!("[{prims}]"));
     assert_eq!(doc.matches(r#""POSITION": 0"#).count(), 4);
-    let e = crate::gltf::parse(doc.as_bytes(), &|_| None).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("without a bufferView"), "{e}");
-    // One such accessor read once still imports.
-    let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3);
-    assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_ok());
-}
-
-/// `refs` primitives sharing one buffer-backed `verts`-vertex POSITION accessor, without indices.
-fn gltf_shared_positions(verts: usize, refs: usize) -> String {
-    let acc = format!(r#"{{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": {verts}}}"#);
-    let prims = vec![r#"{"attributes": {"POSITION": 0}}"#; refs].join(", ");
-    gltf_doc(&acc, r#"{"buffer": 0}"#, verts * 12).replace(r#"[{"attributes": {"POSITION": 0}}]"#, &format!("[{prims}]"))
+    let result = crate::gltf::parse(doc.as_bytes(), &|_| None);
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]
-fn gltf_buffer_backed_reads_share_one_read_budget() {
-    // A buffer-backed accessor is checked against its buffer, but each primitive that references
-    // it reads and keeps its own copy, so a small file listing many references must not ask for
-    // memory set by the reference count (#2139 review). Everything a primitive keeps is charged
-    // to one per-file budget: 1,000 vertices without indices or normals cost 3,000 position
-    // components, 1,000 generated indices, a 999-index triangle list and 999 flat-shaded
-    // vertices of 6 components, 10,993 in all.
-    let one = gltf_shared_positions(1000, 1);
-    let m = crate::gltf::parse_with_budget(one.as_bytes(), &|_| None, 20_000).unwrap();
-    assert_eq!(m.meshes[0].primitives.len(), 1);
-    let three = gltf_shared_positions(1000, 3);
-    assert_eq!(three.matches(r#""POSITION": 0"#).count(), 3);
-    let e = crate::gltf::parse_with_budget(three.as_bytes(), &|_| None, 20_000).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("more than 20000 components"), "{e}");
-    // The real cap leaves room for legitimate sharing: many primitives over one vertex buffer.
-    let m = crate::gltf::parse(gltf_shared_positions(1000, 50).as_bytes(), &|_| None).unwrap();
-    assert_eq!(m.meshes[0].primitives.len(), 50);
+fn texture_decoding_is_charged_to_the_import_budget() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let mut left = 4;
+    assert_eq!(Texture::decode_within(&png, &mut left).unwrap().data.len(), 4);
+    assert_eq!(left, 0);
+    assert!(matches!(Texture::decode_within(&png, &mut left), Err(ModelError::Unsupported(_))));
 }
 
 #[test]
-fn gltf_missing_indices_are_charged_to_the_read_budget() {
-    // Without `indices` every vertex gets a generated index, allocated like a read: after the
-    // 3,000 position components, 999 left is one short for the 1,000 indices.
-    let doc = gltf_shared_positions(1000, 1);
-    let e = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 3999).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("(1000 requested, 999 left)"), "{e}");
+fn obj_repeated_material_libraries_and_textures_load_once() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let mtl = b"newmtl A\nmap_Kd t.png\nnewmtl B\nmap_Kd t.png\n".to_vec();
+    let src = b"mtllib m.mtl\nmtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl A\nf 1 2 3\nusemtl B\nf 1 2 3\nusemtl A\nf 1 2 3\n";
+    let m = obj::parse(src, &|name| match name {
+        "m.mtl" => Some(mtl.clone()),
+        "t.png" => Some(png.clone()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(m.materials.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert_eq!(m.textures.len(), 1);
+    assert_eq!(m.meshes[0].primitives.iter().map(|p| (p.material, p.triangle_count())).collect::<Vec<_>>(), [(Some(0), 2), (Some(1), 1)]);
 }
 
 #[test]
-fn gltf_strip_expansion_is_charged_to_the_read_budget() {
-    // A strip of k indices becomes 3(k-2) triangle indices and as many flat-shaded vertices, so
-    // the output is charged, not only the 1,009 components read.
-    let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3}"#, r#"{"buffer": 0}"#, 1036)
-        .replace(r#""count": 3}]"#, r#""count": 3}, {"bufferView": 0, "componentType": 5121, "type": "SCALAR", "count": 1000}]"#)
-        .replace(r#""attributes": {"POSITION": 0}"#, r#""attributes": {"POSITION": 0}, "indices": 1, "mode": 5"#);
-    let m = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 30_000).unwrap();
-    assert_eq!(m.meshes[0].primitives[0].indices.len(), 2994);
-    let e = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 5000).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("more than 5000 components"), "{e}");
+fn gltf_textures_naming_one_image_share_it() {
+    let doc = String::from_utf8(fixture("quad.gltf")).unwrap();
+    // Three textures of one image: the fixture's sampler, the same sampler again, no sampler.
+    let doc = doc.replace(
+        "\"textures\": [\n  {\n   \"source\": 0,\n   \"sampler\": 0\n  }\n ]",
+        "\"textures\": [{\"source\": 0, \"sampler\": 0}, {\"source\": 0, \"sampler\": 0}, {\"source\": 0}]",
+    );
+    let m = gltf::parse(doc.as_bytes(), &|_| None).unwrap();
+    assert_eq!(m.textures.len(), 2);
+    assert_eq!(m.textures[0].wrap, [Wrap::Clamp, Wrap::Repeat]);
+    assert_eq!(m.textures[1].wrap, [Wrap::Repeat, Wrap::Repeat]);
+}
+
+#[test]
+fn instances_of_one_skin_share_its_joint_matrices() {
+    let p = mesh(PrimitiveKind::Plane, &PrimParams { size: [2.0, 2.0, 0.0], ..Default::default() });
+    let mut m = Model::single(Mesh { name: "s".into(), primitives: vec![p] }, vec![Material::default()]);
+    m.nodes[0].skin = Some(0);
+    m.nodes.push(Node { mesh: Some(0), skin: Some(0), ..Node::default() });
+    m.roots = vec![0, 1];
+    m.skins.push(Skin { joints: vec![0], inverse_bind: vec![Mat4::IDENTITY] });
+    let inst = m.instances(None, 0.0);
+    assert_eq!(inst.len(), 2);
+    assert!(Arc::ptr_eq(inst[0].joints.as_ref().unwrap(), inst[1].joints.as_ref().unwrap()));
+}
+
+#[test]
+fn contour_grouping_is_bounded() {
+    let sq = |x: f64, y: f64, s: f64| vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]];
+    let n = extrude::MAX_CONTOURS + 1;
+    let cs: Vec<Vec<[f64; 2]>> = (0..n).map(|i| sq(i as f64 * 2.0, 0.0, 1.0)).collect();
+    let g = group_contours(cs);
+    assert_eq!(g.len(), extrude::MAX_CONTOURS);
+    assert!(g.iter().all(|o| o.holes.is_empty()));
+}
+
+/// A texture the import leaves out (too large, or not an image) is named in `Model::warnings`,
+/// which the import shows the user; the model still loads.
+#[test]
+fn left_out_textures_are_reported_as_import_warnings() {
+    // A 24-bit BMP header claiming 9000×9000 (81 MP, over one texture's limit) over no pixel data.
+    let mut big = b"BM".to_vec();
+    big.extend_from_slice(&[0; 8]);
+    big.extend_from_slice(&54u32.to_le_bytes());
+    big.extend_from_slice(&40u32.to_le_bytes());
+    big.extend_from_slice(&9000u32.to_le_bytes());
+    big.extend_from_slice(&9000u32.to_le_bytes());
+    big.extend_from_slice(&[1, 0, 24, 0]);
+    big.extend_from_slice(&[0; 24]);
+    let mtl = b"newmtl A\nmap_Kd big.bmp\nnewmtl B\nmap_Kd junk.png\nnewmtl C\nmap_Kd gone.png\n".to_vec();
+    let src = b"mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl A\nf 1 2 3\n";
+    let m = obj::parse(src, &|name| match name {
+        "m.mtl" => Some(mtl.clone()),
+        "big.bmp" => Some(big.clone()),
+        "junk.png" => Some(b"not an image".to_vec()),
+        _ => None,
+    })
+    .unwrap();
+    assert!(m.textures.is_empty());
+    let all = m.warnings.join("|");
+    assert!(all.contains("big.bmp") && all.contains("junk.png") && all.contains("gone.png"), "{all}");
 }

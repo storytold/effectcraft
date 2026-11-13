@@ -426,7 +426,7 @@ fn static_records(file: &AepFile<'_>) -> std::collections::BTreeMap<(String, usi
         for (li, layer) in comp.layers().enumerate() {
             for (ei, e) in layer.effects().into_iter().enumerate() {
                 let Some(spec) = effectcraft_aep::effect_map::by_match_name(e.match_name()) else { continue };
-                let Some(values) = e.chunk().child_list(b"tdgp") else { continue };
+                let Some(values) = e.chunk().child_list(b"tdgp").map(|v| v.to_chunk()) else { continue };
                 let k = values.children();
                 for (i, c) in k.iter().enumerate() {
                     let Some(name) =

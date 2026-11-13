@@ -10,11 +10,13 @@ use serde_json::{Value, json};
 
 use crate::{Outcome, run_code};
 
+mod ae_layer_order;
 mod callable;
 mod ease_presets;
 mod evalfile;
 mod include;
 mod panels;
+mod paragraph_justification;
 #[cfg(not(target_arch = "wasm32"))]
 mod render_wait;
 #[cfg(not(windows))]
@@ -697,6 +699,56 @@ fn save_frame_to_png_writes_behind_the_file_gate() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     // IHDR width and height.
     assert_eq!((u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap())), (40, 30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A script that runs the export commands itself (`app.run`, `__exec`) meets the same file-write
+/// preference as the wrappers; with the preference off nothing is created or replaced.
+#[test]
+fn export_commands_run_directly_by_a_script_respect_the_file_gate() {
+    let dir = std::env::temp_dir().join(format!("ec-direct-export-{}", std::process::id()));
+    // A leftover dir from an interrupted run (same pid) must not feed stale absence checks.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("frame.png");
+    let tpl = dir.join("card.ectemplate");
+    let kept = dir.join("kept.png");
+    std::fs::write(&kept, b"original").unwrap();
+    let mut s = session();
+    s.execute("comp.new", json!({"name": "Card", "width": 64, "height": 64, "duration": 1})).unwrap();
+    s.execute("layer.newText", json!({"text": "Hi"})).unwrap();
+    ok(&mut s, "var c = app.project.activeItem; c.layer(1).property('ADBE Transform Group').property('ADBE Opacity').addToMotionGraphicsTemplate(c);");
+    let q = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
+    let comp = s.active_comp_id().unwrap().0;
+    for (code, target) in [
+        (format!("app.run('comp.saveFrameAs', {{comp: {comp}, path: {}}})", q(&png)), &png),
+        (format!("__exec('comp.saveFrameAs', JSON.stringify({{comp: {comp}, path: {}}}))", q(&png)), &png),
+        (format!("app.run('essential.exportTemplate', {{comp: {comp}, path: {}}})", q(&tpl)), &tpl),
+        (format!("app.run('comp.saveFrameAs', {{comp: {comp}, path: {}}})", q(&kept)), &kept),
+    ] {
+        let o = run_code(&mut s, &code, "direct.jsx");
+        let e = o.error.unwrap_or_else(|| panic!("`{code}` was not refused"));
+        assert!(e.message.contains("Allow Scripts to Write Files"), "{e:?}");
+        if target == &kept {
+            assert_eq!(std::fs::read(&kept).unwrap(), b"original");
+        } else {
+            assert!(!target.exists(), "{} was written", target.display());
+        }
+    }
+    // The wrappers check the gate without touching the file: an existing one is left as it was.
+    let o = run_code(&mut s, &format!("app.project.activeItem.saveFrameToPng(0, new File({}))", q(&kept)), "wrap.jsx");
+    assert!(o.error.is_some());
+    assert_eq!(std::fs::read(&kept).unwrap(), b"original");
+    let o = run_code(&mut s, &format!("app.project.activeItem.exportAsMotionGraphicsTemplate(true, {})", q(&tpl)), "wrap.jsx");
+    assert!(o.error.is_some());
+    assert!(!tpl.exists());
+    // The user, from the UI, is not a script: the same command writes.
+    s.execute("comp.saveFrameAs", json!({"comp": comp, "path": png.to_string_lossy()})).unwrap();
+    assert!(png.exists());
+    // With the preference on, the script's direct call writes too.
+    s.prefs.scripting.allow_scripts_write_files = true;
+    ok(&mut s, &format!("app.run('essential.exportTemplate', {{comp: {comp}, path: {}}})", q(&tpl)));
+    assert!(std::fs::metadata(&tpl).unwrap().len() > 100);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1948,4 +2000,78 @@ fn setting_comp_width_and_height_leaves_the_layers_where_they_are() {
     assert_eq!(o.result, json!(["100,100,0", "100,100,0", "10,20,0", "30,40,0", 800, 400]));
     let (_, c) = comp_named(&s, "w");
     assert_eq!(layer(c, "s").props.prop("transform/position").unwrap().value, KV::Vec3([100.0, 100.0, 0.0]));
+}
+
+#[test]
+fn a_hashbang_line_does_not_hide_deep_nesting_from_eval() {
+    // Boa reads a leading `#!` line of eval source as a comment, so the backtick on it opens no
+    // template: the brackets after it are counted and refused.
+    let mut s = session();
+    let code = "var deep = new Array(5000).join('(') + '1' + new Array(5000).join(')'); var r; \
+        try { eval('#! `\\n' + deep); r = 'ran'; } catch (e) { r = 'refused'; } r";
+    assert_eq!(ok(&mut s, code).result.as_str(), Some("refused"));
+    assert!(crate::runtime::check_nesting(&format!("#! `\n{}1{}", "(".repeat(5000), ")".repeat(5000))).is_err());
+    assert!(crate::runtime::check_nesting("#! `\n(1)").is_ok());
+}
+
+#[test]
+fn code_compiled_at_run_time_passes_the_nesting_check() {
+    // `eval` and `new Function` of a string nested past the limit are refused with a catchable
+    // error instead of overflowing the parser's stack; shallow code still compiles.
+    let mut s = session();
+    for call in ["eval(deep)", "new Function(deep)", "Function('a', deep)"] {
+        let code = format!(
+            "var deep = new Array(5000).join('(') + '1' + new Array(5000).join(')'); var r; try {{ {call}; r = 'ran'; }} catch (e) {{ r = 'refused'; }} r"
+        );
+        assert_eq!(ok(&mut s, &code).result.as_str(), Some("refused"), "{call}");
+    }
+    assert_eq!(ok(&mut s, "eval('1 + (2 * 3)') + new Function('return 4')()").result.as_f64(), Some(11.0));
+}
+
+#[test]
+fn file_masks_match_without_backtracking() {
+    let mut s = session();
+    let r = ok(
+        &mut s,
+        "[__globMatch('*.JSX', 'a.jsx'), __globMatch('a?c*', 'abcdef'), __globMatch('*a*b', 'xaxb'), __globMatch('*.png', 'a.jsx'), __globMatch('*a*a*a*a*a*a*a*a*a*a*a*b', new Array(60).join('a'))].join()",
+    );
+    assert_eq!(r.result.as_str(), Some("true,true,true,false,false"));
+    // `?` still matches one character that lowercases to two.
+    let r = ok(&mut s, "[__globMatch('?.txt', '\\u0130.txt'), __globMatch('\\u0130*', '\\u0130x')].join()");
+    assert_eq!(r.result.as_str(), Some("true,true"));
+    // Greek sigma matches in every case form, as the case-insensitive regular expression did.
+    let r = ok(
+        &mut s,
+        "[__globMatch('\\u03bf\\u03c2.txt', '\\u039f\\u03a3.txt'), __globMatch('\\u03a3*', '\\u03c2x'), __globMatch('k', '\\u212a'), __globMatch('a', 'b')].join()",
+    );
+    assert_eq!(r.result.as_str(), Some("true,true,false,false"));
+}
+
+/// #3395: setValue on a string effect parameter stores the text, or a File's path, as `prop.set`
+/// does. Before, every string fell through to the number check ("value must be a number").
+/// Hidden string parameters (Mesh Warp's Distortion Mesh) stay refused, keys included.
+#[test]
+fn set_value_stores_a_string_parameter() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Str", 64, 36, 1, 1, 24);
+        var l = c.layers.addSolid([1, 0, 0], "s", 64, 36, 1);
+        var fx = l.property("ADBE Effect Parade");
+        var lut = fx.addProperty("Apply Color LUT").property("LUT");
+        lut.setValue("/luts/look.cube");
+        var fromString = lut.value;
+        lut.setValue(new File("/luts/other.cube"));
+        var mesh = fx.addProperty("Mesh Warp").property("Distortion Mesh");
+        function attempt(f) { try { f(); return "no error"; } catch (e) { return e.message; } }
+        var hidden = attempt(function () { mesh.setValue("x"); });
+        var keyed = attempt(function () { mesh.setValueAtTime(0, "x"); });
+        [lut.propertyValueType === PropertyValueType.CUSTOM_VALUE, fromString, lut.value, hidden, keyed, mesh.numKeys]
+        "#,
+    );
+    let refused = "\"Distortion Mesh\" can not be set";
+    assert_eq!(o.result, json!([true, "/luts/look.cube", "/luts/other.cube", refused, refused, 0]));
+    let (_, c) = comp_named(&s, "Str");
+    assert_eq!(layer(c, "s").props.prop("effects/#1/lut").unwrap().value, KV::Str("/luts/other.cube".into()));
 }

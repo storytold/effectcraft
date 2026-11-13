@@ -756,7 +756,7 @@ pub struct UiState {
     /// Flowchart panel options (layers, effects, solids, direction, root comp).
     #[serde(default)]
     pub flowchart: crate::panels::flowchart::FlowOptions,
-    /// Lumetri Scopes panel options.
+    /// Video Scopes panel options.
     #[serde(default)]
     pub scopes: crate::panels::scopes_panel::ScopesState,
 }
@@ -806,7 +806,7 @@ impl Default for UiState {
             home_learn: false,
             home_templates: false,
             align_to_selection: false,
-            cache_when_idle: false,
+            cache_when_idle: true,
             tracker_source: None,
             layer_panel: None,
             layer_view: None,

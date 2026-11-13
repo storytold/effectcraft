@@ -509,10 +509,25 @@ impl Session {
     /// is not for an export to replace. For callers that write the file themselves; call it
     /// before the work, not after it.
     pub fn refuse_export(&self, path: &str) -> crate::Result<()> {
+        self.refuse_script_write(path)?;
         match self.blocking(path) {
             Some(source) => Err(crate::EngineError::Other(source.refusal(path, Use::Export))),
             None => Ok(()),
         }
+    }
+
+    /// `Err` when a script issued the running command ([`Session::running_for_script`]) and
+    /// Settings ▸ Scripting & Expressions ▸ Allow Scripts to Write Files is off. The scripting
+    /// wrappers check this too, but a script can run any command directly (`app.run`, `__exec`),
+    /// so the commands that write a path they are given check here, through
+    /// [`Session::refuse_export`] and [`Session::write_output`].
+    pub fn refuse_script_write(&self, path: &str) -> crate::Result<()> {
+        if self.running_for_script() && !self.prefs.scripting.allow_scripts_write_files {
+            return Err(crate::EngineError::Other(format!(
+                "Unable to write {path}: scripts can't write files unless Settings ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network is on"
+            )));
+        }
+        Ok(())
     }
 
     /// Write `bytes` to `path` through the host's services, unless the project reads the file
@@ -525,6 +540,7 @@ impl Session {
     /// [`Session::write_output`] against files already found ([`Session::protected_files`]),
     /// for a command that writes many.
     pub(crate) fn write_output_with(&self, protected: &Protected, path: &str, bytes: &[u8]) -> crate::Result<()> {
+        self.refuse_script_write(path)?;
         if let Some(source) = protected.find(Path::new(path)) {
             return Err(crate::EngineError::Other(source.refusal(path, Use::Export)));
         }

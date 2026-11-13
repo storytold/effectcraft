@@ -164,6 +164,8 @@ fn noise_alpha_and_hls() {
     effect_case("ec.noise.noisehls", &[("hue", n(30.0)), ("lightness", n(20.0)), ("saturation", n(40.0))]);
     effect_case("ec.noise.noisehls", &[("noise", e(1)), ("lightness", n(50.0)), ("noisePhase", n(200.0))]);
     effect_case("ec.noise.noisehls", &[("noise", e(2)), ("hue", n(60.0)), ("saturation", n(25.0)), ("grainSize", n(3.0))]);
+    // #3483, #3484: the ends of After Effects' ranges.
+    effect_case("ec.noise.noisehls", &[("noise", e(2)), ("hue", n(1000.0)), ("lightness", n(1000.0)), ("saturation", n(1000.0)), ("grainSize", n(0.0))]);
     effect_case("ec.noise.noisehlsauto", &[("noise", e(0)), ("hue", n(20.0)), ("lightness", n(30.0)), ("noiseAnimationSpeed", n(7.0))]);
 }
 
