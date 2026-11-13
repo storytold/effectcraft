@@ -20,6 +20,9 @@ cargo xtask aep-corpus
 EFFECTCRAFT_AEP_FIXTURES=corpus/aep EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1 cargo test -p effectcraft-aep
 ```
 
+The container and typed-view tests are in `craft-aep` ([storytold/craft-libs](https://github.com/storytold/craft-libs)),
+which reads the same corpus from `CRAFT_AEP_FIXTURES` (and `CRAFT_AEP_FIXTURES_REQUIRED`).
+
 The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
 interactively — local variables, parameters, column breakpoints — build with the `dev-full`
 profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUTING.md`).
@@ -28,6 +31,15 @@ profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUT
 `cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
 runs `missing_translations_report` with `--nocapture`, which prints the interface strings each
 language has no translation for. Those strings show in English; the report always passes.
+
+Direct nextest runs, including archived coverage shards, serialise `effectcraft-gpu`,
+`effectcraft-ui-egui`, `effectcraft-sam2` and the CLI adapter tests through the `gpu` test group
+in `.config/nextest.toml`. Their process-local mutexes cannot coordinate nextest's separate
+processes; competing software devices can time out during readback. UI harnesses can also
+create a device lazily when rendering a screenshot. This also reduces UI and SAM2 test
+parallelism in the normal gate. `cargo xtask ci` still runs the GPU library suite in one
+process to reuse its device. Group limits apply within one nextest invocation, not across
+separate invocations, and cannot prevent timeouts from other host workloads.
 
 Each crate with several integration-test files has one test binary, `tests/it/main.rs`, whose
 modules are the files in `tests/it/`. Run one file with `cargo test -p <crate> --test it <module>::`

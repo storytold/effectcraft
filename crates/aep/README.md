@@ -3,7 +3,9 @@
 After Effects projects (`.aep`, `.aepx`) in one crate, the way `effectcraft-lottie` handles Lottie:
 
 - `container`: reads and writes the container as a lossless chunk tree, with a typed, read-only
-  view (below; its API is re-exported at the crate root);
+  view (below). This is `craft-aep` from [storytold/craft-libs](https://github.com/storytold/craft-libs),
+  re-exported at the crate root; its container tests and the `aepdump`/`stubicc` tools are there.
+  Only `effect_map` and `style_map` (After Effects effects and layer styles to EffectCraft's) are here;
 - `import`: maps the typed view into an EffectCraft project and reports everything it does not
   import ([`docs/aep-import.md`](../../docs/aep-import.md));
 - `export`: writes an EffectCraft project as an `.aep` with every chunk built in code, and reports everything it does not export
@@ -21,7 +23,9 @@ tree; pad bytes, odd bodies and the bytes after the container, an XMP packet, ar
 
 The XML form of a project (`.aepx`) is read into the same tree by `read_aepx` (a small bounded
 XML tokenizer, no dependency); `parse_any` picks the reader by content, so the typed view and the
-importer take either form. The mapping is in `docs/aep-format.md`, section 1.
+importer take either form. The mapping is in `docs/aep-format.md`, section 1. The importer, which
+only reads, does not build the owned tree: it reads either form through the flat index
+`TreeIndex`, an `.aep` in place and an `.aepx` decoded into one buffer first.
 
 Bodies that look like lists but are not chunk sequences (for example `LIST btdk`, raw text) stay
 opaque rather than failing the parse. Input is untrusted: sizes are checked against the remaining
@@ -75,6 +79,10 @@ solid, a folder, a Levels and a Glow effect with expressions). Every After Effec
 the working space's ICC profile (HP sRGB IEC61966-2.1 for the default) in a JSON settings chunk;
 the one `Utf8` chunk of this file that held a profile was replaced by `{}`, and nothing else was
 changed. The tests in `tests/it/import/synthetic.rs` damage copies of it and need no other file.
+`tests/fixtures/text-synthetic.aep` is the other: made in After Effects 2026 the same way (working
+space None, nothing changed after the save), one composition with two text layers that hold a
+text animator's Stroke Opacity (static and keyed) and Source Text expressions (enabled and
+disabled); `tests/it/import/text_synthetic.rs` reads it (#3170).
 
 `tests/fixtures/ai-mask-3099.aep` (131 KB, #3099) is the second: four hand-written one-page PDFs
 named `.ai` with distinct page boxes, placed in a composition, one of them with two masks under a
@@ -86,14 +94,9 @@ the import against After Effects' read-back, and the host's `vector_import` test
 
 - `tests/fixtures/tools/`: the generator of the test projects (regenerates the corpus with After
   Effects; its README says how).
-- `examples/aepdump.rs`: prints the chunk tree of a file (ids, sizes, short data, match names):
-  `cargo run -p effectcraft-aep --example aepdump -- file.aep`.
-- `examples/stubicc.rs`: replaces every embedded ICC profile of a saved project by a stub that keeps
-  only the profile's description: the JSON `colorProfileData` of the working space (any white space
-  around the colon, `\/` escapes, quotes as `&quot;`) in an `.aep` chunk or the `.aepx` text, and a raw
-  profile of an imported image (an `.aep` chunk, or the `bdata` hex of an `.aepx`):
-  `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`. A profile it cannot replace
-  stops it before anything is written. The importer reads the working space's name from the
-  description only, so the project imports the same; no vendor colour data stays in the test
-  project. Check the result independently, not by the tool's count (the corpus repository has
-  `tools/aep/inspect-embedded.py`, which scans the raw bytes, base64 and hex).
+- `aepdump` (prints the chunk tree of a file) and `stubicc` (replaces every embedded ICC profile of a
+  saved project by a stub) are examples of `craft-aep` in
+  [storytold/craft-libs](https://github.com/storytold/craft-libs):
+  `cargo run -p craft-aep --example stubicc -- in.aep out.aep` there. Check the result independently,
+  not by the tool's count (the corpus repository has `tools/aep/inspect-embedded.py`, which scans the
+  raw bytes, base64 and hex).

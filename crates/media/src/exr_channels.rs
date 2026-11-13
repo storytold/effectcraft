@@ -31,33 +31,13 @@ use crate::convert::{AlphaOp, float_to_image};
 /// stop at the same size).
 const MAX_DISPLAY_PIXELS: usize = 1 << 28;
 
-fn is_depth(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    last.eq_ignore_ascii_case("z") || name.to_ascii_lowercase().contains("depth")
-}
-
-/// Full plane name of a channel in a part: `part.channel`, except that Blender 5 writes one part
-/// per pass whose channels already carry the full name (part `ViewLayer.Depth` holds
-/// `ViewLayer.Depth.Z`), which is kept as is instead of doubling the prefix.
-fn channel_name(part: Option<&str>, channel: &str) -> String {
-    match part {
-        Some(p) if channel.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')) => channel.to_string(),
-        Some(p) => format!("{p}.{channel}"),
-        None => channel.to_string(),
-    }
-}
+// Channel naming and the Cryptomatte manifest are `craft-exr`'s.
+use craft_exr::channels::{is_depth, part_channel_name as channel_name};
+pub use craft_exr::cryptomatte::parse_manifest;
 
 /// The part name channels are prefixed with (`None`: unnamed).
 fn part_name(header: &Header) -> Option<String> {
     header.own_attributes.layer_name.as_ref().map(|t| t.to_string()).filter(|s| !s.is_empty())
-}
-
-/// Parse a Cryptomatte manifest (`{"name": "hexhash", …}`).
-pub fn parse_manifest(json: &str) -> Vec<(String, u32)> {
-    let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(json) else { return vec![] };
-    let mut v: Vec<(String, u32)> = m.iter().filter_map(|(k, h)| Some((k.clone(), u32::from_str_radix(h.as_str()?.trim(), 16).ok()?))).collect();
-    v.sort();
-    v
 }
 
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build

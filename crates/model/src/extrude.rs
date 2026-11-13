@@ -96,10 +96,14 @@ fn point_in(p: P, c: &[P]) -> bool {
     inside
 }
 
+/// Most contours grouped into outlines; containment is tested pairwise, so the smallest are dropped.
+pub const MAX_CONTOURS: usize = 10_000;
+
 /// Group closed contours into outlines by nesting depth (even depth = outer, odd = hole of the
-/// innermost containing outer contour). Degenerate contours are dropped.
+/// innermost containing outer contour). Degenerate contours are dropped, as are the smallest
+/// past [`MAX_CONTOURS`] (a kept hole always keeps its larger container).
 pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
-    let cs: Vec<Vec<P>> = contours
+    let mut cs: Vec<Vec<P>> = contours
         .into_iter()
         .map(|mut c| {
             c.dedup();
@@ -110,26 +114,60 @@ pub fn group_contours(contours: Vec<Vec<P>>) -> Vec<Outline> {
         })
         .filter(|c| c.len() >= 3 && signed_area(c).abs() > 1e-9)
         .collect();
+    if cs.len() > MAX_CONTOURS {
+        log::warn!("model: {} contours, grouping the {MAX_CONTOURS} largest", cs.len());
+        // Keep the largest, in their original order.
+        let area: Vec<f64> = cs.iter().map(|c| signed_area(c).abs()).collect();
+        let mut keep: Vec<usize> = (0..cs.len()).collect();
+        keep.sort_by(|&a, &b| area[b].total_cmp(&area[a]));
+        keep.truncate(MAX_CONTOURS);
+        keep.sort_unstable();
+        cs = keep.into_iter().map(|i| std::mem::take(&mut cs[i])).collect();
+    }
     let n = cs.len();
     let area: Vec<f64> = cs.iter().map(|c| signed_area(c).abs()).collect();
-    // Containers of each contour (by a vertex inside; nested contours do not cross).
-    let parents: Vec<Vec<usize>> = (0..n)
+    let bounds: Vec<[P; 2]> = cs
+        .iter()
+        .map(|c| c.iter().fold([[f64::MAX; 2], [f64::MIN; 2]], |[lo, hi], p| [[lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]]))
+        .collect();
+    // The containers of each contour: the larger contours holding a vertex of it (nested contours
+    // do not cross); the bounding box must hold the vertex first. Depth is their count, so
+    // overlapping (non-nested) paths keep every container they sit inside.
+    let containers = |i: usize, only: &dyn Fn(usize) -> bool| -> Vec<usize> {
+        let p = cs[i][0];
+        (0..n)
+            .filter(|&j| j != i && area[j] > area[i] && only(j))
+            .filter(|&j| (bounds[j][0][0]..=bounds[j][1][0]).contains(&p[0]) && (bounds[j][0][1]..=bounds[j][1][1]).contains(&p[1]))
+            .filter(|&j| point_in(p, &cs[j]))
+            .collect()
+    };
+    let depth: Vec<usize> = (0..n).map(|i| containers(i, &|_| true).len()).collect();
+    // A hole belongs to the innermost containing contour that is itself an outline: with
+    // overlapping paths the smallest container can be a hole, which has no outline to take it.
+    let parent: Vec<Option<usize>> = (0..n)
         .map(|i| {
-            let probe = cs[i][0];
-            (0..n).filter(|&j| j != i && area[j] > area[i] && point_in(probe, &cs[j])).collect()
+            if depth[i].is_multiple_of(2) {
+                None
+            } else {
+                containers(i, &|j| depth[j].is_multiple_of(2)).into_iter().min_by(|&a, &b| area[a].total_cmp(&area[b]))
+            }
         })
         .collect();
     let mut outlines: Vec<Outline> = vec![];
     let mut slot = vec![usize::MAX; n];
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| parents[i].len());
-    for i in order {
-        let depth = parents[i].len();
-        if depth.is_multiple_of(2) {
+    order.sort_by_key(|&i| depth[i]);
+    // Every outline gets its slot before any hole is attached: with overlapping paths a hole's
+    // parent can be deeper than the hole itself.
+    for &i in &order {
+        if depth[i].is_multiple_of(2) {
             slot[i] = outlines.len();
             outlines.push(Outline { outer: cs[i].clone(), holes: vec![] });
-        } else if let Some(&p) = parents[i].iter().filter(|&&j| parents[j].len() == depth - 1).min_by(|&&a, &&b| area[a].total_cmp(&area[b]))
-            && slot[p] != usize::MAX
+        }
+    }
+    for &i in &order {
+        if !depth[i].is_multiple_of(2)
+            && let Some(p) = parent[i]
         {
             outlines[slot[p]].holes.push(cs[i].clone());
         }

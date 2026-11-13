@@ -41,6 +41,9 @@ zbus = "5.19"
 # Icon + VERSIONINFO for effectcraft.exe; build.rs only uses it when targeting Windows.
 winresource = "0.1"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep the control channel responsive when the window is covered (App Nap / occlusion throttling).
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSString", "NSObject"] }

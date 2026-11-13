@@ -12,7 +12,8 @@ use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{
-    AutoOrient, Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerId, LayerSource, LightKind, MatteKind, Project, Quality, Solid, TrackMatte,
+    AutoOrient, Comp, Footage, FootageKind, ItemId, ItemKind, Layer, LayerId, LayerSource, LightKind, MatteKind, Project, Quality, Solid, SourceLayer,
+    TrackMatte,
 };
 use effectcraft_time::Tick;
 
@@ -25,7 +26,7 @@ use crate::import::props::{AnchorUnit, import_transform};
 use crate::import::report::{Collector, ImportReport, LossCategory};
 use crate::import::shapes::import_shapes;
 use crate::import::styles::import_layer_styles;
-use crate::import::text::{report_text_extras, text_doc};
+use crate::import::text::{import_source_text_expression, report_text_extras, text_doc};
 use crate::import::text_anim::import_animators;
 use crate::import::time::{TimeMap, frame_rate};
 
@@ -216,7 +217,17 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     let aep_id = item.id();
     // An item without a stored name shows its file's name, a sequence `shot_[0101-0103].exr`
     // (126, 603-607).
-    let name = if name.is_empty() { default_footage_name(item, &f).unwrap_or_else(|| "Footage".to_string()) } else { name };
+    // One layer of a Photoshop file is `<layer>/<file>`, as EffectCraft's own Photoshop import
+    // names it (#3087).
+    let name = if name.is_empty() {
+        let file = default_footage_name(item, &f).unwrap_or_else(|| "Footage".to_string());
+        match &f.psd_layer {
+            Some(l) if !l.name.is_empty() => format!("{}/{file}", l.name),
+            _ => file,
+        }
+    } else {
+        name
+    };
     if f.is_solid {
         // A null object's placeholder solid is not an item here.
         if aep_id.is_some_and(|i| null_only.contains(&i)) {
@@ -299,6 +310,7 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         missing: !present,
         placed_page,
         sequence,
+        layer: source_layer(&f, &name, &mut cx.col),
         ..Footage::default()
     };
     // The native frame rate and the stored duration of sequences and clips (352, 603, 606).
@@ -336,6 +348,34 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
 fn is_placed_page_path(path: &str) -> bool {
     let ext = path.rsplit(['/', '\\']).next().and_then(|name| name.rsplit_once('.')).map(|(_, ext)| ext.to_ascii_lowercase());
     matches!(ext.as_deref(), Some("pdf" | "ai"))
+}
+
+/// The Photoshop layer a footage item shows (#3087): at its own bounds when the item is as big
+/// as they are (Retain Layer Sizes), else on the document. A layer without pixels (an adjustment
+/// layer) keeps the merged image and is reported. So is a layer as big as the document but not at
+/// its corner (the item's size fits both framings; its bounds are used), and an item as big as
+/// neither (the document is used).
+fn source_layer(f: &crate::Footage, name: &str, col: &mut Collector) -> Option<SourceLayer> {
+    let l = f.psd_layer.as_ref()?;
+    let Some(size) = l.size() else {
+        col.lose(LossCategory::UnsupportedItems, format!("footage '{name}': a Photoshop layer without pixels (an adjustment layer), the merged image used"));
+        return None;
+    };
+    let layer_size = size == (f.width, f.height);
+    if !layer_size && l.document.iter().all(|side| *side > 0) && !l.document_is((f.width, f.height)) {
+        col.lose(
+            LossCategory::UnsupportedItems,
+            format!("footage '{name}': {} x {} is neither the Photoshop layer's size nor the document's, shown on the document", f.width, f.height),
+        );
+    }
+    let [top, left, ..] = l.bounds;
+    if layer_size && (top, left) != (0, 0) && l.document_is(size) {
+        col.lose(
+            LossCategory::UnsupportedItems,
+            format!("footage '{name}': a Photoshop layer as big as the document but at ({left}, {top}), shown at its own bounds (Retain Layer Sizes assumed)"),
+        );
+    }
+    Some(SourceLayer { index: l.index, name: l.name.clone(), layer_size, ..SourceLayer::default() })
 }
 
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
@@ -667,8 +707,8 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
     }
 }
 
-/// The Source Text of a text layer from its text document, and the reports of what is not
-/// imported.
+/// The Source Text of a text layer from its text document and its expression, and the reports
+/// of what is not imported.
 fn import_source_text(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, cx: &mut Ctx<'_>) {
     match layer.text_document() {
         Some(doc) => {
@@ -680,6 +720,7 @@ fn import_source_text(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, cx: &
         }
         None => cx.col.lose(LossCategory::DamagedData, format!("{what}: the text document is unreadable, the layer is imported with empty text")),
     }
+    import_source_text_expression(layer, l.props.prop_mut("text/sourceText"), what, &mut cx.col);
     report_text_extras(layer, what, &mut cx.col);
 }
 

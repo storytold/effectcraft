@@ -5,7 +5,7 @@ use effectcraft_engine::time::Tick;
 use serde_json::{Value, json};
 
 use crate::confine::{ConfinedFootage, ConfinedServices, Confinement, Lookup};
-use crate::{BridgeClient, Error, Result, base64, encode_png, recompress_png};
+use crate::{BridgeClient, Error, Result, base64, encode_png, fit, recompress_png};
 
 pub struct Backend {
     target: Target,
@@ -27,6 +27,13 @@ pub struct Frame {
     pub time: f64,
     pub width: u32,
     pub height: u32,
+}
+
+/// A rendered comp frame as straight RGBA8 pixels, for callers that compose frames.
+pub struct Pixels {
+    pub image: image::RgbaImage,
+    pub comp: Value,
+    pub time: f64,
 }
 
 impl Backend {
@@ -133,6 +140,56 @@ impl Backend {
         self.render_output(comp, time, max_side, transparent, Some(&absolute.to_string_lossy()))
     }
 
+    /// [`Backend::render_with`] at comp time `time` seconds, as pixels instead of a PNG, longest
+    /// side at most `max_side` (0 = full size).
+    pub fn render_pixels(&mut self, comp: Option<&Value>, time: f64, max_side: u32, transparent: bool) -> Result<Pixels> {
+        match &mut self.target {
+            Target::Headless(s) => {
+                let cid = s.resolve_comp(comp).map_err(|_| no_comp(comp))?;
+                let t = Tick::from_seconds_f64(time);
+                let (w, h, rgba) = s.render_rgba8_alpha(cid, t, max_side, transparent)?;
+                let image = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| Error::Other("bad image buffer".into()))?;
+                Ok(Pixels { image: fit(image, max_side), comp: json!(cid.0), time: t.seconds() })
+            }
+            Target::Bridge(b) => {
+                let r = b.call("render.frame", frame_params(comp, Some(time), max_side, transparent))?;
+                let raw = frame_png(&r)?;
+                let image = image::load_from_memory(&raw).map_err(|e| Error::Other(format!("png: {e}")))?.to_rgba8();
+                // The time the app rendered, or the time asked for when its reply leaves it out.
+                let time = r["time"].as_f64().unwrap_or(time);
+                Ok(Pixels { image: fit(image, max_side), comp: r["comp"].clone(), time })
+            }
+        }
+    }
+
+    /// Check `path` before composing an image here to save there (a contact sheet): the
+    /// [`Confinement`] and the open project's own files, as [`Backend::render_to_file`] checks a
+    /// frame. Returns the absolute path to give [`Backend::write_composed`]. The desktop app
+    /// only saves frames it renders itself, so this is headless only.
+    pub fn composed_output(&mut self, path: &str) -> Result<String> {
+        if let Some(confinement) = self.confinement() {
+            confinement.check(path, crate::confine::Access::Write)?;
+        }
+        let absolute = std::path::absolute(path).map_err(|e| Error::BadArgs(format!("cannot resolve {path}: {e}")))?;
+        let absolute = absolute.to_string_lossy().into_owned();
+        match &mut self.target {
+            Target::Headless(s) => {
+                s.refuse_export(&absolute)?;
+                Ok(absolute)
+            }
+            Target::Bridge(_) => Err(Error::BadArgs(NO_BRIDGED_SHEET.into())),
+        }
+    }
+
+    /// Save bytes composed here to a path from [`Backend::composed_output`], through the session,
+    /// which refuses the files the project reads.
+    pub fn write_composed(&mut self, path: &str, bytes: &[u8]) -> Result<()> {
+        match &mut self.target {
+            Target::Headless(s) => Ok(s.write_output(path, bytes)?),
+            Target::Bridge(_) => Err(Error::BadArgs(NO_BRIDGED_SHEET.into())),
+        }
+    }
+
     fn render_output(&mut self, comp: Option<&Value>, time: Option<f64>, max_side: u32, transparent: bool, path: Option<&str>) -> Result<Frame> {
         match &mut self.target {
             Target::Headless(s) => {
@@ -149,19 +206,10 @@ impl Backend {
                 Ok(Frame { png, comp: json!(cid.0), time: t.seconds(), width: w, height: h })
             }
             Target::Bridge(b) => {
-                let mut p = json!({"max_side": max_side, "base64": true});
+                let mut p = frame_params(comp, time, max_side, transparent);
                 if let Some(path) = path {
                     p["path"] = json!(path);
                     p["write"] = json!(true);
-                }
-                if transparent {
-                    p["transparent"] = json!(true);
-                }
-                if let Some(t) = time {
-                    p["time"] = json!(t);
-                }
-                if let Some(c) = comp.filter(|c| !c.is_null()) {
-                    p["comp"] = c.clone();
                 }
                 let r = b.call("render.frame", p)?;
                 if let Some(path) = path
@@ -169,14 +217,36 @@ impl Backend {
                 {
                     return Err(Error::App("render.frame did not confirm the saved path; update the connected app before saving frames".into()));
                 }
-                let data = r.get("png").and_then(Value::as_str).ok_or_else(|| Error::App("render.frame returned no `png`".into()))?;
-                let raw = base64::decode(data).ok_or_else(|| Error::App("render.frame: bad base64".into()))?;
+                let raw = frame_png(&r)?;
                 let (png, width, height) = recompress_png(&raw, max_side)?;
                 Ok(Frame { png, comp: r["comp"].clone(), time: r["time"].as_f64().unwrap_or(0.0), width, height })
             }
         }
     }
 }
+
+/// `render.frame` parameters for an inline (base64) frame.
+fn frame_params(comp: Option<&Value>, time: Option<f64>, max_side: u32, transparent: bool) -> Value {
+    let mut p = json!({"max_side": max_side, "base64": true});
+    if transparent {
+        p["transparent"] = json!(true);
+    }
+    if let Some(t) = time {
+        p["time"] = json!(t);
+    }
+    if let Some(c) = comp.filter(|c| !c.is_null()) {
+        p["comp"] = c.clone();
+    }
+    p
+}
+
+/// The PNG bytes of a `render.frame` reply.
+fn frame_png(r: &Value) -> Result<Vec<u8>> {
+    let data = r.get("png").and_then(Value::as_str).ok_or_else(|| Error::App("render.frame returned no `png`".into()))?;
+    base64::decode(data).ok_or_else(|| Error::App("render.frame: bad base64".into()))
+}
+
+const NO_BRIDGED_SHEET: &str = "saving a contact sheet (`times` with `path`) needs the headless MCP server: the desktop app only saves frames it renders itself. Leave out `path` to get the sheet inline, or save single frames with `time`";
 
 fn no_comp(comp: Option<&Value>) -> Error {
     match comp.filter(|c| !c.is_null()) {
