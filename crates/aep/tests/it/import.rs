@@ -27,6 +27,7 @@ mod placeholders;
 mod puppet;
 mod resaved_defaults;
 mod robustness;
+mod shape_path_expression;
 mod shapes;
 mod shapes_round2;
 mod styles;
