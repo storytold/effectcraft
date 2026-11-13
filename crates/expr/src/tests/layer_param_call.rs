@@ -28,6 +28,10 @@ fn a_layer_valued_property_is_callable_like_its_layer() {
     assert_close!(on_b("effect('Map')('Layer')('Effects')('Slider Control')('Slider')"), 42.0);
     assert_close!(on_b("effect('Map')(1)('Effects').numProperties"), 1.0);
     assert_close!(on_b("var base = effect('Map')('Layer'); base('Transform')('Position')[0]"), 50.0);
+    // A property of the layer, reached through the layer-valued property, is a property, not a
+    // method to bind (review of #3554).
+    assert_close!(on_b("effect('Map')('Layer').position[0]"), 50.0);
+    assert_close!(on_b("effect('Map')('Layer').transform.position.valueAtTime(0)[0]"), 50.0);
     // What already worked keeps working.
     assert_close!(on_b("effect('Map')('Layer').effect('Slider Control')('Slider')"), 42.0);
     assert_close!(on_b("effect('Map')('Layer').name == 'A' ? 1 : 0"), 1.0);

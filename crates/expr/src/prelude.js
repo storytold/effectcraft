@@ -975,9 +975,9 @@ var __propHandler = {
     var v = t.value;
     if (v === null || v === undefined) return undefined;
     var x = v[k];
-    // Property groups and layers are callable: hand them over as they are, not bound like methods
-    // (#809).
-    if (typeof x === 'function' && (x.__isGroup || x.__isLayer)) return x;
+    // Property groups, layers and properties are callable: hand them over as they are, not bound
+    // like methods (#809).
+    if (typeof x === 'function' && (x.__isGroup || x.__isLayer || x.__isProp)) return x;
     return typeof x === 'function' ? x.bind(v) : x;
   },
 };
