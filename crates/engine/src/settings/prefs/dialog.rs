@@ -136,7 +136,7 @@ pub fn pages() -> Vec<Page> {
                 s("autoSave.enabled", "Automatically Save Projects", B, true),
                 s("autoSave.intervalMinutes", "Save Every", Kind::Int(1, 240, "Minutes"), true),
                 s("autoSave.maxVersions", "Maximum Project Versions", Kind::Int(1, 99, ""), true),
-                s("autoSave.location", "Auto-Save Location", Kind::Choice(&[("Next to Project", "nextToProject"), ("Custom Location", "custom")]), true),
+                s("autoSave.location", "Auto-Save Location", Kind::Choice(&[("Next to Project", "nextToProject"), ("Custom Location", "custom"), ("Project File (Overwrite)", "projectFile")]), true),
                 s("autoSave.folder", "Custom Location", Kind::Path, true),
                 s("autoSave.saveOnRenderStart", "Save When Starting Render Queue", B, true),
                 Button { label: "Save Now", command: "file.autoSave", params: "{}" },

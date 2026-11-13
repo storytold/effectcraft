@@ -1161,6 +1161,46 @@ fn autosave_tick_waits_for_the_interval_and_changes() {
 }
 
 #[test]
+fn autosave_tick_can_save_into_the_project_file_itself() {
+    let d = tmp("tick-project-file");
+    let mut s = session_with_comp();
+    let proj = d.join("P.ecproj");
+    s.execute("file.saveAs", json!({"path": proj.to_string_lossy()})).unwrap();
+    s.execute("prefs.set", json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile"}})).unwrap();
+    assert!(s.autosave_tick(1000.0).is_none(), "the first tick starts the clock");
+    s.execute("layer.newNull", json!({"name": "typed since the last save"})).unwrap();
+    assert!(s.is_dirty());
+    let p = s.autosave_tick(1061.0).unwrap().unwrap();
+    assert_eq!(p, proj.to_string_lossy(), "it saves the open project, not a copy");
+    assert!(std::fs::read_to_string(&proj).unwrap().contains("typed since the last save"));
+    assert!(!s.is_dirty(), "a normal save marks the project saved");
+    assert!(!d.join(autosave::AUTOSAVE_FOLDER).exists(), "no auto-save copy folder is made");
+    assert!(s.autosave_tick(1200.0).is_none(), "nothing changed since");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn autosave_into_the_project_file_still_copies_an_untitled_project() {
+    let d = tmp("tick-untitled");
+    let mut s = session_with_comp();
+    s.execute(
+        "prefs.set",
+        json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile", "autoSave.folder": d.join("custom").to_string_lossy()}}),
+    )
+    .unwrap();
+    assert!(s.path.is_none());
+    assert!(s.autosave_tick(1000.0).is_none());
+    s.execute("layer.newNull", json!({})).unwrap();
+    // No project file to save into, and "projectFile" names no folder: the default root decides.
+    let r = s.autosave_tick(1061.0);
+    assert!(s.path.is_none(), "an untitled project is never given a path by auto-save");
+    if let Some(Ok(p)) = r {
+        assert!(p.contains("auto-save"), "{p}");
+    }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn crash_recovery_detects_an_unclean_exit() {
     let d = tmp("recovery");
     let store: Arc<dyn ConfigStore> = Arc::new(DirConfig::new(d.join("config")));

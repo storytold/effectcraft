@@ -346,6 +346,15 @@ impl Session {
         {
             return None;
         }
+        // "Project File": save into the open project itself, like File ▸ Save, instead of writing a
+        // rotating copy. An untitled project has no file yet, so it still gets a copy.
+        // Headless (MCP) sessions are isolated from real projects, so they never take this branch.
+        if self.prefs.auto_save.location == "projectFile"
+            && self.autosave_folder_override.is_none()
+            && let Some(path) = self.path.clone()
+        {
+            return Some(self.execute("file.save", serde_json::json!({})).map(|_| path));
+        }
         let r = self.autosave_now();
         if let Ok(p) = &r {
             self.toast(format!("Auto-saved {}", Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
