@@ -1129,7 +1129,8 @@ mod tests {
         assert_eq!(latest_compatible(&p).map(|r| r.version.as_str()), Some("1.2.0"));
         assert!(runs_here(&rel("1.0.0", 1, None)), "ABI 1 modules still run on a build with a newer ABI");
         assert!(runs_here(&rel("1.0.0", 2, None)), "ABI 2 modules run on this build");
-        assert!(!runs_here(&rel("1.0.0", 3, None)), "a WebAssembly ABI this build doesn't implement can't load");
+        assert!(runs_here(&rel("1.0.0", 3, None)), "ABI 3 modules (padding) run on this build");
+        assert!(!runs_here(&rel("1.0.0", 4, None)), "a WebAssembly ABI this build doesn't implement can't load");
         let j = package_json(&p, None, &Status::default());
         assert_eq!(j["needsNewerApp"], true);
         assert!(latest_compatible(&Package::default()).is_none());

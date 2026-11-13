@@ -115,14 +115,20 @@ fn module_with(manifest: &str, render_body: &str) -> String {
 }
 
 fn render(spec: &effectcraft_effects::EffectSpec, gain: f64, on: bool) -> Image {
+    render_buf(spec, gain, on, 1.0, 0.0).img
+}
+
+/// The effect applied through the registry as the renderer applies it (padding included), to a
+/// 4 × 2 layer buffer at `scale` buffer pixels per layer pixel, at layer time `time`.
+fn render_buf(spec: &effectcraft_effects::EffectSpec, gain: f64, on: bool, scale: f64, time: f64) -> Buf {
     let mut next = 1;
     let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [4.0, 2.0]);
     let mut params = effectcraft_effects::flatten_params(&g, &mut |p| p.value.clone());
     params.values.insert("gain".into(), effectcraft_keyframe::Value::Scalar(gain));
     params.values.insert("on".into(), effectcraft_keyframe::Value::Bool(on));
-    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 2.0], seed: 1, adjustment: false, env: EffectEnv::default() };
-    let buf = Buf { img: Image::filled(4, 2, [0.8, 0.6, 0.2, 1.0]), offset: [0.0; 2], scale: 1.0 };
-    (spec.render)(&ctx, buf).img
+    let ctx = EffectCtx { params: &params, time, layer_size: [4.0, 2.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let buf = Buf { img: Image::filled(4, 2, [0.8, 0.6, 0.2, 1.0]), offset: [0.0; 2], scale };
+    (spec.render)(&ctx, buf)
 }
 
 #[test]
@@ -169,9 +175,9 @@ fn wasm_plugins_are_sandboxed() {
     let v2 = gain_module("org.test.v2", "")
         .replace("(func (export \"ec_api_version\") (result i32) i32.const 1)", "(func (export \"ec_api_version\") (result i32) i32.const 2)");
     assert!(load_err(load_wasm(v2.as_bytes(), "v2.wat")).contains("ec_render2"));
-    let v3 = gain_module("org.test.v3", "")
-        .replace("(func (export \"ec_api_version\") (result i32) i32.const 1)", "(func (export \"ec_api_version\") (result i32) i32.const 3)");
-    assert!(load_err(load_wasm(v3.as_bytes(), "v3.wat")).contains("ABI 3"));
+    let v4 = gain_module("org.test.v4", "")
+        .replace("(func (export \"ec_api_version\") (result i32) i32.const 1)", "(func (export \"ec_api_version\") (result i32) i32.const 4)");
+    assert!(load_err(load_wasm(v4.as_bytes(), "v4.wat")).contains("ABI 4"));
     let reserved = gain_module("ec.blur.mine", "");
     assert!(load_err(load_wasm(reserved.as_bytes(), "reserved.wat")).contains("reserved"));
 }
@@ -198,8 +204,8 @@ fn abi_violations_fail_to_load_with_reasons() {
     assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains("ec_api_version"));
     let m = edit(&base, "(param $scale f64) (result i32)", "(param $scale f32) (result i32)");
     assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains("ec_render"));
-    // WebAssembly ABIs other than 1 and 2.
-    for v in ["0", "-1", "3", "2147483647"] {
+    // WebAssembly ABIs other than 1 to 3.
+    for v in ["0", "-1", "4", "2147483647"] {
         let m = edit(
             &base,
             "(func (export \"ec_api_version\") (result i32) i32.const 1)",
@@ -233,6 +239,36 @@ fn abi_violations_fail_to_load_with_reasons() {
     for junk in [&b""[..], b"\0asm", b"\0asm\x01\0\0\0\xff\xff", b"(module", b"(module (func (export \"x\") unknown_op))"] {
         assert!(load_wasm(junk, "junk").is_err());
     }
+    // ABI 3: a render export, and `ec_pad` as a function with its signature.
+    let abi3 = set_abi(&base, 3);
+    let m = edit(&abi3, "(func (export \"ec_render\")", "(func (export \"not_a_render\")");
+    assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains("ec_render"));
+    for field in ["(func (export \"ec_pad\") (param i32) (result i32) i32.const 1)", "(global (export \"ec_pad\") i32 (i32.const 1))"] {
+        let e = load_err(load_wasm(with_field(&abi3, field).as_bytes(), "x.wat"));
+        assert!(e.contains("ec_pad"), "{field}: {e}");
+    }
+}
+
+/// `module` with its `ec_api_version` (1 or 2) changed to `abi`.
+fn set_abi(module: &str, abi: i32) -> String {
+    let version = |v: i32| format!("(func (export \"ec_api_version\") (result i32) i32.const {v})");
+    let from = [1, 2].into_iter().map(version).find(|f| module.contains(f.as_str())).unwrap();
+    edit(module, &from, &version(abi))
+}
+
+/// `module` with `field` (a function, a global…) added before its `ec_alloc`.
+fn with_field(module: &str, field: &str) -> String {
+    edit(module, "  (func (export \"ec_alloc\")", &format!("  {field}\n  (func (export \"ec_alloc\")"))
+}
+
+/// An `ec_pad` export running `body`; the parameters are at `$params`, as for `ec_render`.
+fn ec_pad(body: &str) -> String {
+    format!("(func (export \"ec_pad\") (param $params i32) (param $np i32) (param $t f64) (param $scale f64) (result i32) {body})")
+}
+
+/// The gain module `id` at ABI 3 (still rendering with `ec_render`) with an `ec_pad` running `body`.
+fn padded_module(id: &str, body: &str) -> String {
+    with_field(&set_abi(&gain_module(id, ""), 3), &ec_pad(body))
 }
 
 #[test]
@@ -485,4 +521,95 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::plugin::reads_other_times("org.test.neighbours.v1"));
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
+}
+
+/// ABI 3: `ec_pad` gets the parameters, their count, the time and the scale, and the buffer is
+/// padded by its answer before `ec_render` runs over all of it.
+#[test]
+fn abi_3_modules_get_the_padding_they_ask_for() {
+    // (4 × gain + time) × scale pixels on every side; -1 unless all six flattened values (gain,
+    // lift, tint RGBA) arrived.
+    let ask = "local.get $np i32.const 6 i32.ne if (result i32) i32.const -1 else local.get $params f64.load f64.const 4 f64.mul local.get $t f64.add local.get $scale f64.mul i32.trunc_f64_s end";
+    let spec = load_wasm(padded_module("org.test.pad", ask).as_bytes(), "pad.wat").unwrap();
+    let out = render_buf(spec, 0.5, true, 1.0, 0.0);
+    assert_eq!((out.img.width, out.img.height), (8, 6), "2 transparent pixels on every side");
+    assert_eq!(out.offset, [2.0, 2.0], "the layer's origin moved into the padded buffer");
+    // `ec_render` got the padded buffer: the lift reaches the added pixels too.
+    assert_eq!(out.img.get(0, 0), [0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(out.img.get(3, 3), [0.4, 0.3, 1.1, 1.0]);
+    // The time and the scale reach `ec_pad`.
+    let later = render_buf(spec, 0.5, false, 1.0, 1.0);
+    assert_eq!((later.img.width, later.img.height), (10, 8), "3 pixels at 1 s");
+    let half = render_buf(spec, 0.5, false, 0.5, 0.0);
+    assert_eq!((half.img.width, half.img.height), (6, 4), "1 pixel at half resolution");
+    // Asking for none keeps the buffer as it was.
+    let none = render_buf(spec, 0.0, false, 1.0, 0.0);
+    assert_eq!((none.img.width, none.img.height, none.offset), (4, 2, [0.0; 2]));
+    // Rendering with `ec_render`, it doesn't read the neighbouring frames.
+    assert!(!effectcraft_effects::plugin::reads_other_times("org.test.pad"));
+}
+
+/// A negative answer, a trap, a runaway loop or a bad `ec_alloc` buffer for `ec_pad` gets no
+/// padding: the frame still renders at its own size, every time, and padding works again once
+/// `ec_pad` answers.
+#[test]
+fn padding_that_fails_renders_unpadded() {
+    for (id, body) in [("org.test.padneg", "i32.const -3"), ("org.test.padtrap", "unreachable"), ("org.test.padspin", "(loop $spin br $spin) i32.const 2")] {
+        let spec = load_wasm(padded_module(id, body).as_bytes(), "pad.wat").unwrap();
+        for _ in 0..2 {
+            let out = render_buf(spec, 0.5, false, 1.0, 0.0);
+            assert_eq!((out.img.width, out.img.height), (4, 2), "{id}");
+            assert_eq!(out.img.get(1, 1), [0.4, 0.3, 0.1, 1.0], "{id}: rendered");
+        }
+    }
+    // Traps above gain 1 and asks for 2 pixels otherwise: a failed call spoils no later one.
+    let flaky = "local.get $params f64.load f64.const 1 f64.gt if unreachable end i32.const 2";
+    let spec = load_wasm(padded_module("org.test.padflaky", flaky).as_bytes(), "flaky.wat").unwrap();
+    let out = render_buf(spec, 2.0, false, 1.0, 0.0);
+    assert_eq!((out.img.width, out.img.height, out.img.get(1, 1)), (4, 2, [1.6, 1.2, 0.4, 1.0]));
+    let out = render_buf(spec, 0.5, false, 1.0, 0.0);
+    assert_eq!((out.img.width, out.img.height), (8, 6));
+    // `ec_alloc` hands back memory out of bounds for the small parameter buffer `ec_pad` asks
+    // for, and a good buffer for the render: no padding, and the render still works.
+    let bad = "    local.get $n i32.const 100 i32.lt_s if (result i32) i32.const 2000000000 else i32.const 65536 end)";
+    let m = edit(&padded_module("org.test.padalloc", "i32.const 2"), "    i32.const 65536)", bad);
+    let spec = load_wasm(m.as_bytes(), "padalloc.wat").unwrap();
+    for _ in 0..2 {
+        let out = render_buf(spec, 0.5, false, 1.0, 0.0);
+        assert_eq!((out.img.width, out.img.height, out.img.get(1, 1)), (4, 2, [0.4, 0.3, 0.1, 1.0]));
+    }
+}
+
+/// `ec_pad` belongs to ABI 3: an ABI 1 or 2 module's export of that name, of any kind, is never
+/// called, and an ABI 3 module without one renders unpadded.
+#[test]
+fn only_abi_3_modules_pad() {
+    let stray = [
+        ec_pad("i32.const 2"),
+        "(func (export \"ec_pad\") (param i32) (result i32) i32.const 2)".into(),
+        "(global (export \"ec_pad\") i32 (i32.const 2))".into(),
+    ];
+    for (i, field) in stray.iter().enumerate() {
+        for (abi, module) in [(1, gain_module(&format!("org.test.stray1.n{i}"), "")), (2, neighbour_module(&format!("org.test.stray2.n{i}")))] {
+            let spec = load_wasm(with_field(&module, field).as_bytes(), "stray.wat").unwrap_or_else(|e| panic!("ABI {abi}, {field}: {e}"));
+            let out = render_buf(spec, 0.5, false, 1.0, 0.0);
+            assert_eq!((out.img.width, out.img.height), (4, 2), "ABI {abi}, {field}");
+        }
+    }
+    let plain = load_wasm(set_abi(&gain_module("org.test.nopad", ""), 3).as_bytes(), "nopad.wat").unwrap();
+    let out = render_buf(plain, 0.5, false, 1.0, 0.0);
+    assert_eq!((out.img.width, out.img.height, out.img.get(1, 1)), (4, 2, [0.4, 0.3, 0.1, 1.0]));
+}
+
+/// An ABI 3 module may render with `ec_render2` instead: it reads the neighbouring frames, and
+/// its whole padded buffer goes to `ec_render2`.
+#[test]
+fn abi_3_modules_with_neighbours_pad_too() {
+    let m = with_field(&set_abi(&neighbour_module("org.test.padneighbours"), 3), &ec_pad("i32.const 1"));
+    let spec = load_wasm(m.as_bytes(), "padneighbours.wat").unwrap();
+    assert!(effectcraft_effects::plugin::reads_other_times("org.test.padneighbours"));
+    let out = render_buf(spec, 0.5, false, 1.0, 0.0);
+    assert_eq!((out.img.width, out.img.height), (6, 4));
+    // No host: zeroed neighbours and no flags, written to every pixel of the padded buffer.
+    assert!(out.img.data.iter().all(|p| *p == [0.0, 0.0, 0.0, 1.0]), "{:?}", out.img.data);
 }
