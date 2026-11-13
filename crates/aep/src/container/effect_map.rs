@@ -1160,7 +1160,9 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 /// language, so an item can start with a capital outside ASCII (French "Écran"), and its key must
 /// be the same as for the same word in lower case.
 pub fn popup_key(item: &str) -> String {
-    popup_stem(item).chars().flat_map(char::to_lowercase).collect()
+    // The whole string is lowered at once: Unicode's lower case depends on the context (a Greek
+    // capital sigma ends a word as final sigma), which a per-character mapping loses.
+    popup_stem(item).to_lowercase()
 }
 
 /// [`popup_key`] before the lower-casing, borrowed: `item` trimmed, without a final ` channel`
@@ -1178,7 +1180,9 @@ const SUFFIX: &[u8] = b" channel";
 
 /// Whether two popup items have the same [`popup_key`], without building either key.
 pub(crate) fn popup_keys_match(a: &str, b: &str) -> bool {
-    popup_stem(a).chars().flat_map(char::to_lowercase).eq(popup_stem(b).chars().flat_map(char::to_lowercase))
+    let (a, b) = (popup_stem(a), popup_stem(b));
+    // ASCII lowers per byte without a key; anything else lowers as a whole string (see `popup_key`).
+    if a.is_ascii() && b.is_ascii() { a.eq_ignore_ascii_case(b) } else { a.to_lowercase() == b.to_lowercase() }
 }
 
 /// The English [`popup_key`] a non-English After Effects popup item name stands for, when this
@@ -1253,6 +1257,12 @@ mod tests {
             "Luminance",
             "\u{c9}CRAN",
             "\u{e9}cran",
+            // Greek: a capital sigma at the end of a word lowers to the final form.
+            "\u{39f}\u{3a3}",
+            "\u{3bf}\u{3c2}",
+            "\u{3bf}\u{3c3}",
+            "\u{39f}\u{3a3} Channel",
+            "\u{3a3}\u{39f}\u{3a3}",
         ];
         for a in items {
             assert_eq!(popup_key(a), old_key(a), "{a:?}");
@@ -1269,5 +1279,14 @@ mod tests {
         assert_eq!(popup_key(" D\u{e9}sactiv\u{e9} "), "d\u{e9}sactiv\u{e9}");
         assert_eq!(popup_key("Off for 32 bpc Color"), "off for 32 bpc color");
         assert_eq!(popup_key("Red Channel"), "red");
+    }
+
+    /// Lower case is context sensitive: a capital sigma at the end of a word is a final sigma.
+    #[test]
+    fn popup_key_keeps_the_final_sigma() {
+        assert_eq!(popup_key("\u{39f}\u{3a3}"), "\u{3bf}\u{3c2}");
+        assert!(popup_keys_match("\u{39f}\u{3a3}", "\u{3bf}\u{3c2}"));
+        assert!(!popup_keys_match("\u{39f}\u{3a3}", "\u{3bf}\u{3c3}"));
+        assert_eq!(popup_key("\u{3a3}\u{39f}\u{3a3} Channel"), "\u{3c3}\u{3bf}\u{3c2}");
     }
 }

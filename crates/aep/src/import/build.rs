@@ -905,7 +905,12 @@ impl Precomps {
         if closes_loop(from, to, |to| inside && found.is_some_and(|u| u.contains(&to))) {
             return Link::Loop;
         }
-        self.used_by.entry(to).or_default().insert(from);
+        // Only a link inside a component can lie on a path the loop search follows (it never
+        // leaves the component of the layer's comp), so only those are kept: the searches never
+        // visit, or pay budget for, a link between components.
+        if self.same_component(from, to) {
+            self.used_by.entry(to).or_default().insert(from);
+        }
         Link::Accepted
     }
 
@@ -921,8 +926,11 @@ impl Precomps {
         let mut stack = vec![comp];
         while let Some(c) = stack.pop() {
             for u in self.used_by.get(&c).into_iter().flatten() {
+                if !self.same_component(*u, comp) {
+                    continue;
+                }
                 self.steps_left = self.steps_left.checked_sub(1)?;
-                if self.same_component(*u, comp) && found.insert(*u) {
+                if found.insert(*u) {
                     stack.push(*u);
                 }
             }
@@ -931,16 +939,32 @@ impl Precomps {
     }
 }
 
+/// The source id of a layer that `build_layers` decides by [`Precomps::accept`] when the source is
+/// a composition: a camera, light, text, shape or null layer never becomes a precomp layer, whatever
+/// source it stores, so it is no candidate link.
+fn precomp_layer_source(h: &LayerHeader) -> Option<u32> {
+    if h.layer_type != LayerType::Av || h.is_null_object() { None } else { h.source_id }
+}
+
 /// Every link a precomp layer of the file could make: comp -> the comps its layers name as their
 /// source (resolved as `build_layers` resolves them).
 fn precomp_candidates(sources: &HashMap<u32, Source>, pending: &[PendingComp<'_, '_>]) -> HashMap<ItemId, HashSet<ItemId>> {
+    candidate_links(
+        sources,
+        pending.iter().filter_map(|p| {
+            let comp = p.item.comp()?;
+            Some((p.id, comp.layers().filter_map(|l| l.header().and_then(|h| precomp_layer_source(&h))).collect::<Vec<_>>()))
+        }),
+    )
+}
+
+/// [`precomp_candidates`] from each comp's precomp-eligible layer source ids.
+fn candidate_links(sources: &HashMap<u32, Source>, comps: impl IntoIterator<Item = (ItemId, Vec<u32>)>) -> HashMap<ItemId, HashSet<ItemId>> {
     let mut links: HashMap<ItemId, HashSet<ItemId>> = HashMap::new();
-    for p in pending {
-        let Some(comp) = p.item.comp() else { continue };
-        for layer in comp.layers() {
-            let Some(s) = layer.header().and_then(|h| h.source_id).and_then(|s| sources.get(&s)) else { continue };
+    for (from, ids) in comps {
+        for s in ids.iter().filter_map(|id| sources.get(id)) {
             if s.kind == SourceKind::Comp {
-                links.entry(p.id).or_default().insert(s.item);
+                links.entry(from).or_default().insert(s.item);
             }
         }
     }
@@ -1260,6 +1284,41 @@ mod tests {
             }
         }
         refused
+    }
+
+    #[test]
+    fn outside_users_do_not_spend_the_loop_search_budget() {
+        // A is in a loop with B (A <-> B). 100 comps outside the loop show A; the budget is nearly
+        // spent. Building A: its layer of B needs A's users, which are only B's side of the loop:
+        // the outside comps cannot close a loop and must cost nothing, so A's layer is decided.
+        let (a, b) = (ItemId(1), ItemId(2));
+        let ext = |i: u64| ItemId(10 + i);
+        let mut candidates: HashMap<ItemId, HashSet<ItemId>> = HashMap::from([(a, HashSet::from([b])), (b, HashSet::from([a]))]);
+        for i in 0..100 {
+            candidates.insert(ext(i), HashSet::from([a]));
+        }
+        let mut p = Precomps::new(&candidates);
+        for i in 0..100 {
+            assert_eq!(p.accept(ext(i), a, &mut Users::NotSearched), Link::Accepted);
+        }
+        p.steps_left = 5;
+        // B shows A first (inside the loop, one user of A is B itself once accepted), then A shows B.
+        assert_eq!(p.accept(b, a, &mut Users::NotSearched), Link::Accepted);
+        assert_eq!(p.accept(a, b, &mut Users::NotSearched), Link::Loop);
+    }
+
+    #[test]
+    fn ineligible_layers_are_no_candidate_links() {
+        let source = |item: u64, kind| Source { item: ItemId(item), name: String::new(), kind, width: 1, height: 1 };
+        let sources = HashMap::from([(1, source(1, SourceKind::Comp)), (2, source(2, SourceKind::Comp)), (3, source(3, SourceKind::Solid))]);
+        // Comp 1 shows 2 (eligible); comp 2 has no eligible layer of comp 1 (a null or text layer
+        // with that source is filtered by `precomp_layer_source` before): no loop component.
+        let links = candidate_links(&sources, [(ItemId(1), vec![2, 3]), (ItemId(2), vec![])]);
+        let p = Precomps::new(&links);
+        assert!(!p.same_component(ItemId(1), ItemId(2)));
+        // With the back-edge as a candidate they share one, which is what ineligible layers used to do.
+        let looped = candidate_links(&sources, [(ItemId(1), vec![2]), (ItemId(2), vec![1])]);
+        assert!(Precomps::new(&looped).same_component(ItemId(1), ItemId(2)));
     }
 
     #[test]

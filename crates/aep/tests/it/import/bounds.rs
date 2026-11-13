@@ -89,6 +89,12 @@ fn comp_with<'a>(c: &Chunk<'a>, id: u32, name: &str, layers: Vec<Chunk<'a>>) -> 
 /// Composition `B` (id 900) with `n` layers of `C`, and `D` (id 901) with `n` layers of `B`,
 /// after `C` in the file. With `c_uses_d`, `C` also gets a layer of `D`, which closes a loop.
 fn precomp_chain(n: u32, c_uses_d: bool) -> Vec<u8> {
+    precomp_chain_with(n, c_uses_d, false)
+}
+
+/// [`precomp_chain`]; with `null_back_edge` the layer of `D` in `C` is a null object (which shows
+/// nothing, so no loop).
+fn precomp_chain_with(n: u32, c_uses_d: bool, null_back_edge: bool) -> Vec<u8> {
     let mut file = parse(SYNTHETIC).unwrap();
     let c = comp_c(&file);
     let solid = solid_layer(&c);
@@ -102,7 +108,15 @@ fn precomp_chain(n: u32, c_uses_d: bool) -> Vec<u8> {
         let c = fold.iter_mut().find(|k| k.is_list(b"Item") && k.child(b"idta").is_some_and(|i| be_u32(i, 16) == COMP_C)).expect("C");
         let kids = children(c);
         let at = kids.iter().position(|k| k.is_list(b"Layr")).expect("a layer");
-        kids.insert(at, layer_copy(&solid, 300_000, &|l| set_be_u32(l, 40, 901)));
+        kids.insert(
+            at,
+            layer_copy(&solid, 300_000, &|l| {
+                set_be_u32(l, 40, 901);
+                if null_back_edge && let Body::Data(d) = &mut l.body {
+                    d.to_mut()[38] |= 0x80;
+                }
+            }),
+        );
     }
     write(&file).unwrap()
 }
@@ -137,6 +151,17 @@ fn every_precomp_layer_that_closes_a_loop_is_refused() {
     let refused = r.report.count(LossCategory::UnsupportedLayers) - base.report.count(LossCategory::UnsupportedLayers);
     assert_eq!(refused, n as usize, "{:?}", r.report.losses);
     assert!(losses(&r, LossCategory::UnsupportedLayers).iter().any(|d| d.contains("precomposition loop")));
+}
+
+#[test]
+fn a_null_layer_naming_a_composition_closes_no_loop() {
+    // The same files as above, but C's layer of D is a null object: it shows nothing, so D's
+    // layers of B are no loop and all of them are imported.
+    let n = 300;
+    let (p, r) = run(&precomp_chain_with(n, true, true));
+    assert_eq!(comp_named(&p, "D").layers.len(), n as usize);
+    assert!(comp_named(&p, "C").layers.iter().any(|l| l.source == LayerSource::Null));
+    assert!(!losses(&r, LossCategory::UnsupportedLayers).iter().any(|d| d.contains("loop")), "{:?}", r.report.losses);
 }
 
 #[test]
