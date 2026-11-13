@@ -246,6 +246,9 @@ fn a_saved_per_character_3d_setting_makes_the_layer_3d() {
     let text = s.active_comp().unwrap().layer(LayerId(round)).unwrap().props.sub("text").unwrap().uid;
     let path = save(&mut s, "per-char", round, &[text]);
     let target = new_text(&mut s, "Target");
+    s.execute("layer.addTextAnimator", json!({"layer": target, "properties": ["rotation"], "name": "Existing"})).unwrap();
+    let existing = animators(&s, target)[0].clone();
+    assert!(existing.prop("properties/rotationX").is_none());
     let is_3d = |s: &Session| {
         let l = s.active_comp().unwrap().layer(LayerId(target)).unwrap();
         (l.switches.three_d, l.props.prop("text/perChar3d").unwrap().value.as_bool())
@@ -255,10 +258,15 @@ fn a_saved_per_character_3d_setting_makes_the_layer_3d() {
     let _ = std::fs::remove_file(&path);
 
     assert_eq!(is_3d(&s), (true, true));
-    assert!(animators(&s, target)[0].prop("properties/rotationX").is_some());
+    let after = animators(&s, target);
+    assert_eq!(after.len(), 2);
+    assert!(after[0].prop("properties/rotationX").is_some());
+    assert!(after[0].prop("properties/rotationY").is_some());
+    assert!(after[1].prop("properties/rotationX").is_some());
+    assert_uids_are_unique(&s);
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(is_3d(&s), (false, false));
-    assert_eq!(animators(&s, target), vec![]);
+    assert_eq!(animators(&s, target), vec![existing]);
 }
 
 /// A preset that fits no layer says so and leaves the project and history as they were. With a
@@ -271,10 +279,14 @@ fn a_preset_that_fits_no_layer_is_an_error() {
     let path = save(&mut s, "no-fit", source, &[animator]);
     let solid = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
     let steps = s.history.undo.len();
+    let recent = s.prefs.recent_presets.clone();
+    let revision = s.prefs_revision;
 
     let r = s.execute("anim.applyPreset", json!({"path": path, "layers": [solid]}));
     assert!(r.unwrap_err().to_string().contains("nothing in this preset fits"));
     assert_eq!(s.history.undo.len(), steps);
+    assert_eq!(s.prefs.recent_presets, recent);
+    assert_eq!(s.prefs_revision, revision);
 
     let r = s.execute("anim.applyPreset", json!({"path": path, "layers": [solid, source]})).unwrap();
     let _ = std::fs::remove_file(&path);

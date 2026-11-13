@@ -188,12 +188,6 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     if ids.is_empty() {
         return Err(bad("anim.applyPreset", "select a layer"));
     }
-    // Animation ▸ Recent Animation Presets.
-    if let Some(path) = str_p(p, "path") {
-        s.prefs.push_recent_preset(path);
-        s.save_prefs();
-        s.prefs_revision += 1;
-    }
     let mut effects: Vec<PropGroup> =
         doc["effects"].as_array().map(|a| a.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()).unwrap_or_default();
     // Older presets stored effect keys at the source layer's times.
@@ -235,6 +229,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
             let size = sizes.get(lid).copied().unwrap_or([100.0, 100.0]);
             let l = layer_mut(proj, cid, *lid)?;
             let lt = l.layer_time(t);
+            let was_three_d = per_char_on(l);
             if let Some(fx) = l.props.sub_mut("effects") {
                 for g in &effects {
                     let mut g = g.clone();
@@ -277,13 +272,20 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
             }
             // After the properties, so a saved Per-character 3D setting counts: it needs a 3D layer
             // to draw, as `layer.enablePerChar3D` makes one. Without it the layer's setting stays.
-            // Animators add to the ones the layer has, which stay as they are.
+            // Existing animators must follow a newly enabled Per-character 3D setting too.
             let three_d = per_char_on(l);
             l.switches.three_d |= three_d && saved_3d;
             let Some(list) = l.props.group_mut("text/animators") else {
                 skipped.extend(animators.iter().map(|g| format!("text/animators/{}", g.name)));
                 continue;
             };
+            if three_d && !was_three_d {
+                for existing in &mut list.children {
+                    if let Node::Group(existing) = existing {
+                        set_animator_3d(&mut Ids(&mut next), existing, true);
+                    }
+                }
+            }
             for g in &animators {
                 let mut g = g.clone();
                 // `reassign_uids` replaces every uid, the ones of properties added here included.
@@ -297,14 +299,23 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         }
         // Without this, a preset that fits no layer does nothing and says nothing.
         if applied == 0 && !skipped.is_empty() {
-            return Err(bad(
-                "anim.applyPreset",
-                "nothing in this preset fits the layer. A text animation preset saved by an earlier version only updates animators a layer already has: save it again",
-            ));
+            let legacy_text = doc[PRESET_TAG].as_u64().unwrap_or(1) < PRESET_VERSION && props.iter().any(|(path, _)| path.starts_with("text/animators/"));
+            let message = if legacy_text {
+                "nothing in this preset fits the layer. A text animation preset saved by an earlier version only updates animators a layer already has: save it again"
+            } else {
+                "nothing in this preset fits the selected layer(s)"
+            };
+            return Err(bad("anim.applyPreset", message));
         }
         proj.next_id = next;
         Ok(())
     })?;
+    // Animation ▸ Recent Animation Presets.
+    if let Some(path) = str_p(p, "path") {
+        s.prefs.push_recent_preset(path);
+        s.save_prefs();
+        s.prefs_revision += 1;
+    }
     Ok(json!({"applied": applied, "skipped": skipped}))
 }
 
