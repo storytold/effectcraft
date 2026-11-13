@@ -39,7 +39,12 @@ loading).
 ### Frame exchange file
 
 Pixels never go through the pipe. EffectCraft creates a file (in `/dev/shm` on Linux when
-available, otherwise the temp folder) and names it in `hello`. Images are addressed by an
+available, otherwise the temp folder; on Windows with the temporary-file attribute, so the
+system keeps it in memory where it can) and names it in `hello`. EffectCraft and the reference
+helper side (`serve`) use positional reads and writes at the image offsets. No image may end
+beyond 64 GiB in the file; a render's images are stacked from offset 0 (the frame, then every
+callback answer), so in 32 bpc this allows about 128 images of 7680×4320, or 16 of
+16384×16384. Images are addressed by an
 **image ref**:
 
 ```json
