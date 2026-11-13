@@ -2,18 +2,27 @@
 //! through the control pipe. EffectCraft creates it (in `/dev/shm` when there is one, so it
 //! stays in memory, else the temp folder) and both sides read and write it at the offsets the
 //! messages name. Plain file I/O, no `unsafe`: the OS page cache makes it shared memory in
-//! practice, and a helper is free to map it.
+//! practice, and a helper is free to map it. Large images are written and read in a few slices
+//! at once: one thread copies through the page cache at ~2 GB/s (~18 ms for a 1080p frame on
+//! Windows), several at ~4 ms.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::protocol::ImageRef;
 
+/// Images at least this large are copied in [`SLICES`] parallel slices.
+const PARALLEL_BYTES: usize = 4 << 20;
+const SLICES: usize = 4;
+
 /// An open frame exchange file.
 pub struct Exchange {
     file: File,
+    /// More handles to the file for parallel slices, opened on first use. Windows serialises
+    /// I/O on one synchronous handle, so each slice needs its own; Unix positioned I/O doesn't.
+    #[cfg(windows)]
+    more: Vec<File>,
     path: PathBuf,
     /// Remove the file when dropped (the side that created it).
     owned: bool,
@@ -34,13 +43,25 @@ impl Exchange {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
         let file = opts.open(&path)?;
-        Ok(Exchange { file, path, owned: true })
+        Ok(Exchange {
+            file,
+            #[cfg(windows)]
+            more: vec![],
+            path,
+            owned: true,
+        })
     }
 
     /// Open an exchange file EffectCraft created (the helper's side).
     pub fn open(path: &Path) -> std::io::Result<Exchange> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(Exchange { file, path: path.to_path_buf(), owned: false })
+        Ok(Exchange {
+            file,
+            #[cfg(windows)]
+            more: vec![],
+            path: path.to_path_buf(),
+            owned: false,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -60,8 +81,10 @@ impl Exchange {
         if at.pixels() != Some(pixels.len()) {
             return Err(format!("image is {}×{} but has {} pixels", at.width, at.height, pixels.len()));
         }
-        self.file.seek(SeekFrom::Start(at.offset)).map_err(io)?;
-        self.file.write_all(bytemuck::cast_slice(pixels)).map_err(io)
+        let bytes: &[u8] = bytemuck::cast_slice(pixels);
+        let step = slice_len(bytes.len());
+        let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
+        in_parallel(bytes.chunks(step).zip(handles).enumerate(), |(i, (part, f))| write_at(f, part, at.offset + (i * step) as u64))
     }
 
     /// Read the image `at` describes into `out` (which must have its size).
@@ -69,8 +92,23 @@ impl Exchange {
         if at.pixels() != Some(out.len()) {
             return Err(format!("image is {}×{} but the buffer has {} pixels", at.width, at.height, out.len()));
         }
-        self.file.seek(SeekFrom::Start(at.offset)).map_err(io)?;
-        self.file.read_exact(bytemuck::cast_slice_mut(out)).map_err(io)
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(out);
+        let step = slice_len(bytes.len());
+        let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
+        in_parallel(bytes.chunks_mut(step).zip(handles).enumerate(), |(i, (part, f))| read_at(f, part, at.offset + (i * step) as u64))
+    }
+
+    /// `n` handles to the file, one per slice.
+    fn handles(&mut self, n: usize) -> std::io::Result<Vec<&File>> {
+        #[cfg(windows)]
+        {
+            while self.more.len() + 1 < n {
+                self.more.push(OpenOptions::new().read(true).write(true).open(&self.path)?);
+            }
+            Ok(std::iter::once(&self.file).chain(&self.more).take(n).collect())
+        }
+        #[cfg(not(windows))]
+        Ok(vec![&self.file; n])
     }
 
     /// Read the image `at` describes.
@@ -80,6 +118,62 @@ impl Exchange {
         self.read_into(at, &mut out)?;
         Ok(out)
     }
+}
+
+/// The slice size for copying `len` bytes: whole below [`PARALLEL_BYTES`], else in [`SLICES`].
+fn slice_len(len: usize) -> usize {
+    if len < PARALLEL_BYTES { len.max(1) } else { len.div_ceil(SLICES) }
+}
+
+/// Run `f` on every item, on scoped threads when there is more than one.
+fn in_parallel<T: Send>(items: impl Iterator<Item = T>, f: impl Fn(T) -> std::io::Result<()> + Sync) -> Result<(), String> {
+    let mut items: Vec<T> = items.collect();
+    if items.len() <= 1 {
+        return items.pop().map_or(Ok(()), &f).map_err(io);
+    }
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = items.into_iter().map(|t| s.spawn(|| f(t))).collect();
+        jobs.into_iter().try_for_each(|j| j.join().unwrap_or_else(|_| Err(std::io::Error::other("copy thread panicked"))))
+    })
+    .map_err(io)
+}
+
+#[cfg(windows)]
+fn write_at(f: &File, mut buf: &[u8], mut pos: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = f.seek_write(buf, pos)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        pos += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_at(f: &File, mut buf: &mut [u8], mut pos: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = f.seek_read(buf, pos)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        buf = &mut std::mem::take(&mut buf)[n..];
+        pos += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_at(f: &File, buf: &[u8], pos: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, buf, pos)
+}
+
+#[cfg(unix)]
+fn read_at(f: &File, buf: &mut [u8], pos: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(f, buf, pos)
 }
 
 fn io(e: std::io::Error) -> String {
@@ -112,6 +206,13 @@ mod tests {
         a.write(&at, &[[0.1, 0.2, 0.3, 0.4], [1.0, 2.0, 3.0, 4.0]]).unwrap();
         assert_eq!(b.read(&at).unwrap()[1], [1.0, 2.0, 3.0, 4.0]);
         assert!(b.write(&at, &[[0.0; 4]]).is_err(), "size mismatch is an error");
+        // A large image goes in parallel slices (the last one shorter): same pixels back.
+        let big = ImageRef { offset: 64 * 3, width: 1023, height: 1025, origin: [0.0; 2], scale: 1.0 };
+        let px: Vec<[f32; 4]> = (0..1023 * 1025).map(|i| [i as f32, 1.0, 2.0, 3.0]).collect();
+        assert!(px.len() * 16 >= PARALLEL_BYTES);
+        a.write(&big, &px).unwrap();
+        assert_eq!(b.read(&big).unwrap(), px);
+        assert_eq!(a.read(&at).unwrap()[1], [1.0, 2.0, 3.0, 4.0], "the small image below is untouched");
         let p = a.path().to_path_buf();
         a.unlink();
         drop(a);
