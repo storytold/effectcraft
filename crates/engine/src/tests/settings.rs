@@ -1180,23 +1180,70 @@ fn autosave_tick_can_save_into_the_project_file_itself() {
 }
 
 #[test]
+fn background_project_file_autosave_writes_off_the_ui_thread_and_marks_saved_only_what_it_wrote() {
+    let d = tmp("tick-project-file-bg");
+    let mut s = session_with_comp();
+    let proj = d.join("B.ecproj");
+    s.execute("file.saveAs", json!({"path": proj.to_string_lossy()})).unwrap();
+    s.autosave.background = true;
+    s.execute("prefs.set", json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile"}})).unwrap();
+    assert!(s.autosave_tick(1000.0).is_none(), "the first tick starts the clock");
+    s.execute("layer.newNull", json!({"name": "written in the background"})).unwrap();
+    let p = s.autosave_tick(1061.0).unwrap().unwrap();
+    assert_eq!(p, proj.to_string_lossy());
+    assert!(s.autosave.pending.is_some(), "the write runs on the auto-save thread");
+    assert!(s.is_dirty(), "the project is not marked saved before the write lands");
+    // An edit made while the write is in flight must stay unsaved afterwards.
+    s.execute("layer.newNull", json!({"name": "typed while saving"})).unwrap();
+    s.autosave_wait().unwrap();
+    let text = std::fs::read_to_string(&proj).unwrap();
+    assert!(text.contains("written in the background"), "the snapshot was written");
+    assert!(!text.contains("typed while saving"), "later edits are not in that snapshot");
+    assert!(s.is_dirty(), "the later edit is still unsaved");
+    assert!(!d.join(autosave::AUTOSAVE_FOLDER).exists(), "no auto-save copy is made");
+    // A manual save after a background one lands last and wins.
+    s.execute("file.save", json!({})).unwrap();
+    assert!(!s.is_dirty());
+    assert!(std::fs::read_to_string(&proj).unwrap().contains("typed while saving"));
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn background_project_file_autosave_failure_leaves_the_project_unsaved_and_retries() {
+    let d = tmp("tick-project-file-fail");
+    let mut s = session_with_comp();
+    let proj = d.join("F.ecproj");
+    s.execute("file.saveAs", json!({"path": proj.to_string_lossy()})).unwrap();
+    s.autosave.background = true;
+    s.execute("prefs.set", json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile"}})).unwrap();
+    assert!(s.autosave_tick(1000.0).is_none());
+    s.execute("layer.newNull", json!({"name": "must not be lost"})).unwrap();
+    // The folder disappears, so the write fails: the project must stay unsaved, not be marked saved.
+    let moved = d.join("gone");
+    std::fs::rename(&d.join("F.ecproj"), &moved).unwrap();
+    std::fs::remove_file(&moved).unwrap();
+    std::fs::remove_dir_all(&d).unwrap();
+    let _ = s.autosave_tick(1061.0);
+    let _ = s.autosave_wait();
+    assert!(s.is_dirty(), "a failed write never marks the project saved");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn autosave_into_the_project_file_still_copies_an_untitled_project() {
     let d = tmp("tick-untitled");
     let mut s = session_with_comp();
-    s.execute(
-        "prefs.set",
-        json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile", "autoSave.folder": d.join("custom").to_string_lossy()}}),
-    )
-    .unwrap();
+    // A known auto-save root: the config store's folder.
+    let store: Arc<dyn ConfigStore> = Arc::new(DirConfig::new(d.join("config")));
+    s.config = Some(store);
+    s.execute("prefs.set", json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile"}})).unwrap();
     assert!(s.path.is_none());
     assert!(s.autosave_tick(1000.0).is_none());
-    s.execute("layer.newNull", json!({})).unwrap();
-    // No project file to save into, and "projectFile" names no folder: the default root decides.
-    let r = s.autosave_tick(1061.0);
+    s.execute("layer.newNull", json!({"name": "untitled work"})).unwrap();
+    let p = s.autosave_tick(1061.0).expect("an untitled project is still auto-saved").unwrap();
+    assert!(p.contains(autosave::AUTOSAVE_FOLDER) && p.contains("auto-save"), "{p}");
+    assert!(std::fs::read_to_string(&p).unwrap().contains("untitled work"));
     assert!(s.path.is_none(), "an untitled project is never given a path by auto-save");
-    if let Some(Ok(p)) = r {
-        assert!(p.contains("auto-save"), "{p}");
-    }
     let _ = std::fs::remove_dir_all(d);
 }
 

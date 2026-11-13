@@ -87,12 +87,24 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
 /// project opened from an XML copy saves as XML again). Fails, writing nothing, when the project
 /// wouldn't read back.
 pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
-    let compact = s.prefs.project.compact_project_files && !crate::xml_project::is_xml_path(path);
-    let json = s.project.to_file_json_with_view(&s.saved_view(), compact)?;
+    file_text_of(&s.project, &s.saved_view(), s.prefs.project.compact_project_files, path)
+}
+
+/// [`file_text`] from a snapshot, so a background save can serialise without the session.
+pub(crate) fn file_text_of(project: &effectcraft_project::Project, view: &effectcraft_project::SavedView, compact_pref: bool, path: &str) -> Result<String> {
+    let compact = compact_pref && !crate::xml_project::is_xml_path(path);
+    let json = project.to_file_json_with_view(view, compact)?;
     if crate::xml_project::is_xml_path(path) { crate::xml_project::to_xml(&json).map_err(EngineError::Other) } else { Ok(json) }
 }
 
 fn save_to(s: &mut Session, path: &str) -> Result<Value> {
+    // A project-file auto-save still writing in the background holds an older snapshot: let it land
+    // first, so it cannot overwrite this save afterwards. Its own failure is reported by the
+    // auto-save, not here.
+    // (A copy write needs no wait: it never touches the project file.)
+    if s.autosave.pending.as_ref().is_some_and(|w| w.saves_project.is_some()) {
+        let _ = s.autosave_wait();
+    }
     let json = file_text(s, path)?;
     s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.path = Some(path.to_string());
