@@ -42,10 +42,6 @@ impl Translations {
 }
 
 fn load(language: &str, config: Option<&dyn ConfigStore>) -> Arc<BTreeMap<String, String>> {
-    // English is the source language the scripts use; a pack for it would only be a no-op.
-    if language == "en" {
-        return Arc::new(BTreeMap::new());
-    }
     let Some(config) = config else {
         return Arc::new(BTreeMap::new());
     };
@@ -77,13 +73,15 @@ mod tests {
         let config = MemoryConfig::default();
         config.write("Scripts/translations/zh-hans.json", r#"{"OK":"确定","Cancel":"取消"}"#).unwrap();
         config.write("Scripts/translations/ja.json", r#"{"OK":"OK"}"#).unwrap();
+        config.write("Scripts/translations/en.json", r#"{"确定":"OK"}"#).unwrap();
 
         let translations = Translations::default();
         let zh = translations.for_language("zh-hans", Some(&config));
         assert_eq!(zh.get("OK").map(String::as_str), Some("确定"));
         let ja = translations.for_language("ja", Some(&config));
         assert_eq!(ja.get("OK").map(String::as_str), Some("OK"));
-        assert_eq!(translations.for_language("en", Some(&config)).len(), 0);
+        let en = translations.for_language("en", Some(&config));
+        assert_eq!(en.get("确定").map(String::as_str), Some("OK"), "an English pack can translate a non-English script");
     }
 
     #[test]

@@ -552,6 +552,9 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         .cloned()
         .map(|mut w| {
             w.translate_display(&translations);
+            // Translated strings can be wider than the script's: lay the display copy out again
+            // before `show_windows` sizes and draws it (script `fixedBounds` still wins).
+            layout(&mut w);
             w
         })
         .collect();
@@ -706,6 +709,23 @@ mod tests {
             out.textures_delta.clear();
         }
         last
+    }
+
+    /// A translated label can be wider than the source string. `show_windows` lays the display
+    /// copy out again so the floating window grows instead of clipping the translation.
+    #[test]
+    fn a_translated_floating_window_is_laid_out_again() {
+        use std::collections::BTreeMap;
+
+        let label = Widget { id: 1, kind: WidgetKind::StaticText, text: "OK".into(), visible: true, ..Default::default() };
+        let root = Widget { kind: WidgetKind::Window, visible: true, children: vec![label], ..Default::default() };
+        let mut window = ScriptWindow { id: 1, title: "Hello".into(), script: "panel.jsx".into(), visible: true, root, ..Default::default() };
+
+        layout(&mut window);
+        let before = window.root.bounds[2];
+        window.translate_display(&BTreeMap::from([("OK".to_string(), "A much longer translated label".to_string())]));
+        layout(&mut window);
+        assert!(window.root.bounds[2] > before, "the translated window grows to fit the label");
     }
 
     /// #2796: a solid bar, once shown, took its width from the viewport, so a window that exactly
