@@ -29,6 +29,15 @@ profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUT
 runs `missing_translations_report` with `--nocapture`, which prints the interface strings each
 language has no translation for. Those strings show in English; the report always passes.
 
+Direct nextest runs, including archived coverage shards, serialise `effectcraft-gpu`,
+`effectcraft-ui-egui`, `effectcraft-sam2` and the CLI adapter tests through the `gpu` test group
+in `.config/nextest.toml`. Their process-local mutexes cannot coordinate nextest's separate
+processes; competing software devices can time out during readback. UI harnesses can also
+create a device lazily when rendering a screenshot. This also reduces UI and SAM2 test
+parallelism in the normal gate. `cargo xtask ci` still runs the GPU library suite in one
+process to reuse its device. Group limits apply within one nextest invocation, not across
+separate invocations, and cannot prevent timeouts from other host workloads.
+
 Each crate with several integration-test files has one test binary, `tests/it/main.rs`, whose
 modules are the files in `tests/it/`. Run one file with `cargo test -p <crate> --test it <module>::`
 or `cargo nextest run -p <crate> -E 'binary(it) and test(/^<module>::/)'`.
