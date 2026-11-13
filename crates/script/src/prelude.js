@@ -86,6 +86,8 @@ var PropertyValueType = __enum("PropertyValueType", [
   "NO_VALUE", "ThreeD_SPATIAL", "ThreeD", "TwoD_SPATIAL", "TwoD", "OneD", "COLOR", "CUSTOM_VALUE", "MARKER",
   "LAYER_INDEX", "MASK_INDEX", "SHAPE", "TEXT_DOCUMENT"], 6412);
 var PropertyType = __enum("PropertyType", ["PROPERTY", "INDEXED_GROUP", "NAMED_GROUP"], 6212);
+// TextDocument.autoKernType (numbers as After Effects 26.3 gives them).
+var AutoKernType = __enum("AutoKernType", ["NO_AUTO_KERN", "METRIC_KERN", "OPTICAL_KERN"], 11412);
 var LayerQuality = __enum("LayerQuality", ["BEST", "DRAFT", "WIREFRAME"], 4612);
 var LayerSamplingQuality = __enum("LayerSamplingQuality", ["BILINEAR", "BICUBIC"], 4812);
 var FrameBlendingType = __enum("FrameBlendingType", ["NO_FRAME_BLEND", "FRAME_MIX", "PIXEL_MOTION"], 4012);
@@ -607,6 +609,18 @@ TextDocument.prototype = {
   set subscript(v) {
     if (v) this.__set("baseline", "subscript");
     else if (this.subscript) this.__set("baseline", "normal");
+  },
+  // Automatic kerning: `kerning` is "metrics", "optical" or a manual amount (no automatic kerning).
+  get autoKernType() {
+    var k = this.__style("kerning", "metrics");
+    if (k === "optical") return AutoKernType.OPTICAL_KERN;
+    if (k === "metrics") return AutoKernType.METRIC_KERN;
+    return AutoKernType.NO_AUTO_KERN;
+  },
+  set autoKernType(v) {
+    var k = { 11412: 0, 11413: "metrics", 11414: "optical" }[v];
+    if (k === undefined) throw __err("Bad AutoKernType value " + v);
+    this.__set("kerning", k);
   },
   get tsume() { return this.__style("tsume", 0); },
   set tsume(v) { this.__set("tsume", __num(v)); },
