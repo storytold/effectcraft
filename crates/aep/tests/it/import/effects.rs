@@ -72,7 +72,7 @@ fn the_table_names_tint_gradient_ramp_and_exposure() {
     ] {
         assert!(t.contains(&want), "{want:?}");
     }
-    assert_eq!(t.len(), 63);
+    assert_eq!(t.len(), 67);
     for (_, id) in t {
         assert!(effectcraft_effects::find(id).is_some(), "{id}");
     }

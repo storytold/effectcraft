@@ -60,6 +60,26 @@ export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the back
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
 panel registers an element id; both are enforced by `crates/ui-egui/tests/it/ui_agent_audit.rs`.
 
+### Waiting for a render
+
+On native desktop builds, `engine.execute` with `renderQueue.render` and `wait: true`
+(the default) keeps the window responsive while its reply waits for the render worker.
+`script.run` invoked through the control channel also yields the window while
+`app.project.renderQueue.render()` waits. JavaScript resumes after completion or cancellation;
+the original request receives its result and accumulated output only after the continuation
+finishes or shows a modal dialog. Several renders in one script keep the same request pending.
+Headless scripts retain their synchronous behavior.
+
+While a script waits for rendering, the window shows progress and a **Stop Render** button
+(`scriptRender.stop`). Other editing and script callbacks pause so they cannot enter the
+suspended script's undo group. `ui.inspect`, `ui.elements`, command/menu listings, resize,
+focus, and the engine commands `renderQueue.list`, `renderQueue.stop`, `editor.state`,
+`app.capabilities`, `command.list`, `scriptui.list` and `scriptui.get` remain available.
+Other control requests return an error. Use another connection for inspection or Stop,
+since requests on one connection are answered in order. A window-close request is canceled
+during this wait; stop the render and then close normally to use the unsaved-changes prompt.
+The control transport's 60-second request timeout still applies to long renders.
+
 ## UI state
 
 | Method | Params | Result |

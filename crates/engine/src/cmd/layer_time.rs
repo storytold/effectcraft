@@ -59,8 +59,15 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
                 (None, Some(d)) if span > 0.0 => old * d / span,
                 _ => old,
             };
+            if !new.is_finite() {
+                return Err(bad("layer.timeStretch", "the stretch factor must be a number"));
+            }
             if new.abs() < 1.0 {
                 return Err(bad("layer.timeStretch", "the stretch factor must be at least 1 %"));
+            }
+            // After Effects' largest stretch; a project file holds no more either (#3247).
+            if new.abs() > effectcraft_project::limits::MAX_STRETCH {
+                return Err(bad("layer.timeStretch", "the stretch factor must be at most 9900 %"));
             }
             // The hold point keeps showing the same layer time.
             let h = match hold {
@@ -194,6 +201,7 @@ fn freeze(s: &mut Session, p: &Value, last: bool) -> Result<Value> {
         footage: Some(s.footage.as_ref()),
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let now: Vec<(effectcraft_project::LayerId, f64)> = comp
         .layers

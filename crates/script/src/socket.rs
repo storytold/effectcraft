@@ -142,7 +142,7 @@ mod imp {
 
     /// Fill a stream's buffer until `done(buf)` or the timeout / end of stream. Fails only when
     /// the read deadline can't be set.
-    fn fill(s: &mut TcpStream, buf: &mut Vec<u8>, eof: &mut bool, limit: Duration, done: impl Fn(&[u8]) -> bool) -> std::io::Result<()> {
+    fn fill(s: &mut TcpStream, buf: &mut Vec<u8>, eof: &mut bool, limit: Duration, mut done: impl FnMut(&[u8]) -> bool) -> std::io::Result<()> {
         let end = Instant::now() + limit;
         let mut chunk = [0u8; 4096];
         while !done(buf) && !*eof {
@@ -322,7 +322,15 @@ mod imp {
                         }
                     }
                     ("readln", Sock::Stream { s, buf, eof }) => {
-                        if let Err(e) = fill(s, buf, eof, timeout(p), |b| b.contains(&b'\n')) {
+                        // Only the bytes that arrived since the last look are searched: a peer
+                        // sending no newline must not make every read rescan the whole buffer.
+                        let mut seen = 0;
+                        let newline = |b: &[u8]| {
+                            let hit = b.get(seen..).is_some_and(|new| new.contains(&b'\n'));
+                            seen = b.len();
+                            hit
+                        };
+                        if let Err(e) = fill(s, buf, eof, timeout(p), newline) {
                             return err(format!("cannot set the read timeout: {e}"));
                         }
                         let line: Vec<u8> = match buf.iter().position(|&c| c == b'\n') {

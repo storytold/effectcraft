@@ -121,11 +121,17 @@ pub fn four_color_softening(blend: f64, scale: f64) -> f64 {
     (b * b).max(1e-6)
 }
 
+/// 4-Color Gradient's Jitter (percent, up to After Effects' 500 %) as the dither's strength: 1 at
+/// 100 %, a few code values of noise per unit.
+pub fn four_color_jitter(jitter: f64) -> f32 {
+    (jitter / 100.0).clamp(0.0, 5.0) as f32
+}
+
 fn four_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pts: Vec<((f64, f64), [f32; 4])> =
         (1..=4).map(|i| (b.to_px(ctx.params.v2(&format!("positionsColors/point{i}"))), ctx.params.color(&format!("positionsColors/color{i}")))).collect();
     let k = four_color_softening(ctx.params.f("blend"), b.scale);
-    let jitter = (ctx.params.f("jitter") / 100.0).clamp(0.0, 1.0) as f32;
+    let jitter = four_color_jitter(ctx.params.f("jitter"));
     let op = ctx.params.f("opacity") as f32 / 100.0;
     let mode = ctx.params.e("blendingMode");
     let seed = ctx.seed;
@@ -349,8 +355,9 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("positionsColors/color3", "Color 3", col(1.0, 0.0, 1.0), ParamUi::Color),
                 p("positionsColors/point4", "Point 4", pt(0.9, 0.9), ParamUi::Point),
                 p("positionsColors/color4", "Color 4", col(0.0, 0.0, 1.0), ParamUi::Color),
-                p("blend", "Blend", num(100.0), slider(1.0, 1000.0, 1.0, 1000.0, 1)),
-                p("jitter", "Jitter", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                // After Effects' valid ranges (#3478, #3479); Blend keeps its lower minimum (1, not 5).
+                p("blend", "Blend", num(100.0), slider(1.0, 10000.0, 1.0, 1000.0, 1)),
+                p("jitter", "Jitter", num(0.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
                 p("opacity", "Opacity", num(100.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
                 p("blendingMode", "Blending Mode", Value::Enum(0), popup(&GEN_BLEND_MODES[..18])),
             ],
@@ -384,7 +391,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("corner", "Corner", pt(0.1, 0.1), ParamUi::Point),
                 p("width", "Width", num(64.0), slider(1.0, 4000.0, 1.0, 400.0, 1)),
                 p("height", "Height", num(64.0), slider(1.0, 4000.0, 1.0, 400.0, 1)),
-                p("border", "Border", num(2.0), slider(0.0, 400.0, 0.0, 40.0, 1)),
+                p("border", "Border", num(2.0), slider(0.0, 2000.0, 0.0, 40.0, 1)),
                 p("feather/featherWidth", "Width", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 1)),
                 p("feather/featherHeight", "Height", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 1)),
                 p("invertGrid", "Invert Grid", Value::Bool(false), ParamUi::Checkbox),
@@ -463,6 +470,21 @@ mod generator_tests {
             }
             assert!(o.img.data.iter().any(|p| p[3] > 0.99), "blend {blend}: the ramp is drawn inside the shape");
         }
+    }
+
+    /// #3479: Jitter goes up to After Effects' 500 %, and more jitter dithers more (the dither
+    /// stopped growing at 100 %).
+    #[test]
+    fn four_color_jitter_grows_up_to_five_hundred_percent() {
+        let img = Image::filled(32, 32, [0.0, 0.0, 0.0, 1.0]);
+        let spread = |jitter: f64| {
+            let o = run_fx("ec.generate.fourcolor", &[("jitter", num(jitter))], img.clone(), 0.0, EffectEnv::default()).img;
+            let flat = run_fx("ec.generate.fourcolor", &[], img.clone(), 0.0, EffectEnv::default()).img;
+            o.data.iter().zip(&flat.data).map(|(a, b)| (a[0] - b[0]).abs()).fold(0.0f32, f32::max)
+        };
+        let (at100, at500) = (spread(100.0), spread(500.0));
+        assert!(at100 > 0.0 && at500 > 4.0 * at100, "{at100} {at500}");
+        assert!(at500 < 0.2, "a few code values: {at500}");
     }
 
     /// After Effects 2026, 4-Color Gradient defaults (yellow, green, magenta, blue at 10 % / 90 %

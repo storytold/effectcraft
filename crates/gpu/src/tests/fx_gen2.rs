@@ -40,6 +40,8 @@ fn closed_form() {
     env_case("ec.generate.beam", &[]);
     env_case("ec.generate.beam", &[("length", n(70.0)), ("time", n(40.0)), ("softness", n(0.0)), ("perspective3d", off()), ("compositeOnOriginal", off())]);
     env_case("ec.generate.beam", &[("startThickness", n(3.0)), ("endThickness", n(20.0)), ("insideColor", c(0.3, 0.9, 1.0))]);
+    // #3475: After Effects' maximum thickness.
+    env_case("ec.generate.beam", &[("startThickness", n(0.0)), ("endThickness", n(4000.0))]);
     env_case("ec.generate.lensflare", &[]);
     env_case("ec.generate.lensflare", &[("lensType", e(1)), ("flareCenter", pt(50.0, 30.0)), ("blendWithOriginal", n(30.0))]);
     env_case("ec.generate.lensflare", &[("lensType", e(2)), ("flareBrightness", n(160.0))]);

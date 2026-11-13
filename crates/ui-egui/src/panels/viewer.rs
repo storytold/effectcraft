@@ -143,6 +143,7 @@ struct Vw<'a> {
     puppet_layers: Vec<(&'a Layer, super::puppet_tool::Overlay)>,
 }
 
+/// Draws the viewer panel in `rect` for the active comp and handles its input.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
@@ -212,6 +213,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     phase_guides(app, &ectx, &mut v);
     phase_layers(app, ui, &ectx, &mut v);
@@ -836,9 +838,12 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
     let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));
     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.secondary_clicked()).or(forwarded) {
-        // Picking an already selected layer preserves the group; an unselected hit
-        // becomes the target, using the same visible/unlocked hit test as left-click.
-        pick(app, ectx, map.to_comp(pos), false);
+        // The layer a left click there would select: the topmost one, keeping the group when it
+        // is already selected (#1535), or the selected layer whose shown path is under the
+        // pointer. The menu's list reaches the layers under it.
+        if ov::segment_at(&v.paths, &map, pos, 6.0).is_none() {
+            click_pick(app, ectx, map.to_comp(pos), false);
+        }
         let point = map.to_comp(pos);
         let hits: Vec<(u64, String)> = layers_at(ectx, point).map(|l| (l.id.0, l.name.clone())).collect();
         ui.data_mut(|d| d.insert_temp(menu_hits_id, hits));
@@ -1843,15 +1848,19 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
             }
             // The Roto Brush paints in the Layer panel only: select as usual and say so.
             rt if rt.roto_kind(false).is_some() => {
-                if pick(app, ectx, cpt, mods.shift).is_none() {
+                if click_pick(app, ectx, cpt, mods.shift).is_none() {
                     let _ = app.session.execute("edit.deselectAll", json!({}));
                 }
                 app.ui.status = crate::i18n::tr(ROTO_HINT).to_string();
             }
             _ => {
-                if pick(app, ectx, cpt, mods.shift).is_none() {
+                let on_path = ov::segment_at(&paths, &map, pos, 6.0).is_some();
+                if on_path && !mods.shift {
+                    // A click on a path of a selected layer stays on that layer, even where a
+                    // layer in front covers it, so a double-click there free-transforms the path.
+                } else if click_pick(app, ectx, cpt, mods.shift).is_none() {
                     let _ = app.session.execute("edit.deselectAll", json!({}));
-                } else if !mods.shift && !app.session.state.selected_vertices.is_empty() && ov::segment_at(&paths, &map, pos, 6.0).is_none() {
+                } else if !mods.shift && !app.session.state.selected_vertices.is_empty() && !on_path {
                     // A click away from the paths, even on their layer, deselects the mask
                     // points (the layer stays selected), as in After Effects (#513).
                     let _ = app.session.execute("mask.selectVertices", json!({"vertices": []}));
@@ -1902,7 +1911,8 @@ fn phase_dblclick(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Respons
     {
         let cpt = map.to_comp(pos);
         let roto = app.ui.tool.roto_kind(false).is_some();
-        if let Some(l) = pick(app, ectx, cpt, false).and_then(|l| comp.layer(l)) {
+        // The topmost layer, as the double-click's first click selected it (#1535).
+        if let Some(l) = click_pick(app, ectx, cpt, false).and_then(|l| comp.layer(l)) {
             match &l.source {
                 effectcraft_engine::project::LayerSource::Comp { item } => app.session.open_comp(*item),
                 // With a Roto Brush tool, double-clicking a layer opens it in the Layer panel,
@@ -2000,8 +2010,8 @@ use geometry::{
 use geometry::{box_corners, project_clipped};
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};
+pub(crate) use shapes::{click_pick, layer_at, layer_at_including_locked, layers_at, pick, selectable_layers};
 use shapes::{create_shape, draw_shape_ghost, shape_drag};
-pub(crate) use shapes::{layer_at, layer_at_including_locked, layers_at, pick, selectable_layers};
 #[cfg(test)]
 use tools::constrain_45;
 use tools::{add_motion_key, axis_at, axis_drag, drag_axes, draw_rigs, parent_world_inverse, pen_cursor, pen_cursor_icon, pen_press, select_motion_key};

@@ -198,11 +198,10 @@ fn viewer_click_picks_nothing_while_the_solo_layer_is_inactive() {
     assert!(h.state().session.state.selected_layers.is_empty(), "{back:?} stays excluded by solo");
 }
 
-/// A selected layer under the pointer takes the press before the layers in front of it, as in
-/// After Effects: it stays selected and a drag moves it. With none selected there, the topmost
-/// layer does (#230).
+/// A click, left or right, selects the topmost layer under the pointer, even over a selected
+/// layer behind it (#1535); a drag still moves a selected layer behind others (#230).
 #[test]
-fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
+fn viewer_click_selects_the_topmost_layer_and_a_drag_moves_the_selected_one() {
     let mut h = selection_harness();
     let comp = h.state().session.active_comp().unwrap();
     let (front, back) = (comp.layers[0].id, comp.layers[1].id);
@@ -210,7 +209,20 @@ fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
     h.run_steps(3);
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
-    assert_eq!(h.state().session.state.selected_layers, vec![back], "a click keeps the selected layer behind");
+    assert_eq!(h.state().session.state.selected_layers, vec![front], "a click selects the layer in front of the selected one (#1535)");
+    // A right-click selects what a left click would, so the menu acts on the layer in front,
+    // here where both layers cover the pointer and the layer behind is selected.
+    h.state_mut().session.execute("layer.select", json!({"layers": [back.0]})).unwrap();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_layers, vec![front], "a right-click selects the layer in front");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.state_mut().session.execute("layer.select", json!({"layers": [back.0]})).unwrap();
     h.run_steps(40);
     let (front0, back0) = (position_and_anchor(&h, front).0, position_and_anchor(&h, back).0);
     drag(&mut h, at, at + vec2(60.0, 0.0));
@@ -222,6 +234,71 @@ fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
     let at = screen(&h, [300.0, 180.0]);
     click(&mut h, at);
     assert_eq!(h.state().session.state.selected_layers, vec![front], "nothing selected: the topmost layer");
+}
+
+/// A click, left or right, on a path of the selected layer, where a layer in front covers it, stays
+/// on that path's layer rather than selecting the layer in front, so a double-click there
+/// free-transforms the path (#1535 keeps this from `pick`).
+#[test]
+fn viewer_double_click_on_a_covered_path_of_the_selected_layer_free_transforms_it() {
+    let mut h = selection_harness();
+    let comp = h.state().session.active_comp().unwrap();
+    let back = comp.layers[1].id;
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [back.0]})).unwrap();
+    // In Back's own space (80×80): its top edge runs through comp (320, 150), under Front.
+    s.execute("mask.new", json!({"layer": back.0, "vertices": [[10, 10], [70, 10], [70, 70], [10, 70]], "closed": true})).unwrap();
+    h.run_steps(40);
+    let at = screen(&h, [320.0, 150.0]);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    // A right-click there acts on the path's layer too, as a left click does.
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_layers, vec![back], "a right-click on the path keeps its layer");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(40);
+    // Two clicks a frame apart: the first selects as a click does, the second double-clicks.
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.step();
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.selected_layers, vec![back], "the path's layer stays selected");
+    assert_eq!(h.state().session.state.selected_vertices.len(), 4, "all the path's points are selected");
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
+}
+
+/// A double-click where a precomp layer covers the selected layer opens the precomp: like a single
+/// click, it acts on the topmost layer, which its first click selects (#1535).
+#[test]
+fn viewer_double_click_opens_the_topmost_layer_over_a_selected_one() {
+    let mut s = Session::default();
+    let inner = s.execute("comp.new", json!({"name": "Inner", "width": 80, "height": 80, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Main", "width": 640, "height": 360, "duration": 4})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "Back", "color": "#406080", "width": 200, "height": 200})).unwrap();
+    s.execute("layer.addItem", json!({"item": "Inner"})).unwrap();
+    let back = s.active_comp().unwrap().layers[1].id;
+    s.execute("layer.select", json!({"layers": [back.0]})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(40);
+    let at = screen(&h, [320.0, 180.0]);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    // Two clicks a frame apart: the first selects as a click does, the second double-clicks.
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.step();
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().session.active_comp_id().map(|c| c.0), Some(inner), "the precomp in front opens");
 }
 
 /// Each composition keeps its Resolution, saved with the project as in After Effects: chosen for
@@ -1066,6 +1143,38 @@ fn shape_pen_draws_a_closed_shape_layer() {
         .unwrap()
         .clone();
     assert_eq!(sp.vertices.len(), 4);
+}
+
+/// Fit New Layers to Work Area with the playhead past the work area: the Pen's new shape layer
+/// spans the work area and the playhead moves into it, so the path and its vertex controls show
+/// and the closing click lands.
+#[test]
+fn pen_draws_on_a_layer_fitted_to_the_work_area_past_the_playhead() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("prefs.set", json!({"key": "general.fitNewLayersToWorkArea", "value": true})).unwrap();
+    s.execute("comp.workArea", json!({"start": 1, "end": 2})).unwrap();
+    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(3.0));
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let n0 = h.state().session.active_comp().unwrap().layers.len();
+    for p in [[200.0, 100.0], [400.0, 120.0], [300.0, 260.0]] {
+        let at = screen(&h, p);
+        click(&mut h, at);
+    }
+    let l = h.state().session.active_comp().unwrap().layers[0].clone();
+    let t = h.state().session.time();
+    assert!(l.in_point <= t && t < l.out_point, "the playhead is on the new layer: {t:?} in {:?}..{:?}", l.in_point, l.out_point);
+    assert_eq!((l.in_point.seconds().round(), l.out_point.seconds().round()), (1.0, 2.0), "the layer keeps the work area");
+    let path = l.props.sub("contents").unwrap().groups().next().unwrap().sub("contents").unwrap().groups().next().unwrap().clone();
+    assert!(h.state().auto.find(&format!("viewer.shapePath.{}.vertex.0", path.uid)).is_some(), "the Pen's vertex controls show");
+    let at = screen(&h, [200.0, 100.0]);
+    click(&mut h, at);
+    let comp = h.state().session.active_comp().unwrap().clone();
+    assert_eq!(comp.layers.len(), n0 + 1);
+    let sp = comp.layers[0].props.find_group(path.uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    assert_eq!(sp.vertices.len(), 3);
+    assert!(sp.closed, "the click on the first vertex closes the path");
 }
 
 #[test]
@@ -2370,7 +2479,7 @@ fn command_clicking_a_group_twirl_opens_its_whole_tree() {
     // twirls open with it, and closed again with it.
     let mut h = harness();
     let id = layer_id(&h, "Box");
-    h.state_mut().session.execute("effect.apply", json!({"effect": "Lumetri Color", "layers": [id]})).unwrap();
+    h.state_mut().session.execute("effect.apply", json!({"effect": "Color Grading", "layers": [id]})).unwrap();
     fn walk(g: &effectcraft_engine::project::PropGroup, out: &mut Vec<u64>) {
         for sg in g.groups() {
             out.push(sg.uid);

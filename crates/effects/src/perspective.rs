@@ -1,5 +1,5 @@
-//! Perspective effects (batch 2): Bevel Alpha, Bevel Edges, Radial Shadow, CC Cylinder,
-//! CC Sphere and CC Spotlight.
+//! Perspective effects (batch 2): Bevel Alpha, Bevel Edges, Radial Shadow, Cylinder Wrap,
+//! Sphere Wrap and Surface Spotlight.
 //!
 //! Angles follow the convention used by Drop Shadow: measured clockwise from "up", so a light
 //! angle `a` sits in the direction `(sin a, -cos a)` (y grows downwards). 3D vectors use x right,
@@ -158,7 +158,7 @@ fn radial_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Phong-style shading shared by CC Cylinder and CC Sphere.
+/// Phong-style shading shared by Cylinder Wrap and Sphere Wrap.
 struct Shading {
     l: [f64; 3],
     color: [f32; 4],
@@ -394,7 +394,7 @@ pub fn specs() -> Vec<EffectSpec> {
     };
     let render = || popup(&["Full", "Outside", "Inside"]);
     let mut cyl = vec![
-        p("radius", "Radius", num(100.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
+        p("radius", "Radius", num(100.0), slider(0.0, 30000.0, 0.0, 200.0, 1)),
         p("position", "Position", pt(0.5, 0.5), ParamUi::Point),
         p("rotation", "Rotation", num(0.0), ParamUi::Angle),
         p("rotationX", "Rotation X", num(0.0), ParamUi::Angle),
@@ -451,11 +451,11 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             radial_shadow,
         ),
-        spec("ec.perspective.cccylinder", "CC Cylinder", cyl, cylinder),
-        spec("ec.perspective.ccsphere", "CC Sphere", sph, sphere),
+        spec("ec.perspective.cccylinder", "Cylinder Wrap", cyl, cylinder),
+        spec("ec.perspective.ccsphere", "Sphere Wrap", sph, sphere),
         spec(
             "ec.perspective.ccspotlight",
-            "CC Spotlight",
+            "Surface Spotlight",
             vec![
                 p("from", "From", pt(0.3, 0.2), ParamUi::Point),
                 p("to", "To", pt(0.5, 0.5), ParamUi::Point),
@@ -563,6 +563,23 @@ mod tests {
         assert!(out.get(50, 10)[3] > 0.99);
         assert!(out.get(50 + 14, 10)[3] > 0.99);
         assert_eq!(out.get(50 + 18, 10)[3], 0.0);
+    }
+
+    /// #3368: Radius takes the range After Effects' CC Cylinder has, up to 30000 %, and a cylinder
+    /// that large still renders (nearly flat, fully opaque) instead of clamping to 400 %.
+    #[test]
+    fn cylinder_radius_goes_up_to_thirty_thousand_percent() {
+        let spec = find("ec.perspective.cccylinder").unwrap();
+        let radius = spec.params.iter().find(|p| p.id == "radius").unwrap();
+        assert!(matches!(radius.ui, ParamUi::Slider { min, max, .. } if min == 0.0 && max == 30000.0), "{:?}", radius.ui);
+        // The cylinder's axis on the left edge: at 400 % its radius is 400 / 100 * 100 / 2π ≈ 63.7 px,
+        // so a pixel 70 px along is past it there and inside the 30000 % one.
+        let img = Image::filled(100, 20, [0.5, 0.5, 0.5, 1.0]);
+        let at_edge = |radius: f64| run("ec.perspective.cccylinder", &img, &[("radius", num(radius)), ("position", Value::Vec2([0.0, 10.0]))]).img;
+        let clamped = at_edge(400.0).get(70, 10);
+        assert_eq!(clamped[3], 0.0, "beyond a 400 % cylinder: {clamped:?}");
+        let px = at_edge(30000.0).get(70, 10);
+        assert!(px.iter().all(|v| v.is_finite()) && px[3] > 0.99, "{px:?}");
     }
 
     #[test]
