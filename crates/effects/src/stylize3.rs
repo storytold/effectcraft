@@ -294,24 +294,22 @@ fn glass(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let height = ctx.params.f("height") as f32 / 100.0;
     let k = height * 25.0;
     let disp = ctx.params.f("displacement") * b.scale * 0.25;
+    let displace = disp != 0.0 && height != 0.0;
     let light = BumpLight::from(ctx, &b);
     let src = b.img.clone();
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let n = normal(&hf, x, y, k);
             let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
-            let s = if disp != 0.0 && height != 0.0 {
-                src.sample_bilinear_clamped(fx + n[0] as f64 * disp, fy + n[1] as f64 * disp)
-            } else {
-                src.data[y * src.width as usize + x]
-            };
-            let a = src.data[y * src.width as usize + x][3];
+            // Displacement moves the whole pixel, alpha included, so the shape of the layer
+            // underneath is warped. Taking only the colour from the displaced position (and
+            // the alpha from this pixel) cannot move a flat-coloured shape at all.
+            let s = if displace { src.sample_bilinear_clamped(fx + n[0] as f64 * disp, fy + n[1] as f64 * disp) } else { src.data[y * src.width as usize + x] };
+            let (c, a) = unpremul(s);
             if a <= 0.0 {
                 *px = [0.0; 4];
                 continue;
             }
-            let (c, sa) = unpremul(s);
-            let c = if sa > 0.0 { c } else { unpremul(src.data[y * src.width as usize + x]).0 };
             let o = light.shade(c, n, light.to_light(fx, fy));
             *px = premul(o, a);
         }
@@ -650,6 +648,24 @@ mod tests {
         assert!(max_diff(&o.img, &img) < 1e-4, "{}", max_diff(&o.img, &img));
         let o = run("ec.stylize.ccglass", &[], img.clone());
         assert!(max_diff(&o.img, &img) > 0.01);
+    }
+
+    #[test]
+    fn glass_displacement_moves_the_shape() {
+        // A flat white square on transparent: only alpha can show the displacement.
+        let (w, h) = (48u32, 32u32);
+        let mut img = Image::new(w, h);
+        for y in 8..24 {
+            for x in 16..32 {
+                img.set(x, y, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        let vals = [("height", num(100.0)), ("displacement", num(40.0)), ("softness", num(6.0)), ("specular", num(0.0))];
+        let o = run("ec.stylize.ccglass", &vals, img.clone());
+        assert!(o.img.data.iter().zip(&img.data).any(|(a, b)| (a[3] - b[3]).abs() > 0.05), "alpha must be displaced");
+        // No displacement: the shape is untouched.
+        let o = run("ec.stylize.ccglass", &[("displacement", num(0.0)), ("specular", num(0.0))], img.clone());
+        assert!(o.img.data.iter().zip(&img.data).all(|(a, b)| (a[3] - b[3]).abs() < 1e-6));
     }
 
     #[test]

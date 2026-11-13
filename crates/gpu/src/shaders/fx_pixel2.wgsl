@@ -597,8 +597,8 @@ fn fp2_bump(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let px = textureLoad(src, p, 0);
     let glass = P.u[0].x != 0u;
-    if (px.w <= 0.0) {
-        textureStore(out, p, select(px, vec4<f32>(0.0), glass));
+    if (!glass && px.w <= 0.0) {
+        textureStore(out, p, px);
         return;
     }
     let k = P.f[0].x;
@@ -614,18 +614,21 @@ fn fp2_bump(@builtin(global_invocation_id) gid: vec3<u32>) {
         let vl = max(sqrt(v.x * v.x + v.y * v.y + v.z * v.z), 1e-6);
         l = v / vl;
     }
-    var c = fp2_unpremul(px);
+    // CC Glass displacement moves the whole pixel, alpha included (stylize3::glass).
+    var s = px;
     if (glass) {
         let disp = P.f[0].y;
         if (disp != 0.0 && P.f[0].z != 0.0) {
-            let s = sample_bilinear_clamped(src, fx + n.x * disp, fy + n.y * disp);
-            if (s.w > 0.0) {
-                c = fp2_unpremul(s);
-            }
+            s = sample_bilinear_clamped(src, fx + n.x * disp, fy + n.y * disp);
+        }
+        if (s.w <= 0.0) {
+            textureStore(out, p, vec4<f32>(0.0));
+            return;
         }
     }
+    let c = fp2_unpremul(s);
     let o = fp2_shade(c, n, l);
-    textureStore(out, p, vec4<f32>(o * px.w, px.w));
+    textureStore(out, p, vec4<f32>(o * s.w, s.w));
 }
 
 // ---------------------------------------------------------------- CC HexTile (stylize3::hextile)
