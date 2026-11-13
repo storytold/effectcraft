@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-11-03 · **Change:** Traditional Chinese (`zh-hant`) effect names are complete: 308 names and 21 categories (#2037). Previously: minor (Polish (`pl`): menus 630, panels 695; recounted at this tree after #1774: Japanese 1,923 of ≈ 4,200 interface strings (46%, with 297 effect names), Simplified Chinese 1,935 (46%, with 307 effect names), Traditional Chinese 1,581 (38%, its panel catalog 951 rows after #2244); overall ≈ 24%; previously: minor, the panel/dialog catalogs grow by 303 rows in Japanese, Simplified Chinese and Traditional Chinese: panel tabs, form and dialog labels, context menus, tracker/graph/text-panel labels, credits and File-panel footers; previously: minor, catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-11-09 · **Change:** minor (Japanese: how a word is chosen, the same string in English, Simplified Chinese and Japanese side by side, and how a row is added and pinned; previously: Traditional Chinese (`zh-hant`) effect names are complete: 308 names and 21 categories (#2037)). Previously: minor (Polish (`pl`): menus 630, panels 695; recounted at this tree after #1774: Japanese 1,923 of ≈ 4,200 interface strings (46%, with 297 effect names), Simplified Chinese 1,935 (46%, with 307 effect names), Traditional Chinese 1,581 (38%, its panel catalog 951 rows after #2244); overall ≈ 24%; previously: minor, the panel/dialog catalogs grow by 303 rows in Japanese, Simplified Chinese and Traditional Chinese: panel tabs, form and dialog labels, context menus, tracker/graph/text-panel labels, credits and File-panel footers; previously: minor, catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
 
 How much of EffectCraft's interface is translated, language by language, compared with After
 Effects. [gaps.md](gaps.md) gap 16 and workstream G9 hold the work;
@@ -62,6 +62,110 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   layers** (`crates/text`) shaping (harfrust), bidi (UAX #9), vertical text and Tate-Chu-Yoko
   work; text-layer typing goes through the IME (`viewer_text.rs` handles preedit and commit).
 
+## Choosing a Japanese word
+
+This section is about Japanese, and only Japanese. What a Simplified Chinese, Traditional
+Chinese or any other catalog says is for the people who read that language to decide; a change to
+one of those catalogs belongs with them, and this document records the reasoning for Japanese
+rather than setting a standard another language should follow. A contributor who does not read a
+language has no standing to choose its words, which is the same courtesy this catalog asks for
+itself.
+
+One rule, and the consequences that follow from it: **a Japanese word comes from the installed
+After Effects 2026 interface, not from a dictionary.** Where that interface has no such word, the
+catalog says what it did instead.
+
+The reason is not aesthetic. Two audiences read this interface, and both learned the words
+somewhere else: people arriving from After Effects look for the menu item they already know by
+name, and the Japanese After Effects tutorials they follow call it the same thing. A synonym makes
+the video say タイムリマップ while the menu says 時間リマップ, and the reader translates mid-sentence.
+Matching the interface is what lets someone move over and keep using the tutorials they already
+have.
+
+| Situation | What the catalog does | Why |
+|---|---|---|
+| After Effects has the string | Takes its word character for character | Someone moving from After Effects reads the menu without stopping only if the words match |
+| After Effects has a near synonym | Still its word | `トラッキング` for トラック, `ベクター` for ベクトル, `時間リマップ` for タイムリマップ, `ホールドキーフレーム` for 停止したキーフレーム, `レイヤーのトランスフォーム` for レイヤートランスフォーム: each is a second look for a reader who knows that interface, on every visit |
+| After Effects has no such feature | No row at all | Translating a control that does not exist is noise (`Draft 3D`, `3D グリッド`) |
+| After Effects' **Japanese** interface draws the name in English | Leaves it in English too: the `CC` series, `Unmult` | Adobe's **Chinese** interface translates the `CC` names (`CC 球体`), so a Chinese row and a Japanese row legitimately differ here; `VR` and `OCIO` carry Japanese tails in both (`VR ブラー`, `OCIO CDL 変換`), and a row repeating the English name is a choice, not a missing row |
+| The string belongs to EffectCraft and exists nowhere else | Translates it, as the Chinese catalog does, and says so in a comment | There is no interface to copy from; leaving it English makes the dialog half-translated |
+| The English is EffectCraft's own invention (`Fast Previews`) | The English may be translated freely; there is no After Effects wording to match | The English is the source, not a translation |
+
+### The same string in English, Simplified Chinese and Japanese
+
+| English | Simplified Chinese | Japanese (After Effects 2026) | Read from |
+|---|---|---|---|
+| Take Snapshot | 拍摄快照 | スナップショット | the viewer's snapshot button, by its accessible name |
+| Toggle Transparency Grid | 切换透明网格 | 透明グリッド | viewer footer |
+| Half / Third / Quarter | 二分之一 / 三分之一 / 四分之一 | 1/2 画質 / 1/3 画質 / 1/4 画質 | resolution menu, with the space: `1/2画質` is the near miss a later edit introduced |
+| Anchor Point | 锚点 | アンカーポイント | the animator pop-up and the properties group |
+| Line Spacing | 行距 | ラインスペース | the animator pop-up |
+| Character Value | 字符值 | 文字コード | the animator pop-up |
+| Layer Transform | 图层变换 | レイヤートランスフォーム | the properties group |
+| Separate Dimensions | 分离维度 | 次元に分割 | a property's context menu |
+| Advanced | 高级 | 高度 | Composition Settings |
+| 3D Renderer | 3D 渲染器 | 3D レンダラー | Composition Settings; the space is part of it |
+| Fit selection to view | 使所选内容适合视图 | 選択範囲に合わせて表示 | the magnification menu |
+| Extended Viewer | 扩展查看器 | 拡張ビューア | the view menu |
+| Toggle Hold Keyframe | 切换定格关键帧 | 停止したキーフレームの切り替え | Animation ▸ Keyframe |
+| Enable Time Remapping | 启用时间重映射 | タイムリマップを有効にする | Layer ▸ Time |
+| Time-Reverse Layer | 时间反向图层 | 時間反転レイヤー | Layer ▸ Time |
+| Create Shapes from Vector Layer | 从矢量图层创建形状 | ベクトルレイヤーからシェイプを作成 | Layer ▸ Create |
+| Track Motion / Track Mask / Track Camera | 跟踪运动 / 跟踪蒙版 / 跟踪摄像机 | モーションをトラック / マスクをトラック / カメラをトラック | Layer ▸ Mask and Shape Path |
+| CC Sphere | CC 球体 | CC Sphere | Adobe's Japanese interface leaves the `CC` set in English; its Chinese one translates it |
+| Unmult | Unmult | Unmult | stays English in both, as a brand name |
+| Face Track Points | 面部追踪点 | 顔のトラッキングポイント | no After Effects name: translated as the Chinese catalog translates its own |
+
+These are the interface's words, not necessarily the catalog's rows at this tree: some of them
+still differ in `crates/ui-egui/src/i18n/**`, and where they do, the row is the defect and the
+table is what it should read. A row that was read off the interface should arrive with a test
+that pins it: a corrected row stays corrected only if something fails when it is rewritten into a
+near synonym, and today only some rows have one.
+
+Which rows still differ, and where each correction lives:
+
+| English | Catalog today | Corrected in |
+|---|---|---|
+| Half / Third / Quarter | `1/2画質` | #2680 (the space) |
+| Enable Time Remapping | `時間リマップを有効化` | #2738 |
+| Time-Reverse Layer | `レイヤーを時間反転` | #2738 |
+| Create Shapes from Vector Layer | `ベクターレイヤーから…` | #2738 |
+| Toggle Hold Keyframe | `ホールドキーフレームの切り替え` | #2738 |
+| Anchor Point / Skew / Line Spacing / Character Value | `傾斜`, `行間`, `文字の値` in the animator pop-up | #2742 |
+| Take Snapshot | `スナップショットを取得` | #2680 |
+| Layer Transform | `レイヤーのトランスフォーム` | #2680 |
+| Separate Dimensions | `次元を分離` | #2680 |
+
+The pull requests are listed because the correction is the evidence for the table, not because
+this document depends on them: once they land the rows match, and the tests named in
+[Adding a row](#adding-a-row) keep them matched.
+
+### Adding a row
+
+1. Open the string in the installed After Effects — the panel, the menu, or its accessible name
+   through UI Automation — and read the Japanese as it is drawn.
+2. Add the row to the table that draws the string: `i18n.rs` for the fixed menus,
+   `i18n/ui.rs` for panels, dialogs, tooltips and property groups, `i18n/effects.rs` for effect
+   names. A panel literal also has to be routed through `tr` / `tr_args` / `label` first; a string
+   that is still a literal in the panel cannot be translated by adding a row.
+3. Pin it in the test that belongs to it, keyed by the command and the English source rather than
+   by the Japanese alone, so a row moved to another command fails as well.
+4. The pull request carries the screenshot, or the accessible name, the word was read from.
+   Nothing fails when that evidence is missing: it is a convention, so the burden sits with
+   whoever proposes the change rather than with whoever wrote the row.
+
+### Where Japanese stands at this tree
+
+| Catalog | Japanese rows | After Effects | Left |
+|---|---|---|---|
+| Fixed menus (`i18n.rs`) | 632, level with Simplified Chinese | complete | — |
+| Panels, dialogs, tooltips, property groups (`i18n/ui.rs`) | 1,064, level with Simplified Chinese | complete for the wrapped strings | unwrapped literals: Home screen, engine-built tooltips, errors, undo labels |
+| Effect names (`i18n/effects.rs`) | 308 of 308, with the 21 categories | 308 names exist | — |
+| Effect parameter names | 0 of ≈ 1,650 | all | not routed through a catalog yet |
+
+Reviewed by a native speaker: no. Every Japanese row here was read from the interface, which is
+stronger evidence than a draft, but it is not proofreading.
+
 ## Measurement
 
 Measured 10 October 2026 at `origin/main` 1446e27, recounted on 22 October 2026 at `ad8b6acb`,
@@ -120,6 +224,7 @@ can give; only Georgian, contributed by a native speaker (#1843), has had it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Japanese: how a word is chosen (the installed interface, not a dictionary), the same string in English, Simplified Chinese and Japanese, how a row is added and pinned, and where the catalogs stand; effect names are 308 of 308 after #2740 |
 | 2026-11-03 | minor | Traditional Chinese (`zh-hant`): effect names complete — 308 names and 21 categories (#2037); the menu and panel catalogs stay at 630 and 951 rows |
 | 2026-10-30 | minor | Recounted on the merged tree after #1774: Japanese 1,923 (46%, 297 effect names), Simplified Chinese 1,935 (46%, 307 effect names), Traditional Chinese 1,581 (38%, 951 panel rows after #2244's prune); overall ≈ 24% |
 | 2026-10-22 | minor | Panel/dialog second step: 300 more catalog rows in Japanese, Simplified Chinese and Traditional Chinese, plus the three rows the review found missing (Basic, Advanced and Play/Stop) — panel tabs, form and dialog labels, panel context menus, the tracker and graph controls, text-panel options, File-panel footers and credits; the panel tables are now 996 Japanese and 998 Simplified Chinese rows, all drawn through `tr`/`tr_args`, with the tests keeping the three catalogs listing the same sources; the 30 October recount above carries the share |
