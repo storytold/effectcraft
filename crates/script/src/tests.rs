@@ -891,6 +891,15 @@ fn comp_display_start_frame_follows_the_frame_rate() {
         "var c = app.project.items.addComp('c', 64, 64, 1, 4, 25); var a = c.displayStartFrame; c.displayStartFrame = 100; [a, c.displayStartFrame, c.displayStartTime].join('|')",
     );
     assert_eq!(o.result, json!("0|100|4"));
+    // At 23 fps a frame boundary falls between ticks: the stored start must still be that frame.
+    let o = ok(&mut s, "var c = app.project.items.addComp('d', 64, 64, 1, 4, 23); c.displayStartFrame = 1; c.displayStartFrame");
+    assert_eq!(o.result, json!(1));
+    let comp = s.project.items.values().find_map(|i| match &i.kind {
+        effectcraft_project::ItemKind::Comp(c) if i.name == "d" => Some(c.clone()),
+        _ => None,
+    });
+    let comp = comp.expect("comp d");
+    assert_eq!(comp.frame_rate.frame_at(comp.display_start), 1, "the start is frame 1, not the frame before");
 }
 
 #[test]

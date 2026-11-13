@@ -1662,8 +1662,7 @@ CompItem.prototype.constructor = CompItem;
   def("displayStartTime", function () { return this.__info().displayStartTime; }, function (v) { this.__settings({ startTime: __num(v) }); });
   // The comp's start time in frames (displayStartTime x frameRate), rounded to a whole frame like After Effects.
   def("displayStartFrame", function () { var i = this.__info(); return Math.round(i.displayStartTime * i.frameRate); }, function (v) {
-    var i = this.__info();
-    this.__settings({ startTime: __num(v, "displayStartFrame") / i.frameRate });
+    this.__settings({ startFrame: Math.round(__num(v, "displayStartFrame")) });
   });
   def("hideShyLayers", function () { return this.__info().hideShyLayers; }, function (v) { __call("comp.setSwitch", { comp: this.__id, "switch": "hideShy", value: !!v }); });
   def("motionBlur", function () { return this.__info().motionBlur; }, function (v) { __call("comp.setSwitch", { comp: this.__id, "switch": "motionBlur", value: !!v }); });
