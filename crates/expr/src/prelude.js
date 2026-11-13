@@ -877,7 +877,8 @@ Prop.prototype = {
   },
   get value() { return this.__self ? this.__selfValue() : this.valueAtTime(time); },
   // The evaluated property's own value: a layer parameter reads as its layer here too.
-  __selfValue: function () { return this.__info[2] === 'layer' ? this.__wrap(value) : value; },
+  // (After posterizeTime, `value` may already be the layer.)
+  __selfValue: function () { return this.__info[2] === 'layer' && !value?.__isLayer ? this.__wrap(value) : value; },
   valueAtTime: function (t) {
     t = __v(t);
     if (this.__self && t === time) return this.__selfValue();

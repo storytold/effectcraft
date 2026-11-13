@@ -1917,6 +1917,9 @@ fn a_layer_parameters_own_expression_reads_its_layer() {
     ] {
         let e = format!("if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
         f.ev(f.a, path, &e, 0.0).unwrap_or_else(|err| panic!("{path} {read}: {err}"));
+        // After posterizeTime moves the sample time, `value` already holds the layer.
+        let e = format!("posterizeTime(1); if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.5).unwrap_or_else(|err| panic!("posterized {path} {read}: {err}"));
     }
 }
 
