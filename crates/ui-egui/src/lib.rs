@@ -271,6 +271,8 @@ pub struct EffectcraftApp {
     pub ui: UiState,
     workspace_store: workspace_state::WorkspaceStore,
     pub tokens: Tokens,
+    /// ScriptUI display strings for the active language (see [`i18n::scriptui`]).
+    pub(crate) scriptui_translations: i18n::scriptui::Translations,
     pub auto: automation::Registry,
     pub frames: Frames,
     pub playback: Playback,

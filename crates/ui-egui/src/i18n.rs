@@ -7,6 +7,8 @@ use crate::EffectcraftApp;
 
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
+/// Display-time translations for ScriptUI windows (translation packs under `Scripts/translations`).
+pub(crate) mod scriptui;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 pub(crate) mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
