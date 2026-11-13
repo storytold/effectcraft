@@ -1878,6 +1878,22 @@ fn layer_control_property_stands_for_its_layer() {
 }
 
 #[test]
+fn an_empty_layer_control_stands_for_its_own_layer() {
+    // In After Effects a Layer Control set to None gives the layer the effect is on: truthy, named
+    // and callable as that layer. Rigs test it with `L ? … : …` and then read `L.sourceRectAtTime`.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut map = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Map", [20.0, 20.0]));
+    map.prop_mut("layer").unwrap().value = Value::Layer(None);
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(map.into());
+    assert_close!(f.num("effect('Map')(1) ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).name == thisLayer.name ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).index", 0.0), 1.0);
+    assert_close!(f.num("var L = effect('Map')(1); L ? L.transform.position[0] : -1", 0.0), 50.0);
+    assert_close!(f.num("effect('Map')(1).sourceRectAtTime(time).width == thisLayer.sourceRectAtTime(time).width ? 1 : 0", 0.0), 1.0);
+}
+
+#[test]
 fn time_to_frames_rounds_durations_away_from_zero() {
     let f = fx();
     // Adobe's public expression reference distinguishes durations from absolute times.

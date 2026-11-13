@@ -870,7 +870,8 @@ Prop.prototype = {
   propertyGroup: function (n) { return __ancestor(this.__c, this.__l, this.__p, n); },
   __wrap: function (v) {
     var kind = this.__info[2];
-    if (kind === 'layer') return v === null ? null : __layer(this.__c, v);
+    // A layer parameter set to None is the layer it sits on, as in After Effects.
+    if (kind === 'layer') return __layer(this.__c, v === null ? this.__l : v);
     if (kind === 'path' && v !== null) return new __Path(v[0], v[1], v[2], v[3]);
     return v;
   },
