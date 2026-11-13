@@ -1,5 +1,5 @@
 //! Auxiliary channels from multi-layer OpenEXR files (depth, object / material IDs, normals,
-//! Cryptomatte, …) for the 3D Channel effects, read with the pure-Rust `exr` crate.
+//! Cryptomatte, …) for the 3D Channel effects, read through the shared `craft-exr` decoder.
 //!
 //! Every channel of every layer becomes a plane named `layer.channel` (or just `channel` for
 //! the unnamed layer), placed in the display window (pixels outside a layer's data window are
@@ -18,12 +18,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use effectcraft_raster::channels3d::{BACKGROUND_DEPTH, split_channel};
 use effectcraft_raster::{AuxChannels, Image};
 use effectcraft_render::reads::{ReadFile, ReadFiles};
-use exr::block::UncompressedBlock;
-use exr::block::chunk::TileCoordinates;
-use exr::image::read::image::ReadImage;
-use exr::image::read::layers::{ChannelsReader, ReadAllLayers, ReadChannels};
-use exr::meta::attribute::SampleType;
-use exr::meta::header::Header;
 
 use crate::convert::{AlphaOp, float_to_image};
 
@@ -35,177 +29,18 @@ const MAX_DISPLAY_PIXELS: usize = 1 << 28;
 use craft_exr::channels::{is_depth, part_channel_name as channel_name};
 pub use craft_exr::cryptomatte::parse_manifest;
 
-/// The part name channels are prefixed with (`None`: unnamed).
-fn part_name(header: &Header) -> Option<String> {
-    header.own_attributes.layer_name.as_ref().map(|t| t.to_string()).filter(|s| !s.is_empty())
-}
-
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build
 /// can't decompress (HTJ2K, OpenEXR 3.4's High-Throughput JPEG 2000): the decoders only said
 /// "no non-deep rgb channels" or showed a transparent frame (#482). `None` for other files.
 pub fn unsupported_compression(bytes: &[u8]) -> Option<&'static str> {
-    use exr::compression::Compression;
-    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).ok()?;
-    meta.headers
+    let mut limits = craft_exr::decode::Limits::default();
+    limits.max_pixels = u64::MAX;
+    limits.max_bytes = u64::MAX;
+    craft_exr::decode::parts(bytes, &limits)
+        .ok()?
         .iter()
-        .any(|h| matches!(h.compression, Compression::HTJ2K32 | Compression::HTJ2K256))
+        .any(|part| matches!(part.compression.as_str(), "HTJ2K32" | "HTJ2K256"))
         .then_some("OpenEXR HTJ2K compression isn't supported yet: re-save the file with ZIP, PIZ or DWAA compression")
-}
-
-/// Which channels a decode keeps, by plane name, and the display window they are placed in
-/// (the first part's, as the `exr` crate reports the image's).
-struct Planes<'k> {
-    keep: &'k dyn Fn(&str) -> bool,
-    display: exr::meta::attribute::IntegerBounds,
-}
-
-/// One part's kept channels while it is decoded: each line of samples goes straight into its
-/// channel's display-window plane (no copy of the part's samples in their own type first).
-struct PlanesReader {
-    /// Per channel of the part: its plane name, sample type and plane (`None`: not kept).
-    planes: Vec<Option<(String, SampleType, Vec<f32>)>>,
-    /// The data window's position in the display window, and the data window's and display
-    /// window's sizes.
-    offset: (i64, i64),
-    layer: (usize, usize),
-    display: (usize, usize),
-    f16s: Vec<exr::prelude::f16>,
-    u32s: Vec<u32>,
-    f32s: Vec<f32>,
-    /// The part's channel indices of exact `R`, `G`, `B` and `A`, when it has R, G and B.
-    rgb: Option<([usize; 3], Option<usize>)>,
-    /// The part's display window differs from the first part's.
-    own_display: bool,
-}
-
-/// A decoded part: its kept planes (in channel order) and what [`PlanesReader`] found.
-struct PartPlanes {
-    planes: Vec<(String, Vec<f32>)>,
-    /// Positions in `planes` of the part's R, G, B (and A) channels, when it has them and keeps
-    /// them all.
-    rgb: Option<([usize; 3], Option<usize>)>,
-    has_rgb: bool,
-    exact: bool,
-}
-
-impl<'s> ReadChannels<'s> for Planes<'_> {
-    type Reader = PlanesReader;
-
-    fn create_channels_reader(&'s self, header: &Header) -> exr::error::Result<PlanesReader> {
-        if header.deep {
-            return Err(exr::error::Error::NotSupported("deep data".into()));
-        }
-        let dw = self.display;
-        let display = (dw.size.0, dw.size.1);
-        // Each channel is a display-window plane: a 60000² window over a 1×1 data window was a
-        // multi-gigabyte allocation per channel (#2141).
-        let n = display.0.checked_mul(display.1).filter(|n| *n > 0 && *n <= MAX_DISPLAY_PIXELS).ok_or(exr::error::Error::Invalid("display window".into()))?;
-        let prefix = part_name(header);
-        let pos = header.own_attributes.layer_position;
-        let offset = (i64::from(pos.0) - i64::from(dw.position.0), i64::from(pos.1) - i64::from(dw.position.1));
-        let planes = header
-            .channels
-            .list
-            .iter()
-            .map(|ch| {
-                let name = channel_name(prefix.as_deref(), &ch.name.to_string());
-                let fill = if is_depth(&name) { BACKGROUND_DEPTH } else { 0.0 };
-                (self.keep)(&name).then(|| (name, ch.sample_type, vec![fill; n]))
-            })
-            .collect();
-        let find = |c: &str| header.channels.find_index_of_channel(&exr::meta::attribute::Text::from(c));
-        let rgb = match (find("R"), find("G"), find("B")) {
-            (Some(r), Some(g), Some(b)) => Some(([r, g, b], find("A"))),
-            _ => None,
-        };
-        Ok(PlanesReader {
-            planes,
-            offset,
-            layer: (header.layer_size.0, header.layer_size.1),
-            display,
-            f16s: vec![],
-            u32s: vec![],
-            f32s: vec![],
-            rgb,
-            own_display: header.shared_attributes.display_window != dw,
-        })
-    }
-}
-
-impl ChannelsReader for PlanesReader {
-    type Channels = PartPlanes;
-
-    fn filter_block(&self, tile: TileCoordinates) -> bool {
-        tile.is_largest_resolution_level() && self.planes.iter().any(Option::is_some)
-    }
-
-    fn read_block(&mut self, header: &Header, block: UncompressedBlock) -> exr::error::UnitResult {
-        let ((lw, lh), (w, h)) = (self.layer, self.display);
-        for line in block.lines(&header.channels) {
-            let Some(Some((_, kind, plane))) = self.planes.get_mut(line.location.channel) else { continue };
-            let (x0, y, count) = (line.location.position.0, line.location.position.1, line.location.sample_count);
-            // The samples of data-window row `y`, columns `x0..x0 + count`, at display row `ty`
-            // from display column `tx0`; clipped to the display window.
-            if y >= lh || x0.checked_add(count).is_none_or(|end| end > lw) {
-                continue;
-            }
-            let Some(ty) = usize::try_from(y as i64 + self.offset.1).ok().filter(|ty| *ty < h) else { continue };
-            let tx0 = x0 as i64 + self.offset.0;
-            let skip = usize::try_from(-tx0).unwrap_or(0).min(count);
-            let tx = usize::try_from(tx0.max(0)).unwrap_or(usize::MAX);
-            let take = (count - skip).min(w.saturating_sub(tx));
-            let start = ty.checked_mul(w).and_then(|row| row.checked_add(tx));
-            let Some(dst) = start.filter(|_| take > 0).and_then(|s| plane.get_mut(s..s.checked_add(take)?)) else { continue };
-            match kind {
-                SampleType::F16 => {
-                    self.f16s.resize(count, exr::prelude::f16::ZERO);
-                    line.read_samples_into_slice(&mut self.f16s)?;
-                    for (d, s) in dst.iter_mut().zip(self.f16s.iter().skip(skip)) {
-                        *d = s.to_f32();
-                    }
-                }
-                SampleType::F32 => {
-                    self.f32s.resize(count, 0.0);
-                    line.read_samples_into_slice(&mut self.f32s)?;
-                    for (d, s) in dst.iter_mut().zip(self.f32s.iter().skip(skip)) {
-                        *d = *s;
-                    }
-                }
-                SampleType::U32 => {
-                    self.u32s.resize(count, 0);
-                    line.read_samples_into_slice(&mut self.u32s)?;
-                    for (d, s) in dst.iter_mut().zip(self.u32s.iter().skip(skip)) {
-                        *d = *s as f32;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn into_channels(self) -> PartPlanes {
-        // Positions of the kept channels among the kept planes.
-        let mut at = vec![None; self.planes.len()];
-        let mut planes = Vec::with_capacity(self.planes.len());
-        for (i, p) in self.planes.into_iter().enumerate() {
-            if let Some((name, _, data)) = p {
-                if let Some(slot) = at.get_mut(i) {
-                    *slot = Some(planes.len());
-                }
-                planes.push((name, data));
-            }
-        }
-        let kept = |i: usize| at.get(i).copied().flatten();
-        let has_rgb = self.rgb.is_some();
-        let rgb = self.rgb.and_then(|([r, g, b], a)| {
-            let a = match a {
-                Some(a) => Some(kept(a)?),
-                None => None,
-            };
-            Some(([kept(r)?, kept(g)?, kept(b)?], a))
-        });
-        PartPlanes { planes, rgb, has_rgb, exact: !self.own_display }
-    }
 }
 
 /// How the `image` crate's OpenEXR decoder would show a file: the first part with exact `R`, `G`
@@ -253,73 +88,103 @@ enum Refused {
     TooLarge(String),
 }
 
-/// Bytes the planes of the channels `keep` names would take (`None`: not a readable header).
-fn planes_bytes(meta: &exr::meta::MetaData, keep: &dyn Fn(&str) -> bool) -> Option<usize> {
-    let dw = meta.headers.first()?.shared_attributes.display_window;
-    let n = dw.size.0.checked_mul(dw.size.1)?;
-    let mut kept = 0usize;
-    for header in meta.headers.iter() {
-        let prefix = part_name(header);
-        kept = kept.saturating_add(header.channels.list.iter().filter(|ch| keep(&channel_name(prefix.as_deref(), &ch.name.to_string()))).count());
-    }
-    Some(n.saturating_mul(kept).saturating_mul(std::mem::size_of::<f32>()))
+/// Bytes the selected channels occupy in the first part's display window. The channel cache
+/// reserves this before decoding so concurrent imports cannot exceed its soft budget.
+fn planes_bytes(infos: &[craft_exr::decode::PartInfo], keep: &dyn Fn(&str) -> bool) -> Option<usize> {
+    let display = infos.first()?.display_window;
+    let pixels = u64::from(display.width).checked_mul(u64::from(display.height))?;
+    let selected = infos.iter().try_fold(0u64, |total, part| {
+        let count = part.channels.iter().filter(|channel| keep(&channel_name(part.name.as_deref(), &channel.name))).count() as u64;
+        total.checked_add(count)
+    })?;
+    usize::try_from(pixels.checked_mul(selected)?.checked_mul(4)?).ok()
 }
 
-/// Decode the channels of an EXR file's bytes that `keep` names (by plane name).
+/// Decode selected EXR channels through craft-exr, which places each selected block directly
+/// into its bounded display-window plane.
 fn decode(bytes: &[u8], keep: &dyn Fn(&str) -> bool) -> Result<Decoded, Refused> {
-    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).map_err(|_| Refused::Unreadable)?;
-    let display = meta.headers.first().ok_or(Refused::Unreadable)?.shared_attributes.display_window;
-    let need = planes_bytes(&meta, keep).ok_or(Refused::Unreadable)?;
-    if need > MAX_DECODE_BYTES {
-        let gb = |b: usize| b as f64 / f64::from(1u32 << 30);
+    use craft_exr::decode::{self, Error as ExrError, Limits};
+
+    let mut limits = Limits::default();
+    limits.max_pixels = MAX_DISPLAY_PIXELS as u64;
+    limits.max_bytes = MAX_DECODE_BYTES as u64;
+    // Header-only checks must not charge channels this caller does not decode. The shared display
+    // decoder independently checks the exact selected display planes before allocating them.
+    let mut header_limits = limits;
+    header_limits.max_width = u32::MAX;
+    header_limits.max_height = u32::MAX;
+    header_limits.max_pixels = u64::MAX;
+    header_limits.max_bytes = u64::MAX;
+    let infos = decode::parts(bytes, &header_limits).map_err(|e| match e {
+        ExrError::LimitExceeded(message) => Refused::TooLarge(message),
+        _ => Refused::Unreadable,
+    })?;
+    let display = infos.first().ok_or(Refused::Unreadable)?.display_window;
+    let needed = planes_bytes(&infos, keep).filter(|bytes| *bytes > 0).ok_or(Refused::Unreadable)?;
+    if needed > MAX_DECODE_BYTES {
+        let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
         return Err(Refused::TooLarge(format!(
             "its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use",
-            display.size.0,
-            display.size.1,
-            gb(need),
-            gb(MAX_DECODE_BYTES)
+            display.width,
+            display.height,
+            gb(needed as u64),
+            gb(MAX_DECODE_BYTES as u64),
         )));
     }
-    let read = ReadImage::new(ReadAllLayers { read_channels: Planes { keep, display } }, |_| {});
-    let img = read.from_buffered(std::io::Cursor::new(bytes)).map_err(|_| Refused::Unreadable)?;
-    let dw = img.attributes.display_window;
-    let mut aux = AuxChannels::new(dw.size.0 as u32, dw.size.1 as u32, 1.0);
+
+    let mut aux = AuxChannels::new(display.width, display.height, 1.0);
     let mut crypto: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-    let mut collect_meta = |other: &HashMap<exr::meta::attribute::Text, exr::meta::attribute::AttributeValue>| {
-        for (k, v) in other {
-            let key = k.to_string();
+    let mut rgb = Rgb::None;
+    for info in infos {
+        for (key, value) in &info.text_attributes {
             let Some(rest) = key.strip_prefix("cryptomatte/") else { continue };
             let Some((id, field)) = rest.split_once('/') else { continue };
-            let exr::meta::attribute::AttributeValue::Text(t) = v else { continue };
-            let e = crypto.entry(id.to_string()).or_default();
+            let entry = crypto.entry(id.to_string()).or_default();
             match field {
-                "name" => e.0 = Some(t.to_string()),
-                "manifest" => e.1 = Some(t.to_string()),
+                "name" => entry.0 = Some(value.clone()),
+                "manifest" => entry.1 = Some(value.clone()),
                 _ => {}
             }
         }
-    };
-    collect_meta(&img.attributes.other);
-    let mut rgb = Rgb::None;
-    for layer in img.layer_data {
-        collect_meta(&layer.attributes.other);
-        let part = layer.channel_data;
-        if rgb == Rgb::None && part.has_rgb {
+        let prefix = info.name.as_deref();
+        let exact = info.display_window == display;
+        let rgb_indices = ["R", "G", "B"].map(|wanted| info.channels.iter().position(|channel| channel.name == wanted));
+        let has_rgb = rgb_indices.iter().all(Option::is_some);
+        let alpha_index = info.channels.iter().position(|channel| channel.name == "A");
+        let mut part = decode::decode_display_part(
+            bytes,
+            info.index,
+            keep,
+            &|name| {
+                if is_depth(name) { BACKGROUND_DEPTH } else { 0.0 }
+            },
+            &limits,
+        )
+        .map_err(|error| match error {
+            ExrError::LimitExceeded(message) => Refused::TooLarge(message),
+            _ => Refused::Unreadable,
+        })?;
+        if rgb == Rgb::None && has_rgb {
             let base = aux.channels.len();
-            rgb = match part.rgb {
-                Some(([r, g, b], a)) if part.exact => {
-                    let picked = [Some(r), Some(g), Some(b), a];
-                    let depth = picked.iter().flatten().any(|i| part.planes.get(*i).is_some_and(|(n, _)| is_depth(n)));
-                    if depth { Rgb::Unsupported } else { Rgb::Planes([base + r, base + g, base + b], a.map(|a| base + a)) }
+            let locate = |raw: usize| {
+                let name = channel_name(prefix, &info.channels.get(raw)?.name);
+                part.channels.iter().position(|channel| channel.name == name)
+            };
+            rgb = match (rgb_indices[0].and_then(locate), rgb_indices[1].and_then(locate), rgb_indices[2].and_then(locate)) {
+                (Some(r), Some(g), Some(b)) if exact => {
+                    let a = alpha_index.and_then(locate);
+                    let depth =
+                        [Some(r), Some(g), Some(b), a].into_iter().flatten().any(|i| part.channels.get(i).is_some_and(|channel| is_depth(&channel.name)));
+                    if depth { Rgb::Unsupported } else { Rgb::Planes([base + r, base + g, base + b], a.map(|i| base + i)) }
                 }
                 _ => Rgb::Unsupported,
             };
         }
-        aux.channels.extend(part.planes);
+        aux.channels.extend(part.channels.drain(..).map(|channel| (channel.name, channel.samples)));
     }
     for (_, (name, manifest)) in crypto {
-        if let (Some(n), Some(m)) = (name, manifest) {
-            aux.manifests.push((n, parse_manifest(&m)));
+        if let (Some(name), Some(manifest)) = (name, manifest) {
+            aux.manifests.push((name, parse_manifest(&manifest)));
         }
     }
     aux.manifests.sort();
@@ -389,11 +254,16 @@ fn picture_names(aux: &AuxChannels) -> Option<([String; 3], Option<String>)> {
 /// headers, then only those channels decoded; in a multi-part file the other parts' pixels are
 /// not even decompressed), with the names of its planes.
 fn picture_only(bytes: &[u8]) -> Result<(Decoded, [String; 3], Option<String>), Refused> {
-    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).map_err(|_| Refused::Unreadable)?;
+    let mut limits = craft_exr::decode::Limits::default();
+    limits.max_width = u32::MAX;
+    limits.max_height = u32::MAX;
+    limits.max_pixels = u64::MAX;
+    limits.max_bytes = u64::MAX;
+    let meta = craft_exr::decode::parts(bytes, &limits).map_err(|_| Refused::Unreadable)?;
     let mut names = AuxChannels::new(0, 0, 1.0);
-    for header in meta.headers.iter() {
-        let prefix = part_name(header);
-        names.channels.extend(header.channels.list.iter().map(|ch| (channel_name(prefix.as_deref(), &ch.name.to_string()), vec![])));
+    for part in meta {
+        let prefix = part.name.as_deref();
+        names.channels.extend(part.channels.iter().map(|ch| (channel_name(prefix, &ch.name), vec![])));
     }
     let (rgb, a) = picture_names(&names).ok_or(Refused::Unreadable)?;
     // Planes are looked up by name ignoring case, so every channel that could answer is kept.
@@ -672,8 +542,13 @@ impl ChannelCache {
     /// Decode the file at `path` whose bytes are `bytes` for `slot` (see [`ChannelCache::get`]).
     fn decode_file(&self, path: &str, slot: &Slot, bytes: &[u8]) -> Option<Arc<Decoded>> {
         // The planes it will allocate count against the budget while it decodes.
-        if let Ok(meta) = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false)
-            && let Some(need) = planes_bytes(&meta, &|_| true)
+        let mut limits = craft_exr::decode::Limits::default();
+        limits.max_width = u32::MAX;
+        limits.max_height = u32::MAX;
+        limits.max_pixels = u64::MAX;
+        limits.max_bytes = u64::MAX;
+        if let Ok(infos) = craft_exr::decode::parts(bytes, &limits)
+            && let Some(need) = planes_bytes(&infos, &|_| true)
         {
             self.account(slot, need.min(MAX_DECODE_BYTES));
         }
@@ -1240,6 +1115,50 @@ mod tests {
         assert_eq!(aux.get("ViewLayer.Depth.Z").unwrap(), [4.0; 4].as_slice());
         assert!(aux.get("ViewLayer.Depth.ViewLayer.Depth.Z").is_none());
         assert!(aux.get("ViewLayer.Combined.R").is_some());
+    }
+
+    #[test]
+    fn multipart_fallback_filters_channels_and_reserves_display_planes() {
+        use exr::prelude::*;
+        let part = |name: &str, pos: (i32, i32), size: (usize, usize), channels: Vec<AnyChannel<FlatSamples>>| {
+            let attrs = LayerAttributes { layer_name: Some(Text::from(name)), layer_position: Vec2(pos.0, pos.1), ..Default::default() };
+            Layer::new(size, attrs, Encoding::FAST_LOSSLESS, AnyChannels::sort(channels.into()))
+        };
+        let (w, h) = (2usize, 1usize);
+        let bytes = file(
+            vec![
+                part("Depth", (0, 0), (1, 1), vec![AnyChannel::new("Z", FlatSamples::F32(vec![7.0]))]),
+                part(
+                    "Beauty",
+                    (1, 1),
+                    (w, h),
+                    vec![
+                        AnyChannel::new("R", FlatSamples::F32(vec![0.1; w * h])),
+                        AnyChannel::new("G", FlatSamples::F32(vec![0.2; w * h])),
+                        AnyChannel::new("B", FlatSamples::F32(vec![0.3; w * h])),
+                    ],
+                ),
+            ],
+            IntegerBounds::from_dimensions((3, 2)),
+        );
+        let mut limits = craft_exr::decode::Limits::default();
+        limits.max_width = u32::MAX;
+        limits.max_height = u32::MAX;
+        limits.max_pixels = u64::MAX;
+        limits.max_bytes = u64::MAX;
+        let parts = craft_exr::decode::parts(&bytes, &limits).unwrap();
+        assert_eq!(planes_bytes(&parts, &|name| name == "Beauty.R"), Some(3 * 2 * 4));
+        assert_eq!(planes_bytes(&parts, &|_| false), Some(0));
+
+        let selected = decode(&bytes, &|name| name == "Beauty.R").unwrap();
+        assert_eq!(selected.aux.channels.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Beauty.R"]);
+        assert_eq!(selected.aux.get("Beauty.R").unwrap(), [0.0, 0.0, 0.0, 0.0, 0.1, 0.1]);
+
+        // The old app decoder selected the named beauty part when the first part was depth-only,
+        // and placed its data into the shared display window; retain that layered-picture result.
+        let image = layered_image(&bytes).unwrap().to_rgba32f();
+        assert_eq!(image.get_pixel(1, 1).0, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(image.get_pixel(0, 0).0, [0.0, 0.0, 0.0, 1.0]);
     }
 
     /// Straight RGBA of [`layered_image`] at pixel 0 for a file of single-value channels.
