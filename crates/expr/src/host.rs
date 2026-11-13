@@ -10,6 +10,7 @@
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
 use effectcraft_project::ae_order::{self, AeChild};
+use effectcraft_project::matchnames;
 use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup, Property};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
@@ -286,6 +287,14 @@ fn slot_resp(path: &str, s: &ae_order::AeSlot, index: usize) -> Resp {
     ])
 }
 
+/// A child of `g` (a group of `l`) by its After Effects match name (`("ADBE Scale")`,
+/// `("ADBE Vector Shape - Rect")`, `("ADBE Gaussian Blur 2")`), as scripting names them
+/// (`effectcraft_project::matchnames`). Rigs write match names so they work in any UI language.
+fn by_ae_match_name<'l>(l: &'l Layer, g: &'l PropGroup, key: &Key) -> Option<&'l Node> {
+    let Key::Name(name) = key else { return None };
+    g.children.iter().find(|n| l.props.node_chain(n.uid()).is_some_and(|chain| matchnames::node(&chain) == *name))
+}
+
 fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
     match key {
         Key::Index(i) => usize::try_from(*i).ok().filter(|i| *i >= 1).and_then(|i| g.children.get(i - 1)),
@@ -390,7 +399,7 @@ impl<'a> Resolver<'a> {
             });
         }
         let g = if group.is_empty() { &l.props } else { l.props.group(group)? };
-        let n = find_child(g, key)?;
+        let n = find_child(g, key).or_else(|| by_ae_match_name(l, g, key))?;
         let index = if group.is_empty() { ae_order::ae_index(l, n.match_id()) } else { None }
             .unwrap_or_else(|| g.children.iter().position(|c| c.uid() == n.uid()).unwrap_or(0) + 1);
         let path = if group.is_empty() { format!("@{}", n.uid()) } else { format!("{group}/@{}", n.uid()) };
