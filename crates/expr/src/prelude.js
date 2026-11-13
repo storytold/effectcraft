@@ -343,6 +343,17 @@ function framesToTime(frames, fps) {
   return frames / fps;
 }
 
+// The key after `t` (the last one when `t` is past it) and the key at or before `t` (the first one
+// when `t` is before it), in sorted key times.
+function __nextIndex(times, t) {
+  for (var i = 0; i < times.length; i++) if (times[i] > t) return i;
+  return times.length - 1;
+}
+function __previousIndex(times, t) {
+  for (var i = times.length - 1; i >= 0; i--) if (times[i] <= t) return i;
+  return 0;
+}
+
 function __pad(n) { return n < 10 ? '0' + n : '' + n; }
 
 function timeToTimecode(t, base, isDuration) {
@@ -352,6 +363,23 @@ function timeToTimecode(t, base, isDuration) {
   var f = Math.floor(Math.abs(t) * base + 1e-6);
   var ff = f % base, s = Math.floor(f / base), ss = s % 60, m = Math.floor(s / 60), mm = m % 60, h = Math.floor(m / 60);
   return (neg ? '-' : '') + h + ':' + __pad(mm) + ':' + __pad(ss) + ':' + __pad(ff);
+}
+
+// NTSC timecode: frames at 30000/1001 per second shown on a 30 frame base. Drop-frame skips frame
+// numbers 0 and 1 at the start of every minute except each tenth minute (the usual SMPTE rule) and
+// writes a semicolon before the frames.
+function timeToNTSCTimecode(t, drop, isDuration) {
+  if (t === undefined) t = time + thisComp.displayStartTime;
+  var neg = t < 0;
+  var n = Math.abs(t) * 30000 / 1001;
+  // Durations round away from zero, absolute times down (the same rule as timeToFrames).
+  var f = isDuration && t !== 0 ? Math.ceil(n - 1e-6) : Math.floor(n + 1e-6);
+  if (drop) {
+    var tenMin = Math.floor(f / 17982), rem = f % 17982;
+    f += 18 * tenMin + (rem < 2 ? 0 : 2 * Math.floor((rem - 2) / 1798));
+  }
+  var ff = f % 30, s = Math.floor(f / 30), ss = s % 60, m = Math.floor(s / 60), mm = m % 60, h = Math.floor(m / 60);
+  return (neg ? '-' : '') + h + ':' + __pad(mm) + ':' + __pad(ss) + (drop ? ';' : ':') + __pad(ff);
 }
 
 function timeToFeetAndFrames(t, fps, framesPerFoot, isDuration) {
@@ -527,6 +555,17 @@ Comp.prototype = {
   get pixelAspect() { return this.__info[6]; },
   get displayStartTime() { return this.__info[7]; },
   get bgColor() { return this.__info[8]; },
+  // The project has no drop-frame timecode setting, so a comp is never drop-frame.
+  get ntscDropFrame() { return false; },
+  // The first (topmost) layer whose comment contains `comment` (a case-sensitive text match).
+  layerByComment: function (comment) {
+    var text = String(comment);
+    for (var i = 1; i <= this.numLayers; i++) {
+      var l = this.layer(i);
+      if (String(l.__info[14]).indexOf(text) >= 0) return l;
+    }
+    return __err('No layer has a comment containing "' + text + '"');
+  },
   get marker() { return new Markers(this.__c, -1); },
   // The topmost enabled camera active at the current time.
   get activeCamera() {
@@ -701,6 +740,9 @@ Layer.prototype = {
     return __layer(this.__c, p);
   },
   get hasVideo() { return this.__info[8]; },
+  get hasAudio() { return this.__info[12]; },
+  // The Audio switch is on and the current time is between the in and out points.
+  get audioActive() { return this.__info[12] && this.__info[13] && time >= this.inPoint && time < this.outPoint; },
   get enabled() { return this.__info[11]; },
   get active() { return this.__info[11] && time >= this.inPoint && time < this.outPoint; },
   get containingComp() { return new Comp(this.__c); },
@@ -899,6 +941,16 @@ Prop.prototype = {
     var best = 0;
     for (var i = 1; i < times.length; i++) if (Math.abs(times[i] - t) < Math.abs(times[best] - t)) best = i;
     return this.key(best + 1);
+  },
+  nextKey: function (t) {
+    var times = this.__info[4];
+    if (times.length === 0) __err('Property has no keyframes');
+    return this.key(__nextIndex(times, __v(t)) + 1);
+  },
+  previousKey: function (t) {
+    var times = this.__info[4];
+    if (times.length === 0) __err('Property has no keyframes');
+    return this.key(__previousIndex(times, __v(t)) + 1);
   },
   __seedIndex: function () { return this.__self ? __S.idx : __layer(this.__c, this.__l).index; },
   wiggle: function (freq, amp, octaves, ampMult, t) {
@@ -1160,6 +1212,16 @@ Markers.prototype = {
     for (var i = 1; i < list.length; i++) if (Math.abs(list[i][0] - t) < Math.abs(list[best][0] - t)) best = i;
     return this.key(best + 1);
   },
+  nextKey: function (t) {
+    var list = this.__list;
+    if (list.length === 0) __err('No markers');
+    return this.key(__nextIndex(list.map(function (m) { return m[0]; }), __v(t)) + 1);
+  },
+  previousKey: function (t) {
+    var list = this.__list;
+    if (list.length === 0) __err('No markers');
+    return this.key(__previousIndex(list.map(function (m) { return m[0]; }), __v(t)) + 1);
+  },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -1178,7 +1240,7 @@ function __global(name, get) {
 __global('thisComp', function () { return __S.comp || (__S.comp = new Comp(__S.c)); });
 __global('thisLayer', function () { return __S.layer || (__S.layer = __layer(__S.c, __S.l)); });
 __global('thisProperty', function () { return __S.prop || (__S.prop = __mkProp(__S.c, __S.l, __S.path)); });
-['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'enabled', 'active', 'source',
+['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'hasAudio', 'audioActive', 'enabled', 'active', 'source',
   'transform', 'position', 'scale', 'rotation', 'opacity', 'anchorPoint', 'text', 'marker'].forEach(function (k) {
   __global(k, function () { return thisLayer[k]; });
 });

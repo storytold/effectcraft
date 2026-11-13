@@ -61,7 +61,8 @@ fn fx() -> Fx {
     a.markers.push(Marker { time: secs(2.0), comment: "beat".into(), ..Default::default() });
     a.markers.push(Marker { time: secs(4.0), comment: "drop".into(), ..Default::default() });
 
-    let b = solid(&mut p, &comp, "B", [0.0, 0.0, 1.0], 40, 40);
+    let mut b = solid(&mut p, &comp, "B", [0.0, 0.0, 1.0], 40, 40);
+    b.comment = "Motion Control".into();
 
     let mut title = build::layer(&mut p, &comp, "Title", LayerSource::Text, (200, 100), None);
     title.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "Hello".into(), size: 40.0, ..Default::default() }));
@@ -1163,6 +1164,48 @@ fn seed_random_timeless() {
     let b = f.num("seedRandom(5, true); random(100)", 3.7);
     assert_eq!(a, b);
     assert_ne!(a, f.num("seedRandom(6, true); random(100)", 0.1));
+}
+
+/// `nextKey` / `previousKey` on a property and on markers (After Effects 26 expression methods).
+#[test]
+fn next_and_previous_key() {
+    let f = fx();
+    // Rotation has keys at 0 s and 1 s.
+    assert_eq!(f.num("thisLayer.rotation.nextKey(0.5).time", 0.0), 1.0);
+    assert_eq!(f.num("thisLayer.rotation.nextKey(0).time", 0.0), 1.0, "strictly after");
+    assert_eq!(f.num("thisLayer.rotation.nextKey(5).time", 0.0), 1.0, "past the last key: the last key");
+    assert_eq!(f.num("thisLayer.rotation.previousKey(0.5).time", 0.0), 0.0);
+    assert_eq!(f.num("thisLayer.rotation.previousKey(1).time", 0.0), 1.0, "at or before");
+    assert_eq!(f.num("thisLayer.rotation.previousKey(-3).index", 0.0), 1.0, "before the first key: the first key");
+    // Layer A has markers at 2 s ("beat") and 4 s ("drop").
+    assert_eq!(f.num("thisLayer.marker.nextKey(3).time", 0.0), 4.0);
+    assert_eq!(f.num("thisLayer.marker.previousKey(3).comment.length", 0.0), 4.0);
+    assert_eq!(f.num("thisLayer.marker.nextKey(9).index", 0.0), 2.0);
+    assert!(f.ev(f.b, ROT, "thisLayer.rotation.nextKey(0).time", 0.0).is_err(), "no keys is an error");
+}
+
+/// `hasAudio`, `audioActive`, `layerByComment` and `thisComp.ntscDropFrame`.
+#[test]
+fn layer_audio_comment_and_comp_drop_frame() {
+    let f = fx();
+    assert_eq!(f.num("thisLayer.hasAudio ? 1 : 0", 0.0), 0.0, "a solid has no audio");
+    assert_eq!(f.num("hasAudio || audioActive ? 1 : 0", 0.0), 0.0);
+    assert_eq!(f.num("thisComp.layerByComment('Control').name == 'B' ? 1 : 0", 0.0), 1.0, "a partial match");
+    assert!(f.ev(f.a, ROT, "thisComp.layerByComment('control')", 0.0).is_err(), "case sensitive");
+    assert_eq!(f.num("thisComp.ntscDropFrame ? 1 : 0", 0.0), 0.0);
+}
+
+/// `timeToNTSCTimecode`: 1800 frames at 30000/1001 is one minute on the 30 frame base; drop-frame
+/// skips the first two frame numbers of that minute and none at the tenth.
+#[test]
+fn time_to_ntsc_timecode() {
+    let f = fx();
+    let check = |code: &str| assert_eq!(f.num(&format!("{code} ? 1 : 0"), 0.0), 1.0, "{code}");
+    check("timeToNTSCTimecode(0) == '0:00:00:00'");
+    check("timeToNTSCTimecode(60.06) == '0:01:00:00'");
+    check("timeToNTSCTimecode(60.06, true) == '0:01:00;02'");
+    check("timeToNTSCTimecode(17982 * 1001 / 30000, true) == '0:10:00;00'");
+    check("timeToNTSCTimecode(-60.06) == '-0:01:00:00'");
 }
 
 #[test]
