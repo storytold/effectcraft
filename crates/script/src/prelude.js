@@ -618,8 +618,9 @@ TextDocument.prototype = {
     return AutoKernType.NO_AUTO_KERN;
   },
   set autoKernType(v) {
-    var k = { 11412: 0, 11413: "metrics", 11414: "optical" }[v];
-    if (k === undefined) throw __err("Bad AutoKernType value " + v);
+    var map = { 11412: 0, 11413: "metrics", 11414: "optical" };
+    if (!Object.prototype.hasOwnProperty.call(map, v)) throw __err("Bad AutoKernType value " + v);
+    var k = map[v];
     this.__set("kerning", k);
   },
   get tsume() { return this.__style("tsume", 0); },

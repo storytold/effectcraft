@@ -31,10 +31,10 @@ fn auto_kern_type_reads_and_sets_the_kerning() {
         var p = t.property("Source Text"), out = [AutoKernType.NO_AUTO_KERN, AutoKernType.METRIC_KERN, AutoKernType.OPTICAL_KERN, p.value.autoKernType];
         var kinds = [AutoKernType.OPTICAL_KERN, AutoKernType.NO_AUTO_KERN, AutoKernType.METRIC_KERN];
         for (var i = 0; i < kinds.length; i++) { var d = p.value; d.autoKernType = kinds[i]; p.setValue(d); out.push(p.value.autoKernType); }
-        var bad = "accepted"; try { var d = p.value; d.autoKernType = 5; } catch (e) { bad = "refused"; }
-        out.push(bad);
+        var bad = [5, "toString", "__proto__", "constructor"];
+        for (var i = 0; i < bad.length; i++) { var r = "accepted"; try { var d = p.value; d.autoKernType = bad[i]; } catch (e) { r = "refused"; } out.push(r); }
         out
         "#,
     );
-    assert_eq!(o.result, json!([11412, 11413, 11414, 11413, 11414, 11412, 11413, "refused"]));
+    assert_eq!(o.result, json!([11412, 11413, 11414, 11413, 11414, 11412, 11413, "refused", "refused", "refused", "refused"]));
 }
