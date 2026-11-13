@@ -33,3 +33,11 @@ fn unicode_line_separators_stay_inside_strings_and_templates() {
     // ...and still end a line comment.
     assert_close!(f.num("x = 3; // note\u{2028}x + 5", 0.0), 8.0);
 }
+
+#[test]
+fn an_error_after_a_unicode_line_separator_keeps_its_line() {
+    // Review of #3552: U+2028 / U+2029 count as line breaks for the error's line too.
+    let f = fx();
+    let e = f.ev(f.a, ROT, "x = 1;\u{2028}y = 2;\u{2029}undefinedThing + 1", 0.0).unwrap_err();
+    assert!(e.contains("line 3"), "{e}");
+}
