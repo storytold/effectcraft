@@ -1548,6 +1548,15 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
     apply(s, &ctx, Buf { img, offset: [0.0, 0.0], scale: 1.0 })
 }
 
+/// Drop every simulation's cached checkpoints (Particle World, Particle Systems II, Mercury,
+/// Foam, Wave World, Particle Playground): Edit ▸ Purge. They can hold gigabytes.
+pub fn purge_sims() {
+    sim::particle_fx::purge();
+    sim2::foam::purge();
+    sim2::surfaces::purge();
+    sim3::purge();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

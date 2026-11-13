@@ -180,8 +180,7 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
     uniq.dedup();
     // Every effect before this one (the host bounds the count to them).
     let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
-    let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
-    let scale = first.scale;
+    let scale = bufs.iter().find_map(|(_, b)| b.as_ref())?.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for b in bufs.iter().filter_map(|(_, b)| b.as_ref()) {
@@ -195,9 +194,11 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
     let w = ((x1.ceil() - x0) as u32).clamp(1, 16384);
     let h = ((y1.ceil() - y0) as u32).clamp(1, 16384);
     let grid = Buf { img: Image::new(w, h), offset: [-x0, -y0], scale };
-    let place = |b: &Buf| -> Image {
+    // Takes the buffer: one that already fits the grid is moved, not copied (a 4K frame is
+    // 133 MB, and Echo places up to 255 of them; they were copied here and again below).
+    let place = |b: Buf| -> Image {
         if (b.scale - scale).abs() < 1e-9 && b.img.width == w && b.img.height == h && (b.offset[0] + x0).abs() < 1e-6 && (b.offset[1] + y0).abs() < 1e-6 {
-            return b.img.clone();
+            return b.img;
         }
         let k = b.scale / scale;
         let same_scale = (k - 1.0).abs() < 1e-9;
@@ -218,12 +219,19 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
         });
         out
     };
-    let placed: Vec<(i64, Image)> = bufs.iter().map(|(k, b)| (*k, b.as_ref().map(place).unwrap_or_else(|| Image::new(w, h)))).collect();
+    let mut placed: std::collections::HashMap<i64, Image> = bufs.into_iter().map(|(k, b)| (k, b.map(place).unwrap_or_else(|| Image::new(w, h)))).collect();
+    // How many of `times` name each frame: the last one takes it, earlier ones copy.
+    let mut uses: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for t in times {
+        *uses.entry((t * 1e6).round() as i64).or_default() += 1;
+    }
     let imgs = times
         .iter()
         .map(|t| {
             let k = (t * 1e6).round() as i64;
-            placed.iter().find(|(q, _)| *q == k).map(|(_, i)| i.clone()).unwrap_or_else(|| Image::new(w, h))
+            let left = uses.entry(k).or_default();
+            *left = left.saturating_sub(1);
+            if *left == 0 { placed.remove(&k) } else { placed.get(&k).cloned() }.unwrap_or_else(|| Image::new(w, h))
         })
         .collect();
     Some(Frames { grid, imgs })
