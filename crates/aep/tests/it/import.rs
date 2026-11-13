@@ -8,6 +8,7 @@ mod ai_mask;
 mod blend_modes;
 mod cameras;
 mod cases;
+mod cc_repetile;
 mod combined;
 mod cryptomatte;
 mod ease_round2;
