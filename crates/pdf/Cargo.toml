@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-eps = { workspace = true }
 craft-pdf.workspace = true
 effectcraft-svg = { workspace = true }
 kurbo = { workspace = true }

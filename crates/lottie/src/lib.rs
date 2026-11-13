@@ -1,7 +1,7 @@
 //! Lottie JSON import and export.
 //!
-//! Implemented from the public Lottie format description (the lottie-spec 1.0 schema and the
-//! LottieFiles format documentation); no player or exporter source was used.
+//! The format itself (the document model, property and keyframe encoding, paths, gradients,
+//! embedded images) is `craft-lottie`; this crate maps it onto EffectCraft's project.
 //!
 //! **Export** ([`export_comp`]) turns a composition into a Lottie document: nested compositions
 //! become precomp assets, still footage becomes embedded base64 image assets, and shape, solid,
@@ -21,7 +21,6 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod anim;
-mod base64;
 mod export;
 mod import;
 mod shapes;

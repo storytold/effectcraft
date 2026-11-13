@@ -63,6 +63,7 @@ mod styles;
 mod tail;
 mod text;
 mod text_edit;
+mod text_presets;
 mod three_d;
 mod timeline;
 mod timeline_interchange;

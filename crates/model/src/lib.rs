@@ -1,12 +1,14 @@
 //! 3D models for the Advanced 3D renderer.
 //!
-//! - [`gltf`]: glTF 2.0 import (`.gltf` with external or embedded buffers, `.glb`), written from
-//!   the Khronos glTF 2.0 specification: meshes, PBR metallic-roughness materials (base colour,
-//!   metallic-roughness, normal, occlusion and emissive maps), the node hierarchy, skins and
-//!   animations.
+//! The file formats are read with `craft-mesh` (storytold/craft-libs); this crate maps its
+//! scene onto [`Model`], decodes the textures and adds the normals and tangents a file leaves out.
+//!
+//! - [`gltf`]: glTF 2.0 import (`.gltf` with external or embedded buffers, `.glb`): meshes, PBR
+//!   metallic-roughness materials (base colour, metallic-roughness, normal, occlusion and
+//!   emissive maps), the node hierarchy, skins, animations, cameras and lights.
 //! - [`obj`]: Wavefront OBJ geometry with MTL materials (mapped onto the metallic-roughness model).
 //! - [`stl`]: STL meshes (binary and ASCII, with the binary per-facet and part colours).
-//! - [`fbx`]: FBX 7.x scenes, binary and ASCII: meshes, the Model hierarchy, Lambert/Phong
+//! - [`fbx`]: FBX 6.x and 7.x scenes, binary and ASCII: meshes, the Model hierarchy, Lambert/Phong
 //!   materials and their textures.
 //! - [`prim`]: parametric primitives (cube, sphere, plane, torus, cone, cylinder).
 //! - [`extrude`]: extruded, bevelled meshes from 2D outlines (text and shape layers), with
@@ -22,6 +24,7 @@ pub mod fbx;
 pub mod gltf;
 pub mod obj;
 pub mod prim;
+mod scene;
 pub mod stl;
 pub mod triangulate;
 
@@ -226,6 +229,9 @@ impl Primitive {
                 p.normals.push(f);
                 if !self.uvs.is_empty() {
                     p.uvs.push(self.uvs[i]);
+                }
+                if !self.tangents.is_empty() {
+                    p.tangents.push(self.tangents[i]);
                 }
                 if !self.joints.is_empty() {
                     p.joints.push(self.joints[i]);

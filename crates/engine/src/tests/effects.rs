@@ -963,7 +963,7 @@ fn cineon_gamma_presets_carry_the_version() {
     assert_eq!(saved["properties"], json!(1));
     let preset: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     std::fs::remove_file(file).unwrap();
-    assert_eq!(preset["effectcraftAnimationPreset"], json!(3));
+    assert_eq!(preset["effectcraftAnimationPreset"], json!(4));
     assert_eq!(preset["properties"][0]["path"], json!("effects/ec.utility.cineon/gamma"));
     assert_eq!(preset["properties"][0]["cineonVersion"], json!(2.0));
     let get = |s: &Session, id: &str| layer(s, a).effects().unwrap().groups().next().unwrap().get(id).unwrap().value.clone();

@@ -138,13 +138,13 @@ A project saved with the Version parameter opens in an earlier build, since its 
 That build keeps the Version parameter it does not know and reads every Gamma on version 1's
 scale. A version 1 instance renders there as it did before. A version 2 instance's Gamma is read
 there as a version 1 Gamma, so its default Gamma 1.7 renders as linear. It renders lighter in this
-build. Earlier builds apply format 3 animation presets the same way and ignore
+build. Earlier builds apply format 4 animation presets the same way and ignore
 `cineonVersion`.
 
-Animation presets are format 3 (`effectcraftAnimationPreset: 3`). A saved property that is a
+Animation presets are format 4 (`effectcraftAnimationPreset: 4`). A saved property that is a
 Cineon Converter's Gamma records that instance's version in `cineonVersion`. So does an Essential
 Properties value whose control drives only Cineon Converter Gammas of one version, directly or
-through nested comps. The Gamma properties of format 1 and 2 presets are version 1 Gammas. Applying a
+through nested comps. The Gamma properties of format 1 to 3 presets are version 1 Gammas. Applying a
 Gamma to a Cineon Converter on the layer sets that instance's Version to the recorded one.
 Applying it to an Essential Properties value converts the value, its keyframes and their speeds to
 the version of the Gammas that the control drives (dividing by 1.7 from version 1 to version 2).
