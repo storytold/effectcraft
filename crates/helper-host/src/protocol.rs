@@ -134,6 +134,10 @@ pub enum Reply {
         helper_version: String,
         #[serde(default)]
         loads: Vec<String>,
+        /// How many processes of this helper may run at once (a whole number, 1 when absent or
+        /// anything else; clamped by EffectCraft). Each process has its own conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_processes: Option<serde_json::Value>,
     },
     Effects {
         effects: Vec<RemoteEffect>,

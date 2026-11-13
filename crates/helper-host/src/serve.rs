@@ -33,6 +33,12 @@ pub trait Provider {
     fn loads(&self) -> Vec<String> {
         vec![]
     }
+    /// How many processes of this helper EffectCraft may run at once (default 1: one process,
+    /// one render at a time). Each process serves its own conversation and builds its own copy of
+    /// every effect instance, so state is held once per process.
+    fn max_processes(&self) -> u32 {
+        1
+    }
     /// The effects available at start-up, and errors worth reporting.
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>);
     /// Load effects from a file or folder the user picked.
@@ -122,7 +128,8 @@ impl Server<'_> {
                     Err(e) => return self.send(&Reply::Error { message: format!("can't open the frame exchange file: {e}") }),
                 }
                 let (name, helper_version, loads) = (self.provider.name(), self.provider.version(), self.provider.loads());
-                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads })
+                let max_processes = Some(self.provider.max_processes()).filter(|n| *n > 1).map(serde_json::Value::from);
+                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads, max_processes })
             }
             Request::Describe => {
                 let (list, errors) = self.provider.effects();

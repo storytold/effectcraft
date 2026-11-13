@@ -15,7 +15,7 @@ and carries on. See [ADR 0001](adr/0001-external-effect-helpers.md) for why.
 | Install | Put the helper program (`effectcraft-helper-<name>`, `.exe` on Windows) in `helpers/` next to EffectCraft, in `helpers/` in the [settings folder](preferences.md), or in a folder named in `EFFECTCRAFT_HELPER_PATH` (a path list; entries can be programs or folders). Subfolders one level down are searched too. |
 | Start | Helpers run native code, so nothing starts them unless the user asks: Effect ▸ Scan for Effect Helpers (`effect.helpers.scan`) starts them. To start them every time EffectCraft launches, opt in with `EFFECTCRAFT_HELPERS=1`. It is an environment variable, not a setting, so writing to the settings folder can't turn it on. Agents confined with `--automation-read-root` / `--automation-write-root` can't run `effect.helpers.scan` or `effect.helpers.load`, and scripts can run them only with Allow Scripts to Write Files and Access Network on. |
 | Load more plug-ins | Effect ▸ Load Plug-ins Through Helper… (`effect.helpers.load {path}`) hands a file or folder to the helpers that accept it (an OpenFX helper takes `.ofx` plug-ins and `.ofx.bundle` folders). |
-| Inspect | `effect.helpers.list` → `{helpers: [{program, name, version, loads, running, effects, restarts, error}], blocked}`; `effect.plugins.list` shows each effect's `source` (`helper: …`) and last render `error`. |
+| Inspect | `effect.helpers.list` → `{helpers: [{program, name, version, loads, running, processes, max_processes, effects, restarts, error}], blocked}` (`processes` is how many processes run now, `max_processes` how many the helper allows); `effect.plugins.list` shows each effect's `source` (`helper: …`) and last render `error`. |
 | Errors | A failed render leaves the frame as it was and puts ⚠ after the effect's name in Effect Controls (hover for the message). The next render starts the helper again. An effect that stops its helper 3 times is turned off and listed in `helper_blocklist.txt` in the settings folder. `effect.helpers.scan {"retry": true}` turns it back on. A helper that stops 5 times in a minute stays off until the next scan. |
 | Timeouts | `EFFECTCRAFT_HELPER_TIMEOUT` (seconds per render step, default 120) and `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` (start-up, describe, load; default 600). A helper idle for 30 s is pinged before it is used again. |
 
@@ -57,12 +57,12 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 
 | Request | Reply | |
 |---|---|---|
-| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. A different `version` means EffectCraft won't use the helper. |
+| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"],"max_processes":4}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. `max_processes` (optional, default 1) is how many processes of the helper EffectCraft may run at once, see [Parallel rendering](#parallel-rendering). A different `version` means EffectCraft won't use the helper. |
 | `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. |
 | `{"op":"load","path":"…"}` | `effects` (only the new ones) or `error` | A file or folder the user picked. Replayed after a restart. |
 | `{"op":"padding","effect":"…","instance":7,"time":1.0,"scale":1.0,"layer_size":[w,h],"flat":[…],"texts":[…]}` | `{"op":"padding","pixels":3}` | Transparent pixels to add on each side before the render (at most 4096). |
 | `{"op":"render","effect":"…","instance":7,"time":1.0,"frame":<image ref>,"layer_size":[w,h],"flat":[…],"texts":[…],"frame_rate":30,"frame_range":[0,10]}` | callbacks, then `{"op":"done"}` or `{"op":"error","message":"…"}` | Process `frame` in place: read it, write the result to the same ref, reply `done`. `flat` / `texts` are the parameter values flattened by plug-in API 2 rules. `instance` identifies the applied effect (stable across frames). `frame_range` is the layer's source range in layer-time seconds, or `null`. |
-| `{"op":"destroy","instance":7}` | none | The instance is gone; free what it holds. |
+| `{"op":"destroy","instance":7}` | none | The instance is gone; free what it holds. Not sent by EffectCraft yet (see [Parallel rendering](#parallel-rendering)). |
 | `{"op":"ping"}` | `{"op":"pong"}` | Heartbeat. |
 | `{"op":"shutdown"}` | none | Exit. |
 
@@ -80,6 +80,40 @@ asking for the previous frame of a layer that also has a retime effect from the 
 The helper must serve it completely (with its own callbacks, nested up to 16 deep) and then
 keep waiting. Images for callbacks are placed after the frame in the exchange file and freed
 when the render ends.
+
+### Parallel rendering
+
+By default a helper is one process with one conversation, so renders through it take turns. A
+helper that can do better says so in `hello`: `"max_processes": N`. EffectCraft then runs up to
+`N` processes of the same program, each with its own pipes, exchange file and conversation
+(protocol version 1, nothing else changes), and gives every render to a free process.
+
+- `N` must be a whole number from 1 (JSON `4`; `4.0`, `"4"`, `0`, negative values and
+  anything else count as absent, that is 1: exactly the single process described above). Values
+  above 8 are clamped to 8, and to the machine's number of cores. `EFFECTCRAFT_HELPER_MAX_PROCESSES`
+  (a number) replaces the core count in that cap.
+- Processes start lazily: another one starts only when a render needs a process and all running
+  ones are busy. Each process starts with `hello` and `describe` like any other. Extra
+  processes stay alive until the helper is stopped (EffectCraft quits): they are not
+  stopped when idle.
+- Every process builds its own copy of an effect instance, on the first `render` (or `padding`)
+  with an `instance` it doesn't know. State that an instance holds exists once per process, so
+  `N` also multiplies the helper's memory use. Consecutive frames of one instance can land on
+  different processes: don't keep anything between renders that the next one can't rebuild.
+- `load` is sent to every running process; a process that is busy, and one started later,
+  loads the paths before its next request (the same replay as after a restart). It is never sent
+  while the helper waits for a callback answer.
+- `destroy` can be sent to every idle running process (`effectcraft_helper_host::destroy_instance`),
+  without waiting for busy ones. This is API only: EffectCraft does not send `destroy` itself
+  yet, so a helper keeps its instances until it stops.
+- A render's callbacks (`input_at`, ...) and nested renders stay on the process that owns the
+  render, and renders nested in it (see above) go to that process too.
+- A crash or hang stops that one process and fails the render it was working on. The renders in
+  the other processes finish. Stops count per effect as before (an effect that stopped a process 3
+  times is turned off), and the limit of 5 restarts per minute is for the helper as a whole;
+  starting the other processes of the pool for the first time is not a restart.
+- A render that finds all processes busy waits for one, at most `EFFECTCRAFT_HELPER_LOAD_TIMEOUT`
+  seconds, then fails with a message instead of hanging.
 
 ### Errors and restarts
 

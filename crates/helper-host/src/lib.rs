@@ -204,7 +204,7 @@ pub fn load_path(path: &str) -> Result<Value, String> {
 }
 
 /// The helpers and their state: `{helpers: [{program, name, version, loads, running, effects,
-/// restarts, error}], blocked}`.
+/// restarts, error, processes, max_processes}], blocked}`.
 pub fn list() -> Value {
     let helpers: Vec<Value> = lock(helpers())
         .iter()
@@ -216,6 +216,8 @@ pub fn list() -> Value {
                 "version": s.version,
                 "loads": s.loads,
                 "running": s.running,
+                "processes": s.processes,
+                "max_processes": s.max_processes,
                 "effects": s.effects,
                 "restarts": s.restarts,
                 "error": s.last_error,
@@ -223,6 +225,14 @@ pub fn list() -> Value {
         })
         .collect();
     json!({"helpers": helpers, "blocked": blocklist::blocked()})
+}
+
+/// Tell the idle running helper processes that an effect instance is gone (`destroy`), best
+/// effort and without waiting; returns how many were told. API only: EffectCraft itself does
+/// not call it yet, so helpers keep their instances until they stop.
+pub fn destroy_instance(instance: u64) -> usize {
+    let list: Vec<Arc<Helper>> = lock(helpers()).clone();
+    list.iter().map(|h| h.destroy(instance)).sum()
 }
 
 /// Stop every helper process (they start again when needed). Called when the app quits;
