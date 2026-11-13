@@ -42,6 +42,7 @@ mod mask_warp;
 mod menu_cmds;
 mod model3d;
 mod models;
+mod motion;
 mod motion_blur_depth;
 mod paint;
 mod panels;

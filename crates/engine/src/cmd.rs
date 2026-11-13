@@ -45,6 +45,7 @@ pub mod markers;
 mod mask;
 pub mod mask_interp;
 pub(crate) mod model3d;
+mod motion;
 mod nav_more;
 pub mod paint;
 pub mod panels_cmds;
@@ -222,6 +223,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(relink::specs());
         v.extend(relink_moved::specs());
         v.extend(lottie::specs());
+        v.extend(motion::specs());
         v.extend(aep::specs());
         v.extend(import_project::specs());
         v.extend(timeline::specs());

@@ -646,6 +646,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.exportLottie" => ("path", Ask::Save("Animation.json".into())),
         "file.exportAep" => ("path", Ask::Save("Project.aep".into())),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
+        "file.importMotion" => ("path", Ask::Open(&["motn", "motr", "moti", "moef", "mogn"])),
         "file.importAep" => ("path", Ask::Open(&["aep", "aepx"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
         "file.importTimeline" => ("path", Ask::Open(&["xml", "fcpxml", "otio", "edl", "aaf", "omf"])),
