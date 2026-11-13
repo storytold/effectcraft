@@ -1,0 +1,7 @@
+asset:        cc-repetile-3626.aep
+title:        Small After Effects test project: CC RepeTile on a red solid in four compositions (#3626)
+author:       EffectCraft contributors
+source:       original work (made in After Effects 2026 by tools/cc-repetile-3626.jsx from own data: solids and effect settings only, no footage)
+license:      MIT OR Apache-2.0
+added:        2026-11-13 by EffectCraft contributors
+notes:        Scrubbed with tools/scrub.py (no footage aliases; the XMP packet of an empty project of the contributor); crates/aep/examples/stubicc.rs found no embedded colour profile to replace. No Adobe asset is in it.

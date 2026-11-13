@@ -196,6 +196,26 @@ pub const RADIAL_TYPE: &[&str] = &["Spin", "Zoom"];
 pub const RADIAL_AA: &[&str] = &["Low", "High"];
 /// 712 (the fresh default is item 6, Scratch).
 pub const CC_RADIAL_TYPE: &[&str] = &["Straight Zoom", "Fading Zoom", "Centered Zoom", "(-", "Rotate", "Scratch", "Rotate Fading"];
+/// 3626 (the fresh default is item 1, Repeat).
+pub const CC_REPETILE_TILING: &[&str] = &[
+    "Repeat",
+    "Checker Flip H",
+    "Checker Flip V",
+    "Unfold",
+    "Checker 180 deg",
+    "Checker Flip 45 deg",
+    "Checker 90 deg CCW",
+    "Checker 90 deg CW",
+    "Rosette",
+    "Random",
+    "None",
+    "(-",
+    "Turn CW",
+    "Turn CCW",
+    "Twist",
+    "Slide",
+    "Brick",
+];
 /// 712.
 pub const LUMA_KEY_TYPE: &[&str] = &["Key Out Brighter", "Key Out Darker", "Key Out Similar", "Key Out Dissimilar"];
 /// 712.
@@ -588,6 +608,20 @@ pub const EFFECTS: &[EffectMap] = &[
             pm(2, K::FixedSlider, "amount", Conv::Plain { valid_max: 250.0 }),
             pm(3, K::FixedSlider, "quality", Conv::Plain { valid_max: 100.0 }),
             pm(4, K::Point, "center", Conv::Point),
+        ],
+    ),
+    // CC RepeTile (3626, `tests/fixtures/cc-repetile-3626.aep`): Expand Right/Left/Down/Up integer
+    // sliders (valid 0..20 000; the effect renders any of them, its sliders stop at 4000) and
+    // Tiling. Tiling items without a counterpart here, and Blend Borders (6), are reported.
+    fx(
+        "CC RepeTile",
+        "ec.stylize.ccrepetile",
+        &[
+            pm(1, K::IntSlider, "expandRight", Conv::Plain { valid_max: 20000.0 }),
+            pm(2, K::IntSlider, "expandLeft", Conv::Plain { valid_max: 20000.0 }),
+            pm(3, K::IntSlider, "expandDown", Conv::Plain { valid_max: 20000.0 }),
+            pm(4, K::IntSlider, "expandUp", Conv::Plain { valid_max: 20000.0 }),
+            pm(5, K::Popup, "tiling", Conv::Popup { default: 1, items: CC_REPETILE_TILING }),
         ],
     ),
     // Venetian Blinds (712, 715).
