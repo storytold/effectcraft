@@ -6,9 +6,9 @@
 //! property (`tdbs`, with a key list when animated) and `omks` with one `LIST shap` per keyframe (a
 //! single one when the path is static).
 
-use crate::container::Chunk;
 use crate::container::bytes::{be_f32, be_u32, until_nul};
-use crate::container::typed::{KeyList, Layer, Project, PropGroup, PropNode, Property};
+use crate::container::index::Node;
+use crate::container::typed::{KeyList, Layer, PropGroup, PropNode, Property};
 use crate::container::values::{Tracked, read};
 
 /// The mask mode (`mkif` `u32` at byte 4).
@@ -93,8 +93,10 @@ pub struct ShapePath {
 }
 
 impl ShapePath {
-    /// Decodes a `LIST shap`; `None` when `shph` or the point list is malformed.
-    pub fn from_chunk(shap: &Chunk<'_>) -> Option<Self> {
+    /// Decodes a `LIST shap` (a [`Chunk`](crate::container::Chunk) or a [`Node`]); `None` when
+    /// `shph` or the point list is malformed.
+    pub fn from_chunk<'f, 'a: 'f>(shap: impl Into<Node<'f, 'a>>) -> Option<Self> {
+        let shap = shap.into();
         let shph = shap.child(b"shph")?.bytes()?;
         let bbox = [be_f32(shph, 4)?, be_f32(shph, 8)?, be_f32(shph, 12)?, be_f32(shph, 16)?];
         let closed_flag = *shph.get(20)?;
@@ -187,20 +189,10 @@ fn mask_from_atom(atom: &PropGroup<'_, '_>, mkif: Option<&[u8]>) -> Mask {
             }
         }
         if let Some(omks) = oms.child_list(b"omks") {
-            mask.shapes = omks.children().iter().filter(|c| c.is_list(b"shap")).filter_map(ShapePath::from_chunk).collect();
+            mask.shapes = omks.children().filter(|c| c.is_list(b"shap")).filter_map(ShapePath::from_chunk).collect();
         }
     }
     mask
-}
-
-impl<'f, 'a> Project<'f, 'a> {
-    /// The vertices of every path shape of a mask in pixels of the layer: mask boxes are normalised
-    /// to the **layer** size (the size of its source), not the composition's. `None` when the layer
-    /// has no source with a size.
-    pub fn mask_vertices_px(&self, layer: &Layer<'f, 'a>, mask: &Mask) -> Option<Vec<Vec<PathVertex>>> {
-        let (width, height) = self.layer_source_size(layer)?;
-        Some(mask.shapes.iter().map(|s| s.vertices((f64::from(width), f64::from(height)))).collect())
-    }
 }
 
 /// One mask with the views of its records, for readers that need more than [`Mask`]: the
@@ -246,7 +238,7 @@ impl<'f, 'a> Layer<'f, 'a> {
                     if let Some(PropNode::Other(oms)) = atom.get("ADBE Mask Shape") {
                         path = oms.child_list(b"tdbs").and_then(Property::from_chunk);
                         if let Some(omks) = oms.child_list(b"omks") {
-                            path_shapes = omks.children().iter().filter(|c| c.is_list(b"shap")).map(ShapePath::from_chunk).collect();
+                            path_shapes = omks.children().filter(|c| c.is_list(b"shap")).map(ShapePath::from_chunk).collect();
                         }
                     }
                     masks.push(MaskAtom { mask, atom, path, path_shapes });

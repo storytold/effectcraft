@@ -55,7 +55,6 @@ fn assert_plain(h: &LayerHeader) {
     assert_eq!(h.label, 1);
     // No name was set, so the copy of the name at byte 64 is empty (the layer shows its source name).
     assert_eq!(h.name_copy, "");
-    assert!(!h.name_is_user_set());
     assert!(!h.is_null_object());
     assert_eq!(h.parent_id, None);
     assert_eq!(h.source_id, Some(0x1a));
@@ -67,16 +66,13 @@ fn base_layer_header() {
     assert_plain(&h);
     assert_eq!(h.quality, Quality::Best);
     assert_eq!(h.blend_mode, BlendMode::Normal);
-    assert_eq!(h.stretch, 1);
-    assert_eq!(h.stretch_percent(), 100.0);
+    assert_eq!((h.stretch, h.stretch_den), (1, 1));
     assert_eq!(switches(&h), NONE);
     // start 0 s, in 0 s, out 5 s; denominator = the composition timescale.
     assert_eq!(h.start, Rational { num: 0, den: 25600 });
     assert_eq!(h.in_relative, Rational { num: 0, den: 25600 });
     assert_eq!(h.out_relative, Rational { num: 128_000, den: 25600 });
-    assert_eq!(h.start_seconds(), Some(0.0));
-    assert_eq!(h.in_point_seconds(), Some(0.0));
-    assert_eq!(h.out_point_seconds(), Some(5.0));
+    assert_eq!(h.in_point(), Rational::new(0, 1));
     assert_eq!(h.out_point(), Rational::new(5, 1));
 }
 
@@ -98,7 +94,7 @@ fn one_switch_per_case() {
         assert_eq!(switches(&h), expected, "{name}");
         assert_plain(&h);
         assert_eq!((h.quality, h.blend_mode, h.stretch), (Quality::Best, BlendMode::Normal, 1), "{name}");
-        assert_eq!(h.out_point_seconds(), Some(5.0), "{name}");
+        assert_eq!(h.out_point(), Rational::new(5, 1), "{name}");
     }
 }
 
@@ -106,7 +102,6 @@ fn one_switch_per_case() {
 fn name_blend_mode_and_quality() {
     let h = skip!(l_header("010-layer-name.aep"));
     assert_eq!(h.name_copy, "Renamed");
-    assert!(h.name_is_user_set());
     let bytes = fixture!("010-layer-name.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
@@ -114,7 +109,6 @@ fn name_blend_mode_and_quality() {
     // The layer name is the user's; the source footage keeps its own name.
     assert_eq!(layer.name().as_deref(), Some("Renamed"));
     assert_eq!(project.layer_source(&layer).and_then(|i| i.display_name()).as_deref(), Some("L"));
-    assert_eq!(project.layer_display_name(&layer).as_deref(), Some("Renamed"));
 
     assert_eq!(skip!(l_header("016-layer-blend-multiply.aep")).blend_mode, BlendMode::Multiply);
     assert_eq!(skip!(l_header("023-layer-quality-draft.aep")).quality, Quality::Draft);
@@ -127,7 +121,7 @@ fn display_name_falls_back_to_the_source_name() {
     let project = Project::new(&file).unwrap();
     let layer = base_layer(&first_comp(&project));
     assert_eq!(layer.name(), None);
-    assert_eq!(project.layer_display_name(&layer).as_deref(), Some("L"));
+    assert_eq!(project.layer_source(&layer).and_then(|i| i.display_name()).as_deref(), Some("L"));
     assert_eq!(project.layer_source_size(&layer), Some((1920, 1080)));
     let source = project.layer_source(&layer).unwrap();
     assert_eq!(source.id(), Some(0x1a));
@@ -139,26 +133,23 @@ fn time_stretch_and_the_in_out_start_convention() {
     // 018: stretch 100 -> 200: the stored out point stays 5 s, the layer ends at 10 s.
     let h = skip!(l_header("018-layer-stretch200.aep"));
     assert_eq!(h.stretch, 2);
-    assert_eq!(h.stretch_percent(), 200.0);
+    assert_eq!(h.stretch_ratio(), Rational::new(2, 1));
     assert_eq!(h.out_relative, Rational { num: 128_000, den: 25600 });
-    assert_eq!(h.out_point_seconds(), Some(10.0));
-    assert_eq!(h.in_point_seconds(), Some(0.0));
+    assert_eq!(h.out_point(), Rational::new(10, 1));
+    assert_eq!(h.in_point(), Rational::new(0, 1));
 
     // 019: inPoint 0 -> 1; AE moved the out point to 6 s and left the start at 0.
     let h = skip!(l_header("019-layer-inpoint1.aep"));
-    assert_eq!(h.start_seconds(), Some(0.0));
+    assert_eq!(h.start.num, 0);
     assert_eq!(h.in_relative, Rational { num: 25600, den: 25600 });
     assert_eq!(h.in_point(), Rational::new(1, 1));
-    assert_eq!(h.out_point_seconds(), Some(6.0));
+    assert_eq!(h.out_point(), Rational::new(6, 1));
 
     // 021: startTime 0 -> 0.5: in 0.5 s and out 5.5 s although the stored in point stays 0.
     let h = skip!(l_header("021-layer-starttime0.5.aep"));
     assert_eq!(h.start, Rational { num: 12800, den: 25600 });
-    assert_eq!(h.start_seconds(), Some(0.5));
     assert_eq!(h.in_relative.num, 0);
     assert_eq!(h.in_point(), Rational::new(1, 2));
-    assert_eq!(h.in_point_seconds(), Some(0.5));
-    assert_eq!(h.out_point_seconds(), Some(5.5));
     assert_eq!(h.out_point(), Rational::new(11, 2));
 }
 
@@ -175,7 +166,6 @@ fn parent_link_and_null_object() {
     let nh = null.header().unwrap();
     assert_eq!(null.name().as_deref(), Some("Null"));
     assert!(nh.is_null_object());
-    assert!(nh.name_is_user_set());
     assert_eq!(nh.layer_type, LayerType::Av);
     assert_eq!(nh.parent_id, None);
     assert_eq!(project.layer_source(null).and_then(|i| i.display_name()).as_deref(), Some("Null 1"));
@@ -225,17 +215,14 @@ fn base_comp_header() {
     assert_eq!((h.width, h.height), (1920, 1080));
     assert_eq!((h.time_base.frame_duration, h.time_base.timescale), (1024, 25600));
     assert_eq!(h.frame_rate(), Some(25.0));
-    assert_eq!(h.frame_rate_from_fixed(), 25.0);
+    assert_eq!(h.frame_rate_fixed, 25 << 16);
     assert_eq!(h.duration_units, 128_000);
     assert_eq!(h.duration_seconds(), Some(5.0));
     assert_eq!(h.background, [0, 0, 0]);
-    assert_eq!(h.background_rgb(), [0.0, 0.0, 0.0]);
     assert_eq!(h.shutter_angle, 180);
-    assert_eq!(h.work_area_start_seconds(), Some(0.0));
+    assert_eq!(h.work_area_start_units, 0);
     assert_eq!(h.work_area_end_units, None);
-    assert_eq!(h.work_area_end_seconds(), Some(5.0));
     assert_eq!(h.pixel_aspect, Rational { num: 1, den: 1 });
-    assert_eq!(h.pixel_aspect_ratio(), Some(1.0));
     assert!(!h.motion_blur);
     // The manifest calls the classic renderer `ADBE Advanced 3d`; the file stores `ADBE Escher`
     // and the display name `Classic 3D`.
@@ -255,7 +242,7 @@ fn one_comp_change_per_case() {
     let (h, _, _) = skip!(comp_header("031-comp-fps30.aep"));
     assert_eq!((h.time_base.frame_duration, h.time_base.timescale), (1024, 30720));
     assert_eq!(h.frame_rate(), Some(30.0));
-    assert_eq!(h.frame_rate_from_fixed(), 30.0);
+    assert_eq!(h.frame_rate_fixed, 30 << 16);
     assert_eq!(h.duration_units, 153_600);
     assert_eq!(h.duration_seconds(), Some(5.0));
 
@@ -263,12 +250,11 @@ fn one_comp_change_per_case() {
     let (h, _, _) = skip!(comp_header("032-comp-duration10.aep"));
     assert_eq!(h.duration_units, 256_000);
     assert_eq!(h.duration_seconds(), Some(10.0));
-    assert_eq!(h.work_area_end_seconds(), Some(10.0));
+    assert_eq!(h.work_area_end_units, None);
 
     // 033: bgColor [0,0,0] -> [0,1,0].
     let (h, _, _) = skip!(comp_header("033-comp-bg-green.aep"));
     assert_eq!(h.background, [0, 255, 0]);
-    assert_eq!(h.background_rgb(), [0.0, 1.0, 0.0]);
 
     // 034: shutterAngle 180 -> 90.
     let (h, _, _) = skip!(comp_header("034-comp-shutter90.aep"));
@@ -279,8 +265,6 @@ fn one_comp_change_per_case() {
     let (h, _, _) = skip!(comp_header("035-comp-workarea-1-2.aep"));
     assert_eq!(h.work_area_start_units, 25600);
     assert_eq!(h.work_area_end_units, Some(76_800));
-    assert_eq!(h.work_area_start_seconds(), Some(1.0));
-    assert_eq!(h.work_area_end_seconds(), Some(3.0));
 }
 
 #[test]
@@ -290,7 +274,6 @@ fn one_comp_change_per_case_aspect_blur_renderer() {
     // 037: pixelAspect 1 -> 2.
     let (h, _, _) = skip!(comp_header("037-comp-pixelaspect2.aep"));
     assert_eq!(h.pixel_aspect, Rational { num: 2, den: 1 });
-    assert_eq!(h.pixel_aspect_ratio(), Some(2.0));
 
     // 038: comp motion blur on.
     let (h, _, _) = skip!(comp_header("038-comp-motionblur.aep"));
@@ -328,17 +311,16 @@ fn precomp_item_ids_and_labels() {
     assert_eq!(h.source_id, pre_item.id());
     assert_eq!(project.layer_source(layer).unwrap().id(), pre_item.id());
     assert_eq!(h.label, 15);
-    assert!(!h.name_is_user_set());
     assert_eq!(layer.name(), None);
-    assert_eq!(project.layer_display_name(layer).as_deref(), Some("Pre"));
+    assert_eq!(project.layer_source(layer).and_then(|i| i.display_name()).as_deref(), Some("Pre"));
     assert_eq!(project.layer_source_size(layer), Some((1920, 1080)));
     // The precomp layer's start time has the denominator 1; the Pre comp is 1920x1080, 25 fps, 5 s.
     assert_eq!(h.start.den, 1);
     let ph = pre.header().unwrap();
     assert_eq!((ph.width, ph.height, ph.frame_rate(), ph.duration_seconds()), (1920, 1080, Some(25.0), Some(5.0)));
     // C records that it uses the comp Pre (chunk idpi, a little-endian u32).
-    assert_eq!(c_item.used_item_ids(), [pre_item.id().unwrap()]);
-    assert!(pre_item.used_item_ids().is_empty());
+    assert_eq!(crate::common::used_item_ids(c_item), [pre_item.id().unwrap()]);
+    assert!(crate::common::used_item_ids(pre_item).is_empty());
     assert_eq!(pre_item.label(), Some(15));
     // The layer inside Pre is a new layer made from the solid L (moving the layers into a precomp
     // creates new layers).
@@ -347,7 +329,7 @@ fn precomp_item_ids_and_labels() {
     let ih = inner[0].header().unwrap();
     assert_ne!(ih.id, L);
     assert_eq!(ih.source_id, Some(0x1a));
-    assert_eq!(project.layer_display_name(&inner[0]).as_deref(), Some("L"));
+    assert_eq!(project.layer_source(&inner[0]).and_then(|i| i.display_name()).as_deref(), Some("L"));
 }
 
 #[test]
@@ -356,9 +338,8 @@ fn a_negative_stretch_is_a_reversed_layer() {
     // point 0 and out point 5 s relative, so the layer runs from 5 s back to 0 s; 983: -50 % = -1/2.
     let h = skip!(l_header("981-layer-stretch-minus100-start5.aep"));
     assert_eq!((h.stretch, h.stretch_den), (-1, 1));
-    assert_eq!(h.stretch_percent(), -100.0);
-    assert_eq!((h.in_point_seconds(), h.out_point_seconds()), (Some(5.0), Some(0.0)));
+    assert_eq!((h.in_point(), h.out_point()), (Rational::new(5, 1), Rational::new(0, 1)));
     let h = skip!(l_header("983-layer-stretch-minus50-opacity-keys.aep"));
     assert_eq!((h.stretch, h.stretch_den), (-1, 2));
-    assert_eq!((h.in_point_seconds(), h.out_point_seconds()), (Some(5.0), Some(2.5)));
+    assert_eq!((h.in_point(), h.out_point()), (Rational::new(5, 1), Rational::new(5, 2)));
 }

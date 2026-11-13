@@ -237,12 +237,6 @@ impl LayerHeader {
         self.flag_bytes.get(byte).is_some_and(|b| b & mask != 0)
     }
 
-    /// Byte 37 bit `0x01`: the layer has a name set by the user (clear on a default-named camera or
-    /// light and on a precomp layer, whose name is the source's).
-    pub fn name_is_user_set(&self) -> bool {
-        self.flag(0, 0x01)
-    }
-
     /// Byte 37 bit `0x02`: guide layer.
     pub fn is_guide(&self) -> bool {
         self.flag(0, 0x02)
@@ -333,17 +327,6 @@ impl LayerHeader {
         Rational::new(i64::from(self.stretch), i64::from(self.stretch_den))
     }
 
-    /// The time stretch in percent (`stretch / stretch_den * 100`); a zero denominator reads as 1.
-    pub fn stretch_percent(&self) -> f64 {
-        let den = if self.stretch_den == 0 { 1.0 } else { f64::from(self.stretch_den) };
-        f64::from(self.stretch) / den * 100.0
-    }
-
-    /// The start time in seconds, `None` for a zero denominator.
-    pub fn start_seconds(&self) -> Option<f64> {
-        self.start.to_f64()
-    }
-
     /// The absolute in point, `start + in * stretch`, exact and reduced.
     pub fn in_point(&self) -> Option<Rational> {
         self.start.plus_scaled(&self.in_relative, &self.stretch_ratio()?)
@@ -354,16 +337,6 @@ impl LayerHeader {
     /// rate of an image sequence), not the composition timescale.
     pub fn out_point(&self) -> Option<Rational> {
         self.start.plus_scaled(&self.out_relative, &self.stretch_ratio()?)
-    }
-
-    /// The absolute in point in seconds.
-    pub fn in_point_seconds(&self) -> Option<f64> {
-        self.in_point()?.to_f64()
-    }
-
-    /// The absolute out point in seconds.
-    pub fn out_point_seconds(&self) -> Option<f64> {
-        self.out_point()?.to_f64()
     }
 }
 
@@ -464,63 +437,9 @@ impl CompHeader {
         self.time_base.frame_rate()
     }
 
-    /// The frame rate from the 16.16 fixed-point field (25 is `0x0019_0000`).
-    pub fn frame_rate_from_fixed(&self) -> f64 {
-        f64::from(self.frame_rate_fixed) / 65536.0
-    }
-
     /// The duration in seconds.
     pub fn duration_seconds(&self) -> Option<f64> {
         self.time_base.seconds(i32::try_from(self.duration_units).ok()?)
-    }
-
-    /// The work area start in seconds.
-    pub fn work_area_start_seconds(&self) -> Option<f64> {
-        self.time_base.seconds(i32::try_from(self.work_area_start_units).ok()?)
-    }
-
-    /// The work area end in seconds; the composition duration when the work area is the whole
-    /// composition.
-    pub fn work_area_end_seconds(&self) -> Option<f64> {
-        match self.work_area_end_units {
-            Some(end) => self.time_base.seconds(i32::try_from(end).ok()?),
-            None => self.duration_seconds(),
-        }
-    }
-
-    /// The background colour as fractions 0..1 (`byte / 255`).
-    pub fn background_rgb(&self) -> [f64; 3] {
-        self.background.map(|c| f64::from(c) / 255.0)
-    }
-
-    /// The pixel aspect ratio as a number.
-    pub fn pixel_aspect_ratio(&self) -> Option<f64> {
-        self.pixel_aspect.to_f64()
-    }
-
-    /// The display start time in seconds (the start timecode), `None` when absent or the
-    /// denominator is zero.
-    pub fn display_start_seconds(&self) -> Option<f64> {
-        self.display_start?.to_f64()
-    }
-
-    /// The display start as a frame number (`display start * frame rate`, rounded); 100 at 25 fps
-    /// for a display start of 4 s.
-    pub fn display_start_frame(&self) -> Option<i64> {
-        let rate = self.frame_rate()?;
-        Some((self.display_start_seconds()? * rate).round() as i64)
-    }
-
-    /// The frame rate as an exact fraction `timescale / frame_duration`, as typed: 29.97 fps is
-    /// `23976 / 800` (not `30000 / 1001`), 23.976 fps is `23976 / 1000`.
-    pub fn frame_rate_exact(&self) -> Option<Rational> {
-        Rational::new(i64::from(self.time_base.timescale), i64::from(self.time_base.frame_duration))
-    }
-
-    /// The duration in whole frames (`duration / frame_duration`). After Effects snaps a duration
-    /// to a whole number of frames: 5 s at 29.97 fps becomes 150 frames (5.005 s).
-    pub fn duration_frames(&self) -> Option<u32> {
-        self.duration_units.checked_div(self.time_base.frame_duration)
     }
 }
 

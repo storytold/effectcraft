@@ -4,6 +4,7 @@
 mod helpers;
 
 mod aepx;
+mod ai_mask;
 mod blend_modes;
 mod cameras;
 mod cases;
@@ -17,10 +18,12 @@ mod effects_round2;
 mod effects_round3;
 mod effects_thirdparty;
 mod fx_inject;
+mod issue_3087;
 mod lumetri;
 mod markers;
 mod masks;
 mod mattes;
+mod placeholders;
 mod puppet;
 mod resaved_defaults;
 mod robustness;
@@ -30,5 +33,6 @@ mod styles;
 mod synthetic;
 mod text;
 mod text_anim;
+mod text_synthetic;
 mod timing;
 mod versions;

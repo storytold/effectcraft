@@ -38,7 +38,7 @@ fn a_composition_counts_the_compositions_it_shows() {
     let id = |n: &str| items.iter().find(|i| i.display_name().as_deref() == Some(n)).and_then(|i| i.id()).expect(n);
     let c = items.iter().find(|i| i.display_name().as_deref() == Some("C")).expect("C");
     // The list holds each used composition once (in no particular order).
-    let mut used = c.used_item_ids();
+    let mut used = crate::common::used_item_ids(c);
     used.sort();
     let mut want = vec![id("P30"), id("Q")];
     want.sort();
@@ -60,8 +60,8 @@ fn an_image_sequence_knows_its_numbering() {
     let item = project.all_items().into_iter().find(|i| i.footage().is_some_and(|f| !f.is_solid)).expect("sequence");
     let f = item.footage().expect("footage");
     assert_eq!((f.file_type.as_str(), f.width, f.height, f.native_frame_rate, f.is_sequence), ("oEXR", 64, 48, 30, true));
-    assert_eq!(f.sequence_frame_count(), Some(3));
     let s = item.sequence_info().expect("numbering");
+    assert_eq!(s.frame_count(), 3);
     assert_eq!((s.prefix.as_str(), s.suffix.as_str(), s.start, s.end, s.digits), ("shot_", ".exr", 101, 103, 4));
     assert_eq!(s.file_name(101), "shot_0101.exr");
     // A still has no numbering (000: the solid; the base has no other footage).

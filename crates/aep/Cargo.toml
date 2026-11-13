@@ -15,6 +15,7 @@ effectcraft-color = { workspace = true }
 effectcraft-keyframe = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-effects = { workspace = true }
+log = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

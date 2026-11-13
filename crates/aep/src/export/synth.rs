@@ -4,9 +4,10 @@
 //! evidence, or zero where After Effects was shown to accept zero (the read-backs listed in
 //! `docs/aep-export.md`, "Built in code").
 
+use crate::export::tree::{Fixed, R, put_u32};
 use crate::{Body, Chunk};
 
-/// `tdmn`: a match name padded to 40 bytes.
+/// `tdmn`: a match name padded to 40 bytes (at most 39 bytes of the name, so that a NUL remains).
 pub(crate) fn tdmn(name: &str) -> Chunk<'static> {
     let mut b = vec![0u8; 40];
     for (slot, c) in b.iter_mut().zip(name.bytes().take(39)) {
@@ -15,12 +16,34 @@ pub(crate) fn tdmn(name: &str) -> Chunk<'static> {
     Chunk::data(*b"tdmn", b)
 }
 
+/// The match name that closes a property group.
+pub(crate) const GROUP_END: &str = "ADBE Group End";
+
+/// The match name in a `tdmn`: the bytes up to the first NUL as UTF-8, invalid sequences
+/// replaced, as the importer reads it (`container::typed`). After Effects writes ASCII here
+/// (aep-format.md 3.4; every `tdmn` of the corpus is ASCII); `None` when `c` is not a data chunk.
+pub(crate) fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
+    let b = c.bytes()?;
+    let end = b.iter().position(|x| *x == 0).unwrap_or(b.len());
+    Some(String::from_utf8_lossy(b.get(..end)?).into_owned())
+}
+
+/// Whether `c` is a `tdmn` naming `name`.
+pub(crate) fn is_tdmn(c: &Chunk<'_>, name: &str) -> bool {
+    c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(name)
+}
+
 /// The user name of a property that has none (`-_0_/-`, aep-format.md 3.4).
 pub(crate) const NO_NAME: &str = "-_0_/-";
 
 /// `tdsn`: the user name, a nested chunk holding one `Utf8`.
 pub(crate) fn tdsn(name: &str) -> Chunk<'static> {
-    Chunk { id: *b"tdsn", body: Body::Chunks(vec![Chunk::data(*b"Utf8", name.as_bytes().to_vec())]), pad: None }
+    utf8_in(*b"tdsn", name)
+}
+
+/// A nested chunk `id` holding one `Utf8` with `text` (`tdsn`, `fnam`, `pdnm`).
+pub(crate) fn utf8_in(id: [u8; 4], text: &str) -> Chunk<'static> {
+    Chunk { id, body: Body::Chunks(vec![Chunk::data(*b"Utf8", text.as_bytes().to_vec())]), pad: None }
 }
 
 /// How a property's keys are stored (`tdb4` byte 7, aep-format.md 3.5).
@@ -100,13 +123,13 @@ impl RecSpec {
 /// word and the constant doubles at 16..56 are written; After Effects reads the other bytes as
 /// zero (read-back e1-ztdb4d).
 pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
-    let mut b = vec![0u8; 124];
-    let set = |b: &mut Vec<u8>, at: usize, bytes: &[u8]| {
-        if let Some(dst) = b.get_mut(at..at + bytes.len()) {
-            dst.copy_from_slice(bytes);
-        }
-    };
-    set(&mut b, 0, &[0xdb, 0x99, 0x00, spec.dims]);
+    tdb4_layout(spec, keyed, time_scale).finish(|| "tdb4".to_string())
+}
+
+/// The 124-byte `tdb4` property header layout for a record spec.
+fn tdb4_layout(spec: &RecSpec, keyed: bool, time_scale: u32) -> Fixed {
+    let mut b = Fixed::zeroed(124);
+    b.put(0, &[0xdb, 0x99, 0x00, spec.dims]);
     let spatial = match spec.template {
         KeyTemplate::Plain => 0,
         KeyTemplate::Spatial(t) => t,
@@ -115,19 +138,19 @@ pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
         Some(b) => (b & !0x01) | u8::from(!keyed),
         None => (if spatial == 0 { 0 } else { spatial_byte5(spatial) }) | u8::from(!keyed),
     };
-    set(&mut b, 5, &[byte5]);
-    set(&mut b, 7, &[spatial]);
-    set(&mut b, 8, &spec.class.to_be_bytes());
-    set(&mut b, 12, &time_scale.to_be_bytes());
+    b.put(5, &[byte5]);
+    b.put(7, &[spatial]);
+    b.put(8, &spec.class.to_be_bytes());
+    b.put(12, &time_scale.to_be_bytes());
     // Every record After Effects writes carries 0.0001 and four 1.0 here; without them a roving
     // key reads back at time zero instead of its retimed place (read-back s14-re-keyframes).
-    set(&mut b, 16, &1e-4f64.to_be_bytes());
+    b.put(16, &1e-4f64.to_be_bytes());
     for at in [24, 32, 40, 48] {
-        set(&mut b, at, &1.0f64.to_be_bytes());
+        b.put(at, &1.0f64.to_be_bytes());
     }
-    set(&mut b, 68, &[u8::from(keyed)]);
+    b.put(68, &[u8::from(keyed)]);
     // Set on a static spatial property, cleared once it is keyed (aep-format.md 3.4, byte 79).
-    set(&mut b, 79, &[u8::from(spatial != 0 && !keyed)]);
+    b.put(79, &[u8::from(spatial != 0 && !keyed)]);
     b
 }
 
@@ -135,16 +158,21 @@ pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
 /// 3.5): word 0 `0x00d00bee`, word 2 the count, word 3 the blocks of four (at least one), word 4
 /// the size, words 5 and 7 the capacity (the count rounded up to four, at least two), word 6 one.
 pub(crate) fn key_list(size: u32, count: u32, records: Vec<u8>) -> Chunk<'static> {
-    let mut lhd3 = vec![0u8; 52];
-    // Cannot fail: the header is 52 bytes.
-    let _ = crate::export::tree::put_u32(&mut lhd3, 0, 0x00d0_0bee);
-    let _ = crate::export::tree::put_u32(&mut lhd3, 24, 1);
-    let _ = put_key_counts(&mut lhd3, count, size);
+    let lhd3 = key_list_header(size, count).finish(|| "lhd3".to_string());
     Chunk::list(*b"list", vec![Chunk::data(*b"lhd3", lhd3), Chunk::data(*b"ldat", records)])
 }
 
+/// The 52-byte `lhd3` key list header for `count` records of `size` bytes.
+fn key_list_header(size: u32, count: u32) -> Fixed {
+    let mut lhd3 = Fixed::zeroed(52);
+    lhd3.put(0, &0x00d0_0bee_u32.to_be_bytes());
+    lhd3.put(24, &1u32.to_be_bytes());
+    lhd3.apply(|d| put_key_counts(d, count, size));
+    lhd3
+}
+
 /// Sets the count words of a key list header for `count` keys of `size` bytes.
-pub(crate) fn put_key_counts(lhd3: &mut [u8], count: u32, size: u32) -> crate::export::tree::R<()> {
+pub(crate) fn put_key_counts(lhd3: &mut [u8], count: u32, size: u32) -> R<()> {
     let capacity = count.div_ceil(4).saturating_mul(4).max(2);
     put_counts(lhd3, count, count.div_ceil(4).max(1), size, capacity, capacity)
 }
@@ -153,8 +181,7 @@ pub(crate) fn put_key_counts(lhd3: &mut [u8], count: u32, size: u32) -> crate::e
 /// record size, word 5 `w5`, word 7 the capacity. A key list has `w5` = the capacity; a path
 /// list counts vertices: `blocks` = `w5` = the vertex count, the capacity four times it (090:
 /// 12 points, 4, 4 and 16; aep-format.md 3.5).
-pub(crate) fn put_counts(lhd3: &mut [u8], count: u32, blocks: u32, size: u32, w5: u32, capacity: u32) -> crate::export::tree::R<()> {
-    use crate::export::tree::put_u32;
+pub(crate) fn put_counts(lhd3: &mut [u8], count: u32, blocks: u32, size: u32, w5: u32, capacity: u32) -> R<()> {
     put_u32(lhd3, 8, count)?;
     put_u32(lhd3, 12, blocks)?;
     put_u32(lhd3, 16, size)?;
@@ -202,6 +229,38 @@ mod tests {
         let ids: Vec<[u8; 4]> = rec.children().iter().map(|c| c.id).collect();
         assert_eq!(ids, [*b"tdsb", *b"tdsn", *b"tdb4", *b"cdat", *b"tdum", *b"tduM"]);
         assert_eq!(rec.child(b"cdat").and_then(|c| c.bytes()).map(<[u8]>::len), Some(40));
+    }
+
+    /// Every record header fits.
+    #[test]
+    fn every_record_header_fits() {
+        for dims in 0..=u8::MAX {
+            for template in [KeyTemplate::Plain, KeyTemplate::Spatial(1), KeyTemplate::Spatial(3), KeyTemplate::Spatial(u8::MAX)] {
+                for byte5 in [None, Some(0xff)] {
+                    let spec = RecSpec { dims, template, class: u32::MAX, limits: None, byte5 };
+                    assert!(tdb4_layout(&spec, false, u32::MAX).error().is_none() && tdb4_layout(&spec, true, 0).error().is_none());
+                }
+            }
+        }
+        for (size, count) in [(0, 0), (u32::MAX, u32::MAX), (48, 5)] {
+            let h = key_list_header(size, count);
+            assert!(h.error().is_none());
+            assert_eq!(h.finish(String::new).len(), 52);
+        }
+    }
+
+    /// A match name reads as the importer reads it.
+    #[test]
+    fn a_match_name_reads_as_the_importer_reads_it() {
+        let m = tdmn("ADBE Group End");
+        assert_eq!(tdmn_name(&m).as_deref(), Some(GROUP_END));
+        assert!(is_tdmn(&m, GROUP_END) && !is_tdmn(&m, "ADBE Group") && !is_tdmn(&tdsn(GROUP_END), GROUP_END));
+        // At most 39 bytes, so that a NUL remains.
+        let long = "x".repeat(50);
+        assert_eq!(tdmn_name(&tdmn(&long)).map(|n| n.len()), Some(39));
+        // Not ASCII (After Effects writes ASCII): UTF-8, invalid bytes replaced, as on import.
+        let odd = Chunk::data(*b"tdmn", vec![b'A', 0xc3, 0xa9, 0xff, 0, b'B']);
+        assert_eq!(tdmn_name(&odd).as_deref(), Some("A\u{e9}\u{fffd}"));
     }
 
     #[test]

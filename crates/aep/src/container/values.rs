@@ -8,6 +8,7 @@
 //! 100 %. These defaults are verified for AV layers (solids); cameras and lights use other
 //! conventions (see the `camera` module).
 
+use crate::container::bytes::be_f64;
 use crate::container::typed::{Layer, Project, PropGroup, PropNode};
 
 /// Where a [`Tracked`] value came from.
@@ -192,8 +193,7 @@ impl<'f, 'a> Layer<'f, 'a> {
         let otda = otst.child_list(b"otky")?.child(b"otda")?.bytes()?;
         let mut degrees = [0.0; 3];
         for (i, slot) in degrees.iter_mut().enumerate() {
-            let b = otda.get(i * 8..i * 8 + 8)?;
-            *slot = f64::from_be_bytes(b.try_into().ok()?);
+            *slot = be_f64(otda, i * 8)?;
         }
         Some(Orientation {
             degrees,
@@ -223,12 +223,10 @@ impl<'f, 'a> Layer<'f, 'a> {
             .child_list(b"otky")
             .map(|k| {
                 k.children()
-                    .iter()
                     .filter(|c| c.is(b"otda"))
                     .map(|c| {
                         let b = c.bytes()?;
-                        let at = |i: usize| b.get(i * 8..i * 8 + 8).and_then(|s| s.try_into().ok()).map(f64::from_be_bytes);
-                        Some([at(0)?, at(1)?, at(2)?])
+                        Some([be_f64(b, 0)?, be_f64(b, 8)?, be_f64(b, 16)?])
                     })
                     .collect()
             })

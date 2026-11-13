@@ -193,33 +193,14 @@ impl<'f> Keyframe<'f> {
         }
     }
 
-    /// The value of a 3-component spatial keyframe (Position), x, y and z in pixels.
-    pub fn spatial_value(&self) -> Option<[f64; 3]> {
-        let v = self.value()?;
-        if !matches!(self.kind(), KeyframeKind::Spatial { components: 3 }) {
-            return None;
-        }
-        Some([*v.first()?, *v.get(1)?, *v.get(2)?])
-    }
-
     /// The ease of the key: the four slots at byte 16 of a one-component plain record or at byte 24
     /// of a spatial record or a mask path record. For linear and hold keys all four are 0 (a bezier key stores what
     /// `setTemporalEase` was given). Plain records with several components keep four slots per
-    /// component, see [`Keyframe::ease_component`] and [`Keyframe::plain_ease_slots`].
+    /// component, see [`Keyframe::ease_component`].
     pub fn ease(&self) -> Option<KeyEase> {
         match self.kind() {
             KeyframeKind::Plain { components: 1 } => ease_at(self.record, 16),
             KeyframeKind::Spatial { .. } | KeyframeKind::MaskPath => ease_at(self.record, 24),
-            _ => None,
-        }
-    }
-
-    /// The `4 n` ease `f64` of a plain record as stored (from byte `8 + 8 n`). With one component
-    /// they are [`Keyframe::ease`]; with several they are type-major, see
-    /// [`Keyframe::ease_component`].
-    pub fn plain_ease_slots(&self) -> Option<Vec<f64>> {
-        match self.kind() {
-            KeyframeKind::Plain { components } => doubles(self.record, components.checked_mul(8)?.checked_add(8)?, components.checked_mul(4)?),
             _ => None,
         }
     }
@@ -260,16 +241,6 @@ impl<'f> Keyframe<'f> {
         (0..n).map(|i| self.ease_component(i)).collect()
     }
 
-    /// The Euclidean ARGB distance to the next key that After Effects writes at byte 16 of a colour
-    /// (4-component spatial) record whose interpolation is not linear: 255 sqrt(2) = 360.6245 for
-    /// red to blue; 0 on the last key and on linear keys. `None` for other records.
-    pub fn color_distance(&self) -> Option<f64> {
-        match self.kind() {
-            KeyframeKind::Spatial { components: 4 } => be_f64(self.record, 16),
-            _ => None,
-        }
-    }
-
     /// The decoded spatial record (Position: 128 bytes, colour: 152 bytes).
     pub fn spatial(&self) -> Option<SpatialKey> {
         let KeyframeKind::Spatial { components: n } = self.kind() else { return None };
@@ -300,11 +271,6 @@ pub struct ExpressionFlags {
 }
 
 impl ExpressionFlags {
-    /// True when bytes 76, 77 and 120 are all 1.
-    pub fn all_set(&self) -> bool {
-        self.byte_76 == 1 && self.byte_77 == 1 && self.byte_120 == 1
-    }
-
     /// True when byte 119 is 1.
     pub fn disabled(&self) -> bool {
         self.byte_119 == 1
@@ -322,11 +288,6 @@ impl<'f, 'a> Property<'f, 'a> {
     /// the default state.
     pub fn flags(&self) -> Option<u32> {
         be_u32(self.chunk.child(b"tdsb")?.bytes()?, 0)
-    }
-
-    /// True when `tdb4` byte 5 has bit 0 set: the property is static, it has no keyframes.
-    pub fn is_static_flag_set(&self) -> Option<bool> {
-        Some(self.header()?.get(5)? & 1 != 0)
     }
 
     /// The expression source: the raw UTF-8 text of the `Utf8` child that follows the value in the

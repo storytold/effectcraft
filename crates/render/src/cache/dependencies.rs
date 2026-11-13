@@ -33,6 +33,8 @@ impl Dependencies<'_> {
         {
             for g in fx.groups().take(limit.unwrap_or(usize::MAX)).filter(|g| g.enabled) {
                 self.group(ctx, layer, g, 0)?;
+                // A LUT file edited on disk changes the pixels without an edit (#3493).
+                crate::reads::lut_files(ctx, layer, g).hash(self.h);
             }
         }
         self.other_times = previous;
@@ -169,6 +171,14 @@ impl Dependencies<'_> {
                         ItemKind::Comp(comp) => {
                             let time = ctx.source_time(layer);
                             time.0.hash(self.h);
+                            // The nested layers are walked without this instance's Essential
+                            // Properties overrides, which the render applies: a LUT file one of
+                            // them names is read too (#3493).
+                            for o in crate::fx_host::essential_overrides(ctx, layer) {
+                                if let effectcraft_keyframe::Value::Str(src) = &o.value {
+                                    crate::reads::source_files(src).hash(self.h);
+                                }
+                            }
                             let nested = EvalCtx::new(ctx.project, item, comp, time);
                             for child in &comp.layers {
                                 self.layer(&nested, child)?;

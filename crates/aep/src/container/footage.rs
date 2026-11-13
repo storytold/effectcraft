@@ -1,9 +1,9 @@
 //! Item ids and labels, footage items (solids and files), precomp linkage, and the name and size
 //! of a layer's source.
 
-use crate::container::bytes::{be_f32, be_f64, be_u32, cstr, le_u32, text};
-use crate::container::chunk::Chunk;
+use crate::container::bytes::{be_f32, be_f64, be_i32, be_u32, cstr, le_u32, text, until_nul};
 use crate::container::header::Rational;
+use crate::container::index::Node;
 use crate::container::typed::{Item, ItemKind, Layer, Project};
 
 /// The footage data of an item (`LIST Pin ` with `sspc`, `opti` and, for files, `Als2/alas`).
@@ -45,24 +45,62 @@ pub struct Footage {
     /// True when the alias points at a folder (`"target_is_folder":true`): an image sequence is ONE
     /// item whose alias is its folder and whose `opti` holds the first file name.
     pub is_sequence: bool,
+    /// The one layer of a Photoshop file the item shows; `None` for the merged image and for
+    /// any other footage.
+    pub psd_layer: Option<PsdLayer>,
+}
+
+/// One layer of a Photoshop file shown by a footage item, from its `opti` (tag `8BPS`,
+/// docs/aep-format.md 3.3): the layer record's index as a big-endian `i32` at byte 14 (-1 for the
+/// merged image), the document's sides as little-endian `u32` at 32 and 36, its bounds top, left,
+/// bottom, right as little-endian `i32` at 78, 82, 86 and 90, and its name (UTF-8, NUL
+/// terminated) from byte 344.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdLayer {
+    /// The layer record's position in the file (bottom of the stack = 0).
+    pub index: u32,
+    pub name: String,
+    /// Top, left, bottom, right in document pixels; all 0 for a layer without pixels (an
+    /// adjustment layer).
+    pub bounds: [i32; 4],
+    /// The document's two sides (bytes 32 and 36; which one is the width is not sampled: the one
+    /// file read has a square document). 0 when not stored.
+    pub document: [u32; 2],
+}
+
+/// Most bytes of a Photoshop layer name read.
+const MAX_NAME: usize = 1024;
+
+impl PsdLayer {
+    /// The bounds' width and height; `None` when they are empty.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        let [top, left, bottom, right] = self.bounds;
+        let w = u32::try_from(i64::from(right) - i64::from(left)).ok().filter(|w| *w > 0)?;
+        let h = u32::try_from(i64::from(bottom) - i64::from(top)).ok().filter(|h| *h > 0)?;
+        Some((w, h))
+    }
+
+    /// Whether the document is `size` big, its sides in either order.
+    pub fn document_is(&self, size: (u32, u32)) -> bool {
+        let [a, b] = self.document;
+        a > 0 && b > 0 && ((a, b) == size || (b, a) == size)
+    }
+
+    /// The layer an `opti` names; `None` for another tag, the merged image or a cut record.
+    fn read(opti: &[u8]) -> Option<Self> {
+        if opti.get(..4) != Some(&b"8BPS"[..]) {
+            return None;
+        }
+        let index = u32::try_from(be_i32(opti, 14)?).ok()?;
+        let le_i32 = |at| le_u32(opti, at).map(|v| i32::from_le_bytes(v.to_le_bytes()));
+        // (After Effects writes 602 bytes; a longer hostile name is cut.)
+        let name = opti.get(344..).map(|b| text(until_nul(b.get(..MAX_NAME).unwrap_or(b)))).unwrap_or_default();
+        let document = [le_u32(opti, 32).unwrap_or(0), le_u32(opti, 36).unwrap_or(0)];
+        Some(Self { index, name, bounds: [le_i32(78)?, le_i32(82)?, le_i32(86)?, le_i32(90)?], document })
+    }
 }
 
 impl Footage {
-    /// The number of frames of an image sequence (`duration * native_frame_rate`: 3/30 s at 30 fps is
-    /// 3); `None` for anything else.
-    pub fn sequence_frame_count(&self) -> Option<u32> {
-        if !self.is_sequence {
-            return None;
-        }
-        let d = self.duration?;
-        let frames = i128::from(d.num).checked_mul(i128::from(self.native_frame_rate))?;
-        let den = i128::from(d.den);
-        if den <= 0 || frames % den != 0 {
-            return None;
-        }
-        u32::try_from(frames / den).ok()
-    }
-
     /// The solid's colour as fractions R, G, B.
     pub fn solid_rgb(&self) -> Option<[f32; 3]> {
         let [_, r, g, b] = self.solid_argb?;
@@ -216,14 +254,13 @@ impl SequenceInfo {
 /// is unreadable (empty). A name that is not a plain file name (holding `/`, `\`, `:` or a control
 /// character such as NUL, or being `.` or `..`) makes the whole list unreadable (empty): the names
 /// are joined to the folder.
-fn sequence_file_list(list: &Chunk<'_>) -> Vec<String> {
+fn sequence_file_list(list: Node<'_, '_>) -> Vec<String> {
     // After Effects writes the count first (the one sample); a list without a readable count is
     // not read rather than guessed.
     let Some(count) = list.child(b"StVS").and_then(|c| c.bytes()).and_then(|b| le_u32(b, 0)).and_then(|n| usize::try_from(n).ok()) else {
         return Vec::new();
     };
-    let names: Vec<String> =
-        list.children().iter().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).take(count).map(text).filter(|n| !n.is_empty()).collect();
+    let names: Vec<String> = list.children().filter(|c| c.is(b"Utf8")).filter_map(Node::bytes).take(count).map(text).filter(|n| !n.is_empty()).collect();
     if names.iter().any(|n| n.contains(|c: char| matches!(c, '/' | '\\' | ':') || c.is_control()) || n == "." || n == "..") {
         return Vec::new();
     }
@@ -255,9 +292,8 @@ impl<'f, 'a> Item<'f, 'a> {
         }
         let pin = self.chunk.child_list(b"Pin ")?;
         let sspc = pin.child(b"sspc")?.bytes()?;
-        let kids = pin.children();
-        let after = kids.iter().position(|c| c.is_list(b"Als2"))?;
-        let naming = || kids.iter().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
+        let after = pin.children().position(|c| c.is_list(b"Als2"))?;
+        let naming = || pin.children().skip(after.saturating_add(1)).take_while(|c| !c.is(b"opti"));
         let (start, end, digits) = (be_u32(sspc, 172)?, be_u32(sspc, 176)?, be_u32(sspc, 180)?);
         // Force alphabetical order: the file list replaces the numbering.
         if let Some(list) = naming().find(|c| c.is_list(b"StVc")) {
@@ -267,7 +303,7 @@ impl<'f, 'a> Item<'f, 'a> {
             }
             return Some(SequenceInfo { prefix: String::new(), suffix: String::new(), start, end, digits, files });
         }
-        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(|c| c.bytes()).map(text).take(2).collect();
+        let names: Vec<String> = naming().filter(|c| c.is(b"Utf8")).filter_map(Node::bytes).map(text).take(2).collect();
         let (prefix, suffix) = match names.as_slice() {
             [prefix, suffix] => (prefix.clone(), suffix.clone()),
             // An empty prefix is not stored (`0001.png` has only `.png`).
@@ -297,12 +333,6 @@ impl<'f, 'a> Item<'f, 'a> {
         self.chunk.child(b"idta")?.bytes()?.get(58).copied()
     }
 
-    /// The ids of the compositions this item uses as precomp layers: the little-endian `u32` of
-    /// each `idpi` chunk.
-    pub fn used_item_ids(&self) -> Vec<u32> {
-        self.chunk.children().iter().filter(|c| c.is(b"idpi")).filter_map(|c| le_u32(c.bytes()?, 0)).collect()
-    }
-
     /// The footage data of a footage item.
     pub fn footage(&self) -> Option<Footage> {
         if self.kind()? != ItemKind::Footage {
@@ -330,6 +360,7 @@ impl<'f, 'a> Item<'f, 'a> {
             file_size: be_u32(sspc, 208).unwrap_or(0),
             audio_sample_rate: be_f64(sspc, 160).filter(|r| r.is_finite() && *r > 0.0),
             is_sequence,
+            psd_layer: PsdLayer::read(opti),
         })
     }
 
@@ -351,11 +382,6 @@ impl<'f, 'a> Project<'f, 'a> {
         self.item_by_id(layer.header()?.source_id?)
     }
 
-    /// The name a layer shows: its own name, or its source's name when it has none.
-    pub fn layer_display_name(&self, layer: &Layer<'f, 'a>) -> Option<String> {
-        layer.name().or_else(|| self.layer_source(layer)?.display_name())
-    }
-
     /// The pixel size of a layer's source: a footage item's width and height, or a precomp's
     /// composition size.
     pub fn layer_source_size(&self, layer: &Layer<'f, 'a>) -> Option<(u32, u32)> {
@@ -370,7 +396,46 @@ impl<'f, 'a> Project<'f, 'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::json_string;
+    use super::{PsdLayer, json_string};
+
+    /// A 602-byte Photoshop `opti` naming layer `index` with `bounds` and `name`.
+    fn opti(index: i32, bounds: [i32; 4], name: &[u8]) -> Vec<u8> {
+        let mut b = vec![0u8; 602];
+        b[..4].copy_from_slice(b"8BPS");
+        b[14..18].copy_from_slice(&index.to_be_bytes());
+        for (i, v) in bounds.iter().enumerate() {
+            b[78 + 4 * i..82 + 4 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        b[344..344 + name.len()].copy_from_slice(name);
+        b
+    }
+
+    #[test]
+    fn a_photoshop_layer_reads_its_index_bounds_and_name() {
+        let l = PsdLayer::read(&opti(7, [749, 800, 764, 848], "tést".as_bytes())).unwrap();
+        assert_eq!((l.index, l.name.as_str(), l.bounds, l.size()), (7, "tést", [749, 800, 764, 848], Some((48, 15))));
+        // The merged image, another tag, a cut record: no layer.
+        assert_eq!(PsdLayer::read(&opti(-1, [0; 4], b"x")), None);
+        let mut other = opti(1, [0; 4], b"x");
+        other[..4].copy_from_slice(b"Soli");
+        assert_eq!(PsdLayer::read(&other), None);
+        assert_eq!(PsdLayer::read(&opti(1, [0; 4], b"x")[..80]), None);
+        // A cut name, and no name at all.
+        assert_eq!(PsdLayer::read(&opti(1, [0; 4], b"x")[..345]).unwrap().name, "x");
+        assert_eq!(PsdLayer::read(&opti(1, [0; 4], b"x")[..300]).unwrap().name, "");
+        // A layer without pixels has no size; extreme bounds do not overflow.
+        assert_eq!(PsdLayer::read(&opti(2, [0; 4], b"")).unwrap().size(), None);
+        assert_eq!(PsdLayer::read(&opti(2, [i32::MIN, i32::MIN, i32::MAX, i32::MAX], b"")).unwrap().size(), Some((u32::MAX, u32::MAX)));
+        assert_eq!(PsdLayer::read(&opti(2, [i32::MAX, 0, i32::MIN, 1], b"")).unwrap().size(), None);
+        // The document's size, its sides in either order; none when not stored.
+        let mut doc = opti(0, [0, 0, 1000, 800], b"");
+        doc[32..36].copy_from_slice(&800u32.to_le_bytes());
+        doc[36..40].copy_from_slice(&1000u32.to_le_bytes());
+        let l = PsdLayer::read(&doc).unwrap();
+        assert_eq!(l.document, [800, 1000]);
+        assert!(l.document_is((800, 1000)) && l.document_is((1000, 800)) && !l.document_is((800, 800)));
+        assert!(!PsdLayer::read(&opti(0, [0; 4], b"")).unwrap().document_is((0, 0)));
+    }
 
     #[test]
     fn reads_a_string_with_escapes() {

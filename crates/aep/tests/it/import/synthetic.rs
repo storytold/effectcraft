@@ -842,3 +842,187 @@ fn a_default_state_colour_record_holds_the_value() {
     assert_eq!(colour(&default_state), colour(&written));
     assert_ne!(colour(&default_state), colour(&unchanged), "the recorded colour, not the default");
 }
+
+/// The project with its png item made one layer of a Photoshop file `art.psd`: the `opti` of
+/// docs/aep-format.md 3.3 (tag `8BPS`, the layer index at 14, a 1000 x 1000 document at 32 and 36,
+/// its bounds at 78-94, its name at 344) and the item `size` big.
+fn as_psd_layer(index: i32, bounds: [i32; 4], name: &str, size: (u32, u32)) -> Vec<u8> {
+    let mut opti = vec![0u8; 602];
+    opti[..4].copy_from_slice(b"8BPS");
+    opti[14..18].copy_from_slice(&index.to_be_bytes());
+    opti[32..36].copy_from_slice(&1000u32.to_le_bytes());
+    opti[36..40].copy_from_slice(&1000u32.to_le_bytes());
+    for (i, v) in bounds.iter().enumerate() {
+        opti[78 + 4 * i..82 + 4 * i].copy_from_slice(&v.to_le_bytes());
+    }
+    opti[344..344 + name.len()].copy_from_slice(name.as_bytes());
+    let alias = br#"{"fullpath":"C:\\x\\art.psd","platform":1,"target_is_folder":false}"#.to_vec();
+    mutate(&mut |c| {
+        if !c.is_list(b"Pin ") {
+            return;
+        }
+        let Body::List { children, .. } = &mut c.body else { return };
+        if !children.iter().any(|k| k.is(b"opti") && k.bytes().is_some_and(|d| d.get(..4) == Some(&b"png!"[..]))) {
+            return;
+        }
+        // No sequence naming between the alias and the `opti`.
+        children.retain(|k| k.is(b"sspc") || k.is(b"opti") || k.is_list(b"Als2"));
+        for k in children.iter_mut() {
+            if k.is(b"opti") {
+                k.body = Body::Data(opti.clone().into());
+            } else if k.is(b"sspc") {
+                set_data(k, 30, &size.0.to_be_bytes());
+                set_data(k, 34, &size.1.to_be_bytes());
+            }
+        }
+        visit(children, &mut |k| {
+            if k.is(b"alas") {
+                k.body = Body::Data(alias.clone().into());
+            }
+        });
+    })
+}
+
+/// #3087: an item made from one layer of a Photoshop file shows that layer, named
+/// `<layer>/<file>`; it showed the whole document, named after the file. Item as big as the layer:
+/// Retain Layer Sizes; as big as the document: the layer on the document.
+#[test]
+fn a_photoshop_layer_item_shows_its_layer() {
+    for (size, layer_size) in [((48, 15), true), ((1000, 1000), false)] {
+        let (p, r) = run(&as_psd_layer(7, [749, 800, 764, 848], "Tëst", size), true);
+        r.unwrap();
+        let (name, f) = p.items.values().find_map(|i| if let ItemKind::Footage(f) = &i.kind { Some((i.name.clone(), f.clone())) } else { None }).unwrap();
+        assert_eq!(name, "Tëst/art.psd");
+        let l = f.layer.expect("the layer");
+        assert_eq!((l.index, l.name.as_str(), l.layer_size, (f.width, f.height)), (7, "Tëst", layer_size, size));
+    }
+}
+
+/// A layer as big as the document but off its corner fits both framings: shown at its own bounds
+/// and reported. One at the corner, or bigger than the document, reads one way and is not. An item
+/// as big as neither is shown on the document and reported.
+#[test]
+fn a_photoshop_layer_as_big_as_the_document_off_its_corner_is_reported() {
+    let framing = |bounds, size| {
+        let (p, r) = run(&as_psd_layer(3, bounds, "Moved", size), true);
+        let found = losses(&r.unwrap(), LossCategory::UnsupportedItems);
+        let said = |what: &str| found.iter().any(|d| d.contains("'Moved/art.psd'") && d.contains(what));
+        (the_footage(&p).layer.map(|l| l.layer_size), said("as big as the document"), said("neither the Photoshop layer's size"))
+    };
+    assert_eq!(framing([5, 10, 1005, 1010], (1000, 1000)), (Some(true), true, false));
+    assert_eq!(framing([0, 0, 1000, 1000], (1000, 1000)), (Some(true), false, false));
+    assert_eq!(framing([9, -346, 1083, 1086], (1432, 1074)), (Some(true), false, false));
+    assert_eq!(framing([749, 800, 764, 848], (1000, 1000)), (Some(false), false, false));
+    // An item as big as neither the layer nor the document: shown on the document, reported.
+    assert_eq!(framing([5, 10, 1005, 1010], (800, 800)), (Some(false), false, true));
+}
+
+/// #3087: a Photoshop layer without pixels (an adjustment layer) keeps the merged image and is
+/// reported; the merged image itself (index -1) is no layer.
+#[test]
+fn a_photoshop_layer_without_pixels_keeps_the_merged_image() {
+    let (p, r) = run(&as_psd_layer(4, [0; 4], "Levels 1", (1000, 1000)), true);
+    let found = losses(&r.unwrap(), LossCategory::UnsupportedItems);
+    assert!(found.iter().any(|d| d.contains("'Levels 1/art.psd'") && d.contains("without pixels")), "{found:?}");
+    assert_eq!(the_footage(&p).layer, None);
+    let (p, _) = run(&as_psd_layer(-1, [0; 4], "", (1000, 1000)), true);
+    assert_eq!(the_footage(&p).layer, None);
+}
+
+/// #3087: an expression on Orientation arrives with the stored value, as on any property; it was
+/// dropped together with the value and reported as "not decoded".
+#[test]
+fn an_orientation_expression_is_imported_with_its_value() {
+    let bytes = mutate(&mut |c| {
+        if !c.is_list(b"otst") {
+            return;
+        }
+        for child in c.children_mut() {
+            if child.is_list(b"tdbs") {
+                let Body::List { children, .. } = &mut child.body else { continue };
+                for k in children.iter_mut() {
+                    if k.is(b"tdsb") {
+                        set_data(k, 0, &1u32.to_be_bytes());
+                    } else if k.is(b"tdb4") {
+                        set_data(k, 120, &[1]);
+                    }
+                }
+                children.push(Chunk::data(*b"Utf8", b"[0, time * 90, 0]".to_vec()));
+            } else if child.is_list(b"otky") {
+                for k in child.children_mut() {
+                    let degrees: Vec<u8> = [10.0f64, 20.0, 30.0].iter().flat_map(|d| d.to_be_bytes()).collect();
+                    set_data(k, 0, &degrees);
+                }
+            }
+        }
+    });
+    let (p, r) = run(&bytes, true);
+    assert_eq!(losses(&r.unwrap(), LossCategory::TransformProperties), Vec::<String>::new());
+    let mut seen = 0;
+    for item in p.items.values() {
+        let ItemKind::Comp(c) = &item.kind else { continue };
+        for layer in &c.layers {
+            let Some(o) = layer.transform().and_then(|t| t.prop("orientation")).filter(|o| o.expr.is_some()) else { continue };
+            assert_eq!(o.value, effectcraft_keyframe::Value::Vec3([10.0, 20.0, 30.0]), "{}", layer.name);
+            assert_eq!(o.expr.as_ref().map(|e| (e.text.as_str(), e.enabled)), Some(("[0, time * 90, 0]", true)), "{}", layer.name);
+            seen += 1;
+        }
+    }
+    assert!(seen > 0);
+}
+
+/// `SYNTHETIC` with Levels' Channel and Clip to Output Black / White popups' item names (`pdnm`)
+/// rewritten to the French labels a French-language After Effects stores there, keeping the same
+/// item order so the index each popup is set to is unaffected.
+fn with_french_levels_popups() -> Vec<u8> {
+    let (mut channel, mut clip) = (0, 0);
+    let bytes = mutate(&mut |c| {
+        if !c.is(b"Utf8") {
+            return;
+        }
+        if c.bytes() == Some(b"RGB|Red|Green|Blue|Alpha".as_slice()) {
+            *c = Chunk::data(*b"Utf8", b"RVB|Rouge|Vert|Bleu|Alpha".to_vec());
+            channel += 1;
+        } else if c.bytes() == Some(b"On|Off|Off for 32 bpc Color".as_slice()) {
+            *c = Chunk::data(*b"Utf8", "Activé|Désactivé|Désactivé pour la couleur 32 bpc".as_bytes().to_vec());
+            clip += 1;
+        }
+    });
+    assert_eq!(channel, 2, "Levels' Channel pdnm");
+    assert_eq!(clip, 4, "Levels' two Clip pdnm (Black and White), each stored twice");
+    bytes
+}
+
+/// A popup's item names in the file are matched to EffectCraft's own (English) ones by name
+/// (`popup_key`): a project saved by a French After Effects stores "RVB", "Activé", "Désactivé
+/// pour la couleur 32 bpc" for Levels' Channel and Clip to Output Black / White (observed in a
+/// real "Niveaux" effect, After Effects 2026 26.0.0x67). Before `popup_alias`, none of these
+/// matched EffectCraft's English-only options, so each came back "has no counterpart, default
+/// used" and the real selection was silently lost.
+#[test]
+fn french_levels_popup_items_are_recognized() {
+    let (unchanged, r1) = run(SYNTHETIC, true);
+    let (french, r2) = run(&with_french_levels_popups(), true);
+    let (r1, r2) = (r1.unwrap(), r2.unwrap());
+    let found = losses(&r2, LossCategory::Effects);
+    assert!(!found.iter().any(|d| d.contains("has no counterpart")), "{found:?}");
+    for id in ["channel", "clipToOutputBlack", "clipToOutputWhite"] {
+        let want: Vec<_> = effect_values(&unchanged).into_iter().filter(|(p, _)| p == id).collect();
+        let got: Vec<_> = effect_values(&french).into_iter().filter(|(p, _)| p == id).collect();
+        assert_eq!(got, want, "{id}");
+    }
+    assert_eq!(r1.report.imported.effects, r2.report.imported.effects);
+}
+
+/// `popup_alias` must cover every item of a popup it claims to know, not only the one a first
+/// report happened to show: Channel's French "Rouge", "Vert", "Bleu" ("Alpha" is the same word in
+/// both languages) alongside the already-covered "RVB" (`effect_map.rs`, reviewed on #3432).
+#[test]
+fn french_levels_channel_aliases_cover_every_item() {
+    use effectcraft_aep::effect_map::popup_alias;
+    for (french, english) in [("rvb", "rgb"), ("rouge", "red"), ("vert", "green"), ("bleu", "blue")] {
+        assert_eq!(popup_alias(french), Some(english), "{french}");
+    }
+    // "Alpha" needs no alias: the same word in both languages.
+    assert_eq!(popup_alias("alpha"), None);
+}

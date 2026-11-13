@@ -2,7 +2,7 @@
 //! colours, checked against the values the corpus was made with (its MANIFEST, batch 2).
 
 use crate::container::helpers::{assert_near, base_layer, first_comp, layer_of_type, layer_shown_as, open};
-use effectcraft_aep::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Project, Rational, ValueSource};
+use effectcraft_aep::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Project};
 
 fn l_header(name: &str) -> Option<LayerHeader> {
     Some({
@@ -80,22 +80,24 @@ fn ntsc_frame_rates_are_exact_fractions() {
     // 229: frameRate 29.97 -> read back 29.9700012207031; the duration snaps from 5 s to 150 frames (5.005005 s).
     let h = skip!(comp_header("229-comp-fps-29.97.aep"));
     assert_eq!((h.time_base.frame_duration, h.time_base.timescale), (800, 23976));
-    assert_eq!(h.frame_rate_exact(), Some(Rational { num: 2997, den: 100 }));
     assert!((h.frame_rate().unwrap() - 29.97).abs() < 1e-12);
-    assert!((h.frame_rate_from_fixed() - 29.970_001_220_703_1).abs() < 1e-7);
-    assert_eq!((h.duration_units, h.duration_frames()), (120_000, Some(150)));
+    // The 16.16 rate holds the float32 29.97 (29.9700012207031).
+    assert_eq!(h.frame_rate_fixed, 1_964_114);
+    // 150 frames of 800 units.
+    assert_eq!(h.duration_units, 120_000);
     assert!((h.duration_seconds().unwrap() - 5.005_005_005_005_01).abs() < 1e-9);
     // 230: frameRate 23.976 -> read back 23.9759979248047; 120 frames.
     let h = skip!(comp_header("230-comp-fps-23.976.aep"));
     assert_eq!((h.time_base.frame_duration, h.time_base.timescale), (1000, 23976));
-    assert_eq!(h.frame_rate_exact(), Some(Rational { num: 2997, den: 125 }));
     assert!((h.frame_rate().unwrap() - 23.976).abs() < 1e-12);
-    assert!((h.frame_rate_from_fixed() - 23.975_997_924_804_7).abs() < 1e-7);
-    assert_eq!((h.duration_units, h.duration_frames()), (120_000, Some(120)));
+    // The 16.16 rate holds the float32 23.976 (23.9759979248047).
+    assert_eq!(h.frame_rate_fixed, 1_571_291);
+    // 120 frames of 1000 units.
+    assert_eq!(h.duration_units, 120_000);
     assert!((h.duration_seconds().unwrap() - 5.005_005_005_005_01).abs() < 1e-9);
     // 25 fps stays 25.
     let h = skip!(comp_header("000-base.aep"));
-    assert_eq!((h.frame_rate_exact(), h.duration_frames()), (Some(Rational { num: 25, den: 1 }), Some(125)));
+    assert_eq!((h.time_base.timescale, h.time_base.frame_duration, h.duration_units), (25600, 1024, 128_000));
 }
 
 #[test]
@@ -128,7 +130,6 @@ fn background_is_8_bits_per_channel() {
     // 231: bgColor [0.5, 0.5, 0.5] is stored as 128 and reads back as 128/255 = 0.50196.
     let h = skip!(comp_header("231-comp-bg-grey-0.5.aep"));
     assert_eq!(h.background, [128, 128, 128]);
-    assert_near(&h.background_rgb(), &[0.501_960_784_313_73; 3], 1e-12);
     // The frame rate stays 25 even though an earlier edit of the AE session left other numbers in the cache-like fields.
     assert_eq!((h.time_base.frame_duration, h.time_base.timescale), (1024, 25600));
 }
@@ -143,12 +144,10 @@ fn cameras_auto_orient_and_position() {
     let camera = layer_of_type(&comp, LayerType::Camera);
     let h = camera.header().unwrap();
     assert_eq!((h.flag_bytes[1], h.is_auto_oriented(), h.is_three_d(), h.source_id, h.light_type()), (0x44, true, true, None, None));
-    // The default Position is an "auto state" record that stores [0, 0, -2666.67]; the two-node camera reports the comp centre.
+    // The default Position is an "auto state" record that stores [0, 0, -2666.67].
     let pos = camera.camera_position().unwrap();
     assert!(pos.auto_state);
     assert_near(&pos.stored, &[0.0, 0.0, -2666.67], 0.01);
-    assert_near(&pos.reported(1920, 1080, true), &[960.0, 540.0, -2666.67], 0.01);
-    assert_eq!(camera.camera_point_of_interest(), Some([960.0, 540.0, 0.0]));
 
     let bytes = fixture!("251-camera-one-node.aep");
     let file = open(&bytes);
@@ -159,10 +158,9 @@ fn cameras_auto_orient_and_position() {
     // AE reports [0, 0, -2666.67] for the one-node camera: the stored value.
     let pos = camera.camera_position().unwrap();
     assert!(pos.auto_state);
-    assert_near(&pos.reported(1920, 1080, h.is_auto_oriented()), &[0.0, 0.0, -2666.67], 0.01);
-    assert_eq!(camera.camera_point_of_interest(), Some([960.0, 540.0, 0.0]));
+    assert_near(&pos.stored, &[0.0, 0.0, -2666.67], 0.01);
 
-    // 253: Position set to [100, 200, -1000]: stored as given, no auto state; the point of interest stays [960, 540, 0].
+    // 253: Position set to [100, 200, -1000]: stored as given, no auto state.
     let bytes = fixture!("253-camera-position-100-200-m1000.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
@@ -170,35 +168,28 @@ fn cameras_auto_orient_and_position() {
     let pos = camera.camera_position().unwrap();
     assert!(!pos.auto_state);
     assert_eq!(pos.stored, [100.0, 200.0, -1000.0]);
-    assert_eq!(pos.reported(1920, 1080, true), [100.0, 200.0, -1000.0]);
-    assert_eq!(camera.camera_point_of_interest(), Some([960.0, 540.0, 0.0]));
-    // A camera has no light intensity.
-    assert_eq!(camera.light_intensity(), None);
 }
 
+/// Lights type and position.
 #[test]
-fn lights_type_and_intensity() {
-    // 254: a spot light, Intensity 100 -> 50 (stored as 50.0 percent, absent at the default 100).
+fn lights_type_and_position() {
+    // 254: a spot light (its Intensity 50 is checked on import).
     let bytes = fixture!("254-light-spot-intensity-50.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
     let light = layer_of_type(&first_comp(&project), LayerType::Light);
     let h = light.header().unwrap();
     assert_eq!((h.light_type(), h.light_type_code, h.source_id, h.is_auto_oriented(), h.is_three_d()), (Some(LightType::Spot), 1, None, true, true));
-    let intensity = light.light_intensity().unwrap();
-    assert_eq!((intensity.value, intensity.source), (50.0, ValueSource::Stored));
     assert!(light.camera_position().unwrap().auto_state);
     assert_near(&light.camera_position().unwrap().stored, &[0.0, 0.0, -1333.33], 0.01);
 
-    // 252: a point light (light type 2) at the default intensity, which is not stored.
+    // 252: a point light (light type 2).
     let bytes = fixture!("252-light-point.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
     let light = layer_of_type(&first_comp(&project), LayerType::Light);
     let h = light.header().unwrap();
     assert_eq!((h.light_type(), h.light_type_code), (Some(LightType::Point), 2));
-    let intensity = light.light_intensity().unwrap();
-    assert_eq!((intensity.value, intensity.source), (100.0, ValueSource::Default));
     // The solid under it is no light.
     let solid = base_layer(&first_comp(&project)).header().unwrap();
     assert_eq!((solid.light_type(), solid.light_type_code), (None, 0));
@@ -220,6 +211,6 @@ fn solid_colour_is_four_float32_argb() {
     // L is still red.
     let red = project.layer_source(&base_layer(&comp)).unwrap().footage().unwrap();
     assert_eq!(red.solid_rgb(), Some([1.0, 0.0, 0.0]));
-    // The new layer has no user-set name flag (it shows its source's name).
-    assert!(!blue.header().unwrap().name_is_user_set());
+    // The new layer has no name of its own (it shows its source's name).
+    assert_eq!(blue.name(), None);
 }
