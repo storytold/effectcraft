@@ -23,3 +23,13 @@ fn errors_keep_their_line_number_with_carriage_returns() {
     let e = f.ev(f.a, ROT, "x = 1; // one\ry = 2; // two\rundefinedThing + 1", 0.0).unwrap_err();
     assert!(e.contains("line 3"), "{e}");
 }
+
+#[test]
+fn unicode_line_separators_stay_inside_strings_and_templates() {
+    // Review of #3552: U+2028 / U+2029 are kept by JavaScript strings and templates.
+    let f = fx();
+    assert_close!(f.num("'\u{2028}'.charCodeAt(0)", 0.0), 8232.0);
+    assert_close!(f.num("`\u{2029}`.charCodeAt(0)", 0.0), 8233.0);
+    // ...and still end a line comment.
+    assert_close!(f.num("x = 3; // note\u{2028}x + 5", 0.0), 8.0);
+}
