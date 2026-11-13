@@ -621,11 +621,12 @@ pub struct HelperEffect {
     helper: Arc<Helper>,
     manifest: PluginManifest,
     padding: bool,
+    time_varying: bool,
 }
 
 impl HelperEffect {
     pub fn new(helper: Arc<Helper>, remote: RemoteEffect) -> HelperEffect {
-        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding }
+        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, time_varying: remote.time_varying }
     }
 }
 
@@ -661,6 +662,10 @@ impl EffectPlugin for HelperEffect {
 
     fn source(&self) -> String {
         format!("helper: {}", self.helper.program.display())
+    }
+
+    fn reads_other_times(&self) -> bool {
+        self.time_varying
     }
 
     fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64) -> u32 {

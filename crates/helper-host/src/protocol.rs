@@ -132,6 +132,11 @@ pub struct RemoteEffect {
     /// Whether to ask [`Request::Padding`] before every render (otherwise no padding).
     #[serde(default)]
     pub padding: bool,
+    /// Whether the effect changes with time on its own or reads other times (a simulation, an
+    /// echo): the render cache then keys its layer on the layer time, so a static layer still
+    /// renders every frame. Absent means false, as before; hosts without the field ignore it.
+    #[serde(default)]
+    pub time_varying: bool,
 }
 
 /// Helper → EffectCraft.
