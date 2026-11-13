@@ -528,7 +528,7 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
             Some(m) => import_mesh(&m, here, size, group, col),
             None => col.lose(LossCategory::DamagedData, format!("{here}: the Distortion Mesh is unreadable, defaults used")),
         },
-        Extra::Extractor => match ExtractorChannels::parse(data).map(|c| (c.sources(), c)) {
+        Extra::Extractor => match ExtractorChannels::parse(data).map(|c| (c.sources(effectcraft_effects::EXTRACTOR_COPY), c)) {
             // Each output channel reads the footage's channel of the stored name, which
             // EffectCraft's EXtractoR finds by the same name (`Z`); After Effects' `(copy)` is the
             // input's own channel, EffectCraft's `(copy)` (not `A`, which EffectCraft reads from an

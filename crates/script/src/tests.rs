@@ -16,6 +16,7 @@ mod ease_presets;
 mod evalfile;
 mod include;
 mod panels;
+mod paragraph_justification;
 #[cfg(not(target_arch = "wasm32"))]
 mod render_wait;
 #[cfg(not(windows))]

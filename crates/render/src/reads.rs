@@ -35,9 +35,10 @@ impl FileStamp {
     }
 
     /// The identity of the file at `path` now: one `metadata` call. `None` when the file system
-    /// can't describe it (missing, or a path served from memory).
+    /// can't describe it (missing, not a regular file, or a path served from memory).
     pub fn native(path: &str) -> Option<FileStamp> {
-        std::fs::metadata(path).ok().map(|md| FileStamp::of_metadata(&md))
+        let md = std::fs::metadata(path).ok()?;
+        md.is_file().then(|| FileStamp::of_metadata(&md))
     }
 }
 
@@ -352,6 +353,15 @@ mod tests {
         }
         assert!(matches!(stamps[0], FileStamp::Native { modified: Some(t), .. } if t < 0), "{:?}", stamps[0]);
         assert_ne!(stamps[0], stamps[1], "two files from before 1970 with the same size");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_is_not_a_native_file_stamp() {
+        let dir = std::env::temp_dir().join(format!("effectcraft-stamp-directory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(FileStamp::native(&dir.to_string_lossy()), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

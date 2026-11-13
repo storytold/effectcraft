@@ -1259,6 +1259,41 @@ fn source_text_style_api() {
 }
 
 #[test]
+fn paragraph_settings_read_and_write_after_effects_names() {
+    // After Effects 26.3 reads justification as alignLeft / alignCenter / alignRight /
+    // justifyLastLeft / justifyLastCenter / justifyLastRight / justifyFull and direction as
+    // left-to-right / right-to-left, and its setters take those names.
+    let f = fx();
+    let doc = |f: &Fx, e: &str| -> TextDoc {
+        match f.ev(f.title, "text/sourceText", e, 0.0) {
+            Ok(Value::Text(d)) => *d,
+            r => panic!("{e}: {r:?}"),
+        }
+    };
+    let s = |e: &str| doc(&f, e).text;
+    assert_eq!(s("text.sourceText.style.justification + ' ' + text.sourceText.style.direction"), "alignLeft left-to-right");
+    for (ae, want) in [
+        ("alignLeft", effectcraft_keyframe::Justify::Left),
+        ("alignCenter", effectcraft_keyframe::Justify::Center),
+        ("alignRight", effectcraft_keyframe::Justify::Right),
+        ("justifyLastLeft", effectcraft_keyframe::Justify::JustifyLastLeft),
+        ("justifyLastCenter", effectcraft_keyframe::Justify::JustifyLastCenter),
+        ("justifyLastRight", effectcraft_keyframe::Justify::JustifyLastRight),
+        ("justifyFull", effectcraft_keyframe::Justify::JustifyAll),
+    ] {
+        let d = doc(&f, &format!("text.sourceText.style.setJustification('{ae}')"));
+        assert_eq!(d.justify, want, "{ae}");
+    }
+    let d = doc(&f, "text.sourceText.style.setDirection('right-to-left').setJustification('justifyLastRight')");
+    assert_eq!(d.direction, effectcraft_keyframe::Direction::Rtl);
+    assert_eq!(s("text.sourceText.style.setJustification('alignRight').justification"), "alignRight");
+    // Every accepted alias reads back as After Effects' name; an inherited name isn't one.
+    assert_eq!(s("text.sourceText.style.setJustification('CENTER_JUSTIFY').justification"), "alignCenter");
+    assert_eq!(s("text.sourceText.style.setJustification('justifyAll').justification"), "justifyFull");
+    assert_eq!(s("String(text.sourceText.style.setJustification('toString').justification)"), "toString");
+}
+
+#[test]
 fn numbers_to_source_text() {
     let f = fx();
     assert_eq!(f.text("Math.round(time * 10) / 10", 1.25), "1.3");
