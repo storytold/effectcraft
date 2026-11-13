@@ -272,17 +272,17 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
             }
             // After the properties, so a saved Per-character 3D setting counts: it needs a 3D layer
             // to draw, as `layer.enablePerChar3D` makes one. Without it the layer's setting stays.
-            // Existing animators must follow a newly enabled Per-character 3D setting too.
+            // Existing animators follow changes to the saved Per-character 3D setting too.
             let three_d = per_char_on(l);
             l.switches.three_d |= three_d && saved_3d;
             let Some(list) = l.props.group_mut("text/animators") else {
                 skipped.extend(animators.iter().map(|g| format!("text/animators/{}", g.name)));
                 continue;
             };
-            if three_d && !was_three_d {
+            if three_d != was_three_d {
                 for existing in &mut list.children {
                     if let Node::Group(existing) = existing {
-                        set_animator_3d(&mut Ids(&mut next), existing, true);
+                        set_animator_3d(&mut Ids(&mut next), existing, three_d);
                     }
                 }
             }

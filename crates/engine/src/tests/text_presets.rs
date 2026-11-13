@@ -269,6 +269,28 @@ fn a_saved_per_character_3d_setting_makes_the_layer_3d() {
     assert_eq!(animators(&s, target), vec![existing]);
 }
 
+/// Turning per-character 3D off through a saved Text group also updates existing controls.
+#[test]
+fn a_saved_2d_setting_updates_existing_3d_animators_without_losing_rotation() {
+    let mut s = session();
+    let source = new_text(&mut s, "Flat source");
+    let text = s.active_comp().unwrap().layer(LayerId(source)).unwrap().props.sub("text").unwrap().uid;
+    let path = save(&mut s, "disable-3d", source, &[text]);
+    let target = new_text(&mut s, "3D target");
+    s.execute("layer.enablePerChar3D", json!({"layer": target, "enabled": true})).unwrap();
+    s.execute("layer.addTextAnimator", json!({"layer": target, "properties": ["rotation", "scale"]})).unwrap();
+    let before = animators(&s, target)[0].clone();
+    let rotation_x = before.prop("properties/rotationX").unwrap().uid;
+    s.execute("prop.addKey", json!({"layer": target, "prop": rotation_x, "time": 1.0, "value": 45})).unwrap();
+    apply(&mut s, &path, target, 0.0);
+    let _ = std::fs::remove_file(&path);
+    let after = animators(&s, target)[0].clone();
+    assert_eq!(after.prop("properties/scale").unwrap().shown_dims, 2);
+    assert_eq!(after.prop("properties/rotation").unwrap().name, "Rotation");
+    assert_eq!(after.prop("properties/rotationX").unwrap().keys.len(), 1);
+    assert_uids_are_unique(&s);
+}
+
 /// A preset that fits no layer says so and leaves the project and history as they were. With a
 /// text layer among the targets it applies there and reports the other layer.
 #[test]
