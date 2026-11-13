@@ -1,7 +1,8 @@
 //! Project settings (colour depth, working space, working gamma, linear-light switches, time
 //! display, frame count start) from [`crate::ProjectSettings`] (cases 620-634).
 
-use crate::{AepFile, TimeDisplay, WorkingSpace};
+use crate::container::index::{Node, Root};
+use crate::{TimeDisplay, WorkingSpace};
 use effectcraft_color::ColorSpace;
 use effectcraft_project::{BitDepth, ProjectSettings, TimeDisplayStyle};
 
@@ -11,7 +12,9 @@ use crate::import::report::{Collector, LossCategory};
 pub(crate) fn color_space(name: &str) -> Option<ColorSpace> {
     match name {
         "sRGB IEC61966-2.1" => Some(ColorSpace::Srgb),
-        "Rec.709 Gamma 2.4" => Some(ColorSpace::Rec709),
+        // The second name is the one After Effects shows for the profile EffectCraft's exporter
+        // writes (its description tag) once it re-saves such a project.
+        "Rec.709 Gamma 2.4" | "Rec.709 Gamma 2.4 (EffectCraft)" => Some(ColorSpace::Rec709),
         _ => None,
     }
 }
@@ -20,9 +23,9 @@ pub(crate) fn color_space(name: &str) -> Option<ColorSpace> {
 /// holds in an unknown form) keeps the current value. The two linear-light switches are always
 /// held: After Effects writes their chunk only when on (626, 627), so a file without it has them off. A working space EffectCraft does not have is
 /// reported.
-pub(crate) fn map(file: &AepFile<'_>, current: &ProjectSettings, col: &mut Collector) -> ProjectSettings {
-    let s = crate::ProjectSettings::read(file);
-    let nhed = file.chunk(b"nhed").and_then(|c| c.bytes());
+pub(crate) fn map(file: Root<'_, '_>, current: &ProjectSettings, col: &mut Collector) -> ProjectSettings {
+    let s = crate::ProjectSettings::of(file);
+    let nhed = file.chunk(b"nhed").and_then(Node::bytes);
     let mut out = current.clone();
     match s.bits_per_channel {
         Some(8) => out.bit_depth = BitDepth::Bpc8,
@@ -89,8 +92,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rec709_by_name() {
+    fn rec709_under_both_names() {
         assert_eq!(color_space("Rec.709 Gamma 2.4"), Some(ColorSpace::Rec709));
+        assert_eq!(color_space("Rec.709 Gamma 2.4 (EffectCraft)"), Some(ColorSpace::Rec709));
         assert_eq!(color_space("Rec.709 Gamma 2.4 (other)"), None);
     }
 }

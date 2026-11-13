@@ -20,13 +20,16 @@
 //!   calls [`FrameServer::resume`] for the next. Backend Auto picks CPU or GPU per comp from
 //!   the frames' total times ([`effectcraft_render::AutoPick`]).
 //! - Disk cache: a render request may carry the frame's disk-cache key ([`FrameMsg::Render`]
-//!   `disk`); the transport stores the finished frame under it (the browser: in the Origin
-//!   Private File System) and reports [`FrameReply::Stored`].
+//!   `disk`); the transport stores the finished frame under it with the source files it read
+//!   ([`FrameServer::take_files`], `disk_cache::frame_entry`; the browser: in the Origin Private
+//!   File System) and reports [`FrameReply::Stored`]. A frame whose files can't all be named is
+//!   not stored. The page checks an entry's files before it uses it (#3184).
 //! - Layer buffers on disk: with `layers`, the server's layer cache is backed by a
 //!   [`PrefetchStore`] ([`FrameServer::set_layer_store`]): before the request the transport
 //!   fetches the entries named in `prefetch` (recent misses that are on disk, chosen by the
-//!   page, `disk_cache::LayerPrefetch`), so the lookups in the middle of the render find them;
-//!   the reply lists the layer keys that missed and those served from the store
+//!   page, `disk_cache::LayerPrefetch`), so the lookups in the middle of the render find them
+//!   (each entry keeps the source files its buffer was made of and is used only while they are
+//!   unchanged, #3184); the reply lists the layer keys that missed and those served from the store
 //!   ([`FrameReply::Frame`] `layer_misses` / `layer_hits`), and slow buffers queue up for the
 //!   transport to write after the frame ([`PrefetchStore::take_writes`], reported as
 //!   [`FrameReply::Stored`] with `layer`).
@@ -37,6 +40,7 @@
 use std::sync::Arc;
 
 use effectcraft_project::{ItemId, Project};
+use effectcraft_render::reads::{ReadFiles, ReadLog};
 use effectcraft_render::{Accelerator, AutoKey, Backend, ExprHost, FootageSource, Image, LayerCache, LayerStore, PrefetchStore, RenderOpts, Renderer};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -177,7 +181,7 @@ pub enum FrameReply {
         passes: u32,
         #[serde(default)]
         gpu: bool,
-        /// Layer-cache lookups that missed the store (salted keys, 32 hex digits).
+        /// Layer-cache lookups that missed the store (disk keys, 32 hex digits).
         #[serde(default, rename = "layerMisses", skip_serializing_if = "Vec::is_empty")]
         layer_misses: Vec<String>,
         /// Layer buffers served from the store (fetched from disk).
@@ -260,11 +264,12 @@ pub struct FrameServer {
     revision: Option<u64>,
     /// The frame being rendered in passes.
     pending: Option<Pending>,
-    /// The disk cache's layer buffers (see the module docs) and the project's salt.
+    /// The disk cache's layer buffers (see the module docs).
     layer_store: Option<Arc<PrefetchStore>>,
-    salt: u64,
     /// Size and content hash for footage paths with no native metadata (the browser file table).
     virtual_id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>,
+    /// The source files the last finished frame read ([`FrameServer::take_files`]).
+    files: Option<ReadFiles>,
 }
 
 /// A frame whose readbacks are in flight.
@@ -284,6 +289,7 @@ struct Pending {
 pub const MAX_PASSES: u32 = 24;
 
 impl FrameServer {
+    /// A frame server over `footage` and the optional expression host, with an empty layer cache.
     pub fn new(footage: Arc<dyn FootageSource>, expr: Option<Arc<dyn ExprHost>>) -> FrameServer {
         FrameServer {
             footage,
@@ -295,15 +301,28 @@ impl FrameServer {
             revision: None,
             pending: None,
             layer_store: None,
-            salt: 0,
             virtual_id: None,
+            files: None,
         }
     }
 
-    /// Identity of virtual footage files, used when native metadata cannot describe the path.
-    /// Called from `FrameServer::load`, not from the UI thread's cache lookup.
+    /// Identity of virtual footage files, used when native metadata cannot describe the path:
+    /// what the disk entries of frames and layer buffers keep for them and are checked against.
     pub fn set_virtual_id(&mut self, id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>) {
+        self.cache.set_virtual_id(id.clone());
         self.virtual_id = id;
+    }
+
+    /// The source files the frame of the last [`FrameReply::Frame`] read, with their identities
+    /// as read: what its disk entry keeps (`disk_cache::frame_entry`). Taken once.
+    pub fn take_files(&mut self) -> Option<ReadFiles> {
+        self.files.take()
+    }
+
+    /// The identity of footage paths with no native metadata (the browser file table), to store
+    /// with a frame's disk entry.
+    pub fn virtual_id(&self) -> Option<&Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>> {
+        self.virtual_id.as_ref()
     }
 
     /// The store behind the layer cache when a request asks for `layers` (the browser: the
@@ -314,11 +333,6 @@ impl FrameServer {
 
     pub fn layer_store(&self) -> Option<&Arc<PrefetchStore>> {
         self.layer_store.as_ref()
-    }
-
-    /// The salt of the replica's layer keys on disk (keys are `(salt, key)`).
-    pub fn salt(&self) -> u64 {
-        self.salt
     }
 
     /// Render with `accel` when the request's backend asks for it (the worker's GPU). Its miss
@@ -347,8 +361,6 @@ impl FrameServer {
 
     fn load(&mut self, revision: u64) -> Result<(), String> {
         let p = Project::from_json(&self.doc.to_string()).map_err(|e| e.to_string())?;
-        self.salt = effectcraft_render::disk_cache::footage_salt_with(&p, self.virtual_id.as_deref());
-        self.cache.set_store_salt(self.salt);
         self.project = Some(Arc::new(p));
         self.revision = Some(revision);
         Ok(())
@@ -392,7 +404,7 @@ impl FrameServer {
             }
             FrameMsg::Render { id, revision, comp, time, opts, layers, .. } => {
                 let store = self.layer_store.clone().filter(|_| layers);
-                self.cache.set_store(store.map(|s| (s as Arc<dyn LayerStore>, self.salt)));
+                self.cache.set_store(store.map(|s| s as Arc<dyn LayerStore>));
                 let fail = |error: String, stale: bool| vec![(FrameReply::Failed { id, error, stale }, None)];
                 if self.revision != Some(revision) {
                     return fail(format!("the replica is at {:?}, not {revision}", self.revision), true);
@@ -418,7 +430,10 @@ impl FrameServer {
                         }
                     }
                     // A frame still waiting for readbacks is replaced: end it, so every `frame_begin` has its `frame_end`.
-                    if self.pending.take().is_some() {
+                    if let Some(old) = self.pending.take() {
+                        if let (Some((key, chose)), Some(pick)) = (old.auto, a.auto_pick()) {
+                            pick.abandoned(key, chose);
+                        }
                         a.frame_end();
                     }
                     a.frame_begin();
@@ -432,12 +447,16 @@ impl FrameServer {
     /// Run the next pass of the frame in progress; its reply once it is done.
     pub fn resume(&mut self) -> Vec<(FrameReply, Option<Vec<u8>>)> {
         let Some(mut pr) = self.pending.take() else { return vec![] };
+        self.files = None;
         pr.passes += 1;
         let accel = self.accel.clone().filter(|_| pr.opts.backend != Backend::Cpu);
         let give_up = pr.passes > MAX_PASSES;
+        // (each pass renders the whole frame: the last one's files are the frame's)
+        let reads = ReadLog::new();
         let mut r = Renderer::new(&pr.project, self.footage.as_ref(), pr.opts);
         r.expr = self.expr.as_deref();
         r.cache = Some(&self.cache);
+        r.reads = Some(&reads);
         if !give_up {
             r.accel = accel.as_deref();
         }
@@ -451,6 +470,7 @@ impl FrameServer {
         }
         let ms = pr.t0.elapsed().as_secs_f64() * 1000.0;
         let gpu = r.accel.is_some() && r.active_accel().is_some();
+        self.files = Some(reads.files());
         let hex = |v: Vec<u128>| v.into_iter().map(|k| format!("{k:032x}")).collect::<Vec<_>>();
         let (layer_misses, layer_hits) = match &self.layer_store {
             Some(st) => (hex(st.take_misses()), hex(st.take_hits())),

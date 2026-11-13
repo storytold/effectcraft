@@ -7,6 +7,9 @@ impl Session {
 
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         if let Err(why) = (spec.enabled)(self) {
             // Explicit targets (agents, scripts) don't need a UI selection.
@@ -19,10 +22,20 @@ impl Session {
             }
         }
         // Last-resort guard: a panicking command reports an error instead of crashing the app.
-        let r = guard::guarded(&format!("command `{id}`"), || (spec.run)(self, &params))?;
+        let nesting = crate::replay::Nesting::enter(spec.journal);
+        let caught = guard::caught();
+        let r = guard::guarded(&format!("command `{id}`"), || (spec.run)(self, &params));
+        let r = crate::replay::after_command(self, id, &params, &nesting, caught, r)?;
         self.learn_observe(id, &params);
-        if spec.journal {
-            self.journal.push((id.to_string(), params));
+        if spec.journal && !nesting.inside_journaled() {
+            // Revert and Open Recent resolve a file the parameters may not name. Store
+            // the successful read as an explicit open boundary while its resolved path is known.
+            let entry = if matches!(id, "file.revert" | "file.openRecent") {
+                self.path.as_ref().map(|path| ("file.open".to_string(), serde_json::json!({"path": path})))
+            } else {
+                None
+            };
+            self.journal.push(entry.unwrap_or_else(|| (id.to_string(), params)));
             if self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
             }
@@ -57,6 +70,9 @@ impl Session {
     /// Whether `id` names a known command whose `enabled` predicate returns `Ok` for this session;
     /// an unknown id or a predicate error reads as disabled.
     pub fn is_enabled(&self, id: &str) -> bool {
+        if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
+            return false;
+        }
         commands::find(id).is_some_and(|c| (c.enabled)(self).is_ok())
     }
 

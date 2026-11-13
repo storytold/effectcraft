@@ -194,6 +194,7 @@ fn the_star_is_a_named_button_on_the_cursor_row_and_enter_toggles_it() {
     assert_eq!(name, format!("Add to favorites: {effect}"));
     key(&mut h, Key::Enter, Modifiers::NONE);
     assert_eq!(h.state().session.prefs.effects_favorites.len(), 1, "Enter on the star adds the favourite");
+    assert!(h.state().session.state.last_effect.is_none(), "Enter on the star does not also apply the effect");
     let (_, name) = focused(&h).expect("the star keeps the focus");
     assert_eq!(name, format!("Remove from favorites: {effect}"));
 }

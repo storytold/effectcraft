@@ -115,17 +115,33 @@ fn box_row(src: &[f32], dst: &mut [f32], r: usize) {
         dst.copy_from_slice(src);
         return;
     }
-    let get = |i: isize| src[i.clamp(0, n as isize - 1) as usize];
-    let norm = 1.0 / (2 * r + 1) as f32;
-    let mut acc = 0.0f64;
-    for i in -(r as isize)..=(r as isize) {
-        acc += get(i) as f64;
+    // Past the row the window only adds more copies of the edge pixels; the radius is clamped
+    // so the index arithmetic below cannot overflow (the means are unchanged in practice).
+    let r = r.min(MAX_BOX_RADIUS);
+    let (last, ri) = (n - 1, r as i64);
+    let get = |i: i64| src[i.clamp(0, last as i64) as usize];
+    let norm = 1.0 / (2.0 * r as f64 + 1.0);
+    // The first window, -r..=r: the edge pixels it repeats are counted, not visited, so the
+    // work depends on the row length and not on the radius.
+    let inside = r.min(last);
+    let mut acc = (r as f64 + 1.0) * src[0] as f64 + src[1..=inside].iter().map(|v| *v as f64).sum::<f64>();
+    // Only when the window actually repeats the last pixel: 0 * inf would be NaN otherwise.
+    if r > inside {
+        acc += (r - inside) as f64 * src[last] as f64;
     }
     for x in 0..n {
-        dst[x] = acc as f32 * norm;
-        acc += get(x as isize + r as isize + 1) as f64 - get(x as isize - r as isize) as f64;
+        dst[x] = (acc * norm) as f32;
+        let xi = x as i64;
+        acc += get(xi + ri + 1) as f64 - get(xi - ri) as f64;
     }
 }
+
+/// Largest box radius [`box_row`] uses (larger radii come from absurd blur amounts in a
+/// project, such as a Mocha shape's feather).
+const MAX_BOX_RADIUS: usize = 1 << 30;
+
+/// Largest sigma [`box_radii`] spreads into boxes (see [`MAX_BOX_RADIUS`]).
+const MAX_BOX_SIGMA: f64 = 1e8;
 
 /// Separable box mean with radii `rx`, `ry` (edges repeated).
 pub fn box_plane(p: &Plane, rx: usize, ry: usize) -> Plane {
@@ -138,9 +154,10 @@ pub fn box_plane(p: &Plane, rx: usize, ry: usize) -> Plane {
 
 /// Box radii for `n` passes approximating a Gaussian of `sigma`.
 pub fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
-    if sigma <= 0.0 {
+    if sigma.is_nan() || sigma <= 0.0 || n == 0 {
         return vec![0; n];
     }
+    let sigma = sigma.min(MAX_BOX_SIGMA);
     let w_ideal = (12.0 * sigma * sigma / n as f64 + 1.0).sqrt();
     let mut wl = w_ideal.floor() as i64;
     if wl % 2 == 0 {
@@ -545,13 +562,22 @@ struct SimEntry<S> {
 /// Checkpoint every this many steps.
 pub const SIM_CHECKPOINT: u64 = 15;
 
+/// Most steps a simulation runs: three hours of layer time at 60 steps per second. The layer
+/// time comes from the project (start time, stretch), so without a limit a tiny file could ask
+/// for years of steps; past this the state stays where it is.
+pub const MAX_SIM_STEPS: u64 = 60 * 60 * 60 * 3;
+
+/// Most checkpoints kept per simulation (and made by one run, which spaces them further apart
+/// as it goes).
+const MAX_SIM_CHECKPOINTS: usize = 256;
+
 impl<S: Clone> SimCache<S> {
     pub const fn new(cap: usize) -> SimCache<S> {
         SimCache { inner: std::sync::Mutex::new(Vec::new()), cap }
     }
 
-    /// State after `target` steps. `init` builds step 0; `step(state, i)` advances from step
-    /// `i` to `i + 1`.
+    /// State after `target` steps (at most [`MAX_SIM_STEPS`]). `init` builds step 0;
+    /// `step(state, i)` advances from step `i` to `i + 1`.
     pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {
         self.run_where(key, target, init, step, |_, _| true)
     }
@@ -569,6 +595,7 @@ impl<S: Clone> SimCache<S> {
         valid: impl Fn(u64, &S) -> bool,
     ) -> std::sync::Arc<S> {
         use std::sync::Arc;
+        let target = target.min(MAX_SIM_STEPS);
         let start = {
             let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
@@ -587,11 +614,17 @@ impl<S: Clone> SimCache<S> {
         if !had_start {
             fresh.push((0, Arc::new(st.clone())));
         }
+        let mut every = SIM_CHECKPOINT;
         while i < target {
             step(&mut st, i);
             i += 1;
-            if i % SIM_CHECKPOINT == 0 && i != target {
+            if i % every == 0 && i != target {
                 fresh.push((i, Arc::new(st.clone())));
+                // A long run keeps a bounded number of states: spread them twice as far apart.
+                if fresh.len() > MAX_SIM_CHECKPOINTS {
+                    every = every.saturating_mul(2);
+                    fresh.retain(|(s, _)| s % every == 0);
+                }
             }
         }
         let out = Arc::new(st);
@@ -611,19 +644,23 @@ impl<S: Clone> SimCache<S> {
         };
         let e = &mut g[idx];
         e.used = tick;
-        for (s, st) in fresh {
-            e.checkpoints.retain(|(c, _)| *c != s);
-            e.checkpoints.push((s, st));
-        }
-        // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin.
-        if e.checkpoints.len() > 256 {
-            e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0);
+        // Fresh checkpoints replace those at the same step (one pass, not one per checkpoint).
+        let steps: std::collections::HashSet<u64> = fresh.iter().map(|(s, _)| *s).collect();
+        e.checkpoints.retain(|(c, _)| !steps.contains(c));
+        e.checkpoints.extend(fresh);
+        // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin. The
+        // state just asked for keeps its slot, so asking for it again is answered from the cache.
+        if e.checkpoints.len() > MAX_SIM_CHECKPOINTS {
+            e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0 && *s != target);
             e.checkpoints.sort_by_key(|(s, _)| *s);
-            let mut k = 0;
+            // Drop only the excess, evenly spaced, so the rest keep their seek distance.
+            let (len, excess) = (e.checkpoints.len(), (e.checkpoints.len() + 1).saturating_sub(MAX_SIM_CHECKPOINTS));
+            let mut i = 0;
             e.checkpoints.retain(|_| {
-                k += 1;
-                k % 2 == 1
+                i += 1;
+                (i * excess) / len == ((i - 1) * excess) / len
             });
+            e.checkpoints.push((target, out.clone()));
         }
         out
     }
@@ -801,6 +838,45 @@ mod tests {
         assert_eq!(d, e);
     }
 
+    /// Layer time from a project cannot run a simulation without end, and a long run keeps a
+    /// bounded number of checkpoints that still give the same answer when seeking.
+    #[test]
+    fn sim_cache_bounds_steps_and_checkpoints() {
+        let c: SimCache<u64> = SimCache::new(2);
+        let count = |s: &mut u64, _: u64| *s += 1;
+        assert_eq!(*c.run(1, u64::MAX, || 0, count), MAX_SIM_STEPS);
+        let n = c.inner.lock().map(|g| g.iter().map(|e| e.checkpoints.len()).max().unwrap_or(0)).unwrap_or(0);
+        assert!(n <= MAX_SIM_CHECKPOINTS + 1, "{n} checkpoints");
+        let fresh: SimCache<u64> = SimCache::new(2);
+        let step = |s: &mut u64, i: u64| *s = s.wrapping_mul(6364136223846793005).wrapping_add(i);
+        let far = *fresh.run(1, 100_000, || 7, step);
+        let mid = *fresh.run(1, 54_321, || 7, step);
+        let again: SimCache<u64> = SimCache::new(2);
+        assert_eq!(*again.run(1, 54_321, || 7, step), mid);
+        assert_eq!(*again.run(1, 100_000, || 7, step), far);
+    }
+
+    /// A request that leaves the cache over its checkpoint cap still finds its own state there.
+    #[test]
+    fn sim_cache_keeps_the_requested_state_when_trimming() {
+        let c: SimCache<u64> = SimCache::new(2);
+        let steps = std::cell::Cell::new(0u64);
+        let count = |s: &mut u64, _: u64| {
+            steps.set(steps.get() + 1);
+            *s += 1;
+        };
+        let target = SIM_CHECKPOINT * (MAX_SIM_CHECKPOINTS as u64 - 1) + SIM_CHECKPOINT - 1;
+        assert_eq!(*c.run(1, target, || 0, count), target);
+        let n = c.inner.lock().map(|g| g.iter().map(|e| e.checkpoints.len()).max().unwrap_or(0)).unwrap_or(0);
+        assert!(n <= MAX_SIM_CHECKPOINTS, "{n} checkpoints");
+        steps.set(0);
+        assert_eq!(*c.run(1, target, || 0, count), target);
+        assert_eq!(steps.get(), 0, "the second request is answered from the cache");
+        // Only the excess is dropped: the other aligned checkpoints stay.
+        let kept = c.inner.lock().map(|g| g[0].checkpoints.len()).unwrap_or(0);
+        assert_eq!(kept, MAX_SIM_CHECKPOINTS, "trimmed to the cap, not halved");
+    }
+
     #[test]
     fn poly_helpers() {
         let sq = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
@@ -840,5 +916,38 @@ mod tests {
         let p = Plane { w: 16, h: 16, data: vec![0.7; 256] };
         let o = guided_filter(&g, &p, 2, 1e-3);
         assert!(o.data.iter().all(|v| (v - 0.7).abs() < 1e-3));
+    }
+
+    /// The box mean counts repeated edge pixels instead of visiting them: the same means as a
+    /// direct sum, and a huge radius (a Mocha feather of 1e300) costs a row's worth of work.
+    #[test]
+    fn box_row_matches_a_direct_sum_and_bounds_the_radius() {
+        let src = [1.0f32, 2.0, 3.0, 5.0, 8.0];
+        for r in [0usize, 1, 2, 4, 5, 9, 40] {
+            let mut dst = [0.0f32; 5];
+            box_row(&src, &mut dst, r);
+            for (x, d) in dst.iter().enumerate() {
+                let ri = r as i64;
+                let sum: f64 = (x as i64 - ri..=x as i64 + ri).map(|i| src[i.clamp(0, 4) as usize] as f64).sum();
+                let want = (sum / (2 * r + 1) as f64) as f32;
+                assert!((d - want).abs() < 1e-5, "r={r} x={x}: {d} vs {want}");
+            }
+        }
+        // An infinite last pixel inside the window still yields a finite first mean.
+        let mut inf = [0.0f32; 3];
+        box_row(&[1.0, 2.0, f32::INFINITY], &mut inf, 1);
+        assert!((inf[0] - 4.0 / 3.0).abs() < 1e-6, "{inf:?}");
+        let mut one = [0.0f32];
+        box_row(&[0.25], &mut one, usize::MAX);
+        assert!((one[0] - 0.25).abs() < 1e-6);
+        let mut dst = [0.0f32; 5];
+        box_row(&src, &mut dst, usize::MAX);
+        assert!(dst.iter().all(|v| v.is_finite() && (1.0..=8.0).contains(v)), "{dst:?}");
+        for sigma in [1e300, f64::MAX, f64::INFINITY, f64::NAN, -1.0] {
+            assert_eq!(box_radii(sigma, 3).len(), 3);
+        }
+        let p = Plane { w: 4, h: 3, data: vec![0.5; 12] };
+        let g = gauss_plane(&p, 1e300, 1e300);
+        assert!(g.data.iter().all(|v| (v - 0.5).abs() < 1e-4), "{:?}", g.data);
     }
 }

@@ -167,12 +167,28 @@ function normalize(a) {
   return l === 0 ? a.map(function () { return 0; }) : div(a, l);
 }
 
+// Orientation that points the layer's z axis at `at` with its x axis kept level, in the
+// Orientation order (Rx · Ry · Rz) and wrapped to [0, 360), as After Effects returns it.
 function lookAt(from, at) {
   var d = normalize(sub(__v(at), __v(from)));
   var x = d[0], y = d[1], z = d[2] || 0;
-  var rx = -Math.asin(Math.max(-1, Math.min(1, y))) * 180 / Math.PI;
-  var ry = Math.atan2(x, z) * 180 / Math.PI;
-  return [rx, ry, 0];
+  var p = Math.asin(Math.max(-1, Math.min(1, -y)));
+  var w = Math.atan2(x, z);
+  var cw = Math.cos(w), sw = Math.sin(w), cp = Math.cos(p), sp = Math.sin(p);
+  // The rotation Ry(w) · Rx(p), written as Orientation angles.
+  var oy = Math.asin(Math.max(-1, Math.min(1, sw * cp)));
+  var ox, oz;
+  if (Math.sqrt(cw * cw + sw * sw * sp * sp) > 1e-9) {
+    ox = Math.atan2(sp, cw * cp);
+    oz = Math.atan2(-sw * sp, cw);
+  } else {
+    ox = Math.atan2(cw * sp, cp);
+    oz = 0;
+  }
+  return [ox, oy, oz].map(function (r) {
+    var a = ((r * 180 / Math.PI) % 360 + 360) % 360;
+    return a >= 360 - 1e-9 || Math.abs(a) < 1e-9 ? 0 : a;
+  });
 }
 
 function degreesToRadians(d) { return d * Math.PI / 180; }
@@ -218,7 +234,7 @@ function __cubicBezier(curve) {
     x1 = curve[0]; y1 = curve[1]; x2 = curve[2]; y2 = curve[3];
   }
   if (typeof x1 !== 'number' || typeof y1 !== 'number' || typeof x2 !== 'number' || typeof y2 !== 'number' ||
-      !isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) {
+      !Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
     return __lin;
   }
   x1 = Math.max(0, Math.min(1, x1));
@@ -402,8 +418,8 @@ function hslToRgb(c) {
 function hexToRgb(hex) {
   var s = String(hex).replace(/^#|^0x/i, '');
   if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
-  var n = parseInt(s.slice(0, 6), 16);
-  var a = s.length >= 8 ? parseInt(s.slice(6, 8), 16) / 255 : 1;
+  var n = Number.parseInt(s.slice(0, 6), 16);
+  var a = s.length >= 8 ? Number.parseInt(s.slice(6, 8), 16) / 255 : 1;
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a];
 }
 
@@ -479,6 +495,8 @@ function __mod(a, d) { return ((a % d) + d) % d; }
 function __child(c, l, group, key) {
   var info = __h(__CHILD, c, l, group, key);
   if (info === null) return undefined;
+  // `thisLayer(1)` is the layer's markers, as in After Effects (see `ae_order`).
+  if (group === '' && info[0] === '@marker') return new Markers(c, l);
   return info[1] ? __mkGroup(c, l, info) : __mkProp(c, l, info[0]);
 }
 
@@ -486,7 +504,7 @@ function __child(c, l, group, key) {
 // it (default 1), the layer at the top (#1619).
 function __ancestor(c, l, path, countUp) {
   var n = countUp === undefined ? 1 : __v(countUp);
-  if (typeof n !== 'number' || !(n >= 1) || !isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
+  if (typeof n !== 'number' || !(n >= 1) || !Number.isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
   n = Math.floor(n);
   var info = __h(__ANCESTOR, c, l, path, n);
   if (info === 'layer') return __layer(c, l);
@@ -969,6 +987,22 @@ var __mkProp = (function (P) {
 // attributes at, and the setter calls made on it ([key, value, start, count]). Setters return
 // new objects; returning a style from a Source Text expression applies it.
 
+// After Effects' names for a paragraph's justification, which its expressions read and write,
+// from every spelling `Justify::parse` accepts (case, '_', '-' and spaces ignored).
+var __AE_JUSTIFY = {
+  left: 'alignLeft', leftjustify: 'alignLeft', alignleft: 'alignLeft',
+  center: 'alignCenter', centre: 'alignCenter', centerjustify: 'alignCenter', aligncenter: 'alignCenter',
+  right: 'alignRight', rightjustify: 'alignRight', alignright: 'alignRight',
+  justify: 'justifyLastLeft', justifyleft: 'justifyLastLeft', justifylastleft: 'justifyLastLeft', fulljustifylastlineleft: 'justifyLastLeft',
+  justifycenter: 'justifyLastCenter', justifylastcenter: 'justifyLastCenter', fulljustifylastlinecenter: 'justifyLastCenter',
+  justifyright: 'justifyLastRight', justifylastright: 'justifyLastRight', fulljustifylastlineright: 'justifyLastRight',
+  justifyall: 'justifyFull', justifyfull: 'justifyFull', fulljustifylastlinefull: 'justifyFull', fulljustify: 'justifyFull',
+};
+function __aeJustify(v) {
+  var k = String(v).toLowerCase().replace(/[_ -]/g, '');
+  return Object.prototype.hasOwnProperty.call(__AE_JUSTIFY, k) ? __AE_JUSTIFY[k] : String(v);
+}
+
 function __TextStyle(doc, idx, ops, empty) { this.__d = doc; this.__i = idx; this.__ops = ops; this.__empty = empty; }
 
 function __styleSetter(key, conv) {
@@ -1044,13 +1078,13 @@ __TextStyle.prototype = {
   get kerningType() { var k = this.__get('kerning'); return typeof k === 'number' ? 'manual' : k; },
   get kerning() { var k = this.__get('kerning'); return typeof k === 'number' ? k : 0; },
   get isLigature() { return this.__get('ligatures'); },
-  get justification() { return this.__get('justify', true); },
+  get justification() { return __aeJustify(this.__get('justify', true)); },
   get firstLineIndent() { return this.__get('indentFirst', true); },
   get startIndent() { return this.__get('indentLeft', true); },
   get endIndent() { return this.__get('indentRight', true); },
   get spaceBefore() { return this.__get('spaceBefore', true); },
   get spaceAfter() { return this.__get('spaceAfter', true); },
-  get direction() { return this.__get('direction', true); },
+  get direction() { var d = this.__get('direction', true); return d === 'rtl' ? 'right-to-left' : d === 'ltr' ? 'left-to-right' : d; },
   get isEveryLineComposer() { return this.__get('composer', true) === 'everyLine'; },
   get isHangingRoman() { return this.__get('hangingPunctuation', true); },
   setText: __styleSetter('text', function (v) { return String(v); }),
@@ -1081,7 +1115,7 @@ __TextStyle.prototype = {
   setKerningType: __styleSetter('kerning', function (v) { v = String(v).toLowerCase(); return v === 'manual' ? 0 : v; }),
   setKerning: __styleSetter('kerning', Number),
   setLigature: __styleSetter('ligatures', Boolean),
-  setJustification: __styleSetter('justify', function (v) { return String(v); }),
+  setJustification: __styleSetter('justify', __aeJustify),
   setFirstLineIndent: __styleSetter('indentFirst'),
   setStartIndent: __styleSetter('indentLeft'),
   setEndIndent: __styleSetter('indentRight'),
