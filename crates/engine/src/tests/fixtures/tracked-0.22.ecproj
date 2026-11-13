@@ -1,0 +1,1593 @@
+{
+  "savedBy": "0.22.0",
+  "activeComp": 2,
+  "openComps": [
+    2
+  ],
+  "schema": 2,
+  "settings": {
+    "bit_depth": "Bpc8",
+    "linearize": false,
+    "working_space": null,
+    "blend_linear": false,
+    "time_display": "Timecode",
+    "frame_start": 0,
+    "audio_sample_rate": 48000,
+    "gpu_acceleration": true,
+    "color_engine": "Adobe",
+    "hdr": "Clip",
+    "output_space": null,
+    "working_gamma": 2.2
+  },
+  "items": {
+    "1": {
+      "id": 1,
+      "name": "effectcraft-3456-shake.mp4",
+      "label": "Aqua",
+      "comment": "",
+      "parent": null,
+      "kind": {
+        "type": "Footage",
+        "path": "/tmp/effectcraft-3456-shake.mp4",
+        "kind": "Video",
+        "width": 160,
+        "height": 120,
+        "pixel_aspect": 1.0,
+        "frame_rate": {
+          "num": 12,
+          "den": 1
+        },
+        "native_rate": null,
+        "duration": 254016000000,
+        "has_video": true,
+        "has_audio": false,
+        "alpha": "Ignore",
+        "premul_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "loop_count": 1,
+        "codec": "H.264 (High)",
+        "missing": false,
+        "color_profile": "Rec709"
+      }
+    },
+    "2": {
+      "id": 2,
+      "name": "effectcraft-3456-shake",
+      "label": "Sandstone",
+      "comment": "",
+      "parent": null,
+      "kind": {
+        "type": "Comp",
+        "width": 160,
+        "height": 120,
+        "pixel_aspect": 1.0,
+        "frame_rate": {
+          "num": 12,
+          "den": 1
+        },
+        "duration": 254016000000,
+        "display_start": 0,
+        "background": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "work_area": [
+          0,
+          254016000000
+        ],
+        "layers": [
+          {
+            "id": 3,
+            "name": "effectcraft-3456-shake.mp4",
+            "source": {
+              "type": "Footage",
+              "item": 1
+            },
+            "label": "Aqua",
+            "comment": "",
+            "start_time": 0,
+            "in_point": 0,
+            "out_point": 254016000000,
+            "stretch": 100.0,
+            "switches": {
+              "video": true,
+              "audio": true,
+              "solo": false,
+              "locked": false,
+              "shy": false,
+              "collapse": false,
+              "quality": "Best",
+              "sampling": "Bilinear",
+              "effects": true,
+              "frame_blend": "Off",
+              "motion_blur": false,
+              "adjustment": false,
+              "three_d": false,
+              "guide": false
+            },
+            "blend_mode": "Normal",
+            "preserve_transparency": false,
+            "track_matte": null,
+            "parent": null,
+            "markers": [],
+            "auto_orient": "Off",
+            "props": {
+              "uid": 4,
+              "match": "layer",
+              "name": "effectcraft-3456-shake.mp4",
+              "kind": {
+                "kind": "Plain"
+              },
+              "enabled": true,
+              "children": [
+                {
+                  "node": "Group",
+                  "uid": 5,
+                  "match": "masks",
+                  "name": "Masks",
+                  "kind": {
+                    "kind": "Plain"
+                  },
+                  "enabled": true,
+                  "children": []
+                },
+                {
+                  "node": "Group",
+                  "uid": 6,
+                  "match": "effects",
+                  "name": "Effects",
+                  "kind": {
+                    "kind": "Plain"
+                  },
+                  "enabled": true,
+                  "children": [
+                    {
+                      "node": "Group",
+                      "uid": 26,
+                      "match": "ec.distort.warpstabilizer",
+                      "name": "Warp Stabilizer",
+                      "kind": {
+                        "kind": "Effect",
+                        "effect": "ec.distort.warpstabilizer"
+                      },
+                      "enabled": true,
+                      "children": [
+                        {
+                          "node": "Group",
+                          "uid": 28,
+                          "match": "stabilization",
+                          "name": "Stabilization",
+                          "kind": {
+                            "kind": "Plain"
+                          },
+                          "enabled": true,
+                          "children": [
+                            {
+                              "node": "Prop",
+                              "uid": 27,
+                              "match": "result",
+                              "name": "Result",
+                              "value": {
+                                "t": "Enum",
+                                "v": 0
+                              },
+                              "ui": {
+                                "kind": "Popup",
+                                "options": [
+                                  "Smooth Motion",
+                                  "No Motion"
+                                ]
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 29,
+                              "match": "smoothness",
+                              "name": "Smoothness",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 50.0
+                              },
+                              "ui": {
+                                "kind": "Slider",
+                                "min": 0.0,
+                                "max": 1000.0,
+                                "slider_min": 0.0,
+                                "slider_max": 100.0,
+                                "decimals": 0
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 30,
+                              "match": "method",
+                              "name": "Method",
+                              "value": {
+                                "t": "Enum",
+                                "v": 3
+                              },
+                              "ui": {
+                                "kind": "Popup",
+                                "options": [
+                                  "Position",
+                                  "Position, Scale, Rotation",
+                                  "Perspective",
+                                  "Subspace Warp"
+                                ]
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 31,
+                              "match": "preserveScale",
+                              "name": "Preserve Scale",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            }
+                          ]
+                        },
+                        {
+                          "node": "Group",
+                          "uid": 33,
+                          "match": "borders",
+                          "name": "Borders",
+                          "kind": {
+                            "kind": "Plain"
+                          },
+                          "enabled": true,
+                          "children": [
+                            {
+                              "node": "Prop",
+                              "uid": 32,
+                              "match": "framing",
+                              "name": "Framing",
+                              "value": {
+                                "t": "Enum",
+                                "v": 2
+                              },
+                              "ui": {
+                                "kind": "Popup",
+                                "options": [
+                                  "Stabilize Only",
+                                  "Stabilize, Crop",
+                                  "Stabilize, Crop, Auto-scale",
+                                  "Stabilize, Synthesize Edges"
+                                ]
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Group",
+                              "uid": 35,
+                              "match": "autoScale",
+                              "name": "Auto-scale",
+                              "kind": {
+                                "kind": "Plain"
+                              },
+                              "enabled": true,
+                              "children": [
+                                {
+                                  "node": "Prop",
+                                  "uid": 34,
+                                  "match": "maximumScale",
+                                  "name": "Maximum Scale",
+                                  "value": {
+                                    "t": "Scalar",
+                                    "v": 150.0
+                                  },
+                                  "ui": {
+                                    "kind": "Slider",
+                                    "min": 100.0,
+                                    "max": 1000.0,
+                                    "slider_min": 100.0,
+                                    "slider_max": 200.0,
+                                    "decimals": 0
+                                  },
+                                  "spatial": false,
+                                  "hold_only": false,
+                                  "three_d_only": false,
+                                  "two_d_only": false,
+                                  "shown_dims": 0,
+                                  "static_only": false
+                                },
+                                {
+                                  "node": "Prop",
+                                  "uid": 36,
+                                  "match": "actionSafeMargin",
+                                  "name": "Action-safe Margin",
+                                  "value": {
+                                    "t": "Scalar",
+                                    "v": 0.0
+                                  },
+                                  "ui": {
+                                    "kind": "Slider",
+                                    "min": 0.0,
+                                    "max": 45.0,
+                                    "slider_min": 0.0,
+                                    "slider_max": 20.0,
+                                    "decimals": 0
+                                  },
+                                  "spatial": false,
+                                  "hold_only": false,
+                                  "three_d_only": false,
+                                  "two_d_only": false,
+                                  "shown_dims": 0,
+                                  "static_only": false
+                                }
+                              ]
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 37,
+                              "match": "additionalScale",
+                              "name": "Additional Scale",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 100.0
+                              },
+                              "ui": {
+                                "kind": "Slider",
+                                "min": 1.0,
+                                "max": 1000.0,
+                                "slider_min": 50.0,
+                                "slider_max": 150.0,
+                                "decimals": 0
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            }
+                          ]
+                        },
+                        {
+                          "node": "Group",
+                          "uid": 39,
+                          "match": "advanced",
+                          "name": "Advanced",
+                          "kind": {
+                            "kind": "Plain"
+                          },
+                          "enabled": true,
+                          "children": [
+                            {
+                              "node": "Prop",
+                              "uid": 38,
+                              "match": "detailedAnalysis",
+                              "name": "Detailed Analysis",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 40,
+                              "match": "rollingShutterRipple",
+                              "name": "Rolling Shutter Ripple",
+                              "value": {
+                                "t": "Enum",
+                                "v": 0
+                              },
+                              "ui": {
+                                "kind": "Popup",
+                                "options": [
+                                  "Automatic Reduction",
+                                  "Enhanced Reduction"
+                                ]
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 41,
+                              "match": "cropLessSmoothMore",
+                              "name": "Crop Less <-> Smooth More",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 50.0
+                              },
+                              "ui": {
+                                "kind": "Slider",
+                                "min": 0.0,
+                                "max": 100.0,
+                                "slider_min": 0.0,
+                                "slider_max": 100.0,
+                                "decimals": 0
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 42,
+                              "match": "synthesizeInputRange",
+                              "name": "Synthesis Input Range (seconds)",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 1.0
+                              },
+                              "ui": {
+                                "kind": "Slider",
+                                "min": 0.0,
+                                "max": 10.0,
+                                "slider_min": 0.0,
+                                "slider_max": 5.0,
+                                "decimals": 2
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 43,
+                              "match": "synthesizeEdgeFeather",
+                              "name": "Synthesis Edge Feather",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 0.0
+                              },
+                              "ui": {
+                                "kind": "Slider",
+                                "min": 0.0,
+                                "max": 100.0,
+                                "slider_min": 0.0,
+                                "slider_max": 100.0,
+                                "decimals": 0
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Group",
+                              "uid": 45,
+                              "match": "edgeCropping",
+                              "name": "Synthesis Edge Cropping",
+                              "kind": {
+                                "kind": "Plain"
+                              },
+                              "enabled": true,
+                              "children": [
+                                {
+                                  "node": "Prop",
+                                  "uid": 44,
+                                  "match": "left",
+                                  "name": "Left",
+                                  "value": {
+                                    "t": "Scalar",
+                                    "v": 0.0
+                                  },
+                                  "ui": {
+                                    "kind": "Slider",
+                                    "min": 0.0,
+                                    "max": 1000.0,
+                                    "slider_min": 0.0,
+                                    "slider_max": 50.0,
+                                    "decimals": 0
+                                  },
+                                  "spatial": false,
+                                  "hold_only": false,
+                                  "three_d_only": false,
+                                  "two_d_only": false,
+                                  "shown_dims": 0,
+                                  "static_only": false
+                                },
+                                {
+                                  "node": "Prop",
+                                  "uid": 46,
+                                  "match": "top",
+                                  "name": "Top",
+                                  "value": {
+                                    "t": "Scalar",
+                                    "v": 0.0
+                                  },
+                                  "ui": {
+                                    "kind": "Slider",
+                                    "min": 0.0,
+                                    "max": 1000.0,
+                                    "slider_min": 0.0,
+                                    "slider_max": 50.0,
+                                    "decimals": 0
+                                  },
+                                  "spatial": false,
+                                  "hold_only": false,
+                                  "three_d_only": false,
+                                  "two_d_only": false,
+                                  "shown_dims": 0,
+                                  "static_only": false
+                                },
+                                {
+                                  "node": "Prop",
+                                  "uid": 47,
+                                  "match": "right",
+                                  "name": "Right",
+                                  "value": {
+                                    "t": "Scalar",
+                                    "v": 0.0
+                                  },
+                                  "ui": {
+                                    "kind": "Slider",
+                                    "min": 0.0,
+                                    "max": 1000.0,
+                                    "slider_min": 0.0,
+                                    "slider_max": 50.0,
+                                    "decimals": 0
+                                  },
+                                  "spatial": false,
+                                  "hold_only": false,
+                                  "three_d_only": false,
+                                  "two_d_only": false,
+                                  "shown_dims": 0,
+                                  "static_only": false
+                                },
+                                {
+                                  "node": "Prop",
+                                  "uid": 48,
+                                  "match": "bottom",
+                                  "name": "Bottom",
+                                  "value": {
+                                    "t": "Scalar",
+                                    "v": 0.0
+                                  },
+                                  "ui": {
+                                    "kind": "Slider",
+                                    "min": 0.0,
+                                    "max": 1000.0,
+                                    "slider_min": 0.0,
+                                    "slider_max": 50.0,
+                                    "decimals": 0
+                                  },
+                                  "spatial": false,
+                                  "hold_only": false,
+                                  "three_d_only": false,
+                                  "two_d_only": false,
+                                  "shown_dims": 0,
+                                  "static_only": false
+                                }
+                              ]
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 49,
+                              "match": "hideWarningBanner",
+                              "name": "Hide Warning Banner",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 50,
+                              "match": "showTrackPoints",
+                              "name": "Show Track Points",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 51,
+                              "match": "trackPointSize",
+                              "name": "Track Point Size",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 100.0
+                              },
+                              "ui": {
+                                "kind": "Slider",
+                                "min": 0.0,
+                                "max": 1000.0,
+                                "slider_min": 0.0,
+                                "slider_max": 200.0,
+                                "decimals": 0
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            }
+                          ]
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 52,
+                          "match": "analysis",
+                          "name": "Analysis",
+                          "value": {
+                            "t": "Str",
+                            "v": "{\"version\":2,\"start\":0.0,\"frameDuration\":0.08333333333333333,\"size\":[160.0,120.0],\"detailed\":false,\"frames\":[{\"t\":[0.0,0.0],\"s\":[1.0,0.0,0.0,0.0],\"h\":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0],\"inliers\":0,\"features\":0},{\"t\":[-22.388798410890686,30.01868418985143],\"s\":[0.9277781961008736,-0.04422418749279422,-15.523833932787909,35.6091856999425],\"h\":[0.9277781961008736,0.04422418749279422,-15.523833932787909,-0.04422418749279422,0.9277781961008736,35.6091856999425,0.0,0.0],\"inliers\":9,\"features\":15,\"points\":[[92.3,107.9],[95.2,95.7],[92.2,103.7],[74.2,53.6],[74.3,37.4],[99.3,90.7],[82.6,41.5],[82.5,55.5],[88.5,43.5]]},{\"t\":[23.98122532957055,-1.9084399677775892],\"s\":[0.9063620953625465,-0.04409531016401132,30.797313797392007,5.599646102270199],\"h\":[0.7965841302132126,0.29995334448297317,20.168498543438005,-0.0740592055495628,1.046481410433727,-0.473260319309297,-0.002014895402579317,0.0023197947752658875],\"inliers\":10,\"features\":24,\"points\":[[118.4,97.1],[124.8,102.9],[100.5,51.5],[127.3,63.9],[127.5,45.0],[106.1,39.6],[106.2,53.7],[113.7,56.7],[52.5,35.6],[116.8,43.6]]},{\"t\":[11.687620662467452,-7.932031814223215],\"s\":[0.9951636472613027,0.0038103578382923703,12.438092774450126,-8.118641076572445],\"h\":[1.643484923435082,-0.7137632860918511,-2.5905208024072124,0.3548180400361871,0.46037059943190983,-10.538467107984474,0.004219805542554225,-0.0059212698862967],\"inliers\":9,\"features\":18,\"points\":[[132.6,73.5],[131.5,85.1],[106.5,41.5],[138.4,70.5],[143.4,74.0],[112.0,43.6],[122.5,47.5],[130.2,49.8],[149.3,58.5]]},{\"t\":[-30.310403914516613,33.907848152443364],\"s\":[1.007168616747288,0.0037069147029014813,-31.056396618707396,33.11324659331262],\"h\":[0.6198845159470996,0.0005618559126509149,-3.178267007922358,-0.13009530252511717,0.7726770220834841,43.55009577470153,-0.001720398359559105,0.00004737533435711085],\"inliers\":6,\"features\":6,\"points\":[[83.4,78.4],[111.5,91.5],[111.5,72.5],[89.0,80.3],[94.7,83.3],[92.1,67.5]]},{\"t\":[-5.583259809628714,-21.883441966142215],\"s\":[1.0031742036915483,-0.0014807972400717364,-6.0689262496146625,-22.023221544860448],\"h\":[1.1420296883900174,-0.04739597390990014,-10.605302345116598,0.09741208494601904,0.9834838974219691,-26.601790074159226,0.0009113645792746124,-0.0004613682942006241],\"inliers\":12,\"features\":26,\"points\":[[44.4,0.4],[95.7,91.4],[102.5,90.5],[96.9,82.3],[102.8,85.5],[102.6,81.2],[97.1,78.5],[127.8,90.7],[128.5,80.1],[108.6,91.2],[108.5,79.5],[105.0,77.7]]},{\"t\":[27.686733462643232,8.049769635251877],\"s\":[0.929460928303922,0.035973851378530715,35.6798165298027,9.23027450987749],\"h\":[1.008918148822829,0.1261308536278953,23.55178846805191,-0.030309790827892834,1.108836841709476,6.4896286706810855,-0.0005830225271129425,0.0013957761568033347],\"inliers\":9,\"features\":24,\"points\":[[55.5,112.5],[100.6,55.5],[100.6,69.5],[106.2,57.5],[106.1,71.6],[113.5,74.5],[76.4,61.6],[76.6,45.5],[116.6,61.6]]},{\"t\":[-2.1632428252979565,18.033956762750776],\"s\":[0.9823494564274133,-0.03858067520697906,-3.292485287213367,25.146037618301847],\"h\":[0.9579598760613574,-0.13114734456280325,2.830816183351523,0.009276438160611545,0.8429238585075404,27.816268384517308,0.00010866570427004524,-0.0010986404477924933],\"inliers\":9,\"features\":25,\"points\":[[10.2,63.8],[4.5,45.5],[53.4,60.9],[106.6,83.4],[106.6,97.6],[58.5,80.5],[71.6,85.4],[76.7,86.4],[112.4,85.5]]},{\"t\":[-30.66640840418232,-21.989852679037867],\"s\":[1.0156367307051672,0.004551071962152525,-31.763785052482092,-23.691591888755113],\"h\":[1.0156367307051672,-0.004551071962152525,-31.763785052482092,0.004551071962152525,1.0156367307051672,-23.691591888755113,0.0,0.0],\"inliers\":6,\"features\":9,\"points\":[[65.6,55.5],[68.5,58.4],[76.3,61.6],[58.5,55.9],[78.5,77.7],[43.4,48.3]]},{\"t\":[5.708740901092206,24.075281194659254],\"s\":[1.0135826886534363,-0.10515588147251018,-1.1163514746928627,27.59825643107368],\"h\":[1.1505001196625904,-0.004492526279963958,-0.5319258967829654,-0.025738957694540945,0.966887539263372,28.15190307627249,0.0007845902586792284,-0.00031935492918067597],\"inliers\":9,\"features\":24,\"points\":[[104.6,97.7],[104.8,101.6],[108.5,88.8],[103.9,89.0],[116.1,92.7],[112.4,87.8],[113.2,96.3],[47.3,72.5],[46.4,87.5]]},{\"t\":[27.779201319161004,9.926771642811133],\"s\":[0.9890321818477387,0.0013711446087583204,28.575284295787874,10.772618168795788],\"h\":[1.061498205619746,0.009950102807178602,26.602191497678987,0.03562744518371215,1.0470570180393335,7.3128067380884545,0.00040746752749711983,0.00013875206582740715],\"inliers\":19,\"features\":31,\"points\":[[101.5,91.5],[100.5,107.5],[95.4,104.6],[93.2,89.4],[62.5,94.4],[108.2,95.5],[108.2,109.3],[114.0,97.5],[89.2,102.5],[61.5,75.5],[70.5,80.5],[89.3,88.3],[114.9,111.1],[69.5,95.5],[66.5,78.5],[82.3,100.6],[76.5,82.5],[82.5,84.4],[119.1,112.0]]},{\"t\":[-18.08353148330616,-15.925984647541327],\"s\":[0.9665330472023047,-0.007772653084006622,-14.505725243709165,-11.14686987633948],\"h\":[1.396312496581232,-0.10268053165320767,-33.15101241390654,0.021275151660258673,1.173514724589782,-24.185902320422414,0.001847437675107323,-0.0003034312788189646],\"inliers\":9,\"features\":23,\"points\":[[119.3,75.5],[116.5,84.0],[121.6,82.9],[128.5,87.4],[127.6,83.0],[124.8,80.6],[128.7,71.5],[71.6,86.5],[58.4,66.5]]}],\"tracks\":[{\"id\":0,\"start\":0,\"pts\":[[121.5,16.5],[101.4,48.2],[127.2,46.6],[141.2,40.2],[111.2,74.3],[105.1,58.7],[135.1,68.5]]},{\"id\":1,\"start\":0,\"pts\":[[107.5,26.5],[85.4,56.6],[108.9,54.9],[121.0,46.9],[90.3,80.7],[82.3,64.9],[109.6,73.1],[105.7,97.1]]}]}"
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 53,
+                          "match": "analysisKey",
+                          "name": "Analysis Key",
+                          "value": {
+                            "t": "Str",
+                            "v": "f87b8df2e353c28e"
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        }
+                      ]
+                    },
+                    {
+                      "node": "Group",
+                      "uid": 54,
+                      "match": "ec.perspective.cameratracker",
+                      "name": "3D Camera Tracker",
+                      "kind": {
+                        "kind": "Effect",
+                        "effect": "ec.perspective.cameratracker"
+                      },
+                      "enabled": true,
+                      "children": [
+                        {
+                          "node": "Prop",
+                          "uid": 55,
+                          "match": "shotType",
+                          "name": "Shot Type",
+                          "value": {
+                            "t": "Enum",
+                            "v": 0
+                          },
+                          "ui": {
+                            "kind": "Popup",
+                            "options": [
+                              "Fixed Angle of View",
+                              "Variable Zoom",
+                              "Specify Angle of View"
+                            ]
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 56,
+                          "match": "horizontalAngleOfView",
+                          "name": "Horizontal Angle of View",
+                          "value": {
+                            "t": "Scalar",
+                            "v": 40.0
+                          },
+                          "ui": {
+                            "kind": "Slider",
+                            "min": 1.0,
+                            "max": 170.0,
+                            "slider_min": 10.0,
+                            "slider_max": 120.0,
+                            "decimals": 1
+                          },
+                          "spatial": false,
+                          "hold_only": false,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 57,
+                          "match": "showTrackPoints",
+                          "name": "Show Track Points",
+                          "value": {
+                            "t": "Enum",
+                            "v": 1
+                          },
+                          "ui": {
+                            "kind": "Popup",
+                            "options": [
+                              "2D Source",
+                              "3D Solved"
+                            ]
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 58,
+                          "match": "renderTrackPoints",
+                          "name": "Render Track Points",
+                          "value": {
+                            "t": "Bool",
+                            "v": false
+                          },
+                          "ui": {
+                            "kind": "Checkbox"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 59,
+                          "match": "trackPointSize",
+                          "name": "Track Point Size",
+                          "value": {
+                            "t": "Scalar",
+                            "v": 100.0
+                          },
+                          "ui": {
+                            "kind": "Slider",
+                            "min": 0.0,
+                            "max": 1000.0,
+                            "slider_min": 0.0,
+                            "slider_max": 300.0,
+                            "decimals": 0
+                          },
+                          "spatial": false,
+                          "hold_only": false,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 60,
+                          "match": "targetSize",
+                          "name": "Target Size",
+                          "value": {
+                            "t": "Scalar",
+                            "v": 100.0
+                          },
+                          "ui": {
+                            "kind": "Slider",
+                            "min": 1.0,
+                            "max": 1000.0,
+                            "slider_min": 10.0,
+                            "slider_max": 300.0,
+                            "decimals": 0
+                          },
+                          "spatial": false,
+                          "hold_only": false,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Group",
+                          "uid": 62,
+                          "match": "advanced",
+                          "name": "Advanced",
+                          "kind": {
+                            "kind": "Plain"
+                          },
+                          "enabled": true,
+                          "children": [
+                            {
+                              "node": "Prop",
+                              "uid": 61,
+                              "match": "solveMethod",
+                              "name": "Solve Method",
+                              "value": {
+                                "t": "Enum",
+                                "v": 0
+                              },
+                              "ui": {
+                                "kind": "Popup",
+                                "options": [
+                                  "Auto Detect",
+                                  "Typical",
+                                  "Mostly Flat Scene",
+                                  "Tripod Pan"
+                                ]
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 63,
+                              "match": "methodUsed",
+                              "name": "Method Used",
+                              "value": {
+                                "t": "Str",
+                                "v": "Tripod Pan"
+                              },
+                              "ui": {
+                                "kind": "Hidden"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 64,
+                              "match": "averageError",
+                              "name": "Average Error",
+                              "value": {
+                                "t": "Scalar",
+                                "v": 0.48427435472856495
+                              },
+                              "ui": {
+                                "kind": "Hidden"
+                              },
+                              "spatial": false,
+                              "hold_only": false,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 65,
+                              "match": "detailedAnalysis",
+                              "name": "Detailed Analysis",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 66,
+                              "match": "lensDistortion",
+                              "name": "Solve Lens Distortion",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 67,
+                              "match": "undistort",
+                              "name": "Undistort Footage",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 68,
+                              "match": "autoDeletePoints",
+                              "name": "Auto-delete Points Across Time",
+                              "value": {
+                                "t": "Bool",
+                                "v": true
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            },
+                            {
+                              "node": "Prop",
+                              "uid": 69,
+                              "match": "hideWarningBanner",
+                              "name": "Hide Warning Banner",
+                              "value": {
+                                "t": "Bool",
+                                "v": false
+                              },
+                              "ui": {
+                                "kind": "Checkbox"
+                              },
+                              "spatial": false,
+                              "hold_only": true,
+                              "three_d_only": false,
+                              "two_d_only": false,
+                              "shown_dims": 0,
+                              "static_only": false
+                            }
+                          ]
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 70,
+                          "match": "tracks",
+                          "name": "Tracks",
+                          "value": {
+                            "t": "Str",
+                            "v": "{\"version\":1,\"size\":[160.0,120.0],\"start\":0.0,\"frameDuration\":0.08333333333333333,\"frames\":12,\"factor\":1.0,\"detailed\":false,\"tracks\":[{\"id\":0,\"start\":0,\"pts\":[[77.5,21.5],[63.0,42.02],[84.44,46.2],[94.51,43.46],[76.29,65.76],[77.07,73.7],[83.0,80.68],[85.69,85.86],[87.92,90.96],[89.4,99.49],[90.13,103.45],[90.97,109.78]]},{\"id\":1,\"start\":0,\"pts\":[[137.5,41.5],[125.34,65.53],[144.58,68.06],[155.96,64.9],[137.55,87.17]]},{\"id\":2,\"start\":0,\"pts\":[[103.5,9.5],[85.74,29.12],[104.73,32.21],[110.44,21.58],[92.15,43.67]]},{\"id\":3,\"start\":0,\"pts\":[[104.5,29.5],[85.9,50.12],[103.93,52.29],[109.88,48.47],[92.18,70.78]]},{\"id\":4,\"start\":0,\"pts\":[[135.5,18.5],[123.93,41.77],[143.14,45.58],[156.62,36.13],[137.86,58.99],[138.18,64.4],[142.35,72.76]]},{\"id\":5,\"start\":0,\"pts\":[[145.5,43.5],[136.49,68.62],[152.24,70.07]]},{\"id\":6,\"start\":0,\"pts\":[[68.5,16.5],[54.6,38.04],[75.81,40.97],[85.89,39.76],[67.52,62.45],[65.27,69.0]]},{\"id\":7,\"start\":0,\"pts\":[[126.5,18.5],[111.0,39.74],[128.76,42.63],[136.89,32.11],[117.68,54.39]]},{\"id\":8,\"start\":1,\"pts\":[[62.5,17.5],[85.58,22.87],[94.22,13.25],[75.42,35.02],[75.53,43.03],[82.19,51.59],[83.63,56.75],[86.42,64.01],[88.28,72.0],[89.17,76.16],[88.59,83.65]]},{\"id\":9,\"start\":1,\"pts\":[[114.5,106.5],[136.85,100.86],[147.03,92.4]]},{\"id\":10,\"start\":1,\"pts\":[[72.5,23.5],[97.31,29.7],[103.74,19.02],[85.16,40.96],[87.87,50.25],[90.99,56.84],[95.55,64.14],[94.95,69.09],[98.79,80.06],[99.53,84.17],[96.16,89.83]]},{\"id\":11,\"start\":1,\"pts\":[[105.5,56.5],[123.21,58.51],[130.67,54.61],[112.22,76.63],[107.86,82.64],[110.99,88.56],[110.29,92.35],[107.8,96.22],[105.42,105.58],[106.34,109.09],[103.49,114.69]]},{\"id\":12,\"start\":1,\"pts\":[[48.5,14.5],[74.56,20.81],[80.17,10.47],[60.5,31.52]]},{\"id\":13,\"start\":1,\"pts\":[[56.5,17.5],[79.51,23.22],[88.21,13.13],[69.38,34.7],[69.5,43.04],[76.12,50.88],[77.6,55.88],[80.34,63.05],[82.34,69.83],[83.23,74.02],[82.59,80.86]]},{\"id\":14,\"start\":1,\"pts\":[[111.5,56.5],[129.28,58.38],[136.92,54.94]]},{\"id\":15,\"start\":2,\"pts\":[[111.5,35.5],[116.71,24.74],[98.61,46.94],[95.39,52.62],[97.78,59.24]]},{\"id\":16,\"start\":2,\"pts\":[[111.5,54.5],[116.45,50.61],[98.85,72.82],[95.85,78.52],[98.15,84.77]]},{\"id\":17,\"start\":2,\"pts\":[[35.5,25.5],[51.37,25.98],[29.35,47.25],[34.79,58.33],[37.82,64.46],[35.7,68.67]]},{\"id\":18,\"start\":2,\"pts\":[[65.5,37.5],[73.16,34.37],[53.32,56.61]]},{\"id\":19,\"start\":3,\"pts\":[[139.5,91.5],[121.67,103.33],[122.29,98.68],[128.91,94.42],[130.04,88.08],[132.48,82.73],[132.69,85.66],[135.56,80.73],[133.86,80.34]]},{\"id\":20,\"start\":3,\"pts\":[[128.5,27.5],[109.77,49.81],[105.68,55.33]]},{\"id\":21,\"start\":4,\"pts\":[[132.5,108.5],[134.61,103.06],[139.18,98.97]]},{\"id\":22,\"start\":4,\"pts\":[[12.5,44.5],[15.77,54.38],[21.97,62.49],[23.19,67.31],[25.95,73.59],[32.15,76.64],[31.59,80.8],[37.46,83.52]]},{\"id\":23,\"start\":5,\"pts\":[[88.5,76.5],[91.53,82.49],[96.99,88.67],[96.31,92.35]]},{\"id\":24,\"start\":5,\"pts\":[[23.5,26.5],[34.16,36.76],[31.29,40.39]]},{\"id\":25,\"start\":5,\"pts\":[[29.5,29.5],[41.15,39.45],[37.02,43.33],[44.0,51.94]]},{\"id\":26,\"start\":5,\"pts\":[[16.5,25.5],[25.23,35.61],[24.0,39.41],[27.82,47.95],[34.62,50.88],[34.62,55.8],[39.37,61.06]]},{\"id\":27,\"start\":5,\"pts\":[[12.5,21.5],[20.78,30.91],[20.0,35.48],[23.13,42.77],[30.29,46.76],[30.38,51.79],[34.65,56.39]]},{\"id\":28,\"start\":5,\"pts\":[[115.5,82.5],[118.64,88.43],[118.09,93.19],[117.39,96.49],[114.83,106.78],[114.88,110.08]]},{\"id\":29,\"start\":5,\"pts\":[[122.5,61.5],[124.31,67.9],[123.88,72.08],[123.44,76.68],[120.82,86.9],[120.84,90.61],[117.85,97.98]]},{\"id\":30,\"start\":5,\"pts\":[[120.5,66.5],[122.86,72.98],[122.45,77.21],[121.98,81.49]]},{\"id\":31,\"start\":7,\"pts\":[[130.5,110.5],[132.07,103.93],[132.1,107.25],[134.31,101.57],[134.08,101.95]]},{\"id\":32,\"start\":7,\"pts\":[[144.5,87.5],[147.64,81.13],[147.29,84.43]]},{\"id\":33,\"start\":7,\"pts\":[[149.5,87.5],[151.62,81.15],[151.6,83.45]]},{\"id\":34,\"start\":7,\"pts\":[[141.5,109.5],[142.65,102.86],[144.73,106.45]]},{\"id\":35,\"start\":7,\"pts\":[[130.5,105.5],[132.21,97.98],[132.16,101.56]]},{\"id\":36,\"start\":7,\"pts\":[[46.5,46.5],[46.28,52.04],[53.71,58.71],[53.81,63.25]]},{\"id\":37,\"start\":7,\"pts\":[[63.5,78.5],[60.78,82.81],[61.38,87.33],[61.18,91.39],[60.13,92.98]]},{\"id\":38,\"start\":7,\"pts\":[[147.5,79.5],[148.79,73.74],[148.89,76.93],[152.13,71.83],[150.74,73.15]]},{\"id\":39,\"start\":8,\"pts\":[[110.5,73.5],[108.69,82.44],[109.4,86.46],[105.45,92.92]]},{\"id\":40,\"start\":8,\"pts\":[[37.5,75.5],[39.63,77.92],[39.24,82.09],[46.3,85.66]]},{\"id\":41,\"start\":9,\"pts\":[[72.5,92.5],[72.19,96.59],[71.1,99.0]]},{\"id\":42,\"start\":9,\"pts\":[[71.5,66.5],[71.58,70.65],[69.4,74.61]]},{\"id\":43,\"start\":9,\"pts\":[[42.5,52.5],[42.63,57.29],[48.81,63.22]]},{\"id\":44,\"start\":9,\"pts\":[[65.5,63.5],[65.9,67.71],[62.84,71.25]]},{\"id\":45,\"start\":9,\"pts\":[[54.5,84.5],[54.33,88.51],[54.49,89.47]]},{\"id\":46,\"start\":9,\"pts\":[[93.5,108.5],[94.19,112.24],[95.37,117.47]]}]}"
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 71,
+                          "match": "tracksKey",
+                          "name": "Tracks Key",
+                          "value": {
+                            "t": "Str",
+                            "v": "f87b8df2e353c28e"
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 72,
+                          "match": "solve",
+                          "name": "Solve",
+                          "value": {
+                            "t": "Str",
+                            "v": "{\"version\":1,\"size\":[160.0,120.0],\"start\":0.0,\"frameDuration\":0.08333333333333333,\"shot\":\"fixedAngle\",\"methodUsed\":\"tripodPan\",\"averageError\":0.48427435472856495,\"frames\":[{\"rot\":[0.0,0.0,0.0],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.020706432791589117,-0.008075142299053078,-0.06077723052316193],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.023015120128512003,0.005766803085062508,-0.05310541732098104],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.0170200841043793,0.014154804924310056,-0.050762146721755434],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.03356753265765158,-0.00032501028659040183,-0.05939089867356119],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.03943129932097289,0.0005848011077747351,-0.08866812978617226],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.04587385659719372,0.00556317017360105,-0.0922903070481816],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.04943028885690781,0.006586719185689197,-0.1030177435734751],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.05420648867299307,0.008981748111204299,-0.12219539780340982],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.06013167434751454,0.009061063842010806,-0.02749230328481726],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.06324873745045556,0.009255262692673143,-0.0355321639175462],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true},{\"rot\":[-0.06618656945718411,0.009319774678589094,-0.015189163276848288],\"center\":[0.0,0.0,0.0],\"focal\":1307.4062971457863,\"solved\":true}],\"points\":[{\"id\":0,\"pos\":[-0.001884543346613208,-0.029037452307042782,0.9806051370981879],\"error\":0.56470084,\"first\":0,\"last\":11},{\"id\":1,\"pos\":[0.04710854544038102,-0.015334858559503525,1.0773487523110807],\"error\":0.4844214,\"first\":0,\"last\":4},{\"id\":2,\"pos\":[0.015277830948334362,-0.04530698241035739,1.0393293228690133],\"error\":0.3392279,\"first\":0,\"last\":4},{\"id\":3,\"pos\":[0.013625157539074177,-0.028048508549162222,1.005205908477461],\"error\":0.27458376,\"first\":0,\"last\":4},{\"id\":4,\"pos\":[0.04631029390834158,-0.03435434088491794,1.0740657193502177],\"error\":0.58201736,\"first\":0,\"last\":6},{\"id\":5,\"pos\":[0.053943894461564695,-0.013610066623604573,1.082119350918587],\"error\":0.33030823,\"first\":0,\"last\":2},{\"id\":6,\"pos\":[-0.008886582549498147,-0.03423365291632946,1.0500072858529375],\"error\":0.5071384,\"first\":0,\"last\":5},{\"id\":7,\"pos\":[0.03502079415367347,-0.03650999899856251,1.0590501262399414],\"error\":0.3427207,\"first\":0,\"last\":4},{\"id\":8,\"pos\":[-0.0010752140340087664,-0.05237350807489353,0.9970760865042246],\"error\":0.35491616,\"first\":1,\"last\":11},{\"id\":9,\"pos\":[0.04045532180900739,0.011287908043101045,1.1118602867055563],\"error\":0.35821888,\"first\":1,\"last\":3},{\"id\":12,\"pos\":[-0.012247058383356772,-0.05711454082770741,1.026095977383411],\"error\":0.7576372,\"first\":1,\"last\":4},{\"id\":13,\"pos\":[-0.0057782770174717585,-0.05312155593792027,1.002454847850506],\"error\":0.543182,\"first\":1,\"last\":11},{\"id\":14,\"pos\":[0.03444063369446883,-0.02322488536327569,1.0525377480568132],\"error\":0.5363785,\"first\":1,\"last\":3},{\"id\":15,\"pos\":[0.016549051463405264,-0.04448675703801009,1.039611880351983],\"error\":0.31473064,\"first\":2,\"last\":6},{\"id\":16,\"pos\":[0.015561268129555224,-0.024177980474891878,1.0505609541603724],\"error\":0.448273,\"first\":2,\"last\":6},{\"id\":17,\"pos\":[-0.037387500298151244,-0.046978366490905726,1.0292596184739917],\"error\":0.5814284,\"first\":2,\"last\":7},{\"id\":18,\"pos\":[-0.018963958767977365,-0.03840654941654895,1.029868839109744],\"error\":0.62771547,\"first\":2,\"last\":4},{\"id\":20,\"pos\":[0.025824410036239483,-0.04221331533850395,1.051265936102142],\"error\":0.2203965,\"first\":3,\"last\":5},{\"id\":22,\"pos\":[-0.04851356310948073,-0.04922371159135405,1.0148030992016972],\"error\":0.60021263,\"first\":4,\"last\":11},{\"id\":23,\"pos\":[0.0036124978633337353,-0.027413664985930772,0.9671987963193897],\"error\":0.2763749,\"first\":5,\"last\":8},{\"id\":24,\"pos\":[-0.040597577069465214,-0.0703196502868751,1.0235859186232383],\"error\":0.20348576,\"first\":5,\"last\":7},{\"id\":26,\"pos\":[-0.04416469175733074,-0.0698384544617488,1.0211428377131564],\"error\":0.7978787,\"first\":5,\"last\":11},{\"id\":27,\"pos\":[-0.04818954744569584,-0.07416243876625056,1.013378662747375],\"error\":0.6526291,\"first\":5,\"last\":11},{\"id\":36,\"pos\":[-0.02865646311969018,-0.06261471940209673,1.0103266984710924],\"error\":0.47229937,\"first\":7,\"last\":10},{\"id\":37,\"pos\":[-0.022363582487320836,-0.038494993762751006,0.9688013952945587],\"error\":0.5830236,\"first\":7,\"last\":11},{\"id\":39,\"pos\":[0.012856414034624068,-0.040629816490058715,0.9569374661053799],\"error\":0.26666406,\"first\":8,\"last\":11},{\"id\":40,\"pos\":[-0.039487212277480116,-0.04718518517554586,0.9962321113853498],\"error\":0.48472655,\"first\":8,\"last\":11},{\"id\":41,\"pos\":[-0.014270376399443,-0.03389203058278074,0.9480752077612952],\"error\":0.79931283,\"first\":9,\"last\":11},{\"id\":42,\"pos\":[-0.014596706636024855,-0.05446828640367654,0.9808373411559306],\"error\":0.021755833,\"first\":9,\"last\":11},{\"id\":43,\"pos\":[-0.03666075088242092,-0.06654420263172509,0.9970944504474955],\"error\":0.20362298,\"first\":9,\"last\":11},{\"id\":44,\"pos\":[-0.01908451035407613,-0.057350036080083884,0.9896103813509345],\"error\":0.18076603,\"first\":9,\"last\":11},{\"id\":45,\"pos\":[-0.028179725825267236,-0.04186664641926184,0.9918891096090983],\"error\":0.24652581,\"first\":9,\"last\":11},{\"id\":46,\"pos\":[0.0010670642752641536,-0.018463010859931878,0.8064992130555431],\"error\":0.7289736,\"first\":9,\"last\":11}]}"
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 73,
+                          "match": "solveKey",
+                          "name": "Solve Key",
+                          "value": {
+                            "t": "Str",
+                            "v": "FixedAngle||Auto|[]"
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 74,
+                          "match": "deleted",
+                          "name": "Deleted Points",
+                          "value": {
+                            "t": "Str",
+                            "v": ""
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": true,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        },
+                        {
+                          "node": "Prop",
+                          "uid": 75,
+                          "match": "camera",
+                          "name": "Camera Layer",
+                          "value": {
+                            "t": "Scalar",
+                            "v": 0.0
+                          },
+                          "ui": {
+                            "kind": "Hidden"
+                          },
+                          "spatial": false,
+                          "hold_only": false,
+                          "three_d_only": false,
+                          "two_d_only": false,
+                          "shown_dims": 0,
+                          "static_only": false
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "node": "Group",
+                  "uid": 15,
+                  "match": "transform",
+                  "name": "Transform",
+                  "kind": {
+                    "kind": "Plain"
+                  },
+                  "enabled": true,
+                  "children": [
+                    {
+                      "node": "Prop",
+                      "uid": 7,
+                      "match": "anchor",
+                      "name": "Anchor Point",
+                      "value": {
+                        "t": "Vec3",
+                        "v": [
+                          80.0,
+                          60.0,
+                          0.0
+                        ]
+                      },
+                      "ui": {
+                        "kind": "Point"
+                      },
+                      "spatial": true,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 2,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 8,
+                      "match": "position",
+                      "name": "Position",
+                      "value": {
+                        "t": "Vec3",
+                        "v": [
+                          80.0,
+                          60.0,
+                          0.0
+                        ]
+                      },
+                      "ui": {
+                        "kind": "Point"
+                      },
+                      "spatial": true,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 2,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 9,
+                      "match": "scale",
+                      "name": "Scale",
+                      "value": {
+                        "t": "Vec3",
+                        "v": [
+                          100.0,
+                          100.0,
+                          100.0
+                        ]
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 2,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 10,
+                      "match": "orientation",
+                      "name": "Orientation",
+                      "value": {
+                        "t": "Vec3",
+                        "v": [
+                          0.0,
+                          0.0,
+                          0.0
+                        ]
+                      },
+                      "ui": {
+                        "kind": "Angle"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": true,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 11,
+                      "match": "rotationX",
+                      "name": "X Rotation",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 0.0
+                      },
+                      "ui": {
+                        "kind": "Angle"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": true,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 12,
+                      "match": "rotationY",
+                      "name": "Y Rotation",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 0.0
+                      },
+                      "ui": {
+                        "kind": "Angle"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": true,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 13,
+                      "match": "rotation",
+                      "name": "Rotation",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 0.0
+                      },
+                      "ui": {
+                        "kind": "Angle"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 14,
+                      "match": "opacity",
+                      "name": "Opacity",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 100.0
+                      },
+                      "ui": {
+                        "kind": "Slider",
+                        "min": 0.0,
+                        "max": 100.0,
+                        "slider_min": 0.0,
+                        "slider_max": 100.0,
+                        "decimals": 0
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    }
+                  ]
+                },
+                {
+                  "node": "Group",
+                  "uid": 16,
+                  "match": "materialOptions",
+                  "name": "Material Options",
+                  "kind": {
+                    "kind": "Plain"
+                  },
+                  "enabled": true,
+                  "children": [
+                    {
+                      "node": "Prop",
+                      "uid": 17,
+                      "match": "castsShadows",
+                      "name": "Casts Shadows",
+                      "value": {
+                        "t": "Enum",
+                        "v": 0
+                      },
+                      "ui": {
+                        "kind": "Popup",
+                        "options": [
+                          "Off",
+                          "On",
+                          "Only"
+                        ]
+                      },
+                      "spatial": false,
+                      "hold_only": true,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 18,
+                      "match": "lightTransmission",
+                      "name": "Light Transmission",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 0.0
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 19,
+                      "match": "acceptsShadows",
+                      "name": "Accepts Shadows",
+                      "value": {
+                        "t": "Enum",
+                        "v": 1
+                      },
+                      "ui": {
+                        "kind": "Popup",
+                        "options": [
+                          "Off",
+                          "On",
+                          "Only"
+                        ]
+                      },
+                      "spatial": false,
+                      "hold_only": true,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 20,
+                      "match": "acceptsLights",
+                      "name": "Accepts Lights",
+                      "value": {
+                        "t": "Bool",
+                        "v": true
+                      },
+                      "ui": {
+                        "kind": "Checkbox"
+                      },
+                      "spatial": false,
+                      "hold_only": true,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 21,
+                      "match": "ambient",
+                      "name": "Ambient",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 100.0
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 22,
+                      "match": "diffuse",
+                      "name": "Diffuse",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 50.0
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 23,
+                      "match": "specularIntensity",
+                      "name": "Specular Intensity",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 50.0
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 24,
+                      "match": "specularShininess",
+                      "name": "Specular Shininess",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 5.0
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    },
+                    {
+                      "node": "Prop",
+                      "uid": 25,
+                      "match": "metal",
+                      "name": "Metal",
+                      "value": {
+                        "t": "Scalar",
+                        "v": 100.0
+                      },
+                      "ui": {
+                        "kind": "Percent"
+                      },
+                      "spatial": false,
+                      "hold_only": false,
+                      "three_d_only": false,
+                      "two_d_only": false,
+                      "shown_dims": 0,
+                      "static_only": false
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "markers": [],
+        "shutter_angle": 180.0,
+        "shutter_phase": -90.0,
+        "motion_blur_samples": 16,
+        "motion_blur_adaptive_limit": 128,
+        "renderer": "Classic3D",
+        "hide_shy": false,
+        "enable_motion_blur": true,
+        "enable_frame_blending": true,
+        "draft_3d": false,
+        "preserve_frame_rate": false,
+        "preserve_resolution": false,
+        "poster_time": 0,
+        "global_light": {
+          "angle": {
+            "uid": 0,
+            "match": "globalLightAngle",
+            "name": "Global Light Angle",
+            "value": {
+              "t": "Scalar",
+              "v": 120.0
+            },
+            "ui": {
+              "kind": "Angle"
+            },
+            "spatial": false,
+            "hold_only": false,
+            "three_d_only": false,
+            "two_d_only": false,
+            "shown_dims": 0,
+            "static_only": false
+          },
+          "altitude": {
+            "uid": 0,
+            "match": "globalLightAltitude",
+            "name": "Global Light Altitude",
+            "value": {
+              "t": "Scalar",
+              "v": 30.0
+            },
+            "ui": {
+              "kind": "Angle"
+            },
+            "spatial": false,
+            "hold_only": false,
+            "three_d_only": false,
+            "two_d_only": false,
+            "shown_dims": 0,
+            "static_only": false
+          }
+        }
+      }
+    }
+  },
+  "next_id": 76
+}

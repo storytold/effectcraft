@@ -79,9 +79,10 @@ BlendingMode.SILHOUETTE_ALPHA = BlendingMode.SILHOUETE_ALPHA;
 var KeyframeInterpolationType = __enum("KeyframeInterpolationType", ["LINEAR", "BEZIER", "HOLD"], 6612);
 var TrackMatteType = __enum("TrackMatteType", ["NO_TRACK_MATTE", "ALPHA", "ALPHA_INVERTED", "LUMA", "LUMA_INVERTED"], 5012);
 var LightType = __enum("LightType", ["PARALLEL", "SPOT", "POINT", "AMBIENT", "ENVIRONMENT"], 4412);
+// In After Effects' order and numbers (26.3): right comes before centre.
 var ParagraphJustification = __enum("ParagraphJustification", [
-  "LEFT_JUSTIFY", "CENTER_JUSTIFY", "RIGHT_JUSTIFY", "FULL_JUSTIFY_LASTLINE_LEFT", "FULL_JUSTIFY_LASTLINE_CENTER",
-  "FULL_JUSTIFY_LASTLINE_RIGHT", "FULL_JUSTIFY_LASTLINE_FULL", "MULTIPLE_JUSTIFICATIONS"], 7413);
+  "MULTIPLE_JUSTIFICATIONS", "LEFT_JUSTIFY", "RIGHT_JUSTIFY", "CENTER_JUSTIFY", "FULL_JUSTIFY_LASTLINE_LEFT",
+  "FULL_JUSTIFY_LASTLINE_RIGHT", "FULL_JUSTIFY_LASTLINE_CENTER", "FULL_JUSTIFY_LASTLINE_FULL"], 7412);
 var PropertyValueType = __enum("PropertyValueType", [
   "NO_VALUE", "ThreeD_SPATIAL", "ThreeD", "TwoD_SPATIAL", "TwoD", "OneD", "COLOR", "CUSTOM_VALUE", "MARKER",
   "LAYER_INDEX", "MASK_INDEX", "SHAPE", "TEXT_DOCUMENT"], 6412);
@@ -120,7 +121,14 @@ function __blendLabel(v) {
 var __interpKey = { 6612: "linear", 6613: "bezier", 6614: "hold" };
 var __matteKind = { 5013: "alpha", 5014: "alphaInverted", 5015: "luma", 5016: "lumaInverted" };
 var __matteEnum = { Alpha: 5013, AlphaInverted: 5014, Luma: 5015, LumaInverted: 5016 };
-var __justKey = { 7413: "left", 7414: "center", 7415: "right", 7416: "justifyLeft", 7417: "justifyCenter", 7418: "justifyRight", 7419: "justifyAll" };
+var __justKey = {};
+__justKey[ParagraphJustification.LEFT_JUSTIFY] = "left";
+__justKey[ParagraphJustification.CENTER_JUSTIFY] = "center";
+__justKey[ParagraphJustification.RIGHT_JUSTIFY] = "right";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT] = "justifyLeft";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_CENTER] = "justifyCenter";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_RIGHT] = "justifyRight";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_FULL] = "justifyAll";
 
 // ------------------------------------------------------------------ output, $ and dialogs
 
@@ -292,6 +300,34 @@ function Folder(path) {
   if (!(this instanceof Folder)) return new Folder(path);
   this.__path = path === undefined ? "" : __str(path);
 }
+
+// ECMAScript's legacy case canonicalisation (what a `/i` regular expression compares with): the
+// upper case form when it is one code unit, and not an ASCII letter for a non-ASCII one.
+function __canon(ch) {
+  var u = ch.toUpperCase();
+  if (u.length !== 1) return ch;
+  if (ch.charCodeAt(0) >= 128 && u.charCodeAt(0) < 128) return ch;
+  return u;
+}
+
+// A case-insensitive `*` / `?` file mask match in time bounded by mask × name length (a
+// regular expression of `.*` runs backtracks combinatorially on overlapping wildcards).
+function __globMatch(mask, name) {
+  // Wildcards run over the original name (lowercasing it can change its length: "İ" becomes
+  // two code units); literal characters compare one at a time, case-insensitively as `/i` does
+  // ("ς" and "σ" and "Σ" match each other).
+  var p = mask, s = name;
+  var i = 0, j = 0, star = -1, mark = 0;
+  while (j < s.length) {
+    if (i < p.length && (p[i] === "?" || p[i] === s[j] || __canon(p[i]) === __canon(s[j]))) { i++; j++; }
+    else if (i < p.length && p[i] === "*") { star = i++; mark = j; }
+    else if (star !== -1) { i = star + 1; j = ++mark; }
+    else return false;
+  }
+  while (i < p.length && p[i] === "*") i++;
+  return i === p.length;
+}
+
 Folder.prototype = {
   constructor: Folder,
   get fsName() { return this.__path; },
@@ -310,10 +346,7 @@ Folder.prototype = {
     var out = [];
     for (var i = 0; i < names.length; i++) {
       var n = names[i];
-      if (typeof mask === "string" && mask !== "*") {
-        var re = new RegExp("^" + mask.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$", "i");
-        if (!re.test(n.split(/[\/\\]/).pop())) continue;
-      }
+      if (typeof mask === "string" && mask !== "*" && !__globMatch(mask, n.split(/[\/\\]/).pop())) continue;
       var isDir = JSON.parse(__file("isDir", n));
       var f = isDir ? new Folder(n) : new File(n);
       if (typeof mask === "function" && !mask(f)) continue;
@@ -628,8 +661,44 @@ TextDocument.prototype = {
 function __propOf(layer, info) {
   if (!info) return null;
   if (info.isLayer) return layer;
+  if (info.marker) return layer.marker;
+  if (info.absent) return __absentGroup(layer, info);
   if (info.kind === "group") return info.isMask ? new MaskPropertyGroup(layer, info.uid) : new PropertyGroup(layer, info.uid);
   return new Property(layer, info.uid);
+}
+
+// A top-level slot After Effects always has and this layer does not use yet (Layer Styles before
+// any style, Data, Sets…): an empty group, so loops over `numProperties` meet no null.
+function __absentGroup(layer, info) {
+  var g = {
+    __kind: "PropertyGroup",
+    get name() { return info.name; },
+    get matchName() { return info.matchName; },
+    get propertyIndex() { return info.index; },
+    get propertyDepth() { return 1; },
+    get propertyType() { return PropertyType.NAMED_GROUP; },
+    get parentProperty() { return layer; },
+    get numProperties() { return 0; },
+    get enabled() { return true; },
+    get active() { return layer.enabled; },
+    get canSetEnabled() { return false; },
+    get isModified() { return false; },
+    get isEffect() { return false; },
+    get isMask() { return false; },
+    get elided() { return false; },
+    get selected() { return false; },
+    property: function () { return null; },
+    propertyGroup: function (n) { return n === undefined || n === 1 ? layer : null; },
+    canAddProperty: function () { return false; },
+    addProperty: function (n) { throw __err("Can not add \"" + n + "\" to \"" + info.name + "\""); },
+    toString: function () { return "[object PropertyGroup]"; },
+  };
+  // Callable like any group: `layer.property(7)(1)` is `.property(1)`, null.
+  var f = function (k) { return g.property(k); };
+  delete f.name;
+  delete f.length;
+  for (const k of Object.getOwnPropertyNames(g)) Object.defineProperty(f, k, Object.getOwnPropertyDescriptor(g, k));
+  return f;
 }
 
 function PropertyBase() {}
@@ -866,6 +935,12 @@ Property.prototype.property = function () { return null; };
       var idx = v?.__id !== undefined ? v.index : __num(v);
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
+    }
+    // A string parameter (a LUT or look file, a text field) takes the text, or a File's path (#3395).
+    // A hidden one (Mesh Warp's mesh) stays refused by the key setters too, as by setValue.
+    if (info.type === "string") {
+      if (info.hidden) throw __err("\"" + info.name + "\" can not be set");
+      return __str(v);
     }
     if (info.type === "enum") return __num(v) - 1;
     if (info.type === "bool") return typeof v === "boolean" ? v : __num(v) !== 0;
@@ -1652,7 +1727,7 @@ CompItem.prototype.constructor = CompItem;
   P.saveFrameToPng = function (time, file) {
     var f = __str(file);
     if (!f) throw __err("saveFrameToPng: missing file");
-    __file("write", f, "");
+    __file("checkWrite", f);
     __call("comp.saveFrameAs", { comp: this.__id, path: f, time: __num(time, "time") });
   };
   P.openInEssentialGraphics = function () { __call("comp.openInEssentialGraphics", { comp: this.__id }); };
@@ -1662,8 +1737,8 @@ CompItem.prototype.constructor = CompItem;
     if (!/\.[A-Za-z0-9]+$/.test(f)) f += ".ectemplate";
     if (!overwrite && JSON.parse(__file("exists", f)) === true) return false;
     if (this.__controllers().length === 0) return false;
-    // The file gate applies to templates too.
-    __file("write", f, "");
+    // The file gate applies to templates too (checked without touching the file).
+    __file("checkWrite", f);
     __call("essential.exportTemplate", { comp: this.__id, path: f });
     return true;
   };

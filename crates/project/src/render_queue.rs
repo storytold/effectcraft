@@ -421,7 +421,12 @@ impl RenderSettings {
     /// The output frame rate: the Frame Rate override, unless the comp preserves its frame rate
     /// (Composition Settings ▸ Preserve frame rate when nested or in render queue).
     pub fn rate(&self, comp: &Comp) -> FrameRate {
-        if comp.preserve_frame_rate { comp.frame_rate } else { self.frame_rate.unwrap_or(comp.frame_rate) }
+        if comp.preserve_frame_rate {
+            return comp.frame_rate;
+        }
+        // A saved override is held to the supported rates, as a comp's own rate is: its frame count
+        // is the export's work.
+        self.frame_rate.map_or(comp.frame_rate, |r| crate::limits::frame_rate(r, comp.frame_rate))
     }
     /// First output-rate frame starting at or after `t`.
     fn ceil_frame(r: FrameRate, t: Tick) -> i64 {
@@ -480,6 +485,8 @@ impl RenderSettings {
             TimeSpan::Custom { start, end } => format!("Custom ({:.3}s – {:.3}s)", start.seconds(), end.seconds()),
         };
         let rate = match (self.frame_rate, comp) {
+            // A saved override outside the supported rates renders at the clamped one: say so.
+            (Some(r), Some(c)) if self.rate(c) != r => format!("{:.3} fps (renders at {:.3})", r.as_f64(), self.rate(c).as_f64()),
             (Some(r), _) => format!("{:.3} fps", r.as_f64()),
             (None, Some(c)) => format!("Use comp's frame rate ({:.3})", c.frame_rate.as_f64()),
             (None, None) => "Use comp's frame rate".into(),
@@ -1713,7 +1720,22 @@ pub fn numbered_template(template: &str, n: u32) -> String {
 
 /// Make a name safe as a file name component.
 pub fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
+    let mut s: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
+    // At most a file name's worth (255 UTF-8 bytes, whole characters only): a template repeating
+    // a long name token must not expand to gigabytes. A cut name ends in a hash of the whole
+    // name so long names that share a prefix stay distinct.
+    if s.len() > 255 {
+        // shortcut: 64-bit FNV-1a, not collision-resistant against crafted names; use a real hash if names become untrusted keys.
+        let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let mut end = 255 - 17;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str(&format!("-{hash:016x}"));
+    }
+    // `.` and `..` would name the folder itself or its parent when the token is a path component.
+    if !s.is_empty() && s.chars().all(|c| c == '.') { "_".repeat(s.len()) } else { s }
 }
 
 #[cfg(test)]
@@ -1738,9 +1760,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sanitize_limits_the_name_in_bytes() {
+        // 255 two-byte characters are cut to whole characters plus a 17-byte hash suffix.
+        let s = sanitize(&"é".repeat(255));
+        assert!(s.len() <= 255 && s.len() > 235, "{}", s.len());
+        assert!(s.starts_with("éé") && s.is_char_boundary(s.len() - 17));
+        // Names that share their first 255 bytes stay distinct, and a name that fits is untouched.
+        let (a, b) = (sanitize(&format!("{}A", "界".repeat(85))), sanitize(&format!("{}B", "界".repeat(85))));
+        assert_ne!(a, b);
+        assert!(a.len() <= 255 && b.len() <= 255);
+        assert_eq!(sanitize(&"n".repeat(255)), "n".repeat(255));
+        assert_eq!(sanitize(&"é".repeat(127)), "é".repeat(127));
+    }
+
+    #[test]
     fn templates_and_sequences() {
         let v = TemplateVars { comp_name: "Main/Title", project_name: "P", width: 1920, height: 1080, frame_rate: 29.97, start_frame: 0, end_frame: 9 };
         assert_eq!(expand_template(DEFAULT_TEMPLATE, OutputFormat::H264, &v), "Main_Title.mp4");
+        // A dot-only name is not a parent-folder component; a long one is cut to a file name.
+        for name in ["..", "."] {
+            let v = TemplateVars { comp_name: name, ..v };
+            assert_eq!(expand_template("out/[compName]/x.[fileExtension]", OutputFormat::Gif, &v), format!("out/{}/x.gif", "_".repeat(name.len())));
+        }
+        let long = "n".repeat(100_000);
+        let v2 = TemplateVars { comp_name: &long, ..v };
+        assert_eq!(expand_template(&"[compName]".repeat(100), OutputFormat::Gif, &v2).len(), 255 * 100);
         assert_eq!(expand_template("[compName]_[width]x[height]@[frameRate].[fileExtension]", OutputFormat::Gif, &v), "Main_Title_1920x1080@29.97.gif");
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");
@@ -1888,6 +1932,22 @@ mod tests {
         assert_eq!(s.sample(&c, 3), FrameSample::Fields { first: Tick::from_seconds_f64(0.12), second: Tick::from_seconds_f64(0.14), upper_first: false });
         let p = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
         assert_eq!(p.sample(&c, 3), FrameSample::Progressive(Tick::from_seconds_f64(0.12)));
+    }
+
+    /// A saved Frame Rate override outside the supported rates is clamped, so a short comp cannot
+    /// ask for billions of output frames.
+    #[test]
+    fn frame_rate_override_is_held_to_the_supported_rates() {
+        let c = Comp::new(64, 48, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let s = |r| RenderSettings { frame_rate: Some(r), time_span: TimeSpan::LengthOfComp, ..Default::default() };
+        let huge = s(FrameRate::new(1_000_000_000_000, 1));
+        assert_eq!(huge.rate(&c).as_f64(), crate::limits::MAX_FPS);
+        assert!(huge.frame_count(&c) <= 2001, "{}", huge.frame_count(&c));
+        assert_eq!(s(FrameRate::new(0, 1)).rate(&c), c.frame_rate);
+        assert_eq!(s(FrameRate::new(60, 1)).rate(&c), FrameRate::new(60, 1));
+        let shown = |r| s(r).describe(Some(&c)).into_iter().find(|l| l.0 == "Frame Rate").map(|l| l.1).unwrap_or_default();
+        assert!(shown(FrameRate::new(1_000_000_000_000, 1)).contains("renders at 1000.000"), "{}", shown(FrameRate::new(1_000_000_000_000, 1)));
+        assert_eq!(shown(FrameRate::new(60, 1)), "60.000 fps");
     }
 
     #[test]

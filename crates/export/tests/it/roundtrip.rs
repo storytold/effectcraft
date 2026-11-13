@@ -288,15 +288,15 @@ fn prores_alpha_final_run_is_present_in_exported_movies() {
                 run_frames(&project, comp, &MediaPool::new(), &output, &path, 1);
 
                 let bytes = std::fs::read(&path).expect("exported MOV");
-                let movie = filmcraft_isobmff::open(bytes.as_slice()).expect("demux exported MOV");
-                let video = movie.tracks.iter().find(|track| track.kind == filmcraft_isobmff::TrackKind::Video).expect("video track");
+                let movie = craft_media::isobmff::open(bytes.as_slice()).expect("demux exported MOV");
+                let video = movie.tracks.iter().find(|track| track.kind == craft_media::isobmff::TrackKind::Video).expect("video track");
                 assert_eq!(video.samples.len(), 1);
                 let sample = &video.samples[0];
                 let frame = &bytes[sample.offset as usize..][..sample.size as usize];
-                let (header, start, size) = filmcraft_prores::FrameHeader::parse(frame).expect("ProRes header");
+                let (header, start, size) = craft_video::prores::FrameHeader::parse(frame).expect("ProRes header");
                 assert_eq!((header.width, header.height), (16, 16));
                 let picture = &frame[start..size];
-                let header = filmcraft_prores::PictureHeader::parse(picture).expect("picture header");
+                let header = craft_video::prores::PictureHeader::parse(picture).expect("picture header");
                 assert_eq!(header.num_slices, 1);
                 let slice = &picture[header.header_size + 2..];
                 let color_bytes: usize = slice[2..8].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b) as usize).sum();

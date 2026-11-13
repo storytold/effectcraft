@@ -494,16 +494,27 @@ fn gauss(lo: usize, hi: usize, t: usize, sigma: f64) -> Vec<f64> {
 /// subspace dimension (9 in the paper). Frames without enough trajectories get no pairs.
 pub fn smooth_trajectories(tracks: &[Track2D], frames: usize, sigma: f64, rank: usize) -> Vec<Vec<([f64; 2], [f64; 2])>> {
     let max_r = ((3.0 * sigma).ceil() as usize).clamp(1, 30);
+    // The trajectories seen on each frame (in track order): a frame only ever uses those, so none
+    // scans the whole collection (every frame did, once per window shrink).
+    let mut seen: Vec<Vec<u32>> = vec![Vec::new(); frames];
+    for (i, tr) in tracks.iter().enumerate() {
+        let (a, b) = (tr.start as usize, (tr.end() as usize).min(frames));
+        for list in seen.iter_mut().take(b).skip(a) {
+            list.push(i as u32);
+        }
+    }
     (0..frames)
         .into_par_iter()
         .map(|t| {
             let t32 = t as u32;
+            let on_frame = &seen[t];
             let mut r = max_r;
             // The window around t: shrink it until enough trajectories span it.
             let (lo, hi, complete) = loop {
                 let lo = t.saturating_sub(r);
                 let hi = (t + r).min(frames.saturating_sub(1));
-                let complete: Vec<&Track2D> = tracks.iter().filter(|tr| tr.start as usize <= lo && tr.end() as usize > hi).collect();
+                let complete: Vec<&Track2D> =
+                    on_frame.iter().map(|&i| &tracks[i as usize]).filter(|tr| tr.start as usize <= lo && tr.end() as usize > hi).collect();
                 if complete.len() >= 8 || r <= 2 {
                     break (lo, hi, complete);
                 }
@@ -556,7 +567,7 @@ pub fn smooth_trajectories(tracks: &[Track2D], frames: usize, sigma: f64, rank: 
             // Incomplete trajectories seen on t: coefficients by least squares over the frames
             // they cover in the window.
             let need = (k + 3).max(m / 2);
-            for tr in tracks.iter().filter(|tr| tr.at(t32).is_some() && !(tr.start as usize <= lo && tr.end() as usize > hi)) {
+            for tr in on_frame.iter().map(|&i| &tracks[i as usize]).filter(|tr| !(tr.start as usize <= lo && tr.end() as usize > hi)) {
                 let cols: Vec<usize> = (0..m).filter(|c| tr.at((lo + c) as u32).is_some()).collect();
                 if cols.len() < need {
                     continue;
@@ -600,6 +611,22 @@ pub fn smooth_trajectories(tracks: &[Track2D], frames: usize, sigma: f64, rank: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Smoothing visits only the trajectories seen on each frame: tracks that start after the clip
+    /// (or on other frames) change nothing and cost nothing, however many there are.
+    #[test]
+    fn smoothing_ignores_trajectories_off_the_frame() {
+        let frames = 60usize;
+        let wob = |k: usize, f: usize| [10.0 + k as f32 * 3.0 + (f as f32 * 0.2).sin() * 4.0, 20.0 + (k % 7) as f32 * 5.0 + f as f32 * 0.5];
+        let mut tracks: Vec<Track2D> = (0..30).map(|k| Track2D { id: k as u32, start: 0, pts: (0..frames).map(|f| wob(k, f)).collect() }).collect();
+        // Partial tracks: some seen on only part of the clip.
+        tracks.extend((0..10).map(|k| Track2D { id: 100 + k as u32, start: 5 * k as u32, pts: (5 * k..frames.min(5 * k + 30)).map(|f| wob(k, f)).collect() }));
+        let base = smooth_trajectories(&tracks, frames, 3.0, 9);
+        assert!(base.iter().any(|v| v.len() >= 30), "the fixture gives frames with pairs");
+        let mut more = tracks.clone();
+        more.extend((0..200_000u32).map(|i| Track2D { id: 1000 + i, start: frames as u32 + i % 50, pts: vec![[1.0, 2.0]] }));
+        assert_eq!(smooth_trajectories(&more, frames, 3.0, 9), base);
+    }
 
     #[test]
     fn mesh_identity_sample_and_forward() {

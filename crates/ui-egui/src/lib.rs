@@ -373,6 +373,12 @@ pub struct EffectcraftApp {
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
     footage_watch_key: Option<(u64, String, bool)>,
+    /// The worker that stamps the LUT files in use ([`Self::tick_lut_files`], #3493).
+    lut_watcher: Option<effectcraft_engine::lut_reload::Watcher>,
+    /// The LUT generation the frames kept were rendered at ([`effectcraft_engine::lut_reload::generation`]).
+    lut_generation: u64,
+    /// How many times the caches were purged ([`Self::purge_stamp`]).
+    purges: u64,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,
@@ -403,8 +409,8 @@ pub struct EffectcraftApp {
     applied_prefs: Option<(u64, Option<bool>)>,
     /// A previous run that didn't exit cleanly (shown by `Dialog::Recovery`).
     pub recovery: Option<effectcraft_engine::autosave::Recovery>,
-    /// Docked groups laid out last frame: (active panel, group rect) — `~` maximizes the one
-    /// under the pointer.
+    /// Panels drawn last frame, docked and floating: (panel, body rect). `~` maximizes the one
+    /// under the pointer; Effect Controls' arrow keys work only while it is on screen.
     pub(crate) dock_rects: Vec<(PanelKind, egui::Rect)>,
     /// The floating panels' OS windows that drew a panel last frame; one that is gone releases
     /// its IME state.

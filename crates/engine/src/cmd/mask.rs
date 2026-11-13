@@ -762,7 +762,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("mask.new", "New Mask from Points", [], None, "{layer?, vertices: [[x,y]…], inTangents?, outTangents?, closed?, mode?}", has_layers, new_mask),
         cmd!("mask.addVertex", "Add Mask Vertex", [], None, "{layer?, mask, point: [x,y], in?, out?, index?}", has_layers, add_vertex),
         cmd!("mask.setVertex", "Set Mask Vertex", [], None, "{layer?, mask, index, point?, in?, out?, merge?}", has_layers, set_vertex),
-        cmd!("mask.setClosed", "Closed", ["Layer", "Mask and Shape Path"], None, "{layer?, mask, closed?}", has_layers, set_closed),
+        cmd!("mask.setClosed", "Closed", [], None, "{layer?, mask, closed?}", has_layers, set_closed),
         cmd!("mask.setRoundness", "Set Mask Roundness", [], None, "{layer?, mask, roundness (corner radius in px; 0 = square)}", has_layers, set_roundness),
         cmd!("mask.selectVertices", "Select Mask Vertices", [], None, "{vertices: [{layer, mask, index}], add?, toggle?}", has_comp, select_vertices),
         cmd!("mask.moveVertices", "Move Mask Vertices", [], None, "{vertices?: [{layer, mask, index}], delta: [dx,dy], merge?}", has_vertices, move_vertices),
