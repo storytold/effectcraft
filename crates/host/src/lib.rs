@@ -138,7 +138,7 @@ fn helper_hooks() -> Option<effectcraft_engine::HelperHooks> {
 /// Stop the external effect helpers (when the app quits).
 pub fn stop_helpers() {
     #[cfg(not(target_arch = "wasm32"))]
-    effectcraft_helper_host::stop_all();
+    effectcraft_helper_host::shut_down();
 }
 
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):

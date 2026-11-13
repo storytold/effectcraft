@@ -25,6 +25,9 @@ use crate::protocol::{HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEf
 const MAX_DEPTH: u32 = 16;
 /// Restarts allowed per minute before a helper is left stopped until the next scan.
 const MAX_RESTARTS_PER_MINUTE: usize = 5;
+/// Set by [`crate::shut_down`]: no helper starts again.
+pub(crate) static SHUT_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// A helper idle for longer than this is pinged before it is used again.
 const HEARTBEAT_AFTER: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -378,6 +381,9 @@ impl Helper {
     }
 
     fn spawn(&self) -> Result<Conn, String> {
+        if SHUT_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("EffectCraft is quitting".into());
+        }
         {
             let mut r = lock(&self.restarts);
             r.retain(|t| t.elapsed() < Duration::from_secs(60));

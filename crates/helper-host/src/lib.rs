@@ -233,6 +233,14 @@ pub fn stop_all() {
     }
 }
 
+/// Stop every helper for good: the app is quitting. A render still running then (the viewer,
+/// say) would start a helper again, with a new exchange file that nothing removes once the
+/// process exits (on Windows the file is only removed when its [`frames::Exchange`] drops).
+pub fn shut_down() {
+    client::SHUT_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    stop_all();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

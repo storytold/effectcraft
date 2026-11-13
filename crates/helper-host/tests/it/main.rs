@@ -294,7 +294,14 @@ fn run_checks() -> bool {
         &starts,
     );
 
-    effectcraft_helper_host::stop_all();
+    // Quitting: a render after shut_down fails instead of starting the helper (and a new
+    // exchange file nothing would remove).
+    effectcraft_helper_host::shut_down();
+    let mine = format!("effectcraft-helper-{}-", std::process::id());
+    let files =
+        || std::fs::read_dir(std::env::temp_dir()).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&mine)).count()).unwrap_or(0);
+    let r = render("org.test.helper.invert", &mut vec![[0.0; 4]; 4], 2, 2, 1.0, false);
+    all &= check("no helper starts after shut_down", r.as_ref().is_err_and(|e| e.contains("quitting")) && files() == 0, (&r, files()));
     let _ = std::fs::remove_dir_all(&state);
     all
 }
