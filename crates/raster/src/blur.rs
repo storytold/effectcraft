@@ -7,7 +7,7 @@
 
 use rayon::prelude::*;
 
-use crate::{Image, Px};
+use crate::{Image, Mask, Px};
 
 /// One horizontal box pass of radius `r` (window 2r+1) over each row of `src` (width `w`) into
 /// `out`; `repeat` = edge pixels extend, otherwise transparent.
@@ -173,6 +173,70 @@ fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
 pub fn box_blur(img: &Image, rx: usize, ry: usize, iterations: usize, repeat: bool) -> Image {
     let n = iterations.max(1);
     box_passes(img, &vec![rx; n], &vec![ry; n], repeat)
+}
+
+/// [`box_blur`] (one pass, transparent edges) of a single-channel mask: the same running sums in
+/// the same order, so each value is bit-identical to the alpha of `box_blur` on
+/// [`Mask::to_image`], at a quarter of the memory.
+pub fn box_blur_mask(mask: &Mask, rx: usize, ry: usize) -> Mask {
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    if w == 0 || h == 0 || mask.data.len() != w * h || (rx == 0 && ry == 0) {
+        return mask.clone();
+    }
+    let mut data = mask.data.clone();
+    if rx > 0 {
+        let mut out = vec![0.0f32; data.len()];
+        mask_h_into(&data, &mut out, w, rx);
+        data = out;
+    }
+    if ry > 0 {
+        let mut out = vec![0.0f32; data.len()];
+        mask_v_into(&data, &mut out, w, h, ry);
+        data = out;
+    }
+    Mask { width: mask.width, height: mask.height, data }
+}
+
+/// [`box_h_into`] on one channel, without edge extension.
+fn mask_h_into(src: &[f32], out: &mut [f32], w: usize, r: usize) {
+    let norm = 1.0 / (2 * r + 1) as f32;
+    out.par_chunks_mut(w).zip(src.par_chunks(w)).for_each(|(o, row)| {
+        let get = |i: isize| usize::try_from(i).ok().and_then(|i| row.get(i)).copied().unwrap_or(0.0);
+        let mut acc = 0.0f32;
+        for i in -(r as isize)..=(r as isize) {
+            acc += get(i);
+        }
+        for (x, o) in o.iter_mut().enumerate() {
+            *o = acc * norm;
+            acc += get(x as isize + r as isize + 1) - get(x as isize - r as isize);
+        }
+    });
+}
+
+/// [`box_v_into`] on one channel, without edge extension (the same blocks, so the same sums).
+fn mask_v_into(src: &[f32], out: &mut [f32], w: usize, h: usize, r: usize) {
+    let norm = 1.0 / (2 * r + 1) as f32;
+    let block = (4 * r).clamp(32, 256);
+    let row = |i: isize| -> Option<&[f32]> { usize::try_from(i).ok().filter(|&i| i < h).and_then(|i| src.get(i * w..(i + 1) * w)) };
+    out.par_chunks_mut(w * block).enumerate().for_each(|(bi, chunk)| {
+        let ya = (bi * block) as isize;
+        let mut acc = vec![0.0f32; w];
+        for i in ya - r as isize..=ya + r as isize {
+            if let Some(rw) = row(i) {
+                acc.iter_mut().zip(rw).for_each(|(a, p)| *a += p);
+            }
+        }
+        for (yy, o) in chunk.chunks_mut(w).enumerate() {
+            let y = ya + yy as isize;
+            o.iter_mut().zip(&acc).for_each(|(o, a)| *o = a * norm);
+            match (row(y + r as isize + 1), row(y - r as isize)) {
+                (Some(add), Some(sub)) => acc.iter_mut().zip(add).zip(sub).for_each(|((a, p), q)| *a += p - q),
+                (Some(add), None) => acc.iter_mut().zip(add).for_each(|(a, p)| *a += p),
+                (None, Some(sub)) => acc.iter_mut().zip(sub).for_each(|(a, q)| *a -= q),
+                (None, None) => {}
+            }
+        }
+    });
 }
 
 /// Gaussian blur with standard deviations in pixels (3 box passes per axis).
@@ -436,6 +500,19 @@ mod tests {
         let mut out = vec![[0.0; 4]; w * h];
         box_h_into(&src, &mut out, w, 1 << 40, true);
         box_v_into(&src, &mut out.clone(), w, h, 1 << 40, true);
+    }
+
+    #[test]
+    fn mask_blur_is_bit_identical_to_the_image_blur() {
+        let (w, h) = (97u32, 61u32);
+        let data = (0..w * h).map(|i| (i.wrapping_mul(2_654_435_761) >> 7) as f32 / (1u32 << 25) as f32).collect();
+        let mask = Mask { width: w, height: h, data };
+        for (rx, ry) in [(1, 1), (5, 0), (0, 5), (31, 17), (150, 200)] {
+            let via_image = Mask::from_alpha(&box_blur(&mask.to_image(), rx, ry, 1, false));
+            let direct = box_blur_mask(&mask, rx, ry);
+            let bits = |m: &Mask| m.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&direct), bits(&via_image), "radii {rx}, {ry}");
+        }
     }
 
     #[test]
