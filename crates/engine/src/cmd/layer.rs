@@ -24,7 +24,7 @@ mod transform;
 
 use contents::{add_mask, add_shape_item, mask_props, set_text};
 use create::{add_item, new_adjustment, new_null, new_shape, new_solid, new_text};
-pub(crate) use create::{color_p, index_p, insert_layer, insert_layer_at, place, position_p};
+pub(crate) use create::{color_p, fit_span, index_p, insert_layer, insert_layer_at, new_layer_span, place, position_p, show_span};
 pub(crate) use parent::parent_fixes;
 use parent::set_parent;
 use replace::{has_replace_source, replace_source};

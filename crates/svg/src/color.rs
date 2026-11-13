@@ -251,6 +251,7 @@ mod tests {
     use super::parse_color;
 
     #[test]
+    /// Non-finite channel values are rejected.
     fn non_finite_rejected() {
         for s in [
             "rgb(nan,0,0)",

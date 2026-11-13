@@ -335,6 +335,26 @@ fn shapes_computed_at_run_time_must_match_the_declared_ones() {
 }
 
 #[test]
+fn a_folded_dequantize_has_its_declared_size() {
+    let half = |n: usize| vec![0u8; 2 * n];
+    let fold = |declared: Vec<i32>| {
+        model(vec![half(4)], vec![(vec![1, 4], FLOAT16, Some(0)), (declared, FLOAT32, None)], vec![(op::DEQUANTIZE, vec![0], vec![1], vec![])], vec![], vec![1])
+    };
+    // A declared output of one value would let the folded four-value constant be copied out per reference.
+    refused(&fold(vec![1, 1]), "DEQUANTIZE output size");
+    assert!(Model::read(&fold(vec![1, 4])).is_ok());
+}
+
+#[test]
+fn tensor_metadata_is_bounded_in_all() {
+    // A rank of 4 million dimensions of 1 is a valid shape by size, but copied per tensor.
+    let m = model(vec![], vec![(vec![1; 1 << 22], FLOAT32, None)], vec![], vec![], vec![]);
+    refused(&m, "metadata is too large");
+    let ok = model(vec![], (0..70).map(|_| (vec![1, 2, 3], FLOAT32, None)).collect(), vec![], vec![], vec![]);
+    assert!(Model::read(&ok).is_ok());
+}
+
+#[test]
 fn shared_weights_count_once_per_use() {
     // One 128 KB buffer decoded for 2100 tensors would be 2100 copies of 2¹⁶ floats.
     let m = model(vec![vec![0; 2 << 16]], (0..2100).map(|_| (vec![1, 1 << 16], FLOAT16, Some(0))).collect(), vec![], vec![], vec![]);

@@ -44,6 +44,9 @@ impl EffectcraftApp {
     pub fn set_gpu_failure_bridge(&mut self, bridge: gpu_failure::GpuFailureBridge) {
         if let Some(gpu) = &self.gpu {
             bridge.forward_to(gpu.context().device_failure_notifier());
+            if let Some(observer) = bridge.scoped_error_observer() {
+                gpu.set_scoped_error_observer(observer);
+            }
         }
         self.gpu_failures = Some(bridge);
     }
@@ -257,6 +260,9 @@ impl EffectcraftApp {
             Ok(Ok(g)) => {
                 if let Some(bridge) = &self.gpu_failures {
                     bridge.forward_to(g.context().device_failure_notifier());
+                    if let Some(observer) = bridge.scoped_error_observer() {
+                        g.set_scoped_error_observer(observer);
+                    }
                     if bridge.failure().is_some() {
                         return;
                     }

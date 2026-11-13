@@ -18,10 +18,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L0 | `time` | `Tick` (254 016 000 000 per second), rational frame rates incl. NTSC, SMPTE and drop-frame timecode |
 | L0 | `geom` | Vectors, matrices, quaternions, the layer transform (anchor, position, scale, orientation, rotation) |
 | L0 | `color` | sRGB and linear, HSL/HSV, luminance, the 38 blend modes, label colors |
-| L0 | `vp9enc` | VP9 encoder (profile 0, 8-bit 4:2:0, key and inter frames with motion search, loop filter and rate control; lossless at quality 100) for WebM export, from the VP9 bitstream specification |
 | L0 | `opusenc` | Opus encoder: RFC 6716 SILK (NB/MB/WB), hybrid (SWB/FB) and CELT (FB) modes chosen by bitrate and application (audio / voice), 48 kHz 20 ms packets, mono/stereo, and the RFC 7845 `OpusHead`, for WebM export audio |
-| L0 | `hevcenc` | HEVC (H.265) encoder from ITU-T H.265: Main / Main 10 4:2:0, IDR + P slices (quarter-pel motion, merge/AMVP), CABAC, deblocking, bitrate or constant-QP rate control, for MP4 (`hvc1`) export |
-| L0 | `av1enc` | AV1 encoder from the AV1 bitstream specification: Main profile 8/10-bit 4:2:0, key + inter frames (quarter-pel motion), deblocking, for MP4 (`av01`) and WebM export |
 | L1 | `raster` | Premultiplied float images, sampling, affine and projective warps, blurs, compositing (parallel with rayon) |
 | L1 | `keyframe` | Animated values, keyframes with temporal ease and spatial Bezier, roving, hold, velocity |
 | L1 | `segment` | Swappable trained models for Roto Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
@@ -43,7 +40,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
 | L3 | `aep` | After Effects projects in one crate (like `lottie`): `container` reads and writes the `.aep` container (RIFX `Egg!`) as a lossless chunk tree with a byte-identical round trip, bounded for hostile input, reads the `.aepx` XML form into the same tree, and has a typed view of items, layers, properties, effects, masks, shapes, text, markers, footage, cameras, lights and layer styles, from our own observations of generated files ([aep-format.md](aep-format.md)); `import` maps the typed view into a project (items, settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text, shapes, cameras, lights, mattes, markers, time remapping, layer styles, the effects of a shared table, footage) with a report of everything not imported ([aep-import.md](aep-import.md)); `export` builds every chunk in code (prototypes in the layout After Effects writes, cloned and edited only at verified fields) for the same scope, with a report of everything not exported, verified by opening the output in After Effects ([aep-export.md](aep-export.md)) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
-| L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
+| L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (WebAssembly ABI v1 and v2, the latter with neighbouring frames; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
 | L3 | `helper-host` | External effect helpers: finds helper programs, runs each as a child process and registers its effects (plug-in API 2) over a versioned pipe + shared-file protocol; a crashing helper is an error on the effect, never a crash ([external-helpers.md](external-helpers.md), [ADR 0001](adr/0001-external-effect-helpers.md)). Native only |
 | L4 | `engine` | `Session`: project, branching undo history, editor state, the command registry and menus, the ScriptUI window model (`scriptui`) |
 | L4 | `script` | Scripting: JavaScript (boa) with an After Effects-style object model (`app.project`, comps, layers, properties, render queue) and ScriptUI (dialogs, palettes, dockable panels; script-host threads so dialogs block `show()`), whose edits run engine commands; AE match names |
@@ -340,10 +337,13 @@ whichever compositor measured faster for it (`render::auto::AutoPick`, kept by t
 per comp, output scale and path (readback or viewer display) it averages CPU and GPU frame times
 (warm-up on both sides, the fastest warm-up frame starting the average, single stalls capped),
 picks the GPU unless the CPU is clearly faster, and re-measures the other side every 48 frames.
-Render Queue jobs don't use Auto: every frame of a job renders on the project's renderer (the
-GPU compositor with GPU Acceleration), so runs of a render don't differ by timing.
 Light comps (a few small layers, which the CPU composites only within their bounds) then stay on
-the CPU instead of paying for full-frame passes and a readback. A GPU frame walks the comp like
+the CPU instead of paying for full-frame passes and a readback. Render Queue jobs don't use
+Auto per frame: a job renders every frame on one compositor, never a mix (#3335). A GPU
+Acceleration job with an accelerator times both on its first frames
+(`export::pipeline::Cx::probe`, jobs of 12 frames or more) and keeps the faster, the CPU only
+when clearly faster; `EFFECTCRAFT_RQ_RENDERER=gpu|cpu` fixes the choice, and readback-deferred
+accelerators (the web) render on the project's renderer. A GPU frame walks the comp like
 `draw_comp`: cached layer buffers are uploaded once per buffer, then transformed with the CPU's
 sampling (nearest, bilinear, Catmull-Rom bicubic, the same minification pre-filter), motion-blur
 sub-samples are accumulated, and track mattes, Preserve Transparency, layer style passes,
@@ -412,7 +412,12 @@ as NaNs (a kernel that skips pixels fails the oracle) and validation errors pani
 (`ui-egui::frames`); headless renders, the CLI (unless `--gpu`) and CI use the CPU. Outside
 tests, device errors are logged rather than fatal. A viewer frame that runs out of video memory
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
-the RAM preview keeps half as many GPU frames from then on. The same guard catches a frame's
+the RAM preview keeps half as many GPU frames from then on. However many frame threads the viewer
+runs, at most two of them start GPU render attempts at once. Shared-pool workers use the CPU
+when both slots are busy rather than blocking Rayon helpers; dedicated single-thread preview
+lanes wait for admission and remain on the GPU, so
+working-texture pressure is bounded by concurrent attempts rather than the thread count (#3028).
+A single large frame or retained frames can still exceed the available video memory. The same guard catches a frame's
 validation errors (an invalid texture, often left by a failed allocation): that frame renders on
 the CPU and the kept textures are freed, but the compositor stays on and, with no allocation
 failure before it, the RAM preview keeps its GPU frames (#1319). A frame whose render panics is

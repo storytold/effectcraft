@@ -26,7 +26,7 @@ pub mod three_d;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use auto::{AutoKey, AutoPick};
+pub use auto::{AutoKey, AutoPick, AutoTicket};
 pub use cache::{CacheStats, LayerCache, LayerStore, PrefetchStore};
 use effectcraft_color::BlendMode;
 use effectcraft_effects::{Buf, EffectCtx, EffectEnv, EffectHost, LayerPixels, Params};
@@ -46,7 +46,7 @@ mod layers;
 mod opts;
 mod pipeline;
 
-pub use accel::{Accelerator, Backend, FxStep, FxTarget};
+pub use accel::{Accelerator, Backend, FrameMemory, FxStep, FxTarget};
 pub use footage::{CancellableFootage, FloatCurve, FootageSource, NoFootage, is_vector_footage, missing_item_problem, vector_fit};
 pub use frames::{
     adaptive_samples, blend_frames, cineon_frame, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path,
@@ -61,7 +61,7 @@ pub use layers::{Placement, StyledLayer};
 pub(crate) use opts::Collapse3d;
 pub use opts::{LayerTiming, RenderOpts};
 use opts::{MAX_THROUGH, Through};
-pub use pipeline::{Collapsed, MediaOverride, PropertyOverride};
+pub use pipeline::{Collapsed, FootagePicture, MediaOverride, PropertyOverride};
 
 pub struct Renderer<'a> {
     pub project: &'a Project,
@@ -102,6 +102,8 @@ pub struct Renderer<'a> {
     through: [Option<Through<'a>>; MAX_THROUGH],
     /// More collapsed levels than [`MAX_THROUGH`]: their motion is not blurred.
     through_lost: bool,
+    /// Layer-space consumers must not use the viewport raster optimization.
+    pub(crate) whole_raster: bool,
 }
 
 #[cfg(test)]
