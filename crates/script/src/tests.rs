@@ -900,6 +900,15 @@ fn comp_display_start_frame_follows_the_frame_rate() {
     });
     let comp = comp.expect("comp d");
     assert_eq!(comp.frame_rate.frame_at(comp.display_start), 1, "the start is frame 1, not the frame before");
+    // The frame is counted at the rate the same command sets: 100 at 50 fps, not at the old 23 fps.
+    let id = s.project.items.iter().find_map(|(id, i)| (i.name == "d").then_some(id.0)).expect("comp d id");
+    s.execute("comp.settings", json!({"comp": id, "frameRate": 50, "startFrame": 100})).unwrap();
+    let comp = s.project.items.values().find_map(|i| match &i.kind {
+        effectcraft_project::ItemKind::Comp(c) if i.name == "d" => Some(c.clone()),
+        _ => None,
+    });
+    let comp = comp.expect("comp d");
+    assert_eq!(comp.frame_rate.frame_at(comp.display_start), 100, "frame 100 at the new rate");
 }
 
 #[test]

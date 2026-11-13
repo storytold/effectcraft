@@ -47,7 +47,8 @@ fn apply_settings(c: &mut Comp, p: &Value) {
     } else if let Some(f) = f_p(p, "startFrame").filter(|f| f.is_finite()) {
         // A whole frame: its first tick, so the start still reads as that frame at rates whose frame
         // boundaries fall between ticks (rounding seconds to the nearest tick can land just before it).
-        c.display_start = c.frame_rate.tick_of(f.round() as i64);
+        // At the frame rate this same command sets, not the one it replaces below.
+        c.display_start = rate_p(p).unwrap_or(c.frame_rate).tick_of(f.round() as i64);
     } else if let Some(tc) = str_p(p, "startTimecode")
         && let Ok(f) = effectcraft_time::parse_timecode(tc, c.frame_rate, c.frame_rate.supports_drop_frame(), 0)
     {
