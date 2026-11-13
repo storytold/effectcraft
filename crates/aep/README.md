@@ -3,7 +3,9 @@
 After Effects projects (`.aep`, `.aepx`) in one crate, the way `effectcraft-lottie` handles Lottie:
 
 - `container`: reads and writes the container as a lossless chunk tree, with a typed, read-only
-  view (below; its API is re-exported at the crate root);
+  view (below). This is `craft-aep` from [storytold/craft-libs](https://github.com/storytold/craft-libs),
+  re-exported at the crate root; its container tests and the `aepdump`/`stubicc` tools are there.
+  Only `effect_map` and `style_map` (After Effects effects and layer styles to EffectCraft's) are here;
 - `import`: maps the typed view into an EffectCraft project and reports everything it does not
   import ([`docs/aep-import.md`](../../docs/aep-import.md));
 - `export`: writes an EffectCraft project as an `.aep` with every chunk built in code, and reports everything it does not export
@@ -92,14 +94,9 @@ the import against After Effects' read-back, and the host's `vector_import` test
 
 - `tests/fixtures/tools/`: the generator of the test projects (regenerates the corpus with After
   Effects; its README says how).
-- `examples/aepdump.rs`: prints the chunk tree of a file (ids, sizes, short data, match names):
-  `cargo run -p effectcraft-aep --example aepdump -- file.aep`.
-- `examples/stubicc.rs`: replaces every embedded ICC profile of a saved project by a stub that keeps
-  only the profile's description: the JSON `colorProfileData` of the working space (any white space
-  around the colon, `\/` escapes, quotes as `&quot;`) in an `.aep` chunk or the `.aepx` text, and a raw
-  profile of an imported image (an `.aep` chunk, or the `bdata` hex of an `.aepx`):
-  `cargo run -p effectcraft-aep --example stubicc -- in.aep out.aep`. A profile it cannot replace
-  stops it before anything is written. The importer reads the working space's name from the
-  description only, so the project imports the same; no vendor colour data stays in the test
-  project. Check the result independently, not by the tool's count (the corpus repository has
-  `tools/aep/inspect-embedded.py`, which scans the raw bytes, base64 and hex).
+- `aepdump` (prints the chunk tree of a file) and `stubicc` (replaces every embedded ICC profile of a
+  saved project by a stub) are examples of `craft-aep` in
+  [storytold/craft-libs](https://github.com/storytold/craft-libs):
+  `cargo run -p craft-aep --example stubicc -- in.aep out.aep` there. Check the result independently,
+  not by the tool's count (the corpus repository has `tools/aep/inspect-embedded.py`, which scans the
+  raw bytes, base64 and hex).

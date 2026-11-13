@@ -20,6 +20,9 @@ cargo xtask aep-corpus
 EFFECTCRAFT_AEP_FIXTURES=corpus/aep EFFECTCRAFT_AEP_FIXTURES_REQUIRED=1 cargo test -p effectcraft-aep
 ```
 
+The container and typed-view tests are in `craft-aep` ([storytold/craft-libs](https://github.com/storytold/craft-libs)),
+which reads the same corpus from `CRAFT_AEP_FIXTURES` (and `CRAFT_AEP_FIXTURES_REQUIRED`).
+
 The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
 interactively — local variables, parameters, column breakpoints — build with the `dev-full`
 profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUTING.md`).

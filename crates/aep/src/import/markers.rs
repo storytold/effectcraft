@@ -11,8 +11,8 @@
 //! EffectCraft's `timeRemap` property (seconds, keys in layer time) at the top of the layer's
 //! properties, where the engine's Enable Time Remapping puts it.
 
-use crate::container::index::Node as AepNode;
 use crate::{CueType, Layer as AepLayer, Marker as AepMarker, PropNode, Property as AepProp};
+use craft_aep::Node as AepNode;
 use effectcraft_color::Label;
 use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
