@@ -104,7 +104,7 @@ impl Server<'_> {
         let mut effects = vec![];
         for e in list {
             let manifest = e.manifest().clone();
-            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), manifest: manifest.clone() });
+            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), time_varying: e.reads_other_times(), manifest: manifest.clone() });
             self.effects.insert(manifest.id, e);
         }
         self.send(&Reply::Effects { effects, errors })
