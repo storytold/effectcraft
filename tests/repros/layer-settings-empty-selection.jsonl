@@ -1,0 +1,8 @@
+// Layer Settings' enablement read the first selected layer with `selected_layers[0]`: with layers
+// in the comp but none selected it indexed an empty list and panicked (fixed in b21e04b, M4.12).
+{"start": "demo"}
+{"command": "edit.deselectAll"}
+{"command": "layer.settings", "expect_error": "select a layer"}
+{"command": "layer.newSolid", "params": {"color": "#3366ff", "name": "Blue"}}
+{"command": "layer.settings", "params": {"name": "Renamed"}}
+{"expect_no_error": true}

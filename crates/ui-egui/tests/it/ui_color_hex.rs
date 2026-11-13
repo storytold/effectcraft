@@ -1,4 +1,4 @@
-//! The colour picker every colour input opens: its hex field sets an effect's colour (CC Toner),
+//! The colour picker every colour input opens: its hex field sets an effect's colour (Multi-Tone Tint),
 //! the dialogs' colour button stores sRGB (egui's own `color_edit_button_rgba` read the stored
 //! sRGB values as linear, so mid-grey `#808080` was stored as `#373737`), the square, slider and
 //! HSB / RGB fields set the colour, and Cancel / Escape / the original swatch restore it.
@@ -45,7 +45,7 @@ fn hex_code_sets_an_effect_colour() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Hex", "width": 320, "height": 180, "duration": 4})).unwrap();
     let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
-    let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "CC Toner"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "Multi-Tone Tint"})).unwrap()["effects"][0].as_u64().unwrap();
     let uid = s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(fx).unwrap().get("midtones").unwrap().uid;
     s.state.selected_layers = vec![LayerId(layer)];
     let mut app = EffectcraftApp::new(s);

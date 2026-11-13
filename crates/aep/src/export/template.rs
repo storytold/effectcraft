@@ -81,6 +81,24 @@ fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
         .collect()
 }
 
+/// The template every export clones from: built by the first export of the process and kept, as
+/// [`Template::load`] always builds the same prototypes and nothing changes them afterwards (the
+/// exporter only reads them through `&Template` and clones what it edits).
+///
+/// Concurrent exports are safe: the `static` requires `Template: Send + Sync`, which the compiler
+/// checks. Exports that race on the first call each build a template; one is kept and the others
+/// are dropped, and all of them are equal. A failed build is not kept, so the next export tries
+/// again and reports the same error.
+pub(crate) fn shared() -> R<&'static Template> {
+    static SHARED: std::sync::OnceLock<Template> = std::sync::OnceLock::new();
+    if let Some(t) = SHARED.get() {
+        return Ok(t);
+    }
+    // A failed build returns here, before `get_or_init`, so it is never kept.
+    let t = Template::load()?;
+    Ok(SHARED.get_or_init(|| t))
+}
+
 impl Template {
     pub fn load() -> R<Template> {
         let file = AepFile { chunks: crate::export::base::project_chunks(), trailer: std::borrow::Cow::Borrowed(&[]) };

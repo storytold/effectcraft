@@ -270,7 +270,7 @@ fn line_get(horizontal: bool, line: i32, i: i32, n: i32, repeat: bool) -> vec4<f
 }
 
 // One box pass of radius r along rows (horizontal) or columns, as running sums over blocks of
-// `block` pixels (each block restarts its sum, as the CPU's vertical pass does).
+// `block` pixels (each block restarts its sum, as the CPU's vertical pass does; rows are one block).
 fn box_pass(gid: vec3<u32>, horizontal: bool) {
     let dims = out_dims();
     let r = i32(P.u[0].x);

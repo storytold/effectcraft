@@ -1,0 +1,8 @@
+asset: object-matte-0.22.ecproj
+title: One frozen Object Matte from EffectCraft 0.22.0
+author: lisn0
+source: original work
+license: MIT OR Apache-2.0
+license-file: ../../../../../LICENSE-MIT
+added: 2026-11-11 by lisn0
+notes: Saved by the released 0.22.0 CLI using a generated 64x48 orange rectangle on a blue background. Contains one frozen alpha plane. The source path is a generic test path, and the source video is unnecessary for the state-preservation regression test.
