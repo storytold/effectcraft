@@ -5,6 +5,7 @@
 //! stay frames at every rate (29.97 fps is `23976 / 800` in the file and `30000 / 1001` in the
 //! project). Any other time is rounded to the nearest tick.
 
+use crate::container::TimeBase as ContainerTimeBase;
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
 /// The composition's frame structure: the stored time base and the rate the project gets.
@@ -27,7 +28,8 @@ pub(crate) fn frame_rate(timescale: u32, frame_duration: u32) -> Option<FrameRat
     }
     let exact = FrameRate::new(i64::from(timescale), i64::from(frame_duration));
     let fps = exact.as_f64();
-    for ntsc in [FrameRate::FPS_23_976, FrameRate::FPS_29_97, FrameRate::FPS_59_94, FrameRate::FPS_119_88] {
+    for ((num, den), _) in ContainerTimeBase::NTSC {
+        let ntsc = FrameRate::new(i64::from(num), i64::from(den));
         if (ntsc.as_f64() - fps).abs() < 0.0005 {
             return Some(ntsc);
         }
