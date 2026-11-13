@@ -218,37 +218,45 @@ mod tests {
         {
             let palette = [255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0];
             let mut enc = gif::Encoder::new(&mut bytes, 3, 2, &palette).unwrap();
-            let mut first = gif::Frame::default();
-            first.width = 3;
-            first.height = 2;
-            first.buffer = vec![0; 6].into(); // red background
-            first.delay = 5;
-            first.dispose = gif::DisposalMethod::Keep;
+            let first = gif::Frame {
+                width: 3,
+                height: 2,
+                buffer: vec![0; 6].into(), // red background
+                delay: 5,
+                dispose: gif::DisposalMethod::Keep,
+                ..gif::Frame::default()
+            };
             enc.write_frame(&first).unwrap();
 
-            let mut second = gif::Frame::default();
-            second.left = 1;
-            second.width = 1;
-            second.height = 1;
-            second.buffer = vec![1].into(); // green patch
-            second.delay = 7;
-            second.dispose = gif::DisposalMethod::Background;
+            let second = gif::Frame {
+                left: 1,
+                width: 1,
+                height: 1,
+                buffer: vec![1].into(), // green patch
+                delay: 7,
+                dispose: gif::DisposalMethod::Background,
+                ..gif::Frame::default()
+            };
             enc.write_frame(&second).unwrap();
 
-            let mut third = gif::Frame::default();
-            third.left = 2;
-            third.width = 1;
-            third.height = 1;
-            third.buffer = vec![2].into(); // blue patch after disposal
-            third.delay = 9;
-            third.dispose = gif::DisposalMethod::Previous;
+            let third = gif::Frame {
+                left: 2,
+                width: 1,
+                height: 1,
+                buffer: vec![2].into(), // blue patch after disposal
+                delay: 9,
+                dispose: gif::DisposalMethod::Previous,
+                ..gif::Frame::default()
+            };
             enc.write_frame(&third).unwrap();
 
-            let mut fourth = gif::Frame::default();
-            fourth.width = 1;
-            fourth.height = 1;
-            fourth.buffer = vec![3].into(); // black patch after restoring the previous canvas
-            fourth.delay = 11;
+            let fourth = gif::Frame {
+                width: 1,
+                height: 1,
+                buffer: vec![3].into(), // black patch after restoring the previous canvas
+                delay: 11,
+                ..gif::Frame::default()
+            };
             enc.write_frame(&fourth).unwrap();
         }
         let expected = legacy_gif_frames(&bytes);
