@@ -5,11 +5,9 @@
 //! delays), so uneven timing is kept exactly; [`Anim::frame_at`] looks the frame up by time.
 //! Animated WebP ([`crate::webp_anim`]) shares [`Anim`] and this decode path.
 
-use std::io::Cursor;
-
 use effectcraft_project::{AlphaMode, Footage, FootageKind};
 use effectcraft_time::{FrameRate, Tick};
-use image::{AnimationDecoder, DynamicImage, codecs::gif::GifDecoder};
+use image::DynamicImage;
 
 use crate::{MediaError, Result};
 
@@ -86,39 +84,39 @@ impl Anim {
         if crate::webp_anim::is_webp(bytes) {
             return crate::webp_anim::load(bytes);
         }
-        let mut dec = GifDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
-        // A frame may be far larger than the canvas, and the decoder allocates its buffer before
-        // decoding it: no single buffer may pass what all the frames may hold.
-        let mut limits = image::Limits::no_limits();
-        limits.max_alloc = Some(MAX_BYTES as u64);
-        image::ImageDecoder::set_limits(&mut dec, limits).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
-        // The decoder allocates the full logical canvas for the first frame, however small the
-        // frames themselves are: check it before decoding any.
-        let (w, h) = image::ImageDecoder::dimensions(&dec);
-        if u64::from(w) * u64::from(h) * 4 > MAX_BYTES as u64 {
-            return Err(MediaError::Unsupported(format!("GIF canvas of {w}×{h} is too large to hold in memory")));
-        }
-        let (mut frames, mut starts) = (Vec::new(), Vec::new());
-        let (mut at, mut size) = (0i64, 0usize);
-        for frame in dec.into_frames() {
-            let frame = match frame {
-                Ok(f) => f,
-                Err(e) if frames.is_empty() => return Err(MediaError::Decode(format!("GIF: {e}"))),
-                Err(e) => {
-                    log::warn!("media: GIF stops after {} frames: {e}", frames.len());
-                    break;
-                }
-            };
-            let (numer, denom) = frame.delay().numer_denom_ms();
-            let cs = delay_cs(numer.checked_div(denom).unwrap_or(0) / 10);
-            let buf = frame.into_buffer();
-            size = size.saturating_add(buf.as_raw().len());
-            if size > MAX_BYTES {
-                return Err(MediaError::Unsupported("GIF is too large to hold in memory".into()));
+        let mut limits = craft_gif::frames::FrameLimits::default();
+        limits.max_frames = MAX_FRAMES;
+        limits.max_bytes = MAX_BYTES as u64;
+        limits.max_canvas_bytes = MAX_BYTES as u64;
+        limits.max_decode_bytes = Some(MAX_BYTES as u64);
+        let decoded = craft_gif::frames::read_frames(bytes, &limits).map_err(|e| match e {
+            craft_gif::frames::FrameError::Malformed(m) => MediaError::Decode(format!("GIF: {m}")),
+            craft_gif::frames::FrameError::LimitExceeded(m)
+                if m.contains("cannot hold") || m.contains("decode-allocation limit") || m.to_ascii_lowercase().contains("memory limit") =>
+            {
+                MediaError::Unsupported("GIF is too large to hold in memory".into())
             }
+            craft_gif::frames::FrameError::LimitExceeded(m) if m.contains("canvas is over") => {
+                MediaError::Unsupported("GIF canvas is too large to hold in memory".into())
+            }
+            craft_gif::frames::FrameError::LimitExceeded(m) => MediaError::Unsupported(format!("GIF: {m}")),
+        })?;
+        if matches!(&decoded.stop, craft_gif::frames::Stop::ByteLimit | craft_gif::frames::Stop::FrameLimit) {
+            return Err(MediaError::Unsupported("GIF is too large to hold in memory".into()));
+        }
+        if let craft_gif::frames::Stop::Damaged(ref e) = decoded.stop {
+            log::warn!("media: GIF stops after {} frames: {e}", decoded.frames.len());
+        }
+        let mut frames = Vec::with_capacity(decoded.frames.len());
+        let mut starts = Vec::with_capacity(decoded.frames.len());
+        let mut at = 0i64;
+        for frame in decoded.frames {
+            let cs = delay_cs(frame.delay_ms / 10);
+            let image = image::RgbaImage::from_raw(decoded.width, decoded.height, frame.rgba)
+                .ok_or_else(|| MediaError::Decode("GIF: invalid decoded frame dimensions".into()))?;
             starts.push(Tick::from_units(at, 100));
             at = at.saturating_add(i64::from(cs));
-            frames.push(DynamicImage::ImageRgba8(buf));
+            frames.push(DynamicImage::ImageRgba8(image));
         }
         Anim::new(frames, starts).ok_or_else(|| MediaError::Decode("GIF: no frames".into()))
     }
@@ -133,9 +131,13 @@ impl Anim {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use effectcraft_project::{Footage, FootageKind};
     use effectcraft_time::{FrameRate, Tick};
+    use image::AnimationDecoder;
 
+    use super::MAX_FRAMES;
     use crate::{MediaPool, probe_bytes};
 
     /// A 2×2 GIF with one solid-colour frame per `(rgb, delay)`.
@@ -150,6 +152,15 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Preserve the old consumer path as a test oracle while the frame API is shared.
+    fn legacy_gif_frames(bytes: &[u8]) -> Vec<image::RgbaImage> {
+        image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).unwrap().into_frames().map(|frame| frame.unwrap().into_buffer()).collect()
+    }
+
+    fn legacy_gif_frames_until_error(bytes: &[u8]) -> Vec<image::RgbaImage> {
+        image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).unwrap().into_frames().map_while(|frame| frame.ok()).map(|frame| frame.into_buffer()).collect()
     }
 
     const RED: [u8; 3] = [255, 0, 0];
@@ -202,6 +213,54 @@ mod tests {
     }
 
     #[test]
+    fn shared_gif_frames_match_legacy_compositing_and_disposal() {
+        let mut bytes = Vec::new();
+        {
+            let palette = [255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0];
+            let mut enc = gif::Encoder::new(&mut bytes, 3, 2, &palette).unwrap();
+            let mut first = gif::Frame::default();
+            first.width = 3;
+            first.height = 2;
+            first.buffer = vec![0; 6].into(); // red background
+            first.delay = 5;
+            first.dispose = gif::DisposalMethod::Keep;
+            enc.write_frame(&first).unwrap();
+
+            let mut second = gif::Frame::default();
+            second.left = 1;
+            second.width = 1;
+            second.height = 1;
+            second.buffer = vec![1].into(); // green patch
+            second.delay = 7;
+            second.dispose = gif::DisposalMethod::Background;
+            enc.write_frame(&second).unwrap();
+
+            let mut third = gif::Frame::default();
+            third.left = 2;
+            third.width = 1;
+            third.height = 1;
+            third.buffer = vec![2].into(); // blue patch after disposal
+            third.delay = 9;
+            third.dispose = gif::DisposalMethod::Previous;
+            enc.write_frame(&third).unwrap();
+
+            let mut fourth = gif::Frame::default();
+            fourth.width = 1;
+            fourth.height = 1;
+            fourth.buffer = vec![3].into(); // black patch after restoring the previous canvas
+            fourth.delay = 11;
+            enc.write_frame(&fourth).unwrap();
+        }
+        let expected = legacy_gif_frames(&bytes);
+        let actual = super::Anim::load(&bytes).unwrap();
+        assert_eq!(actual.frames.len(), expected.len());
+        for (frame, old) in actual.frames.iter().zip(expected) {
+            assert_eq!(frame.to_rgba8(), old);
+        }
+        assert_eq!(actual.starts, vec![Tick::from_units(0, 100), Tick::from_units(5, 100), Tick::from_units(12, 100), Tick::from_units(21, 100)]);
+    }
+
+    #[test]
     fn a_single_frame_gif_stays_a_still() {
         let f = probe_bytes("a.gif", gif(&[(RED, 10)]).into()).unwrap();
         assert_eq!(f.kind, FootageKind::Still);
@@ -226,6 +285,20 @@ mod tests {
         };
         assert!(pool.frame_at(&f, Tick::ZERO).is_err());
         let _ = probe_bytes("a.gif", bytes.into());
+    }
+
+    #[test]
+    fn a_damaged_gif_tail_keeps_frames_already_decoded() {
+        let mut bytes = gif(&[(RED, 5), (GREEN, 5), (BLUE, 5)]);
+        let info = craft_gif::scan(&bytes, MAX_FRAMES).unwrap();
+        assert_eq!(info.frames.len(), 3);
+        bytes.truncate(info.frames[1].offset);
+
+        let legacy = legacy_gif_frames_until_error(&bytes);
+        assert_eq!(legacy.len(), 1);
+        let actual = super::Anim::load(&bytes).unwrap();
+        assert_eq!(actual.frames.len(), legacy.len());
+        assert_eq!(actual.frames[0].to_rgba8(), legacy[0]);
     }
 
     #[test]
