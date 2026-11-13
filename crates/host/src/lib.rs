@@ -20,6 +20,9 @@ impl Importer for MediaImporter {
     fn probe(&self, path: &str) -> Result<Footage, String> {
         effectcraft_media::probe(path).map_err(|e| e.to_string())
     }
+    fn probe_noting(&self, path: &str) -> Result<(Footage, Option<String>), String> {
+        effectcraft_media::probe_noting(path).map_err(|e| e.to_string())
+    }
 }
 
 /// Render Queue export via `effectcraft-export`: to the file system, or to `sink` (the web app

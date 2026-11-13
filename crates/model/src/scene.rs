@@ -8,8 +8,8 @@ use std::sync::Arc;
 use craft_mesh as cm;
 
 use crate::{
-    AlphaMode, Animation, CameraProjection, Channel, ChannelPath, Interp, Mat4, Material, Mesh, Model, ModelCamera, ModelError, ModelLight, ModelLightKind,
-    Node, Primitive, Result, Skin, TexRef, Texture, Wrap,
+    AlphaMode, Animation, CameraProjection, Channel, ChannelPath, Interp, MAX_IMPORT_TEXTURE_PIXELS, Mat4, Material, Mesh, Model, ModelCamera, ModelError,
+    ModelLight, ModelLightKind, Node, Primitive, Result, Skin, TexRef, Texture, Wrap,
 };
 
 /// The bounds every reader keeps: `craft-mesh`'s defaults, with up to 2 GiB of buffers,
@@ -59,39 +59,57 @@ fn wrap(w: cm::Wrap) -> Wrap {
 /// The scene as a model. `image` gives the bytes of an image the scene names but does not hold
 /// (OBJ, which only names its textures); an image that cannot be read or decoded leaves its
 /// material untextured, with a log line.
-pub(crate) fn to_model(scene: cm::Scene, missing: MissingNormals, image: &dyn Fn(&cm::Image) -> Option<Vec<u8>>) -> Result<Model> {
-    for w in &scene.warnings {
+pub(crate) fn to_model(mut scene: cm::Scene, missing: MissingNormals, image: &dyn Fn(&cm::Image) -> Option<Vec<u8>>) -> Result<Model> {
+    let mut warnings = std::mem::take(&mut scene.warnings);
+    for w in &warnings {
         log::warn!("model: {w}");
     }
     // Images decode once; each (image, wrap) a material uses is one texture.
+    let mut pixels_left = MAX_IMPORT_TEXTURE_PIXELS;
+    let mut decoded_by_name: HashMap<String, Option<Arc<Texture>>> = HashMap::new();
     let decoded: Vec<Option<Arc<Texture>>> = scene
         .images
         .iter()
-        .map(|im| {
-            let bytes = im.data.clone().or_else(|| image(im));
-            match bytes.map(|b| Texture::decode(&b)) {
+        .enumerate()
+        .map(|(index, im)| {
+            let key = image_key(im, index);
+            if let Some(decoded) = decoded_by_name.get(&key) {
+                return decoded.clone();
+            }
+            let external;
+            let bytes = if let Some(data) = im.data.as_deref() {
+                Some(data)
+            } else {
+                external = image(im);
+                external.as_deref()
+            };
+            let decoded = match bytes.map(|b| Texture::decode_within(b, &mut pixels_left)) {
                 Some(Ok(t)) => Some(Arc::new(t)),
                 Some(Err(e)) => {
-                    log::warn!("model: cannot decode texture `{}`: {e}", im.uri.as_deref().unwrap_or(&im.name));
+                    let warning = format!("texture `{}` was left out: {e}", im.uri.as_deref().unwrap_or(&im.name));
+                    log::warn!("model: {warning}");
+                    warnings.push(warning);
                     None
                 }
                 None => {
-                    log::warn!("model: texture `{}` was not found next to the model", im.uri.as_deref().unwrap_or(&im.name));
+                    let warning = format!("texture `{}` was not found next to the model", im.uri.as_deref().unwrap_or(&im.name));
+                    log::warn!("model: {warning}");
+                    warnings.push(warning);
                     None
                 }
-            }
+            };
+            decoded_by_name.insert(key, decoded.clone());
+            decoded
         })
         .collect();
     let mut textures: Vec<Arc<Texture>> = vec![];
-    let mut texture_of: HashMap<(usize, [Wrap; 2]), usize> = HashMap::new();
+    let mut texture_of: HashMap<(String, [Wrap; 2]), usize> = HashMap::new();
+    for texture in &scene.texture_variants {
+        ensure_texture(&scene, &decoded, *texture, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings);
+    }
     let mut tref = |t: Option<cm::TextureRef>| -> Option<TexRef> {
         let t = t?;
-        let img = decoded.get(t.image).cloned().flatten()?;
-        let w = t.wrap.map(wrap);
-        let texture = *texture_of.entry((t.image, w)).or_insert_with(|| {
-            textures.push(if img.wrap == w { img } else { Arc::new(Texture { wrap: w, ..(*img).clone() }) });
-            textures.len() - 1
-        });
+        let texture = ensure_texture(&scene, &decoded, t, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings)?;
         Some(TexRef { texture, uv_set: t.uv_set })
     };
     let materials: Vec<Material> = scene
@@ -210,7 +228,45 @@ pub(crate) fn to_model(scene: cm::Scene, missing: MissingNormals, image: &dyn Fn
             range: l.range,
         })
         .collect();
-    Ok(Model { meshes, nodes, roots: scene.roots, materials, textures, skins, animations, cameras, lights })
+    Ok(Model { meshes, nodes, roots: scene.roots, materials, textures, skins, animations, cameras, lights, warnings })
+}
+
+fn image_key(image: &cm::Image, index: usize) -> String {
+    image.uri.as_deref().or_else(|| (!image.name.is_empty()).then_some(image.name.as_str())).map(str::to_string).unwrap_or_else(|| format!("image:{index}"))
+}
+
+fn ensure_texture(
+    scene: &cm::Scene,
+    decoded: &[Option<Arc<Texture>>],
+    reference: cm::TextureRef,
+    textures: &mut Vec<Arc<Texture>>,
+    texture_of: &mut HashMap<(String, [Wrap; 2]), usize>,
+    pixels_left: &mut u64,
+    warnings: &mut Vec<String>,
+) -> Option<usize> {
+    let image = decoded.get(reference.image)?.as_ref()?;
+    let wrap_mode = reference.wrap.map(wrap);
+    let key = (image_key(scene.images.get(reference.image)?, reference.image), wrap_mode);
+    if let Some(&index) = texture_of.get(&key) {
+        return Some(index);
+    }
+    if image.wrap != wrap_mode {
+        let cost = (image.width as u64).checked_mul(image.height as u64);
+        let Some(cost) = cost.filter(|&cost| cost <= *pixels_left) else {
+            let source = scene.images.get(reference.image)?;
+            let warning = format!("texture `{}` wrap variant exceeds the model texture pixel limit", source.uri.as_deref().unwrap_or(&source.name));
+            log::warn!("model: {warning}");
+            warnings.push(warning);
+            return None;
+        };
+        *pixels_left -= cost;
+        textures.push(Arc::new(Texture { wrap: wrap_mode, ..(**image).clone() }));
+    } else {
+        textures.push(image.clone());
+    }
+    let index = textures.len() - 1;
+    texture_of.insert(key, index);
+    Some(index)
 }
 
 /// One primitive per part, each with one vertex per distinct corner of its triangles. Normals
@@ -368,4 +424,36 @@ fn smooth_normals(m: &cm::Mesh, missing: MissingNormals) -> HashMap<(u32, Option
             (key, n)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_variants_share_and_charge_the_import_pixel_budget() {
+        let scene = cm::Scene { images: vec![cm::Image { name: "texture.png".into(), ..cm::Image::default() }], ..cm::Scene::default() };
+        let texture = Arc::new(Texture { width: 2, height: 2, data: vec![[1.0; 4]; 4], wrap: [Wrap::Repeat; 2] });
+        let decoded = vec![Some(texture)];
+        let mut textures = vec![];
+        let mut texture_of = HashMap::new();
+        // The decoded image has already taken four pixels from this budget.
+        let mut pixels_left = 4;
+        let mut warnings = vec![];
+        let clamped = cm::TextureRef { image: 0, uv_set: 0, wrap: [cm::Wrap::Clamp; 2] };
+
+        let first = ensure_texture(&scene, &decoded, clamped, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).unwrap();
+        let shared = ensure_texture(&scene, &decoded, clamped, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).unwrap();
+        assert_eq!(first, shared);
+        assert_eq!(pixels_left, 0);
+
+        let repeated = cm::TextureRef { wrap: [cm::Wrap::Repeat; 2], ..clamped };
+        assert!(ensure_texture(&scene, &decoded, repeated, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).is_some());
+        assert_eq!(pixels_left, 0);
+
+        let mirrored = cm::TextureRef { wrap: [cm::Wrap::Mirror; 2], ..clamped };
+        assert!(ensure_texture(&scene, &decoded, mirrored, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).is_none());
+        assert_eq!(textures.len(), 2);
+        assert_eq!(warnings.len(), 1);
+    }
 }

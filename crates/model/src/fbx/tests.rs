@@ -213,3 +213,93 @@ fn fbx_models_instancing_one_geometry_share_its_mesh() {
     assert_ne!(mesh_of("Shape"), mesh_of("Red only"), "different materials: its own mesh");
     assert_eq!(m.meshes.len(), 2);
 }
+
+#[test]
+fn texture_aliases_of_one_image_share_its_pixels() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(2, 1, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let objects = r#"
+	Texture: 600, "Texture::Base", "" {
+		RelativeFilename: "maps\base.png"
+	}
+	Texture: 700, "Texture::Base again", "" {
+		RelativeFilename: "maps\base.png"
+	}
+}
+Connections:  {"#;
+    let doc = ASCII
+        .replace("}\nConnections:  {", objects)
+        .replace("C: \"OO\",500,300\n", "C: \"OO\",500,300\n\tC: \"OP\",600,400, \"DiffuseColor\"\n\tC: \"OP\",700,500, \"DiffuseColor\"\n");
+    let resolve = |uri: &str| (uri == "maps/base.png").then(|| png.clone());
+    let m = parse(doc.as_bytes(), &resolve).unwrap();
+    assert_eq!(m.textures.len(), 1);
+    assert!(m.materials.iter().all(|x| x.base_color_tex.map(|t| t.texture) == Some(0)));
+    assert!(m.warnings.is_empty());
+}
+
+/// A PNG that is only a header claiming `w`×`h` pixels (an empty data chunk follows).
+fn png_header_only(w: u32, h: u32) -> Vec<u8> {
+    fn chunk(png: &mut Vec<u8>, ty: &[u8], data: &[u8]) {
+        let body = [ty, data].concat();
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in &body {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        png.extend((data.len() as u32).to_be_bytes());
+        png.extend(&body);
+        png.extend((!crc).to_be_bytes());
+    }
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    chunk(&mut png, b"IHDR", &[w.to_be_bytes(), h.to_be_bytes(), [8, 6, 0, 0]].concat().iter().copied().chain([0]).collect::<Vec<u8>>());
+    chunk(&mut png, b"IDAT", &[]);
+    png
+}
+
+#[test]
+fn a_texture_past_the_limits_is_left_out_with_a_warning_not_a_failed_import() {
+    let objects = r#"
+	Texture: 600, "Texture::Base", "" {
+		RelativeFilename: "maps\base.png"
+	}
+}
+Connections:  {"#;
+    let doc = ASCII.replace("}\nConnections:  {", objects).replace("C: \"OO\",500,300\n", "C: \"OO\",500,300\n\tC: \"OP\",600,400, \"DiffuseColor\"\n");
+    // 30000×30000 pixels would take ~14 GiB; the header alone is refused, before anything is allocated.
+    let huge = png_header_only(30000, 30000);
+    let resolve = |_: &str| Some(huge.clone());
+    let m = parse(doc.as_bytes(), &resolve).unwrap();
+    assert!(m.textures.is_empty() && m.materials.iter().all(|x| x.base_color_tex.is_none()));
+    assert!(m.warnings.iter().any(|w| w.contains("30000")), "{:?}", m.warnings);
+}
+
+#[test]
+fn texture_files_resolving_to_one_image_share_it() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(2, 1, image::Rgba([0, 255, 0, 255]));
+        let mut b = std::io::Cursor::new(vec![]);
+        img.write_to(&mut b, image::ImageFormat::Png).unwrap();
+        b.into_inner()
+    };
+    let objects = r#"
+	Texture: 600, "Texture::Base", "" {
+		RelativeFilename: "maps\base.png"
+	}
+	Texture: 700, "Texture::Other spelling", "" {
+		RelativeFilename: "missing\base.png"
+		FileName: "maps\base.png"
+	}
+}
+Connections:  {"#;
+    let doc = ASCII
+        .replace("}\nConnections:  {", objects)
+        .replace("C: \"OO\",500,300\n", "C: \"OO\",500,300\n\tC: \"OP\",600,400, \"DiffuseColor\"\n\tC: \"OP\",700,500, \"DiffuseColor\"\n");
+    let resolve = |uri: &str| (uri == "maps/base.png").then(|| png.clone());
+    assert_eq!(parse(doc.as_bytes(), &resolve).unwrap().textures.len(), 1);
+}

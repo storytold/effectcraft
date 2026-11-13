@@ -483,12 +483,54 @@ pub fn default_folder() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
         return PathBuf::from(x).join("effectcraft/disk-cache");
     }
-    home.map(|h| h.join(".cache/effectcraft/disk-cache")).unwrap_or_else(|| std::env::temp_dir().join("effectcraft-disk-cache"))
+    // Without a home folder: a per-user folder in the shared temp folder, made private by `open`.
+    let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
+    home.map(|h| h.join(".cache/effectcraft/disk-cache")).unwrap_or_else(|| std::env::temp_dir().join(format!("effectcraft-disk-cache-{user}")))
+}
+
+/// A cache folder in the shared temp folder must be ours alone: not a link someone placed there,
+/// and private (setting the mode fails unless we own it), so another user cannot redirect the
+/// cache's writes and clean-up or read its files.
+#[cfg(unix)]
+fn make_private(folder: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Judge the folder as written and as it resolves (a relative path, a link or an alias such as
+    // /tmp -> /private/tmp can all land in the shared temp folder).
+    // The shared roots: the process's temp folder (`TMPDIR`) and the system's own, which a cache
+    // configured by path lands in whatever `TMPDIR` says.
+    let roots: Vec<PathBuf> = [std::env::temp_dir(), PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]
+        .into_iter()
+        .flat_map(|t| {
+            let real = t.canonicalize().unwrap_or_else(|_| t.clone());
+            [t, real]
+        })
+        .collect();
+    let given = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let real = folder.canonicalize().unwrap_or_else(|_| given.clone());
+    // The shared folder itself is not ours to change or to keep a cache in: refused.
+    if [&given, &real].iter().any(|p| roots.contains(p)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the disk cache folder is the shared temp folder"));
+    }
+    // Only folders inside it are made private.
+    if ![&given, &real].iter().any(|p| roots.iter().any(|t| p.starts_with(t) && **p != *t)) {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(folder)?.file_type().is_symlink() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the disk cache folder is a link"));
+    }
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn make_private(_: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl DiskCache {
     /// Open (or create) the cache in `folder`, holding at most `max_bytes`.
     pub fn open(folder: impl AsRef<Path>, max_bytes: u64) -> std::io::Result<Arc<DiskCache>> {
+        std::fs::create_dir_all(folder.as_ref())?;
+        make_private(folder.as_ref())?;
         let dir = folder.as_ref().join(VERSION);
         std::fs::create_dir_all(&dir)?;
         let dc = Arc::new(DiskCache {
@@ -1145,8 +1187,9 @@ impl DiskCache {
     /// started at.
     /// The buffer is shared, and encoded on the writer thread.
     pub fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
-        // (no room on the disk: refused before the buffer is queued and compressed)
-        if self.contains(Kind::Layer, key) || !self.accepts_writes() {
+        // (no room on the disk, or a buffer no entry could hold: refused before it is queued and
+        // compressed)
+        if !layer_fits(buf.img.data.len()) || self.contains(Kind::Layer, key) || !self.accepts_writes() {
             return;
         }
         self.count_encode();
@@ -1155,6 +1198,9 @@ impl DiskCache {
 
     /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
     pub fn put_layer_now(&self, key: u128, buf: &Buf, files: &ReadFiles) {
+        if !layer_fits(buf.img.data.len()) {
+            return;
+        }
         if let Some(files) = EntryFiles::of(files, None) {
             self.write_format(Kind::Layer, key, FORMAT_LAYER_FILES, &with_files(&files, encode_layer(buf)));
         }
@@ -1163,8 +1209,12 @@ impl DiskCache {
     /// A segmentation (chain key, scale) written by [`DiskCache::put_seg`].
     pub fn get_seg(&self, key: u64, scale: f64) -> Option<effectcraft_effects::roto::FrameSeg> {
         let p = self.read(Kind::Matte, seg_key(key, scale))?;
-        let raw = lz4_flex::decompress_size_prepended(&p).ok()?;
-        effectcraft_effects::roto::FrameSeg::from_bytes(&raw)
+        let seg = decompress_checked(&p, None).and_then(|raw| effectcraft_effects::roto::FrameSeg::from_bytes(&raw));
+        if seg.is_none() {
+            // A rejected entry would otherwise stay indexed and keep `put_seg` from replacing it.
+            self.discard(Kind::Matte, seg_key(key, scale));
+        }
+        seg
     }
 
     /// Queue a segmentation for writing.
@@ -1403,14 +1453,36 @@ fn encode_frame(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The most bytes one cache entry decompresses to (a 16384² frame of 8-bit RGBA): the size an
+/// entry states is checked against it, and against what the entry's dimensions need, before
+/// anything is allocated.
+const MAX_ENTRY_BYTES: usize = 1 << 30;
+
+/// An LZ4 payload with its stated size prepended, decompressed only when that size is
+/// `expected` (any size up to [`MAX_ENTRY_BYTES`] when `None`).
+fn decompress_checked(p: &[u8], expected: Option<usize>) -> Option<Vec<u8>> {
+    let size = u32::from_le_bytes(p.get(..4)?.try_into().ok()?) as usize;
+    if size > MAX_ENTRY_BYTES || expected.is_some_and(|e| e != size) {
+        return None;
+    }
+    // A block that ends short of the size it states is damaged: callers index by that size.
+    lz4_flex::decompress(p.get(4..)?, size).ok().filter(|raw| raw.len() == size)
+}
+
 fn decode_frame(p: &[u8]) -> Option<Frame8> {
     if p.len() < 8 {
         return None;
     }
     let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let rgba = lz4_flex::decompress_size_prepended(&p[8..]).ok()?;
+    let rgba = decompress_checked(&p[8..], Some((w as usize).checked_mul(h as usize)?.checked_mul(4)?))?;
     (rgba.len() == w as usize * h as usize * 4).then_some(Frame8 { width: w, height: h, rgba })
+}
+
+/// Whether a layer of `pixels` pixels (16 bytes each, decompressed) is within what a cache entry
+/// may hold: a larger one could never be read back, so it is not compressed or written.
+fn layer_fits(pixels: usize) -> bool {
+    pixels.checked_mul(16).is_some_and(|b| b <= MAX_ENTRY_BYTES)
 }
 
 /// Half floats with their low and high bytes in planes (per channel), then LZ4: the high bytes
@@ -1440,10 +1512,7 @@ fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
     let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
     let n = (w as usize).checked_mul(h as usize)?;
-    let planes = lz4_flex::decompress_size_prepended(&p[8..]).ok()?;
-    if planes.len() != n.checked_mul(8)? {
-        return None;
-    }
+    let planes = decompress_checked(&p[8..], Some(n.checked_mul(8)?))?;
     let mut rgba = vec![0u16; n * 4];
     for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         for (c, v) in px.iter_mut().enumerate() {
@@ -1486,9 +1555,9 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
     let f = |i: usize| -> Option<f64> { Some(f64::from_le_bytes(p[i..i + 8].try_into().ok()?)) };
     let offset = [f(8)?, f(16)?];
     let scale = f(24)?;
-    let planes = lz4_flex::decompress_size_prepended(&p[32..]).ok()?;
     let n = (w as usize).checked_mul(h as usize)?;
-    if planes.len() != n.checked_mul(16)? {
+    let planes = decompress_checked(&p[32..], Some(n.checked_mul(16)?))?;
+    if planes.len() != n * 16 {
         return None;
     }
     let mut img = Image::new(w, h);
@@ -1507,7 +1576,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-6";
+const RENDER_VERSION: &str = "effectcraft-render-7";
 
 /// Feeds the `Debug` form of `v` into the hash, followed by a separator byte.
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
@@ -1618,6 +1687,82 @@ pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_folder_in_the_temp_folder_is_made_private_and_never_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("private");
+        let dc = DiskCache::open(&d, 1 << 20).unwrap();
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
+        drop(dc);
+        let link = tmpdir("link-private-temp");
+        std::os::unix::fs::symlink(&d, &link).unwrap();
+        assert!(DiskCache::open(&link, 1 << 20).is_err());
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_temp_folder_itself_is_refused_as_a_cache_folder() {
+        let tmp = std::env::temp_dir();
+        assert!(DiskCache::open(&tmp, 1 << 20).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_resolves_into_the_temp_folder_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        // `<cwd>/link` names a folder in the temp folder only through the link.
+        let real = tmpdir("alias-real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = std::env::current_dir().unwrap().join(format!("effectcraft-alias-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dc = DiskCache::open(link.join("cache"), 1 << 20).unwrap();
+        let mode = std::fs::metadata(real.join("cache")).map(|m| m.permissions().mode() & 0o777);
+        drop(dc);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
+        assert_eq!(mode.unwrap(), 0o700);
+    }
+
+    #[test]
+    fn layers_too_big_to_read_back_are_not_written() {
+        assert!(layer_fits(MAX_ENTRY_BYTES / 16));
+        assert!(!layer_fits(MAX_ENTRY_BYTES / 16 + 1));
+        assert!(!layer_fits(10_000 * 10_000));
+        assert!(!layer_fits(usize::MAX));
+    }
+
+    #[test]
+    fn an_entry_stating_a_size_its_dimensions_do_not_need_is_not_decompressed() {
+        // A 2×2 frame whose payload states 3 GiB: refused before any allocation.
+        let mut p = 2u32.to_le_bytes().to_vec();
+        p.extend_from_slice(&2u32.to_le_bytes());
+        p.extend_from_slice(&(3u32 << 30).to_le_bytes());
+        p.extend_from_slice(&[0; 16]);
+        assert!(decode_frame(&p).is_none());
+        assert!(decompress_checked(&p[8..], None).is_none());
+        // A well-formed entry still decodes.
+        let ok = encode_frame(2, 2, &[7; 16]);
+        assert_eq!(decode_frame(&ok).map(|f| f.rgba), Some(vec![7; 16]));
+    }
+
+    #[test]
+    fn a_block_shorter_than_the_size_it_states_is_rejected() {
+        // The payload states 100 bytes but holds a valid block of 10: `lz4_flex` returns the 10.
+        let mut p = 100u32.to_le_bytes().to_vec();
+        p.extend_from_slice(&lz4_flex::block::compress(&[5u8; 10]));
+        assert!(decompress_checked(&p, None).is_none());
+        // A half-float frame whose planes come up short is refused, not indexed past.
+        let mut f16 = 2u32.to_le_bytes().to_vec();
+        f16.extend_from_slice(&2u32.to_le_bytes());
+        f16.extend_from_slice(&32u32.to_le_bytes());
+        f16.extend_from_slice(&lz4_flex::block::compress(&[1u8; 8]));
+        assert!(decode_frame_f16(&f16).is_none());
+    }
 
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("effectcraft-disk-cache-{name}-{}", std::process::id()));

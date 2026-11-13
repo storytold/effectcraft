@@ -38,6 +38,19 @@ pub enum Conv {
     Skip,
 }
 
+impl Conv {
+    /// For a number (`Percent`, `Plain`, `Factor`): what a stored value is multiplied by to give
+    /// the value here. `None` for every other conversion.
+    pub fn number_scale(self) -> Option<f64> {
+        match self {
+            Conv::Percent { valid_max } => Some(100.0 / valid_max),
+            Conv::Plain { .. } => Some(1.0),
+            Conv::Factor { factor, .. } => Some(factor),
+            _ => None,
+        }
+    }
+}
+
 // After Effects' popup items as the corpus stores them (`pdnm`).
 /// 368.
 pub const RAMP_SHAPE: &[&str] = &["Linear Ramp", "Radial Ramp"];

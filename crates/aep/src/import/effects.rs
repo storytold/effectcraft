@@ -1,7 +1,8 @@
 //! Effects: a table maps an After Effects effect (its match name) and its parameters (by their
-//! index in `parT`) to an EffectCraft effect, a parameter id and a unit conversion. Effects and
-//! parameters outside the table are reported in [`LossCategory::Effects`] by match name, never
-//! dropped silently.
+//! index in `parT`) to an EffectCraft effect, a parameter id and a unit conversion. Parameters
+//! outside the table are reported in [`LossCategory::Effects`] by match name, never dropped
+//! silently. An effect outside it arrives as a placeholder holding its parameters (`placeholder.rs`)
+//! and is reported too.
 //!
 //! Every conversion is backed by the corpus (`docs/aep-format.md` 3.7, cases 356-450, 511-516):
 //!
@@ -82,44 +83,37 @@ pub(crate) fn import_effects<'f, 'a>(
             continue;
         }
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
-        let Some(map) = EFFECTS.iter().find(|m| m.match_name == fx.match_name()) else {
-            col.lose_unmapped_effect(fx.match_name(), format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
-            continue;
-        };
-        let Some(spec) = effectcraft_effects::find(map.effect) else {
-            col.lose_unmapped_effect(fx.match_name(), format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
-            continue;
-        };
+        let found = EFFECTS.iter().find(|m| m.match_name == fx.match_name()).and_then(|m| Some((m, effectcraft_effects::find(m.effect)?)));
+        let lost = format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
         if defs.source(&fx) == DefinitionSource::Missing {
-            col.lose(
-                LossCategory::Effects,
-                format!("{}: '{}' has the effect '{shown}' ({}) without readable parameter definitions, not imported", cx.comp, cx.layer, fx.match_name()),
-            );
+            match found {
+                Some(_) => col.lose(LossCategory::Effects, format!("{lost} without readable parameter definitions, not imported")),
+                None => col.lose_unmapped_effect(fx.match_name(), lost),
+            }
             continue;
         }
-        let size = [f64::from(cx.size.0), f64::from(cx.size.1)];
-        let mut group = effectcraft_effects::instantiate(spec, ids, &shown, size);
-        match fx.enabled() {
-            Some(on) => group.enabled = on,
-            None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
+        if found.is_none() && col.placeholder_cost >= crate::import::placeholder::MAX_COST {
+            // The import's placeholder budget is spent: the definitions (shared by many instances)
+            // are not read again. Named like any effect without a counterpart, in a group of its
+            // own (with the kept instances it would read as kept).
+            let key = format!("{} (not kept)", fx.match_name());
+            col.lose_unmapped_effect(&key, format!("{lost}, not kept (past the import's placeholder parameters)"));
+            continue;
         }
         let params = defs.params(&fx);
-        // Borrowed definitions (another instance's or the project copy) may not name every value
-        // record this instance has: such a record has nothing to import into, so it is reported.
-        if params.first().is_some_and(|p| p.borrowed_definition) {
-            let defined: std::collections::HashSet<&str> = params.iter().map(|p| p.match_name.as_str()).collect();
-            for name in fx.value_record_names().iter().filter(|n| !defined.contains(n.as_str())) {
-                col.lose(
-                    LossCategory::Effects,
-                    format!(
-                        "{}: '{}' effect '{shown}' ({}): the value record {name} has no parameter definition, not imported",
-                        cx.comp,
-                        cx.layer,
-                        fx.match_name()
-                    ),
-                );
-            }
-        }
+        report_records_without_definition(&fx, &params, cx, &shown, col);
+        let Some((map, spec)) = found else {
+            // No counterpart: kept as a placeholder that renders nothing, for expressions (#3087).
+            let mut group = crate::import::placeholder::placeholder(&fx, &params, cx, &shown, ids, refs, col);
+            set_enabled(&fx, &mut group, cx, &shown, col);
+            col.lose_unmapped_effect(fx.match_name(), format!("{lost}, kept without rendering"));
+            col.imported.placeholder_effects = col.imported.placeholder_effects.saturating_add(1);
+            target.children.push(Node::Group(group));
+            continue;
+        };
+        let size = [f64::from(cx.size.0), f64::from(cx.size.1)];
+        let mut group = effectcraft_effects::instantiate(spec, ids, &shown, size);
+        set_enabled(&fx, &mut group, cx, &shown, col);
         if map.extra == Extra::Lumetri {
             crate::import::lumetri::import_lumetri(&fx, &params, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
         } else if map.extra == Extra::Cryptomatte {
@@ -131,6 +125,29 @@ pub(crate) fn import_effects<'f, 'a>(
         }
         col.imported.effects = col.imported.effects.saturating_add(1);
         target.children.push(Node::Group(group));
+    }
+}
+
+/// The effect's fx switch.
+fn set_enabled(fx: &AepEffect<'_, '_>, group: &mut PropGroup, cx: &LayerCtx<'_>, shown: &str, col: &mut Collector) {
+    match fx.enabled() {
+        Some(on) => group.enabled = on,
+        None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
+    }
+}
+
+/// Borrowed definitions (another instance's or the project copy) may not name every value record
+/// this instance has: such a record has nothing to import into, so it is reported.
+fn report_records_without_definition(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx: &LayerCtx<'_>, shown: &str, col: &mut Collector) {
+    if !params.first().is_some_and(|p| p.borrowed_definition) {
+        return;
+    }
+    let defined: std::collections::HashSet<&str> = params.iter().map(|p| p.match_name.as_str()).collect();
+    for name in fx.value_record_names().iter().filter(|n| !defined.contains(n.as_str())) {
+        col.lose(
+            LossCategory::Effects,
+            format!("{}: '{}' effect '{shown}' ({}): the value record {name} has no parameter definition, not imported", cx.comp, cx.layer, fx.match_name()),
+        );
     }
 }
 
@@ -242,23 +259,12 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         Conv::Checkbox => Kind::EffectBool,
         // Handled above.
         Conv::LayerRef { .. } | Conv::Skip => return,
-        Conv::Percent { valid_max } => {
+        Conv::Percent { valid_max } | Conv::Plain { valid_max } | Conv::Factor { valid_max, .. } => {
             if !checked(valid_max, col) {
                 return;
             }
-            Kind::EffectNumber(100.0 / valid_max)
-        }
-        Conv::Plain { valid_max } => {
-            if !checked(valid_max, col) {
-                return;
-            }
-            Kind::EffectNumber(1.0)
-        }
-        Conv::Factor { valid_max, factor } => {
-            if !checked(valid_max, col) {
-                return;
-            }
-            Kind::EffectNumber(factor)
+            let Some(scale) = m.conv.number_scale() else { return };
+            Kind::EffectNumber(scale)
         }
     };
     // Grouped parameters are addressed by path (`master/exposure`).
@@ -364,7 +370,7 @@ fn report_beyond_limit<'v>(limit: Option<(f64, f64)>, values: impl Iterator<Item
 /// A layer parameter: None stays unset, the owning layer is itself (`own`) or unset, another layer
 /// is resolved by [`resolve_layer_refs`] once the composition's layers exist.
 /// `names` is `(here, label)`, the effect and the parameter for the report.
-fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
+pub(crate) fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
     let (here, label) = names;
     let ParamOut { group, refs, col } = out;
     // After Effects hands the named layer's source to the effect, without its masks and effects
@@ -804,7 +810,7 @@ fn px(v: f64) -> String {
 
 /// A decoded value in EffectCraft's units, `None` when it does not fit the kind or is not a valid
 /// number.
-fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
+pub(crate) fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
     let raw = match (value, kind) {
         // The reader gives colours as ARGB fractions; `Kind` takes the stored 0..255.
         (ParamValue::Argb(c), Kind::EffectColor) => c.map(|x| x * 255.0).to_vec(),
