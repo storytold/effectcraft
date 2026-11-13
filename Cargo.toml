@@ -16,7 +16,7 @@ craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-l
 craft-quit = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "e7c3dda7f3e339dd2c8d40fc4eb405472be1a1e4" }
 craft-ecproj-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "e7c3dda7f3e339dd2c8d40fc4eb405472be1a1e4" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
-craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "e7c3dda7f3e339dd2c8d40fc4eb405472be1a1e4", features = ["egui"] }
+craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "47b6bbadf0e8e378486416de26712c8b4c836132", features = ["egui"] }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
