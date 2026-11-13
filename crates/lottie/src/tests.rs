@@ -799,6 +799,24 @@ fn dotlottie_archive_roundtrip() {
     assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
 }
 
+#[test]
+fn deflated_dotlottie_archive_imports() {
+    let (mut p, cid) = setup();
+    let l = solid_layer(&mut p, cid, [0.0, 1.0, 0.0], 40, 40);
+    push(&mut p, cid, l);
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({"version":"1","animations":[{"id":"main"}]})).unwrap();
+    let animation = serde_json::to_vec(&res.json).unwrap();
+    let zip = craft_lottie::zip::try_store_with_compression(
+        &[("manifest.json".into(), manifest), ("animations/main.json".into(), animation)],
+        craft_lottie::zip::Compression::Deflated,
+    )
+    .unwrap();
+    let mut q = Project::default();
+    let imp = import(&mut q, &zip, "compressed", "", &mut |_| None).unwrap();
+    assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
+}
+
 // ---------------------------------------------------------------- hand-written fixtures
 
 fn fixture(name: &str) -> (Project, ItemId, Vec<String>) {
