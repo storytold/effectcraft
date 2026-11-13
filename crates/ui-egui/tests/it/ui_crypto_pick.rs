@@ -122,14 +122,18 @@ pub(crate) fn chip(h: &Harness<'_, EffectcraftApp>) -> Option<String> {
 
 /// Step until the chip stops saying the probe is being built (the job runs on its own thread).
 pub(crate) fn wait_probe(h: &mut Harness<'_, EffectcraftApp>) {
-    for _ in 0..3000 {
+    // Coverage builds are instrumented and can make the CPU Cryptomatte probe substantially
+    // slower than the ordinary UI test run. Keep the same completion condition and finite
+    // failure, but allow a loaded runner more time for the 4K blur fixture to finish.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         h.step();
         if chip(h).as_deref() != Some(READING) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    panic!("the probe never finished");
+    panic!("the probe never finished within 30 seconds");
 }
 
 fn hover(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2) -> String {
