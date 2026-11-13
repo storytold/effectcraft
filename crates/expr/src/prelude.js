@@ -987,6 +987,12 @@ var __mkProp = (function (P) {
 // attributes at, and the setter calls made on it ([key, value, start, count]). Setters return
 // new objects; returning a style from a Source Text expression applies it.
 
+// After Effects' names for a paragraph's justification, which its expressions read and write.
+var __AE_JUSTIFY = {
+  left: 'alignLeft', center: 'alignCenter', right: 'alignRight',
+  justifyLeft: 'justifyLastLeft', justifyCenter: 'justifyLastCenter', justifyRight: 'justifyLastRight', justifyAll: 'justifyFull',
+};
+
 function __TextStyle(doc, idx, ops, empty) { this.__d = doc; this.__i = idx; this.__ops = ops; this.__empty = empty; }
 
 function __styleSetter(key, conv) {
@@ -1062,13 +1068,13 @@ __TextStyle.prototype = {
   get kerningType() { var k = this.__get('kerning'); return typeof k === 'number' ? 'manual' : k; },
   get kerning() { var k = this.__get('kerning'); return typeof k === 'number' ? k : 0; },
   get isLigature() { return this.__get('ligatures'); },
-  get justification() { return this.__get('justify', true); },
+  get justification() { var j = this.__get('justify', true); return __AE_JUSTIFY[j] || j; },
   get firstLineIndent() { return this.__get('indentFirst', true); },
   get startIndent() { return this.__get('indentLeft', true); },
   get endIndent() { return this.__get('indentRight', true); },
   get spaceBefore() { return this.__get('spaceBefore', true); },
   get spaceAfter() { return this.__get('spaceAfter', true); },
-  get direction() { return this.__get('direction', true); },
+  get direction() { var d = this.__get('direction', true); return d === 'rtl' ? 'right-to-left' : d === 'ltr' ? 'left-to-right' : d; },
   get isEveryLineComposer() { return this.__get('composer', true) === 'everyLine'; },
   get isHangingRoman() { return this.__get('hangingPunctuation', true); },
   setText: __styleSetter('text', function (v) { return String(v); }),
