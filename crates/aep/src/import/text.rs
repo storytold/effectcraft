@@ -14,7 +14,9 @@
 
 use crate::{AutoKern, Caps, FontBaseline, Justification, Layer as AepLayer, ParagraphRun, PropGroup, PropNode, StyleRun as AepRun, TextDocument};
 use effectcraft_keyframe::text_doc::{BaselineOption, CharStyle, Composer, Direction, Justify, Kerning, ParaStyle, StyleRun, TextDoc};
+use effectcraft_project::Property;
 
+use crate::import::props::import_expression;
 use crate::import::report::{Collector, LossCategory};
 
 /// How deep the walk over the text property groups goes.
@@ -344,15 +346,27 @@ fn has_stored(g: &PropGroup<'_, '_>, depth: usize) -> bool {
     })
 }
 
+/// The Source Text expression into `target` (the layer's `text/sourceText`). The Source Text
+/// record keeps it like any other property: the text in its `Utf8`, the flags in its `tdb4`
+/// (`tests/fixtures/text-synthetic.aep`). An expression whose flags are unreadable, or a layer
+/// without a Source Text property, is reported.
+pub(crate) fn import_source_text_expression(layer: &AepLayer<'_, '_>, target: Option<&mut Property>, what: &str, col: &mut Collector) {
+    let Some(st) = layer.source_text_property() else { return };
+    if st.expression().is_none() {
+        return;
+    }
+    match target {
+        Some(p) if st.expression_enabled().is_some() => import_expression(&st, p, col),
+        _ => col.lose(LossCategory::TextLayers, format!("{what}: the Source Text expression is not imported")),
+    }
+}
+
 /// The parts of a text layer besides its first text document that are not imported.
 pub(crate) fn report_text_extras(layer: &AepLayer<'_, '_>, what: &str, col: &mut Collector) {
-    if let Some(st) = layer.source_text_property() {
-        if st.is_animated() || layer.text_document_count() > 1 {
-            col.lose(LossCategory::TextLayers, format!("{what}: Source Text keyframes are not imported (the first text document is)"));
-        }
-        if st.expression().is_some() {
-            col.lose(LossCategory::TextLayers, format!("{what}: the Source Text expression is not imported"));
-        }
+    if let Some(st) = layer.source_text_property()
+        && (st.is_animated() || layer.text_document_count() > 1)
+    {
+        col.lose(LossCategory::TextLayers, format!("{what}: Source Text keyframes are not imported (the first text document is)"));
     }
     let Some(PropNode::Group(text)) = layer.properties().and_then(|p| p.get("ADBE Text Properties")) else { return };
     for e in text.entries() {

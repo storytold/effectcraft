@@ -21,6 +21,7 @@ use effectcraft_project::{Layer, Node, PropGroup};
 use crate::export::plan::CompPlan;
 use crate::export::report::{Collector, LossCategory};
 use crate::export::shapes::{Conv, Layout, RecVal, ShCx, build_record, c_color, c_popup, c_scalar, rec_value};
+use crate::export::synth::{GROUP_END, is_tdmn};
 use crate::export::tree::{R, kids_mut, set_utf8, tpl};
 
 /// More animators or selectors than this on one layer are not written (and reported).
@@ -88,6 +89,7 @@ const PROPS: &[(&str, &str, Conv, Layout)] = &[
     ("opacity", "ADBE Text Opacity", c_scalar, Layout::One),
     ("fillColor", "ADBE Text Fill Color", c_color, Layout::Color),
     ("strokeColor", "ADBE Text Stroke Color", c_color, Layout::Color),
+    ("strokeOpacity", "ADBE Text Stroke Opacity", c_scalar, Layout::One),
     ("strokeWidth", "ADBE Text Stroke Width", c_scalar, Layout::One),
     ("tracking", "ADBE Text Tracking Amount", c_scalar, Layout::One),
     ("lineSpacing", "ADBE Text Line Spacing", c_vec2, Layout::Size),
@@ -219,14 +221,8 @@ fn plan_selector(s: &PropGroup, animator: &str, cx: &mut ShCx<'_>) -> SelPlan {
     SelPlan { name: crate::export::plan::cut_name(&s.name, 255, &here, cx.col), records, advanced }
 }
 
-fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let b = c.bytes()?;
-    let end = b.iter().position(|x| *x == 0).unwrap_or(b.len());
-    std::str::from_utf8(b.get(..end)?).ok().map(str::to_string)
-}
-
 fn pos(kids: &[Chunk<'static>], n: &str) -> Option<usize> {
-    kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(n))
+    kids.iter().position(|c| is_tdmn(c, n))
 }
 
 /// The item's user name (`tdsn/Utf8`).
@@ -296,7 +292,7 @@ pub(crate) fn put_animators(layr: &mut Chunk<'static>, t: &AnimProtos, anims: &[
     }
     {
         let gk = kids_mut(&mut group)?;
-        let end = pos(gk, "ADBE Group End").unwrap_or(gk.len());
+        let end = pos(gk, GROUP_END).unwrap_or(gk.len());
         gk.splice(end..end, built);
     }
     // Into the layer's `ADBE Text Properties`, before its Group End.
@@ -305,7 +301,7 @@ pub(crate) fn put_animators(layr: &mut Chunk<'static>, t: &AnimProtos, anims: &[
     let ti = pos(rk, "ADBE Text Properties").ok_or_else(|| tpl("text layer without text properties"))?;
     let tp = rk.get_mut(ti + 1).ok_or_else(|| tpl("text layer without text properties"))?;
     let tk = kids_mut(tp)?;
-    let end = pos(tk, "ADBE Group End").unwrap_or(tk.len());
+    let end = pos(tk, GROUP_END).unwrap_or(tk.len());
     tk.splice(end..end, [gm, group]);
     Ok(())
 }

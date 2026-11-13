@@ -22,10 +22,20 @@ impl Session {
             }
         }
         // Last-resort guard: a panicking command reports an error instead of crashing the app.
-        let r = guard::guarded(&format!("command `{id}`"), || (spec.run)(self, &params))?;
+        let nesting = crate::replay::Nesting::enter(spec.journal);
+        let caught = guard::caught();
+        let r = guard::guarded(&format!("command `{id}`"), || (spec.run)(self, &params));
+        let r = crate::replay::after_command(self, id, &params, &nesting, caught, r)?;
         self.learn_observe(id, &params);
-        if spec.journal {
-            self.journal.push((id.to_string(), params));
+        if spec.journal && !nesting.inside_journaled() {
+            // Revert and Open Recent resolve a file the parameters may not name. Store
+            // the successful read as an explicit open boundary while its resolved path is known.
+            let entry = if matches!(id, "file.revert" | "file.openRecent") {
+                self.path.as_ref().map(|path| ("file.open".to_string(), serde_json::json!({"path": path})))
+            } else {
+                None
+            };
+            self.journal.push(entry.unwrap_or_else(|| (id.to_string(), params)));
             if self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
             }

@@ -109,6 +109,8 @@ fn arbitrary_map_signed_fractional_and_near_zero_wraps() {
 #[test]
 fn scatter_brush_strokes() {
     effect_case("ec.stylize.scatter", &[("amount", n(5.0))]);
+    // #3477: After Effects' maximum, far beyond the layer.
+    effect_case("ec.stylize.scatter", &[("amount", n(1000.0))]);
     effect_case("ec.stylize.scatter", &[("amount", n(3.0)), ("grain", e(1))]);
     effect_case("ec.stylize.scatter", &[("amount", n(7.0)), ("grain", e(2)), ("randomizeEveryFrame", on())]);
     effect_case("ec.stylize.brushstrokes", &[]);

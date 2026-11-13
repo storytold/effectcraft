@@ -151,7 +151,11 @@ impl EffectcraftApp {
                         self.ui.status = e;
                     }
                 }
-                effectcraft_engine::Event::PurgeCaches => self.frames.clear(),
+                effectcraft_engine::Event::PurgeCaches => {
+                    self.frames.clear();
+                    // (frames made after it get keys of their own: see `Self::purge_stamp`)
+                    self.purges = self.purges.wrapping_add(1);
+                }
                 effectcraft_engine::Event::CopyImage { width, height, rgba } => {
                     if let Err(e) = copy_image(ctx, width, height, &rgba) {
                         self.ui.status = e;
@@ -386,7 +390,7 @@ impl EffectcraftApp {
     /// fonts are ready, draw the frame, finish pointer wrapping, pump queued wasm frames, record input activity,
     /// publish the completed pass's geometry and pass sequence, acknowledge applied synthetic input and answer
     /// `AfterInput` replies only after a non-discarded pass. Requests repaints while frames are in flight.
-    fn draw_inner(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+    fn draw_inner(&mut self, ui: &mut egui::Ui, _frame: &eframe::Frame) {
         let ctx = ui.ctx().clone();
         if self.gpu_failure_applied == Some(true) {
             self.close_after_device_loss(&ctx);
@@ -404,7 +408,7 @@ impl EffectcraftApp {
         self.frame(ui);
         panels::crypto_pick::upkeep(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        pointer_wrap::finish_native(&ctx, frame);
+        pointer_wrap::finish_native(&ctx, _frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.
         if cfg!(target_arch = "wasm32") && self.frames.pump(std::time::Duration::from_millis(if self.playback.playing { 24 } else { 40 })) {
             ctx.request_repaint();
@@ -654,6 +658,23 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         self.tick_footage_reload(ctx);
+        self.tick_lut_files(ctx);
+    }
+
+    /// A LUT file in use changed on disk (#3493): the frames kept were rendered with the old one.
+    /// Renders read it again by themselves; the watcher wakes the interface when no render did.
+    /// The frame keys carry the generation ([`Self::frame_series`]), so the viewers show the
+    /// frames rendered again, and a frame still rendering with the old LUT is never asked for.
+    fn tick_lut_files(&mut self, ctx: &egui::Context) {
+        if self.lut_watcher.is_none() {
+            let wake = ctx.clone();
+            self.lut_watcher = effectcraft_engine::lut_reload::Watcher::start(move || wake.request_repaint());
+        }
+        let generation = effectcraft_engine::lut_reload::generation();
+        if generation != self.lut_generation {
+            self.lut_generation = generation;
+            self.frames.clear();
+        }
     }
 
     /// One background worker tracks source availability and optional content reloads. It wakes

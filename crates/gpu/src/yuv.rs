@@ -147,7 +147,7 @@ pub(crate) fn record(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) ->
 pub(crate) fn convert(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) -> Option<Vec<u8>> {
     let stg = record(e, yp, img, bg)?;
     let n = planes_len(img.width, img.height) as usize;
-    e.g.read_buffer(&stg, n, n, 1).map_err(|err| log::error!(target: "effectcraft_gpu", "yuv420 readback: {err}")).ok()
+    e.g.read_buffer_after(&stg, e.last_submission(), n, n, 1).map_err(|err| log::error!(target: "effectcraft_gpu", "yuv420 readback: {err}")).ok()
 }
 
 #[cfg(test)]
