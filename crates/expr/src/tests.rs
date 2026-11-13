@@ -61,7 +61,12 @@ fn fx() -> Fx {
     a.markers.push(Marker { time: secs(2.0), comment: "beat".into(), ..Default::default() });
     a.markers.push(Marker { time: secs(4.0), comment: "drop".into(), ..Default::default() });
 
-    let b = solid(&mut p, &comp, "B", [0.0, 0.0, 1.0], 40, 40);
+    let mut b = solid(&mut p, &comp, "B", [0.0, 0.0, 1.0], 40, 40);
+    b.switches.three_d = true;
+    let material = group_push(&mut p, build::material_options);
+    b.props.children.push(material.into());
+    b.props.prop_mut("transform/rotationX").unwrap().value = Value::Scalar(30.0);
+    b.props.prop_mut("transform/orientation").unwrap().value = Value::Vec3([1.0, 2.0, 3.0]);
 
     let mut title = build::layer(&mut p, &comp, "Title", LayerSource::Text, (200, 100), None);
     title.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "Hello".into(), size: 40.0, ..Default::default() }));
@@ -1163,6 +1168,31 @@ fn seed_random_timeless() {
     let b = f.num("seedRandom(5, true); random(100)", 3.7);
     assert_eq!(a, b);
     assert_ne!(a, f.num("seedRandom(6, true); random(100)", 0.1));
+}
+
+/// A 3D layer's rotation, Orientation and Material Options by their After Effects attribute names: plain
+/// numbers (the shadow options are 0 Off, 1 On, 2 Only).
+#[test]
+fn layer_3d_attributes() {
+    let f = fx();
+    let on_b = |code: &str| match f.ev(f.b, ROT, code, 0.0) {
+        Ok(v) => v.as_f64(),
+        Err(e) => panic!("{code}: {e}"),
+    };
+    assert_eq!(on_b("thisLayer.rotationX"), 30.0);
+    assert_eq!(on_b("thisLayer.rotationY"), 0.0);
+    assert_eq!(on_b("thisLayer.rotationZ"), 0.0);
+    assert_eq!(on_b("thisLayer.orientation[2]"), 3.0);
+    assert_eq!(on_b("thisLayer.ambient"), 100.0);
+    assert_eq!(on_b("thisLayer.diffuse"), 50.0);
+    assert_eq!(on_b("thisLayer.specular"), 50.0);
+    assert_eq!(on_b("thisLayer.shininess"), 5.0);
+    assert_eq!(on_b("thisLayer.metal"), 100.0);
+    assert_eq!(on_b("thisLayer.lightTransmission"), 0.0);
+    assert_eq!(on_b("thisLayer.acceptsShadows"), 1.0);
+    assert_eq!(on_b("thisLayer.castsShadows"), 0.0);
+    assert_eq!(on_b("thisLayer.acceptsLights"), 1.0);
+    assert_eq!(on_b("thisLayer.materialOption.ambient.value"), 100.0);
 }
 
 #[test]
