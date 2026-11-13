@@ -1245,7 +1245,12 @@ fn background_project_file_autosave_failure_leaves_the_project_unsaved_and_retri
     std::fs::remove_file(&moved).unwrap();
     std::fs::remove_dir_all(&d).unwrap();
     let _ = s.autosave_tick(1061.0);
-    let _ = s.autosave_wait();
+    assert!(s.autosave.pending.is_some());
+    // Open, Revert and Save collect a pending project-file write first: its failure must be shown.
+    s.drain_events();
+    crate::cmd::file::wait_for_project_save(&mut s);
+    let shown = s.drain_events().iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.contains("auto-save failed")));
+    assert!(shown, "the failed write is reported when Open or Revert collects it");
     assert!(s.is_dirty(), "a failed write never marks the project saved");
     let _ = std::fs::remove_dir_all(d);
 }

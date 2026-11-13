@@ -43,10 +43,13 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
 /// Let a project-file auto-save that is still writing in the background land before the project
 /// file is read or written (Open, Revert, Save): otherwise the read could see the older file and
 /// an older snapshot could overwrite a newer save. A copy write needs no wait, since it never
-/// touches the project file. Its own failure is reported by the auto-save, not here.
+/// touches the project file. If that write failed, collecting it here removes the error from the
+/// auto-save, so it is shown now: the project stays unsaved and the user should know why.
 pub(crate) fn wait_for_project_save(s: &mut Session) {
-    if s.autosave.pending.as_ref().is_some_and(|w| w.saves_project.is_some()) {
-        let _ = s.autosave_wait();
+    if s.autosave.pending.as_ref().is_some_and(|w| w.saves_project.is_some())
+        && let Err(e) = s.autosave_wait()
+    {
+        s.toast(e.to_string());
     }
 }
 
