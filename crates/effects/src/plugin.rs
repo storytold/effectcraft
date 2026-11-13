@@ -24,10 +24,12 @@
 //! * rendering must be deterministic (same inputs, same output) and may run on several threads
 //!   at once.
 //!
-//! API 2 (native plug-ins; the WebAssembly ABI stays at 1) adds [`EffectPlugin::padding`] and
-//! [`EffectPlugin::render_v2`], which gets a [`PluginHost`] to read the effect's input or other
-//! layers at other times, and the extra parameter kinds. External effect helpers
-//! (`effectcraft-helper-host`) are built on it.
+//! API 2 (native plug-ins) adds [`EffectPlugin::padding`] and [`EffectPlugin::render_v2`], which
+//! gets a [`PluginHost`] to read the effect's input or other layers at other times, and the extra
+//! parameter kinds. External effect helpers (`effectcraft-helper-host`) are built on it.
+//!
+//! The WebAssembly ABI is versioned separately ([`WASM_API_VERSION`]): ABI 1 is `ec_render`;
+//! ABI 2 adds `ec_render2`, which receives the layer's previous and next frames.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -39,9 +41,12 @@ use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, Params, RenderFn};
 
 /// The plug-in API version this build implements (manifests with API 1 or 2 are accepted).
 pub const PLUGIN_API_VERSION: u32 = 2;
-/// The plug-in API a WebAssembly module implements (its `ec_api_version`). API 2 is for native
-/// and helper plug-ins; WebAssembly modules stay at 1.
-pub const WASM_API_VERSION: u32 = 1;
+/// The newest WebAssembly ABI this build implements (a module's `ec_api_version`). ABI 1 is
+/// `ec_render`; ABI 2 adds `ec_render2` and the layer's neighbouring frames. This is separate
+/// from the plug-in API version: a module's manifest `api` stays 1 or 2.
+pub const WASM_API_VERSION: u32 = 2;
+/// The oldest WebAssembly ABI this build still loads.
+pub const MIN_WASM_API_VERSION: u32 = 1;
 
 /// The most plug-in effects one process can register (commercial effect suites register a few hundred each).
 pub const MAX_PLUGINS: usize = 1024;
@@ -269,6 +274,22 @@ impl PluginImage {
     fn from_buf(b: Buf) -> PluginImage {
         PluginImage { width: b.img.width, height: b.img.height, pixels: b.img.data, origin: b.offset, scale: b.scale }
     }
+
+    /// This image resampled onto a `width × height` buffer grid at `origin`/`scale` (the current
+    /// frame's); the pixels unchanged when the grids already match.
+    pub fn on_grid(&self, width: u32, height: u32, origin: [f64; 2], scale: f64) -> Vec<[f32; 4]> {
+        if self.width == width && self.height == height && self.origin == origin && self.scale == scale {
+            return self.pixels.clone();
+        }
+        let k = self.scale / scale.max(1e-9);
+        let src = crate::Image { width: self.width, height: self.height, data: self.pixels.clone() };
+        crate::util::gen_image(width, height, |x, y| {
+            let lx = (x as f64 + 0.5 - origin[0]) * k + self.origin[0];
+            let ly = (y as f64 + 0.5 - origin[1]) * k + self.origin[1];
+            src.sample_bilinear(lx, ly)
+        })
+        .data
+    }
 }
 
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
@@ -388,6 +409,12 @@ pub trait EffectPlugin: Send + Sync {
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, _host: &dyn PluginHost) -> Result<(), String> {
         self.render(frame, params, time)
     }
+    /// Whether rendering reads the layer at other times (its neighbouring frames). Default
+    /// false; the render cache keys a layer with such an effect on its layer time. WebAssembly
+    /// ABI 2 plug-ins return true.
+    fn reads_other_times(&self) -> bool {
+        false
+    }
 }
 
 static SLOTS: [OnceLock<Arc<dyn EffectPlugin>>; MAX_PLUGINS] = [const { OnceLock::new() }; MAX_PLUGINS];
@@ -430,6 +457,12 @@ fn set_plugin_error(id: &str, error: Option<String>) {
 /// The plug-in behind a registered effect id.
 pub fn plugin(id: &str) -> Option<Arc<dyn EffectPlugin>> {
     SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).cloned()
+}
+
+/// Whether the registered plug-in `id` reads the layer at other times (its neighbouring frames),
+/// so the render cache must key its layer on the layer time.
+pub fn reads_other_times(id: &str) -> bool {
+    SLOTS.iter().filter_map(|s| s.get()).any(|p| p.manifest().id == id && p.reads_other_times())
 }
 
 fn leak(s: &str) -> &'static str {

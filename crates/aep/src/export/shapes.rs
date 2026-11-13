@@ -24,10 +24,12 @@ use crate::Chunk;
 use effectcraft_keyframe::{Gradient, Interp, Keyframe, Value};
 use effectcraft_project::{Node, PropGroup, Property};
 
+use crate::export::keys::{fill_key_list, replace_cdat, spatial_record, timed_keys};
 use crate::export::masks::ShapePlan;
 use crate::export::plan::{CompPlan, EaseSlot, KeyPlan};
 use crate::export::report::{Collector, LossCategory};
-use crate::export::tree::{R, child_data, kids_mut, list_mut, put, put_f64, put_u8, put_u16, put_u32, set_utf8, tpl};
+use crate::export::synth::{GROUP_END, is_tdmn, tdmn};
+use crate::export::tree::{R, child_data, kids_mut, list_mut, put_f64, put_u8, set_utf8, tpl};
 
 /// The deepest group nesting written.
 const MAX_DEPTH: usize = 16;
@@ -192,7 +194,7 @@ impl ShapeProtos {
             put_f64(child_data(&mut node, b"tdum")?, 0, lo)?;
             put_f64(child_data(&mut node, b"tduM")?, 0, hi)?;
         }
-        Ok([crate::export::camlight::tdmn_chunk(name), node])
+        Ok([tdmn(name), node])
     }
 }
 
@@ -267,20 +269,7 @@ pub(crate) struct ShCx<'a> {
 
 /// The keys of `p` in the file's units.
 fn plan_keys(p: &Property, conv: Conv, layout: Layout, what: &str, cx: &mut ShCx<'_>) -> Vec<KeyPlan> {
-    let mut timed: Vec<(i64, &Keyframe)> = Vec::with_capacity(p.keys.len());
-    for k in &p.keys {
-        let (u, inexact) = cx.cp.tb.units(k.time);
-        if inexact {
-            cx.col.lose(LossCategory::RoundedTimes, format!("{what}: key at {:.4} s moved to the time base", k.time.seconds()));
-        }
-        timed.push((u, k));
-    }
-    timed.sort_by_key(|(u, _)| *u);
-    let before = timed.len();
-    timed.dedup_by_key(|(u, _)| *u);
-    if timed.len() != before {
-        cx.col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: keys at the same time were merged"));
-    }
+    let timed = timed_keys(&p.keys, &cx.cp.tb, what, "key", cx.col);
     let all: Vec<Keyframe> = timed.iter().map(|(_, k)| (*k).clone()).collect();
     let mut out = Vec::with_capacity(timed.len());
     let beyond = std::cell::Cell::new(false);
@@ -618,38 +607,6 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
     out
 }
 
-fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let b = c.bytes()?;
-    let end = b.iter().position(|x| *x == 0).unwrap_or(b.len());
-    std::str::from_utf8(b.get(..end)?).ok().map(str::to_string)
-}
-
-/// A key of a point (the spatial layout of a 2D Position, 853) or a colour (854).
-fn spatial_key(k: &KeyPlan, n: usize, point: bool, size: usize) -> R<Vec<u8>> {
-    let mut r = vec![0u8; size];
-    put(&mut r, 0, &k.time.to_be_bytes())?;
-    put_u8(&mut r, 4, k.in_interp)?;
-    put_u8(&mut r, 5, k.out_interp)?;
-    let base: u16 = if point { 0x0007 } else { 0x0001 };
-    put_u16(&mut r, 6, base | (u16::from(k.label) << 6))?;
-    if point {
-        put_u32(&mut r, 8, u32::from(k.spatial_auto))?;
-        let (i, o) = (k.in_ease.first().copied().unwrap_or_default(), k.out_ease.first().copied().unwrap_or_default());
-        put_f64(&mut r, 24, i.speed)?;
-        put_f64(&mut r, 32, i.influence)?;
-        put_f64(&mut r, 40, o.speed)?;
-        put_f64(&mut r, 48, o.influence)?;
-    }
-    for j in 0..n {
-        put_f64(&mut r, 56 + 8 * j, k.value.get(j).copied().unwrap_or(0.0))?;
-        if point {
-            put_f64(&mut r, 56 + 8 * n + 8 * j, k.spatial_in.get(j).copied().unwrap_or(0.0))?;
-            put_f64(&mut r, 56 + 16 * n + 8 * j, k.spatial_out.get(j).copied().unwrap_or(0.0))?;
-        }
-    }
-    Ok(r)
-}
-
 /// The value record of `name` holding `v`.
 fn value_record(t: &ShapeProtos, name: &'static str, v: &RecVal) -> R<[Chunk<'static>; 2]> {
     let [m, node] = t.record(name)?;
@@ -681,32 +638,17 @@ pub(crate) fn build_record(m: Chunk<'static>, mut node: Chunk<'static>, layout: 
                 put_u8(tdb4, 79, 0)?;
             }
         }
-        let mut list = key_list.clone();
-        let count = u32::try_from(v.keys.len()).map_err(|_| tpl("too many keys"))?;
-        {
-            let lhd3 = child_data(&mut list, b"lhd3")?;
-            crate::export::synth::put_key_counts(lhd3, count, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-        }
         let mut ldat = Vec::with_capacity(size * v.keys.len());
         for k in &v.keys {
             ldat.extend(match layout {
-                Layout::Point => spatial_key(k, n, true, size)?,
-                Layout::Color => spatial_key(k, n, false, size)?,
+                Layout::Point => spatial_record(k, n, true, size)?,
+                Layout::Color => spatial_record(k, n, false, size)?,
                 _ => crate::export::emit::plain_record(n, k, size)?,
             });
         }
-        {
-            let lk = kids_mut(&mut list)?;
-            match lk.iter_mut().find(|c| c.is(b"ldat")) {
-                Some(c) => *c = Chunk::data(*b"ldat", ldat),
-                None => lk.push(Chunk::data(*b"ldat", ldat)),
-            }
-        }
-        let kids = kids_mut(&mut node)?;
-        let at = kids.iter().position(|c| c.is(b"cdat")).ok_or_else(|| tpl("shape record without cdat"))?;
-        if let Some(slot) = kids.get_mut(at) {
-            *slot = list;
-        }
+        let mut list = key_list.clone();
+        fill_key_list(&mut list, ldat, v.keys.len(), size)?;
+        replace_cdat(&mut node, list)?;
     }
     if let Some((text, enabled)) = &v.expr {
         // As on the Transform properties (R15; 856).
@@ -746,7 +688,7 @@ pub(crate) fn build_items(t: &ShapeProtos, items: &[ShItem], depth: usize) -> R<
     if depth > MAX_DEPTH {
         return Ok(out);
     }
-    let pos = |kids: &[Chunk<'static>], n: &str| kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(n));
+    let pos = |kids: &[Chunk<'static>], n: &str| kids.iter().position(|c| is_tdmn(c, n));
     for item in items {
         match item {
             ShItem::Off(inner) => {
@@ -766,7 +708,7 @@ pub(crate) fn build_items(t: &ShapeProtos, items: &[ShItem], depth: usize) -> R<
                 let vg = pos(kids, "ADBE Vectors Group").ok_or_else(|| tpl("group prototype without contents"))?;
                 let contents = kids.get_mut(vg + 1).ok_or_else(|| tpl("group prototype without contents"))?;
                 let ck = kids_mut(contents)?;
-                let end = ck.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Group End")).unwrap_or(ck.len());
+                let end = ck.iter().position(|c| is_tdmn(c, GROUP_END)).unwrap_or(ck.len());
                 ck.splice(end..end, children);
                 let tg = pos(kids, "ADBE Vector Transform Group").ok_or_else(|| tpl("group prototype without transform"))?;
                 let tnode = kids.get_mut(tg + 1).ok_or_else(|| tpl("group prototype without transform"))?;
@@ -815,13 +757,10 @@ pub(crate) fn put_contents(layr: &mut Chunk<'static>, t: &ShapeProtos, items: &[
     let built = build_items(t, items, 0)?;
     let root = list_mut(layr, b"tdgp")?;
     let kids = kids_mut(root)?;
-    let at = kids
-        .iter()
-        .position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Root Vectors Group"))
-        .ok_or_else(|| tpl("shape layer without contents"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, "ADBE Root Vectors Group")).ok_or_else(|| tpl("shape layer without contents"))?;
     let rv = kids.get_mut(at + 1).ok_or_else(|| tpl("shape layer without contents"))?;
     let rk = kids_mut(rv)?;
-    let end = rk.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some("ADBE Group End")).unwrap_or(rk.len());
+    let end = rk.iter().position(|c| is_tdmn(c, GROUP_END)).unwrap_or(rk.len());
     rk.splice(end..end, built);
     Ok(())
 }

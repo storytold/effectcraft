@@ -7,9 +7,8 @@ use effectcraft_svg::{Affine, BezPath, FillRule, Geom, Group, Node, Paint, Shape
 /// PostScript program, or the PDF content stream.
 pub(crate) const MAX_PATH: usize = 1 << 20;
 
-/// The deepest groups (clips, layers, transparency groups) nest in the document; below the
-/// renderer's own limit (256), so everything kept is drawn.
-pub(crate) const MAX_GROUP_DEPTH: usize = 200;
+/// The deepest the open groups nest (the render tree and its consumers recurse through them).
+const MAX_DEPTH: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -24,6 +23,9 @@ pub(crate) struct Builder {
     pub top_layers: Vec<bool>,
     pub skipped: Vec<String>,
     pub shapes: usize,
+    /// Groups the finished nodes will sit under once placed (an enclosing builder's open groups
+    /// and the pattern or mask groups around them), counted against [`MAX_DEPTH`].
+    base: usize,
 }
 
 pub(crate) fn group(name: &str) -> Group {
@@ -32,11 +34,23 @@ pub(crate) fn group(name: &str) -> Group {
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0 }
+        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0, base: 0 }
+    }
+
+    /// A builder for content that will be placed inside this one's open groups and `wrap` more
+    /// groups (a pattern's `Pattern` and `Tile`, a soft mask's two), so its nesting limit counts
+    /// them.
+    pub fn nested(&self, wrap: usize) -> Builder {
+        Builder { base: self.base.saturating_add(self.stack.len()).saturating_add(wrap), ..Builder::new() }
     }
 
     pub fn depth(&self) -> usize {
         self.stack.len()
+    }
+
+    /// `wrap` more groups fit under the open ones within [`MAX_DEPTH`].
+    pub fn has_room(&self, wrap: usize) -> bool {
+        self.base.saturating_add(self.stack.len()).saturating_add(wrap) <= MAX_DEPTH
     }
 
     pub fn skip(&mut self, what: &str) {
@@ -66,6 +80,16 @@ impl Builder {
         }
     }
 
+    /// Open `g` as the group drawn into from now on; past [`MAX_DEPTH`] the group is dropped
+    /// (what would have been drawn inside it goes to the open group) and noted as skipped.
+    fn push_group(&mut self, g: Group, kind: Kind) {
+        if self.base.saturating_add(self.stack.len()) >= MAX_DEPTH {
+            self.skip("group nesting limit");
+            return;
+        }
+        self.stack.push((g, kind));
+    }
+
     /// Children drawn from now on are clipped by `path` (page space) until the group closes.
     pub fn clip(&mut self, path: BezPath, rule: FillRule) {
         let mut g = group("Clip Group");
@@ -83,18 +107,6 @@ impl Builder {
     /// Open a group (blend mode, soft mask) closed with the graphics state.
     pub fn open_group(&mut self, g: Group) {
         self.push_group(g, Kind::Plain);
-    }
-
-    /// Open a group, unless groups are already nested [`MAX_GROUP_DEPTH`] deep: the document
-    /// is a tree that is drawn, measured, copied and dropped recursively, and a crafted file
-    /// can nest `q … W n` without end. Deeper groups are left out (their content is drawn
-    /// in the group around them) and the document says so.
-    fn push_group(&mut self, g: Group, kind: Kind) {
-        if self.stack.len() >= MAX_GROUP_DEPTH {
-            self.skip("groups nested deeper than 200 levels");
-            return;
-        }
-        self.stack.push((g, kind));
     }
 
     /// Add a finished node (an image, pattern tiles).

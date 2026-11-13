@@ -136,8 +136,12 @@ const IGNORED: [&str; 4] = ["ADBE Position_0", "ADBE Position_1", "ADBE Position
 /// How the stored Anchor Point becomes pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AnchorUnit {
-    /// A fraction of a source this big (pixels): AV layers.
+    /// A fraction of a source this big (pixels): AV layers; the source's centre when absent.
     Source(u32, u32),
+    /// A fraction of a null object's source this big (pixels); its top-left corner when absent:
+    /// After Effects 2026 reads a null's absent Anchor Point as `[0, 0]` (#3099: two nulls made
+    /// with `addNull`, one left at its default, read back `[0, 0, 0]` and `[10, 20, 0]`).
+    Null(u32, u32),
     /// Pixels as stored, the origin when absent: text (385) and shape (462) layers, which have no
     /// source.
     Pixels,
@@ -168,6 +172,14 @@ pub(crate) fn import_transform(
         AnchorUnit::Source(w, h) => {
             let (sw, sh) = (f64::from(w), f64::from(h));
             (Kind::Anchor(sw, sh), tr.anchor_px(sw, sh))
+        }
+        AnchorUnit::Null(w, h) => {
+            let (sw, sh) = (f64::from(w), f64::from(h));
+            let px = match tr.anchor_fraction.source {
+                ValueSource::Default | ValueSource::Unreadable => [0.0; 3],
+                ValueSource::Stored | ValueSource::Keyframed => tr.anchor_px(sw, sh),
+            };
+            (Kind::Anchor(sw, sh), px)
         }
         AnchorUnit::Pixels | AnchorUnit::PointOfInterest => (Kind::Anchor(1.0, 1.0), tr.text_anchor_px()),
     };
@@ -219,15 +231,21 @@ pub(crate) fn import_transform(
         }
         import_expression(&node, prop, col);
     }
-    if let Some(PropNode::Other(_)) = group.get("ADBE Orientation") {
+    if let Some(PropNode::Other(otst)) = group.get("ADBE Orientation") {
         match (layer.orientation(), target.get_mut("orientation")) {
-            (Some(o), Some(prop)) if !o.animated && !o.has_expression && sane(&Value::Vec3(o.degrees)) => prop.value = Value::Vec3(o.degrees),
+            (Some(o), Some(prop)) if o.animated || sane(&Value::Vec3(o.degrees)) => {
+                if o.animated {
+                    import_orientation_keys(layer, layer_name, tm, prop, col);
+                } else {
+                    prop.value = Value::Vec3(o.degrees);
+                }
+                // The expression is stored in the `otst`'s `tdbs` as on any property (#3087).
+                if let Some(node) = otst.child_list(b"tdbs").and_then(AepProp::from_chunk) {
+                    import_expression(&node, prop, col);
+                }
+            }
             // A layer without an orientation (an ambient light) loses nothing with the default.
             (Some(o), None) if !o.animated && !o.has_expression && o.degrees == [0.0; 3] => {}
-            (Some(o), Some(prop)) if o.animated && !o.has_expression => import_orientation_keys(layer, layer_name, tm, prop, col),
-            (Some(o), Some(_)) if o.has_expression => {
-                col.lose(LossCategory::TransformProperties, format!("{layer_name}: ADBE Orientation expression (not decoded)"));
-            }
             _ => col.lose(LossCategory::TransformProperties, format!("{layer_name}: ADBE Orientation")),
         }
     }

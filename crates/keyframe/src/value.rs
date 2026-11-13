@@ -210,7 +210,13 @@ impl Gradient {
     }
 }
 
+/// Most stops (colour or opacity) a gradient is sampled through. Gradients are sampled per
+/// pixel, so the stop count multiplies every painted pixel's work: stops past this are ignored
+/// when sampling, and a gradient written as JSON with more is refused.
+pub const MAX_GRADIENT_STOPS: usize = 256;
+
 fn sample_stops<T: Copy>(stops: &[(f64, T)], t: f64, lerp: impl Fn(T, T, f64) -> T) -> Option<T> {
+    let stops = &stops[..stops.len().min(MAX_GRADIENT_STOPS)];
     let first = stops.first()?;
     if t <= first.0 {
         return Some(first.1);
@@ -243,7 +249,7 @@ fn gradient_json(j: &serde_json::Value) -> Option<Gradient> {
     }
     fn stops(a: &[J]) -> Option<Vec<(f64, [f32; 4])>> {
         let n = a.len();
-        if n < 2 {
+        if !(2..=MAX_GRADIENT_STOPS).contains(&n) {
             return None;
         }
         a.iter()
@@ -259,6 +265,7 @@ fn gradient_json(j: &serde_json::Value) -> Option<Gradient> {
         J::Object(o) => {
             let colors = stops(o.get("colors")?.as_array()?)?;
             let op = match o.get("opacities") {
+                Some(J::Array(a)) if a.len() > MAX_GRADIENT_STOPS => return None,
                 Some(J::Array(a)) => Some(
                     a.iter()
                         .map(|s| {
@@ -469,9 +476,10 @@ impl Value {
             }
             Value::Layer(_) => Some(Value::Layer(j.as_u64())),
             Value::Path(_) => serde_json::from_value::<ShapePath>(j.clone()).ok().map(Value::Path).or_else(|| serde_json::from_value::<Value>(j.clone()).ok()),
-            Value::Gradient(_) => {
-                serde_json::from_value::<Value>(j.clone()).ok().filter(|v| matches!(v, Value::Gradient(_))).or_else(|| gradient_json(j).map(Value::Gradient))
-            }
+            Value::Gradient(_) => serde_json::from_value::<Value>(j.clone())
+                .ok()
+                .filter(|v| matches!(v, Value::Gradient(g) if g.colors.len() <= MAX_GRADIENT_STOPS && g.opacities.len() <= MAX_GRADIENT_STOPS))
+                .or_else(|| gradient_json(j).map(Value::Gradient)),
         }
     }
     /// JSON for display/automation (numbers/arrays for numeric kinds).
