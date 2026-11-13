@@ -364,6 +364,23 @@ fn what_cannot_be_written_is_reported() {
     parse(&r.bytes).expect("still a valid file");
 }
 
+/// Lumetri Color is imported but not written (no prototype to write from): the export reports it
+/// as a loss and still produces a valid file.
+#[test]
+fn lumetri_color_is_reported_not_written() {
+    let mut p = skip!(tint(|_| {}));
+    let c = p.items.values().find(|i| i.name == "C").map(|i| i.id).expect("C");
+    with_layer(&mut p, c, 0, |l| {
+        if let Some(Node::Group(g)) = l.props.sub_mut("effects").and_then(|e| e.children.first_mut()) {
+            g.kind = effectcraft_project::GroupKind::Effect { effect: "ec.color.lumetri".into() };
+        }
+    });
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::Effects), 1, "{:?}", r.report.losses);
+    assert_eq!(r.report.exported.effects, 0);
+    parse(&r.bytes).expect("still a valid file");
+}
+
 /// CC Color Neutralizer, EXtractoR and IDentifier are in the import table but have no prototype
 /// to write from: each is reported, not written.
 #[test]
@@ -409,7 +426,7 @@ fn static_records(file: &AepFile<'_>) -> std::collections::BTreeMap<(String, usi
         for (li, layer) in comp.layers().enumerate() {
             for (ei, e) in layer.effects().into_iter().enumerate() {
                 let Some(spec) = effectcraft_aep::effect_map::by_match_name(e.match_name()) else { continue };
-                let Some(values) = e.chunk().child_list(b"tdgp") else { continue };
+                let Some(values) = e.chunk().child_list(b"tdgp").map(|v| v.to_chunk()) else { continue };
                 let k = values.children();
                 for (i, c) in k.iter().enumerate() {
                     let Some(name) =

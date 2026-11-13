@@ -23,8 +23,10 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::styles::{self as st, STYLE_BLEND_MODES};
 use effectcraft_project::{Comp, Layer, PropGroup, Property};
 
+use crate::export::keys::{fill_key_list, replace_cdat, timed_keys};
 use crate::export::plan::{CompPlan, EaseSlot, KeyPlan};
 use crate::export::report::{Collector, LossCategory};
+use crate::export::synth::{GROUP_END, is_tdmn};
 use crate::export::tree::{R, child_data, kids_mut, put_f64, put_u8, put_u32, tpl};
 
 /// A record's value.
@@ -128,20 +130,7 @@ fn plan_record(spec: &StyleParam, full: String, prop: &Property, cp: &CompPlan, 
 /// The keys of a scalar in the layer's time base: linear, hold and bezier sides with the ease in
 /// stored units per second (the plain template of 976).
 fn plan_number_keys(prop: &Property, cp: &CompPlan, what: &str, col: &mut Collector) -> Vec<KeyPlan> {
-    let mut timed: Vec<(i64, &effectcraft_keyframe::Keyframe)> = Vec::with_capacity(prop.keys.len());
-    for k in &prop.keys {
-        let (u, inexact) = cp.tb.units(k.time);
-        if inexact {
-            col.lose(LossCategory::RoundedTimes, format!("{what}: key at {:.4} s moved to the time base", k.time.seconds()));
-        }
-        timed.push((u, k));
-    }
-    timed.sort_by_key(|(u, _)| *u);
-    let before = timed.len();
-    timed.dedup_by_key(|(u, _)| *u);
-    if timed.len() != before {
-        col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: keys at the same time were merged"));
-    }
+    let timed = timed_keys(&prop.keys, &cp.tb, what, "key", col);
     let mut out = Vec::with_capacity(timed.len());
     let beyond = std::cell::Cell::new(false);
     for (u, k) in timed {
@@ -279,11 +268,6 @@ pub(crate) struct StyleProtos {
     keyed: Chunk<'static>,
 }
 
-fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
-    let d = c.bytes()?;
-    Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
-}
-
 impl StyleProtos {
     /// The records built in code from the style table (`style_defs`); the keyed form of a scalar
     /// takes `tdb4` bytes 5, 68 and 79 and the key list of a keyed one-component record.
@@ -322,28 +306,13 @@ impl StyleProtos {
                     }
                 }
                 let mut list = self.keyed.child_list(b"list").cloned().ok_or_else(|| tpl("keyed style prototype without keys"))?;
-                let n = u32::try_from(keys.len()).map_err(|_| tpl("too many keys"))?;
                 let size = 48usize;
-                {
-                    let lhd3 = child_data(&mut list, b"lhd3")?;
-                    crate::export::synth::put_key_counts(lhd3, n, 48)?;
-                }
                 let mut ldat = Vec::with_capacity(size * keys.len());
                 for k in keys {
                     ldat.extend(crate::export::emit::plain_record(1, k, size)?);
                 }
-                {
-                    let lk = kids_mut(&mut list)?;
-                    match lk.iter_mut().find(|c| c.is(b"ldat")) {
-                        Some(c) => *c = Chunk::data(*b"ldat", ldat),
-                        None => lk.push(Chunk::data(*b"ldat", ldat)),
-                    }
-                }
-                let kids = kids_mut(&mut rec)?;
-                let at = kids.iter().position(|c| c.is(b"cdat")).ok_or_else(|| tpl("style record without cdat"))?;
-                if let Some(slot) = kids.get_mut(at) {
-                    *slot = list;
-                }
+                fill_key_list(&mut list, ldat, keys.len(), size)?;
+                replace_cdat(&mut rec, list)?;
             }
         }
         if let Some((text, enabled)) = &r.expr {
@@ -362,7 +331,7 @@ impl StyleProtos {
 
 /// The node after the `tdmn` named `name` among `kids`.
 fn named_mut<'a>(kids: &'a mut [Chunk<'static>], name: &str) -> R<&'a mut Chunk<'static>> {
-    let i = kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(name)).ok_or_else(|| tpl("layer styles group incomplete"))?;
+    let i = kids.iter().position(|c| is_tdmn(c, name)).ok_or_else(|| tpl("layer styles group incomplete"))?;
     kids.get_mut(i + 1).ok_or_else(|| tpl("layer styles group incomplete"))
 }
 
@@ -377,7 +346,7 @@ fn insert_records(protos: &StyleProtos, g: &mut Chunk<'static>, recs: &[Record],
         built.extend(protos.build(r)?);
     }
     let kids = kids_mut(g)?;
-    let at = kids.iter().position(|c| c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(before)).ok_or_else(|| tpl("layer styles group incomplete"))?;
+    let at = kids.iter().position(|c| is_tdmn(c, before)).ok_or_else(|| tpl("layer styles group incomplete"))?;
     kids.splice(at..at, built);
     Ok(())
 }
@@ -392,12 +361,12 @@ pub(crate) fn put_styles(protos: &StyleProtos, layr: &mut Chunk<'static>, plan: 
         set_flags(bo, sm::FLAGS_ON)?;
         insert_records(protos, bo, &plan.global, sm::ADV_BLEND)?;
         let adv = named_mut(kids_mut(bo)?, sm::ADV_BLEND)?;
-        insert_records(protos, adv, &plan.adv, "ADBE Group End")?;
+        insert_records(protos, adv, &plan.adv, GROUP_END)?;
     }
     for (prefix, recs, on) in &plan.styles {
         let g = named_mut(kids_mut(ls)?, &format!("{prefix}/enabled"))?;
         set_flags(g, if *on { sm::FLAGS_ON } else { sm::FLAGS_OFF })?;
-        insert_records(protos, g, recs, "ADBE Group End")?;
+        insert_records(protos, g, recs, GROUP_END)?;
     }
     Ok(())
 }

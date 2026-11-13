@@ -513,6 +513,9 @@ fn paths_stop_at_the_path_limit() {
         // The outlines of 100,000 H's, 13 elements each.
         "/Helvetica findfont 10 scalefont setfont /s 100000 string def 0 1 99999 { s exch 72 put } for \
          0 0 moveto s false charpath",
+        // The same outlines shown: the text path is bounded like the current path.
+        "/Helvetica findfont 10 scalefont setfont /s 100000 string def 0 1 99999 { s exch 72 put } for \
+         0 0 moveto s show",
         // 210,000 rectangles of five elements each.
         "/a 840000 array def 0 1 839999 { a exch 0 put } for a rectfill",
     ] {
@@ -525,6 +528,46 @@ fn paths_stop_at_the_path_limit() {
     // `moveto` and `show` leave a path of one element.
     let doc = eps_soon("/Helvetica findfont 10 scalefont setfont 550 { 1000 { 0 0 moveto ( ) show } repeat } repeat 0 0 10 10 rectfill");
     assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn copies_past_the_operand_limit_copy_nothing() {
+    // `count copy` doubles the operand stack: 40 doublings would be 2^40 values. A copy that would
+    // pass the operand limit (100,000) copies nothing, so the program runs on to its end.
+    let doc = eps_soon("0 0 10 10 rectfill 1 40 { count copy } repeat clear 20 20 10 10 rectfill");
+    assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    assert_eq!(doc.flatten().len(), 2);
+}
+
+#[test]
+fn storage_made_in_a_loop_runs_out_of_the_budget() {
+    // Each value of an array and each eight bytes of a string count as an operation when they
+    // are made, so a loop keeping large arrays or strings spends the budget, not the memory.
+    for body in ["/a 1000 array def 0 1 999 { a exch 1000000 array put } for", "/a 1000 array def 0 1 999 { a exch 10000000 string put } for"] {
+        runs_out_of_budget(body);
+    }
+}
+
+#[test]
+fn groups_stop_nesting_at_the_depth_limit() {
+    // Every `rectclip` opens a clipping group inside the last: past 256 open groups the group is
+    // dropped (and noted), and what is drawn inside goes to the open one.
+    let doc = eps_soon("300 { 0 0 100 100 rectclip } repeat 0 0 10 10 rectfill");
+    assert_eq!(doc.skipped, ["group nesting limit"]);
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn bounding_box_comments_are_scanned_once() {
+    // A rejected `%%BoundingBox:` comment is not scanned again from each later marker on its
+    // line: 20,000 markers on one line would otherwise take quadratic work.
+    let mut src = b"%!PS-Adobe-3.0 EPSF-3.0\n".to_vec();
+    // Keep the valid comment inside craft-eps's bounded header window.
+    src.extend_from_slice("%%BoundingBox: x ".repeat(3_000).as_bytes());
+    src.extend_from_slice(b"\n%%BoundingBox: 0 0 50 50\n0 0 10 10 rectfill\n");
+    let doc = parse(&src).unwrap();
+    assert_eq!((doc.width, doc.height), (50.0, 50.0));
     assert_eq!(doc.flatten().len(), 1);
 }
 

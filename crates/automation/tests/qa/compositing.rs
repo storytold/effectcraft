@@ -106,7 +106,7 @@ fn track_matte(qa: &mut Qa) {
 fn adjustment_layer(qa: &mut Qa, normal: &Img) {
     // Adjustment layer: Lumetri exposure, inside a feathered, expanded elliptical mask; then Glow.
     qa.exec("layer.newAdjustment", json!({"name": "Grade"}));
-    let fx = qa.exec("effect.apply", json!({"effect": "Lumetri Color", "layers": ["Grade"]}));
+    let fx = qa.exec("effect.apply", json!({"effect": "Color Grading", "layers": ["Grade"]}));
     assert_eq!(fx["paths"], json!(["effects/#1"]), "effect.apply answers with the instance path: {fx}");
     qa.tool("set_property", json!({"layer": "Grade", "path": "effects/#1/basicCorrection/tone/exposure", "value": 2}));
     let before = qa.frame(None, 0.5);

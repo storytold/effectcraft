@@ -180,7 +180,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.ccgluegun",
-            "CC Glue Gun",
+            "Paint Beads",
             vec![
                 p("brushPosition", "Brush Position", pt(0.5, 0.5), ParamUi::Point),
                 p("strokeWidth", "Stroke Width", num(25.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
@@ -194,7 +194,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.ccthreads",
-            "CC Threads",
+            "Woven Threads",
             vec![
                 p("width", "Width", num(50.0), slider(1.0, 1000.0, 1.0, 200.0, 1)),
                 p("height", "Height", num(50.0), slider(1.0, 1000.0, 1.0, 200.0, 1)),

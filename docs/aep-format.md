@@ -1,6 +1,6 @@
 # After Effects project format (`.aep`)
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-07 · **Change:** Puppet (`ADBE FreePin3`, 3.7): the property tree from an external scripting listing, **?** until a byte sample exists (#3093); before that: footage: an image sequence without a filename prefix stores only the suffix `Utf8`, and one imported with Force alphabetical order stores its file list in `LIST StVc` / `StVS` (section 3, footage); before that: versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-11 · **Change:** text: a Source Text expression is stored like any property's (`tdb4` bytes 119 / 120, `Utf8`; `text-synthetic.aep`, #3170); before that: footage: the Photoshop layer an item shows and its document's size (`opti` tag `8BPS`, section 3.3, issue 3087); before that: Puppet (`ADBE FreePin3`, 3.7): the property tree from an external scripting listing, **?** until a byte sample exists (#3093); before that: footage: an image sequence without a filename prefix stores only the suffix `Utf8`, and one imported with Force alphabetical order stores its file list in `LIST StVc` / `StVS` (section 3, footage); before that: versions: `svap` is the version that wrote the file, `head` bytes 4 to 7 the version it is written for, and what a Save a Copy As 25.x / 24.x of After Effects 2026 changes (section 1, "Versions"); before that: the stretch numerator is signed (a negative one reverses the layer, 981-983); layer styles (3.12b, 950-980); before that: footage: `sspc@118` of an image sequence is its folder's modification time (860, read-back x1-x3); before that: text: paragraph `/24`, `/35` and style `/68` are neutral for 0 and 1 (732-734, edited in place); before that: keyframes: the ease of mask path keys (599, 700), the spatial speed unit of fractional values (597, 598, 730); before that: text: character and paragraph settings, manual kerning, vertical text, `/nil` is neutral (S17: 538-578, 595, 596); before that: cameras, lights and 3D rotations (S16: the auto Position of a two-node camera is where After Effects renders it, 537; camera and light defaults read back 255, 256; Orientation `otst/otda` 488), Timewarp (529-533), an expression on an effect parameter (534); before that: text: style slot /13 is superscript / subscript (526-528; every scripted text of the corpus is superscript), wrapping box text 517; before that: effects of batch 5 (409-450, 511-516: integer sliders, checkbox defaults in `pard`, arbitrary data of Hue/Saturation and Levels, the parameters of Invert, Fast Box Blur, Gaussian Blur, Drop Shadow, Glow; section 3.7); before that: shape items of batch 5 (451-484, 519: ellipse, fill and stroke opacity, fill rule, group transform, shape layer anchor, trim paths, rectangle roundness, polystar fields, gradient default, nested groups, the defaults of every item; section 3.9); before that: track mattes: mode at `ldta` byte 107 and the matte layer id at byte 160 (cases 402-408, section 3.1); before that: text: automatic leading is verified (400); Exposure (`ADBE Exposure2`, cases 389-397): group start / end parameter types 13 / 14, float slider valid minimum and slider range (section 3.7); before that: text: U+0003 is a paragraph break (386, 387); before that: a stored text Anchor Point is pixels (385, now V); before that: the XML form `.aepx` is read into the same chunk tree (section 1, "The XML form"); the `head` save counter is a `u32` at byte 16; text documents for the importer (stroke colour, automatic leading, the font of each run, the undecoded-slot check, the text-layer Anchor Point, the Source Text record); before that: third round of verified field layouts (explicit-default semantics, type-major bezier ease, exact time stretch and in / out points, Time Remapping state, comp pixel aspect / shutter phase / display start, Point default, Layer Control None, dropdown selection, one `mkif` per mask, polystar and radial gradient records, text styles, camera and light options, marker cue data, audio and image-sequence footage) added to the typed view of `effectcraft-aep` · **Target:** Adobe After Effects 2026
 
 What `crates/aep` ([`effectcraft-aep`](../crates/aep/README.md)) reads and writes, and the evidence
 for each statement. Everything here was observed on project files we generated ourselves; no
@@ -119,6 +119,11 @@ counterpart (a name that is not 1 to 4 characters) are skipped with their conten
   with the byte offset. It runs without recursion; the nesting depth (`Limits::max_depth`) and the
   element count (`Limits::max_chunks`) are bounded, and everything it allocates is bounded by the
   size of the input.
+- There are two readers. `read_aepx` builds the owned tree element by element. The importer, which
+  only reads, uses a second reader that decodes every body (hex, text, the alias JSON, the
+  numbers) into one buffer and records the chunks as a flat depth-first list whose bodies are
+  ranges of that buffer; it indexes that buffer (`TreeIndex`) as it indexes an `.aep`. The tests
+  hold both readers to the same tree and the same errors.
 - Tests: `tests/aepx.rs` compares the five fixture pairs chunk by chunk and byte by byte, compares
   the typed view of both forms, and runs truncated, bit-flipped, deeply nested and oversized
   inputs; `crates/aep/tests/it/import/aepx.rs` imports both forms of each pair and expects the same
@@ -138,7 +143,7 @@ write on their own.
 | `svap` (4 bytes, the first top-level chunk) is the version of the After Effects that **wrote** the file: `0f 11 0e 02` in all 36 (a down-saved copy keeps the 2026 word) and in all 1 192 other `.aep` files of the local corpus folders. After Effects opens a file without `svap` (`t-nosvap`). | All 36; corpus scan. |
 | `head` bytes 4 to 7 are the version the file is **written for**: `0f 11 0e 02` (= `svap`) in the 2026 saves, `0f 0b 06 61` in the 25.x copies, `0f 03 06 41` in the 24.x copies, the same word in every family. After Effects refuses a file whose word is zero ("created with an older version [0.0x0]", `u-zhead`). | All 36; `u-zhead`. |
 | The word is packed (bit 31 first): bits 25-24 and 21-19 the major, 18-15 the minor, 14-11 the bug-fix, 10-8 a stage (6 in all), 7-0 the build; bits 31-26 (`000011`) and 23-22 (`00`) are the same in all samples and not decoded. `0f110e02` = **26.2.1x2**, which is what the saving After Effects reports for itself (`app.version` recorded by the corpus scripts) - this one sample fixes minor, bug-fix and build. The copies read as **25.6.0x97** and **24.6.0x65** (major **V** from three consecutive majors; minor, bug-fix and build of the copies **E**: one other word decides their positions). `effectcraft_aep::AeVersion`, `AepFile::file_version`, `AepFile::saved_by_version`. | Tests `decodes_the_sampled_words`, `the_container_of_a_copy_states_its_version_in_head_and_the_writer_in_svap`. |
-| `head` bytes 0 to 1 (a `u16`) step with the major: 97 (`0x61`) in the 2026 saves, 96 in 25.x, 95 in 24.x; bytes 2 to 3 are 5, 9 and 6 (**?**). Bytes 8 to 15 differ between families, not between versions; bytes 16 to 19 are the save counter (one higher in each copy). Nothing is derived from bytes 0 to 3 (`AepFile::head_revision` exposes the `u16`). | All 36. |
+| `head` bytes 0 to 1 (a `u16`) step with the major: 97 (`0x61`) in the 2026 saves, 96 in 25.x, 95 in 24.x; bytes 2 to 3 are 5, 9 and 6 (**?**). Bytes 8 to 15 differ between families, not between versions; bytes 16 to 19 are the save counter (one higher in each copy). Nothing is derived from bytes 0 to 3, and the reader does not expose them. | All 36. |
 | The XMP packet after the container is no guide: its `CreatorTool` is "Adobe After Effects 2026" in the copies too. | All 36. |
 | **26 against 25.x** (per family, chunk tree aligned by item and layer id): besides `head`, `nhed` / `nnhd` differ in 6 bytes (`nhed` 20-23 and 26-27: `827fa930` / `0015` in the 2026 save, `00000000` / `011b` in both copies; session state, see section 4). Every **solid's** `Pin /CLRS` changes: the 2026 save has `dcui` (1 byte, 1), `apid` all `0xff` and an empty `Utf8`; the copies drop `dcui`, set `apid` to a GUID (`601e9973...`, the same in all) and embed a 935-byte JSON with an ICC profile (`baseColorProfile/colorProfileData`). A **footage** item that the 2026 save stores with an assigned profile (`mcsp` = 1 and a profile JSON) loses `mcsp` and that JSON in the copies, and its `epid` becomes all `0xff`. The rest is save noise: the footage alias `ascendcount_base` (the copies were saved in another folder), `sspc` byte 112 of a footage item (a modification time), the `oEXR` `opti` of an EXR item (the copies hold the display device name `\.\DISPLAY1` as UTF-16 at byte 126 and, in the 24.x copy, a few non-zero bytes from byte 2 102 that look like uninitialised memory; the 2026 save has zeros), the plug-ins' sequence data `sdat` of Lumetri Color (16 instances and the project's `EfdG`), the mask counter `mkif` byte 8. No chunk is added or reordered, and no `pard`, `cdat`, `ldta`, `cdta`, `tdb4`, keyframe, text or shape chunk differs. | All 12 families. |
 | **25.x against 24.x**: only `head` (bytes 1, 3, 5 and 7), and the session noise in `opti` and `sdat` above. | All 12 families. |
@@ -216,12 +221,12 @@ the value from the corpus manifest (test file in parentheses at the end of each 
 
 API: `LayerHeader` (`is_video_enabled`/`is_enabled`, `is_audio_enabled`, `is_effects_enabled`,
 `is_auto_oriented`, `light_type`, `blend_mode`, `stretch` / `stretch_den`, `stretch_ratio`,
-`stretch_percent`, `in_point`, `out_point`); the same switches on `Layer`; `Layer::track_matte`
+`in_point`, `out_point`); the same switches on `Layer`; `Layer::track_matte`
 (`TrackMatte`, `MatteMode`; test `tests/matte.rs`). `stretch` is now the
 numerator of the ratio (it was the whole multiplier before 50 % and 150 % were sampled). Tests:
 `tests/header.rs`, `tests/layer_switches.rs`. The layer name itself is the `Utf8` child of the
 `Layr` (empty while the name is the source's); the layer then shows the name of its source item
-(`Project::layer_display_name`).
+(`Project::layer_source(...)` then `Item::display_name`, the rule the importer uses).
 
 ### 3.2 Composition header (`Item/cdta`, 204 bytes; the decoder needs the first 176) and renderer
 
@@ -246,9 +251,9 @@ numerator of the ratio (it was the whole multiplier before 50 % and 150 % were s
 
 The inert `ADBE Time Remapping` record of every AV layer has `tduM` = the source's duration in seconds: 5 for 5 s compositions (124, 257, 258), 3 and 2 for a 3 s and a 2 s composition (600, 601), 1 for the 1 s WAV (351), 0.1 for the three-frame sequence (353), 0 on solids and stills (000, 126). Every property's keyframe time scale (`tdb4` bytes 12 to 15) follows the composition (23 976 in every
 property of `L` after 229 and 230). The corpus manifest calls the classic renderer
-`ADBE Advanced 3d`; the file stores `ADBE Escher` / `Classic 3D`. API: `CompHeader::frame_rate_exact`
-(exact fraction), `duration_frames`, `shutter_phase`, `display_start`, `display_start_seconds`,
-`display_start_frame`. Tests: `tests/header.rs`, `tests/layer_switches.rs`.
+`ADBE Advanced 3d`; the file stores `ADBE Escher` / `Classic 3D`. API: `CompHeader::{time_base,
+frame_rate_fixed, duration_units, shutter_phase, display_start}` (`display_start` is the exact
+fraction). Tests: `tests/header.rs`, `tests/layer_switches.rs`.
 
 ### 3.3 Items, footage and precomps
 
@@ -263,6 +268,7 @@ property of `L` after 229 and 230). The corpus manifest calls the classic render
 | footage size | `Pin /sspc` | 30, 34 | u32, u32 | width, height in pixels | 000 (1920 x 1080), 022 (100 x 100 null), 126 (8 x 8), 211, 212, 259 | V |
 | footage name | `Pin /opti` | 26 (solid), 58 (file) | ASCII, NUL terminated | the item's own `Utf8` name is empty for footage | 000 (`L`), 022 (`Null 1`), 126 (`test8x8.png`), 211 (`S100`), 259 (`Blue`) | V |
 | **solid colour** | `Pin /opti` | 10, 14, 18, 22 | 4 x f32 | ARGB, 0..1: red [1, 0, 0] is `1, 1, 0, 0`, blue [0, 0, 1] is `1, 0, 0, 1` | 000, 259 | V |
+| **Photoshop layer** | `Pin /opti` (tag `8BPS`) | 14; 32, 36; 78, 82, 86, 90; 344 | i32 BE; 2 x u32 **LE**; 4 x i32 **LE**; UTF-8, NUL terminated | an item made from one layer of a `.psd`: the layer record's index in the file (bottom of the stack = 0; -1 is the merged image), the document's two sides (which is the width: **?**, the one sample is square), the layer's bounds top, left, bottom, right in document pixels (all 0 for a layer without pixels, such as an adjustment layer) and the layer's name. The item's size (`sspc` 30 / 34) is the bounds' size with Retain Layer Sizes, else the document's. `Footage::psd_layer` | the project of issue 3087: ten layers, each index, bounds and name equal to the `.psd`'s layer record at that position (`Layer 1` `[9, -346, 1083, 1086]`, item 1432 x 1074; `test` `[749, 800, 764, 848]`, item 48 x 15; 32 and 36 hold 1000, 1000 in every record, the `.psd`'s size) | V |
 | file path | `Pin /Als2/alas` | key `fullpath` | JSON string | alias JSON of a file footage item | 126 (the fixture holds a neutral path) | V |
 | precomp linkage | `Layr/ldta` | 40 | u32 | the layer's source id is the id of the precomp's item | 124 | V |
 
@@ -292,7 +298,8 @@ name. A footage layer shows the item's name while it has no name of its own (351
 
 Test: `tests/header.rs` (precomp), `tests/text_markers_footage.rs` and `tests/batch3_objects.rs`
 (footage), `tests/layer_switches.rs` (solid colour). API: `Footage::{duration, native_frame_rate,
-bits_per_pixel, file_size, audio_sample_rate, is_sequence, sequence_frame_count}`.
+bits_per_pixel, file_size, audio_sample_rate, is_sequence}`; `Item::sequence_info` (with
+`SequenceInfo::frame_count`).
 
 ### 3.4 Properties: sparse storage, static values and units
 
@@ -401,8 +408,8 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
-returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::ease_component(i)`
+returns one component's `KeyEase`, `Keyframe::ease_components` all of them. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
 (100 in 204 key 1, 0 on the last key and right after creation; safe to ignore), **ease at 24 in
@@ -427,7 +434,7 @@ in tangent (`n` x `f64`, relative offset from the value) at `56 + 8 n`, out tang
 | **ease, colour switched to bezier** | spatial n=4 @24..55 | keyframe.set_interpolation bezier on two colour keys stores speed 0 and influence 0 on both sides, and After Effects interpolates them linearly (598 Start Color red to blue: 0.75 / 0.5 / 0.25 red at 0.5 / 1 / 1.5 s); a custom colour ease cannot be set by script | 598 | V |
 | **ease, mask path** | 64-byte record @24..55 | in speed, in influence, out speed, out influence as in the spatial template: 599 out / in influence 0.75, 700 0.2 / 0.5, speeds 0 (the path at 0.5 s is 5.42 % / 28.0 % of the way). The `f64` at 16 is 1 (093) or 2 (599, 700) on the first key and 0 on the last (not decoded) | 093, 599, 700 | V (influence), ? (speed unit) |
 
-API: `Keyframe::{interpolation_in, interpolation_out, kind, value, ease, ease_component, ease_components, plain_ease_slots, color_distance, spatial}`;
+API: `Keyframe::{interpolation_in, interpolation_out, kind, value, ease, ease_component, ease_components, spatial}` (the `f64` at byte 16 of a colour key is `SpatialKey::segment_length`);
 `Property::keys()` hands the property's template to its records. Marker record (16 bytes): time,
 `03 03` hold bytes, 8 stale bytes. Mask path record (64 bytes): the common fields and the ease at byte 24 (599, 700). Test:
 `tests/values.rs`, `tests/keyframes.rs`.
@@ -604,6 +611,64 @@ suffix is a parameter id, not the `parT` position (Curves -0002 Channel before -
 -0005 Quality before -0004). API: `CurvesData`, `MeshData`, `curve_lut`. [V; details: corpus FORMAT
 S]
 
+**Lumetri Color** (`ADBE Lumetri`, 1200: 63 compositions in After Effects 2026, 32 bpc, working space
+None; by script: defaults, all set, one per section, valid minima and maxima, every popup item the script
+can set, checkboxes toggled, keys, an expression; from presets made by hand, `-58` ... `-62`: an Input
+LUT, a Look, the RGB curve, Hue vs Sat, the colour wheels): 131 `parT` entries. The `-NNNN` suffix is a
+parameter id, not the position (`-0127` ... `-0130` sit between `-0005` and `-0026`), so the importer
+keys by suffix. Float sliders (type 10) store the value After Effects shows; the valid ranges (`pard`
+104 / 108) are wider than the slider's (112 / 116): Temperature / Tint -300..300 (slider -100..100),
+Saturation 0..300 (0..200), Exposure -7..7 (-5..5), Contrast, Highlights, Shadows, Whites, Blacks,
+HDR Specular, Tint Balance -150..150 (-100..100), Faded Film 0..150 (0..100), HDR White 100..1000,
+HDR Range 100..10000, Refine Blur 0..1000 (0..30), Vignette Amount -5..5 (-3..3); the read-backs of
+`-19-min` / `-20-max` equal the stored numbers. **Hidden controls are recorded in the default state**
+(`tdsb` 3) and still hold the value After Effects reads back: High Dynamic Range `-0062` (1.0),
+HDR Specular `-0064` (22), the second Look popup `-0128` (26.16 as set, read back 26), Legacy Tone And
+Saturation `-0097` (its `pard` default reads off as the script saved the project and on once the
+project was opened and saved again, `versions/1200-lumetri-26`, `-25x`, `-24x`; a fresh instance reads
+back off), Auto Color `-0124`, Face Detection `-0102`, the Auto Intensity `-0123`
+(`EffectParam::recorded_value`). Each section has an Active checkbox (blank `pard` name; `-0003` Basic
+Correction, `-0023` Creative, `-0037` Curves, `-0118` RGB Curves, `-0104` / `-0105` / `-0107` / `-0109` /
+`-0111` the hue / saturation curves, `-0046` Color Wheels, `-0068` HSL Secondary, `-0050` Vignette, on
+by default); off, the section does nothing (`-03-sec-basic-correction`, `-17-sec-vignette` render as
+`-00-defaults`). Arbitrary data (type 11, a record and `aRbs` in every instance; empty is `fe fe`):
+`-0001` an XML copy of the grade written only when the Look changes (not kept current: `-01-set-all`
+holds defaults for controls set after the Look; it names the LUT file, `Fuji F125 Kodak 2393 (by
+Adobe).cube`); `-0096` the Look's name, UTF-16LE (`SL BLUE ICE`, `Fuji F125 Kodak 2393 (by Adobe)` in
+`-59-preset-look-lut`; the popup `-0025` itself has no record, `-0128` can disagree with it:
+`-07-sec-creative` names item 20 while `-0128` holds 23), `-0095` likewise for the Input LUT
+(`ALEXA_Default_LogC2Rec709`, `-58-preset-input-lut`; the popups `-0005` / `-0127` keep no record,
+`-0004`, `-0024` and the assets `-0125` / `-0126` stay `fe fe`: the LUTs are After Effects' own files,
+named, not embedded); `-0129` the Look colour space's 16-byte id (the GUID `LookColorSpace` of `-0001`
+in Windows layout: the first 4, 2 and 2 bytes little-endian; zero for None; the Color Space popup
+`-0130` writes no record of its own, `-22-pop38-1` ... `-53-pop38-33`);
+`-0032` Split Toning (32 zero bytes); `-0039` the four RGB curves and `-0042`, `-0106`, `-0108`,
+`-0110`, `-0112` the hue / saturation curves, 520 bytes each: `i32` type (3 for the hue curves, 2 for
+Luma vs Sat and Sat vs Sat, 0 for an RGB curve), `u32` point count, then little-endian `f64` pairs x, y
+sorted by x (bytes after the counted points are stale). RGB: x and y 0..1, (0, 0), (1, 1) by default;
+the first of the four is the master curve (`-60-preset-curves-rgb`: (0.491, 0.787) lifts R, G and B
+alike, and the render follows a natural cubic spline through the points within 0.003); the order of
+the other three is H (the `-0001` XML names `ToneCurvesLuma`, `Red`, `Green`, `Blue`; no sample moves
+one). Hue / saturation: x the hue (0 red, 1/3 green) or the luma / saturation 0..1, y the offset from
+neutral 0; a fresh curve has no points, the selector colours `-0113` ... `-0117` add three at y = 0,
+the hue picked +- 0.0556. Hue vs Sat's y scales the saturation by 1 + y in linear light
+(`-61-preset-curves-huesat`: (0.0155, 0.97) takes pure red's linear saturation to 1.96 times, (0.263,
+-0.03) and (0.765, -0.02) green, cyan and blue to 0.97); the other four curves' scale is H. `-0047`
+Color Wheels, 4 `f64` triples: hue in degrees (0 red, 120 green), brightness slider 0..1 (0.5
+neutral), distance from the centre 0..1; 0, 0.5, 0 each by default; Shadows, Midtones, Highlights, then
+a fourth wheel of unknown role (`-62-preset-wheels`: Shadows 229.1, 0.370, 0.547 towards blue with the
+slider down; Midtones 0.1, 0.5, 0.395 towards red; Highlights 93.4, 0.727, 0.319 towards yellow-green
+with the slider up; the fourth at its default); `-0085` the HSL correction wheels (8 triples, the same
+default; layout H); `-0073` the HSL key, 40 bytes: a flag byte (1 once a colour was picked), then hue,
+saturation, lightness, each centre, range, tolerance (`f32` LE, fractions) and an enabled byte (fresh:
+0.5, 0, 0, on; picking RGB 0.02 0.55 0.85 gives hue centre 0.5605 = that colour's hue and lightness
+centre 0.435 = its HSL lightness, range 0.05, tolerance 0.1: `-01-set-all`; whether range is the half
+or full width is H); `-0122` the Auto Tone analysis (UTF-16 JSON). The project saved as 25.x and 24.x
+copies (`versions/1200-lumetri-25x`, `-24x`: the 58 scripted compositions, saved by After Effects
+2026) stores every Lumetri definition, valid range and value as the 26 save does. [V for the sliders,
+checkboxes, popups, the `tdsb` 3 values, the master RGB curve, Hue vs Sat, the colour wheels and the
+LUT names; H where marked]
+
 **Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our
 sample; read from 88 instances in one production project, not made by us, and from our own After
 Effects 2026 sample 1400 (corpus `aep/cryptomatte.aep`: a fresh instance, Selection Mode on, each
@@ -706,7 +771,7 @@ pins are placed by hand or by a preset.
 328), so mode and inverted are reported per mask. `mkif` byte 8 is the running mask id counter of the
 **layer** in the session (1, 2 for the two masks of 328; 329 then gets 3; undo does not reset it; a new
 layer starts at 1 again): exposed as `Mask::counter`, a session counter and not a stable id. API:
-`Mask::{mode, inverted, counter}`, `Project::mask_vertices_px` (vertices in layer pixels), `Layer::mask_atoms` (`MaskAtom`: the mask with its atom group, its path property and its shapes by position, for the keys and expressions of the mask properties). Tests:
+`Mask::{mode, inverted, counter}`, `ShapePath::vertices(size)` (vertices in layer pixels: `size` is the size of the layer's source, `Project::layer_source_size`; a text or shape layer has no source size and its mask boxes are already pixels, so the importer passes 1 x 1), `Layer::mask_atoms` (`MaskAtom`: the mask with its atom group, its path property and its shapes by position, for the keys and expressions of the mask properties). Tests:
 `tests/masks.rs` (with a synthetic check of the handle order), `tests/batch3_objects.rs`.
 
 ### 3.9 Shape layers (`tdgp[ADBE Root Vectors Group]`)
@@ -792,7 +857,7 @@ verified paths from the top level (keys `/98 /0 /1`; `RUN` = `/1/1[0]/0`):
 | **stroke colour** | `.../6/54/0/1` = `[A R G B]`, the fill's layout; white in the untouched samples, red `[1 1 0 0]` in 574, blue in 595. The stroke switch, width and order are slots `/57`, `/63`, `/58` (see "character settings") | 110, 113, 574, 595 | V |
 | **automatic leading** | style slot `.../6/4`: `true` = automatic leading (lines advance by 1.2 x the size; `/5` is then not used), `false` = `/5` is the leading. **243: `/4` false, `/5` 98, the second line's baseline is stored 98 px below the first (`/1/1[0]/1/2[0]/6[0]/6[0]/6[0]/6[1]/0/0[1]`)**. **400 (Auto Leading switched on for `A` CR `B`, size 100, leading 98; against its unedited save 399): the run style changes in `/4` (false -> true) and `/5` (98 -> 0.01) only, the stored second baseline moves from 98 to 120 px below the first (1.2 x 100), and After Effects measures the same 120 px (`text.measure`)**; the rest of the diff is save noise (`head`, the comp's modification time, the text's `btgu/pgui`). That `/5` holds 0.01 under automatic leading is seen in 400 only | 243, 339 (`/5`); 400 (`/4`); test `automatic_leading_is_slot_4` | V |
 | **undecoded slots** | the run style and paragraph dictionaries of an untouched document (244; 110 stores the same bytes) are the reference: a slot that is not decoded and differs from it is listed (`TextDocument::undecoded_style_fields`, `undecoded_paragraph_fields`); a slot the reference lacks is listed only when it is not 0, `false`, empty or `/nil` (a neutral value is taken to carry nothing, so it is not reported as a loss; `/nil` is how 244 stores its paragraph slots `/27`, `/28` and `/36`). Decoded style slots: `/0 /1 /2 /3 /4 /5 /6 /7 /8 /9 /11 /12 /13 /18 /35 /36 /52 /53 /54 /56 /57 /58 /62 /63 /70`; paragraph slots: `/0 /1 /2 /3 /4 /5 /8 /9 /21 /29 /33`. Not found by any scriptable setting (none of the `text.set_style` attributes tried in S17 changes them): style `/20 /38 /78 /87 /88`, paragraph `/31 /32`. **Paragraph `/24`, `/35` and style `/68`** (1, 1 and 0 in a scripted text) were edited in place in the wrapping box text 517 (732: `/24` 0, 733: `/35` 0, 734: `/68` 1, same length); After Effects opens each without a dialog, keeps the value on a re-save and composes the same four lines, baselines and bounds (`text.measure`, `layer.bounds`; 734 renders like 517), so 0 and 1 are not listed (`NEUTRAL_PARAGRAPH_VALUES`, `NEUTRAL_STYLE_VALUES`; their meaning stays unknown, Latin text only). **Paragraph `/34`** is 0 in a scripted text and 7 after Reset Paragraph (727: the only slot that changes); a justified 600 px box text of 88 characters composes the same four lines, baselines and bounds with both values (S18), so 0 and 7 are not listed (`NEUTRAL_PARAGRAPH_VALUES`), other values are | every text sample lists none; 725, 727 | V (reference), E (/34) |
-| **Source Text record** | the `tdbs` in `btds[ADBE Text Document]` (next to the `btdk`) has no keys and no expression in every sample; Source Text keyframes (presumably one `btdk` per key) and expressions were not sampled, the reader only reports them (`Layer::source_text_property`, `Layer::text_document_count`) | 110-114, 243-248, 334-340 | E |
+| **Source Text record** | the `tdbs` in `btds[ADBE Text Document]` (next to the `btdk`) has no keys and no expression in every corpus sample. A Source Text expression is stored as on any other property: its text in the `tdbs`'s `Utf8`, `tdb4` byte 120 = 1, byte 119 = 0 when enabled and 1 when disabled (`tests/fixtures/text-synthetic.aep`: `text.sourceText + "!"` enabled, `"X"` disabled; the `btdk` keeps the typed text). Source Text keyframes (presumably one `btdk` per key) were not sampled, the reader only reports them (`Layer::source_text_property`, `Layer::text_document_count`) | 110-114, 243-248, 334-340, text-synthetic | E; expression V |
 
 API: `TextDocument` (`paragraphs`, `style_runs`, `text_box`, `paragraph_texts`, `font_of`,
 `incomplete_runs`, `undecoded_style_fields`, `undecoded_paragraph_fields`, `kerning`,
@@ -834,7 +899,7 @@ groups as on other layers, with these conventions:
 
 | What | Path | Stored | Evidence | Conf. |
 |---|---|---|---|---|
-| camera Position, default (auto state) | `ADBE Transform Group/ADBE Position`, `tdb4` 76 and 77 = 1 although no expression exists | `[0, 0, -2666.67]` (x and y are 0 whatever the composition size; z = -zoom). A **one-node** camera reports `[0, 0, -2666.67]` (251). **Correction (S16): a reopened two-node camera reports `[0, 0, -2666.67]` too (256 read back), and After Effects renders it there**: the default two-node camera of 537 above the 3D solid of 486 renders from `[0, 0, -2666.67]` towards the point of interest, not like the composition's default view (537 differs from 486 in 24 % of the grid points, and EffectCraft's import with the stored position matches 537 but for 4 edge points). The `[960, 540, ...]` of the batch-3 notes was not reproduced (535 and 537, created by script, read back the stored value too); `CameraPosition::reported` keeps the old rule and is marked as contradicted | 256, 251, 537 | V |
+| camera Position, default (auto state) | `ADBE Transform Group/ADBE Position`, `tdb4` 76 and 77 = 1 although no expression exists | `[0, 0, -2666.67]` (x and y are 0 whatever the composition size; z = -zoom). A **one-node** camera reports `[0, 0, -2666.67]` (251). **Correction (S16): a reopened two-node camera reports `[0, 0, -2666.67]` too (256 read back), and After Effects renders it there**: the default two-node camera of 537 above the 3D solid of 486 renders from `[0, 0, -2666.67]` towards the point of interest, not like the composition's default view (537 differs from 486 in 24 % of the grid points, and EffectCraft's import with the stored position matches 537 but for 4 edge points). The `[960, 540, ...]` of the batch-3 notes was not reproduced (535 and 537, created by script, read back the stored value too); the reader keeps only the stored value (`CameraPosition::stored`) | 256, 251, 537 | V |
 | camera Position, set by the user | same, `tdb4` 76 and 77 = 0 | the absolute value `[100, 200, -1000]` | 253 | V |
 | camera point of interest | `ADBE Anchor Point` | `[960, 540, 0]` in **pixels** (not a fraction); the record's `tdsb` is 1 on a two-node and 3 on the one-node camera (not asserted) | 251, 253, 256 | V (value), E (`tdsb`) |
 | light Position, default | same as the camera | `[0, 0, -1333.33]`, as After Effects reports it (255 read back); the point of interest `[960, 540, 0]` | 254, 255 | V |
@@ -850,10 +915,8 @@ groups as on other layers, with these conventions:
 
 A point light made by converting a spot light has a different property set (`Orientation`, `Rotate
 X/Y/Z`, `Cone Angle`, `Cone Feather 2` in the default state) that a spot light lacks (252); whether that
-is an artefact of the conversion is untested. API: `Layer::camera_position`,
-`CameraPosition::reported`, `Layer::camera_point_of_interest`, `Layer::light_intensity`,
-`Layer::{camera_zoom, camera_depth_of_field, camera_focus_distance, camera_aperture, light_color,
-light_cone_angle, light_cone_feather}`, `DEFAULT_CAMERA_ZOOM` (2 666.67 is verified for the 1920 px
+is an artefact of the conversion is untested. API: `Layer::camera_position`; the camera and light
+options are read by the importer's table (`import/camera.rs`); `DEFAULT_CAMERA_ZOOM` (2 666.67 is verified for the 1920 px
 composition only), `Layer::orientation` (`Orientation`; test `orientation_is_otst_otda` in
 `tests/batch5.rs`). Render checks against After Effects (20 px grid, 5 184 points): 486 1 point
 off, 535 2, 536 0, 537 4 (anti-aliased edges); **488 (Orientation `[10, 20, 30]`): 272 points

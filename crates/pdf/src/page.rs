@@ -23,6 +23,9 @@ pub struct Page {
     pub resources: Dict,
     /// CropBox (else MediaBox) `[x0, y0, x1, y1]`.
     pub bbox: [f64; 4],
+    /// The page's own ArtBox clipped to [`Page::bbox`] (ISO 32000-1 §14.11.2), when it has one
+    /// that keeps an area there; not inherited (table 30).
+    pub art: Option<[f64; 4]>,
     pub rotate: i32,
 }
 
@@ -31,13 +34,15 @@ pub fn pages(file: &File) -> Vec<Page> {
     let mut out = vec![];
     let Some(cat) = file.catalog() else { return out };
     let Some(root) = file.get_dict(cat, "Pages") else { return out };
+    /// Collects the pages under `node`, passing on the attributes pages inherit (resources,
+    /// MediaBox, CropBox, /Rotate); bounded in depth and page count.
     fn walk(file: &File, node: &Dict, inherited: (Option<Dict>, Option<Vec<f64>>, Option<Vec<f64>>, i32), out: &mut Vec<Page>, depth: usize) {
         if depth > 32 || out.len() > 10_000 {
             return;
         }
         let res = file.get_dict(node, "Resources").cloned().or(inherited.0);
-        let media = file.get(node, "MediaBox").map(|m| file.nums(m)).filter(|v| v.len() == 4).or(inherited.1);
-        let crop = file.get(node, "CropBox").map(|m| file.nums(m)).filter(|v| v.len() == 4).or(inherited.2);
+        let media = file.get(node, "MediaBox").map(|m| file.nums(m)).filter(|v| is_area(v)).or(inherited.1);
+        let crop = file.get(node, "CropBox").map(|m| file.nums(m)).filter(|v| is_area(v)).or(inherited.2);
         let rot = file.get_num(node, "Rotate").map(|r| r as i32).unwrap_or(inherited.3);
         match file.get(node, "Kids").and_then(Obj::array) {
             Some(kids) if file.get(node, "Type").and_then(Obj::name) != Some("Page") => {
@@ -49,13 +54,41 @@ pub fn pages(file: &File) -> Vec<Page> {
             }
             _ => {
                 let b = crop.or(media).unwrap_or_else(|| vec![0.0, 0.0, 612.0, 792.0]);
-                let bbox = [b[0].min(b[2]), b[1].min(b[3]), b[0].max(b[2]), b[1].max(b[3])];
-                out.push(Page { dict: node.clone(), resources: res.unwrap_or_default(), bbox, rotate: rot.rem_euclid(360) });
+                let bbox = normalized(&b).unwrap_or([0.0, 0.0, 612.0, 792.0]);
+                // The ArtBox is the page's own (not inherited), clipped to the crop box.
+                let art = file
+                    .get(node, "ArtBox")
+                    .map(|m| file.nums(m))
+                    .filter(|v| is_area(v))
+                    .and_then(|v| normalized(&v))
+                    .map(|a| [a[0].max(bbox[0]), a[1].max(bbox[1]), a[2].min(bbox[2]), a[3].min(bbox[3])])
+                    .filter(|a| a[2] > a[0] && a[3] > a[1]);
+                out.push(Page { dict: node.clone(), resources: res.unwrap_or_default(), bbox, art, rotate: rot.rem_euclid(360) });
             }
         }
     }
     walk(file, root, (None, None, None, 0), &mut out, 0);
     out
+}
+
+/// A box `[x0, y0, x1, y1]` (corners in any order) with finite corners and a finite span that
+/// encloses an area.
+fn is_area(v: &[f64]) -> bool {
+    match v {
+        [x0, y0, x1, y1] => {
+            let (w, h) = (x1 - x0, y1 - y0);
+            v.iter().all(|c| c.is_finite()) && w.is_finite() && h.is_finite() && w.abs() > 0.0 && h.abs() > 0.0
+        }
+        _ => false,
+    }
+}
+
+/// A box with its corners ordered (`x0 < x1`, `y0 < y1`), `None` unless [`is_area`].
+fn normalized(v: &[f64]) -> Option<[f64; 4]> {
+    match v {
+        [x0, y0, x1, y1] if is_area(v) => Some([x0.min(*x1), y0.min(*y1), x0.max(*x1), y0.max(*y1)]),
+        _ => None,
+    }
 }
 
 /// The page's content streams, decoded and joined.
@@ -636,7 +669,12 @@ impl<'a> Interp<'a> {
                 let bc = f.get(&sm, "BC").map(|b| f.nums(b)).unwrap_or_default();
                 let gcs = f.get_dict(&gd, "Group").and_then(|gr| f.get(gr, "CS")).map(|c| color_space(f, c, Some(res))).unwrap_or(Cs::Rgb);
                 let backdrop = if bc.is_empty() { [0.0; 3] } else { gcs.to_rgb(&bc) };
-                let saved_b = std::mem::replace(&mut self.b, Builder::new());
+                // The mask it replaces closes first: its groups don't enclose the new one.
+                if let Some(d) = self.gs.mask_depth {
+                    self.close_to(d);
+                }
+                let inner = self.b.nested(2);
+                let saved_b = std::mem::replace(&mut self.b, inner);
                 let ctm = self.gs.ctm;
                 let saved_gs = std::mem::replace(&mut self.gs, GState { ctm, ..GState::default() });
                 let saved_stack = std::mem::take(&mut self.saved);
@@ -647,9 +685,6 @@ impl<'a> Interp<'a> {
                 let (nodes, _, sk) = mask_b.finish();
                 for s in sk {
                     self.b.skip(&s);
-                }
-                if let Some(d) = self.gs.mask_depth {
-                    self.close_to(d);
                 }
                 let mut content = Group::new("Soft Mask");
                 content.children = nodes;
@@ -751,8 +786,15 @@ impl<'a> Interp<'a> {
         if depth > 8 {
             return;
         }
+        // The `Pattern` and `Tile` wrappers must fit under the open groups too.
+        if !self.b.has_room(2) {
+            self.b.skip("group nesting limit");
+            return;
+        }
         // The cell, drawn once in pattern space.
-        let saved_b = std::mem::replace(&mut self.b, Builder::new());
+        // The cell ends up under the open groups and this pattern's `Pattern` and `Tile`.
+        let inner = self.b.nested(2);
+        let saved_b = std::mem::replace(&mut self.b, inner);
         let saved_gs = std::mem::take(&mut self.gs);
         let saved_stack = std::mem::take(&mut self.saved);
         let saved_path = std::mem::take(&mut self.path);

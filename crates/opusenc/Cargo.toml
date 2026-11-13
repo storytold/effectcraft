@@ -12,4 +12,4 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
-filmcraft-opus = { workspace = true }
+craft-audio = { workspace = true }

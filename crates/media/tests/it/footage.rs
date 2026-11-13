@@ -747,8 +747,8 @@ fn sequence_gaps_hold_the_previous_frame() {
 /// parallax project's 21120-px plates were decoded and resampled for every frame at Quarter).
 #[test]
 fn stills_at_reduced_sizes_are_resampled_once() {
-    let dir = std::env::temp_dir().join(format!("ec-still-size-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let guard = tempfile::tempdir().expect("temp dir");
+    let dir = guard.path().to_path_buf();
     let p = dir.join("plate.png");
     let px = |x: u32, y: u32| {
         image::Rgba([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x ^ y) % 256) as u8, if (x + y).is_multiple_of(5) { 0 } else { 255 - (x % 128) as u8 }])
