@@ -18,11 +18,11 @@
 //! options of extruded shapes.
 
 use crate::{Layer as AepLayer, PropGroup as AepGroup, PropNode, Property as AepProp, ShapePath as AepPath};
-use effectcraft_keyframe::Gradient;
+use effectcraft_keyframe::{Gradient, ShapePath};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Node, PropGroup};
 
-use crate::import::masks::{import_path_keys, to_path};
+use crate::import::masks::{NO_VERTICES, import_path_keys, to_path};
 use crate::import::props::{Kind, import_expression, import_keys};
 use crate::import::report::{Collector, LossCategory};
 use crate::import::time::TimeMap;
@@ -400,15 +400,20 @@ fn path(g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) -> Option<PropGroup> {
         Some(None) => Err("its path is unreadable"),
         None => Err("it has no path"),
     };
+    let node = oms.child_list(b"tdbs").and_then(AepProp::from_chunk);
+    // A static path an expression draws (a text-box rig writes its outline from the text's size):
+    // After Effects stores it empty. The expression is the path, so it is kept, on an empty value.
+    let drawn_by_expression = node.as_ref().is_some_and(|n| n.expression().is_some() && !n.is_animated());
     let first = match first {
         Ok(p) => p,
+        Err(why) if why == NO_VERTICES && drawn_by_expression => ShapePath::default(),
         Err(why) => {
             cx.col.lose(LossCategory::ShapeLayers, format!("{}: a shape path not imported, {why}", cx.what));
             return None;
         }
     };
     let mut p = build::shape_path(cx.ids, first);
-    if let (Some(node), Some(prop)) = (oms.child_list(b"tdbs").and_then(AepProp::from_chunk), p.get_mut("path")) {
+    if let (Some(node), Some(prop)) = (node, p.get_mut("path")) {
         if node.is_animated() {
             import_path_keys(&shapes, &node, cx.what, (1, 1), cx.tm, prop, cx.col);
         }
