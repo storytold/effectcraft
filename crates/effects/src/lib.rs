@@ -107,7 +107,7 @@ pub use generate3::{
     Coverage, MarksPlan, PaintPlan, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
 };
 pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
-pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
+pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, glyph_strokes, text_passes};
 pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
