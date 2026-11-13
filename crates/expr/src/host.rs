@@ -292,7 +292,14 @@ fn slot_resp(path: &str, s: &ae_order::AeSlot, index: usize) -> Resp {
 /// (`effectcraft_project::matchnames`). Rigs write match names so they work in any UI language.
 fn by_ae_match_name<'l>(l: &'l Layer, g: &'l PropGroup, key: &Key) -> Option<&'l Node> {
     let Key::Name(name) = key else { return None };
-    g.children.iter().find(|n| l.props.node_chain(n.uid()).is_some_and(|chain| matchnames::node(&chain) == *name))
+    // The chain down to `g` is the same for every child, so find it once (empty at the layer's root).
+    let mut chain = if std::ptr::eq(g, &l.props) { Vec::new() } else { l.props.node_chain(g.uid)? };
+    g.children.iter().find(|n| {
+        chain.push(n);
+        let hit = matchnames::node(&chain) == *name;
+        chain.pop();
+        hit
+    })
 }
 
 fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
