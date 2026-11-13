@@ -882,6 +882,20 @@ fn frames_count_type_sets_the_project_frame_count() {
     assert_eq!(s.project.settings.frame_start, 0);
 }
 
+/// `app.project.revision` starts at 1 and goes up with every change; `listColorProfiles()` lists the
+/// working spaces the project can take.
+#[test]
+fn project_revision_and_color_profiles() {
+    let mut s = session();
+    let o = ok(&mut s, "var p = app.project; var a = p.revision; p.items.addComp('c', 64, 64, 1, 2, 24); [a, p.revision > a].join('|')");
+    assert_eq!(o.result, json!("1|true"));
+    let o = ok(&mut s, "var l = app.project.listColorProfiles(); [l.length, l[0], l.indexOf('rec709') >= 0].join('|')");
+    assert_eq!(o.result, json!("6|srgb|true"));
+    // Each one is accepted back as the working space.
+    let o = ok(&mut s, "var p = app.project; var l = p.listColorProfiles(); for (var i = 0; i < l.length; i++) p.workingSpace = l[i]; l.length");
+    assert_eq!(o.result, json!(6));
+}
+
 #[test]
 fn console_keeps_variables() {
     let mut s = session();

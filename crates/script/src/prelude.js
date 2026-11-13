@@ -1966,6 +1966,10 @@ Project.prototype = {
   get selection() { return this.__info().selection.map(__item); },
   get file() { var p = this.__info().path; return p ? new File(p) : null; },
   get dirty() { return this.__info().dirty; },
+  // The project's revision: 1 for a new project, one more after every change (read-only).
+  get revision() { return this.__info().revision + 1; },
+  // The working spaces a project can use, in the form `workingSpace` takes.
+  listColorProfiles: function () { return this.__info().colorProfiles.slice(); },
   get renderQueue() { return new RenderQueue(); },
   get bitsPerChannel() { return this.__info().bitsPerChannel; },
   set bitsPerChannel(v) { __call("file.projectSettings", { bitDepth: __num(v) }); },

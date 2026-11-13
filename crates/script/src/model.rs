@@ -89,6 +89,7 @@ fn project(s: &Session) -> J {
         "displayStartFrame": p.settings.frame_start,
         "renderQueue": p.render_queue.len(),
         "revision": s.revision,
+        "colorProfiles": effectcraft_project::ColorSpace::WORKING.iter().map(|c| c.id()).collect::<Vec<_>>(),
     })
 }
 
