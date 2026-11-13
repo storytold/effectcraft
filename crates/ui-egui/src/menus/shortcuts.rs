@@ -403,6 +403,10 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         if app.dialog.is_some() {
             continue;
         }
+        if !mods.any() && crate::panels::effect_controls::handle_disclosure_key(app, key) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+            continue;
+        }
         // Enter in the Project panel renames the selected item (handled by the panel).
         // In Effects & Presets and the Render Queue Enter applies or opens the row (handled by the
         // panel), not the layer rename.

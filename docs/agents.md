@@ -492,8 +492,9 @@ between the layer's In and Out points in the background ("Analyzing in backgroun
 then "Stabilizing..."; `warp.status` reports `progress`, `banner`, whether the effect is
 `analyzed`, and the current frame's `warp` matrix, `autoScale` and `crop`); `warp.cancel` stops it
 without writing anything. The analysis is stored in the effect (saved with the project) and is
-one undo step; trimming, slipping, time-remapping or replacing the layer's source clears it and
-the app re-analyses automatically (headless: run `warp.analyze` again). Settings are ordinary
+one undo step; trimming, slipping, time-remapping or replacing the layer's source, editing its
+masks, the effects above the Warp Stabilizer or, on a precomp layer, the precomp's contents
+clears it and the app re-analyses automatically (headless: run `warp.analyze` again). Settings are ordinary
 properties under the instance's groups, e.g. `effects/#1/stabilization/result` (0 Smooth Motion,
 1 No Motion), `effects/#1/stabilization/smoothness`, `effects/#1/stabilization/method`,
 `effects/#1/borders/framing` (0 Stabilize Only … 3 Stabilize, Synthesize Edges),
@@ -540,7 +541,8 @@ Each edit is one undo step; the first create adds the one-node "3D Tracker Camer
 startFrame?: 1, includePoints?: true}` exports the solve as an executable Blender scene script:
 baked camera/lens/focus, synced video background, points and ground. See
 [Blender camera export](blender-camera-export.md) for framing, assumptions and limitations.
-Changing the layer's frames clears the analysis; changing `effects/#1/shotType`,
+Changing the layer's frames, masks, the effects above the tracker or a precomp's contents
+clears the analysis; changing `effects/#1/shotType`,
 `effects/#1/horizontalAngleOfView`, `effects/#1/advanced/solveMethod` re-solves the stored tracks.
 
 ```sh

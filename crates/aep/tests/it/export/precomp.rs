@@ -47,10 +47,10 @@ fn a_precomposition_layer_points_at_its_composition() {
     let (c, pre) = (by_name("C"), by_name("Pre"));
     let pre_id = pre.id().expect("id");
     // C records the composition it uses (idpi, little-endian), idpc byte 0 is 1.
-    assert_eq!(c.used_item_ids(), vec![pre_id]);
+    assert_eq!(crate::common::used_item_ids(&c), vec![pre_id]);
     let idpc = c.chunk().child(b"idpc").and_then(|x| x.bytes()).expect("idpc");
     assert_eq!(idpc.first(), Some(&1));
-    assert_eq!(pre.used_item_ids(), Vec::<u32>::new());
+    assert_eq!(crate::common::used_item_ids(&pre), Vec::<u32>::new());
     assert_eq!(pre.chunk().child(b"idpc").and_then(|x| x.bytes()).and_then(|b| b.first().copied()), Some(0));
     let layer = c.comp().expect("comp").layers().next().expect("layer");
     let h = layer.header().expect("header");
@@ -107,7 +107,7 @@ fn one_composition_used_twice_is_recorded_once_and_chains_nest() {
     let view = effectcraft_aep::Project::new(&file).expect("project");
     let items = view.all_items();
     let id = |n: &str| items.iter().find(|i| i.display_name().as_deref() == Some(n)).and_then(|i| i.id()).expect(n);
-    let used = |n: &str| items.iter().find(|i| i.display_name().as_deref() == Some(n)).expect(n).used_item_ids();
+    let used = |n: &str| items.iter().find(|i| i.display_name().as_deref() == Some(n)).map(crate::common::used_item_ids).expect(n);
     assert_eq!(used("B"), vec![id("A")]);
     // Ascending ids (601; the order carries no meaning), and idpc counts them.
     let mut ab = vec![id("A"), id("B")];

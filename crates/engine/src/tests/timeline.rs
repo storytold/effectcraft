@@ -1581,3 +1581,28 @@ fn a_typed_component_moves_its_follow_components_by_each_layers_own_change() {
     let keys: Vec<Vec<f64>> = prop(&s, b, "audio/levels").keys.iter().map(|k| k.value.components()).collect();
     assert_eq!(keys, vec![vec![-20.0, -30.0], vec![-4.0, -34.0]], "B's 1 s key rises 6 dB on both channels");
 }
+
+#[test]
+fn convert_expression_to_keyframes_refuses_a_layer_of_millions_of_frames() {
+    let (mut s, l) = setup();
+    s.execute("prop.setExpression", json!({"layer": l, "path": "transform/rotation", "expression": "value"})).unwrap();
+    // A saved Out point a million seconds after the In point.
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().out_point =
+        effectcraft_time::Tick::from_seconds_f64(1e6);
+    let e = s.execute("prop.convertExpressionToKeyframes", json!({"layer": l, "path": "transform/rotation"})).unwrap_err().to_string();
+    assert!(e.contains("at most"), "{e}");
+    assert!(prop(&s, l, "transform/rotation").keys.is_empty());
+}
+
+#[test]
+fn convert_expression_to_keyframes_refuses_a_zero_frame_duration() {
+    let (mut s, l) = setup();
+    s.execute("prop.setExpression", json!({"layer": l, "path": "transform/rotation", "expression": "value"})).unwrap();
+    // A saved frame rate of 0/1 s has a frame duration of 0: the sampling loop never advanced.
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().frame_rate.den = 0;
+    let e = s.execute("prop.convertExpressionToKeyframes", json!({"layer": l, "path": "transform/rotation"})).unwrap_err().to_string();
+    assert!(e.contains("frame duration"), "{e}");
+    assert!(prop(&s, l, "transform/rotation").keys.is_empty());
+}

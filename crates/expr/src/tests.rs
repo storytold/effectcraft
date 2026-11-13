@@ -1259,6 +1259,41 @@ fn source_text_style_api() {
 }
 
 #[test]
+fn paragraph_settings_read_and_write_after_effects_names() {
+    // After Effects 26.3 reads justification as alignLeft / alignCenter / alignRight /
+    // justifyLastLeft / justifyLastCenter / justifyLastRight / justifyFull and direction as
+    // left-to-right / right-to-left, and its setters take those names.
+    let f = fx();
+    let doc = |f: &Fx, e: &str| -> TextDoc {
+        match f.ev(f.title, "text/sourceText", e, 0.0) {
+            Ok(Value::Text(d)) => *d,
+            r => panic!("{e}: {r:?}"),
+        }
+    };
+    let s = |e: &str| doc(&f, e).text;
+    assert_eq!(s("text.sourceText.style.justification + ' ' + text.sourceText.style.direction"), "alignLeft left-to-right");
+    for (ae, want) in [
+        ("alignLeft", effectcraft_keyframe::Justify::Left),
+        ("alignCenter", effectcraft_keyframe::Justify::Center),
+        ("alignRight", effectcraft_keyframe::Justify::Right),
+        ("justifyLastLeft", effectcraft_keyframe::Justify::JustifyLastLeft),
+        ("justifyLastCenter", effectcraft_keyframe::Justify::JustifyLastCenter),
+        ("justifyLastRight", effectcraft_keyframe::Justify::JustifyLastRight),
+        ("justifyFull", effectcraft_keyframe::Justify::JustifyAll),
+    ] {
+        let d = doc(&f, &format!("text.sourceText.style.setJustification('{ae}')"));
+        assert_eq!(d.justify, want, "{ae}");
+    }
+    let d = doc(&f, "text.sourceText.style.setDirection('right-to-left').setJustification('justifyLastRight')");
+    assert_eq!(d.direction, effectcraft_keyframe::Direction::Rtl);
+    assert_eq!(s("text.sourceText.style.setJustification('alignRight').justification"), "alignRight");
+    // Every accepted alias reads back as After Effects' name; an inherited name isn't one.
+    assert_eq!(s("text.sourceText.style.setJustification('CENTER_JUSTIFY').justification"), "alignCenter");
+    assert_eq!(s("text.sourceText.style.setJustification('justifyAll').justification"), "justifyFull");
+    assert_eq!(s("String(text.sourceText.style.setJustification('toString').justification)"), "toString");
+}
+
+#[test]
 fn numbers_to_source_text() {
     let f = fx();
     assert_eq!(f.text("Math.round(time * 10) / 10", 1.25), "1.3");
@@ -1374,6 +1409,28 @@ fn checkbox_and_dropdown_results() {
     assert_eq!(f.ev(f.b, "effects/#1/checkbox", "0", 2.0).unwrap(), Value::Bool(false));
     assert_eq!(f.ev(f.b, "effects/#2/menu", "3", 0.0).unwrap(), Value::Enum(2));
     assert_close!(f.ev(f.b, ROT, "effect('Dropdown Menu Control')('Menu') * 10", 0.0).unwrap().as_f64(), 10.0);
+}
+
+/// An effect EffectCraft does not have (an imported After Effects placeholder, #3087) is read by
+/// name like any other: its parameters by their names, a popup 1-based. It is also found by its
+/// After Effects match name, its effect id (the group's match id is one path segment).
+#[test]
+fn an_unknown_effects_parameters_are_read_by_name() {
+    let mut f = fx();
+    let g = group_push(&mut f.p, |ids| {
+        let mut g = ids.group("Pseudo_0_25", "Settings");
+        g.kind = effectcraft_project::GroupKind::Effect { effect: "Pseudo/0.25".into() };
+        g.children.push(ids.prop("param1", "Speed", Value::Scalar(3.0)).into());
+        g.children.push(ids.prop("param2", "Mode", Value::Enum(1)).into());
+        g
+    });
+    f.layer_mut(f.b).props.sub_mut("effects").unwrap().children.push(g.into());
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')('Speed') * 2", 0.0).unwrap().as_f64(), 6.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')('Mode') * 10", 0.0).unwrap().as_f64(), 20.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')(1)", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "thisLayer('Effects')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "thisLayer('ADBE Effect Parade')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
 }
 
 #[test]
@@ -2025,6 +2082,7 @@ fn an_expression_cant_change_the_prelude_for_the_next() {
     }
 }
 
+mod ae_layer_order;
 mod property_group;
 
 /// Timing harness for the prelude's cost on the evaluation path. Ignored: it is a measurement, not

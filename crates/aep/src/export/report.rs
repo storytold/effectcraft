@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Most example lines kept per loss category (the count is always exact).
-pub const MAX_DETAILS: usize = 20;
+/// Most example lines kept per loss category (the count is always exact); the same as the import
+/// report's.
+pub const MAX_DETAILS: usize = crate::import::MAX_DETAILS;
 
 /// Why a piece of the project did not arrive in the `.aep`, or arrived changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -130,15 +131,9 @@ impl LossCategory {
     }
 }
 
-/// One category of things that were not exported.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Loss {
-    pub category: LossCategory,
-    /// How many occurrences (exact).
-    pub count: usize,
-    /// Up to [`MAX_DETAILS`] example lines.
-    pub details: Vec<String>,
-}
+/// One category of things that were not exported: the import report's loss entry with the
+/// export categories.
+pub type Loss = crate::import::Loss<LossCategory>;
 
 /// What was written to the file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +217,7 @@ pub struct ExportReport {
 impl ExportReport {
     /// The sum of all loss counts.
     pub fn total_losses(&self) -> usize {
-        self.losses.iter().map(|l| l.count).sum()
+        Loss::total(&self.losses)
     }
 
     /// True when nothing was lost.
@@ -232,12 +227,12 @@ impl ExportReport {
 
     /// The loss count of a category.
     pub fn count(&self, category: LossCategory) -> usize {
-        self.losses.iter().find(|l| l.category == category).map_or(0, |l| l.count)
+        Loss::count_of(&self.losses, category)
     }
 
     /// `effects: 3, masks: 1` (empty when lossless).
     pub fn summary(&self) -> String {
-        self.losses.iter().map(|l| format!("{}: {}", l.category.label(), l.count)).collect::<Vec<_>>().join(", ")
+        Loss::summary(&self.losses, LossCategory::label)
     }
 }
 
@@ -251,11 +246,7 @@ pub(crate) struct Collector {
 impl Collector {
     /// Records one loss.
     pub fn lose(&mut self, category: LossCategory, detail: impl Into<String>) {
-        let loss = self.losses.entry(category).or_insert_with(|| Loss { category, count: 0, details: Vec::new() });
-        loss.count = loss.count.saturating_add(1);
-        if loss.details.len() < MAX_DETAILS {
-            loss.details.push(detail.into());
-        }
+        Loss::record(&mut self.losses, category, move || detail.into());
     }
 
     pub fn finish(self) -> ExportReport {
@@ -264,5 +255,58 @@ impl Collector {
             losses: self.losses.into_values().collect(),
             limitations: LIMITATIONS.iter().map(|s| (*s).to_string()).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A report with losses in two categories, as the collector finishes it.
+    fn collected() -> ExportReport {
+        let mut col = Collector::default();
+        col.exported.layers = 2;
+        col.lose(LossCategory::RoundedTimes, "time 1");
+        col.lose(LossCategory::Effects, String::from("fx 1"));
+        col.lose(LossCategory::Effects, "fx 2");
+        let mut report = col.finish();
+        report.limitations.truncate(1);
+        report.limitations[0] = "limit".into();
+        report
+    }
+
+    /// The JSON shape agents read: field names, category spelling, order and the loss entries.
+    #[test]
+    fn the_json_shape_is_pinned() {
+        let json = serde_json::to_string(&collected()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"exported":{"folders":0,"compositions":0,"solids":0,"layers":2,"solidLayers":0,"nullLayers":0,"adjustmentLayers":0,"properties":0,"keyframes":0,"expressions":0,"masks":0,"precompLayers":0,"effects":0,"footage":0,"footageLayers":0,"textLayers":0,"markers":0,"cameras":0,"lights":0,"shapeLayers":0,"timeRemaps":0,"textAnimators":0,"layerStyles":0},"losses":[{"category":"effects","count":2,"details":["fx 1","fx 2"],"unlisted":0},{"category":"rounded_times","count":1,"details":["time 1"],"unlisted":0}],"limitations":["limit"]}"#
+        );
+        let back: ExportReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, collected());
+    }
+
+    /// The queries read the losses.
+    #[test]
+    fn the_queries_read_the_losses() {
+        let report = collected();
+        assert_eq!((report.total_losses(), report.is_lossless()), (3, false));
+        assert_eq!((report.count(LossCategory::Effects), report.count(LossCategory::Lights)), (2, 0));
+        assert_eq!(report.summary(), "effects: 2, rounded times: 1");
+        let empty = Collector::default().finish();
+        assert_eq!((empty.total_losses(), empty.is_lossless(), empty.summary()), (0, true, String::new()));
+    }
+
+    /// Details stop at the cap.
+    #[test]
+    fn details_stop_at_the_cap() {
+        let mut col = Collector::default();
+        for i in 0..MAX_DETAILS + 5 {
+            col.lose(LossCategory::Masks, format!("mask {i}"));
+        }
+        let report = col.finish();
+        assert_eq!(report.count(LossCategory::Masks), MAX_DETAILS + 5);
+        assert_eq!(report.losses[0].details.len(), MAX_DETAILS);
     }
 }

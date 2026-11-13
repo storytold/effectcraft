@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-eps = { workspace = true }
 craft-pdf.workspace = true
 # The PDF a VectorCraft document carries (Create PDF-Compatible File).
 craft-doc = { workspace = true }
