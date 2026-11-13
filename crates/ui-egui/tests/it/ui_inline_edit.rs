@@ -438,8 +438,11 @@ fn ctrl_click_on_the_time_display_toggles_timecode_and_frames() {
     click_with(&mut h, at, Modifiers::COMMAND);
     assert_eq!(style(&h), TimeDisplayStyle::Timecode);
     assert_eq!(shown(&h, "timeline.timecode"), "0:00:01:06");
-    // A plain click changes nothing.
+    // A plain click leaves the display alone: it opens Go to Time (#3373), closed here.
     click_with(&mut h, at, Modifiers::NONE);
+    assert_eq!(style(&h), TimeDisplayStyle::Timecode);
+    key(&mut h, Key::Escape);
+    assert!(h.query_by_label("Go to Time").is_none(), "Go to Time closed");
     let at = center(&h, "timeline.timecode");
     click_with(&mut h, at, Modifiers::NONE);
     assert_eq!(style(&h), TimeDisplayStyle::Timecode);
@@ -745,4 +748,18 @@ fn typing_one_component_with_several_layers_selected_keeps_their_other_component
     key(&mut h, Key::Enter);
     assert_eq!(pos(&h, a), [40.0, 50.0, -300.0]);
     assert_eq!(pos(&h, b), [200.0, 120.0, -300.0], "B keeps its own X and Y");
+}
+
+/// #3373: a click on the Composition panel's time display opens Go to Time, as in After Effects;
+/// Ctrl/Cmd+click still switches between timecode and frames.
+#[test]
+fn clicking_the_viewer_time_display_opens_go_to_time() {
+    let (mut h, _) = harness();
+    h.state_mut().session.execute("time.set", json!({"frame": 30})).unwrap();
+    h.run_steps(2);
+    assert!(h.query_by_label("Go to Time").is_none(), "set up: no dialog yet");
+    let at = center(&h, "viewer.timecode");
+    click(&mut h, at, 1);
+    h.run_steps(2);
+    assert!(h.query_by_label("Go to Time").is_some(), "the dialog is open");
 }

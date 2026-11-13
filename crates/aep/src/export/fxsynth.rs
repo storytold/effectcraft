@@ -11,7 +11,8 @@
 use crate::Chunk;
 use crate::effect_map::{Conv, by_match_name};
 use crate::export::fx_defs::{BUILT_IN, FxDef, PDef};
-use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, tdmn, tdsn};
+use crate::export::synth::{GROUP_END, KeyTemplate, NO_NAME, RecSpec, class, tdmn, tdsn, utf8_in};
+use crate::export::tree::Fixed;
 use crate::{CURVE_IDENTITY, CurvesData, MeshData};
 
 /// The layer a prototype's layer parameters name when their default is the owning layer; the
@@ -37,12 +38,6 @@ pub(crate) fn value_spec(code: u8, range: Option<(f64, f64)>) -> Option<RecSpec>
     })
 }
 
-fn put(b: &mut [u8], at: usize, bytes: &[u8]) {
-    if let Some(dst) = b.get_mut(at..at + bytes.len()) {
-        dst.copy_from_slice(bytes);
-    }
-}
-
 fn fixed(v: f64) -> [u8; 4] {
     ((v * 65536.0).round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32).to_be_bytes()
 }
@@ -53,83 +48,88 @@ fn fixed(v: f64) -> [u8; 4] {
 /// display 124; fixed and integer: 124 / 128 / 132 / 136, default 140, display 144). Every other
 /// byte is zero (the switches at 48 are not needed: s12-e2-nofl).
 pub(crate) fn pard(p: &PDef, popup_items: Option<u16>) -> Vec<u8> {
-    let mut b = vec![0u8; 148];
-    put(&mut b, 12, &u32::from(p.code).to_be_bytes());
+    pard_layout(p, popup_items).finish(|| format!("pard (type {})", p.code))
+}
+
+/// The 148-byte `pard` layout of a parameter definition: type, name and defaults.
+fn pard_layout(p: &PDef, popup_items: Option<u16>) -> Fixed {
+    let mut b = Fixed::zeroed(148);
+    b.put(12, &u32::from(p.code).to_be_bytes());
     let d = |i: usize| p.default.get(i).copied().unwrap_or(0.0);
     // After Effects takes the default of a parameter without a value record from here (s8-e1:
     // the copies below are the ones it reads).
     match p.code {
         10 => {
-            put(&mut b, 56, &d(0).to_be_bytes());
+            b.put(56, &d(0).to_be_bytes());
             // The default again as `f32` at 120, the display word (decimals) at 124.
-            put(&mut b, 120, &(d(0) as f32).to_be_bytes());
-            put(&mut b, 124, &p.display.to_be_bytes());
+            b.put(120, &(d(0) as f32).to_be_bytes());
+            b.put(124, &p.display.to_be_bytes());
         }
-        2 => put(&mut b, 56, &fixed(d(0))),
+        2 => b.put(56, &fixed(d(0))),
         // An angle: the default again at 60.
         3 => {
-            put(&mut b, 56, &fixed(d(0)));
-            put(&mut b, 60, &fixed(d(0)));
+            b.put(56, &fixed(d(0)));
+            b.put(60, &fixed(d(0)));
         }
-        1 => put(&mut b, 56, &(d(0).round() as i32).to_be_bytes()),
+        1 => b.put(56, &(d(0).round() as i32).to_be_bytes()),
         // A checkbox: the default again as a byte at 60.
         4 => {
-            put(&mut b, 56, &(d(0).round().max(0.0) as u32).to_be_bytes());
-            put(&mut b, 60, &[u8::from(d(0) != 0.0)]);
+            b.put(56, &(d(0).round().max(0.0) as u32).to_be_bytes());
+            b.put(60, &[u8::from(d(0) != 0.0)]);
         }
         // A popup: the default again as `u16` at 62 (the item count is at 60).
         7 => {
             let sel = d(0).round().clamp(0.0, f64::from(u16::MAX));
-            put(&mut b, 56, &(sel as u32).to_be_bytes());
-            put(&mut b, 62, &(sel as u16).to_be_bytes());
+            b.put(56, &(sel as u32).to_be_bytes());
+            b.put(62, &(sel as u16).to_be_bytes());
         }
         6 => {
             // Fractions of the layer at 56 / 60 and the same in percent at 68 / 72.
-            put(&mut b, 56, &fixed(d(0)));
-            put(&mut b, 60, &fixed(d(1)));
-            put(&mut b, 68, &fixed(d(0) * 100.0));
-            put(&mut b, 72, &fixed(d(1) * 100.0));
+            b.put(56, &fixed(d(0)));
+            b.put(60, &fixed(d(1)));
+            b.put(68, &fixed(d(0) * 100.0));
+            b.put(72, &fixed(d(1) * 100.0));
         }
         5 => {
             // ARGB at 56 and the same at 60.
             let c: Vec<u8> = (0..4).map(|i| d(i).round().clamp(0.0, 255.0) as u8).collect();
-            put(&mut b, 56, &c);
-            put(&mut b, 60, &c);
+            b.put(56, &c);
+            b.put(60, &c);
         }
         _ => {}
     }
     if p.code == 7 {
         let n = popup_items.unwrap_or_else(|| u16::try_from(p.display).unwrap_or(0));
-        put(&mut b, 60, &n.to_be_bytes());
+        b.put(60, &n.to_be_bytes());
     }
     match p.code {
         10 => {
             if let Some(m) = p.valid_min {
-                put(&mut b, 104, &(m as f32).to_be_bytes());
+                b.put(104, &(m as f32).to_be_bytes());
             }
             if let Some(m) = p.valid_max {
-                put(&mut b, 108, &(m as f32).to_be_bytes());
+                b.put(108, &(m as f32).to_be_bytes());
             }
             if let Some((lo, hi)) = p.range {
-                put(&mut b, 112, &(lo as f32).to_be_bytes());
-                put(&mut b, 116, &(hi as f32).to_be_bytes());
+                b.put(112, &(lo as f32).to_be_bytes());
+                b.put(116, &(hi as f32).to_be_bytes());
             }
         }
         1 | 2 => {
             let enc = |v: f64| if p.code == 2 { fixed(v) } else { (v.round() as i32).to_be_bytes() };
             if let Some(m) = p.valid_min {
-                put(&mut b, 124, &enc(m));
+                b.put(124, &enc(m));
             }
             if let Some(m) = p.valid_max {
-                put(&mut b, 128, &enc(m));
+                b.put(128, &enc(m));
             }
             if let Some((lo, hi)) = p.range {
-                put(&mut b, 132, &enc(lo));
-                put(&mut b, 136, &enc(hi));
+                b.put(132, &enc(lo));
+                b.put(136, &enc(hi));
             }
             // The default again at 140, the display word (decimals, percent) at 144.
-            put(&mut b, 140, &enc(d(0)));
-            put(&mut b, 144, &p.display.to_be_bytes());
+            b.put(140, &enc(d(0)));
+            b.put(144, &p.display.to_be_bytes());
         }
         _ => {}
     }
@@ -224,7 +224,7 @@ fn data_record(data: Vec<u8>) -> [Chunk<'static>; 2] {
 /// group (records only for layer parameters, groups, buttons and arbitrary data, the built-in
 /// group) and `pgui` (zero).
 pub(crate) fn default_sspc(fx: &FxDef) -> Chunk<'static> {
-    let fnam = Chunk { id: *b"fnam", body: crate::Body::Chunks(vec![Chunk::data(*b"Utf8", fx.name.as_bytes().to_vec())]), pad: None };
+    let fnam = utf8_in(*b"fnam", fx.name);
     let count = u32::try_from(fx.params.len()).unwrap_or(u32::MAX);
     let mut part = vec![Chunk::data(*b"parn", count.to_be_bytes().to_vec())];
     let mut values = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(NO_NAME)];
@@ -235,11 +235,11 @@ pub(crate) fn default_sspc(fx: &FxDef) -> Chunk<'static> {
         if matches!(p.code, 4 | 7 | 15) {
             // Checkboxes, popups and buttons have a `pdnm` (their label or items); its text may
             // be empty.
-            part.push(Chunk { id: *b"pdnm", body: crate::Body::Chunks(vec![Chunk::data(*b"Utf8", Vec::new())]), pad: None });
+            part.push(utf8_in(*b"pdnm", ""));
         }
         if p.id == BUILT_IN {
             values.push(tdmn(&record));
-            values.push(Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(NO_NAME), tdmn("ADBE Group End")]));
+            values.push(Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(NO_NAME), tdmn(GROUP_END)]));
             continue;
         }
         match p.code {
@@ -265,6 +265,24 @@ pub(crate) fn default_sspc(fx: &FxDef) -> Chunk<'static> {
             _ => {}
         }
     }
-    values.push(tdmn("ADBE Group End"));
+    values.push(tdmn(GROUP_END));
     Chunk::list(*b"sspc", vec![fnam, Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values), Chunk::data(*b"pgui", vec![0u8; 16])])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::fx_defs::FX_DEFS;
+
+    /// The `pard` of every parameter of the effect table fits its 148 bytes.
+    #[test]
+    fn every_parameter_definition_fits() {
+        for fx in FX_DEFS {
+            for (i, p) in fx.params.iter().enumerate() {
+                let b = pard_layout(p, popup_items(fx, i));
+                assert!(b.error().is_none(), "{} {}", fx.match_name, i);
+                assert_eq!(b.finish(String::new).len(), 148);
+            }
+        }
+    }
 }

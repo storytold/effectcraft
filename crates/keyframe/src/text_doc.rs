@@ -85,13 +85,13 @@ impl Justify {
     }
     pub fn parse(s: &str) -> Option<Justify> {
         Some(match s.to_ascii_lowercase().replace(['_', ' ', '-'], "").as_str() {
-            "left" | "leftjustify" => Justify::Left,
-            "center" | "centre" | "centerjustify" => Justify::Center,
-            "right" | "rightjustify" => Justify::Right,
+            "left" | "leftjustify" | "alignleft" => Justify::Left,
+            "center" | "centre" | "centerjustify" | "aligncenter" => Justify::Center,
+            "right" | "rightjustify" | "alignright" => Justify::Right,
             "justify" | "justifyleft" | "justifylastleft" | "fulljustifylastlineleft" => Justify::JustifyLastLeft,
             "justifycenter" | "justifylastcenter" | "fulljustifylastlinecenter" => Justify::JustifyLastCenter,
             "justifyright" | "justifylastright" | "fulljustifylastlineright" => Justify::JustifyLastRight,
-            "justifyall" | "fulljustifylastlinefull" | "fulljustify" => Justify::JustifyAll,
+            "justifyall" | "justifyfull" | "fulljustifylastlinefull" | "fulljustify" => Justify::JustifyAll,
             _ => return None,
         })
     }
@@ -977,7 +977,19 @@ impl TextDoc {
             if r.start >= r.end && n > 0 {
                 return Ok(true);
             }
-            self.apply_style(r.start..r.end.max(r.start + usize::from(n == 0)), |s| {
+            // Empty text: apply_style ignores the bounds, so a fixed range avoids `start + 1` overflow.
+            let range = if n == 0 { 0..1 } else { r.start..r.end };
+            // Check every affected run first, so a value one run refuses changes none of them.
+            let mut err = None;
+            self.apply_style(range.clone(), |s| {
+                if let Err(e) = apply_char_attr(&mut s.clone(), key, v) {
+                    err.get_or_insert(e);
+                }
+            });
+            if let Some(e) = err {
+                return Err(e);
+            }
+            self.apply_style(range, |s| {
                 let _ = apply_char_attr(s, key, v);
             });
             return Ok(true);
@@ -1362,6 +1374,11 @@ pub const CHAR_ATTRS: &[&str] = &[
 pub const PARA_ATTRS: &[&str] =
     &["justify", "indentLeft", "indentRight", "indentFirst", "spaceBefore", "spaceAfter", "direction", "composer", "hangingPunctuation"];
 
+/// Most variable font axes one style can set. Real fonts have a handful (OpenType registers
+/// five; custom axes rarely bring the total past twenty); a `variations` object with more is
+/// rejected before any of it is applied.
+pub const MAX_VARIATION_AXES: usize = 64;
+
 /// Set one character attribute; Ok(false) for keys that aren't character attributes.
 pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, String> {
     match key {
@@ -1478,20 +1495,28 @@ pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, Stri
         "variations" => match v {
             J::Null => s.variations.clear(),
             J::Object(m) => {
-                if m.is_empty() {
-                    s.variations.clear();
+                if m.len() > MAX_VARIATION_AXES {
+                    return Err(format!("variations: at most {MAX_VARIATION_AXES} axes"));
                 }
+                // One keyed merge (the result sorted by tag), applied only when every entry is valid.
+                let mut axes: std::collections::BTreeMap<String, f32> = if m.is_empty() { Default::default() } else { s.variations.iter().cloned().collect() };
                 for (tag, val) in m {
                     if tag.is_empty() || tag.len() > 4 {
                         return Err(format!("variations: `{tag}` is not an axis tag"));
                     }
-                    s.variations.retain(|(t, _)| t != tag);
                     match val {
-                        J::Null => {}
-                        _ => s.variations.push((tag.clone(), val.as_f64().ok_or("variations: expected {tag: number}")? as f32)),
+                        J::Null => {
+                            axes.remove(tag);
+                        }
+                        _ => {
+                            axes.insert(tag.clone(), val.as_f64().ok_or("variations: expected {tag: number}")? as f32);
+                        }
                     }
                 }
-                s.variations.sort_by(|a, b| a.0.cmp(&b.0));
+                if axes.len() > MAX_VARIATION_AXES {
+                    return Err(format!("variations: at most {MAX_VARIATION_AXES} axes"));
+                }
+                s.variations = axes.into_iter().collect();
             }
             _ => return Err("variations: expected {tag: number, …}".into()),
         },
@@ -1765,6 +1790,44 @@ mod tests {
         merge(&mut inst, &mut base, &master);
         assert_eq!(inst, inst_was);
         assert!(inst.style_at(0).faux_bold);
+    }
+
+    #[test]
+    fn variations_merge_by_tag_and_reject_too_many_axes() {
+        let mut doc = TextDoc::plain("ab");
+        assert!(doc.set_attr("variations", &serde_json::json!({"wght": 650, "wdth": 90}), None).unwrap());
+        assert!(doc.set_attr("variations", &serde_json::json!({"wght": 700, "wdth": null, "opsz": 12}), None).unwrap());
+        assert_eq!(doc.style_at(0).variations, vec![("opsz".to_string(), 12.0), ("wght".to_string(), 700.0)]);
+        // More axes than any font has: refused up front, the style untouched.
+        let many: serde_json::Map<String, J> = (0..MAX_VARIATION_AXES + 1).map(|i| (format!("a{i:03}"), J::from(1.0))).collect();
+        assert!(doc.set_attr("variations", &J::Object(many), None).is_err());
+        assert_eq!(doc.style_at(0).variations.len(), 2);
+        // A merge that would grow past the limit is refused too.
+        let fill: serde_json::Map<String, J> = (0..MAX_VARIATION_AXES - 2).map(|i| (format!("b{i:03}"), J::from(1.0))).collect();
+        assert!(doc.set_attr("variations", &J::Object(fill), None).unwrap());
+        assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
+        // (The probe on an empty style passes; the styles already at the limit keep their axes.)
+        let _ = doc.set_attr("variations", &serde_json::json!({"zzzz": 1}), None);
+        assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
+        assert!(!doc.style_at(0).variations.iter().any(|(t, _)| t == "zzzz"));
+    }
+
+    #[test]
+    fn refused_variation_leaves_every_run_unchanged() {
+        // "ab" is at the axis limit; "cd" has none. Three new axes over both runs must be refused
+        // for both, not applied to "cd" only.
+        let mut doc = TextDoc::plain("abcd");
+        let fill: serde_json::Map<String, J> = (0..MAX_VARIATION_AXES).map(|i| (format!("b{i:03}"), J::from(1.0))).collect();
+        assert!(doc.set_attr("variations", &J::Object(fill), Some(0..2)).unwrap());
+        assert!(doc.set_attr("variations", &serde_json::json!({"x1": 1, "x2": 1, "x3": 1}), None).is_err());
+        assert_eq!(doc.style_at(3).variations.len(), 0);
+        assert_eq!(doc.style_at(0).variations.len(), MAX_VARIATION_AXES);
+    }
+
+    #[test]
+    fn empty_document_accepts_an_extreme_range_without_overflow() {
+        let mut doc = TextDoc::plain("");
+        assert!(doc.set_attr("size", &J::from(20), Some(usize::MAX..usize::MAX)).unwrap());
     }
 
     #[test]

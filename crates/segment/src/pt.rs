@@ -108,10 +108,14 @@ fn read_entry<'a>(b: &'a [u8], e: &Entry) -> Result<std::borrow::Cow<'a, [u8]>> 
     match e.method {
         0 => Ok(std::borrow::Cow::Borrowed(raw)),
         8 => {
-            if e.size > MAX_ENTRY_BYTES {
+            // Deflate expands at most about 1032:1, so a stated size past that is not this entry's.
+            if e.size > MAX_ENTRY_BYTES || e.size > e.stored.saturating_mul(1032).saturating_add(64) {
                 return Err("zip entry exceeds the size limit".into());
             }
-            miniz_oxide::inflate::decompress_to_vec_with_limit(raw, e.size.max(1)).map(std::borrow::Cow::Owned).map_err(|e| format!("bad deflate data: {e:?}"))
+            // The status only: the error's partial output can be as large as the entry.
+            miniz_oxide::inflate::decompress_to_vec_with_limit(raw, e.size.max(1))
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| format!("bad deflate data: {:?}", e.status))
         }
         m => Err(format!("unsupported zip compression {m}")),
     }
@@ -162,6 +166,11 @@ fn nodes(o: &Obj, budget: usize) -> usize {
     let kids: Vec<&Obj> = match o {
         Obj::Tuple(v) | Obj::List(v) => v.iter().collect(),
         Obj::Dict(v) => v.iter().flat_map(|(k, x)| [k, x]).collect(),
+        // A string counts one node per 64 bytes it holds (a vector one per 8 elements): copies
+        // are charged for everything they own, not as one object.
+        Obj::Str(s) => return 1 + s.len() / 64,
+        Obj::Global(a, b) | Obj::Storage(a, b) => return 1 + (a.len() + b.len()) / 64,
+        Obj::Tensor { dtype, key, size, stride, .. } => return 1 + (dtype.len() + key.len()) / 64 + (size.len() + stride.len()) / 8,
         _ => return 1,
     };
     let mut n = 1;
@@ -202,6 +211,17 @@ fn tensor_element_count(name: &str, offset: usize, size: &[usize], stride: &[usi
 /// A memoized object, charged against the clone budget (memo reuse can otherwise grow trees exponentially).
 fn memo_get(memo: &HashMap<u64, Obj>, k: u64, cloned: &mut usize) -> Result<Obj> {
     let o = memo.get(&k).ok_or("pickle: bad memo")?;
+    *cloned = cloned.saturating_add(nodes(o, MAX_PICKLE_NODES));
+    if *cloned > MAX_PICKLE_NODES {
+        return Err("pickle exceeds the object limit".into());
+    }
+    Ok(o.clone())
+}
+
+/// A copy of the stack top to memoize, charged against the clone budget like a memo read: a
+/// program memoizing one large object many times keeps a copy each time.
+fn memo_put(stack: &[Obj], cloned: &mut usize) -> Result<Obj> {
+    let o = stack.last().ok_or("pickle stack underflow")?;
     *cloned = cloned.saturating_add(nodes(o, MAX_PICKLE_NODES));
     if *cloned > MAX_PICKLE_NODES {
         return Err("pickle exceeds the object limit".into());
@@ -310,15 +330,15 @@ fn unpickle(p: &[u8]) -> Result<Obj> {
             }
             b'q' => {
                 let k = take(&mut i, 1)?[0] as u64;
-                memo.insert(k, stack.last().cloned().ok_or("pickle stack underflow")?);
+                memo.insert(k, memo_put(&stack, &mut cloned)?);
             }
             b'r' => {
                 let s = take(&mut i, 4)?;
-                memo.insert(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64, stack.last().cloned().ok_or("pickle stack underflow")?);
+                memo.insert(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64, memo_put(&stack, &mut cloned)?);
             }
             0x94 => {
                 let k = memo.len() as u64;
-                memo.insert(k, stack.last().cloned().ok_or("pickle stack underflow")?);
+                memo.insert(k, memo_put(&stack, &mut cloned)?);
             }
             b'h' => {
                 let k = take(&mut i, 1)?[0] as u64;
@@ -608,5 +628,35 @@ mod tests {
         assert!(read(&file).is_err());
         assert_eq!(half_to_f32(0x3c00), 1.0);
         assert_eq!(half_to_f32(0xc000), -2.0);
+    }
+
+    #[test]
+    fn memoizing_a_long_string_again_and_again_runs_out_of_the_budget() {
+        // A 1 MiB string memoized 300 times would keep 300 MiB of copies.
+        let mut p = vec![0x80, 2, b'X'];
+        p.extend_from_slice(&(1u32 << 20).to_le_bytes());
+        p.extend(std::iter::repeat_n(b'a', 1 << 20));
+        p.extend(std::iter::repeat_n(0x94, 300));
+        p.push(b'.');
+        assert!(unpickle(&p).is_err_and(|e| e.contains("object limit")));
+    }
+
+    #[test]
+    fn every_owned_field_is_charged_to_the_clone_budget() {
+        let long = || "a".repeat(1 << 20);
+        let budget = MAX_PICKLE_NODES;
+        // A one-byte module with a 1 MiB name (and the same for storages and tensors).
+        assert!(nodes(&Obj::Global("m".into(), long()), budget) >= (1 << 20) / 64);
+        assert!(nodes(&Obj::Storage("m".into(), long()), budget) >= (1 << 20) / 64);
+        let t = Obj::Tensor { dtype: "m".into(), key: long(), offset: 0, size: vec![1; 4096], stride: vec![1; 4096] };
+        assert!(nodes(&t, budget) >= (1 << 20) / 64 + 1024);
+        // Small ones stay cheap.
+        assert_eq!(nodes(&Obj::Global("a".into(), "b".into()), budget), 1);
+    }
+
+    #[test]
+    fn an_entry_stating_more_than_deflate_can_expand_to_is_refused() {
+        let e = Entry { data: 0, size: 1 << 29, stored: 4, method: 8 };
+        assert!(read_entry(&[0u8; 4], &e).is_err_and(|m| m.contains("size limit")));
     }
 }
