@@ -730,6 +730,8 @@ fn malformed_input() {
     assert_eq!(d.skipped, vec!["text".to_string()]);
     assert!(looks_like_svg(BASIC));
     assert!(!looks_like_svg(b"\x89PNG"));
+    // The first element must be the `svg`: an HTML page with an inline SVG is not one.
+    assert!(!looks_like_svg(b"<html><body><svg/></body></html>"));
 }
 
 #[test]
@@ -767,7 +769,7 @@ fn deep_nesting_errors_instead_of_overflowing_the_stack() {
         "<g>".repeat(1000),
         "<rect/>".repeat(1000)
     );
-    assert_eq!(crate::xml_depth(&s), 2);
+    assert!(!craft_svg::guard::deeper_than(&s, 3) && craft_svg::guard::deeper_than(&s, 2));
     assert!(crate::parse(s.as_bytes()).is_ok());
 }
 

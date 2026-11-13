@@ -118,7 +118,7 @@ fn extractor_channel_info_layout() {
     // `02 00 00 32` on Alpha, still the input's own channel.
     let c = ExtractorChannels::parse(&channels([(1, "R"), (1, "G"), (1, "B"), (0x3200_0002, "(copy)")])).expect("parses");
     assert!(c.is_default());
-    assert_eq!(c.sources(), Ok(["R", "G", "B", "(copy)"].map(String::from)));
+    assert_eq!(c.sources(effectcraft_effects::EXTRACTOR_COPY), Ok(["R", "G", "B", "(copy)"].map(String::from)));
 }
 
 #[test]

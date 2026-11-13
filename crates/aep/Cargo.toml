@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-aep = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-color = { workspace = true }
 effectcraft-keyframe = { workspace = true }
@@ -21,8 +22,3 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-
-# The tool's own tests run with the crate's (examples are only built by default).
-[[example]]
-name = "stubicc"
-test = true

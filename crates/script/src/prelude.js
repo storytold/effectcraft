@@ -79,9 +79,10 @@ BlendingMode.SILHOUETTE_ALPHA = BlendingMode.SILHOUETE_ALPHA;
 var KeyframeInterpolationType = __enum("KeyframeInterpolationType", ["LINEAR", "BEZIER", "HOLD"], 6612);
 var TrackMatteType = __enum("TrackMatteType", ["NO_TRACK_MATTE", "ALPHA", "ALPHA_INVERTED", "LUMA", "LUMA_INVERTED"], 5012);
 var LightType = __enum("LightType", ["PARALLEL", "SPOT", "POINT", "AMBIENT", "ENVIRONMENT"], 4412);
+// In After Effects' order and numbers (26.3): right comes before centre.
 var ParagraphJustification = __enum("ParagraphJustification", [
-  "LEFT_JUSTIFY", "CENTER_JUSTIFY", "RIGHT_JUSTIFY", "FULL_JUSTIFY_LASTLINE_LEFT", "FULL_JUSTIFY_LASTLINE_CENTER",
-  "FULL_JUSTIFY_LASTLINE_RIGHT", "FULL_JUSTIFY_LASTLINE_FULL", "MULTIPLE_JUSTIFICATIONS"], 7413);
+  "MULTIPLE_JUSTIFICATIONS", "LEFT_JUSTIFY", "RIGHT_JUSTIFY", "CENTER_JUSTIFY", "FULL_JUSTIFY_LASTLINE_LEFT",
+  "FULL_JUSTIFY_LASTLINE_RIGHT", "FULL_JUSTIFY_LASTLINE_CENTER", "FULL_JUSTIFY_LASTLINE_FULL"], 7412);
 var PropertyValueType = __enum("PropertyValueType", [
   "NO_VALUE", "ThreeD_SPATIAL", "ThreeD", "TwoD_SPATIAL", "TwoD", "OneD", "COLOR", "CUSTOM_VALUE", "MARKER",
   "LAYER_INDEX", "MASK_INDEX", "SHAPE", "TEXT_DOCUMENT"], 6412);
@@ -120,7 +121,14 @@ function __blendLabel(v) {
 var __interpKey = { 6612: "linear", 6613: "bezier", 6614: "hold" };
 var __matteKind = { 5013: "alpha", 5014: "alphaInverted", 5015: "luma", 5016: "lumaInverted" };
 var __matteEnum = { Alpha: 5013, AlphaInverted: 5014, Luma: 5015, LumaInverted: 5016 };
-var __justKey = { 7413: "left", 7414: "center", 7415: "right", 7416: "justifyLeft", 7417: "justifyCenter", 7418: "justifyRight", 7419: "justifyAll" };
+var __justKey = {};
+__justKey[ParagraphJustification.LEFT_JUSTIFY] = "left";
+__justKey[ParagraphJustification.CENTER_JUSTIFY] = "center";
+__justKey[ParagraphJustification.RIGHT_JUSTIFY] = "right";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT] = "justifyLeft";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_CENTER] = "justifyCenter";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_RIGHT] = "justifyRight";
+__justKey[ParagraphJustification.FULL_JUSTIFY_LASTLINE_FULL] = "justifyAll";
 
 // ------------------------------------------------------------------ output, $ and dialogs
 

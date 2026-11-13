@@ -35,11 +35,9 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Quick sniff: an XML document whose root looks like `<svg`.
+/// Quick sniff: the first element is `<svg` (`craft_svg::sniff::is_svg`).
 pub fn looks_like_svg(bytes: &[u8]) -> bool {
-    let head = &bytes[..bytes.len().min(2048)];
-    let s = String::from_utf8_lossy(head);
-    s.contains("<svg") && (s.trim_start().starts_with('<') || s.starts_with('\u{feff}'))
+    craft_svg::sniff::is_svg(bytes)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1726,53 +1724,6 @@ const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
 /// Bound viewport-specific pattern results; uncached resolutions remain covered by the work budget.
 const MAX_PATTERN_CACHE_ENTRIES: usize = 256;
 
-/// The deepest element nesting of `text` (a quick scan that skips comments, CDATA, processing
-/// instructions, declarations and quoted attribute values).
-fn xml_depth(text: &str) -> usize {
-    let b = text.as_bytes();
-    let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
-    let skip_to = |from: usize, end: &[u8]| b.get(from..).and_then(|r| r.windows(end.len()).position(|w| w == end)).map_or(b.len(), |p| from + p + end.len());
-    while i < b.len() {
-        if b[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        let rest = &b[i..];
-        if rest.starts_with(b"<!--") {
-            i = skip_to(i + 4, b"-->");
-        } else if rest.starts_with(b"<![CDATA[") {
-            i = skip_to(i + 9, b"]]>");
-        } else if rest.starts_with(b"<?") {
-            i = skip_to(i + 2, b"?>");
-        } else if rest.starts_with(b"<!") {
-            i = skip_to(i + 2, b">");
-        } else if rest.starts_with(b"</") {
-            depth = depth.saturating_sub(1);
-            i = skip_to(i + 2, b">");
-        } else {
-            // A start tag: find its end outside quotes; `/>` closes it at once.
-            let mut j = i + 1;
-            let mut quote = None;
-            while let Some(&c) = b.get(j) {
-                match quote {
-                    Some(q) if c == q => quote = None,
-                    Some(_) => {}
-                    None if c == b'"' || c == b'\'' => quote = Some(c),
-                    None if c == b'>' => break,
-                    None => {}
-                }
-                j += 1;
-            }
-            if b.get(j.wrapping_sub(1)) != Some(&b'/') {
-                depth += 1;
-                max = max.max(depth);
-            }
-            i = j + 1;
-        }
-    }
-    max
-}
-
 /// Nodes a document may expand to: a few kilobytes of nested internal entities
 /// (`<!ENTITY b "&a;&a;…">`) otherwise expand to millions and exhaust memory.
 const MAX_XML_NODES: u32 = 4_000_000;
@@ -1781,7 +1732,7 @@ const MAX_XML_NODES: u32 = 4_000_000;
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim_start_matches('\u{feff}');
-    if xml_depth(text) > MAX_XML_DEPTH {
+    if craft_svg::guard::deeper_than(text, MAX_XML_DEPTH) {
         return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
     }
     // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).

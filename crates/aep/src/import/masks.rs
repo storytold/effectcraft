@@ -50,13 +50,16 @@ fn source_rectangle(size: (u32, u32)) -> ShapePath {
     }
 }
 
+/// [`to_path`]'s error for a stored path without vertices.
+pub(crate) const NO_VERTICES: &str = "its path has no vertices";
+
 pub(crate) fn to_path(s: &AepPath, size: (u32, u32)) -> Result<ShapePath, &'static str> {
     if !s.points.len().is_multiple_of(3) {
         return Err("its point count is not a multiple of three");
     }
     let n = s.vertex_count();
     if n == 0 {
-        return Err("its path has no vertices");
+        return Err(NO_VERTICES);
     }
     if n > MAX_VERTICES {
         return Err("its path has too many vertices");
