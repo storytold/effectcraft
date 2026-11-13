@@ -1197,6 +1197,19 @@ fn layer_audio_comment_and_comp_drop_frame() {
 
 /// `timeToNTSCTimecode`: 1800 frames at 30000/1001 is one minute on the 30 frame base; drop-frame
 /// skips the first two frame numbers of that minute and none at the tenth.
+/// `nextKey` / `previousKey` choose by composition time, whatever order the keys are listed in (a
+/// reversed layer lists them latest first).
+#[test]
+fn next_and_previous_key_ignore_listing_order() {
+    let f = fx();
+    let pick = |code: &str| f.num(&format!("[[3, 2, 1, 0]].map(function (t) {{ return {code}; }})[0]"), 0.0);
+    // The helpers are internal; exercise them through a descending list of times.
+    assert_eq!(pick("__nextIndex(t, 1.5)"), 1.0, "2 is the next time after 1.5, at index 1 of [3, 2, 1, 0]");
+    assert_eq!(pick("__previousIndex(t, 1.5)"), 2.0, "1 is the last time at or before 1.5, at index 2");
+    assert_eq!(pick("__nextIndex(t, 9)"), 0.0, "past the latest: the latest, at index 0");
+    assert_eq!(pick("__previousIndex(t, -1)"), 3.0, "before the earliest: the earliest, at index 3");
+}
+
 #[test]
 fn time_to_ntsc_timecode() {
     let f = fx();
@@ -1206,6 +1219,11 @@ fn time_to_ntsc_timecode() {
     check("timeToNTSCTimecode(60.06, true) == '0:01:00;02'");
     check("timeToNTSCTimecode(17982 * 1001 / 30000, true) == '0:10:00;00'");
     check("timeToNTSCTimecode(-60.06) == '-0:01:00:00'");
+    // Absolute times round down toward negative infinity; durations away from zero.
+    check("timeToNTSCTimecode(-0.01) == '-0:00:00:01'");
+    check("timeToNTSCTimecode(0.01) == '0:00:00:00'");
+    check("timeToNTSCTimecode(0.01, false, true) == '0:00:00:01'");
+    check("timeToNTSCTimecode(-0.01, false, true) == '-0:00:00:01'");
 }
 
 #[test]

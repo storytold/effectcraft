@@ -343,15 +343,24 @@ function framesToTime(frames, fps) {
   return frames / fps;
 }
 
-// The key after `t` (the last one when `t` is past it) and the key at or before `t` (the first one
-// when `t` is before it), in sorted key times.
+// The key after `t` (the last one in time when `t` is past it) and the key at or before `t` (the
+// first one in time when `t` is before it). The times are composition times and need not be in
+// order: a reversed (negatively stretched) layer lists them latest first.
 function __nextIndex(times, t) {
-  for (var i = 0; i < times.length; i++) if (times[i] > t) return i;
-  return times.length - 1;
+  var best = -1, last = 0;
+  for (var i = 0; i < times.length; i++) {
+    if (times[i] > t && (best < 0 || times[i] < times[best])) best = i;
+    if (times[i] > times[last]) last = i;
+  }
+  return best < 0 ? last : best;
 }
 function __previousIndex(times, t) {
-  for (var i = times.length - 1; i >= 0; i--) if (times[i] <= t) return i;
-  return 0;
+  var best = -1, first = 0;
+  for (var i = 0; i < times.length; i++) {
+    if (times[i] <= t && (best < 0 || times[i] > times[best])) best = i;
+    if (times[i] < times[first]) first = i;
+  }
+  return best < 0 ? first : best;
 }
 
 function __pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -370,10 +379,12 @@ function timeToTimecode(t, base, isDuration) {
 // writes a semicolon before the frames.
 function timeToNTSCTimecode(t, drop, isDuration) {
   if (t === undefined) t = time + thisComp.displayStartTime;
-  var neg = t < 0;
-  var n = Math.abs(t) * 30000 / 1001;
-  // Durations round away from zero, absolute times down (the same rule as timeToFrames).
-  var f = isDuration && t !== 0 ? Math.ceil(n - 1e-6) : Math.floor(n + 1e-6);
+  var n = t * 30000 / 1001;
+  // Absolute times round down toward negative infinity, durations away from zero (as timeToFrames does);
+  // the sign is taken after rounding, so -0.01 s is one frame before zero.
+  var f = isDuration && t !== 0 ? (n > 0 ? Math.ceil(n - 1e-6) : Math.floor(n + 1e-6)) : Math.floor(n + 1e-6);
+  var neg = f < 0;
+  f = Math.abs(f);
   if (drop) {
     var tenMin = Math.floor(f / 17982), rem = f % 17982;
     f += 18 * tenMin + (rem < 2 ? 0 : 2 * Math.floor((rem - 2) / 1798));
