@@ -46,18 +46,24 @@ fn cameras() {
     assert_eq!(c.auto_orient, AutoOrient::TowardsPointOfInterest);
     close(&v(&c, "transform/poi"), &[960.0, 540.0, 0.0]);
     close(&v(&c, "transform/position"), &[0.0, 0.0, -2666.6667]);
-    close(&v(&c, "cameraOptions/zoom"), &[2666.6667]);
+    close(&v(&c, "cameraOptions/zoom"), &[effectcraft_aep::DEFAULT_CAMERA_ZOOM]);
     close(&v(&c, "cameraOptions/focusDistance"), &[2666.6667]);
     close(&v(&c, "cameraOptions/aperture"), &[25.3093]);
     assert_eq!(v(&c, "cameraOptions/dof"), Value::Bool(false));
-    // 251: one-node camera.
-    assert_eq!(skip!(layer("251-camera-one-node.aep", "Camera 1")).auto_orient, AutoOrient::Off);
-    // 253: position set by the user.
-    close(&v(&skip!(layer("253-camera-position-100-200-m1000.aep", "Camera 1")), "transform/position"), &[100.0, 200.0, -1000.0]);
+    // 251: one-node camera; its point of interest is stored at the centre too.
+    let c = skip!(layer("251-camera-one-node.aep", "Camera 1"));
+    assert_eq!(c.auto_orient, AutoOrient::Off);
+    close(&v(&c, "transform/poi"), &[960.0, 540.0, 0.0]);
+    // 253: position set by the user; the point of interest stays at the centre.
+    let c = skip!(layer("253-camera-position-100-200-m1000.aep", "Camera 1"));
+    close(&v(&c, "transform/position"), &[100.0, 200.0, -1000.0]);
+    close(&v(&c, "transform/poi"), &[960.0, 540.0, 0.0]);
     // 341, 342: zoom, depth of field.
     close(&v(&skip!(layer("341-camera-zoom-2000.aep", "Camera 1")), "cameraOptions/zoom"), &[2000.0]);
     let c = skip!(layer("342-camera-dof-800-30.aep", "Camera 1"));
     assert_eq!(v(&c, "cameraOptions/dof"), Value::Bool(true));
+    // The zoom it does not store stays the default.
+    close(&v(&c, "cameraOptions/zoom"), &[2666.6667]);
     close(&v(&c, "cameraOptions/focusDistance"), &[800.0]);
     close(&v(&c, "cameraOptions/aperture"), &[30.0]);
     // 535-537: a camera above the 3D solid of 486.
@@ -75,13 +81,27 @@ fn spot_and_point_lights() {
     close(&v(&l, "transform/poi"), &[960.0, 540.0, 0.0]);
     close(&v(&l, "transform/position"), &[0.0, 0.0, -1333.3333]);
     assert_eq!(l.auto_orient, AutoOrient::TowardsPointOfInterest);
-    close(&v(&skip!(layer("343-light-spot-color-red.aep", "Light 1")), "lightOptions/color"), &[1.0, 0.0, 0.0, 1.0]);
-    close(&v(&skip!(layer("344-light-spot-coneangle-60.aep", "Light 1")), "lightOptions/coneAngle"), &[60.0]);
-    close(&v(&skip!(layer("345-light-spot-conefeather-30.aep", "Light 1")), "lightOptions/coneFeather"), &[30.0]);
+    // The options it does not store keep After Effects' defaults: white, 90, 50.
+    close(&v(&l, "lightOptions/color"), &[1.0, 1.0, 1.0, 1.0]);
+    close(&v(&l, "lightOptions/coneAngle"), &[90.0]);
+    close(&v(&l, "lightOptions/coneFeather"), &[50.0]);
+    let l = skip!(layer("343-light-spot-color-red.aep", "Light 1"));
+    close(&v(&l, "lightOptions/color"), &[1.0, 0.0, 0.0, 1.0]);
+    close(&v(&l, "lightOptions/coneAngle"), &[90.0]);
+    close(&v(&l, "lightOptions/coneFeather"), &[50.0]);
+    let l = skip!(layer("344-light-spot-coneangle-60.aep", "Light 1"));
+    close(&v(&l, "lightOptions/coneAngle"), &[60.0]);
+    close(&v(&l, "lightOptions/coneFeather"), &[50.0]);
+    close(&v(&l, "lightOptions/color"), &[1.0, 1.0, 1.0, 1.0]);
+    let l = skip!(layer("345-light-spot-conefeather-30.aep", "Light 1"));
+    close(&v(&l, "lightOptions/coneFeather"), &[30.0]);
+    close(&v(&l, "lightOptions/coneAngle"), &[90.0]);
     // 252: a point light stores its cone as default-state records, which hold nothing.
     let l = skip!(layer("252-light-point.aep", "Light 1"));
     assert!(matches!(l.source, LayerSource::Light { kind: LightKind::Point }));
     close(&v(&l, "lightOptions/intensity"), &[100.0]);
+    // Its stored Cone Angle 90 (a default-state record) has no counterpart: a point light has no cone.
+    assert!(l.props.prop("lightOptions/coneAngle").is_none());
     assert_eq!(l.auto_orient, AutoOrient::Off);
 }
 

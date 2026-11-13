@@ -163,11 +163,15 @@ fn wasm_plugins_are_sandboxed() {
     // No imports (files, clock, network…).
     let imports = r#"(module (import "env" "now" (func $now (result f64))) (memory (export "memory") 1))"#;
     assert!(load_err(load_wasm(imports.as_bytes(), "imports.wat")).contains("import"));
-    // Garbage, wrong API version, bad manifests.
+    // Garbage, an ABI this build doesn't implement, bad manifests. A module that claims ABI 2
+    // must export `ec_render2` (this one still has only `ec_render`).
     assert!(load_wasm(b"\0asm nope", "bad.wasm").is_err());
     let v2 = gain_module("org.test.v2", "")
         .replace("(func (export \"ec_api_version\") (result i32) i32.const 1)", "(func (export \"ec_api_version\") (result i32) i32.const 2)");
-    assert!(load_err(load_wasm(v2.as_bytes(), "v2.wat")).contains("API 2"));
+    assert!(load_err(load_wasm(v2.as_bytes(), "v2.wat")).contains("ec_render2"));
+    let v3 = gain_module("org.test.v3", "")
+        .replace("(func (export \"ec_api_version\") (result i32) i32.const 1)", "(func (export \"ec_api_version\") (result i32) i32.const 3)");
+    assert!(load_err(load_wasm(v3.as_bytes(), "v3.wat")).contains("ABI 3"));
     let reserved = gain_module("ec.blur.mine", "");
     assert!(load_err(load_wasm(reserved.as_bytes(), "reserved.wat")).contains("reserved"));
 }
@@ -194,14 +198,14 @@ fn abi_violations_fail_to_load_with_reasons() {
     assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains("ec_api_version"));
     let m = edit(&base, "(param $scale f64) (result i32)", "(param $scale f32) (result i32)");
     assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains("ec_render"));
-    // API versions other than 1.
-    for v in ["0", "-1", "2147483647"] {
+    // WebAssembly ABIs other than 1 and 2.
+    for v in ["0", "-1", "3", "2147483647"] {
         let m = edit(
             &base,
             "(func (export \"ec_api_version\") (result i32) i32.const 1)",
             &format!("(func (export \"ec_api_version\") (result i32) i32.const {v})"),
         );
-        assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains(&format!("API {v}")), "{v}");
+        assert!(load_err(load_wasm(m.as_bytes(), "x.wat")).contains(&format!("ABI {v}")), "{v}");
     }
     // Manifest out of bounds, negative or absurd lengths, not JSON.
     let ptr = "(func (export \"ec_manifest_ptr\") (result i32) i32.const 16)";
@@ -316,4 +320,169 @@ fn wasm_rendering_is_deterministic() {
     // The same module loaded under another id renders the same bits.
     let twin = load_wasm(gain_module("org.test.det2", body).as_bytes(), "det2.wat").unwrap();
     assert_eq!(bits(&render(twin, 0.37, true)), first);
+}
+
+/// An ABI 2 module whose `ec_render2` writes what it got from the host into each pixel: red is
+/// |next.red − prev.red|, green `flags / 8`, blue `prev_time`, alpha 1.
+fn neighbour_module(id: &str) -> String {
+    let manifest = format!(r#"{{"api":2,"id":"{id}","name":"Neighbours {id}","category":"Test Plug-ins","version":"1","params":[]}}"#);
+    let len = manifest.len();
+    let escaped = manifest.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"(module
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (func (export "ec_api_version") (result i32) i32.const 2)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_render2")
+    (param $px i32) (param $w i32) (param $h i32) (param $params i32) (param $np i32)
+    (param $t f64) (param $scale f64)
+    (param $prev i32) (param $prev_t f64) (param $next i32) (param $next_t f64) (param $flags i32)
+    (result i32)
+    (local $i i32) (local $n i32)
+    local.get $w
+    local.get $h
+    i32.mul
+    local.set $n
+    block $done
+      loop $per_pixel
+        local.get $i
+        local.get $n
+        i32.ge_u
+        br_if $done
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        local.get $next
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        f32.load
+        local.get $prev
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        f32.load
+        f32.sub
+        f32.abs
+        f32.store
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        local.get $flags
+        f32.convert_i32_s
+        f32.const 8
+        f32.div
+        f32.store offset=4
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        local.get $prev_t
+        f32.demote_f64
+        f32.store offset=8
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        f32.const 1
+        f32.store offset=12
+        local.get $i
+        i32.const 1
+        i32.add
+        local.set $i
+        br $per_pixel
+      end
+    end
+    i32.const 0))"#
+    )
+}
+
+fn neighbour_image(red: f32) -> effectcraft_effects::plugin::PluginImage {
+    effectcraft_effects::plugin::PluginImage { width: 2, height: 1, pixels: vec![[red, 0.0, 0.0, 1.0]; 2], origin: [0.0; 2], scale: 1.0 }
+}
+
+/// A host with frames at two layer times.
+struct Host {
+    time: f64,
+    fps: f64,
+    prev: Option<(f64, effectcraft_effects::plugin::PluginImage)>,
+    next: Option<(f64, effectcraft_effects::plugin::PluginImage)>,
+}
+
+impl effectcraft_effects::plugin::PluginHost for Host {
+    fn input_at(&self, layer_time: f64) -> Option<effectcraft_effects::plugin::PluginImage> {
+        if let Some((t, img)) = &self.prev
+            && (t - layer_time).abs() < 1e-9
+        {
+            return Some(img.clone());
+        }
+        if let Some((t, img)) = &self.next
+            && (t - layer_time).abs() < 1e-9
+        {
+            return Some(img.clone());
+        }
+        None
+    }
+
+    fn layer_input(&self, _param_id: &str, _layer_time: f64) -> Option<effectcraft_effects::plugin::PluginImage> {
+        None
+    }
+
+    fn params_at(&self, _layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        None
+    }
+
+    fn frame_rate(&self) -> f64 {
+        self.fps
+    }
+
+    fn time(&self) -> f64 {
+        self.time
+    }
+}
+
+#[test]
+fn abi_v2_receives_neighbour_frames_and_times() {
+    load_wasm(neighbour_module("org.test.neighbours").as_bytes(), "neighbours.wat").unwrap();
+    let p = effectcraft_effects::plugin::plugin("org.test.neighbours").unwrap();
+    assert!(effectcraft_effects::plugin::reads_other_times("org.test.neighbours"));
+    assert!(effectcraft_effects::is_time_dependent("org.test.neighbours"));
+    // The module has no parameters, so the flattened vector is empty.
+    let params = effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat: &[], texts: &[] };
+    let mut px = vec![[0.0f32; 4]; 2];
+    let host = Host { time: 0.5, fps: 4.0, prev: Some((0.25, neighbour_image(0.1))), next: Some((0.75, neighbour_image(0.6))) };
+    let mut frame = effectcraft_effects::plugin::PluginFrame { width: 2, height: 1, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0, 1.0] };
+    p.render_v2(&mut frame, &params, 0.5, &host).unwrap();
+    assert!((px[0][0] - 0.5).abs() < 1e-6, "|next − prev|: {px:?}");
+    assert!((px[0][1] - 3.0 / 8.0).abs() < 1e-6, "both flags: {px:?}");
+    assert!((px[0][2] - 0.25).abs() < 1e-6, "previous frame's time: {px:?}");
+    assert_eq!(px[0][3], 1.0);
+}
+
+#[test]
+fn abi_v2_without_a_host_gets_zeroed_neighbours() {
+    let spec = load_wasm(neighbour_module("org.test.neighbours.empty").as_bytes(), "empty.wat").unwrap();
+    let mut next_id = 1;
+    let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next_id), spec.name, [2.0, 1.0]);
+    let params = effectcraft_effects::flatten_params(&g, &mut |p| p.value.clone());
+    let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [2.0, 1.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let buf = Buf { img: Image::filled(2, 1, [0.5, 0.5, 0.5, 1.0]), offset: [0.0; 2], scale: 1.0 };
+    // No host: both neighbour buffers are zeroed and no flag is set.
+    assert_eq!((spec.render)(&ctx, buf).img.get(0, 0), [0.0, 0.0, 0.0, 1.0]);
+    // ABI 1 plug-ins keep the time-independent behaviour.
+    let gain = load_wasm(gain_module("org.test.neighbours.v1", "").as_bytes(), "v1.wat").unwrap();
+    assert!(!effectcraft_effects::plugin::reads_other_times("org.test.neighbours.v1"));
+    assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
+    assert!(gain.id.starts_with("org.test."));
 }

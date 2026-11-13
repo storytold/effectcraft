@@ -272,7 +272,7 @@ mod tests {
         let id = source.id;
         let mut recovered = source.footage.clone();
         recovered.path = "/new/project/plate.png".into();
-        let observed = super::super::availability::prepare(&s.project, std::slice::from_ref(&source), &[true], false).unwrap();
+        let observed = super::super::availability::prepare(&s.project, std::slice::from_ref(&source), &[true]).unwrap();
         assert!(observed.apply(&mut s));
         assert!(matches!(&s.project.item(id).unwrap().kind, ItemKind::Footage(f) if f.missing));
         let result = apply(&mut s, vec![(source, Found::Moved(Box::new(recovered)))]);

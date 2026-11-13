@@ -82,6 +82,91 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether the next token opens an array or a dictionary (skipping white space first).
+    pub fn at_compound(&mut self) -> bool {
+        self.skip_ws();
+        match self.data.get(self.pos) {
+            Some(b'[') => true,
+            Some(b'<') => self.data.get(self.pos + 1) == Some(&b'<'),
+            _ => false,
+        }
+    }
+
+    /// Skip the array or dictionary at the current position (see [`Lexer::at_compound`]) as
+    /// [`Lexer::next`] would read it, without building it: for readers that have no use for one
+    /// and must not allocate a vector per element of a hostile stream.
+    pub fn skip_compound(&mut self) {
+        let mut open = 0usize;
+        loop {
+            self.skip_ws();
+            match self.data.get(self.pos) {
+                None => return,
+                Some(b'[') => {
+                    open += 1;
+                    self.pos += 1;
+                }
+                Some(b'<') if self.data.get(self.pos + 1) == Some(&b'<') => {
+                    open += 1;
+                    self.pos += 2;
+                }
+                Some(b']') | Some(b'>') if self.data[self.pos] == b']' || self.data.get(self.pos + 1) == Some(&b'>') => {
+                    open = open.saturating_sub(1);
+                    self.pos += if self.data[self.pos] == b']' { 1 } else { 2 };
+                    if open == 0 {
+                        return;
+                    }
+                }
+                // Anything else is one token (a string, name, number or word), passed over
+                // without building it.
+                Some(_) => self.skip_scalar(),
+            }
+        }
+    }
+
+    /// Pass over one token that is not an array or dictionary bracket, as [`Lexer::next`] reads
+    /// it but without building its value.
+    fn skip_scalar(&mut self) {
+        let Some(&c) = self.data.get(self.pos) else { return };
+        match c {
+            b'(' => {
+                // A literal string: balanced parentheses, a backslash escapes the next byte.
+                let mut depth = 0usize;
+                while let Some(&d) = self.data.get(self.pos) {
+                    self.pos += 1;
+                    match d {
+                        b'\\' => self.pos += 1,
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.pos = self.pos.min(self.data.len());
+            }
+            b'<' => {
+                // A hexadecimal string.
+                while self.data.get(self.pos).is_some_and(|d| *d != b'>') {
+                    self.pos += 1;
+                }
+                self.pos = (self.pos + 1).min(self.data.len());
+            }
+            b'/' => {
+                self.pos += 1;
+                self.word();
+            }
+            b']' | b'{' | b'}' | b')' | b'>' => self.pos += 1,
+            _ => {
+                if self.word().is_empty() {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
     fn word(&mut self) -> &'a [u8] {
         let s = self.pos;
         while self.pos < self.data.len() && !is_white(self.data[self.pos]) && !is_delim(self.data[self.pos]) {

@@ -73,10 +73,6 @@ pub struct StyleMap {
 }
 
 impl StyleMap {
-    /// The switch group's match name (`dropShadow/enabled`).
-    pub fn switch_name(&self) -> String {
-        format!("{}/enabled", self.ae)
-    }
     /// A parameter's full match name (`dropShadow/opacity`).
     pub fn param_name(&self, p: &StyleParam) -> String {
         format!("{}/{}", self.ae, p.ae)

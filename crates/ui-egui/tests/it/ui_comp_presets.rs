@@ -174,6 +174,8 @@ fn composition_settings_view_stays_put_when_it_scrolls() {
 #[test]
 fn composition_settings_refits_when_the_language_changes() {
     let mut s = Session::default();
+    // Idle caching keeps repainting while it renders; this test waits for repaints to stop.
+    s.prefs.previews.cache_frames_when_idle = false;
     s.execute("comp.new", json!({"name": "Edit", "width": 2560, "height": 1440, "frameRate": 60, "duration": 4})).unwrap();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1600.0, 1000.0))

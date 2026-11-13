@@ -4,14 +4,14 @@
 //! e1-sparse).
 
 use crate::Chunk;
-use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, tdbs, tdmn, tdsn};
+use crate::export::synth::{GROUP_END, KeyTemplate, NO_NAME, RecSpec, class, tdbs, tdmn, tdmn_name, tdsn};
 
 /// A group: its match name and a `tdgp` with the state `state` (`tdsb`), no user name, `kids` and
 /// the closing `ADBE Group End`.
 pub(crate) fn group(name: &str, state: u32, kids: Vec<Chunk<'static>>) -> [Chunk<'static>; 2] {
     let mut body = vec![Chunk::data(*b"tdsb", state.to_be_bytes().to_vec()), tdsn(NO_NAME)];
     body.extend(kids);
-    body.push(tdmn("ADBE Group End"));
+    body.push(tdmn(GROUP_END));
     [tdmn(name), Chunk::list(*b"tdgp", body)]
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn av_layer() -> Vec<Chunk<'static>> {
     let mut root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(""), tdmn("ADBE Time Remapping"), time_remap()];
     root.extend(group("ADBE Transform Group", 1, crate::export::tree_spec::build(crate::export::tree_defs::AV_TRANSFORM)));
     root.extend(layer_styles());
-    root.push(tdmn("ADBE Group End"));
+    root.push(tdmn(GROUP_END));
     let layr = Chunk::list(
         *b"Layr",
         vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), crate::export::base::guides()],
@@ -78,7 +78,7 @@ pub(crate) fn av_layer() -> Vec<Chunk<'static>> {
 pub(crate) fn layer_block(nodes: &[crate::export::tree_spec::Node]) -> Vec<Chunk<'static>> {
     let mut root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn("")];
     root.extend(crate::export::tree_spec::build(nodes));
-    root.push(tdmn("ADBE Group End"));
+    root.push(tdmn(GROUP_END));
     let layr = Chunk::list(
         *b"Layr",
         vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), crate::export::base::guides()],
@@ -125,7 +125,7 @@ pub(crate) fn text_layer(doc: &[u8]) -> Vec<Chunk<'static>> {
     root.extend(group("ADBE Text Properties", 1, props));
     root.extend(group("ADBE Transform Group", 1, crate::export::tree_spec::build(crate::export::tree_defs::AV_TRANSFORM)));
     root.extend(layer_styles());
-    root.push(tdmn("ADBE Group End"));
+    root.push(tdmn(GROUP_END));
     let layr = Chunk::list(
         *b"Layr",
         vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), crate::export::base::guides()],
@@ -141,7 +141,7 @@ pub(crate) fn pairs(nodes: &[crate::export::tree_spec::Node]) -> Vec<(String, [C
     let mut out = Vec::new();
     let mut it = crate::export::tree_spec::build(nodes).into_iter();
     while let (Some(m), Some(n)) = (it.next(), it.next()) {
-        let name = String::from_utf8_lossy(m.bytes().unwrap_or_default().split(|b| *b == 0).next().unwrap_or_default()).into_owned();
+        let name = tdmn_name(&m).unwrap_or_default();
         out.push((name, [m, n]));
     }
     out

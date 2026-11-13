@@ -649,6 +649,31 @@ fn time_set_keeps_the_frame_shown_in_the_current_time_field() {
     assert_eq!(r["frame"], 13);
 }
 
+/// A comp that starts before 0 shows its first frames as negative timecode (`-0:00:00:12`).
+/// Typing back what the current-time display shows (Go to Time opens with it) stays on that frame;
+/// the leading `-` used to move back from the current frame instead. A bare `-n` still steps back,
+/// and in a comp that starts at 0 a `-` stays relative.
+#[test]
+fn time_set_round_trips_negative_displayed_timecode() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Pre-roll", "width": 64, "height": 64, "frameRate": 24, "duration": 4, "startTime": -1})).unwrap();
+    for frame in [0_i64, 1, 12, 23, 24, 25, 60] {
+        let r = s.execute("time.set", json!({"frame": frame})).unwrap();
+        let display = r["display"].as_str().unwrap().to_string();
+        let r = s.execute("time.set", json!({"timecode": display})).unwrap();
+        assert_eq!(r["frame"], frame, "displayed {display}");
+    }
+    s.execute("time.set", json!({"frame": 12})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"timecode": "-0:00:00:12"})).unwrap()["display"], "-0:00:00:12");
+    assert_eq!(s.execute("time.set", json!({"timecode": "-5"})).unwrap()["frame"], 7, "a bare -n steps back");
+    assert_eq!(s.execute("time.set", json!({"timecode": "-0:00:00:20"})).unwrap()["frame"], 4);
+    assert!(s.execute("time.set", json!({"timecode": "- -1:00"})).is_err(), "a second sign is still an error");
+
+    s.execute("comp.settings", json!({"startTime": 0})).unwrap();
+    s.execute("time.set", json!({"frame": 12})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"timecode": "-0:00:00:02"})).unwrap()["frame"], 10, "relative when the comp starts at 0");
+}
+
 /// Frames display style: typed digits are a frame count, so 00100 is frame 100, not 1 s (#530).
 #[test]
 fn time_set_reads_frames_style_digits_as_a_frame_count() {
@@ -1555,4 +1580,29 @@ fn a_typed_component_moves_its_follow_components_by_each_layers_own_change() {
     s.execute("prop.set", json!({"layer": a, "prop": uid, "value": [-4.0, -10.0], "time": 1.0, "selected": true, "dims": [0], "follow": [1]})).unwrap();
     let keys: Vec<Vec<f64>> = prop(&s, b, "audio/levels").keys.iter().map(|k| k.value.components()).collect();
     assert_eq!(keys, vec![vec![-20.0, -30.0], vec![-4.0, -34.0]], "B's 1 s key rises 6 dB on both channels");
+}
+
+#[test]
+fn convert_expression_to_keyframes_refuses_a_layer_of_millions_of_frames() {
+    let (mut s, l) = setup();
+    s.execute("prop.setExpression", json!({"layer": l, "path": "transform/rotation", "expression": "value"})).unwrap();
+    // A saved Out point a million seconds after the In point.
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().out_point =
+        effectcraft_time::Tick::from_seconds_f64(1e6);
+    let e = s.execute("prop.convertExpressionToKeyframes", json!({"layer": l, "path": "transform/rotation"})).unwrap_err().to_string();
+    assert!(e.contains("at most"), "{e}");
+    assert!(prop(&s, l, "transform/rotation").keys.is_empty());
+}
+
+#[test]
+fn convert_expression_to_keyframes_refuses_a_zero_frame_duration() {
+    let (mut s, l) = setup();
+    s.execute("prop.setExpression", json!({"layer": l, "path": "transform/rotation", "expression": "value"})).unwrap();
+    // A saved frame rate of 0/1 s has a frame duration of 0: the sampling loop never advanced.
+    let cid = s.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().frame_rate.den = 0;
+    let e = s.execute("prop.convertExpressionToKeyframes", json!({"layer": l, "path": "transform/rotation"})).unwrap_err().to_string();
+    assert!(e.contains("frame duration"), "{e}");
+    assert!(prop(&s, l, "transform/rotation").keys.is_empty());
 }
