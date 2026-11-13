@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, TrySendError, sync_channel};
 
 use craft_web_api::methods::Methods;
 use craft_web_api::page::{PageApi, Request};
@@ -26,14 +26,22 @@ thread_local! {
 /// How often a waiting call looks for the app's reply, in milliseconds (about a frame).
 const POLL_MS: i32 = 16;
 
+/// How many control requests may wait for the app at once. `craft-web-api` already refuses calls past its own
+/// in-flight limit; this bounds the app's queue too, so a flood of calls can't grow it without limit.
+const QUEUE: usize = 64;
+
 /// Put the crate's functions on `window.effectcraft` and return the queue the app drains each frame
 /// (hand it to `with_control`). An existing `window.effectcraft` keeps the functions it already has.
 pub(crate) fn install(ctx: egui::Context) -> Receiver<ControlRequest> {
-    let (queue, requests) = channel::<ControlRequest>();
+    let (queue, requests) = sync_channel::<ControlRequest>(QUEUE);
     let request: Request = Rc::new(move |method, params| {
         let (control, reply) = ControlRequest::new(method, params);
-        if queue.send(control).is_err() {
-            return Box::pin(async { json!({"ok": false, "error": "the app is not running"}) });
+        if let Err(refused) = queue.try_send(control) {
+            let error = match refused {
+                TrySendError::Full(_) => format!("effectcraft is busy: {QUEUE} requests are already waiting for the app"),
+                TrySendError::Disconnected(_) => "the app is not running".to_string(),
+            };
+            return Box::pin(async move { json!({"ok": false, "error": error}) });
         }
         ctx.request_repaint();
         Box::pin(wait(reply))
