@@ -1,3 +1,14 @@
 # Minimum cargo-nextest for this repository: GHSA-vc25-qg58-w57c is fixed in 0.9.150 and CI
 # installs exactly that version, so an older nextest refuses to run (exit 92 REQUIRED_VERSION_NOT_MET).
 nextest-version = "0.9.150"
+
+[test-groups]
+gpu = { max-threads = 1 }
+
+# Coverage runs each test in a separate process, so the GPU suite's in-process lock
+# cannot protect software adapters from competing devices and readback timeouts.
+# UI harnesses can create a device lazily when rendering a screenshot, so include
+# the whole UI package instead of an incomplete list of GPU-named tests.
+[[profile.default.overrides]]
+filter = 'package(effectcraft-gpu) | package(effectcraft-ui-egui) | package(effectcraft-sam2) | (package(effectcraft-cli) & test(/^cli::gpu_adapter_name_/))'
+test-group = 'gpu'
