@@ -875,10 +875,12 @@ Prop.prototype = {
     if (kind === 'path' && v !== null) return new __Path(v[0], v[1], v[2], v[3]);
     return v;
   },
-  get value() { return this.__self ? value : this.valueAtTime(time); },
+  get value() { return this.__self ? this.__selfValue() : this.valueAtTime(time); },
+  // The evaluated property's own value: a layer parameter reads as its layer here too.
+  __selfValue: function () { return this.__info[2] === 'layer' ? this.__wrap(value) : value; },
   valueAtTime: function (t) {
     t = __v(t);
-    if (this.__self && t === time) return value;
+    if (this.__self && t === time) return this.__selfValue();
     return this.__wrap(__h(__VALUE, this.__c, this.__l, this.__p, t, this.__self));
   },
   velocityAtTime: function (t) {
