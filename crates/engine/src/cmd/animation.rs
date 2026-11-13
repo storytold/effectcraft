@@ -218,7 +218,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    // The Cineon Converter version of each saved Gamma; a version 1 preset holds version 1 Gammas.
+    // The Cineon Converter version of each saved Gamma; a format 1 to 3 preset holds version 1 Gammas.
     let legacy = doc[PRESET_TAG].as_u64().unwrap_or(1) < PRESET_VERSION;
     let props: Vec<(String, Property, Option<f64>)> = doc["properties"]
         .as_array()

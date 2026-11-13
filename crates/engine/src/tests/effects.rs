@@ -951,7 +951,7 @@ fn preset_before_cineon_version_2(preset: &serde_json::Value) -> serde_json::Val
 
 /// A Cineon Converter's Gamma saved alone in an animation preset records its instance's
 /// version, and applying it sets the Version of the instance it lands on. A preset saved before
-/// version 3 records none, and its Gamma lands on the instance as a version 1 value.
+/// format 4 records none, and its Gamma lands on the instance as a version 1 value.
 #[test]
 fn cineon_gamma_presets_carry_the_version() {
     let (mut s, a, _) = comp_with_two_solids();
@@ -977,12 +977,17 @@ fn cineon_gamma_presets_carry_the_version() {
     s.execute("anim.applyPreset", json!({"preset": preset_before_cineon_version_2(&preset), "layers": [a]})).unwrap();
     assert_eq!((get(&s, "gamma"), get(&s, "version")), (KV::Scalar(1.3), KV::Scalar(1.0)));
 
-    // Format 2 already had relative effect keys, but its Gamma had no version tag.
-    let mut format_2 = preset.clone();
-    format_2["effectcraftAnimationPreset"] = json!(2);
-    format_2["properties"][0].as_object_mut().unwrap().remove("cineonVersion");
-    s.execute("anim.applyPreset", json!({"preset": format_2, "layers": [a]})).unwrap();
-    assert_eq!((get(&s, "gamma"), get(&s, "version")), (KV::Scalar(1.3), KV::Scalar(1.0)));
+    // Format 2 already had relative effect keys and format 3 whole text animators, but their
+    // Gammas had no version tag.
+    for format in [2, 3] {
+        s.execute("anim.applyPreset", json!({"preset": preset.clone(), "layers": [a]})).unwrap();
+        assert_eq!(get(&s, "version"), KV::Scalar(2.0), "format {format}");
+        let mut untagged = preset.clone();
+        untagged["effectcraftAnimationPreset"] = json!(format);
+        untagged["properties"][0].as_object_mut().unwrap().remove("cineonVersion");
+        s.execute("anim.applyPreset", json!({"preset": untagged, "layers": [a]})).unwrap();
+        assert_eq!((get(&s, "gamma"), get(&s, "version")), (KV::Scalar(1.3), KV::Scalar(1.0)), "format {format}");
+    }
 
     // A whole Cineon Converter from a preset saved before version 2 is applied as version 1,
     // and a Gamma preset applied to it later sets its Version.
@@ -1051,13 +1056,24 @@ fn presets_convert_exposed_cineon_gamma_to_the_driven_version() {
                 let expected = if mixed { 2.2 } else { converted };
                 assert!((value - expected).abs() < 1e-9, "nested={nested}, mixed={mixed}, case {i}: {value} != {expected}");
             }
-            // With an expression, a Gamma saved on another version is skipped.
+            // With an expression, a Gamma saved on another version is skipped. It is the only
+            // property in the preset, so nothing is applied and the command reports that.
             let mut with_expression = preset_before_cineon_version_2(&preset);
             with_expression["properties"][0]["expression"] = json!({"text": "1.7", "enabled": true});
             s.execute("essential.set", json!({"layer": instance, "control": control, "value": 0.5})).unwrap();
-            let result = s.execute("anim.applyPreset", json!({"preset": with_expression, "layers": [instance]})).unwrap();
-            let skipped = if mixed { json!([]) } else { json!([path]) };
-            assert_eq!(result["skipped"], skipped, "nested={nested}, mixed={mixed}");
+            let steps = s.history.undo.len();
+            let result = s.execute("anim.applyPreset", json!({"preset": with_expression.clone(), "layers": [instance]}));
+            if mixed {
+                assert_eq!(result.unwrap()["skipped"], json!([]), "nested={nested}");
+            } else {
+                assert!(result.unwrap_err().to_string().contains("nothing in this preset fits"), "nested={nested}");
+                assert_eq!(s.history.undo.len(), steps, "nested={nested}");
+                // Beside a property that fits, the Gamma is listed as skipped.
+                let mut with_opacity = with_expression;
+                with_opacity["properties"].as_array_mut().unwrap().push(json!({"path": "transform/opacity", "value": KV::Scalar(80.0), "keys": []}));
+                let result = s.execute("anim.applyPreset", json!({"preset": with_opacity, "layers": [instance]})).unwrap();
+                assert_eq!((&result["applied"], &result["skipped"]), (&json!(1), &json!([path])), "nested={nested}");
+            }
             let value = s.execute("prop.get", json!({"layer": instance, "path": path})).unwrap()["value"].as_f64().unwrap();
             assert!((value - if mixed { 2.2 } else { 0.5 }).abs() < 1e-9, "nested={nested}, mixed={mixed}: {value}");
         }
