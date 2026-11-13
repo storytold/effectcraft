@@ -368,6 +368,16 @@ effects can be registered.
   frames pool their native instances by it) and `frame_range()` (the layer's source time range in
   layer-time seconds, `None` when it has none). Images are `PluginImage { width, height, pixels, origin, scale }`.
   It may run on several threads at once.
+* **`EffectPlugin::notify_params()`** (default none) lists parameters whose changes by the user
+  the plug-in wants to hear about; **`EffectPlugin::param_changed(change)`** then gets a
+  `ParamChange { param, instance_key, time, layer_size, values, texts }` (`values` keyed by id in
+  property units, see `plugin::param_values`) and returns other parameter values to set, as
+  `(id, JSON value)` pairs. EffectCraft applies them with the user's edit in one undo step (a
+  keyframe at the edit's time when the property is animated), checks every value against the
+  manifest and ignores what doesn't fit; a change it applies is not reported again. It is called
+  only for edits (never while rendering or evaluating expressions) and the edit waits for it, so it
+  must be quick. This is how [external effect helpers](external-helpers.md#parameter-changes)
+  receive `param_changed`; WebAssembly modules can't use it.
 
 ### Compatibility
 

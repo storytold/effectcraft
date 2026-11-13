@@ -8,6 +8,7 @@ use super::{
 mod comps;
 mod dispatch;
 mod edit;
+mod param_notify;
 mod render;
 
 pub use edit::upgrade_effects;

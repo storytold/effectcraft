@@ -330,6 +330,118 @@ pub fn ctx_instance_key(ctx: &EffectCtx) -> u64 {
     (1u64 << 32) | u64::from(ctx.seed)
 }
 
+/// The [`PluginHost::instance_key`] of the effect instance whose property group has uid `uid`
+/// (renders seed an effect with its group's uid, so this is the key its renders have).
+pub fn instance_key_for(uid: u64) -> u64 {
+    (1u64 << 32) | (uid & u64::from(u32::MAX))
+}
+
+/// The user changed parameter `param` of an effect instance that asked to hear about it
+/// ([`EffectPlugin::notify_params`]): never sent while rendering or evaluating expressions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParamChange {
+    /// The parameter the user changed.
+    pub param: String,
+    /// The instance ([`PluginHost::instance_key`]).
+    pub instance_key: u64,
+    /// The layer time of the change, seconds.
+    pub time: f64,
+    /// The layer's size in layer pixels (the effect's layer bounds).
+    pub layer_size: [f64; 2],
+    /// Every parameter's value at `time` after the change, in property units, keyed by
+    /// parameter id (see [`param_values`]); text and hidden parameters are in `texts`.
+    pub values: serde_json::Map<String, serde_json::Value>,
+    /// One string per text / hidden parameter, in declaration order.
+    pub texts: Vec<String>,
+}
+
+/// The values of an effect instance's parameters for a [`ParamChange`], in property units keyed
+/// by id: slider / angle numbers, checkbox `true`/`false`, popup 0-based index, point `[x, y]`
+/// and point3 `[x, y, z]` in layer pixels, colour `[r, g, b, a]` 0–1, layer id or `null`. Text and
+/// hidden parameters are left out (see [`flatten_texts`]).
+pub fn param_values(m: &PluginManifest, params: &Params) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::json;
+    let mut out = serde_json::Map::new();
+    for p in &m.params {
+        let v = params.get(&p.id);
+        let j = match &p.kind {
+            PluginParamKind::Slider { default, .. } | PluginParamKind::Angle { default } => json!(v.map(Value::as_f64).unwrap_or(*default)),
+            PluginParamKind::Checkbox { default } => json!(v.map(Value::as_bool).unwrap_or(*default)),
+            PluginParamKind::Popup { default, .. } => json!(v.map(Value::as_enum).unwrap_or(*default)),
+            PluginParamKind::Point { .. } => json!(v.map(Value::as_vec2).unwrap_or([0.0; 2])),
+            PluginParamKind::Point3 { default } => json!(v.map(Value::as_vec3).unwrap_or(*default)),
+            PluginParamKind::Color { default } => json!(match v {
+                Some(Value::Color(c)) => *c,
+                Some(o) => o.as_color().map(f64::from),
+                None => *default,
+            }),
+            PluginParamKind::Layer => json!(v.and_then(Value::as_layer)),
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => continue,
+        };
+        out.insert(p.id.clone(), j);
+    }
+    out
+}
+
+/// The longest string a text / hidden parameter may be set to.
+const MAX_TEXT: usize = 64 << 20;
+
+/// The entries of `raw` (a JSON object of parameter id → value, as a plug-in answers a
+/// [`ParamChange`]) that are valid for manifest `m`, in the units of [`param_values`] (text and
+/// hidden parameters take a string). Unknown ids, values of the wrong type or shape, numbers that
+/// aren't finite, popup indices out of range or not whole and over-long strings are left out;
+/// slider values are clamped to the slider's range. Anything but an object gives nothing.
+pub fn checked_values(m: &PluginManifest, raw: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    use serde_json::{Value as J, json};
+    let Some(obj) = raw.as_object() else { return vec![] };
+    let num = |j: &J| j.as_f64().filter(|v| v.is_finite());
+    let nums = |j: &J, n: &[usize]| -> Option<Vec<f64>> {
+        let a = j.as_array().filter(|a| n.contains(&a.len()))?;
+        a.iter().map(num).collect()
+    };
+    let mut out = vec![];
+    for p in &m.params {
+        let Some(j) = obj.get(&p.id) else { continue };
+        let v = match &p.kind {
+            PluginParamKind::Slider { min, max, .. } => num(j).map(|v| json!(v.clamp(*min, *max))),
+            PluginParamKind::Angle { .. } => num(j).map(|v| json!(v)),
+            PluginParamKind::Checkbox { .. } => j.as_bool().or_else(|| num(j).map(|v| v != 0.0)).map(|b| json!(b)),
+            PluginParamKind::Popup { options, .. } => num(j).filter(|v| v.fract() == 0.0 && *v >= 0.0 && *v < options.len() as f64).map(|v| json!(v as u64)),
+            PluginParamKind::Point { .. } => nums(j, &[2]).map(|v| json!(v)),
+            PluginParamKind::Point3 { .. } => nums(j, &[3]).map(|v| json!(v)),
+            PluginParamKind::Color { .. } => nums(j, &[3, 4]).map(|mut v| {
+                if v.len() == 3 {
+                    v.push(1.0);
+                }
+                json!(v)
+            }),
+            PluginParamKind::Layer => match j {
+                J::Null => Some(J::Null),
+                _ => match num(j) {
+                    Some(-1.0) => Some(J::Null),
+                    Some(v) if v >= 0.0 && v.fract() == 0.0 && v < 9.0e15 => Some(json!(v as u64)),
+                    _ => None,
+                },
+            },
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => j.as_str().filter(|s| s.len() <= MAX_TEXT).map(|s| json!(s)),
+        };
+        if let Some(v) = v {
+            out.push((p.id.clone(), v));
+        }
+    }
+    out
+}
+
+/// Whether any registered plug-in declared [`EffectPlugin::notify_params`] (when none did, edits
+/// skip looking for changes to report).
+static ANY_NOTIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether some registered plug-in effect wants to hear about parameter changes
+/// ([`EffectPlugin::notify_params`]).
+pub fn any_notify_params() -> bool {
+    ANY_NOTIFY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Parameter values for one render, flattened (see the module docs) with typed accessors.
 pub struct PluginParams<'a> {
     pub manifest: &'a PluginManifest,
@@ -414,6 +526,20 @@ pub trait EffectPlugin: Send + Sync {
     /// ABI 2 plug-ins return true.
     fn reads_other_times(&self) -> bool {
         false
+    }
+    /// The parameters (ids) whose changes by the user the plug-in wants to hear about through
+    /// [`EffectPlugin::param_changed`] (a preset menu that sets other parameters, a "link"
+    /// checkbox). Default none. Read when the plug-in is registered and on every edit.
+    fn notify_params(&self) -> &[String] {
+        &[]
+    }
+    /// The user changed one of the [`EffectPlugin::notify_params`] (Effect Controls, the
+    /// timeline, `prop.set`, scripts; never while rendering or evaluating expressions). Returns
+    /// other parameter values to set with the change, in one undo step, as `(id, value)` pairs in
+    /// the units of [`param_values`]; the host checks them ([`checked_values`]) and ignores what
+    /// doesn't fit. The host waits for the answer, so it must be quick. Default: nothing.
+    fn param_changed(&self, _change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+        Ok(vec![])
     }
 }
 
@@ -508,6 +634,9 @@ pub fn register_plugin(plugin: Arc<dyn EffectPlugin>) -> Result<&'static EffectS
         .iter()
         .position(|s| s.get().is_none())
         .ok_or_else(|| format!("too many plug-in effects: a session registers at most {MAX_PLUGINS}; remove some plug-ins and restart EffectCraft"))?;
+    if !plugin.notify_params().is_empty() {
+        ANY_NOTIFY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     SLOTS[slot].set(plugin).map_err(|_| "plug-in slot taken".to_string())?;
     let spec: &'static EffectSpec = Box::leak(Box::new(EffectSpec {
         id: leak(&m.id),
@@ -723,4 +852,69 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
         set_plugin_error(&m.id, None);
     }
     buf
+}
+
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn m() -> PluginManifest {
+        let p = |id: &str, kind| PluginParam { id: id.into(), name: id.into(), group: String::new(), kind };
+        PluginManifest {
+            api: 2,
+            id: "org.test.values".into(),
+            name: "Values".into(),
+            category: "Test".into(),
+            version: String::new(),
+            author: String::new(),
+            description: String::new(),
+            params: vec![
+                p("s", PluginParamKind::Slider { default: 1.0, min: 0.0, max: 10.0, slider_min: None, slider_max: None, decimals: 1, integer: false }),
+                p("c", PluginParamKind::Checkbox { default: false }),
+                p("m", PluginParamKind::Popup { options: vec!["a".into(), "b".into()], default: 1 }),
+                p("pt", PluginParamKind::Point { default: [0.5, 0.5] }),
+                p("col", PluginParamKind::Color { default: [1.0; 4] }),
+                p("l", PluginParamKind::Layer),
+                p("t", PluginParamKind::Text { default: "x".into() }),
+            ],
+        }
+    }
+
+    #[test]
+    fn values_are_in_property_units_and_texts_left_out() {
+        let mut params = Params::default();
+        params.values.insert("pt".into(), Value::Vec2([12.0, 34.0]));
+        params.values.insert("m".into(), Value::Enum(1));
+        params.values.insert("col".into(), Value::Color([0.1, 0.2, 0.3, 0.4]));
+        params.values.insert("l".into(), Value::Layer(Some(5)));
+        let v = param_values(&m(), &params);
+        assert_eq!(v["s"], json!(1.0), "the default when unset");
+        assert_eq!(v["pt"], json!([12.0, 34.0]));
+        assert_eq!(v["m"], json!(1));
+        assert_eq!(v["col"], json!([0.1, 0.2, 0.3, 0.4]));
+        assert_eq!(v["l"], json!(5));
+        assert!(!v.contains_key("t"));
+    }
+
+    #[test]
+    fn only_values_that_fit_are_kept() {
+        let raw = json!({
+            "s": 99, "c": 1, "m": 2, "pt": [1, 2, 3], "col": [1, 0, 0], "l": -1, "t": "y", "zz": 1
+        });
+        let got = checked_values(&m(), &raw);
+        assert_eq!(
+            got,
+            vec![
+                ("s".to_string(), json!(10.0)),
+                ("c".to_string(), json!(true)),
+                ("col".to_string(), json!([1.0, 0.0, 0.0, 1.0])),
+                ("l".to_string(), serde_json::Value::Null),
+                ("t".to_string(), json!("y")),
+            ]
+        );
+        assert!(checked_values(&m(), &json!({"m": 0.5, "pt": [1, "x"], "l": 1.5, "t": 3, "s": "1"})).is_empty());
+        assert!(checked_values(&m(), &json!([1, 2])).is_empty());
+        assert_eq!(checked_values(&m(), &json!({"m": 1, "pt": [1.5, 2]})), vec![("m".into(), json!(1)), ("pt".into(), json!([1.5, 2.0]))]);
+    }
 }

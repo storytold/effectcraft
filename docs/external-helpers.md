@@ -15,9 +15,9 @@ and carries on. See [ADR 0001](adr/0001-external-effect-helpers.md) for why.
 | Install | Put the helper program (`effectcraft-helper-<name>`, `.exe` on Windows) in `helpers/` next to EffectCraft, in `helpers/` in the [settings folder](preferences.md), or in a folder named in `EFFECTCRAFT_HELPER_PATH` (a path list; entries can be programs or folders). Subfolders one level down are searched too. |
 | Start | Helpers run native code, so nothing starts them unless the user asks: Effect ▸ Scan for Effect Helpers (`effect.helpers.scan`) starts them. To start them every time EffectCraft launches, opt in with `EFFECTCRAFT_HELPERS=1`. It is an environment variable, not a setting, so writing to the settings folder can't turn it on. Agents confined with `--automation-read-root` / `--automation-write-root` can't run `effect.helpers.scan` or `effect.helpers.load`, and scripts can run them only with Allow Scripts to Write Files and Access Network on. |
 | Load more plug-ins | Effect ▸ Load Plug-ins Through Helper… (`effect.helpers.load {path}`) hands a file or folder to the helpers that accept it (an OpenFX helper takes `.ofx` plug-ins and `.ofx.bundle` folders). |
-| Inspect | `effect.helpers.list` → `{helpers: [{program, name, version, loads, running, processes, max_processes, effects, restarts, error}], blocked}` (`processes` is how many processes run now, `max_processes` how many the helper allows); `effect.plugins.list` shows each effect's `source` (`helper: …`) and last render `error`. |
+| Inspect | `effect.helpers.list` → `{helpers: [{program, name, version, loads, running, processes, max_processes, effects, restarts, error, features}], blocked}` (`processes` is how many processes run now, `max_processes` how many the helper allows, `features` the [extensions](#extensions) it announced); `effect.plugins.list` shows each effect's `source` (`helper: …`) and last render `error`. |
 | Errors | A failed render leaves the frame as it was and puts ⚠ after the effect's name in Effect Controls (hover for the message). The next render starts the helper again. An effect that stops its helper 3 times is turned off and listed in `helper_blocklist.txt` in the settings folder; the 3 stops are counted per effect across all processes of the helper (see [Parallel rendering](#parallel-rendering)), not per process. `effect.helpers.scan {"retry": true}` turns it back on. A helper that restarts 5 times in a minute (counted over all its processes) stays off until the next scan. |
-| Timeouts | `EFFECTCRAFT_HELPER_TIMEOUT` (seconds per render step, default 120) and `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` (start-up, describe, load; default 600). A helper idle for 30 s is pinged before it is used again. |
+| Timeouts | `EFFECTCRAFT_HELPER_TIMEOUT` (seconds per render step, default 120), `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` (start-up, describe, load; default 600) and `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` (seconds an edit waits for a [`param_changed`](#parameter-changes) answer, fractions allowed, default 2). A helper idle for 30 s is pinged before it is used again. |
 
 Helpers are not available in the web build.
 
@@ -64,11 +64,12 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 
 | Request | Reply | |
 |---|---|---|
-| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"],"max_processes":4}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. `max_processes` (optional, default 1) is how many processes of the helper EffectCraft may run at once, see [Parallel rendering](#parallel-rendering). A different `version` means EffectCraft won't use the helper. |
-| `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. |
+| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"],"max_processes":4,"features":["param_changed"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. `max_processes` (optional, default 1) is how many processes of the helper EffectCraft may run at once, see [Parallel rendering](#parallel-rendering). `features` (optional) lists the [extensions](#extensions) the helper understands. A different `version` means EffectCraft won't use the helper. |
+| `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true,"notify_params":["p114"]}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. `notify_params` (optional): see [Parameter changes](#parameter-changes). |
 | `{"op":"load","path":"…"}` | `effects` (only the new ones) or `error` | A file or folder the user picked. Replayed after a restart. |
 | `{"op":"padding","effect":"…","instance":7,"time":1.0,"scale":1.0,"layer_size":[w,h],"flat":[…],"texts":[…]}` | `{"op":"padding","pixels":3}` | Transparent pixels to add on each side before the render (at most 4096). |
 | `{"op":"render","effect":"…","instance":7,"time":1.0,"frame":<image ref>,"layer_size":[w,h],"flat":[…],"texts":[…],"frame_rate":30,"frame_range":[0,10]}` | callbacks, then `{"op":"done"}` or `{"op":"error","message":"…"}` | Process `frame` in place: read it, write the result to the same ref, reply `done`. `flat` / `texts` are the parameter values flattened by plug-in API 2 rules. `instance` identifies the applied effect (stable across frames). `frame_range` is the layer's source range in layer-time seconds, or `null`. |
+| `{"op":"param_changed","effect":"…","instance":7,"param":"p114","time":1.0,"layer_size":[w,h],"values":{…},"texts":[…]}` | `{"op":"set_params","values":{"p3":[1,0.4,0,1],"p4":36}}` or `error` | The user changed a parameter listed in `notify_params`; only to helpers with the `param_changed` [extension](#extensions). See [Parameter changes](#parameter-changes). |
 | `{"op":"destroy","instance":7}` | none | The instance is gone; free what it holds. Not sent by EffectCraft yet (see [Parallel rendering](#parallel-rendering)). |
 | `{"op":"ping"}` | `{"op":"pong"}` | Heartbeat. |
 | `{"op":"shutdown"}` | none | Exit. |
@@ -87,6 +88,63 @@ asking for the previous frame of a layer that also has a retime effect from the 
 The helper must serve it completely (with its own callbacks, nested up to 16 deep) and then
 keep waiting. Images for callbacks are placed after the frame in the exchange file and freed
 when the render ends.
+
+### Extensions
+
+A helper lists the protocol extensions it understands in `hello`: `"features": ["param_changed"]`.
+EffectCraft uses an extension only with helpers that list it, so a helper without `features` (or
+with an empty list) is spoken to exactly as described above; the protocol version stays 1.
+Entries EffectCraft doesn't know are ignored, as is anything that isn't an array of strings.
+
+| Feature | What it adds |
+|---|---|
+| `param_changed` | [Parameter changes](#parameter-changes): `notify_params` in `describe` / `load`, the `param_changed` request and the `set_params` reply. |
+
+### Parameter changes
+
+Some effects set other parameters when the user changes one: a preset menu that rewrites a dozen
+values, a "link" checkbox, a mode menu that resets dependent controls. A helper with the
+`param_changed` extension lists those parameters per effect, in `describe` / `load`:
+`"notify_params": ["p114", "p109"]` (ids of the manifest's parameters; unknown ids are ignored).
+
+- **When.** The user changes one of them: in Effect Controls, the timeline, with `prop.set`,
+  pasting values, a script, any other edit. A changed stored value or changed keyframes count
+  (moving the keyframe of a notifying parameter does, editing its expression does not). Never while
+  rendering, never for expression or keyframe evaluation, never for undo and redo.
+- **Request.** `param_changed` names the effect, the `instance` (the same id renders have), the
+  `param` the user changed, the layer `time` of the change in seconds (where the user's keyframe
+  went, else the current time) and the layer size. `values` holds every parameter's value at that
+  time, keyed by id, in property units: sliders and angles as numbers, checkboxes `true`/`false`,
+  popups 0-based, points `[x, y]` and point3 `[x, y, z]` in layer pixels (not buffer pixels),
+  colours `[r, g, b, a]` 0-1, layers the layer id or `null`. Text and hidden parameters are in
+  `texts`, as in `render`. The instance may be one the process hasn't rendered yet.
+- **Answer.** `set_params` with the parameters the helper changes, in the same units (text and
+  hidden ones as strings), or `{"values":{}}`. EffectCraft writes them into the user's edit: one
+  undo step, at the same time and the same way as the user's value (a new keyframe when the
+  property is animated). Ids that aren't the effect's, values of the wrong type or shape, numbers
+  that aren't finite, popup indices out of range or not whole, layers that aren't in the comp and
+  strings over 64 MB are ignored entry by entry; slider values are clamped to the slider range. A
+  change the answer makes doesn't send another `param_changed`. `ui` in the answer (per-parameter
+  state such as `{"p12": {"enabled": false}}`) is accepted and ignored for now: Effect Controls
+  can't grey out a single parameter yet.
+- **Time.** The edit waits for the answer, on the thread that draws the interface, so it waits at
+  most `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` (default 2 s), the wait for a free process included. It
+  uses a process that runs and is idle, between renders: never one inside a render's
+  conversation, and it never starts a process (after a crash the next render starts the helper
+  again, and the first change after that is reported). A process that still has to replay `load`s
+  isn't asked. When the helper isn't running, is busy for the whole time, answers `error`, misses
+  the time, exits or answers anything but `set_params` / `error`, the user's change stays and
+  nothing else changes. A helper that missed the time or broke the protocol is stopped (its late
+  answer would be out of step), as after any timeout, but this doesn't count towards turning the
+  effect off. The next render starts it again, and that start does count towards the 5 restarts a
+  minute: a helper that keeps missing the edit timeout ends up off until the next scan, so give
+  slow helpers a longer `EFFECTCRAFT_HELPER_EDIT_TIMEOUT`.
+- One edit reports at most 8 changes (pasting into many effects), one after another, each with
+  the values the answers before it set; after one that fails no more are sent for that edit.
+
+Rust helpers built on `serve` announce `param_changed` and answer it with
+`EffectPlugin::notify_params` / `EffectPlugin::param_changed` of their effects (see
+[plug-ins](plugins.md)).
 
 ### Parallel rendering
 

@@ -15,11 +15,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParams};
+use effectcraft_effects::plugin::{EffectPlugin, ParamChange, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParams, checked_values};
 
 use crate::blocklist;
 use crate::frames::Exchange;
-use crate::protocol::{HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, parse_reply, request_line};
+use crate::protocol::{
+    FEATURE_PARAM_CHANGED, HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, feature_list, parse_reply,
+    request_line,
+};
 
 /// How deep renders through one helper may nest (an effect asking for its input, which another
 /// effect of the same helper renders, ...).
@@ -51,6 +54,29 @@ fn render_timeout() -> Duration {
     }
     match RENDER_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed) {
         0 => Duration::from_secs(120),
+        ms => Duration::from_millis(ms),
+    }
+}
+
+/// [`set_edit_timeout`] (milliseconds; 0 = not set).
+static EDIT_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Override the edit timeout (tests; `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` still wins).
+pub fn set_edit_timeout(t: Duration) {
+    EDIT_TIMEOUT_MS.store(u64::try_from(t.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The longest the user's edit waits for a helper to answer `param_changed`, including the wait
+/// for a free process: `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` seconds (fractions allowed, at most
+/// 600), default 2. Edits run on the thread that draws the interface, so this is short: a helper
+/// that needs longer has the user's change applied alone (and is stopped, as on every timeout,
+/// since its late answer would be out of step).
+pub fn edit_timeout() -> Duration {
+    if let Some(s) = std::env::var("EFFECTCRAFT_HELPER_EDIT_TIMEOUT").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|s| s.is_finite() && *s > 0.0) {
+        return Duration::from_secs_f64(s.min(600.0));
+    }
+    match EDIT_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => Duration::from_secs(2),
         ms => Duration::from_millis(ms),
     }
 }
@@ -271,6 +297,8 @@ pub struct HelperStatus {
     pub effects: usize,
     pub restarts: usize,
     pub last_error: Option<String>,
+    /// The protocol extensions the helper announced in `hello` (`features`).
+    pub features: Vec<String>,
 }
 
 /// One helper program and, while it runs, its process.
@@ -343,6 +371,11 @@ impl Helper {
 
     pub fn loads(&self, ext: &str) -> bool {
         lock(&self.info).loads.iter().any(|e| e.eq_ignore_ascii_case(ext))
+    }
+
+    /// Whether the helper announced protocol extension `feature` in its `hello`.
+    pub fn has_feature(&self, feature: &str) -> bool {
+        lock(&self.info).features.iter().any(|f| f == feature)
     }
 
     pub(crate) fn add_effects(&self, n: usize) {
@@ -707,10 +740,10 @@ impl Helper {
         let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation, loaded: vec![], unacked: 0 };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
-            Ok(Reply::Hello { version, name, helper_version, loads, max_processes }) if version == PROTOCOL_VERSION => {
+            Ok(Reply::Hello { version, name, helper_version, loads, max_processes, features }) if version == PROTOCOL_VERSION => {
                 self.max_processes.store(clamp_processes(max_processes.as_ref()), Ordering::Relaxed);
                 let mut i = lock(&self.info);
-                (i.name, i.version, i.loads) = (name, helper_version, loads);
+                (i.name, i.version, i.loads, i.features) = (name, helper_version, loads, feature_list(features.as_ref()));
             }
             Ok(Reply::Hello { version, .. }) => {
                 c.stop();
@@ -743,6 +776,65 @@ impl Helper {
             return Err(format!("the helper stopped while loading plug-ins: {e}"));
         }
         Ok(c)
+    }
+
+    /// A free turn on a process that is running, waiting for one until `deadline`. Never starts a
+    /// process, and fails at once when none runs or the calling thread already holds one (it is
+    /// inside a render: nothing may be sent into that conversation).
+    fn take_idle_turn(&self, deadline: Option<Instant>) -> Result<TurnGuard<'_>, String> {
+        let me = std::thread::current().id();
+        let mut p = lock(&self.pool);
+        loop {
+            if p.entries.iter().any(|e| e.turn.owner == Some(me)) {
+                return Err("the helper is in the middle of a render on this thread".into());
+            }
+            if !p.entries.iter().any(|e| e.slot.running()) {
+                return Err("the helper is not running".into());
+            }
+            if let Some(e) = p.entries.iter_mut().find(|e| e.turn.owner.is_none() && e.slot.running()) {
+                e.turn = Turn { owner: Some(me), depth: 1 };
+                return Ok(TurnGuard { helper: self, slot: e.slot.clone(), fresh: true });
+            }
+            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Err("every process of the helper stayed busy".into());
+            }
+            p = self.turn_cv.wait_timeout(p, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+
+    /// Ask the helper about a parameter the user changed ([`Request::ParamChanged`]) and return
+    /// the `values` of its [`Reply::SetParams`] (unchecked). Bounded by [`edit_timeout`] in all
+    /// (the wait for a free process included); uses a process that runs and has done every load,
+    /// never starts one and never sends into a render's conversation. A helper that misses the
+    /// time, breaks the protocol or exits is stopped like after any timeout (the next render
+    /// starts it again), but this is not charged to the effect.
+    fn param_changed(&self, req: &Request) -> Result<serde_json::Value, String> {
+        let limit = edit_timeout();
+        let deadline = Instant::now().checked_add(limit);
+        let turn = self.take_idle_turn(deadline)?;
+        let mut g = lock(&turn.slot.conn);
+        let Some(c) = g.as_mut() else { return Err("the helper is not running".into()) };
+        // Loads still to replay can take minutes: an edit doesn't wait for them.
+        let pending = lock(&self.loaded).len();
+        if (0..pending).any(|i| !c.loaded.contains(&i)) {
+            return Err("the helper is still loading plug-ins".into());
+        }
+        let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
+        let r = c.call(req, left);
+        c.last_used = Instant::now();
+        let broken = match r {
+            Ok(Reply::SetParams { values, .. }) => return Ok(values.unwrap_or(serde_json::Value::Null)),
+            Ok(Reply::Error { message }) => return Err(message),
+            Err(Failure::Refused(e)) => return Err(e),
+            Ok(other) => format!("unexpected reply to param_changed: {other:?}"),
+            Err(Failure::Broken(e)) => e,
+        };
+        self.note_error(&broken);
+        if let Some(dead) = g.take() {
+            dead.stop();
+        }
+        Err(broken)
     }
 
     fn padding(&self, effect: &str, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance: u64) -> Result<u32, String> {
@@ -845,11 +937,14 @@ pub struct HelperEffect {
     helper: Arc<Helper>,
     manifest: PluginManifest,
     padding: bool,
+    /// The valid [`RemoteEffect::notify_params`].
+    notify: Vec<String>,
 }
 
 impl HelperEffect {
     pub fn new(helper: Arc<Helper>, remote: RemoteEffect) -> HelperEffect {
-        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding }
+        let notify = remote.notify_ids();
+        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, notify }
     }
 }
 
@@ -898,6 +993,28 @@ impl EffectPlugin for HelperEffect {
                 0
             }
         }
+    }
+
+    fn notify_params(&self) -> &[String] {
+        // Only helpers that said they answer `param_changed` are asked.
+        if self.notify.is_empty() || !self.helper.has_feature(FEATURE_PARAM_CHANGED) { &[] } else { &self.notify }
+    }
+
+    fn param_changed(&self, change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+        if !self.notify.contains(&change.param) || !self.helper.has_feature(FEATURE_PARAM_CHANGED) || blocklist::is_blocked(&self.manifest.id) {
+            return Ok(vec![]);
+        }
+        let req = Request::ParamChanged {
+            effect: self.manifest.id.clone(),
+            instance: change.instance_key,
+            param: change.param.clone(),
+            time: change.time,
+            layer_size: change.layer_size,
+            values: change.values.clone(),
+            texts: change.texts.clone(),
+        };
+        let values = self.helper.param_changed(&req).map_err(|e| format!("{}: {e}", self.manifest.name))?;
+        Ok(checked_values(&self.manifest, &values))
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {

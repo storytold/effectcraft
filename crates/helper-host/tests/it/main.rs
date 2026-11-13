@@ -10,7 +10,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParam, PluginParamKind, PluginParams, plugin};
+use effectcraft_effects::plugin::{
+    EffectPlugin, ParamChange, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParam, PluginParamKind, PluginParams, plugin,
+};
 use effectcraft_helper_host::protocol::{HELPER_ARG, Reply, reply_line};
 use effectcraft_helper_host::serve::{Provider, serve};
 
@@ -59,11 +61,59 @@ enum Kind {
     Meet { hold_ms: u64, exit: bool },
     /// Pool checks: asks for the input at another time (a callback) and finishes.
     Ask,
+    /// Parameter-change checks: answers `param_changed` for `preset` (see [`preset_answer`]).
+    Preset,
 }
 
 struct Fake {
     m: PluginManifest,
     kind: Kind,
+    /// The parameters whose changes it wants to hear about.
+    notify: Vec<String>,
+}
+
+impl Fake {
+    fn new(m: PluginManifest, kind: Kind) -> Fake {
+        Fake { m, kind, notify: vec![] }
+    }
+}
+
+/// What the fake answers when `preset` changes to: 1, values made from what it was told
+/// (amount halved; tint = time, layer width / 100, whether the instance is 7, 1); 2, values that
+/// don't fit (only `link`, as a number, survives and amount 5 is clamped); 3, nothing for 10 s
+/// (past the edit timeout); 4, it exits; 5, a reply that isn't `set_params`; else nothing.
+fn preset_answer(change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+    use serde_json::json;
+    if let Ok(dir) = pool_dir() {
+        let _ = append(&dir, "changed.log", &format!("{} {}", std::process::id(), change.param));
+    }
+    let amount = change.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(-1.0);
+    match change.values.get("preset").and_then(serde_json::Value::as_u64) {
+        Some(1) => Ok(vec![
+            ("amount".into(), json!(amount * 0.5)),
+            ("tint".into(), json!([change.time, change.layer_size[0] / 100.0, if change.instance_key == 7 { 1.0 } else { 0.0 }, 1.0])),
+        ]),
+        Some(2) => Ok(vec![
+            ("nope".into(), json!(1)),
+            ("tint".into(), json!([1.0])),
+            ("preset".into(), json!(9)),
+            ("link".into(), json!(1)),
+            ("amount".into(), json!(5.0)),
+            ("tint".into(), json!("red")),
+        ]),
+        Some(3) => {
+            std::thread::sleep(Duration::from_secs(10));
+            Ok(vec![])
+        }
+        Some(4) => std::process::exit(3),
+        Some(5) => {
+            let mut out = std::io::stdout();
+            out.write_all(reply_line(&Reply::Pong)?.as_bytes()).and_then(|_| out.flush()).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_secs(10));
+            Ok(vec![])
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 impl EffectPlugin for Fake {
@@ -104,6 +154,7 @@ impl EffectPlugin for Fake {
                 let _ = host.input_at(0.0);
                 IN_ASK.store(false, Ordering::SeqCst);
             }
+            Kind::Preset => {}
             Kind::Crash => std::process::exit(3),
             Kind::Hang => {
                 let mut out = std::io::stdout();
@@ -122,6 +173,12 @@ impl EffectPlugin for Fake {
             }
         }
         Ok(())
+    }
+    fn notify_params(&self) -> &[String] {
+        &self.notify
+    }
+    fn param_changed(&self, change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+        if self.kind == Kind::Preset { preset_answer(change) } else { Ok(vec![]) }
     }
 }
 
@@ -242,7 +299,7 @@ impl Provider for PoolProvider {
         ];
         let v: Vec<Arc<dyn EffectPlugin>> = kinds
             .into_iter()
-            .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.{}.{n}", self.tag), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
+            .map(|(n, kind)| Arc::new(Fake::new(manifest(&format!("org.test.{}.{n}", self.tag), vec![amount()]), kind)) as Arc<dyn EffectPlugin>)
             .collect();
         (v, vec![])
     }
@@ -275,6 +332,37 @@ impl Provider for PoolProvider {
     }
 }
 
+/// The fake helper of the parameter-change checks (`EC_FAKE_MODE` `notify`, or `old`: a helper
+/// from before the extension, which announces no features): one process, effects
+/// `org.test.<tag>.preset` (notifies on `preset`) and `.ask` (holds its process in a callback).
+struct NotifyProvider {
+    tag: &'static str,
+}
+
+impl Provider for NotifyProvider {
+    fn name(&self) -> String {
+        "Notify".into()
+    }
+    fn features(&self) -> Vec<String> {
+        if self.tag == "old" { vec![] } else { vec![effectcraft_helper_host::protocol::FEATURE_PARAM_CHANGED.into()] }
+    }
+    fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+        let preset = PluginParam {
+            id: "preset".into(),
+            name: "Preset".into(),
+            group: String::new(),
+            kind: PluginParamKind::Popup { options: vec!["Custom".into(); 6], default: 0 },
+        };
+        let tint = PluginParam { id: "tint".into(), name: "Tint".into(), group: String::new(), kind: PluginParamKind::Color { default: [1.0; 4] } };
+        let link = PluginParam { id: "link".into(), name: "Link".into(), group: String::new(), kind: PluginParamKind::Checkbox { default: false } };
+        let mut fx = Fake::new(manifest(&format!("org.test.{}.preset", self.tag), vec![amount(), preset, tint, link]), Kind::Preset);
+        // Unknown ids are dropped by EffectCraft.
+        fx.notify = vec!["preset".into(), "no_such_param".into()];
+        let ask = Fake::new(manifest(&format!("org.test.{}.ask", self.tag), vec![amount()]), Kind::Ask);
+        (vec![Arc::new(fx), Arc::new(ask)], vec![])
+    }
+}
+
 struct FakeProvider;
 
 impl Provider for FakeProvider {
@@ -285,7 +373,7 @@ impl Provider for FakeProvider {
         let v: Vec<Arc<dyn EffectPlugin>> =
             [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang), ("noisy", Kind::Noisy)]
                 .into_iter()
-                .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
+                .map(|(n, kind)| Arc::new(Fake::new(manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind)) as Arc<dyn EffectPlugin>)
                 .collect();
         (v, vec!["fake helper: a warning".into()])
     }
@@ -463,6 +551,8 @@ fn run_checks() -> bool {
     all &= pool_group("serial");
     all &= pool_group("pool");
     all &= pool_group("startup");
+    all &= pool_group("notify");
+    all &= pool_group("old");
     let _ = std::fs::remove_dir_all(&state);
     all
 }
@@ -707,6 +797,115 @@ fn startup_checks(dir: &Path) -> bool {
     all
 }
 
+/// A [`ParamChange`] of `preset` to `preset` with amount 0.8, instance 7, at 1.5 s on a 300 px
+/// wide layer.
+fn change(preset: u64) -> ParamChange {
+    let mut values = serde_json::Map::new();
+    values.insert("amount".into(), serde_json::json!(0.8));
+    values.insert("preset".into(), serde_json::json!(preset));
+    values.insert("tint".into(), serde_json::json!([1.0, 1.0, 1.0, 1.0]));
+    values.insert("link".into(), serde_json::json!(false));
+    ParamChange { param: "preset".into(), instance_key: 7, time: 1.5, layer_size: [300.0, 200.0], values, texts: vec![] }
+}
+
+/// Parameter changes (#3663), run in a child of the test with `EC_FAKE_MODE` `notify` (a helper
+/// that announces `param_changed`) or `old` (one that announces nothing).
+fn run_notify_checks(exe: &Path, mode: &str) -> bool {
+    let mut all = true;
+    let Ok(dir) = pool_dir() else { return check("EC_FAKE_DIR", false, "not set") };
+    effectcraft_helper_host::blocklist::set_state_dir(dir.join("state"));
+    effectcraft_helper_host::client::set_edit_timeout(Duration::from_millis(1500));
+    let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe.to_path_buf()), false);
+    all &= check(&format!("{mode}: scan registers the helper's effects"), r["loaded"].as_array().map_or(0, Vec::len) == 2, &r);
+    let Some(fx) = plugin(&format!("org.test.{mode}.preset")) else { return check("the preset effect is registered", false, &r) };
+    let changed = || log_lines(&dir, "changed.log").len();
+
+    if mode == "old" {
+        // A helper without the feature: nothing to notify, and nothing is ever sent to it.
+        let r = fx.param_changed(&change(1));
+        all &= check("old helper: no notify_params", fx.notify_params().is_empty(), fx.notify_params());
+        all &= check("old helper: param_changed is never sent", r == Ok(vec![]) && changed() == 0, (&r, changed()));
+        all &= check("old helper: features are empty", helper_entry()["features"] == serde_json::json!([]), helper_entry());
+        effectcraft_helper_host::stop_all();
+        return all;
+    }
+
+    all &= check("notify_params: the valid ids", fx.notify_params() == ["preset".to_string()], fx.notify_params());
+    all &= check("list shows the features", helper_entry()["features"] == serde_json::json!(["param_changed"]), helper_entry());
+
+    // The round trip: what the helper was told comes back in its answer.
+    let r = fx.param_changed(&change(1));
+    let want = vec![("amount".to_string(), serde_json::json!(0.4)), ("tint".to_string(), serde_json::json!([1.5, 3.0, 1.0, 1.0]))];
+    all &= check("param_changed round trip", r.as_ref() == Ok(&want) && changed() == 1, (&r, changed()));
+
+    // Values that don't fit are dropped, entry by entry; slider values are clamped.
+    let r = fx.param_changed(&change(2));
+    let want = vec![("amount".to_string(), serde_json::json!(1.0)), ("link".to_string(), serde_json::json!(true))];
+    all &= check("values that don't fit are ignored", r.as_ref() == Ok(&want), &r);
+
+    // A parameter that isn't in notify_params is not sent.
+    let mut other = change(1);
+    other.param = "amount".into();
+    let r = fx.param_changed(&other);
+    all &= check("other parameters are not sent", r == Ok(vec![]) && changed() == 2, (&r, changed()));
+
+    // A helper that doesn't answer in time: the edit goes on after the edit timeout, the helper
+    // is stopped (its late answer would be out of step) and is not charged with a crash.
+    let t0 = Instant::now();
+    let r = fx.param_changed(&change(3));
+    let took = t0.elapsed();
+    all &= check(
+        "a slow answer times out within the edit timeout",
+        r.as_ref().is_err_and(|e| e.contains("did not answer")) && took < Duration::from_secs(5),
+        (&r, took),
+    );
+    all &= check("the slow helper was stopped", helper_entry()["processes"] == 0, helper_entry());
+    // Not running: an edit doesn't start the helper; a render does.
+    let t0 = Instant::now();
+    let r = fx.param_changed(&change(1));
+    all &= check("an edit doesn't start a stopped helper", r.as_ref().is_err_and(|e| e.contains("not running")) && t0.elapsed() < Duration::from_secs(1), &r);
+    let r = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    all &= check("a render starts it again", r.is_ok(), &r);
+
+    // A helper that exits, or answers something else, while asked: an error, not a crash count.
+    let r = fx.param_changed(&change(4));
+    all &= check(
+        "a helper that exits while asked is an error",
+        r.is_err() && !effectcraft_helper_host::blocklist::is_blocked(&format!("org.test.{mode}.preset")),
+        &r,
+    );
+    let _ = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    let r = fx.param_changed(&change(5));
+    all &= check("a reply that isn't set_params is an error", r.as_ref().is_err_and(|e| e.contains("unexpected reply")), &r);
+    let _ = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    let r = fx.param_changed(&change(1));
+    all &= check("and the next change is answered again", r.as_ref().is_ok_and(|v| v.len() == 2), &r);
+
+    // The only process is busy in a render: the edit waits at most the edit timeout for it, and
+    // never sends into that render's conversation.
+    let (ready_tx, ready_rx) = channel();
+    let (go_tx, go_rx) = channel();
+    let ask = format!("org.test.{mode}.ask");
+    let holder = std::thread::spawn(move || {
+        render_pool_with(&ask, 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx), nested: "org.test.notify.ask" })
+    });
+    let waiting = ready_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+    let before = changed();
+    let t0 = Instant::now();
+    let r = fx.param_changed(&change(1));
+    let took = t0.elapsed();
+    let _ = go_tx.send(());
+    let held = holder.join().unwrap_or_else(|_| Err("thread panicked".into()));
+    all &= check(
+        "a busy helper holds an edit up for the edit timeout at most",
+        waiting && r.as_ref().is_err_and(|e| e.contains("busy")) && took >= Duration::from_millis(1400) && took < Duration::from_secs(5) && changed() == before,
+        (waiting, &r, took),
+    );
+    all &= check("the render it waited for finishes", held.is_ok(), &held);
+    effectcraft_helper_host::stop_all();
+    all
+}
+
 /// Run the pool checks of one mode in a child of this test, so its helpers (this same program)
 /// see the mode in their environment.
 fn pool_group(mode: &str) -> bool {
@@ -737,6 +936,8 @@ fn main() {
             Ok("pool") => serve(&mut PoolProvider::new("pool", 4)),
             Ok("serial") => serve(&mut PoolProvider::new("serial", 1)),
             Ok("startup") => serve(&mut PoolProvider::new("startup", 4)),
+            Ok("notify") => serve(&mut NotifyProvider { tag: "notify" }),
+            Ok("old") => serve(&mut NotifyProvider { tag: "old" }),
             _ => serve(&mut FakeProvider),
         };
         if let Err(e) = r {
@@ -747,7 +948,11 @@ fn main() {
     }
     if args.iter().any(|a| a == POOL_ARG) {
         let (Ok(exe), Ok(mode)) = (std::env::current_exe(), std::env::var("EC_FAKE_MODE")) else { std::process::exit(2) };
-        if !run_pool_checks(&exe, &mode) {
+        let ok = match mode.as_str() {
+            "notify" | "old" => run_notify_checks(&exe, &mode),
+            _ => run_pool_checks(&exe, &mode),
+        };
+        if !ok {
             std::process::exit(1);
         }
         return;

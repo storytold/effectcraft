@@ -13,10 +13,10 @@ use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginParams};
+use effectcraft_effects::plugin::{EffectPlugin, ParamChange, PluginFrame, PluginHost, PluginImage, PluginParams};
 
 use crate::frames::Exchange;
-use crate::protocol::{ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, reply_line};
+use crate::protocol::{FEATURE_PARAM_CHANGED, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, reply_line};
 
 /// How deep nested renders may go.
 const MAX_DEPTH: u32 = 16;
@@ -51,6 +51,12 @@ pub trait Provider {
     }
     /// The effect instance is gone.
     fn destroy(&mut self, _instance: u64) {}
+    /// The protocol extensions announced in `hello` (`features`). The default is everything
+    /// [`serve`] implements: `param_changed` goes to [`EffectPlugin::param_changed`] for the
+    /// parameters in [`EffectPlugin::notify_params`].
+    fn features(&self) -> Vec<String> {
+        vec![FEATURE_PARAM_CHANGED.into()]
+    }
 }
 
 /// Serve requests on stdin / stdout until EffectCraft says `shutdown` or closes the pipe.
@@ -110,7 +116,11 @@ impl Server<'_> {
         let mut effects = vec![];
         for e in list {
             let manifest = e.manifest().clone();
-            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), manifest: manifest.clone() });
+            let mut remote = RemoteEffect::new(manifest.clone(), self.provider.wants_padding(e.as_ref()));
+            if !e.notify_params().is_empty() {
+                remote.notify_params = Some(serde_json::json!(e.notify_params()));
+            }
+            effects.push(remote);
             self.effects.insert(manifest.id, e);
         }
         self.send(&Reply::Effects { effects, errors })
@@ -129,7 +139,8 @@ impl Server<'_> {
                 }
                 let (name, helper_version, loads) = (self.provider.name(), self.provider.version(), self.provider.loads());
                 let max_processes = Some(self.provider.max_processes()).filter(|n| *n > 1).map(serde_json::Value::from);
-                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads, max_processes })
+                let features = Some(self.provider.features()).filter(|f| !f.is_empty()).map(|f| serde_json::json!(f));
+                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads, max_processes, features })
             }
             Request::Describe => {
                 let (list, errors) = self.provider.effects();
@@ -151,6 +162,16 @@ impl Server<'_> {
                 Ok(()) => self.send(&Reply::Done),
                 Err(message) => self.send(&Reply::Error { message }),
             },
+            Request::ParamChanged { effect, instance, param, time, layer_size, values, texts } => {
+                let Some(e) = self.effects.get(&effect).cloned() else {
+                    return self.send(&Reply::Error { message: format!("unknown effect `{effect}`") });
+                };
+                let change = ParamChange { param, instance_key: instance, time, layer_size, values, texts };
+                match e.param_changed(&change) {
+                    Ok(v) => self.send(&Reply::SetParams { values: Some(serde_json::Value::Object(v.into_iter().collect())), ui: None }),
+                    Err(message) => self.send(&Reply::Error { message }),
+                }
+            }
             Request::Destroy { instance } => {
                 self.provider.destroy(instance);
                 Ok(())

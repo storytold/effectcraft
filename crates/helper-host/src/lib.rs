@@ -204,7 +204,7 @@ pub fn load_path(path: &str) -> Result<Value, String> {
 }
 
 /// The helpers and their state: `{helpers: [{program, name, version, loads, running, effects,
-/// restarts, error, processes, max_processes}], blocked}`.
+/// restarts, error, processes, max_processes, features}], blocked}`.
 pub fn list() -> Value {
     let helpers: Vec<Value> = lock(helpers())
         .iter()
@@ -221,6 +221,7 @@ pub fn list() -> Value {
                 "effects": s.effects,
                 "restarts": s.restarts,
                 "error": s.last_error,
+                "features": s.features,
             })
         })
         .collect();

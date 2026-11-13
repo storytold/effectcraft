@@ -103,6 +103,22 @@ pub enum Request {
     Image { image: Option<ImageRef> },
     /// The answer to [`Reply::ParamsAt`]: flattened values and texts, or `None`.
     Params { values: Option<(Vec<f64>, Vec<String>)> },
+    /// The user changed parameter `param` of an effect that asked for it
+    /// ([`RemoteEffect::notify_params`]; only to helpers that list [`FEATURE_PARAM_CHANGED`] in
+    /// their `hello`) → [`Reply::SetParams`] or [`Reply::Error`]. `values` holds every parameter's
+    /// value in property units ([`effectcraft_effects::plugin::param_values`]), `texts` the text /
+    /// hidden ones as in [`RenderRequest::texts`]. Sent between renders, never into one.
+    ParamChanged {
+        effect: String,
+        instance: u64,
+        param: String,
+        /// Layer time, seconds.
+        time: f64,
+        layer_size: [f64; 2],
+        values: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        texts: Vec<String>,
+    },
     /// The effect instance is gone; the helper may free what it keeps for it. No reply.
     Destroy { instance: u64 },
     /// Heartbeat → [`Reply::Pong`].
@@ -119,6 +135,45 @@ pub struct RemoteEffect {
     /// Whether to ask [`Request::Padding`] before every render (otherwise no padding).
     #[serde(default)]
     pub padding: bool,
+    /// Parameter ids whose changes by the user EffectCraft reports with
+    /// [`Request::ParamChanged`] (helpers that announce [`FEATURE_PARAM_CHANGED`]). Read
+    /// leniently: anything but an array of the manifest's parameter ids is ignored, entry by entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_params: Option<serde_json::Value>,
+}
+
+impl RemoteEffect {
+    /// An effect without the protocol extensions.
+    pub fn new(manifest: PluginManifest, padding: bool) -> RemoteEffect {
+        RemoteEffect { manifest, padding, notify_params: None }
+    }
+
+    /// The valid [`RemoteEffect::notify_params`]: ids of the manifest's parameters, each once.
+    pub fn notify_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        for id in self.notify_params.as_ref().and_then(serde_json::Value::as_array).into_iter().flatten().filter_map(serde_json::Value::as_str) {
+            if self.manifest.params.iter().any(|p| p.id == id) && !out.iter().any(|o| o == id) {
+                out.push(id.to_string());
+            }
+        }
+        out
+    }
+}
+
+/// The `hello` feature of helpers that answer [`Request::ParamChanged`].
+pub const FEATURE_PARAM_CHANGED: &str = "param_changed";
+
+/// The feature names in a helper's `hello` (`features`): the strings of an array, at most 64,
+/// each at most 64 bytes; anything else is ignored.
+pub fn feature_list(v: Option<&serde_json::Value>) -> Vec<String> {
+    v.and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|s| s.len() <= 64)
+        .take(64)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Helper → EffectCraft.
@@ -138,6 +193,10 @@ pub enum Reply {
         /// anything else; clamped by EffectCraft). Each process has its own conversation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_processes: Option<serde_json::Value>,
+        /// The protocol extensions the helper understands (`["param_changed"]`, see
+        /// [`feature_list`]). Absent: none, the helper is spoken to exactly as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<serde_json::Value>,
     },
     Effects {
         effects: Vec<RemoteEffect>,
@@ -162,6 +221,16 @@ pub enum Reply {
     },
     /// The render finished; the result is in the request's frame.
     Done,
+    /// Answer to [`Request::ParamChanged`]: parameter values to set with the user's change
+    /// (only those the helper changes, same units; ids that aren't the effect's, values of the
+    /// wrong type and numbers that aren't finite are ignored). `ui` (per-parameter UI state such
+    /// as `{"p12": {"enabled": false}}`) is accepted and ignored for now.
+    SetParams {
+        #[serde(default)]
+        values: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui: Option<serde_json::Value>,
+    },
     /// The request failed (the helper keeps running).
     Error {
         message: String,
