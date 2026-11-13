@@ -145,6 +145,38 @@ fn count_files(dir: &Path, prefix: &str) -> usize {
     std::fs::read_dir(dir).map_or(0, |rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).count())
 }
 
+/// Append one line to the log `name` in `dir` (one write: processes append at the same time).
+fn append(dir: &Path, name: &str, line: &str) -> Result<(), String> {
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(name)).map_err(|e| e.to_string())?;
+    f.write_all(format!("{line}\n").as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The lines of the log `name` in `dir`, split at the first space (process id, rest).
+fn log_lines(dir: &Path, name: &str) -> Vec<(String, String)> {
+    std::fs::read_to_string(dir.join(name))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.split_once(' ').map_or((l.to_string(), String::new()), |(a, b)| (a.to_string(), b.to_string())))
+        .collect()
+}
+
+/// The processes that loaded `path` (`loads.log`), each with how often.
+fn loads_of(dir: &Path, path: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut m = std::collections::BTreeMap::new();
+    for (pid, p) in log_lines(dir, "loads.log") {
+        if p == path {
+            *m.entry(pid).or_insert(0) += 1;
+        }
+    }
+    m
+}
+
+/// The paths a fake helper process has loaded, in order.
+static LOADED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A destroyed instance that makes the pool's fake helper stop reading its input for a while.
+const SLEEPY_INSTANCE: u64 = 666;
+
 /// One render of [`Kind::Meet`]: `need` renders (this one included) are active at the same time,
 /// or this fails after 15 s. The most renders seen at once is appended to `seen.log`.
 fn meet(need: usize, hold_ms: u64, exit: bool) -> Result<(), String> {
@@ -158,19 +190,14 @@ fn meet(need: usize, hold_ms: u64, exit: bool) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("seen.log")).map_err(|e| e.to_string())?;
-    // One write per line: processes append to the same file at the same time.
-    log.write_all(
-        format!(
-            "{seen}
-"
-        )
-        .as_bytes(),
-    )
-    .map_err(|e| e.to_string())?;
+    append(&dir, "seen.log", &seen.to_string())?;
+    // What this process had loaded when it rendered.
+    let loaded = LOADED.lock().map(|l| l.join(",")).unwrap_or_default();
+    append(&dir, "renders.log", &format!("{} {loaded}", std::process::id()))?;
     std::thread::sleep(Duration::from_millis(hold_ms));
     let _ = std::fs::remove_file(&mine);
     if exit {
+        append(&dir, "crashes.log", &std::process::id().to_string())?;
         std::process::exit(3);
     }
     if seen < need { Err(format!("only {seen} renders were active at once, wanted {need}")) } else { Ok(()) }
@@ -186,6 +213,10 @@ struct PoolProvider {
 impl PoolProvider {
     fn new(tag: &'static str, max: u32) -> PoolProvider {
         if let Ok(dir) = pool_dir() {
+            // A process that dies while it starts up (before answering `hello`).
+            if dir.join("die-on-start").exists() {
+                std::process::exit(3);
+            }
             let _ = mark(&dir.join("procs"), &std::process::id().to_string());
         }
         PoolProvider { tag, max }
@@ -215,17 +246,30 @@ impl Provider for PoolProvider {
             .collect();
         (v, vec![])
     }
-    fn load(&mut self, _: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
+    fn load(&mut self, path: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
         let pid = std::process::id();
+        let dir = pool_dir()?;
         // A load in the middle of a render's callback is a protocol error of EffectCraft's side.
         if IN_ASK.load(Ordering::SeqCst) {
-            mark(&pool_dir()?, &format!("load-during-render.{pid}"))?;
+            mark(&dir, &format!("load-during-render.{pid}"))?;
         }
-        mark(&pool_dir()?, &format!("loaded.{pid}"))?;
+        // While `refuse-z` exists, only the first process to load `z.pool` can.
+        if path == "z.pool" && dir.join("refuse-z").exists() && std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join("z-first")).is_err() {
+            return Err("z.pool can't be loaded now".into());
+        }
+        append(&dir, "loads.log", &format!("{pid} {path}"))?;
+        if let Ok(mut l) = LOADED.lock() {
+            l.push(path.to_string());
+        }
         Ok((vec![], vec![]))
     }
     fn destroy(&mut self, instance: u64) {
-        if let Ok(dir) = pool_dir() {
+        if instance == SLEEPY_INSTANCE {
+            std::thread::sleep(Duration::from_secs(6));
+        }
+        if let Ok(dir) = pool_dir()
+            && instance < 1000
+        {
             let _ = mark(&dir, &format!("destroyed.{}.{instance}", std::process::id()));
         }
     }
@@ -418,6 +462,7 @@ fn run_checks() -> bool {
     effectcraft_helper_host::stop_all();
     all &= pool_group("serial");
     all &= pool_group("pool");
+    all &= pool_group("startup");
     let _ = std::fs::remove_dir_all(&state);
     all
 }
@@ -446,13 +491,15 @@ fn render_together(jobs: &[(&'static str, f64)]) -> Vec<Result<(), String>> {
 struct GateHost {
     ready: Mutex<Sender<()>>,
     go: Mutex<Receiver<()>>,
+    /// The effect of the nested render.
+    nested: &'static str,
 }
 
 impl PluginHost for GateHost {
     fn input_at(&self, _: f64) -> Option<PluginImage> {
         let _ = self.ready.lock().ok()?.send(());
         self.go.lock().ok()?.recv_timeout(Duration::from_secs(30)).ok()?;
-        render_pool("org.test.pool.meet", 1.0).ok()?;
+        render_pool(self.nested, 1.0).ok()?;
         Some(PluginImage { width: 2, height: 2, pixels: vec![[0.0; 4]; 4], origin: [0.0; 2], scale: 1.0 })
     }
     fn layer_input(&self, _: &str, _: f64) -> Option<PluginImage> {
@@ -488,7 +535,7 @@ fn helper_entry() -> serde_json::Value {
 
 /// Process pools: a helper that says `max_processes` gets that many processes, one render each.
 /// Run in a child of the test (`--pool-checks`) with `EC_FAKE_MODE` (`pool`: max 4, `serial`: no
-/// `max_processes`), `EC_FAKE_DIR` for the helpers' marks, and the helper program being this
+/// `max_processes`, `startup`: max 4, see [`startup_checks`]), `EC_FAKE_DIR` for the helpers' marks, and the helper program being this
 /// very binary, which reads the same variables when started as the helper.
 fn run_pool_checks(exe: &Path, mode: &str) -> bool {
     let mut all = true;
@@ -511,6 +558,9 @@ fn run_pool_checks(exe: &Path, mode: &str) -> bool {
         effectcraft_helper_host::stop_all();
         return all;
     }
+    if mode == "startup" {
+        return all & startup_checks(&dir);
+    }
 
     // max_processes 4: four renders that only finish when all four are active at once. A serial
     // helper can't, so this proves they ran in parallel, in four processes.
@@ -530,13 +580,40 @@ fn run_pool_checks(exe: &Path, mode: &str) -> bool {
     // load reaches every running process; destroy too.
     let r = effectcraft_helper_host::load_path("x.pool");
     all &= check("load is accepted", r.is_ok(), &r);
-    all &= check("load reached all four processes", count_files(&dir, "loaded.") == 4, count_files(&dir, "loaded."));
+    let x = loads_of(&dir, "x.pool");
+    all &= check("load reached all four processes", x.len() == 4 && x.values().all(|n| *n == 1), &x);
+    // Loading the same path again (a folder with new plug-ins) reaches every process again.
+    let r = effectcraft_helper_host::load_path("x.pool");
+    let x = loads_of(&dir, "x.pool");
+    all &= check("a repeated load reaches all four processes", r.is_ok() && x.len() == 4 && x.values().all(|n| *n == 2), (&r, &x));
+
+    // A load a process refuses stays pending, and that process loads it before its next render.
+    let _ = mark(&dir, "refuse-z");
+    let r = effectcraft_helper_host::load_path("z.pool");
+    let z = loads_of(&dir, "z.pool");
+    all &= check("a load refused by the other processes", r.is_ok() && z.len() == 1, (&r, &z));
+    let _ = std::fs::remove_file(dir.join("refuse-z"));
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    let z = loads_of(&dir, "z.pool");
+    all &= check("a refused load is tried again before the next render", rs.iter().all(Result::is_ok) && z.len() == 4, (&rs, &z));
+
     let told = effectcraft_helper_host::destroy_instance(42);
     let t0 = Instant::now();
     while count_files(&dir, "destroyed.") < 4 && t0.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(20));
     }
     all &= check("destroy reached all four processes", told == 4 && count_files(&dir, "destroyed.") == 4, (told, count_files(&dir, "destroyed.")));
+
+    // destroy never waits for a process to read its input: these processes stop reading for a
+    // while, and many more destroys than their pipes hold are still handed over at once. Renders
+    // afterwards are in step (the writer's results for the destroys come first).
+    let told = effectcraft_helper_host::destroy_instance(SLEEPY_INSTANCE);
+    let t0 = Instant::now();
+    let flood: usize = (0..20_000u64).map(|i| effectcraft_helper_host::destroy_instance(1000 + i)).sum();
+    let took = t0.elapsed();
+    all &= check("destroy doesn't wait for a helper that stopped reading", told == 4 && flood == 80_000 && took < Duration::from_secs(3), (told, flood, took));
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    all &= check("renders after many destroys", rs.iter().all(Result::is_ok), &rs);
 
     // A crash in one process leaves the renders in the other three alone.
     let rs = render_together(&[("org.test.pool.slow", 4.0), ("org.test.pool.slow", 4.0), ("org.test.pool.slow", 4.0), ("org.test.pool.crash", 4.0)]);
@@ -552,13 +629,17 @@ fn run_pool_checks(exe: &Path, mode: &str) -> bool {
     effectcraft_helper_host::stop_all();
     let r = render_pool("org.test.pool.meet", 1.0);
     all &= check("a stopped pool restarts for a render", r.is_ok(), &r);
-    all &= check("a process started later loads what was loaded", count_files(&dir, "loaded.") == 5, count_files(&dir, "loaded."));
+    let x = loads_of(&dir, "x.pool");
+    // The new process loads x.pool once, though it was loaded twice.
+    all &= check("a process started later loads what was loaded", x.len() == 5 && x.values().filter(|n| **n == 1).count() == 1, &x);
 
     // A path loaded while a render waits for a callback is not sent into that conversation: the
     // nested render in the callback runs on the same process, which catches up on its next turn.
     let (ready_tx, ready_rx) = channel();
     let (go_tx, go_rx) = channel();
-    let renderer = std::thread::spawn(move || render_pool_with("org.test.pool.ask", 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx) }));
+    let renderer = std::thread::spawn(move || {
+        render_pool_with("org.test.pool.ask", 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx), nested: "org.test.pool.meet" })
+    });
     let waiting = ready_rx.recv_timeout(Duration::from_secs(30)).is_ok();
     let r = effectcraft_helper_host::load_path("y.pool");
     let _ = go_tx.send(());
@@ -566,16 +647,62 @@ fn run_pool_checks(exe: &Path, mode: &str) -> bool {
     all &= check("a load during a callback is accepted", waiting && r.is_ok() && rendered.is_ok(), (waiting, &r, &rendered));
     all &=
         check("a load never reaches a render waiting for a callback", count_files(&dir, "load-during-render.") == 0, count_files(&dir, "load-during-render."));
-    let rs = render_together(&[("org.test.pool.meet", 1.0); 4]);
-    all &= check("every process catches up on loads before it is used", rs.iter().all(Result::is_ok), &rs);
+    // Four renders at once, so all four processes: each had loaded y.pool when it rendered.
+    let _ = std::fs::remove_file(dir.join("renders.log"));
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    let renders = log_lines(&dir, "renders.log");
+    let pids: std::collections::BTreeSet<&String> = renders.iter().map(|(pid, _)| pid).collect();
+    all &= check(
+        "every process catches up on loads before it is used",
+        rs.iter().all(Result::is_ok) && pids.len() == 4 && renders.iter().all(|(_, loaded)| loaded.split(',').any(|p| p == "y.pool")),
+        (&rs, &renders),
+    );
 
-    // Crashes are counted per effect across the pool: three turn it off.
+    // Crashes are counted per effect across the pool, not per process: three turn it off. Each
+    // crash ends its process, so they are spread over three processes.
     for _ in 0..2 {
         let _ = render_pool("org.test.pool.crash", 1.0);
     }
+    let crashed: std::collections::BTreeSet<String> = log_lines(&dir, "crashes.log").into_iter().map(|(pid, _)| pid).collect();
     let r = render_pool("org.test.pool.crash", 1.0);
-    all &= check("repeat offenders are blocked across the pool", r.as_ref().is_err_and(|e| e.contains("turned off")), &r);
+    all &= check(
+        "three crashes in different processes block the effect",
+        crashed.len() == 3 && r.as_ref().is_err_and(|e| e.contains("turned off")),
+        (&crashed, &r),
+    );
 
+    effectcraft_helper_host::stop_all();
+    all
+}
+
+/// A fresh pool whose new processes die while they start: the first try of a slot other than the
+/// first doesn't count as a restart, every later one does.
+fn startup_checks(dir: &Path) -> bool {
+    let mut all = true;
+    let restarts = || helper_entry()["restarts"].as_u64().unwrap_or(u64::MAX);
+    let before = restarts();
+    // Hold the running process (slot 0) in a callback, so the renders below need another slot.
+    let (ready_tx, ready_rx) = channel();
+    let (go_tx, go_rx) = channel();
+    let holder = std::thread::spawn(move || {
+        render_pool_with("org.test.startup.ask", 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx), nested: "org.test.startup.meet" })
+    });
+    let waiting = ready_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+    let _ = mark(dir, "die-on-start");
+    let first = render_pool("org.test.startup.meet", 1.0);
+    let after_first = restarts();
+    let second = render_pool("org.test.startup.meet", 1.0);
+    let after_second = restarts();
+    let _ = std::fs::remove_file(dir.join("die-on-start"));
+    let _ = go_tx.send(());
+    let held = holder.join().unwrap_or_else(|_| Err("thread panicked".into()));
+    all &= check(
+        "a slot's first start is not a restart, even when it fails",
+        waiting && first.is_err() && after_first == before,
+        (waiting, &first, before, after_first),
+    );
+    all &= check("a slot's second start is a restart", second.is_err() && after_second == before + 1, (&second, before, after_second));
+    all &= check("the held render finishes", held.is_ok(), &held);
     effectcraft_helper_host::stop_all();
     all
 }
@@ -609,6 +736,7 @@ fn main() {
         let r = match std::env::var("EC_FAKE_MODE").as_deref() {
             Ok("pool") => serve(&mut PoolProvider::new("pool", 4)),
             Ok("serial") => serve(&mut PoolProvider::new("serial", 1)),
+            Ok("startup") => serve(&mut PoolProvider::new("startup", 4)),
             _ => serve(&mut FakeProvider),
         };
         if let Err(e) = r {

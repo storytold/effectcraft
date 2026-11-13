@@ -89,25 +89,44 @@ struct Conn {
     top: u64,
     last_used: Instant,
     generation: u64,
-    /// The paths this process has loaded ([`Helper::load`]); a process that lacks one is brought
-    /// up to date before it is used.
-    loaded: Vec<String>,
+    /// The loads ([`Helper::load`], by their index in [`Helper::loaded`]) this process has done;
+    /// a process that lacks one is brought up to date before it is used.
+    loaded: Vec<usize>,
+    /// Lines handed to the writer thread without waiting for it ([`Conn::post`]); their results
+    /// come before those of later lines.
+    unacked: usize,
 }
 
 impl Conn {
-    /// Write one request, waiting at most `timeout` for the helper to take it.
+    /// Write one request, waiting at most `timeout` for the helper to take it (and the requests
+    /// posted before it).
     fn send(&mut self, r: &Request, timeout: Duration) -> Result<(), Failure> {
-        let line = request_line(r).map_err(Failure::Broken)?;
-        let closed = || Failure::Broken("can't write to the helper: its input is closed".into());
-        self.input.send(line.into_bytes()).map_err(|_| closed())?;
-        match self.written.recv_timeout(timeout) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(Failure::Broken(format!("can't write to the helper: {e}"))),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(Failure::Broken(format!("the helper did not answer within {} s (it stopped reading its input)", timeout.as_secs())))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err(closed()),
+        self.post(r)?;
+        let deadline = Instant::now().checked_add(timeout);
+        // The writer answers every line in order: first those posted without waiting.
+        while self.unacked > 0 {
+            let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
+            let r = match self.written.recv_timeout(left) {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(Failure::Broken(format!("can't write to the helper: {e}"))),
+                Err(RecvTimeoutError::Timeout) => {
+                    Err(Failure::Broken(format!("the helper did not answer within {} s (it stopped reading its input)", timeout.as_secs())))
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(Failure::Broken("can't write to the helper: its input is closed".into())),
+            };
+            self.unacked -= 1;
+            r?;
         }
+        Ok(())
+    }
+
+    /// Hand one request to the writer thread without waiting for the helper to take it. A write
+    /// that fails is reported by the next [`Conn::send`], which stops the process.
+    fn post(&mut self, r: &Request) -> Result<(), Failure> {
+        let line = request_line(r).map_err(Failure::Broken)?;
+        self.input.send(line.into_bytes()).map_err(|_| Failure::Broken("can't write to the helper: its input is closed".into()))?;
+        self.unacked = self.unacked.saturating_add(1);
+        Ok(())
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Reply, Failure> {
@@ -171,7 +190,8 @@ struct Turn {
 struct Slot {
     index: usize,
     conn: Mutex<Option<Conn>>,
-    /// Whether a process was started in this slot before (a start after that is a restart).
+    /// Whether a process was launched in this slot before (a launch after that is a restart, see
+    /// [`Helper::spawn`]).
     started: AtomicBool,
 }
 
@@ -261,7 +281,8 @@ pub struct Helper {
     turn_cv: Condvar,
     /// How many processes may run at once (from the helper's `hello`; 1 until it is known).
     max_processes: AtomicUsize,
-    /// Paths loaded with [`Helper::load`], loaded again after a restart.
+    /// Every successful [`Helper::load`] in order (a path loaded twice is listed twice, so the
+    /// second load reaches every process too); replayed after a restart.
     loaded: Mutex<Vec<String>>,
     restarts: Mutex<Vec<Instant>>,
     generation: Mutex<u64>,
@@ -330,24 +351,27 @@ impl Helper {
     }
 
     /// Load effects from a path through the helper ([`Request::Load`]). Every running process
-    /// loads it; one that is busy, and one started later, does before it is used next.
+    /// loads it; one that is busy, and one started later, does before it is used next. Loading
+    /// a path again (a folder with new plug-ins) reaches every process again.
     pub fn load(&self, path: &str) -> Result<(Vec<RemoteEffect>, Vec<String>), String> {
         let turn = self.take_turn()?;
         let r = self.with_conn(&turn.slot, turn.fresh, |c| {
             let r = c.call(&Request::Load { path: path.to_string() }, load_timeout());
-            if matches!(r, Ok(Reply::Effects { .. })) && !c.loaded.iter().any(|p| p == path) {
-                c.loaded.push(path.to_string());
+            if matches!(r, Ok(Reply::Effects { .. })) {
+                // A new load for the other processes; this one has done it (and every earlier
+                // load of the same path, should one still be pending here).
+                let mut l = lock(&self.loaded);
+                l.push(path.to_string());
+                for (i, _) in l.iter().enumerate().filter(|(_, p)| *p == path) {
+                    if !c.loaded.contains(&i) {
+                        c.loaded.push(i);
+                    }
+                }
             }
             r
         });
         let out = match r {
-            Ok(Reply::Effects { effects, errors }) => {
-                let mut l = lock(&self.loaded);
-                if !l.iter().any(|p| p == path) {
-                    l.push(path.to_string());
-                }
-                Ok((effects, errors))
-            }
+            Ok(Reply::Effects { effects, errors }) => Ok((effects, errors)),
             Ok(Reply::Error { message }) => Err(message),
             Ok(other) => Err(format!("unexpected reply to load: {other:?}")),
             Err(Failure::Refused(e) | Failure::Broken(e)) => Err(e),
@@ -379,7 +403,8 @@ impl Helper {
     }
 
     /// Tell every idle running process an effect instance is gone ([`Request::Destroy`]); best
-    /// effort and never waiting: a process that is busy rendering (or held by the calling thread,
+    /// effort and never waiting (not even for the helper to read the request): a process that is
+    /// busy rendering (or held by the calling thread,
     /// which may be inside a render callback) is skipped, and a process that never saw the
     /// instance, or starts later, ignores it. Returns how many processes were told.
     pub fn destroy(&self, instance: u64) -> usize {
@@ -391,7 +416,9 @@ impl Helper {
             };
             let mut g = lock(&slot.conn);
             if let Some(c) = g.as_mut() {
-                match c.send(&Request::Destroy { instance }, render_timeout()) {
+                // Handed to the writer thread: a process that stopped reading its input can't hold
+                // this up. A write that fails is found by the next request, which stops the process.
+                match c.post(&Request::Destroy { instance }) {
                     Ok(()) => told += 1,
                     Err(Failure::Broken(e) | Failure::Refused(e)) => {
                         self.note_error(&e);
@@ -414,16 +441,29 @@ impl Helper {
         }
     }
 
-    /// Load what the user loaded since `c` started ([`Helper::load`]).
+    /// Do the loads ([`Helper::load`]) that `c` hasn't done yet: all of them for a process that
+    /// just started. A path loaded several times is loaded once. A load the helper answers with an
+    /// error stays pending and is tried again before the next turn; a process that breaks or
+    /// answers out of step is an error (the caller stops it).
     fn catch_up(&self, c: &mut Conn) -> Result<(), Failure> {
-        let missing: Vec<String> = lock(&self.loaded).iter().filter(|p| !c.loaded.contains(p)).cloned().collect();
-        for path in missing {
+        // Copied: a load can take minutes, and `load` on another process must not wait for it.
+        let all = lock(&self.loaded).clone();
+        let mut done: Vec<&str> = vec![];
+        for (i, path) in all.iter().enumerate() {
+            if c.loaded.contains(&i) || done.contains(&path.as_str()) {
+                continue;
+            }
+            done.push(path);
             match c.call(&Request::Load { path: path.clone() }, load_timeout()) {
-                Ok(Reply::Effects { .. }) => {}
-                Ok(_) | Err(Failure::Refused(_)) => log::warn!("helper {}: loading {path} failed", self.program.display()),
+                Ok(Reply::Effects { .. }) => {
+                    let now: Vec<usize> = all.iter().enumerate().filter(|(j, p)| *p == path && !c.loaded.contains(j)).map(|(j, _)| j).collect();
+                    c.loaded.extend(now);
+                }
+                Ok(Reply::Error { message }) => log::warn!("helper {}: loading {path} failed (tried again later): {message}", self.program.display()),
+                Ok(other) => return Err(Failure::Broken(format!("unexpected reply to load: {other:?}"))),
+                Err(Failure::Refused(e)) => log::warn!("helper {}: loading {path} failed (tried again later): {e}", self.program.display()),
                 Err(e) => return Err(e),
             }
-            c.loaded.push(path);
         }
         Ok(())
     }
@@ -566,8 +606,13 @@ impl Helper {
             if r.len() >= MAX_RESTARTS_PER_MINUTE {
                 return Err("the helper keeps stopping; it stays off until the next scan (Effect ▸ Scan for Effect Helpers)".into());
             }
-            // Filling the pool is not restarting: only a slot's first process doesn't count
-            // (the first slot's is counted, as it always was).
+            // Filling the pool is not restarting. The rule: every launch of slot 0 counts (as it
+            // always did); in the other slots, the first launch of a process doesn't, and every
+            // later one does, whether the process before it crashed, hung, or exited while it was
+            // starting up (`hello`, `describe`, replaying loads). The exemption is used up when the
+            // child process is launched (`started`, set below), so a try that never got that far
+            // (no exchange file, the program can't be run) doesn't use it up, and a slot whose
+            // first process keeps dying while starting can't retry forever without counting.
             if slot.started.load(Ordering::Relaxed) || slot.index == 0 {
                 r.push(Instant::now());
             }
@@ -585,6 +630,7 @@ impl Helper {
             cmd.creation_flags(0x0800_0000);
         }
         let mut child = cmd.spawn().map_err(|e| format!("can't start {}: {e}", self.program.display()))?;
+        slot.started.store(true, Ordering::Relaxed);
         let (Some(stdin), Some(stdout), stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
             let _ = child.kill();
             let _ = child.wait();
@@ -658,7 +704,7 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation, loaded: vec![] };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation, loaded: vec![], unacked: 0 };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
             Ok(Reply::Hello { version, name, helper_version, loads, max_processes }) if version == PROTOCOL_VERSION => {
@@ -690,13 +736,12 @@ impl Helper {
             c.stop();
             return Err("the restarted helper could not list its effects".into());
         }
-        for path in lock(&self.loaded).clone() {
-            if !matches!(c.call(&Request::Load { path: path.clone() }, load_timeout()), Ok(Reply::Effects { .. })) {
-                log::warn!("helper {}: reloading {path} failed", self.program.display());
-            }
-            c.loaded.push(path);
+        // A load the helper refuses stays pending for the next turn; a process that breaks here
+        // is not used.
+        if let Err(Failure::Broken(e) | Failure::Refused(e)) = self.catch_up(&mut c) {
+            c.stop();
+            return Err(format!("the helper stopped while loading plug-ins: {e}"));
         }
-        slot.started.store(true, Ordering::Relaxed);
         Ok(c)
     }
 

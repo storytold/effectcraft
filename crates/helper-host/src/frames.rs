@@ -109,9 +109,11 @@ impl Exchange {
 }
 
 /// Upper bound for the end of any image in the exchange file; keeps a hostile offset from
-/// growing the file. Images of one render are stacked from 0 (the frame, then every
-/// `input_at` / `layer_input` answer and nested render), so in 32 bpc this allows about 128
-/// images of 7680×4320, or 16 of 16384×16384.
+/// growing the file. Each process has its own file; the images it holds at once are stacked in
+/// it: the outermost render's frame at 0, then its `input_at` / `layer_input` answers, and a
+/// nested render starts above the images the render around it still uses. All of them share this
+/// limit, so in 32 bpc one process holds about 128 images of 7680×4320 at once, or 16 of
+/// 16384×16384.
 const MAX_EXTENT: u64 = 1 << 36;
 
 #[cfg(unix)]
