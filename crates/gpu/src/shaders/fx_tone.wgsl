@@ -40,7 +40,16 @@ fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     if (clip_w) {
         t = min(t, 1.0);
     }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, max(data[o + 2u], 0.01));
+    // color2::LEVELS_IC_CURVE_LIMIT keeps the curve finite. WGSL leaves an overflowing pow
+    // indeterminate, so a curve past the bound saturates before pow: |t|^(1/g) > 1e30 once
+    // log2|t| / g > 99.66; between 1e30 and 2^99.7 the clamp gives the same 1e30.
+    // A branch, not select: select evaluates both sides, so pow would still run.
+    let g = max(data[o + 2u], 0.01);
+    var curve = sign(t) * 1e30;
+    if (!(abs(t) > 1.0 && log2(abs(t)) / g > 99.7)) {
+        curve = clamp(fxt_gamma(t, g), -1e30, 1e30);
+    }
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * curve;
 }
 
 // color_fx::level (data offset o: ib, iw, g, ob, ow, clip black, clip white).

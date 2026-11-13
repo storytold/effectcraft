@@ -85,13 +85,13 @@ impl Justify {
     }
     pub fn parse(s: &str) -> Option<Justify> {
         Some(match s.to_ascii_lowercase().replace(['_', ' ', '-'], "").as_str() {
-            "left" | "leftjustify" => Justify::Left,
-            "center" | "centre" | "centerjustify" => Justify::Center,
-            "right" | "rightjustify" => Justify::Right,
+            "left" | "leftjustify" | "alignleft" => Justify::Left,
+            "center" | "centre" | "centerjustify" | "aligncenter" => Justify::Center,
+            "right" | "rightjustify" | "alignright" => Justify::Right,
             "justify" | "justifyleft" | "justifylastleft" | "fulljustifylastlineleft" => Justify::JustifyLastLeft,
             "justifycenter" | "justifylastcenter" | "fulljustifylastlinecenter" => Justify::JustifyLastCenter,
             "justifyright" | "justifylastright" | "fulljustifylastlineright" => Justify::JustifyLastRight,
-            "justifyall" | "fulljustifylastlinefull" | "fulljustify" => Justify::JustifyAll,
+            "justifyall" | "justifyfull" | "fulljustifylastlinefull" | "fulljustify" => Justify::JustifyAll,
             _ => return None,
         })
     }

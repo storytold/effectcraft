@@ -4,8 +4,8 @@
 //! Plain data; the evidence for each row is in `docs/aep-format.md` 3.7 and the case numbers in
 //! the comments. The importer reads a file through it, the exporter writes the inverse.
 
-use crate::container::effects::ParamKind;
 use ParamKind as K;
+use craft_aep::ParamKind;
 
 /// How a stored parameter value becomes an EffectCraft value.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +36,19 @@ pub enum Conv {
     LayerRef { own: bool },
     /// A parameter that holds no value to import (Levels (Individual Controls)' histogram).
     Skip,
+}
+
+impl Conv {
+    /// For a number (`Percent`, `Plain`, `Factor`): what a stored value is multiplied by to give
+    /// the value here. `None` for every other conversion.
+    pub fn number_scale(self) -> Option<f64> {
+        match self {
+            Conv::Percent { valid_max } => Some(100.0 / valid_max),
+            Conv::Plain { .. } => Some(1.0),
+            Conv::Factor { factor, .. } => Some(factor),
+            _ => None,
+        }
+    }
 }
 
 // After Effects' popup items as the corpus stores them (`pdnm`).

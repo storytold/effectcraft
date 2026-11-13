@@ -38,6 +38,8 @@ fn twirl_bulge_ripple_wave_warp() {
 #[test]
 fn turbulent_displace_and_cc_lens() {
     effect_case("ec.distort.turbulentdisplace", &[("size", n(30.0)), ("amount", n(20.0))]);
+    // #3470: After Effects' maximum Random Seed.
+    effect_case("ec.distort.turbulentdisplace", &[("size", n(30.0)), ("amount", n(20.0)), ("evolutionOptions/randomSeed", n(100000.0))]);
     effect_case(
         "ec.distort.turbulentdisplace",
         &[("displacement", e(1)), ("complexity", n(3.5)), ("evolution", n(90.0)), ("size", n(25.0)), ("pinning", e(2)), ("resizeLayer", on())],

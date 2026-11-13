@@ -175,11 +175,8 @@ impl Dependencies<'_> {
                             // Properties overrides, which the render applies: a LUT file one of
                             // them names is read too (#3493).
                             for o in crate::fx_host::essential_overrides(ctx, layer) {
-                                if let effectcraft_keyframe::Value::Str(src) = &o.value
-                                    && let Some(path) = effectcraft_effects::lut_file(src)
-                                {
-                                    crate::reads::ReadFile::new(path, crate::reads::FileStamp::native(path).unwrap_or(crate::reads::FileStamp::Missing))
-                                        .hash(self.h);
+                                if let effectcraft_keyframe::Value::Str(src) = &o.value {
+                                    crate::reads::source_files(src).hash(self.h);
                                 }
                             }
                             let nested = EvalCtx::new(ctx.project, item, comp, time);
