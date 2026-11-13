@@ -40,8 +40,19 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"comp": s.state.active_comp.map(|c| c.0)}))
 }
 
+/// Let a project-file auto-save that is still writing in the background land before the project
+/// file is read or written (Open, Revert, Save): otherwise the read could see the older file and
+/// an older snapshot could overwrite a newer save. A copy write needs no wait, since it never
+/// touches the project file. Its own failure is reported by the auto-save, not here.
+pub(crate) fn wait_for_project_save(s: &mut Session) {
+    if s.autosave.pending.as_ref().is_some_and(|w| w.saves_project.is_some()) {
+        let _ = s.autosave_wait();
+    }
+}
+
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
+    wait_for_project_save(s);
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
     let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
@@ -101,10 +112,7 @@ fn save_to(s: &mut Session, path: &str) -> Result<Value> {
     // A project-file auto-save still writing in the background holds an older snapshot: let it land
     // first, so it cannot overwrite this save afterwards. Its own failure is reported by the
     // auto-save, not here.
-    // (A copy write needs no wait: it never touches the project file.)
-    if s.autosave.pending.as_ref().is_some_and(|w| w.saves_project.is_some()) {
-        let _ = s.autosave_wait();
-    }
+    wait_for_project_save(s);
     let json = file_text(s, path)?;
     s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.path = Some(path.to_string());

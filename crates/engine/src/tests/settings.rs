@@ -1209,6 +1209,27 @@ fn background_project_file_autosave_writes_off_the_ui_thread_and_marks_saved_onl
 }
 
 #[test]
+fn open_and_revert_wait_for_a_pending_project_file_write() {
+    let d = tmp("tick-project-file-open");
+    let mut s = session_with_comp();
+    let proj = d.join("O.ecproj");
+    s.execute("file.saveAs", json!({"path": proj.to_string_lossy()})).unwrap();
+    s.autosave.background = true;
+    s.execute("prefs.set", json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "projectFile"}})).unwrap();
+    assert!(s.autosave_tick(1000.0).is_none());
+    s.execute("layer.newNull", json!({"name": "newest work"})).unwrap();
+    s.autosave_tick(1061.0).unwrap().unwrap();
+    assert!(s.autosave.pending.is_some());
+    // Revert reads the project's own file: it must see the write in flight, not the older file.
+    s.execute("file.revert", json!({})).unwrap();
+    let names: Vec<String> = s.active_comp().map(|c| c.layers.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
+    assert!(names.iter().any(|n| n == "newest work"), "reverted to the older file: {names:?}");
+    assert!(s.autosave.pending.is_none());
+    assert!(!s.is_dirty());
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn background_project_file_autosave_failure_leaves_the_project_unsaved_and_retries() {
     let d = tmp("tick-project-file-fail");
     let mut s = session_with_comp();
