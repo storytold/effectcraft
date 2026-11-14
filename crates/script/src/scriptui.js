@@ -750,7 +750,7 @@ function __uiMouseWanted(c, inherited) {
 function __uiMouseEvent(type, target, v) {
   var num = function (x, d) {
     x = Number(x);
-    return isFinite(x) ? x : d;
+    return Number.isFinite(x) ? x : d;
   };
   var keys = { alt: !!v.altKey, control: !!v.ctrlKey, ctrl: !!v.ctrlKey, meta: !!v.metaKey, shift: !!v.shiftKey };
   return {

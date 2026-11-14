@@ -91,6 +91,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
                     rt.updater.dismiss_status();
                 }
                 CheckResultResponse::CheckAgain => rt.updater.check_now(ctx),
+                CheckResultResponse::RestartToUpdate => rt.updater.restart_to_update(),
             }
             // A check that found a release leaves the status idle and the startup prompt takes over.
             if matches!(rt.updater.status(), Status::Idle) && !rt.check_requested {

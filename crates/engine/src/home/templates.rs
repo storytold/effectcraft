@@ -751,6 +751,9 @@ fn footage_dir(s: &Session, name: &str, footage_dir: Option<&str>, project_path:
 fn extract_footage(s: &Session, proj: &mut Project, entries: &[(String, Vec<u8>)], dir: &str) -> Result<Vec<String>> {
     let mut written = std::collections::HashMap::new();
     let mut used = std::collections::HashSet::new();
+    // Where each (item, file) pair's numbering resumes, so repeated names don't retry every
+    // number before theirs.
+    let mut next = std::collections::HashMap::new();
     for (k, v) in entries.iter().filter(|(k, _)| k.starts_with("media/")) {
         // `media/<item>/<file>` → one folder; a name another item took gets the item's id.
         let file = safe_file_name(&base_name(k));
@@ -763,10 +766,10 @@ fn extract_footage(s: &Session, proj: &mut Project, entries: &[(String, Vec<u8>)
         // case-insensitive volume (Windows and macOS as they come), and Win32 drops a trailing
         // dot or space, so `a.png.` is `a.png` there. The name written stays as it is.
         let mut name = file.clone();
-        let mut n = 0usize;
+        let n = next.entry((item, same_file_key(&file))).or_insert(0usize);
         while !used.insert(same_file_key(&name)) {
-            n += 1;
-            name = if n == 1 { format!("{item}-{file}") } else { format!("{item}-{n}-{file}") };
+            *n += 1;
+            name = if *n == 1 { format!("{item}-{file}") } else { format!("{item}-{n}-{file}") };
         }
         let out = format!("{dir}/{name}");
         s.services.store_file(&out, v).map_err(|e| EngineError::Other(format!("cannot write {out}: {e}")))?;

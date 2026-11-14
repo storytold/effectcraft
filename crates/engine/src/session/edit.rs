@@ -30,6 +30,9 @@ impl Session {
     /// undo step under `label`, unless it merges with the current merge key (then the redo branch
     /// is dropped). An `Err` from `f` propagates with the session unchanged.
     fn edit_inner<T>(&mut self, label: &str, merge: Option<&str>, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<T>) -> Result<T> {
+        if self.script_ui.render_host.is_some() {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         let before = self.project.clone();
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
@@ -105,6 +108,9 @@ impl Session {
     /// modified) but is no undo step, and it changes no pixels: the comp's cached frames stay
     /// valid ([`effectcraft_project::Comp::same_pixels`]).
     pub fn set_resolution(&mut self, comp: ItemId, r: effectcraft_project::Resolution) -> Result<()> {
+        if self.script_ui.render_host.is_some() {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         if self.project.comp(comp).ok_or(EngineError::NoComp)?.resolution == r {
             return Ok(());
         }
@@ -134,6 +140,9 @@ impl Session {
     /// on-canvas editor gets a new IME epoch only when its own document changed) and the session is
     /// bumped. Returns `false`, changing nothing, when there is nothing to undo.
     pub fn undo(&mut self) -> bool {
+        if self.script_ui.render_host.is_some() {
+            return false;
+        }
         let Some((label, p)) = self.history.undo.pop() else { return false };
         let edited = commands::text_edit::active_editor_snapshot(self);
         let probe = commands::kept_crypto_probe(self);
@@ -152,6 +161,9 @@ impl Session {
     /// text document starts a new IME epoch) and the session is bumped. Returns `false`, changing
     /// nothing, when there is nothing to redo.
     pub fn redo(&mut self) -> bool {
+        if self.script_ui.render_host.is_some() {
+            return false;
+        }
         let Some((label, p)) = self.history.redo.pop() else { return false };
         let edited = commands::text_edit::active_editor_snapshot(self);
         let probe = commands::kept_crypto_probe(self);

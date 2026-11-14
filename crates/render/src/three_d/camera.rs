@@ -302,6 +302,13 @@ pub fn auto_orient_2d(ctx: &EvalCtx, layer: &Layer) -> f64 {
     path_tangent(ctx, layer).map(|t| t.y.atan2(t.x).to_degrees()).unwrap_or(0.0)
 }
 
+/// The most camera-facing layers whose parents are evaluated inside one another.
+const MAX_ORIENT_NESTING: usize = 8;
+
+thread_local! {
+    static ORIENT_NESTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Whether `id` is `layer` or one of its parents.
 fn in_parent_chain(ctx: &EvalCtx, layer: &Layer, id: effectcraft_project::LayerId) -> bool {
     let mut cur = Some(layer);
@@ -336,8 +343,27 @@ pub fn auto_orient_3d(ctx: &EvalCtx, layer: &Layer, pos: Vec3) -> Option<Mat4> {
             if ctx.comp.active_camera(ctx.time).is_some_and(|c| in_parent_chain(ctx, c, layer.id)) {
                 return None;
             }
+            // The parent's world matrix evaluates the parent's own orientation: a parent cycle
+            // of camera-facing layers would recurse without end, and a chain of them is walked
+            // again from every link. Past MAX_ORIENT_NESTING the layer keeps its Orientation.
+            let nesting = ORIENT_NESTING.with(|n| n.get());
+            if nesting >= MAX_ORIENT_NESTING {
+                return None;
+            }
+            // Restored when this scope ends, a panic unwinding through it included (the CPU retry
+            // after one must not start with a raised count).
+            struct Restore(usize);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    ORIENT_NESTING.with(|n| n.set(self.0));
+                }
+            }
+            ORIENT_NESTING.with(|n| n.set(nesting + 1));
+            let restore = Restore(nesting);
+            let parent = parent_world(ctx, layer);
+            drop(restore);
             let eye = active_camera(ctx).eye;
-            let e = parent_world(ctx, layer).inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
+            let e = parent.inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
             let d = pos - e;
             (d.length() > 1e-9).then(|| basis_rotation(d, vec3(0.0, 1.0, 0.0)))
         }

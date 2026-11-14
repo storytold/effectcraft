@@ -295,7 +295,15 @@ impl<'a> Renderer<'a> {
     /// in this render ([`Self::mask_blur`]'s gate: the render options, the precomp layers above).
     /// The key has the layer's own motion blur state, but a mask set to On blurs without it.
     pub(crate) fn mask_gate_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
+        // Queue jobs share this cache but may override Proxy Use differently. The item's
+        // proxy switch alone does not describe the source a renderer actually reads.
         let k = key?;
+        let k = match self.opts.proxy {
+            effectcraft_project::render_queue::ProxyUse::CurrentSettings => k,
+            effectcraft_project::render_queue::ProxyUse::UseAll => cache::derive(k, 0x7072_6f78_7901),
+            effectcraft_project::render_queue::ProxyUse::UseCompOnly => cache::derive(k, 0x7072_6f78_7902),
+            effectcraft_project::render_queue::ProxyUse::UseNone => cache::derive(k, 0x7072_6f78_7903),
+        };
         let masked = layer.masks().is_some_and(|m| !m.children.is_empty());
         Some(if masked && !self.mask_blur(ctx, layer).allowed { cache::derive(k, 0x6d62_6f66) } else { k })
     }

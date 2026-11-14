@@ -283,7 +283,7 @@ impl<'a> EvalCtx<'a> {
 }
 
 impl crate::PropertyOverride {
-    fn value(&self, layer: &Layer, prop: &Property, time: Tick) -> Value {
+    pub(crate) fn value(&self, layer: &Layer, prop: &Property, time: Tick) -> Value {
         if self.font {
             // A Font control merges only the font into the target text, as
             // `essential::with_overrides` does.

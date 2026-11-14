@@ -12,8 +12,11 @@
 //! pre-roll of earlier audio and only the block's tail is kept — so preview playback and export
 //! produce identical samples.
 //!
-//! Time-stretched layers are resampled nearest-sample; reversed (negative stretch) layers are
-//! silent for now.
+//! Time-stretched layers are resampled linearly, so pitch follows the speed. A reversed layer
+//! (negative stretch, Layer > Time > Time-Reverse Layer) plays its audio backwards at the same
+//! speed: comp sample `k` plays the source just before layer time `layer_time(k)`, so at -100 %
+//! with the start at the out point (After Effects' layout) it is the exact mirror of the
+//! layer's span. Backwards on a reversed layer plays it forwards again.
 
 use effectcraft_effects::Params;
 use effectcraft_effects::audio_fx;
@@ -23,6 +26,24 @@ use effectcraft_time::{TICKS_PER_SECOND, Tick};
 use crate::{EvalCtx, ExprHost, FootageSource};
 
 const MAX_DEPTH: usize = 16;
+
+/// Fastest a layer's audio plays (source samples per comp sample): 1 % stretch, the smallest
+/// Time Stretch accepts. The mix plays the clamped stretch (`Layer::effective_stretch`, #3247),
+/// so a layer is never faster; a faster speed would be silent instead of reading unbounded
+/// source: a last-resort guard.
+const MAX_SPEED: f64 = 100.0;
+
+/// Most source sample frames one read asks a footage item or precomp for; a longer read is made
+/// in pieces, so memory stays bounded however fast a layer plays and however deep stretched
+/// precomps nest. The work is not bounded: each 1 % precomp level still reads 100 times its
+/// span.
+pub(crate) const MAX_READ: usize = 1 << 18;
+
+/// The most effect preroll (history before a block) mixed, in seconds, across a layer's effects.
+const MAX_PREROLL_SECONDS: f64 = 30.0;
+
+/// The longest footage a waveform summarises (a day).
+const MAX_PEAK_SECONDS: i64 = 24 * 3600;
 
 /// `frames` stereo sample frames of `comp`'s mix from comp time `start` at `rate` Hz,
 /// interleaved (L R L R …).
@@ -35,22 +56,29 @@ pub fn mix_comp(project: &Project, footage: &dyn FootageSource, expr: Option<&dy
 /// Whether the comp has anything audible (footage with audio, a sound generator, or a precomp
 /// that has).
 pub fn comp_has_audio(project: &Project, comp: ItemId) -> bool {
-    fn walk(project: &Project, comp: ItemId, depth: usize) -> bool {
-        let Some(c) = project.comp(comp) else { return false };
-        depth < MAX_DEPTH
-            && c.layers.iter().any(|l| {
-                l.switches.audio
-                    && (generates(l)
-                        || match &l.source {
-                            LayerSource::Footage { item } => {
-                                matches!(project.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio && !f.missing)
-                            }
-                            LayerSource::Comp { item } => walk(project, *item, depth + 1),
-                            _ => false,
-                        })
-            })
+    // Breadth first, so each comp is looked at once and at its shallowest level: a comp reached
+    // first through a long chain (past MAX_DEPTH) is still found by a shorter route, and a cycle
+    // cannot hide a result (nothing is cached as "silent" while it is being explored).
+    let mut seen = std::collections::HashSet::from([comp]);
+    let mut level = vec![comp];
+    for _ in 0..MAX_DEPTH {
+        let mut next = vec![];
+        for id in level {
+            let Some(c) = project.comp(id) else { continue };
+            for l in c.layers.iter().filter(|l| l.switches.audio) {
+                match &l.source {
+                    _ if generates(l) => return true,
+                    LayerSource::Footage { item } if matches!(project.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio && !f.missing) => {
+                        return true;
+                    }
+                    LayerSource::Comp { item } if seen.insert(*item) => next.push(*item),
+                    _ => {}
+                }
+            }
+        }
+        level = next;
     }
-    walk(project, comp, 0)
+    false
 }
 
 /// Enabled audio effects of a layer (in stack order) with their effect ids.
@@ -102,6 +130,13 @@ fn animated(g: &effectcraft_project::PropGroup) -> bool {
     })
 }
 
+/// The clock (seconds) a layer's audio effects run on at comp time `t` (oscillator phase): comp
+/// time since the layer's start. It advances one sample per sample at any stretch, forwards or
+/// reversed, so blocks join up; at 100 % it is the layer time.
+fn fx_clock(l: &Layer, t: Tick) -> f64 {
+    Tick(t.0.saturating_sub(l.start_time.0)).seconds()
+}
+
 fn sample_tick(i: i64, rate: u32) -> Tick {
     // Keep the requested sample when the rate does not divide the tick clock.
     let t = Tick::from_units(i, i64::from(rate));
@@ -127,7 +162,7 @@ impl MixEnv<'_> {
 
     /// The layer's own (pre-effect) audio for comp sample indices `i0 .. i0 + n`, silent
     /// outside its [in, out) span. Comp sample index `k` maps to `in + out − 1 − k` when
-    /// `reversed`.
+    /// `reversed` (the Backwards effect).
     fn layer_raw(&self, l: &Layer, i0: i64, n: usize, reversed: bool) -> Vec<f32> {
         let rate = self.rate;
         let mut out = vec![0.0f32; n * 2];
@@ -154,40 +189,86 @@ impl MixEnv<'_> {
         if a >= b {
             return out;
         }
-        let m = b - a;
-        let speed = 100.0 / l.stretch;
-        let src_n = ((m as f64 * speed).ceil() as usize).max(1);
-        let lt = l.layer_time(sample_tick(i0 + a as i64, rate));
+        // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
+        // usize::MAX source samples for one block. A negative stretch plays backwards (#3239).
+        let speed = 100.0 / l.effective_stretch();
+        let aspeed = speed.abs();
+        // The clamped stretch keeps the speed within MAX_SPEED; NaN is checked anyway. The
+        // tolerance keeps exactly 1 % audible whatever the float noise in the stretch.
+        if aspeed.is_nan() || aspeed > MAX_SPEED * (1.0 + 1e-9) {
+            return out;
+        }
+        let backwards = speed < 0.0;
+        // Comp samples per piece, so that one piece reads at most MAX_READ source frames (its
+        // span, the fraction it starts past a source sample, and the sample after its end).
+        let piece = (((MAX_READ - 4) as f64 / aspeed) as usize).clamp(1, b - a);
+        let mut p0 = a;
+        while p0 < b {
+            let p1 = p0.saturating_add(piece).min(b);
+            // Forwards a piece reads the source from the layer time of its first sample. Backwards
+            // it reads from the layer time of its end and plays what it read last to first, so
+            // comp sample `k` plays the source just before `layer_time(k)` — at -100 % the exact
+            // mirror Backwards gives a forward layer.
+            let origin = sample_tick(i0.saturating_add((if backwards { p1 } else { p0 }) as i64), rate);
+            let Some(run) = self.source_run(l, l.layer_time(origin), p1 - p0, aspeed) else { return out };
+            for (i, f) in run.as_chunks::<2>().0.iter().take(p1 - p0).enumerate() {
+                let k = if backwards { (p1 - 1).saturating_sub(i) } else { p0 + i };
+                if let Some(o) = out.get_mut(k * 2..k * 2 + 2) {
+                    o.copy_from_slice(f);
+                }
+            }
+            p0 = p1;
+        }
+        out
+    }
+
+    /// `m` sample frames of the layer's source audio from layer time `lt` on, played at `speed`
+    /// (≥ 0) source samples per comp sample: blended linearly between source samples, or copied
+    /// as they are at speed 1. `None` when the layer has no source audio.
+    ///
+    /// Sources deliver samples on their sample grid (from the sample at or before the time asked
+    /// for), so a resampled run reads from that grid sample and starts `x` at `lt`'s exact
+    /// position past it: a run then continues where the previous block or piece left off.
+    fn source_run(&self, l: &Layer, lt: Tick, m: usize, speed: f64) -> Option<Vec<f32>> {
+        let rate = self.rate;
+        let same = (speed - 1.0).abs() < 1e-9;
+        let s0 = lt.to_units_floor(i64::from(rate));
+        let from = sample_tick(s0, rate);
+        // `lt`'s position past sample s0, in samples (0 ≤ frac < 1); copies ignore it.
+        let tps = TICKS_PER_SECOND as i128;
+        let frac = if same { 0.0 } else { (i128::from(lt.0) * i128::from(rate)).rem_euclid(tps) as f64 / tps as f64 };
+        // Resampled, one more source sample than the run covers: the last sample blends with it.
+        let src_n = ((frac + m as f64 * speed).ceil() as usize).saturating_add(usize::from(!same)).max(1);
         let buf = match &l.source {
             LayerSource::Footage { item } => match self.project.item(*item).map(|i| &i.kind) {
-                Some(ItemKind::Footage(f)) if f.has_audio => self.footage.audio(*item, f, lt, src_n, rate).unwrap_or_else(|| vec![0.0; src_n * 2]),
-                _ => return out,
+                Some(ItemKind::Footage(f)) if f.has_audio => self.footage.audio(*item, f, from, src_n, rate).unwrap_or_else(|| vec![0.0; src_n * 2]),
+                _ => return None,
             },
             LayerSource::Comp { item } => {
                 if self.project.comp_contains(*item, self.comp_id) {
-                    return out;
+                    return None;
                 }
                 let mut sub = vec![0.0f32; src_n * 2];
-                mix_into(&AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate }, *item, lt, &mut sub, self.depth + 1);
+                mix_into(&AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate }, *item, from, &mut sub, self.depth + 1);
                 sub
             }
-            _ => return out,
+            _ => return None,
         };
-        let same = (speed - 1.0).abs() < 1e-9;
+        let mut out = vec![0.0f32; m * 2];
         for i in 0..m {
             // The source sample at fractional index `x`, blended linearly with the next one unless the
             // layer plays at its own speed (then the samples are copied as they are).
-            let x = i as f64 * speed;
+            let x = frac + i as f64 * speed;
             let j = if same { i } else { (x as usize).min(src_n - 1) };
             if j * 2 + 1 >= buf.len() {
                 break;
             }
             let k = if same || (j + 1) * 2 + 1 >= buf.len() { j } else { j + 1 };
             let f = if same { 0.0 } else { ((x - j as f64) as f32).clamp(0.0, 1.0) };
-            out[(a + i) * 2] = buf[j * 2] + (buf[k * 2] - buf[j * 2]) * f;
-            out[(a + i) * 2 + 1] = buf[j * 2 + 1] + (buf[k * 2 + 1] - buf[j * 2 + 1]) * f;
+            out[i * 2] = buf[j * 2] + (buf[k * 2] - buf[j * 2]) * f;
+            out[i * 2 + 1] = buf[j * 2 + 1] + (buf[k * 2 + 1] - buf[j * 2 + 1]) * f;
         }
-        out
+        Some(out)
     }
 
     /// Effect parameters at comp time `t`.
@@ -211,11 +292,11 @@ impl MixEnv<'_> {
             return self.layer_raw(l, i0, n, false);
         }
         let reversed = fx.iter().any(|(id, _, _)| audio_fx::reverses(id));
-        let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum();
+        let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum::<f64>().clamp(0.0, MAX_PREROLL_SECONDS);
         let pre = (pre_s * self.rate as f64).ceil() as usize;
         let b0 = i0 - pre as i64;
         let mut buf = self.layer_raw(l, b0, n + pre, reversed);
-        let start = l.layer_time(sample_tick(b0, self.rate)).seconds();
+        let start = fx_clock(l, sample_tick(b0, self.rate));
         for (id, g, p) in &fx {
             if audio_fx::per_sample(id) && animated(g) {
                 self.process_stepped(l, id, g, &mut buf, b0);
@@ -239,7 +320,7 @@ impl MixEnv<'_> {
             let end = usize::try_from(next.saturating_sub(b0)).unwrap_or(frames).clamp(k + 1, frames);
             let t = sample_tick(i, self.rate);
             if let Some(piece) = buf.get_mut(k * 2..end * 2) {
-                audio_fx::process(id, &self.params(l, g, t), piece, self.rate, l.layer_time(t).seconds());
+                audio_fx::process(id, &self.params(l, g, t), piece, self.rate, fx_clock(l, t));
             }
             k = end;
         }
@@ -291,7 +372,9 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
-        if !audible(project, l) || (any_solo && !l.switches.solo) || l.stretch <= 0.0 {
+        // The stretch the layer's time uses (#3247): 0 and NaN play at 100 %, as `layer_time`;
+        // a negative one plays backwards (#3239).
+        if !audible(project, l) || (any_solo && !l.switches.solo) {
             continue;
         }
         // Sample range of the block that falls inside the layer's [in, out).
@@ -339,12 +422,14 @@ pub fn footage_peaks(footage: &dyn FootageSource, item: ItemId, f: &effectcraft_
     let bin = (64usize).max(4000 / bins_per_sec as usize);
     let rate = bin as u32 * bins_per_sec;
     let chunk = bin * bins_per_sec as usize;
-    let total = units_ceil(duration, rate).max(0) as usize;
+    // The stated duration comes from the project: at most a day is summarised, and the summary
+    // ends where the audio does.
+    let total = units_ceil(duration, rate).clamp(0, MAX_PEAK_SECONDS.saturating_mul(rate as i64)) as usize;
     let mut out = Vec::with_capacity(total / bin + 1);
     let mut i = 0usize;
     while i < total {
         let n = chunk.min(total - i);
-        let buf = footage.audio(item, f, sample_tick(i as i64, rate), n, rate).unwrap_or_else(|| vec![0.0; n * 2]);
+        let Some(buf) = footage.audio(item, f, sample_tick(i as i64, rate), n, rate) else { break };
         out.extend(peak_summary(&buf, bin));
         i += n;
     }
@@ -370,6 +455,55 @@ mod tests {
         fn audio(&self, _: ItemId, _: &Footage, start: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
             Some((0..frames).flat_map(|_| if start >= Tick::ZERO { [0.25, -0.25] } else { [0.0, 0.0] }).collect())
         }
+    }
+
+    #[test]
+    fn audio_detection_answers_each_comp_once() {
+        // Twenty levels, each comp holding two layers of the one below: 2^20 walks without a
+        // memo, and all silent. A cycle is answered too.
+        let mut p = Project::default();
+        let mk = |p: &mut Project, layers: Vec<Layer>| {
+            let mut c = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+            c.layers = layers.into();
+            p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(c.into()))
+        };
+        let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+        let mut below = mk(&mut p, vec![]);
+        for _ in 0..20 {
+            let a = build::layer(&mut p, &base, "a", LayerSource::Comp { item: below }, (0, 0), None);
+            let b = build::layer(&mut p, &base, "b", LayerSource::Comp { item: below }, (0, 0), None);
+            below = mk(&mut p, vec![a, b]);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(comp_has_audio(&p, below)).ok());
+        assert!(!rx.recv_timeout(std::time::Duration::from_secs(20)).expect("detection finishes"));
+    }
+
+    #[test]
+    fn audio_found_by_a_short_route_is_not_hidden_by_a_deep_one() {
+        let mut p = Project::default();
+        let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+        let mk = |p: &mut Project, layers: Vec<Layer>| {
+            let mut c = base.clone();
+            c.layers = layers.into();
+            p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(c.into()))
+        };
+        let f = Footage { kind: FootageKind::Audio, has_audio: true, ..Default::default() };
+        let fid = p.add_item("x.wav", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(f));
+        let sound = build::layer(&mut p, &base, "s", LayerSource::Footage { item: fid }, (0, 0), None);
+        let audible = mk(&mut p, vec![sound]);
+        // A chain of MAX_DEPTH comps ends in `audible` one level past what is searched; the root
+        // reaches `audible` directly as well, after the chain.
+        let mut chain = audible;
+        for _ in 0..MAX_DEPTH {
+            let l = build::layer(&mut p, &base, "c", LayerSource::Comp { item: chain }, (0, 0), None);
+            chain = mk(&mut p, vec![l]);
+        }
+        assert!(!comp_has_audio(&p, chain), "too deep to be found");
+        let via_chain = build::layer(&mut p, &base, "chain", LayerSource::Comp { item: chain }, (0, 0), None);
+        let direct = build::layer(&mut p, &base, "direct", LayerSource::Comp { item: audible }, (0, 0), None);
+        let root = mk(&mut p, vec![via_chain, direct]);
+        assert!(comp_has_audio(&p, root));
     }
 
     #[test]
@@ -482,6 +616,11 @@ mod tests {
         let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
         let mut tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
         tone.stretch = stretch;
+        // A reversed layer as After Effects lays it out: over [0, 2) s, starting at its out point.
+        let end = if stretch < 0.0 { 2.0 } else { 0.0 };
+        if stretch < 0.0 {
+            (tone.in_point, tone.out_point, tone.start_time) = (Tick::ZERO, Tick::from_seconds_f64(2.0), Tick::from_seconds_f64(2.0));
+        }
         let mut comp = base.clone();
         comp.layers = vec![tone].into();
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
@@ -491,8 +630,11 @@ mod tests {
         let speed = 100.0 / stretch;
         let (mut worst, mut sq) = (0.0f64, 0.0f64);
         for i in 0..n {
-            // The source plays `speed` times as fast as the comp: source time = speed * comp time.
-            let ideal = (std::f64::consts::TAU * 440.0 * speed * (t.seconds() + i as f64 / rate as f64)).sin() * 0.5;
+            // The source plays `speed` times as fast as the comp: source time = speed * (comp time −
+            // start). Reversed, a comp sample plays the source sample just before that time.
+            let back = if stretch < 0.0 { speed / rate as f64 } else { 0.0 };
+            let src = speed * (t.seconds() + i as f64 / rate as f64 - end) + back;
+            let ideal = (std::f64::consts::TAU * 440.0 * src).sin() * 0.5;
             let e = (m[i * 2] as f64 - ideal).abs();
             worst = worst.max(e);
             sq += e * e;
@@ -510,5 +652,19 @@ mod tests {
             let (worst, _) = stretch_error(stretch, 8_000);
             assert!(worst < 1e-2, "stretch {stretch}%: error {worst} at 8 kHz");
         }
+    }
+
+    /// A reversed layer plays its tone backwards with the same resampling quality as forwards
+    /// (it was silent, #3239); at -100 % the samples are copied exactly.
+    #[test]
+    fn reversed_layers_resample_a_tone_with_small_error() {
+        for stretch in [-70.0, -33.0] {
+            let (worst, _) = stretch_error(stretch, 48_000);
+            assert!(worst < 1e-3, "stretch {stretch}%: error {worst} at 48 kHz");
+            let (worst, _) = stretch_error(stretch, 8_000);
+            assert!(worst < 1e-2, "stretch {stretch}%: error {worst} at 8 kHz");
+        }
+        let (worst, _) = stretch_error(-100.0, 48_000);
+        assert!(worst < 1e-5, "stretch -100%: error {worst}");
     }
 }

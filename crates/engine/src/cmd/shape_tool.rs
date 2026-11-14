@@ -8,6 +8,7 @@ use effectcraft_geom::vec2;
 use effectcraft_keyframe::{Gradient, ShapePath, Value as KV};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, ItemId, LayerId, LayerSource, Project, PropGroup};
+use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -263,7 +264,8 @@ pub(crate) fn draw_target(s: &Session, comp: &Comp, p: &Value, cmd: &str) -> Res
 }
 
 /// A new empty shape layer ("Shape Layer n" unless `name`) with its Position at `position` (comp
-/// pixels; else the comp centre), above the selected layer and selected.
+/// pixels; else the comp centre), above the selected layer and selected. `span` is the
+/// [`new_layer_span`](super::layer::new_layer_span) the layer takes, if any.
 pub(crate) fn new_shape_layer(
     proj: &mut Project,
     st: &mut EditorState,
@@ -271,11 +273,13 @@ pub(crate) fn new_shape_layer(
     cid: ItemId,
     name: Option<&str>,
     position: Option<[f64; 2]>,
+    span: Option<(Tick, Tick)>,
 ) -> Result<LayerId> {
     let count = comp.layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
     let name = name.map(str::to_string).unwrap_or_else(|| format!("Shape Layer {}", count + 1));
     let mut l = build::layer(proj, comp, &name, LayerSource::Shape, (comp.width, comp.height), None);
     place(&mut l, position);
+    super::layer::fit_span(&mut l, span);
     insert_layer(proj, st, cid, l)
 }
 
@@ -346,10 +350,11 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         _ => "Rectangle Tool",
     };
     let name = str_p(p, "name");
+    let span = super::layer::new_layer_span(s, &comp);
     let (lid, group) = s.edit(label, None, |proj, st| {
         let lid = match target {
             Some(l) => l,
-            None => new_shape_layer(proj, st, &comp, cid, name, Some(pos))?,
+            None => new_shape_layer(proj, st, &comp, cid, name, Some(pos), span)?,
         };
         let mut next = proj.next_id;
         let g = shape_group(&mut Ids(&mut next), kind, size, &paint).ok_or_else(|| bad(c, "unknown kind"))?;
@@ -358,6 +363,9 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_layers = vec![lid];
         Ok((lid, group))
     })?;
+    if target.is_none() {
+        super::layer::show_span(s, cid, span);
+    }
     Ok(json!({"layer": lid.0, "group": group}))
 }
 

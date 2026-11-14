@@ -867,8 +867,8 @@ impl Session {
             });
             for pr in has {
                 let text = pr.expr.as_ref().map(|e| e.text.clone()).unwrap_or_default();
-                let mut ctx = effectcraft_render::EvalCtx::new(&self.project, cid, comp, t);
-                ctx.expr = Some(host.as_ref());
+                // With the footage source, so `sampleImage()` doesn't fail here only (#3231).
+                let ctx = super::expr_tools::eval_ctx(self, cid, comp, t);
                 if let Err(e) = host.eval(&ctx, l, pr, &pr.value_at(l.layer_time(t))) {
                     errors.push(json!({"layer": l.id.0, "prop": pr.uid, "name": pr.name, "expression": text, "error": e}));
                 }
