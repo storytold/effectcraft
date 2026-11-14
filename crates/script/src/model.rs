@@ -89,6 +89,12 @@ fn project(s: &Session) -> J {
         "displayStartFrame": p.settings.frame_start,
         "renderQueue": p.render_queue.len(),
         "revision": s.revision,
+        // The spaces `workingSpace` accepts now: under OCIO only the linear ones.
+        "colorProfiles": effectcraft_project::ColorSpace::WORKING
+            .iter()
+            .filter(|c| p.settings.color_engine != effectcraft_project::ColorEngine::Ocio || c.is_linear())
+            .map(|c| c.id())
+            .collect::<Vec<_>>(),
     })
 }
 

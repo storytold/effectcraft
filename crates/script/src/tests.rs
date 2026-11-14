@@ -882,6 +882,22 @@ fn frames_count_type_sets_the_project_frame_count() {
     assert_eq!(s.project.settings.frame_start, 0);
 }
 
+/// `listColorProfiles()` lists the working spaces the project can take now: every one under the
+/// default engine, only the linear ones under OCIO, and each is accepted back by `workingSpace`.
+#[test]
+fn project_color_profiles_follow_the_color_engine() {
+    let mut s = session();
+    let o = ok(&mut s, "var l = app.project.listColorProfiles(); [l.length, l[0], l.indexOf('rec709') >= 0].join('|')");
+    assert_eq!(o.result, json!("6|srgb|true"));
+    let o = ok(&mut s, "var p = app.project; var l = p.listColorProfiles(); for (var i = 0; i < l.length; i++) p.workingSpace = l[i]; l.length");
+    assert_eq!(o.result, json!(6));
+    s.execute("file.projectSettings", json!({"colorEngine": "ocio", "workingSpace": "acescg"})).unwrap();
+    let o = ok(&mut s, "app.project.listColorProfiles().join('|')");
+    assert_eq!(o.result, json!("acescg|aces2065"));
+    let o = ok(&mut s, "var p = app.project; var l = p.listColorProfiles(); for (var i = 0; i < l.length; i++) p.workingSpace = l[i]; l.length");
+    assert_eq!(o.result, json!(2));
+}
+
 #[test]
 fn console_keeps_variables() {
     let mut s = session();

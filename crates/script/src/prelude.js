@@ -1966,6 +1966,8 @@ Project.prototype = {
   get selection() { return this.__info().selection.map(__item); },
   get file() { var p = this.__info().path; return p ? new File(p) : null; },
   get dirty() { return this.__info().dirty; },
+  // The working spaces `workingSpace` accepts now, in the form it takes (under OCIO only the linear ones).
+  listColorProfiles: function () { return this.__info().colorProfiles.slice(); },
   get renderQueue() { return new RenderQueue(); },
   get bitsPerChannel() { return this.__info().bitsPerChannel; },
   set bitsPerChannel(v) { __call("file.projectSettings", { bitDepth: __num(v) }); },
