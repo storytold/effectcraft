@@ -270,6 +270,11 @@ fn node_resp(path: String, n: &Node, index: usize) -> Resp {
         Resp::Str(n.match_id().into()),
         Resp::Num(n.as_group().map_or(0, |g| g.children.len()) as f64),
         Resp::Num(index as f64),
+        // For a mask, whether it is inverted (`mask("Mask 1").invert`); null for everything else.
+        match n.as_group().map(|g| &g.kind) {
+            Some(GroupKind::Mask { inverted, .. }) => Resp::Bool(*inverted),
+            _ => Resp::Null,
+        },
     ])
 }
 

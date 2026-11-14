@@ -6,7 +6,7 @@ mod fuzz;
 use effectcraft_color::Label;
 use effectcraft_keyframe::{Keyframe, ShapePath, TextDoc, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{Comp, Expression, ItemId, ItemKind, Layer, LayerId, LayerSource, Marker, MaskMode, Project, PropGroup, Solid};
+use effectcraft_project::{Comp, Expression, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Marker, MaskMode, Project, PropGroup, Solid};
 use effectcraft_render::{EvalCtx, NoFootage, RenderOpts, Renderer};
 use effectcraft_time::{FrameRate, Tick};
 
@@ -1163,6 +1163,27 @@ fn seed_random_timeless() {
     let b = f.num("seedRandom(5, true); random(100)", 3.7);
     assert_eq!(a, b);
     assert_ne!(a, f.num("seedRandom(6, true); random(100)", 0.1));
+}
+
+/// `mask("Mask 1").invert` and `maskPath.createPath()`.
+#[test]
+fn mask_invert_and_create_path() {
+    let mut f = fx();
+    // A second, inverted mask on layer A (kept out of the shared fixture, which other tests count).
+    let mut inverted = group_push(&mut f.p, |ids| build::mask(ids, "Mask 2", ShapePath::rect([0.0, 0.0], 5.0, 5.0), MaskMode::Subtract, [0, 255, 0]));
+    if let GroupKind::Mask { inverted: flag, .. } = &mut inverted.kind {
+        *flag = true;
+    }
+    let a = f.a;
+    let layer = f.p.comp_mut(f.cid).and_then(|c| c.layers.iter_mut().find(|l| l.id == a)).unwrap();
+    layer.props.sub_mut("masks").unwrap().children.push(inverted.into());
+    assert_eq!(f.num("thisLayer.mask('Mask 1').invert ? 1 : 0", 0.0), 0.0);
+    assert_eq!(f.num("thisLayer.mask('Mask 2').invert ? 1 : 0", 0.0), 1.0);
+    // Only masks answer `invert`: an effect's own parameter keeps its name.
+    assert!(f.ev(f.a, ROT, "thisLayer.effect(1).invert", 0.0).is_err());
+    let path = "thisLayer.mask('Mask 1').maskPath.createPath([[0,0],[10,0],[10,10]], [], [], false)";
+    assert_eq!(f.num(&format!("{path}.points().length"), 0.0), 3.0);
+    assert_eq!(f.num(&format!("{path}.isClosed() ? 1 : 0"), 0.0), 0.0);
 }
 
 #[test]
