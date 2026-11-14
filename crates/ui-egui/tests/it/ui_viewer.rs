@@ -3131,6 +3131,67 @@ fn rotate_tool_counts_revolutions_both_ways() {
     assert_eq!(h.state().session.history.undo.len(), undo_before + 1, "one drag, one undo step");
 }
 
+/// #2769: the Rotation tool counts the turn from where the button went down, as in After Effects,
+/// not from where the drag registered: a first move that sweeps 60° round the anchor turns the
+/// layer 60° (it used to drop that sweep, so near the anchor the tool lagged behind the pointer).
+#[test]
+fn rotate_tool_counts_the_turn_from_the_press() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    let center = screen(&h, [320.0, 180.0]);
+    let r = (screen(&h, [350.0, 180.0]) - center).x;
+    // Press on the box right of its anchor (0°), then one move to 60° clockwise, still on the box.
+    let press = center + vec2(r * 0.3, 0.0);
+    let to = center + vec2(r * 60f32.to_radians().cos(), r * 60f32.to_radians().sin());
+    h.input_mut().events.push(Event::PointerMoved(press));
+    h.input_mut().events.push(Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.input_mut().events.push(Event::PointerMoved(to));
+    h.step();
+    // The gesture applies the previous frame's pointer: hold a frame.
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let rot = h.state().session.active_comp().unwrap().layer(box_id).unwrap().props.prop("transform/rotation").unwrap().value.as_f64();
+    assert!((rot - 60.0).abs() < 1.0, "the whole sweep from the press turns the layer: {rot}");
+}
+
+/// #2769: a press right on the anchor point has no direction to count the turn from, so the layer
+/// doesn't jump on the first move; the turn counts from where the drag registered.
+#[test]
+fn rotate_tool_pressed_on_the_anchor_does_not_jump() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    let rotation = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(box_id).unwrap().props.prop("transform/rotation").unwrap().value.as_f64()
+    };
+    let center = screen(&h, [320.0, 180.0]);
+    let r = (screen(&h, [350.0, 180.0]) - center).x;
+    let at = |deg: f32| center + vec2(r * deg.to_radians().cos(), r * deg.to_radians().sin());
+    h.input_mut().events.push(Event::PointerMoved(center));
+    h.input_mut().events.push(Event::PointerButton { pos: center, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.input_mut().events.push(Event::PointerMoved(at(60.0)));
+    h.step();
+    // The gesture applies the previous frame's pointer: hold a frame.
+    h.step();
+    let first = rotation(&h);
+    assert!(first.abs() < 1.0, "no jump on the first move: {first}");
+    h.input_mut().events.push(Event::PointerMoved(at(90.0)));
+    h.step();
+    h.step();
+    let next = rotation(&h);
+    assert!((next - 30.0).abs() < 1.0, "then turns with the pointer: {next}");
+    h.input_mut().events.push(Event::PointerButton { pos: at(90.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
 /// A harness whose Box is a child of Plate (anchor 320,180) with `plate` set on Plate first, at
 /// parent-space position (200, 120). Returns the two layers' ids.
 fn rotate_child_harness(plate: serde_json::Value) -> (Harness<'static, EffectcraftApp>, u64, u64) {
