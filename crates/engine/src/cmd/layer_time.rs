@@ -18,6 +18,7 @@ fn remappable(l: &Layer) -> bool {
     matches!(l.source, LayerSource::Comp { .. } | LayerSource::Footage { .. })
 }
 
+/// Handles `layer.timeStretch` and `layer.timeReverse`: sets the selected layers' stretch to a percentage, or mirrors them when `op` is `reverse`.
 fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let reverse = str_p(p, "op") == Some("reverse");
@@ -37,10 +38,17 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
         for l in comp.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             let old = l.stretch;
             if reverse {
-                // Keep the in/out points; play the visible span backwards.
-                let last = l.layer_time(l.out_point - fd);
+                // Keep the in/out points and play the span backwards, mirrored exactly: the start
+                // moves to `in + out - start`, so the In point shows the layer time the Out point
+                // showed and the Out point the In point's (`layer_time(in) = D`, `layer_time(out)
+                // = 0` for an untrimmed layer of duration D), at any stretch. This is how After
+                // Effects lays a reversed layer out (the start at the later end, as an imported
+                // .aep has it); a reversed layer shows the source just before its layer time
+                // (`EvalCtx::source_time`), so the In point shows the last frame. Integer ticks:
+                // reversing twice restores the start exactly. Keys stay in layer time, so they
+                // are mirrored with the span.
                 l.stretch = -old;
-                l.start_time = l.in_point - Tick((last.0 as f64 * l.stretch / 100.0).round() as i64);
+                l.start_time = Tick(l.in_point.0.saturating_add(l.out_point.0).saturating_sub(l.start_time.0));
                 continue;
             }
             let span = (l.out_point - l.in_point).seconds();
@@ -89,6 +97,46 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// Reversed layers a project file from before #3245 has in the old Time-Reverse Layer layout,
+/// moved to After Effects' layout. A file written since carries
+/// [`effectcraft_project::REVERSE_LAYOUT_AE`] in its settings (`reverse_layout`) and is left
+/// alone; in an older one (no marker), the layers with the unambiguous signature (reversed, no
+/// Time Remap, footage or a precomp, the Out point exactly one comp frame below layer time 0,
+/// which is what the old command made of a layer starting at its source's start) start one comp
+/// frame later. Returns (the layers moved, the other reversed layers left as they are because
+/// they may be either layout), each as "Comp ▸ Layer". The project is marked as checked either
+/// way, so saving it writes the marker and it is not checked again.
+pub(crate) fn repair_old_time_reverse(project: &mut effectcraft_project::Project) -> (Vec<String>, Vec<String>) {
+    let (mut moved, mut unsure) = (vec![], vec![]);
+    if project.settings.reverse_layout >= effectcraft_project::REVERSE_LAYOUT_AE {
+        return (moved, unsure);
+    }
+    project.settings.reverse_layout = effectcraft_project::REVERSE_LAYOUT_AE;
+    let reversed = |l: &Layer| l.stretch < 0.0 && l.stretch.is_finite() && l.props.get("timeRemap").is_none() && remappable(l);
+    let cids: Vec<(effectcraft_project::ItemId, String)> = project
+        .comps()
+        .filter(|(_, c)| c.layers.iter().any(reversed))
+        .map(|(id, _)| (*id, project.item(*id).map_or_else(String::new, |i| i.name.clone())))
+        .collect();
+    for (cid, comp_name) in cids {
+        let Some(comp) = project.comp_mut(cid) else { continue };
+        let fd = comp.frame_duration();
+        for l in comp.layers.iter_mut_where(reversed) {
+            // One comp frame in layer time.
+            let frame = fd.0 as f64 * 100.0 / l.stretch.abs();
+            let out = l.layer_time(l.out_point).0 as f64;
+            let name = format!("{comp_name} ▸ {}", l.name);
+            if (out + frame).abs() <= 2.0 {
+                l.start_time += fd;
+                moved.push(name);
+            } else if out != 0.0 {
+                unsure.push(name);
+            }
+        }
+    }
+    (moved, unsure)
+}
+
 fn remap_prop(ids: &mut Ids) -> Property {
     let mut p = ids.prop("timeRemap", "Time Remap", KV::Scalar(0.0)).with_ui(ParamUi::Number);
     p.ui = ParamUi::Number;
@@ -100,10 +148,10 @@ fn source_secs(l: &Layer, t: Tick) -> f64 {
     l.layer_time(t).seconds()
 }
 
+/// Turns Time Remapping on or off for the selected layers, keeping the frames each layer shows.
 fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let want = b_p(p, "value");
-    let fd = s.project.comp(cid).ok_or(EngineError::NoComp)?.frame_duration();
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     if !comp.layers.iter().filter(|l| ids.contains(&l.id)).any(remappable) {
         return Err(bad("layer.enableTimeRemap", "time remapping needs a footage or composition layer"));
@@ -132,11 +180,9 @@ fn enable_time_remap(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 pr.value = KV::Scalar(source_secs(l, l.in_point));
                 pr.keys = vec![Keyframe::new(a, KV::Scalar(a.seconds())), Keyframe::new(b, KV::Scalar(b.seconds()))];
-                if lin > lout {
-                    // Reversed layers keep showing what they showed.
-                    pr.keys[0].value = KV::Scalar(source_secs(l, l.out_point - fd));
-                    pr.keys[1].value = KV::Scalar(source_secs(l, l.in_point));
-                }
+                // A reversed layer keeps showing what it showed: it reads the source just before
+                // the time its remap names, as it does before its layer time without remapping
+                // (`EvalCtx::source_time`), so the identity keys need nothing more.
                 l.props.children.insert(0, Node::Prop(pr));
             } else if !target && has {
                 l.props.children.retain(|c| c.match_id() != "timeRemap");

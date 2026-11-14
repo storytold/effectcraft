@@ -950,7 +950,11 @@ impl<'a> Renderer<'a> {
                 if let Some(pf) = self.proxy_for(*item)
                     && let Some(nc) = self.project.comp(*item)
                 {
-                    let img = self.footage_frame(ctx, layer, *item, pf, lt, None)?;
+                    // A reversed layer's proxy is footage like any other: it takes the instant
+                    // just before the layer time, not the nested comp's floored frame, so its
+                    // frame blending mirrors forward blending (see `footage_frame_raw`).
+                    let pt = if EvalCtx::plays_backwards(layer) && !nc.preserve_frame_rate { ctx.source_time(layer) } else { lt };
+                    let img = self.footage_frame(ctx, layer, *item, pf, pt, None)?;
                     return Some(self.footage_buf(&img, pf, nc.width, nc.height, false));
                 }
                 // Essential Properties overrides render the nested comp with this instance's
@@ -972,7 +976,12 @@ impl<'a> Renderer<'a> {
                 if mode != FrameBlend::Off
                     && let Some(nc) = self.project.comp(*item)
                 {
-                    let (i, w) = frame_position(lt, nc.frame_rate);
+                    // A reversed precomp blends from the nested frame ending at its layer time
+                    // toward the one before, the mirror of a forward one (as footage does in
+                    // `footage_frame_raw`); `lt` is already floored to that frame.
+                    let at =
+                        if EvalCtx::plays_backwards(layer) && !nc.preserve_frame_rate { ctx.source_time(layer) + Tick(1) - nc.frame_duration() } else { lt };
+                    let (i, w) = frame_position(at, nc.frame_rate);
                     if w > 1e-6 {
                         let a = sub.comp_frame(*item, nc.frame_rate.tick_of(i));
                         let b = sub.comp_frame(*item, nc.frame_rate.tick_of(i + 1));
@@ -1218,12 +1227,17 @@ impl<'a> Renderer<'a> {
     }
 
     /// The footage frame at source time `t` after frame blending: the average of the source frames one comp frame spans, else a blend of the two neighbouring frames, else the plain frame.
-    /// Log scans are converted first, and blended frames are cached.
+    /// Log scans are converted first, and blended frames are cached. A reversed layer blends from the frame ending at `t` toward the one before.
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
         if mode != FrameBlend::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
-            let (i, w) = frame_position(t, f.frame_rate);
+            // A reversed layer's `t` is the instant just before the time it names (its layer
+            // time or remap value, see `EvalCtx::source_time`); it blends from the frame that ends
+            // at that time toward the one before, the mirror of a forward layer: one source
+            // frame earlier, so a reversed layer on the footage's own frames blends nothing.
+            let at = if EvalCtx::plays_backwards(layer) { t + Tick(1) - f.frame_rate.frame_duration() } else { t };
+            let (i, w) = frame_position(at, f.frame_rate);
             if w > 1e-6 {
                 // Blended frames are cached (Pixel Motion is expensive).
                 let key = self.cache.map(|_| {
