@@ -159,8 +159,9 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
         let mut paths = crate::masks::paths(&ctx, other);
         paths.extend(crate::masks::glyph_paths(&ctx, other));
-        // In the other layer's effect space, where its pixels for a layer parameter are.
-        let (size, o) = ctx.effect_bounds(other);
+        // In the other layer's effect space, rebased exactly as `layer_at` rebases its pixels
+        // ([`FxHost::pixels`]: the bounds of this render's context), so masks and pixels line up.
+        let (size, o) = self.ctx.effect_bounds(other);
         Some((paths.into_iter().map(|m| m.shifted([-o[0], -o[1]])).collect(), size))
     }
 

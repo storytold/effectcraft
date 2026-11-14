@@ -179,3 +179,39 @@ fn the_owner_key_follows_the_other_layers_masks() {
     m.get_mut("expansion").unwrap().value = Value::Scalar(9.0);
     assert_ne!(key(&q), before, "the other layer's mask expansion");
 }
+
+/// Another layer's masks at another time line up with its pixels as `layer_at` gives them (the
+/// pixels a helper's `layer_input` gets): every opaque pixel of a masked text layer lies inside its
+/// mask, mapped the same way. A text layer's effect space starts half a comp before its origin, so
+/// a mask placed with other bounds would miss its pixels by that much.
+#[test]
+fn another_layers_masks_line_up_with_its_pixels_at_another_time() {
+    let (mut p, cid, comp) = project();
+    let mut t = text(&mut p, &comp, "OK");
+    let mut next = p.next_id;
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([30.0, -15.0], 80.0, 50.0), MaskMode::Add, [255, 0, 0]);
+    p.next_id = next;
+    t.props.sub_mut("masks").unwrap().children.push(Node::Group(m));
+    p.comp_mut(cid).unwrap().layers.push(t);
+    let s = solid(&mut p, &comp, 100, 100);
+    p.comp_mut(cid).unwrap().layers.push(s);
+    let id = p.comp(cid).unwrap().layers[0].id.0;
+    let (pixels, (masks, size)) = with_host(&p, cid, 1, |h| (h.layer_at(id, 0.5, true).unwrap(), h.layer_mask_paths(id, 0.5).unwrap()));
+    assert_eq!(size, pixels.size);
+    let b = &pixels.buf;
+    let to_buf = |v: [f64; 2]| [v[0] * b.scale + b.offset[0], v[1] * b.scale + b.offset[1]];
+    let corners: Vec<[f64; 2]> = masks[0].vertices.iter().map(|v| to_buf(*v)).collect();
+    let (x0, x1) = corners.iter().fold((f64::MAX, f64::MIN), |(lo, hi), c| (lo.min(c[0]), hi.max(c[0])));
+    let (y0, y1) = corners.iter().fold((f64::MAX, f64::MIN), |(lo, hi), c| (lo.min(c[1]), hi.max(c[1])));
+    let mut opaque = 0;
+    for y in 0..b.img.height {
+        for x in 0..b.img.width {
+            if b.img.get(x as i64, y as i64)[3] > 0.5 {
+                opaque += 1;
+                let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+                assert!(cx >= x0 - 1.0 && cx <= x1 + 1.0 && cy >= y0 - 1.0 && cy <= y1 + 1.0, "pixel ({x}, {y}) outside the mask {corners:?}");
+            }
+        }
+    }
+    assert!(opaque > 50, "{opaque}");
+}
