@@ -102,6 +102,7 @@ mod ui_timeline_effect_label;
 mod ui_timeline_group_select;
 mod ui_timeline_marquee;
 mod ui_timeline_pan;
+mod ui_timeline_reset;
 mod ui_timeline_shapes;
 mod ui_timeline_switches;
 mod ui_timeline_trim;

@@ -2185,6 +2185,8 @@ fn group_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCt
     group_popups(app, ui, g, rc);
     group_mask_mode(ui, g, rc);
     group_row_click(app, ui, g, rc);
+    // Last, so it is on top of the row's own hit areas when hidden columns leave it over the name.
+    group_reset(app, ui, g, rc, &shown);
 }
 
 /// An expression row: its controls and the editor.
@@ -3730,6 +3732,72 @@ fn group_popups(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &Ro
         }
     }
     dash_buttons(app, ui, &lp, layer, *uid, pos2(cw.switches, cy), &mut *actions);
+}
+
+/// Reset the layer Transform or this effect, without changing the current selection.
+fn group_reset(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, shown: &str) {
+    let RowKind::Group { uid, .. } = &rc.row.kind else { return };
+    let layer = rc.layer;
+    let Some(group) = layer.props.find_group(*uid) else { return };
+    let (command, params, label) = if layer.transform().is_some_and(|tr| tr.uid == *uid) {
+        ("layer.transform", json!({"layers": [layer.id.0], "op": "reset"}), "Reset Transform".to_string())
+    } else if matches!(group.kind, GroupKind::Effect { .. }) {
+        ("effect.reset", json!({"layer": layer.id.0, "effect": uid}), format!("Reset {}", group.name))
+    } else {
+        return;
+    };
+    let text = tr("Reset");
+    let t = g.tl.t;
+    let font = Tokens::ui(11.5);
+    let width = g.lp.layout_no_wrap(text.to_string(), font.clone(), t.accent).size().x;
+    // A link at the left edge of the values (as in After Effects), so it lines up with the values
+    // and dropdowns of the rows below it. On an effect row a translation too long to end before
+    // the fx switch goes after the switches instead, and it always stays inside the outline (which
+    // ends at the graph), whichever columns are hidden.
+    // The click target is at least 24 points wide (the text stays where it is) and as tall as the
+    // row; the row itself is shorter than 24, and a taller target would cover the rows around it.
+    let hit_w = (width + 4.0).max(24.0);
+    let fx_left = g.tl.cw.switches + SW * 3.5 - 8.0;
+    let mut x = g.tl.cw.switches + 2.0;
+    if matches!(group.kind, GroupKind::Effect { .. }) && x + hit_w > fx_left - 2.0 {
+        x = g.tl.cw.switches + SW * 4.0 + 6.0;
+    }
+    let x = x.min(g.tl.graph_x0 - hit_w - 4.0).max(rc.r.min.x);
+    let rect = Rect::from_min_size(pos2(x, rc.r.min.y), vec2(hit_w, rc.r.height()));
+    let enabled = !layer.switches.locked;
+    // Screen readers hear what is reset and on which layer, in the interface language; the link
+    // itself only says Reset.
+    let spoken = format!("{text} {shown} ({})", layer.name);
+    let response = ui.add_enabled_ui(enabled, |ui| {
+        let r = ui.interact(rect, egui::Id::unique(("tl-group-reset", uid)), Sense::click());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &spoken));
+        crate::a11y::role_name(&r, egui::accesskit::Role::Button, &spoken);
+        // Underlined whenever it can be used, like the value fields below it, so it does not rely
+        // on colour alone; hover brightens it and keyboard focus draws the usual outline.
+        let color = if !enabled {
+            t.text_dim
+        } else if r.hovered() {
+            t.accent_hover
+        } else {
+            t.accent
+        };
+        let at = pos2(rect.min.x + 2.0, rect.center().y);
+        g.lp.text(at, Align2::LEFT_CENTER, text, font.clone(), color);
+        if enabled {
+            let y = rect.center().y + 7.0;
+            g.lp.line_segment([pos2(at.x, y), pos2(at.x + width, y)], Stroke::new(1.0, color));
+            if r.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            widgets::focus_outline(ui, &r, &t);
+        }
+        r
+    });
+    let response = response.inner;
+    app.auto.add(&format!("timeline.group.{uid}.reset"), rect, &label);
+    if response.clicked() {
+        g.tl.actions.push((command.into(), params));
+    }
 }
 
 /// Mask mode and inverted, inline.
