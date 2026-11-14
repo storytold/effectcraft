@@ -562,3 +562,21 @@ fn mute_round_trips_and_survives_value_replacement() {
     assert!(keys[0].muted);
     assert_eq!(keys[0].value, Value::Scalar(2.0));
 }
+
+#[test]
+fn feather_after_insert_survives_extreme_segment_index() {
+    let mut p = ShapePath::polygon(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], true);
+    let point = |segment| FeatherPoint { segment, t: 0.9, radius: 1.0, tension: 0.0 };
+    // A vertex inserted before the point moves it one segment on, stopping at usize::MAX.
+    for segment in [usize::MAX, usize::MAX - 1] {
+        p.feather = vec![point(segment)];
+        p.feather_after_insert(0, None);
+        assert_eq!(p.feather[0].segment, usize::MAX);
+        assert_eq!(p.feather[0].t, 0.9);
+    }
+    // Splitting the point's own segment at t = 0.5 moves a point at t = 0.9 into the second half.
+    p.feather = vec![point(usize::MAX - 1)];
+    p.feather_after_insert(usize::MAX, Some(0.5));
+    assert_eq!(p.feather[0].segment, usize::MAX);
+    assert!((p.feather[0].t - 0.8).abs() < 1e-12, "t = {}", p.feather[0].t);
+}
