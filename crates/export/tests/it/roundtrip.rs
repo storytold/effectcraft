@@ -554,10 +554,12 @@ fn gif_roundtrip() {
     opts.set_color_output(gif::ColorOutput::RGBA);
     let mut dec = opts.read_info(std::fs::File::open(&path).expect("open")).expect("gif header");
     assert_eq!((dec.width() as u32, dec.height() as u32), (W, H));
+    assert_eq!(dec.repeat(), gif::Repeat::Infinite);
     let mut k = 0;
     let mut total_delay = 0u32;
     while let Some(f) = dec.read_next_frame().expect("frame") {
         assert_eq!((f.width as u32, f.height as u32), (W, H));
+        assert_eq!(f.dispose, gif::DisposalMethod::Keep);
         total_delay += f.delay as u32;
         let img = Image::from_rgba8(W, H, &f.buffer);
         check_frame(&img, k, 0.06);
@@ -565,9 +567,55 @@ fn gif_roundtrip() {
     }
     assert_eq!(k, FRAMES);
     assert_eq!(total_delay, 120, "1.2 s in centiseconds");
+
+    // Re-encode the same rendered RGB pixels through the former app-local gif 0.13 path. The
+    // shared writer must preserve the complete output bytes, including quantization and LZW data.
+    let reference_dir = out_dir("gif-byte-parity");
+    let png_pattern = reference_dir.join("frame_[#####].png");
+    let png_module = OutputModule::for_format(OutputFormat::PngSequence);
+    run(&p, cid, &NoFootage, &png_module, &png_pattern);
+    let png_pattern = png_pattern.to_string_lossy();
+    let mut expected = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut expected, W as u16, H as u16, &[]).expect("reference GIF encoder");
+        encoder.set_repeat(gif::Repeat::Infinite).expect("reference GIF repeat");
+        for frame_number in 0..FRAMES {
+            let png_path = sequence_path(&png_pattern, frame_number as i64);
+            let mut rgba = image::open(png_path).expect("reference PNG").to_rgba8().into_raw();
+            let mut frame = gif::Frame::from_rgba_speed(W as u16, H as u16, &mut rgba, 10);
+            frame.delay = 10;
+            encoder.write_frame(&frame).expect("reference GIF frame");
+        }
+    }
+    let actual = std::fs::read(&path).expect("GIF bytes");
+    assert_eq!(actual.len(), expected.len(), "GIF byte length differs: actual {}, reference {}", actual.len(), expected.len());
+    let difference = actual.iter().zip(&expected).position(|(a, b)| a != b);
+    assert!(
+        difference.is_none(),
+        "GIF bytes differ at offset {:?}: actual {:#04x}, reference {:#04x}",
+        difference,
+        difference.map_or(0, |i| actual[i]),
+        difference.map_or(0, |i| expected[i])
+    );
     if let Some(s) = ffprobe(&path) {
         assert!(s.starts_with("gif|64|48"), "{s}");
     }
+}
+
+#[test]
+fn gif_rgba_keeps_background_disposal_and_non_looping() {
+    let (p, cid) = project(None);
+    let d = out_dir("gif-rgba");
+    let om = OutputModule { channels: Channels::Rgba, gif_loop: false, ..OutputModule::for_format(OutputFormat::Gif) };
+    let path = d.join("anim.gif");
+    run(&p, cid, &NoFootage, &om, &path);
+
+    let mut opts = gif::DecodeOptions::new();
+    opts.set_color_output(gif::ColorOutput::RGBA);
+    let mut dec = opts.read_info(std::fs::File::open(&path).expect("open")).expect("gif header");
+    assert_eq!(dec.repeat(), gif::Repeat::Finite(0));
+    let first = dec.read_next_frame().expect("frame").expect("first frame");
+    assert_eq!(first.dispose, gif::DisposalMethod::Background);
 }
 
 #[test]
