@@ -381,9 +381,7 @@ fn workspace_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     app.auto.add("header.workspaces", more, "Workspaces");
     let current = app.ui.workspace.clone();
     crate::widgets::context_menu(&mresp, |ui| ws_menu(app, ui, &current));
-    if mresp.clicked() {
-        widgets::open_popup(ui, egui::Id::unique("ws-pop"));
-    }
+    widgets::open_on_press(ui, &mresp, egui::Id::unique("ws-pop"));
     let names: Vec<String> = crate::dock::WORKSPACES.iter().map(|s| crate::i18n::command_label("window.workspace", s).to_string()).collect();
     if let Some(i) = widgets::popup_menu(
         ui,
