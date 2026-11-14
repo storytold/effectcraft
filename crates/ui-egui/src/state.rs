@@ -647,6 +647,10 @@ pub struct UiState {
     /// `crate::dock_ui::native_outer_to_content`). Workspaces are not saved while any remain.
     #[serde(skip)]
     pub native_outer: Vec<u64>,
+    /// The script of each [`PanelKind::ScriptPanel`] id the workspaces refer to: a live window's
+    /// id, or a saved one of a script that isn't open (`crate::workspace_state::script_panels`).
+    #[serde(skip)]
+    pub script_panels: std::collections::BTreeMap<u32, String>,
     /// Locked Composition / Timeline tabs (panel ids): opening another composition does not
     /// bring a locked panel forward (the tab's lock icon, as After Effects' viewer lock).
     #[serde(default)]
@@ -771,6 +775,7 @@ impl Default for UiState {
             dock: crate::dock::Workspace::new(crate::dock::workspace("Default")),
             saved_workspaces: Default::default(),
             native_outer: Vec::new(),
+            script_panels: Default::default(),
             maximized: None,
             locked_tabs: BTreeSet::new(),
             viewers: Default::default(),

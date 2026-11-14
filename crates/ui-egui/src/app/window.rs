@@ -27,9 +27,11 @@ impl EffectcraftApp {
             self.ui.start_screen = false;
             self.ui.home_learn = false;
         }
+        crate::workspace_state::script_panels::bind(&mut self.ui, &self.session.script_ui);
         self.ui.workspace = name.to_string();
         self.ui.dock = self.ui.saved_workspaces.get(name).cloned().unwrap_or_else(|| dock::Workspace::new(dock::workspace(name)));
         self.ui.maximized = None;
+        crate::workspace_state::script_panels::fit(&mut self.ui, &self.session.script_ui);
     }
 
     /// Built-in workspaces followed by the saved ones (Window ▸ Workspace ▸ Save as New Workspace).
@@ -69,8 +71,16 @@ impl EffectcraftApp {
     }
 
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
-    /// give it the focus: Window ▸ `<panel>`.
+    /// give it the focus: Window ▸ `<panel>`. A ScriptUI panel whose script window isn't open stays
+    /// closed, and the status bar says so.
     pub fn show_panel(&mut self, p: PanelKind) {
+        // A saved place outlives its script's window, and an empty tab shows nothing.
+        if let PanelKind::ScriptPanel(id) = p
+            && self.session.script_ui.window(id).is_none()
+        {
+            self.ui.status = "That ScriptUI panel's script isn't open".into();
+            return;
+        }
         if !self.ui.dock.is_floating(p) && self.ui.maximized.is_some_and(|m| m != p) {
             self.ui.maximized = None;
         }
