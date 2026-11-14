@@ -4,7 +4,7 @@
 //! an `ANIM` chunk (background colour, loop count) and one `ANMF` chunk per frame. Each frame's
 //! image is, by the Output Module's compression:
 //!
-//! * **Lossy** (the default): a `VP8 ` key frame from `effectcraft-vp8enc` at the module's
+//! * **Lossy** (the default): a `VP8 ` key frame from `craft_video::vp8` at the module's
 //!   quality, with an `ALPH` chunk before it when the frame has any transparency (§2.7.1.2): the
 //!   alpha plane compressed with the lossless format (a `VP8L` image-stream without its header),
 //!   through a prediction filter when that codes smaller, and below alpha quality 100 reduced to
@@ -31,7 +31,7 @@ use crate::{Cx, ExportError, Report, Result, State, batch_size, io};
 /// Largest frame side: `VP8L` stores width − 1 and height − 1 in 14 bits.
 pub(crate) const MAX_SIDE: u32 = 1 << 14;
 /// Largest lossy frame side: the VP8 key frame header stores the size itself in 14 bits.
-pub(crate) const MAX_SIDE_LOSSY: u32 = effectcraft_vp8enc::MAX_SIDE;
+pub(crate) const MAX_SIDE_LOSSY: u32 = craft_video::vp8::MAX_SIDE;
 /// `ALPH` header bits: compressed with the lossless format; level reduction applied (P = 1); the
 /// filter method sits in bits 2–3.
 const ALPH_LOSSLESS: u8 = 0x01;
@@ -263,8 +263,8 @@ pub(crate) fn encode_frame(px: &[u8], w: u32, h: u32, codec: Codec) -> Result<Ve
 
 /// A `VP8 ` chunk, after an `ALPH` chunk when any pixel is not opaque (§2.7.1.2).
 fn encode_lossy(px: &[u8], w: u32, h: u32, quality: u8, alpha_quality: u8) -> Result<Vec<u8>> {
-    let frame = effectcraft_vp8enc::encode_rgba(px, w, h, &effectcraft_vp8enc::Vp8Params { quality, loop_filter: None })
-        .map_err(|e| ExportError::Encode(e.to_string()))?;
+    let frame =
+        craft_video::vp8::encode_rgba(px, w, h, &craft_video::vp8::Vp8Params { quality, loop_filter: None }).map_err(|e| ExportError::Encode(e.to_string()))?;
     let mut out = Vec::with_capacity(frame.data.len() + 16);
     if !px.as_chunks::<4>().0.iter().all(|p| p[3] == 255) {
         let mut alpha: Vec<u8> = px.as_chunks::<4>().0.iter().map(|p| p[3]).collect();

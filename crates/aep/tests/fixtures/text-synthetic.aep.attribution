@@ -1,0 +1,7 @@
+asset:        text-synthetic.aep
+title:        Small After Effects test project for the .aep importer's text animator and Source Text expression tests
+author:       EffectCraft contributors
+source:       original work (made in After Effects 2026 by script from own data: a composition with two text layers, a text animator Stroke Opacity, static and keyed, and Source Text expressions, enabled and disabled)
+license:      MIT OR Apache-2.0
+added:        2026-11-08 by EffectCraft contributors
+notes:        The working space was set to None, so the file embeds no ICC profile; nothing After Effects wrote was changed. See crates/aep/README.md (Clean room).

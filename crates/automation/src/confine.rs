@@ -65,6 +65,8 @@ const REFUSED: &[&str] = &[
     "file.revealInFinder",
     "layer.openSource",
     "help.revealLogFile",
+    // Hands the footage file to the platform's default application.
+    "edit.editOriginal",
     "file.autoSave",
     // The Plug-in Library downloads code, installs it to load at start-up and reads `file://` catalogs.
     "library.refresh",
@@ -73,6 +75,10 @@ const REFUSED: &[&str] = &[
     "library.uninstall",
     "library.loadInstalled",
     "library.preview",
+    // Watch Folder renders the projects it finds to the outputs they name and writes status
+    // files into the watched folder: neither is a path the agent gives, so neither is checked.
+    "file.watchFolder",
+    "file.watchFolder.poll",
 ];
 
 /// Most numbered folders `check_render_folder` inspects for one output; more are refused.
@@ -91,7 +97,6 @@ const READS: &[(&str, &[&str])] = &[
     ("file.replaceFootage", &["path"]),
     ("file.relinkFootage", &["folder"]),
     ("file.setProxy", &["path"]),
-    ("file.watchFolder", &["folder"]),
     ("anim.applyPreset", &["path"]),
     ("anim.applyRecentPreset", &["path"]),
     ("keys.rpfCameraImport", &["path"]),
@@ -105,7 +110,6 @@ const READS: &[(&str, &[&str])] = &[
     // unchecked.
     ("essential.templateInfo", &["path"]),
     ("file.importProject", &["path"]),
-    ("file.watchFolder.poll", &["folder"]),
     ("footage.relink", &["path"]),
     ("layer.newModel", &["path"]),
     ("mediaBrowser.fileInfo", &["path"]),
@@ -783,6 +787,16 @@ mod tests {
         assert!(!shown && !files.is_complete(), "outside the roots: {files:?}");
         // The next render on the thread is not affected.
         assert!(read(&footage(&inside)).1.is_complete());
+    }
+
+    #[test]
+    fn watch_folder_and_edit_original_are_refused_while_confined() {
+        let dir = std::env::temp_dir();
+        let c = Confinement::new(std::slice::from_ref(&dir), std::slice::from_ref(&dir)).unwrap();
+        for id in ["file.watchFolder", "file.watchFolder.poll", "edit.editOriginal"] {
+            let e = c.check_command(id, &serde_json::json!({"folder": dir.to_string_lossy()})).unwrap_err().to_string();
+            assert!(e.contains("not available while file access is confined"), "{id}: {e}");
+        }
     }
 
     #[test]

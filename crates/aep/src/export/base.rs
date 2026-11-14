@@ -6,15 +6,20 @@
 //! (read-backs t-no<id>, t-zcdta, u-zsspc, u-noclrs, u-noftgi, u-nofrec, u-nocdrp).
 
 use crate::Chunk;
-use crate::export::synth::{tdmn, tdsn};
+use crate::export::synth::{GROUP_END, tdmn, tdsn};
+use crate::export::tree::Fixed;
 
-/// A zero buffer of `len` bytes with `fields` (offset, bytes) written into it.
+/// A zero buffer of `len` bytes with `fields` (offset, bytes) written into it. The layouts are
+/// fixed in code ([`Fixed`]).
 pub(crate) fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
-    let mut b = vec![0u8; len];
+    layout(len, fields).finish(|| format!("base::bytes ({len} bytes, fields at {:?})", fields.iter().map(|(at, v)| (*at, v.len())).collect::<Vec<_>>()))
+}
+
+/// The fixed layout of `len` zero bytes with `fields` written at their offsets.
+fn layout(len: usize, fields: &[(usize, &[u8])]) -> Fixed {
+    let mut b = Fixed::zeroed(len);
     for (at, v) in fields {
-        if let Some(dst) = b.get_mut(*at..at.saturating_add(v.len())) {
-            dst.copy_from_slice(v);
-        }
+        b.put(*at, v);
     }
     b
 }
@@ -52,12 +57,8 @@ pub(crate) fn project_chunks() -> Vec<Chunk<'static>> {
     // colour depth (2: 32 bits); the save noise after the code page is left zero.
     let nhed = bytes(32, &[(7, &[5]), (9, &[1]), (12, &[0x1e, 16, 2, 2]), (18, &UTF8_CODE_PAGE)]);
     let nnhd = bytes(40, &[(7, &[5]), (9, &[1]), (15, &[0x1e]), (19, &[16, 2]), (24, &[2]), (26, &UTF8_CODE_PAGE)]);
-    let mut lhd3 = bytes(52, &[(0, &0x00d0_0bee_u32.to_be_bytes()), (12, &1u32.to_be_bytes()), (16, &RQ_ITEM_LEN.to_be_bytes())]);
-    for at in [20, 24, 28] {
-        if let Some(dst) = lhd3.get_mut(at..at + 4) {
-            dst.copy_from_slice(&1u32.to_be_bytes());
-        }
-    }
+    let one = 1u32.to_be_bytes();
+    let lhd3 = bytes(52, &[(0, &0x00d0_0bee_u32.to_be_bytes()), (12, &one), (16, &RQ_ITEM_LEN.to_be_bytes()), (20, &one), (24, &one), (28, &one)]);
     let wsnm: Vec<u8> = "Default".encode_utf16().flat_map(u16::to_be_bytes).collect();
     vec![
         Chunk::data(*b"svap", VERSION.to_vec()),
@@ -157,30 +158,17 @@ fn view_layer(ty: &[u8; 4], name: &str, label: u8, kind: u8) -> Vec<Chunk<'stati
     let markers = kind == 4;
     let mut name_copy = name.as_bytes().to_vec();
     name_copy.truncate(31);
-    let mut ldta = bytes(
-        164,
-        &[
-            (8, &1u32.to_be_bytes()),
-            (16, &600u32.to_be_bytes()),
-            (24, &25_600u32.to_be_bytes()),
-            (28, &VIEW_OUT.to_be_bytes()),
-            (32, &25_600u32.to_be_bytes()),
-            (61, &[label]),
-            (64, &name_copy),
-            (108, &1u32.to_be_bytes()),
-            (128, &u32::from(kind).to_be_bytes()),
-        ],
-    );
     // Byte 38: 3D and auto-orient on the cameras; byte 39: the video switch (and on the markers
     // layer also effects, locked and collapse); quality Draft and blend mode Normal on the
     // markers layer.
-    let flags: &[(usize, u8)] = if markers { &[(5, 2), (39, 0x87), (99, 2)] } else { &[(38, 0x44), (39, 1)] };
-    for (at, v) in flags {
-        if let Some(b) = ldta.get_mut(*at) {
-            *b = *v;
-        }
-    }
-    let root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(""), tdmn("ADBE Group End")];
+    let flags: &[(usize, &[u8])] = if markers { &[(5, &[2]), (39, &[0x87]), (99, &[2])] } else { &[(38, &[0x44]), (39, &[1])] };
+    let (one, scale, kind_word) = (1u32.to_be_bytes(), 25_600u32.to_be_bytes(), u32::from(kind).to_be_bytes());
+    let (base, out, label) = (600u32.to_be_bytes(), VIEW_OUT.to_be_bytes(), [label]);
+    let mut fields: Vec<(usize, &[u8])> =
+        vec![(8, &one), (16, &base), (24, &scale), (28, &out), (32, &scale), (61, &label), (64, &name_copy), (108, &one), (128, &kind_word)];
+    fields.extend_from_slice(flags);
+    let ldta = bytes(164, &fields);
+    let root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(""), tdmn(GROUP_END)];
     let layer = Chunk::list(*ty, vec![Chunk::data(*b"ldta", ldta), utf8(name), Chunk::list(*b"tdgp", root), guides()]);
     let mut out = vec![layer, Chunk::list(*b"Ewst", Vec::new())];
     out.extend(crate::export::skeleton::f_records());
@@ -292,6 +280,16 @@ pub(crate) fn solid_item() -> Chunk<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A field out of range is an error.
+    #[test]
+    fn a_field_out_of_range_is_an_error() {
+        let ok = layout(4, &[(0, &[1]), (3, &[2])]);
+        assert!(ok.error().is_none());
+        assert_eq!(ok.finish(String::new), [1, 0, 0, 2]);
+        assert!(layout(4, &[(3, &[1, 2])]).error().is_some());
+        assert!(layout(4, &[(usize::MAX, &[1])]).error().is_some());
+    }
 
     /// The chunks After Effects refuses a file without, or crashes on (aep-export.md, "What After
     /// Effects needs").
