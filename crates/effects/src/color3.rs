@@ -489,9 +489,13 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s_contrast = sec("correction/contrast", 0.0) / 100.0;
     let s_sharpen = sec("correction/sharpen", 0.0) / 100.0;
     let s_sat = sec("correction/saturation", 100.0) / 100.0;
+    // Wrap in f64: as f32, a large angle loses the fraction of a turn it adds.
+    let hue_deg = pr.get("hslSecondary/correction/hueShift").map(Value::as_f64).unwrap_or(0.0);
+    let s_hue = if hue_deg.is_finite() { ((hue_deg.rem_euclid(360.0) / 360.0) as f32).rem_euclid(1.0) } else { 0.0 };
     let s_wheel = pr.get("hslSecondary/correction/correctionWheel").map(|v| tint_offset(v.as_color())).unwrap_or([0.0; 3]);
     let show_mask = pr.b("hslSecondary/key/showMask");
-    let sec_active = show_mask || s_temp != 0.0 || s_tint != 0.0 || s_contrast != 0.0 || s_sharpen != 0.0 || s_sat != 1.0 || s_wheel != [0.0; 3];
+    let sec_active =
+        show_mask || s_temp != 0.0 || s_tint != 0.0 || s_contrast != 0.0 || s_sharpen != 0.0 || s_sat != 1.0 || s_wheel != [0.0; 3] || s_hue != 0.0;
     let (lx, ly, lw, lh) = layer_rect(ctx, &b);
     let w = b.img.width as usize;
     let (cx, cy) = (lx + lw * 0.5, ly + lh * 0.5);
@@ -653,6 +657,12 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
             }
             if k > 0.0 {
                 let mut d = c;
+                if s_hue != 0.0 {
+                    let base = d.map(|v| v.clamp(0.0, 1.0));
+                    let (h, s, l) = rgb_to_hsl(base[0], base[1], base[2]);
+                    let (r, g, b2) = hsl_to_rgb((h + s_hue).rem_euclid(1.0), s, l);
+                    d = [d[0] + r - base[0], d[1] + g - base[1], d[2] + b2 - base[2]];
+                }
                 if s_temp != 0.0 || s_tint != 0.0 {
                     d = [d[0] * (1.0 + 0.25 * s_temp), d[1] * (1.0 - 0.25 * s_tint), d[2] * (1.0 - 0.25 * s_temp)];
                 }
@@ -798,6 +808,8 @@ pub fn specs() -> Vec<EffectSpec> {
         p("hslSecondary/correction/contrast", "Contrast", num(0.0), tone()),
         p("hslSecondary/correction/sharpen", "Sharpen", num(0.0), bipolar()),
         p("hslSecondary/correction/saturation", "Saturation", num(100.0), sat()),
+        // Not in After Effects: turns the keyed hue (an EffectCraft extra, last in Correction).
+        p("hslSecondary/correction/hueShift", "Hue Shift", num(0.0), ParamUi::Angle),
         p("vignette/vignetteAmount", "Amount", num(0.0), slider(-5.0, 5.0, -5.0, 5.0, 2)),
         p("vignette/vignetteMidpoint", "Midpoint", num(50.0), pct()),
         p("vignette/vignetteRoundness", "Roundness", num(0.0), bipolar()),
@@ -1066,6 +1078,32 @@ mod tests {
         let m = run("ec.color.lumetri", &vals, wide);
         let v = m.get(16, 0)[0];
         assert!(v > 0.05 && v < 0.95, "blurred matte edge {v}");
+    }
+
+    #[test]
+    fn lumetri_hsl_secondary_hue_shift_turns_only_the_keyed_hue() {
+        let img = swatches();
+        let key_red = [("hslSecondary/key/hueCenter", num(0.0)), ("hslSecondary/key/hueRange", num(20.0)), ("hslSecondary/key/hueSoftness", num(10.0))];
+        let shifted = |deg: f64, img: Image| {
+            let mut vals: Vec<(&str, Value)> = key_red.to_vec();
+            vals.push(("hslSecondary/correction/hueShift", num(deg)));
+            run("ec.color.lumetri", &vals, img)
+        };
+        // The keyed red turns 120° to green with its saturation and lightness; the rest stays.
+        // Whole turns on top of it, however many, change nothing.
+        for deg in [120.0, 3_600_000_120.0, -3_600_000_240.0] {
+            let out = shifted(deg, img.clone());
+            assert!(close_px(out.get(0, 0), [0.1, 0.8, 0.1, 1.0], 1e-4), "{deg}: {:?}", out.get(0, 0));
+            assert!(close_px(out.get(1, 0), img.get(1, 0), 1e-5) && close_px(out.get(2, 0), img.get(2, 0), 1e-5));
+        }
+        // A whole turn, either way, changes nothing.
+        for deg in [360.0, -360.0] {
+            assert!(close_px(shifted(deg, img.clone()).get(0, 0), img.get(0, 0), 1e-5), "{deg}");
+        }
+        // HDR: the part above 1 rides along unchanged.
+        let hdr = Image::filled(1, 1, [1.5, 0.1, 0.1, 1.0]);
+        let p = shifted(120.0, hdr).get(0, 0);
+        assert!(close_px(p, [0.6, 1.0, 0.1, 1.0], 1e-4), "{p:?}");
     }
 
     #[test]
