@@ -121,6 +121,11 @@ mod imp {
         s.try_clone().unwrap()
     }
 
+    /// Most bytes one `read`/`readln` may hold. A peer that never ends its stream used to grow
+    /// the buffer until memory ran out, and a failed `extend_from_slice` aborts the process; a
+    /// bound makes that an error the script can handle (audit F3).
+    pub(super) const MAX_READ: usize = 64 << 20;
+
     fn timeout(p: &J) -> Duration {
         Duration::from_secs_f64(p.get("timeout").and_then(J::as_f64).unwrap_or(10.0).clamp(0.0, 3600.0))
     }
@@ -142,10 +147,15 @@ mod imp {
 
     /// Fill a stream's buffer until `done(buf)` or the timeout / end of stream. Fails only when
     /// the read deadline can't be set.
-    fn fill(s: &mut TcpStream, buf: &mut Vec<u8>, eof: &mut bool, limit: Duration, mut done: impl FnMut(&[u8]) -> bool) -> std::io::Result<()> {
+    pub(super) fn fill(s: &mut TcpStream, buf: &mut Vec<u8>, eof: &mut bool, limit: Duration, mut done: impl FnMut(&[u8]) -> bool) -> std::io::Result<()> {
         let end = Instant::now() + limit;
         let mut chunk = [0u8; 4096];
         while !done(buf) && !*eof {
+            if buf.len() >= MAX_READ {
+                return Err(std::io::Error::other(format!(
+                    "a socket read may hold at most {MAX_READ} bytes; close it or read in smaller pieces"
+                )));
+            }
             let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -153,7 +163,12 @@ mod imp {
             s.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;
             match s.read(&mut chunk) {
                 Ok(0) => *eof = true,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    let take = n.min(MAX_READ - buf.len());
+                    // A failed allocation is an error, never an abort (#audit F3).
+                    buf.try_reserve(take).map_err(|e| std::io::Error::other(e.to_string()))?;
+                    buf.extend_from_slice(&chunk[..take]);
+                }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {
                     if e.kind() != ErrorKind::Interrupted {
                         break;
@@ -307,14 +322,14 @@ mod imp {
                         let limit = timeout(p);
                         if count < 0 {
                             if let Err(e) = fill(s, buf, eof, limit, |_| false) {
-                                return err(format!("cannot set the read timeout: {e}"));
+                                return err(format!("cannot read: {e}"));
                             }
                             let all = std::mem::take(buf);
                             json!({"data": decode(&all, utf8)})
                         } else {
-                            let n = count as usize;
+                            let n = usize::try_from(count).unwrap_or(usize::MAX).min(MAX_READ);
                             if let Err(e) = fill(s, buf, eof, limit, |b| b.len() >= n) {
-                                return err(format!("cannot set the read timeout: {e}"));
+                                return err(format!("cannot read: {e}"));
                             }
                             let take = n.min(buf.len());
                             let out: Vec<u8> = buf.drain(..take).collect();
@@ -331,7 +346,7 @@ mod imp {
                             hit
                         };
                         if let Err(e) = fill(s, buf, eof, timeout(p), newline) {
-                            return err(format!("cannot set the read timeout: {e}"));
+                            return err(format!("cannot read: {e}"));
                         }
                         let line: Vec<u8> = match buf.iter().position(|&c| c == b'\n') {
                             Some(i) => {
@@ -565,5 +580,22 @@ mod tests {
             run("close", id, &J::Null);
             reader.join().unwrap();
         }
+    }
+
+    /// Audit F3: one read cannot grow past `MAX_READ`. A peer that never ends its stream used to
+    /// grow the buffer until allocation failed, which aborts the process; the bound is now an
+    /// error the script can handle.
+    #[test]
+    fn an_unbounded_read_stops_at_the_read_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let id = open(&listener.local_addr().unwrap().to_string());
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.write_all(b"x").unwrap();
+        let mut stream = super::imp::test_stream(id);
+        let mut buf = vec![0u8; super::imp::MAX_READ];
+        let mut eof = false;
+        let e = super::imp::fill(&mut stream, &mut buf, &mut eof, Duration::from_secs(1), |_| false).expect_err("the read limit is enforced");
+        assert!(e.to_string().contains("at most"), "{e}");
+        run("close", id, &J::Null);
     }
 }
