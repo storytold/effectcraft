@@ -10,8 +10,9 @@
 //! - **Trace Path** (`paths.tracePath`): one null with a Progress slider (keyframed 0 → 100 % over
 //!   the layer's span, optionally looping) whose Position follows `pointOnPath(progress)`.
 //!
-//! The path is `path`/`prop` of `layer`, else the selected path property, else the layer's first
-//! mask or shape path. Each command is one undo step.
+//! The path is `path`/`prop` of `layer`, else the selected path property (on `layer`, when one is given),
+//! else the layer's first mask or shape path. An explicit `layer` always beats a path selected on another
+//! layer. Each command is one undo step.
 //!
 //! **Puppet pins** rig the same way (controllers drive the pins, or props ride along with a pin):
 //! with `pins`, selected pins, or a layer that has Puppet pins but no path, Points Follow Nulls
@@ -32,7 +33,9 @@ fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""))
 }
 
-/// The target path property: (comp, layer, uid).
+/// The target path property: (comp, layer, uid). Order: `path`/`prop` of `layer`; else the selected path
+/// (only on `layer` when one is given); else the first mask or shape path of `layer` (or of the first
+/// selected layer).
 fn target(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
     if p.get("path").is_some() || p.get("prop").is_some() {
         let r = super::prop::prop_ref(s, p, cmd)?;
@@ -41,15 +44,23 @@ fn target(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
     }
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    // An explicit `layer` wins over the selection: a path selected on another layer is not used.
+    let explicit = match p.get("layer").filter(|v| !v.is_null()) {
+        Some(_) => Some(super::layer_p(s, p, cmd)?.1),
+        None => None,
+    };
     // A selected path property.
     for (l, u) in super::selected_leaf_props(s) {
+        if explicit.is_some_and(|e| e != l) {
+            continue;
+        }
         if comp.layer(l).and_then(|ly| ly.props.find(u)).is_some_and(|pr| matches!(pr.value, KV::Path(_))) {
             return Ok((cid, l, u));
         }
     }
     // The first path of `layer` (or of the first selected layer).
-    let lid = match p.get("layer") {
-        Some(_) => super::layer_p(s, p, cmd)?.1,
+    let lid = match explicit {
+        Some(e) => e,
         None => *s.state.selected_layers.first().ok_or_else(|| bad(cmd, "select a layer with a mask or shape path"))?,
     };
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
@@ -60,6 +71,13 @@ fn target(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid)> {
         }
     });
     found.map(|u| (cid, lid, u)).ok_or_else(|| bad(cmd, format!("`{}` has no mask or shape path", layer.name)))
+}
+
+/// The path the Layer ▸ Create null entries rig, as the explicit `{comp, layer, prop}` the `paths.*` commands take: naming the
+/// property keeps them on the path even when a Puppet pin is selected (they would rig the pin otherwise).
+pub(super) fn path_params(s: &Session, p: &Value) -> Result<Value> {
+    let (cid, lid, uid) = target(s, p, "layer.create")?;
+    Ok(json!({"comp": cid.0, "layer": lid.0, "prop": uid}))
 }
 
 /// What the commands need about the path: its vertices in comp space (now), the path value, the

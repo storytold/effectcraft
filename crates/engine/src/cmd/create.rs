@@ -1,6 +1,10 @@
 //! Layer ▸ Create: Convert to Editable Text (Photoshop type layers), Create Shapes from Text,
 //! Create Masks from Text, Create Shapes from Vector Layer (SVG footage) and Create 3D Layer
-//! Instance (a 2D copy of a 3D model layer that 2D effects can be applied to).
+//! Instance (a 2D copy of a 3D model layer that 2D effects can be applied to). Null Controllers for
+//! Path Points, Nulls Following Path Points and Null Tracing Along Path (`nullsPathPoints` ->
+//! `paths.pointsFollowNulls`, `nullsFollowing` -> `paths.nullsFollowPoints`, `nullTracing` ->
+//! `paths.tracePath`) work on one path: the selected path, else the first path of the layer named by
+//! `layers[0]` (or `layer`); further `layers` entries are ignored and an empty `layers` is refused.
 
 use effectcraft_color::Label;
 use effectcraft_keyframe::Value as KV;
@@ -11,12 +15,45 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, has_layers, layers_p, str_p};
 use crate::{EngineError, Result, Session, cmd};
 
-const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|instance3d";
+const OPS: &str = "editableText|shapesFromText|masksFromText|shapesFromVector|instance3d|nullsPathPoints|nullsFollowing|nullTracing";
 
 /// Layer ▸ Create (`layer.create`): the `op` ([`OPS`]) on the given or selected layers; returns
 /// the created layer ids and what was skipped.
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let op = str_p(p, "op").ok_or_else(|| bad("layer.create", format!("missing `op` ({OPS})")))?;
+    // The Layer ▸ Create null entries are the Create Nulls From Paths commands. They work on one path:
+    // the layer is `layers[0]` when `layers` is given (it beats `layer`, as for the other ops), else
+    // `layer`, else the selection; the path is then the one selected on that layer, else its first.
+    let paths_cmd = match op {
+        "nullsPathPoints" => Some("paths.pointsFollowNulls"),
+        "nullsFollowing" => Some("paths.nullsFollowPoints"),
+        "nullTracing" => Some("paths.tracePath"),
+        _ => None,
+    };
+    if let Some(c) = paths_cmd {
+        let mut t = serde_json::Map::new();
+        for k in ["comp", "layer"] {
+            if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+                t.insert(k.into(), v.clone());
+            }
+        }
+        match p.get("layers") {
+            Some(Value::Array(a)) => match a.first() {
+                Some(first) => {
+                    t.insert("layer".into(), first.clone());
+                }
+                None => return Err(bad("layer.create", "select a layer first")),
+            },
+            Some(Value::Null) | None => {}
+            Some(_) => return Err(bad("layer.create", "`layers` must be an array")),
+        }
+        // Only the path, and `loop` for the tracing null, go on to the `paths.*` command.
+        let mut q = super::path_nulls::path_params(s, &Value::Object(t))?;
+        if let ("nullTracing", Some(l), Some(o)) = (op, p.get("loop"), q.as_object_mut()) {
+            o.insert("loop".into(), l.clone());
+        }
+        return s.execute(c, q);
+    }
     let (cid, lids) = layers_p(s, p)?;
     if lids.is_empty() {
         return Err(bad("layer.create", "select a layer first"));
@@ -285,5 +322,16 @@ fn insert_above(
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![cmd!("layer.create", "Create", [], None, "{op: editableText|shapesFromText|masksFromText|shapesFromVector|instance3d, layers?}", has_layers, create)]
+    vec![cmd!(
+        "layer.create",
+        "Create",
+        [],
+        None,
+        "{op: editableText|shapesFromText|masksFromText|shapesFromVector|instance3d|\
+        nullsPathPoints|nullsFollowing|nullTracing, layers?, loop?} (nullsPathPoints = paths.pointsFollowNulls, \
+        nullsFollowing = paths.nullsFollowPoints, nullTracing = paths.tracePath, which also takes loop: they use the path selected on \
+        layers[0] (else the selection), else its first path; extra layers are ignored, an empty layers is refused)",
+        has_layers,
+        create
+    )]
 }
