@@ -143,6 +143,64 @@ fn the_file_menu_opens_the_name_in_view() {
     assert_eq!(name(&h, folder).as_deref(), Some("Renders"));
 }
 
+/// Press on `from`, move to `to` in steps, release there.
+fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    for k in 1..=10 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+fn item_named(h: &Harness<'_, EffectcraftApp>, name: &str) -> ItemId {
+    h.state().session.project.items.values().find(|i| i.name == name).map(|i| i.id).unwrap_or_else(|| panic!("no item {name}"))
+}
+
+fn parent(h: &Harness<'_, EffectcraftApp>, id: ItemId) -> Option<ItemId> {
+    h.state().session.project.item(id).and_then(|i| i.parent)
+}
+
+/// #3196: two selected items (one at the root, one in a folder) dragged onto the New Folder
+/// button go into a new folder, out of the folder they were in, with its name open as the
+/// button's; one undo takes it all back.
+#[test]
+fn items_dropped_on_the_new_folder_button_go_into_a_new_folder() {
+    let (mut h, bin) = harness(2);
+    let (a, b) = (item_named(&h, "Comp 000"), item_named(&h, "Comp 001"));
+    h.state_mut().session.execute("project.move", json!({"items": [b.0], "folder": bin.0})).unwrap();
+    h.state_mut().session.state.project_selection = vec![a, b];
+    h.run_steps(3);
+    let before = folders(&h);
+    let project = h.state().session.project.clone();
+    let from = rect(&h, &format!("project.item.{}.name", a.0)).center();
+    let to = rect(&h, "project.newFolder").center();
+    drag(&mut h, from, to);
+    let [folder] = new_folders(&h, &before)[..] else { panic!("one new folder") };
+    assert_eq!((parent(&h, a), parent(&h, b)), (Some(folder), Some(folder)), "both dragged items are in it");
+    assert_eq!(parent(&h, folder), None, "where the button makes folders");
+    assert_eq!(h.state().session.state.project_selection, [folder]);
+    assert!(renaming(&h, folder), "its name is open, as from the button");
+    assert!(h.state().ui.project_open_folders.contains(&folder.0), "open, so the moved items stay in view");
+    key(&mut h, Key::Escape);
+    assert_eq!(name(&h, folder).as_deref(), Some("Untitled Folder"));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(h.state().session.project, project, "one undo takes back the folder and the move");
+
+    // An item that is not selected goes alone.
+    h.state_mut().session.state.project_selection = vec![b];
+    h.run_steps(3);
+    let before = folders(&h);
+    let from = rect(&h, &format!("project.item.{}.name", a.0)).center();
+    drag(&mut h, from, to);
+    let [folder] = new_folders(&h, &before)[..] else { panic!("one new folder") };
+    assert_eq!((parent(&h, a), parent(&h, b)), (Some(folder), Some(bin)), "only the dragged item");
+}
+
 /// Agents and scripts: `engine.execute` only creates the folder.
 #[test]
 fn engine_execute_only_creates_the_folder() {

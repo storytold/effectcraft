@@ -3,7 +3,8 @@
 //! Media Duration, Frame Rate, File Path, Comment — shown or hidden from the header's context
 //! menu), folders (drag items into and out of them), renaming (Enter, or double-click the name),
 //! the label colour picker, and the bottom bar (interpret, new folder, new comp: click, or drop
-//! items on it for a comp from them, bit depth, delete), and the keyboard (the arrow keys select,
+//! items on New Folder for a folder holding them, or on New Comp for a comp from them; bit depth,
+//! delete), and the keyboard (the arrow keys select,
 //! extend the selection and open / close folders; rows and buttons carry AccessKit names and
 //! states for screen readers). Edits are engine commands, so they are undoable.
 
@@ -905,17 +906,24 @@ fn footer(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, foot: 
             }
         }
         // Items dropped on Create a new Composition: New Comp from Selection with them (After
-        // Effects; several items ask how in its dialog).
-        if id == "newComp"
+        // Effects; several items ask how in its dialog). Dropped on Create a new Folder: a new
+        // folder holding them (#3196). The dragged item, or the selection it belongs to.
+        if matches!(id, "newComp" | "newFolder")
             && let Some(DragPayload::Item(iid)) = egui::DragAndDrop::payload::<DragPayload>(&ctx).as_deref()
             && ui.rect_contains_pointer(r)
         {
             p.rect_stroke(r, 4.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
             if ctx.input(|i| i.pointer.any_released()) {
-                if !app.session.state.project_selection.contains(&ItemId(*iid)) {
-                    app.session.state.project_selection = vec![ItemId(*iid)];
+                let selected = app.session.state.project_selection.contains(&ItemId(*iid));
+                if id == "newComp" {
+                    if !selected {
+                        app.session.state.project_selection = vec![ItemId(*iid)];
+                    }
+                    actions.push(("file.newCompFromSelection".into(), json!({})));
+                } else {
+                    let items: Vec<u64> = if selected { app.session.state.project_selection.iter().map(|i| i.0).collect() } else { vec![*iid] };
+                    actions.push(("project.newFolder".into(), json!({"items": items})));
                 }
-                actions.push(("file.newCompFromSelection".into(), json!({})));
                 egui::DragAndDrop::clear_payload(&ctx);
             }
         }
