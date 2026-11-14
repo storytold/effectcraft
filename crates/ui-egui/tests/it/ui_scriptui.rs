@@ -456,7 +456,7 @@ fn script_browse_buttons_open_the_file_dialog() {
     let (dialog, answer) = done.lock().unwrap().pop().expect("the folder dialog is asked for");
     assert_eq!(dialog, effectcraft_ui_egui::FileDialog::ScriptFolder { prompt: "Output folder".into(), start: String::new() });
     let folder = std::env::temp_dir().to_string_lossy().to_string();
-    answer(vec![folder.clone()]);
+    answer(Ok(vec![folder.clone()]));
     h.run_steps(3);
     assert_eq!(text(&h, "out"), folder);
     // A dialog that ends without answering (its completion handler never runs) counts as

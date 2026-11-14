@@ -53,7 +53,7 @@ fn stored_group(bytes: &[u8]) -> Vec<u8> {
             {
                 // As far as the exporter writes records (`decoded`).
                 let mut f2 = effectcraft_aep::AepFile {
-                    chunks: vec![crate::export::helpers::decoded(&g.chunk().clone().into_owned())],
+                    chunks: vec![crate::export::helpers::decoded(&g.chunk().to_chunk().into_owned())],
                     trailer: std::borrow::Cow::Owned(vec![]),
                 };
                 f2.trailer = std::borrow::Cow::Owned(vec![]);

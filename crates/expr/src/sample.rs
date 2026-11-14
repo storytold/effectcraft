@@ -4,13 +4,16 @@
 //! expression (its footage source; [`EvalCtx::footage`]): source → masks → effects for
 //! `postEffect = true`, the bare source otherwise, in layer space (before the transform). Buffers
 //! are cached per thread for the frame, so many expressions sampling the same layer at the same
-//! time render it once.
+//! time render it once. The source files a sampled render reads are kept with its buffer and
+//! noted in the evaluating render's log ([`EvalCtx::reads`]) on every use, so a frame whose
+//! expressions sample footage lists that footage too (#3184).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use effectcraft_project::{ItemId, Layer};
+use effectcraft_render::reads::{ReadFiles, ReadLog};
 use effectcraft_render::{EvalCtx, NoFootage, RenderOpts, Renderer};
 use effectcraft_time::Tick;
 
@@ -26,7 +29,8 @@ struct Sampled {
 type Key = (usize, u64, u64, u64, bool, u64);
 
 thread_local! {
-    static CACHE: RefCell<HashMap<Key, Option<Sampled>>> = RefCell::new(HashMap::new());
+    /// The sampled buffers and the source files each was made of.
+    static CACHE: RefCell<HashMap<Key, (Option<Sampled>, Arc<ReadFiles>)>> = RefCell::new(HashMap::new());
     /// Nested sampleImage renders (a sampled layer whose expressions sample again).
     static DEPTH: RefCell<usize> = const { RefCell::new(0) };
 }
@@ -42,13 +46,21 @@ fn fingerprint(layer: &Layer) -> u64 {
     h.finish()
 }
 
+/// Renders `layer` of `comp` at time `t` for an expression sample, before or after effects as `post` says.
+/// Returns `None` once the nesting depth limit is reached.
 fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Option<Sampled> {
     let depth = DEPTH.with(|d| *d.borrow());
     if depth >= MAX_DEPTH {
         return None;
     }
     let key: Key = (ctx.project as *const _ as usize, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer));
-    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    let note = |files: &ReadFiles| {
+        if let Some(log) = ctx.reads {
+            log.note_all(files);
+        }
+    };
+    if let Some((hit, files)) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        note(&files);
         return hit;
     }
     DEPTH.with(|d| *d.borrow_mut() += 1);
@@ -60,20 +72,24 @@ fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Opti
     }
     let _pop = Pop;
     let footage: &dyn effectcraft_render::FootageSource = ctx.footage.unwrap_or(&NoFootage);
+    let log = ReadLog::new();
     let mut r = Renderer::new(ctx.project, footage, RenderOpts { motion_blur: false, ..Default::default() });
     r.expr = ctx.expr;
+    r.reads = Some(&log);
     let ectx = r.eval_ctx(comp, Tick::from_seconds_f64(t))?;
     let out = if post {
-        r.content_buf(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img.clone()), offset: b.offset, scale: b.scale })
+        r.layer_content(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img.clone()), offset: b.offset, scale: b.scale })
     } else {
         r.layer_source(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img), offset: b.offset, scale: b.scale })
     };
+    let files = Arc::new(log.into_files());
+    note(&files);
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if c.len() >= MAX_CACHE {
             c.clear();
         }
-        c.insert(key, out.clone());
+        c.insert(key, (out.clone(), files));
     });
     out
 }

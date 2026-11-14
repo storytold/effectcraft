@@ -1,5 +1,5 @@
 //! Channel effects, batch 2: layer-to-layer combinations (Blend, Calculations, Compound
-//! Arithmetic) and CC Composite. Second layers come from layer parameters through the effect
+//! Arithmetic) and Source Composite. Second layers come from layer parameters through the effect
 //! host; with no layer chosen the effect uses the layer itself, as After Effects does.
 
 use effectcraft_color::{BlendMode, blend_pixel, hsl_to_rgb, luminance, rgb_to_hsl};
@@ -69,7 +69,7 @@ fn blend(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- Calculations
 
-/// Blending modes offered by Calculations / CC Composite (menu order).
+/// Blending modes offered by Calculations / Source Composite (menu order).
 const CALC_MODES: [BlendMode; 22] = [
     BlendMode::Normal,
     BlendMode::Darken,
@@ -150,7 +150,7 @@ fn calculations(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Composite
+// ---------------------------------------------------------------- Source Composite
 
 const CC_COMPOSITE_MODES: [&str; 16] = [
     "In Front",
@@ -321,7 +321,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.channel.cccomposite",
-            "CC Composite",
+            "Source Composite",
             vec![
                 p("opacity", "Opacity", num(100.0), pct()),
                 p("compositeOriginal", "Composite Original", Value::Enum(0), popup(&CC_COMPOSITE_MODES)),

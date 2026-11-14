@@ -44,6 +44,9 @@ impl EffectcraftApp {
     pub fn set_gpu_failure_bridge(&mut self, bridge: gpu_failure::GpuFailureBridge) {
         if let Some(gpu) = &self.gpu {
             bridge.forward_to(gpu.context().device_failure_notifier());
+            if let Some(observer) = bridge.scoped_error_observer() {
+                gpu.set_scoped_error_observer(observer);
+            }
         }
         self.gpu_failures = Some(bridge);
     }
@@ -143,7 +146,12 @@ impl EffectcraftApp {
             self.file_dialogs.answered();
             // A script's file dialog: answered even when cancelled (the script waits on it).
             if answer.command == panels::scriptui_view::FILE_DIALOG_COMMAND {
-                panels::scriptui_view::answer_file_dialog(self, &answer.params, answer.paths);
+                // A dialog that couldn't open says why in the status line and counts as cancelled.
+                let paths = answer.paths.unwrap_or_else(|e| {
+                    self.ui.status = e;
+                    Vec::new()
+                });
+                panels::scriptui_view::answer_file_dialog(self, &answer.params, paths);
                 continue;
             }
             menus::dialog_answered(self, answer);
@@ -262,6 +270,9 @@ impl EffectcraftApp {
             Ok(Ok(g)) => {
                 if let Some(bridge) = &self.gpu_failures {
                     bridge.forward_to(g.context().device_failure_notifier());
+                    if let Some(observer) = bridge.scoped_error_observer() {
+                        g.set_scoped_error_observer(observer);
+                    }
                     if bridge.failure().is_some() {
                         return;
                     }

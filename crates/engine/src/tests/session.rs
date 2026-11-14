@@ -96,6 +96,25 @@ fn imported_files_go_into_the_comp_where_they_were_dropped() {
     assert!(s.execute("layer.addItem", json!({"item": "a.png", "position": [1.0]})).is_err(), "position needs x and y");
 }
 
+/// What an import left out of a file (a 3D model's textures over the limits) comes back in the
+/// import's `warnings`.
+#[test]
+fn what_an_import_left_out_is_a_warning() {
+    use effectcraft_project::{Footage, FootageKind};
+    struct Probe;
+    impl crate::Importer for Probe {
+        fn probe(&self, path: &str) -> Result<Footage, String> {
+            Ok(Footage { path: path.into(), kind: FootageKind::Model, ..Default::default() })
+        }
+        fn probe_noting(&self, path: &str) -> Result<(Footage, Option<String>), String> {
+            Ok((self.probe(path)?, Some(format!("{path}: texture `a.png` left out"))))
+        }
+    }
+    let mut s = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+    let r = s.execute("file.import", json!({"paths": ["/m/scene.obj"]})).unwrap();
+    assert_eq!(r["warnings"], json!(["/m/scene.obj: texture `a.png` left out"]));
+}
+
 /// #270: files dropped or picked in the Import dialog (`file.import {background}`) are probed in
 /// a background job that says which file it is reading and how many are left; then they arrive
 /// in one undo step, all selected, with a count. The same file imported again arrives again.

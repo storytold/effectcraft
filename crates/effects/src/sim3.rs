@@ -1,4 +1,4 @@
-//! Simulation: Particle Playground and CC Hair.
+//! Simulation: Particle Playground and Surface Fibers.
 //!
 //! **Particle Playground** is a deterministic 2D particle system stepped from layer time 0 at
 //! [`SPS`] steps per second through [`SimCache`] (seeking anywhere gives the same frame as
@@ -17,7 +17,7 @@
 //! being rendered (their pixels are part of the cache key). Particles replace the layer's own
 //! pixels, as in After Effects.
 //!
-//! **CC Hair** grows strands from the layer's opaque pixels (Density per 1 000 px²), each a
+//! **Surface Fibers** grows strands from the layer's opaque pixels (Density per 1 000 px²), each a
 //! quadratic curve of Length that droops with Weight, optionally steered and scaled by a hairfall
 //! map layer (luminance → length, horizontal/vertical gradient → lean), and shades them with a
 //! Kajiya–Kay-style strand model (diffuse ∝ sin(tangent, light), specular from the half vector).
@@ -934,7 +934,7 @@ impl PgPlan {
     }
 }
 
-// ---------------------------------------------------------------- CC Hair
+// ---------------------------------------------------------------- Surface Fibers
 
 fn cc_hair(ctx: &EffectCtx, b: Buf) -> Buf {
     let Some(mut plan) = hair_plan(ctx, &b) else { return b };
@@ -942,7 +942,7 @@ fn cc_hair(ctx: &EffectCtx, b: Buf) -> Buf {
     plan.finish(b)
 }
 
-/// CC Hair's strands as line sprites (each coloured from its root, see [`Tint::Root`]);
+/// Surface Fibers's strands as line sprites (each coloured from its root, see [`Tint::Root`]);
 /// `None` = no hair (the layer passes through).
 pub(crate) fn hair_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan> {
     let pr = ctx.params;
@@ -1144,7 +1144,7 @@ pub fn specs() -> Vec<EffectSpec> {
         spec("ec.sim.particleplayground", "Particle Playground", pg, particle_playground),
         spec(
             "ec.sim.cchair",
-            "CC Hair",
+            "Surface Fibers",
             vec![
                 sp("length", "Length", px(30.0, 200.0)),
                 p("thickness", "Thickness", num(1.0), slider(0.05, 20.0, 0.1, 5.0, 2)),

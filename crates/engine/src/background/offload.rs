@@ -375,7 +375,7 @@ pub(crate) fn job_accel() -> Option<Arc<dyn Accelerator>> {
 }
 
 /// Render options of an analysis's input frames: 100 %; with an accelerator, the project's
-/// renderer (Mercury GPU Acceleration: its GPU effects on the device; Software Only: the CPU).
+/// renderer (GPU Acceleration: its GPU effects on the device; Software Only: the CPU).
 pub(crate) fn analysis_opts(accel: Option<&dyn Accelerator>) -> RenderOpts {
     RenderOpts { scale: 1.0, backend: if accel.is_some() { Backend::Auto } else { Backend::Cpu }, ..Default::default() }
 }

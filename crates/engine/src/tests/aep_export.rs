@@ -1,4 +1,4 @@
-//! File ▸ Export ▸ After Effects Project… through the command registry.
+//! File ▸ Export ▸ Adobe After Effects Project… through the command registry.
 
 use serde_json::json;
 
@@ -73,11 +73,12 @@ fn bad_input_is_an_error_not_a_crash() {
     assert!(empty.execute_checked("file.exportAep", json!({"path": path})).is_ok());
 }
 
+/// File ▸ Export ▸ Adobe After Effects Project… is in the menu under that label.
 #[test]
 fn aep_export_menu_entry_exists() {
     let entries = crate::menus::entries();
     let find = |cmd: &str| entries.iter().find(|(_, e)| e.command == cmd).map(|(p, e)| (p.join(" > "), e.label.clone()));
-    assert_eq!(find("file.exportAep"), Some(("File > Export".into(), "After Effects Project...".into())));
+    assert_eq!(find("file.exportAep"), Some(("File > Export".into(), "Adobe After Effects Project...".into())));
 }
 
 #[test]

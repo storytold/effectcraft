@@ -1,5 +1,5 @@
-//! Stylize effects, batch 3: CC Block Load, CC Burn Film, CC Glass, CC HexTile, CC Mr. Smoothie
-//! and CC Plastic.
+//! Stylize effects, batch 3: Block Reveal, Film Burn, Glass Relief, Hexagonal Tiles, Palette Map
+//! and Plastic Shading.
 //!
 //! Written from the public descriptions of what these effects do (progressive block loading,
 //! burning film, bump-mapped glass / plastic surfaces lit by an effect light, hexagonal tiling,
@@ -27,7 +27,7 @@ fn pt(x: f64, y: f64) -> Value {
     Value::Vec2([x, y])
 }
 
-// ------------------------------------------------------------------ CC Block Load
+// ------------------------------------------------------------------ Block Reveal
 
 /// Mean colour of every `s`×`s` block (grid of `ceil(w/s)`×`ceil(h/s)`).
 fn block_means(img: &Image, s: usize) -> (usize, usize, Vec<Px>) {
@@ -135,7 +135,7 @@ fn block_load(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Burn Film
+// ------------------------------------------------------------------ Film Burn
 
 fn burn_film(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let burn = (ctx.params.f("burn") / 100.0).clamp(0.0, 1.0) as f32;
@@ -180,7 +180,7 @@ fn burn_film(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 const BUMP_PROPS: [&str; 6] = ["Red", "Green", "Blue", "Alpha", "Luminance", "Lightness"];
 
-/// The bump-map layer parameter: CC Glass's Bump Map, CC Plastic's Bump Layer.
+/// The bump-map layer parameter: Glass Relief's Bump Map, Plastic Shading's Bump Layer.
 pub fn bump_layer_id(ctx: &EffectCtx) -> &'static str {
     if ctx.params.get("bumpLayer").is_some() { "bumpLayer" } else { "bumpMap" }
 }
@@ -208,7 +208,7 @@ fn height_field(ctx: &EffectCtx, b: &Buf) -> Plane {
     pl
 }
 
-/// The effect light and surface of CC Glass / CC Plastic (shared with the GPU compositor).
+/// The effect light and surface of Glass Relief / Plastic Shading (shared with the GPU compositor).
 pub struct BumpLight {
     pub intensity: f32,
     pub color: [f32; 3],
@@ -342,7 +342,7 @@ fn plastic(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC HexTile
+// ------------------------------------------------------------------ Hexagonal Tiles
 
 /// Axial hex cell (pointy-top) containing (x, y) for circumradius `r`; returns the cell centre
 /// and integer cell coordinates.
@@ -418,7 +418,7 @@ fn hextile(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Mr. Smoothie
+// ------------------------------------------------------------------ Palette Map
 
 const SMOOTHIE_PROPS: [&str; 8] = ["Red", "Green", "Blue", "Alpha", "Luminance", "Lightness", "Hue", "Saturation"];
 
@@ -518,7 +518,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.stylize.ccblockload",
-            "CC Block Load",
+            "Block Reveal",
             vec![
                 p("completion", "Completion", num(0.0), pct()),
                 p("scanlines", "Scanlines", Value::Bool(true), ParamUi::Checkbox),
@@ -530,7 +530,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccburnfilm",
-            "CC Burn Film",
+            "Film Burn",
             vec![
                 p("burn", "Burn", num(0.0), pct()),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -538,10 +538,10 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             burn_film,
         ),
-        spec("ec.stylize.ccglass", "CC Glass", glass_p, glass),
+        spec("ec.stylize.ccglass", "Glass Relief", glass_p, glass),
         spec(
             "ec.stylize.cchextile",
-            "CC HexTile",
+            "Hexagonal Tiles",
             vec![
                 p("render", "Render", Value::Enum(0), popup(&["Normal", "Mirrored", "Rotated"])),
                 p("radius", "Radius", num(50.0), slider(1.0, 4000.0, 2.0, 500.0, 1)),
@@ -553,7 +553,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.stylize.ccmrsmoothie",
-            "CC Mr. Smoothie",
+            "Palette Map",
             vec![
                 p("flowLayer", "Flow Layer", Value::Layer(None), ParamUi::Layer),
                 p("property", "Property", Value::Enum(4), popup(&SMOOTHIE_PROPS)),
@@ -565,7 +565,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             smoothie,
         ),
-        spec("ec.stylize.ccplastic", "CC Plastic", plastic_p, plastic),
+        spec("ec.stylize.ccplastic", "Plastic Shading", plastic_p, plastic),
     ]
 }
 

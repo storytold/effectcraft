@@ -40,7 +40,17 @@ fn close3(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
 fn frame(s: &Session, id: u64) -> (Vec3, Vec3) {
     let c = cid(s);
     let comp = s.project.comp(c).unwrap();
-    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: Tick::ZERO, expr: None, footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx {
+        project: &s.project,
+        comp_id: c,
+        comp,
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
     let (e, f, _) = layer_frame(&ctx, comp.layer(LayerId(id)).unwrap());
     (e, f)
 }
@@ -244,7 +254,7 @@ fn parented_camera_keeps_its_frame_under_an_offset_null() {
 fn frame_at(s: &Session, id: u64, t: Tick) -> (Vec3, Vec3, Vec3) {
     let c = cid(s);
     let comp = s.project.comp(c).unwrap();
-    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: t, expr: None, footage: None, property_overrides: &[], media_overrides: &[] };
+    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: t, expr: None, footage: None, property_overrides: &[], media_overrides: &[], reads: None };
     layer_frame(&ctx, comp.layer(LayerId(id)).unwrap())
 }
 
@@ -429,7 +439,7 @@ const RIGGED: &str = r#"{
   ],
   "cameras": [{"type": "perspective", "name": "Shot", "perspective": {"yfov": 0.6, "znear": 0.1}}],
   "extensions": {"KHR_lights_punctual": {"lights": [
-    {"type": "spot", "name": "Key Light", "color": [1, 0.8, 0.6], "intensity": 1.5, "spot": {"innerConeAngle": 0.25, "outerConeAngle": 0.5}},
+    {"type": "spot", "name": "Screen Color Key", "color": [1, 0.8, 0.6], "intensity": 1.5, "spot": {"innerConeAngle": 0.25, "outerConeAngle": 0.5}},
     {"type": "point", "name": "Fill Light", "intensity": 0.5, "range": 4}
   ]}}
 }"#;
@@ -468,7 +478,7 @@ fn cameras_and_lights_from_model() {
     let r = s.execute("light.fromModel", json!({})).unwrap();
     let ls: Vec<Layer> = r["layers"].as_array().unwrap().iter().map(|v| layer_in(&s, cid(&s), v.as_u64().unwrap())).collect();
     assert_eq!(ls.len(), 2);
-    let key = ls.iter().find(|l| l.name == "Key Light").unwrap();
+    let key = ls.iter().find(|l| l.name == "Screen Color Key").unwrap();
     assert_eq!(key.source, LayerSource::Light { kind: LightKind::Spot });
     assert!((key.props.prop("lightOptions/coneAngle").unwrap().value.as_f64() - 1.0f64.to_degrees()).abs() < 1e-6);
     assert!((key.props.prop("lightOptions/coneFeather").unwrap().value.as_f64() - 50.0).abs() < 1e-6);

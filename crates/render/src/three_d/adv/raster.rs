@@ -126,11 +126,14 @@ fn setup(s: &Scene, clip: &[[f32; 4]], range: std::ops::Range<usize>) -> Vec<STr
                 x1 = x1.max(v.0[0]);
                 y1 = y1.max(v.0[1]);
             }
+            // Clamped on both sides to the viewport before narrowing to i32, so a far-off
+            // coordinate cannot wrap into a huge pixel range (a viewport past i32::MAX is capped there).
+            let (w, h) = (i64::from(s.width.min(i32::MAX as u32)), i64::from(s.height.min(i32::MAX as u32)));
             let bbox = [
-                (x0.floor() as i64).max(0) as i32,
-                (y0.floor() as i64).max(0) as i32,
-                (x1.ceil() as i64).min(s.width as i64) as i32,
-                (y1.ceil() as i64).min(s.height as i64) as i32,
+                (x0.floor() as i64).clamp(0, w) as i32,
+                (y0.floor() as i64).clamp(0, h) as i32,
+                (x1.ceil() as i64).clamp(0, w) as i32,
+                (y1.ceil() as i64).clamp(0, h) as i32,
             ];
             if bbox[0] >= bbox[2] || bbox[1] >= bbox[3] {
                 continue;

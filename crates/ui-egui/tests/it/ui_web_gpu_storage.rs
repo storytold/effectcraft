@@ -61,7 +61,7 @@ impl RemoteFrames for GpuWorker {
     fn start(&self, job: RemoteJob, done: RemoteDone) {
         // The page reads a hit from the disk cache instead of asking the worker.
         if let Some(k) = job.disk_key
-            && let Some(f) = self.disk.lock().unwrap().get(&k).and_then(|e| disk_cache::read_frame_entry(e))
+            && let Some(f) = self.disk.lock().unwrap().get(&k).and_then(|e| disk_cache::read_frame_entry(e, None))
         {
             return done(Ok(RemoteFrame { width: f.width, height: f.height, rgba: f.rgba, ms: 0.0 }));
         }
@@ -91,8 +91,11 @@ impl RemoteFrames for GpuWorker {
         match out.into_iter().next() {
             Some((FrameReply::Frame { width, height, ms, passes, gpu, .. }, Some(rgba))) => {
                 self.rendered.lock().unwrap().push((passes, gpu));
-                if let Some(k) = job.disk_key {
-                    self.disk.lock().unwrap().insert(k, disk_cache::frame_entry(width, height, &rgba));
+                if let Some(k) = job.disk_key
+                    && let Some(files) = server.take_files()
+                    && let Some(entry) = disk_cache::frame_entry(width, height, &rgba, &files, None)
+                {
+                    self.disk.lock().unwrap().insert(k, entry);
                 }
                 done(Ok(RemoteFrame { width, height, rgba, ms }))
             }

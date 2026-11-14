@@ -287,7 +287,7 @@ impl Psd {
                 let d = descriptor::read_descriptor(&mut r)?;
                 let text = d.text("Txt ").unwrap_or_default().replace("\r\n", "\n").replace('\r', "\n");
                 let text = text.strip_suffix('\n').map(str::to_string).unwrap_or(text);
-                let style = d.raw("EngineData").map(|e| engine_data::text_style(&engine_data::parse(e))).unwrap_or_default();
+                let style = d.raw("EngineData").map(|e| engine_data::text_style(&engine_data::parse_lossy(e))).unwrap_or_default();
                 let bounds =
                     d.obj("bounds").or_else(|| d.obj("boundingBox")).and_then(|o| Some([o.num("Left")?, o.num("Top ")?, o.num("Rght")?, o.num("Btom")?]));
                 l.text = Some(TextInfo { text, transform: t, style, bounds });

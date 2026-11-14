@@ -259,7 +259,7 @@ pub fn tutorials() -> Vec<Tutorial> {
                     target: Some("menu.Layer"),
                     accepts: &["layer.newLight"],
                     when: Value::Null,
-                    show: vec![("layer.newLight", json!({"kind": "Spot", "name": "Key Light"}))],
+                    show: vec![("layer.newLight", json!({"kind": "Spot", "name": "Screen Color Key"}))],
                 }),
                 step(S {
                     title: "Add a camera",

@@ -53,6 +53,7 @@ pub(super) fn aux_views(
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let selected = app.session.state.selected_layers.clone();
     let mut picked: Option<(usize, View3D)> = None;

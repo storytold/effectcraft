@@ -1,9 +1,9 @@
 //! Time effects (Effect > Time): Echo, Posterize Time, Time Difference, Time Displacement,
-//! Timewarp, CC Force Motion Blur, CC Wide Time and Pixel Motion Blur.
+//! Timewarp, Temporal Motion Blur, Temporal Blend and Pixel Motion Blur.
 //!
 //! These read the layer at *other* layer times through [`EffectHost::self_at`]: its source with
 //! its masks and the effects applied before them, as After Effects renders them (SceneYard:
-//! Echo after CC Particle Systems II echoes the fireworks, not the black solid under them;
+//! Echo after Particle Emitter 2D echoes the fireworks, not the black solid under them;
 //! Posterize Time after Turbulent Displace steps the displacement). Timewarp is the exception:
 //! it retimes the layer's source with its masks and ignores the effects above it (After
 //! Effects 2026: a red solid with a Gradient Ramp and then Timewarp shows the red solid).
@@ -123,7 +123,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.time.ccforcemotionblur",
-            "CC Force Motion Blur",
+            "Temporal Motion Blur",
             vec![
                 p("motionBlurLevels", "Motion Blur Levels", num(8.0), slider(2.0, 64.0, 2.0, 32.0, 0)),
                 p("overrideShutterAngle", "Override Shutter Angle", Value::Bool(true), ParamUi::Checkbox),
@@ -134,7 +134,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.time.ccwidetime",
-            "CC Wide Time",
+            "Temporal Blend",
             vec![
                 p("forwardSteps", "Forward Steps", num(3.0), slider(0.0, 45.0, 0.0, 15.0, 0)),
                 p("backwardSteps", "Backward Steps", num(3.0), slider(0.0, 45.0, 0.0, 15.0, 0)),
@@ -565,7 +565,8 @@ impl PixelMotion {
         let px = |id: &str| (g(id, 0.0).max(0.0) * scale).round() as u32;
         PixelMotion {
             tile,
-            window: ((g("tuning/blockSize", 8.0).max(4.0)) * scale).round().max(4.0) as u32,
+            // Block Size is declared 4..64; a project can store any number.
+            window: ((g("tuning/blockSize", 8.0).clamp(4.0, 64.0)) * scale).round().max(4.0) as u32,
             global_smoothness: g("tuning/smoothing/globalSmoothness", 0.5).clamp(0.0, 1.0) as f32,
             local_smoothness: g("tuning/smoothing/localSmoothness", 0.5).clamp(0.0, 1.0) as f32,
             iterations: g("tuning/smoothing/smoothingIterations", 20.0).clamp(0.0, 200.0) as u32,
@@ -994,7 +995,7 @@ fn matte_image(m: &[f32], like: &Image) -> Image {
     out
 }
 
-// ---------------------------------------------------------------- CC Force Motion Blur / CC Wide Time / Pixel Motion Blur
+// ---------------------------------------------------------------- Temporal Motion Blur / Temporal Blend / Pixel Motion Blur
 
 fn force_motion_blur(ctx: &EffectCtx, b: Buf) -> Buf {
     let n = ctx.params.f("motionBlurLevels").round().clamp(2.0, 64.0) as usize;
