@@ -20,6 +20,26 @@ pub(crate) enum V {
     Null,
     /// `currentfile`.
     File,
+    /// A decoding filter over `currentfile`.
+    Filter(Rc<RefCell<Filter>>),
+}
+
+/// A chain of decoding filters over `currentfile`, innermost first. Its data is decoded when it
+/// is first read.
+pub(crate) struct Filter {
+    pub(crate) names: Vec<String>,
+    pub(crate) data: Option<Vec<u8>>,
+    pub(crate) pos: usize,
+}
+
+/// The current colour space, as far as images need it.
+#[derive(Clone)]
+pub(crate) enum ImageCs {
+    Gray,
+    Rgb,
+    Cmyk,
+    Indexed { base: Rc<ImageCs>, hival: usize, lookup: Rc<Vec<u8>> },
+    Other,
 }
 
 impl V {
@@ -57,6 +77,9 @@ pub(super) enum Flow {
 pub(super) struct GState {
     pub(crate) ctm: Affine,
     pub(crate) color: [f64; 3],
+    pub(crate) image_cs: ImageCs,
+    /// The last `setcmykcolor`: the colour it made and its operands.
+    pub(crate) cmyk: Option<([f64; 3], [f64; 4])>,
     pub(crate) lw: f64,
     pub(crate) cap: Cap,
     pub(crate) join: Join,

@@ -284,7 +284,7 @@ impl Interp {
             }
             // An embedded Type 1 program's encrypted part (read by `embedded_fonts`).
             "eexec" => {
-                if matches!(self.pop(), V::File) {
+                if matches!(self.pop(), V::File | V::Filter(_)) {
                     let rest = &src.d[src.pos.min(src.d.len())..];
                     src.pos += rest.windows(11).position(|w| w == b"cleartomark").map_or(rest.len(), |p| p + 11);
                 }
