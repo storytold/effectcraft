@@ -142,10 +142,15 @@ build. Earlier builds apply format 4 animation presets the same way and ignore
 `cineonVersion`.
 
 Animation presets are format 4 (`effectcraftAnimationPreset: 4`). A saved property that is a
-Cineon Converter's Gamma records that instance's version in `cineonVersion`. So does an Essential
-Properties value whose control drives only Cineon Converter Gammas of one version, directly or
-through nested comps. The Gamma properties of format 1 to 3 presets are version 1 Gammas. Applying a
-Gamma to a Cineon Converter on the layer sets that instance's Version to the recorded one.
+Cineon Converter's Gamma records that instance's version at the current time in `cineonVersion`.
+So does an Essential Properties value whose control drives only Cineon Converter Gammas of one
+version, directly or through nested comps. A keyframed Version counts there only when its keys
+that play hold one value without easing between them. A Version that an expression sets has no
+version to record. The Gamma properties of format 1 to 3 presets are version 1 Gammas. Applying a
+Gamma to a Cineon Converter on the layer sets that instance's Version to the recorded one. When
+that Version is keyframed, its keys stay and the Gamma is converted to the one version they hold;
+the Gamma is skipped when the keys hold several versions or an expression sets the Version. A
+preset that also holds the Version sets it from that property.
 Applying it to an Essential Properties value converts the value, its keyframes and their speeds to
 the version of the Gammas that the control drives (dividing by 1.7 from version 1 to version 2).
 That conversion aligns the linear points, but the two versions use different curves at other
