@@ -328,6 +328,25 @@ pub struct CompCamera {
     pub dof: Option<[f64; 3]>,
 }
 
+/// A light of the composition as an effect's layer sees it ([`PluginHost::comp_lights`]): a
+/// particle system's Light(s) emitter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompLightInfo {
+    /// The light layer's name (a particle system may emit only from lights named "Emitter...").
+    pub name: String,
+    /// 0 parallel, 1 spot, 2 point, 3 ambient.
+    pub kind: u8,
+    /// Position in this layer's pixels (x, y as a point parameter in layer pixels, z away from
+    /// the viewer), and the unit direction it shines (spot and parallel lights).
+    pub pos: [f64; 3],
+    pub dir: [f64; 3],
+    /// Colour (0-1, not multiplied by intensity) and Intensity (1 = 100 %).
+    pub color: [f32; 3],
+    pub intensity: f64,
+    /// Spot cone angle (degrees, the whole cone).
+    pub cone: f64,
+}
+
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
 pub trait PluginHost {
     /// This effect's input (its layer with masks and the effects above this one) at another
@@ -352,6 +371,11 @@ pub trait PluginHost {
     /// The composition's camera at **layer time** `layer_time` (converted to composition time)
     /// as this layer sees it then (camera motion blur). `None` when unknown.
     fn comp_camera_at(&self, _layer_time: f64) -> Option<CompCamera> {
+        None
+    }
+    /// The composition's lights switched on at **layer time** `layer_time`, as this layer sees
+    /// them ([`CompLightInfo`]). `None` when unknown.
+    fn comp_lights(&self, _layer_time: f64) -> Option<Vec<CompLightInfo>> {
         None
     }
     /// All flattened parameter values (and texts) at another layer time.
@@ -728,6 +752,11 @@ impl PluginHost for RenderHost<'_, '_> {
         let sc = self.ctx.env.host?.comp_scene()?;
         // effect-space pixels, as the frame's points are once divided back by its scale
         Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
+    }
+
+    fn comp_lights(&self, layer_time: f64) -> Option<Vec<CompLightInfo>> {
+        let ctx = self.ctx;
+        Some(ctx.env.host?.comp_lights(ctx.env.comp_time + (layer_time - ctx.time)))
     }
 
     fn comp_camera_at(&self, layer_time: f64) -> Option<CompCamera> {

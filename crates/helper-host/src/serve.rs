@@ -152,7 +152,7 @@ impl Server<'_> {
                 Ok(())
             }
             Request::Ping => self.send(&Reply::Pong),
-            Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } => {
+            Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } | Request::Lights { .. } => {
                 self.send(&Reply::Error { message: "no callback is waiting for an answer".into() })
             }
             Request::Shutdown => Ok(()),
@@ -193,7 +193,7 @@ impl Server<'_> {
         loop {
             let req = self.next_request()?.ok_or("EffectCraft closed the pipe")?;
             match req {
-                Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } => return Ok(req),
+                Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } | Request::Lights { .. } => return Ok(req),
                 Request::Shutdown => return Err("EffectCraft asked the helper to shut down".into()),
                 other => self.handle(other)?,
             }
@@ -241,6 +241,16 @@ impl PluginHost for Callbacks<'_, '_> {
         }
         match s.ask(&Reply::CompCamera { time: None }) {
             Ok(Request::Camera { camera }) => camera,
+            _ => None,
+        }
+    }
+    fn comp_lights(&self, layer_time: f64) -> Option<Vec<effectcraft_effects::plugin::CompLightInfo>> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_lights") {
+            return None;
+        }
+        match s.ask(&Reply::CompLights { time: layer_time }) {
+            Ok(Request::Lights { lights }) => lights,
             _ => None,
         }
     }

@@ -579,6 +579,11 @@ pub trait EffectHost: Sync {
     fn comp_scene(&self) -> Option<CompScene> {
         None
     }
+    /// The composition's lights switched on at comp time `comp_time`, in the effect's space
+    /// (as [`EffectHost::comp_scene`]'s camera). Empty when unknown.
+    fn comp_lights(&self, _comp_time: f64) -> Vec<plugin::CompLightInfo> {
+        Vec::new()
+    }
     /// [`EffectHost::comp_scene`] at comp time `comp_time` (seconds). `None` when unknown.
     fn comp_scene_at(&self, _comp_time: f64) -> Option<CompScene> {
         None

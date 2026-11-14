@@ -114,6 +114,8 @@ pub enum Request {
     Transform { transform: Option<effectcraft_effects::plugin::LayerTransform> },
     /// The answer to [`Reply::CompCamera`], or `None`.
     Camera { camera: Option<effectcraft_effects::plugin::CompCamera> },
+    /// The answer to [`Reply::CompLights`], or `None`.
+    Lights { lights: Option<Vec<effectcraft_effects::plugin::CompLightInfo>> },
     /// The effect instance is gone; the helper may free what it keeps for it. No reply.
     Destroy { instance: u64 },
     /// Heartbeat → [`Reply::Pong`].
@@ -180,6 +182,11 @@ pub enum Reply {
     CompCamera {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         time: Option<f64>,
+    },
+    /// During a render: the composition's lights at a layer time as the effect's layer sees them
+    /// (only when the host listed `"comp_lights"` in [`Request::Hello`]) → [`Request::Lights`].
+    CompLights {
+        time: f64,
     },
     /// The render finished; the result is in the request's frame.
     Done,
@@ -252,6 +259,20 @@ mod tests {
         assert_eq!(serde_json::from_str::<Reply>(r#"{"op":"comp_camera"}"#).unwrap(), Reply::CompCamera { time: None });
         let at = Reply::CompCamera { time: Some(0.25) };
         assert_eq!(parse_reply(&reply_line(&at).unwrap()).unwrap().unwrap(), at);
+        let l = Reply::CompLights { time: 0.5 };
+        assert_eq!(parse_reply(&reply_line(&l).unwrap()).unwrap().unwrap(), l);
+        let lights = Request::Lights {
+            lights: Some(vec![effectcraft_effects::plugin::CompLightInfo {
+                name: "Emitter".into(),
+                kind: 2,
+                pos: [600.0, 540.0, 0.0],
+                dir: [0.0, 0.0, 1.0],
+                color: [1.0, 0.0, 0.0],
+                intensity: 1.0,
+                cone: 90.0,
+            }]),
+        };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&lights).unwrap()).unwrap(), lights);
         let t = Request::Transform {
             transform: Some(effectcraft_effects::plugin::LayerTransform {
                 matrix: [[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 3.0], [0.0, 0.0, 1.0, 0.0]],

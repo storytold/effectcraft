@@ -146,6 +146,42 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
     }
 
+    fn comp_lights(&self, comp_time: f64) -> Vec<effectcraft_effects::plugin::CompLightInfo> {
+        if !comp_time.is_finite() {
+            return Vec::new();
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        let Some(inv) = ctx.world_matrix(self.layer).inverse() else { return Vec::new() };
+        ctx.comp
+            .layers
+            .iter()
+            .filter(|l| l.is_light() && l.switches.video && l.is_active_at(ctx.time))
+            .filter_map(|l| {
+                let s = three_d::light::LightState::from_layer(&ctx, l)?;
+                let g = l.props.sub("lightOptions")?;
+                let (pos, dir) = (inv.apply(s.pos), inv.apply_vec(s.dir));
+                let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt().max(1e-12);
+                let c = ctx.color(l, g, "color");
+                let kind = match s.kind {
+                    effectcraft_project::LightKind::Parallel => 0,
+                    effectcraft_project::LightKind::Spot => 1,
+                    effectcraft_project::LightKind::Point => 2,
+                    _ => 3,
+                };
+                Some(effectcraft_effects::plugin::CompLightInfo {
+                    name: l.name.clone(),
+                    kind,
+                    // effect space, as the camera (rebased onto the effect's origin)
+                    pos: [pos.x - self.origin[0], pos.y - self.origin[1], pos.z],
+                    dir: [dir.x / len, dir.y / len, dir.z / len],
+                    color: [c[0], c[1], c[2]],
+                    intensity: ctx.f(l, g, "intensity", 100.0) / 100.0,
+                    cone: ctx.f(l, g, "coneAngle", 90.0),
+                })
+            })
+            .collect()
+    }
+
     fn comp_scene_at(&self, comp_time: f64) -> Option<effectcraft_effects::CompScene> {
         if !comp_time.is_finite() {
             return None;
