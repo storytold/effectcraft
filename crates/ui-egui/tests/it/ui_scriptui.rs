@@ -454,7 +454,7 @@ fn script_browse_buttons_open_the_file_dialog() {
     h.state_mut().hooks.file_dialog_async = Some(Box::new(move |dialog, answer| queue.lock().unwrap().push((dialog, answer))));
     click(&mut h, &format!("scriptui.{d}.where"));
     let (dialog, answer) = done.lock().unwrap().pop().expect("the folder dialog is asked for");
-    assert_eq!(dialog, effectcraft_ui_egui::FileDialog::Folder);
+    assert_eq!(dialog, effectcraft_ui_egui::FileDialog::ScriptFolder { prompt: "Output folder".into(), start: String::new() });
     let folder = std::env::temp_dir().to_string_lossy().to_string();
     answer(vec![folder.clone()]);
     h.run_steps(3);
@@ -469,6 +469,56 @@ fn script_browse_buttons_open_the_file_dialog() {
     click(&mut h, &format!("scriptui.{d}.ok"));
     assert_eq!(layer_names(&h), [format!("{picked} | (cancelled)")]);
     assert!(h.state().session.script_ui.windows.is_empty());
+}
+
+/// #2778 review: the prompt, the start location and the full filter of a script's instance
+/// `openDlg` / `saveDlg` / `selectDlg` reach the host's dialog, not just the filter's extensions.
+#[test]
+fn script_file_dialog_options_reach_the_host_dialog() {
+    use effectcraft_ui_egui::FileDialog;
+    use std::sync::{Arc, Mutex};
+    let mut h = harness();
+    let asked: Arc<Mutex<Vec<FileDialog>>> = Arc::default();
+    let log = asked.clone();
+    h.state_mut().hooks.pick_file_dialog = Some(Box::new(move |dialog| {
+        log.lock().unwrap().push(dialog);
+        Vec::new()
+    }));
+    let dir = std::env::temp_dir().to_string_lossy().to_string();
+    let code = format!(
+        r#"
+      var d = new Window("dialog", "Options");
+      d.add("button", undefined, "Open", {{ name: "open" }}).onClick = function () {{ new File({dir:?}).openDlg("Pick a song", "Audio:*.mp3;*.wav,All files:*.*", false); }};
+      d.add("button", undefined, "Save", {{ name: "save" }}).onClick = function () {{ new File({dir:?} + "/Mix.wav").saveDlg("Save the mix", "Audio:*.wav;*.aif"); }};
+      d.add("button", undefined, "Folder", {{ name: "folder" }}).onClick = function () {{ new Folder({dir:?}).selectDlg("Output folder"); }};
+      d.add("button", undefined, "OK", {{ name: "ok" }});
+      d.show();
+    "#
+    );
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "opts.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(3);
+    let d = h.state().session.script_ui.windows.iter().find(|w| w.modal).unwrap().id;
+    for name in ["open", "save", "folder"] {
+        click(&mut h, &format!("scriptui.{d}.{name}"));
+    }
+    let got = asked.lock().unwrap().clone();
+    let exts = |e: &[&str]| e.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        got,
+        [
+            FileDialog::Script { label: "Audio".into(), exts: exts(&["mp3", "wav"]), any: true, many: false, prompt: "Pick a song".into(), start: dir.clone() },
+            FileDialog::ScriptSave {
+                default: format!("{dir}/Mix.wav"),
+                prompt: "Save the mix".into(),
+                label: "Audio".into(),
+                exts: exts(&["wav", "aif"]),
+                any: false
+            },
+            FileDialog::ScriptFolder { prompt: "Output folder".into(), start: dir.clone() },
+        ],
+        "the dialogs carry the script's prompt, start location and whole filter"
+    );
 }
 
 /// #2894: the same from a dockable ScriptUI panel (Window ▸ <panel>): its button's

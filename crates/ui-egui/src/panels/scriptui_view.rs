@@ -575,9 +575,22 @@ pub fn serve_file_dialogs(app: &mut EffectcraftApp) {
         (true, None) => "Untitled".to_string(),
     };
     let request = match asked.kind {
-        FileDialogKind::Open => crate::FileDialog::Script { label: asked.label.clone(), exts: asked.exts.clone(), any: asked.any, many: asked.many },
-        FileDialogKind::Save => crate::FileDialog::save(&default),
-        FileDialogKind::Folder => crate::FileDialog::Folder,
+        FileDialogKind::Open => crate::FileDialog::Script {
+            label: asked.label.clone(),
+            exts: asked.exts.clone(),
+            any: asked.any,
+            many: asked.many,
+            prompt: asked.prompt.clone(),
+            start: asked.start.clone(),
+        },
+        FileDialogKind::Save => crate::FileDialog::ScriptSave {
+            default: default.clone(),
+            prompt: asked.prompt.clone(),
+            label: asked.label.clone(),
+            exts: asked.exts.clone(),
+            any: asked.any,
+        },
+        FileDialogKind::Folder => crate::FileDialog::ScriptFolder { prompt: asked.prompt.clone(), start: asked.start.clone() },
     };
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let answer = crate::DialogAnswer { command: FILE_DIALOG_COMMAND.to_string(), key: "paths", params, paths: Vec::new() };
@@ -587,7 +600,7 @@ pub fn serve_file_dialogs(app: &mut EffectcraftApp) {
         return;
     }
     let paths: Vec<String> = match (&app.hooks.pick_file_dialog, asked.kind) {
-        (Some(pick), FileDialogKind::Open | FileDialogKind::Folder) => pick(request),
+        (Some(pick), _) => pick(request),
         (_, FileDialogKind::Open) => {
             let exts: Vec<&str> = asked.exts.iter().map(String::as_str).collect();
             app.hooks.pick_files.as_ref().map(|pick| pick(&exts)).unwrap_or_default()

@@ -16,7 +16,16 @@ pub enum FileDialog {
     /// A file (several when `many`) a script asks for (`File.openDialog`, #2778): the script's
     /// filter named `label` with these extensions (none: every file), and `any`: every file
     /// besides (the filter's `*.*`).
-    Script { label: String, exts: Vec<String>, any: bool, many: bool },
+    /// `prompt` is the dialog's title (empty: the system's) and `start` the file or folder it
+    /// opens at (empty: the system's).
+    Script { label: String, exts: Vec<String>, any: bool, many: bool, prompt: String, start: String },
+    /// A folder a script asks for (`Folder.selectDialog`, `folder.selectDlg`) with its `prompt`
+    /// (the dialog's title) and the folder it starts in (`start`); both empty when not given.
+    ScriptFolder { prompt: String, start: String },
+    /// Where a script wants to save (`File.saveDialog`, `file.saveDlg`): `default` (a file name
+    /// or path) with the script's filter (`label`, `exts`, `any` as in [`FileDialog::Script`]; no
+    /// extensions: the default's extension) and the script's `prompt` as the title.
+    ScriptSave { default: String, prompt: String, label: String, exts: Vec<String>, any: bool },
     /// Where to save `default` (a file name or path) with extension `ext` (empty: no filter);
     /// `project`: the project save dialog, given the file name.
     Save { default: String, ext: String, project: bool },
