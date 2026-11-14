@@ -122,9 +122,9 @@ impl Image {
         let ty = (fy - y0) as f32;
         let (x0, y0) = (x0 as i64, y0 as i64);
         let a = self.get(x0, y0);
-        let b = self.get(x0 + 1, y0);
-        let c = self.get(x0, y0 + 1);
-        let d = self.get(x0 + 1, y0 + 1);
+        let b = self.get(x0.saturating_add(1), y0);
+        let c = self.get(x0, y0.saturating_add(1));
+        let d = self.get(x0.saturating_add(1), y0.saturating_add(1));
         let mut o = [0.0; 4];
         for i in 0..4 {
             let top = a[i] + (b[i] - a[i]) * tx;
