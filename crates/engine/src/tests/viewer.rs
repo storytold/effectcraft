@@ -1177,3 +1177,36 @@ fn polystar_undo_sanitizes_live_and_parked_property_selections_before_uid_reuse(
         assert_eq!(layer(&s, lid).props.prop("transform/positionZ").unwrap(), &position_z, "the reused UID must not become an implicit expression target");
     }
 }
+
+/// #3229: a drag Shift keeps to one axis snaps only that axis. A point a few pixels off the axis
+/// lines the feature up with it (along x: its x) without taking it off the axis, as a line
+/// through the point would; lines along the drag are left out, and the point reaches only `tol`
+/// off the axis. Unconstrained (`snap`) the same point takes both coordinates, the feature leaving
+/// the axis.
+#[test]
+fn a_shift_drag_snaps_only_along_its_axis() {
+    use crate::viewer::snap_along;
+    let src = SnapSource::Layer(LayerId(1));
+    let corner = SnapTarget::point([450.0, 150.0], PRI_LAYER, src);
+    let row = SnapTarget::hline(151.0, PRI_GUIDE, SnapSource::Guide);
+    let column = SnapTarget::vline(449.0, PRI_GUIDE, SnapSource::Guide);
+    let feature = [[448.0, 153.0]];
+    assert_eq!(snap(&feature, &[corner, row], 8.0).unwrap().at, [450.0, 150.0]);
+    // Along x: x onto the corner's, y kept (the nearer row does not pull it either).
+    let s = snap_along(&feature, &[corner, row], 8.0, true).unwrap();
+    assert_eq!(s.delta, [2.0, 0.0]);
+    assert_eq!(s.at, [450.0, 153.0]);
+    // The point, and the line from it to the feature (the feedback).
+    assert_eq!(s.hits, [corner, SnapTarget::vline(450.0, PRI_LAYER, src).within(Some([150.0, 153.0]))]);
+    // Along y: y onto the corner's, x kept (the column is left out).
+    let s = snap_along(&feature, &[corner, column], 8.0, false).unwrap();
+    assert_eq!(s.delta, [0.0, -3.0]);
+    assert_eq!(s.at, [448.0, 150.0]);
+    assert_eq!(s.hits, [corner, SnapTarget::hline(150.0, PRI_LAYER, src).within(Some([450.0, 448.0]))]);
+    // A line across the drag still snaps; a nearer one wins over the point.
+    let s = snap_along(&feature, &[corner, column], 8.0, true).unwrap();
+    assert_eq!(s.at, [449.0, 153.0]);
+    assert_eq!(s.hits, [column]);
+    // The point reaches only the tolerance off the axis.
+    assert_eq!(snap_along(&[[448.0, 170.0]], &[corner], 8.0, true), None);
+}
