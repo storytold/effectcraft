@@ -8,6 +8,11 @@ use super::{CommandSpec, always, b_p, bad, str_p};
 use crate::sequence::{SequenceOptions, Source};
 use crate::{EngineError, Result, Session, cmd};
 
+/// Largest project file `file.open` reads (JSON or XML). A project is text, so 1 GiB leaves wide
+/// room past any real document, while a hostile or sparse file that claims more is refused before
+/// the whole file is committed to memory (audit F4).
+const MAX_PROJECT_BYTES: u64 = 1 << 30;
+
 fn has_path(s: &Session) -> std::result::Result<(), String> {
     if s.path.is_some() { Ok(()) } else { Err("the project has not been saved yet".into()) }
 }
@@ -16,7 +21,7 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
     // Settings ▸ Project ▸ New Project Loads Template: open the template as an untitled project.
     let tpl = s.prefs.project.template_path.trim().to_string();
     if s.prefs.project.use_template && !tpl.is_empty() {
-        let bytes = s.services.read_file(&tpl).map_err(|e| EngineError::Other(format!("cannot read the new project template {tpl}: {e}")))?;
+        let bytes = s.services.read_file_bounded(&tpl, MAX_PROJECT_BYTES).map_err(|e| EngineError::Other(format!("cannot read the new project template {tpl}: {e}")))?;
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
         crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
@@ -42,7 +47,7 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
-    let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+    let bytes = s.services.read_file_bounded(path, MAX_PROJECT_BYTES).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
     let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
