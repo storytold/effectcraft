@@ -270,6 +270,7 @@ mod tests {
                 color: [1.0, 0.0, 0.0],
                 intensity: 1.0,
                 cone: 90.0,
+                feather: 0.5,
             }]),
         };
         assert_eq!(serde_json::from_str::<Request>(&request_line(&lights).unwrap()).unwrap(), lights);

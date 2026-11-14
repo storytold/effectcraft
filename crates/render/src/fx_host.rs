@@ -177,6 +177,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
                     color: [c[0], c[1], c[2]],
                     intensity: ctx.f(l, g, "intensity", 100.0) / 100.0,
                     cone: ctx.f(l, g, "coneAngle", 90.0),
+                    feather: s.feather,
                 })
             })
             .collect()

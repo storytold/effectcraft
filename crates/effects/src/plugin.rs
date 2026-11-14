@@ -345,6 +345,10 @@ pub struct CompLightInfo {
     pub intensity: f64,
     /// Spot cone angle (degrees, the whole cone).
     pub cone: f64,
+    /// Spot cone feather (0-1 of the half angle, softening inwards from the edge). Older hosts
+    /// leave it out.
+    #[serde(default)]
+    pub feather: f64,
 }
 
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
