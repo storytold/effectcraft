@@ -1040,6 +1040,59 @@ fn effect_control_name_can_be_renamed_from_its_header() {
     assert_eq!(current_name(&h), "Point Control");
 }
 
+/// #3198: the effect rename field opens with the whole name selected, so typing replaces it (no
+/// Ctrl/Cmd+A first), whether Enter or a double-click on the header opens it, as in After
+/// Effects. Enter used to leave the field open without the keyboard, the caret after the name.
+#[test]
+fn effect_rename_opens_with_the_name_selected() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    settle(&mut h);
+    let edit = format!("effectControls.effect.{}.nameEdit", x.point_fx);
+    let current_name =
+        |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, x.small).effects().unwrap().groups().find(|g| g.uid == x.point_fx).unwrap().name.clone();
+    let type_and_commit = |h: &mut Harness<'_, EffectcraftApp>, text: &str| {
+        assert!(ids(h).contains(&edit), "the rename field is open");
+        assert!(h.ctx.egui_wants_keyboard_input(), "the rename field has the keyboard");
+        h.event(egui::Event::Text(text.into()));
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert!(!ids(h).contains(&edit), "Enter closes the rename field");
+    };
+    // Enter with the effect selected.
+    h.state_mut().session.execute("prop.select", json!({"layer": x.small, "prop": x.point_fx, "selectKeys": false})).unwrap();
+    h.run_steps(3);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    type_and_commit(&mut h, "Speed");
+    assert_eq!(current_name(&h), "Speed", "the typed text replaced the whole name");
+    // A double-click on the effect's name.
+    let point = rect_of(&h, &format!("effectControls.effect.{}.name", x.point_fx)).center();
+    double_click(&mut h, point);
+    h.run_steps(3);
+    type_and_commit(&mut h, "Drift");
+    assert_eq!(current_name(&h), "Drift", "the typed text replaced the whole name");
+    // The header's context menu ▸ Rename.
+    let header = rect_of(&h, &format!("effectControls.effect.{}", x.point_fx)).center();
+    right_click(&mut h, header);
+    let rename = h.query_by_label("Rename").expect("the effect menu's Rename").rect().center();
+    click(&mut h, rename);
+    h.run_steps(3);
+    type_and_commit(&mut h, "Wander");
+    assert_eq!(current_name(&h), "Wander", "the typed text replaced the whole name");
+    // Enter and Enter again without typing: no rename, no undo step.
+    let undo = h.state().session.history.undo.len();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(ids(&h).contains(&edit) && h.ctx.egui_wants_keyboard_input(), "Enter opens the rename field with the keyboard");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(!ids(&h).contains(&edit), "Enter closes the rename field");
+    assert_eq!(current_name(&h), "Wander", "the name stays");
+    assert_eq!(h.state().session.history.undo.len(), undo, "no undo step");
+}
+
 // Regression test for #1497: double-clicking an effect parameter's name in Effect Controls did
 // nothing; it should reveal that property in the Timeline, as After Effects does.
 #[test]
