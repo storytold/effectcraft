@@ -48,21 +48,23 @@ pub(crate) fn snap(
     sources: &[[f64; 2]],
     mods: egui::Modifiers,
 ) -> [f64; 2] {
-    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[] })
+    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[], along_x: None })
 }
 
 /// What [`snap_with`] snaps: the dragged features and the layers to ignore, plus `extra` layer
-/// targets (the Pan Behind layer's own box).
+/// targets (the Pan Behind layer's own box). `along_x` is the axis a Shift drag keeps to
+/// (`Some(true)`: x), whose coordinate alone snaps ([`vw::snap_along`], #3229).
 pub(crate) struct SnapQuery<'a> {
     pub exclude: &'a [LayerId],
     pub sources: &'a [[f64; 2]],
     pub mods: egui::Modifiers,
     pub extra: &'a [vw::SnapTarget],
+    pub along_x: Option<bool>,
 }
 
 /// [`snap`] with extra layer targets.
 pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCtx, map: &ViewerMap, q: &SnapQuery) -> [f64; 2] {
-    let SnapQuery { exclude, sources, mods, extra } = *q;
+    let SnapQuery { exclude, sources, mods, extra, along_x } = *q;
     let layers = snapping_on(app, mods);
     let v = &app.ui.viewer;
     let guides = v.snap_guides && v.guides;
@@ -75,7 +77,12 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
     if layers {
         targets.extend_from_slice(extra);
     }
-    match vw::snap(sources, &targets, SNAP_PX / map.zoom.max(1e-3) as f64) {
+    let tol = SNAP_PX / map.zoom.max(1e-3) as f64;
+    let hit = match along_x {
+        Some(x) => vw::snap_along(sources, &targets, tol, x),
+        None => vw::snap(sources, &targets, tol),
+    };
+    match hit {
         Some(s) => {
             let d = s.delta;
             ctx.data_mut(|dd| dd.insert_temp(snap_id(), s));
@@ -981,12 +988,21 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     }
     app.auto.add_response("viewer.timecode", &resp, "Current time");
     crate::panels::toggle_time_display(app, &resp);
+    go_to_time_on_click(app, &resp);
     // Right: render time.
     let ms = app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0);
     if tr.max.x + 50.0 < bar.max.x {
         p.text(pos2(bar.max.x - 10.0, cy), Align2::RIGHT_CENTER, format!("{ms:.0} ms"), Tokens::ui(11.0), t.text_faint);
     }
     (tr.right() + 8.0 - bar.left()).max(bar.width())
+}
+
+/// A plain click on the time display opens Go to Time, as it does in After Effects; Ctrl/Cmd+click
+/// is [`crate::panels::toggle_time_display`] (#3373).
+fn go_to_time_on_click(app: &mut EffectcraftApp, resp: &egui::Response) {
+    if resp.clicked() && !resp.ctx.input(|i| i.modifiers.command) {
+        crate::panels::forms::open_form(app, "time.set", &json!({}));
+    }
 }
 
 #[cfg(test)]

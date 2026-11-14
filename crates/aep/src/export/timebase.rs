@@ -7,6 +7,7 @@
 //! `rate x frame duration >= 24 576` (25 fps: 1024 and 25 600; 12 fps: 2048 and 24 576; 1 fps:
 //! 32 768 and 32 768; 240 fps: 128 and 30 720).
 
+use crate::container::TimeBase as ContainerTimeBase;
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
 /// Frame duration and time scale in units; one frame lasts `frame_duration` units and a second
@@ -27,10 +28,7 @@ pub(crate) fn fixed_rate(rate: FrameRate) -> u32 {
 /// The typed value of an NTSC rate (23.976, 29.97, 59.94, 119.88), which After Effects stores as
 /// a float32 of exactly these decimals.
 pub(crate) fn ntsc_typed(rate: FrameRate) -> Option<f32> {
-    [(FrameRate::FPS_23_976, 23.976f32), (FrameRate::FPS_29_97, 29.97), (FrameRate::FPS_59_94, 59.94), (FrameRate::FPS_119_88, 119.88)]
-        .into_iter()
-        .find(|(r, _)| *r == rate)
-        .map(|(_, v)| v)
+    ContainerTimeBase::NTSC.into_iter().find(|((num, den), _)| FrameRate::new(i64::from(*num), i64::from(*den)) == rate).map(|(_, v)| v)
 }
 
 /// The time base for `rate`, or `None` for a rate After Effects cannot hold (non-positive, or not

@@ -550,6 +550,10 @@ impl Keymaps {
     }
 }
 
+/// Most conflicts [`ShortcutTable::all_conflicts`] lists: a preset binding every command to one
+/// key would otherwise list every pair of them.
+pub const MAX_CONFLICTS: usize = 10_000;
+
 /// The active preset resolved against every bindable command.
 #[derive(Clone, Debug, Default)]
 pub struct ShortcutTable {
@@ -584,8 +588,15 @@ impl ShortcutTable {
     }
 
     /// Every active binding: (keys, bindable).
+    /// Each bindable's keys once: an imported preset can repeat a binding any number of times.
     pub fn bindings(&self) -> Vec<(&str, &Bindable)> {
-        self.bindables.iter().flat_map(|b| self.keys.get(&b.key).into_iter().flatten().map(move |k| (k.as_str(), b))).collect()
+        self.bindables
+            .iter()
+            .flat_map(|b| {
+                let mut seen = std::collections::HashSet::new();
+                self.keys.get(&b.key).into_iter().flatten().filter(move |k| seen.insert(k.as_str())).map(move |k| (k.as_str(), b))
+            })
+            .collect()
     }
 
     /// Other bindables using `keys` in an overlapping scope.
@@ -607,6 +618,7 @@ impl ShortcutTable {
     /// Every pair of commands sharing keys in the same scope, or in two contexts (which can be
     /// active at once): only one of the two can run, or neither ([`pick`]). (Other pairs in
     /// different scopes are intended, see [`Conflict::overrides`].)
+    /// At most [`MAX_CONFLICTS`] are listed.
     pub fn all_conflicts(&self) -> Vec<(String, Conflict)> {
         let mut by_keys: BTreeMap<&str, Vec<&Bindable>> = BTreeMap::new();
         for (k, b) in self.bindings() {
@@ -618,6 +630,9 @@ impl ShortcutTable {
         for (k, bs) in by_keys {
             for (i, a) in bs.iter().enumerate() {
                 for b in &bs[i + 1..] {
+                    if out.len() >= MAX_CONFLICTS {
+                        return out;
+                    }
                     if a.scope == b.scope || (is_context(&a.scope) && is_context(&b.scope)) {
                         out.push((
                             a.key.clone(),

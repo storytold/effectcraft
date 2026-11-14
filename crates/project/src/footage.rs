@@ -269,6 +269,13 @@ pub struct Footage {
     /// made from the footage starts with them, and Update Markers From Source copies new ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// PDF / Illustrator footage (`.pdf`, `.ai`; not EPS) from an After Effects project: the page
+    /// is framed as After Effects places it (the ArtBox, `/Rotate` ignored) and drawn to fill
+    /// `width` × `height`, the size After Effects stored, which the layers' anchors and masks are
+    /// measured against (#3099). Other footage (and every project saved before this field) shows
+    /// the page as a PDF viewer does, at its own size.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub placed_page: bool,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -307,6 +314,7 @@ impl Default for Footage {
             start_timecode: None,
             file_timecode: None,
             markers: vec![],
+            placed_page: false,
         }
     }
 }

@@ -1,4 +1,5 @@
 use super::eps::find_from;
+use super::exec::MAX_STACK;
 use super::scanner::Src;
 use super::text::encoding_array;
 use super::value::{Flow, V, array, matrix_of, matrix_val, new_dict};
@@ -181,8 +182,13 @@ impl Interp {
                 match self.pop() {
                     V::Num(k) => {
                         let k = (k.max(0.0) as usize).min(self.st.len());
-                        let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
-                        self.st.extend(tail);
+                        // A copy past the operand limit copies nothing, and the values copied
+                        // count as operations (one for eight): repeated doubling spends the budget.
+                        if self.st.len().saturating_add(k) <= MAX_STACK {
+                            self.charge(k / 8);
+                            let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
+                            self.st.extend(tail);
+                        }
                     }
                     V::Array(dst) => {
                         let s = self.pop().items().unwrap_or_default();
@@ -507,12 +513,16 @@ impl Interp {
     fn try_collection_op(&mut self, n: &str) -> bool {
         match n {
             // Arrays and strings.
+            // The storage made counts as operations (a value, or eight bytes, each), so a loop
+            // of large constructors spends the budget rather than the memory.
             "array" => {
                 let k = self.popn().clamp(0.0, 1e6) as usize;
+                self.charge(k);
                 self.push(array(vec![V::Null; k]));
             }
             "string" => {
                 let k = self.popn().clamp(0.0, 1e7) as usize;
+                self.charge(k / 8);
                 self.push(V::Str(Rc::new(RefCell::new(vec![0; k]))));
             }
             "length" => {

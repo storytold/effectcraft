@@ -264,6 +264,8 @@ pub(crate) static TEXT_ANIMATOR_RECORDS: &[Node] = &[
     R("ADBE Text Opacity", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[37.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
     R("ADBE Text Fill Color", Rec { state: 1, label: "-_0_/-", dims: 4, template: 0, class: 0x0002ffff, byte5: 0x07, header: &[(79, 1)], cdat_len: 96, cdat: &[255.0, 0.0, 255.0], key_size: 0, limits: None, tdpi: None }),
     R("ADBE Text Stroke Color", Rec { state: 1, label: "-_0_/-", dims: 4, template: 0, class: 0x0002ffff, byte5: 0x07, header: &[(79, 1)], cdat_len: 96, cdat: &[255.0, 0.0, 0.0, 255.0], key_size: 0, limits: None, tdpi: None }),
+    // text-synthetic.aep (#3170): the record After Effects wrote for Stroke Opacity 40 %.
+    R("ADBE Text Stroke Opacity", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[40.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
     R("ADBE Text Stroke Width", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[3.0], key_size: 0, limits: Some((-1000.0, 1000.0)), tdpi: None }),
     R("ADBE Text Tracking Amount", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[20.0], key_size: 0, limits: Some((-32000.0, 32000.0)), tdpi: None }),
     R("ADBE Text Line Spacing", Rec { state: 1, label: "-_0_/-", dims: 2, template: 0, class: 0x0002ffff, byte5: 0x01, header: &[], cdat_len: 80, cdat: &[10.0, 20.0], key_size: 0, limits: Some((-32000.0, 32000.0)), tdpi: None }),

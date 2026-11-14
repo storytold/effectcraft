@@ -338,11 +338,11 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
 /// The Project Settings dialog's title and fields.
 fn project_settings_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>) {
     let st = &s.project.settings;
-    // The catalogue row is `Mercury GPU Acceleration ({})`, so the value goes through
+    // The catalogue row is `GPU Acceleration ({})`, so the value goes through
     // tr_args: wrapping the assembled string in tr() would look up the backend's name.
     let gpu_label = match &s.accel {
-        Some(a) => tr_args("Mercury GPU Acceleration ({})", &[&a.name()]),
-        None => tr("Mercury GPU Acceleration (no GPU: software)").to_string(),
+        Some(a) => tr_args("GPU Acceleration ({})", &[&a.name()]),
+        None => tr("GPU Acceleration (no GPU: software)").to_string(),
     };
     let depth = match st.bit_depth.label() {
         l if l.starts_with("16") => 1,
@@ -436,7 +436,7 @@ fn project_settings_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>
             Field::choice(
                 "renderer",
                 "Video rendering and effects",
-                &[(gpu_label.as_str(), json!("gpu")), ("Mercury Software Only", json!("software"))],
+                &[(gpu_label.as_str(), json!("gpu")), ("Software Rendering", json!("software"))],
                 usize::from(!st.gpu_acceleration),
             ),
         ],
@@ -630,9 +630,11 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 )],
             )
         }
+        // The time as the project displays it (timecode, or frames from Start Numbering Frames At,
+        // or feet + frames), which `time.set` reads back the same way.
         "time.set" if !has(p, &["time", "frame", "timecode"]) => {
-            let frame = comp.map(|c| c.frame_rate.frame_at(t)).unwrap_or(0);
-            ("Go to Time".into(), vec![Field::num("frame", "Frame", frame as f64)])
+            let shown = comp.map(|c| crate::panels::timecode(s, c, t)).unwrap_or_default();
+            ("Go to Time".into(), vec![Field::text("timecode", "Time", &shown)])
         }
         "view.addGuide" if !has(p, &["position"]) => {
             let (w, _) = comp.map(|c| (c.width, c.height)).unwrap_or((1920, 1080));
@@ -1051,6 +1053,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renderer_form_keeps_descriptive_labels_and_stable_option_values() {
+        crate::i18n::set_current("en");
+        let (_, fields) = project_settings_form(&effectcraft_engine::Session::default());
+        let renderer = fields.iter().find(|field| field.key == "renderer").unwrap();
+        let FieldKind::Choice { options, .. } = &renderer.kind else { panic!("renderer must be a choice") };
+        assert_eq!(
+            options.as_slice(),
+            &[("GPU Acceleration (no GPU: software)".to_string(), json!("gpu")), ("Software Rendering".to_string(), json!("software"))]
+        );
+    }
+
+    #[test]
     fn form_params_build_arrays_and_choices() {
         let f = Form {
             title: "T".into(),
@@ -1094,6 +1108,42 @@ mod tests {
         assert_eq!(app.dialog_state.form.params()["value"], json!([42.0, 540.0]));
         frame(&mut app, vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
         assert!(app.dialog.is_none(), "one Enter confirms");
+    }
+
+    /// Go to Time shows the time as the project displays it, so with Frames numbered from 1 the
+    /// viewer's frame 00013 opens as 00013 and 00020 goes to the frame displayed 00020 (the
+    /// engine's frame 19). The dialog used to show and take the engine's own frame number (#3373).
+    #[test]
+    fn go_to_time_uses_the_projects_frame_numbering() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 36, "frameRate": 24, "duration": 4})).unwrap();
+        app.session.execute("file.projectSettings", json!({"timeDisplay": "frames", "frameStart": 1})).unwrap();
+        app.session.execute("time.set", json!({"frame": 12})).unwrap();
+        assert!(open_form(&mut app, "time.set", &json!({})));
+        let f = &app.dialog_state.form;
+        assert_eq!(f.command, "time.set");
+        assert!(matches!(&f.fields[0].kind, FieldKind::Text(t) if t == "00013"), "{:?}", f.fields[0]);
+        app.dialog_state.form.fields[0].kind = FieldKind::Text("00020".into());
+        let (command, params) = (app.dialog_state.form.command.clone(), app.dialog_state.form.params());
+        app.session.execute(&command, params).unwrap();
+        let at = app.session.active_comp().unwrap().frame_rate.frame_at(app.session.time());
+        assert_eq!(at, 19, "displayed 00020 with frames starting at 1");
+    }
+
+    /// In a comp that starts 1 s before 0, Go to Time at frame 12 opens on the negative time the
+    /// viewer shows, and OK without editing it stays on frame 12 (it used to jump to frame 0).
+    #[test]
+    fn go_to_time_ok_keeps_a_negative_displayed_time() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 36, "frameRate": 24, "duration": 4, "startTime": -1})).unwrap();
+        app.session.execute("time.set", json!({"frame": 12})).unwrap();
+        assert!(open_form(&mut app, "time.set", &json!({})));
+        let f = &app.dialog_state.form;
+        assert!(matches!(&f.fields[0].kind, FieldKind::Text(t) if t == "-0:00:00:12"), "{:?}", f.fields[0]);
+        let (command, params) = (f.command.clone(), f.params());
+        app.session.execute(&command, params).unwrap();
+        let at = app.session.active_comp().unwrap().frame_rate.frame_at(app.session.time());
+        assert_eq!(at, 12, "OK on the unedited time stays put");
     }
 
     /// File ▸ Export ▸ Adobe Premiere Pro Project… opens a form that says it writes Final Cut Pro
