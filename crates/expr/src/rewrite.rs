@@ -243,7 +243,7 @@ fn tokenize(src: &str) -> (Vec<Tok>, String) {
             continue;
         }
         if ch == '/' && c.get(i + 1) == Some(&'/') {
-            while i < c.len() && c[i] != '\n' {
+            while i < c.len() && !is_line_break(c[i]) {
                 i += 1;
             }
             ws.push(' ');
@@ -283,7 +283,7 @@ fn tokenize(src: &str) -> (Vec<Tok>, String) {
             i += punct_len(&c, i);
             Kind::Punct
         };
-        let nl = ws.contains('\n');
+        let nl = ws.contains(is_line_break);
         out.push(Tok { kind, text: c[start..i].iter().collect(), ws: std::mem::take(&mut ws), nl });
     }
     (out, ws)
@@ -815,12 +815,32 @@ fn too_deep() -> String {
     format!("Error: expression is nested too deeply (more than {MAX_NESTING} levels of brackets, or too long a chain of operators)")
 }
 
+/// `\r\n` and a lone `\r` as `\n`. After Effects stores expressions with `\r` line breaks (Mac
+/// line endings), so a `// comment` in an expression from a project file would otherwise run to
+/// the end of the text and swallow every line after it. This is safe everywhere, literals
+/// included: JavaScript doesn't allow a raw `\r` in a quoted string, and reads a template's `\r\n`
+/// and `\r` as `\n`. U+2028 and U+2029 are left alone, because strings and templates keep them;
+/// the tokenizer ends a line comment at them instead. Each line break stays one line break, so
+/// error line numbers don't move.
+pub(crate) fn line_breaks_as_newlines(src: &str) -> String {
+    if !src.contains('\r') {
+        return src.to_string();
+    }
+    src.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// JavaScript's line terminators (`\r` is gone by then: see [`line_breaks_as_newlines`]).
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\n' | '\u{2028}' | '\u{2029}')
+}
+
 /// Rewrite an expression's source for array-aware arithmetic. Line breaks are preserved.
 /// An expression nested deeper than [`MAX_NESTING`] becomes a `throw` of that error.
 pub fn rewrite(src: &str) -> String {
     if over_rewrite_limit(src) {
         return throw_too_large();
     }
+    let src = &line_breaks_as_newlines(src);
     let (toks, tail) = tokenize(src);
     if too_nested(&toks) {
         return throw_too_deep();
@@ -873,6 +893,19 @@ mod tests {
         assert_eq!(n(&rewrite("x = a ? b + 1 : c")), n("x = a ? __add(b,  1) : c"));
         assert_eq!(n(&rewrite("if (a) -b; else c")), n("if (a) __neg(b); else c"));
         assert_eq!(n(&rewrite("return -x")), n("return __neg(x)"));
+    }
+
+    #[test]
+    fn carriage_return_line_breaks_end_line_comments() {
+        // After Effects' own line breaks (`\r`): the comment ends at each one.
+        let out = rewrite("fps = 12.5; // rate\rposterizeTime(fps); // here\rvalueAtTime(time)");
+        assert!(out.contains("posterizeTime(fps)") && out.contains("valueAtTime(time)"), "{out}");
+        assert_eq!(out.lines().count(), 3);
+        assert_eq!(rewrite("a\r\nb\rc").lines().count(), 3);
+        // U+2028 / U+2029 end a line comment, and stay as they are inside strings and templates.
+        assert!(rewrite("1 // x\u{2028}+ 2").contains('2'), "the comment ends at U+2028");
+        assert!(rewrite("'a\u{2028}b'").contains('\u{2028}'));
+        assert!(rewrite("`a\u{2029}b`").contains('\u{2029}'));
     }
 
     #[test]

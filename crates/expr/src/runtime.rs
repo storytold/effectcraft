@@ -490,8 +490,9 @@ fn format_error(msg: &str, max_line: usize) -> String {
     }
 }
 
+/// Lines as JavaScript counts them (`\r` and U+2028 / U+2029 end a line too).
 fn line_count(text: &str) -> usize {
-    text.lines().count()
+    crate::rewrite::line_breaks_as_newlines(text).replace(['\u{2028}', '\u{2029}'], "\n").lines().count()
 }
 
 /// Line number from `at line N` (parser errors), else the user script's (`<main>`) backtrace
