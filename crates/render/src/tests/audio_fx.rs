@@ -1,13 +1,14 @@
 //! Audio effects through the mixdown (the path preview playback and export share).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use effectcraft_keyframe::{Keyframe, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::audio::{comp_has_audio, footage_peaks, mix_comp, peak_summary};
+use crate::audio::{MAX_READ, comp_has_audio, footage_peaks, mix_comp, peak_summary};
 use crate::{FootageSource, Image};
 
 const SR: u32 = 8000;
@@ -107,6 +108,221 @@ fn backwards_reverses_the_layer_span() {
     let (p, cid) = comp_with(None, &[], false);
     let m = mix(&p, &Signal(ramp), cid, 0.0, SR as usize);
     assert!((m[4000 * 2] - 0.5).abs() < 1e-3);
+}
+
+/// `comp_with`, its layer reversed at `stretch` (< 0) the way After Effects lays it out: in 0,
+/// out `out` s, starting at the out point.
+fn reversed(id: Option<&str>, vals: &[(&str, Value)], solid: bool, stretch: f64, out: f64) -> (Project, ItemId) {
+    let (mut p, cid) = comp_with(id, vals, solid);
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    l.stretch = stretch;
+    (l.in_point, l.out_point, l.start_time) = (Tick::ZERO, Tick::from_seconds_f64(out), Tick::from_seconds_f64(out));
+    (p, cid)
+}
+
+/// A time-reversed layer plays its audio backwards instead of being silent (#3239): at -100 %
+/// sample for sample what Backwards plays on the forward layer, in any block size.
+#[test]
+fn a_reversed_layer_plays_its_audio_backwards() {
+    let n = SR as usize;
+    let (p, cid) = reversed(None, &[], false, -100.0, 1.0);
+    let m = mix(&p, &Signal(ramp), cid, 0.0, n);
+    // Comp sample k plays source sample n − 1 − k.
+    for k in [0usize, 1, 2000, 4000, 7000] {
+        let want = (n - 1 - k) as f32 / SR as f32;
+        assert!((m[k * 2] - want).abs() < 1e-6 && (m[k * 2 + 1] + want).abs() < 1e-6, "k={k}: {} {}, want {want}", m[k * 2], m[k * 2 + 1]);
+    }
+    let (bp, bcid) = comp_with(Some("ec.audio.backwards"), &[], false);
+    assert_eq!(m, mix(&bp, &Signal(ramp), bcid, 0.0, n), "not the mirror Backwards plays");
+    let mut blocks = vec![];
+    for k in 0..n / 320 {
+        blocks.extend(mix(&p, &Signal(ramp), cid, (k * 320) as f64 / SR as f64, 320));
+    }
+    let worst = m.iter().zip(&blocks).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(worst < 1e-6, "block size changes the result by {worst}");
+}
+
+/// The speed of a reversed layer follows its stretch as a forward one's does: -50 % plays the
+/// source twice as fast, -200 % at half speed, both backwards.
+#[test]
+fn a_reversed_layer_plays_at_its_stretch() {
+    // -50 % over 0.5 s: comp sample k plays source sample 2 (n − 1 − k), n = 4000.
+    let (p, cid) = reversed(None, &[], false, -50.0, 0.5);
+    let m = mix(&p, &Signal(ramp), cid, 0.0, 4000);
+    for k in [0usize, 1000, 3000] {
+        let want = 2.0 * (3999 - k) as f32 / SR as f32;
+        assert!((m[k * 2] - want).abs() < 1e-6, "-50 %, k={k}: {}, want {want}", m[k * 2]);
+    }
+    // -200 % over 2 s: comp sample k plays source sample (n − 1 − k) / 2, n = 16000, blended.
+    let (p, cid) = reversed(None, &[], false, -200.0, 2.0);
+    let m = mix(&p, &Signal(ramp), cid, 0.0, 16_000);
+    for k in [0usize, 1, 5001, 12_000] {
+        let want = (15_999 - k) as f32 / 2.0 / SR as f32;
+        assert!((m[k * 2] - want).abs() < 1e-5, "-200 %, k={k}: {}, want {want}", m[k * 2]);
+    }
+}
+
+/// Backwards on a reversed layer plays it forwards: the two reversals cancel.
+#[test]
+fn backwards_on_a_reversed_layer_plays_forwards() {
+    let (p, cid) = reversed(Some("ec.audio.backwards"), &[], false, -100.0, 1.0);
+    let (fp, fcid) = comp_with(None, &[], false);
+    for (from, frames) in [(0.0, SR as usize), (0.25, 2000)] {
+        let m = mix(&p, &Signal(ramp), cid, from, frames);
+        assert!(m.iter().any(|v| v.abs() > 0.1), "silent from {from} s");
+        assert_eq!(m, mix(&fp, &Signal(ramp), fcid, from, frames), "from {from} s");
+    }
+}
+
+/// Effects on a reversed layer run on a clock that moves forwards with the samples at comp speed,
+/// so a Tone joins up across blocks (preview's frame blocks and export's one-second blocks
+/// agree), at -50 % too. On the layer-time clock, block k at -100 % would start 0.08 k s off:
+/// 35.2 k cycles at 440 Hz, a phase jump.
+#[test]
+fn tone_on_a_reversed_layer_joins_up_across_blocks() {
+    let mut vals: Vec<(&str, Value)> = vec![("frequency1", Value::Scalar(440.0))];
+    for k in ["frequency2", "frequency3", "frequency4", "frequency5"] {
+        vals.push((k, Value::Scalar(0.0)));
+    }
+    for stretch in [-100.0, -50.0] {
+        let (p, cid) = reversed(Some("ec.audio.tone"), &vals, true, stretch, 1.0);
+        let long = mix(&p, &Signal(ramp), cid, 0.2, 1600);
+        assert!(rms(&long) > 0.05, "{stretch} %: silent: {}", rms(&long));
+        let mut blocks = vec![];
+        for k in 0..5 {
+            blocks.extend(mix(&p, &Signal(ramp), cid, 0.2 + k as f64 * 0.04, 320));
+        }
+        let worst = long.iter().zip(&blocks).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "{stretch} %: block size changes the tone by {worst}");
+    }
+}
+
+/// Footage audio on its sample grid, as the media pool decodes it: a read from any time starts
+/// at the sample at or before it. Sample n is `f(n / rate)` over [0, 2) s.
+struct Grid(fn(f64) -> (f32, f32));
+impl FootageSource for Grid {
+    fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+        None
+    }
+    fn audio(&self, _: ItemId, _: &Footage, start: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
+        let s0 = start.to_units_floor(i64::from(rate));
+        Some(
+            (0..frames as i64)
+                .flat_map(|i| {
+                    let t = (s0 + i) as f64 / rate as f64;
+                    let (l, r) = if (0.0..2.0).contains(&t) { (self.0)(t) } else { (0.0, 0.0) };
+                    [l, r]
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A stretched layer, forwards or reversed, gives the same samples mixed in one block as in
+/// blocks of any size (preview's video-frame blocks, export's seconds): each block resamples
+/// from the exact source position, not from the source sample a block happens to start on.
+#[test]
+fn stretched_layers_join_up_across_blocks() {
+    // (stretch, out point, start): the reversed layers start at their out point, the -50 % one
+    // off the sample grid (a third of a sample late), so its source positions are fractional.
+    let third = Tick(Tick::from_seconds_f64(1.0 / SR as f64).0 / 3);
+    for (stretch, out, start) in [
+        (200.0, 2.0, Tick::ZERO),
+        (-70.0, 0.7, Tick::from_seconds_f64(0.7)),
+        (-50.0, 0.5, Tick(Tick::from_seconds_f64(0.5).0 + third.0)),
+        (-200.0, 2.0, Tick::from_seconds_f64(2.0)),
+    ] {
+        let (mut p, cid) = comp_with(None, &[], false);
+        let l = &mut p.comp_mut(cid).unwrap().layers[0];
+        l.stretch = stretch;
+        (l.in_point, l.out_point, l.start_time) = (Tick::ZERO, Tick::from_seconds_f64(out), start);
+        let n = 3210;
+        let long = mix(&p, &Grid(ramp), cid, 0.1, n);
+        assert!(long.iter().any(|v| v.abs() > 0.05), "{stretch} %: silent");
+        for block in [321, 107] {
+            let mut blocks = vec![];
+            for k in 0..n / block {
+                blocks.extend(mix(&p, &Grid(ramp), cid, 0.1 + (k * block) as f64 / SR as f64, block));
+            }
+            let worst = long.iter().zip(&blocks).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 1e-6, "{stretch} %, blocks of {block}: off by {worst}");
+        }
+    }
+}
+
+/// At 200 % the last sample of a block blends with the source sample after it, as inside the
+/// block, instead of holding the one before.
+#[test]
+fn a_stretched_block_ends_on_a_blended_sample() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    l.stretch = 200.0;
+    (l.in_point, l.out_point, l.start_time) = (Tick::ZERO, Tick::from_seconds_f64(2.0), Tick::ZERO);
+    let m = mix(&p, &Grid(ramp), cid, 0.0, 320);
+    // Comp sample 319 plays source position 159.5.
+    let want = 159.5 / SR as f32;
+    assert!((m[319 * 2] - want).abs() < 1e-6, "{}, want {want}", m[319 * 2]);
+}
+
+/// Records the longest audio read and answers with a short run, so an unbounded request fails
+/// the assert below instead of allocating.
+struct Longest(AtomicUsize);
+impl FootageSource for Longest {
+    fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+        None
+    }
+    fn audio(&self, _: ItemId, _: &Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+        self.0.fetch_max(frames, Ordering::Relaxed);
+        Some(vec![0.25; frames.min(4096) * 2])
+    }
+}
+
+/// Tiny, huge, zero and non-finite stretches, and fast precomps nested in fast precomps, read
+/// at most MAX_READ source frames at a time and mix to finite samples (a tiny positive stretch
+/// asked for 10⁸ times the block, and its precomp buffer could abort the process).
+#[test]
+fn extreme_stretches_read_bounded_source() {
+    let stretches = [1e-6, -1e-6, 0.5, -0.5, 1.0, -1.0, 1e12, -1e12, f64::MIN_POSITIVE, 0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+    for stretch in stretches {
+        let (mut p, cid) = comp_with(None, &[], false);
+        p.comp_mut(cid).unwrap().layers[0].stretch = stretch;
+        let src = Longest(AtomicUsize::new(0));
+        let m = mix(&p, &src, cid, 0.0, 800);
+        let longest = src.0.load(Ordering::Relaxed);
+        assert!(longest <= MAX_READ, "stretch {stretch}: read {longest} frames at once");
+        assert!(m.iter().all(|v| v.is_finite()), "stretch {stretch}");
+    }
+    // Exactly 1 %, give or take float noise, stays audible.
+    let (mut p, cid) = comp_with(None, &[], false);
+    p.comp_mut(cid).unwrap().layers[0].stretch = 1.0 - 1e-12;
+    let m = mix(&p, &Longest(AtomicUsize::new(0)), cid, 0.0, 800);
+    assert!(m.iter().any(|v| *v != 0.0), "1 % is silent");
+    // A 1 % footage layer in a 1 % precomp: 10⁴ source samples per comp sample. The precomp layer
+    // lasts 0.02 s, which plays the inner layer's 2 s once (backwards from its out point at -1 %).
+    for sign in [1.0, -1.0] {
+        let mut p = Project::default();
+        let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let fid = p.add_item("x.wav", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(audio_footage()));
+        let mut inner_l = build::layer(&mut p, &base, "a", LayerSource::Footage { item: fid }, (64, 64), None);
+        inner_l.stretch = sign;
+        (inner_l.in_point, inner_l.out_point, inner_l.start_time) =
+            (Tick::ZERO, Tick::from_seconds_f64(2.0), if sign < 0.0 { Tick::from_seconds_f64(2.0) } else { Tick::ZERO });
+        let mut inner = base.clone();
+        inner.layers = vec![inner_l].into();
+        let inner_id = p.add_item("Inner", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(inner.into()));
+        let mut pre = build::layer(&mut p, &base, "pre", LayerSource::Comp { item: inner_id }, (64, 64), None);
+        pre.stretch = sign;
+        let pre_out = Tick::from_seconds_f64(0.02);
+        (pre.in_point, pre.out_point, pre.start_time) = (Tick::ZERO, pre_out, if sign < 0.0 { pre_out } else { Tick::ZERO });
+        let mut outer = base.clone();
+        outer.layers = vec![pre].into();
+        let outer_id = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
+        let src = Longest(AtomicUsize::new(0));
+        let m = mix(&p, &src, outer_id, 0.0, 800);
+        let longest = src.0.load(Ordering::Relaxed);
+        assert!(longest > 0 && longest <= MAX_READ, "nested {sign}%: read {longest} frames at once");
+        assert!(m.iter().all(|v| v.is_finite()));
+    }
 }
 
 #[test]
