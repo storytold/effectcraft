@@ -495,7 +495,7 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
                 (c[0] - e[0]).hypot(c[1] - e[1])
             })
             .collect();
-        let smooth = smooth_mesh(&mesh, &def, buf.scale);
+        let smooth = smooth_mesh_holding(&mesh, &def, buf.scale, &held_points(&mesh, &m.pins));
         for (t, k) in smooth.tris.iter().zip(&smooth.parent) {
             let r = [px(smooth.rest[t[0]]), px(smooth.rest[t[1]]), px(smooth.rest[t[2]])];
             let d = [px(smooth.deformed[t[0]]), px(smooth.deformed[t[1]]), px(smooth.deformed[t[2]])];
@@ -555,20 +555,79 @@ fn vertex_gradients(mesh: &Mesh, def: &[[f64; 2]]) -> Vec<[f64; 4]> {
     sum.into_iter().map(|(g, a)| if a > 0.0 { g.map(|x| x / a) } else { [1.0, 0.0, 0.0, 1.0] }).collect()
 }
 
+/// The points the moving pins hold inside triangles (see [`held_point`]), for
+/// [`smooth_mesh_holding`].
+fn held_points(mesh: &Mesh, pins: &[Pin]) -> Vec<([usize; 3], [f64; 3])> {
+    pins.iter().filter(|p| p.kind.moves()).filter_map(|p| held_point(mesh, p.rest)).collect()
+}
+
+/// Sweeps that settle the gradients of pins sharing a vertex.
+const HOLD_SWEEPS: usize = 8;
+
+/// Bend the vertex gradients so the smoothed map takes each held point where the solve did: for
+/// each point, the least change to its triangle's three gradients that cancels the curve's offset
+/// from the linear map there. The map along an edge still depends only on its two vertices, so the
+/// change leaves no cracks.
+fn hold_points(mesh: &Mesh, grads: &mut [[f64; 4]], held: &[([usize; 3], [f64; 3])]) {
+    for _ in 0..HOLD_SWEEPS {
+        for (t, l) in held {
+            let (Some(v), Some(g)) = (
+                t.iter().map(|i| mesh.verts.get(*i).copied()).collect::<Option<Vec<_>>>(),
+                t.iter().map(|i| grads.get(*i).copied()).collect::<Option<Vec<_>>>(),
+            ) else {
+                continue;
+            };
+            let q = [0, 1].map(|c| l[0] * v[0][c] + l[1] * v[1][c] + l[2] * v[2][c]);
+            let e: Vec<[f64; 2]> = v.iter().map(|r| [q[0] - r[0], q[1] - r[1]]).collect();
+            // The curve's offset from the chord at the point, cancelled.
+            let mut o = [0.0, 0.0];
+            for k in 0..3 {
+                o[0] -= l[k] * (g[k][0] * e[k][0] + g[k][1] * e[k][1]);
+                o[1] -= l[k] * (g[k][2] * e[k][0] + g[k][3] * e[k][1]);
+            }
+            let den: f64 = (0..3).map(|k| l[k] * l[k] * (e[k][0] * e[k][0] + e[k][1] * e[k][1])).sum();
+            if den < 1e-12 || !o[0].is_finite() || !o[1].is_finite() {
+                continue;
+            }
+            for k in 0..3 {
+                let s = l[k] / den;
+                let step = [o[0] * s * e[k][0], o[0] * s * e[k][1], o[1] * s * e[k][0], o[1] * s * e[k][1]];
+                if let Some(gk) = grads.get_mut(t[k])
+                    && step.iter().all(|x| x.is_finite())
+                {
+                    for (a, b) in gk.iter_mut().zip(step) {
+                        *a += b;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Smooth the piecewise-linear solve for drawing: Phong deformation (James, "Phong Deformation: A
 /// Better C0 Interpolation for Embedded Deformation", SIGGRAPH 2020). A point at barycentric `l`
 /// goes to `Σ l_i (d_i + F_i (q − r_i))` instead of `Σ l_i d_i`, with `F_i` the gradients at the
-/// vertices. It agrees at the vertices and reproduces any affine map, so pins and rigid parts
-/// stay exact; between them, straight lines in the image bend along a curve where a linear map
-/// creases at every mesh edge. The map is quadratic, and the same along an edge from both sides,
-/// so a uniform split of every triangle follows it within [`SMOOTH_TOLERANCE`] with no cracks.
+/// vertices. It agrees at the vertices and reproduces any affine map, so pins on vertices and
+/// rigid parts stay exact; between them, straight lines in the image bend along a curve where a
+/// linear map creases at every mesh edge. The map is quadratic, and the same along an edge from
+/// both sides, so a uniform split of every triangle follows it within [`SMOOTH_TOLERANCE`] with
+/// no cracks.
 pub fn smooth_mesh(mesh: &Mesh, def: &[[f64; 2]], scale: f64) -> SmoothMesh {
+    smooth_mesh_holding(mesh, def, scale, &[])
+}
+
+/// [`smooth_mesh`] that also takes each of `held` (a triangle and barycentric coordinates, the
+/// points pins hold inside triangles) where the linear solve put it, so the image under a pin
+/// stays under it.
+pub fn smooth_mesh_holding(mesh: &Mesh, def: &[[f64; 2]], scale: f64, held: &[([usize; 3], [f64; 3])]) -> SmoothMesh {
     let n = mesh.tris.len();
     let plain = || SmoothMesh { rest: mesh.verts.clone(), deformed: def.to_vec(), tris: mesh.tris.clone(), parent: (0..n).collect() };
     if def.len() != mesh.verts.len() || n == 0 {
         return plain();
     }
-    let grads = vertex_gradients(mesh, def);
+    let mut grads = vertex_gradients(mesh, def);
+    hold_points(mesh, &mut grads, held);
+    let grads = grads;
     let v = &mesh.verts;
     let phong = |t: &[usize; 3], l: [f64; 3]| {
         let q = [l[0] * v[t[0]][0] + l[1] * v[t[1]][0] + l[2] * v[t[2]][0], l[0] * v[t[0]][1] + l[1] * v[t[1]][1] + l[2] * v[t[2]][1]];
@@ -839,22 +898,27 @@ fn resolve(buf: &Buf, tris: &[RasterTri], owners: &[u32], x: f64, y: f64) -> [f3
     let mut sum = [0.0f32; 4];
     for gy in 0..grid {
         for gx in 0..grid {
-            // Covered samples in this cell, read at the first of them.
+            // Covered samples in this cell by triangle, in scan order: (triangle, first sample, count).
+            let mut groups = [(NO_TRI, 0usize, 0usize, 0.0f32); 16];
+            let mut found = 0;
             let mut count = 0.0f32;
-            let mut read = None;
             for sy in 0..cell {
                 for sx in 0..cell {
                     let (i, j) = (gx * cell + sx, gy * cell + sy);
-                    let o = owners[i + 4 * j];
-                    if o != NO_TRI {
-                        count += 1.0;
-                        if read.is_none() {
-                            read = Some((o, i, j));
-                        }
+                    let Some(&o) = owners.get(i + 4 * j) else { continue };
+                    if o == NO_TRI {
+                        continue;
+                    }
+                    count += 1.0;
+                    if let Some(g) = groups[..found].iter_mut().find(|g| g.0 == o) {
+                        g.3 += 1.0;
+                    } else if let Some(g) = groups.get_mut(found) {
+                        *g = (o, i, j, 1.0);
+                        found += 1;
                     }
                 }
             }
-            let Some((o, i, j)) = read else { continue };
+            let Some(&(o, i, j, _)) = groups[..found].first() else { continue };
             let Some(t) = tris.get(o as usize) else { continue };
             // A fully covered cell reads its centre; a partial one, a sample known to be inside.
             let (fx, fy) = if count as usize == cell * cell {
@@ -862,10 +926,27 @@ fn resolve(buf: &Buf, tris: &[RasterTri], owners: &[u32], x: f64, y: f64) -> [f3
             } else {
                 ((i as f64 + 0.5) * grid as f64 / 4.0, (j as f64 + 0.5) * grid as f64 / 4.0)
             };
-            let src = t.source(x + fx / grid as f64, y + fy / grid as f64);
+            let (px, py) = (x + fx / grid as f64, y + fy / grid as f64);
+            let src = t.source(px, py);
+            // Triangles of the same sheet agree on the source and read with the first; another sheet
+            // overlapping in the cell reads its own colour at its own first sample.
+            let mut weight = count;
+            for &(o2, i2, j2, n2) in groups[..found].iter().skip(1) {
+                let Some(u) = tris.get(o2 as usize) else { continue };
+                let q = u.source(px, py);
+                if (q[0] - src[0]).abs().max((q[1] - src[1]).abs()) <= 2.0 {
+                    continue;
+                }
+                weight -= n2;
+                let s = u.source(x + (i2 as f64 + 0.5) / 4.0, y + (j2 as f64 + 0.5) / 4.0);
+                let c = buf.img.sample_bilinear(s[0], s[1]);
+                for (a, b) in sum.iter_mut().zip(c) {
+                    *a += b * n2 / 16.0;
+                }
+            }
             let c = buf.img.sample_bilinear(src[0], src[1]);
             for (a, b) in sum.iter_mut().zip(c) {
-                *a += b * count / 16.0;
+                *a += b * weight / 16.0;
             }
         }
     }

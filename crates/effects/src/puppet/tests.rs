@@ -909,6 +909,14 @@ fn drawing_and_the_overlay_show_the_same_solve() {
     }
 }
 
+/// Largest distance between two solves of the same mesh, which must be whole and finite to compare
+/// (`f64::max` would skip a NaN).
+fn farthest_apart(a: &[[f64; 2]], b: &[[f64; 2]]) -> f64 {
+    assert_eq!(a.len(), b.len(), "the solves have different vertex counts");
+    assert!(a.iter().chain(b).all(|p| p[0].is_finite() && p[1].is_finite()), "a solve has a non-finite vertex");
+    a.iter().zip(b).map(|(p, q)| (p[0] - q[0]).hypot(p[1] - q[1])).fold(0.0, f64::max)
+}
+
 #[test]
 fn conjugate_gradients_land_where_the_factor_does() {
     // A factor too large to keep hands the solve to conjugate gradients, which must agree.
@@ -916,7 +924,7 @@ fn conjugate_gradients_land_where_the_factor_does() {
     let pins = three_pins([1000.0, -60.0]);
     let cg = solve_with(&m, &pins, default_rounds(), arap::Limits { max_factor: 0, ..arap::LIMITS });
     let factored = solve(&m, &pins, default_rounds());
-    let off = cg.iter().zip(&factored).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+    let off = farthest_apart(&cg, &factored);
     assert!(off < 1e-3, "{off} px apart");
 }
 
@@ -935,7 +943,7 @@ fn stopping_once_the_rounds_settle_changes_nothing_visible() {
         for rounds in [default_rounds(), 200] {
             let all = solve_with(mesh, pins, rounds, arap::Limits { settled: 0.0, ..arap::LIMITS });
             let early = solve(mesh, pins, rounds);
-            let off = all.iter().zip(&early).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+            let off = farthest_apart(&all, &early);
             assert!(off < 0.01, "{rounds} rounds, pins at {:?}: {off} px apart", pins.iter().map(|p| p.position).collect::<Vec<_>>());
         }
     }
@@ -1092,4 +1100,55 @@ fn every_small_triangle_lies_in_the_triangle_it_came_from() {
     }
     // Every triangle split the same way.
     assert!(count.iter().all(|c| *c == count[0]), "{:?}", &count[..8]);
+}
+
+/// Where the drawing puts the rest point `p`: through the small triangle over it.
+fn drawn(s: &SmoothMesh, p: [f64; 2]) -> Option<[f64; 2]> {
+    s.tris.iter().find_map(|t| {
+        let l = bary(s.rest[t[0]], s.rest[t[1]], s.rest[t[2]], p).filter(|l| l.iter().all(|x| *x >= -1e-9))?;
+        Some([0, 1].map(|c| l[0] * s.deformed[t[0]][c] + l[1] * s.deformed[t[1]][c] + l[2] * s.deformed[t[2]][c]))
+    })
+}
+
+#[test]
+fn the_drawing_keeps_the_image_under_each_pin() {
+    // Smoothing bent the drawn mesh away from the points the pins hold inside triangles: the image
+    // under a pin landed up to 10 px from it on these rigs.
+    let m = traced_solid();
+    let (s, s_pins, _) = s_curve(350.0);
+    let mut cases: Vec<(&Mesh, Vec<Pin>)> = [[1000.0, -60.0], [1500.0, 360.0], [1083.0, 357.0]].into_iter().map(|to| (&m, three_pins(to))).collect();
+    cases.push((&s, s_pins));
+    for (mesh, pins) in &cases {
+        let d = solve(mesh, pins, default_rounds());
+        let sm = smooth_mesh_holding(mesh, &d, 1.0, &held_points(mesh, pins));
+        for p in pins {
+            let Some((t, l)) = held_point(mesh, p.rest) else { continue };
+            let solved = [0, 1].map(|c| l[0] * d[t[0]][c] + l[1] * d[t[1]][c] + l[2] * d[t[2]][c]);
+            let q = drawn(&sm, p.rest).unwrap();
+            let off = (q[0] - solved[0]).hypot(q[1] - solved[1]);
+            assert!(off < SMOOTH_TOLERANCE, "pin at {:?} dragged to {:?}: drawn {off} px from where it holds", p.rest, p.position);
+        }
+    }
+}
+
+#[test]
+fn a_cell_shared_by_two_sheets_mixes_both_colours() {
+    // Two sheets over the same pixel, owning alternate sample columns: one maps to a red source,
+    // the other 40 px over to a blue one. Each 2x2 cell holds samples of both, and must count
+    // each sheet's samples with that sheet's colour instead of all with the first's.
+    let mut img = Image::new(64, 32);
+    for y in 0..32u32 {
+        for x in 0..64u32 {
+            img.set(x, y, if x < 32 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] });
+        }
+    }
+    let buf = Buf { img, offset: [0.0; 2], scale: 1.0 };
+    let out = [[0.0, 0.0], [30.0, 0.0], [0.0, 30.0]];
+    let red = RasterTri::new(&out, &out).unwrap();
+    let blue = RasterTri::new(&out.map(|p| [p[0] + 40.0, p[1]]), &out).unwrap();
+    let owners: Vec<u32> = (0..16).map(|s| (s % 4 % 2) as u32).collect();
+    let c = resolve(&buf, &[red, blue], &owners, 5.0, 5.0);
+    for (got, want) in c.iter().zip([0.5, 0.0, 0.5, 1.0]) {
+        assert!((got - want).abs() < 1e-4, "{c:?}");
+    }
 }
