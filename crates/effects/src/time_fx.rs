@@ -664,12 +664,38 @@ fn smooth_flow(flow: &mut Flow, pm: &PixelMotion) {
 
 /// The motion field from frame `a` to frame `b` (or from the warp layer's frames).
 pub fn timewarp_flow(a: &Image, b: &Image, pm: &PixelMotion) -> Flow {
-    timewarp_flow_search(a, b, pm, 4)
+    timewarp_flow_search(a, b, pm, timewarp_search(a.width, a.height))
 }
 
-/// [`timewarp_flow`] with an explicit coarse search radius: Timewarp's own resampling needs
-/// little (motion between adjacent source frames at near-100% speed), but Pixel Motion Blur
-/// must find fast full-frame displacements (#535).
+/// Timewarp's coarse search radius, in proportion to the frame. The pyramid reaches
+/// `radius · 2ⁿ` for its `n` levels, so on a 640-px frame or wider this searches about 128 px
+/// between adjacent source frames, where it used to search 32 (a flat radius of 4). Fast
+/// footage moves further than 32 px in a frame, and past the reach the vectors are not merely
+/// short but wrong — they collapse to a fraction of the true displacement, and the in-between
+/// frame comes out worse than a plain frame mix (#3453).
+///
+/// Measured on a 160-px textured square crossing a textured background at 640×360: the vector
+/// read at the square's centre was 15 px whatever the true displacement was above the reach,
+/// and now tracks it to within a few per cent out to 96 px. A radius of 32 or 64 finds nothing
+/// further for 3.5× and 13× the search work.
+///
+/// It is proportional rather than flat because the reach has to stay small against the frame:
+/// at a flat 16 a 96×64 frame would search two thirds of its own width and match the wrong
+/// region, which is what the old flat 4 was protecting. Small frames therefore keep the reach
+/// they had.
+///
+/// Two costs, both real. One field takes 2.5× as long at 1080p (9.5 ms → 23.6 ms) and 1.2× at
+/// 640×360, since [`effectcraft_raster::flow`] only trims the radius once the frame is far
+/// larger than the search. And a wider search is slightly worse at displacements of a few
+/// pixels, where it has more room to mismatch: on the scene above, the mid-frame error against
+/// ground truth rose from 0.0062 to 0.0119 at 3 px and 0.0104 to 0.0147 at 6 px. That is the
+/// price of a vector that is right rather than wrong once the motion is fast.
+fn timewarp_search(w: u32, h: u32) -> i32 {
+    (w.max(h) / 40).clamp(4, 16) as i32
+}
+
+/// [`timewarp_flow`] with an explicit coarse search radius: Pixel Motion Blur must find fast
+/// full-frame displacements, further than Timewarp's frame-to-frame reach (#535).
 fn timewarp_flow_search(a: &Image, b: &Image, pm: &PixelMotion, radius: i32) -> Flow {
     let ga = motion_grey(&crop_edges(a, pm.crops), pm.weights, 1.0);
     let gain = if pm.correct_luminance {
@@ -1512,5 +1538,70 @@ mod tests {
         let h = Clock { static_layer: true };
         let out = run("ec.time.timedisplacement", &[], 0.0, &h);
         assert!((out.img.data[0][0] - 0.4).abs() < 1e-5);
+    }
+
+    /// Timewarp's Pixel Motion searched only about 32 px between adjacent source frames, so
+    /// faster footage got vectors that were not merely short but wrong (they collapsed to a
+    /// fraction of the true displacement), and the in-between frame came out worse than a plain
+    /// frame mix (#3453).
+    #[test]
+    fn timewarp_finds_motion_faster_than_32_px_a_frame() {
+        // Timewarp's defaults: Vector Detail 20 (a vector per 18 px), Block Size 8, smoothing on.
+        let pm = PixelMotion {
+            tile: 18,
+            window: 8,
+            global_smoothness: 0.5,
+            local_smoothness: 0.5,
+            iterations: 20,
+            build_from_one: false,
+            correct_luminance: false,
+            extreme: false,
+            error_threshold: 0.1,
+            weights: [0.3, 0.59, 0.11],
+            crops: [0; 4],
+        };
+        // 8 to 32 px passed before the fix and must keep passing; 48 and up were the bug, and
+        // came back as 13-19 px whatever the real displacement was.
+        for dx in [8.0, 24.0, 32.0, 48.0, 64.0, 96.0] {
+            let (a, b) = (moving_square(640, 360, 160, 0.0), moving_square(640, 360, 160, dx));
+            let m = timewarp_flow(&a, &b, &pm).at(320.0, 180.0);
+            // Smoothing pulls the vector a few per cent below the true displacement.
+            let tol = (dx * 0.15) as f32;
+            assert!((m[0] - dx as f32).abs() <= tol, "dx {dx}: found {m:?}");
+            assert!(m[1].abs() <= 3.0, "dx {dx}: spurious vertical motion {m:?}");
+        }
+    }
+
+    /// The reach has to stay small against the frame: a radius wide enough for HD would search
+    /// two thirds of a 96-px frame and match the wrong region, which is what the old flat 4 was
+    /// protecting, so small frames keep the reach they had (#3453).
+    #[test]
+    fn the_timewarp_search_radius_scales_with_the_frame() {
+        assert_eq!(timewarp_search(96, 64), 4);
+        assert_eq!(timewarp_search(320, 240), 8);
+        assert_eq!(timewarp_search(640, 360), 16);
+        assert_eq!(timewarp_search(1920, 1080), 16);
+        assert_eq!(timewarp_search(7680, 4320), 16);
+    }
+
+    /// A textured square of `square` px displaced by `dx`, over a static textured background.
+    /// The square carries its own texture frame, so the texture travels with it.
+    fn moving_square(w: u32, h: u32, square: u32, dx: f64) -> Image {
+        let mut img = Image::new(w, h);
+        let (sx, sy) = (f64::from(w - square) / 2.0 + dx, f64::from(h - square) / 2.0);
+        img.rows_mut().for_each(|(y, row)| {
+            for (x, p) in row.iter_mut().enumerate() {
+                let (xf, yf) = (x as f64, y as f64);
+                let inside = xf >= sx && xf < sx + f64::from(square) && yf >= sy && yf < sy + f64::from(square);
+                let s = (if inside {
+                    let (u, v) = (xf - sx, yf - sy);
+                    0.5 + 0.25 * (u * 0.37 + v * 0.11).sin() + 0.2 * (u * 0.09 - v * 0.31).cos()
+                } else {
+                    0.5 + 0.2 * (xf * 0.21 + yf * 0.07).sin() + 0.15 * (xf * 0.05 - yf * 0.19).cos()
+                }) as f32;
+                *p = [s, s * 0.8, 1.0 - s, 1.0];
+            }
+        });
+        img
     }
 }
