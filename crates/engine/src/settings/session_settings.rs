@@ -295,6 +295,31 @@ impl Session {
         Ok(path)
     }
 
+    /// The `projectFile` auto-save with [`autosave::AutoSaveState::background`]: the UI thread only
+    /// snapshots the project (an `Arc` clone); serialising and writing the file happen on the
+    /// auto-save thread. The project counts as saved only when [`Session::autosave_wait`] sees the
+    /// write succeed, and only up to the revision that was written, so later edits stay unsaved.
+    fn save_project_in_background(&mut self, path: String) -> Result<String> {
+        self.autosave_wait()?;
+        let snapshot = self.project.clone();
+        let view = self.saved_view();
+        let compact = self.prefs.project.compact_project_files;
+        let services = self.services.clone();
+        let target = path.clone();
+        let work = {
+            let snapshot = snapshot.clone();
+            move || {
+                let text = crate::cmd::file::file_text_of(&snapshot, &view, compact, &target).map_err(std::io::Error::other)?;
+                services.write_file(&target, text.as_bytes())
+            }
+        };
+        let pending = autosave::PendingWrite::spawn(std::path::PathBuf::from(&path), 0, self.revision, self.path.clone(), self.script_ui.project_epoch, work)
+            .map_err(|e| EngineError::Other(format!("auto-save failed: {e}")))?
+            .saving_project(snapshot);
+        self.autosave.pending = Some(pending);
+        Ok(path)
+    }
+
     /// Advance recovery bookkeeping only for a successfully written snapshot.
     fn commit_autosave(&mut self, path: String, slot: u32, revision: u64) {
         self.autosave.last_slot = Some(slot);
@@ -312,7 +337,17 @@ impl Session {
                 // write. Save As changes only its path. Never publish the old snapshot as the
                 // new project's recovery record, even when that record's final reset fails.
                 if w.project_path == self.path && w.project_epoch == self.script_ui.project_epoch {
-                    self.commit_autosave(w.path.to_string_lossy().into_owned(), w.slot, w.revision);
+                    if let Some(saved) = &w.saves_project {
+                        // The project file itself was written: it is saved as of that snapshot.
+                        if w.revision >= self.saved_revision {
+                            self.saved_project = saved.clone();
+                            self.saved_revision = w.revision;
+                            self.update_sentinel();
+                            self.toast(format!("Saved {}", w.path.display()));
+                        }
+                    } else {
+                        self.commit_autosave(w.path.to_string_lossy().into_owned(), w.slot, w.revision);
+                    }
                 }
                 Ok(())
             }
@@ -345,6 +380,18 @@ impl Session {
         if self.path.is_none() && self.prefs.auto_save.location != "custom" && self.default_autosave_root().is_none() && self.autosave_folder_override.is_none()
         {
             return None;
+        }
+        // "Project File": save into the open project itself, like File ▸ Save, instead of writing a
+        // rotating copy. An untitled project has no file yet, so it still gets a copy.
+        // Headless (MCP) sessions are isolated from real projects, so they never take this branch.
+        if self.prefs.auto_save.location == "projectFile"
+            && self.autosave_folder_override.is_none()
+            && let Some(path) = self.path.clone()
+        {
+            if self.autosave.background && !cfg!(target_arch = "wasm32") {
+                return Some(self.save_project_in_background(path));
+            }
+            return Some(self.execute("file.save", serde_json::json!({})).map(|_| path));
         }
         let r = self.autosave_now();
         if let Ok(p) = &r {

@@ -48,7 +48,7 @@ Commands (CLI, MCP, control channel):
 - `autoSave.enabled`: Automatically Save Projects
 - `autoSave.intervalMinutes`: Save Every
 - `autoSave.maxVersions`: Maximum Project Versions
-- `autoSave.location`: Auto-Save Location
+- `autoSave.location`: Auto-Save Location (`nextToProject`, `custom`, or `projectFile`: the timed auto-save saves into the open project file itself, like File ▸ Save, instead of writing `auto-save N` copies; untitled projects still get a copy). **Warning:** `projectFile` keeps no older versions to roll back to, and a bad edit can be saved over your project file. Use Save As or Increment and Save for milestones
 - `autoSave.folder`: Custom Location
 - `autoSave.saveOnRenderStart`: Save When Starting Render Queue
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
