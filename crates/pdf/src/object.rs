@@ -516,6 +516,7 @@ fn ascii_hex(data: &[u8], max: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+#[cfg(test)]
 pub fn ascii85(data: &[u8]) -> Vec<u8> {
     // The PostScript reader uses this unbounded entry point. No Vec can hold more
     // than usize::MAX bytes, so its output cannot exceed this bound.
