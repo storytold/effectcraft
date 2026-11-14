@@ -980,6 +980,32 @@ fn motion_blur_smears_moving_meshes() {
 }
 
 #[test]
+fn motion_blur_on_a_cameras_first_frame_stays_in_that_camera() {
+    let (mut p, cid) = project(160, 120);
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Cube }, |l| {
+        set(l, "geometryOptions/width", Value::Scalar(30.0));
+        set(l, "geometryOptions/height", Value::Scalar(30.0));
+        set(l, "geometryOptions/depth", Value::Scalar(30.0));
+        set(l, "materialOptions/baseColor", Value::Color([1.0, 1.0, 1.0, 1.0]));
+        l.switches.motion_blur = true;
+    });
+    // Looking at x = 160: the cube at the comp's centre (x = 80) lands on the left edge.
+    let zoom = 160.0 * 50.0 / 36.0;
+    add(&mut p, cid, LayerSource::Camera, |l| {
+        set(l, "transform/poi", Value::Vec3([160.0, 60.0, 0.0]));
+        set(l, "transform/position", Value::Vec3([160.0, 60.0, -zoom]));
+    });
+    let c = p.comp_mut(cid).unwrap();
+    c.enable_motion_blur = true;
+    // The shutter opens a quarter frame before time 0, before the camera's In point.
+    assert_eq!(c.shutter_phase, -90.0);
+    let img = render(&p, cid);
+    let a = |x: u32| img.data[(60 * 160 + x) as usize][3];
+    assert!(a(5) > 0.99, "every sub-sample is seen through the camera: {}", a(5));
+    assert_eq!(a(80), 0.0, "no copy of the cube seen by the default camera");
+}
+
+#[test]
 fn blend_modes_and_occlusion_in_advanced_3d() {
     let (mut p, cid) = project(120, 90);
     let red = solid(&mut p, [1.0, 0.0, 0.0], 120, 90);
