@@ -11,8 +11,9 @@ fn out_dims() -> vec2<i32> {
 
 // Warp `src` by the inverse matrix (output pixel → source pixel) and blend over `aux`
 // (raster::composite_warp / accumulate_warp).
-// u[0] = (mode, sampling, seed, flags: 1 accumulate, 2 clear outside bounds)
-// f[0..3] = inverse rows; f[3] = (opacity, weight); f[4] = bounds (x0, y0, x1, y1)
+// u[0] = (mode, sampling, seed, flags: 1 accumulate, 2 clear outside bounds, 4 box footprint)
+// f[0..3] = inverse rows; f[3] = (opacity, weight); f[4] = bounds (x0, y0, x1, y1);
+// f[5] = (box half-width, half-height, how far beyond the source a sample still reaches on x, y)
 @compute @workgroup_size(16, 16)
 fn warp_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -48,14 +49,20 @@ fn warp_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let sz = vec2<f32>(textureDimensions(src));
     let stencil = is_stencil(mode);
-    if (px < -1.0 || py < -1.0 || px > sz.x + 1.0 || py > sz.y + 1.0) {
+    let reach = P.f[5].zw;
+    if (px < -reach.x || py < -reach.y || px > sz.x + reach.x || py > sz.y + reach.y) {
         if (stencil && (flags & 1u) == 0u) {
             d = blend_pixel(mode, d, vec4<f32>(0.0), 0.5);
         }
         store_q(vec2<i32>(x, y), d, P.f[3].z, P.f[3].w);
         return;
     }
-    var s = sample(src, sampling, px, py);
+    var s: vec4<f32>;
+    if ((flags & 4u) != 0u) {
+        s = sample_box(src, px, py, P.f[5].x, P.f[5].y);
+    } else {
+        s = sample(src, sampling, px, py);
+    }
     if ((flags & 1u) != 0u) {
         if (s.w > 0.0) {
             d = d + s * P.f[3].y;
