@@ -75,8 +75,9 @@ fn fxc_colorama_phase(c: vec3<f32>, a: f32, mode: u32) -> f32 {
 // Selective Color range weights (color2::sc_weights).
 fn fxc_sc_weights(c0: vec3<f32>) -> array<f32, 9> {
     let c = clamp(c0, vec3<f32>(0.0), vec3<f32>(1.0));
-    // Stable descending sort of the channel indices.
-    var idx = vec3<u32>(0u, 1u, 2u);
+    // Stable descending sort of the channel indices. Use an array because llvmpipe does not
+    // preserve dynamically indexed writes to vector components here.
+    var idx = array<u32, 3>(0u, 1u, 2u);
     for (var i = 1u; i < 3u; i++) {
         var j = i;
         while (j > 0u && c[idx[j]] > c[idx[j - 1u]]) {
@@ -86,14 +87,14 @@ fn fxc_sc_weights(c0: vec3<f32>) -> array<f32, 9> {
             j--;
         }
     }
-    let mx = c[idx.x];
-    let md = c[idx.y];
-    let mn = c[idx.z];
+    let mx = c[idx[0]];
+    let md = c[idx[1]];
+    let mn = c[idx[2]];
     var w = array<f32, 9>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     var prim = array<u32, 3>(0u, 2u, 4u);
     var sec = array<u32, 3>(3u, 5u, 1u);
-    w[prim[idx.x]] = mx - md;
-    w[sec[idx.z]] = md - mn;
+    w[prim[idx[0]]] = mx - md;
+    w[sec[idx[2]]] = md - mn;
     w[6] = max((mn - 0.5) * 2.0, 0.0);
     w[8] = max((0.5 - mx) * 2.0, 0.0);
     w[7] = clamp(1.0 - (abs(mx - 0.5) + abs(mn - 0.5)), 0.0, 1.0);
