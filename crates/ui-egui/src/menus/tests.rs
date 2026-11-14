@@ -884,7 +884,10 @@ fn picked_projects_report_every_error() {
     std::fs::write(&aep, b"not an aep").unwrap();
     std::fs::write(&ecproj, b"not a project").unwrap();
     let paths = vec![aep.to_string_lossy().to_string(), ecproj.to_string_lossy().to_string()];
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(paths.clone()) });
+    super::frontend::dialog_answered(
+        &mut app,
+        crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(paths.clone()) },
+    );
     let status = &app.ui.status;
     assert!(status.contains("broken.aep") && status.contains("broken.ecproj"), "{status}");
     assert!(!status.contains('"'), "messages, not quoted JSON: {status}");
