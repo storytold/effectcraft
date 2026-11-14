@@ -397,6 +397,103 @@ fn color_stabilizer_samples_the_reference_at_the_points_reference_positions() {
     }
 }
 
+/// After Effects 2026's Sample Size samples (#3125): a horizontal ramp, Stabilize Levels, and a
+/// 6 px white square centred at `square` that appears after the reference frame (the card at
+/// `square: None` is the reference).
+fn sample_size_card(w: u32, h: u32, square: Option<[f64; 2]>) -> Image {
+    let mut img = Image::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let mut v = (cx / w as f64) as f32;
+            if square.is_some_and(|s| (cx - s[0]).abs() < 3.0 && (cy - s[1]).abs() < 3.0) {
+                v = 1.0;
+            }
+            img.set(x, y, [v, v, v, 1.0]);
+        }
+    }
+    img
+}
+
+/// Whether Color Stabilizer (Levels, Black Point at `bp`, Sample Size `size`) changes the
+/// `w` × `h` card when the square at `square` appears: the change is read on the right half of
+/// the layer, far from the square.
+fn stabilizer_reacts(w: u32, h: u32, square: [f64; 2], bp: [f64; 2], size: f64) -> bool {
+    let host = RefHost(sample_size_card(w, h, None));
+    let env = EffectEnv { host: Some(&host), ..Default::default() };
+    let vals = [
+        ("stabilize", Value::Enum(1)),
+        ("blackPoint", Value::Vec2(bp)),
+        ("whitePoint", Value::Vec2([w as f64 * 0.85, h as f64 * 0.5])),
+        ("sampleSize", num(size)),
+    ];
+    let input = sample_size_card(w, h, Some(square));
+    let out = run_fx("ec.color.colorstabilizer", &vals, input.clone(), 0.0, env);
+    let (x, y) = (w as i64 * 7 / 8, h as i64 / 4);
+    (out.img.get(x, y)[0] - input.get(x, y)[0]).abs() > 1e-5
+}
+
+/// #3125: Sample Size is the full width of the sampled square in layer pixels, at any layer
+/// size. After Effects 2026 (320 × 180 and 640 × 360, Black Point at 25 % width, mid-height)
+/// reacts to a square whose near edge is 7 px to the right of the point from Sample Size 13.5
+/// (not at 13), to one 17 px away by 35, and never to one 37 px away up to 50. EffectCraft used
+/// Sample Size as the half-width and reacted at 12 and 30.
+#[test]
+fn color_stabilizer_sample_size_is_the_full_width_in_pixels() {
+    for (w, h) in [(320u32, 180u32), (640, 360)] {
+        let (bx, by) = (w as f64 * 0.25, h as f64 * 0.5);
+        let r = |dx: f64, size: f64| stabilizer_reacts(w, h, [bx + dx, by], [bx, by], size);
+        assert!(r(10.0, 13.5), "{w}x{h}: d 10 at 13.5");
+        assert!(!r(10.0, 13.0), "{w}x{h}: d 10 at 13");
+        assert!(!r(10.0, 12.0), "{w}x{h}: d 10 at 12");
+        assert!(r(20.0, 35.0), "{w}x{h}: d 20 at 35");
+        assert!(!r(20.0, 33.0), "{w}x{h}: d 20 at 33");
+        assert!(!r(20.0, 30.0), "{w}x{h}: d 20 at 30");
+        for size in [1.0, 5.0, 12.0, 25.0, 40.0, 50.0] {
+            assert!(!r(40.0, size), "{w}x{h}: d 40 at {size}");
+        }
+    }
+}
+
+/// #3125: the sampled area is a square centred on the middle of the pixel the point names, half a
+/// pixel right of and below EffectCraft's layer point. After Effects 2026 with the Black Point at
+/// (80, 90) on a 320 × 180 card: a square 7 px to the right or below reacts from 13.5 (not at
+/// 13), one 7 px to the left or above only from 15.5 (not at 15). Diagonally, with the square's
+/// near corner 7, 10 and 14 px away on both axes, it reacts at 16, 26 and 38 and not at 13, 19
+/// and 27: a square area (a circle of that width would first react at 18.4, 26.9 and 38.2).
+#[test]
+fn color_stabilizer_samples_a_square_centred_on_the_pixel() {
+    let r = |square: [f64; 2], size: f64| stabilizer_reacts(320, 180, square, [80.0, 90.0], size);
+    for (square, no, yes) in [
+        ([90.0, 90.0], 13.0, 13.5),
+        ([80.0, 100.0], 13.0, 13.5),
+        ([70.0, 90.0], 15.0, 15.5),
+        ([80.0, 80.0], 15.0, 15.5),
+        ([90.0, 100.0], 13.0, 16.0),
+        ([93.0, 103.0], 19.0, 26.0),
+        ([97.0, 107.0], 27.0, 38.0),
+    ] {
+        assert!(!r(square, no), "{square:?} at {no}");
+        assert!(r(square, yes), "{square:?} at {yes}");
+    }
+}
+
+/// #3125: sub-pixel Black Points. After Effects 2026, square near edge at x 87 (or y 97): with
+/// the point at x (or y) + 0.25 it reacts from 13 (not 12.5), + 0.5 from 12.5 (not 12), + 0.75
+/// already at 12; each pixel counts with the share of it the area covers.
+#[test]
+fn color_stabilizer_sub_pixel_points_cover_partial_pixels() {
+    for (f, no, yes) in [(0.25, Some(12.5), 13.0), (0.5, Some(12.0), 12.5), (0.75, None, 12.0)] {
+        for (square, bp) in [([90.0, 90.0], [80.0 + f, 90.0]), ([80.0, 100.0], [80.0, 90.0 + f])] {
+            let r = |size: f64| stabilizer_reacts(320, 180, square, bp, size);
+            if let Some(no) = no {
+                assert!(!r(no), "{bp:?} at {no}");
+            }
+            assert!(r(yes), "{bp:?} at {yes}");
+        }
+    }
+}
+
 /// Writes `text` to `dir/name` with modification time `secs` (so an edit within the file system's
 /// time resolution still moves the stamp), returning the path.
 fn write_dated(dir: &std::path::Path, name: &str, text: &str, secs: u64) -> String {
