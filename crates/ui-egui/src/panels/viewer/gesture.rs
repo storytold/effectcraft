@@ -14,8 +14,8 @@ pub(super) enum Gesture {
         tool: Tool,
     },
     /// A bounding-box handle: scales about the anchor point so the grabbed point follows the
-    /// pointer (corners both axes, edges one), relative to the layer as the drag began; the
-    /// handle snaps.
+    /// pointer (corners both axes, edges one, Shift keeps the proportions), relative to the layer
+    /// as the drag began; the handle snaps.
     Scale {
         layer: LayerId,
         start_scale: [f64; 3],

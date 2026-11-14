@@ -2749,6 +2749,78 @@ fn handle_drags_scale_about_the_anchor_and_follow_the_pointer() {
     assert!(close(scale(&h), [162.5, 162.5]), "{:?}", scale(&h));
 }
 
+/// #2860: Shift on an edge handle keeps the proportions as it does on a corner: the ratio comes
+/// from the pointer along the handle's own axis and applies to both, about the anchor point
+/// wherever that is, to every selected layer; the handle still snaps.
+#[test]
+fn shift_on_an_edge_handle_keeps_the_proportions() {
+    let mut h = harness();
+    let layers = h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id).collect::<Vec<_>>();
+    let (box_id, plate) = (layers[0], layers[1]);
+    let scale = |h: &Harness<'_, EffectcraftApp>, id: LayerId| {
+        let l = h.state().session.active_comp().unwrap().layer(id).unwrap().clone();
+        l.props.prop("transform/scale").unwrap().value.as_vec3()
+    };
+    let set = |h: &mut Harness<'_, EffectcraftApp>, id: LayerId, path: &str, v: serde_json::Value| {
+        h.state_mut().session.execute("prop.set", json!({"layer": id.0, "path": path, "value": v})).unwrap();
+    };
+    // Shift-drag the box's `handle` to `to` (comp pixels), from the scale `from`.
+    let drag = |h: &mut Harness<'_, EffectcraftApp>, handle: usize, from: [f64; 2], to: [f32; 2]| {
+        set(h, box_id, "transform/scale", json!([from[0], from[1], 100]));
+        h.run_steps(2);
+        let edge = rect(h, &format!("viewer.handle.{}.{handle}", box_id.0)).center();
+        let to = screen(h, to);
+        drag_path(h, &[edge, to], egui::Modifiers::SHIFT);
+        scale(h, box_id)
+    };
+    let close = |a: [f64; 3], b: [f64; 2]| (a[0] - b[0]).abs() < 1.0 && (a[1] - b[1]).abs() < 1.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    // The 80×80 box spans (280, 140)–(360, 220), its anchor in the middle at (320, 180). Each
+    // edge counts along its own axis: the pointer's other coordinate doesn't matter.
+    for (handle, to, want) in [
+        (5, [380.0, 200.0], 150.0), // the right edge, 40 px from the anchor, to 60
+        (7, [260.0, 170.0], 150.0), // the left
+        (6, [300.0, 240.0], 150.0), // the bottom
+        (4, [340.0, 100.0], 200.0), // the top, to 80
+    ] {
+        let s = drag(&mut h, handle, [100.0, 100.0], to);
+        assert!(close(s, [want, want]), "handle {handle}: {s:?}");
+    }
+    // A layer that isn't square keeps its own proportions.
+    let s = drag(&mut h, 5, [200.0, 100.0], [440.0, 180.0]);
+    assert!(close(s, [300.0, 150.0]), "{s:?}");
+    // Past the anchor both axes flip, as a corner's do.
+    let s = drag(&mut h, 5, [100.0, 100.0], [280.0, 180.0]);
+    assert!(close(s, [-100.0, -100.0]), "{s:?}");
+
+    // The right edge snaps to the comp's, with the anchor off centre too (20 px left of the right
+    // edge): x reaches 640.
+    set(&mut h, box_id, "transform/anchor", json!([60, 50, 0]));
+    h.state_mut().session.execute("view.snapping", json!({"value": true})).unwrap();
+    let s = drag(&mut h, 5, [100.0, 100.0], [637.0, 180.0]);
+    assert!((s[0] - 1600.0).abs() < 0.01 && (s[1] - 1600.0).abs() < 0.01, "{s:?}");
+    set(&mut h, box_id, "transform/anchor", json!([40, 40, 0]));
+    let s = drag(&mut h, 5, [100.0, 100.0], [637.0, 200.0]);
+    assert!((s[0] - 800.0).abs() < 0.01 && (s[1] - 800.0).abs() < 0.01, "{s:?}");
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+
+    // The other selected layers scale by the same ratio, keeping their own proportions, in one
+    // undo step.
+    set(&mut h, plate, "transform/scale", json!([50, 80, 100]));
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0, plate.0]})).unwrap();
+    set(&mut h, box_id, "transform/scale", json!([100, 100, 100]));
+    h.run_steps(2);
+    let edge = rect(&h, &format!("viewer.handle.{}.5", box_id.0)).center();
+    let to = screen(&h, [380.0, 180.0]);
+    drag_path(&mut h, &[edge, to], egui::Modifiers::SHIFT);
+    assert!(close(scale(&h, box_id), [150.0, 150.0]), "{:?}", scale(&h, box_id));
+    assert!(close(scale(&h, plate), [75.0, 120.0]), "{:?}", scale(&h, plate));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert!(close(scale(&h, box_id), [100.0, 100.0]), "one undo step: {:?}", scale(&h, box_id));
+    assert!(close(scale(&h, plate), [50.0, 80.0]), "one undo step: {:?}", scale(&h, plate));
+}
+
 /// #491: with several layers selected, a handle drag scales all of them by the same ratio, each
 /// about its own anchor point, in one undo step.
 #[test]
@@ -3437,4 +3509,69 @@ fn unselected_null_keeps_its_outline() {
     h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "solo", "value": true})).unwrap();
     h.run_steps(2);
     assert_eq!(outlines(&h), 1, "a soloed null keeps its outline");
+}
+
+/// #2860: the snap feedback of a Shift-dragged handle shows what the handle took: nothing for a
+/// correction out of its reach, only the line it reached when two are near. A plain drag still
+/// shows its snap.
+#[test]
+fn a_handle_drag_only_shows_the_snap_it_took() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    // The handle's lever from the anchor point: 2 px in x, 70 px in y, with its corner at (320, 100).
+    for (path, value) in [("transform/anchor", json!([78, 10, 0])), ("transform/position", json!([318, 30, 0]))] {
+        h.state_mut().session.execute("prop.set", json!({"layer": box_id.0, "path": path, "value": value})).unwrap();
+    }
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.run_steps(2);
+    // The feedback's line segments: the cross where the handle landed, and any snapped line.
+    fn segments(h: &Harness<'_, EffectcraftApp>) -> Vec<[Pos2; 2]> {
+        fn walk(s: &egui::Shape, out: &mut Vec<[Pos2; 2]>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::LineSegment { points, stroke } if stroke.color == egui::Color32::from_rgb(0xff, 0xd2, 0x3c) => out.push(*points),
+                _ => {}
+            }
+        }
+        let mut out = vec![];
+        h.output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+    let move_to = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.step();
+    };
+    let shift = egui::Modifiers::SHIFT;
+    let corner = rect(&h, &format!("viewer.handle.{}.2", box_id.0)).center();
+    h.input_mut().events.push(Event::ModifiersChanged(shift));
+    h.input_mut().events.push(Event::PointerMoved(corner));
+    h.input_mut().events.push(Event::PointerButton { pos: corner, button: egui::PointerButton::Primary, pressed: true, modifiers: shift });
+    h.step();
+    // Near the comp's centre line in x, whose correction would throw the handle along y.
+    let p = screen(&h, [320.0, 115.0]);
+    move_to(&mut h, p);
+    assert!(segments(&h).is_empty(), "the handle didn't snap: {:?}", segments(&h));
+    // Near the centre line in y too, which it can reach: that line shows, the other doesn't.
+    let p = screen(&h, [320.0, 178.0]);
+    move_to(&mut h, p);
+    let shown = segments(&h);
+    let y = screen(&h, [0.0, 180.0]).y;
+    let x = screen(&h, [320.0, 0.0]).x;
+    assert!(shown.iter().any(|[a, b]| (a.y - y).abs() < 0.5 && (b.y - y).abs() < 0.5), "the line it reached: {shown:?}");
+    assert!(!shown.iter().any(|[a, b]| (a.x - x).abs() < 0.5 && (b.x - x).abs() < 0.5), "not the other: {shown:?}");
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: shift });
+    h.run_steps(2);
+    h.input_mut().events.push(Event::ModifiersChanged(Default::default()));
+    h.step();
+    // Without Shift the handle takes the correction, and the feedback stays.
+    let corner = rect(&h, &format!("viewer.handle.{}.2", box_id.0)).center();
+    h.input_mut().events.push(Event::PointerMoved(corner));
+    h.input_mut().events.push(Event::PointerButton { pos: corner, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let p = screen(&h, [321.0, 250.0]);
+    move_to(&mut h, p);
+    let shown = segments(&h);
+    assert!(shown.iter().any(|[a, b]| (a.x - x).abs() < 0.5 && (b.x - x).abs() < 0.5), "{shown:?}");
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
 }

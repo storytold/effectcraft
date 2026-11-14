@@ -1469,11 +1469,15 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
             }
             Gesture::Scale { layer, start_scale, start_local, handle, anchor, axes, l2c, inv, others } => {
                 let lp = inv.apply(gv2(cpt[0], cpt[1]));
-                let uniform = mods.shift && axes == [true, true];
+                let uniform = mods.shift;
                 let f = drag_ratio(start_local, [lp.x - anchor[0], lp.y - anchor[1]], axes, uniform);
                 // The handle snaps (to the comp's and other layers' edges, corners and centres),
                 // so a layer scales exactly to them, e.g. to the comp's size.
-                let f = snap_handle(f, handle, anchor, &l2c, axes, uniform, |p| vt::snap(app, &ctx, ectx, &map, &[layer], &[p], mods));
+                let f = snap_handle(f, handle, anchor, &l2c, axes, uniform, vt::SNAP_PX / map.zoom.max(1e-3) as f64, |p| {
+                    vt::snap(app, &ctx, ectx, &map, &[layer], &[p], mods)
+                });
+                let landed = l2c.apply(gv2(anchor[0] + f[0] * handle[0], anchor[1] + f[1] * handle[1]));
+                vt::snap_landed(&ctx, [landed.x, landed.y]);
                 for (lid, s0) in std::iter::once((layer, start_scale)).chain(others) {
                     let v = [s0[0] * f[0], s0[1] * f[1], s0[2]];
                     let _ = app.session.execute("prop.set", json!({"layer": lid.0, "path": "transform/scale", "value": v, "merge": merge}));

@@ -193,13 +193,15 @@ pub(super) fn handle_cursor(sq: &[Pos2], handle: usize) -> egui::CursorIcon {
 }
 
 /// The scale ratio (x, y) that puts the point grabbed at `start` (relative to the anchor, layer
-/// pixels) under the pointer at `cur`. `uniform` (Shift on a corner) keeps the aspect ratio,
-/// following the pointer along the handle's diagonal. Dragging past the anchor flips the layer,
-/// as in After Effects; an axis whose grabbed point sits on the anchor keeps its scale.
+/// pixels) under the pointer at `cur`. `uniform` (Shift) keeps the aspect ratio: a corner follows
+/// the pointer along the handle's diagonal, an edge takes its one axis's ratio for both (#2860).
+/// Dragging past the anchor flips the layer, as in After Effects; an axis whose grabbed point sits
+/// on the anchor keeps its scale.
 pub(super) fn drag_ratio(start: [f64; 2], cur: [f64; 2], axes: [bool; 2], uniform: bool) -> [f64; 2] {
     if uniform {
-        let d2 = start[0] * start[0] + start[1] * start[1];
-        let f = if d2 > 1e-6 { (cur[0] * start[0] + cur[1] * start[1]) / d2 } else { 1.0 };
+        let s = [0, 1].map(|k| if axes[k] { start[k] } else { 0.0 });
+        let d2 = s[0] * s[0] + s[1] * s[1];
+        let f = if d2 > 1e-6 { (cur[0] * s[0] + cur[1] * s[1]) / d2 } else { 1.0 };
         return [f, f];
     }
     [0, 1].map(|k| if axes[k] && start[k].abs() > 1e-3 { cur[k] / start[k] } else { 1.0 })
@@ -209,7 +211,9 @@ pub(super) fn drag_ratio(start: [f64; 2], cur: [f64; 2], axes: [bool; 2], unifor
 /// drag began; `l2c` that layer space → comp) at scale ratio `f` goes through `snap` (a comp
 /// point → its correction), and the ratio that puts the handle where it snapped comes back.
 /// A `uniform` drag slides the handle along its line from the anchor point to the nearer snapped
-/// line; otherwise each scaled axis takes the snapped point.
+/// line, one that takes it no further than `tol` (the snap distance, comp pixels) along the other
+/// axis; otherwise each scaled axis takes the snapped point.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn snap_handle(
     f: [f64; 2],
     h: [f64; 2],
@@ -217,6 +221,7 @@ pub(super) fn snap_handle(
     l2c: &Mat3,
     axes: [bool; 2],
     uniform: bool,
+    tol: f64,
     snap: impl FnOnce([f64; 2]) -> [f64; 2],
 ) -> [f64; 2] {
     let at = |f: [f64; 2]| {
@@ -227,9 +232,17 @@ pub(super) fn snap_handle(
     let c = snap(p);
     let s = [p[0] + c[0], p[1] + c[1]];
     if uniform {
+        // An edge on the anchor point can't scale: the pointer doesn't, wherever on the handle it
+        // pressed, so neither does a snap.
+        if axes != [true, true] && h[usize::from(axes[1])].abs() <= 1e-3 {
+            return [1.0, 1.0];
+        }
         let o = at([0.0; 2]);
         let d = [p[0] - o[0], p[1] - o[1]];
-        let k = [0, 1].into_iter().filter(|k| c[*k] != 0.0 && d[*k].abs() > 1e-9).min_by(|x, y| c[*x].abs().total_cmp(&c[*y].abs()));
+        // Near the anchor point on one axis, a small correction there is a big step on the other:
+        // that line is out of reach, or the scale would jump.
+        let reach = |k: usize| d[k].abs() > 1e-9 && (c[k] * d[1 - k] / d[k]).abs() <= tol;
+        let k = [0, 1].into_iter().filter(|k| c[*k] != 0.0 && reach(*k)).min_by(|x, y| c[*x].abs().total_cmp(&c[*y].abs()));
         return k.map_or(f, |k| f.map(|v| v * (s[k] - o[k]) / d[k]));
     }
     let Some(inv) = l2c.inverse().filter(|_| c != [0.0; 2]) else { return f };
