@@ -702,7 +702,7 @@ fn card_layer(r: &Renderer, ctx: &EvalCtx, layer: &Layer, b: &mut Builder) {
     mat.opacity = (ctx.opacity(layer) as f32 * r.opacity_mul()).clamp(0.0, 1.0);
     let world = b.outer * ctx.world_matrix(layer);
     if crate::text::per_char_3d(ctx, layer) {
-        for (buf, m) in crate::text::per_char_planes(&r.with_reads(ctx), layer, r.opts.scale) {
+        for (buf, m) in crate::text::per_char_planes(&r.with_reads(ctx), layer, r.opts.scale, r.edited(layer)) {
             let buf = r.to_blend(Arc::new(buf), None, &Arc::default());
             card(b, &buf, world * m, mat);
         }

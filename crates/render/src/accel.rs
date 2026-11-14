@@ -3,7 +3,7 @@ use super::fx_host::MAX_FX_DEPTH;
 use super::layers::StyledLayer;
 use super::opts::LayerTiming;
 use super::{
-    Arc, AutoPick, Buf, EffectCtx, EvalCtx, Image, ItemId, ItemKind, Layer, LayerSource, Mat3, MatteKind, Renderer, Tick, cache, color, masks, three_d, vec2,
+    Arc, AutoPick, Buf, EffectCtx, EvalCtx, Image, ItemId, ItemKind, Layer, LayerSource, Mat3, MatteKind, Renderer, Tick, cache, color, three_d, vec2,
 };
 
 /// Which compositor renders a frame (Project Settings ▸ Video Rendering and Effects).
@@ -373,7 +373,10 @@ impl<'a> Renderer<'a> {
     /// its effects show. `None` = the layer changes nothing.
     pub fn adjustment_footprint(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
         // Cached, so an accelerator sees the same buffer (and uploads it once) every frame.
-        let key = self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
+        let key = self.mask_aware_key(
+            layer,
+            self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer))),
+        );
         let key = self.mask_gate_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let Some((b, _)) = self.cached(key) {
             return Some(b);
@@ -382,7 +385,7 @@ impl<'a> Renderer<'a> {
             // (what the masks' expressions read, at shutter times too, goes to the buffer's files)
             let ctx = &r.with_reads(ctx);
             let mut foot = r.source(ctx, layer)?;
-            let _ = masks::apply(ctx, layer, &mut foot, r.mask_blur(ctx, layer));
+            let _ = r.apply_masks(ctx, layer, &mut foot);
             Some(foot)
         });
         // The buffer the cache keeps (another worker's, if it kept one first).
