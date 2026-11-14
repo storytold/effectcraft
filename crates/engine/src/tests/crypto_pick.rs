@@ -78,7 +78,11 @@ impl crate::Importer for Probe {
 }
 
 fn session() -> Session {
-    let mut s = Session { footage: Arc::new(Crypto), importer: Some(Arc::new(Probe)), ..Default::default() };
+    session_with(Arc::new(Crypto))
+}
+
+fn session_with(footage: Arc<dyn FootageSource>) -> Session {
+    let mut s = Session { footage, importer: Some(Arc::new(Probe)), ..Default::default() };
     let item = s.execute("file.import", json!({"paths": ["/renders/crypto.exr"]})).unwrap()["items"][0].clone();
     s.execute("comp.new", json!({"name": "C", "width": 8, "height": 4, "frameRate": 24, "duration": 2})).unwrap();
     s.execute("layer.addItem", json!({"item": item})).unwrap();
@@ -135,7 +139,9 @@ fn picks_replace_add_and_remove_in_one_undo_step_each() {
 }
 
 /// A second layer that fits a standard slot (`Z.CryptoObject` beside `CryptoObject`) is picked by
-/// its own Layer value (3); Layer 0 still reads the first one.
+/// its own Layer value (3); Layer 0 still reads the first one. The agent commands follow that
+/// Layer value too (#3020): ids/coverage/pick-by-name read `Z.CryptoObject`, and unknown-name
+/// errors name it.
 #[test]
 fn pick_reads_the_second_layer_of_a_kind() {
     let mut s = session();
@@ -143,6 +149,14 @@ fn pick_reads_the_second_layer_of_a_kind() {
     s.execute_checked("prop.set", json!({"path": "effects/#1/layer", "value": 3})).unwrap();
     assert_eq!(pick(&mut s, 1.0, "replace")["name"], "right");
     assert_eq!(s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 1.0, "y": 1.5})).unwrap()["name"], "right");
+    let r = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1})).unwrap();
+    assert_eq!(r["layer"].as_str(), Some("Z.CryptoObject"), "{r}");
+    assert_eq!(ids(&r), [json!("right")]);
+    let cov = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "name": "right"})).unwrap();
+    assert!((cov["coverage"].as_f64().unwrap() - 1.0).abs() < 1e-9, "{cov}");
+    assert_eq!(s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "right"})).unwrap()["name"], "right");
+    let e = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "name": "left"})).unwrap_err().to_string();
+    assert!(e.contains("in Z.CryptoObject"), "{e}");
 }
 
 #[test]
@@ -931,6 +945,20 @@ impl FootageSource for Layers {
     }
 }
 
+/// [`Crypto`] with a manifest that names two IDs `twin` (`right` and the unnamed `ghost`).
+struct Twins;
+impl FootageSource for Twins {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        Crypto.frame(item, f, t)
+    }
+    fn aux(&self, _: ItemId, _: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        let mut aux = aux_at(t);
+        aux.manifests[0].1.retain(|(n, _)| n != "right");
+        aux.manifests[0].1.extend([("twin".to_string(), crypto_hash("right")), ("twin".to_string(), crypto_hash("ghost"))]);
+        Some(Arc::new(aux))
+    }
+}
+
 /// #473: the probe reads the layer the Layer value names, as the effect does: 0 (a saved
 /// CryptoObject) on a file without it reads the file's first layer, 1 is CryptoMaterial, and 3
 /// is the file's other layer.
@@ -950,4 +978,531 @@ fn pick_reads_the_layer_the_layer_value_names() {
     assert_eq!(name_at(&mut s, 0).1, "CryptoMaterial", "a saved CryptoObject: the first layer");
     assert_eq!(name_at(&mut s, 1).1, "CryptoMaterial");
     assert_eq!(name_at(&mut s, 3).1, "Mine");
+}
+
+fn ids(r: &Value) -> Vec<Value> {
+    r["ids"].as_array().unwrap().iter().map(|i| i["name"].clone()).collect()
+}
+
+#[test]
+fn ids_list_the_manifest_then_unnamed_ids_with_their_coverage() {
+    let mut s = session();
+    pick(&mut s, 0.5, "replace");
+    let steps = s.history.undo.len();
+    let r = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1})).unwrap();
+    assert_eq!(
+        (r["layer"].as_str(), r["layers"].clone(), r["total"].as_u64()),
+        (Some("CryptoObject"), json!(["CryptoObject", "Z.CryptoObject"]), Some(6)),
+        "{r}"
+    );
+    // The manifest in its order, then the unnamed `ghost`, by hash.
+    assert_eq!(ids(&r), [json!("left"), json!("right"), json!("late"), json!(COMMA), json!("star*"), Value::Null]);
+    assert_eq!(r["ids"][5]["hash"], format!("{:08x}", crypto_hash("ghost")));
+    assert_eq!((r["ids"][0]["selected"].as_bool(), r["ids"][1]["selected"].as_bool()), (Some(true), Some(false)));
+    // `left`: 0.6, 0.3 and 0.5 of 4, 4 and 2 aux columns, on 6 of the 8 rows of a 16 × 8 aux.
+    let want = (0.6 * 4.0 + 0.3 * 4.0 + 0.5 * 2.0) * 6.0 / 128.0;
+    assert!((r["ids"][0]["coverage"].as_f64().unwrap() - want).abs() < 1e-6, "{}", r["ids"][0]);
+    assert_eq!(r["ids"][2]["coverage"], 0.0, "`late` isn't on this frame");
+    // `present` drops IDs that aren't on the frame; `filter` matches names, case-insensitively.
+    let r = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1, "present": true, "filter": "L"})).unwrap();
+    assert_eq!(ids(&r), [json!("left"), json!(COMMA)]);
+    let r = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1, "time": 1.5, "present": true})).unwrap();
+    assert!(ids(&r).contains(&json!("late")), "from 1 s `late` is on the frame: {r}");
+    let r = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1, "limit": 2})).unwrap();
+    assert_eq!((ids(&r).len(), r["total"].as_u64()), (2, Some(6)));
+    // A query: no undo step, the Selection as it was.
+    assert_eq!((s.history.undo.len(), selection(&s)), (steps, "left".to_string()));
+    assert!(s.execute_checked("effect.cryptomatteIds", json!({"effect": 1, "probeOnly": true})).is_err(), "not a parameter");
+}
+
+#[test]
+fn coverage_point_is_deep_inside_the_id_and_picks_it() {
+    let mut s = session();
+    let r = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "name": "star*"})).unwrap();
+    assert_eq!((r["hashes"].clone(), r["bounds"].clone()), (json!([format!("{:08x}", crypto_hash("star*"))]), json!([4.0, 0.0, 6.0, 3.0])), "{r}");
+    assert!((r["coverage"].as_f64().unwrap() - 24.0 / 128.0).abs() < 1e-9, "{r}");
+    // `star*` is aux columns 8-11, rows 0-5: a pick reads it at layer pixels 4-5, rows 0-2 (the
+    // aux pixel under each centre), all as deep; the one nearest the centre comes first (4, 1).
+    // The first of them, the corner (4, 0), would give [4.5, 0.5], on the matte's top edge.
+    assert_eq!(r["point"], json!([4.5, 1.5]));
+    let at =
+        |s: &mut Session, r: &Value| s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": r["point"][0], "y": r["point"][1]})).unwrap()["name"].clone();
+    assert_eq!(at(&mut s, &r), "star*");
+    // Default: the whole Selection (a wildcard here); empty, it covers nothing.
+    let none = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1})).unwrap();
+    assert_eq!((none["coverage"].as_f64(), none["bounds"].is_null(), none["point"].is_null()), (Some(0.0), true, true));
+    s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": "le*"})).unwrap();
+    let sel = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1})).unwrap();
+    assert_eq!(sel["hashes"], json!([format!("{:08x}", crypto_hash("left"))]));
+    assert_eq!(at(&mut s, &sel), "left");
+    // An ID that is never on top (`right` loses every pixel, a tie to the lower rank) has
+    // coverage and bounds but no point a pick would read.
+    let right = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "name": "right"})).unwrap();
+    assert!(right["coverage"].as_f64().unwrap() > 0.0 && right["bounds"].is_array() && right["point"].is_null(), "{right}");
+    // By hash, with or without the brackets.
+    for hash in [format!("{:08x}", crypto_hash("ghost")), format!("<{:08x}>", crypto_hash("ghost"))] {
+        let g = s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "hash": hash})).unwrap();
+        assert_eq!(at(&mut s, &g), Value::Null, "`ghost` has no name");
+        assert_eq!(g["bounds"], json!([6.0, 0.0, 7.0, 3.0]));
+    }
+}
+
+#[test]
+fn picks_by_name_or_hash_in_one_undo_step_each() {
+    let mut s = session();
+    let steps = s.history.undo.len();
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": COMMA})).unwrap();
+    assert_eq!((r["selection"].as_str(), r["changed"].as_bool()), (Some(r#""Green, \"Glossy\"""#), Some(true)), "{r}");
+    let hash = format!("{:08x}", crypto_hash("ghost"));
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "hash": hash, "mode": "add"})).unwrap();
+    assert_eq!(r["selection"], format!(r#""Green, \"Glossy\"", <{hash}>"#));
+    // `star*` goes in as its hash, so it can't act as a wildcard.
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "star*", "mode": "add"})).unwrap();
+    assert!(r["selection"].as_str().unwrap().ends_with(&format!("<{:08x}>", crypto_hash("star*"))), "{r}");
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": COMMA, "mode": "remove"})).unwrap();
+    assert_eq!(r["selection"], format!("<{hash}>, <{:08x}>", crypto_hash("star*")));
+    // An ID that isn't on this frame can be picked by name too.
+    s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "late"})).unwrap();
+    assert_eq!(selection(&s), "late");
+    assert_eq!(s.history.undo.len(), steps + 5);
+    // Picking what is already there changes nothing and adds no step.
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "late", "mode": "add"})).unwrap();
+    assert_eq!((r["changed"].as_bool(), s.history.undo.len()), (Some(false), steps + 5));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(selection(&s), format!("<{hash}>, <{:08x}>", crypto_hash("star*")));
+}
+
+#[test]
+fn named_ids_that_are_unknown_ambiguous_or_malformed_are_errors() {
+    let mut s = session();
+    let steps = s.history.undo.len();
+    let err = |s: &mut Session, c: &str, p: Value| s.execute_checked(c, p).unwrap_err().to_string();
+    for c in ["effect.pickCryptomatte", "effect.cryptomatteCoverage"] {
+        assert!(err(&mut s, c, json!({"effect": 1, "name": "nobody"})).contains("no ID named \"nobody\" in CryptoObject"), "{c}");
+        assert!(err(&mut s, c, json!({"effect": 1, "name": "left", "hash": "00000001"})).contains("not both"), "{c}");
+        for bad in ["xyz", "123", "1234567890", ""] {
+            assert!(err(&mut s, c, json!({"effect": 1, "hash": bad})).contains("8 hex digits"), "{c} {bad}");
+        }
+        assert!(err(&mut s, c, json!({"effect": 1, "name": 3})).contains("string"), "{c}");
+    }
+    assert!(err(&mut s, "effect.pickCryptomatte", json!({"effect": 1, "name": "left", "x": 1, "y": 1})).contains("not both"));
+    assert!(err(&mut s, "effect.pickCryptomatte", json!({"effect": 1, "name": "left", "mode": "toggle"})).contains("mode"));
+    assert_eq!((s.history.undo.len(), selection(&s)), (steps, String::new()));
+    // A name the manifest gives to two IDs: pick by hash instead.
+    let mut s = session_with(Arc::new(Twins));
+    let e = err(&mut s, "effect.pickCryptomatte", json!({"effect": 1, "name": "twin"}));
+    let (a, b) = (format!("{:08x}", crypto_hash("right")), format!("{:08x}", crypto_hash("ghost")));
+    assert!(e.contains("2 IDs in CryptoObject are named \"twin\"") && e.contains(&a) && e.contains(&b), "{e}");
+    assert!(err(&mut s, "effect.cryptomatteCoverage", json!({"effect": 1, "name": "twin"})).contains("pass `hash`"));
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "hash": b})).unwrap();
+    assert_eq!(r["selection"], format!("<{b}>"), "a shared name doesn't select one ID");
+    // Without a manifest a name is hashed, as the Selection reads it.
+    let mut s = session_with(Arc::new(NoManifest));
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "left"})).unwrap();
+    assert_eq!((r["hash"].clone(), r["selection"].clone()), (json!(format!("{:08x}", crypto_hash("left"))), json!(format!("<{:08x}>", crypto_hash("left")))));
+    let r = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1})).unwrap();
+    assert!(r["ids"].as_array().unwrap().iter().all(|i| i["name"].is_null()) && r["total"] == 5, "{r}");
+}
+
+/// [`Crypto`] without a manifest.
+struct NoManifest;
+impl FootageSource for NoManifest {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        Crypto.frame(item, f, t)
+    }
+    fn aux(&self, _: ItemId, _: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        let mut aux = aux_at(t);
+        aux.manifests.clear();
+        Some(Arc::new(aux))
+    }
+}
+
+#[test]
+fn new_commands_need_a_cryptomatte_effect_on_a_layer_with_cryptomatte() {
+    let mut s = session();
+    s.execute_checked("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap();
+    let queries =
+        [("effect.cryptomatteIds", json!({})), ("effect.cryptomatteCoverage", json!({"name": "left"})), ("effect.pickCryptomatte", json!({"name": "left"}))];
+    for (c, p) in &queries {
+        let mut p = p.clone();
+        p["effect"] = json!(2);
+        assert!(s.execute_checked(c, p).unwrap_err().to_string().contains("not a Cryptomatte effect"), "{c}");
+    }
+    s.execute("layer.newSolid", json!({"name": "S"})).unwrap();
+    s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
+    for (c, p) in queries {
+        let mut p = p;
+        p["effect"] = json!(1);
+        let e = s.execute_checked(c, p).unwrap_err().to_string();
+        assert!(e.contains("no Cryptomatte channels"), "{c}: {e}");
+    }
+}
+
+#[test]
+fn memory_purges_drop_the_probe() {
+    for (what, drops) in [("memory", true), ("all", true), ("image", true), ("memoryAndDisk", true), ("disk", false), ("snapshot", false)] {
+        let mut s = session();
+        s.execute_checked("effect.cryptomatteIds", json!({"effect": 1})).unwrap();
+        assert!(s.crypto_probe.lock().unwrap().kept(), "the queries keep the probe like a hover");
+        s.execute_checked("edit.purge", json!({"what": what})).unwrap();
+        assert_eq!(!s.crypto_probe.lock().unwrap().kept(), drops, "{what}");
+    }
+}
+
+/// What the undo tests compare after every step: the Cryptomatte Selection (`None` without the
+/// effect), the layer's opacity and position, and the undo and redo labels (next redo last).
+#[derive(Clone, Debug, PartialEq)]
+struct Snap {
+    selection: Option<String>,
+    opacity: Value,
+    position: Value,
+    undo: Vec<String>,
+    redo: Vec<String>,
+}
+
+fn snap(s: &mut Session) -> Snap {
+    let l = &s.active_comp().unwrap().layers[0];
+    let selection = l.effects().and_then(|fx| fx.groups().find(|g| g.match_id == "ec.3d.cryptomatte")).map(|g| match &g.prop("selection").unwrap().value {
+        effectcraft_keyframe::Value::Str(t) => t.clone(),
+        v => panic!("{v:?}"),
+    });
+    let mut get = |path: &str| s.execute("prop.get", json!({"layer": 1, "path": path})).unwrap()["value"].clone();
+    let (opacity, position) = (get("transform/opacity"), get("transform/position"));
+    let labels = |v: &[(String, Arc<effectcraft_project::Project>)]| v.iter().map(|(l, _)| l.clone()).collect();
+    Snap { selection, opacity, position, undo: labels(&s.history.undo), redo: labels(&s.history.redo) }
+}
+
+#[test]
+fn name_and_hash_picks_are_one_undo_step_and_queries_and_purges_none() {
+    let mut s = session();
+    let base = s.history.undo.len();
+    s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "left"})).unwrap();
+    assert_eq!(s.history.undo.len(), base + 1);
+    s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "hash": format!("{:08x}", crypto_hash("ghost")), "mode": "add"})).unwrap();
+    assert_eq!(s.history.undo.len(), base + 2);
+    s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": COMMA, "mode": "add"})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    let before = snap(&mut s);
+    assert_eq!(before.redo.len(), 1);
+    let rev = s.revision;
+    // Read-only commands and the probe's purge: no step, the redo stack untouched.
+    s.execute_checked("effect.cryptomatteIds", json!({"effect": 1})).unwrap();
+    s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "name": "left"})).unwrap();
+    s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1})).unwrap();
+    s.execute_checked("effect.cryptomatteAt", json!({"effect": 1, "x": 0.5, "y": 0.5})).unwrap();
+    s.execute_checked("edit.purge", json!({"what": "memory"})).unwrap();
+    s.execute_checked("effect.cryptomatteAt", json!({"effect": 1, "x": 2.5, "y": 0.5})).unwrap();
+    assert_eq!((snap(&mut s), s.revision), (before.clone(), rev));
+    // Picks that change nothing make no step either, and keep the redo stack.
+    s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "left", "mode": "add"})).unwrap();
+    s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "right", "mode": "remove"})).unwrap();
+    assert_eq!(snap(&mut s), before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(selection(&s), format!(r#"left, <{:08x}>, "Green, \"Glossy\"""#, crypto_hash("ghost")));
+    // Undo after a purge restores the Selection, and a pick after it rebuilds the probe.
+    s.execute_checked("edit.purge", json!({"what": "all"})).unwrap();
+    assert!(!s.crypto_probe.lock().unwrap().kept());
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(selection(&s), "left");
+    let builds = s.crypto_probe.lock().unwrap().builds().1;
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "x": 2.5, "y": 0.5, "mode": "add"})).unwrap();
+    assert_eq!(r["selection"], r#"left, "Green, \"Glossy\"""#);
+    assert_eq!(s.crypto_probe.lock().unwrap().builds().1, builds + 1, "rebuilt after the undo");
+    assert!(s.history.redo.is_empty(), "a new step clears the redo stack");
+}
+
+#[test]
+fn a_long_mixed_history_undoes_and_redoes_step_by_step() {
+    let mut s = session();
+    let g = format!("<{:08x}>", crypto_hash("ghost"));
+    let st = format!("<{:08x}>", crypto_hash("star*"));
+    let gh = format!("{:08x}", crypto_hash("ghost"));
+    let pick = |p: Value| ("effect.pickCryptomatte", p);
+    // Each step, then the Selection, opacity and position it leaves.
+    #[rustfmt::skip]
+    let steps: Vec<((&str, Value), Option<String>, f64, [f64; 3])> = vec![
+        (pick(json!({"effect": 1, "name": "left"})), Some("left".into()), 100.0, [4.0, 2.0, 0.0]),
+        (("prop.set", json!({"layer": 1, "path": "transform/opacity", "value": 50})), Some("left".into()), 50.0, [4.0, 2.0, 0.0]),
+        (pick(json!({"effect": 1, "x": 2.5, "y": 0.5, "mode": "add"})), Some(r#"left, "Green, \"Glossy\"""#.to_string()), 50.0, [4.0, 2.0, 0.0]),
+        (pick(json!({"effect": 1, "hash": gh, "mode": "add"})), Some(format!(r#"left, "Green, \"Glossy\"", {g}"#)), 50.0, [4.0, 2.0, 0.0]),
+        (("prop.set", json!({"layer": 1, "path": "transform/position", "value": [6, 3]})), Some(format!(r#"left, "Green, \"Glossy\"", {g}"#)), 50.0, [6.0, 3.0, 0.0]),
+        (pick(json!({"effect": 1, "name": "left", "mode": "remove"})), Some(format!(r#""Green, \"Glossy\"", {g}"#)), 50.0, [6.0, 3.0, 0.0]),
+        (pick(json!({"effect": 1, "x": 4.5, "y": 1.5})), Some(st.clone()), 50.0, [6.0, 3.0, 0.0]),
+        (("effect.remove", json!({"layer": 1, "effect": 1})), None, 50.0, [6.0, 3.0, 0.0]),
+        (("prop.set", json!({"layer": 1, "path": "transform/opacity", "value": 25})), None, 25.0, [6.0, 3.0, 0.0]),
+        (("effect.apply", json!({"effect": "Cryptomatte"})), Some(String::new()), 25.0, [6.0, 3.0, 0.0]),
+        (pick(json!({"effect": 1, "name": "right"})), Some("right".into()), 25.0, [6.0, 3.0, 0.0]),
+        (pick(json!({"effect": 1, "x": 0.5, "y": 0.5, "mode": "add"})), Some("right, left".into()), 25.0, [6.0, 3.0, 0.0]),
+        (("prop.set", json!({"layer": 1, "path": "transform/position", "value": [1, 1]})), Some("right, left".into()), 25.0, [1.0, 1.0, 0.0]),
+        (pick(json!({"effect": 1, "name": "right", "mode": "remove"})), Some("left".into()), 25.0, [1.0, 1.0, 0.0]),
+    ];
+    let start = snap(&mut s);
+    assert_eq!((start.selection.as_deref(), start.opacity.clone(), start.position.clone()), (Some(""), json!(100.0), json!([4.0, 2.0, 0.0])), "{start:?}");
+    // Forward: each step is one undo step, and leaves what the table says.
+    let mut states = vec![start.clone()];
+    for (i, ((c, p), sel, op, pos)) in steps.iter().enumerate() {
+        s.execute_checked(c, p.clone()).unwrap_or_else(|e| panic!("step {i} {c}: {e}"));
+        let now = snap(&mut s);
+        assert_eq!((now.selection.clone(), now.opacity.clone(), now.position.clone()), (sel.clone(), json!(op), json!(pos)), "step {i} {c}");
+        assert_eq!(now.undo.len(), start.undo.len() + i + 1, "step {i} {c}: one undo step");
+        assert!(now.redo.is_empty());
+        states.push(now);
+    }
+    let labels: Vec<String> = states.last().unwrap().undo[start.undo.len()..].to_vec();
+    let picks = labels.iter().zip(&steps).filter(|(_, ((c, _), ..))| *c == "effect.pickCryptomatte").map(|(l, _)| l.clone()).collect::<Vec<_>>();
+    assert!(!picks.is_empty() && picks.iter().all(|l| l == "Pick Cryptomatte"), "every pick is labelled as a pick: {labels:?}");
+    let n = steps.len();
+    // State k with the steps after it undone: the forward state, its later labels on the redo stack.
+    let expect = |k: usize| Snap { redo: labels[k..].iter().rev().cloned().collect(), ..states[k].clone() };
+    for k in (0..n).rev() {
+        s.execute_checked("edit.undo", json!({})).unwrap();
+        assert_eq!(snap(&mut s), expect(k), "undo to {k}");
+    }
+    for k in 1..=n {
+        s.execute_checked("edit.redo", json!({})).unwrap();
+        assert_eq!(snap(&mut s), expect(k), "redo to {k}");
+    }
+    // Undo part way (back into the first effect's picks), then a new edit drops the redo stack.
+    for k in (6..n).rev() {
+        s.execute_checked("edit.undo", json!({})).unwrap();
+        assert_eq!(snap(&mut s), expect(k), "undo to {k} again");
+    }
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "name": "star*", "mode": "add"})).unwrap();
+    let now = snap(&mut s);
+    assert_eq!(now.selection, Some(format!(r#""Green, \"Glossy\"", {g}, {st}"#)), "{r}");
+    assert_eq!((now.opacity.clone(), now.position.clone()), (json!(50.0), json!([6.0, 3.0, 0.0])));
+    assert_eq!(now.undo, [states[6].undo.clone(), vec![picks[0].clone()]].concat());
+    assert!(now.redo.is_empty(), "the new edit cleared the redo stack");
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(snap(&mut s), Snap { redo: vec![picks[0].clone()], ..states[6].clone() });
+}
+
+/// [`Crypto`] with an ID `thin` on aux column `.0` only (rows 0-5, where `star*` was), in the
+/// manifest. The aux is twice the layer's size: a pick reads only the odd aux columns.
+struct Thin(usize);
+impl FootageSource for Thin {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        Crypto.frame(item, f, t)
+    }
+    fn aux(&self, _: ItemId, _: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        let mut aux = aux_at(t);
+        let w = aux.width as usize;
+        for y in 0..6 {
+            aux.channels[0].1[y * w + self.0] = crypto_float(crypto_hash("thin"));
+            aux.channels[1].1[y * w + self.0] = 1.0;
+        }
+        aux.manifests[0].1.push(("thin".into(), crypto_hash("thin")));
+        Some(Arc::new(aux))
+    }
+}
+
+/// `point` is always a pixel a pick reads as the ID (an aux finer than the effect's input has
+/// pixels no pick reads): on an even aux column `thin` has coverage and bounds but no point; on
+/// an odd one its point picks it. Every named ID's point round-trips through cryptomatteAt.
+#[test]
+fn coverage_point_is_a_pixel_a_pick_reads() {
+    let cov = |s: &mut Session, name: &str| s.execute_checked("effect.cryptomatteCoverage", json!({"effect": 1, "name": name})).unwrap();
+    let at =
+        |s: &mut Session, r: &Value| s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": r["point"][0], "y": r["point"][1]})).unwrap()["name"].clone();
+    let mut s = session_with(Arc::new(Thin(8)));
+    let r = cov(&mut s, "thin");
+    assert!(r["coverage"].as_f64().unwrap() > 0.0 && r["bounds"] == json!([4.0, 0.0, 4.5, 3.0]), "{r}");
+    assert!(r["point"].is_null(), "no pick reads aux column 8: {r}");
+    let reads: Vec<Value> =
+        (0..8).flat_map(|x| (0..4).map(move |y| (x, y))).map(|(x, y)| json!({"effect": 1, "x": x as f64 + 0.5, "y": y as f64 + 0.5})).collect();
+    for q in &reads {
+        assert_ne!(s.execute("effect.cryptomatteAt", q.clone()).unwrap()["name"], "thin", "{q}");
+    }
+    let mut s = session_with(Arc::new(Thin(9)));
+    let r = cov(&mut s, "thin");
+    assert_eq!((r["point"].clone(), at(&mut s, &r)), (json!([4.5, 1.5]), json!("thin")), "{r}");
+    for name in ["left", COMMA, "star*", "thin"] {
+        let r = cov(&mut s, name);
+        assert_eq!(at(&mut s, &r), name, "{r}");
+    }
+}
+
+/// [`Ranked`] with a manifest naming its rank-0 IDs (`r0_c<col>_<row>`), so a wildcard Selection
+/// stands for thousands of them.
+struct Named(Ranked, std::sync::OnceLock<Arc<AuxChannels>>);
+impl FootageSource for Named {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        self.0.frame(item, f, t)
+    }
+    fn aux(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        Some(
+            self.1
+                .get_or_init(|| {
+                    let mut aux = (*self.0.aux(item, f, t).unwrap()).clone();
+                    let (w, h) = (self.0.0 as usize, self.0.1 as usize);
+                    let names = (0..w.div_ceil(37)).flat_map(|x| (0..h.div_ceil(29)).map(move |y| format!("r0_{}", Cells::name(x * 37, y * 29))));
+                    aux.manifests = vec![("CryptoObject".into(), names.map(|n| (n.clone(), crypto_hash(&n))).collect())];
+                    Arc::new(aux)
+                })
+                .clone(),
+        )
+    }
+}
+
+fn named_session(w: u32, h: u32) -> Session {
+    let mut s = Session {
+        footage: Arc::new(Named(Ranked(w, h, Default::default()), Default::default())),
+        importer: Some(Arc::new(CellsProbe(w, h))),
+        ..Default::default()
+    };
+    let item = s.execute("file.import", json!({"paths": ["/renders/ranked.exr"]})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "C", "width": w, "height": h, "frameRate": 24, "duration": 2})).unwrap();
+    s.execute("layer.addItem", json!({"item": item})).unwrap();
+    s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
+    s
+}
+
+/// Seconds `cmd` takes (and its reply); the first query on a session includes the probe build.
+fn timed(s: &mut Session, cmd: &str, p: Value) -> (f64, Value) {
+    let t0 = std::time::Instant::now();
+    let r = s.execute_checked(cmd, p).unwrap();
+    (t0.elapsed().as_secs_f64(), r)
+}
+
+/// The coverage of a wildcard Selection (`*`: 18×13 = 234 named IDs at 640×360, 6 ranks) names
+/// every manifest ID and covers rank 0 (1/6). More than 16 IDs, so `crypto_cov` takes its set
+/// path, as for thousands. Timing bounds (1080p, 8K) live in [`wildcard_coverage_cost`].
+#[test]
+fn coverage_of_a_wildcard_selection_names_every_id() {
+    let mut s = named_session(640, 360);
+    s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": "*"})).unwrap();
+    let (cov, r) = timed(&mut s, "effect.cryptomatteCoverage", json!({"effect": 1}));
+    assert_eq!(r["hashes"].as_array().unwrap().len(), 18 * 13, "every manifest name (more than 16: the set path)");
+    assert!((r["coverage"].as_f64().unwrap() - 1.0 / 6.0).abs() < 1e-6, "rank 0 covers 1/6: {}", r["coverage"]);
+    eprintln!("COST 640x360 6 ranks, `*` (234 IDs): coverage {cov:.3} s, probe build included");
+    // One ID: its point is looked for over its bounds only.
+    let (one, one_r) = timed(&mut s, "effect.cryptomatteCoverage", json!({"effect": 1, "name": "r0_c1_1"}));
+    eprintln!("COST 640x360 6 ranks, one ID: coverage {one:.3} s");
+    assert_eq!(one_r["hashes"].as_array().unwrap().len(), 1);
+    assert!(one_r["coverage"].as_f64().unwrap() > 0.0, "{one_r}");
+}
+
+/// The coverage reply (coverage, bounds, point, hashes) is the same as the whole-grid version's
+/// for names, unnamed hashes, Selections (wildcards included), the 2× aux fixtures and the
+/// small session's IDs. At 640×360 (not 1080p: cost lives in `wildcard_coverage_cost`) the last
+/// column/row of 37×29 cells are still cut off by the layer edge (18×13 = 234 named rank-0 IDs).
+#[test]
+fn coverage_matches_the_whole_grid_version() {
+    let same = |s: &mut Session, q: Value| {
+        let fast = s.execute_checked("effect.cryptomatteCoverage", q.clone()).unwrap();
+        let reference = crate::commands::crypto_cov_reference(s, &q).unwrap();
+        assert_eq!(fast, reference, "{q}");
+        fast
+    };
+    let mut s = named_session(640, 360);
+    let ids = s.execute_checked("effect.cryptomatteIds", json!({"effect": 1, "limit": 100000})).unwrap();
+    let ids = ids["ids"].as_array().unwrap().clone();
+    let (named, unnamed): (Vec<&Value>, Vec<&Value>) = ids.iter().partition(|i| i["name"].is_string());
+    let mut points = 0;
+    let samples: Vec<&&Value> = named.iter().step_by(7).take(34).collect();
+    for i in &samples {
+        points += usize::from(!same(&mut s, json!({"effect": 1, "name": i["name"]}))["point"].is_null());
+    }
+    for i in unnamed.iter().step_by(unnamed.len().div_ceil(10).max(1)).take(10) {
+        same(&mut s, json!({"effect": 1, "hash": i["hash"]}));
+    }
+    for name in ["r0_c0_0", "r0_c17_0", "r0_c0_12", "r0_c17_12"] {
+        assert!(!same(&mut s, json!({"effect": 1, "name": name}))["point"].is_null(), "{name}");
+    }
+    assert!(points == samples.len() && unnamed.len() >= 10, "{points} points of {}, {} unnamed", samples.len(), unnamed.len());
+    for sel in ["*", "r0_c1*", "r0_c3_4, r0_c17_12"] {
+        s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": sel})).unwrap();
+        same(&mut s, json!({"effect": 1}));
+    }
+    for col in [8, 9] {
+        let mut s = session_with(Arc::new(Thin(col)));
+        for name in ["thin", "left", COMMA, "star*"] {
+            same(&mut s, json!({"effect": 1, "name": name}));
+        }
+    }
+    let mut s = session();
+    for name in ["left", COMMA, "star*"] {
+        same(&mut s, json!({"effect": 1, "name": name}));
+    }
+    s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": "le*"})).unwrap();
+    same(&mut s, json!({"effect": 1}));
+}
+
+/// Cost of `cryptomatteCoverage` and `cryptomatteIds` with 6 ranks: one ID and a wildcard
+/// Selection, at 1080p (`*`, 1976 IDs) and 8K (`r0_c1*`, 16539 IDs). Run with `--ignored
+/// --nocapture`. At 1080p it asserts coverage stays within a few times of listing the IDs
+/// (minimum of several runs); at 8K it only measures.
+#[test]
+#[ignore]
+fn wildcard_coverage_cost() {
+    for (w, h, wild) in [(1920u32, 1080u32, "*"), (7680, 4320, "r0_c1*")] {
+        let r0 = rss_mb();
+        let mut s = named_session(w, h);
+        let (build, _) = timed(&mut s, "effect.cryptomatteIds", json!({"effect": 1}));
+        let runs = if w == 1920 { 3 } else { 1 };
+        let mut ids_min = f64::INFINITY;
+        let mut one_min = f64::INFINITY;
+        for _ in 0..runs {
+            let (ids, _) = timed(&mut s, "effect.cryptomatteIds", json!({"effect": 1}));
+            ids_min = ids_min.min(ids);
+            let (one, _) = timed(&mut s, "effect.cryptomatteCoverage", json!({"effect": 1, "name": "r0_c1_1"}));
+            one_min = one_min.min(one);
+        }
+        s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": wild})).unwrap();
+        s.execute_checked("effect.cryptomatteIds", json!({"effect": 1})).unwrap();
+        let mut all_min = f64::INFINITY;
+        let mut n = 0;
+        for _ in 0..runs {
+            let (all, r) = timed(&mut s, "effect.cryptomatteCoverage", json!({"effect": 1}));
+            all_min = all_min.min(all);
+            n = r["hashes"].as_array().unwrap().len();
+        }
+        eprintln!(
+            "COST {w}x{h} 6 ranks: probe build {build:.2} s, ids {ids_min:.2} s, coverage of one ID {one_min:.2} s, of `{wild}` ({n} IDs) {all_min:.2} s; RSS +{:.0} MB",
+            rss_mb() - r0
+        );
+        if w == 1920 {
+            assert!(all_min < 4.0 * ids_min + 0.3, "coverage {all_min:.3} s against ids {ids_min:.3} s");
+            assert!(one_min < ids_min + 0.05, "one ID {one_min:.3} s against ids {ids_min:.3} s");
+        }
+    }
+}
+
+/// The new commands' parameters: a hash as hex or as a number, an unknown hash or name an
+/// error, `name` exact (no wildcards), wrong types for `limit`, `present` and `filter` errors,
+/// and a pick with nothing to pick says what to pass.
+#[test]
+fn cryptomatte_params_are_checked() {
+    let mut s = session();
+    let err = |s: &mut Session, c: &str, p: Value| s.execute_checked(c, p).unwrap_err().to_string();
+    let left = crypto_hash("left");
+    for c in ["effect.pickCryptomatte", "effect.cryptomatteCoverage"] {
+        let r = s.execute_checked(c, json!({"effect": 1, "hash": left})).unwrap();
+        assert_eq!(r["hash"].as_str().or(r["hashes"][0].as_str()), Some(format!("{left:08x}").as_str()), "{c}: a number is the hash");
+        for bad in [json!(-1), json!(4294967296u64), json!(1.5), json!(true), json!(null)] {
+            assert!(err(&mut s, c, json!({"effect": 1, "hash": bad})).contains("8 hex digits"), "{c} {bad}");
+        }
+        let e = err(&mut s, c, json!({"effect": 1, "hash": "deadbeef"}));
+        assert!(e.contains("no ID with that hash deadbeef in CryptoObject"), "{c}: {e}");
+        assert!(err(&mut s, c, json!({"effect": 1, "hash": 0xdeadbeefu32})).contains("deadbeef"), "{c}");
+        assert!(err(&mut s, c, json!({"effect": 1, "name": "le*"})).contains("no ID named \"le*\""), "{c}: no wildcards");
+    }
+    // A hash only in the Selection (an ID from another frame or file) can still be removed.
+    s.execute_checked("prop.set", json!({"path": "effects/#1/selection", "value": "left, <deadbeef>"})).unwrap();
+    let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "hash": "deadbeef", "mode": "remove"})).unwrap();
+    assert_eq!(r["selection"], "left");
+    for (k, v, says) in
+        [("limit", json!(-1), "`limit`"), ("limit", json!("3"), "`limit`"), ("present", json!("yes"), "`present`"), ("filter", json!(3), "`filter`")]
+    {
+        let e = err(&mut s, "effect.cryptomatteIds", json!({"effect": 1, k: v}));
+        assert!(e.contains(says), "{k} {v}: {e}");
+    }
+    let e = err(&mut s, "effect.pickCryptomatte", json!({"effect": 1}));
+    assert!(e.contains("pass a point (`x` and `y`, layer pixels), `name` or `hash`"), "{e}");
+    assert!(err(&mut s, "effect.pickCryptomatte", json!({"effect": 1, "x": 1})).contains("pass a point"));
+    // Without a manifest a name is hashed, and an ID nowhere is an error too.
+    let mut s = session_with(Arc::new(NoManifest));
+    let e = err(&mut s, "effect.pickCryptomatte", json!({"effect": 1, "name": "nobody"}));
+    assert!(e.contains(&format!("no ID named that (its hash) {:08x}", crypto_hash("nobody"))), "{e}");
 }

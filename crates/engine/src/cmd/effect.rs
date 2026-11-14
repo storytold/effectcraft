@@ -751,28 +751,45 @@ enum Hit {
 fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Hit> {
     let (key, time, layer, g, prop) = probe_key(s, p, cmd)?;
     let (Some(x), Some(y)) = (f_p(p, "x"), f_p(p, "y")) else { return Err(bad(cmd, "missing `x` / `y` (layer pixels)")) };
-    let probe = match cached_probe(s, key) {
-        Some(probe) => probe,
-        None if b_p(p, "probeOnly").unwrap_or(false) => return Ok(Hit::Pending),
-        None => {
-            let r = s.renderer(effectcraft_render::RenderOpts { scale: key.scale, ..Default::default() });
-            if let Ok(mut slot) = s.crypto_probe.lock() {
-                slot.clear();
-                slot.builds += 1;
-            }
-            // (Never cancelled here: nothing else runs on this thread.)
-            let Some(probe) = CryptoProbe::build(&r, key, time, &|| true).map(std::sync::Arc::new) else { return Ok(Hit::Pending) };
-            if let Ok(mut slot) = s.crypto_probe.lock() {
-                slot.probe = Some(probe.clone());
-            }
-            probe
-        }
-    };
+    let Some(probe) = probe_for(s, p, key, time) else { return Ok(Hit::Pending) };
     let b = probe.grid.as_ref().map_err(|e| bad(cmd, e.clone()))?;
     let (bs, o) = (b.scale, b.offset);
     // The centre of its pixel under the point, at the aux point the effect reads there.
     let [ax, ay] = effectcraft_effects::aux_point(bs, o, [(x * bs + o[0]).floor() + 0.5, (y * bs + o[1]).floor() + 0.5]);
     let Some(hash) = b.aux.index_at(ax, ay).and_then(|i| b.aux.crypto_id_at(&b.layer, i)) else { return Ok(Hit::Nothing) };
+    Ok(Hit::Id(hit_of(s, (key, time, layer, g, prop), &probe, hash)?))
+}
+
+/// The probe of `key`: the kept one, else built now and kept; `None` with `probeOnly`.
+fn probe_for(s: &Session, p: &Value, key: ProbeKey, time: Tick) -> Option<std::sync::Arc<CryptoProbe>> {
+    if let Some(probe) = cached_probe(s, key) {
+        return Some(probe);
+    }
+    if b_p(p, "probeOnly").unwrap_or(false) {
+        return None;
+    }
+    let r = s.renderer(effectcraft_render::RenderOpts { scale: key.scale, ..Default::default() });
+    if let Ok(mut slot) = s.crypto_probe.lock() {
+        slot.clear();
+        slot.builds += 1;
+    }
+    // (Never cancelled here: nothing else runs on this thread.)
+    let probe = std::sync::Arc::new(CryptoProbe::build(&r, key, time, &|| true)?);
+    if let Ok(mut slot) = s.crypto_probe.lock() {
+        slot.probe = Some(probe.clone());
+    }
+    Some(probe)
+}
+
+/// ID `hash` of the effect [`probe_key`] found, with its Selection.
+#[allow(clippy::type_complexity)]
+fn hit_of(
+    s: &Session,
+    (key, time, layer, g, prop): (ProbeKey, Tick, &Layer, &PropGroup, &effectcraft_project::Property),
+    probe: &std::sync::Arc<CryptoProbe>,
+    hash: u32,
+) -> Result<CryptoHit> {
+    let b = probe.grid.as_ref().map_err(|e| EngineError::Other(e.clone()))?;
     let (cid, lid, ..) = key.at;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let ctx = effectcraft_render::EvalCtx {
@@ -789,7 +806,7 @@ fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Hit> {
     let selection = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr)).s("selection").to_string();
     let driven = prop.expr.as_ref().is_some_and(|e| e.enabled);
     let (aux, layer_name) = (b.aux.clone(), b.layer.clone());
-    Ok(Hit::Id(CryptoHit { at: (cid, lid, time), probe: probe.clone(), aux, layer: layer_name, hash, selection, prop: prop.uid, driven }))
+    Ok(CryptoHit { at: (cid, lid, time), probe: probe.clone(), aux, layer: layer_name, hash, selection, prop: prop.uid, driven })
 }
 
 /// `effect.cryptomatteAt`: the ID under a point, for the viewer's hover hint. The first call per
@@ -814,10 +831,25 @@ fn pick_crypto(s: &mut Session, p: &Value) -> Result<Value> {
         "remove" => PickMode::Remove,
         m => return Err(bad(cmd, format!("unknown `mode` {m:?} (replace, add or remove)"))),
     };
-    let h = match crypto_hit(s, p, cmd)? {
-        Hit::Id(h) => h,
-        Hit::Pending => return Ok(json!({"pending": true, "changed": false})),
-        Hit::Nothing => return Err(bad(cmd, "no Cryptomatte ID there (empty or outside the layer)")),
+    let pending = json!({"pending": true, "changed": false});
+    let h = if p.get("name").is_some() || p.get("hash").is_some() {
+        if p.get("x").is_some() || p.get("y").is_some() {
+            return Err(bad(cmd, "pass a point (`x`, `y`) or `name` / `hash`, not both"));
+        }
+        let k = probe_key(s, p, cmd)?;
+        let Some(probe) = probe_for(s, p, k.0, k.1) else { return Ok(pending) };
+        probe.grid.as_ref().map_err(|e| bad(cmd, e.clone()))?;
+        let mut h = hit_of(s, k, &probe, 0)?;
+        h.hash = id_named(p, &h, cmd)?;
+        h
+    } else if f_p(p, "x").is_none() || f_p(p, "y").is_none() {
+        return Err(bad(cmd, "pass a point (`x` and `y`, layer pixels), `name` or `hash`"));
+    } else {
+        match crypto_hit(s, p, cmd)? {
+            Hit::Id(h) => h,
+            Hit::Pending => return Ok(pending),
+            Hit::Nothing => return Err(bad(cmd, "no Cryptomatte ID there (empty or outside the layer)")),
+        }
     };
     if h.driven {
         return Err(bad(cmd, "the Selection is driven by an expression; disable it to pick"));
@@ -846,6 +878,256 @@ fn pick_crypto(s: &mut Session, p: &Value) -> Result<Value> {
     out["selection"] = json!(sel);
     out["changed"] = json!(changed);
     Ok(out)
+}
+
+/// The ID `{name}` (exact, no wildcards) or `{hash}` (8 hex digits, or the hash as a number)
+/// names: a manifest name (an error when the manifest lacks it or gives it to several IDs), or
+/// without a manifest the hash Cryptomatte gives it. An ID that is neither in the manifest, on
+/// this frame nor in the Selection is an error too.
+fn id_named(p: &Value, h: &CryptoHit, cmd: &str) -> Result<u32> {
+    let layer = &h.layer;
+    let id = match (p.get("name"), p.get("hash")) {
+        (Some(_), Some(_)) => return Err(bad(cmd, "pass `name` or `hash`, not both")),
+        (_, Some(Value::String(v))) => {
+            let hex = v.trim().trim_start_matches('<').trim_end_matches('>');
+            u32::from_str_radix(hex, 16)
+                .ok()
+                .filter(|_| hex.len() == 8)
+                .ok_or_else(|| bad(cmd, format!("`hash` {v:?} is not 8 hex digits, such as 3a5f00c1")))?
+        }
+        (_, Some(v)) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| bad(cmd, "`hash` is 8 hex digits (a string, such as \"3a5f00c1\") or the hash as a number"))?,
+        _ => {
+            let name = str_p(p, "name").ok_or_else(|| bad(cmd, "`name` is a string (an exact name; no wildcards)"))?;
+            match h.manifest().filter(|m| !m.is_empty()).map(|m| m.iter().filter(|(n, _)| n == name).map(|(_, h)| *h).collect::<Vec<_>>()) {
+                None => effectcraft_raster::channels3d::crypto_hash(name),
+                Some(found) => match found[..] {
+                    [h] => return Ok(h),
+                    [] => return Err(bad(cmd, format!("no ID named {name:?} in {layer} (effect.cryptomatteIds lists them)"))),
+                    ref many => {
+                        let hashes: Vec<String> = many.iter().map(|h| format!("{h:08x}")).collect();
+                        return Err(bad(cmd, format!("{} IDs in {layer} are named {name:?}; pass `hash` ({})", many.len(), hashes.join(", "))));
+                    }
+                },
+            }
+        }
+    };
+    let known = h.manifest().is_some_and(|m| m.iter().any(|(_, x)| *x == id))
+        || effectcraft_effects::selection_hashes(&h.selection, h.manifest()).contains(&id)
+        || h.aux.crypto_rank_planes(layer).iter().any(|(ids, cov)| ids.iter().zip(*cov).any(|(i, c)| *c > 0.0 && i.to_bits() == id));
+    if !known {
+        let what = if p.get("name").is_some() { "named that (its hash)" } else { "with that hash" };
+        return Err(bad(
+            cmd,
+            format!("no ID {what} {id:08x} in {layer}: not on this frame, in the manifest or the Selection (effect.cryptomatteIds lists them)"),
+        ));
+    }
+    Ok(id)
+}
+
+/// The probe and Selection a Cryptomatte query reads: never `probeOnly`, it builds when needed.
+fn query_probe(s: &Session, p: &Value, cmd: &str) -> Result<(std::sync::Arc<CryptoProbe>, CryptoHit)> {
+    let k = probe_key(s, p, cmd)?;
+    let probe = probe_for(s, &Value::Null, k.0, k.1).ok_or_else(|| bad(cmd, "the Cryptomatte probe is unavailable"))?;
+    if let Err(e) = &probe.grid {
+        return Err(bad(cmd, e.clone()));
+    }
+    let h = hit_of(s, k, &probe, 0)?;
+    Ok((probe, h))
+}
+
+/// Per ID of the probe's Cryptomatte layer, its summed coverage over the frame's aux pixels.
+fn id_coverage(b: &ProbeGrid) -> std::collections::HashMap<u32, f64> {
+    let mut sums = std::collections::HashMap::new();
+    for (id, cov) in b.aux.crypto_rank_planes(&b.layer) {
+        for (i, c) in id.iter().zip(cov).filter(|(_, c)| **c > 0.0) {
+            *sums.entry(i.to_bits()).or_insert(0.0) += f64::from(*c);
+        }
+    }
+    sums
+}
+
+/// `effect.cryptomatteIds`: the IDs of the Cryptomatte effect's layer (its manifest, plus IDs
+/// on the frame the manifest lacks), with how much of the layer each covers on this frame.
+fn crypto_ids(s: &mut Session, p: &Value) -> Result<Value> {
+    let (probe, h) = query_probe(s, p, "effect.cryptomatteIds")?;
+    let Ok(b) = &probe.grid else { return Err(EngineError::Other("no probe".into())) };
+    let (sums, area) = (id_coverage(b), (b.aux.width as f64 * b.aux.height as f64).max(1.0));
+    let selected: std::collections::HashSet<u32> = effectcraft_effects::selection_hashes(&h.selection, h.manifest()).into_iter().collect();
+    let mut ids: Vec<(Option<&str>, u32)> = h.manifest().unwrap_or_default().iter().map(|(n, h)| (Some(n.as_str()), *h)).collect();
+    let named: std::collections::HashSet<u32> = ids.iter().map(|(_, h)| *h).collect();
+    let mut extra: Vec<u32> = sums.keys().copied().filter(|x| !named.contains(x)).collect();
+    extra.sort_unstable();
+    ids.extend(extra.into_iter().map(|h| (None, h)));
+    let cmd = "effect.cryptomatteIds";
+    let filter = match p.get("filter") {
+        None => None,
+        Some(f) => Some(f.as_str().ok_or_else(|| bad(cmd, "`filter` is a string (part of a name)"))?.to_lowercase()),
+    };
+    let present = p.get("present").map_or(Some(false), Value::as_bool).ok_or_else(|| bad(cmd, "`present` is true or false"))?;
+    let limit = p.get("limit").map_or(Some(1000), Value::as_u64).ok_or_else(|| bad(cmd, "`limit` is a whole number, 0 or more"))? as usize;
+    let list: Vec<Value> = ids
+        .into_iter()
+        .map(|(name, hash)| (name, hash, sums.get(&hash).copied().unwrap_or(0.0) / area))
+        .filter(|(n, _, c)| (!present || *c > 0.0) && filter.as_ref().is_none_or(|f| n.is_some_and(|n| n.to_lowercase().contains(f.as_str()))))
+        .map(|(name, hash, c)| json!({"name": name, "hash": format!("{hash:08x}"), "selected": selected.contains(&hash), "coverage": c}))
+        .collect();
+    Ok(json!({"layer": b.layer, "layers": b.aux.crypto_layers(), "total": list.len(), "ids": list.into_iter().take(limit).collect::<Vec<_>>()}))
+}
+
+/// The pixel deepest inside `top` (`w` wide; the pixels a pick reads as a wanted ID): the largest
+/// 3-4 chamfer distance to a pixel outside it or to the layer's edge, ties to the one nearest
+/// the region's centre. A pick on the matte's edge or corner would be one pixel from another ID.
+fn deepest(top: &[bool], w: usize) -> Option<usize> {
+    let h = top.len() / w.max(1);
+    let mut d: Vec<u32> = top.iter().map(|&t| if t { u32::MAX / 2 } else { 0 }).collect();
+    // Distance through neighbour (x + dx, y + dy): 0 off the layer.
+    let step = |d: &[u32], x: usize, y: usize, dx: isize, dy: isize, cost: u32| {
+        let (nx, ny) = (x as isize + dx, y as isize + dy);
+        let inside = nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h;
+        if inside { d[ny as usize * w + nx as usize] + cost } else { cost }
+    };
+    for (pass, near) in [(0, [(-1, 0, 3), (-1, -1, 4), (0, -1, 3), (1, -1, 4)]), (1, [(1, 0, 3), (1, 1, 4), (0, 1, 3), (-1, 1, 4)])] {
+        for k in 0..w * h {
+            let i = if pass == 0 { k } else { w * h - 1 - k };
+            if d[i] > 0 {
+                d[i] = near.iter().fold(d[i], |m, &(dx, dy, c)| m.min(step(&d, i % w, i / w, dx, dy, c)));
+            }
+        }
+    }
+    let n = top.iter().filter(|t| **t).count();
+    if n == 0 {
+        return None;
+    }
+    let centre = |f: fn(usize, usize) -> usize| (0..w * h).filter(|&i| top[i]).map(|i| f(i, w) as f64 + 0.5).sum::<f64>() / n as f64;
+    let (cx, cy) = (centre(|i, w| i % w), centre(|i, w| i / w));
+    let far = |i: usize| ((i % w) as f64 + 0.5 - cx).powi(2) + ((i / w) as f64 + 0.5 - cy).powi(2);
+    // The deepest, then the nearest the centre; `min_by` keeps the first of equal ones.
+    (0..w * h).filter(|&i| top[i]).min_by(|&a, &b| d[b].cmp(&d[a]).then(far(a).total_cmp(&far(b))))
+}
+
+/// `effect.cryptomatteCoverage`: where an ID (or the whole Selection) covers the layer on this
+/// frame: the covered fraction, the bounds and a point to pick it at, in effect space.
+fn crypto_cov(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "effect.cryptomatteCoverage";
+    let (probe, h) = query_probe(s, p, cmd)?;
+    let Ok(b) = &probe.grid else { return Err(EngineError::Other("no probe".into())) };
+    let want: Vec<u32> = if p.get("name").is_some() || p.get("hash").is_some() {
+        vec![id_named(p, &h, cmd)?]
+    } else {
+        effectcraft_effects::selection_hashes(&h.selection, h.manifest())
+    };
+    // A set for a wildcard Selection (it can stand for thousands of IDs); a scan for a few.
+    let set: std::collections::HashSet<u32> = if want.len() > 16 { want.iter().copied().collect() } else { Default::default() };
+    let wanted = |id: u32| if want.len() > 16 { set.contains(&id) } else { want.contains(&id) };
+    let (aw, ah, sc) = (b.aux.width as usize, b.aux.height as usize, b.aux.scale.max(1e-9));
+    let planes = b.aux.crypto_rank_planes(&b.layer);
+    // Coverage and bounds, and which aux pixels show a wanted ID on top (only where one covers).
+    let (mut sum, mut bounds) = (0.0f64, None::<[usize; 4]>);
+    let mut aux_top = vec![false; aw * ah];
+    for i in 0..aw * ah {
+        let c = planes
+            .iter()
+            .filter(|(id, _)| id.get(i).is_some_and(|v| wanted(v.to_bits())))
+            .map(|(_, c)| c.get(i).map_or(0.0, |c| c.max(0.0)))
+            .sum::<f32>()
+            .min(1.0);
+        if c > 0.0 {
+            let (x, y) = (i % aw, i / aw);
+            sum += f64::from(c);
+            let r = bounds.get_or_insert([x, y, x, y]);
+            *r = [r[0].min(x), r[1].min(y), r[2].max(x + 1), r[3].max(y + 1)];
+            aux_top[i] = effectcraft_raster::channels3d::crypto_top(&planes, i).is_some_and(wanted);
+        }
+    }
+    // The point: of the effect's input pixels over the layer, those whose centre a pick reads as
+    // a wanted ID (the aux pixel under the centre, as `crypto_hit`), the deepest; its centre.
+    // (An aux finer than the input has pixels no pick reads.) Only the input pixels over the
+    // bounds (±1) can be such pixels; the rest count as outside, as the layer's edge does, so
+    // the window gives the same point as the whole grid.
+    let (bs, o) = (b.scale, b.offset);
+    let to_input = |v: usize, axis: usize| v as f64 / sc * bs + o[axis];
+    let point = bounds.and_then(|r| {
+        let first = [(o[0].floor() as i64).max(to_input(r[0], 0).floor() as i64 - 1), (o[1].floor() as i64).max(to_input(r[1], 1).floor() as i64 - 1)];
+        let last = [
+            ((aw as f64 / sc * bs + o[0]).ceil() as i64).min(to_input(r[2], 0).ceil() as i64 + 1),
+            ((ah as f64 / sc * bs + o[1]).ceil() as i64).min(to_input(r[3], 1).ceil() as i64 + 1),
+        ];
+        let (gw, gh) = ((last[0] - first[0]).max(0) as usize, (last[1] - first[1]).max(0) as usize);
+        let pixel = |k: usize| [first[0] + (k % gw) as i64, first[1] + (k / gw) as i64];
+        let top: Vec<bool> = (0..gw * gh)
+            .map(|k| {
+                let [ax, ay] = effectcraft_effects::aux_point(bs, o, pixel(k).map(|v| v as f64 + 0.5));
+                b.aux.index_at(ax, ay).is_some_and(|i| aux_top[i])
+            })
+            .collect();
+        deepest(&top, gw).map(|k| {
+            let [x, y] = pixel(k);
+            [(x as f64 + 0.5 - o[0]) / bs, (y as f64 + 0.5 - o[1]) / bs]
+        })
+    });
+    let bounds = bounds.map(|r| r.map(|v| v as f64 / sc));
+    let area = (aw as f64 * ah as f64).max(1.0);
+    let hashes: Vec<String> = want.iter().map(|h| format!("{h:08x}")).collect();
+    Ok(json!({"layer": b.layer, "hashes": hashes, "coverage": sum / area, "bounds": bounds, "point": point}))
+}
+
+/// The previous `crypto_cov` (whole-grid point pass), kept for the equivalence test.
+/// `effect.cryptomatteCoverage`: where an ID (or the whole Selection) covers the layer on this
+/// frame: the covered fraction, the bounds and a point to pick it at, in effect space.
+#[cfg(test)]
+pub(crate) fn crypto_cov_reference(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "effect.cryptomatteCoverage";
+    let (probe, h) = query_probe(s, p, cmd)?;
+    let Ok(b) = &probe.grid else { return Err(EngineError::Other("no probe".into())) };
+    let want: Vec<u32> = if p.get("name").is_some() || p.get("hash").is_some() {
+        vec![id_named(p, &h, cmd)?]
+    } else {
+        effectcraft_effects::selection_hashes(&h.selection, h.manifest())
+    };
+    // A set: a wildcard Selection can stand for thousands of IDs.
+    let wanted: std::collections::HashSet<u32> = want.iter().copied().collect();
+    let (aw, sc) = (b.aux.width as usize, b.aux.scale.max(1e-9));
+    let planes = b.aux.crypto_rank_planes(&b.layer);
+    let (mut sum, mut bounds) = (0.0f64, None::<[usize; 4]>);
+    for i in 0..aw * b.aux.height as usize {
+        let c = planes
+            .iter()
+            .filter(|(id, _)| id.get(i).is_some_and(|v| wanted.contains(&v.to_bits())))
+            .map(|(_, c)| c.get(i).map_or(0.0, |c| c.max(0.0)))
+            .sum::<f32>()
+            .min(1.0);
+        if c > 0.0 {
+            let (x, y) = (i % aw, i / aw);
+            sum += f64::from(c);
+            let r = bounds.get_or_insert([x, y, x, y]);
+            *r = [r[0].min(x), r[1].min(y), r[2].max(x + 1), r[3].max(y + 1)];
+        }
+    }
+    // The point: of the effect's input pixels over the layer, those whose centre a pick reads as
+    // a wanted ID (the aux pixel under the centre, as `crypto_hit`), the deepest; its centre.
+    // (An aux finer than the input has pixels no pick reads.)
+    let (bs, o) = (b.scale, b.offset);
+    let first = [o[0].floor() as i64, o[1].floor() as i64];
+    let last = [(aw as f64 / sc * bs + o[0]).ceil() as i64, (b.aux.height as f64 / sc * bs + o[1]).ceil() as i64];
+    let (gw, gh) = ((last[0] - first[0]).max(0) as usize, (last[1] - first[1]).max(0) as usize);
+    let pixel = |k: usize| [first[0] + (k % gw) as i64, first[1] + (k / gw) as i64];
+    let top: Vec<bool> = (0..gw * gh)
+        .map(|k| {
+            let [ax, ay] = effectcraft_effects::aux_point(bs, o, pixel(k).map(|v| v as f64 + 0.5));
+            b.aux.index_at(ax, ay).and_then(|i| effectcraft_raster::channels3d::crypto_top(&planes, i)).is_some_and(|id| wanted.contains(&id))
+        })
+        .collect();
+    let point = deepest(&top, gw).map(|k| {
+        let [x, y] = pixel(k);
+        [(x as f64 + 0.5 - o[0]) / bs, (y as f64 + 0.5 - o[1]) / bs]
+    });
+    let bounds = bounds.map(|r| r.map(|v| v as f64 / sc));
+    let area = (aw as f64 * b.aux.height as f64).max(1.0);
+    let hashes: Vec<String> = want.iter().map(|h| format!("{h:08x}")).collect();
+    Ok(json!({"layer": b.layer, "hashes": hashes, "coverage": sum / area, "bounds": bounds, "point": point}))
 }
 
 fn remove(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1300,9 +1582,21 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pick Cryptomatte",
             [],
             None,
-            "{layer?, effect?: index|uid|name, x, y (effect space), mode?: replace|add|remove (default replace), scale? (preview resolution, default 1), time?, probeOnly?} → {name, hash, layer, selection, changed, selected} | {pending} — edits the Cryptomatte effect's Selection with the ID under the point",
+            "{layer?, effect?: index|uid|name, x?, y? (effect space), name? (exact manifest name, no wildcards) | hash? (8 hex digits, or the hash as a number) instead of the point, mode?: replace|add|remove (default replace), scale? (preview resolution, default 1), time?, probeOnly?} → {name, hash, layer, selection, changed, selected} | {pending} — edits the Cryptomatte effect's Selection with the ID under the point, or the named ID",
             has_layers,
             pick_crypto
+        ),
+        crate::query!(
+            "effect.cryptomatteIds",
+            "Cryptomatte IDs",
+            "{layer?, effect?: index|uid|name, time?, filter?: string (name contains), present?: bool (only IDs on this frame), limit?: integer (default 1000)} → {layer, layers, total, ids: [{name|null, hash, selected, coverage (0-1 of the layer)}]} — the IDs of the Cryptomatte effect's layer: its manifest, then IDs on the frame it lacks",
+            crypto_ids
+        ),
+        crate::query!(
+            "effect.cryptomatteCoverage",
+            "Cryptomatte Coverage",
+            "{layer?, effect?: index|uid|name, name? (exact) | hash? (default: the Selection), time?} → {layer, hashes, coverage (0-1 of the layer), bounds: [x0, y0, x1, y1] | null, point: [x, y] | null (effect space: the centre of the input pixel deepest inside the pixels a pick reads as the ID, so a pick there picks it; null when no pick reads it)} — where an ID covers the layer on this frame",
+            crypto_cov
         ),
         crate::query!(
             "effect.cryptomatteAt",

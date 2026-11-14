@@ -184,7 +184,7 @@ Short recipes; every step is one tool call.
 | Animate | `add_keyframe {"layer":2,"path":"transform/scale","keys":[{"time":0,"value":[0,0]},{"time":0.5,"value":[100,100]}],"interpolation":"easyEase"}` |
 | Effect with settings | `list_effects {"filter":"glow"}` → `add_effect {"layer":2,"effect":"Glow","values":{"threshold":40,"radius":30}}` → `set_property {"layer":2,"path":"effects/#1/intensity","value":2}` |
 | Key a green screen | `add_effect {"layer":2,"effect":"Keylight (1.2)"}` → `execute_command effect.pickColor {"layer":2,"effect":1,"param":"screenColour","x":20,"y":20,"average":true}` (a screen pixel, layer space; samples the effect's input) → `set_property {"layer":2,"path":"effects/#1/screenMatte/clipBlack","value":10}` → `render_frame {"transparent":true}` |
-| Key objects by Cryptomatte | `add_effect {"layer":2,"effect":"Cryptomatte"}` → `execute_command effect.pickCryptomatte {"layer":2,"effect":1,"x":120,"y":80}` (the ID under that layer pixel replaces the Selection; `"mode":"add"` / `"remove"` edit it; `effect.cryptomatteAt` with the same point only reports the name) → `render_frame` |
+| Key objects by Cryptomatte | `add_effect {"layer":2,"effect":"Cryptomatte"}` → `execute_command effect.cryptomatteIds {"layer":2,"effect":1}` (the IDs and how much of the layer each covers) → `execute_command effect.pickCryptomatte {"layer":2,"effect":1,"name":"Sphere"}` (or `"x":120,"y":80` for the ID under that layer pixel; `"mode":"add"` / `"remove"` edit the Selection) → `render_frame`; see [Cryptomatte](#cryptomatte) |
 | Drive with an expression | `set_property {"layer":2,"path":"transform/rotation","expression":"time*90"}` |
 | Inspect a layer | `get_layer {"layer":2,"flat":true}` (every property with its `path`, value, key count) |
 | Check the result | `render_frame {"time":1.5,"max_side":640}`; in bridge mode `screenshot {"panel":"Timeline"}` |
@@ -621,6 +621,61 @@ by what they are made of, so reopening a project reuses them.
 ```sh
 effectcraft-cli run clip.ecproj objectMatte.apply '{"layer":"#1","point":[320,200],"box":[250,120,400,300]}' \
   objectMatte.propagate '{"layer":"#1","wait":true}' objectMatte.freeze '{"layer":"#1","wait":true}' --save
+```
+
+### Cryptomatte
+
+The Cryptomatte effect reads the ID passes of a multi-layer OpenEXR (with the manifest from its
+header) or of a 3D precomp. Its **Selection** is text: names separated by commas, quoted when
+they contain a comma or a quote (`"Cube, big"`), `<hex>` for an ID by hash, `*` as a wildcard. In
+the app, the eyedropper next to Selection turns on picking in the Composition viewer: hovering
+names the ID under the cursor and highlights its coverage; Click replaces the Selection with it,
+Shift adds it, Alt or Ctrl removes it (Option, Cmd or Ctrl on a Mac), one undo step each, labelled
+**Pick Cryptomatte**. Picking stays on until Esc (not an Esc that leaves a text field or closes a
+menu) or the eyedropper again; the middle button still pans and the right button opens the
+viewer's menu. Errors (a layer without Cryptomatte channels, a failed read) show in the hover
+chip. After Effects picks with the same modifiers once the effect is selected, without the
+hover name or highlight.
+
+Agents use the same rules without the viewer:
+
+- `effect.cryptomatteIds {layer, effect, filter?, present?, limit?, time?}`: the layer's IDs, the
+  manifest in its order then IDs on the frame it lacks (`name: null`), each with `hash`,
+  `selected` and `coverage` (the fraction of the layer it covers on this frame). `filter` is a
+  string (part of a name, any case), `present` true or false (only IDs on this frame), `limit`
+  a whole number. These commands read the layer the effect reads: the one its Layer Name
+  (`layerName`, set by an imported After Effects project) names when the footage has it, else the
+  one its Layer value picks (see [footage.md](footage.md)). The reply's `layer` is that layer;
+  `layers` lists the file's Cryptomatte layers by name, sorted, not by Layer value.
+- `effect.cryptomatteCoverage {layer, effect, name? | hash?, time?}`: where an ID (default: the
+  whole Selection) is, as `coverage`, `bounds` and `point` (effect space). `point` is the centre
+  of an input pixel that a pick reads as that ID, as deep inside it as there is; `null` when no
+  pick reads it anywhere (an ID too thin to be on top at any pixel centre). `hashes` lists every
+  ID the reply is for: for the Selection, every ID it stands for (a wildcard can be thousands).
+- `effect.cryptomatteAt {layer, effect, x, y, time?}`: the ID under a point, without changing
+  anything (`null` on empty pixels).
+- `effect.pickCryptomatte {layer, effect, x, y | name | hash, mode?: replace|add|remove}`: edits
+  the Selection as a click would, with names quoted and `*` names or unnamed IDs written as
+  `<hex>`. A pick that changes nothing records no undo step; each pick is one step labelled
+  `Pick Cryptomatte`.
+
+The three queries are never undo steps. `name` is an exact name (no wildcards: `*` and `?` are
+part of it); `hash` is 8 hex digits as a string (`"3a5f00c1"`, `<>` optional) or the hash as a
+number. A `name` the manifest lacks, or gives to several IDs, is an error (pass `hash`); without
+a manifest a name is hashed as the Selection reads it. A name or hash that is not on the frame,
+in the manifest or in the Selection is an error too. Picks fail on a Selection driven by an
+expression, on a layer without Cryptomatte channels and on an empty pixel. The first call per
+frame renders the effect's input once and keeps what a pick needs (the layer's aux channels:
+hundreds of MB at 4K); later calls on that frame reuse it. `edit.purge {"what":"memory"}` lets
+go of it, as does any edit other than a pick (picks, and undo or redo over picks, keep it). The
+viewer's eyedropper uses the same kept probe: an agent query on another frame or layer replaces
+the viewer's, which then reads its own again. `probeOnly` is the viewer's: it answers
+`{pending: true}` instead of rendering.
+
+```sh
+effectcraft-cli run shot.ecproj effect.cryptomatteIds '{"layer":"#1","effect":1,"present":true}' \
+  effect.pickCryptomatte '{"layer":"#1","effect":1,"name":"Cube, big"}' \
+  effect.pickCryptomatte '{"layer":"#1","effect":1,"name":"Sphere","mode":"add"}' --save
 ```
 
 ### Text: styles and editing

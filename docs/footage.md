@@ -134,7 +134,8 @@ channels alone.
 
 The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
 file's manifest. Pick them with the eyedropper next to its Selection, then click in the
-Composition viewer (Shift adds, Alt or Ctrl removes). Matte Only shows the matte as grey in
+Composition viewer (Shift adds, Alt or Ctrl removes); agents list and pick them by name (see
+[agents.md](agents.md#cryptomatte)). Matte Only shows the matte as grey in
 RGB over full alpha, as After Effects' Cryptomatte plug-in does; projects saved before that
 change keep their matte in alpha as well. Its Layer popup lists the Cryptomatte
 layers the footage has (a file with only `CryptoMaterial` shows just that), and the standard
