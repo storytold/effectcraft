@@ -90,9 +90,6 @@ Commands (CLI, MCP, control channel):
 - `audio.outputDevice`: Default Output (device list from the desktop host)
 - `audio.outputLeft`: Left (Audio Output Mapping)
 - `audio.outputRight`: Right (Audio Output Mapping)
-- `memory.layerCacheMb`: Layer Cache (in the browser at most 512 MB, see [web.md](web.md))
-- `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB)
-- `memory.previewCacheMb`: Preview (RAM) Cache
 - `memory.gpuFramesInFlight`: GPU Frames Rendered at Once (`auto`, `1`, `2`, `3`): how many
   frames the Render Queue renders on the GPU at once. Auto measures the GPU memory after the
   job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
@@ -185,9 +182,51 @@ Commands (CLI, MCP, control channel):
 - `disk.mediaCacheFolder`: audio waveform summaries kept between sessions (`Peaks/`)
 - `disk.conformedMediaFolder`: decoded (conformed) footage audio, written once per file and
   sample rate and read back instead of decoding again
-- `memory.ramReservedGb`: the cache budgets together leave this much physical memory free
-- `memory.reduceCacheWhenLow`: cache budgets halve while the system is low on memory (checked
-  every 30 s by the desktop app, on a background thread)
+- `disk.localizeFootage` (off by default), `disk.localizeMaxGb` (20), `disk.localizeFolder`,
+  `disk.networkFootageLocations`: OpenEXR footage on network shares is copied, one file at a
+  time on a background thread, to a local folder (by default beside the disk cache's folder),
+  and read from the copy once it is complete and the source still has the size and modification
+  time it had when copied. Network footage is UNC paths (`\\server\share\…`) and the locations
+  listed in `disk.networkFootageLocations` (`;`-separated path prefixes, such as a drive letter
+  mapped to a share: `P:\`). The copies take at most `disk.localizeMaxGb` and leave the disk
+  cache's reserve free on their disk; earlier sessions' copies are adopted. The Disk page shows
+  the local copies, what is queued and being copied, and the network locations
+- `memory.ramReservedGb`: RAM Reserved for Other Applications, the one memory setting (After
+  Effects has a setting of this name too). EffectCraft's big caches (processed layers, decoded
+  footage frames, decoded OpenEXR planes, RAM preview frames, and the disk cache's write queue)
+  share one budget: 80 % of the installed RAM left after the reserve. The other 20 % is room for
+  EffectCraft's own working memory (decoders, render buffers, undo, GPU staging, the interface).
+  With the default 6 GB reserved that is 8.0 GB on a 16 GB machine, 46.4 GB on 64 GB and 97.6 GB
+  on 128 GB. The budget is at least 192 MB for all caches together; while the installed RAM is
+  unknown (a sandbox, the CLI, or the desktop before its first reading) it is 5 GB, in the browser 3.5 GB
+  (with the RAM preview at most 3 GB there). No cache has a share of its own: when they
+  hold more than the budget together, the memory accountant frees the least valuable data first,
+  whichever cache holds it, down to 90 % of the budget. An item's value is what it would cost to
+  make again (its measured render or decode time; when not measured, a typical 4 ms per MB for a
+  layer, 8 ms for a preview frame, 2 ms for footage frames and planes) per byte, divided by
+  `ln(seconds unused + 1) + 1`: a slow decay (about a fifth after a minute unused, a seventh after
+  ten), so a costly frame unused for minutes still outlives a cheap one; a copy of data another
+  cache holds (a queued disk write) is worth nothing, and a cache that had to make again what it
+  let go of shortly before is protected for a while. The frames a playing RAM preview shows next
+  go last: they may keep the caches over the budget by a tenth of it (at most 1 GB) while other
+  items can go instead. Besides the bytes the caches count, the process's measured memory is
+  watched (its resident size, read with each balance and at most every 250 ms): above 95 % of the
+  installed RAM left after the reserve the caches give way by what it is over even within their
+  budget (memory nobody counts: GPU staging, effect buffers, the allocator's fragmentation), at
+  most once per reading unless it grows; above all of it also the preview frames that would
+  play next. A frame or plane set is written to the disk cache only when making it again costs
+  more than reading it back (the measured read rate, 10 ms per MB until reads are measured); a
+  RAM eviction keeps the disk copy, and the disk cache drops its oldest entries first. At most
+  256 movie and audio files are kept open, the least recently used closed beyond that (image
+  sequences, OpenEXR included, keep no file open between decodes). In the browser the layer cache also stays within 512 MB and the footage frames within
+  256 MB (see [web.md](web.md)). The Memory & CPU page shows what EffectCraft may use, of the
+  installed RAM. Settings saved before this (version 4 and earlier) had Layer Cache, Footage
+  Frame Cache and Preview (RAM) Cache budgets (`memory.layerCacheMb`, `memory.mediaCacheMb`,
+  `memory.previewCacheMb`); they are dropped when the settings are read
+- `memory.reduceCacheWhenLow`: the budget halves while the system is low on memory (less than
+  10 % of the RAM, or less than 1 GB, available; checked every 30 s by the desktop app, on a
+  background thread). It stays halved until twice that much is available again, so freeing the
+  caches doesn't end the episode at once, and the toast saying so shows once per episode
 - `video.enableOutput`, `video.device`, `video.outputDuringPlayback`, `video.mirrorOnMonitor`,
   `video.disableWhenBackground`: Video Preview, a second window (or full screen on the display
   it is on) showing the composition frame, Mercury Transmit-style

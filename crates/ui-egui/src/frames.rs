@@ -263,6 +263,10 @@ struct Cached {
     /// (`None`: rendered without a disk cache, or elsewhere; never written from here).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     since: Option<DiskSince>,
+    /// When it was last shown or stored, for the memory accountant (`memory::tick`).
+    used: u64,
+    /// What rendering it took, in microseconds (a typical cost when not timed).
+    cost_us: u64,
 }
 
 /// A disk cache and its drop generation ([`DiskCache::drop_generation`]) when a render started.
@@ -308,9 +312,20 @@ impl Cache {
     }
     /// [`Cache::insert`] with the source files the frame was made of and the disk cache's drop
     /// generation when its render started.
+    #[cfg(test)]
     fn insert_with(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>) {
+        self.insert_took(k, img, files, since, None);
+    }
+    /// Keep a frame with the source files it was made of, the disk cache drop generation when its
+    /// render started, and what rendering it took (`None`: not timed).
+    fn insert_took(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, took: Option<std::time::Duration>) {
         let (sz, gpu) = (img.bytes(), img.is_gpu());
-        if let Some(old) = self.map.insert(k, Cached { img, files, since }) {
+        let cost_us = took.map_or_else(
+            || effectcraft_engine::render::memory::default_cost(sz, effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB),
+            |t| u64::try_from(t.as_micros()).unwrap_or(u64::MAX).max(1),
+        );
+        let used = effectcraft_engine::render::memory::tick();
+        if let Some(old) = self.map.insert(k, Cached { img, files, since, used, cost_us }) {
             self.forget(&old.img);
         } else {
             self.order.push_back(k);
@@ -329,14 +344,18 @@ impl Cache {
     /// prefetch kept refilling while it evicted the next frames (#595). Frames of another scale
     /// than the one on screen go first (a zoom or resolution change).
     fn victim(&self) -> Option<usize> {
+        self.victim_of(|_| true)
+    }
+    /// [`Cache::victim`] among the frames `eligible` accepts (in the same order).
+    fn victim_of(&self, eligible: impl Fn(&FrameKey) -> bool) -> Option<usize> {
         if let Some(s) = self.scale
-            && let Some(i) = self.order.iter().position(|k| k.scale != s)
+            && let Some(i) = self.order.iter().position(|k| k.scale != s && eligible(k))
         {
             return Some(i);
         }
-        let Some(p) = &self.playhead else { return (!self.order.is_empty()).then_some(0) };
+        let Some(p) = &self.playhead else { return self.order.iter().position(&eligible) };
         let mut farthest: Option<(i64, usize)> = None;
-        for (i, k) in self.order.iter().enumerate() {
+        for (i, k) in self.order.iter().enumerate().filter(|(_, k)| eligible(k)) {
             match p.ahead(k) {
                 None => return Some(i),
                 Some(d) if farthest.is_none_or(|(f, _)| d > f) => farthest = Some((d, i)),
@@ -344,6 +363,10 @@ impl Cache {
             }
         }
         farthest.map(|(_, i)| i)
+    }
+    /// [`Cache::victim`] among the frames in RAM (a GPU frame's bytes are video memory).
+    fn cpu_victim(&self) -> Option<usize> {
+        self.victim_of(|k| self.map.get(k).is_some_and(|c| !c.img.is_gpu()))
     }
     /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
     /// than the one on screen first (a zoom or resolution change).
@@ -393,6 +416,9 @@ impl Cache {
     }
     /// Shown again: last in line for eviction.
     fn touch(&mut self, k: &FrameKey) {
+        if let Some(c) = self.map.get_mut(k) {
+            c.used = effectcraft_engine::render::memory::tick();
+        }
         if let Some(i) = self.order.iter().rposition(|o| o == k)
             && let Some(k) = self.order.remove(i)
         {
@@ -425,6 +451,45 @@ impl Cache {
             let Some(old) = self.victim().and_then(|i| self.order.remove(i)) else { break };
             self.remove(&old);
         }
+    }
+}
+
+/// The preview frames (in RAM; GPU frames have their own budget) in the common memory budget
+/// (#3271, #3298): each frame is worth what rendering it took, per byte. The frame offered is
+/// the one the cache would evict next ([`Cache::cpu_victim`]: it spares the frames a playing
+/// preview shows next).
+struct PreviewMemory(Arc<Mutex<Cache>>);
+
+impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
+    fn name(&self) -> &'static str {
+        "preview frames"
+    }
+    fn bytes(&self) -> usize {
+        self.0.lock().map(|c| c.bytes.saturating_sub(c.gpu_bytes)).unwrap_or(0)
+    }
+    // (only frames in RAM: dropping a GPU frame frees no RAM, and loses a viewer frame)
+    /// A frame a playing preview shows next is protected: the accountant lets it keep the caches
+    /// over the budget by a bounded amount while other items can go instead (#3301: one rendered
+    /// from cached layers costs little, and older footage outlived it, so the preview played into
+    /// live renders). A frame costs at least a typical render
+    /// ([`effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB`]): a quick one still
+    /// stands for a whole comp.
+    fn oldest(&self) -> Option<effectcraft_engine::render::memory::Candidate> {
+        use effectcraft_engine::render::memory::{Candidate, DEFAULT_PREVIEW_US_PER_MB, default_cost};
+        let c = self.0.lock().ok()?;
+        let k = c.order.get(c.cpu_victim()?)?;
+        let f = c.map.get(k)?;
+        let bytes = f.img.bytes();
+        let protected = c.playhead.as_ref().is_some_and(|p| p.ahead(k).is_some());
+        let cost_us = f.cost_us.max(default_cost(bytes, DEFAULT_PREVIEW_US_PER_MB));
+        Some(Candidate { used: f.used, bytes, cost_us, protected })
+    }
+    fn drop_oldest(&self) -> usize {
+        let Ok(mut c) = self.0.lock() else { return 0 };
+        let Some(old) = c.cpu_victim().and_then(|i| c.order.remove(i)) else { return 0 };
+        let bytes = c.map.get(&old).map_or(0, |f| f.img.bytes());
+        c.remove(&old);
+        bytes
     }
 }
 
@@ -660,6 +725,8 @@ pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
 
 pub struct Frames {
     cache: Arc<Mutex<Cache>>,
+    /// The preview frames in the common memory budget (#3271), held here (registered weakly).
+    _memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder>,
     /// Keys queued or rendering.
     inflight: Arc<Mutex<HashSet<FrameKey>>>,
     /// Pending jobs, picked by priority when a pool thread frees up (the viewer's frame first).
@@ -767,8 +834,23 @@ impl Frames {
         let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), gpu_limit: 1, ..Default::default() };
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
+        let cache = Arc::new(Mutex::new(Cache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            gpu_bytes: 0,
+            budget: 3 << 30,
+            gpu_budget: GPU_BUDGET,
+            gpu_pressure: None,
+            gpu_adjusted: None,
+            playhead: None,
+            scale: None,
+        }));
+        let memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder> = Arc::new(PreviewMemory(cache.clone()));
+        effectcraft_engine::render::memory::Accountant::global().register(&memory);
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
+            cache,
+            _memory: memory,
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1225,6 +1307,10 @@ impl Frames {
                     // (only with the generation its render started at, for this cache: a frame
                     // made of a file Reload Footage dropped since holds the pixels from before)
                     let since = c.since.as_ref().and_then(|s| s.for_cache(&dc)).filter(|s| !dc.dropped_since(files, *s))?;
+                    // (only a frame that costs more to render again than to read back, #3301)
+                    if !dc.pays_off(c.img.bytes(), c.cost_us) {
+                        return None;
+                    }
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
                     let tries = written.1.get(&dk).copied().unwrap_or(0);
                     (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk))
@@ -1857,10 +1943,13 @@ impl Worker {
         // and compression. Persistence still runs on this worker, using the same snapshot.
         let since = disk.as_ref().map(|(dc, _, since)| DiskSince::of(dc, *since));
         self.finish(&job, ci.clone(), Some(files.clone()), since, t0);
+        let took_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
         // The GPU's part is done; storing it on disk is the CPU's.
         drop(slot);
         if !disk_hit
             && let Some((dc, k, since)) = &disk
+            // (only a frame that costs more to render again than to read back, #3301)
+            && dc.pays_off(ci.bytes(), took_us)
             && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref(), *since)
             && let Some(ctx) = &self.ctx
         {
@@ -1897,11 +1986,14 @@ impl Worker {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
         }
+        let ram = if img.is_gpu() { 0 } else { img.bytes() };
         if let Ok(mut c) = self.cache.lock()
             && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
         {
-            c.insert_with(key, img, files, since);
+            c.insert_took(key, img, files, since, Some(t0.elapsed()));
         }
+        // (with the lock released: the accountant asks every cache for its bytes)
+        effectcraft_engine::render::memory::Accountant::global().note_growth(ram);
         self.release(key, urgent);
     }
 

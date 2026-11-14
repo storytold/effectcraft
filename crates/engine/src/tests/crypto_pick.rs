@@ -198,8 +198,17 @@ fn picks_on_a_precomp_of_a_3d_comp() {
 }
 
 /// The matte the rendered Cryptomatte effect gives the picked ID at the buffer pixel under
-/// `{x, y}`: the pick has to name the ID the effect's own input buffer samples there.
+/// `{x, y}`: the pick has to name the ID the effect's own input buffer samples there. Below one
+/// buffer pixel per layer pixel (reduced resolution, a smaller proxy) the effect shows the matte
+/// box-filtered over the pixel (#3334): the picked ID is then lit, partly where the pixel holds
+/// other IDs too.
 fn rendered_matte_of_pick(s: &mut Session, x: f64, y: f64, scale: f64) -> (String, f32) {
+    let (name, m, _) = rendered_matte_and_scale(s, x, y, scale);
+    (name, m)
+}
+
+/// [`rendered_matte_of_pick`], and whether the buffer shows the box-filtered matte.
+fn rendered_matte_and_scale(s: &mut Session, x: f64, y: f64, scale: f64) -> (String, f32, bool) {
     let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": "Cryptomatte", "x": x, "y": y, "scale": scale, "mode": "replace"})).unwrap();
     let fx = s.active_comp().unwrap().layers[0].effects().unwrap().groups().position(|g| g.match_id == "ec.3d.cryptomatte").unwrap() + 1;
     s.execute_checked("prop.set", json!({"path": format!("effects/#{fx}/matteOnly"), "value": true})).unwrap();
@@ -219,7 +228,7 @@ fn rendered_matte_of_pick(s: &mut Session, x: f64, y: f64, scale: f64) -> (Strin
     let buf = s.renderer(effectcraft_render::RenderOpts { scale, ..Default::default() }).content_buf(&ctx, layer).unwrap();
     let (px, py) = buf.to_px([x, y]);
     let m = buf.img.get(px.floor() as i64, py.floor() as i64)[0];
-    (r["name"].as_str().unwrap_or("?").to_string(), m)
+    (r["name"].as_str().unwrap_or("?").to_string(), m, effectcraft_effects::crypto_box_scale(buf.scale).is_some())
 }
 
 /// Between 3/4 and full resolution footage keeps its native pixels: at 0.8 the effect samples
@@ -239,8 +248,8 @@ fn pick_on_a_proxy_matches_the_proxy_sized_buffer() {
     let mut s = session();
     let item = *s.project.items.iter().find(|(_, i)| matches!(i.kind, effectcraft_project::ItemKind::Footage(_))).unwrap().0;
     s.execute("file.setProxy", json!({"item": item.0, "path": "/renders/crypto_proxy.exr"})).unwrap();
-    let (name, m) = rendered_matte_of_pick(&mut s, 6.5, 1.5, 1.0);
-    assert!(m >= 0.5, "picked {name:?}, but the render gives it matte {m} there");
+    let (name, m, boxed) = rendered_matte_and_scale(&mut s, 6.5, 1.5, 1.0);
+    assert!(boxed && m > 0.0, "picked {name:?}, but the render gives it matte {m} there");
     assert_eq!(name, "left");
 }
 
@@ -281,8 +290,9 @@ fn pick_maps_pixel_centres_bit_exactly_as_the_effect() {
     s.execute("layer.addItem", json!({"item": item})).unwrap();
     s.execute_checked("effect.apply", json!({"effect": "Cryptomatte"})).unwrap();
     s.execute("file.setProxy", json!({"item": item, "path": "/renders/edge_proxy.exr"})).unwrap();
-    let (name, m) = rendered_matte_of_pick(&mut s, 118.0, 5.0, 1.0);
-    assert_eq!((name.as_str(), m), ("left", 1.0));
+    let (name, m, boxed) = rendered_matte_and_scale(&mut s, 118.0, 5.0, 1.0);
+    assert!(boxed && m > 0.0, "{m}");
+    assert_eq!(name, "left");
 }
 
 struct EdgeProbe(Footage, Footage);
@@ -312,8 +322,8 @@ fn mismatches(s: &mut Session, scales: &[f64], xs: impl Iterator<Item = f64> + C
             if s.execute("effect.cryptomatteAt", json!({"effect": "Cryptomatte", "x": x, "y": y, "scale": scale})).unwrap().is_null() {
                 continue;
             }
-            let (name, m) = rendered_matte_of_pick(s, x, y, scale);
-            if m < 0.5 {
+            let (name, m, boxed) = rendered_matte_and_scale(s, x, y, scale);
+            if if boxed { m <= 0.0 } else { m < 0.5 } {
                 bad.push(format!("scale {scale} ({x:.2}, {y}): picked {name:?}, matte {m}"));
             }
         }

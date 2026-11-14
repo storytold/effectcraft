@@ -205,8 +205,9 @@ and undo can reuse earlier content. During rapid edits at the same time and view
 shows the newest completed revision while the exact requested revision renders; out-of-order
 completions cannot move it backwards. This avoids freezing until a slider or layer drag stops.
 Frames at other times or with other render options are never substituted. Obsolete queued jobs
-are dropped; running jobs finish into the cache. When the budget (Settings ▸ Memory & CPU) is
-full the least recently shown frames go first. The timeline's green bar counts cached frames
+are dropped; running jobs finish into the cache. The frames share one memory budget with
+the other big caches (Settings ▸ Memory & CPU); when it is full the memory accountant frees the
+least valuable data first, by cost to make again per byte and time since last use. The timeline's green bar counts cached frames
 of the current content and viewer settings.
 Resolution Auto renders the pixels the magnification needs, as in After Effects (Full above
 50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). The Resolution is the comp's

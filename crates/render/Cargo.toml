@@ -16,6 +16,7 @@ effectcraft-color = { workspace = true }
 effectcraft-keyframe = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-raster = { workspace = true }
+half = { workspace = true }
 effectcraft-path = { workspace = true }
 effectcraft-text = { workspace = true }
 effectcraft-effects = { workspace = true }

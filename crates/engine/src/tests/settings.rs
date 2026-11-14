@@ -76,8 +76,8 @@ fn prefs_migrate_old_layout_and_keep_unknown_keys() {
     assert_eq!(p.labels[1].name, "Sun");
     assert_eq!(p.labels[2].name, "Aqua");
     assert_eq!(p.labels.len(), 16);
-    // A bad value falls back to that page's defaults; other pages survive.
-    assert_eq!(p.memory.layer_cache_mb, 1024);
+    // The old cache budgets (#3298) are dropped, not kept as unknown keys.
+    assert_eq!(p.memory, crate::prefs::Memory::default());
     // Unknown keys (a newer version's) are kept and written back.
     let again: serde_json::Value = serde_json::from_str(&p.to_json()).unwrap();
     assert_eq!(again["futureSetting"], json!({"x": 1}));
@@ -351,10 +351,16 @@ fn renamed_labels_show_in_the_label_menu_and_apply_by_name() {
 }
 
 #[test]
+/// #3298: the caches share one budget from RAM Reserved for Other Applications; a workload of
+/// footage only may use nearly all of it (it was held to the 1 GB Footage Frame Cache).
 fn cache_budgets_are_applied() {
     let mut s = Session::default();
-    s.execute("prefs.set", json!({"key": "memory.layerCacheMb", "value": 128})).unwrap();
-    assert_eq!(s.layer_cache.budget(), 128 << 20);
+    assert!(s.layer_cache.budget() > 0);
+    s.sys_memory = Some(crate::sysinfo::SysMemory { total: 64 << 30, available: 60 << 30 });
+    s.execute("prefs.set", json!({"key": "memory.ramReservedGb", "value": 6})).unwrap();
+    let budget = (58usize << 30) * 80 / 100;
+    assert_eq!(s.memory_budget().bytes, budget);
+    assert_eq!(s.layer_cache.budget(), budget, "no layer cache budget of its own");
     struct Src(std::sync::Mutex<usize>);
     impl effectcraft_render::FootageSource for Src {
         fn frame(&self, _: effectcraft_project::ItemId, _: &effectcraft_project::Footage, _: effectcraft_time::Tick) -> Option<Arc<effectcraft_raster::Image>> {
@@ -366,8 +372,9 @@ fn cache_budgets_are_applied() {
     }
     let src = Arc::new(Src(Default::default()));
     s.footage = src.clone();
-    s.execute("prefs.set", json!({"key": "memory.mediaCacheMb", "value": 256})).unwrap();
-    assert_eq!(*src.0.lock().unwrap(), 256 << 20);
+    s.execute("prefs.set", json!({"key": "memory.ramReservedGb", "value": 32})).unwrap();
+    assert_eq!(*src.0.lock().unwrap(), (32usize << 30) * 80 / 100, "the footage frames may use the whole budget");
+    assert!(s.execute("prefs.set", json!({"key": "memory.mediaCacheMb", "value": 256})).is_err(), "no such setting any more");
 }
 
 #[test]

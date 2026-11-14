@@ -16,6 +16,7 @@ pub mod disk_cache;
 use color::Region;
 pub mod eval;
 pub mod masks;
+pub mod memory;
 pub mod passes;
 pub mod reads;
 pub mod shapes;
@@ -47,7 +48,9 @@ mod opts;
 mod pipeline;
 
 pub use accel::{Accelerator, Backend, FrameMemory, FxStep, FxTarget};
-pub use footage::{CancellableFootage, FloatCurve, FootageSource, NoFootage, is_vector_footage, missing_item_problem, vector_fit};
+pub use footage::{
+    CancellableFootage, FloatCurve, FootageSource, LocalizeConfig, LocalizeReport, NoFootage, is_vector_footage, missing_item_problem, vector_fit,
+};
 pub use frames::{
     adaptive_samples, blend_frames, cineon_frame, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path,
     render_frame, roi_inside,

@@ -113,6 +113,10 @@ pub fn session() -> Session {
         ..Default::default()
     };
     effectcraft_script::install(&mut s);
+    // The caches' common budget from the start (#3298): the CLI and the MCP server never load
+    // the settings, and the caches have no limits of their own below it. Without a memory
+    // reading yet, the budget for unknown RAM.
+    s.apply_cache_budgets();
     s
 }
 

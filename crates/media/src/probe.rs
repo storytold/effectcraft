@@ -280,6 +280,9 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
     {
         return Err(MediaError::Decode(format!("{path}: {why}")));
     }
+    if fmt == image::ImageFormat::OpenExr && !crate::exr_index::safe_to_decode(bytes) {
+        return Err(MediaError::Decode(format!("{path}: an OpenEXR part larger than this reader takes")));
+    }
     let reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt);
     let (w, h, has_alpha) = match reader.into_decoder() {
         Ok(mut dec) => {
@@ -289,10 +292,10 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
             (w, h, dec.color_type().has_alpha())
         }
         Err(e) => {
-            // A multi-layer OpenEXR file without an unnamed RGB layer.
-            let img = (fmt == image::ImageFormat::OpenExr).then(|| crate::exr_channels::layered_image(bytes)).flatten();
-            let img = img.ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?;
-            (img.width(), img.height(), img.color().has_alpha())
+            // A multi-layer OpenEXR file without an unnamed RGB layer: its picture's size and
+            // alpha from the headers alone (#3271), no pixels decoded.
+            let size = (fmt == image::ImageFormat::OpenExr).then(|| crate::exr_channels::layered_size(bytes)).flatten();
+            size.ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?
         }
     };
     Ok(still_footage(path, w, h, fmt, has_alpha))

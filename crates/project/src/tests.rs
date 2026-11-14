@@ -535,3 +535,275 @@ fn an_item_inside_a_non_folder_moves_to_the_top_level_when_a_project_is_opened()
     // Nothing to repair in a sound project.
     assert!(Project::from_json_repaired(&q.to_json()).expect("opens").1.is_empty());
 }
+
+/// #3324: a layer of [`project_with_layer`] with `add` applied and three keys (at 1, 2 and 3 s)
+/// with `values` on the property at `path`, and that layer with the middle key's value `mid`.
+fn middle_key_edit(add: impl FnOnce(&mut Ids, &mut crate::Layer), path: &str, values: [Value; 3], mid: Value) -> (crate::Layer, crate::Layer) {
+    let (mut p, cid) = project_with_layer();
+    let mut l = p.comp(cid).unwrap().layers[0].clone();
+    add(&mut Ids(&mut p.next_id), &mut l);
+    l.props.prop_mut(path).unwrap_or_else(|| panic!("{path}")).keys =
+        values.into_iter().zip([1.0, 2.0, 3.0]).map(|(v, s)| Keyframe::new(Tick::from_seconds_f64(s), v)).collect();
+    let mut edited = l.clone();
+    edited.props.prop_mut(path).unwrap().keys[1].value = mid;
+    (l, edited)
+}
+
+/// The span of a middle-key edit: from the first key to the last (1 to 3 s).
+fn first_to_last_key() -> Option<Vec<(Tick, Tick)>> {
+    Some(vec![(Tick::from_seconds_f64(1.0), Tick::from_seconds_f64(3.0))])
+}
+
+/// An effect instance as `effects::instantiate` builds it: `params` under its group, or under a
+/// `master` group (Exposure's `master/exposure`).
+fn effect(ids: &mut Ids, id: &str, params: Vec<crate::Property>) -> crate::PropGroup {
+    let mut fx = ids.group(id, id);
+    fx.kind = crate::GroupKind::Effect { effect: id.into() };
+    for p in params {
+        fx.children.push(p.into());
+    }
+    fx
+}
+
+fn exposure(ids: &mut Ids) -> crate::PropGroup {
+    let master = ids.group("master", "Master").with(ids.prop("exposure", "Exposure", Value::Scalar(0.0)));
+    let mut fx = effect(ids, "ec.color.exposure", vec![]);
+    fx.children.push(master.into());
+    fx
+}
+
+fn add_effect(l: &mut crate::Layer, fx: crate::PropGroup) {
+    l.props.sub_mut("effects").unwrap().children.push(fx.into());
+}
+
+fn scalars(v: [f64; 3]) -> [Value; 3] {
+    v.map(Value::Scalar)
+}
+
+/// A key edit on an effect parameter (inside the effect's Master group) keeps the frames
+/// outside its keys, as a Transform key edit does (#3324).
+#[test]
+fn an_effect_key_edit_reaches_only_its_keys() {
+    let (a, b) = middle_key_edit(|ids, l| add_effect(l, exposure(ids)), "effects/#1/master/exposure", scalars([0.0, 1.0, 0.0]), Value::Scalar(2.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+    assert_eq!(a.keyframe_spans(&b, true, false), first_to_last_key());
+}
+
+/// A key edit on a mask's path (a shape value) keeps the frames outside its keys (#3324).
+#[test]
+fn a_mask_path_key_edit_reaches_only_its_keys() {
+    let path = |w: f64| Value::Path(ShapePath::rect([0.0, 0.0], w, 10.0));
+    let (a, b) = middle_key_edit(
+        |ids, l| {
+            let m = build::mask(ids, "Mask 1", ShapePath::rect([0.0, 0.0], 10.0, 10.0), MaskMode::Add, [255, 0, 0]);
+            l.props.sub_mut("masks").unwrap().children.push(m.into());
+        },
+        "masks/mask#1/path",
+        [path(10.0), path(20.0), path(10.0)],
+        path(40.0),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+}
+
+/// A key edit on a shape's path inside a shape group keeps the frames outside its keys (#3324).
+#[test]
+fn a_shape_path_key_edit_reaches_only_its_keys() {
+    let path = |w: f64| Value::Path(ShapePath::ellipse([0.0, 0.0], w, 10.0));
+    let (a, b) = middle_key_edit(
+        |ids, l| {
+            let shape = build::shape_path(ids, ShapePath::ellipse([0.0, 0.0], 10.0, 10.0));
+            let fill = build::shape_fill(ids, [1.0, 0.0, 0.0, 1.0]);
+            let group = build::shape_group(ids, "Group 1", vec![shape, fill]);
+            l.props.children.push(build::contents(ids).with(group).into());
+        },
+        "contents/group#1/contents/path#1/path",
+        [path(10.0), path(20.0), path(10.0)],
+        path(40.0),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+}
+
+/// A key edit on a text animator's property keeps the frames outside its keys, and so does one
+/// on Source Text (hold keys) (#3324).
+#[test]
+fn text_key_edits_reach_only_their_keys() {
+    let text = |ids: &mut Ids, l: &mut crate::Layer| {
+        let mut t = build::text(ids, effectcraft_keyframe::TextDoc::plain("Hello"));
+        let opacity = build::text_anim_prop(ids, "opacity").unwrap();
+        let animator = build::text_animator(ids, "Animator 1", vec![opacity]);
+        t.sub_mut("animators").unwrap().children.push(animator.into());
+        l.props.children.push(t.into());
+    };
+    let (a, b) = middle_key_edit(text, "text/animators/animator#1/properties/opacity", scalars([100.0, 0.0, 100.0]), Value::Scalar(50.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+    let doc = |s: &str| Value::Text(Box::new(effectcraft_keyframe::TextDoc::plain(s)));
+    let (a, b) = middle_key_edit(text, "text/sourceText", [doc("a"), doc("b"), doc("c")], doc("B"));
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+}
+
+/// An expression anywhere on the layer can read the keyed property at other times: an effect key
+/// edit then reaches the layer's whole span (#3324).
+#[test]
+fn an_expression_elsewhere_on_the_layer_keeps_the_whole_span() {
+    let (a, b) = middle_key_edit(
+        |ids, l| {
+            add_effect(l, exposure(ids));
+            l.props.prop_mut("transform/rotation").unwrap().expr = Some(crate::Expression { text: "time * 10".into(), enabled: true });
+        },
+        "effects/#1/master/exposure",
+        scalars([0.0, 1.0, 0.0]),
+        Value::Scalar(2.0),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+}
+
+/// A change of the tree's structure reaches the layer's whole span: an effect added (even beside
+/// a key edit), and a group header (an effect switched off) (#3324).
+#[test]
+fn an_effect_added_or_switched_off_keeps_the_whole_span() {
+    let (a, b) = middle_key_edit(|ids, l| add_effect(l, exposure(ids)), "effects/#1/master/exposure", scalars([0.0, 1.0, 0.0]), Value::Scalar(2.0));
+    let mut added = a.clone();
+    add_effect(&mut added, effect(&mut Ids(&mut 10_000), "ec.channel.invert", vec![]));
+    assert_eq!(added.keyframe_spans(&a, true, false), None);
+    let mut both = b.clone();
+    add_effect(&mut both, effect(&mut Ids(&mut 10_000), "ec.channel.invert", vec![]));
+    assert_eq!(both.keyframe_spans(&a, true, false), None);
+    let mut off = b.clone();
+    off.props.group_mut("effects/#1").unwrap().enabled = false;
+    assert_eq!(off.keyframe_spans(&a, true, false), None);
+}
+
+/// Effects that read their own parameters at other times (Write-on's dabs since the layer's
+/// start, Radio Waves' birth values, Transform's own shutter) reach the layer's whole span with a
+/// key edit of theirs, not with one of another effect on the layer (#3324).
+#[test]
+fn effects_reading_their_parameters_elsewhen_keep_the_whole_span() {
+    let v2 = |x: f64| Value::Vec2([x, 0.0]);
+    let write_on = |ids: &mut Ids| {
+        let p = ids.prop("brushPosition", "Brush Position", v2(0.0));
+        effect(ids, "ec.generate.writeon", vec![p])
+    };
+    let (a, b) = middle_key_edit(|ids, l| add_effect(l, write_on(ids)), "effects/#1/brushPosition", [v2(0.0), v2(5.0), v2(0.0)], v2(9.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+    let radio = |ids: &mut Ids| {
+        let p = ids.prop("producePoint", "Producer Point", v2(0.0));
+        effect(ids, "ec.generate.radiowaves", vec![p])
+    };
+    let (a, b) = middle_key_edit(|ids, l| add_effect(l, radio(ids)), "effects/#1/producePoint", [v2(0.0), v2(5.0), v2(0.0)], v2(9.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+    // Transform: its own Shutter Angle reaches past the comp's shutter, the comp's doesn't unless
+    // the layer is stretched (Transform samples its shutter in layer time).
+    for (comp_shutter, stretch, want) in [(false, 100.0, None), (true, 100.0, first_to_last_key()), (true, 200.0, None)] {
+        let transform = |ids: &mut Ids, l: &mut crate::Layer| {
+            let shutter = ids.prop("useCompositionShutterAngle", "Use Composition's Shutter Angle", Value::Bool(comp_shutter));
+            let rotation = ids.prop("rotation", "Rotation", Value::Scalar(0.0));
+            add_effect(l, effect(ids, "ec.distort.transform", vec![shutter, rotation]));
+            l.stretch = stretch;
+        };
+        let (a, b) = middle_key_edit(transform, "effects/#1/rotation", scalars([0.0, 10.0, 0.0]), Value::Scalar(20.0));
+        let want = want.map(|_| vec![(a.comp_time(Tick::from_seconds_f64(1.0)), a.comp_time(Tick::from_seconds_f64(3.0)))]);
+        assert_eq!(b.keyframe_spans(&a, true, false), want, "comp shutter {comp_shutter}, stretch {stretch}");
+    }
+    // Another effect's key edit beside a Write-on.
+    let (a, b) = middle_key_edit(
+        |ids, l| {
+            add_effect(l, write_on(ids));
+            add_effect(l, exposure(ids));
+        },
+        "effects/#2/master/exposure",
+        scalars([0.0, 1.0, 0.0]),
+        Value::Scalar(2.0),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+}
+
+/// The Essential Properties feed a nested comp, and audio something draws (a waveform reads a
+/// stretch of it): a key edit there reaches the layer's whole span. Audio nothing draws doesn't
+/// count at all (#3324).
+#[test]
+fn essential_properties_and_heard_audio_keep_the_whole_span() {
+    let (a, b) = middle_key_edit(
+        |ids, l| {
+            let mut g = ids.group("essentialProperties", "Essential Properties").with(ids.prop("control1", "Size", Value::Scalar(0.0)));
+            g.kind = crate::GroupKind::Essential { overridden: vec![] };
+            l.props.children.push(g.into());
+        },
+        "essentialProperties/control1",
+        scalars([0.0, 1.0, 0.0]),
+        Value::Scalar(2.0),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+    let (a, b) = middle_key_edit(
+        |ids, l| l.props.children.push(build::audio(ids).into()),
+        "audio/levels",
+        [Value::Vec2([0.0; 2]), Value::Vec2([-6.0; 2]), Value::Vec2([0.0; 2])],
+        Value::Vec2([-12.0; 2]),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, true), None, "heard");
+    assert_eq!(b.keyframe_spans(&a, true, false), Some(vec![]), "not heard: the picture is the same");
+}
+
+/// A property tree nested deeper than the walk goes counts as changed everywhere (#3324).
+#[test]
+fn a_deeply_nested_key_edit_keeps_the_whole_span() {
+    // 100 groups around a property keyed at 1, 2 and 3 s with `mid` in the middle (the same uids
+    // each time).
+    let deep = |mid: f64| {
+        let mut n = 50_000;
+        let ids = &mut Ids(&mut n);
+        let mut x = ids.prop("x", "X", Value::Scalar(0.0));
+        x.keys = [0.0, mid, 0.0].into_iter().zip([1.0, 2.0, 3.0]).map(|(v, s)| Keyframe::new(Tick::from_seconds_f64(s), Value::Scalar(v))).collect();
+        let mut g = ids.group("g", "G").with(x);
+        for _ in 0..100 {
+            g = ids.group("g", "G").with(g);
+        }
+        g
+    };
+    let (p, cid) = project_with_layer();
+    let (mut a, mut b) = (p.comp(cid).unwrap().layers[0].clone(), p.comp(cid).unwrap().layers[0].clone());
+    a.props.children.push(deep(1.0).into());
+    b.props.children.push(deep(2.0).into());
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+    // (a Transform key edit beside the same deep tree keeps its span)
+    let (a, b) = middle_key_edit(|_, l| l.props.children.push(deep(1.0).into()), "transform/opacity", scalars([100.0, 0.0, 100.0]), Value::Scalar(50.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key());
+}
+
+/// On a reversed layer (negative stretch) the first keys play last: an edit of the first key
+/// reaches from the next keys' time to the out point, not from the in point (#3324).
+#[test]
+fn a_first_key_edit_on_a_reversed_layer_reaches_the_out_point() {
+    // (a layer from 0 to 10 s reversed: start 10 s, so layer time t shows at 10 - t)
+    let reversed = |_: &mut Ids, l: &mut crate::Layer| (l.stretch, l.start_time) = (-100.0, Tick::from_seconds_f64(10.0));
+    let (a, _) = middle_key_edit(reversed, "transform/opacity", scalars([100.0, 0.0, 100.0]), Value::Scalar(0.0));
+    let mut b = a.clone();
+    b.props.prop_mut("transform/opacity").unwrap().keys[0].value = Value::Scalar(50.0);
+    let spans = b.keyframe_spans(&a, true, false).unwrap();
+    let (s, e) = spans[0];
+    assert_eq!(spans.len(), 1);
+    // Keys at layer 1, 2, 3 s show at 9, 8, 7 s; the first key's edit reaches 7 s (its second key
+    // after) through the out point.
+    assert_eq!((s, e), (Tick::from_seconds_f64(7.0), a.out_point), "{spans:?}");
+}
+
+/// The renderer reads some properties at other times: Position under Auto-Orient Along Path (a
+/// still layer keeps its last direction of travel) and a model's animation clip (it plays from the
+/// key that chose it). Their key edits reach the layer's whole span (#3324).
+#[test]
+fn properties_the_renderer_reads_elsewhen_keep_the_whole_span() {
+    let v3 = |x: f64| Value::Vec3([x, 0.0, 0.0]);
+    let (a, b) = middle_key_edit(|_, l| l.auto_orient = crate::AutoOrient::AlongPath, "transform/position", [v3(0.0), v3(5.0), v3(9.0)], v3(2.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+    let (a, b) = middle_key_edit(|_, _| {}, "transform/position", [v3(0.0), v3(5.0), v3(9.0)], v3(2.0));
+    assert_eq!(b.keyframe_spans(&a, true, false), first_to_last_key(), "without Auto-Orient");
+    let (a, b) = middle_key_edit(
+        |ids, l| {
+            let g = ids.group("geometryOptions", "Geometry Options").with(ids.prop("animation", "Animation", Value::Enum(0)));
+            l.props.children.push(g.into());
+        },
+        "geometryOptions/animation",
+        [Value::Enum(0), Value::Enum(1), Value::Enum(1)],
+        Value::Enum(0),
+    );
+    assert_eq!(b.keyframe_spans(&a, true, false), None);
+}

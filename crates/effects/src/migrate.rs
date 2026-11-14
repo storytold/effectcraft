@@ -348,6 +348,29 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
     *g != before
 }
 
+/// Make the channel-selection parameters of the saved instance `g` of `spec` static
+/// ([`crate::channel3d::selects_channels`]: not animatable, as in After Effects). Keyframes or an
+/// expression on one (a project from before, or an import) are dropped: it keeps the value of
+/// its first keyframe (else its static value). Returns the names of the parameters that lost
+/// their animation.
+pub fn static_channel_params(spec: &EffectSpec, g: &mut PropGroup) -> Vec<String> {
+    let mut lost = vec![];
+    for ps in spec.params.iter().filter(|ps| crate::channel3d::selects_channels(spec.id, ps.id)) {
+        let Some(pr) = prop_at(g, ps.id) else { continue };
+        pr.static_only = true;
+        if pr.keys.is_empty() && pr.expr.is_none() {
+            continue;
+        }
+        if let Some(first) = pr.keys.first() {
+            pr.value = first.value.clone();
+        }
+        pr.keys.clear();
+        pr.expr = None;
+        lost.push(pr.name.clone());
+    }
+    lost
+}
+
 /// The spec id of the parameter that an instance of `spec` saved at `id` (`a/b/param`) is now:
 /// `id` itself when the spec still has it, the new id of a renamed parameter
 /// ([`PARAM_ID_ALIASES`]), or the twirl-down path of a top-level parameter that moved into a
@@ -483,6 +506,30 @@ fn same_point(a: &Value, b: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::{find, instantiate};
+
+    /// #3271: an import or an older document with a keyed or scripted channel selection
+    /// (Cryptomatte's Layer) keeps the first key's value, static, and names what it lost.
+    #[test]
+    fn channel_selection_becomes_static() {
+        let spec = find("ec.3d.cryptomatte").unwrap();
+        let mut next = 1;
+        let mut g = instantiate(spec, &mut Ids(&mut next), "Cryptomatte", [100.0, 50.0]);
+        assert!(static_channel_params(spec, &mut g).is_empty(), "a fresh instance loses nothing");
+        let pr = g.get_mut("layer").unwrap();
+        assert!(pr.static_only, "no stopwatch");
+        pr.static_only = false;
+        // (keys at 0 s and 1 s)
+        let first = effectcraft_keyframe::Keyframe::new(Default::default(), Value::Enum(2));
+        let mut second = effectcraft_keyframe::Keyframe::new(Default::default(), Value::Enum(0));
+        second.time.0 = 254_016_000_000;
+        pr.keys = vec![first, second];
+        g.get_mut("layerName").unwrap().expr = Some(effectcraft_project::Expression { text: "'CryptoObject'".into(), enabled: true });
+        assert_eq!(static_channel_params(spec, &mut g), ["Layer", "Layer Name"]);
+        let pr = g.get_mut("layer").unwrap();
+        assert!(pr.static_only && pr.keys.is_empty());
+        assert_eq!(pr.value, Value::Enum(2));
+        assert!(g.get_mut("layerName").unwrap().expr.is_none());
+    }
 
     #[test]
     fn upgrade_is_a_no_op_on_fresh_instances() {

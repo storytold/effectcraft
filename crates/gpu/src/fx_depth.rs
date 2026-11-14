@@ -6,18 +6,23 @@
 //! extra texture at the aux resolution: the planes an effect reads are packed into its four
 //! channels (alpha = 1 marks "inside the aux image"). `fxd_lookup` resamples it nearest-neighbour
 //! onto the buffer grid with the CPU's exact index arithmetic (layer position × aux scale,
-//! floored), and the effect kernels work on that buffer-sized plane. Cryptomatte packs a
-//! per-aux-pixel reduction of its rank layers (selection coverage and the coverage-weighted ID
-//! colours, measured on the CPU) instead of the raw ranks. Fog 3D's Gradient Layer is rendered
-//! by the host on the CPU (it is another layer) and uploaded.
+//! floored), and the effect kernels work on that buffer-sized plane. Cryptomatte uploads its
+//! finished output instead of the raw ranks (#3334): the matte as one R32F plane (the Colors
+//! display: its RGBA pixels), made on the CPU from the unscaled channels at source resolution,
+//! box-filtered below render scale 1 and kept in [`matte_cache`]. Fog 3D's Gradient Layer is
+//! rendered by the host on the CPU (it is another layer) and uploaded.
 
-use effectcraft_effects::{Buf, EffectCtx};
+use std::sync::Arc;
+
+use effectcraft_effects::{Buf, CryptoOutput, CryptoPlane, EffectCtx};
 use effectcraft_keyframe::Value;
 use effectcraft_raster::channels3d::BACKGROUND_DEPTH;
 use effectcraft_raster::{AuxChannels, Image};
 
 use crate::context::{Enc, GpuImage, Params};
 use crate::effects::{GBuf, gaussian_blur};
+
+pub(crate) mod matte_cache;
 
 /// Compute entry points in `fx_depth.wgsl`.
 pub(crate) const KERNELS: &[&str] = &["fxd_lookup", "fxd_point", "fxd_dof_f", "fxd_dof_level", "fxd_avg"];
@@ -73,12 +78,12 @@ fn aux_texture(e: &mut Enc, a: &AuxChannels, planes: [Option<&[f32]>; 4]) -> Opt
     e.g.upload_image(&img)
 }
 
-/// Resample an aux texture onto the buffer grid (nearest; `fill` outside the aux image),
-/// sampling each buffer pixel at sub-pixel position `at`.
-fn lookup(e: &mut Enc, b: &GBuf, a: &AuxChannels, tex: &GpuImage, at: [f64; 2], fill: [f32; 4]) -> GpuImage {
+/// Resample an aux texture (`tex_scale` texels per layer pixel) onto the buffer grid (nearest;
+/// `fill` outside the aux image), sampling each buffer pixel at sub-pixel position `at`.
+fn lookup(e: &mut Enc, b: &GBuf, tex_scale: f64, tex: &GpuImage, at: [f64; 2], fill: [f32; 4]) -> GpuImage {
     let inv = 1.0 / b.scale.max(1e-9);
     let mut p = Params::default();
-    p.f[0] = [b.offset[0] as f32, b.offset[1] as f32, inv as f32, a.scale as f32];
+    p.f[0] = [b.offset[0] as f32, b.offset[1] as f32, inv as f32, tex_scale as f32];
     p.f[1] = [at[0] as f32, at[1] as f32, 0.0, 0.0];
     p.f[2] = fill;
     let out = e.scratch(b.img.width, b.img.height);
@@ -116,14 +121,14 @@ fn channel_extract(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Op
     p.u[0] = [0, mode, pr.b("clampOutput") as u32, pr.b("invertDepthMap") as u32];
     p.f[0] = [pr.f("blackPoint") as f32, pr.f("whitePoint") as f32, 0.0, 0.0];
     if !pr.b("antialias") {
-        let plane = lookup(e, &b, a, &tex, [0.5, 0.5], [0.0; 4]);
+        let plane = lookup(e, &b, a.scale, &tex, [0.5, 0.5], [0.0; 4]);
         return point(e, &p, b, &plane);
     }
     // Anti-alias: four sub-pixel samples, summed in order and scaled once (as the CPU does).
     let (w, h) = (b.img.width, b.img.height);
     let mut acc: Option<GpuImage> = None;
     for s in [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]] {
-        let plane = lookup(e, &b, a, &tex, s, [0.0; 4]);
+        let plane = lookup(e, &b, a.scale, &tex, s, [0.0; 4]);
         let one = e.scratch(w, h);
         e.pixels("fxd_point", &p, &b.img, Some(&plane), &one, None);
         acc = Some(match acc {
@@ -146,7 +151,7 @@ fn channel_extract(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Op
 fn depth_plane(e: &mut Enc, b: &GBuf, a: &AuxChannels) -> Option<GpuImage> {
     let z = a.depth()?;
     let tex = aux_texture(e, a, [Some(z), None, None, None])?;
-    Some(lookup(e, b, a, &tex, [0.5, 0.5], [BACKGROUND_DEPTH, 0.0, 0.0, 0.0]))
+    Some(lookup(e, b, a.scale, &tex, [0.5, 0.5], [BACKGROUND_DEPTH, 0.0, 0.0, 0.0]))
 }
 
 fn depth_matte(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<GBuf> {
@@ -236,7 +241,7 @@ fn id_matte(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<GB
     let Some(ids) = id_plane(a, pr.e("auxChannel")) else { return Some(b) };
     let cov = if pr.b("useCoverage") { a.coverage() } else { None };
     let tex = aux_texture(e, a, [Some(ids), cov, None, None])?;
-    let plane = lookup(e, &b, a, &tex, [0.5, 0.5], [0.0; 4]);
+    let plane = lookup(e, &b, a.scale, &tex, [0.5, 0.5], [0.0; 4]);
     let (w, h) = (b.img.width, b.img.height);
     let mut p = op(4);
     p.u[0][1] = cov.is_some() as u32;
@@ -257,7 +262,7 @@ fn identifier(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<
     let Some(ids) = id_plane(a, pr.e("channelType")) else { return Some(b) };
     let max_id = ids.iter().cloned().fold(1.0f32, f32::max);
     let tex = aux_texture(e, a, [Some(ids), None, None, None])?;
-    let plane = lookup(e, &b, a, &tex, [0.5, 0.5], [0.0; 4]);
+    let plane = lookup(e, &b, a.scale, &tex, [0.5, 0.5], [0.0; 4]);
     let mut p = op(6);
     p.u[0][1] = pr.e("display");
     p.f[0] = [pr.f("id").round() as f32, max_id, 0.0, 0.0];
@@ -266,24 +271,66 @@ fn identifier(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<
 
 // ---------------------------------------------------------------- Cryptomatte
 
-fn cryptomatte(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &AuxChannels) -> Option<GBuf> {
+fn cryptomatte(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: &Arc<AuxChannels>) -> Option<GBuf> {
     let pr = ctx.params;
     let Some(layer) = effectcraft_effects::crypto_layer_named(a, pr.s("layerName"), pr.e("layer") as usize) else { return Some(b) };
-    let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
+    let manifest = a.manifest(&layer);
     let sel = effectcraft_effects::selection_hashes(pr.s("selection"), manifest);
-    // Per aux pixel: coverage-weighted ID colours (RGB) and the selection's coverage (A), on all
-    // cores with the rank planes resolved once.
-    // The ID colours are only read by the Colors display; Matte, Preview and Matte Only need the
-    // matte alone.
+    // The finished output, made on the CPU from the unscaled ID and coverage channels at source
+    // resolution and box-filtered below render scale 1 (#3334): the matte alone for Matte,
+    // Preview and Matte Only, the finished pixels for Colors. Kept per footage frame, layer,
+    // selection and output, so a frame shown again neither makes nor reads the ranks again.
     // `tests::fx_depth::cryptomatte_every_display_matches_the_cpu` guards this against the shader.
-    let what = effectcraft_effects::CryptoAux::for_display(pr.e("display"), pr.b("matteOnly"));
-    let img = effectcraft_effects::crypto_aux_image_with(a, &layer, &sel, what);
-    let tex = e.g.upload_image(&img)?;
-    let plane = lookup(e, &b, a, &tex, [0.5, 0.5], [0.0; 4]);
+    let output = CryptoOutput::for_display(pr.e("display"), pr.b("matteOnly"));
+    let finished = matte_cache::plane(a, &layer, &sel, output, b.scale);
+    let tex = upload_plane(e, &finished)?;
+    let plane = lookup(e, &b, finished.scale, &tex, [0.5, 0.5], [0.0; 4]);
     let mut p = op(7);
     p.u[0] = [7, pr.e("display"), pr.b("matteOnly") as u32, pr.b(effectcraft_effects::MATTE_ONLY_IN_ALPHA) as u32];
     point(e, &p, b, &plane)
 }
+
+/// Upload a finished Cryptomatte plane: the matte as one R32F channel (four bytes a pixel, not
+/// the sixteen of a working image), the Colors display's pixels as RGBA. `None` when it does not
+/// fit the device (the effect then runs on the CPU).
+fn upload_plane(e: &Enc, p: &CryptoPlane) -> Option<GpuImage> {
+    let g = e.g;
+    if !g.fits(p.width, p.height) {
+        return None;
+    }
+    let (format, bpp) = match p.output {
+        CryptoOutput::Matte => (wgpu::TextureFormat::R32Float, 4),
+        CryptoOutput::Colors => (wgpu::TextureFormat::Rgba32Float, 16),
+    };
+    let n = (p.width as usize).checked_mul(p.height as usize)?.checked_mul(p.output.channels())?;
+    if p.data.len() != n {
+        return None;
+    }
+    let size = wgpu::Extent3d { width: p.width, height: p.height, depth_or_array_layers: 1 };
+    let texture = g.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Cryptomatte plane"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    g.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        bytemuck::cast_slice(&p.data),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(p.width.checked_mul(bpp)?), rows_per_image: Some(p.height) },
+        size,
+    );
+    #[cfg(test)]
+    PLANE_UPLOADS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((p.output, p.width, p.height, p.bytes()));
+    Some(GpuImage::new(texture, p.width, p.height))
+}
+
+/// The Cryptomatte planes uploaded so far (output, width, height, bytes; tests).
+#[cfg(test)]
+pub(crate) static PLANE_UPLOADS: std::sync::Mutex<Vec<(CryptoOutput, u32, u32, usize)>> = std::sync::Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------- EXtractoR
 
@@ -303,7 +350,7 @@ fn extractor(e: &mut Enc, ctx: &EffectCtx, b: GBuf, a: Option<&AuxChannels>) -> 
     let plane = match a {
         Some(a) if src_ch.iter().any(Option::is_some) => {
             let tex = aux_texture(e, a, [src_ch[0], src_ch[1], src_ch[2], src_ch[3]])?;
-            Some(lookup(e, &b, a, &tex, [0.5, 0.5], [0.0; 4]))
+            Some(lookup(e, &b, a.scale, &tex, [0.5, 0.5], [0.0; 4]))
         }
         _ => None,
     };

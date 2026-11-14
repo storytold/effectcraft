@@ -220,6 +220,9 @@ pub struct Session {
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
     /// (headless sessions don't query it, see [`Session::memory_tick`]).
     pub sys_memory: Option<sysinfo::SysMemory>,
+    /// The system is in a low-memory episode (the cache budgets stay reduced until it ends, see
+    /// [`sysinfo::SysMemory::still_low`] and [`Session::memory_budget`]).
+    pub memory_low: bool,
     /// The keyframe drag in progress (`keys.move` with a merge key).
     pub key_move: Option<KeyMove>,
     /// Reads the system's memory in the background for [`Session::memory_tick`].
@@ -259,9 +262,15 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
+    /// Footage reloaded so far ([`Session::forget_decoded`]): part of the Project panel's
+    /// thumbnail keys ([`Session::thumbnail_key`]), which otherwise look at no file.
+    pub footage_reloads: std::sync::atomic::AtomicU64,
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
+    /// What the effects read of each of those files, as last given ([`Session::refresh_aux_footage`],
+    /// #3271); `None` = not given yet.
+    pub aux_needs: Option<Vec<(String, effectcraft_raster::channels3d::AuxNeed)>>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -372,6 +381,7 @@ impl Default for Session {
             library: Default::default(),
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
+            memory_low: false,
             key_move: None,
             memory_watch: Default::default(),
             disk_watch: Default::default(),
@@ -389,7 +399,9 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
+            footage_reloads: Default::default(),
             aux_footage: None,
+            aux_needs: None,
             script_calls: ScriptCalls::default(),
         }
     }

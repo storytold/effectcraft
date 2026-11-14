@@ -123,6 +123,15 @@ pub(crate) fn import_effects<'f, 'a>(
                 import_param(&fx, map, p, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
             }
         }
+        // Channel selection is static, as in After Effects (which can't animate it either): a
+        // key or an expression there can't come from After Effects; defensively, the first
+        // value is kept and the rest reported.
+        for name in effectcraft_effects::migrate::static_channel_params(spec, &mut group) {
+            col.lose(
+                LossCategory::Effects,
+                format!("{}: '{}' effect '{shown}': keyframes or an expression on the channel selection {name} are not imported (it can't be animated), first value used", cx.comp, cx.layer),
+            );
+        }
         col.imported.effects = col.imported.effects.saturating_add(1);
         target.children.push(Node::Group(group));
     }

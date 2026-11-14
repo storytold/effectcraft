@@ -888,7 +888,9 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     }
     let text = String::from_utf8(get("project.ecproj").ok_or("template has no project.ecproj")?).map_err(|e| e.to_string())?;
     let mut project = Project::from_json(&text).map_err(|e| e.to_string())?;
-    crate::upgrade_effects(&mut project);
+    // (channel selection can't be animated, as in After Effects: a template made before that
+    // keeps its first value; read for listings and thumbnails too, so not said each time)
+    let _static_channels = crate::upgrade_effects(&mut project);
     Ok((manifest, project, entries))
 }
 

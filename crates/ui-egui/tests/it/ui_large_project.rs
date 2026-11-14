@@ -65,7 +65,7 @@ fn comp_thumbnail_renders_off_the_ui_thread() {
     for _ in 0..400 {
         h.step();
         if h.state().auto.find("project.thumbnail").is_some()
-            && h.ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::unique(("proj-thumb", main.0)))).is_some()
+            && h.ctx.data(|d| d.get_temp::<(u128, egui::TextureHandle)>(egui::Id::unique(("proj-thumb", main.0)))).is_some()
         {
             landed = true;
             break;
@@ -73,6 +73,53 @@ fn comp_thumbnail_renders_off_the_ui_thread() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(landed, "thumbnail texture");
+}
+
+/// #3271 review: a footage reload that leaves the project's revision as it was (File ▸ Reload
+/// Footage, a watched file that changed) gives the Project panel's thumbnail a new key.
+#[test]
+fn a_footage_reload_gives_the_panel_thumbnail_a_new_key() {
+    let mut h = harness(large());
+    let main = h.state().session.active_comp_id().unwrap();
+    h.state_mut().session.execute("project.select", json!({"items": [main.0]})).unwrap();
+    h.state_mut().show_panel(PanelKind::Project);
+    let id = egui::Id::unique(("proj-thumb-key", main.0));
+    let shown = |h: &egui_kittest::Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<(u64, u64, u64, i64, u128, f64)>(id)).map(|k| k.4);
+    let want = |h: &egui_kittest::Harness<'_, EffectcraftApp>| h.state().session.thumbnail_key(main, effectcraft_engine::time::Tick::ZERO, 192);
+    h.run_steps(2);
+    let before = shown(&h);
+    assert!(before.is_some() && before == want(&h));
+    let rev = h.state().session.revision;
+    h.state().session.footage_reloads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(h.state().session.revision, rev);
+    let mut now = before;
+    for _ in 0..100 {
+        h.step();
+        now = shown(&h);
+        if now != before {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_ne!(now, before, "a new key after the reload");
+    assert_eq!(now, want(&h));
+    // A preference that changes what a comp shows (Switches Affect Nested Comps) does too; the
+    // project's revision stays.
+    let before = now;
+    let rev = h.state().session.revision;
+    let on = h.state().session.prefs.general.switches_affect_nested_comps;
+    h.state_mut().session.execute("prefs.set", json!({"key": "general.switchesAffectNestedComps", "value": !on})).unwrap();
+    assert_eq!(h.state().session.revision, rev);
+    for _ in 0..100 {
+        h.step();
+        now = shown(&h);
+        if now != before {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_ne!(now, before, "a new key after the preference changed");
+    assert_eq!(now, want(&h));
 }
 
 #[test]

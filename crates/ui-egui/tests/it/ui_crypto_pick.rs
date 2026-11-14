@@ -196,17 +196,12 @@ fn lit(h: &mut Harness<'_, EffectcraftApp>, name: &str, p: [f64; 2], scale: f64)
     img.get((p[0] * scale).floor() as i64, (p[1] * scale).floor() as i64)[0]
 }
 
-/// Whether ID `got` (a cell name) has the largest coverage of the shown pixel at comp point `p`
-/// (a downsampled or scaled layer blends the cells around it).
+/// Whether ID `got` (a cell name) lights the shown pixel at comp point `p`. Below one buffer pixel
+/// per layer pixel (a reduced resolution, a smaller proxy) the effect shows the matte
+/// box-filtered over the layer pixels a shown pixel covers (#3334), so at a cell edge the ID the
+/// hover reads under the cursor lights it partly, and need not be the one covering most of it.
 fn largest(h: &mut Harness<'_, EffectcraftApp>, got: &str, p: [f64; 2], scale: f64) -> bool {
-    let v = lit(h, got, p, scale);
-    if v >= 0.5 {
-        return true;
-    }
-    let (cx, cy) = ((p[0] / 37.0).floor() as i64, (p[1] / 29.0).floor() as i64);
-    let others: Vec<String> =
-        (-2..=2).flat_map(|dx| (-2..=2).map(move |dy| (cx + dx, cy + dy))).filter(|c| c.0 >= 0 && c.1 >= 0).map(|c| format!("c{}_{}", c.0, c.1)).collect();
-    v > 0.0 && others.iter().filter(|o| *o != got).all(|o| lit(h, o, p, scale) <= v + 1e-4)
+    lit(h, got, p, scale) > 0.0
 }
 
 #[test]
@@ -671,7 +666,10 @@ fn picks_on_the_gpu_viewer() {
             let sp = comp_to_screen(&h.ctx, [p[0] as f32, p[1] as f32]).unwrap();
             let got = hover(&mut h, sp).trim_end_matches(" (selected)").to_string();
             let q = to_comp(&h, sp);
-            assert!(got.starts_with('c') && lit(&mut h, &got, q, scale) >= 0.5, "{res:?}: at {q:?} hover {got:?} is not lit there");
+            // (below Full the matte is box-filtered: an edge pixel is lit partly, #3334)
+            let lit_at = lit(&mut h, &got, q, scale);
+            let ok = if res == Resolution::Full { lit_at >= 0.5 } else { lit_at > 0.0 };
+            assert!(got.starts_with('c') && ok, "{res:?}: at {q:?} hover {got:?} is not lit there ({lit_at})");
             checked += 1;
         }
     }

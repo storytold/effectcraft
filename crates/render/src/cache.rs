@@ -54,10 +54,17 @@ struct Entry {
     files: Arc<ReadFiles>,
     bytes: usize,
     last_use: u64,
+    /// When it was last used, for the memory accountant ([`crate::memory::tick`]).
+    used: u64,
+    /// What it took to make (its render, or its read from the disk cache), in microseconds.
+    cost_us: u64,
 }
 
 struct Inner {
     map: HashMap<u64, Entry>,
+    /// The keys by last use (`Entry::last_use`, unique: the clock moves on every use), oldest
+    /// first: the memory accountant asks for the oldest often, so it is not looked for.
+    order: std::collections::BTreeMap<u64, u64>,
     bytes: usize,
     budget: usize,
     clock: u64,
@@ -67,6 +74,70 @@ struct Inner {
     /// a render's reads started at travels with its files instead, [`ReadFiles::since`]: two
     /// renders of a key may overlap).
     missed_at: HashMap<u64, web_time::Instant>,
+    /// Keys let go of lately (newest last, at most [`EVICTED_KEPT`]) and how many of them were
+    /// asked for again: a cache that keeps making again what it just let go of is thrashing
+    /// ([`crate::memory::MemoryHolder::refills`]).
+    evicted: std::collections::VecDeque<u64>,
+    refills: u64,
+}
+
+/// Keys of evicted buffers remembered to tell a refill (#3271).
+const EVICTED_KEPT: usize = 256;
+
+impl Inner {
+    /// The least recently used entry's key.
+    fn oldest_key(&self) -> Option<u64> {
+        self.order.first_key_value().map(|(_, k)| *k)
+    }
+
+    /// Mark the entry under `key` as used at `now` (the clock), for `order` and the accountant.
+    fn touch(&mut self, key: u64, now: u64) {
+        let Some(e) = self.map.get_mut(&key) else { return };
+        self.order.remove(&e.last_use);
+        e.last_use = now;
+        e.used = crate::memory::tick();
+        self.order.insert(now, key);
+    }
+
+    /// Keep `e` under `key` (replacing what was there).
+    fn put(&mut self, key: u64, e: Entry) {
+        self.order.insert(e.last_use, key);
+        self.bytes = self.bytes.saturating_add(e.bytes);
+        if let Some(old) = self.map.insert(key, e) {
+            self.order.remove(&old.last_use);
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+    }
+
+    /// Take the entry under `key` out (its bytes no longer counted).
+    fn take(&mut self, key: u64) -> Option<Entry> {
+        let e = self.map.remove(&key)?;
+        self.order.remove(&e.last_use);
+        self.bytes = self.bytes.saturating_sub(e.bytes);
+        Some(e)
+    }
+
+    /// Drop the entry under `key`, remembering its key (a refill if it is asked for again);
+    /// the bytes freed.
+    fn evict(&mut self, key: u64) -> usize {
+        let Some(e) = self.take(key) else { return 0 };
+        if self.evicted.len() >= EVICTED_KEPT {
+            self.evicted.pop_front();
+        }
+        self.evicted.push_back(key);
+        e.bytes
+    }
+
+    /// Drop least recently used entries until at most `bytes` are held, remembering their keys.
+    fn evict_to(&mut self, bytes: usize) {
+        if self.bytes <= bytes {
+            return;
+        }
+        while self.bytes > bytes {
+            let Some(k) = self.oldest_key() else { break };
+            self.evict(k);
+        }
+    }
 }
 
 /// Hit/miss counters and memory use (for perf readouts and tests).
@@ -88,7 +159,18 @@ impl LayerCache {
     /// A cache holding at most `budget` bytes of pixels.
     pub fn new(budget: usize) -> LayerCache {
         LayerCache {
-            inner: Mutex::new(Inner { map: HashMap::new(), bytes: 0, budget, clock: 0, hits: 0, misses: 0, missed_at: HashMap::new() }),
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                order: Default::default(),
+                bytes: 0,
+                budget,
+                clock: 0,
+                hits: 0,
+                misses: 0,
+                missed_at: HashMap::new(),
+                evicted: Default::default(),
+                refills: 0,
+            }),
             disk: Mutex::new(None),
             store: Mutex::new(None),
             virtual_id: Mutex::new(None),
@@ -162,6 +244,11 @@ impl LayerCache {
             None => {
                 let mut g = self.inner.lock().ok()?;
                 g.misses += 1;
+                // (made again shortly after it was let go of: a refill)
+                if let Some(at) = g.evicted.iter().position(|k| *k == key) {
+                    g.evicted.remove(at);
+                    g.refills += 1;
+                }
                 drop(g);
                 let store = self.persistent();
                 // (before the entry is read: what it is made of may be dropped meanwhile)
@@ -175,10 +262,11 @@ impl LayerCache {
                 // Disk cache: a hit comes back into memory, read at generation `since`.
                 let store = store?;
                 let id = self.virtual_id();
+                let read = web_time::Instant::now();
                 let (buf, mut files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
                 files.note_since(since);
                 let files = Arc::new(files);
-                Some(self.insert_mem(key, buf, files))
+                Some(self.insert_mem(key, buf, files, Some(read.elapsed())))
             }
         }
     }
@@ -222,7 +310,7 @@ impl LayerCache {
                 store.put_layer(layer_disk_key(key), &buf, &entry, since);
             }
         }
-        self.insert_mem(key, buf, files)
+        self.insert_mem(key, buf, files, started.map(|t| t.elapsed()))
     }
 
     /// The buffer kept in memory under `key` with its files, if it is not made of a file dropped
@@ -240,18 +328,18 @@ impl LayerCache {
             let mut g = self.inner.lock().ok()?;
             g.clock += 1;
             let now = g.clock;
-            let e = g.map.get_mut(&key)?;
+            let e = g.map.get(&key)?;
+            let found = (e.buf.clone(), e.files.clone());
             if hit {
-                e.last_use = now;
+                g.touch(key, now);
             }
-            (e.buf.clone(), e.files.clone())
+            found
         };
         if self.made_before_a_drop(&found.1) {
             if let Ok(mut g) = self.inner.lock()
                 && g.map.get(&key).is_some_and(|e| Arc::ptr_eq(&e.files, &found.1))
-                && let Some(e) = g.map.remove(&key)
             {
-                g.bytes = g.bytes.saturating_sub(e.bytes);
+                g.take(key);
             }
             return None;
         }
@@ -276,45 +364,43 @@ impl LayerCache {
 
     /// See [`LayerCache::insert`]: the buffer kept under `key` and its files (`buf` and `files`,
     /// unless one was kept first or `buf` is too large to keep).
-    fn insert_mem(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
+    /// `took`: what making it took (`None`: not timed; a typical cost is assumed,
+    /// [`crate::memory::DEFAULT_LAYER_US_PER_MB`]).
+    fn insert_mem(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>, took: Option<std::time::Duration>) -> (Arc<Buf>, Arc<ReadFiles>) {
         let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
+        let cost_us = took.map_or_else(
+            || crate::memory::default_cost(bytes, crate::memory::DEFAULT_LAYER_US_PER_MB),
+            |t| u64::try_from(t.as_micros()).unwrap_or(u64::MAX).max(1),
+        );
         let Ok(mut g) = self.inner.lock() else { return (buf, files) };
         if bytes > g.budget / 4 {
             return (buf, files);
         }
         g.clock += 1;
         let now = g.clock;
-        if let Some(e) = g.map.get_mut(&key) {
+        if let Some(e) = g.map.get(&key) {
             // (one made before a drop gives way: see [`LayerCache::kept`])
             if !self.made_before_a_drop(&e.files) {
-                e.last_use = now;
-                return (e.buf.clone(), e.files.clone());
+                let kept = (e.buf.clone(), e.files.clone());
+                g.touch(key, now);
+                return kept;
             }
-            if let Some(old) = g.map.remove(&key) {
-                g.bytes = g.bytes.saturating_sub(old.bytes);
-            }
+            g.take(key);
         }
         // (checked again just before it is published: a drop may have come since `insert`
         // checked; one that comes later is caught when the buffer is looked up)
         if self.made_before_a_drop(&files) {
             return (buf, files);
         }
-        g.map.insert(key, Entry { buf: buf.clone(), files: files.clone(), bytes, last_use: now });
-        g.bytes += bytes;
+        g.put(key, Entry { buf: buf.clone(), files: files.clone(), bytes, last_use: now, used: crate::memory::tick(), cost_us });
         if g.bytes > g.budget {
             // Evict least-recently used entries down to 3/4 of the budget.
             let target = g.budget / 4 * 3;
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= target {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
+            g.evict_to(target);
         }
+        drop(g);
+        // (with the lock released: the accountant asks every cache for its bytes)
+        crate::memory::Accountant::global().note_growth(bytes);
         (buf, files)
     }
 
@@ -327,23 +413,13 @@ impl LayerCache {
     pub fn set_budget(&self, budget: usize) {
         let Ok(mut g) = self.inner.lock() else { return };
         g.budget = budget;
-        if g.bytes > budget {
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= budget {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
-        }
+        g.evict_to(budget);
     }
 
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.map.clear();
+            g.order.clear();
             g.bytes = 0;
         }
     }
@@ -708,11 +784,22 @@ fn history_unkeyable(layer: &Layer, effects: Option<usize>) -> bool {
     reads_other_times(layer, effects) && layer.props.children.iter().any(|c| matches!(c, Node::Group(g) if g.match_id != "transform" && has_expression(g)))
 }
 
-/// A still image (no proxy): its layer is cached like a text or shape layer, so the GPU
-/// compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by every
-/// preview worker ran the GPU out of memory). Movies and sequences stay in the media pool only.
-fn still_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
-    ctx.project.item(item).is_some_and(|it| it.proxy.is_none() && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still))
+/// Footage whose processed layer is cached (keyed by item and source time for all but stills):
+/// - a still image (no proxy): its layer is cached like a text or shape layer, so the GPU
+///   compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by
+///   every preview worker ran the GPU out of memory);
+/// - an OpenEXR sequence (no proxy, #3271): each frame is a file read whole and its effects
+///   (EXtractoR, Cryptomatte, depth effects) are costly, so a processed frame is worth keeping in
+///   RAM and on disk. Its entries list the frame file they read, so Reload Footage and a changed
+///   file drop them as any other.
+///
+/// Movies and other sequences stay in the media pool only.
+fn cached_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
+    ctx.project.item(item).is_some_and(|it| {
+        it.proxy.is_none()
+            && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still
+                || (f.kind == FootageKind::Sequence && f.sequence.first().is_some_and(|p| p.to_ascii_lowercase().ends_with(".exr"))))
+    })
 }
 
 /// Does the layer have an animated mask that motion blur may draw at other times (Layer ▸ Mask ▸
@@ -787,7 +874,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             hash_debug(&mut h, s);
         }
         LayerSource::Text | LayerSource::Shape => {}
-        LayerSource::Footage { item } if footage || still_footage(ctx, ctx.media_item(layer, *item)) => {
+        LayerSource::Footage { item } if footage || cached_footage(ctx, ctx.media_item(layer, *item)) => {
             let item = ctx.media_item(layer, *item);
             let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };
@@ -797,7 +884,19 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             item.hash(&mut h);
             // A still is the same at every time (unless a proxy, which may be a movie, stands in).
             if f.kind != FootageKind::Still || it.proxy.is_some() {
-                ctx.source_time(layer).0.hash(&mut h);
+                // A sequence frame without frame blending or fields shows one file for its whole
+                // frame duration: keyed by its frame, so times within it (a faster comp, a
+                // stretched layer) share the entry (#3271).
+                let whole_frames = f.kind == FootageKind::Sequence
+                    && it.proxy.is_none()
+                    && f.fields == effectcraft_project::FieldOrder::Off
+                    && crate::frames::frame_blend_mode(ctx, layer) == effectcraft_project::FrameBlend::Off;
+                if whole_frames {
+                    0x5e9_u16.hash(&mut h);
+                    crate::frames::frame_position(ctx.source_time(layer), f.frame_rate).0.hash(&mut h);
+                } else {
+                    ctx.source_time(layer).0.hash(&mut h);
+                }
             }
             // Frame blending mixes neighbouring source frames.
             ctx.comp.enable_frame_blending.hash(&mut h);
@@ -940,6 +1039,33 @@ pub fn derive(key: u64, i: u64) -> u64 {
     let mut h = KeyHasher(key);
     i.hash(&mut h);
     h.finish()
+}
+
+/// The layer cache in the common memory budget (#3271, #3298): each buffer is worth what
+/// rendering it took (or reading it from the disk cache), per byte.
+impl crate::memory::MemoryHolder for LayerCache {
+    fn name(&self) -> &'static str {
+        "layer cache"
+    }
+    fn bytes(&self) -> usize {
+        self.inner.lock().map(|g| g.bytes).unwrap_or(0)
+    }
+    /// Its least recently used buffer, with what rendering it took.
+    fn oldest(&self) -> Option<crate::memory::Candidate> {
+        let g = self.inner.lock().ok()?;
+        let e = g.map.get(&g.oldest_key()?)?;
+        Some(crate::memory::Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false })
+    }
+    fn drop_oldest(&self) -> usize {
+        let Ok(mut g) = self.inner.lock() else { return 0 };
+        match g.oldest_key() {
+            Some(k) => g.evict(k),
+            None => 0,
+        }
+    }
+    fn refills(&self) -> u64 {
+        self.inner.lock().map(|g| g.refills).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

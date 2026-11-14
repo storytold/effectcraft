@@ -119,17 +119,56 @@ pub fn drop_folder(project: &effectcraft_engine::project::Project, row: Option<I
     if it.is_folder() { Some(it.id) } else { it.parent }
 }
 
-/// A thumbnail being rendered off the UI thread: (revision, result slot).
-type PendingThumb = (u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+/// A thumbnail being rendered off the UI thread: (content key, result slot).
+type PendingThumb = (u128, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
 
-/// Thumbnail of a comp (its current time) or footage (first frame), cached per item/revision.
-/// Rendered on a background thread (inline on wasm32): until the new one lands the previous
-/// thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
+/// The content key of item `it`'s thumbnail at `t` ([`effectcraft_engine::Session::thumbnail_key`]),
+/// worked out again only when the project's revision, the footage reloads (Reload Footage or a
+/// watched file that changed: the project's revision stays), the preferences (Switches Affect
+/// Nested Comps and real-time shadows change what a comp shows) or the time changed.
+fn thumbnail_key(app: &EffectcraftApp, ctx: &egui::Context, it: &Item, t: effectcraft_engine::time::Tick) -> u128 {
+    let id = egui::Id::unique(("proj-thumb-key", it.id.0));
+    let rev = app.session.revision;
+    let reloads = app.session.footage_reloads.load(std::sync::atomic::Ordering::Relaxed);
+    let prefs = app.session.prefs_revision;
+    let now = ctx.input(|i| i.time);
+    if let Some((r, n, pr, at, k, when)) = ctx.data(|d| d.get_temp::<ThumbKey>(id)) {
+        if r == rev && n == reloads && pr == prefs && at == t.0 {
+            return k;
+        }
+        // (the key hashes the comp's content: while edits come fast, at most every 0.25 s)
+        if now - when < THUMB_KEY_EVERY {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(THUMB_KEY_EVERY));
+            return k;
+        }
+    }
+    // (no key: the revision stands in, as before)
+    let k = app.session.thumbnail_key(it.id, t, THUMB_SIDE).unwrap_or(u128::from(rev) | (1 << 127));
+    ctx.data_mut(|d| d.insert_temp::<ThumbKey>(id, (rev, reloads, prefs, t.0, k, now)));
+    k
+}
+
+/// A thumbnail's content key as last worked out: (project revision, footage reloads, preferences
+/// revision, time, key, when, in seconds of UI time).
+type ThumbKey = (u64, u64, u64, i64, u128, f64);
+
+/// The longest side of a Project panel thumbnail, in pixels.
+const THUMB_SIDE: u32 = 192;
+
+/// A thumbnail's content key is worked out again at most this often (seconds) while the
+/// project keeps changing.
+const THUMB_KEY_EVERY: f64 = 0.25;
+
+/// Thumbnail of a comp (its current time) or footage (first frame), cached per item by what it
+/// shows ([`thumbnail_key`], #3271): an edit that doesn't change the picture doesn't render it
+/// again. Rendered on a background thread (inline on wasm32): until the new one lands the
+/// previous thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egui::TextureHandle> {
     let key = egui::Id::unique(("proj-thumb", it.id.0));
     let pkey = egui::Id::unique(("proj-thumb-pending", it.id.0));
-    let rev = app.session.revision;
-    let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(key));
+    let t = app.session.state.times.get(&it.id).copied().unwrap_or_default();
+    let rev = thumbnail_key(app, ctx, it, t);
+    let cached: Option<(u128, egui::TextureHandle)> = ctx.data(|d| d.get_temp(key));
     let mut tex = cached.as_ref().map(|(_, t)| t.clone());
     let have = cached.as_ref().map(|(r, _)| *r);
     // A finished render: upload it.
@@ -162,8 +201,7 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
     if have == Some(rev) {
         return tex;
     }
-    let t = app.session.state.times.get(&it.id).copied().unwrap_or_default();
-    let job = app.session.thumbnail_job(it.id, t, 192)?;
+    let job = app.session.thumbnail_job(it.id, t, THUMB_SIDE)?;
     let slot: Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>> = Arc::default();
     if cfg!(target_arch = "wasm32") {
         *slot.lock().ok()? = Some(job());

@@ -61,7 +61,7 @@ device of their own), `?nosw` (don't register the service worker).
 | config directory: settings, shortcut presets, recent projects, the recovery sentinel | `store::WebConfig` in browser storage |
 | auto-save folder | `/EffectCraft Auto-Save/` in browser storage (`ConfigStore::files`) |
 | media reads (`MediaPool`, `probe`) | `files::WebImporter`: bytes from the file table, handed to `MediaPool::add_bytes` / `probe_bytes` |
-| Memory & CPU cache budgets, scaled to the system's RAM | the page's memory, at most 4 GiB (wasm32), which the caches share with the decoders' own decoded frames (FilmCraft keeps up to 384 MB per open movie): the Layer Cache stays within 512 MB and the Footage Frame Cache within 256 MB (`Prefs::cache_budgets`) |
+| One cache budget from the system's RAM | the page's memory, at most 4 GiB (wasm32), which the caches share with the decoders' own decoded frames (FilmCraft keeps up to 384 MB per open movie): the installed RAM is unknown, so the caches share 3.5 GB, and within that the RAM preview stays within 3 GB, the layer cache within 512 MB and the footage frames within 256 MB (`Prefs::memory_budget`, `MemoryBudget::caps`) |
 | export writes (`effectcraft-export`) | the job's `sink` (`effectcraft_host::FileExporter { sink }`): files land in the table and download after the render; several files (an image sequence) download as one stored `.zip` |
 | rfd file dialogs | `<input type=file>` for File ▸ Open / Import; drop files anywhere on the page (`.ecproj` opens, everything else imports); "Save As" / "Output To" pick a download name |
 | Media Browser on the file system | browser storage and folders opened with the File System Access API (below) |

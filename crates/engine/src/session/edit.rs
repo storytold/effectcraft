@@ -220,7 +220,7 @@ impl Session {
         self.drop_tasks();
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
-        upgrade_effects(&mut p);
+        let lost = upgrade_effects(&mut p);
         // The media layer keys decoded frames by path: files of the new project may have changed
         // since an earlier project decoded them (#1070).
         for it in p.items.values() {
@@ -232,11 +232,18 @@ impl Session {
         self.project = Arc::new(p);
         // The set of footage effects read the channels of is sent again, even when it is empty.
         self.aux_footage = None;
+        self.aux_needs = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;
         self.bump();
         self.mark_saved();
+        // (channel selection can't be animated, as in After Effects: a document that animated it
+        // keeps its first value; said once, not as an error)
+        if !lost.is_empty() {
+            log::warn!("channel selection is static: keyframes or expressions dropped on {}", lost.join("; "));
+            self.toast(format!("Channel selection can't be animated: kept the first value of {}", lost.join(", ")));
+        }
         let first = self.project.comps().next().map(|(id, _)| *id);
         if let Some(c) = first {
             self.open_comp(c);
@@ -250,8 +257,12 @@ impl Session {
 /// [`effectcraft_project::SCHEMA_EFFECT_SPACE`] into effect space
 /// ([`effectcraft_effects::migrate::to_effect_space`]). Shape path operations get the
 /// properties added since ([`effectcraft_project::build::upgrade_shape_contents`]). Stamps the
-/// current schema.
-pub fn upgrade_effects(p: &mut Project) {
+/// current schema. Channel-selection parameters are made static
+/// ([`effectcraft_effects::migrate::static_channel_params`]); returns what lost its animation
+/// (`Layer: Effect: Parameter`).
+#[must_use = "what lost its animation is reported to the user"]
+pub fn upgrade_effects(p: &mut Project) -> Vec<String> {
+    let mut lost = vec![];
     let to_effect_space = p.schema < effectcraft_project::SCHEMA_EFFECT_SPACE;
     // Effect bounds per layer: (size, top-left in layer coordinates).
     let mut bounds = std::collections::HashMap::new();
@@ -285,10 +296,14 @@ pub fn upgrade_effects(p: &mut Project) {
                     if to_effect_space {
                         effectcraft_effects::migrate::to_effect_space(spec, g, size, d, &clone_d);
                     }
+                    for name in effectcraft_effects::migrate::static_channel_params(spec, g) {
+                        lost.push(format!("{}: {}: {name}", l.name, g.name));
+                    }
                 }
             }
         }
     }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+    lost
 }
