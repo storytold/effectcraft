@@ -231,3 +231,95 @@ fn the_bar_past_the_source_end_is_striped() {
     h.run_steps(2);
     assert!(h.state().auto.find(&past).is_none(), "time remapping decides what shows");
 }
+
+/// #3439: the keyframe navigator diamonds paint one state across properties, like stopwatches.
+#[test]
+fn dragging_over_keyframe_buttons_sets_them_all() {
+    let (mut h, ids) = harness();
+    let mut uids = Vec::new();
+    for id in &ids {
+        h.state_mut().session.execute("prop.toggleAnimation", json!({"layer": id, "path": "transform/opacity"})).unwrap();
+        let uid = h.state().session.active_comp().unwrap().layer(LayerId(*id)).unwrap().props.prop("transform/opacity").unwrap().uid;
+        uids.push(uid);
+        h.state_mut().ui.timeline.open_layers.insert(*id);
+    }
+    for id in &ids {
+        h.state_mut().ui.timeline.layer_reveal.insert(*id, vec!["opacity".into()]);
+    }
+    h.state_mut().session.execute("time.set", json!({"time": 1})).unwrap();
+    // One row already has a key; it must stay keyed during an add gesture.
+    h.state_mut().session.execute("prop.toggleKey", json!({"layer": ids[1], "prop": uids[1]})).unwrap();
+    h.run_steps(3);
+    let button = |h: &Harness<'_, EffectcraftApp>, i: usize| rect(h, &format!("timeline.prop.{}.addKey", uids[i])).center();
+    let counts = |h: &Harness<'_, EffectcraftApp>| -> Vec<usize> {
+        let comp = h.state().session.active_comp().unwrap();
+        ids.iter().zip(&uids).map(|(id, uid)| comp.layer(LayerId(*id)).unwrap().props.find(*uid).unwrap().keys.len()).collect()
+    };
+    let before = h.state().session.project.clone();
+    let undo = h.state().session.history.undo.len();
+    let (a, d) = (button(&h, 0), button(&h, 3));
+    // A fast move must hit the middle rows too.
+    drag(&mut h, a, d, 1);
+    assert_eq!(counts(&h), [2; 4]);
+    assert_eq!(h.state().session.history.undo.len(), undo + 1);
+    let added = h.state().session.project.clone();
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(h.state().session.project, before);
+    h.state_mut().session.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(h.state().session.project, added);
+    h.run_steps(2);
+    // Lock B; removing upward skips it and merges all other rows into one undo step.
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [ids[1]], "switch": "lock", "value": true})).unwrap();
+    h.run_steps(2);
+    let undo = h.state().session.history.undo.len();
+    let (d, a) = (button(&h, 3), button(&h, 0));
+    drag(&mut h, d, a, 1);
+    assert_eq!(counts(&h), [1, 2, 1, 1]);
+    assert_eq!(h.state().session.history.undo.len(), undo + 1);
+    // An ordinary click still toggles only one property.
+    let a = button(&h, 0);
+    drag(&mut h, a, a, 1);
+    assert_eq!(counts(&h), [2, 2, 1, 1]);
+    // Move out of the diamond column before moving vertically: no other keys change.
+    let a = button(&h, 0);
+    let d = button(&h, 3);
+    h.event(Event::PointerMoved(a));
+    h.step();
+    h.event(Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    for p in [a + vec2(55.0, 0.0), d + vec2(55.0, 0.0)] {
+        h.event(Event::PointerMoved(p));
+        h.step();
+    }
+    h.event(Event::PointerButton { pos: d + vec2(55.0, 0.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(counts(&h), [1, 2, 1, 1]);
+    // Re-enter diagonally at D: the actual pointer segment misses C's diamond.
+    let a = button(&h, 0);
+    let d = button(&h, 3);
+    h.event(Event::PointerMoved(a));
+    h.step();
+    h.event(Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    for p in [a + vec2(55.0, 0.0), d] {
+        h.event(Event::PointerMoved(p));
+        h.step();
+    }
+    h.event(Event::PointerButton { pos: d, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(counts(&h), [2, 2, 1, 2]);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    assert_eq!(counts(&h), [1, 2, 1, 1]);
+    // Keyboard activation remains available and changes just the focused property.
+    h.get_by_role_and_label(egui::Role::Button, "Add or remove keyframe: Opacity (A)").focus();
+    h.run_steps(2);
+    h.key_press(egui::Key::Space);
+    h.run_steps(2);
+    assert_eq!(counts(&h), [2, 2, 1, 1]);
+    // A press elsewhere must not arm a key gesture.
+    let a = button(&h, 0);
+    let d = button(&h, 3);
+    drag(&mut h, a + vec2(55.0, 0.0), d, 1);
+    assert_eq!(counts(&h), [2, 2, 1, 1]);
+}

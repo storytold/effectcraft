@@ -60,6 +60,17 @@ export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the back
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
 panel registers an element id; both are enforced by `crates/ui-egui/tests/it/ui_agent_audit.rs`.
 
+### Painting keyframes in the Timeline
+
+Press a keyframe navigator diamond and drag over other diamonds to give them the first
+button's new state (add or remove), in one undo step (#3439). Locked layers are skipped.
+The existing `timeline.prop.<uid>.addKey` automation ids identify the buttons.
+
+Headless callers use `prop.toggleKey {layer, path|prop, value?, merge?, selected?}`:
+`value: true` ensures a key exists at the playhead, `false` ensures none exists, and omitting
+it toggles as before. Repeated explicit states are no-ops. Reuse one `merge` token for a
+gesture; key times still use each layer's time mapping. The CLI and MCP use the same command.
+
 ### Waiting for a render
 
 On native desktop builds, `engine.execute` with `renderQueue.render` and `wait: true`

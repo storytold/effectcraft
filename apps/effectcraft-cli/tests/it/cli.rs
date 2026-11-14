@@ -1259,3 +1259,45 @@ fn replay_accepts_a_utf8_bom() {
     assert_eq!(code, 0, "{report}");
     assert_eq!(report["ok"], true);
 }
+
+/// #3439: explicit key states used by the drag gesture also work through the CLI.
+#[test]
+fn keyframe_button_gesture_through_cli() {
+    let project = tmp("keyframe-buttons.ecproj");
+    let path = project.to_str().unwrap();
+    ok_json(&[
+        "run",
+        "--empty",
+        "comp.new",
+        r#"{"name":"Keys","width":64,"height":64,"duration":4}"#,
+        "layer.newSolid",
+        r##"{"name":"A","color":"#406080"}"##,
+        "--save-as",
+        path,
+    ]);
+    ok_json(&["set", "Keys", "A", "transform/opacity", "80", path, "--save"]);
+    ok_json(&[
+        "run",
+        path,
+        "time.set",
+        r#"{"time":1}"#,
+        "prop.toggleKey",
+        r#"{"layer":"A","path":"transform/opacity","value":true,"merge":"drag"}"#,
+        "prop.toggleKey",
+        r#"{"layer":"A","path":"transform/rotation","value":true,"merge":"drag"}"#,
+        "prop.toggleKey",
+        r#"{"layer":"A","path":"transform/opacity","value":true,"merge":"drag"}"#,
+        "edit.undo",
+        "{}",
+        "edit.redo",
+        "{}",
+        "--save",
+    ]);
+    for property in ["transform/opacity", "transform/rotation"] {
+        let value = ok_json(&["exec", "prop.get", &json!({"layer":"A","path":property}).to_string(), path]);
+        assert_eq!(value["keys"].as_array().unwrap().len(), 1);
+    }
+    let frame = tmp("keyframe-buttons.png");
+    ok_json(&["render-frame", path, "--time", "1", "--out", frame.to_str().unwrap()]);
+    assert_eq!(image::open(frame).unwrap().width(), 64);
+}
