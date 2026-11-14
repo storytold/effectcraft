@@ -330,10 +330,12 @@ pub fn glyph_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::Mas
         return Vec::new();
     }
     let Some(geom) = crate::text::text_geom(ctx, layer) else { return Vec::new() };
-    let chars: Vec<char> = geom.doc.text.chars().filter(|c| !c.is_whitespace()).collect();
+    // Each glyph knows the character it came from (`char_index` into the whole text): spaces,
+    // zero-width characters and accents drawn with their letter make no glyph of their own.
+    let chars: Vec<char> = geom.doc.text.chars().collect();
     let mut out = Vec::new();
     for (i, g) in geom.glyphs.iter().enumerate() {
-        let name = chars.get(i).map(|c| c.to_string()).unwrap_or_else(|| format!("Glyph {}", i + 1));
+        let name = chars.get(g.char_index).filter(|c| !c.is_whitespace()).map(|c| c.to_string()).unwrap_or_else(|| format!("Glyph {}", i.saturating_add(1)));
         for sp in effectcraft_path::from_kurbo(&g.path()) {
             if out.len() >= MAX_GLYPH_PATHS {
                 return out;
