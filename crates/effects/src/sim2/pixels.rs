@@ -4,8 +4,89 @@ use super::{Acc, Buf, EffectCtx, IntoParallelIterator, ParallelIterator, Post, S
 
 // ------------------------------------------------------------------ CC Ball Action
 
+/// CC Ball Action's Coloring: how a ball takes its colour from the layer under its grid cell.
+/// An approximation: After Effects' own meaning is not published beyond "how smooth the
+/// balls look". Crisp takes the nearest pixel, Medium keeps EffectCraft's earlier smooth
+/// sample at the cell centre (for compatibility), Smooth averages 16 samples over the cell.
+pub(super) const BALL_COLORING: &[&str] = &["Crisp", "Medium", "Smooth"];
+pub(super) const BALL_COLORING_MEDIUM: u32 = 1;
+/// CC Ball Action's default Shading: the lit sphere (`Shape::Sphere`); 0 draws flat discs.
+pub(super) const BALL_SHADING_DEFAULT: f64 = -75.0;
+/// CC Ball Action's Displace Property: what pushes a ball towards (high values) or away from
+/// (low values) the camera. The option names come from public descriptions; what Radius,
+/// Diamond and Spherize compute here is an assumption pending a comparison with After Effects.
+pub(super) const BALL_DISPLACE_PROPERTIES: &[&str] = &["Red", "Green", "Blue", "Brightness", "Saturation", "RGB", "Radius", "Diamond", "Spherize"];
+pub(super) const BALL_DISPLACE_BRIGHTNESS: u32 = 3;
+
 pub(super) fn ball_action(ctx: &EffectCtx, b: Buf) -> Buf {
     ball_action_plan(ctx, &b).finish(b)
+}
+
+/// A parameter's number, or `default` when the instance does not carry it.
+fn f_or(ctx: &EffectCtx, id: &str, default: f64) -> f64 {
+    ctx.params.values.get(id).map(|v| v.as_f64()).unwrap_or(default)
+}
+
+/// The layer's straight colour and alpha for the ball of the grid cell centred on (`sx`, `sy`)
+/// (buffer pixels, cell `cell` buffer pixels wide), by Coloring `coloring`.
+fn ball_color(src: &effectcraft_raster::Image, sx: f64, sy: f64, cell: f64, coloring: u32) -> ([f32; 3], f32) {
+    match coloring {
+        // Crisp: the pixel under the cell centre.
+        0 => unpremul(src.get(sx.floor() as i64, sy.floor() as i64)),
+        // Smooth: the cell's average (4 × 4 samples, premultiplied).
+        2 => {
+            const N: u32 = 4;
+            let mut acc = [0.0f32; 4];
+            for j in 0..N {
+                for i in 0..N {
+                    let ox = (f64::from(i) + 0.5) / f64::from(N) - 0.5;
+                    let oy = (f64::from(j) + 0.5) / f64::from(N) - 0.5;
+                    let p = src.sample_bilinear(sx + ox * cell, sy + oy * cell);
+                    for (a, v) in acc.iter_mut().zip(p) {
+                        *a += v;
+                    }
+                }
+            }
+            let n = (N * N) as f32;
+            unpremul([acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n])
+        }
+        // Medium: a smooth sample at the cell centre.
+        _ => unpremul(src.sample_bilinear(sx, sy)),
+    }
+}
+
+/// CC Ball Action's Displace Property `prop` (0..1) for a ball of straight colour `c` at
+/// (`gx`, `gy`) on a `lw` × `lh` layer (`maxr`: half its diagonal). Assumed meanings (not
+/// compared with After Effects yet): Radius, Diamond and Spherize are shapes that peak at the
+/// layer centre.
+fn ball_displace_value(prop: u32, c: [f32; 3], gx: f32, gy: f32, lw: f32, lh: f32, maxr: f32) -> f32 {
+    let (cx, cy) = (lw * 0.5, lh * 0.5);
+    let v = match prop {
+        0 => c[0],
+        1 => c[1],
+        2 => c[2],
+        // Brightness: the brightest channel (HSB brightness).
+        3 => c[0].max(c[1]).max(c[2]),
+        // Saturation: HSB saturation.
+        4 => {
+            let mx = c[0].max(c[1]).max(c[2]);
+            let mn = c[0].min(c[1]).min(c[2]);
+            if mx > 0.0 { (mx - mn) / mx } else { 0.0 }
+        }
+        // RGB: the channels' mean.
+        5 => (c[0] + c[1] + c[2]) / 3.0,
+        // Radius: high at the centre, low at the corners.
+        6 => 1.0 - (gx - cx).hypot(gy - cy) / maxr.max(1.0),
+        // Diamond: high at the centre, falling linearly to the edge midpoints' diamond.
+        7 => 1.0 - ((gx - cx).abs() / cx.max(0.5) + (gy - cy).abs() / cy.max(0.5)) * 0.5,
+        // Spherize: a hemisphere over the largest centred circle.
+        _ => {
+            let rr = cx.min(cy).max(0.5);
+            let d = (gx - cx).hypot(gy - cy) / rr;
+            (1.0 - d * d).max(0.0).sqrt()
+        }
+    };
+    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
 }
 
 /// CC Ball Action's balls (far to near), coloured by the layer's pixels.
@@ -18,7 +99,29 @@ fn ball_action_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
     let twist = pr.f("twistAngle").to_radians();
     let spacing = pr.f("gridSpacing").max(1.0) as f32;
     let size = pr.f("ballSize") as f32 / 100.0;
-    let instab = pr.f("instabilityState").to_radians() as f32;
+    // Scatter Motion, treated as the renamed Instability State (an assumption: After Effects
+    // 24.2 shows Scatter Motion and no Instability State): turns each ball's scatter direction.
+    let instab = pr.f("scatterMotion").to_radians() as f32;
+    let coloring = pr.values.get("coloring").map(|v| v.as_enum()).unwrap_or(BALL_COLORING_MEDIUM);
+    let shading = f_or(ctx, "shading", BALL_SHADING_DEFAULT);
+    // Shading: -75 is the lit sphere as it always was, 0 flat discs; the magnitude scales the
+    // light and shine (strength 1 at 75) and the sign mirrors the light's direction (positive
+    // lights the balls from the lower right). How this compares with After Effects' sign
+    // (described as concave versus convex) is unverified, as is the -100..100 range.
+    let shape = if shading == BALL_SHADING_DEFAULT || !shading.is_finite() {
+        Shape::Sphere
+    } else if shading == 0.0 {
+        Shape::Disc
+    } else {
+        // Clamped: a huge value would reach the GPU as an infinite strength (and NaN colours).
+        Shape::Ball { shade: (-shading.clamp(-100.0, 100.0) / 75.0) as f32 }
+    };
+    // Displace: pushes each ball along z by its Displace Property (high values towards the
+    // camera, pivoting at the property's middle value); 100 moves the extremes by half the
+    // layer's diagonal. Scale, direction, pivot and range are EffectCraft's own choice,
+    // pending a comparison with After Effects. Clamped so huge values stay finite.
+    let displace = pr.f("displace").clamp(-1000.0, 1000.0) as f32;
+    let displace_prop = pr.values.get("displaceProperty").map(|v| v.as_enum()).unwrap_or(BALL_DISPLACE_BRIGHTNESS);
     let seed = ctx.seed.wrapping_mul(0x2545f491);
     let (lw, lh) = (ctx.layer_size[0] as f32, ctx.layer_size[1] as f32);
     let s = b.scale as f32;
@@ -43,7 +146,7 @@ fn ball_action_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
             let gx = (i % nx) as f32 * spacing + spacing * 0.5;
             let gy = (i / nx) as f32 * spacing + spacing * 0.5;
             let (sx, sy) = b.to_px([gx as f64, gy as f64]);
-            let (c, a) = unpremul(src.sample_bilinear(sx, sy));
+            let (c, a) = ball_color(src, sx, sy, f64::from(spacing * s), coloring);
             if a <= 0.0 || size <= 0.0 {
                 return None;
             }
@@ -54,11 +157,16 @@ fn ball_action_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
                 _ => crate::util::rgb3([c[0], c[1], c[2], 0.0]).iter().sum::<f32>() / 3.0,
             } as f64;
             let ang = rot + twist * tp;
-            // Scatter: random 3D offsets whose direction drifts with the instability state.
+            // Scatter: random 3D offsets whose direction drifts with Scatter Motion.
             let ph = h(i, 1, seed) * std::f32::consts::TAU + instab;
             let sc = scatter * h(i, 2, seed);
             let off = [(sc * ph.cos()) as f64, (sc * ph.sin()) as f64, (scatter * hs(i, 3, seed)) as f64];
-            let p0 = [gx as f64 - cx + off[0], gy as f64 - cy + off[1], off[2]];
+            let mut p0 = [gx as f64 - cx + off[0], gy as f64 - cy + off[1], off[2]];
+            // Only when set, so Displace 0 leaves every depth (and the far-to-near order) as is.
+            if displace != 0.0 && displace.is_finite() {
+                let v = ball_displace_value(displace_prop, c, gx, gy, lw, lh, maxr);
+                p0[2] -= f64::from(displace / 100.0 * (v - 0.5) * 2.0 * maxr);
+            }
             let m = rot_axis(ax, ang);
             let q: [f64; 3] = std::array::from_fn(|k| m[k][0] * p0[0] + m[k][1] * p0[1] + m[k][2] * p0[2]);
             if d + q[2] <= d * 0.05 {
@@ -67,7 +175,7 @@ fn ball_action_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
             let persp = d / (d + q[2]);
             let (bx, by) = b.to_px([cx + q[0] * persp, cy + q[1] * persp]);
             let r = spacing * 0.5 * size * persp as f32 * s;
-            Some((q[2], Sprite::new(bx as f32, by as f32, r, [c[0], c[1], c[2], a], Shape::Sphere)))
+            Some((q[2], Sprite::new(bx as f32, by as f32, r, [c[0], c[1], c[2], a], shape)))
         })
         .collect();
     balls.sort_by(|a, b| b.0.total_cmp(&a.0));

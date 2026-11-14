@@ -7,6 +7,7 @@
 //! the answers and runs the script again. Expressions are pure functions of these answers, so
 //! re-running is exact, and the runtime stays free of borrowed state.
 
+use effectcraft_effects::migrate::PARAM_ID_ALIASES;
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
 use effectcraft_project::ae_order::{self, AeChild};
@@ -300,8 +301,22 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 // An effect by its After Effects match name, an imported placeholder's effect id
                 // (`effect("Pseudo/0.25")`; its match id is one path segment, `Pseudo_0_25`).
                 .or_else(|| g.children.iter().find(|n| matches!(n.as_group().map(|g| &g.kind), Some(GroupKind::Effect { effect }) if effect == name)))
+                // Last, so a legacy name never shadows a current one.
+                .or_else(|| legacy_effect_child(g, &c))
         }
     }
+}
+
+/// A parameter of an effect instance addressed by a name it had when the project was saved
+/// ([`PARAM_ID_ALIASES`]): `effect("CC Ball Action")("Instability State")` keeps reading the
+/// parameter that is now Scatter Motion. `c` is the compacted (lowercase, no spaces) name. Only
+/// renames inside the instance's own top-level group count; moves into twirl-downs do not.
+fn legacy_effect_child<'g>(g: &'g PropGroup, c: &str) -> Option<&'g Node> {
+    let GroupKind::Effect { effect } = &g.kind else { return None };
+    PARAM_ID_ALIASES
+        .iter()
+        .filter(|(e, old, new)| e == effect && !old.contains('/') && !new.contains('/') && compact(old) == c)
+        .find_map(|(_, _, new)| g.children.iter().find(|n| n.match_id() == *new))
 }
 
 impl<'a> Resolver<'a> {

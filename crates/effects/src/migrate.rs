@@ -44,6 +44,9 @@ pub const PARAM_ID_ALIASES: &[(&str, &str, &str)] = &[
     ("ec.key.innerouter", "additionalBackground", "additionalBackground/background1"),
     // Generate: Radio Waves' growth speed was called Velocity; Velocity now moves the wave.
     ("ec.generate.radiowaves", "velocity", "waveMotion/expansion"),
+    // Simulation: CC Ball Action's Instability State is treated as the control After Effects
+    // 24.2 calls Scatter Motion (#3197; an assumption: 24.2 shows no Instability State).
+    ("ec.sim.ccballaction", "instabilityState", "scatterMotion"),
 ];
 
 /// Popup option labels renamed since they were first saved:
@@ -189,6 +192,14 @@ fn take_at(g: &mut PropGroup, id: &str) -> Option<Property> {
     }
 }
 
+/// The position of the property at spec id `id` (`a/b/param`) among its siblings.
+fn index_at(g: &PropGroup, id: &str) -> Option<usize> {
+    match id.split_once('/') {
+        None => g.children.iter().position(|c| matches!(c, Node::Prop(p) if p.match_id == id)),
+        Some((first, rest)) => index_at(g.sub(first)?, rest),
+    }
+}
+
 fn prop_at<'a>(g: &'a mut PropGroup, id: &str) -> Option<&'a mut Property> {
     match id.split_once('/') {
         None => g.get_mut(id),
@@ -276,6 +287,12 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         // before it moved into a twirl-down group.
         let found = prop_at(g, ps.id).is_some();
         if !found {
+            // A parameter renamed within its group keeps its place, so expressions that address
+            // it by index still read it.
+            let slot = PARAM_ID_ALIASES
+                .iter()
+                .filter(|(e, old, new)| *e == spec.id && *new == ps.id && old.rsplit_once('/').map(|(p, _)| p) == new.rsplit_once('/').map(|(p, _)| p))
+                .find_map(|(_, old, _)| index_at(g, old));
             let moved = PARAM_ID_ALIASES.iter().filter(|(e, _, new)| *e == spec.id && *new == ps.id).find_map(|(_, old, _)| take_at(g, old)).or_else(|| {
                 let leaf = ps.id.rsplit('/').next().unwrap_or(ps.id);
                 // Not when the top-level leaf is an old id of another parameter (Radio
@@ -297,9 +314,13 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                     pr
                 }
             };
+            let at = |sub: &mut PropGroup| match slot {
+                Some(i) if i <= sub.children.len() => sub.children.insert(i, pr.into()),
+                _ => sub.children.push(pr.into()),
+            };
             match path.and_then(|path| group_at(g, ids, path)) {
-                Some(sub) => sub.children.push(pr.into()),
-                None => g.children.push(pr.into()),
+                Some(sub) => at(sub),
+                None => at(g),
             }
         }
         if let Some(pr) = prop_at(g, ps.id) {
@@ -579,6 +600,27 @@ mod tests {
         assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 100.0]));
         let pr = g.get("distortionMeshOffset").unwrap();
         assert_eq!((&pr.ui, &pr.value), (&ParamUi::Point, &Value::Vec2([20.0, -5.0])));
+    }
+
+    /// #3197 review: an old CC Ball Action saved Instability State as its 8th property; renamed to
+    /// Scatter Motion it keeps that place, so an expression that reads `effect(..)(8)` still gets
+    /// the same control (new controls are appended after it).
+    #[test]
+    fn upgrade_renames_a_param_in_place_and_keeps_its_index() {
+        let spec = find("ec.sim.ccballaction").unwrap();
+        let mut next = 1;
+        let mut g = instantiate(spec, &mut Ids(&mut next), "Ball Grid", [100.0, 50.0]);
+        // The layout an earlier version saved: eight parameters, Instability State last.
+        let old = ["scatter", "rotationAxis", "rotation", "twistProperty", "twistAngle", "gridSpacing", "ballSize", "scatterMotion"];
+        let mut kept: Vec<Property> = old.iter().map(|id| take_prop(&mut g, id).unwrap()).collect();
+        g.children.clear();
+        kept[7].match_id = "instabilityState".into();
+        kept[7].value = Value::Scalar(33.0);
+        g.children.extend(kept.into_iter().map(Node::from));
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        let ids: Vec<&str> = g.children.iter().take(8).map(|c| c.match_id()).collect();
+        assert_eq!(ids, ["scatter", "rotationAxis", "rotation", "twistProperty", "twistAngle", "gridSpacing", "ballSize", "scatterMotion"]);
+        assert_eq!(g.get("scatterMotion").unwrap().value, Value::Scalar(33.0));
     }
 
     #[test]

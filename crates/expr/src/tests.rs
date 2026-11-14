@@ -2129,6 +2129,89 @@ fn bench_evaluation() {
     }
 }
 
+/// Layer A with an old-format CC Ball Action: Scatter Motion saved as `instabilityState`
+/// ("Instability State"), opened through the migration (#3197). Scatter Motion is 37 and keyed
+/// 10 at 0 s, 50 at 2 s.
+fn old_ball_action() -> Fx {
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.sim.ccballaction").unwrap();
+    let mut g = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "CC Ball Action", [20.0, 20.0]));
+    let sm = g.prop_mut("scatterMotion").unwrap();
+    sm.value = Value::Scalar(37.0);
+    sm.keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(10.0)), Keyframe::new(secs(2.0), Value::Scalar(50.0))];
+    sm.match_id = "instabilityState".into();
+    sm.name = "Instability State".into();
+    let mut next = f.p.next_id;
+    assert!(effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [20.0, 20.0]));
+    f.p.next_id = next;
+    assert!(g.prop("scatterMotion").is_some(), "the migration renamed the parameter");
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(g.into());
+    f
+}
+
+#[test]
+fn old_parameter_names_still_resolve_in_expressions() {
+    let f = old_ball_action();
+    for name in ["Instability State", "instabilityState", "instability state", "InstabilityState"] {
+        // Keyframes still apply: the keyed value at 0 s, not the stored 37.
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}')"), 0.0), 10.0);
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}')"), 2.0), 50.0);
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}').valueAtTime(2)"), 0.0), 50.0);
+    }
+    // Current names read the same property, unchanged.
+    for name in ["Scatter Motion", "scatterMotion"] {
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}')"), 0.0), 10.0);
+    }
+}
+
+#[test]
+fn old_parameter_name_follows_the_parameter_expression() {
+    let mut f = old_ball_action();
+    let p = f.p.comp_mut(f.cid).unwrap().layers[0].props.prop_mut("effects/#2/scatterMotion");
+    let p = match p {
+        Some(p) => p,
+        None => panic!("scatterMotion at effects/#2"),
+    };
+    p.expr = Some(Expression { text: "123".into(), enabled: true });
+    assert_close!(f.num("effect('CC Ball Action')('Instability State')", 0.0), 123.0);
+}
+
+#[test]
+fn unknown_parameter_names_still_fail() {
+    let f = old_ball_action();
+    assert!(f.ev(f.a, ROT, "effect('CC Ball Action')('No Such Thing')", 0.0).is_err());
+    // Old names only exist on the effect they were renamed on.
+    assert!(f.ev(f.a, ROT, "effect('Slider Control')('Instability State')", 0.0).is_err());
+}
+
+/// Every in-group rename in the alias table keeps resolving by its old id and display name.
+#[test]
+fn every_in_group_alias_resolves_by_its_old_name() {
+    let mut n = 0;
+    for (effect, old, new) in effectcraft_effects::migrate::PARAM_ID_ALIASES {
+        if old.contains('/') || new.contains('/') {
+            continue;
+        }
+        let Some(spec) = effectcraft_effects::find(effect) else { continue };
+        let mut f = fx();
+        let g = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Probe", [20.0, 20.0]));
+        f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(g.into());
+        let (new_name, kind) = {
+            let l = &f.p.comp(f.cid).unwrap().layers[0];
+            let p = l.props.prop(&format!("effects/#2/{new}")).unwrap();
+            (p.name.clone(), p.value.clone())
+        };
+        if !matches!(kind, Value::Scalar(_)) {
+            continue;
+        }
+        let a = f.ev(f.a, ROT, &format!("effect('Probe')('{old}')"), 0.0).unwrap();
+        let b = f.ev(f.a, ROT, &format!("effect('Probe')('{new_name}')"), 0.0).unwrap();
+        assert_eq!(a, b, "{effect}: {old}");
+        n += 1;
+    }
+    assert!(n >= 1);
+}
+
 /// Viewport clipping must never affect layer-space expression reads (#1388).
 #[test]
 fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {

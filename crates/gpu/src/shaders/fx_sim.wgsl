@@ -145,6 +145,27 @@ fn fxm_sprite(at: u32, x: f32, y: f32) -> FxmShade {
             }
             cov = fxm_aa(m);
         }
+        // sim::Shape::Ball (CC Ball Action's Shading): the sphere's light and shine scaled by
+        // |shade| (data[at + 9]), lit from the lower right when shade < 0.
+        case 9u: {
+            let d = sqrt(dx * dx + dy * dy);
+            let cv = fxm_aa(r - d);
+            if (cv <= 0.0) {
+                return fxm_none();
+            }
+            let shade = data[at + 9u];
+            let nx = dx / r;
+            let ny = dy / r;
+            let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
+            let m = select(1.0, -1.0, shade < 0.0);
+            let diff = max(nx * (-0.48 * m) + ny * (-0.58 * m) + nz * 0.66, 0.0);
+            let rz = 2.0 * diff * nz - 0.66;
+            let st = abs(shade);
+            let spec = powz(max(rz, 0.0), 20.0) * 0.6 * st;
+            let k = max(1.0 - st * 0.8 * (1.0 - diff), 0.0);
+            rgb = rgb * k + spec;
+            cov = cv;
+        }
         default: {
             let lx = data[at + 9u];
             let ly = data[at + 10u];

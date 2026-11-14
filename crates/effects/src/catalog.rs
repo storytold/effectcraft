@@ -147,7 +147,7 @@ pub fn effects_markdown() -> String {
          - **Status**: {} implemented in full, {partial} partial (what is missing is listed).\n\n",
         r.len() - partial
     ));
-    s.push_str("Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`).\n\n");
+    s.push_str("Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`). A parameter that was renamed keeps its old name working in expressions of older projects: `effect(\"CC Ball Action\")(\"Instability State\")` still reads Scatter Motion.\n\n");
     for cat in CATEGORIES {
         let list: Vec<_> = r.iter().filter(|e| e.category == *cat).collect();
         if list.is_empty() {
