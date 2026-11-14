@@ -838,6 +838,16 @@ error exits with status 1 and `file:line:col: message`. Scripts may read files o
 project's folder and may not write files or use the network unless the user turns on Preferences ▸
 Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network.
 
+A failing expression doesn't fail a render or a script: the frame just falls back to the
+property's value. `render-frame`, `render` and `script` run the same check as the app's expression
+error bar (`expr.errors`) and print each failure on stderr as `warning: expression error: <text>`
+(the text names the property, layer and comp); with `--json` the list is also in `expressionErrors`
+(`render`: per entry of `rendered`). The exit code stays 0. `render-frame` checks the rendered comp
+at the rendered time, `render` each comp at its first rendered frame, and a successful `script` every
+comp at its current time. Failures that start later in a render, or inside a nested comp, aren't
+reported yet. If the check can't run (an older app over `--bridge`), the warning says
+`could not check expressions`.
+
 `file.exportLottie` returns `{path, bytes, warnings}`: the warnings list every feature Lottie
 cannot express (most effects, cameras and lights, layer styles, audio, video footage…), so an
 agent can check what a player will not show. A `.lottie` path writes a dotLottie archive.

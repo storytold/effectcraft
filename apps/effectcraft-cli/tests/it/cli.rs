@@ -417,6 +417,95 @@ fn render_frame_writes_png() {
     assert!((v["time"].as_f64().unwrap() - 0.5).abs() < 0.02, "{v}");
 }
 
+/// A project with a comp 'Broken' (a Position expression that throws) and a comp 'Clean'.
+fn broken_expression_project(name: &str) -> PathBuf {
+    let proj = tmp(name);
+    let jsx = tmp(&format!("{name}.jsx"));
+    std::fs::write(
+        &jsx,
+        "var c = app.project.items.addComp('Broken', 160, 90, 1, 1, 24);
+var s = c.layers.addSolid([1, 0, 0], 'Red', 160, 90, 1);
+s.property('Position').expression = '[80, nope + 1]';
+app.project.items.addComp('Clean', 160, 90, 1, 1, 24).layers.addSolid([0, 0, 1], 'Blue', 160, 90, 1);",
+    )
+    .unwrap();
+    let out = bin().args(["script", jsx.to_str().unwrap(), "--save-as", proj.to_str().unwrap()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    proj
+}
+
+/// A failing expression doesn't fail `script`, but a successful script names every failing
+/// expression it leaves in the project on stderr and in its JSON, however it saved (#3444).
+#[test]
+fn script_reports_expression_errors() {
+    let jsx = tmp("script-expr-errors.jsx");
+    std::fs::write(&jsx, "app.project.items.addComp('Broken', 160, 90, 1, 1, 24).layers.addSolid([1, 0, 0], 'Red', 160, 90, 1).property('Position').expression = '[80, nope + 1]';
+app.project.items.addComp('Clean', 160, 90, 1, 1, 24);").unwrap();
+    let saved = tmp("script-expr-errors.ecproj");
+    let out = bin().args(["script", jsx.to_str().unwrap(), "--save-as", saved.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(out.status.success(), "a failing expression doesn't fail the script");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let errors = v["expressionErrors"].as_array().unwrap_or_else(|| panic!("no expressionErrors: {v}"));
+    assert_eq!(errors.len(), 1, "only 'Broken' fails: {v}");
+    assert!(errors[0].as_str().unwrap().contains("comp 'Broken'"), "{v}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning: expression error:") && err.contains("comp 'Broken'"), "{err}");
+
+    // A script that saves through app.project.save(), without --save, is checked too.
+    let out = bin()
+        .args([
+            "script",
+            "--project",
+            saved.to_str().unwrap(),
+            "--eval",
+            "var c; for (var i = 1; i <= app.project.numItems; i++) if (app.project.item(i).name == 'Clean') c = app.project.item(i); c.layers.addSolid([0, 0, 1], 'Blue', 160, 90, 1).property('Opacity').expression = 'nope'; app.project.save();",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("comp 'Broken'") && err.contains("comp 'Clean'"), "{err}");
+
+    // A failing script is reported as such, without the check.
+    let out = bin().args(["script", "--empty", "--eval", "nope()"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("expression error"));
+
+    let v = ok_json(&["script", "--empty", "--eval", "app.project.items.addComp('Clean', 160, 90, 1, 1, 24);"]);
+    assert!(v.get("expressionErrors").is_none(), "{v}");
+}
+
+/// A failing expression doesn't fail `render-frame` or `render`, but both name it on stderr and
+/// in their JSON, as the app's error bar does (#3444). A clean comp reports nothing.
+#[test]
+fn render_reports_expression_errors() {
+    let proj = broken_expression_project("render-expr-errors.ecproj");
+    let p = proj.to_str().unwrap();
+
+    let png = tmp("render-expr-errors.png");
+    let out = bin().args(["render-frame", "--project", p, "--comp", "Broken", "--out", png.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(out.status.success(), "a failing expression doesn't fail the render");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let errors = v["expressionErrors"].as_array().unwrap_or_else(|| panic!("no expressionErrors: {v}"));
+    assert_eq!(errors.len(), 1, "{v}");
+    assert!(errors[0].as_str().unwrap().contains("nope") && errors[0].as_str().unwrap().contains("'Red'"), "{v}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning: expression error:") && err.contains("nope"), "{err}");
+
+    let v = ok_json(&["render-frame", "--project", p, "--comp", "Clean", "--out", png.to_str().unwrap()]);
+    assert!(v.get("expressionErrors").is_none(), "{v}");
+
+    let gif = tmp("render-expr-errors.gif");
+    let out = bin()
+        .args(["render", "--project", p, "--comp", "Broken", "--format", "gif", "--end", "0.1", "--out", gif.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["rendered"][0]["expressionErrors"][0].as_str().is_some_and(|e| e.contains("nope")), "{v}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr).matches("warning: expression error:").count(), 1);
+}
+
 #[test]
 fn errors_are_json() {
     let (code, v) = run_json(&["exec", "no.such.command", "--empty"]);
