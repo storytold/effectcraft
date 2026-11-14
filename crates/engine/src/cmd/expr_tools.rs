@@ -73,20 +73,26 @@ pub fn errors_in(ctx: &EvalCtx, check: Option<fn(&str) -> std::result::Result<()
             if !keep_going() {
                 return None;
             }
-            let msg = if e.enabled {
-                match &ctx.expr {
-                    Some(h) => h.eval(ctx, l, p, &p.value_at(l.layer_time(ctx.time))).err(),
-                    None => None,
-                }
-            } else {
-                check.and_then(|check| check(&e.text).err())
-            };
-            if let Some(message) = msg {
+            if let Some(message) = property_error(ctx, check, l, p) {
                 out.push(error_of(ctx.comp_id, i, l, p, message, !e.enabled));
             }
         }
     }
     keep_going().then_some(out)
+}
+
+/// Why property `p` of layer `l` fails at `ctx.time` (comp time), as `expr.errors` reports it and
+/// scripts read it as `Property.expressionError`: the evaluation error (an exception or a
+/// non-finite result) of an enabled expression, or the syntax error that disabled one. `None`
+/// without an expression or when it evaluates. Evaluates this one expression; renders nothing.
+/// Without an evaluator an enabled expression gets the syntax check, so a broken one (from a
+/// project file) still reports why.
+pub fn property_error(ctx: &EvalCtx, check: Option<fn(&str) -> std::result::Result<(), String>>, l: &Layer, p: &Property) -> Option<String> {
+    let e = p.expr.as_ref().filter(|e| !e.text.trim().is_empty())?;
+    match ctx.expr {
+        Some(h) if e.enabled => h.eval(ctx, l, p, &p.value_at(l.layer_time(ctx.time))).err(),
+        _ => check.and_then(|check| check(&e.text).err()),
+    }
 }
 
 fn error_of(cid: ItemId, i: usize, l: &Layer, p: &Property, message: String, disabled: bool) -> ExprError {
