@@ -1008,6 +1008,136 @@ fn cineon_gamma_presets_carry_the_version() {
     assert_eq!((second(&s, "gamma"), second(&s, "version")), (Some(KV::Scalar(1.3)), Some(KV::Scalar(2.0))));
 }
 
+/// A Gamma preset records the Version its Cineon Converter has at the time it is saved. Applied
+/// to a Cineon Converter whose Version is keyframed, it keeps the keys and is converted to the
+/// one version they hold, or skipped when they hold several. A nested Cineon Converter's
+/// keyframed Version counts only when its keys that play hold one value.
+#[test]
+fn cineon_gamma_presets_follow_a_keyframed_version() {
+    let (mut s, a, _) = comp_with_two_solids();
+    apply(&mut s, a, "Cineon Converter");
+    for (time, value) in [(0.0, 2.0), (1.0, 1.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "path": "effects/#1/version", "time": time, "value": value})).unwrap();
+    }
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/gamma", "value": 1.3})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "effects/#1/gamma"})).unwrap();
+    let file = std::env::temp_dir().join(format!("ec-cineon-keyed-version-{}.ecpreset", std::process::id()));
+    s.execute("anim.savePreset", json!({"path": file})).unwrap();
+    let preset: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    std::fs::remove_file(file).unwrap();
+    assert_eq!(preset["properties"][0]["cineonVersion"], json!(1.0));
+
+    // Applied to a Cineon Converter whose Version keys hold more than one version, the Gamma is
+    // skipped and the keys stay.
+    let get = |s: &Session, id: &str| layer(s, a).effects().unwrap().groups().next().unwrap().get(id).unwrap().clone();
+    let keys = get(&s, "version").keys;
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/gamma", "value": 4.0})).unwrap();
+    let err = s.execute("anim.applyPreset", json!({"preset": preset.clone(), "layers": [a]})).unwrap_err();
+    assert!(err.to_string().contains("nothing in this preset fits"), "{err}");
+    assert_eq!((get(&s, "gamma").value, get(&s, "version").keys), (KV::Scalar(4.0), keys));
+
+    // When the keys hold one version, the Gamma is converted to it and the keys stay.
+    s.execute("prop.addKey", json!({"layer": a, "path": "effects/#1/version", "time": 0.0, "value": 1.0})).unwrap();
+    let keys = get(&s, "version").keys;
+    let mut version_2 = preset;
+    version_2["properties"][0]["cineonVersion"] = json!(2.0);
+    let r = s.execute("anim.applyPreset", json!({"preset": version_2.clone(), "layers": [a]})).unwrap();
+    assert_eq!((&r["applied"], &r["skipped"]), (&json!(1), &json!([])), "{r}");
+    let gamma = get(&s, "gamma").value.as_f64();
+    assert!((gamma - 1.3 * 1.7).abs() < 1e-9, "{gamma}");
+    assert_eq!(get(&s, "version").keys, keys);
+
+    // Keys of one value that ease with a speed move the Version between them, so the Gamma is
+    // skipped. A muted key of another value does not count, and neither does the ease of a key
+    // with no other key that plays.
+    let cid = s.active_comp_id().unwrap();
+    let fx = layer(&s, a).effects().unwrap().groups().next().unwrap().uid;
+    let edit_keys = |s: &mut Session, f: &dyn Fn(&mut [effectcraft_keyframe::Keyframe])| {
+        s.edit("keys", None, |project, _| {
+            let pr = project.comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_group_mut(fx).unwrap().get_mut("version").unwrap();
+            f(&mut pr.keys);
+            Ok(())
+        })
+        .unwrap();
+    };
+    edit_keys(&mut s, &|keys| {
+        keys[0].out_interp = Interp::Bezier;
+        keys[0].out_ease = vec![Ease { speed: 3.0, influence: 50.0 }];
+    });
+    let mut with_gamma = version_2.clone();
+    with_gamma["properties"].as_array_mut().unwrap().push(json!({"path": "transform/opacity", "value": KV::Scalar(80.0), "keys": []}));
+    let r = s.execute("anim.applyPreset", json!({"preset": with_gamma, "layers": [a]})).unwrap();
+    assert_eq!(r["skipped"], json!(["effects/ec.utility.cineon/gamma"]), "{r}");
+    edit_keys(&mut s, &|keys| {
+        keys[1].value = KV::Scalar(2.0);
+        keys[1].muted = true;
+    });
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/gamma", "value": 4.0})).unwrap();
+    s.execute("anim.applyPreset", json!({"preset": version_2.clone(), "layers": [a]})).unwrap();
+    let gamma = get(&s, "gamma").value.as_f64();
+    assert!((gamma - 1.3 * 1.7).abs() < 1e-9, "{gamma}");
+
+    // A preset that holds the Version after the Gamma sets the Version, and the Gamma lands as
+    // saved.
+    edit_keys(&mut s, &|keys| keys[1].muted = false);
+    let mut both = version_2;
+    both["properties"].as_array_mut().unwrap().push(json!({"path": "effects/ec.utility.cineon/version", "value": KV::Scalar(2.0), "keys": []}));
+    let r = s.execute("anim.applyPreset", json!({"preset": both.clone(), "layers": [a]})).unwrap();
+    assert_eq!((&r["applied"], &r["skipped"]), (&json!(2), &json!([])), "{r}");
+    let version = get(&s, "version");
+    assert_eq!((get(&s, "gamma").value, version.value, version.keys.len()), (KV::Scalar(1.3), KV::Scalar(2.0), 0));
+    // Listed before the Gamma, the preset's Version stays as the preset has it.
+    let mut first = both.clone();
+    let props = first["properties"].as_array_mut().unwrap();
+    let saved_version = props.pop().unwrap();
+    props.insert(0, saved_version);
+    props[0]["value"] = json!(KV::Scalar(1.0));
+    s.execute("anim.applyPreset", json!({"preset": first.clone(), "layers": [a]})).unwrap();
+    assert_eq!((get(&s, "gamma").value, get(&s, "version").value), (KV::Scalar(1.3), KV::Scalar(1.0)));
+    // A Version of another type is skipped, and the Gamma sets the Version it was saved with.
+    first["properties"][0]["value"] = json!(KV::Bool(true));
+    s.execute("anim.applyPreset", json!({"preset": first, "layers": [a]})).unwrap();
+    assert_eq!(get(&s, "version").value, KV::Scalar(2.0));
+
+    // A Version that an expression sets has no version to record or convert to.
+    s.execute("prop.setExpression", json!({"layer": a, "path": "effects/#1/version", "expression": "1"})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "effects/#1/gamma"})).unwrap();
+    let file = std::env::temp_dir().join(format!("ec-cineon-version-expression-{}.ecpreset", std::process::id()));
+    s.execute("anim.savePreset", json!({"path": file})).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    std::fs::remove_file(file).unwrap();
+    assert_eq!(saved["properties"][0]["cineonVersion"], json!(null));
+    let mut tagged = saved;
+    tagged["properties"][0]["cineonVersion"] = json!(2.0);
+    tagged["properties"].as_array_mut().unwrap().push(json!({"path": "transform/opacity", "value": KV::Scalar(80.0), "keys": []}));
+    let r = s.execute("anim.applyPreset", json!({"preset": tagged, "layers": [a]})).unwrap();
+    assert_eq!(r["skipped"], json!(["effects/ec.utility.cineon/gamma"]), "{r}");
+
+    // A Gamma exposed from a nested comp records a keyframed Version only when its keys all
+    // hold one value.
+    for (second, recorded) in [(1.0, json!(null)), (2.0, json!(2.0))] {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "Inner", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap();
+        let inner = s.active_comp_id().unwrap();
+        let solid = s.execute("layer.newSolid", json!({"width": 8, "height": 8})).unwrap()["layer"].as_u64().unwrap();
+        apply(&mut s, solid, "Cineon Converter");
+        for (time, value) in [(0.0, 2.0), (1.0, second)] {
+            s.execute("prop.addKey", json!({"layer": solid, "path": "effects/#1/version", "time": time, "value": value})).unwrap();
+        }
+        let control = s.execute("essential.addProperty", json!({"layer": solid, "path": "effects/#1/gamma"})).unwrap()["controls"][0].as_u64().unwrap();
+        s.execute("comp.new", json!({"name": "Main", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap();
+        let instance = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+        let path = format!("essential/{}", effectcraft_project::essential::match_id(control));
+        s.execute("prop.select", json!({"layer": instance, "path": path})).unwrap();
+        let file = std::env::temp_dir().join(format!("ec-cineon-keyed-nested-{}-{second}.ecpreset", std::process::id()));
+        s.execute("anim.savePreset", json!({"path": file})).unwrap();
+        let preset: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(preset["properties"][0]["cineonVersion"], recorded, "second key {second}");
+    }
+}
+
 /// A Gamma exposed through Essential Properties (directly, or again from a middle comp) is
 /// converted to the version of the Cineon Converter it drives when the preset was saved with
 /// another version, or before version 2. A control that also drives another property keeps the
