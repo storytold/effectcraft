@@ -221,6 +221,8 @@ impl Session {
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
         upgrade_effects(&mut p);
+        // Source Text overrides saved before they kept a base start from the master as it is.
+        effectcraft_project::essential::init_bases(&mut p);
         // The media layer keys decoded frames by path: files of the new project may have changed
         // since an earlier project decoded them (#1070).
         for it in p.items.values() {

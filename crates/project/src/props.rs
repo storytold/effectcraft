@@ -195,11 +195,39 @@ pub enum GroupKind {
     Tracker { settings: Box<crate::tracking::TrackerSettings> },
     /// The Essential Properties of a precomp layer (master properties): one child per control
     /// of the nested comp's Essential Graphics; `overridden` lists the children (uids) whose
-    /// values this instance overrides.
+    /// values this instance overrides. `bases`: for overridden Source Text children, the master
+    /// document they are merged with (see [`crate::essential`]).
     Essential {
         #[serde(default)]
         overridden: Vec<Uid>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bases: Vec<EssentialBase>,
     },
+}
+
+/// The master document an overridden Source Text of an Essential Properties group is merged
+/// with: the master as it was when the instance overrode it, with every attribute the instance
+/// has not changed since brought up to date ([`effectcraft_keyframe::TextDoc::merge_master`]).
+/// Projects saved before bases existed have none; the instance's value then counts as its own
+/// only where it differs from the master when the project is opened.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EssentialBase {
+    /// The instance property (uid of the Essential Properties child).
+    pub prop: Uid,
+    /// The base of the property's value. For a keyframed override, the base a key without its
+    /// own (a new or moved key) starts from: the master as it was at the last sync.
+    pub doc: Box<effectcraft_keyframe::TextDoc>,
+    /// A keyframed override: each key's own base, by key time, so what one key followed never
+    /// makes another key's own value count as following.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<EssentialKeyBase>,
+}
+
+/// The base of one keyframe of an overridden Source Text ([`EssentialBase::keys`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EssentialKeyBase {
+    pub time: effectcraft_time::Tick,
+    pub doc: Box<effectcraft_keyframe::TextDoc>,
 }
 
 /// Mask motion blur (sub-frame samples of an animated mask path).
