@@ -8,7 +8,9 @@ use effectcraft_time::Tick;
 use serde_json::json;
 
 use crate::Session;
-use crate::viewer::{Channel, DisplayPass, FrameEncoding, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, PassCurve, SnapKind, SnapSource, SnapTarget, snap};
+use crate::viewer::{
+    Channel, DisplayPass, FrameEncoding, PRI_COMP, PRI_GRID, PRI_GUIDE, PRI_LAYER, PRI_VERTEX, PassCurve, SnapKind, SnapSource, SnapTarget, snap,
+};
 
 fn comp() -> Session {
     let mut s = Session::default();
@@ -84,6 +86,46 @@ fn snap_point_beats_one_line_and_loses_only_to_two_nearer_lines() {
     assert_eq!(s.hits, [v, h]);
 }
 
+/// #2681: a pair of lines, one of them through the point (the layer's own edge line), beats the
+/// point only when it is clearly nearer (by `POINT_BIAS` of the tolerance, 2 of 8 here); a pair
+/// only a little nearer leaves the feature on the point.
+#[test]
+fn a_line_pair_through_a_point_beats_it_only_by_a_clear_margin() {
+    use crate::viewer::POINT_BIAS;
+    assert_eq!(8.0 * POINT_BIAS, 2.0);
+    let src = SnapSource::Layer(LayerId(1));
+    let edge = SnapTarget::vline(100.0, PRI_LAYER, src);
+    let row = SnapTarget::hline(51.5, PRI_COMP, SnapSource::Comp);
+    // The point is 5 away; the pair (3 and ½) about 3.04, under 2 nearer: the point.
+    let pt = SnapTarget::point([100.0, 47.0], PRI_LAYER, src);
+    let s = snap(&[[103.0, 51.0]], &[edge, row, pt], 8.0).unwrap();
+    assert_eq!(s.hits, [pt]);
+    assert_eq!(s.at, [100.0, 47.0]);
+    // The point about 6.7 away, the same pair more than 2 nearer: the pair.
+    let far = SnapTarget::point([100.0, 45.0], PRI_LAYER, src);
+    let s = snap(&[[103.0, 51.0]], &[edge, row, far], 8.0).unwrap();
+    assert_eq!(s.hits, [edge, row]);
+    assert_eq!(s.at, [100.0, 51.5]);
+}
+
+/// #2681: two guides crossing 1 px beside a layer's point are reachable right next to it: a pair
+/// of lines that both miss the point gets no margin, only the nearer one wins.
+#[test]
+fn a_guide_intersection_beside_a_point_stays_reachable() {
+    let src = SnapSource::Layer(LayerId(1));
+    let pt = SnapTarget::point([100.0, 50.0], PRI_LAYER, src);
+    let own = [SnapTarget::vline(100.0, PRI_LAYER, src), SnapTarget::hline(50.0, PRI_LAYER, src)];
+    let guides = [SnapTarget::vline(101.0, PRI_GUIDE, SnapSource::Guide), SnapTarget::hline(51.0, PRI_GUIDE, SnapSource::Guide)];
+    let t = [own[0], own[1], guides[0], guides[1], pt];
+    // Nearer the intersection (about 0.71) than the point (about 2.12): the intersection.
+    let s = snap(&[[101.5, 51.5]], &t, 8.0).unwrap();
+    assert_eq!(s.at, [101.0, 51.0]);
+    assert_eq!(s.hits, guides);
+    // Nearer the point: the point.
+    let s = snap(&[[100.3, 50.3]], &t, 8.0).unwrap();
+    assert_eq!(s.hits, [pt]);
+}
+
 /// #2855: an unrotated layer's centre lines follow its edges' span rule, reach the outer comp
 /// through a collapsed precomp layer, and a rotated layer keeps its points only.
 #[test]
@@ -114,6 +156,105 @@ fn layer_centre_lines_follow_the_edges() {
     // Rotated: no lines at all.
     s.execute("prop.set", json!({"layer": pre.0, "path": "transform/rotation", "value": 30})).unwrap();
     assert_eq!(lines(&at(&s, off), pre), (None, None));
+}
+
+/// #2681: two Ellipse-tool circles, one moved so its left point meets the other's right point.
+/// The point must land exactly on the other circle's point at 100 % as at 200 % and 400 %, on
+/// HiDPI displays too. The tolerance is the viewer's (8 screen points over the zoom in points per
+/// comp pixel), so at 100 % it reaches the comp's centre row 6 px below the circles and a guide
+/// 3 px below them. Neither may pull the circle off the point: the other circle's own edge line
+/// and row pass through its point, so a pair of lines made with that row or guide is only a
+/// little nearer than the point (the row or guide a few pixels nearer on y), and a point wins
+/// unless a pair is clearly nearer (`POINT_BIAS`). Before #2855 one nearer line was enough, and
+/// even after it any pair nearer by a hair; zoomed in the row and guide were out of reach, so
+/// the snap looked right there and not at 100 %.
+#[test]
+fn circles_snap_point_to_point_at_every_zoom() {
+    circles_snap_point_to_point(false);
+}
+
+/// #2681 with the circles converted to Bezier paths (Convert To Bezier Path): the dragged path
+/// point lands on the other circle's path point (a vertex target) the same way.
+#[test]
+fn bezier_circles_snap_path_point_to_path_point_at_every_zoom() {
+    circles_snap_point_to_point(true);
+}
+
+/// The #2681 drops: parametric circles (their edge midpoints snap) or, with `bezier`, the same
+/// circles as Bezier paths (their path points snap).
+fn circles_snap_point_to_point(bezier: bool) {
+    use crate::viewer::{SnapOptions, layer_features, layer_vertices, targets};
+    let mut s = comp();
+    // Circle A: 100 px, centred at (200, 174), its right point at (250, 174); the comp's centre
+    // row is y = 180, a horizontal guide at y = 177.
+    s.execute("view.addGuide", json!({"orientation": "horizontal", "position": 177})).unwrap();
+    let a = s.execute("shape.newShape", json!({"kind": "ellipse", "size": [100, 100], "position": [200, 174]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    let b = s.execute("shape.newShape", json!({"kind": "ellipse", "size": [100, 100], "position": [400, 300]})).unwrap()["layer"].as_u64().unwrap();
+    assert_ne!(a, b, "two shape layers");
+    if bezier {
+        for l in [a, b] {
+            /// Returns the uid of the first ellipse group in the tree, searching depth first.
+            fn ellipse(g: &effectcraft_project::PropGroup) -> Option<u64> {
+                if g.match_id == "ellipse" {
+                    return Some(g.uid);
+                }
+                g.groups().find_map(ellipse)
+            }
+            let uid = ellipse(layer(&s, l).props.sub("contents").unwrap()).unwrap();
+            s.state.selected_props = vec![(LayerId(l), uid)];
+            s.execute("path.convertToBezier", json!({})).unwrap();
+        }
+    }
+    let cid = s.active_comp_id().unwrap();
+    // The circle's right (`right`) or left point: an edge midpoint of its box (features:
+    // corners, edge midpoints top, right, bottom, left, centre, anchor point), or a path point.
+    let point = |s: &Session, id: u64, right: bool| {
+        let comp = s.project.comp(cid).unwrap().clone();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, Tick::ZERO);
+        let l = comp.layer(LayerId(id)).unwrap();
+        if !bezier {
+            return layer_features(&ctx, l)[if right { 5 } else { 7 }];
+        }
+        let v = layer_vertices(&ctx, l);
+        assert!(v.len() >= 4, "a Bezier circle: {v:?}");
+        let x = |p: &&[f64; 2]| p[0];
+        *(if right { v.iter().max_by(|p, q| x(p).total_cmp(&x(q))) } else { v.iter().min_by(|p, q| x(p).total_cmp(&x(q))) }).unwrap()
+    };
+    let near = |p: [f64; 2], q: [f64; 2], e: f64| (p[0] - q[0]).abs() < e && (p[1] - q[1]).abs() < e;
+    let right_of_a = point(&s, a, true);
+    assert!(near(right_of_a, [250.0, 174.0], 1e-6), "{right_of_a:?}");
+    let left_of_b = point(&s, b, false);
+    assert!(near(left_of_b, [350.0, 300.0], 1e-6), "{left_of_b:?}");
+    let to_left = [left_of_b[0] - 400.0, left_of_b[1] - 300.0];
+    let source = if bezier { SnapSource::Vertex(LayerId(a)) } else { SnapSource::Layer(LayerId(a)) };
+    // B's left point dropped right of and below A's right point (screen points): just off it,
+    // and nearer the comp's centre row (at 100 %) than A's own row. With and without snapping to
+    // the guide.
+    for (dx, dy) in [(3.0, 1.0), (3.0, 3.5)] {
+        for guides in [false, true] {
+            for ppp in [1.0, 1.25, 1.5] {
+                for magnification in [1.0, 2.0, 4.0] {
+                    let case = format!("bezier {bezier}, drop ({dx}, {dy}) pt, guides {guides}, {magnification}x, ppp {ppp}");
+                    // The viewer's zoom (points per comp pixel) and snap tolerance (`SNAP_PX / zoom`).
+                    let zoom: f64 = magnification / ppp;
+                    let tol = 8.0 / zoom;
+                    let want = [right_of_a[0] + dx / zoom, right_of_a[1] + dy / zoom];
+                    s.execute("prop.set", json!({"layer": b, "path": "transform/position", "value": [want[0] - to_left[0], want[1] - to_left[1], 0]})).unwrap();
+                    let src = point(&s, b, false);
+                    assert!(near(src, want, 1e-9), "{case}: {src:?} {want:?}");
+                    let comp = s.project.comp(cid).unwrap().clone();
+                    let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, Tick::ZERO);
+                    let t = targets(&ctx, &[LayerId(b)], SnapOptions { layers: true, guides, ..Default::default() });
+                    let hit = snap(&[src], &t, tol).unwrap_or_else(|| panic!("{case}: nothing snapped"));
+                    assert!(near(hit.at, right_of_a, 1e-9), "{case}: B's left point lands at {:?}, not on A's right point {right_of_a:?}", hit.at);
+                    assert_eq!(hit.hits.len(), 1, "{case}: one point, not two lines: {:?}", hit.hits);
+                    assert_eq!(hit.hits[0].kind, SnapKind::Point, "{case}");
+                    assert_eq!(hit.hits[0].source, source, "{case}");
+                }
+            }
+        }
+    }
 }
 
 #[test]
