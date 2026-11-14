@@ -70,6 +70,9 @@ next to it.
 Agents: `file.importProject {"path": "/projects/titles.ecproj"}` returns the comps, the root comps,
 `primaryComp` (the only root comp, if there is one) and any missing media.
 
+After Effects projects (`.aep`, `.aepx`) given to File ▸ Import ▸ File… or dropped on the window
+import as File ▸ Import ▸ Adobe After Effects Project… does ([aep-import.md](aep-import.md)).
+
 ## Finding a layer's source in the Project panel
 
 Right-click a layer in the Timeline or Composition panel and choose **Reveal Layer Source in

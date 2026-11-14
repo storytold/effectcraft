@@ -89,6 +89,8 @@ pub(crate) struct TextPlan {
     pub frame: Option<[f64; 4]>,
     /// The text animators (planned with the layer's time base, `textanim.rs`).
     pub animators: Vec<crate::export::textanim::AnimPlan>,
+    /// The Source Text expression and its enable switch.
+    pub expr: Option<(String, bool)>,
 }
 
 /// Where a text value is written, for the loss report.
@@ -133,16 +135,19 @@ pub(crate) fn plan_text(layer: &Layer, comp_name: &str, col: &mut Collector) -> 
     if !st.keys.is_empty() {
         col.lose(LossCategory::TextLayers, format!("{what}: Source Text keyframes are not written (the first key's text is)"));
     }
-    if st.has_expression() {
-        col.lose(LossCategory::TextLayers, format!("{what}: the Source Text expression is not written"));
-    }
     let value = st.keys.first().map(|k| &k.value).unwrap_or(&st.value);
     let Value::Text(doc) = value else {
         col.lose(LossCategory::TextLayers, format!("{what}: Source Text holds no text document"));
         return None;
     };
     report_extras(text, &what, col);
-    Some(plan_doc(doc, &what, col))
+    let mut plan = plan_doc(doc, &what, col);
+    // Written enabled or disabled, as on any other property.
+    plan.expr = st.expr.as_ref().filter(|e| !e.text.is_empty()).map(|e| (e.text.clone(), e.enabled));
+    if plan.expr.is_some() {
+        col.exported.expressions = col.exported.expressions.saturating_add(1);
+    }
+    Some(plan)
 }
 
 /// Path / More Options that hold anything other than a new text layer's defaults are not
@@ -190,6 +195,8 @@ fn differs(g: &PropGroup, def: Option<&PropGroup>, depth: usize) -> bool {
     })
 }
 
+/// The text document `doc` in the file's terms (text, style runs, paragraphs, box); what the file
+/// cannot hold is reported for `what`.
 fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
     let base = doc.base_style();
     let runs = doc.runs();
@@ -288,7 +295,7 @@ fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
             at.fit(h, (1.0, 1e6), 1.0, "box height"),
         ]
     });
-    TextPlan { text, runs: out_runs, paras, frame, animators: Vec::new() }
+    TextPlan { text, runs: out_runs, paras, frame, animators: Vec::new(), expr: None }
 }
 
 fn style_out(s: &effectcraft_keyframe::text_doc::CharStyle, what: &str, col: &mut Collector) -> StyleOut {
@@ -518,11 +525,47 @@ pub(crate) fn build_doc(proto: &TNode, tp: &TextPlan) -> Option<TNode> {
     Some(doc)
 }
 
-/// Rewrites the text document of a text layer block's `Layr` for `tp` and gives the document a
-/// fresh `btgu/pgui`.
+/// The Source Text expression into the `tdbs` of `btds` (`docs/aep-format.md` 3.10, read back from
+/// `tests/fixtures/text-synthetic.aep`): `tdb4` byte 120 = 1, byte 119 = 1 when disabled, and the
+/// text as a `Utf8` after the record's `cdat`.
+fn put_source_text_expression(layr: &mut crate::Chunk<'static>, text: &str, enabled: bool) -> crate::export::tree::R<()> {
+    use crate::Body;
+    use crate::export::tree::tpl;
+    /// The `tdbs` of the first `btds` below `c`, at most 32 levels down.
+    fn find<'c>(c: &'c mut crate::Chunk<'static>, depth: usize) -> Option<&'c mut crate::Chunk<'static>> {
+        if depth > 32 {
+            return None;
+        }
+        if c.is_list(b"btds") {
+            return match &mut c.body {
+                Body::List { children, .. } => children.iter_mut().find(|k| k.is_list(b"tdbs")),
+                _ => None,
+            };
+        }
+        match &mut c.body {
+            Body::List { children, .. } | Body::Chunks(children) => children.iter_mut().find_map(|k| find(k, depth + 1)),
+            _ => None,
+        }
+    }
+    let tdbs = find(layr, 0).ok_or_else(|| tpl("text prototype without a Source Text record"))?;
+    let Body::List { children, .. } = &mut tdbs.body else { return Err(tpl("text prototype without a Source Text record")) };
+    let tdb4 = children.iter_mut().find(|k| k.is(b"tdb4")).ok_or_else(|| tpl("Source Text record without tdb4"))?;
+    let Body::Data(d) = &mut tdb4.body else { return Err(tpl("Source Text record without tdb4")) };
+    let d = d.to_mut();
+    *d.get_mut(120).ok_or_else(|| tpl("short Source Text tdb4"))? = 1;
+    *d.get_mut(119).ok_or_else(|| tpl("short Source Text tdb4"))? = u8::from(!enabled);
+    children.retain(|k| !k.is(b"Utf8"));
+    let at = children.iter().position(|k| k.is(b"tdum")).unwrap_or(children.len());
+    children.insert(at, crate::Chunk::data(*b"Utf8", text.as_bytes().to_vec()));
+    Ok(())
+}
+
+/// Rewrites the text document of a text layer block's `Layr` for `tp`, writes its Source Text
+/// expression and gives the document a fresh `btgu/pgui`.
 pub(crate) fn put_doc(layr: &mut crate::Chunk<'static>, tp: &TextPlan, guid: [u8; 16]) -> crate::export::tree::R<()> {
     use crate::Body;
     use crate::export::tree::tpl;
+    /// The first `LIST btdk` below `c`, at most 32 levels down.
     fn find<'c>(c: &'c mut crate::Chunk<'static>, depth: usize) -> Option<&'c mut crate::Chunk<'static>> {
         if depth > 32 {
             return None;
@@ -535,6 +578,7 @@ pub(crate) fn put_doc(layr: &mut crate::Chunk<'static>, tp: &TextPlan, guid: [u8
             _ => None,
         }
     }
+    /// The first `pgui` of the first `btgu` below `c`, at most 32 levels down.
     fn find_pgui<'c>(c: &'c mut crate::Chunk<'static>, depth: usize) -> Option<&'c mut crate::Chunk<'static>> {
         if depth > 32 {
             return None;
@@ -555,6 +599,9 @@ pub(crate) fn put_doc(layr: &mut crate::Chunk<'static>, tp: &TextPlan, guid: [u8
     let proto = crate::export::textdoc::parse(data.as_ref()).ok_or_else(|| tpl("the text prototype's document does not parse"))?;
     let doc = build_doc(&proto, tp).ok_or_else(|| tpl("the text prototype's document has another shape"))?;
     *data = std::borrow::Cow::Owned(crate::export::textdoc::write(&doc));
+    if let Some((text, enabled)) = &tp.expr {
+        put_source_text_expression(layr, text, *enabled)?;
+    }
     if let Some(p) = find_pgui(layr, 0) {
         *p = crate::Chunk::data(*b"pgui", guid.to_vec());
     }

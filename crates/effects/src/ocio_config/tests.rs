@@ -410,3 +410,69 @@ fn builtin_styles() {
 fn rgb_white_xyz() -> [f64; 3] {
     [D65[0] / D65[1], 1.0, (1.0 - D65[0] - D65[1]) / D65[1]]
 }
+
+/// #3538: a custom `.ocio` config, and the LUTs it reads, were read once per process.
+#[test]
+fn an_ocio_config_and_its_luts_are_read_again_once_they_change() {
+    const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+    const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+    let dir = std::env::temp_dir().join(format!("ec-fx-3538-config-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.as_path().join("luts")).unwrap();
+    let write = |name: &str, text: &str, secs: u64| {
+        let path = dir.as_path().join(name);
+        std::fs::write(&path, text).unwrap();
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    let config = |space: &str| {
+        format!(
+            "ocio_profile_version: 2\nsearch_path: luts\nroles:\n  scene_linear: lin\ncolorspaces:\n  - !<ColorSpace>\n    name: lin\n  - !<ColorSpace>\n    name: {space}\n    to_reference: !<FileTransform> {{src: grade.cube, interpolation: linear}}\n  - !<ColorSpace>\n    name: later\n    to_reference: !<FileTransform> {{src: later.cube, interpolation: linear}}\n"
+        )
+    };
+    let src = dir.as_path().join("config.ocio").to_string_lossy().into_owned();
+    assert!(load_config(&src).is_err(), "no config yet");
+    write("config.ocio", &config("graded"), 1_000);
+    write("luts/grade.cube", BLACK, 1_000);
+    let to_lin = |space: &str| {
+        let c = load_config(&src).unwrap();
+        c.convert(c.space(space).unwrap(), c.space("lin").unwrap(), [0.5; 3])
+    };
+    assert_eq!(to_lin("graded"), [0.0; 3], "a config created after a failed load");
+    write("luts/grade.cube", WHITE, 2_000);
+    assert_eq!(to_lin("graded"), [1.0; 3], "a LUT the config reads, edited");
+    assert_eq!(to_lin("later"), [0.5; 3], "a LUT not there yet passes through");
+    write("luts/later.cube", BLACK, 1_000);
+    assert_eq!(to_lin("later"), [0.0; 3], "a LUT the config reads, created");
+    write("config.ocio", &config("regraded"), 2_000);
+    assert!(load_config(&src).unwrap().space("regraded").is_some(), "an edited config");
+    std::fs::remove_file(&src).unwrap();
+    assert!(load_config(&src).is_err(), "a deleted config");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A LUT a cached config read that changes is noticed without a render loading the config (the
+/// interface's watcher), and the config's files name it (frame and layer cache keys hold them).
+#[test]
+fn check_lut_files_notices_a_configs_lut() {
+    let dir = std::env::temp_dir().join(format!("ec-fx-3538-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lut = dir.join("watched.cube");
+    std::fs::write(&lut, "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n").unwrap();
+    let config = dir.join("config.ocio");
+    std::fs::write(&config, "ocio_profile_version: 2\ncolorspaces:\n  - !<ColorSpace>\n    name: lin\n  - !<ColorSpace>\n    name: graded\n    to_reference: !<FileTransform> {src: watched.cube}\n").unwrap();
+    let src = config.to_string_lossy().into_owned();
+    // A config not read yet is read: its files name its LUT from the first render on.
+    let files = crate::lut_files(&src);
+    assert!(files.contains(&lut.to_string_lossy().into_owned()), "{files:?}");
+    assert!(load_config(&src).is_ok());
+    let before = crate::check_lut_files();
+    assert!(cached_files(&src).is_some(), "an unchanged config stays");
+    std::fs::write(&lut, "LUT_1D_SIZE 3\n0 0 0\n0.5 0.5 0.5\n1 1 1\n").unwrap();
+    assert!(crate::check_lut_files() > before);
+    assert!(cached_files(&src).is_none(), "a config whose LUT changed is read again");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
