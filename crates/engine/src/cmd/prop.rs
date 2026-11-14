@@ -371,20 +371,41 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let follow: Vec<usize> =
         p.get("follow").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).filter_map(|d| usize::try_from(d).ok()).collect();
+    // A typed `*2`, `/2` (`factor`) or `+10` (`addend`) (#3195): each layer's own value times it
+    // or plus it, not the edited layer's result (which its range may have clamped).
+    let factor = p.get("factor").and_then(Value::as_f64).filter(|k| k.is_finite() && delta.is_none());
+    let addend = p.get("addend").and_then(Value::as_f64).filter(|n| n.is_finite() && delta.is_none());
+    let own_step = |v: f64| -> Option<f64> {
+        let r = match (factor, addend) {
+            (Some(k), _) => v * k,
+            (None, Some(n)) => v + n,
+            (None, None) => return None,
+        };
+        r.is_finite().then_some(r)
+    };
     // Each layer's own value where `set` writes it (a `time` other than the CTI keys there).
     let typed = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid| {
+        let at = snapped_key_time(s, cid, olid, q, "prop.set").ok().flatten();
+        if scalar && let Some(v) = components_at(s, cid, olid, ouid, at).and_then(|c| c.first().copied()).and_then(own_step) {
+            q["value"] = json!(v);
+        }
         if let (Some(dims), Some(n)) = (&dims, &new)
-            && let Some(mut c) = components_at(s, cid, olid, ouid, snapped_key_time(s, cid, olid, q, "prop.set").ok().flatten())
+            && let Some(mut c) = components_at(s, cid, olid, ouid, at)
         {
-            let change = dims.first().and_then(|&d| Some(n.get(d)? - c.get(d)?)).unwrap_or(0.0);
+            // The typed components' new values on this layer.
+            let typed_value = |c: &[f64], d: usize| {
+                if factor.is_some() || addend.is_some() { c.get(d).copied().and_then(own_step) } else { n.get(d).copied() }
+            };
+            let change = dims.first().and_then(|&d| Some(typed_value(&c, d)? - c.get(d)?)).unwrap_or(0.0);
+            let values: Vec<Option<f64>> = dims.iter().map(|&d| typed_value(&c, d)).collect();
             for &d in &follow {
                 if let Some(slot) = c.get_mut(d) {
                     *slot += change;
                 }
             }
-            for &d in dims {
-                if let (Some(slot), Some(v)) = (c.get_mut(d), n.get(d)) {
-                    *slot = *v;
+            for (&d, v) in dims.iter().zip(values) {
+                if let (Some(slot), Some(v)) = (c.get_mut(d), v) {
+                    *slot = v;
                 }
             }
             q["value"] = json!(c);
@@ -421,12 +442,35 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
             let mut q = twin_params(p, olid, ouid);
             shifted(s, &mut q, olid, ouid, k);
             typed(s, &mut q, olid, ouid);
+            if is_mask_feather(s, cid, olid, ouid) {
+                non_negative(&mut q["value"]);
+            }
             // (a layer that can't take it, e.g. a clamped or static property, keeps its value)
             let _ = set(s, &q);
         }
         Ok(out)
     };
     if merge_p(p).is_some() { run(s) } else { super::app_more::grouped(s, "Change Property", run) }
+}
+
+/// Whether property `uid` of `lid` is a mask's Mask Feather, which is never negative (After
+/// Effects; the panels clamp a typed or scrubbed value at 0).
+fn is_mask_feather(s: &Session, cid: ItemId, lid: LayerId, uid: Uid) -> bool {
+    let Some(l) = s.project.comp(cid).and_then(|c| c.layer(lid)) else { return false };
+    l.props.find(uid).is_some_and(|q| q.match_id == "feather") && l.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }))
+}
+
+/// A JSON number, or each number of an array, raised to at least 0.
+fn non_negative(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if let Some(x) = n.as_f64().filter(|x| *x < 0.0) {
+                *v = json!(x.max(0.0));
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(non_negative),
+        _ => {}
+    }
 }
 
 /// `prop.toggleAnimation`; with `selected`, the other selected layers' same property follows.
@@ -1446,6 +1490,7 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
     })
 }
 
+/// Returns the command specs for the property commands (get, set, keyframes, expressions and the rest).
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         query!("prop.get", "Get Property", "{layer?, path|prop, time? (comp s)}", get),
@@ -1454,7 +1499,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Property Value",
             [],
             None,
-            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value), follow? (with dims: components that move on each other layer by the change its first typed component takes)}",
+            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value), follow? (with dims: components that move on each other layer by the change its first typed component takes), factor? (with selected, a typed `*` or `/`: the other layers take their own value times it, in the dims components of a vector), addend? (the same for a typed `+`: their own value plus it)}",
             has_layers,
             set_selected
         ),
