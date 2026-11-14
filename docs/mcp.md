@@ -10,7 +10,10 @@ PhotoCraft) confine what the agent can reach: files are read only under a read o
 written only under a write root; with no write root nothing is written. Every engine command
 (`execute_command`, `command_run`, each `batch` step) is checked before it runs: its file
 parameters must be absolute paths inside the roots (symbolic links resolved, no `..`), and so must
-any other absolute path in its parameters. Save, Increment and Save and rendering the Render
+any other absolute path in its parameters. On Windows a network path
+(`\\server\share\...`, `\\?\UNC\...`, WebDAV's `\\host@SSL\share\...`), a device path (`\\.\...`) or a
+verbatim path that isn't a disk (a volume by its `\\?\Volume{…}` name is local) is refused by its name before anything looks it up, since looking it
+up would contact that host, unless a root is on the same server and share (or the same verbatim prefix); a link whose target is one of those is refused from the link's text, before it is followed. On Windows a name that ends in a period or a space, in a path or as a link's target, is refused too, since Windows trims it where it looks a name up. The check and the open are two steps on a name, so a link put in place between them is not seen: this is a known residual risk of path-based confinement, and closing it means opening every folder by a handle and working relative to it. Until then, keep a host from being contacted at all: block outbound SMB (TCP 445) and WebDAV from the machine or account that runs the server, and set the Windows policy "Restrict NTLM: Outgoing NTLM traffic to remote servers" to deny, so no credentials leave even if a link is swapped in time. Save, Increment and Save and rendering the Render
 Queue are checked against the files they write (the open project's, the queued outputs);
 `renderQueue.add`, `render.preRender` and `file.createProxy` without an output file need a saved
 project, since an unsaved one's default output would go to the home folder (#2479). In a headless
