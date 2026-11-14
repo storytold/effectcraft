@@ -250,11 +250,11 @@ impl Collector {
     }
 
     pub fn finish(self) -> ExportReport {
-        ExportReport {
-            exported: self.exported,
-            losses: self.losses.into_values().collect(),
-            limitations: LIMITATIONS.iter().map(|s| (*s).to_string()).collect(),
+        let mut losses: Vec<_> = self.losses.into_values().collect();
+        for loss in &mut losses {
+            loss.unlisted = loss.count.saturating_sub(loss.details.len());
         }
+        ExportReport { exported: self.exported, losses, limitations: LIMITATIONS.iter().map(|s| (*s).to_string()).collect() }
     }
 }
 
@@ -308,5 +308,6 @@ mod tests {
         let report = col.finish();
         assert_eq!(report.count(LossCategory::Masks), MAX_DETAILS + 5);
         assert_eq!(report.losses[0].details.len(), MAX_DETAILS);
+        assert_eq!(report.losses[0].unlisted, 5);
     }
 }

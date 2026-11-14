@@ -334,7 +334,7 @@ fn raw(item: &Item) -> Piece {
         Item::Tok(t) => Piece { ws: t.ws.clone(), body: t.text.clone() },
         Item::Group { open, inner, close } => {
             let mut body = open.text.clone();
-            body.push_str(&rewrite_seq(inner));
+            body.push_str(&rewrite_seq(inner, open.text == "{"));
             if let Some(c) = close {
                 body.push_str(&c.ws);
                 body.push_str(&c.text);
@@ -378,25 +378,7 @@ fn operand(items: &[Item], i: usize) -> Option<(Piece, usize)> {
         };
         return Some((Piece { ws: t.ws.clone(), body }, j));
     }
-    let mut p = raw(first);
-    let mut j = i + 1;
-    // `function name(args) { body }` is one atom.
-    if first.tok().is_some_and(|t| t.is_kw(&["function"])) {
-        if items.get(j).is_some_and(|x| x.is("*")) {
-            push(&mut p, &items[j]);
-            j += 1;
-        }
-        if items.get(j).and_then(Item::tok).is_some_and(|t| t.kind == Kind::Ident) {
-            push(&mut p, &items[j]);
-            j += 1;
-        }
-        for g in ["(", "{"] {
-            if items.get(j).and_then(Item::group) == Some(g) {
-                push(&mut p, &items[j]);
-                j += 1;
-            }
-        }
-    }
+    let (mut p, mut j) = if is_function(first) { function_atom(items, i) } else { (raw(first), i + 1) };
     // Postfix: member access, calls, indexing, tagged templates, `x++`.
     while let Some(it) = items.get(j) {
         let member = it.is(".") || it.is("?.");
@@ -426,6 +408,59 @@ fn operand(items: &[Item], i: usize) -> Option<(Piece, usize)> {
         j = k;
     }
     Some((p, j))
+}
+
+fn is_function(item: &Item) -> bool {
+    item.tok().is_some_and(|t| t.is_kw(&["function"]))
+}
+
+/// `function [*] [name] (args) { body }` from the `function` keyword at `i`, as one atom.
+fn function_atom(items: &[Item], i: usize) -> (Piece, usize) {
+    let Some(first) = items.get(i) else {
+        // Unreachable for callers (they pass a `function` item); still advance so no loop stalls.
+        return (Piece { ws: String::new(), body: String::new() }, i.saturating_add(1));
+    };
+    let mut p = raw(first);
+    let mut j = i + 1;
+    if items.get(j).is_some_and(|x| x.is("*")) {
+        push(&mut p, &items[j]);
+        j += 1;
+    }
+    if items.get(j).and_then(Item::tok).is_some_and(|t| t.kind == Kind::Ident) {
+        push(&mut p, &items[j]);
+        j += 1;
+    }
+    for g in ["(", "{"] {
+        if items.get(j).and_then(Item::group) == Some(g) {
+            push(&mut p, &items[j]);
+            j += 1;
+        }
+    }
+    (p, j)
+}
+
+/// Is the `function` keyword at `i` at the start of a statement, so a function declaration
+/// (ECMAScript: an expression statement cannot start with `function`)? A declaration ends at its
+/// `}`: whatever follows is a new statement, never an operand of it. `stmts` says whether
+/// `items` is a statement list (the whole expression or a `{ … }` block) rather than the inside
+/// of `( … )` or `[ … ]`.
+fn at_statement_start(items: &[Item], i: usize, stmts: bool) -> bool {
+    // `async function`: the statement starts at `async` (no line break may come between them).
+    let is_async = |k: usize| items.get(k).and_then(Item::tok).is_some_and(|a| a.is_kw(&["async"]));
+    let at = match i.checked_sub(1) {
+        Some(k) if is_async(k) && !items.get(i).is_some_and(Item::nl) => k,
+        _ => i,
+    };
+    let Some(prev) = at.checked_sub(1).and_then(|k| items.get(k)) else {
+        return stmts;
+    };
+    match prev {
+        // A block, an `if (…)`/`while (…)` header or a value the line break ends.
+        Item::Group { .. } => true,
+        // Known limit: after a label, `case …:` or `default:` a declaration is still read as an
+        // expression (that `:` cannot be told from an object literal's or a conditional's here).
+        Item::Tok(t) => t.is(";") || t.is_kw(&["else", "do"]) || ends_value(t),
+    }
 }
 
 fn push(p: &mut Piece, item: &Item) {
@@ -510,7 +545,9 @@ fn assignment_end(items: &[Item], i: usize) -> usize {
     j
 }
 
-fn rewrite_seq(items: &[Item]) -> String {
+/// Rewrite a sequence of items. `stmts`: the sequence is a statement list (the whole expression
+/// or the inside of `{ … }`), not the inside of `( … )` or `[ … ]`.
+fn rewrite_seq(items: &[Item], stmts: bool) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < items.len() {
@@ -521,12 +558,20 @@ fn rewrite_seq(items: &[Item]) -> String {
             i += 2;
             continue;
         }
+        // A function declaration ends at its `}` (#3212): `function f() {}\n-1` is two statements,
+        // so the next line must not become an operand (`__sub(function f() {}, 1)` is NaN).
+        if is_function(it) && at_statement_start(items, i, stmts) {
+            let (p, j) = function_atom(items, i);
+            push_piece(&mut out, p);
+            i = j;
+            continue;
+        }
         if let Some((p, j)) = chain(items, i) {
             // Compound assignment: `x += v` → `x = __add(x, (v))` (the target is evaluated twice,
             // which only matters for targets with side effects).
             if let Some(op) = items.get(j).and_then(Item::tok).filter(|t| t.kind == Kind::Punct && matches!(t.text.as_str(), "+=" | "-=" | "*=" | "/=")) {
                 let end = assignment_end(items, j + 1);
-                let rhs = rewrite_seq(&items[j + 1..end]);
+                let rhs = rewrite_seq(&items[j + 1..end], false);
                 let h = helper(&op.text[..1]).unwrap_or("__add");
                 let target = compound_assignment_target(items, i, j);
                 out.push_str(&p.ws);
@@ -555,7 +600,7 @@ fn raw_ref(item: &Item) -> String {
                     out.push_str(&raw_ref(item));
                 }
             } else {
-                out.push_str(&rewrite_seq(inner));
+                out.push_str(&rewrite_seq(inner, open.text == "{"));
             }
             if let Some(close) = close {
                 out.push_str(&close.text);
@@ -794,7 +839,7 @@ pub fn check_nesting(src: &str) -> Result<(), String> {
     if too_nested(&toks) {
         return Err(too_deep());
     }
-    let mut out = rewrite_seq(&build(toks));
+    let mut out = rewrite_seq(&build(toks), true);
     out.push_str(&tail);
     if over_rewrite_limit(&out) {
         return Err(too_large());
@@ -825,7 +870,7 @@ pub fn rewrite(src: &str) -> String {
     if too_nested(&toks) {
         return throw_too_deep();
     }
-    let mut out = rewrite_seq(&build(toks));
+    let mut out = rewrite_seq(&build(toks), true);
     out.push_str(&tail);
     if over_rewrite_limit(&out) {
         return throw_too_large();
@@ -895,6 +940,26 @@ mod tests {
         assert_eq!(n(&rewrite("typeof a + 'x'")), n("__add(typeof a,  'x')"));
         assert_eq!(n(&rewrite("i++ + 1")), n("__add(i++,  1)"));
         assert_eq!(n(&rewrite("2 ** 3 * 2")), n("__mul(2 ** 3,  2)"));
+    }
+
+    #[test]
+    fn a_function_declaration_is_not_an_operand_of_the_next_statement() {
+        // #3212: a declaration ends at its `}` (an expression statement cannot start with
+        // `function`), so a following `-`, `+` or `[` starts a new statement.
+        assert_eq!(n(&rewrite("function f(x){ return x; }\n-50 + 100")), n("function f(x){ return x; }\n__add(-50, 100)"));
+        assert_eq!(n(&rewrite("function f(){}\n+a - b")), n("function f(){}\n__sub(+a, b)"));
+        assert_eq!(n(&rewrite("function f(){}\n[1, 2] - [1, 1]")), n("function f(){}\n__sub([1, 2], [1, 1])"));
+        assert_eq!(n(&rewrite("function f(){}\n(a) - b")), n("function f(){}\n__sub((a), b)"));
+        assert_eq!(n(&rewrite("function* g(){} -x")), n("function* g(){} __neg(x)"));
+        assert_eq!(n(&rewrite("async function f(){}\n-x")), n("async function f(){}\n__neg(x)"));
+        assert_eq!(n(&rewrite("var a = 1;function f(){}\n-x")), n("var a = 1;function f(){}\n__neg(x)"));
+        assert_eq!(n(&rewrite("if (a) { function f(){}\n-b }")), n("if (a) { function f(){}\n__neg(b) }"));
+        // Function expressions stay operands, whatever follows on the next line.
+        assert_eq!(n(&rewrite("x = function(a){ return a } - 1")), n("x = __sub(function(a){ return a }, 1)"));
+        assert_eq!(n(&rewrite("var g = function(){}\n- 1")), n("var g = __sub(function(){},\n 1)"));
+        assert_eq!(n(&rewrite("(function f(){} - 1)")), n("(__sub(function f(){}, 1))"));
+        assert_eq!(n(&rewrite("[function(){} - 1]")), n("[__sub(function(){}, 1)]"));
+        assert_eq!(n(&rewrite("o = {k: function(){} - 1}")), n("o = {k: __sub(function(){}, 1)}"));
     }
 
     #[test]

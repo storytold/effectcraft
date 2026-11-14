@@ -2,7 +2,7 @@
 //! file's units, with everything that cannot be written already reported. Pure data; the chunks
 //! are built from it in `emit`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::{Ease, Interp, Keyframe};
@@ -11,6 +11,7 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::export::report::{Collector, LossCategory};
 use crate::export::timebase::{TimeBase, time_base};
+use crate::import::build::{closes_loop, components};
 
 /// No sensible coordinate, angle or percentage comes near this; larger numbers (and NaN
 /// or infinity) are written as the default.
@@ -352,24 +353,40 @@ pub(crate) fn natural_key(name: &str) -> Vec<(bool, String, u128)> {
     out
 }
 
-fn sort_entries(v: &mut [Entry]) {
-    v.sort_by(|a, b| {
-        let ka = natural_key(&a.name);
-        let kb = natural_key(&b.name);
-        let cmp = |x: &(bool, String, u128), y: &(bool, String, u128)| match (x.0, y.0) {
-            (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
-            (false, false) => x.1.cmp(&y.1),
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-        };
-        for (x, y) in ka.iter().zip(kb.iter()) {
-            let c = cmp(x, y);
+/// A [`natural_key`] ordered segment by segment: a number before text, numbers by value and then
+/// by their digits, text by its lowercase string, and a key that is a prefix of the other first.
+/// (The derived order of the tuples is not this one: it puts text first and compares the digits
+/// before the value.)
+#[derive(PartialEq, Eq)]
+struct Natural(Vec<(bool, String, u128)>);
+
+impl Ord for Natural {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        for (x, y) in self.0.iter().zip(other.0.iter()) {
+            let c = match (x.0, y.0) {
+                (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
+                (false, false) => x.1.cmp(&y.1),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+            };
             if c != std::cmp::Ordering::Equal {
                 return c;
             }
         }
-        ka.len().cmp(&kb.len()).then_with(|| a.ec.0.cmp(&b.ec.0))
-    });
+        self.0.len().cmp(&other.0.len())
+    }
+}
+
+impl PartialOrd for Natural {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Sorts by name in natural order, then by project id. Each name's key is built once, not on
+/// every comparison (the sort is stable, as `sort_by` is).
+fn sort_entries(v: &mut [Entry]) {
+    v.sort_by_cached_key(|e| (Natural(natural_key(&e.name)), e.ec.0));
 }
 
 /// Plans the whole project.
@@ -408,7 +425,8 @@ pub(crate) fn plan(project: &Project, col: &mut Collector) -> ProjectPlan {
             by_parent.entry(item.parent.filter(|p| project.items.contains_key(p))).or_default().push(*id);
         }
     }
-    let cx = PlanCx { project, by_parent: &by_parent, ok: &ok };
+    let component = components(&precomp_links(project));
+    let cx = PlanCx { project, by_parent: &by_parent, ok: &ok, component: &component };
     let root = plan_children(&cx, None, col);
     // The base writes an empty render queue.
     for job in &project.render_queue {
@@ -422,6 +440,8 @@ struct PlanCx<'a> {
     project: &'a Project,
     by_parent: &'a BTreeMap<Option<ItemId>, Vec<ItemId>>,
     ok: &'a HashSet<ItemId>,
+    /// The component of each composition in the precomposition links ([`precomp_loop`]).
+    component: &'a HashMap<ItemId, usize>,
 }
 
 fn plan_children(cx: &PlanCx<'_>, parent: Option<ItemId>, col: &mut Collector) -> Vec<Entry> {
@@ -627,16 +647,17 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
             cp.layers.push(lp);
         }
     }
-    resolve_parents(&mut cp, name, col);
-    resolve_mattes(&mut cp, name, col);
-    resolve_effect_layers(&mut cp, name, col);
+    // The layers that are written; none of the three steps below adds or removes one.
+    let exported: HashSet<LayerId> = cp.layers.iter().map(|l| l.ec_id).collect();
+    resolve_parents(&mut cp, &exported, name, col);
+    resolve_mattes(&mut cp, &exported, name, col);
+    resolve_effect_layers(&mut cp, &exported, name, col);
     cp
 }
 
 /// An effect's layer parameter that names a layer that is not exported falls back to the owning
 /// layer (After Effects' default) and is reported.
-fn resolve_effect_layers(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
-    let exported: HashSet<LayerId> = cp.layers.iter().map(|l| l.ec_id).collect();
+fn resolve_effect_layers(cp: &mut CompPlan, exported: &HashSet<LayerId>, comp_name: &str, col: &mut Collector) {
     for l in &mut cp.layers {
         for fx in &mut l.fx {
             let before = fx.layers.len();
@@ -655,8 +676,7 @@ fn resolve_effect_layers(cp: &mut CompPlan, comp_name: &str, col: &mut Collector
 }
 
 /// A track matte whose layer is not exported, or is the layer itself, is dropped and reported.
-fn resolve_mattes(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
-    let exported: HashSet<LayerId> = cp.layers.iter().map(|l| l.ec_id).collect();
+fn resolve_mattes(cp: &mut CompPlan, exported: &HashSet<LayerId>, comp_name: &str, col: &mut Collector) {
     for l in &mut cp.layers {
         if let Some((m, _)) = l.matte
             && (m == l.ec_id || !exported.contains(&m))
@@ -668,17 +688,95 @@ fn resolve_mattes(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
 }
 
 /// Parent links to a layer that was not exported, and links that lead into a loop, are cut.
-fn resolve_parents(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
-    let exported: HashSet<LayerId> = cp.layers.iter().map(|l| l.ec_id).collect();
-    let mut links: std::collections::HashMap<LayerId, LayerId> = cp.layers.iter().filter_map(|l| l.parent.map(|p| (l.ec_id, p))).collect();
-    for l in &mut cp.layers {
-        let Some(p) = l.parent else { continue };
+fn resolve_parents(cp: &mut CompPlan, exported: &HashSet<LayerId>, comp_name: &str, col: &mut Collector) {
+    let links: Vec<(LayerId, Option<LayerId>)> = cp.layers.iter().map(|l| (l.ec_id, l.parent)).collect();
+    let cut = parents_to_cut(&links, exported);
+    for (l, cut) in cp.layers.iter_mut().zip(cut) {
+        if cut {
+            col.lose(LossCategory::ParentLinks, format!("{comp_name}: '{}' has a parent that was not exported or forms a loop", l.name));
+            l.parent = None;
+        }
+    }
+}
+
+/// Which parent links (`(layer, parent)` in stack order) are cut: one to a layer that is not
+/// exported, and, of each loop, the link of its first layer in stack order (cutting it opens
+/// the loop, so the others stay).
+///
+/// Each parent chain used to be walked from every layer (a chain of N layers took N² steps).
+/// With unique layer ids each layer has one link, the links form chains and disjoint loops, and
+/// the layers on a loop are found once ([`loop_of`]). Repeated ids (not made by EffectCraft)
+/// keep the walk ([`parents_to_cut_by_walk`]).
+fn parents_to_cut(links: &[(LayerId, Option<LayerId>)], exported: &HashSet<LayerId>) -> Vec<bool> {
+    if exported.len() != links.len() {
+        return parents_to_cut_by_walk(links, exported);
+    }
+    let on_loop = loop_of(&links.iter().filter_map(|(l, p)| p.map(|p| (*l, p))).collect());
+    let mut opened: HashSet<usize> = HashSet::new();
+    links
+        .iter()
+        .map(|(l, p)| match p {
+            None => false,
+            Some(p) if !exported.contains(p) => true,
+            Some(_) => on_loop.get(l).is_some_and(|lp| opened.insert(*lp)),
+        })
+        .collect()
+}
+
+/// The loop each layer is on (a number per loop), for the links `layer -> parent`. Each layer is
+/// visited once.
+fn loop_of(links: &HashMap<LayerId, LayerId>) -> HashMap<LayerId, usize> {
+    // Absent: not seen; `false`: on the chain being walked; `true`: finished.
+    let mut done: HashMap<LayerId, bool> = HashMap::with_capacity(links.len());
+    let mut on_loop: HashMap<LayerId, usize> = HashMap::new();
+    let mut loops = 0usize;
+    for &start in links.keys() {
+        let mut chain = Vec::new();
+        let mut at = start;
+        loop {
+            match done.get(&at) {
+                Some(false) => {
+                    // Back on the chain: the part from `at` on is a loop.
+                    if let Some(i) = chain.iter().position(|l| *l == at) {
+                        for l in chain.get(i..).unwrap_or_default() {
+                            on_loop.insert(*l, loops);
+                        }
+                        loops = loops.saturating_add(1);
+                    }
+                    break;
+                }
+                Some(true) => break,
+                None => {}
+            }
+            done.insert(at, false);
+            chain.push(at);
+            match links.get(&at) {
+                Some(next) => at = *next,
+                None => break,
+            }
+        }
+        for l in chain {
+            done.insert(l, true);
+        }
+    }
+    on_loop
+}
+
+/// [`parents_to_cut`] by following each chain from its layer (for repeated layer ids): a chain
+/// longer than the number of links is a loop.
+fn parents_to_cut_by_walk(layers: &[(LayerId, Option<LayerId>)], exported: &HashSet<LayerId>) -> Vec<bool> {
+    let mut links: HashMap<LayerId, LayerId> = layers.iter().filter_map(|(l, p)| p.map(|p| (*l, p))).collect();
+    let mut out = Vec::with_capacity(layers.len());
+    for (l, p) in layers {
+        let Some(p) = *p else {
+            out.push(false);
+            continue;
+        };
         let mut cut = !exported.contains(&p);
         if !cut {
-            // Follow the chain; a chain longer than the number of links is a loop.
             let mut at = p;
             for _ in 0..=links.len() {
-                if at == l.ec_id {
+                if at == *l {
                     cut = true;
                     break;
                 }
@@ -687,16 +785,16 @@ fn resolve_parents(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
                     None => break,
                 }
             }
-            if !cut && at == l.ec_id {
+            if !cut && at == *l {
                 cut = true;
             }
         }
         if cut {
-            col.lose(LossCategory::ParentLinks, format!("{comp_name}: '{}' has a parent that was not exported or forms a loop", l.name));
-            links.remove(&l.ec_id);
-            l.parent = None;
+            links.remove(l);
         }
+        out.push(cut);
     }
+    out
 }
 
 /// The source of a layer and its size; `None` (with a loss) for a layer that is not written.
@@ -761,7 +859,7 @@ fn plan_source(
             }
         },
         LayerSource::Comp { item } => match cx.project.item(*item).filter(|_| cx.ok.contains(item)).map(|i| &i.kind) {
-            Some(ItemKind::Comp(c)) if !precomp_loop(cx.project, comp_id, *item) => {
+            Some(ItemKind::Comp(c)) if !precomp_loop(cx.component, comp_id, *item) => {
                 (LayerSrc::Comp(*item), (c.width.clamp(1, MAX_SIDE), c.height.clamp(1, MAX_SIDE)))
             }
             Some(ItemKind::Comp(_)) => {
@@ -1115,27 +1213,28 @@ fn has_bezier_keys(g: &effectcraft_project::PropGroup, depth: usize) -> bool {
     })
 }
 
-/// Whether showing the composition `to` inside `from` closes a loop (`to` is `from`, or uses it
-/// through its own precomposition layers). The walk is iterative and visits each item once.
-fn precomp_loop(project: &Project, from: ItemId, to: ItemId) -> bool {
-    let mut seen: HashSet<ItemId> = HashSet::new();
-    let mut stack = vec![to];
-    while let Some(at) = stack.pop() {
-        if at == from {
-            return true;
-        }
-        if !seen.insert(at) {
-            continue;
-        }
-        if let Some(ItemKind::Comp(c)) = project.item(at).map(|i| &i.kind) {
-            for l in &c.layers {
+/// Every precomposition link of the project once: composition -> the items its layers show.
+fn precomp_links(project: &Project) -> HashMap<ItemId, HashSet<ItemId>> {
+    let mut links: HashMap<ItemId, HashSet<ItemId>> = HashMap::new();
+    for (id, item) in &project.items {
+        if let ItemKind::Comp(c) = &item.kind {
+            for l in c.layers.iter() {
                 if let LayerSource::Comp { item } = &l.source {
-                    stack.push(*item);
+                    links.entry(*id).or_default().insert(*item);
                 }
             }
         }
     }
-    false
+    links
+}
+
+/// Whether showing the composition `to` in `from` closes a loop: `to` is `from` or uses it
+/// through its own precomposition layers. The layer itself links `from` to `to`, so `to` uses
+/// `from` exactly when both are in one component of the project's precomposition links
+/// (`component`, found once per export). Before, every precomposition layer walked the layers of
+/// every composition below its source (N layers of a precomposition with N layers took N² steps).
+fn precomp_loop(component: &HashMap<ItemId, usize>, from: ItemId, to: ItemId) -> bool {
+    closes_loop(from, to, |to| matches!((component.get(&from), component.get(&to)), (Some(a), Some(b)) if a == b))
 }
 
 /// The names of a layer's Material Options that differ from a new layer's (value, keys or an
@@ -1345,4 +1444,213 @@ fn plan_remap(p: &Property, comp: &Comp, cp: &CompPlan, layer: &str, comp_name: 
         col.exported.keyframes += 1;
     }
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The comparator as it was written before the keys were cached (the reference).
+    fn old_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+        let (ka, kb) = (natural_key(a), natural_key(b));
+        let cmp = |x: &(bool, String, u128), y: &(bool, String, u128)| match (x.0, y.0) {
+            (true, true) => x.2.cmp(&y.2).then_with(|| x.1.cmp(&y.1)),
+            (false, false) => x.1.cmp(&y.1),
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+        };
+        for (x, y) in ka.iter().zip(kb.iter()) {
+            let c = cmp(x, y);
+            if c != std::cmp::Ordering::Equal {
+                return c;
+            }
+        }
+        ka.len().cmp(&kb.len())
+    }
+
+    /// A pseudo-random generator for the differential tests.
+    fn lcg(seed: u64) -> impl FnMut(u64) -> u64 {
+        let mut state = seed;
+        move |n| {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n.max(1)
+        }
+    }
+
+    #[test]
+    fn parent_links_are_cut_as_the_walk_cut_them() {
+        for seed in 0..500 {
+            let mut next = lcg(seed);
+            let n = 1 + next(12);
+            // Unique ids, or (one seed in five) some repeated; parents among the layers, missing
+            // ones (not exported) and none.
+            let ids: Vec<LayerId> = (0..n).map(|i| LayerId(if seed % 5 == 0 { next(n) } else { i })).collect();
+            let links: Vec<(LayerId, Option<LayerId>)> = ids
+                .iter()
+                .map(|l| {
+                    let p = match next(4) {
+                        0 => None,
+                        1 => Some(LayerId(100 + next(3))),
+                        _ => Some(LayerId(next(n))),
+                    };
+                    (*l, p)
+                })
+                .collect();
+            let exported: HashSet<LayerId> = ids.iter().copied().collect();
+            assert_eq!(parents_to_cut(&links, &exported), parents_to_cut_by_walk(&links, &exported), "{links:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_parent_chain_is_resolved_in_linear_time() {
+        // 200 000 layers each parented to the next and the last to the first: one link is cut.
+        // Walking the chain from every layer (as before) is 4e10 steps.
+        let n = 200_000u64;
+        let links: Vec<(LayerId, Option<LayerId>)> = (0..n).map(|i| (LayerId(i), Some(LayerId((i + 1) % n)))).collect();
+        let exported: HashSet<LayerId> = (0..n).map(LayerId).collect();
+        let cut = parents_to_cut(&links, &exported);
+        assert_eq!(cut.iter().filter(|c| **c).count(), 1);
+        assert!(cut[0]);
+    }
+
+    /// The loop check as it was (the reference): a walk from `to` over the layers of every
+    /// composition below it.
+    fn old_precomp_loop(project: &Project, from: ItemId, to: ItemId) -> bool {
+        let mut seen: HashSet<ItemId> = HashSet::new();
+        let mut stack = vec![to];
+        while let Some(at) = stack.pop() {
+            if at == from {
+                return true;
+            }
+            if !seen.insert(at) {
+                continue;
+            }
+            if let Some(ItemKind::Comp(c)) = project.item(at).map(|i| &i.kind) {
+                for l in c.layers.iter() {
+                    if let LayerSource::Comp { item } = &l.source {
+                        stack.push(*item);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// A project with `comps` compositions; composition `i` shows the items `shows(i)` (repeats
+    /// and non-compositions allowed), as layers.
+    fn project_of(comps: usize, shows: &mut dyn FnMut(usize) -> Vec<usize>) -> (Project, Vec<ItemId>) {
+        use effectcraft_project::build;
+        let mut p = Project::default();
+        let solid = p.add_item(
+            "S",
+            effectcraft_color::Label::None,
+            None,
+            ItemKind::Solid(effectcraft_project::Solid { color: [0.0; 3], width: 4, height: 4, pixel_aspect: 1.0 }),
+        );
+        let ids: Vec<ItemId> = (0..comps)
+            .map(|i| {
+                let c = Comp::new(4, 4, effectcraft_time::FrameRate::new(25, 1), Tick(effectcraft_time::TICKS_PER_SECOND));
+                p.add_item(&format!("C{i}"), effectcraft_color::Label::None, None, ItemKind::Comp(std::sync::Arc::new(c)))
+            })
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            let Some(mut c) = p.comp(*id).cloned() else { continue };
+            for s in shows(i) {
+                let source = match ids.get(s) {
+                    Some(item) => LayerSource::Comp { item: *item },
+                    None => LayerSource::Solid { item: solid },
+                };
+                let l = build::layer(&mut p, &c, "L", source, (4, 4), None);
+                c.layers.push(l);
+            }
+            if let Some(item) = p.item_mut(*id) {
+                item.kind = ItemKind::Comp(std::sync::Arc::new(c));
+            }
+        }
+        (p, ids)
+    }
+
+    #[test]
+    fn precomp_loops_are_found_as_the_walk_found_them() {
+        for seed in 0..300 {
+            let mut next = lcg(seed);
+            let comps = 1 + usize::try_from(next(10)).unwrap_or(0);
+            let (p, ids) = project_of(comps, &mut |_| (0..next(6)).map(|_| usize::try_from(next(comps as u64 + 2)).unwrap_or(0)).collect());
+            let component = components(&precomp_links(&p));
+            for from in &ids {
+                let Some(c) = p.comp(*from) else { continue };
+                for l in c.layers.iter() {
+                    if let LayerSource::Comp { item } = &l.source {
+                        assert_eq!(precomp_loop(&component, *from, *item), old_precomp_loop(&p, *from, *item), "{from:?} -> {item:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layered_precomps_are_checked_in_linear_time() {
+        // K top compositions each show K middle ones, each of which shows K leaves: the old walk
+        // from every layer took K^3 steps; the components are found once.
+        let k = 60;
+        let (p, ids) = project_of(3 * k, &mut |i| if i < 2 * k { (0..k).map(|j| if i < k { k + j } else { 2 * k + j }).collect() } else { Vec::new() });
+        let component = components(&precomp_links(&p));
+        let mut checked = 0;
+        for from in &ids {
+            let Some(c) = p.comp(*from) else { continue };
+            for l in c.layers.iter() {
+                if let LayerSource::Comp { item } = &l.source {
+                    assert!(!precomp_loop(&component, *from, *item));
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 2 * k * k);
+        // One more layer, a leaf showing a top composition, closes a loop through all three.
+        let (p, ids) = project_of(3 * k, &mut |i| match i {
+            _ if i < k => (k..2 * k).collect(),
+            _ if i < 2 * k => (2 * k..3 * k).collect(),
+            _ if i == 2 * k => vec![0],
+            _ => Vec::new(),
+        });
+        let component = components(&precomp_links(&p));
+        assert!(precomp_loop(&component, ids[2 * k], ids[0]));
+        assert!(precomp_loop(&component, ids[0], ids[k]));
+        assert!(!precomp_loop(&component, ids[k], ids[2 * k + 1]));
+    }
+
+    #[test]
+    fn the_cached_natural_key_orders_as_the_comparator_did() {
+        let names = [
+            "",
+            "a",
+            "A",
+            "a1",
+            "a01",
+            "a001",
+            "a2",
+            "a10",
+            "1",
+            "01",
+            "001",
+            "10",
+            "1a",
+            "a b",
+            "a-b",
+            "Comp 2",
+            "comp 10",
+            "Comp 1 copy",
+            "ß",
+            "Ä 3",
+            "x99999999999999999999999999999999999999999999",
+            "x100000000000000000000000000000000000000000000",
+            "Solids",
+            "solids 0",
+        ];
+        for a in names {
+            for b in names {
+                assert_eq!(Natural(natural_key(a)).cmp(&Natural(natural_key(b))), old_cmp(a, b), "{a:?} {b:?}");
+            }
+        }
+    }
 }

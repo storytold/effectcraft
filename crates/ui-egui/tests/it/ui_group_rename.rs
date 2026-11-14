@@ -63,7 +63,8 @@ fn rename_with_enter(h: &mut Harness<'_, EffectcraftApp>, layer: u64, uid: u64, 
     select(h, layer, uid);
     key(h, Key::Enter);
     assert!(editing(h, uid), "Enter opens a rename field on group {uid}");
-    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    // The field has the keyboard with the whole name selected: typing replaces it (#3198).
+    assert!(h.ctx.egui_wants_keyboard_input(), "the rename field on group {uid} has the keyboard");
     h.event(Event::Text(new.into()));
     h.step();
     key(h, Key::Enter);

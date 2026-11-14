@@ -14,7 +14,7 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
 use super::timeline::TMap;
-use crate::theme::Tokens;
+use crate::theme::{Tokens, contrast_ratio};
 use crate::{EffectcraftApp, widgets};
 
 type Actions = Vec<(String, serde_json::Value)>;
@@ -29,6 +29,84 @@ const PROP_COLORS: [Color32; 6] = [
     Color32::from_rgb(0x9c, 0xd8, 0x50),
     Color32::from_rgb(0xf0, 0x70, 0x90),
 ];
+/// The same hues, darker, for the Light theme's pale graph (the bright ones vanish on it).
+const DIM_COLORS_LIGHT: [Color32; 4] =
+    [Color32::from_rgb(0xb0, 0x20, 0x20), Color32::from_rgb(0x1a, 0x7a, 0x1a), Color32::from_rgb(0x1c, 0x50, 0xc0), Color32::from_rgb(0x8a, 0x6a, 0x00)];
+const PROP_COLORS_LIGHT: [Color32; 6] = [
+    Color32::from_rgb(0x8a, 0x6a, 0x00),
+    Color32::from_rgb(0x90, 0x30, 0xa8),
+    Color32::from_rgb(0x00, 0x78, 0x78),
+    Color32::from_rgb(0xb0, 0x50, 0x00),
+    Color32::from_rgb(0x4a, 0x80, 0x10),
+    Color32::from_rgb(0xc0, 0x30, 0x60),
+];
+
+/// The Graph Editor's colours for the active theme (#3202): its surfaces come from the theme's
+/// tokens (the plot is the Timeline's time graph, the buttons sit on the panel), and the curve,
+/// key and handle colours have a darker set for a pale plot (Light), so all of it stays readable.
+/// Built once per frame in [`show`] and passed down.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GraphPalette {
+    /// The plot's background.
+    pub bg: Color32,
+    /// The horizontal value grid lines.
+    pub grid: Color32,
+    /// The value labels on the grid and the "select animated properties" hint.
+    pub label: Color32,
+    /// An unlit bar button's fill and label.
+    pub button: Color32,
+    pub button_text: Color32,
+    /// A lit bar button's fill and label.
+    pub button_on: Color32,
+    pub button_on_text: Color32,
+    /// Bezier handles (line and end).
+    pub handle: Color32,
+    /// A key's fill, unselected and muted-unselected.
+    pub key: Color32,
+    pub key_muted: Color32,
+    /// The transform box's outline and its handles' fill.
+    pub box_line: Color32,
+    pub box_fill: Color32,
+    /// Curve colours: one per dimension, or one per property.
+    pub dims: [Color32; 4],
+    pub props: [Color32; 6],
+}
+
+/// The lowest contrast of any of `colors` against `bg`.
+fn min_contrast(colors: &[Color32], bg: Color32) -> f32 {
+    colors.iter().map(|c| contrast_ratio(*c, bg)).fold(f32::INFINITY, f32::min)
+}
+
+impl GraphPalette {
+    pub(crate) fn new(t: &Tokens) -> Self {
+        let bg = t.tl_bg;
+        // The darker marks for a pale plot: chosen by the plot itself, not the theme's name, as
+        // the brightness slider moves the plot (Dark lightened, Light darkened). Whichever set
+        // stands out more from the plot wins.
+        let bright: Vec<Color32> = DIM_COLORS.iter().chain(PROP_COLORS.iter()).copied().collect();
+        let dark: Vec<Color32> = DIM_COLORS_LIGHT.iter().chain(PROP_COLORS_LIGHT.iter()).copied().collect();
+        let light = min_contrast(&dark, bg) > min_contrast(&bright, bg);
+        let button_on = t.panel_bg.lerp_to_gamma(t.accent, 0.55);
+        // White on a deep blue; on a pale one (Light) the theme's dark text.
+        let button_on_text = if contrast_ratio(Color32::WHITE, button_on) >= contrast_ratio(t.text, button_on) { Color32::WHITE } else { t.text };
+        GraphPalette {
+            bg,
+            grid: bg.lerp_to_gamma(t.text, 0.06),
+            label: t.text_dim,
+            button: t.panel_bg.lerp_to_gamma(t.text, 0.06),
+            button_text: t.text,
+            button_on,
+            button_on_text,
+            handle: if light { Color32::from_rgb(0x80, 0x70, 0x10) } else { Color32::from_rgb(0xd8, 0xd8, 0x60) },
+            key: if light { t.keyframe } else { Color32::from_gray(0xe0) },
+            key_muted: if light { Color32::from_gray(0xa0) } else { Color32::from_gray(0x70) },
+            box_line: if light { Color32::from_gray(0x40) } else { Color32::from_gray(0xd8) },
+            box_fill: if light { Color32::from_gray(0xf2) } else { Color32::from_gray(0x20) },
+            dims: if light { DIM_COLORS_LIGHT } else { DIM_COLORS },
+            props: if light { PROP_COLORS_LIGHT } else { PROP_COLORS },
+        }
+    }
+}
 
 struct Handle {
     out: bool,
@@ -53,12 +131,12 @@ struct KeyPt {
 }
 
 /// A graph key's fill and edge colours: muted keys stay visible and selectable, dimmed.
-fn key_colors(t: &Tokens, edge: Color32, k: &KeyPt) -> (Color32, Color32) {
+fn key_colors(t: &Tokens, pal: &GraphPalette, edge: Color32, k: &KeyPt) -> (Color32, Color32) {
     let fill = match (k.muted, k.sel) {
         (true, true) => t.keyframe_selected.gamma_multiply(0.5),
-        (true, false) => Color32::from_gray(0x70),
+        (true, false) => pal.key_muted,
         (false, true) => t.keyframe_selected,
-        (false, false) => Color32::from_gray(0xe0),
+        (false, false) => pal.key,
     };
     (fill, if k.muted { edge.gamma_multiply(0.4) } else { edge })
 }
@@ -131,7 +209,7 @@ fn speed_at(pr: &Property, spatial: bool, d: usize, lt: Tick) -> f64 {
 }
 
 /// Build the curves for the visible time span.
-fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, plot: Rect, speed: bool) -> Vec<Curve<'a>> {
+fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, plot: Rect, speed: bool, pal: &GraphPalette) -> Vec<Curve<'a>> {
     let sel = &app.session.state.selected_keys;
     let n = ((plot.width() / 2.0) as usize).max(2);
     let mut out = vec![];
@@ -141,7 +219,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
         let spatial = pr.spatial && matches!(pr.value, Value::Vec2(_) | Value::Vec3(_));
         let dims = if speed && spatial { 1 } else { shown_dims(l, pr) };
         for d in 0..dims {
-            let color = if dims > 1 { DIM_COLORS[d % 4] } else { PROP_COLORS[pi % PROP_COLORS.len()] };
+            let color = if dims > 1 { pal.dims[d % pal.dims.len()] } else { pal.props[pi % pal.props.len()] };
             let mut pts = Vec::with_capacity(n);
             for i in 0..n {
                 let x = plot.min.x + plot.width() * i as f32 / (n - 1) as f32;
@@ -193,6 +271,9 @@ struct ButtonBar {
     hidden: Vec<(String, String, bool, String)>,
     /// The id picked from the "»" menu last frame, run by its button this frame.
     chosen: Option<String>,
+    /// The bar's rectangle and the theme's Graph Editor colours.
+    bar: Rect,
+    pal: GraphPalette,
 }
 
 /// The "»" menu's popup and the id it picked (read by the next frame's buttons).
@@ -204,22 +285,22 @@ impl ButtonBar {
     /// A bar starting 8 points into `bar`, stopping short of its right end by the "»" button's
     /// width. It takes the id picked from the "»" menu in the previous frame, so the button whose
     /// id that was reports a click on the frame after the pick.
-    fn new(ctx: &egui::Context, bar: Rect) -> Self {
+    fn new(ctx: &egui::Context, bar: Rect, pal: GraphPalette) -> Self {
         let chosen = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::unique(MORE_POPUP).with("chosen")));
-        ButtonBar { x: bar.min.x + 8.0, limit: bar.max.x - 8.0 - Self::MORE_W - 4.0, hidden: Vec::new(), chosen }
+        ButtonBar { x: bar.min.x + 8.0, limit: bar.max.x - 8.0 - Self::MORE_W - 4.0, hidden: Vec::new(), chosen, bar, pal }
     }
 
     /// The "»" button and its menu, when buttons did not fit.
-    fn more(&mut self, app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, bar: Rect) {
+    fn more(&mut self, app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter) {
         if self.hidden.is_empty() {
             return;
         }
-        let t = app.tokens;
+        let (t, pal, bar) = (app.tokens, self.pal, self.bar);
         let r = Rect::from_min_size(pos2(bar.max.x - 8.0 - Self::MORE_W, bar.center().y - 9.0), vec2(Self::MORE_W, 18.0));
         let pid = egui::Id::unique(MORE_POPUP);
         let resp = ui.interact(r, pid.with("button"), Sense::click()).on_hover_text(crate::i18n::tr("More"));
-        p.rect_filled(r, 3.0, if resp.hovered() { t.hover } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) });
-        p.text(r.center(), Align2::CENTER_CENTER, "»", Tokens::ui(12.0), t.text);
+        p.rect_filled(r, 3.0, if resp.hovered() { t.hover } else { pal.button });
+        p.text(r.center(), Align2::CENTER_CENTER, "»", Tokens::ui(12.0), pal.button_text);
         app.auto.add("timeline.graph.more", r, "More");
         if resp.clicked() {
             let open = widgets::popup_is_open(ui, pid);
@@ -273,18 +354,19 @@ fn text_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, b
     }
     let r = Rect::from_min_size(pos2(bar.x, y - 9.0), vec2(w, 18.0));
     let resp = ui.interact(r, egui::Id::unique(("graph-btn", id)), Sense::click()).on_hover_text(shown_tip);
+    let pal = &bar.pal;
     p.rect_filled(
         r,
         3.0,
         if on {
-            t.accent.gamma_multiply(0.55)
+            pal.button_on
         } else if resp.hovered() {
             t.hover
         } else {
-            Color32::from_rgb(0x2c, 0x2c, 0x2c)
+            pal.button
         },
     );
-    p.text(r.center(), Align2::CENTER_CENTER, shown, Tokens::ui(11.0), if on { Color32::WHITE } else { t.text });
+    p.text(r.center(), Align2::CENTER_CENTER, shown, Tokens::ui(11.0), if on { pal.button_on_text } else { pal.button_text });
     app.auto.add(&format!("timeline.graph.{id}"), r, tip);
     bar.x += w + 4.0;
     resp.clicked()
@@ -299,9 +381,9 @@ pub(crate) struct GraphView<'a> {
 }
 
 /// Show Reference Graph: the other graph type, faint, scaled to the plot.
-fn reference_graph(app: &EffectcraftApp, view: GraphView, plot: Rect, speed: bool, pc: &egui::Painter) {
+fn reference_graph(app: &EffectcraftApp, view: GraphView, plot: Rect, speed: bool, pc: &egui::Painter, pal: &GraphPalette) {
     let GraphView { comp, ectx, tm } = view;
-    let other = curves(app, comp, ectx, tm, plot, !speed);
+    let other = curves(app, comp, ectx, tm, plot, !speed, pal);
     let (mut rlo, mut rhi) = (f64::INFINITY, f64::NEG_INFINITY);
     for c in &other {
         for (_, v) in &c.pts {
@@ -407,16 +489,17 @@ fn fit_on_open(app: &mut EffectcraftApp, ctx: &egui::Context, cs: &[Curve], tm: 
 pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, view: GraphView, area: Rect, actions: &mut Actions) {
     let GraphView { comp, ectx, tm } = view;
     let t = app.tokens;
+    let pal = GraphPalette::new(&t);
     let ctx = ui.ctx().clone();
     let footer_h = 28.0;
     let plot = Rect::from_min_max(area.min + vec2(0.0, 6.0), pos2(area.max.x, area.max.y - footer_h));
     let bar = Rect::from_min_max(pos2(area.min.x, area.max.y - footer_h), area.max);
     // Background first so keys and handles (added later) sit on top for hit-testing.
     let bg = ui.interact(plot, egui::Id::unique("graph-bg"), Sense::click_and_drag());
-    p.rect_filled(area, 0.0, Color32::from_rgb(0x1d, 0x1d, 0x1d));
+    p.rect_filled(area, 0.0, pal.bg);
     app.auto.add("timeline.graph", plot, &app.ui.timeline.graph_mode.clone());
     let speed = speed_graph(app, comp);
-    let cs = curves(app, comp, ectx, tm, plot, speed);
+    let cs = curves(app, comp, ectx, tm, plot, speed, &pal);
     fit_on_open(app, &ctx, &cs, tm, plot, speed);
 
     // Vertical range: auto-zoom to the curves + handles, or the stored manual range.
@@ -437,8 +520,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let mut gv = (lo / step).ceil() * step;
     while gv <= hi {
         let y = ymap(gv);
-        pc.line_segment([pos2(plot.min.x, y), pos2(plot.max.x, y)], Stroke::new(1.0, Color32::from_white_alpha(12)));
-        pc.text(pos2(plot.min.x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, fmt(gv, step), Tokens::ui(10.0), t.text_faint);
+        pc.line_segment([pos2(plot.min.x, y), pos2(plot.max.x, y)], Stroke::new(1.0, pal.grid));
+        pc.text(pos2(plot.min.x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, fmt(gv, step), Tokens::ui(10.0), pal.label);
         gv += step;
     }
     if cs.is_empty() {
@@ -447,12 +530,12 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             Align2::CENTER_CENTER,
             crate::i18n::tr("Select animated properties to show them in the Graph Editor"),
             Tokens::ui(12.0),
-            t.text_faint,
+            pal.label,
         );
     }
 
     if app.ui.timeline.graph_reference && !cs.is_empty() {
-        reference_graph(app, view, plot, speed, &pc);
+        reference_graph(app, view, plot, speed, &pc, &pal);
     }
     // Curves.
     for c in &cs {
@@ -465,7 +548,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         .flat_map(|c| c.keys.iter().filter(|k| k.sel).map(move |k| super::graph_tools::SelKey { t: k.t, v: k.v, dim: c.dim, editable: c.editable }))
         .collect();
     let all_key_times: Vec<(u64, usize, f64)> = cs.iter().flat_map(|c| c.keys.iter().map(move |k| (c.prop.uid, k.idx, k.t))).collect();
-    super::graph_tools::transform_box(app, ui, &pc, &sel_keys, tm, &ymap, &vmap, speed, false, actions);
+    super::graph_tools::transform_box(app, ui, &pc, &sel_keys, tm, &ymap, &vmap, speed, false, &pal, actions);
     // Keys and handles.
     let mut key_screens: Vec<(serde_json::Value, Pos2)> = vec![];
     for c in &cs {
@@ -484,8 +567,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             // Handles (selected keys).
             for h in &k.handles {
                 let hp = pos2(tm.x(h.t), ymap(h.v));
-                pc.line_segment([kp, hp], Stroke::new(1.0, Color32::from_rgb(0xd8, 0xd8, 0x60)));
-                pc.circle_filled(hp, 3.5, Color32::from_rgb(0xd8, 0xd8, 0x60));
+                pc.line_segment([kp, hp], Stroke::new(1.0, pal.handle));
+                pc.circle_filled(hp, 3.5, pal.handle);
                 let side = if h.out { "out" } else { "in" };
                 let hr = Rect::from_center_size(hp, vec2(10.0, 10.0));
                 let hresp = ui.interact(hr, egui::Id::unique(("ghandle", uid, d, k.idx, side)), Sense::drag());
@@ -539,7 +622,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 }
             }
             // The key itself.
-            let (col, edge) = key_colors(&t, c.color, k);
+            let (col, edge) = key_colors(&t, &pal, c.color, k);
             pc.rect_filled(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, col);
             pc.rect_stroke(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, Stroke::new(1.0, edge), StrokeKind::Outside);
             let kr = Rect::from_center_size(kp, vec2(11.0, 11.0));
@@ -597,25 +680,24 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         }
     }
 
-    super::graph_tools::transform_box(app, ui, &pc, &sel_keys, tm, &ymap, &vmap, speed, true, actions);
+    super::graph_tools::transform_box(app, ui, &pc, &sel_keys, tm, &ymap, &vmap, speed, true, &pal, actions);
 
     box_select(ui, &pc, &bg, &key_screens, t.accent, actions);
     wheel_zoom(app, ui, plot, (lo, hi));
-    if button_bar(app, ui, p, comp, bar, speed, actions) {
+    if button_bar(app, ui, p, comp, ButtonBar::new(&ctx, bar, pal), speed, actions) {
         fit_selection(app, &cs, tm, plot, speed);
     }
 }
 
 /// The footer button bar: graph type, display toggles, fit, snap and keyframe interpolation.
 /// Returns whether Fit Selection was pressed.
-fn button_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: &Comp, bar: Rect, speed: bool, actions: &mut Actions) -> bool {
+fn button_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: &Comp, mut buttons: ButtonBar, speed: bool, actions: &mut Actions) -> bool {
     let t = app.tokens;
-    let ctx = ui.ctx().clone();
+    let bar = buttons.bar;
     let mut fit_sel = false;
     p.rect_filled(bar, 0.0, t.panel_bg);
     p.line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, t.separator));
     let y = bar.center().y;
-    let mut buttons = ButtonBar::new(&ctx, bar);
     let tl = &app.ui.timeline;
     let (auto_type, show_sel, auto_on) = (tl.graph_mode == "auto", tl.graph_show_selected, tl.graph_auto_zoom);
     if text_button(
@@ -706,7 +788,7 @@ fn button_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, co
             actions.push((cmd.into(), params));
         }
     }
-    buttons.more(app, ui, p, bar);
+    buttons.more(app, ui, p);
     fit_sel
 }
 
@@ -888,6 +970,76 @@ fn handle_drag_id() -> egui::Id {
 /// Which axes a drag may move on (time, value): both, or with Shift only the one the pointer moved more along.
 fn shift_axes(shift: bool, dx: f32, dy: f32) -> (bool, bool) {
     if shift { (dx.abs() >= dy.abs(), dy.abs() > dx.abs()) } else { (true, true) }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::{Color32, DIM_COLORS, DIM_COLORS_LIGHT, GraphPalette, PROP_COLORS, PROP_COLORS_LIGHT, min_contrast};
+    use crate::theme::{ThemeKind, Tokens, contrast_ratio as contrast};
+
+    /// #3202: on every theme the Graph Editor's surfaces come from the theme, the bar buttons'
+    /// labels (lit and unlit) are readable on their fills, and the curves, keys, handles and the
+    /// transform box show on the plot. Before, the plot was a fixed #1d1d1d and the unlit buttons
+    /// a fixed #2c2c2c under the theme's text colour: Light's #222 text on them measured 1.1:1.
+    #[test]
+    fn the_graph_editor_follows_the_theme_and_stays_readable() {
+        let mut fills = vec![];
+        for kind in [ThemeKind::Dark, ThemeKind::Darker, ThemeKind::Light] {
+            let t = Tokens::for_kind(kind);
+            let pal = GraphPalette::new(&t);
+            assert_eq!(pal.bg, t.tl_bg, "{kind:?}: the plot is the Timeline's time graph background");
+            for (what, fg, bg, min) in [
+                ("unlit button label", pal.button_text, pal.button, 4.5),
+                ("lit button label", pal.button_on_text, pal.button_on, 4.5),
+                ("hovered button label", pal.button_text, t.hover, 4.5),
+                ("grid value labels", pal.label, pal.bg, 4.5),
+                ("Bezier handles", pal.handle, pal.bg, 3.0),
+                ("unselected keys", pal.key, pal.bg, 3.0),
+                ("transform box", pal.box_line, pal.bg, 3.0),
+                ("transform box handles", pal.box_line, pal.box_fill, 3.0),
+                ("unlit button on the bar", pal.button, t.panel_bg, 1.05),
+                ("grid lines", pal.grid, pal.bg, 1.08),
+            ] {
+                let r = contrast(fg, bg);
+                assert!(r >= min, "{kind:?}: {what}: {r:.2}:1, needs {min}:1");
+            }
+            for (i, c) in pal.dims.iter().chain(pal.props.iter()).enumerate() {
+                let r = contrast(*c, pal.bg);
+                assert!(r >= 3.0, "{kind:?}: curve colour {i} {c:?} on the plot: {r:.2}:1");
+            }
+            fills.push((pal.bg, pal.button));
+        }
+        assert_ne!(fills[0], fills[2], "Dark and Light draw the graph differently, not one fixed grey");
+        // The dark curve colours would not do on the Light plot: that is why it has its own set.
+        let light = GraphPalette::new(&Tokens::for_kind(ThemeKind::Light));
+        assert!(DIM_COLORS.iter().chain(PROP_COLORS.iter()).any(|c| contrast(*c, light.bg) < 3.0));
+    }
+
+    /// The brightness slider moves the plot (Dark lightened towards mid grey, Light darkened):
+    /// the plot still follows it, the curve set is whichever stands out more from that plot (not
+    /// the one the theme's name picks), and the lit button's label stays the more readable one.
+    #[test]
+    fn the_curve_set_follows_the_plot_under_the_brightness_slider() {
+        let bright: Vec<Color32> = DIM_COLORS.iter().chain(PROP_COLORS.iter()).copied().collect();
+        let dark: Vec<Color32> = DIM_COLORS_LIGHT.iter().chain(PROP_COLORS_LIGHT.iter()).copied().collect();
+        for kind in [ThemeKind::Dark, ThemeKind::Darker, ThemeKind::Light] {
+            for b in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                let t = Tokens::for_kind(kind).with_brightness(b);
+                let pal = GraphPalette::new(&t);
+                assert_eq!(pal.bg, t.tl_bg, "{kind:?} at {b}: the plot follows the slider");
+                let shown: Vec<Color32> = pal.dims.iter().chain(pal.props.iter()).copied().collect();
+                let best = min_contrast(&bright, pal.bg).max(min_contrast(&dark, pal.bg));
+                assert_eq!(min_contrast(&shown, pal.bg), best, "{kind:?} at {b}: the curves are the set that stands out more from {:?}", pal.bg);
+                let lit = contrast(pal.button_on_text, pal.button_on);
+                assert!(lit >= contrast(Color32::WHITE, pal.button_on).max(contrast(t.text, pal.button_on)), "{kind:?} at {b}: lit label {lit:.2}:1");
+            }
+        }
+        // Light darkened all the way is a dark plot: it gets the bright curves, as Dark does.
+        let dimmed = GraphPalette::new(&Tokens::for_kind(ThemeKind::Light).with_brightness(-1.0));
+        assert_eq!(dimmed.props, PROP_COLORS);
+        let lit = GraphPalette::new(&Tokens::for_kind(ThemeKind::Light));
+        assert_eq!(lit.props, PROP_COLORS_LIGHT);
+    }
 }
 
 #[cfg(test)]

@@ -404,6 +404,94 @@ fn tab_commits_a_value_and_moves_to_the_next() {
     assert_eq!(value(&h, "effects/#2/slider"), [42.0]);
 }
 
+/// #3195: a value field reads typed arithmetic, as in After Effects: `960/2` sets 480, a leading
+/// `*` applies to the value shown, and text that is no number (a division by zero) keeps the
+/// value with no undo step. In the Timeline and in Effect Controls.
+#[test]
+fn typed_arithmetic_sets_a_value() {
+    let (mut h, _) = harness();
+    let (layer, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.select", json!({"layers": [l]})).unwrap();
+        s.execute("effect.apply", json!({"layers": [l], "effect": "Point Control"})).unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": [160.0, 90.0]})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().uid;
+        (l, tr)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::EffectControls);
+    h.run_steps(3);
+    let props =
+        |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.clone();
+    let value = |h: &Harness<'_, EffectcraftApp>, path: &str| props(h).prop(path).unwrap().value.components();
+    let position = props(&h).prop("transform/position").unwrap().uid;
+    assert_eq!(value(&h, "transform/position")[..2], [160.0, 90.0]);
+    let type_into = |h: &mut Harness<'_, EffectcraftApp>, id: &str, text: &str| {
+        // (Settle first: a click right after the last one's would count as part of a double click.)
+        h.run_steps(5);
+        let p = center(h, id);
+        click(h, p, 1);
+        type_text(h, text);
+        key(h, Key::Enter);
+    };
+    type_into(&mut h, &format!("timeline.prop.{position}.value.0"), "960/2");
+    assert_eq!(value(&h, "transform/position")[..2], [480.0, 90.0], "960/2 is 480");
+    type_into(&mut h, &format!("timeline.prop.{position}.value.1"), "*2");
+    assert_eq!(value(&h, "transform/position")[..2], [480.0, 180.0], "*2 doubles the value shown");
+    let undo = h.state().session.history.undo.len();
+    type_into(&mut h, &format!("timeline.prop.{position}.value.0"), "1/0");
+    assert_eq!(value(&h, "transform/position")[..2], [480.0, 180.0], "a division by zero keeps the value");
+    assert_eq!(h.state().session.history.undo.len(), undo, "and adds no undo step");
+    let point = props(&h).prop("effects/#1/point").unwrap().uid;
+    type_into(&mut h, &format!("effectControls.prop.{point}.value.1"), "(3+4)*2");
+    assert_eq!(value(&h, "effects/#1/point")[1], 14.0);
+}
+
+/// #3195: with several layers selected, a typed `+10` or `*2` takes each layer's own value one
+/// step on; it doesn't give them all the edited layer's result.
+#[test]
+fn a_typed_step_applies_to_each_selected_layer() {
+    let (mut h, _) = harness();
+    let (a, b, transform) = {
+        let s = &mut h.state_mut().session;
+        let mut ids = vec![];
+        for (name, opacity) in [("A", 40.0), ("B", 30.0)] {
+            let l = s.execute("layer.newSolid", json!({"name": name, "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+            s.execute("prop.set", json!({"layer": l, "path": "transform/opacity", "value": opacity})).unwrap();
+            ids.push(l);
+        }
+        s.execute("layer.select", json!({"layers": ids})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(ids[0])).unwrap().props.sub("transform").unwrap().uid;
+        (ids[0], ids[1], tr)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(a);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    let opacity_of = |h: &Harness<'_, EffectcraftApp>, l: u64| {
+        h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.prop("transform/opacity").unwrap().value.as_f64()
+    };
+    let opacity = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(a)).unwrap().props.prop("transform/opacity").unwrap().uid;
+    for (text, expected) in [("+10", (50.0, 40.0)), ("*2", (100.0, 80.0)), ("/4", (25.0, 20.0)), ("60", (60.0, 60.0))] {
+        let p = center(&h, &format!("timeline.prop.{opacity}.value"));
+        click(&mut h, p, 1);
+        type_text(&mut h, text);
+        key(&mut h, Key::Enter);
+        assert_eq!((opacity_of(&h, a), opacity_of(&h, b)), expected, "{text}");
+    }
+    // `+10` where the edited layer stops at 100: the others still add 10, not the 5 it moved.
+    for (l, v) in [(a, 95.0), (b, 30.0)] {
+        h.state_mut().session.execute("prop.set", json!({"layer": l, "path": "transform/opacity", "value": v})).unwrap();
+    }
+    h.run_steps(5);
+    let p = center(&h, &format!("timeline.prop.{opacity}.value"));
+    click(&mut h, p, 1);
+    type_text(&mut h, "+10");
+    key(&mut h, Key::Enter);
+    assert_eq!((opacity_of(&h, a), opacity_of(&h, b)), (100.0, 40.0));
+}
+
 /// A click at `p` with `modifiers` held.
 fn click_with(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, modifiers: Modifiers) {
     h.input_mut().events.push(Event::PointerMoved(p));
@@ -635,6 +723,50 @@ fn an_expression_added_at_the_bottom_of_the_timeline_comes_into_view() {
     type_text(&mut h, "25");
     commit_expression(&mut h);
     assert_eq!(expression(&h, layer, opacity).as_deref(), Some("25"));
+}
+
+fn right_click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+/// Right-click Opacity's `target` (its stopwatch or name) in the Timeline, pick Add Expression
+/// and type `text` without another click: the new expression's editor has the keyboard.
+fn add_expression_from_menu(target: &str, text: &str) {
+    let (mut h, _) = harness();
+    let (layer, opacity, _) = open_transform(&mut h, "Plate");
+    let at = center(&h, &format!("timeline.prop.{opacity}.{target}"));
+    right_click(&mut h, at);
+    let item = format!("timeline.prop.{opacity}.menu.addExpression");
+    assert!(h.state().auto.find(&item).is_some(), "the {target}'s menu offers Add Expression");
+    let animated =
+        h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(opacity).unwrap().is_animated();
+    assert!(!animated, "the right-click didn't toggle the stopwatch");
+    let at = center(&h, &item);
+    click(&mut h, at, 1);
+    assert!(expression(&h, layer, opacity).is_some(), "an expression was added from the {target}'s menu");
+    type_text(&mut h, text);
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, opacity).as_deref(), Some(text), "typing replaced the expression added from the {target}'s menu");
+}
+
+/// #3192: Linux window managers take Alt+click to move the window, so the stopwatch has a
+/// right-click menu whose Add Expression does what the Alt-click does: the expression is added
+/// and its editor takes the keyboard (the stopwatch itself isn't toggled).
+#[test]
+fn add_expression_from_the_stopwatch_menu_focuses_the_new_expression() {
+    add_expression_from_menu("stopwatch", "50");
+}
+
+/// #3192: Add Expression from the property name's menu opens the editor with the keyboard too,
+/// as the Alt-click does (it took another click).
+#[test]
+fn add_expression_from_the_name_menu_focuses_the_new_expression() {
+    add_expression_from_menu("name", "90");
 }
 
 /// A primary-button drag from `from` to `to` with `modifiers` held from the press to the release.

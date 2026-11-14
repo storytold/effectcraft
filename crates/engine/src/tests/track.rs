@@ -433,3 +433,58 @@ fn analyze_1080p_single_point_speed() {
     assert!(dist(fc.value_at(frame_time(30)).as_vec2(), [990.0, 555.0]) < 0.25);
     assert!(fps > 30.0, "{fps} frames/s");
 }
+
+/// A stand-in for `sampleImage()` on a footage layer (the engine has no expression language): the
+/// pixel at (0, 0) of the layer's footage, read through the context's footage source. The real
+/// one samples transparent without the source; this one fails, so either symptom shows.
+struct SampleFootage;
+
+impl crate::render::ExprHost for SampleFootage {
+    /// Reads the red channel of the layer's footage pixel at (0, 0) through the context's footage source, scaled to 0-100.
+    fn eval(
+        &self,
+        ctx: &EvalCtx,
+        layer: &effectcraft_project::Layer,
+        _: &effectcraft_project::Property,
+        _: &effectcraft_keyframe::Value,
+    ) -> Result<effectcraft_keyframe::Value, String> {
+        let item = layer.source.item().ok_or("not a footage layer")?;
+        let Some(ItemKind::Footage(footage)) = ctx.project.item(item).map(|i| &i.kind) else { return Err("not a footage layer".into()) };
+        let src = ctx.footage.ok_or("sampleImage: no footage source")?;
+        let img = src.frame(item, footage, ctx.time).ok_or("no frame")?;
+        Ok(effectcraft_keyframe::Value::Scalar(f64::from(img.get(0, 0)[0]) * 100.0))
+    }
+}
+
+/// The clip of [`setup`] (uniform 25 % grey footage) with an opacity expression that samples its
+/// footage: 25 with the footage source. Here for `setup`'s footage layer (#3231).
+fn sampling_clip() -> (Session, ItemId, LayerId) {
+    let (mut s, clip, _) = setup(|_| Image::filled(W, H, [0.25, 0.25, 0.25, 1.0]));
+    let cid = s.active_comp_id().unwrap();
+    s.expr = Some(Arc::new(SampleFootage));
+    s.execute("prop.setExpression", json!({"layer": clip.0, "path": "transform/opacity", "expression": "sampleImage([0, 0])[0] * 100"})).unwrap();
+    (s, cid, clip)
+}
+
+/// #3231: `prop.get` evaluates an expression that samples footage pixels with the footage source,
+/// as the render and `expr.errors` do: the same value and no spurious `expressionError`.
+#[test]
+fn prop_get_evaluates_footage_sampling_expressions_with_the_footage_source() {
+    let (mut s, cid, clip) = sampling_clip();
+    let got = s.execute("prop.get", json!({"layer": clip.0, "path": "transform/opacity", "time": 0.0})).unwrap();
+    assert!(got.get("expressionError").is_none(), "no spurious error: {got}");
+    assert_eq!(got["evaluated"].as_f64(), Some(25.0), "the footage pixel, not the keyframed 100: {got}");
+    // The render applies the same opacity: the clip alone (outside the solid) covers 25 %.
+    let img = s.render(cid, Tick::ZERO, crate::render::RenderOpts::default());
+    let a = img.get(5, 5)[3];
+    assert!((a - 0.25).abs() < 0.01, "rendered opacity {a}");
+    assert!(crate::cmd::expr_tools::errors(&s, cid, Tick::ZERO).is_empty());
+}
+
+/// #3231: Reveal Expression Errors and the viewer's error banner evaluate with the footage source,
+/// so an expression that samples footage pixels isn't reported as failing.
+#[test]
+fn expression_errors_evaluate_footage_sampling_expressions_with_the_footage_source() {
+    let (s, cid, _) = sampling_clip();
+    assert_eq!(s.expression_errors(cid), Vec::<serde_json::Value>::new());
+}

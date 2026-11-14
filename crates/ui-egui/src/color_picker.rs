@@ -447,7 +447,12 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
                     if ch == Chan::H && v >= 360.0 {
                         v = 0.0;
                     }
-                    let drag = egui::DragValue::new(&mut v).range(0.0..=scale).fixed_decimals(0).suffix(suffix).speed(scale / 255.0);
+                    let drag = egui::DragValue::new(&mut v)
+                        .range(0.0..=scale)
+                        .fixed_decimals(0)
+                        .suffix(suffix)
+                        .speed(scale / 255.0)
+                        .custom_parser(|text| crate::num_math::calc(text, None));
                     if ui.add_sized(vec2(56.0, 18.0), drag).labelled_by(radio.id).changed() {
                         pick = pick.set(ch, v.round() / scale);
                     }

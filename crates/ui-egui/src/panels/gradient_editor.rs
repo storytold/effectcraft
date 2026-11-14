@@ -440,7 +440,14 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             .unwrap_or(0.0);
             let mut pct = pos * 100.0;
-            let r = ui.add(egui::DragValue::new(&mut pct).range(0.0..=100.0).speed(0.5).max_decimals(1).suffix("%"));
+            let r = ui.add(
+                egui::DragValue::new(&mut pct)
+                    .range(0.0..=100.0)
+                    .speed(0.5)
+                    .max_decimals(1)
+                    .suffix("%")
+                    .custom_parser(|text| crate::num_math::calc(text, None)),
+            );
             app.auto.add("dialog.gradient.location", r.rect, "Location");
             if r.changed() {
                 app.dialog_state.gradient.move_to(track, id, pct / 100.0);
@@ -452,7 +459,14 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 Track::Opacity => {
                     ui.label(tr("Opacity:"));
                     let mut a = app.dialog_state.gradient.opacities.get(i).map_or(1.0, |s| s.value) as f64 * 100.0;
-                    let r = ui.add(egui::DragValue::new(&mut a).range(0.0..=100.0).speed(0.5).max_decimals(1).suffix("%"));
+                    let r = ui.add(
+                        egui::DragValue::new(&mut a)
+                            .range(0.0..=100.0)
+                            .speed(0.5)
+                            .max_decimals(1)
+                            .suffix("%")
+                            .custom_parser(|text| crate::num_math::calc(text, None)),
+                    );
                     app.auto.add("dialog.gradient.opacity", r.rect, "Opacity");
                     if r.changed() {
                         app.dialog_state.gradient.set_opacity(id, (a / 100.0) as f32);

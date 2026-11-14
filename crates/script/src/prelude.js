@@ -868,8 +868,8 @@ Property.prototype.property = function () { return null; };
     __call("prop.setExpression", this.__ref({ enabled: !!v }));
   });
   def("expressionError", function () {
-    var e = this.expression;
-    return e ? __get("exprError", { code: e }) : "";
+    // Evaluated at the comp's current time, so a runtime error or a non-finite result shows too.
+    return this.expression ? __get("exprError", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid }) : "";
   });
   def("canSetExpression", function () { return !!this.__info().canSetExpression; });
   def("canVaryOverTime", function () { return !!this.__info().canVaryOverTime; });

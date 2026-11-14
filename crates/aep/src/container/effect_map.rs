@@ -1160,8 +1160,29 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 /// language, so an item can start with a capital outside ASCII (French "Écran"), and its key must
 /// be the same as for the same word in lower case.
 pub fn popup_key(item: &str) -> String {
-    let s = item.trim().to_lowercase();
-    s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+    // The whole string is lowered at once: Unicode's lower case depends on the context (a Greek
+    // capital sigma ends a word as final sigma), which a per-character mapping loses.
+    popup_stem(item).to_lowercase()
+}
+
+/// [`popup_key`] before the lower-casing, borrowed: `item` trimmed, without a final ` channel`
+/// in any case (the suffix is ASCII, so the cut is on a character boundary).
+pub(crate) fn popup_stem(item: &str) -> &str {
+    let t = item.trim();
+    let cut = t.len().saturating_sub(SUFFIX.len());
+    match (t.as_bytes().get(cut..), t.get(..cut)) {
+        (Some(end), Some(stem)) if t.len() >= SUFFIX.len() && end.eq_ignore_ascii_case(SUFFIX) => stem,
+        _ => t,
+    }
+}
+
+const SUFFIX: &[u8] = b" channel";
+
+/// Whether two popup items have the same [`popup_key`], without building either key.
+pub(crate) fn popup_keys_match(a: &str, b: &str) -> bool {
+    let (a, b) = (popup_stem(a), popup_stem(b));
+    // ASCII lowers per byte without a key; anything else lowers as a whole string (see `popup_key`).
+    if a.is_ascii() && b.is_ascii() { a.eq_ignore_ascii_case(b) } else { a.to_lowercase() == b.to_lowercase() }
 }
 
 /// The English [`popup_key`] a non-English After Effects popup item name stands for, when this
@@ -1208,12 +1229,64 @@ pub const LEVELS_RGB: [&str; 5] = ["inBlack", "inWhite", "gamma", "outBlack", "o
 mod tests {
     use super::*;
 
+    /// The key as it was built before the borrowed form (the reference for the differential test).
+    fn old_key(item: &str) -> String {
+        let s = item.trim().to_lowercase();
+        s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
+    }
+
+    #[test]
+    fn the_borrowed_popup_key_matches_the_owned_one() {
+        let items = [
+            "",
+            " ",
+            "(-",
+            "Red",
+            "red channel",
+            "Red Channel",
+            " Alpha CHANNEL ",
+            "channel",
+            " channel",
+            "x channel",
+            "Xchannel",
+            "\u{c4} channel",
+            "Gr\u{fc}n Channel",
+            "\u{e9}",
+            "\u{dc}nit  channel",
+            "a channel channel",
+            "Luminance",
+            "\u{c9}CRAN",
+            "\u{e9}cran",
+            // Greek: a capital sigma at the end of a word lowers to the final form.
+            "\u{39f}\u{3a3}",
+            "\u{3bf}\u{3c2}",
+            "\u{3bf}\u{3c3}",
+            "\u{39f}\u{3a3} Channel",
+            "\u{3a3}\u{39f}\u{3a3}",
+        ];
+        for a in items {
+            assert_eq!(popup_key(a), old_key(a), "{a:?}");
+            for b in items {
+                assert_eq!(popup_keys_match(a, b), old_key(a) == old_key(b), "{a:?} {b:?}");
+            }
+        }
+    }
+
     /// A capital outside ASCII has the same key as its lower case; ASCII keys are unchanged.
     #[test]
     fn popup_key_lowers_non_ascii_capitals() {
-        assert_eq!(popup_key("ÉCRAN"), popup_key("écran"));
-        assert_eq!(popup_key(" Désactivé "), "désactivé");
+        assert_eq!(popup_key("\u{c9}CRAN"), popup_key("\u{e9}cran"));
+        assert_eq!(popup_key(" D\u{e9}sactiv\u{e9} "), "d\u{e9}sactiv\u{e9}");
         assert_eq!(popup_key("Off for 32 bpc Color"), "off for 32 bpc color");
         assert_eq!(popup_key("Red Channel"), "red");
+    }
+
+    /// Lower case is context sensitive: a capital sigma at the end of a word is a final sigma.
+    #[test]
+    fn popup_key_keeps_the_final_sigma() {
+        assert_eq!(popup_key("\u{39f}\u{3a3}"), "\u{3bf}\u{3c2}");
+        assert!(popup_keys_match("\u{39f}\u{3a3}", "\u{3bf}\u{3c2}"));
+        assert!(!popup_keys_match("\u{39f}\u{3a3}", "\u{3bf}\u{3c3}"));
+        assert_eq!(popup_key("\u{3a3}\u{39f}\u{3a3} Channel"), "\u{3c3}\u{3bf}\u{3c2}");
     }
 }

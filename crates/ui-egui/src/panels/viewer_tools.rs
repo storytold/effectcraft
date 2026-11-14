@@ -48,21 +48,23 @@ pub(crate) fn snap(
     sources: &[[f64; 2]],
     mods: egui::Modifiers,
 ) -> [f64; 2] {
-    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[] })
+    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[], along_x: None })
 }
 
 /// What [`snap_with`] snaps: the dragged features and the layers to ignore, plus `extra` layer
-/// targets (the Pan Behind layer's own box).
+/// targets (the Pan Behind layer's own box). `along_x` is the axis a Shift drag keeps to
+/// (`Some(true)`: x), whose coordinate alone snaps ([`vw::snap_along`], #3229).
 pub(crate) struct SnapQuery<'a> {
     pub exclude: &'a [LayerId],
     pub sources: &'a [[f64; 2]],
     pub mods: egui::Modifiers,
     pub extra: &'a [vw::SnapTarget],
+    pub along_x: Option<bool>,
 }
 
 /// [`snap`] with extra layer targets.
 pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCtx, map: &ViewerMap, q: &SnapQuery) -> [f64; 2] {
-    let SnapQuery { exclude, sources, mods, extra } = *q;
+    let SnapQuery { exclude, sources, mods, extra, along_x } = *q;
     let layers = snapping_on(app, mods);
     let v = &app.ui.viewer;
     let guides = v.snap_guides && v.guides;
@@ -75,7 +77,12 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
     if layers {
         targets.extend_from_slice(extra);
     }
-    match vw::snap(sources, &targets, SNAP_PX / map.zoom.max(1e-3) as f64) {
+    let tol = SNAP_PX / map.zoom.max(1e-3) as f64;
+    let hit = match along_x {
+        Some(x) => vw::snap_along(sources, &targets, tol, x),
+        None => vw::snap(sources, &targets, tol),
+    };
+    match hit {
         Some(s) => {
             let d = s.delta;
             ctx.data_mut(|dd| dd.insert_temp(snap_id(), s));

@@ -440,7 +440,8 @@ mod tests {
     fn a_dialog_answer_runs_before_the_close_decision() {
         let (mut app, ctx) = app();
         assert!(!app.session.is_dirty());
-        let answer = crate::DialogAnswer { command: "comp.new".into(), key: "name", params: json!({"width": 64, "height": 64}), paths: vec!["Main".into()] };
+        let answer =
+            crate::DialogAnswer { command: "comp.new".into(), key: "name", params: json!({"width": 64, "height": 64}), paths: Ok(vec!["Main".into()]) };
         app.dialog_answers.0.send(answer).unwrap();
         let mut raw = egui::RawInput::default();
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);

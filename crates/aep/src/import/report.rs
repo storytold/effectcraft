@@ -340,14 +340,15 @@ impl Collector {
     /// Records one instance of an effect with no counterpart. The loss is counted now; its line is
     /// made in [`Collector::finish`], one per effect with the number of instances, so that many
     /// other losses cannot hide which effects were dropped.
-    pub fn lose_unmapped_effect(&mut self, match_name: &str, detail: String) {
+    /// `detail` is only called for an effect not seen before.
+    pub fn lose_unmapped_effect(&mut self, match_name: &str, detail: impl FnOnce() -> String) {
         let loss =
             self.losses.entry(LossCategory::Effects).or_insert_with(|| Loss { category: LossCategory::Effects, count: 0, details: Vec::new(), unlisted: 0 });
         loss.count = loss.count.saturating_add(1);
         if let Some(seen) = self.unmapped_effects.get_mut(match_name) {
             seen.1 = seen.1.saturating_add(1);
         } else if self.unmapped_effects.len() < MAX_UNMAPPED_EFFECTS {
-            self.unmapped_effects.insert(match_name.to_string(), (detail, 1));
+            self.unmapped_effects.insert(match_name.to_string(), (detail(), 1));
         }
         // (Past the limit an effect is only counted: its name is not worth a line of its own.)
     }
@@ -457,9 +458,9 @@ mod tests {
             col.lose(LossCategory::Effects, format!("C: 'L{i}': parameter P not imported"));
         }
         for i in 0..25 {
-            col.lose_unmapped_effect("CC Cylinder", format!("C: 'Cyl{i}' has the effect 'CC Cylinder' (CC Cylinder)"));
+            col.lose_unmapped_effect("CC Cylinder", || format!("C: 'Cyl{i}' has the effect 'CC Cylinder' (CC Cylinder)"));
         }
-        col.lose_unmapped_effect("Pseudo/", "C: 'D' has the effect 'Dropdown' (Pseudo/)".to_string());
+        col.lose_unmapped_effect("Pseudo/", || "C: 'D' has the effect 'Dropdown' (Pseudo/)".to_string());
         let report = col.finish();
         let effects = report.losses.iter().find(|l| l.category == LossCategory::Effects).unwrap();
         assert_eq!(effects.count, 56, "30 parameters, 25 cylinders and 1 dropdown");
@@ -496,7 +497,7 @@ mod tests {
     fn at_most_the_limit_of_unmapped_effects_are_named() {
         let mut col = Collector::default();
         for i in 0..=MAX_UNMAPPED_EFFECTS {
-            col.lose_unmapped_effect(&format!("Effect {i}"), format!("C: 'L' has the effect 'Effect {i}' (Effect {i})"));
+            col.lose_unmapped_effect(&format!("Effect {i}"), || format!("C: 'L' has the effect 'Effect {i}' (Effect {i})"));
         }
         let report = col.finish();
         let effects = report.losses.iter().find(|l| l.category == LossCategory::Effects).unwrap();

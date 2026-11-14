@@ -8,6 +8,7 @@
 use effectcraft_engine::geom::{Mat3, vec2 as gv2};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
+use crate::num_math::Step;
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -56,19 +57,30 @@ fn degrees_edit(v: f64, shown: f64, new: f64, dragging: bool) -> f64 {
 /// are hot numbers of their own (drag to scrub, click to type) and changing one keeps the other.
 /// Returns the revolutions' rect, the degrees' rect and the new angle when either changed.
 pub fn angle_field(ui: &mut egui::Ui, at: Pos2, id: egui::Id, v: f64, decimals: usize, t: &Tokens) -> (Rect, Rect, Option<f64>) {
+    let (rr, dr, out, _) = angle_field_step(ui, at, id, v, decimals, t);
+    (rr, dr, out)
+}
+
+/// [`angle_field`], also returning a typed `+n` into the degrees (#3195): other selected layers
+/// can turn their own angle by it. A typed step applies to the signed remainder, so `+10` on
+/// `0x-30°` is `0x-20°`.
+pub fn angle_field_step(ui: &mut egui::Ui, at: Pos2, id: egui::Id, v: f64, decimals: usize, t: &Tokens) -> (Rect, Rect, Option<f64>, Option<Step>) {
     let (rev, deg) = split_angle(v);
     let (rr, new_rev, _) = widgets::hot_int_at(ui, at, id.with("rev"), rev, 0.1, "x", t);
     // A negative remainder's minus sign is part of the degrees' text, so typing replaces it (#3367).
     let sign = ui.painter().text(pos2(rr.max.x - 2.0, rr.center().y), Align2::LEFT_CENTER, if deg < 0.0 { "" } else { "+" }, Tokens::ui(12.0), t.hot_text);
-    let (dr, new_deg, _) =
-        widgets::hot_number_at(ui, pos2(sign.max.x - 2.0, at.y), id, deg, &widgets::HotSpec { speed: 0.5, range: (-1e9, 1e9), decimals, suffix: "°" }, t);
+    let (dr, new_deg, _, step) =
+        widgets::hot_number_step_at(ui, pos2(sign.max.x - 2.0, at.y), id, deg, &widgets::HotSpec { speed: 0.5, range: (-1e9, 1e9), decimals, suffix: "°" }, t);
     let dragging = new_deg.is_some() && ui.ctx().is_being_dragged(id);
-    let out = match (new_rev, new_deg) {
-        (Some(r), _) => Some(r as f64 * 360.0 + deg),
-        (None, Some(d)) => Some(degrees_edit(v, deg, d, dragging)),
-        (None, None) => None,
+    let out = match (new_rev, new_deg, step) {
+        (Some(r), _, _) => Some(r as f64 * 360.0 + deg),
+        // A typed step goes from the signed remainder the field shows.
+        (None, Some(_), Some(s)) => s.apply(deg).map(|d| rev as f64 * 360.0 + d),
+        (None, Some(d), None) => Some(degrees_edit(v, deg, d, dragging)),
+        (None, None, _) => None,
     };
-    (rr, dr, out)
+    let step = step.filter(|s| matches!(s, Step::Add(_)) && new_rev.is_none() && out.is_some());
+    (rr, dr, out, step)
 }
 
 /// Dial angle (degrees, 0 = up, clockwise) of `p` around `c` in screen space.
