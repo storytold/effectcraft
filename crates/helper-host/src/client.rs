@@ -58,27 +58,20 @@ fn render_timeout() -> Duration {
     }
 }
 
-/// [`set_edit_timeout`] (milliseconds; 0 = not set).
-static EDIT_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Override the edit timeout (tests; `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` still wins).
+/// Set the edit timeout ([`edit_timeout`]); it wins over `EFFECTCRAFT_HELPER_EDIT_TIMEOUT`, so
+/// tests don't depend on the environment.
 pub fn set_edit_timeout(t: Duration) {
-    EDIT_TIMEOUT_MS.store(u64::try_from(t.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+    effectcraft_effects::plugin::set_param_change_timeout(t);
 }
 
-/// The longest the user's edit waits for a helper to answer `param_changed`, including the wait
-/// for a free process: `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` seconds (fractions allowed, at most
-/// 600), default 2. Edits run on the thread that draws the interface, so this is short: a helper
-/// that needs longer has the user's change applied alone (and is stopped, as on every timeout,
-/// since its late answer would be out of step).
+/// The longest the user's edit (or one command with all its edits: a batch, a script) waits for
+/// helpers to answer `param_changed`, the wait for a free process included:
+/// [`effectcraft_effects::plugin::param_change_timeout`] (`EFFECTCRAFT_HELPER_EDIT_TIMEOUT`
+/// seconds, default 2). Edits run on the thread that draws the interface, so this is short: a
+/// helper that needs longer has the user's change applied alone (and is stopped, as on every
+/// timeout, since its late answer would be out of step).
 pub fn edit_timeout() -> Duration {
-    if let Some(s) = std::env::var("EFFECTCRAFT_HELPER_EDIT_TIMEOUT").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|s| s.is_finite() && *s > 0.0) {
-        return Duration::from_secs_f64(s.min(600.0));
-    }
-    match EDIT_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => Duration::from_secs(2),
-        ms => Duration::from_millis(ms),
-    }
+    effectcraft_effects::plugin::param_change_timeout()
 }
 
 /// Timeout for start-up, `describe` and `load`, `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` seconds
@@ -118,6 +111,9 @@ struct Conn {
     /// The loads ([`Helper::load`], by their index in [`Helper::loaded`]) this process has done;
     /// a process that lacks one is brought up to date before it is used.
     loaded: Vec<usize>,
+    /// The loads this process answered with an error (a folder that went away): tried again before
+    /// its next turn, but an edit doesn't wait for them ([`Conn::tried_all_loads`]).
+    failed: Vec<usize>,
     /// Lines handed to the writer thread without waiting for it ([`Conn::post`]); their results
     /// come before those of later lines.
     unacked: usize,
@@ -175,6 +171,28 @@ impl Conn {
     fn call(&mut self, r: &Request, timeout: Duration) -> Result<Reply, Failure> {
         self.send(r, timeout)?;
         self.recv(timeout)
+    }
+
+    /// [`Conn::call`] within `timeout` in all: the answer gets only what writing the request left.
+    fn call_within(&mut self, r: &Request, timeout: Duration) -> Result<Reply, Failure> {
+        let start = Instant::now();
+        self.send(r, timeout)?;
+        self.recv(timeout.saturating_sub(start.elapsed()))
+    }
+
+    /// Whether this process has tried every load of `loaded` (the number of loads so far): done,
+    /// or answered with an error (retried before renders, but nothing an edit waits for).
+    fn tried_all_loads(&self, loaded: usize) -> bool {
+        (0..loaded).all(|i| self.loaded.contains(&i) || self.failed.contains(&i))
+    }
+
+    /// Note that loading `path` (every index of it in `all`) failed on this process.
+    fn note_failed(&mut self, all: &[String], path: &str) {
+        for (i, _) in all.iter().enumerate().filter(|(_, p)| *p == path) {
+            if !self.failed.contains(&i) {
+                self.failed.push(i);
+            }
+        }
     }
 
     /// Reserve room for an image of `width × height` at the top of the exchange file.
@@ -492,9 +510,15 @@ impl Helper {
                     let now: Vec<usize> = all.iter().enumerate().filter(|(j, p)| *p == path && !c.loaded.contains(j)).map(|(j, _)| j).collect();
                     c.loaded.extend(now);
                 }
-                Ok(Reply::Error { message }) => log::warn!("helper {}: loading {path} failed (tried again later): {message}", self.program.display()),
+                Ok(Reply::Error { message }) => {
+                    c.note_failed(&all, path);
+                    log::warn!("helper {}: loading {path} failed (tried again later): {message}", self.program.display())
+                }
                 Ok(other) => return Err(Failure::Broken(format!("unexpected reply to load: {other:?}"))),
-                Err(Failure::Refused(e)) => log::warn!("helper {}: loading {path} failed (tried again later): {e}", self.program.display()),
+                Err(Failure::Refused(e)) => {
+                    c.note_failed(&all, path);
+                    log::warn!("helper {}: loading {path} failed (tried again later): {e}", self.program.display())
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -737,7 +761,7 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation, loaded: vec![], unacked: 0 };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation, loaded: vec![], failed: vec![], unacked: 0 };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
             Ok(Reply::Hello { version, name, helper_version, loads, max_processes, features }) if version == PROTOCOL_VERSION => {
@@ -791,7 +815,15 @@ impl Helper {
             if !p.entries.iter().any(|e| e.slot.running()) {
                 return Err("the helper is not running".into());
             }
-            if let Some(e) = p.entries.iter_mut().find(|e| e.turn.owner.is_none() && e.slot.running()) {
+            // An idle process that has tried every load before one that still has to.
+            let loads = lock(&self.loaded).len();
+            let ready = |e: &Entry| match e.slot.conn.try_lock() {
+                Ok(c) => c.as_ref().is_some_and(|c| c.tried_all_loads(loads)),
+                Err(_) => false,
+            };
+            let free = |e: &Entry| e.turn.owner.is_none() && e.slot.running();
+            let pick = p.entries.iter().position(|e| free(e) && ready(e)).or_else(|| p.entries.iter().position(free));
+            if let Some(e) = pick.and_then(|i| p.entries.get_mut(i)) {
                 e.turn = Turn { owner: Some(me), depth: 1 };
                 return Ok(TurnGuard { helper: self, slot: e.slot.clone(), fresh: true });
             }
@@ -809,19 +841,22 @@ impl Helper {
     /// never starts one and never sends into a render's conversation. A helper that misses the
     /// time, breaks the protocol or exits is stopped like after any timeout (the next render
     /// starts it again), but this is not charged to the effect.
-    fn param_changed(&self, req: &Request) -> Result<serde_json::Value, String> {
-        let limit = edit_timeout();
+    fn param_changed(&self, req: &Request, budget: Option<Duration>) -> Result<serde_json::Value, String> {
+        let limit = budget.map_or_else(edit_timeout, |b| b.min(edit_timeout()));
+        if limit.is_zero() {
+            return Err("no time is left for the helper in this edit".into());
+        }
         let deadline = Instant::now().checked_add(limit);
         let turn = self.take_idle_turn(deadline)?;
         let mut g = lock(&turn.slot.conn);
         let Some(c) = g.as_mut() else { return Err("the helper is not running".into()) };
-        // Loads still to replay can take minutes: an edit doesn't wait for them.
-        let pending = lock(&self.loaded).len();
-        if (0..pending).any(|i| !c.loaded.contains(&i)) {
+        // Loads still to replay can take minutes: an edit doesn't wait for them. Loads the process
+        // tried and failed (a folder that went away) don't hold edits up.
+        if !c.tried_all_loads(lock(&self.loaded).len()) {
             return Err("the helper is still loading plug-ins".into());
         }
         let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
-        let r = c.call(req, left);
+        let r = c.call_within(req, left);
         c.last_used = Instant::now();
         let broken = match r {
             Ok(Reply::SetParams { values, .. }) => return Ok(values.unwrap_or(serde_json::Value::Null)),
@@ -1037,7 +1072,7 @@ impl EffectPlugin for HelperEffect {
             values: change.values.clone(),
             texts: change.texts.clone(),
         };
-        let values = self.helper.param_changed(&req).map_err(|e| format!("{}: {e}", self.manifest.name))?;
+        let values = self.helper.param_changed(&req, change.budget).map_err(|e| format!("{}: {e}", self.manifest.name))?;
         Ok(checked_values(&self.manifest, &values))
     }
 

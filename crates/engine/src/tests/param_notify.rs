@@ -22,6 +22,10 @@ enum Mode {
     Fail,
     /// Answers values that don't fit.
     Invalid,
+    /// Takes 150 ms, then fails.
+    Slow,
+    /// Takes all the time it is given, then answers nothing.
+    Spend,
 }
 
 struct Notifier {
@@ -30,6 +34,8 @@ struct Notifier {
     mode: Mode,
     calls: AtomicUsize,
     last: Mutex<Option<ParamChange>>,
+    /// The budget of every change it was told about.
+    budgets: Mutex<Vec<Option<std::time::Duration>>>,
 }
 
 impl EffectPlugin for Notifier {
@@ -45,10 +51,25 @@ impl EffectPlugin for Notifier {
     fn param_changed(&self, change: &ParamChange) -> Result<Vec<(String, Value)>, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some(change.clone());
+        self.budgets.lock().unwrap().push(change.budget);
         match self.mode {
+            Mode::Slow => {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                Err("the helper did not answer in time".into())
+            }
+            Mode::Spend => {
+                std::thread::sleep(change.budget.unwrap_or_default());
+                Ok(vec![])
+            }
             Mode::Fail => Err("the helper did not answer within 2 s".into()),
             Mode::Preset => Ok(if change.values["preset"] == json!(1) {
-                vec![("amount".into(), json!(75.0)), ("tint".into(), json!([1.0, 0.5, 0.0, 1.0])), ("link".into(), json!(true))]
+                vec![
+                    ("amount".into(), json!(75.0)),
+                    ("tint".into(), json!([1.0, 0.5, 0.0, 1.0])),
+                    ("link".into(), json!(true)),
+                    ("label".into(), json!("warm")),
+                    ("secret".into(), json!("lut data")),
+                ]
             } else {
                 vec![]
             }),
@@ -91,9 +112,18 @@ fn notifier(tag: &str, mode: Mode) -> Arc<Notifier> {
             param("mirror", slider(0.0)),
             param("other", PluginParamKind::Layer),
             param("label", PluginParamKind::Text { default: "x".into() }),
+            param("speed", slider(0.0)),
+            param("secret", PluginParamKind::Hidden { default: String::new() }),
         ],
     };
-    let n = Arc::new(Notifier { m, notify: vec!["preset".into(), "link".into()], mode, calls: AtomicUsize::new(0), last: Mutex::new(None) });
+    let n = Arc::new(Notifier {
+        m,
+        notify: vec!["preset".into(), "link".into(), "speed".into()],
+        mode,
+        calls: AtomicUsize::new(0),
+        last: Mutex::new(None),
+        budgets: Mutex::new(vec![]),
+    });
     register_plugin(n.clone()).unwrap();
     n
 }
@@ -135,6 +165,9 @@ fn a_change_applies_the_answer_in_the_same_undo_step() {
     assert_eq!(value(&s, l, fx, "tint"), KV::Color([1.0, 0.5, 0.0, 1.0]));
     // `link` is a notifying parameter too, but set by the answer: not reported again.
     assert_eq!(value(&s, l, fx, "link"), KV::Bool(true));
+    // Text and hidden parameters take the strings of the answer.
+    assert_eq!(value(&s, l, fx, "label"), KV::Str("warm".into()));
+    assert_eq!(value(&s, l, fx, "secret"), KV::Str("lut data".into()));
     assert_eq!(n.calls.load(Ordering::SeqCst), 1, "the answer started another round");
     assert_eq!(s.history.undo.len(), undo_before + 1, "one undo step");
     // What the plug-in was told: the parameter, the instance its renders have, the values.
@@ -146,7 +179,7 @@ fn a_change_applies_the_answer_in_the_same_undo_step() {
     assert_eq!(c.values["tint"], json!([1.0, 1.0, 1.0, 1.0]));
     assert_eq!(c.values["other"], Value::Null);
     assert!(!c.values.contains_key("label"));
-    assert_eq!(c.texts, vec!["x".to_string()]);
+    assert_eq!(c.texts, vec!["x".to_string(), String::new()]);
     assert!(c.layer_size[0] > 0.0 && c.layer_size[1] > 0.0, "{:?}", c.layer_size);
     // One undo takes back the user's change and the plug-in's.
     assert!(s.undo());
@@ -202,4 +235,97 @@ fn values_that_dont_fit_are_ignored() {
     assert_eq!(value(&s, l, fx, "other"), KV::Layer(None), "no such layer");
     assert_eq!(value(&s, l, fx, "label"), KV::Str("x".into()));
     assert_eq!(value(&s, l, fx, "mirror"), KV::Scalar(100.0), "clamped to the slider");
+}
+
+fn key_count(s: &Session, l: u64, fx: u64, id: &str) -> usize {
+    group(s, l, fx).get(id).unwrap().keys.len()
+}
+
+/// Only a changed value is reported: turning the stopwatch on, or changing a keyframe's
+/// interpolation or ease, changes no value.
+#[test]
+fn only_value_changes_are_reported() {
+    let n = notifier("values", Mode::Preset);
+    let (mut s, l, fx) = setup("org.test.notify.values");
+    let speed = group(&s, l, fx).get("speed").unwrap().uid;
+    // The stopwatch on (a key with the value it has): nothing changes.
+    s.execute("prop.addKey", json!({"layer": l, "prop": speed, "time": 0.0, "timeBase": "comp", "value": 0.0})).unwrap();
+    assert_eq!(key_count(&s, l, fx, "speed"), 1);
+    assert_eq!(n.calls.load(Ordering::SeqCst), 0, "stopwatch on");
+    // A key with another value at 1 s: reported, at that time.
+    s.execute("prop.addKey", json!({"layer": l, "prop": speed, "time": 1.0, "timeBase": "comp", "value": 50.0})).unwrap();
+    assert_eq!(n.calls.load(Ordering::SeqCst), 1, "a new value");
+    assert_eq!(n.last.lock().unwrap().as_ref().map(|c| c.time), Some(1.0));
+    // Interpolation and ease of the keys: no value changes.
+    let cid = s.active_comp_id().unwrap();
+    s.edit("Interpolation", None, |proj, _| {
+        let layer = &mut proj.comp_mut(cid).unwrap().layers[0];
+        let pr = layer.props.find_group_mut(fx).unwrap().get_mut("speed").unwrap();
+        for k in &mut pr.keys {
+            k.in_interp = effectcraft_keyframe::Interp::Bezier;
+            k.out_interp = effectcraft_keyframe::Interp::Bezier;
+            k.in_ease = vec![effectcraft_keyframe::Ease { speed: 0.0, influence: 60.0 }];
+            k.out_ease = vec![effectcraft_keyframe::Ease { speed: 0.0, influence: 60.0 }];
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(n.calls.load(Ordering::SeqCst), 1, "interpolation and ease");
+    // A changed value at the current time: reported.
+    let speed_path = json!({"layer": l, "prop": speed, "value": 20.0});
+    s.execute("prop.set", speed_path).unwrap();
+    assert_eq!(n.calls.load(Ordering::SeqCst), 2, "a changed value");
+}
+
+/// A project can hold a slider whose range is upside down (min > max, from a file): setting it,
+/// by hand or from a plug-in's answer, takes the value instead of failing on the clamp.
+#[test]
+fn a_slider_with_an_upside_down_range_takes_the_value() {
+    notifier("range", Mode::Preset);
+    let (mut s, l, fx) = setup("org.test.notify.range");
+    let cid = s.active_comp_id().unwrap();
+    s.edit("Range", None, |proj, _| {
+        let layer = &mut proj.comp_mut(cid).unwrap().layers[0];
+        let g = layer.props.find_group_mut(fx).unwrap();
+        for id in ["amount", "mirror"] {
+            g.get_mut(id).unwrap().ui = effectcraft_project::ParamUi::Slider { min: 100.0, max: 0.0, slider_min: 0.0, slider_max: 100.0, decimals: 1 };
+        }
+        Ok(())
+    })
+    .unwrap();
+    // prop.set (the user's edit) and the plug-in's answer (amount 75).
+    set(&mut s, l, fx, "mirror", json!(5.0)).unwrap();
+    assert_eq!(value(&s, l, fx, "mirror"), KV::Scalar(5.0));
+    set(&mut s, l, fx, "preset", json!(1)).unwrap();
+    assert_eq!(value(&s, l, fx, "amount"), KV::Scalar(75.0));
+}
+
+/// One command waits at most the edit timeout for all its answers: after a plug-in failed, the
+/// rest of a batch reports nothing; and what is left of the wait is passed on.
+#[test]
+fn a_batch_waits_for_plugins_once() {
+    effectcraft_effects::plugin::set_param_change_timeout(std::time::Duration::from_millis(400));
+    let slow = notifier("slow", Mode::Slow);
+    let (mut s, l, fx) = setup("org.test.notify.slow");
+    let preset = group(&s, l, fx).get("preset").unwrap().uid;
+    let steps: Vec<Value> = [1, 2, 1, 2].iter().map(|v| json!({"command": "prop.set", "params": {"layer": l, "prop": preset, "value": v}})).collect();
+    let t0 = std::time::Instant::now();
+    s.execute("engine.batch", json!({"steps": steps})).unwrap();
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 1, "after a failure the batch reports nothing more");
+    assert_eq!(value(&s, l, fx, "preset"), KV::Enum(2), "every step still applies");
+    assert!(t0.elapsed() < std::time::Duration::from_millis(1500), "{:?}", t0.elapsed());
+    // Each budget is what is left: a plug-in that uses it all leaves nothing for the next step.
+    let spend = notifier("spend", Mode::Spend);
+    let (mut s, l, fx) = setup("org.test.notify.spend");
+    let preset = group(&s, l, fx).get("preset").unwrap().uid;
+    let steps: Vec<Value> = [1, 2, 1].iter().map(|v| json!({"command": "prop.set", "params": {"layer": l, "prop": preset, "value": v}})).collect();
+    let t0 = std::time::Instant::now();
+    s.execute("engine.batch", json!({"steps": steps})).unwrap();
+    let budgets = spend.budgets.lock().unwrap().clone();
+    assert_eq!(budgets.len(), 1, "{budgets:?}");
+    assert!(budgets[0].is_some_and(|b| b <= std::time::Duration::from_millis(400)), "{budgets:?}");
+    assert!(t0.elapsed() < std::time::Duration::from_millis(1500), "{:?}", t0.elapsed());
+    // A new command has its own wait again.
+    set(&mut s, l, fx, "preset", json!(2)).unwrap();
+    assert_eq!(spend.budgets.lock().unwrap().len(), 2);
 }

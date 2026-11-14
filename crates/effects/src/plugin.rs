@@ -384,6 +384,33 @@ pub struct ParamChange {
     pub values: serde_json::Map<String, serde_json::Value>,
     /// One string per text / hidden parameter, in declaration order.
     pub texts: Vec<String>,
+    /// How long the host still waits for the answer, at most ([`param_change_timeout`] when
+    /// `None`): what is left of the edit's wait. A plug-in that would take longer answers with an
+    /// error (or is cut off) and the user's change is applied alone.
+    pub budget: Option<std::time::Duration>,
+}
+
+/// [`set_param_change_timeout`] (milliseconds; 0 = not set).
+static CHANGE_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set the edit wait ([`param_change_timeout`]); it wins over `EFFECTCRAFT_HELPER_EDIT_TIMEOUT`
+/// (tests set it so the environment can't change them). Zero unsets it.
+pub fn set_param_change_timeout(t: std::time::Duration) {
+    CHANGE_TIMEOUT_MS.store(u64::try_from(t.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The longest one edit (or one command, such as a batch or a script, with all its edits) waits
+/// for plug-ins to answer [`EffectPlugin::param_changed`], in all: [`set_param_change_timeout`],
+/// else `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` seconds (fractions allowed, at most 600), else 2 s.
+/// Edits run on the thread that draws the interface, so it is short.
+pub fn param_change_timeout() -> std::time::Duration {
+    use std::time::Duration;
+    match CHANGE_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {}
+        ms => return Duration::from_millis(ms),
+    }
+    let env = std::env::var("EFFECTCRAFT_HELPER_EDIT_TIMEOUT").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|s| s.is_finite() && *s > 0.0);
+    env.map_or(Duration::from_secs(2), |s| Duration::from_secs_f64(s.min(600.0)))
 }
 
 /// The values of an effect instance's parameters for a [`ParamChange`], in property units keyed
@@ -414,14 +441,18 @@ pub fn param_values(m: &PluginManifest, params: &Params) -> serde_json::Map<Stri
     out
 }
 
-/// The longest string a text / hidden parameter may be set to.
-const MAX_TEXT: usize = 64 << 20;
+/// The longest string a text / hidden parameter may be set to by a [`ParamChange`] answer, and
+/// the most string bytes one answer may set in all. Hidden parameters carry opaque plug-in data
+/// (look-up tables of a few MB), so this is not smaller; it keeps one answer from growing the
+/// project (and every undo step) by more.
+pub const MAX_ANSWER_TEXT: usize = 16 << 20;
 
 /// The entries of `raw` (a JSON object of parameter id → value, as a plug-in answers a
 /// [`ParamChange`]) that are valid for manifest `m`, in the units of [`param_values`] (text and
 /// hidden parameters take a string). Unknown ids, values of the wrong type or shape, numbers that
-/// aren't finite, popup indices out of range or not whole and over-long strings are left out;
-/// slider values are clamped to the slider's range. Anything but an object gives nothing.
+/// aren't finite, popup indices out of range or not whole and strings longer than
+/// [`MAX_ANSWER_TEXT`] are left out, and strings once [`MAX_ANSWER_TEXT`] bytes of them are
+/// taken; slider values are clamped to the slider's range. Anything but an object gives nothing.
 pub fn checked_values(m: &PluginManifest, raw: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
     use serde_json::{Value as J, json};
     let Some(obj) = raw.as_object() else { return vec![] };
@@ -431,6 +462,7 @@ pub fn checked_values(m: &PluginManifest, raw: &serde_json::Value) -> Vec<(Strin
         a.iter().map(num).collect()
     };
     let mut out = vec![];
+    let mut text_left = MAX_ANSWER_TEXT;
     for p in &m.params {
         let Some(j) = obj.get(&p.id) else { continue };
         let v = match &p.kind {
@@ -454,7 +486,17 @@ pub fn checked_values(m: &PluginManifest, raw: &serde_json::Value) -> Vec<(Strin
                     _ => None,
                 },
             },
-            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => j.as_str().filter(|s| s.len() <= MAX_TEXT).map(|s| json!(s)),
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => match j.as_str() {
+                Some(s) if s.len() <= text_left => {
+                    text_left -= s.len();
+                    Some(json!(s))
+                }
+                Some(s) => {
+                    log::warn!("plug-in `{}`: `{}` ({} bytes) is left out: an answer sets at most {MAX_ANSWER_TEXT} bytes of text", m.id, p.id, s.len());
+                    None
+                }
+                None => None,
+            },
         };
         if let Some(v) = v {
             out.push((p.id.clone(), v));
@@ -471,6 +513,18 @@ static ANY_NOTIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// ([`EffectPlugin::notify_params`]).
 pub fn any_notify_params() -> bool {
     ANY_NOTIFY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The ids of the registered plug-in effects that declared [`EffectPlugin::notify_params`].
+fn notifying() -> &'static RwLock<std::collections::HashSet<String>> {
+    static N: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
+    N.get_or_init(Default::default)
+}
+
+/// Whether effect `id` is a registered plug-in that declared [`EffectPlugin::notify_params`]
+/// (a set lookup: edits ask this for every effect they look at).
+pub fn notifies(id: &str) -> bool {
+    !id.starts_with("ec.") && notifying().read().map(|n| n.contains(id)).unwrap_or(false)
 }
 
 /// Parameter values for one render, flattened (see the module docs) with typed accessors.
@@ -671,6 +725,9 @@ pub fn register_plugin(plugin: Arc<dyn EffectPlugin>) -> Result<&'static EffectS
         .position(|s| s.get().is_none())
         .ok_or_else(|| format!("too many plug-in effects: a session registers at most {MAX_PLUGINS}; remove some plug-ins and restart EffectCraft"))?;
     if !plugin.notify_params().is_empty() {
+        if let Ok(mut n) = notifying().write() {
+            n.insert(m.id.clone());
+        }
         ANY_NOTIFY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     SLOTS[slot].set(plugin).map_err(|_| "plug-in slot taken".to_string())?;
@@ -969,6 +1026,21 @@ mod notify_tests {
         assert!(checked_values(&m(), &json!({"m": 0.5, "pt": [1, "x"], "l": 1.5, "t": 3, "s": "1"})).is_empty());
         assert!(checked_values(&m(), &json!([1, 2])).is_empty());
         assert_eq!(checked_values(&m(), &json!({"m": 1, "pt": [1.5, 2]})), vec![("m".into(), json!(1)), ("pt".into(), json!([1.5, 2.0]))]);
+    }
+
+    #[test]
+    fn an_answer_sets_at_most_16_mb_of_text() {
+        let mut man = m();
+        for id in ["h1", "h2", "h3"] {
+            man.params.push(PluginParam { id: id.into(), name: id.into(), group: String::new(), kind: PluginParamKind::Hidden { default: String::new() } });
+        }
+        let big = |n: usize| "x".repeat(n);
+        // 10 MB fits; another 10 MB would pass 16 MB in all and is left out; a short one still fits.
+        let got = checked_values(&man, &json!({"h1": big(10 << 20), "h2": big(10 << 20), "h3": "small"}));
+        let ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["h1", "h3"]);
+        // One string over the limit is left out.
+        assert!(checked_values(&man, &json!({"h1": big(MAX_ANSWER_TEXT + 1)})).is_empty());
     }
 }
 

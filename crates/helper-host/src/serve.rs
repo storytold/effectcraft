@@ -177,7 +177,7 @@ impl Server<'_> {
                 let Some(e) = self.effects.get(&effect).cloned() else {
                     return self.send(&Reply::Error { message: format!("unknown effect `{effect}`") });
                 };
-                let change = ParamChange { param, instance_key: instance, time, layer_size, values, texts };
+                let change = ParamChange { param, instance_key: instance, time, layer_size, values, texts, budget: None };
                 match e.param_changed(&change) {
                     Ok(v) => self.send(&Reply::SetParams { values: Some(serde_json::Value::Object(v.into_iter().collect())), ui: None }),
                     Err(message) => self.send(&Reply::Error { message }),

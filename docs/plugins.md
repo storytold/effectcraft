@@ -376,7 +376,9 @@ effects can be registered.
   keyframe at the edit's time when the property is animated), checks every value against the
   manifest and ignores what doesn't fit; a change it applies is not reported again. It is called
   only for edits (never while rendering or evaluating expressions) and the edit waits for it, so it
-  must be quick. This is how [external effect helpers](external-helpers.md#parameter-changes)
+  must be quick: `change.budget` is what is left of the command's wait
+  (`plugin::param_change_timeout`, 2 s by default, for all the answers of one command). Text and
+  hidden values take at most 16 MB per answer (`plugin::MAX_ANSWER_TEXT`). This is how [external effect helpers](external-helpers.md#parameter-changes)
   receive `param_changed`; WebAssembly modules can't use it.
 * **`PluginHost::masks()`** (default none) gives the layer's enabled masks at the render time as
   `MaskPath { name, closed, mode, inverted, opacity, feather, expansion, vertices, in_tangents,

@@ -380,6 +380,16 @@ impl Provider for NotifyProvider {
     fn features(&self) -> Vec<String> {
         if self.tag == "old" { vec![] } else { vec![effectcraft_helper_host::protocol::FEATURE_PARAM_CHANGED.into()] }
     }
+    fn loads(&self) -> Vec<String> {
+        vec!["notify".into()]
+    }
+    /// Loads anything, except while `refuse-loads` exists (a loaded folder that went away).
+    fn load(&mut self, _path: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
+        if pool_dir().is_ok_and(|d| d.join("refuse-loads").exists()) {
+            return Err("the folder is gone".into());
+        }
+        Ok((vec![], vec![]))
+    }
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
         let preset = PluginParam {
             id: "preset".into(),
@@ -868,7 +878,7 @@ fn change(preset: u64) -> ParamChange {
     values.insert("preset".into(), serde_json::json!(preset));
     values.insert("tint".into(), serde_json::json!([1.0, 1.0, 1.0, 1.0]));
     values.insert("link".into(), serde_json::json!(false));
-    ParamChange { param: "preset".into(), instance_key: 7, time: 1.5, layer_size: [300.0, 200.0], values, texts: vec![] }
+    ParamChange { param: "preset".into(), instance_key: 7, time: 1.5, layer_size: [300.0, 200.0], values, texts: vec![], budget: None }
 }
 
 /// Parameter changes (#3663), run in a child of the test with `EC_FAKE_MODE` `notify` (a helper
@@ -943,6 +953,18 @@ fn run_notify_checks(exe: &Path, mode: &str) -> bool {
     let _ = render_pool(&format!("org.test.{mode}.ask"), 1.0);
     let r = fx.param_changed(&change(1));
     all &= check("and the next change is answered again", r.as_ref().is_ok_and(|v| v.len() == 2), &r);
+
+    // A load the restarted process can't replay (its folder went away) is tried again before
+    // renders, but doesn't hold edits up.
+    let r = effectcraft_helper_host::load_path("plugins.notify");
+    all &= check("a folder loads", r.is_ok(), &r);
+    let _ = mark(&dir, "refuse-loads");
+    effectcraft_helper_host::stop_all();
+    let r = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    all &= check("a render with a load that fails to replay", r.is_ok(), &r);
+    let r = fx.param_changed(&change(1));
+    all &= check("a load that failed to replay doesn't block edits", r.as_ref().is_ok_and(|v| v.len() == 2), &r);
+    let _ = std::fs::remove_file(dir.join("refuse-loads"));
 
     // The only process is busy in a render: the edit waits at most the edit timeout for it, and
     // never sends into that render's conversation.
@@ -1094,7 +1116,15 @@ fn pool_group(mode: &str) -> bool {
         return check("create the marks folder", false, &dir);
     }
     let status =
-        std::process::Command::new(exe).arg(POOL_ARG).env("EC_FAKE_MODE", mode).env("EC_FAKE_DIR", &dir).env("EFFECTCRAFT_HELPER_MAX_PROCESSES", "4").status();
+        // The timeouts the checks set must not be changed by the environment the tests run in.
+        std::process::Command::new(exe)
+            .arg(POOL_ARG)
+            .env("EC_FAKE_MODE", mode)
+            .env("EC_FAKE_DIR", &dir)
+            .env("EFFECTCRAFT_HELPER_MAX_PROCESSES", "4")
+            .env_remove("EFFECTCRAFT_HELPER_EDIT_TIMEOUT")
+            .env_remove("EFFECTCRAFT_HELPER_TIMEOUT")
+            .status();
     let _ = std::fs::remove_dir_all(&dir);
     check(&format!("pool checks ({mode}) pass"), status.is_ok_and(|s| s.success()), "see the lines above")
 }

@@ -17,7 +17,7 @@ and carries on. See [ADR 0001](adr/0001-external-effect-helpers.md) for why.
 | Load more plug-ins | Effect ▸ Load Plug-ins Through Helper… (`effect.helpers.load {path}`) hands a file or folder to the helpers that accept it (an OpenFX helper takes `.ofx` plug-ins and `.ofx.bundle` folders). |
 | Inspect | `effect.helpers.list` → `{helpers: [{program, name, version, loads, running, processes, max_processes, effects, restarts, error, features}], blocked}` (`processes` is how many processes run now, `max_processes` how many the helper allows, `features` the [extensions](#extensions) it announced); `effect.plugins.list` shows each effect's `source` (`helper: …`) and last render `error`. |
 | Errors | A failed render leaves the frame as it was and puts ⚠ after the effect's name in Effect Controls (hover for the message). The next render starts the helper again. An effect that stops its helper 3 times is turned off and listed in `helper_blocklist.txt` in the settings folder; the 3 stops are counted per effect across all processes of the helper (see [Parallel rendering](#parallel-rendering)), not per process. `effect.helpers.scan {"retry": true}` turns it back on. A helper that restarts 5 times in a minute (counted over all its processes) stays off until the next scan. |
-| Timeouts | `EFFECTCRAFT_HELPER_TIMEOUT` (seconds per render step, default 120), `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` (start-up, describe, load; default 600) and `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` (seconds an edit waits for a [`param_changed`](#parameter-changes) answer, fractions allowed, default 2). A helper idle for 30 s is pinged before it is used again. |
+| Timeouts | `EFFECTCRAFT_HELPER_TIMEOUT` (seconds per render step, default 120), `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` (start-up, describe, load; default 600) and `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` (seconds one command waits for [`param_changed`](#parameter-changes) answers in all, fractions allowed, default 2, at most 600). A helper idle for 30 s is pinged before it is used again. |
 
 Helpers are not available in the web build.
 
@@ -110,9 +110,11 @@ values, a "link" checkbox, a mode menu that resets dependent controls. A helper 
 `"notify_params": ["p114", "p109"]` (ids of the manifest's parameters; unknown ids are ignored).
 
 - **When.** The user changes one of them: in Effect Controls, the timeline, with `prop.set`,
-  pasting values, a script, any other edit. A changed stored value or changed keyframes count
-  (moving the keyframe of a notifying parameter does, editing its expression does not). Never while
-  rendering, never for expression or keyframe evaluation, never for undo and redo.
+  pasting values, a script, any other edit, when the parameter's value at the edit's time changed
+  (the time of a keyframe the edit set, else the current time). Turning the stopwatch on, changing
+  a keyframe's interpolation, ease or label, or editing an expression changes no value and sends
+  nothing. Never while rendering, never for expression or keyframe evaluation, never for undo and
+  redo.
 - **Request.** `param_changed` names the effect, the `instance` (the same id renders have), the
   `param` the user changed, the layer `time` of the change in seconds (where the user's keyframe
   went, else the current time) and the layer size. `values` holds every parameter's value at that
@@ -124,25 +126,33 @@ values, a "link" checkbox, a mode menu that resets dependent controls. A helper 
   hidden ones as strings), or `{"values":{}}`. EffectCraft writes them into the user's edit: one
   undo step, at the same time and the same way as the user's value (a new keyframe when the
   property is animated). Ids that aren't the effect's, values of the wrong type or shape, numbers
-  that aren't finite, popup indices out of range or not whole, layers that aren't in the comp and
-  strings over 64 MB are ignored entry by entry; slider values are clamped to the slider range. A
+  that aren't finite, popup indices out of range or not whole and layers that aren't in the comp
+  are ignored entry by entry; slider values are clamped to the slider range. Text and hidden
+  values take at most 16 MB per answer in all (enough for opaque plug-in data such as a look-up
+  table; it keeps one answer from bloating the project and every undo step): a string that would
+  pass that is left out, and logged. A
   change the answer makes doesn't send another `param_changed`. `ui` in the answer (per-parameter
   state such as `{"p12": {"enabled": false}}`) is accepted and ignored for now: Effect Controls
   can't grey out a single parameter yet.
-- **Time.** The edit waits for the answer, on the thread that draws the interface, so it waits at
-  most `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` (default 2 s), the wait for a free process included. It
-  uses a process that runs and is idle, between renders: never one inside a render's
-  conversation, and it never starts a process (after a crash the next render starts the helper
-  again, and the first change after that is reported). A process that still has to replay `load`s
-  isn't asked. When the helper isn't running, is busy for the whole time, answers `error`, misses
+- **Time.** Edits wait for the answers on the thread that draws the interface, so the wait is
+  bounded per command: one command (an edit in Effect Controls, a `prop.set`, an `engine.batch`
+  or a script with every edit it makes) waits at most `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` (default
+  2 s) for all its answers together, the wait for a free process and writing the request
+  included. Each request is given what is left; once that is spent, or an answer failed, the rest
+  of the command sends no more `param_changed` (logged). One edit reports at most 8 changes
+  (pasting into many effects), one after another, each with the values the answers before it set.
+  It uses a process that runs and is idle, between renders, preferring one that has tried every
+  `load`: never one inside a render's conversation, and it never starts a process (after a crash
+  the next render starts the helper again, and the first change after that is reported). A
+  process that still has to replay a `load` for the first time isn't asked; a `load` it tried and
+  that failed (a folder that went away) is retried before renders but doesn't hold edits up. When
+  the helper isn't running, is busy for the whole time, answers `error`, misses
   the time, exits or answers anything but `set_params` / `error`, the user's change stays and
   nothing else changes. A helper that missed the time or broke the protocol is stopped (its late
   answer would be out of step), as after any timeout, but this doesn't count towards turning the
   effect off. The next render starts it again, and that start does count towards the 5 restarts a
   minute: a helper that keeps missing the edit timeout ends up off until the next scan, so give
   slow helpers a longer `EFFECTCRAFT_HELPER_EDIT_TIMEOUT`.
-- One edit reports at most 8 changes (pasting into many effects), one after another, each with
-  the values the answers before it set; after one that fails no more are sent for that edit.
 
 Rust helpers built on `serve` announce `param_changed` and answer it with
 `EffectPlugin::notify_params` / `EffectPlugin::param_changed` of their effects (see
