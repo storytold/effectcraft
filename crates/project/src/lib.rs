@@ -11,6 +11,7 @@ pub mod build;
 pub mod essential;
 mod file_check;
 pub mod limits;
+pub mod matchnames;
 pub mod props;
 pub mod render_queue;
 pub mod render_templates;
