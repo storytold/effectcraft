@@ -234,8 +234,9 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     // Masks the selection targets too (a selected mask or one of its properties, mask vertices)
     // convert with the shape paths in the same step, as the command acts on every selected path:
     // selecting a mask and a Rectangle path must not convert only the rectangle.
+    // Explicit `items` name exactly what converts: the selection adds no masks to them.
     let mut sel_masks: Vec<(LayerId, Uid)> = Vec::new();
-    if !shapes.is_empty() {
+    if !shapes.is_empty() && p.get("items").is_none() {
         let masks_of = |l: LayerId| comp.layer(l).filter(|ly| !ly.switches.locked).and_then(|ly| ly.masks());
         for (l, u) in &s.state.selected_props {
             let Some(m) = masks_of(*l) else { continue };

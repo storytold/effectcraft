@@ -916,6 +916,25 @@ fn convert_to_bezier_converts_a_selected_mask_and_path_together() {
     assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }), "and the mask");
 }
 
+/// #3057 review: explicit `items` convert only those shape paths; a RotoBezier mask that happens to
+/// be selected on the same layer is not converted along with them.
+#[test]
+fn convert_to_bezier_with_explicit_items_leaves_a_selected_mask_alone() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [50, 0], [50, 50], [0, 50]], "closed": true})).unwrap();
+    let m = layer(&s, l).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("path.rotoBezier", json!({"layer": l, "mask": m, "value": true})).unwrap();
+    let (rect, _) = first_shape(&s, l);
+    s.state.selected_vertices.clear();
+    s.state.selected_props = vec![(LayerId(l), m)];
+    let out = s.execute("path.convertToBezier", json!({"layer": l, "items": [rect]})).unwrap();
+    assert_eq!(out["paths"].as_u64(), Some(1), "{out}");
+    assert!(out.get("masks").is_none_or(|v| v.as_u64().unwrap_or(0) == 0), "{out}");
+    assert_eq!(first_shape(&s, l).1, "path", "the listed rectangle converts");
+    assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }), "the selected mask is unchanged");
+}
+
 /// #3057 review: an explicit `layer` scopes the mask conversion too: a RotoBezier mask selected
 /// on another layer is left alone, and the given layer's masks convert.
 #[test]
