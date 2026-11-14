@@ -345,8 +345,11 @@ fn auto_range(cs: &[Curve], speed: bool) -> (f64, f64) {
     if speed {
         lo = lo.min(0.0);
     }
-    if (hi - lo).abs() < 1e-9 {
-        hi = lo + 1.0;
+    // A flat curve still needs a drawable span; at very large values that span also has to be
+    // wider than one f64 step, or the grid step and `hi - lo` lose all precision.
+    let min_span = 1e-6_f64.max(lo.abs().max(hi.abs()) * 1e-9).max(1.0);
+    if (hi - lo).abs() < min_span {
+        hi = lo + min_span;
     }
     let pad = (hi - lo) * 0.08;
     (lo - pad, hi + pad)
@@ -375,16 +378,69 @@ fn box_select(ui: &egui::Ui, pc: &egui::Painter, bg: &egui::Response, key_screen
     }
 }
 
-/// Wheel over the graph with Ctrl zooms the value axis `(lo, hi)` (turns auto-zoom off).
-fn wheel_zoom(app: &mut EffectcraftApp, ui: &egui::Ui, plot: Rect, (lo, hi): (f64, f64)) {
-    if ui.rect_contains_pointer(plot) {
-        let (dy, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl || i.modifiers.command));
-        if zoom && dy.abs() > 0.0 {
-            let k = (-dy as f64 / 200.0).exp();
-            let mid = (lo + hi) / 2.0;
+/// The Graph Editor footer's button-bar height.
+pub(crate) const FOOTER_H: f32 = 28.0;
+
+/// The plot rectangle inside the Graph Editor's `area` (the right side of the Timeline). The
+/// Timeline uses the same rectangle to route wheel and hand gestures to the value axis.
+pub(crate) fn plot_rect(area: Rect) -> Rect {
+    Rect::from_min_max(area.min + vec2(0.0, 6.0), pos2(area.max.x, area.max.y - FOOTER_H))
+}
+
+/// A backstop for the value grid: if a bad span ever reaches the drawing code, it can draw at
+/// most this many lines instead of looping forever.
+const MAX_GRID_LINES: usize = 512;
+
+/// A value range the graph can draw: finite endpoints, `hi > lo`, and a span between
+/// `max(1e-6, |v| * 1e-9)` and `1e12`. The lower bound follows f64's precision at the value, so
+/// repeated zooming at large values cannot make `hi - lo` smaller than one representable step
+/// (which used to stall the value grid).
+pub(crate) fn valid_range(lo: f64, hi: f64) -> Option<(f64, f64)> {
+    let span = hi - lo;
+    let mag = lo.abs().max(hi.abs());
+    let min_span = 1e-6_f64.max(mag * 1e-9);
+    (lo.is_finite() && hi.is_finite() && span.is_finite() && span >= min_span && span <= 1e12).then_some((lo, hi))
+}
+
+/// Wheel or pinch over the graph: Ctrl/Cmd+wheel (or a trackpad pinch) zooms the value axis
+/// around the pointer; a plain wheel pans it. Both turn Auto-zoom off. This is where egui's
+/// `zoom_delta()` is consumed for the value axis: egui turns Ctrl/Cmd+wheel into a zoom factor,
+/// not into `smooth_scroll_delta`, so the Timeline must not also zoom time for the same gesture.
+pub(crate) fn wheel_nav(app: &mut EffectcraftApp, ui: &egui::Ui, plot: Rect) {
+    let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+    let (lo, hi) = app.ui.timeline.graph_range.unwrap_or((0.0, 100.0));
+    let span = (hi - lo).max(1e-9);
+    if (zoom - 1.0).abs() > 1e-4 {
+        let y = ui.input(|i| i.pointer.hover_pos()).map_or(plot.center().y, |p| p.y);
+        let v = lo + (plot.max.y - y) as f64 / plot.height().max(1.0) as f64 * span;
+        let z = zoom.max(1e-4) as f64;
+        if let Some(range) = valid_range(v - (v - lo) / z, v + (hi - v) / z) {
             app.ui.timeline.graph_auto_zoom = false;
-            app.ui.timeline.graph_range = Some((mid - (mid - lo) * k, mid + (hi - mid) * k));
+            app.ui.timeline.graph_range = Some(range);
         }
+    } else if scroll.y.abs() > 0.0 {
+        let dv = scroll.y as f64 / plot.height().max(1.0) as f64 * span;
+        if let Some(range) = valid_range(lo + dv, hi + dv) {
+            app.ui.timeline.graph_auto_zoom = false;
+            app.ui.timeline.graph_range = Some(range);
+        }
+    }
+}
+
+/// Draw the value grid lines and their labels, bounded even if a bad range reaches here.
+fn value_grid(pc: &egui::Painter, plot: Rect, (lo, hi): (f64, f64), t: &Tokens) {
+    let span = hi - lo;
+    let ymap = |v: f64| plot.max.y - ((v - lo) / span) as f32 * plot.height();
+    let step = nice_step(span / 6.0);
+    let mut gv = (lo / step).ceil() * step;
+    for _ in 0..MAX_GRID_LINES {
+        if !gv.is_finite() || gv > hi {
+            break;
+        }
+        let y = ymap(gv);
+        pc.line_segment([pos2(plot.min.x, y), pos2(plot.max.x, y)], Stroke::new(1.0, Color32::from_white_alpha(12)));
+        pc.text(pos2(plot.min.x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, fmt(gv, step), Tokens::ui(10.0), t.text_faint);
+        gv += step;
     }
 }
 
@@ -408,11 +464,12 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let GraphView { comp, ectx, tm } = view;
     let t = app.tokens;
     let ctx = ui.ctx().clone();
-    let footer_h = 28.0;
-    let plot = Rect::from_min_max(area.min + vec2(0.0, 6.0), pos2(area.max.x, area.max.y - footer_h));
-    let bar = Rect::from_min_max(pos2(area.min.x, area.max.y - footer_h), area.max);
-    // Background first so keys and handles (added later) sit on top for hit-testing.
-    let bg = ui.interact(plot, egui::Id::unique("graph-bg"), Sense::click_and_drag());
+    let plot = plot_rect(area);
+    let bar = Rect::from_min_max(pos2(area.min.x, area.max.y - FOOTER_H), area.max);
+    // Background first so keys and handles (added later) sit on top for hit-testing. While the
+    // Spacebar hand is held the Timeline owns the drag, so the background does not start a box.
+    let bg_sense = if super::space_hand(&ctx) { Sense::hover() } else { Sense::click_and_drag() };
+    let bg = ui.interact(plot, egui::Id::unique("graph-bg"), bg_sense);
     p.rect_filled(area, 0.0, Color32::from_rgb(0x1d, 0x1d, 0x1d));
     app.auto.add("timeline.graph", plot, &app.ui.timeline.graph_mode.clone());
     let speed = speed_graph(app, comp);
@@ -425,22 +482,19 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let drag_id = egui::Id::unique("graph-dragging");
     let dragging = ctx.data(|d| d.get_temp::<bool>(drag_id)).unwrap_or(false) && ctx.input(|i| i.pointer.any_down());
     let (lo, hi) = if app.ui.timeline.graph_auto_zoom && !dragging { auto } else { app.ui.timeline.graph_range.unwrap_or(auto) };
+    // A stored range can come from a project/UI state or the control channel; never draw a
+    // non-finite or collapsed span, even if Auto-zoom is off.
+    let (lo, hi) = valid_range(lo, hi).unwrap_or_else(|| valid_range(auto.0, auto.1).unwrap_or((0.0, 1.0)));
     if app.ui.timeline.graph_auto_zoom && !dragging {
         app.ui.timeline.graph_range = Some((lo, hi));
     }
-    let ymap = |v: f64| plot.max.y - ((v - lo) / (hi - lo)) as f32 * plot.height();
-    let vmap = |y: f32| lo + (plot.max.y - y) as f64 / plot.height() as f64 * (hi - lo);
+    let span = hi - lo;
+    let ymap = |v: f64| plot.max.y - ((v - lo) / span) as f32 * plot.height();
+    let vmap = |y: f32| lo + (plot.max.y - y) as f64 / plot.height() as f64 * span;
 
     // Grid + value labels.
     let pc = p.with_clip_rect(plot);
-    let step = nice_step((hi - lo) / 6.0);
-    let mut gv = (lo / step).ceil() * step;
-    while gv <= hi {
-        let y = ymap(gv);
-        pc.line_segment([pos2(plot.min.x, y), pos2(plot.max.x, y)], Stroke::new(1.0, Color32::from_white_alpha(12)));
-        pc.text(pos2(plot.min.x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, fmt(gv, step), Tokens::ui(10.0), t.text_faint);
-        gv += step;
-    }
+    value_grid(&pc, plot, (lo, hi), &t);
     if cs.is_empty() {
         p.text(
             plot.center(),
@@ -600,7 +654,6 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     super::graph_tools::transform_box(app, ui, &pc, &sel_keys, tm, &ymap, &vmap, speed, true, actions);
 
     box_select(ui, &pc, &bg, &key_screens, t.accent, actions);
-    wheel_zoom(app, ui, plot, (lo, hi));
     if button_bar(app, ui, p, comp, bar, speed, actions) {
         fit_selection(app, &cs, tm, plot, speed);
     }

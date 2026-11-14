@@ -47,6 +47,7 @@ mod ui_gradient_editor;
 mod ui_gradient_handles;
 mod ui_gradient_value;
 mod ui_graph_fit;
+mod ui_graph_navigation;
 mod ui_group_rename;
 mod ui_guide_layers;
 mod ui_info_tracker_a11y;
