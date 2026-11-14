@@ -43,18 +43,11 @@ pub(crate) fn gcd(a: u32, b: u32) -> u32 {
 }
 
 /// Describe an animated GIF as a movie. `None` for a GIF with fewer than two frames (a still) or
-/// one whose headers can't be read.
+/// one whose headers can't be read. A damaged tail keeps the frames before it.
 pub(crate) fn probe(path: &str, bytes: &[u8]) -> Option<Footage> {
-    let mut dec = gif::DecodeOptions::new().read_info(Cursor::new(bytes)).ok()?;
-    let (width, height) = (u32::from(dec.width()), u32::from(dec.height()));
-    let mut delays: Vec<u32> = Vec::new();
-    while delays.len() < MAX_FRAMES {
-        match dec.next_frame_info() {
-            Ok(Some(f)) => delays.push(delay_cs(u32::from(f.delay))),
-            // The end, or a damaged tail: keep the frames before it.
-            _ => break,
-        }
-    }
+    let info = craft_gif::scan(bytes, MAX_FRAMES)?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let delays: Vec<u32> = info.frames.iter().map(|f| delay_cs(u32::from(f.delay_cs))).collect();
     if delays.len() < 2 || width == 0 || height == 0 {
         return None;
     }

@@ -2,11 +2,14 @@
 
 use std::collections::BTreeSet;
 
+use craft_lottie::model::{Asset, Effect, Font, Fonts, Layer as LottieLayer, LayerContent, Marker, Mask, PrecompLayer, SolidLayer, Transform};
+use craft_lottie::{Animated, Animation, Json};
 use effectcraft_keyframe::Value;
 use effectcraft_project::{Comp, FootageKind, GroupKind, ItemId, ItemKind, Layer, LayerSource, MaskMode, MatteKind, Project, PropGroup};
-use serde_json::{Map, Value as Json, json};
+use serde_json::json;
 
 use crate::anim::{self, Ex, export_prop};
+use crate::shapes::fixed;
 use crate::{LottieError, Timebase, shapes, text};
 
 /// Export settings.
@@ -134,30 +137,15 @@ struct Doc<'a> {
     opts: &'a ExportOptions,
     read: &'a dyn Fn(&str) -> Option<Vec<u8>>,
     ex: Ex,
-    assets: Vec<Json>,
+    assets: Vec<Asset>,
     done: BTreeSet<String>,
-    fonts: Vec<Json>,
+    fonts: Vec<Font>,
     any_3d: bool,
-}
-
-fn hex(c: [f32; 3]) -> String {
-    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
 }
 
 /// The image type `bytes` hold, by their signature; `None` for anything else.
 pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        Some("image/webp")
-    } else {
-        None
-    }
+    craft_lottie::image_mime(bytes)
 }
 
 impl Doc<'_> {
@@ -165,84 +153,68 @@ impl Doc<'_> {
         self.ex.tb.frame(t)
     }
 
-    fn prop(&mut self, g: &PropGroup, m: &str, conv: &dyn Fn(&Value) -> Json, label: &str) -> Option<Json> {
+    fn prop(&mut self, g: &PropGroup, m: &str, conv: &dyn Fn(&Value) -> Json, label: &str) -> Option<Animated> {
         let p = g.get(m)?;
         Some(export_prop(&mut self.ex, p, conv, &format!("{label} ▸ {}", p.name)))
     }
 
-    fn transform(&mut self, l: &Layer) -> Json {
-        let mut ks = Map::new();
-        let Some(tr) = l.transform() else { return json!({}) };
+    fn transform(&mut self, l: &Layer) -> Transform {
+        let mut ks = Transform::default();
+        let Some(tr) = l.transform() else { return ks };
         let label = format!("{} ▸ Transform", l.name);
         let three = l.is_3d();
-        if let Some(a) = self.prop(tr, "anchor", &anim::arr3, &label) {
-            ks.insert("a".into(), a);
-        }
+        ks.anchor = self.prop(tr, "anchor", &anim::arr3, &label);
         if tr.get("positionX").is_some() {
             let mut p = json!({"s": true});
             for (k, m) in [("x", "positionX"), ("y", "positionY"), ("z", "positionZ")] {
                 if (k != "z" || three)
                     && let Some(v) = self.prop(tr, m, &anim::num, &label)
                 {
-                    p[k] = v;
+                    p[k] = v.0;
                 }
             }
-            ks.insert("p".into(), p);
-        } else if let Some(p) = self.prop(tr, "position", &anim::arr3, &label) {
-            ks.insert("p".into(), p);
+            ks.position = Some(Animated(p));
+        } else {
+            ks.position = self.prop(tr, "position", &anim::arr3, &label);
         }
-        if let Some(s) = self.prop(tr, "scale", &anim::arr3, &label) {
-            ks.insert("s".into(), s);
-        }
+        ks.scale = self.prop(tr, "scale", &anim::arr3, &label);
         if three {
-            for (k, m) in [("rx", "rotationX"), ("ry", "rotationY"), ("rz", "rotation")] {
-                if let Some(v) = self.prop(tr, m, &anim::num, &label) {
-                    ks.insert(k.into(), v);
-                }
-            }
-            if let Some(v) = self.prop(tr, "orientation", &anim::arr3, &label) {
-                ks.insert("or".into(), v);
-            }
-        } else if let Some(r) = self.prop(tr, "rotation", &anim::num, &label) {
-            ks.insert("r".into(), r);
+            ks.rotation_x = self.prop(tr, "rotationX", &anim::num, &label);
+            ks.rotation_y = self.prop(tr, "rotationY", &anim::num, &label);
+            ks.rotation_z = self.prop(tr, "rotation", &anim::num, &label);
+            ks.orientation = self.prop(tr, "orientation", &anim::arr3, &label);
+        } else {
+            ks.rotation = self.prop(tr, "rotation", &anim::num, &label);
         }
-        if let Some(o) = self.prop(tr, "opacity", &anim::num, &label) {
-            ks.insert("o".into(), o);
-        }
-        Json::Object(ks)
+        ks.opacity = self.prop(tr, "opacity", &anim::num, &label);
+        ks
     }
 
-    fn masks(&mut self, l: &Layer) -> Vec<Json> {
+    fn masks(&mut self, l: &Layer) -> Vec<Mask> {
         let Some(masks) = l.masks() else { return vec![] };
         let mut out = vec![];
         for m in masks.groups() {
             let GroupKind::Mask { mode, inverted, .. } = m.kind else { continue };
             let label = format!("{} ▸ {}", l.name, m.name);
-            let mut o = json!({"nm": m.name, "mode": mask_mode(mode), "inv": inverted});
-            if let Some(v) = self.prop(m, "path", &shapes::path_value, &label) {
-                o["pt"] = v;
-            }
-            if let Some(v) = self.prop(m, "opacity", &anim::num, &label) {
-                o["o"] = v;
-            }
-            if let Some(v) = self.prop(m, "expansion", &anim::num, &label) {
-                o["x"] = v;
-            }
+            let mut o = Mask { name: Some(m.name.clone()), mode: Some(mask_mode(mode).into()), inverted: Some(inverted), ..Default::default() };
+            o.path = self.prop(m, "path", &shapes::path_value, &label);
+            o.opacity = self.prop(m, "opacity", &anim::num, &label);
+            o.expansion = self.prop(m, "expansion", &anim::num, &label);
             if let Some(f) = m.get("feather") {
                 if f.is_animated() || f.value.components().iter().any(|v| *v != 0.0) {
                     self.ex.warn(format!("{label}: mask feather is exported as `f` (not every Lottie player renders it)"));
                 }
-                o["f"] = export_prop(&mut self.ex, f, &anim::arr2, &format!("{label} ▸ Mask Feather"));
+                o.extra.insert("f".into(), export_prop(&mut self.ex, f, &anim::arr2, &format!("{label} ▸ Mask Feather")).0);
             }
             if !m.enabled {
-                o["mode"] = json!("n");
+                o.mode = Some("n".into());
             }
             out.push(o);
         }
         out
     }
 
-    fn effects(&mut self, l: &Layer) -> Vec<Json> {
+    fn effects(&mut self, l: &Layer) -> Vec<Effect> {
         let Some(fx) = l.effects() else { return vec![] };
         let mut out = vec![];
         for (i, g) in fx.groups().enumerate() {
@@ -268,11 +240,27 @@ impl Doc<'_> {
                         };
                         (p.name.clone(), export_prop(&mut self.ex, p, &conv, &format!("{label} ▸ {}", p.name)))
                     }
-                    None => (format!("Param {}", pi + 1), json!({"a": 0, "k": konst})),
+                    None => (format!("Param {}", pi + 1), fixed(json!(konst))),
                 };
-                params.push(json!({"ty": ty, "nm": nm, "mn": m, "ix": pi + 1, "v": v}));
+                params.push(Effect {
+                    kind: Some(i64::from(*ty)),
+                    name: Some(nm),
+                    match_name: Some((*m).into()),
+                    index: Some(pi as i64 + 1),
+                    value: Some(v),
+                    ..Default::default()
+                });
             }
-            out.push(json!({"ty": map.ty, "nm": g.name, "mn": effect, "ix": i + 1, "en": g.enabled as u8, "np": params.len(), "ef": params}));
+            out.push(Effect {
+                kind: Some(i64::from(map.ty)),
+                name: Some(g.name.clone()),
+                match_name: Some(effect.clone()),
+                index: Some(i as i64 + 1),
+                enabled: Some(i64::from(g.enabled)),
+                count: Some(params.len() as i64),
+                values: Some(params),
+                ..Default::default()
+            });
         }
         out
     }
@@ -294,8 +282,16 @@ impl Doc<'_> {
             self.ex.warn(format!("{}: `{}` is not a PNG, JPEG, GIF or WebP image (layer exported as a null)", l.name, f.path));
             return None;
         };
-        let uri = format!("data:{mime};base64,{}", crate::base64::encode(&bytes));
-        self.assets.push(json!({"id": id, "nm": it.name, "w": f.width, "h": f.height, "u": "", "p": uri, "e": 1}));
+        self.assets.push(Asset {
+            id: Some(id.clone()),
+            name: Some(it.name.clone()),
+            width: Some(f64::from(f.width)),
+            height: Some(f64::from(f.height)),
+            dir: Some(String::new()),
+            path: Some(craft_lottie::base64::to_data_uri(mime, &bytes)),
+            embedded: Some(1),
+            ..Default::default()
+        });
         self.done.insert(id.clone());
         Some(id)
     }
@@ -309,11 +305,19 @@ impl Doc<'_> {
         let c = it.as_comp()?;
         self.done.insert(id.clone());
         let layers = self.layers(c);
-        self.assets.push(json!({"id": id, "nm": it.name, "fr": c.frame_rate.as_f64(), "w": c.width, "h": c.height, "layers": layers}));
+        self.assets.push(Asset {
+            id: Some(id.clone()),
+            name: Some(it.name.clone()),
+            frame_rate: Some(c.frame_rate.as_f64()),
+            width: Some(f64::from(c.width)),
+            height: Some(f64::from(c.height)),
+            layers: Some(layers),
+            ..Default::default()
+        });
         Some(id)
     }
 
-    fn layers(&mut self, comp: &Comp) -> Vec<Json> {
+    fn layers(&mut self, comp: &Comp) -> Vec<LottieLayer> {
         let mattes: BTreeSet<_> = comp.layers.iter().filter_map(|l| l.track_matte.map(|m| m.layer)).collect();
         let mut out = vec![];
         for (idx, l) in comp.layers.iter().enumerate() {
@@ -322,11 +326,9 @@ impl Doc<'_> {
         out
     }
 
-    fn layer(&mut self, comp: &Comp, idx: usize, l: &Layer, is_matte: bool) -> Json {
+    fn layer(&mut self, comp: &Comp, idx: usize, l: &Layer, is_matte: bool) -> LottieLayer {
         let name = l.name.clone();
-        let mut o = Map::new();
-        o.insert("ind".into(), json!(idx + 1));
-        o.insert("nm".into(), json!(name));
+        let mut o = LottieLayer { index: Some(idx as i64 + 1), name: Some(name.clone()), ..Default::default() };
         let three = l.is_3d();
         if three {
             self.any_3d = true;
@@ -334,34 +336,30 @@ impl Doc<'_> {
                 self.ex.warn(format!("{name}: 3D layer exported with ddd: 1 (most Lottie players render 2D only)"));
             }
         }
-        o.insert("ddd".into(), json!(three as u8));
+        o.three_d = Some(i64::from(three));
         let mut hidden = !l.switches.video || l.switches.guide;
-        let mut ty = 3;
+        o.content = LayerContent::Null;
         match &l.source {
             LayerSource::Shape => {
-                ty = 4;
                 let items = l.props.sub("contents").map(|c| shapes::export_items(&mut self.ex, c, &name)).unwrap_or_default();
-                o.insert("shapes".into(), json!(items));
+                o.content = LayerContent::Shape(items);
             }
             LayerSource::Text => {
                 if self.opts.text_as_shapes {
-                    ty = 4;
-                    let items = text::glyph_shapes(&mut self.ex, l);
-                    o.insert("shapes".into(), json!(items));
+                    o.content = LayerContent::Shape(text::glyph_shapes(&mut self.ex, l));
                 } else {
-                    ty = 5;
-                    let t = text::export_text(&mut self.ex, l, &mut self.fonts);
-                    o.insert("t".into(), t);
+                    o.content = LayerContent::Text(Box::new(text::export_text(&mut self.ex, l, &mut self.fonts)));
                 }
             }
             LayerSource::Solid { item } => {
                 let sol = self.project.item(*item).and_then(|i| if let ItemKind::Solid(s) = &i.kind { Some(s.clone()) } else { None });
                 match sol {
                     Some(s) if !l.switches.adjustment => {
-                        ty = 1;
-                        o.insert("sc".into(), json!(hex(s.color)));
-                        o.insert("sw".into(), json!(s.width));
-                        o.insert("sh".into(), json!(s.height));
+                        o.content = LayerContent::Solid(SolidLayer {
+                            color: Some(craft_lottie::to_hex(s.color)),
+                            width: Some(f64::from(s.width)),
+                            height: Some(f64::from(s.height)),
+                        });
                     }
                     _ => {
                         self.ex.warn(format!("{name}: adjustment layers are not part of Lottie (exported as a null)"));
@@ -371,15 +369,9 @@ impl Doc<'_> {
             }
             LayerSource::Comp { item } => {
                 if let Some(id) = self.precomp_asset(*item) {
-                    ty = 0;
                     let (w, h) = self.project.comp(*item).map(|c| (c.width, c.height)).unwrap_or((comp.width, comp.height));
-                    o.insert("refId".into(), json!(id));
-                    o.insert("w".into(), json!(w));
-                    o.insert("h".into(), json!(h));
-                    if let Some(tm) = l.props.get("timeRemap") {
-                        let v = export_prop(&mut self.ex, tm, &anim::num, &format!("{name} ▸ Time Remap"));
-                        o.insert("tm".into(), v);
-                    }
+                    let time_remap = l.props.get("timeRemap").map(|tm| export_prop(&mut self.ex, tm, &anim::num, &format!("{name} ▸ Time Remap")));
+                    o.content = LayerContent::Precomp(PrecompLayer { ref_id: Some(id), width: Some(f64::from(w)), height: Some(f64::from(h)), time_remap });
                 }
             }
             LayerSource::Footage { item } => {
@@ -387,8 +379,7 @@ impl Doc<'_> {
                 match kind {
                     Some((FootageKind::Still, true)) => {
                         if let Some(id) = self.image_asset(*item, l) {
-                            ty = 2;
-                            o.insert("refId".into(), json!(id));
+                            o.content = LayerContent::Image(Some(id));
                         } else {
                             hidden = true;
                         }
@@ -413,20 +404,16 @@ impl Doc<'_> {
                 hidden = true;
             }
         }
-        o.insert("ty".into(), json!(ty));
-        if let Some(p) = l.parent.and_then(|p| comp.index_of(p)) {
-            o.insert("parent".into(), json!(p));
-        }
-        o.insert("sr".into(), json!(l.stretch / 100.0));
+        o.parent = l.parent.and_then(|p| comp.index_of(p)).map(|p| p as i64);
+        o.stretch = Some(l.stretch / 100.0);
         if l.stretch < 0.0 {
             self.ex.warn(format!("{name}: reversed time stretch is not supported by most Lottie players"));
         }
-        let ks = self.transform(l);
-        o.insert("ks".into(), ks);
-        o.insert("ao".into(), json!((l.auto_orient == effectcraft_project::AutoOrient::AlongPath) as u8));
-        o.insert("ip".into(), json!(self.frame(l.in_point)));
-        o.insert("op".into(), json!(self.frame(l.out_point)));
-        o.insert("st".into(), json!(self.frame(l.start_time)));
+        o.transform = Some(self.transform(l));
+        o.auto_orient = Some(i64::from(l.auto_orient == effectcraft_project::AutoOrient::AlongPath));
+        o.in_point = Some(self.frame(l.in_point));
+        o.out_point = Some(self.frame(l.out_point));
+        o.start_time = Some(self.frame(l.start_time));
         let bm = match crate::blend_to_lottie(l.blend_mode) {
             Some(b) => b,
             None => {
@@ -434,32 +421,32 @@ impl Doc<'_> {
                 0
             }
         };
-        o.insert("bm".into(), json!(bm));
+        o.blend_mode = Some(i64::from(bm));
         let masks = self.masks(l);
         if !masks.is_empty() {
-            o.insert("hasMask".into(), json!(true));
-            o.insert("masksProperties".into(), json!(masks));
+            o.has_mask = Some(true);
+            o.masks = Some(masks);
         }
         let ef = self.effects(l);
         if !ef.is_empty() {
-            o.insert("ef".into(), json!(ef));
+            o.effects = Some(ef);
         }
         if let Some(tm) = l.track_matte
             && let Some(mi) = comp.index_of(tm.layer)
         {
-            o.insert("tt".into(), json!(matte_code(tm.kind)));
-            o.insert("tp".into(), json!(mi));
+            o.matte_mode = Some(i64::from(matte_code(tm.kind)));
+            o.matte_parent = Some(mi as i64);
             if mi != idx {
                 self.ex.warn(format!("{name}: track matte layer is not directly above (players without `tp` support use the layer above)"));
             }
         }
         if is_matte {
-            o.insert("td".into(), json!(1));
+            o.is_matte = Some(1);
             if l.switches.video {
                 self.ex.warn(format!("{name}: visible track matte layer (Lottie always hides matte layers)"));
             }
         } else if hidden {
-            o.insert("hd".into(), json!(true));
+            o.hidden = Some(true);
         }
         if !l.markers.is_empty() {
             self.ex.warn(format!("{name}: layer markers are not part of Lottie (composition markers are exported)"));
@@ -471,7 +458,7 @@ impl Doc<'_> {
         if l.preserve_transparency {
             self.ex.warn(format!("{name}: Preserve Underlying Transparency is not part of Lottie"));
         }
-        Json::Object(o)
+        o
     }
 }
 
@@ -493,24 +480,27 @@ pub fn export_comp(project: &Project, comp: ItemId, opts: &ExportOptions, read: 
     };
     doc.done.insert(format!("comp_{}", comp.0));
     let layers = doc.layers(c);
-    let markers: Vec<Json> = c.markers.iter().map(|m| json!({"tm": doc.frame(m.time), "cm": m.comment, "dr": doc.frame(m.duration)})).collect();
-    let mut out = json!({
-        "v": "5.12.0",
-        "fr": c.frame_rate.as_f64(),
-        "ip": 0,
-        "op": doc.frame(c.duration),
-        "w": c.width,
-        "h": c.height,
-        "nm": item.name,
-        "ddd": doc.any_3d as u8,
-        "assets": doc.assets,
-        "layers": layers,
-        "markers": markers,
-    });
-    if !doc.fonts.is_empty() {
-        out["fonts"] = json!({"list": doc.fonts});
-    }
-    Ok(ExportResult { json: out, warnings: doc.ex.warnings })
+    let markers: Vec<Marker> = c
+        .markers
+        .iter()
+        .map(|m| Marker { time: Some(doc.frame(m.time)), comment: Some(m.comment.clone()), duration: Some(doc.frame(m.duration)), ..Default::default() })
+        .collect();
+    let animation = Animation {
+        version: Some("5.12.0".into()),
+        frame_rate: Some(c.frame_rate.as_f64()),
+        in_point: Some(0.0),
+        out_point: Some(doc.frame(c.duration)),
+        width: Some(f64::from(c.width)),
+        height: Some(f64::from(c.height)),
+        name: Some(item.name.clone()),
+        three_d: Some(i64::from(doc.any_3d)),
+        assets: Some(doc.assets),
+        layers: Some(layers),
+        markers: Some(markers),
+        fonts: (!doc.fonts.is_empty()).then(|| Fonts { list: Some(doc.fonts), ..Default::default() }),
+        ..Default::default()
+    };
+    Ok(ExportResult { json: animation.to_json(), warnings: doc.ex.warnings })
 }
 
 /// Package an export as a dotLottie archive (`manifest.json` + `animations/<id>.json`).

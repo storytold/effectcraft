@@ -194,6 +194,22 @@ fn functions_and_let_are_reusable_across_evaluations() {
 }
 
 #[test]
+fn a_function_declaration_ends_at_its_brace_so_a_leading_minus_starts_a_new_statement() {
+    // #3212: the array-math rewrite took `function … {…}\n-50 + 100` for one expression,
+    // `(function … {…}) - 50 + 100`, which is NaN (and left the function undeclared).
+    let f = fx();
+    assert_close!(f.num("function same3212(x){ return x; }\n-50 + 100", 0.0), 50.0);
+    // The declaration really declared the function (globals do not outlive one evaluation).
+    assert_close!(f.num("function same3212(x){ return x; }\n-50 + 100;\nsame3212(7)", 0.0), 7.0);
+    assert_close!(f.num("function twice3212(x){ return x * 2; }\n-twice3212(10) + 100", 0.0), 80.0);
+    assert_close!(f.num("function seven3212(){ return 7; }\n+seven3212()", 0.0), 7.0);
+    assert_close!(f.num("function one3212(){ return 1; } -one3212() * 3", 0.0), -3.0);
+    assert_close!(f.num("if (time >= 0) { function neg3212(x){ return -x; }\n-neg3212(4) }", 0.0), 4.0);
+    // A function expression stays an operand: `function - 1` is NaN in JavaScript too.
+    assert_close!(f.num("var g3212 = function(){ return 1; }\n- 1;\ntypeof g3212 == 'number' ? 5 : 6", 0.0), 5.0);
+}
+
+#[test]
 fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
     let f = fx();
     // #2133: one runtime serves every expression on a thread and user code runs at global scope, so
@@ -1256,6 +1272,41 @@ fn source_text_style_api() {
     assert_eq!(d.runs().len(), 3);
     // Non-text properties have no style.
     assert!(f.ev(f.a, ROT, "transform.rotation.style.fontSize", 0.0).is_err());
+}
+
+#[test]
+fn paragraph_settings_read_and_write_after_effects_names() {
+    // After Effects 26.3 reads justification as alignLeft / alignCenter / alignRight /
+    // justifyLastLeft / justifyLastCenter / justifyLastRight / justifyFull and direction as
+    // left-to-right / right-to-left, and its setters take those names.
+    let f = fx();
+    let doc = |f: &Fx, e: &str| -> TextDoc {
+        match f.ev(f.title, "text/sourceText", e, 0.0) {
+            Ok(Value::Text(d)) => *d,
+            r => panic!("{e}: {r:?}"),
+        }
+    };
+    let s = |e: &str| doc(&f, e).text;
+    assert_eq!(s("text.sourceText.style.justification + ' ' + text.sourceText.style.direction"), "alignLeft left-to-right");
+    for (ae, want) in [
+        ("alignLeft", effectcraft_keyframe::Justify::Left),
+        ("alignCenter", effectcraft_keyframe::Justify::Center),
+        ("alignRight", effectcraft_keyframe::Justify::Right),
+        ("justifyLastLeft", effectcraft_keyframe::Justify::JustifyLastLeft),
+        ("justifyLastCenter", effectcraft_keyframe::Justify::JustifyLastCenter),
+        ("justifyLastRight", effectcraft_keyframe::Justify::JustifyLastRight),
+        ("justifyFull", effectcraft_keyframe::Justify::JustifyAll),
+    ] {
+        let d = doc(&f, &format!("text.sourceText.style.setJustification('{ae}')"));
+        assert_eq!(d.justify, want, "{ae}");
+    }
+    let d = doc(&f, "text.sourceText.style.setDirection('right-to-left').setJustification('justifyLastRight')");
+    assert_eq!(d.direction, effectcraft_keyframe::Direction::Rtl);
+    assert_eq!(s("text.sourceText.style.setJustification('alignRight').justification"), "alignRight");
+    // Every accepted alias reads back as After Effects' name; an inherited name isn't one.
+    assert_eq!(s("text.sourceText.style.setJustification('CENTER_JUSTIFY').justification"), "alignCenter");
+    assert_eq!(s("text.sourceText.style.setJustification('justifyAll').justification"), "justifyFull");
+    assert_eq!(s("String(text.sourceText.style.setJustification('toString').justification)"), "toString");
 }
 
 #[test]

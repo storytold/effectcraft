@@ -411,7 +411,7 @@ impl EffectcraftApp {
     /// fonts are ready, draw the frame, finish pointer wrapping, pump queued wasm frames, record input activity,
     /// publish the completed pass's geometry and pass sequence, acknowledge applied synthetic input and answer
     /// `AfterInput` replies only after a non-discarded pass. Requests repaints while frames are in flight.
-    fn draw_inner(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+    fn draw_inner(&mut self, ui: &mut egui::Ui, _frame: &eframe::Frame) {
         let ctx = ui.ctx().clone();
         if self.gpu_failure_applied == Some(true) {
             self.close_after_device_loss(&ctx);
@@ -429,7 +429,7 @@ impl EffectcraftApp {
         self.frame(ui);
         panels::crypto_pick::upkeep(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        pointer_wrap::finish_native(&ctx, frame);
+        pointer_wrap::finish_native(&ctx, _frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.
         if cfg!(target_arch = "wasm32") && self.frames.pump(std::time::Duration::from_millis(if self.playback.playing { 24 } else { 40 })) {
             ctx.request_repaint();
@@ -530,6 +530,7 @@ impl EffectcraftApp {
         crate::color_picker::note_dialog(&ctx, self.dialog);
         // After the shortcuts, menus and header, which can replace the project (New, Open).
         self.ui.timeline.scope_links(self.session.script_ui.project_epoch);
+        panels::effect_controls::scope_lock(self);
         self.dock_area(ui, body);
         #[cfg(not(target_arch = "wasm32"))]
         prefs_live::dropped_files(self, ui, full);

@@ -360,18 +360,30 @@ pub(super) fn profile_converter(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---- Color Stabilizer
 
-/// Mean straight colour of a square (half-size `r` layer pixels) around layer point `pt`.
-fn sample_mean(b: &Buf, pt: [f64; 2], r: f64) -> [f64; 3] {
-    let (cx, cy) = b.to_px(pt);
-    let rr = (r * b.scale).max(0.5);
-    let (x0, x1) = ((cx - rr).floor().max(0.0) as i64, ((cx + rr).ceil() as i64).min(b.img.width as i64));
-    let (y0, y1) = ((cy - rr).floor().max(0.0) as i64, ((cy + rr).ceil() as i64).min(b.img.height as i64));
+/// Mean straight colour of Color Stabilizer's sampled area for layer point `pt`, as After Effects
+/// 2026 samples it (#3125): a square `size` layer pixels wide (Sample Size is the full width)
+/// centred on the middle of the pixel the point names, i.e. half a pixel right of and below the
+/// layer point (After Effects' point (x, y) is the centre of pixel (x, y)). Each pixel counts
+/// with the share of it the square covers, so the mean changes smoothly with a sub-pixel point
+/// or a fractional size. At least one buffer pixel wide.
+fn sample_mean(b: &Buf, pt: [f64; 2], size: f64) -> [f64; 3] {
+    let (cx, cy) = b.to_px([pt[0] + 0.5, pt[1] + 0.5]);
+    let h = (size * 0.5 * b.scale).max(0.5);
+    // The share of pixel `i` (covering [i, i + 1]) inside [c − h, c + h].
+    let cover = |i: i64, c: f64| ((i as f64 + 1.0).min(c + h) - (i as f64).max(c - h)).max(0.0);
+    let (x0, x1) = ((cx - h).floor().max(0.0) as i64, ((cx + h).ceil() as i64).min(b.img.width as i64));
+    let (y0, y1) = ((cy - h).floor().max(0.0) as i64, ((cy + h).ceil() as i64).min(b.img.height as i64));
     let mut acc = [0.0f64; 4];
     for y in y0..y1 {
+        let wy = cover(y, cy);
         for x in x0..x1 {
+            let w = wy * cover(x, cx);
+            if w <= 0.0 {
+                continue;
+            }
             let p = b.img.get(x, y);
             for k in 0..4 {
-                acc[k] += p[k] as f64;
+                acc[k] += w * p[k] as f64;
             }
         }
     }
@@ -410,7 +422,8 @@ fn stabilizer_samples(ctx: &EffectCtx, b: &Buf) -> Option<([[f64; 3]; 3], [[f64;
     let host = ctx.env.host?;
     let t_ref = ctx.params.f("referenceFrame");
     let reference = host.self_at(t_ref, ctx.env.effect_index)?;
-    let r = ctx.params.f("sampleSize").max(0.5);
+    // Sample Size is the full width of the sampled square in layer pixels (#3125).
+    let r = ctx.params.f("sampleSize").max(1.0);
     let pts = STABILIZER_POINTS.map(|id| ctx.params.v2(id));
     let ref_params = host.params_at(t_ref);
     let ref_pts = match &ref_params {

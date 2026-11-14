@@ -381,7 +381,7 @@ fn offset_paths_miter_uses_animatable_lottie_value() {
     assert_eq!(shapes[0]["ml"]["k"][1]["s"], json!([9.0]));
     assert_eq!(shapes[1]["ml"], json!({"a": 0, "k": 6.0}));
     assert_eq!(shapes[2]["ty"], "st");
-    assert_eq!(shapes[2]["ml"], json!(7.0));
+    assert_eq!(shapes[2]["ml"].as_f64(), Some(7.0));
     assert!(compare_comps(&p, cid, &q, nc) > 10);
     let restored = &q.comp(nc).unwrap().layers[0];
     assert_eq!(restored.props.group("contents/offset").unwrap().get("miter").unwrap().keys.len(), 2);
