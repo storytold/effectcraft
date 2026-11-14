@@ -268,6 +268,77 @@ impl Playback {
     }
 }
 
+/// An error awaiting its first standalone display.
+pub(crate) struct ErrorToast {
+    message: String,
+    shown_at: Option<f64>,
+    /// A status already reports this error; dismissing that same status acknowledges both.
+    reported_status: Option<String>,
+    reports: usize,
+}
+
+impl ErrorToast {
+    const MAX_PENDING: usize = 32;
+    const MAX_DETAILS: usize = 16 << 10;
+
+    fn bounded_text<'a>(messages: impl IntoIterator<Item = &'a str>) -> String {
+        let mut text = String::new();
+        let mut truncated = false;
+        for (index, part) in messages.into_iter().enumerate() {
+            let separator = usize::from(!text.is_empty());
+            let remaining = Self::MAX_DETAILS.saturating_sub(text.len() + separator);
+            if remaining == 0 || index >= Self::MAX_DETAILS {
+                truncated = true;
+                break;
+            }
+            if separator != 0 {
+                text.push('\n');
+            }
+            let end = part.floor_char_boundary(remaining.min(part.len()));
+            text.push_str(part.get(..end).unwrap_or_default());
+            if end < part.len() {
+                truncated = true;
+                break;
+            }
+        }
+        if truncated {
+            let marker = crate::i18n::ui::tr("Further error details were truncated.");
+            let marker = marker.get(..marker.floor_char_boundary(Self::MAX_DETAILS - 1)).unwrap_or_default();
+            text.truncate(text.floor_char_boundary(Self::MAX_DETAILS.saturating_sub(marker.len() + 1)));
+            text.push('\n');
+            text.push_str(marker);
+        }
+        text
+    }
+
+    fn new<'a>(messages: impl IntoIterator<Item = &'a str>, reported_status: Option<&str>) -> Self {
+        Self { message: Self::bounded_text(messages), shown_at: None, reported_status: reported_status.map(|status| Self::bounded_text([status])), reports: 1 }
+    }
+
+    fn omitted(reports: usize) -> Self {
+        let message = crate::i18n::ui::tr_args("Additional error notifications omitted: {}.", &[&reports.to_string()]);
+        Self { reports, ..Self::new([message.as_str()], None) }
+    }
+
+    fn reported_by(&self, status: &str) -> bool {
+        self.reported_status.as_deref().is_some_and(|reported| status == reported || status.strip_prefix(reported).is_some_and(|rest| rest.starts_with("; ")))
+    }
+
+    /// Pair the details with `status`, a later status line that reports the same errors.
+    fn restate(&mut self, status: &str) {
+        self.reported_status = Some(Self::bounded_text([status]));
+    }
+
+    fn message_at(&mut self, foreground_status: bool, now: f64) -> Option<&str> {
+        if self.shown_at.is_none() && !foreground_status {
+            // Only the first standalone display starts the timer. Later statuses cannot
+            // extend it, and an unseen error cannot expire behind a foreground status.
+            self.shown_at = Some(now);
+        }
+        self.shown_at.is_none_or(|at| now - at < 4.0).then_some(self.message.as_str())
+    }
+}
+
 pub struct EffectcraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -327,6 +398,8 @@ pub struct EffectcraftApp {
     /// When the project last changed, and its revision then (see [`Self::editing`]).
     last_edit: (f64, u64),
     pub(crate) toast: Option<(String, f64)>,
+    /// Error details survive routine notifications and wait for a foreground status to clear.
+    pub(crate) error_toasts: std::collections::VecDeque<ErrorToast>,
     /// Texture of the last CPU frame shown in the viewer, the key it came from and the factor it
     /// was averaged down by for the magnification (`panels::viewer::minify_factor`).
     pub(crate) viewer_tex: Option<(egui::TextureHandle, FrameKey, usize)>,

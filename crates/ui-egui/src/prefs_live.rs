@@ -59,6 +59,7 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
     }
 
     let mut errors = Vec::new();
+    let mut import_reported_errors = false;
     if skipped != 0 {
         errors.push(crate::i18n::tr_args("Skipped {} dropped file(s) without a local path. Use File ▸ Import ▸ File…", &[&skipped]));
     }
@@ -162,13 +163,17 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
             params["sequence"] = json!(false);
         }
 
-        if let Err(e) = crate::menus::invoke(app, &ctx, "file.import", params) {
-            errors.push(crate::i18n::tr_args("Cannot import dropped files: {}", &[&e]));
+        match crate::menus::invoke(app, &ctx, "file.import", params) {
+            Ok(result) => {
+                import_reported_errors = result["errors"].as_array().is_some_and(|errors| errors.iter().any(Value::is_string));
+            }
+            Err(e) => errors.push(crate::i18n::tr_args("Cannot import dropped files: {}", &[&e])),
         }
     }
 
     if !errors.is_empty() {
-        app.ui.status = errors.join("; ");
+        let local = errors.join("; ");
+        app.ui.status = if import_reported_errors { format!("{}; {local}", app.ui.status) } else { local };
     }
 }
 

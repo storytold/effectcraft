@@ -143,7 +143,8 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             _ => format!("Importing {total} files"),
         };
         let p = p.clone();
-        return s.spawn_task("import", label, false, move |ctl| {
+        let immediate_errors = pending.errors.clone();
+        let mut result = s.spawn_task("import", label, false, move |ctl| {
             let mut probed = Vec::with_capacity(total);
             for (k, src) in sources.iter().enumerate() {
                 ctl.message(format!("{} ({} of {total})", src.name(), k + 1));
@@ -162,13 +163,19 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
                 match errors.as_slice() {
                     [] => {}
                     [one] => toast = format!("{toast}. {one}"),
-                    [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)", rest.len()),
+                    [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)\n{}", rest.len(), errors.join("\n")),
                 }
                 r["toast"] = json!(toast);
                 Ok(r)
             });
             Ok(apply)
-        });
+        })?;
+        // Preparation can reject layered files before the remaining footage needs probing.
+        // Report those failures now as well as in the eventual job result.
+        if result["started"] == true {
+            result["errors"] = json!(immediate_errors);
+        }
+        return Ok(result);
     }
     let probed = pending.sources.iter().map(|src| pending.prober.probe(src)).collect();
     let mut r = add_footage(s, pending, probed)?;
@@ -346,8 +353,9 @@ impl Prober {
                 None => ask_alpha = true,
             }
         }
-        // Page: another page of a PDF / Illustrator file.
-        if self.page > 0 && matches!(f.codec.as_str(), "PDF" | "AI") {
+        // Page: another page of a PDF / Illustrator file, or another artboard of a VectorCraft
+        // document's PDF.
+        if self.page > 0 && matches!(f.codec.as_str(), "PDF" | "AI" | "VectorCraft") {
             let doc = self
                 .services
                 .read_file(path)
@@ -563,7 +571,8 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
 /// definition, OpenEXR premultiplied); TGA, TIFF and movies with alpha don't.
 fn alpha_is_labeled(path: &str, codec: &str) -> bool {
     let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    matches!(ext.as_str(), "png" | "gif" | "webp" | "psd" | "psb" | "exr" | "svg" | "jpg" | "jpeg" | "ai" | "pdf" | "eps") || codec.eq_ignore_ascii_case("PSD")
+    matches!(ext.as_str(), "png" | "gif" | "webp" | "psd" | "psb" | "exr" | "svg" | "jpg" | "jpeg" | "ai" | "pdf" | "eps" | "vectorcraft")
+        || codec.eq_ignore_ascii_case("PSD")
 }
 
 /// A Photoshop layer by index or name (pixel layers only).

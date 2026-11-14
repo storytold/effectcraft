@@ -528,6 +528,80 @@ fn tga_is_available_in_import_replace_and_proxy_dialogs() {
     }
 }
 
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
+    #[derive(Debug)]
+    struct Drop(std::path::PathBuf);
+    impl egui::DroppedFile for Drop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+    let folder = std::env::temp_dir().join(format!("effectcraft-mixed-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("no-pdf.vectorcraft");
+    std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+    let second = folder.join("also-no-pdf.vectorcraft");
+    std::fs::copy(&path, &second).unwrap();
+    let footage = folder.join("pending.png");
+    std::fs::write(&footage, b"not a PNG").unwrap();
+    for (bad_import, background) in [(false, false), (true, false), (true, true)] {
+        let mut app = EffectcraftApp::new(effectcraft_host::session());
+        app.session.prefs.import.drag_import_as = "comp".into();
+        let ctx = egui::Context::default();
+        let mut dropped_files: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(Drop("no-local-path".into()))];
+        if bad_import {
+            dropped_files.push(std::sync::Arc::new(Drop(path.clone())));
+            dropped_files.push(std::sync::Arc::new(Drop(second.clone())));
+        }
+        if background {
+            dropped_files.push(std::sync::Arc::new(Drop(footage.clone())));
+        }
+        ctx.run_ui(egui::RawInput { dropped_files, ..Default::default() }, |ui| {
+            crate::prefs_live::dropped_files(&mut app, ui, ui.max_rect());
+        })
+        .textures_delta
+        .clear();
+        assert!(app.ui.status.contains("without a local path"), "{}", app.ui.status);
+        if bad_import {
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+            let details = &app.error_toasts.back().expect("all import errors remain available").message;
+            assert!(details.contains("also-no-pdf.vectorcraft"), "{details}");
+            if background {
+                app.session.execute("jobs.wait", json!({})).unwrap();
+                app.handle_events(&ctx);
+                let details = &app.error_toasts.back().unwrap().message;
+                for name in ["no-pdf.vectorcraft", "also-no-pdf.vectorcraft", "pending.png"] {
+                    assert!(details.contains(name), "{details}");
+                }
+                assert!(app.ui.status.contains("without a local path"));
+            }
+        } else {
+            assert!(!app.ui.status.contains(";"), "{}", app.ui.status);
+        }
+    }
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[test]
+fn importing_without_a_form_shows_immediate_file_errors() {
+    let folder = std::env::temp_dir().join(format!("effectcraft-drop-import-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("no-pdf.vectorcraft");
+    std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+    let mut app = EffectcraftApp::new(effectcraft_host::session());
+    let ctx = egui::Context::default();
+    let r = invoke(&mut app, &ctx, "file.import", json!({"paths": [path], "importAs": "composition", "background": true, "drag": true})).unwrap();
+    assert!(app.dialog.is_none());
+    assert!(r["errors"][0].as_str().unwrap().contains("Create PDF-Compatible File"));
+    assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
 /// Cmd+W with the Render Queue focused closes the queue; the composition next to it stays
 /// open (it used to be closed, and the queue stayed).
 #[test]
@@ -767,6 +841,35 @@ fn bundle_result_errors_show_compactly_in_the_status_line() {
     // A clean success leaves the status line alone.
     super::frontend::show_result_errors(&mut app, &json!({"installed": ["x.wasm"], "errors": []}));
     assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+}
+
+/// A picked or menu import reports its errors twice: `report_import_errors` queues the details
+/// with a short status, and the command's result then writes the longer status. Dismissing that
+/// status still acknowledges the queued details, also when After Effects project errors lead it.
+/// Another command's errors do not take over an import's details, even with the same text.
+#[test]
+fn an_import_status_rewritten_by_its_result_still_acknowledges_its_details() {
+    let long = format!("first failed file {}", "x".repeat(20_000));
+    for first in ["first failed file", "first failed file\nwith a second line", long.as_str()] {
+        let import = json!({"errors": [first, "second failed file"]});
+        let with_aep = json!({"errors": ["project.aep: cannot read it", first, "second failed file"]});
+        for result in [&import, &with_aep] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            app.report_import_errors("file.import", &import);
+            super::frontend::show_command_result_errors(&mut app, "file.import", result);
+            assert!(app.ui.status.contains("first failed file"), "{}", app.ui.status);
+            assert_eq!(app.error_toasts.len(), 1);
+            assert!(app.error_toasts.back().unwrap().reported_by(&app.ui.status), "{first:.40}: {:.80}", app.ui.status);
+        }
+    }
+    let import = json!({"errors": ["first failed file", "second failed file"]});
+    for other in [json!({"errors": [{"file": "a.wasm", "error": "does not load"}]}), import.clone()] {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.report_import_errors("file.import", &import);
+        super::frontend::show_command_result_errors(&mut app, "effect.installBundle", &other);
+        assert!(!app.ui.status.contains("(and"), "{}", app.ui.status);
+        assert!(!app.error_toasts.back().unwrap().reported_by(&app.ui.status), "{}", app.ui.status);
+    }
 }
 
 /// Effect ▸ Install Effect Plug-in… picks its dialog by params: a bundle asks for a folder,

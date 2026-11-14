@@ -114,6 +114,10 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   stitching and PostScript calculator (type 4) functions.
 - **Pages:** any page ([`parse_page`], [`page_count`]); File ▸ Import takes `page` (from 1) and
   the Import dialog asks for it; footage remembers its page (`Footage::page`).
+- **VectorCraft documents** (`.vectorcraft`, plain or compressed): the PDF the document carries
+  when VectorCraft saved it with Create PDF-Compatible File, one page per artboard, read through
+  `craft-doc` from craft-libs. The footage codec is `VectorCraft`. A document saved without that
+  option has no PDF, and importing it reports an error that names the option.
 
 ## Limitations
 
