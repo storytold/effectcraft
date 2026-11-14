@@ -1,8 +1,28 @@
 use super::config;
 
+/// The largest PhotoCraft bundle [`Services::read_pcraft`] reads.
+pub const PCRAFT_MAX_INPUT: u64 = 512 << 20;
+
+/// The error for a PhotoCraft bundle over [`PCRAFT_MAX_INPUT`].
+pub fn pcraft_too_large() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "PhotoCraft bundle exceeds the 512 MiB input limit")
+}
+
 /// Host services (file access) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// A PhotoCraft bundle's bytes: like [`Services::read_file`], but a file over
+    /// [`PCRAFT_MAX_INPUT`] is an error. Other files read with `read_file` have no such limit.
+    fn read_pcraft(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if self.stamp(path).is_some_and(|(len, _)| len > PCRAFT_MAX_INPUT) {
+            return Err(pcraft_too_large());
+        }
+        let bytes = self.read_file(path)?;
+        if bytes.len() as u64 > PCRAFT_MAX_INPUT {
+            return Err(pcraft_too_large());
+        }
+        Ok(bytes)
+    }
     /// [`Services::read_file`] for a copy that must not load an unbounded file: more than `max`
     /// bytes is an error. The native one opens the file once, reads its size from that handle and
     /// reads through a [`std::io::Read::take`] limit, so a file grown or swapped after the check
@@ -64,17 +84,12 @@ impl Services for FsServices {
     /// Refuses what isn't a regular file: a project can name `/dev/zero` or a FIFO, and reading
     /// those never ends (#2134).
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        let meta = file.metadata()?;
-        if !meta.is_file() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{path} is not a file")));
-        }
-        let mut bytes = Vec::new();
-        // A sparse file can claim far more than memory: an error, not an abort.
-        bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        read_regular_file(path, None)
+    }
+    /// Checks the size before reserving the buffer, and stops reading a file that grows past
+    /// the limit while it is read.
+    fn read_pcraft(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        read_regular_file(path, Some(PCRAFT_MAX_INPUT))
     }
     fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
         use std::io::Read;
@@ -99,6 +114,27 @@ impl Services for FsServices {
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         config::atomic_write(std::path::Path::new(path), data)
     }
+}
+
+/// A regular file's bytes; with `limit`, a file larger than `limit` bytes is an error.
+fn read_regular_file(path: &str, limit: Option<u64>) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{path} is not a file")));
+    }
+    if limit.is_some_and(|max| meta.len() > max) {
+        return Err(pcraft_too_large());
+    }
+    let mut bytes = Vec::new();
+    // A sparse file can claim far more than memory: an error, not an abort.
+    bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
+    file.take(limit.map_or(u64::MAX, |max| max + 1)).read_to_end(&mut bytes)?;
+    if limit.is_some_and(|max| bytes.len() as u64 > max) {
+        return Err(pcraft_too_large());
+    }
+    Ok(bytes)
 }
 
 /// Imports media files into the project (implemented by the media layer).
@@ -133,6 +169,23 @@ mod tests {
         let f = dir.join(format!("ec-services-read-{}.txt", std::process::id()));
         std::fs::write(&f, b"data").unwrap();
         assert_eq!(FsServices.read_file(&f.to_string_lossy()).unwrap(), b"data");
+        let _ = std::fs::remove_file(f);
+    }
+
+    /// Templates and dotLottie files are ZIP archives too: only PhotoCraft reads have the
+    /// 512 MiB input limit. The length is set without writing the data.
+    #[test]
+    fn only_photocraft_reads_have_the_input_limit() {
+        let f = std::env::temp_dir().join(format!("ec-services-large-{}.zip", std::process::id()));
+        std::fs::write(&f, b"PK\x03\x04").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_len(super::PCRAFT_MAX_INPUT + 1).unwrap();
+        let path = f.to_string_lossy();
+        let error = FsServices.read_pcraft(&path).unwrap_err();
+        assert!(error.to_string().contains("512 MiB input limit"), "{error}");
+        let bytes = FsServices.read_file(&path).unwrap();
+        assert_eq!(bytes.len() as u64, super::PCRAFT_MAX_INPUT + 1);
+        assert!(bytes.starts_with(b"PK\x03\x04"));
+        drop(bytes);
         let _ = std::fs::remove_file(f);
     }
 

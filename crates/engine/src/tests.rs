@@ -24,6 +24,7 @@ mod fidelity;
 mod frame_export;
 mod fuzz_open;
 mod history;
+mod import_photocraft;
 mod import_project;
 mod instance3d;
 mod key_metadata_order;
