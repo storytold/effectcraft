@@ -94,6 +94,11 @@ fn generates(l: &Layer) -> bool {
     audio_effect_groups(l).any(|(id, _)| audio_fx::generates_audio(id))
 }
 
+/// Does an enabled audio effect (Backwards) play the layer's [in, out) span reversed?
+pub fn plays_backwards(l: &Layer) -> bool {
+    audio_effect_groups(l).any(|(id, _)| audio_fx::reverses(id))
+}
+
 /// Does the layer contribute to the mix (Audio switch on and something to hear)?
 pub fn audible(project: &Project, l: &Layer) -> bool {
     l.switches.audio
@@ -291,7 +296,7 @@ impl MixEnv<'_> {
         if fx.is_empty() {
             return self.layer_raw(l, i0, n, false);
         }
-        let reversed = fx.iter().any(|(id, _, _)| audio_fx::reverses(id));
+        let reversed = plays_backwards(l);
         let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum::<f64>().clamp(0.0, MAX_PREROLL_SECONDS);
         let pre = (pre_s * self.rate as f64).ceil() as usize;
         let b0 = i0 - pre as i64;
