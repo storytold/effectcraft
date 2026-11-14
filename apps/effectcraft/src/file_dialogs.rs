@@ -91,12 +91,7 @@ fn blocking<T>(errors: &Errors, what: &str, open: impl FnOnce() -> Option<T>) ->
     blocking_on(errors, what, on_main_thread(), open)
 }
 
-fn blocking_on<T>(
-    errors: &Errors,
-    what: &str,
-    main_thread: bool,
-    open: impl FnOnce() -> Option<T>,
-) -> Option<T> {
+fn blocking_on<T>(errors: &Errors, what: &str, main_thread: bool, open: impl FnOnce() -> Option<T>) -> Option<T> {
     guarded_on(main_thread, what, open).unwrap_or_else(|e| {
         let _ = errors.tx.send(e);
         errors.ctx.request_repaint();
@@ -187,13 +182,7 @@ fn show(dialog: FileDialog, done: DialogDone, ctx: egui::Context, open: impl FnO
     show_on(dialog, done, ctx, on_main_thread(), open);
 }
 
-fn show_on(
-    dialog: FileDialog,
-    done: DialogDone,
-    ctx: egui::Context,
-    main_thread: bool,
-    open: impl FnOnce(FileDialog) -> Answer,
-) {
+fn show_on(dialog: FileDialog, done: DialogDone, ctx: egui::Context, main_thread: bool, open: impl FnOnce(FileDialog) -> Answer) {
     let what = title(&dialog);
     let answer = match guarded_on(main_thread, what, || open(dialog)) {
         Ok(answer) => answer,
