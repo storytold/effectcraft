@@ -141,7 +141,12 @@ pub fn install_pickers(app: &mut EffectcraftApp, ctx: &egui::Context) -> Receive
 pub fn message(title: &str, description: String) {
     let shown = guarded("message", || rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title(title).set_description(description).show());
     if let Err(e) = shown {
-        log::error!("{e}");
+        // The diagnostic helper runs before logging is installed.
+        if log::log_enabled!(log::Level::Error) {
+            log::error!("{e}");
+        } else {
+            eprintln!("effectcraft: {e}");
+        }
     }
 }
 
