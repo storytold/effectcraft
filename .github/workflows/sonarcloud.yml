@@ -20,5 +20,8 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/sonarcloud.yml@main
     with:
       timeout-minutes: 120
+      # GPU tests share a process-local lock; separate coverage shards create independent
+      # software Vulkan devices, bypassing that lock and potentially contending on llvmpipe.
+      shards: 1
       fonts-ref: b076417b5880bd4154bd22f00695b1d28c6bea83
     secrets: inherit
