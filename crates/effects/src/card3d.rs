@@ -344,6 +344,9 @@ pub struct CompScene {
     /// follows only a camera layer).
     pub camera_layer: bool,
     pub light: Option<CompLight>,
+    /// The camera's zoom (comp pixels): with `camera`'s W the depth in front of it, a length at
+    /// that depth shows `zoom / W` times as long. 0 when unknown.
+    pub zoom: f64,
 }
 
 impl CompScene {

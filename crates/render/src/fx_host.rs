@@ -33,7 +33,7 @@ impl FxHost<'_, '_, '_> {
 /// composites.
 pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_effects::CompScene> {
     let world = ctx.world_matrix(layer);
-    let (cam, _, _) = ctx.camera();
+    let (cam, _, zoom) = ctx.camera();
     let p = (cam * world).0;
     let back = ctx.layer_to_comp(layer).0.inverse()?.0;
     let rows = [p[0], p[1], p[3]];
@@ -52,7 +52,7 @@ pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_eff
         Some(effectcraft_effects::CompLight { pos: [pos.x, pos.y, pos.z], dir: [dir.x / len, dir.y / len, dir.z / len], color: l.color, kind })
     });
     let camera_layer = ctx.comp.active_camera(ctx.time).is_some();
-    Some(effectcraft_effects::CompScene { camera: Some(camera), camera_layer, light })
+    Some(effectcraft_effects::CompScene { camera: Some(camera), camera_layer, light, zoom })
 }
 
 /// Nesting limit for effects that render layers (other layers, other times).

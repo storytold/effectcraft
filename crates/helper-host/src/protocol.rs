@@ -112,6 +112,8 @@ pub enum Request {
     Params { values: Option<(Vec<f64>, Vec<String>)> },
     /// The answer to [`Reply::LayerTransform`], or `None`.
     Transform { transform: Option<effectcraft_effects::plugin::LayerTransform> },
+    /// The answer to [`Reply::CompCamera`], or `None`.
+    Camera { camera: Option<effectcraft_effects::plugin::CompCamera> },
     /// The effect instance is gone; the helper may free what it keeps for it. No reply.
     Destroy { instance: u64 },
     /// Heartbeat → [`Reply::Pong`].
@@ -172,6 +174,9 @@ pub enum Reply {
         param: String,
         time: f64,
     },
+    /// During a render: the composition's camera as the effect's layer sees it (only when the
+    /// host listed `"comp_camera"` in [`Request::Hello`]) → [`Request::Camera`].
+    CompCamera,
     /// The render finished; the result is in the request's frame.
     Done,
     /// The request failed (the helper keeps running).
@@ -224,6 +229,15 @@ mod tests {
         assert_eq!(serde_json::from_str::<Request>(&request_line(&new).unwrap()).unwrap(), new);
         let r = Reply::LayerTransform { param: "emitter_layer".into(), time: 0.5 };
         assert_eq!(parse_reply(&reply_line(&r).unwrap()).unwrap().unwrap(), r);
+        let c = Request::Camera {
+            camera: Some(effectcraft_effects::plugin::CompCamera {
+                matrix: [[1.0, 0.0, 960.0, 0.0], [0.0, 1.0, 540.0, 0.0], [0.0, 0.0, 1.0, 2666.0]],
+                zoom: 2666.0,
+                camera_layer: true,
+            }),
+        };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&c).unwrap()).unwrap(), c);
+        assert_eq!(parse_reply(&reply_line(&Reply::CompCamera).unwrap()).unwrap().unwrap(), Reply::CompCamera);
         let t = Request::Transform {
             transform: Some(effectcraft_effects::plugin::LayerTransform {
                 matrix: [[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 3.0], [0.0, 0.0, 1.0, 0.0]],

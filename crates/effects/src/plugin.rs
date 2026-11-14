@@ -307,6 +307,19 @@ pub struct LayerTransform {
     pub opacity: f64,
 }
 
+/// The composition's camera as this layer sees it ([`PluginHost::comp_camera`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompCamera {
+    /// This layer's pixels (x, y, as a point parameter in layer pixels, and z away from the
+    /// viewer) → homogeneous X, Y, W (rows of a 3 × 4 matrix): the point shows at (X / W, Y / W)
+    /// in this layer's pixels, and W is its depth in front of the camera (comp pixels).
+    pub matrix: [[f64; 4]; 3],
+    /// The camera's zoom (comp pixels): a length at depth W shows `zoom / W` times as long.
+    pub zoom: f64,
+    /// It is an active camera layer's, not the comp's default view.
+    pub camera_layer: bool,
+}
+
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
 pub trait PluginHost {
     /// This effect's input (its layer with masks and the effects above this one) at another
@@ -321,6 +334,11 @@ pub trait PluginHost {
     /// Where the layer chosen in Layer parameter `param_id` sits at **layer time** `layer_time`
     /// relative to this layer ([`LayerTransform`]). `None` when unset or unknown.
     fn layer_transform(&self, _param_id: &str, _layer_time: f64) -> Option<LayerTransform> {
+        None
+    }
+    /// The composition's camera at the current time as this layer sees it ([`CompCamera`]).
+    /// `None` when unknown.
+    fn comp_camera(&self) -> Option<CompCamera> {
         None
     }
     /// All flattened parameter values (and texts) at another layer time.
@@ -691,6 +709,12 @@ impl PluginHost for RenderHost<'_, '_> {
         };
         let img = crate::util::fit_layer(ctx, &self.grid(), &other, false);
         Some(PluginImage { width: img.width, height: img.height, pixels: img.data, origin: self.offset, scale: self.scale })
+    }
+
+    fn comp_camera(&self) -> Option<CompCamera> {
+        let sc = self.ctx.env.host?.comp_scene()?;
+        // effect-space pixels, as the frame's points are once divided back by its scale
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer }).filter(|c| c.zoom > 0.0)
     }
 
     fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<LayerTransform> {

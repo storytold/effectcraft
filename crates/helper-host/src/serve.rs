@@ -152,7 +152,7 @@ impl Server<'_> {
                 Ok(())
             }
             Request::Ping => self.send(&Reply::Pong),
-            Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } => {
+            Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } => {
                 self.send(&Reply::Error { message: "no callback is waiting for an answer".into() })
             }
             Request::Shutdown => Ok(()),
@@ -193,7 +193,7 @@ impl Server<'_> {
         loop {
             let req = self.next_request()?.ok_or("EffectCraft closed the pipe")?;
             match req {
-                Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } => return Ok(req),
+                Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } => return Ok(req),
                 Request::Shutdown => return Err("EffectCraft asked the helper to shut down".into()),
                 other => self.handle(other)?,
             }
@@ -231,6 +231,16 @@ impl PluginHost for Callbacks<'_, '_> {
         }
         match s.ask(&Reply::LayerTransform { param: param_id.to_string(), time: layer_time }) {
             Ok(Request::Transform { transform }) => transform,
+            _ => None,
+        }
+    }
+    fn comp_camera(&self) -> Option<effectcraft_effects::plugin::CompCamera> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_camera") {
+            return None;
+        }
+        match s.ask(&Reply::CompCamera) {
+            Ok(Request::Camera { camera }) => camera,
             _ => None,
         }
     }
