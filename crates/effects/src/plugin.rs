@@ -322,6 +322,10 @@ pub struct CompCamera {
     pub zoom: f64,
     /// It is an active camera layer's, not the comp's default view.
     pub camera_layer: bool,
+    /// The camera's depth of field when it is on: focus distance (comp pixels from the eye),
+    /// aperture (comp pixels) and Blur Level (1 = 100 %). Older hosts leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dof: Option<[f64; 3]>,
 }
 
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
@@ -718,7 +722,7 @@ impl PluginHost for RenderHost<'_, '_> {
     fn comp_camera(&self) -> Option<CompCamera> {
         let sc = self.ctx.env.host?.comp_scene()?;
         // effect-space pixels, as the frame's points are once divided back by its scale
-        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer }).filter(|c| c.zoom > 0.0)
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
     }
 
     fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<LayerTransform> {

@@ -347,6 +347,9 @@ pub struct CompScene {
     /// The camera's zoom (comp pixels): with `camera`'s W the depth in front of it, a length at
     /// that depth shows `zoom / W` times as long. 0 when unknown.
     pub zoom: f64,
+    /// The camera's depth of field when it is on: focus distance (comp pixels from the eye),
+    /// aperture (comp pixels) and Blur Level (1 = 100 %).
+    pub dof: Option<[f64; 3]>,
 }
 
 impl CompScene {

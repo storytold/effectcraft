@@ -52,7 +52,8 @@ pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_eff
         Some(effectcraft_effects::CompLight { pos: [pos.x, pos.y, pos.z], dir: [dir.x / len, dir.y / len, dir.z / len], color: l.color, kind })
     });
     let camera_layer = ctx.comp.active_camera(ctx.time).is_some();
-    Some(effectcraft_effects::CompScene { camera: Some(camera), camera_layer, light, zoom })
+    let dof = three_d::active_camera(ctx).dof.map(|d| [d.focus, d.aperture, d.blur_level]);
+    Some(effectcraft_effects::CompScene { camera: Some(camera), camera_layer, light, zoom, dof })
 }
 
 /// Nesting limit for effects that render layers (other layers, other times).

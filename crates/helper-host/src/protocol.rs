@@ -234,9 +234,15 @@ mod tests {
                 matrix: [[1.0, 0.0, 960.0, 0.0], [0.0, 1.0, 540.0, 0.0], [0.0, 0.0, 1.0, 2666.0]],
                 zoom: 2666.0,
                 camera_layer: true,
+                dof: Some([2666.0, 200.0, 1.0]),
             }),
         };
         assert_eq!(serde_json::from_str::<Request>(&request_line(&c).unwrap()).unwrap(), c);
+        // a camera without depth of field leaves `dof` out, and older hosts' replies still parse
+        let off = r#"{"op":"camera","camera":{"matrix":[[1,0,0,0],[0,1,0,0],[0,0,1,1]],"zoom":1.0,"camera_layer":false}}"#;
+        let Request::Camera { camera: Some(cam) } = serde_json::from_str::<Request>(off).unwrap() else { panic!("camera") };
+        assert_eq!(cam.dof, None);
+        assert!(!request_line(&Request::Camera { camera: Some(cam) }).unwrap().contains("dof"));
         assert_eq!(parse_reply(&reply_line(&Reply::CompCamera).unwrap()).unwrap().unwrap(), Reply::CompCamera);
         let t = Request::Transform {
             transform: Some(effectcraft_effects::plugin::LayerTransform {
