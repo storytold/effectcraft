@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-export"
-description = "Render Queue jobs and output modules: H.264 MP4 (+AAC), ProRes and uncompressed MOV (+PCM) , HEVC / AV1 MP4 (+AAC) and WebM (VP9 or AV1) via craft-libs codecs, Opus via effectcraft-opusenc, PNG/JPEG/TIFF/EXR/Targa sequences, animated GIF, WAV/AIFF"
+description = "Render Queue jobs and output modules: H.264 MP4 (+AAC), ProRes and uncompressed MOV (+PCM) , HEVC / AV1 MP4 (+AAC) and WebM (VP9 or AV1) via craft-libs codecs, Opus via effectcraft-opusenc, PNG/JPEG/TIFF/EXR/Targa sequences, animated GIF and WebP (lossy VP8 via craft-libs' VP8 encoder, or lossless), WAV/AIFF"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ craft-video = { workspace = true }
 craft-audio = { workspace = true }
 craft-media = { workspace = true }
 effectcraft-opusenc = { workspace = true }
-image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
+image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga", "webp"] }
 exr = { workspace = true }
 gif = { workspace = true }
 rayon = { workspace = true }

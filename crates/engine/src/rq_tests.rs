@@ -205,7 +205,7 @@ fn without_exporter() {
     s.execute("renderQueue.add", json!({})).unwrap();
     assert!(!s.is_enabled("renderQueue.render"));
     let f = s.execute("renderQueue.formats", json!({})).unwrap();
-    assert_eq!(f["formats"].as_array().unwrap().len(), 14);
+    assert_eq!(f["formats"].as_array().unwrap().len(), 15);
     assert_eq!(f["formats"][0]["available"], false);
 }
 

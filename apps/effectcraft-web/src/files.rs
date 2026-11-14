@@ -73,6 +73,7 @@ fn mime(name: &str) -> &'static str {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
+        "webp" => "image/webp",
         "tif" | "tiff" => "image/tiff",
         "mp4" => "video/mp4",
         "mov" => "video/quicktime",

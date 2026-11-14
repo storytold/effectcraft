@@ -92,7 +92,7 @@ tempfile = "3.27"
 # codecs + containers shared by the Craft apps (crates/media, crates/export); keep all three on one rev.
 craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["isobmff", "matroska"] }
 craft-audio = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["aac-decode", "aac-encode", "opus-decode"] }
-craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", features = ["h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
+craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", features = ["h264-encode", "prores", "hevc-encode", "vp8-encode", "vp9-encode", "av1", "threads"] }
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
