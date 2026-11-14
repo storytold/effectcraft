@@ -542,7 +542,22 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
 
 /// The floating script windows (dialogs, palettes, windows), drawn over the app.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
+    let translations = app.scriptui_translations.for_language(crate::i18n::language(app), app.session.config.as_deref());
+    let windows: Vec<ScriptWindow> = app
+        .session
+        .script_ui
+        .windows
+        .iter()
+        .filter(|w| w.kind != WindowKind::Panel)
+        .cloned()
+        .map(|mut w| {
+            w.translate_display(&translations);
+            // Translated strings can be wider than the script's: lay the display copy out again
+            // before `show_windows` sizes and draws it (script `fixedBounds` still wins).
+            layout(&mut w);
+            w
+        })
+        .collect();
     if windows.is_empty() {
         return;
     }
@@ -593,6 +608,8 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("This ScriptUI panel has closed"), Tokens::ui(12.0), t.text_faint);
         return;
     };
+    let translations = app.scriptui_translations.for_language(crate::i18n::language(app), app.session.config.as_deref());
+    w.translate_display(&translations);
     // Docked panels fill their frame (ScriptUI lays them out at the panel's size).
     let (pw, ph) = (rect.width() as f64, rect.height() as f64);
     w.root.fixed_bounds = Some([0.0, 0.0, pw.max(w.root.bounds[2]), ph.max(w.root.bounds[3])]);
@@ -650,7 +667,8 @@ fn panel_bars(dock: egui::Vec2, window: egui::Vec2) -> egui::scroll_area::Scroll
 
 /// Tab title of a script panel.
 pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
-    app.session.script_ui.window(id).map(|w| if w.title.is_empty() { w.script.clone() } else { w.title.clone() })
+    let translations = app.scriptui_translations.for_language(crate::i18n::language(app), app.session.config.as_deref());
+    app.session.script_ui.window(id).map(|w| w.display_title(&translations))
 }
 
 /// Close the dock panels whose script window has gone (the script closed it, or a saved
@@ -691,6 +709,23 @@ mod tests {
             out.textures_delta.clear();
         }
         last
+    }
+
+    /// A translated label can be wider than the source string. `show_windows` lays the display
+    /// copy out again so the floating window grows instead of clipping the translation.
+    #[test]
+    fn a_translated_floating_window_is_laid_out_again() {
+        use std::collections::BTreeMap;
+
+        let label = Widget { id: 1, kind: WidgetKind::StaticText, text: "OK".into(), visible: true, ..Default::default() };
+        let root = Widget { kind: WidgetKind::Window, visible: true, children: vec![label], ..Default::default() };
+        let mut window = ScriptWindow { id: 1, title: "Hello".into(), script: "panel.jsx".into(), visible: true, root, ..Default::default() };
+
+        layout(&mut window);
+        let before = window.root.bounds[2];
+        window.translate_display(&BTreeMap::from([("OK".to_string(), "A much longer translated label".to_string())]));
+        layout(&mut window);
+        assert!(window.root.bounds[2] > before, "the translated window grows to fit the label");
     }
 
     /// #2796: a solid bar, once shown, took its width from the viewport, so a window that exactly

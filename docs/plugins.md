@@ -111,6 +111,27 @@ keys. Agents use a panel like a user: `scriptui.list`, `scriptui.get` (its contr
 (`crates/engine/scripts/ScriptUI Panels/`) and the Ease Presets extension below are longer
 examples.
 
+### Translating a script's interface
+
+Scripts usually write their interface strings in one language. A translation pack can change what
+ScriptUI draws without editing the script: put a JSON object of exact source strings to translated
+strings at `<settings>/Scripts/translations/<language>.json`, where `<language>` is a code from
+Settings ▸ General ▸ Language (`zh-hans`, `ja`, …). For example:
+
+```json
+{
+  "Nudge Right": "向右微移",
+  "Select layers, then click.": "先选择图层，再点击。",
+  "Cancel": "取消"
+}
+```
+
+EffectCraft uses the pack for every ScriptUI window and docked panel: window titles, control text,
+tooltips and drop-down/list items. The lookup is exact and case-sensitive; strings without an entry
+keep the script's text. Values, control names, automation ids and the contents of editable
+`edittext` controls are not translated. A missing or invalid pack simply falls back to the script's
+strings.
+
 ## Bundled extensions
 
 Optional tools that ship with EffectCraft but are not part of its core: they are scripts on the
