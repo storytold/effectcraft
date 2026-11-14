@@ -42,9 +42,10 @@
 //! resolving named transforms [`MAX_NAMED_DEPTH`] levels down or past [`MAX_OPS`] steps
 //! (a config that refers to itself in a loop), so a hostile config can't exhaust the stack.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+
+use crate::file_cache::{self, Registered};
 
 use super::ocio::{ACES_CG, ACES2065_1, Cdl, D65, FileXform, P3, REC709, REC2020, Space, Tf, load_file, matrix, sp};
 
@@ -882,13 +883,21 @@ fn resolve(src: &str, dir: &Path, search: &[String]) -> Option<PathBuf> {
     if src.trim().is_empty() {
         return None;
     }
+    // (a candidate not there is noted: the config is read again once it appears)
+    let found = |c: PathBuf| {
+        let there = c.exists();
+        if !there {
+            file_cache::note_missing(&c.to_string_lossy());
+        }
+        there.then_some(c)
+    };
     let p = Path::new(src);
     if p.is_absolute() {
-        return p.exists().then(|| p.to_path_buf());
+        return found(p.to_path_buf());
     }
     let mut dirs: Vec<PathBuf> = search.iter().map(|s| dir.join(s)).collect();
     dirs.push(dir.to_path_buf());
-    dirs.into_iter().map(|d| d.join(src)).find(|c| c.exists())
+    dirs.into_iter().map(|d| d.join(src)).find_map(found)
 }
 
 // ---------------------------------------------------------------- the config
@@ -1338,33 +1347,34 @@ impl<'c> Build<'c> {
     }
 }
 
-type ConfigCache = Mutex<HashMap<String, Result<Arc<Config>, String>>>;
+/// [`load_config`]'s cache, by parameter text.
+static CONFIGS: Registered<Result<Arc<Config>, String>> = Registered::new(16, 64 << 20);
+
+/// The files the config cached for `src` was read from: the `.ocio` file, the files its
+/// `FileTransform`s read and the places it looked for missing ones.
+pub(crate) fn cached_files(src: &str) -> Option<Vec<String>> {
+    file_cache::lock(CONFIGS.get()).files(src)
+}
 
 /// Load (and cache) a config from a `.ocio` path or the config text itself; why not, when it
-/// can't be read.
+/// can't be read. The config file and the files its `FileTransform`s read are stamped (one
+/// `metadata` call each) on every load, and the config is read again once one of them moved or a
+/// missing one appeared (see [`crate::file_cache`]).
 pub fn load_config(src: &str) -> Result<Arc<Config>, String> {
     let t = src.trim();
     if t.is_empty() {
         return Err("no config file chosen".into());
     }
-    static CACHE: OnceLock<ConfigCache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
-    {
-        return v.clone();
-    }
-    let parsed = if src.contains('\n') {
-        Config::parse(src, Path::new("."))
-    } else {
+    file_cache::cached(CONFIGS.get(), src, || {
+        if src.contains('\n') {
+            return (Config::parse(src, Path::new(".")).map(Arc::new), 0);
+        }
         let p = Path::new(t);
-        std::fs::read_to_string(p).map_err(|e| format!("{t}: {e}")).and_then(|text| Config::parse(&text, p.parent().unwrap_or(Path::new("."))))
-    }
-    .map(Arc::new);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
-    }
-    parsed
+        match file_cache::read(t) {
+            Ok(text) => (Config::parse(&text, p.parent().unwrap_or(Path::new("."))).map(Arc::new), text.len()),
+            Err(e) => (Err(format!("{t}: {e}")), 0),
+        }
+    })
 }
 
 #[cfg(test)]

@@ -12,6 +12,9 @@ use super::layer_menu::target_masks;
 use super::{CommandSpec, b_p, bad, comp_id, f_p, has_comp, has_layers, layer_mut, layer_p, layers_p, merge_p, str_p, unlocked};
 use crate::{EngineError, Result, Session, VertexRef, cmd};
 
+mod closed;
+pub(crate) use closed::selected_paths_closed;
+
 // ---------------------------------------------------------------- RotoBezier
 
 /// Automatic (RotoBezier) tangents: each vertex's tangents follow the line through its
@@ -746,6 +749,7 @@ fn ungroup_shapes(s: &mut Session, p: &Value) -> Result<Value> {
 /// The command specs for the path commands: RotoBezier, Convert To Bezier Path, Group Shapes, Ungroup Shapes and the rest of this module.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!("path.toggleClosed", "Closed", ["Layer", "Mask and Shape Path"], None, "{}", closed::has_paths, closed::toggle_closed),
         cmd!("path.rotoBezier", "RotoBezier", ["Layer", "Mask and Shape Path"], None, "{layer?, mask?, value?}", has_layers, roto_bezier),
         cmd!(
             "path.convertToBezier",

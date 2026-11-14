@@ -249,6 +249,7 @@ pub(crate) fn parent_fixes(s: &Session, cid: ItemId, ids: &[LayerId], parent: Op
         footage: Some(s.footage.as_ref()),
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let space = |id: Option<LayerId>| -> effectcraft_geom::Mat3 {
         id.and_then(|i| comp.layer(i)).filter(|l| !l.is_3d()).map(|l| ectx.layer_to_comp(l).0).unwrap_or(effectcraft_geom::Mat3::IDENTITY)

@@ -19,7 +19,7 @@
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::sync::Arc;
 
-use filmcraft_aac::{AudioSpecificConfig, ProgramConfig};
+use craft_audio::aac::{AudioSpecificConfig, ProgramConfig};
 
 /// A source channel's contribution to the left and right outputs, before normalisation.
 pub type Pair = [f32; 2];
@@ -185,7 +185,7 @@ mod tests {
         }
     }
 
-    /// AudioSpecificConfigs as ffmpeg 8.1 and FilmCraft's encoder write them (48 kHz AAC-LC).
+    /// AudioSpecificConfigs as ffmpeg 8.1 and craft-audio's encoder write them (48 kHz AAC-LC).
     const PCE_FFMPEG_61: &str = "118004c848002000c4400d4c61766336322e32382e31303256e500";
     const PCE_FILMCRAFT_61: &str = "118004c845000108840000";
 

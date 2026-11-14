@@ -201,8 +201,9 @@ fn every_written_field_parses_back() {
     for m in [&masks[0], &masks[2], &masks[4]] {
         assert_eq!((m.feather.source, m.opacity_percent.source, m.expansion.source), (ValueSource::Default, ValueSource::Default, ValueSource::Default));
     }
-    // Paths: vertices in layer pixels, open bit.
-    let px = view.mask_vertices_px(&layer, &masks[2]).expect("vertices");
+    // Paths: vertices in layer pixels (the box scaled by the source size, as the importer does), open bit.
+    let (w, h) = view.layer_source_size(&layer).expect("size");
+    let px: Vec<_> = masks[2].shapes.iter().map(|s| s.vertices((f64::from(w), f64::from(h)))).collect();
     let open = open_path();
     assert!(masks[2].shapes[0].open && !masks[0].shapes[0].open);
     for (v, (want, (ti, to))) in px[0].iter().zip(open.vertices.iter().zip(open.in_tangents.iter().zip(&open.out_tangents))) {

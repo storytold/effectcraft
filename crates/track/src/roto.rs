@@ -80,6 +80,10 @@ impl StrokeKind {
     }
 }
 
+/// The most frames a propagation chain reaches on either side of its base frame (about two
+/// hours at 24 fps).
+const MAX_CHAIN: i64 = 200_000;
+
 /// One stroke: a polyline swept by a disc of `radius` layer pixels, on layer frame `frame`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,8 +155,16 @@ impl RotoData {
     pub fn strokes_of(&self, frame: i64, object: u32) -> Vec<&Stroke> {
         self.strokes.iter().filter(|s| s.frame == frame && (s.object == object || matches!(s.kind, StrokeKind::Refine | StrokeKind::RefineErase))).collect()
     }
+    /// The stored span cut to at most MAX_CHAIN frames either side of the base: a project's
+    /// numbers must not make one render build billions of keys. Frames past it have no key.
+    fn bounded_span(&self, base: i64) -> [i64; 2] {
+        [self.span[0].max(base.saturating_sub(MAX_CHAIN)), self.span[1].min(base.saturating_add(MAX_CHAIN))]
+    }
     pub fn in_span(&self, f: i64) -> bool {
-        self.base.is_some() && f >= self.span[0] && f <= self.span[1]
+        self.base.is_some_and(|b| {
+            let span = self.bounded_span(b);
+            f >= span[0] && f <= span[1]
+        })
     }
     /// Add a stroke: the first segmentation stroke sets the base frame and a span of
     /// `default_span` frames each side (clamped to `limits`); strokes outside the span extend it.
@@ -181,10 +193,15 @@ impl RotoData {
     pub fn chain_keys(&self, seed: u64) -> BTreeMap<i64, u64> {
         let mut out = BTreeMap::new();
         let Some(base) = self.base else { return out };
+        // The strokes by frame, grouped once (each frame looked through every stroke before).
+        let mut by_frame: BTreeMap<i64, Vec<&Stroke>> = BTreeMap::new();
+        for s in &self.strokes {
+            by_frame.entry(s.frame).or_default().push(s);
+        }
         let key = |prev: u64, f: i64| {
             let mut h = prev ^ 0x9e37_79b9_7f4a_7c15;
             fnv(&mut h, &f.to_le_bytes());
-            for s in self.strokes.iter().filter(|s| s.frame == f) {
+            for s in by_frame.get(&f).into_iter().flatten() {
                 fnv(&mut h, serde_json::to_string(s).unwrap_or_default().as_bytes());
             }
             h
@@ -192,12 +209,16 @@ impl RotoData {
         let k0 = key(seed, base);
         out.insert(base, k0);
         let mut k = k0;
-        for f in base + 1..=self.span[1] {
-            k = key(k, f);
-            out.insert(f, k);
+        let span = self.bounded_span(base);
+        // `base + 1` only when there is a frame after the base (it overflows at i64::MAX).
+        if base < span[1] {
+            for f in base + 1..=span[1] {
+                k = key(k, f);
+                out.insert(f, k);
+            }
         }
         k = k0;
-        for f in (self.span[0]..base).rev() {
+        for f in (span[0]..base).rev() {
             k = key(k, f);
             out.insert(f, k);
         }

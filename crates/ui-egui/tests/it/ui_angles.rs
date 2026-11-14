@@ -38,7 +38,7 @@ fn harness(panel: Panel, angle: f64) -> (Harness<'static, EffectcraftApp>, u64, 
     s.execute("comp.new", json!({"name": "Angles", "width": 320, "height": 180, "duration": 4})).unwrap();
     let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
     let uid = if matches!(panel, Panel::EffectControls) {
-        let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "CC Bend It"})).unwrap()["effects"][0].as_u64().unwrap();
+        let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "Two-Point Bend"})).unwrap()["effects"][0].as_u64().unwrap();
         s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(fx).unwrap().get("bend").unwrap().uid
     } else {
         s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/rotation").unwrap().uid
@@ -168,6 +168,21 @@ fn typing_replaces_the_clicked_value() {
             h.step();
             key(&mut h, Key::Enter, Modifiers::NONE);
             assert_eq!(angle(&h, layer, uid), expected, "{panel:?}");
+        }
+    }
+}
+
+/// #3195: a typed `+10` turns the angle by 10°, from its signed remainder: `0x-30°` becomes
+/// `0x-20°` (the degrees field shows the remainder's size, 30, which would have given -40°).
+#[test]
+fn a_typed_step_applies_to_the_signed_angle() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for (text, expected) in [("+10", -20.0), ("*2", -60.0), ("/3", -10.0)] {
+            let (mut h, layer, uid) = harness(panel, -30.0);
+            let p = component(&h, panel, uid, false);
+            begin_edit(&mut h, p, text);
+            key(&mut h, Key::Enter, Modifiers::NONE);
+            assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: {text}");
         }
     }
 }

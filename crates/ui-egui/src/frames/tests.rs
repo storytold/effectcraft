@@ -1,4 +1,5 @@
 use super::*;
+use effectcraft_engine::project::LayerSource;
 
 #[test]
 fn render_scales_are_the_factors_the_thousandths_stand_for() {
@@ -60,7 +61,7 @@ fn disk_fixture(stored_frames: &[i64]) -> (Frames, RenderSource, FrameKey, Rende
     disk.keys.lock().unwrap().extend(stored_frames.iter().map(|frame| disk_cache::frame_key(content, *frame, base.scale, base.view ^ opts_hash(&opts))));
     let mut frames = Frames::default();
     frames.set_remote(Some(disk.clone()));
-    frames.content_keys.lock().unwrap().insert((base.revision, base.comp, 0), content);
+    frames.content_keys.lock().unwrap().insert((base.revision, base.comp), content);
     let source = RenderSource {
         project: session.project.clone(),
         footage: session.footage.clone(),
@@ -126,7 +127,7 @@ fn disk_indicator_does_not_hash_on_ui_thread_and_coalesces_edits() {
     assert_eq!(frames.content_key_jobs.lock().unwrap().pending.len(), 1);
     release.send(()).unwrap();
     let until = Instant::now() + Duration::from_secs(3);
-    while !frames.content_keys.lock().unwrap().contains_key(&(base.revision, base.comp, 0)) {
+    while !frames.content_keys.lock().unwrap().contains_key(&(base.revision, base.comp)) {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -153,7 +154,7 @@ fn disk_indicator_range_tracks_live_membership() {
 
     let mut revised = base;
     revised.revision += 1;
-    frames.content_keys.lock().unwrap().insert((revised.revision, revised.comp, 0), 5678);
+    frames.content_keys.lock().unwrap().insert((revised.revision, revised.comp), 5678);
     assert!(frames.disk_frames(&src, &revised, 10..13, &opts).is_empty());
 
     let changed = FrameKey { scale: base.scale + 1, ..base };
@@ -211,7 +212,7 @@ fn retirement_reaches_existing_workers_and_keeps_cpu_frames_and_completion_live(
     let next = key(1, 1, 0);
     frames.inflight.lock().unwrap().insert(next);
     frames.queue.lock().unwrap().running.insert(next);
-    worker.finish_key(next, false, img(), web_time::Instant::now());
+    worker.finish_key(next, false, img(), None, None, web_time::Instant::now());
     assert!(frames.is_cached(&next), "CPU retry can still publish");
     assert_eq!(frames.inflight(), 0);
     assert!(frames.queue.lock().unwrap().running.is_empty());
@@ -609,15 +610,21 @@ struct ParallelClip {
     started: std::sync::atomic::AtomicUsize,
     /// Frames started by the time frame 1 was done.
     started_at_first: std::sync::atomic::AtomicUsize,
+    /// Frames decoding now, and the most at a time.
+    active: std::sync::atomic::AtomicUsize,
+    most_active: std::sync::atomic::AtomicUsize,
 }
 
 impl FootageSource for ParallelClip {
     fn frame(&self, _: ItemId, _: &effectcraft_engine::project::Footage, t: Tick) -> Option<Arc<effectcraft_engine::render::Image>> {
         self.started.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_active.fetch_max(active, Ordering::SeqCst);
         (0..16).into_par_iter().for_each(|_| (0..4).into_par_iter().for_each(|_| std::thread::sleep(std::time::Duration::from_millis(1))));
         if effectcraft_engine::time::FrameRate::FPS_30.frame_at(t) == 1 {
             self.started_at_first.store(self.started.load(Ordering::SeqCst), Ordering::SeqCst);
         }
+        self.active.fetch_sub(1, Ordering::SeqCst);
         Some(Arc::new(effectcraft_engine::render::Image::new(4, 4)))
     }
 }
@@ -726,6 +733,166 @@ fn queued_frames_render_when_a_preview_starts_or_stops() {
     f.request_urgent(&src, FrameKey { frame: 119, ..series }, cid, FrameRate::FPS_30.tick_of(119), RenderOpts::default());
     wait_for_renders(&f);
     assert_eq!(f.cached_frames(&series).len(), 119);
+}
+
+/// Waits for the lanes to be idle (after their last frame they give back their GPU slot) and
+/// checks every GPU slot was given back.
+fn wait_for_idle_lanes(f: &Frames) {
+    for _ in 0..2000 {
+        let q = f.queue.lock().unwrap();
+        if q.idle_lanes.len() == f.lanes.len() {
+            break;
+        }
+        drop(q);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let q = f.queue.lock().unwrap();
+    assert_eq!(q.idle_lanes.len(), f.lanes.len(), "every lane is idle again");
+    assert_eq!(q.gpu_lanes, 0, "every lane gave its GPU slot back");
+}
+
+/// Plays a preview of `frames` frames of a [`parallel_clip`] as the viewer renders them (the
+/// project's renderer: `backend` Auto) or with `backend`, as if there were a GPU compositor
+/// (`gpu`), `retired` or with the project on Mercury Software Only (`!gpu_acceleration`), and
+/// waits for them: the frame cache and the most frames that rendered at a time.
+fn play_preview(gpu: bool, retired: bool, backend: effectcraft_engine::render::Backend, gpu_acceleration: bool) -> (Frames, usize) {
+    use effectcraft_engine::time::FrameRate;
+    let (f, footage, mut src, cid, series) = parallel_clip();
+    Arc::make_mut(&mut src.project).settings.gpu_acceleration = gpu_acceleration;
+    f.queue.lock().unwrap().fake_gpu = gpu;
+    if retired {
+        f.retire_gpu();
+    }
+    let opts = RenderOpts { backend, ..RenderOpts::default() };
+    f.set_playhead(Some(Playhead { series, cur: 0, start: 0, end: 299, step: 1, looping: false }));
+    let frames = 24;
+    for frame in 1..=frames {
+        f.request(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), opts);
+    }
+    wait_for_renders(&f);
+    assert_eq!(f.cached_frames(&series).len(), frames as usize);
+    wait_for_idle_lanes(&f);
+    let most = footage.most_active.load(Ordering::SeqCst);
+    (f, most)
+}
+
+/// Every lane composited a playing preview's frame on the GPU at the same time, on the device
+/// the window draws with: the window froze for hundreds of milliseconds and the preview jumped
+/// ahead (#3345). A preview starts on one GPU lane (see [`Queue::ui_frame`]).
+#[test]
+fn a_preview_composites_on_a_few_lanes_at_a_time() {
+    use effectcraft_engine::render::Backend;
+    for backend in [Backend::Auto, Backend::Gpu] {
+        let (_, most) = play_preview(true, false, backend, true);
+        assert!(most <= 1, "{most} lanes composited on the GPU at once ({backend:?})");
+    }
+}
+
+/// Frames that render on the CPU use every lane: with no GPU compositor, with the GPU retired,
+/// and with Mercury Software Only (the project's renderer, or the CPU backend).
+#[test]
+fn frames_on_the_cpu_render_on_every_lane() {
+    use effectcraft_engine::render::Backend;
+    for (gpu, retired, backend, gpu_acceleration) in
+        [(false, false, Backend::Auto, true), (true, true, Backend::Auto, true), (true, false, Backend::Auto, false), (true, false, Backend::Cpu, true)]
+    {
+        let (f, most) = play_preview(gpu, retired, backend, gpu_acceleration);
+        if f.lanes.len() > 2 {
+            assert!(most > 2, "frames on the CPU rendered on {most} lanes at a time ({gpu} {retired} {backend:?} {gpu_acceleration})");
+        }
+    }
+}
+
+/// A queue of `lanes` lanes, `busy` of them compositing on the GPU.
+fn gpu_queue(lanes: usize, busy: usize) -> Queue {
+    Queue { lanes, gpu_lanes: busy, gpu_limit: 1, ..Default::default() }
+}
+
+/// Window frames every `gap` ms from `t` for `ms` ms; the time after the last.
+fn ui_frames(q: &mut Queue, t: web_time::Instant, gap: u64, ms: u64) -> web_time::Instant {
+    let mut t = t;
+    for _ in 0..ms / gap {
+        t += std::time::Duration::from_millis(gap);
+        q.ui_frame(Some(t));
+    }
+    t
+}
+
+/// A GPU that keeps up with the window gets every lane, one more each half second the window
+/// stays smooth with every allowed lane compositing.
+#[test]
+fn a_smooth_window_gives_the_gpu_every_lane() {
+    let mut q = gpu_queue(8, 0);
+    let t = web_time::Instant::now();
+    q.ui_frame(Some(t));
+    // Nothing compositing: the limit isn't what holds the preview back.
+    let t = ui_frames(&mut q, t, 16, 2000);
+    assert_eq!(q.gpu_limit, 1);
+    let mut t = t;
+    for _ in 0..20 {
+        q.gpu_lanes = q.gpu_limit;
+        t = ui_frames(&mut q, t, 16, 520);
+    }
+    assert_eq!(q.gpu_limit, 8, "no more than the lanes");
+}
+
+/// A window that stalls while lanes composite halves the limit, and the limit that stalled is
+/// tried again only after a long smooth spell; a window that is only slow keeps the limit.
+#[test]
+fn a_stalling_window_takes_lanes_from_the_gpu() {
+    let mut q = gpu_queue(8, 4);
+    q.gpu_limit = 4;
+    let t = web_time::Instant::now();
+    q.ui_frame(Some(t));
+    let t = ui_frames(&mut q, t, 300, 300);
+    assert_eq!((q.gpu_limit, q.gpu_stalled_at), (2, 4));
+    let t = ui_frames(&mut q, t, 80, 5000);
+    assert_eq!(q.gpu_limit, 2, "a slow (not stalling) window keeps the limit");
+    q.gpu_lanes = 2;
+    let t = ui_frames(&mut q, t, 16, 600);
+    assert_eq!(q.gpu_limit, 3);
+    q.gpu_lanes = 3;
+    let t = ui_frames(&mut q, t, 16, 2000);
+    assert_eq!(q.gpu_limit, 3, "4 stalled: it waits longer");
+    ui_frames(&mut q, t, 16, 10_000);
+    assert_eq!(q.gpu_limit, 4);
+    // A stall with nothing compositing isn't the GPU's.
+    let mut q = gpu_queue(8, 0);
+    q.gpu_limit = 4;
+    let t = web_time::Instant::now();
+    q.ui_frame(Some(t));
+    ui_frames(&mut q, t, 500, 500);
+    assert_eq!(q.gpu_limit, 4);
+    // Never below one lane; a stopped preview's pause is no stall.
+    let mut q = gpu_queue(8, 1);
+    let t = web_time::Instant::now();
+    q.ui_frame(Some(t));
+    ui_frames(&mut q, t, 400, 400);
+    assert_eq!(q.gpu_limit, 1);
+    q.gpu_limit = 2;
+    q.ui_frame(None);
+    q.ui_frame(Some(t + std::time::Duration::from_secs(5)));
+    assert_eq!(q.gpu_limit, 2);
+}
+
+/// A preview that stops while lanes composite: their frames finish, the queued ones move to the
+/// pool and render, the viewer's frame is not held up, and every GPU slot is given back.
+#[test]
+fn a_preview_stopping_mid_render_gives_the_gpu_slots_back() {
+    use effectcraft_engine::time::FrameRate;
+    let (f, _, src, cid, series) = parallel_clip();
+    f.queue.lock().unwrap().fake_gpu = true;
+    let opts = RenderOpts { backend: effectcraft_engine::render::Backend::Auto, ..RenderOpts::default() };
+    f.set_playhead(Some(Playhead { series, cur: 0, start: 0, end: 299, step: 1, looping: false }));
+    for frame in 1..=24 {
+        f.request(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), opts);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    f.set_playhead(None);
+    f.request_urgent(&src, FrameKey { frame: 100, ..series }, cid, FrameRate::FPS_30.tick_of(100), opts);
+    wait_for_renders(&f);
+    assert_eq!(f.cached_frames(&series).len(), 25);
+    wait_for_idle_lanes(&f);
 }
 
 /// The cache is full. A zoom (or preview-resolution) change left the frames of the old
@@ -996,7 +1163,7 @@ fn the_frames_an_edit_keeps_match_a_fresh_render() {
     // The work area is a preview and render range: setting it (B, N) keeps every frame, on
     // disk too.
     let n = s.project.comp(comp).map(|c| c.frame_rate.frame_at(c.duration)).unwrap();
-    let disk = |s: &Session| effectcraft_engine::render::disk_cache::comp_content_key_with(&s.project, comp, None);
+    let disk = |s: &Session| effectcraft_engine::render::disk_cache::comp_content_key(&s.project, comp);
     let d0 = disk(&s);
     let work_area = |start: f64, end: f64| json!({"cmd": "comp.workArea", "params": {"comp": comp.0, "start": start, "end": end}});
     assert_eq!(kept(&mut s, comp, work_area(1.0, 4.0)), (0..n).collect::<Vec<_>>());
@@ -1593,6 +1760,71 @@ fn half_float_ram_frames_missing_on_disk_are_written() {
     ram_frames_missing_on_disk_are_written_as(true);
 }
 
+/// A RAM frame whose render started before Reload Footage dropped one of its files (#3184)
+/// holds the pixels from before: writing it later to the disk cache (an idle pass after the
+/// drop) would bring them back, also after a restart, since the file kept its size and time. It
+/// is written only with the drop generation its render started at, for the cache it started
+/// with: so it is not written, nor is a frame rendered without that cache. Frames of other files,
+/// and frames rendered after the drop, are written.
+#[test]
+fn ram_frames_from_before_a_drop_are_not_written() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::render::reads::{FileStamp, ReadFile};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path().join("cache"), 1 << 30).unwrap();
+    let other = DiskCache::open(dir.path().join("other"), 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let f = Frames::default();
+    let series = FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()), ..key(0, 0, 0) };
+    let read = |p: &str| Some(Arc::new([ReadFile::new(p, FileStamp::Native { len: 3, modified: Some(1) })].into_iter().collect::<ReadFiles>()));
+    let before = DiskSince::of(&disk, disk.drop_generation());
+    {
+        let mut c = f.cache.lock().unwrap();
+        c.insert_with(FrameKey { frame: 0, ..series }, img(), read("/a.png"), Some(before.clone()));
+        c.insert_with(FrameKey { frame: 1, ..series }, img(), read("/b.png"), Some(before));
+        c.insert_with(FrameKey { frame: 2, ..series }, img(), read("/a.png"), None);
+        c.insert_with(FrameKey { frame: 3, ..series }, img(), read("/a.png"), Some(DiskSince::of(&other, other.drop_generation())));
+    }
+    // Reload Footage of a.png.
+    disk.drop_files(["/a.png"]);
+    disk.flush();
+    f.cache.lock().unwrap().insert_with(FrameKey { frame: 4, ..series }, img(), read("/a.png"), Some(DiskSince::of(&disk, disk.drop_generation())));
+    let on_disk = |fr: i64| {
+        disk.contains(
+            disk_cache::Kind::Frame,
+            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, opts_hash(&RenderOpts::default())),
+        )
+    };
+    // Idle passes until there is nothing left to write.
+    let mut done = false;
+    for _ in 0..1000 {
+        let more = f.persist_missing(&src, &series, &RenderOpts::default());
+        disk.flush();
+        if !more && f.persisted.lock().unwrap().is_empty() {
+            done = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(done, "the idle passes end");
+    assert!(on_disk(1) && on_disk(4), "another file's frame, and a frame rendered after the drop");
+    assert!(!on_disk(0), "made of a.png as it was before the drop");
+    assert!(!on_disk(2) && !on_disk(3), "rendered without this disk cache");
+    assert_eq!(disk.stats().entries, 2);
+}
+
 fn ram_frames_missing_on_disk_are_written_as(half: bool) {
     use effectcraft_engine::Session;
     use serde_json::json;
@@ -1616,19 +1848,12 @@ fn ram_frames_missing_on_disk_are_written_as(half: bool) {
         FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
     for fr in 0..10 {
         let frame = if half { FrameImage::CpuF16(Arc::new(F16Frame::from_image(&effectcraft_engine::render::Image::new(8, 8), SRGB))) } else { img() };
-        f.cache.lock().unwrap().insert(FrameKey { frame: fr, ..series }, frame);
+        f.cache.lock().unwrap().insert_with(FrameKey { frame: fr, ..series }, frame, Some(Arc::default()), Some(DiskSince::of(&disk, disk.drop_generation())));
     }
     let on_disk = |fr: i64| {
         disk.contains(
             disk_cache::Kind::Frame,
-            frame_disk_key(
-                &f.content_keys,
-                &src.project,
-                &FrameKey { frame: fr, ..series },
-                opts_hash(&RenderOpts::default()),
-                f.virtual_epoch.load(Ordering::Relaxed),
-                None,
-            ),
+            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, opts_hash(&RenderOpts::default())),
         )
     };
     let persist = || {
@@ -1674,6 +1899,71 @@ fn ram_frames_missing_on_disk_are_written_as(half: bool) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// While free disk space holds the disk cache at 0, frames are not converted or compressed for
+/// it (the frame workers spent about 8 ms per frame on writes that were then refused), and idle
+/// passes don't keep converting the RAM frames; with room again they are written.
+#[test]
+fn no_frame_is_encoded_while_the_disk_has_no_room() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    const GB: u64 = 1 << 30;
+    let dir = std::env::temp_dir().join(format!("ec-persist-full-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 20 * GB).unwrap();
+    // 4 TB disk, 1 GB free: under the 10 GB reserve.
+    disk.set_disk_space(Some((4096 * GB, GB)));
+    assert!(!disk.accepts_writes());
+    // The frame worker's write: refused up front.
+    assert!(!put_disk_frame(&disk, 1, &img(), &ReadFiles::default(), None, disk.drop_generation()));
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let f = Frames::default();
+    let series =
+        FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()) ^ 1, ..key(0, 0, 0) };
+    for fr in 0..10 {
+        f.cache.lock().unwrap().insert_with(FrameKey { frame: fr, ..series }, img(), Some(Arc::default()), Some(DiskSince::of(&disk, disk.drop_generation())));
+    }
+    // Idle passes: nothing to do, nothing converted.
+    for _ in 0..20 {
+        assert!(!f.persist_missing(&src, &series, &RenderOpts::default()), "no idle passes while there is no room");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    disk.flush();
+    assert!(f.persisted.lock().unwrap().is_empty());
+    assert_eq!((disk.encodes(), disk.stats().entries), (0, 0));
+    // Room again: the RAM frames are written.
+    disk.set_disk_space(Some((4096 * GB, 500 * GB)));
+    let on_disk = |fr: i64| {
+        disk.contains(
+            disk_cache::Kind::Frame,
+            frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, opts_hash(&RenderOpts::default())),
+        )
+    };
+    let mut written = false;
+    for _ in 0..1000 {
+        f.persist_missing(&src, &series, &RenderOpts::default());
+        disk.flush();
+        if (0..10).all(on_disk) && f.persisted.lock().unwrap().is_empty() {
+            written = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(written, "every RAM frame written once there is room");
+    assert_eq!(disk.encodes(), 10);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Audio changes pixels only where something draws it: a clip's Audio Levels, audio effects and
 /// Audio switch keep every frame, in RAM and on disk, until a waveform picks the clip (on another
 /// layer, on itself, or through a precomp of it); then the frames of the reader render again.
@@ -1681,7 +1971,7 @@ fn ram_frames_missing_on_disk_are_written_as(half: bool) {
 fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
     use effectcraft_engine::Session;
     use effectcraft_engine::project::{Footage, GroupKind, LayerId, Value, build};
-    use effectcraft_engine::render::disk_cache::comp_content_key_with;
+    use effectcraft_engine::render::disk_cache::comp_content_key;
     use serde_json::json;
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
@@ -1736,7 +2026,7 @@ fn audio_edits_keep_the_frames_until_something_draws_the_audio() {
         let mut p1 = p0.clone();
         edit(Arc::make_mut(&mut p1));
         let id1 = f.content_of(&p1, 2, view);
-        (f.cached_frames(&k(id1, 0)), comp_content_key_with(&p0, view, None) == comp_content_key_with(&p1, view, None))
+        (f.cached_frames(&k(id1, 0)), comp_content_key(&p0, view) == comp_content_key(&p1, view))
     };
     let all: Vec<i64> = (0..120).collect();
     let edits: [(&str, &dyn Fn(&mut Project)); 3] = [("levels", &levels), ("audio effect", &backwards), ("audio switch", &mute)];
@@ -1933,9 +2223,9 @@ fn disk_frames_outlive_an_edit_that_cant_change_them() {
         disk: Some(disk.clone()),
     };
     // Every frame of `p0` on disk, none in RAM.
-    let content0 = disk_cache::comp_content_key_with(&p0, cid, None);
+    let content0 = disk_cache::comp_content_key(&p0, cid);
     for f in 0..30 {
-        disk.put_frame_now(disk_cache::frame_key(content0, f, 1000, oh), 1, 1, &[1, 2, 3, 255]);
+        disk.put_frame_now(disk_cache::frame_key(content0, f, 1000, oh), 1, 1, &[1, 2, 3, 255], &ReadFiles::default());
     }
     let rename: fn(&mut Project, ItemId, LayerId) = |p, c, l| p.comp_mut(c).unwrap().layer_mut(l).unwrap().name = "Renamed".into();
     let trim: fn(&mut Project, ItemId, LayerId) = |p, c, l| {
@@ -1978,6 +2268,80 @@ fn disk_frames_outlive_an_edit_that_cant_change_them() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(!f.carry_scheduled.load(Ordering::Acquire) && f.disk_carries.lock().unwrap().is_empty(), "{name}: carry job finished");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With expressions the disk key covers what they can read (#3184, #1492): an edit to a comp no
+/// expression names keeps every frame on disk under the same key; an edit to the comp one names
+/// gives the comp a new key, and the frames outside the layer with that expression are carried to
+/// it (the dirty spans of #2795).
+#[test]
+fn disk_frames_outlive_edits_their_expressions_cant_read() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Expression, LayerId, Value};
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-disk-carry-expr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    let mut s = Session::default();
+    let comp = |s: &mut Session, name: &str| {
+        ItemId(s.execute("comp.new", json!({"name": name, "width": 8, "height": 8, "duration": 1, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap())
+    };
+    let solid = |s: &mut Session, c: ItemId| LayerId(s.execute("layer.newSolid", json!({"comp": c.0, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
+    let cid = comp(&mut s, "A");
+    let (a, b) = (solid(&mut s, cid), solid(&mut s, cid));
+    let other = comp(&mut s, "Other");
+    let o = solid(&mut s, other);
+    let third = comp(&mut s, "Third");
+    let t = solid(&mut s, third);
+    let fr = s.project.comp(cid).unwrap().frame_rate;
+    let mut p0 = (*s.project).clone();
+    for (l, i, out) in [(a, 0, 15), (b, 15, 30)] {
+        let l = p0.comp_mut(cid).unwrap().layer_mut(l).unwrap();
+        (l.start_time, l.in_point, l.out_point) = (fr.tick_of(i), fr.tick_of(i), fr.tick_of(out));
+    }
+    p0.comp_mut(cid).unwrap().layer_mut(a).unwrap().props.prop_mut("transform/opacity").unwrap().expr =
+        Some(Expression { text: "comp(\"Other\").layer(1).transform.opacity".into(), enabled: true });
+    let p0 = Arc::new(p0);
+    let opts = RenderOpts::default();
+    let oh = opts_hash(&opts);
+    let src = |p: &Arc<Project>| RenderSource {
+        project: p.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let content0 = disk_cache::comp_content_key(&p0, cid);
+    for f in 0..30 {
+        disk.put_frame_now(disk_cache::frame_key(content0, f, 1000, oh), 1, 1, &[1, 2, 3, 255], &ReadFiles::default());
+    }
+    let opacity = |p: &mut Project, c: ItemId, l: LayerId| {
+        p.comp_mut(c).unwrap().layer_mut(l).unwrap().props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(40.0)
+    };
+    for (name, edited, layer, same_key, kept) in [("Third", third, t, true, (0..30).collect::<Vec<i64>>()), ("Other", other, o, false, (17..30).collect())] {
+        let f = Frames::default();
+        let series = |p: &Arc<Project>, rev: u64| FrameKey { revision: rev, content: f.content_of(p, rev, cid), comp: cid.0, opts: oh, ..key(0, 0, 0) };
+        let blue = |p: &Arc<Project>, rev: u64, want: &[i64]| {
+            let base = series(p, rev);
+            let mut got = vec![];
+            for _ in 0..1000 {
+                got = f.disk_frames(&src(p), &base, 0..30, &opts);
+                if got == want {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            got
+        };
+        assert_eq!(blue(&p0, 1, &(0..30).collect::<Vec<_>>()), (0..30).collect::<Vec<_>>(), "{name}: before");
+        let mut p1 = p0.clone();
+        opacity(Arc::make_mut(&mut p1), edited, layer);
+        assert_eq!(disk_cache::comp_content_key(&p1, cid) == content0, same_key, "{name}: the key");
+        assert_eq!(blue(&p1, 2, &kept), kept, "{name}: after");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2041,7 +2405,7 @@ fn a_keyframe_edit_reaches_only_the_keys_around_it() {
 fn music_volume_keeps_the_frames_with_expressions_that_dont_read_audio() {
     use effectcraft_engine::Session;
     use effectcraft_engine::project::{Expression, Footage, FootageKind, LayerId, Value, build};
-    use effectcraft_engine::render::disk_cache::comp_content_key_with;
+    use effectcraft_engine::render::disk_cache::comp_content_key;
     use serde_json::json;
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 4, "frameRate": 30})).unwrap()["comp"].as_u64().unwrap());
@@ -2069,7 +2433,7 @@ fn music_volume_keeps_the_frames_with_expressions_that_dont_read_audio() {
         let mut p1 = p0.clone();
         Arc::make_mut(&mut p1).comp_mut(cid).unwrap().layer_mut(music_id).unwrap().props.prop_mut("audio/levels").unwrap().value = Value::Vec2([-6.0, -6.0]);
         let id1 = f.content_of(&p1, 2, cid);
-        (f.cached_frames(&k(id1, 0)).len(), comp_content_key_with(&p0, cid, None) == comp_content_key_with(&p1, cid, None))
+        (f.cached_frames(&k(id1, 0)).len(), comp_content_key(&p0, cid) == comp_content_key(&p1, cid))
     };
     assert_eq!(kept("wiggle(2, 20)"), (120, true), "a wiggle reads no audio");
     let (frames, disk) = kept("value + thisComp.layer(\"Music\")(\"Audio\")(\"Audio Levels\")[0]");
@@ -2448,4 +2812,612 @@ fn a_keyframe_edit_beside_muted_keys_reaches_the_keys_that_play() {
     for i in kept {
         assert!(same(i), "kept frame {i} renders differently after the edit");
     }
+}
+
+/// Disk-cache frame entries that keep the source files they were made of (#3184): a sequence
+/// comp in a folder of its own, with a large unused sequence in the project.
+mod frame_files {
+    use super::*;
+    use effectcraft_engine::project::{Footage, FootageKind, build};
+    use effectcraft_engine::time::FrameRate;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicUsize;
+
+    const RATE: FrameRate = FrameRate::FPS_30;
+    const FRAMES: i64 = 5;
+
+    /// A fresh folder for test `name` (on the build drive, not the system temp folder), deleted
+    /// when the guard is dropped.
+    fn folder(name: &str) -> tempfile::TempDir {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&target).unwrap();
+        tempfile::Builder::new().prefix(&format!("test-frame-files-{name}-")).tempdir_in(target).unwrap()
+    }
+
+    /// A flat grey PNG of `level` at `path`.
+    fn png(path: &Path, level: u8) -> String {
+        image::RgbaImage::from_pixel(16, 8, image::Rgba([level, level, level, 255])).save(path).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    /// The grey level of sequence frame `i` as first written.
+    fn level(i: i64) -> u8 {
+        20 + i as u8 * 30
+    }
+
+    /// A project with a comp showing a sequence of [`FRAMES`] PNGs (in `dir/seq`) and, unused, a
+    /// sequence of 5000 frames that don't even exist. The files of the shown sequence.
+    fn project(dir: &Path) -> (Arc<Project>, ItemId, Vec<String>) {
+        let seq_dir = dir.join("seq");
+        std::fs::create_dir_all(&seq_dir).unwrap();
+        let files: Vec<String> = (0..FRAMES).map(|i| png(&seq_dir.join(format!("f_{i:04}.png")), level(i))).collect();
+        let mut seq = Footage { kind: FootageKind::Sequence, sequence: files.clone(), frame_rate: RATE, ..effectcraft_media::probe(&files[0]).unwrap() };
+        seq.sync_sequence_duration();
+        let unused = Footage {
+            kind: FootageKind::Sequence,
+            sequence: (0..5000).map(|i| dir.join("unused").join(format!("big_{i:05}.exr")).to_string_lossy().to_string()).collect(),
+            frame_rate: RATE,
+            width: 16,
+            height: 8,
+            has_video: true,
+            ..Default::default()
+        };
+        let mut p = Project::default();
+        p.add_item("Unused", effectcraft_engine::color::Label::Aqua, None, ItemKind::Footage(unused));
+        let item = p.add_item("Seq", effectcraft_engine::color::Label::Aqua, None, ItemKind::Footage(seq));
+        let mut comp = Comp::new(16, 8, RATE, RATE.tick_of(FRAMES));
+        comp.layers = vec![build::layer(&mut p, &comp, "Seq", LayerSource::Footage { item }, (16, 8), Some(comp.duration))].into();
+        let cid = p.add_item("C", effectcraft_engine::color::Label::None, None, ItemKind::Comp(comp.into()));
+        (Arc::new(p), cid, files)
+    }
+
+    /// A session over the disk cache in `dir`: a new preview cache, media pool, layer cache and
+    /// disk cache instance (as after reopening the project), counting the calls of the hook for
+    /// files served from memory.
+    struct Session {
+        frames: Frames,
+        src: RenderSource,
+        disk: Arc<DiskCache>,
+        hook_calls: Arc<AtomicUsize>,
+        /// The session's media pool (`src.footage`): what it decoded and opened.
+        pool: Arc<effectcraft_media::MediaPool>,
+    }
+
+    fn session(p: &Arc<Project>, dir: &Path) -> Session {
+        let disk = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let mut frames = Frames::default();
+        let calls = hook_calls.clone();
+        frames.set_virtual_id(Arc::new(move |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            None
+        }));
+        let pool = Arc::new(effectcraft_media::MediaPool::new());
+        let src = RenderSource {
+            project: p.clone(),
+            footage: pool.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: Some(disk.clone()),
+        };
+        Session { frames, src, disk, hook_calls, pool }
+    }
+
+    impl Session {
+        fn key(&self, cid: ItemId, frame: i64) -> FrameKey {
+            FrameKey {
+                revision: 1,
+                content: self.frames.content_of(&self.src.project, 1, cid),
+                comp: cid.0,
+                frame,
+                scale: 1000,
+                view: 0,
+                opts: opts_hash(&RenderOpts::default()),
+            }
+        }
+
+        /// Show `frames` of `cid` (rendered or read from disk); the grey level of each, once
+        /// their disk writes are done.
+        fn show(&self, cid: ItemId, frames: &[i64]) -> Vec<u8> {
+            for &f in frames {
+                self.frames.request(&self.src, self.key(cid, f), cid, RATE.tick_of(f), RenderOpts::default());
+            }
+            wait_for_renders(&self.frames);
+            // (the worker queues the write after it has released the frame)
+            for _ in 0..400 {
+                self.disk.flush();
+                if frames.iter().all(|f| self.disk.contains(disk_cache::Kind::Frame, self.disk_key(cid, *f))) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames
+                .iter()
+                .map(|f| match self.frames.get(&self.key(cid, *f)) {
+                    Some(FrameImage::Cpu(c)) => c.pixels[0].r(),
+                    _ => panic!("frame {f}: an 8-bit CPU frame"),
+                })
+                .collect()
+        }
+
+        fn disk_key(&self, cid: ItemId, frame: i64) -> u128 {
+            frame_disk_key(&self.frames.content_keys, &self.src.project, &self.key(cid, frame), opts_hash(&RenderOpts::default()))
+        }
+
+        /// (disk hits, disk misses) so far.
+        fn hits(&self) -> (u64, u64) {
+            let s = self.disk.stats();
+            (s.hits, s.misses)
+        }
+    }
+
+    fn close(a: u8, b: u8) -> bool {
+        a.abs_diff(b) <= 2
+    }
+
+    /// Give `path` a modification time `secs` later, contents and size unchanged.
+    fn touch(path: &str, secs: u64) {
+        let t = std::fs::metadata(path).unwrap().modified().unwrap() + std::time::Duration::from_secs(secs);
+        std::fs::File::options().append(true).open(path).unwrap().set_modified(t).unwrap();
+    }
+
+    /// Correct: a source file of the sequence changes (new contents and size; or only a new
+    /// time): exactly the frames that read it render again and their entries are replaced; the
+    /// others come from disk, also after reopening.
+    #[test]
+    fn a_changed_source_file_re_renders_exactly_its_frames() {
+        let tmp = folder("correct");
+        let dir = tmp.path();
+        let (p, cid, files) = project(dir);
+        let all: Vec<i64> = (0..FRAMES).collect();
+        let first = session(&p, dir);
+        let shown = first.show(cid, &all);
+        assert!(all.iter().all(|f| close(shown[*f as usize], level(*f))), "{shown:?}");
+        assert_eq!(first.hits(), (0, FRAMES as u64), "rendered, nothing on disk yet");
+        assert_eq!(first.disk.stats().entries, FRAMES as usize, "every frame stored");
+        drop(first);
+        // Frame 2's file gets new pixels (and size), frame 3's only a new time.
+        png(Path::new(&files[2]), 250);
+        touch(&files[3], 30);
+        let second = session(&p, dir);
+        let shown = second.show(cid, &all);
+        assert!(close(shown[2], 250), "frame 2 shows its new file: {shown:?}");
+        assert!([0, 1, 3, 4].iter().all(|f| close(shown[*f as usize], level(*f))), "{shown:?}");
+        assert_eq!(second.hits(), (3, 2), "frames 0, 1 and 4 from disk; 2 and 3 rendered again");
+        assert_eq!(second.disk.file_checks(), FRAMES as u64, "one file checked per frame read");
+        assert_eq!(second.disk.stats().entries, FRAMES as usize, "the entries of 2 and 3 were replaced");
+        drop(second);
+        // Reopened: every frame from disk, the replaced ones with their new pixels.
+        let third = session(&p, dir);
+        let shown = third.show(cid, &all);
+        assert_eq!(third.hits(), (FRAMES as u64, 0));
+        assert!(close(shown[2], 250) && close(shown[3], level(3)), "{shown:?}");
+    }
+
+    /// Reopened (a new preview cache, media pool, layer cache and disk cache on the same folder):
+    /// the frame comes from disk, its one source file is checked (a `metadata` call), and no
+    /// source file is opened or decoded for it.
+    #[test]
+    fn a_reopened_project_serves_its_frame_from_disk_without_opening_a_source_file() {
+        let tmp = folder("reopen");
+        let dir = tmp.path();
+        let (p, cid, _) = project(dir);
+        let first = session(&p, dir);
+        let shown = first.show(cid, &[1]);
+        assert!(close(shown[0], level(1)), "{shown:?}");
+        assert!(first.pool.stats().misses > 0, "the first session decodes the frame's file: {:?}", first.pool.stats());
+        assert!(first.disk.contains(disk_cache::Kind::Frame, first.disk_key(cid, 1)));
+        drop(first);
+        let again = session(&p, dir);
+        let shown = again.show(cid, &[1]);
+        assert!(close(shown[0], level(1)), "{shown:?}");
+        assert_eq!(again.hits(), (1, 0), "served from disk");
+        assert_eq!(again.disk.file_checks(), 1, "its one file checked");
+        assert_eq!(again.pool.stats(), effectcraft_media::PoolStats::default(), "no source file opened or decoded");
+    }
+
+    /// No scan: opening a comp of a project that also holds a large sequence, and showing a
+    /// frame, looks only at the files that frame reads; the comp's key looks at no file (it
+    /// stays the same when its files change, and never asks for the identity of a path).
+    #[test]
+    fn showing_a_frame_checks_only_the_files_it_reads() {
+        let tmp = folder("no-scan");
+        let dir = tmp.path();
+        let (p, cid, files) = project(dir);
+        let key = disk_cache::comp_content_key(&p, cid);
+        png(Path::new(&files[1]), 99);
+        touch(&files[2], 5);
+        assert_eq!(disk_cache::comp_content_key(&p, cid), key, "the key looks at no file");
+        let first = session(&p, dir);
+        first.show(cid, &[2]);
+        drop(first);
+        let again = session(&p, dir);
+        // (the indicator's key is computed off the UI thread first)
+        let mut blue = vec![];
+        for _ in 0..400 {
+            blue = again.frames.disk_frames(&again.src, &again.key(cid, 0), 0..FRAMES, &RenderOpts::default());
+            if !blue.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(blue, vec![2], "the blue bar: present entries, no file looked at");
+        assert_eq!(again.disk.file_checks(), 0, "the indicator checks no file");
+        let shown = again.show(cid, &[2]);
+        assert!(close(shown[0], level(2)), "{shown:?}");
+        assert_eq!(again.hits(), (1, 0));
+        assert_eq!(again.disk.file_checks(), 1, "only the file frame 2 read");
+        assert_eq!(again.hook_calls.load(Ordering::Relaxed), 0, "no path of the unused sequence was asked about");
+    }
+
+    /// The frame entry files under the cache folder.
+    fn entries(dir: &Path) -> Vec<PathBuf> {
+        let mut out = vec![];
+        let mut stack = vec![dir.join("cache")];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "ecc") && p.to_string_lossy().contains("frames") {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// Safe: a missing source file, an unreadable one (a folder in its place) and a damaged
+    /// cache entry never serve the frame from before; each is rendered again and stored anew.
+    #[test]
+    fn missing_or_unreadable_files_and_damaged_entries_never_serve_a_stale_frame() {
+        let tmp = folder("safe");
+        let dir = tmp.path();
+        let (p, cid, files) = project(dir);
+        let first = session(&p, dir);
+        first.show(cid, &[0]);
+        assert_eq!(first.disk.stats().entries, 1);
+        drop(first);
+        // Missing: not served; the frame is rendered without it.
+        std::fs::remove_file(&files[0]).unwrap();
+        let missing = session(&p, dir);
+        let shown = missing.show(cid, &[0]);
+        assert!(!close(shown[0], level(0)), "the frame from before was served: {shown:?}");
+        assert_eq!(missing.hits(), (0, 1));
+        drop(missing);
+        // Back, with other pixels: the entry made while it was missing is not served either.
+        png(Path::new(&files[0]), 180);
+        let back = session(&p, dir);
+        let shown = back.show(cid, &[0]);
+        assert!(close(shown[0], 180), "{shown:?}");
+        assert_eq!(back.hits(), (0, 1));
+        drop(back);
+        // Unreadable (a folder in its place).
+        std::fs::remove_file(&files[0]).unwrap();
+        std::fs::create_dir(&files[0]).unwrap();
+        let unreadable = session(&p, dir);
+        let shown = unreadable.show(cid, &[0]);
+        assert!(!close(shown[0], 180), "the frame from before was served: {shown:?}");
+        assert_eq!(unreadable.hits(), (0, 1));
+        drop(unreadable);
+        std::fs::remove_dir(&files[0]).unwrap();
+        png(Path::new(&files[0]), 120);
+        let fresh = session(&p, dir);
+        assert!(close(fresh.show(cid, &[0])[0], 120));
+        drop(fresh);
+        // A damaged entry: a miss, rendered, stored again, then served.
+        let found = entries(dir);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let mut bytes = std::fs::read(&found[0]).unwrap();
+        let n = bytes.len() / 2;
+        bytes[n] ^= 0x5a;
+        std::fs::write(&found[0], bytes).unwrap();
+        let damaged = session(&p, dir);
+        assert!(close(damaged.show(cid, &[0])[0], 120));
+        assert_eq!(damaged.hits(), (0, 1));
+        drop(damaged);
+        let healed = session(&p, dir);
+        assert!(close(healed.show(cid, &[0])[0], 120));
+        assert_eq!(healed.hits(), (1, 0), "the rewritten entry is used");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_renders_in_flight_stay_within_the_cap() {
+    use std::sync::atomic::AtomicUsize;
+    let slots = GpuRenderSlots::new();
+    let now = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..16 {
+            s.spawn(|| {
+                let _slot = slots.acquire(2);
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                now.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    assert!(peak.load(Ordering::SeqCst) <= 2);
+    assert_eq!(*slots.busy.lock().unwrap_or_else(PoisonError::into_inner), 0);
+}
+
+/// #3028: exercise the actual worker routes, not only the admission counter. The Auto CPU
+/// compositor still has a live accelerator for its layer effects.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
+    use effectcraft_engine::render::{Accelerator, Backend};
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("GPU worker route test skipped: no adapter");
+        return;
+    };
+    let (frames, mut src, key, _, _, _) = disk_fixture(&[]);
+    let mut session = effectcraft_engine::Session::default();
+    session.execute("comp.new", serde_json::json!({"width": 16, "height": 16, "duration": 1})).unwrap();
+    let comp = session.active_comp_id().unwrap();
+    let solid = session.execute("layer.newSolid", serde_json::json!({"color": "#ff0000"})).unwrap()["layer"].clone();
+    session.execute("effect.apply", serde_json::json!({"layers": [solid], "effect": "Gaussian Blur"})).unwrap();
+    src.project = session.project;
+    src.gpu = Some(gpu.clone());
+    src.gpu_display = true;
+    let mut job = Job {
+        key,
+        src,
+        comp,
+        t: Tick::ZERO,
+        opts: RenderOpts { backend: Backend::Gpu, ..Default::default() },
+        urgent: true,
+        background: false,
+        seq: 0,
+        cancel: Arc::default(),
+    };
+    let worker = frames.worker();
+    let admissions = || GPU_RENDER_SLOTS.entered.load(Ordering::SeqCst);
+    // This path is called on the UI thread by dispatch_remote: a full GPU must decline
+    // immediately so the frame can go to the remote worker and the window keeps painting.
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let declined = std::thread::scope(|scope| {
+        scope.spawn(|| tx.send(worker.render_gpu(&job).is_none()).unwrap());
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop((first, second));
+        result
+    });
+    assert_eq!(declined, Ok(true), "UI display must not wait for GPU admission");
+    let before = admissions();
+    assert!(worker.render_gpu(&job).is_some(), "direct display path renders");
+    assert!(admissions() > before, "direct display bypassed GPU admission");
+
+    let before = admissions();
+    assert!(worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert!(admissions() > before, "worker display bypassed GPU admission");
+
+    job.src.gpu_display = false;
+    job.src.layer_cache.clear();
+    let before = admissions();
+    assert!(!worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert!(admissions() > before, "readback bypassed GPU admission");
+
+    job.src.gpu_display = true;
+    job.src.layer_cache.clear();
+    job.opts.backend = Backend::Auto;
+    let renderer = Renderer::new(&job.src.project, job.src.footage.as_ref(), job.opts);
+    let (pick, key) = renderer.frame_auto(&gpu, comp, true).unwrap();
+    pick.declined(key); // Select CPU compositing while retaining GPU-capable layer effects.
+    let before = admissions();
+    assert!(!worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert!(admissions() > before, "Auto CPU effects bypassed GPU admission");
+
+    let before = admissions();
+    assert!(!worker.render_job(&job, false, &ReadLog::new()).is_gpu());
+    assert_eq!(admissions(), before, "CPU retry must not hold a GPU slot");
+    assert_eq!(*GPU_RENDER_SLOTS.busy.lock().unwrap(), 0);
+
+    // Saturation in the shared Rayon pool is contention, not a GPU fault. It must finish
+    // through the fresh CPU route without admitting GPU effects or retiring the device.
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let before = admissions();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cpu = std::thread::scope(|scope| {
+        scope.spawn(|| pool.install(|| tx.send(!worker.render_job(&job, true, &ReadLog::new()).is_gpu()).unwrap()));
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop((first, second));
+        result
+    });
+    assert_eq!(cpu, Ok(true), "busy pool worker must complete on the CPU");
+    assert_eq!(admissions(), before);
+    assert!(worker.gpu_ready());
+    assert!(gpu.context().check_health().is_ok());
+
+    // The real dedicated-lane drain waits, then caches a GPU frame instead of silently
+    // switching a healthy preview to CPU rendering while the other lanes are busy.
+    frames.queue.lock().unwrap().jobs.push(Job {
+        key: job.key,
+        src: job.src.clone(),
+        comp,
+        t: job.t,
+        opts: RenderOpts { backend: Backend::Gpu, ..job.opts },
+        urgent: false,
+        background: true,
+        seq: 1,
+        cancel: Arc::default(),
+    });
+    let first = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let second = GPU_RENDER_SLOTS.acquire(MAX_GPU_RENDERS);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (early, finished) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                started.send(()).unwrap();
+                worker.drain(Some(0));
+                tx.send(()).unwrap();
+            })
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let early = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop((first, second));
+        let finished = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
+        (early, finished)
+    });
+    assert!(early.is_err(), "preview lane must wait for an available GPU permit");
+    assert_eq!(finished, Ok(()));
+    assert!(frames.cache.lock().unwrap().map.get(&job.key).unwrap().img.is_gpu());
+
+    // A retirement found inside the scope releases the permit before the fresh CPU retry.
+    gpu.context().device_failure_notifier()("synthetic worker retirement".into());
+    let before = admissions();
+    assert!(!worker.render_job(&job, true, &ReadLog::new()).is_gpu());
+    assert_eq!(admissions(), before + 1, "failed GPU attempt must retry without a second admission");
+    assert_eq!(*GPU_RENDER_SLOTS.busy.lock().unwrap(), 0);
+    gpu.frame_end();
+}
+
+/// Early returns and unwinding release admission even before another render starts.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_render_slots_return_after_failure_and_unwind() {
+    let slots = GpuRenderSlots::new();
+    let failed = || -> Result<(), ()> {
+        let _slot = slots.acquire(2);
+        Err(())
+    };
+    assert!(failed().is_err());
+    assert_eq!(*slots.busy.lock().unwrap(), 0);
+    let result = std::panic::catch_unwind(|| {
+        let _slot = slots.acquire(2);
+        panic!("synthetic render panic");
+    });
+    assert!(result.is_err());
+    assert_eq!(*slots.busy.lock().unwrap(), 0);
+}
+
+/// A Rayon helper must decline a full gate rather than wait for a render that can itself be
+/// waiting for that helper. Release the permits on timeout so a regression fails, not hangs.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_render_slots_never_block_rayon_helpers() {
+    let slots = GpuRenderSlots::new();
+    let first = slots.acquire(2);
+    let second = slots.acquire(2);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let declined = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                rayon::join(|| {}, || tx.send(slots.for_render(2).is_none()).unwrap());
+            });
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop((first, second));
+        result
+    });
+    assert_eq!(declined, Ok(true), "Rayon helpers must not wait on GPU permits");
+    assert_eq!(*slots.busy.lock().unwrap(), 0);
+}
+
+/// A lane's drain thread can wait without creating the shared-pool helper dependency cycle,
+/// and must keep rendering on a healthy GPU; the lane's other threads ([`LANE_WIDTH`] wide)
+/// help with its frame and never wait.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
+    let slots = GpuRenderSlots::new();
+    let first = slots.acquire(2);
+    let second = slots.acquire(2);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(LANE_WIDTH).build().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (early, admitted, helper) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.install(|| {
+                let _drain = Draining::enter(Some(0)).unwrap();
+                assert!(Draining::enter(None).is_none(), "a lane cannot start a nested drain");
+                assert!(DRAINING_LANE.get(), "nested rejection must not clear the lane marker");
+                started.send(()).unwrap();
+                tx.send(slots.for_render(2).is_some()).unwrap();
+            });
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        // Another thread of the same lane, while its drain thread waits: it declines.
+        let (htx, hrx) = std::sync::mpsc::channel();
+        let (pool, slots) = (&pool, &slots);
+        scope.spawn(move || pool.install(|| htx.send(slots.for_render(2).is_none()).unwrap()));
+        let helper = hrx.recv_timeout(std::time::Duration::from_secs(2));
+        let early = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop((first, second));
+        let admitted = early.or_else(|_| rx.recv_timeout(std::time::Duration::from_secs(2)));
+        (early, admitted, helper)
+    });
+    assert!(early.is_err(), "busy dedicated lane must wait instead of falling back to CPU");
+    assert_eq!(admitted, Ok(true));
+    assert_eq!(helper, Ok(true), "a lane's helper thread must not wait on GPU permits");
+    pool.install(|| {
+        assert!(!DRAINING.get());
+        assert!(!DRAINING_LANE.get());
+        let panic = std::panic::catch_unwind(|| {
+            let _drain = Draining::enter(Some(0)).unwrap();
+            panic!("synthetic lane failure");
+        });
+        assert!(panic.is_err());
+        assert!(!DRAINING.get());
+        assert!(!DRAINING_LANE.get());
+    });
+}
+
+#[test]
+fn effect_detection_answers_each_comp_once() {
+    // Sixteen levels, each comp holding eight layers of the one below and no effects: 8^16 walks
+    // without a memo. Answered at once.
+    use effectcraft_engine::project::{Comp, ItemKind, LayerSource, build};
+    use effectcraft_engine::time::{FrameRate, Tick};
+    let mut p = Project::default();
+    let base = Comp::new(8, 8, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+    let mut below = p.add_item("C", effectcraft_engine::color::Label::Sandstone, None, ItemKind::Comp(base.clone().into()));
+    for _ in 0..16 {
+        let layers: Vec<_> = (0..8).map(|_| build::layer(&mut p, &base, "a", LayerSource::Comp { item: below }, (0, 0), None)).collect();
+        let mut c = base.clone();
+        c.layers = layers.into();
+        below = p.add_item("C", effectcraft_engine::color::Label::Sandstone, None, ItemKind::Comp(c.into()));
+    }
+    let start = std::time::Instant::now();
+    assert!(!comp_has_effects(&p, below));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn an_effect_found_by_a_short_route_is_not_hidden_by_a_deep_one() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    let mut s = Session::default();
+    let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    let comp = |s: &mut Session| ItemId(id(s.execute("comp.new", json!({"name": "C", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
+    let nest = |s: &mut Session, outer: ItemId, inner: ItemId| {
+        s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0, "time": 0.0})).unwrap();
+    };
+    // `fx` holds a layer with an effect; seventeen comps stack above it, one level too many to be found.
+    let fx = comp(&mut s);
+    let l = id(s.execute("layer.newSolid", json!({"comp": fx.0, "color": "#ff0000"})).unwrap(), "layer");
+    s.execute("effect.apply", json!({"comp": fx.0, "layers": [l], "effect": "ec.vr.converter"})).unwrap();
+    let mut chain = fx;
+    for _ in 0..17 {
+        let up = comp(&mut s);
+        nest(&mut s, up, chain);
+        chain = up;
+    }
+    assert!(!comp_has_effects(&s.project, chain), "too deep to be found");
+    // A root that nests the chain first and `fx` directly after it.
+    let root = comp(&mut s);
+    nest(&mut s, root, chain);
+    nest(&mut s, root, fx);
+    assert!(comp_has_effects(&s.project, root));
 }

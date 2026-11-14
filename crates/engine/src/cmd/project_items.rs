@@ -8,7 +8,7 @@ use super::{CommandSpec, always, b_p, bad, str_p};
 use crate::{EngineError, Result, Session, cmd, query};
 
 /// `item` (id or name) → id.
-fn item_ref(s: &Session, v: &Value, cmd: &str) -> Result<ItemId> {
+pub(super) fn item_ref(s: &Session, v: &Value, cmd: &str) -> Result<ItemId> {
     match v {
         Value::Number(n) => n.as_u64().map(ItemId).filter(|i| s.project.item(*i).is_some()),
         Value::String(name) => s.project.find_by_name(name).map(|i| i.id),

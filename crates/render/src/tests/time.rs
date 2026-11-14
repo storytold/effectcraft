@@ -1,7 +1,10 @@
 //! Time effects through the renderer: neighbouring frames via `EffectHost::self_at`, and the
 //! layer cache staying correct while scrubbing.
 
+use std::sync::Arc;
+
 use effectcraft_color::Label;
+use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginManifest, PluginParams, register_plugin};
 use effectcraft_keyframe::{Keyframe, ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, MaskMode, Project, Solid};
@@ -143,6 +146,7 @@ fn input_keys_ignore_later_effects() {
             footage: None,
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         };
         let l = &comp.layers[0];
         (crate::cache::input_key(&ctx, l, 1.0, false, false, 1), crate::cache::input_key(&ctx, l, 1.0, false, false, 2))
@@ -155,4 +159,90 @@ fn input_keys_ignore_later_effects() {
     assert_ne!(key(&p).1, two);
     set(&mut p, "effects/#1/blurriness", 8.0);
     assert_ne!(key(&p).0, one);
+}
+
+/// A plug-in that reads the layer's neighbouring frames (WebAssembly ABI 2) makes its layer's
+/// cache key depend on the layer time, even when the source and every property are static. A
+/// plug-in that does not keeps the old key (#1977: a static layer stays cached across a scrub).
+#[test]
+fn abi2_plugin_layers_key_on_layer_time() {
+    struct NeighbourReader {
+        m: PluginManifest,
+    }
+
+    impl EffectPlugin for NeighbourReader {
+        fn manifest(&self) -> &PluginManifest {
+            &self.m
+        }
+
+        fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn reads_other_times(&self) -> bool {
+            true
+        }
+    }
+
+    struct Plain {
+        m: PluginManifest,
+    }
+
+    impl EffectPlugin for Plain {
+        fn manifest(&self) -> &PluginManifest {
+            &self.m
+        }
+
+        fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A static white solid with one plug-in effect, registered by `plugin`.
+    fn plugin_scene(plugin: Arc<dyn EffectPlugin>) -> (Project, ItemId) {
+        let mut p = Project::default();
+        let comp = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+        let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 200, height: 100, pixel_aspect: 1.0 }));
+        let mut l = build::layer(&mut p, &comp, "Solid", LayerSource::Solid { item: sid }, (200, 100), None);
+        let spec = register_plugin(plugin).unwrap();
+        let mut next = p.next_id;
+        let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [200.0, 100.0]);
+        p.next_id = next;
+        l.props.sub_mut("effects").unwrap().children.push(g.into());
+        p.comp_mut(cid).unwrap().layers.push(l);
+        (p, cid)
+    }
+
+    fn key(p: &Project, cid: ItemId, t: f64) -> Option<u64> {
+        let comp = p.comp(cid).unwrap();
+        let ctx = crate::EvalCtx {
+            project: p,
+            comp_id: cid,
+            comp,
+            time: Tick::from_seconds_f64(t),
+            expr: None,
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+            reads: None,
+        };
+        crate::cache::layer_key(&ctx, &comp.layers[0], 1.0, false, false)
+    }
+
+    let manifest = |id: &str| PluginManifest {
+        api: 2,
+        id: id.into(),
+        name: "Key".into(),
+        category: "Test Plug-ins".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![],
+    };
+
+    let (plain, c1) = plugin_scene(Arc::new(Plain { m: manifest("org.test.render.time-key.plain") }));
+    assert_eq!(key(&plain, c1, 0.25), key(&plain, c1, 0.5), "a plain plug-in keeps the old key");
+    let (reader, c2) = plugin_scene(Arc::new(NeighbourReader { m: manifest("org.test.render.time-key.reader") }));
+    assert_ne!(key(&reader, c2, 0.25), key(&reader, c2, 0.5), "an ABI 2 plug-in keys on the layer time");
 }
