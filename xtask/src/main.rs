@@ -369,7 +369,10 @@ fn serve_dir(dir: &std::path::Path, port: u16) -> Result<(), String> {
     println!("serving {} on http://127.0.0.1:{port}/", dir.display());
     for stream in listener.incoming().flatten() {
         let dir = dir.to_path_buf();
-        std::thread::spawn(move || {
+        // A client that connects and sends nothing gives its thread back after the timeout.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        // Out of threads: drop this connection rather than panic the server.
+        let _ = std::thread::Builder::new().spawn(move || {
             let mut stream = stream;
             let mut line = String::new();
             let mut reader = BufReader::new(match stream.try_clone() {
@@ -386,8 +389,7 @@ fn serve_dir(dir: &std::path::Path, port: u16) -> Result<(), String> {
                 }
             }
             let path = line.split_whitespace().nth(1).unwrap_or("/").split(['?', '#']).next().unwrap_or("/").to_string();
-            let rel = if path == "/" { "index.html".to_string() } else { path.trim_start_matches('/').replace("..", "") };
-            let file = dir.join(&rel);
+            let file = served_file(&dir, &path);
             let (status, body) = match std::fs::read(&file) {
                 Ok(b) => ("200 OK", b),
                 Err(_) => ("404 Not Found", b"not found".to_vec()),
@@ -413,6 +415,13 @@ fn serve_dir(dir: &std::path::Path, port: u16) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+/// The file under `dir` a request for `path` serves: only its normal components are kept (no
+/// `..`, root, drive or empty ones), so the result stays inside `dir`.
+fn served_file(dir: &std::path::Path, path: &str) -> std::path::PathBuf {
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|c| !c.is_empty() && *c != "." && *c != ".." && !c.contains(':')).collect();
+    if parts.is_empty() { dir.join("index.html") } else { parts.iter().fold(dir.to_path_buf(), |p, c| p.join(c)) }
 }
 
 /// The guidance printed when the ALSA pkg-config package is missing. Split out so the tests can
@@ -646,5 +655,20 @@ mod tests {
     fn alsa_missing_appends_pkg_config_s_own_detail() {
         let e = audio_backend_missing_hint(Some("Package 'alsa' not found"));
         assert!(e.contains("pkg-config said: Package 'alsa' not found"), "detail lost:\n{e}");
+    }
+}
+
+#[cfg(test)]
+mod serve_tests {
+    #[test]
+    fn served_files_stay_inside_the_served_folder() {
+        let dir = std::path::Path::new("/srv/dist");
+        for p in ["/..//etc/passwd", "/....//....//etc/passwd", "//etc/passwd", "/..\\..\\x", "/C:/Windows/win.ini", "/a/../../b"] {
+            let f = super::served_file(dir, p);
+            assert!(f.starts_with(dir) && f.components().count() > dir.components().count(), "{p} -> {}", f.display());
+            assert!(!f.components().any(|c| matches!(c, std::path::Component::ParentDir)), "{p} -> {}", f.display());
+        }
+        assert_eq!(super::served_file(dir, "/"), dir.join("index.html"));
+        assert_eq!(super::served_file(dir, "/pkg/app.wasm"), dir.join("pkg").join("app.wasm"));
     }
 }

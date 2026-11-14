@@ -18,11 +18,25 @@ struct FakeTools {
 
 impl FakeTools {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!("effectcraft-xtask-audio-{tag}-{}", std::process::id()));
+        // A new directory this test creates itself: a predictable one that already exists (made
+        // by another user) is never trusted for the tools put on the child's PATH.
+        let base = (0u32..)
+            .map(|n| std::env::temp_dir().join(format!("effectcraft-xtask-audio-{tag}-{}-{n}", std::process::id())))
+            .find_map(|b| match std::fs::create_dir(&b) {
+                Ok(()) => Some(b),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => panic!("create scratch dir {}: {e}", b.display()),
+            })
+            .expect("create a new scratch dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("make the scratch dir private");
+        }
         let dir = base.join("bin");
         let off_path = base.join("off-path");
-        std::fs::create_dir_all(&dir).expect("create PATH dir");
-        std::fs::create_dir_all(&off_path).expect("create off-PATH dir");
+        std::fs::create_dir(&dir).expect("create PATH dir");
+        std::fs::create_dir(&off_path).expect("create off-PATH dir");
         Self { dir, off_path }
     }
 
@@ -49,8 +63,10 @@ impl FakeTools {
 
 impl Drop for FakeTools {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-        let _ = std::fs::remove_dir_all(&self.off_path);
+        // Both live in the scratch dir this test created.
+        if let Some(base) = self.dir.parent() {
+            let _ = std::fs::remove_dir_all(base);
+        }
     }
 }
 

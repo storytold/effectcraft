@@ -19,7 +19,8 @@ fi
 
 TMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 KEYCHAIN="$TMP/effectcraft-signing.keychain-db"
-CERT="$TMP/effectcraft-signing.p12"
+# Created new and private (mode 0600) by mktemp, never an existing file someone else can read.
+CERT="$(mktemp "$TMP/effectcraft-signing.XXXXXX")"
 KC_PASS="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
 
 trap 'rm -f "$CERT"' EXIT
