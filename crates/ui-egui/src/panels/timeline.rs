@@ -4298,19 +4298,6 @@ fn prop_context_menu(
     }
 }
 
-/// An expression was just added to `prop` (it had none) or removed: adding one opens its
-/// editor, which comes into view and takes the keyboard with the new expression selected
-/// (#1072); removing it leaves nothing to take the keyboard.
-fn expression_toggled(app: &mut EffectcraftApp, ctx: &egui::Context, prop: &Property) {
-    let uid = prop.uid;
-    if prop.expr.is_none() {
-        app.ui.timeline.expr_closed.remove(&uid);
-        focus_expression(ctx, uid, [usize::MAX, 0]);
-    } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == uid) {
-        ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
-    }
-}
-
 /// The value editors and the property pick whip.
 fn prop_value_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowCtx<'_>, ectx: &EvalCtx<'_>, prop: &Property, name_x: f32) {
     let vis = g.tl.vis;
