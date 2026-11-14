@@ -983,12 +983,12 @@ fn effects_p(s: &Session, p: &Value, cmd: &str) -> Result<Vec<(LayerId, Uid)>> {
 }
 
 pub(crate) fn effect_time_error(cmd: &str) -> EngineError {
-    bad(cmd, "an effect keyframe converts outside the supported time range")
+    bad(cmd, "a keyframe converts outside the supported time range")
 }
 
 /// Validate before Layer's saturating conversions, so a bad stretch or time never silently
 /// moves a copied key to another frame. Normal-speed layers keep their exact integer ticks.
-fn effect_time(layer: &Layer, time: Tick, to_comp: bool, cmd: &str) -> Result<Tick> {
+pub(crate) fn effect_time(layer: &Layer, time: Tick, to_comp: bool, cmd: &str) -> Result<Tick> {
     if !layer.stretch.is_finite() || layer.stretch == 0.0 {
         return Err(bad(cmd, "the layer has an invalid time stretch"));
     }
@@ -1035,7 +1035,7 @@ pub(crate) fn retime_effect(group: &mut PropGroup, scale: f64, cmd: &str, mut ti
                 for ease in key.in_ease.iter_mut().chain(&mut key.out_ease) {
                     ease.speed /= speed_scale;
                     if !ease.speed.is_finite() {
-                        return Err(bad(cmd, "an effect keyframe ease converts outside the supported range"));
+                        return Err(bad(cmd, "a keyframe ease converts outside the supported range"));
                     }
                 }
                 if scale < 0.0 {
@@ -1055,7 +1055,7 @@ pub(crate) fn retime_effect(group: &mut PropGroup, scale: f64, cmd: &str, mut ti
         }
         pr.keys.sort_by_key(|key| key.time);
         if pr.keys.windows(2).any(|pair| pair[0].time == pair[1].time) {
-            result = Err(bad(cmd, "the layer's time stretch maps effect keyframes to the same tick"));
+            result = Err(bad(cmd, "the layer's time stretch maps keyframes to the same tick"));
         }
     });
     result
@@ -1089,6 +1089,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     s.state.keyframe_text = None;
     s.state.contents_clipboard.clear();
     s.state.mask_clipboard.clear();
+    s.state.animator_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.clip_is_keys = false;
     let n = groups.len();

@@ -135,6 +135,86 @@ pub(crate) fn copy_contents(s: &Session) -> Vec<PropGroup> {
     selected_contents(s).into_iter().filter_map(|(lid, uid)| c.layer(lid)?.props.find_group(uid).cloned()).collect()
 }
 
+/// Whole selected text animators. A selected child travels with its parent, once.
+/// Keys use comp-time offsets, matching the effect clipboard and preserving time stretch.
+pub(crate) fn copy_animators(s: &Session) -> Result<Vec<PropGroup>> {
+    use super::effect::{effect_time, effect_time_error, retime_effect};
+    const CMD: &str = "edit.copy";
+    let Some(comp) = s.active_comp() else { return Ok(vec![]) };
+    let mut groups = vec![];
+    let mut earliest = None;
+    for layer in comp.layers.iter().filter(|l| s.state.selected_layers.contains(&l.id) && matches!(l.source, LayerSource::Text)) {
+        let Some(animators) = layer.props.group("text/animators") else { continue };
+        for animator in animators.groups().filter(|g| s.state.selected_props.contains(&(layer.id, g.uid))) {
+            let mut group = animator.clone();
+            retime_effect(&mut group, layer.stretch / 100.0, CMD, |t| {
+                let t = effect_time(layer, t, true, CMD)?;
+                earliest = Some(earliest.map_or(t, |first: effectcraft_time::Tick| first.min(t)));
+                Ok(t)
+            })?;
+            groups.push(group);
+        }
+    }
+    if let Some(first) = earliest {
+        for group in &mut groups {
+            retime_effect(group, 1.0, CMD, |t| Ok(effectcraft_time::Tick(t.0.checked_sub(first.0).ok_or_else(|| effect_time_error(CMD))?)))?;
+        }
+    }
+    Ok(groups)
+}
+
+/// Append independent animator copies to selected, unlocked text layers, in one undo step.
+pub(crate) fn paste_animators(s: &mut Session, p: &Value) -> Result<Value> {
+    use super::effect::{effect_time, effect_time_error, retime_effect};
+    const CMD: &str = "edit.paste";
+    let clip = s.state.animator_clipboard.clone();
+    let (cid, ids) = layers_p(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let targets: Vec<_> = ids.into_iter().filter(|id| comp.layer(*id).is_some_and(|l| matches!(l.source, LayerSource::Text) && !l.switches.locked)).collect();
+    if targets.is_empty() {
+        return Err(bad(CMD, "select an unlocked text layer to paste text animators into"));
+    }
+    let at = s.time_of(cid);
+    let copied = s.edit("Paste Text Animators", None, |proj, st| {
+        let mut next = proj.next_id;
+        let mut out = vec![];
+        for lid in &targets {
+            let layer = layer_mut(proj, cid, *lid)?;
+            let mut groups = clip.clone();
+            for group in &mut groups {
+                retime_effect(group, 100.0 / layer.stretch, CMD, |offset| {
+                    let t = effectcraft_time::Tick(at.0.checked_add(offset.0).ok_or_else(|| effect_time_error(CMD))?);
+                    effect_time(layer, t, false, CMD)
+                })?;
+            }
+            let animators = layer.props.group_mut("text/animators").ok_or_else(|| bad(CMD, "the layer has no text animators"))?;
+            for mut group in groups {
+                // reassign_uids increments once per node. Refuse exhaustion before calling it,
+                // including the free id reserved after the inserted groups.
+                let mut count = 1u64;
+                let mut pending = vec![&group];
+                while let Some(g) = pending.pop() {
+                    count = count.checked_add(g.children.len() as u64).ok_or_else(|| bad(CMD, "too many animator properties"))?;
+                    pending.extend(g.groups());
+                }
+                if next.checked_add(count).and_then(|n| n.checked_add(1)).is_none() {
+                    return Err(bad(CMD, "the project has no available property ids"));
+                }
+                group.reassign_uids(&mut next);
+                group.name = super::effect::unique_name(animators, &group.name);
+                out.push((*lid, group.uid));
+                animators.children.push(group.into());
+            }
+        }
+        proj.next_id = next.checked_add(1).ok_or_else(|| bad(CMD, "the project has no available property ids"))?;
+        st.selected_props = out.clone();
+        st.selected_keys.clear();
+        st.selected_vertices.clear();
+        Ok(out)
+    })?;
+    Ok(json!({"animators": copied.into_iter().map(|(_, uid)| uid).collect::<Vec<_>>()}))
+}
+
 /// Masks selected on the active comp's layers, top to bottom (#2091).
 pub(crate) fn selected_masks(s: &Session) -> Vec<(LayerId, Uid)> {
     let Some(c) = s.active_comp().filter(|_| !s.state.selected_props.is_empty()) else { return vec![] };

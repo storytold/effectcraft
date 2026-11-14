@@ -1175,3 +1175,14 @@ top of this page and in items 16–18 above.
 | 2026-10-05 | minor | Checklist updated for M3.9–M4.12 (as `docs/parity.md`) |
 | 2026-10-04 | major | Checklist audit at `d39c0e8`: ≈ 99% weighted breadth, 89 / 3 / 0 of 92 |
 | 2026-10-02 | major | First audit: ≈ 64% weighted breadth |
+
+### Update: whole text animator clipboard (#2021, 2026-11-14)
+
+Edit Copy/Paste and native clipboard events now transfer selected animator roots between text
+layers, including their selector trees, properties, expressions and keyframes. Copies receive
+fresh property IDs and unique names; pasting to multiple unlocked text layers is one undo step.
+Keyframes align to the CTI in comp time, including reversed or stretched layers and easing.
+Engine regressions cover payload preservation, independent copies, undo/redo, save/load, rendered
+output, incompatible destinations, ID exhaustion and clipboard replacement. A UI regression drives
+Copy/Paste events from a Timeline group selection. This is internal workflow verification, not a
+comparison with After Effects; selector-only clipboard interchange remains outside this change.

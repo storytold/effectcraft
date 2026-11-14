@@ -62,6 +62,7 @@ pub(crate) mod stubs;
 mod styles;
 mod tail;
 mod text;
+mod text_animator_clipboard;
 mod text_edit;
 mod text_presets;
 mod three_d;

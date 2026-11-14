@@ -26,6 +26,7 @@ fn has_clip(s: &Session) -> std::result::Result<(), String> {
         && s.state.effect_clipboard.is_empty()
         && s.state.contents_clipboard.is_empty()
         && s.state.mask_clipboard.is_empty()
+        && s.state.animator_clipboard.is_empty()
         && s.state.link_clipboard.is_none()
         && s.state.value_clipboard.is_empty()
     {
@@ -288,6 +289,7 @@ fn clear_clipboards(s: &mut Session) {
     s.state.effect_clipboard.clear();
     s.state.contents_clipboard.clear();
     s.state.mask_clipboard.clear();
+    s.state.animator_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.value_clipboard.clear();
     s.state.keyframe_text = None;
@@ -313,6 +315,15 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     // Effects selected (Effect Controls / timeline) → copy the effects.
     if p.get("layers").is_none() && !super::effect::selected_effects(s).is_empty() {
         return s.execute("effect.copy", json!({}));
+    }
+    // #2021: whole text animators travel as groups, not as duplicate text layers.
+    if p.get("layers").is_none() && p.get("layer").is_none_or(Value::is_null) {
+        let animators = super::prop_groups::copy_animators(s)?;
+        if !animators.is_empty() {
+            clear_clipboards(s);
+            s.state.animator_clipboard = animators;
+            return Ok(json!({"animators": s.state.animator_clipboard.len()}));
+        }
     }
     // Masks selected → copy them (not their layer), for Paste onto other layers (#2091), unless
     // a layer is named explicitly.
@@ -606,6 +617,9 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if !s.state.effect_clipboard.is_empty() {
         return s.execute("effect.paste", p.clone());
+    }
+    if !s.state.animator_clipboard.is_empty() {
+        return super::prop_groups::paste_animators(s, p);
     }
     if !s.state.contents_clipboard.is_empty() {
         return super::prop_groups::paste_contents(s, p);

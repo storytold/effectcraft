@@ -101,6 +101,9 @@ pub struct EditorState {
     /// Copied masks (Edit ▸ Copy with masks selected); Paste adds them to the selected layers.
     #[serde(skip)]
     pub mask_clipboard: Vec<effectcraft_project::PropGroup>,
+    /// Whole text animators, with comp-time key offsets from the earliest copied key.
+    #[serde(skip)]
+    pub animator_clipboard: Vec<effectcraft_project::PropGroup>,
     /// Selected mask vertices (viewer Selection tool / pen).
     #[serde(default)]
     pub selected_vertices: Vec<VertexRef>,
