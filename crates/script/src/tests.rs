@@ -679,6 +679,31 @@ fn security_gate_for_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Files in the settings folder run or load by themselves (`Scripts/Startup`, `Scripts/Shutdown`,
+/// ScriptUI panels, `helpers/`, `Plug-ins/`), so the file-write preference never lets a script
+/// write there. It still writes anywhere else.
+#[test]
+fn scripts_cannot_write_into_the_apps_settings_folder() {
+    use effectcraft_engine::config::DirConfig;
+    let dir = std::env::temp_dir().join(format!("ec-script-settings-gate-{}", std::process::id()));
+    let settings = dir.join("settings");
+    std::fs::create_dir_all(settings.join("Scripts/Startup")).unwrap();
+    let mut s = session();
+    s.config = Some(Arc::new(DirConfig::new(settings.clone())));
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let q = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
+    let target = settings.join("Scripts/Startup/persist.jsx");
+    let o = run_code(&mut s, &format!("var f = new File({}); f.open('w'); f.write('x'); f.close();", q(&target)), "settings.jsx");
+    let e = o.error.expect("refused");
+    assert!(e.message.contains("settings folder"), "{e:?}");
+    assert!(!target.exists());
+    // The preference still allows writes outside the settings folder.
+    let outside = dir.join("ok.txt");
+    ok(&mut s, &format!("var f = new File({}); f.open('w'); f.write('x'); f.close();", q(&outside)));
+    assert!(outside.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #816: CompItem.saveFrameToPng writes the frame as a PNG, behind the file-write preference.
 #[test]
 fn save_frame_to_png_writes_behind_the_file_gate() {
