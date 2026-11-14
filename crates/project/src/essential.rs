@@ -17,12 +17,18 @@
 //!   the attributes it changed itself; the others follow the master's restyles. A Set of an
 //!   overridden Source Text rebases what it changed ([`TextDoc::rebase`]), so the value set
 //!   stays the instance's own. A keyframed override has a base per key
-//!   ([`EssentialBase::keys`]). Limits: only the master's Source Text at time 0 is compared (a
-//!   style that changes at a later master keyframe does not reach instances); character and
-//!   paragraph attributes are merged only where uniform in the master, and where mixed in the
-//!   base only when the instance kept that formatting as it is; and the base is one document per
-//!   override (or key), so in an instance with mixed formatting a run that followed moves the
-//!   base on for every run.
+//!   ([`EssentialBase::keys`]). Ownership is kept per run and per paragraph: the base document
+//!   carries the base each run (or paragraph) of the instance follows
+//!   ([`TextDoc::follow_runs`], [`TextDoc::follow_paras`], empty in projects saved before and
+//!   while every run has the base's), so a run the instance styled itself keeps its own base
+//!   while the others follow, and [`TextDoc::rebase`] carries the records through the
+//!   instance's edits (typing, splitting, merging and deleting runs). Limits: only the
+//!   master's Source Text at time 0 is compared (a style that changes at a later master
+//!   keyframe does not reach instances); character and paragraph attributes are merged only
+//!   where uniform in the master, and where mixed in the base only when the instance kept
+//!   that formatting as it is. (As before, a keyframed override's keys keep a base each but the
+//!   instance's edits rebase only the override's own base, not its keys'; two master changes
+//!   with no edit in between keep every key's own runs.)
 
 use serde::{Deserialize, Serialize};
 

@@ -317,6 +317,29 @@ fn deleting_the_masters_bold_first_word_keeps_the_instance_bold() {
     assert_eq!((own.text.as_str(), own.size, own.style_at(0).faux_bold), ("Wow", 64.0, true));
 }
 
+/// An instance with mixed formatting (its first word explicitly red over a blue master): the
+/// master turns red, then green. The unchanged run follows both times and the explicitly red
+/// first word stays red. One base for the whole copy used to move to red with the first
+/// sync, so the second took the red word for following and turned it green.
+#[test]
+fn an_explicitly_red_run_survives_two_master_restyles() {
+    let (mut s, bubble, text, body, main, inst) = bubble(json!({"text": "Placeholder", "size": 54, "fill": "#0000ff"}));
+    let (mut doc, _) = instance_value(&s, main, inst, body);
+    doc.set_text("Red blue");
+    doc.apply_style(0..3, |st| st.fill = [1.0, 0.0, 0.0, 1.0]);
+    set_doc(&mut s, inst, body, &doc);
+    for fill in ["#ff0000", "#00ff00"] {
+        s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": fill})).unwrap();
+    }
+    let (own, overridden) = instance_value(&s, main, inst, body);
+    assert!(overridden);
+    for d in [&own, &rendered_text(&s, main, inst, bubble, text)] {
+        assert_eq!(d.text, "Red blue");
+        assert_eq!(d.style_at(1).fill, [1.0, 0.0, 0.0, 1.0], "the instance's own red word stays");
+        assert_fill(&TextDoc { fill: d.style_at(6).fill, ..TextDoc::default() }, [0x00, 0xff, 0x00]);
+    }
+}
+
 /// Two instances, one overriding the text and one not: both show the restyle, each with its
 /// text.
 #[test]

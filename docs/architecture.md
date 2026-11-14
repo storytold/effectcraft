@@ -552,7 +552,14 @@ Every precomp layer of such a comp gets an Essential Properties group (`GroupKin
 children `eg<control id>`), kept in step by `Session::edit`; editing a child overrides it for
 that instance. An overridden Source Text keeps a base (the master document it is merged with,
 `EssentialBase`): it keeps its characters and the attributes it changed itself, and follows the
-master's restyles in the others (`TextDoc::merge_master`). A collapsed instance carries its property, Font and Media Replacement overrides
+master's restyles in the others (`TextDoc::merge_master`). Ownership is kept per run and per
+paragraph: the base document carries `follow_runs` / `follow_paras` (the base each run or
+paragraph of the copy follows, aligned to the copy's text), so a run the instance styled itself
+keeps its own base while its neighbours follow the master (blue base, instance-red first run:
+master red, then green, leaves the first run red). `TextDoc::rebase` carries those records through
+the instance's edits (typing, splitting, merging, deleting runs, Enter) by comparing the texts and
+rebases only the runs and paragraphs the edit changed; old projects have no records (serde
+default) and start from the base's flat style. A collapsed instance carries its property, Font and Media Replacement overrides
 into the nested render context (`Collapsed`, `EvalCtx::{property_overrides, media_overrides}`);
 other instances are drawn from a copy of the project with the overridden source properties set
 (`essential::with_overrides`). Templates are `.ectemplate`
