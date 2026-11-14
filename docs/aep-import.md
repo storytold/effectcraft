@@ -72,6 +72,27 @@ outside the sampled ones keeps the current value and is reported as `project set
 | Time Remapping | an enabled remap becomes the `timeRemap` property (source seconds, keys in layer time with their interpolation and ease, expression), first in the layer's properties as Layer > Time > Enable Time Remapping puts it; 319, 354 |
 | Footage | a link to the stored path; **missing-footage placeholder** when the path does not exist where the import runs (listed in `missingFootage`), a normal link when it does. The importer never opens footage. **An image sequence** (its alias is the folder) becomes a sequence of its files, named from the stored numbering (`shot_0101.exr` .. `shot_0103.exr` in 603, `seq_001.png` .. in 353), at its native frame rate; the first file is the footage's path and the one checked. Sequences and clips take the stored native frame rate and duration (603, 606). A sequence of more than 100 000 frames, or beyond a million file names in one import, links only its first file and is reported. **One layer of a Photoshop file** shows that layer (`Footage::layer`: its index and name; at its own size with Retain Layer Sizes, else on the document) and is named `<layer>/<file>` unless the item has a name; a layer without pixels (an adjustment layer) keeps the merged image and is reported; so is a layer as big as the document but not at its corner, which the item's size does not tell apart (shown at its own size), and an item as big as neither the layer nor the document (shown on the document) |
 
+### Projects saved by After Effects in another language, moved projects
+
+Found with projects saved by a Japanese-language After Effects 2025 / 2026 on Windows (no corpus
+case; checked against After Effects' own read-back and renders of those projects):
+
+- **Popups** name their items in the language of the After Effects that saved the file. When the
+  file's items do not match EffectCraft's by name but their count is After Effects' (the table's),
+  the stored position picks the item, with the table's English names; before, such a parameter
+  fell back to its default and was reported.
+- **Separate Dimensions**: a separated Position (`ADBE Position` `tdsb` bit `0x800`, `ADBE
+  Position_0` / `_1` stored or keyed) arrives as X / Y / Z Position (`positionX`...), with their
+  keys; before, the parts were reported and the combined Position's stale keys moved the layer.
+- **Moved footage**: footage missing at its stored path is looked for below the folder the
+  `.aep` is in now, by the last components of the stored path, the longest first (up to four),
+  as After Effects finds the footage of a project moved together with it.
+  `ImportOptions::project_folder`; `file.importAep` passes the file's folder. The paths found are
+  then resolved through the document-path policy like any other stored path.
+- **Lens Flare** is imported (`effect_map::IMPORT_ONLY`: Flare Center, Flare Brightness, Lens
+  Type, Blend With Original). The exporter does not write it yet: that needs a prototype instance
+  made with After Effects in `aep-export/template/effects.aep`.
+
 Units, the "absent = default" rule and the keyframe templates are the reader's
 ([aep-format.md](aep-format.md), sections 3.3–3.6). The importer converts them to EffectCraft's:
 

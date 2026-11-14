@@ -42,7 +42,11 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     // project); into one with compositions only when asked (`applySettings`). Settings that are not
     // taken over cannot be lost, so the dry run and the refusal leave them out.
     let apply = b_p(p, "applySettings").unwrap_or_else(|| s.project.comps().next().is_none());
-    let options = ImportOptions { allow_losses, exists: &exists, has_font: &has_font, folder_name: &name, settings: apply };
+    // Footage that moved together with the project is found beside it (`relocate` in the importer).
+    let file = std::path::Path::new(&path);
+    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+    let folder = file.parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty());
+    let options = ImportOptions { allow_losses, exists: &exists, has_font: &has_font, folder_name: &name, settings: apply, project_folder: folder.as_deref() };
     if dry_run {
         let report = effectcraft_aep::import::analyze_with(&bytes, &options).map_err(|e| EngineError::Other(format!("cannot import {path}: {e}")))?;
         return Ok(json!({"dryRun": true, "report": report}));

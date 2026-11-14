@@ -22,7 +22,7 @@ use crate::import::camera::{import_camera_options, import_light_options};
 use crate::import::effects::{LayerCtx, PendingLayerRef, import_effects, resolve_layer_refs};
 use crate::import::markers::{import_markers, import_time_remap, insert_time_remap};
 use crate::import::masks::{MaskLayer, import_masks};
-use crate::import::props::{AnchorUnit, import_transform};
+use crate::import::props::{AnchorUnit, import_separated_position, import_transform};
 use crate::import::report::{Collector, ImportReport, LossCategory};
 use crate::import::shapes::import_shapes;
 use crate::import::styles::import_layer_styles;
@@ -290,7 +290,21 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         // The alias is a folder, but the file names could not be read: the item links the folder.
         cx.col.lose(LossCategory::DamagedData, format!("footage '{name}': image sequence naming not read, linked to its folder"));
     }
-    let present = !path.is_empty() && (cx.options.exists)(&path);
+    let mut present = !path.is_empty() && (cx.options.exists)(&path);
+    if !present
+        && let Some(folder) = cx.options.project_folder
+        && let Some(found) = relocate(&path, folder, cx.options.exists)
+    {
+        // A sequence moves with its first file: the same folder change for every frame.
+        let (old_dir, new_dir) = (parent_of(&path), parent_of(&found));
+        for frame in &mut sequence {
+            if let Some(rest) = frame.strip_prefix(old_dir) {
+                *frame = format!("{new_dir}{rest}");
+            }
+        }
+        path = found;
+        present = true;
+    }
     if !present {
         let shown = if path.is_empty() { format!("{name} (no path stored)") } else { path.clone() };
         cx.col.missing_footage.push(shown);
@@ -376,6 +390,32 @@ fn source_layer(f: &crate::Footage, name: &str, col: &mut Collector) -> Option<S
         );
     }
     Some(SourceLayer { index: l.index, name: l.name.clone(), layer_size, ..SourceLayer::default() })
+}
+
+/// How many trailing components of a stored footage path are tried below the project's folder.
+const RELOCATE_DEPTH: usize = 4;
+
+/// The folder part of `path` (either separator), without the last separator.
+fn parent_of(path: &str) -> &str {
+    path.rfind(['\\', '/']).and_then(|i| path.get(..i)).unwrap_or("")
+}
+
+/// Footage missing at `stored` looked for below `folder`, the `.aep`'s folder now: the stored
+/// path's last components joined to the folder, the longest first (`footage/clip.mp4` before
+/// `clip.mp4`), as a project moved together with its footage keeps the footage's place relative
+/// to it: a project that stores `D:\old\clip.mp4` and was moved with the clip to `E:\new\`
+/// finds `E:\new\clip.mp4`, as After Effects does, instead of showing a placeholder.
+fn relocate(stored: &str, folder: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    let parts: Vec<&str> = stored.split(['\\', '/']).filter(|p| !p.is_empty() && *p != "." && *p != "..").collect();
+    let sep = if folder.contains('\\') { '\\' } else { '/' };
+    let folder = folder.trim_end_matches(['\\', '/']);
+    // Keep the drive or share out: only the components below it can move with the project.
+    let max = RELOCATE_DEPTH.min(parts.len().saturating_sub(1)).max(1);
+    (1..=max).rev().find_map(|k| {
+        let tail = parts.get(parts.len().checked_sub(k)?..)?;
+        let candidate = format!("{folder}{sep}{}", tail.join(&sep.to_string()));
+        (candidate != stored && exists(&candidate)).then_some(candidate)
+    })
 }
 
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
@@ -638,6 +678,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, is_null, size);
         if let Some(tr) = l.props.sub_mut("transform") {
             import_transform(&layer, &name, comp_size, anchor, &tm, tr, &mut cx.col);
+            import_separated_position(&layer, &name, &tm, tr, &mut Ids(&mut project.next_id), &mut cx.col);
         }
         if is_camera || light.is_some() {
             // Byte 38 bit 0x40: a two-node camera and every light aim at the point of interest; a
