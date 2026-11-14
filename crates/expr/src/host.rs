@@ -36,7 +36,8 @@ pub enum Req {
     CompByName { name: String },
     /// Layer id or null.
     LayerLookup { comp: u64, key: Key },
-    /// `[name, index, inPoint, outPoint, startTime, width, height, parentId|null, hasVideo, is3D, source, enabled]`.
+    /// `[name, index, inPoint, outPoint, startTime, width, height, parentId|null, hasVideo, is3D, source, enabled,
+    /// hasAudio, audioSwitch, comment]`.
     LayerInfo { comp: u64, layer: u64 },
     /// `[path, isGroup, name, matchName, numChildren, propertyIndex]` or null.
     Child { comp: u64, layer: u64, group: String, key: Key },
@@ -228,6 +229,12 @@ pub struct Own<'a> {
 pub struct Resolver<'a> {
     pub ctx: EvalCtx<'a>,
     pub own: Own<'a>,
+}
+
+/// Whether the layer has audio: a footage or precomp layer with an Audio group (the same test the
+/// scripting `hasAudio` uses).
+fn has_audio(l: &Layer) -> bool {
+    matches!(l.source, LayerSource::Footage { .. } | LayerSource::Comp { .. }) && l.props.sub("audio").is_some()
 }
 
 fn mat3(m: &Mat3) -> Resp {
@@ -447,6 +454,9 @@ impl<'a> Resolver<'a> {
                     Resp::Bool(l.is_3d()),
                     Resp::Str(l.source.type_name().to_string()),
                     Resp::Bool(l.switches.video),
+                    Resp::Bool(has_audio(l)),
+                    Resp::Bool(l.switches.audio),
+                    Resp::Str(l.comment.clone()),
                 ])
             }
             Req::Child { comp, layer, group, key } => return self.child(*comp, *layer, group, key),
