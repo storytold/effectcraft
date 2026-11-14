@@ -349,6 +349,11 @@ pub trait PluginHost {
     fn comp_camera(&self) -> Option<CompCamera> {
         None
     }
+    /// The composition's camera at **layer time** `layer_time` (converted to composition time)
+    /// as this layer sees it then (camera motion blur). `None` when unknown.
+    fn comp_camera_at(&self, _layer_time: f64) -> Option<CompCamera> {
+        None
+    }
     /// All flattened parameter values (and texts) at another layer time.
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)>;
     /// Composition frame rate (30 when unknown).
@@ -722,6 +727,12 @@ impl PluginHost for RenderHost<'_, '_> {
     fn comp_camera(&self) -> Option<CompCamera> {
         let sc = self.ctx.env.host?.comp_scene()?;
         // effect-space pixels, as the frame's points are once divided back by its scale
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
+    }
+
+    fn comp_camera_at(&self, layer_time: f64) -> Option<CompCamera> {
+        let ctx = self.ctx;
+        let sc = ctx.env.host?.comp_scene_at(ctx.env.comp_time + (layer_time - ctx.time))?;
         Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
     }
 

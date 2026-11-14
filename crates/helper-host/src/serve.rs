@@ -239,7 +239,17 @@ impl PluginHost for Callbacks<'_, '_> {
         if !s.features.iter().any(|f| f == "comp_camera") {
             return None;
         }
-        match s.ask(&Reply::CompCamera) {
+        match s.ask(&Reply::CompCamera { time: None }) {
+            Ok(Request::Camera { camera }) => camera,
+            _ => None,
+        }
+    }
+    fn comp_camera_at(&self, layer_time: f64) -> Option<effectcraft_effects::plugin::CompCamera> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_camera_time") {
+            return None;
+        }
+        match s.ask(&Reply::CompCamera { time: Some(layer_time) }) {
             Ok(Request::Camera { camera }) => camera,
             _ => None,
         }

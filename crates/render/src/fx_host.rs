@@ -146,6 +146,14 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
     }
 
+    fn comp_scene_at(&self, comp_time: f64) -> Option<effectcraft_effects::CompScene> {
+        if !comp_time.is_finite() {
+            return None;
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        Some(comp_scene(&ctx, self.layer)?.rebased(self.origin))
+    }
+
     fn layer_transform(&self, id: u64, comp_time: f64) -> Option<effectcraft_effects::LayerXf> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         if !comp_time.is_finite() {

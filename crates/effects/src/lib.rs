@@ -579,6 +579,10 @@ pub trait EffectHost: Sync {
     fn comp_scene(&self) -> Option<CompScene> {
         None
     }
+    /// [`EffectHost::comp_scene`] at comp time `comp_time` (seconds). `None` when unknown.
+    fn comp_scene_at(&self, _comp_time: f64) -> Option<CompScene> {
+        None
+    }
     /// The running effect's own parameters evaluated at another **layer time** (Radio Waves'
     /// Parameters Are Set At: Birth). `None` when unavailable.
     fn params_at(&self, _layer_time: f64) -> Option<Params> {

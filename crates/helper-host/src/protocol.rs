@@ -175,8 +175,12 @@ pub enum Reply {
         time: f64,
     },
     /// During a render: the composition's camera as the effect's layer sees it (only when the
-    /// host listed `"comp_camera"` in [`Request::Hello`]) → [`Request::Camera`].
-    CompCamera,
+    /// host listed `"comp_camera"` in [`Request::Hello`]) → [`Request::Camera`]; at another
+    /// layer time `time` when the host also listed `"comp_camera_time"` (camera motion blur).
+    CompCamera {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        time: Option<f64>,
+    },
     /// The render finished; the result is in the request's frame.
     Done,
     /// The request failed (the helper keeps running).
@@ -243,7 +247,11 @@ mod tests {
         let Request::Camera { camera: Some(cam) } = serde_json::from_str::<Request>(off).unwrap() else { panic!("camera") };
         assert_eq!(cam.dof, None);
         assert!(!request_line(&Request::Camera { camera: Some(cam) }).unwrap().contains("dof"));
-        assert_eq!(parse_reply(&reply_line(&Reply::CompCamera).unwrap()).unwrap().unwrap(), Reply::CompCamera);
+        assert_eq!(parse_reply(&reply_line(&Reply::CompCamera { time: None }).unwrap()).unwrap().unwrap(), Reply::CompCamera { time: None });
+        // an older helper's plain request still parses
+        assert_eq!(serde_json::from_str::<Reply>(r#"{"op":"comp_camera"}"#).unwrap(), Reply::CompCamera { time: None });
+        let at = Reply::CompCamera { time: Some(0.25) };
+        assert_eq!(parse_reply(&reply_line(&at).unwrap()).unwrap().unwrap(), at);
         let t = Request::Transform {
             transform: Some(effectcraft_effects::plugin::LayerTransform {
                 matrix: [[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 3.0], [0.0, 0.0, 1.0, 0.0]],
