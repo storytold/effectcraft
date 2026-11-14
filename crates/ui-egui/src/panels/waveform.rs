@@ -39,12 +39,13 @@ pub fn audio_item(project: &Project, l: &Layer) -> Option<ItemId> {
     }
 }
 
-/// How the layer plays its audio, as far as its waveform goes: `None` when it is silent
-/// (reversed, see [`audio::stretch_is_mixed`]), else whether the Backwards effect plays its
-/// [in, out) span mirrored ([`audio::plays_backwards`]). The Audio switch and solo are not
-/// followed: a muted layer still shows its waveform.
-fn played(layer: &Layer) -> Option<bool> {
-    audio::stretch_is_mixed(layer).then(|| audio::plays_backwards(layer))
+/// Does the layer's [in, out) span play mirrored, as far as its waveform goes
+/// ([`audio::plays_backwards`])? A reversed layer (negative stretch) is audible and plays the
+/// source span backwards through its time mapping (#3239), which `Layer::layer_time` already
+/// gives, so only the Backwards effect adds a mirror, and on a reversed layer it undoes the
+/// reversal. The Audio switch and solo are not followed: a muted layer still shows its waveform.
+fn played(layer: &Layer) -> bool {
+    audio::plays_backwards(layer)
 }
 
 /// The summary bins under the Timeline column for comp times `ta .. tb` (seconds, limited to
@@ -122,7 +123,7 @@ fn level_gains(levels: Option<&Property>, t: Tick) -> [f32; 2] {
 
 /// Draw `layer`'s waveform in `rect` (left channel above right), columns mapped through the
 /// timeline's time map and the layer's time mapping, limited to its [in, out) span and drawn as
-/// the layer plays (see [`played`]): only the baselines for a silent layer.
+/// the layer plays (see [`played`]).
 pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summary, color: Color32) {
     let mid = [rect.min.y + rect.height() * 0.25, rect.min.y + rect.height() * 0.75];
     let half = rect.height() * 0.25 - 1.0;
@@ -132,7 +133,7 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
     for c in 0..2 {
         p.line_segment([pos2(x0 as f32, mid[c]), pos2(x1 as f32, mid[c])], Stroke::new(1.0, color.gamma_multiply(0.5)));
     }
-    let Some(mirror) = played(layer) else { return };
+    let mirror = played(layer);
     for x in x0..x1 {
         let (ta, tb) = (tm.t(x as f32), tm.t(x as f32 + 1.0));
         let Some(bins) = column_bins(layer, s, ta, tb, mirror) else { continue };
@@ -229,7 +230,7 @@ mod played_tests {
 
     /// The loudest left-channel peak drawn in the column for comp times `ta .. tb`.
     fn drawn(l: &Layer, s: &Summary, ta: f64, tb: f64) -> Option<f32> {
-        played(l).and_then(|mirror| column_bins(l, s, ta, tb, mirror)).map(|bins| bins.iter().fold(f32::MIN, |m, b| m.max(b[1])))
+        column_bins(l, s, ta, tb, played(l)).map(|bins| bins.iter().fold(f32::MIN, |m, b| m.max(b[1])))
     }
 
     /// The left-channel sample the mix plays at comp time `t`.
@@ -237,21 +238,44 @@ mod played_tests {
         mix_comp(p, &Ramp, None, cid, Tick::from_seconds_f64(t), 1, 8000).first().copied().unwrap_or(f32::NAN)
     }
 
-    /// #3238: a time-reversed layer (Time-Reverse Layer: stretch -100 %, start time at its out
-    /// point) is silent in the mix, so the Timeline draws no waveform columns for it.
+    /// Columns of `l` over [0, 1) s: each drawn peak against what the mix plays at the column.
+    fn assert_columns_match_the_mix(p: &Project, cid: ItemId, l: &Layer, s: &Summary, name: &str) {
+        let mut max_drawn = 0.0f32;
+        for k in 0..100 {
+            let (ta, tb) = (k as f64 / 100.0, (k + 1) as f64 / 100.0);
+            let d = drawn(l, s, ta, tb).unwrap_or_else(|| panic!("{name}: no column at {ta} s"));
+            let h = heard(p, cid, (ta + tb) * 0.5);
+            // The ramp rises 0.01 per column, so a column's peak is within a couple of steps.
+            assert!((d - h).abs() < 0.03, "{name}: column at {ta} s draws {d}, heard {h}");
+            max_drawn = max_drawn.max(d);
+        }
+        assert!(max_drawn > 0.9, "{name}: the waveform is drawn (loudest {max_drawn})");
+    }
+
+    /// #3238/#3239: a time-reversed layer (Time-Reverse Layer: stretch -100 %, start time at its
+    /// out point) is audible, and its waveform columns agree with the mix: loud first, quiet last.
     #[test]
-    fn a_reversed_layer_draws_no_waveform_as_the_mix_is_silent() {
+    fn a_reversed_layer_draws_the_waveform_the_mix_plays() {
         let (p, cid, l, s) = setup(&|l| {
             l.stretch = -100.0;
             l.start_time = Tick::from_seconds_f64(1.0);
         });
-        for k in 0..200 {
-            let (ta, tb) = (k as f64 / 200.0, (k + 1) as f64 / 200.0);
-            assert_eq!(drawn(&l, &s, ta, tb), None, "column at {ta} s");
-        }
-        for t in [0.1, 0.5, 0.9] {
-            assert_eq!(heard(&p, cid, t), 0.0, "the mix plays the reversed layer at {t} s");
-        }
+        assert_columns_match_the_mix(&p, cid, &l, &s, "reversed");
+        assert!(heard(&p, cid, 0.005) > 0.98, "the mix plays the clip's last samples first");
+        assert!(heard(&p, cid, 0.995) < 0.02, "and its first samples last");
+    }
+
+    /// Backwards on a reversed layer plays it forwards again, and the waveform follows.
+    #[test]
+    fn a_double_reversal_draws_the_waveform_forwards() {
+        let (p, cid, l, s) = setup(&|l| {
+            l.stretch = -100.0;
+            l.start_time = Tick::from_seconds_f64(1.0);
+            add_backwards(l, true);
+        });
+        assert_columns_match_the_mix(&p, cid, &l, &s, "double reversal");
+        assert!(heard(&p, cid, 0.005) < 0.02, "the mix plays the clip's first samples first");
+        assert!(heard(&p, cid, 0.995) > 0.98, "and its last samples last");
     }
 
     /// #3238: with the Backwards audio effect the first column shows the clip's last samples
