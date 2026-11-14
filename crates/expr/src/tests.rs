@@ -2154,3 +2154,48 @@ fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {
         assert!(pixel[0] > 0.99 && pixel[3] > 0.99, "postEffect={post}: {pixel:?}");
     }
 }
+
+/// Delimited data whose row objects would repeat a long header many times is refused.
+#[test]
+fn delimited_data_row_objects_are_bounded() {
+    let header = "h".repeat(1 << 20);
+    let mut text = format!("{header}\n");
+    for _ in 0..100 {
+        text.push_str("1\n");
+    }
+    let f = effectcraft_project::Footage { path: "/d.csv".into(), kind: effectcraft_project::FootageKind::Data, data: Some(text), ..Default::default() };
+    assert!(crate::host::footage_data_json(&f).is_none());
+    let f = effectcraft_project::Footage {
+        path: "/d.csv".into(),
+        kind: effectcraft_project::FootageKind::Data,
+        data: Some("a,b\n1,2\n".into()),
+        ..Default::default()
+    };
+    assert!(crate::host::footage_data_json(&f).unwrap().contains("\"a\":1"));
+}
+
+/// The row-object estimate counts serialized (escaped) header bytes and each distinct name once.
+#[test]
+fn delimited_data_estimate_counts_escaped_and_distinct_headers() {
+    let data = |text: String| effectcraft_project::Footage {
+        path: "/d.csv".into(),
+        kind: effectcraft_project::FootageKind::Data,
+        data: Some(text),
+        ..Default::default()
+    };
+    // A control character serializes as six bytes: 200 KiB of them over 100 rows is ~120 MiB.
+    let mut text = format!("{}\n", "\u{1}".repeat(200 << 10));
+    text.push_str(&"1\n".repeat(100));
+    assert!(crate::host::footage_data_json(&data(text)).is_none());
+    // A name repeated across many columns is one key per row object.
+    let mut text = format!("{}\n", vec!["x"; 100].join(","));
+    text.push_str(&"1\n".repeat(140_000));
+    assert!(crate::host::footage_data_json(&data(text)).is_some());
+}
+
+#[test]
+fn json_string_length_matches_the_serialized_one() {
+    for s in ["", "plain", "a\"b\\c", "tab\tnl\ncr\rbs\u{8}ff\u{c}", "\u{1}\u{1f}\u{7f}", "é界😀", &"\u{1}".repeat(1000)] {
+        assert_eq!(crate::host::json_string_len(s), serde_json::to_string(s).unwrap().len(), "{s:?}");
+    }
+}

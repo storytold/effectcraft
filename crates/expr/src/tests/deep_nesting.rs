@@ -70,6 +70,12 @@ fn eval_and_function_still_work() {
 }
 
 #[test]
+fn function_constructor_ignores_changes_to_object_prototype() {
+    let f = fx();
+    assert_eq!(f.num("Object.prototype.get = 1; Object.prototype.set = 1; Function('a', 'b', 'return a + b')(2, 3)", 0.0), 5.0);
+}
+
+#[test]
 fn deep_array_result_is_an_error_or_text_not_a_crash() {
     // The result itself: detaching it used to `toString` it past depth 4.
     let _ = eval_small_stack(&format!("{DEEP_ARRAY} a"));
@@ -127,4 +133,34 @@ fn stringify_with_a_key_list_reports_cycles_and_allows_shared_objects() {
     assert_eq!(cyclic, "TypeError");
     let shared = f.text("var x = {a: 1, b: 2}; JSON.stringify({p: x, q: x}, ['p', 'q', 'a'])", 0.0);
     assert_eq!(shared, r#"{"p":{"a":1},"q":{"a":1}}"#);
+}
+
+/// Array helpers replaced by the expression don't change what the `Function` guard checks: the
+/// deeply nested parameter list it compiles is the one it checks.
+#[test]
+fn function_guard_checks_the_text_it_compiles() {
+    let params = format!("{}a{}", "[".repeat(20_000), "]".repeat(20_000));
+    let text = format!(
+        "Array.prototype.join = function () {{ return ''; }}; Array.prototype.slice = function () {{ return []; }}; \
+         Array.prototype.push = function () {{ return 0; }}; Function('{params}', 'return 1'); 'ran'"
+    );
+    let e = eval_small_stack(&text).unwrap_err();
+    assert!(e.contains("nested too deeply"), "{e}");
+}
+
+/// A path-tagged result whose points lead back to itself stops at the detach depth instead of
+/// recursing until the stack overflows.
+#[test]
+fn a_cyclic_path_result_is_bounded() {
+    // Reaching the end (an error or a value) is the test: the overflow aborted the process.
+    let _ = eval_small_stack("var o = {__path: true}; o.__pts = o; o.__in = o; o.__out = o; o");
+}
+
+/// One array referenced at every level of a result is not copied once per reference past the
+/// result's value budget.
+#[test]
+fn a_result_of_shared_arrays_is_bounded() {
+    let e = eval_small_stack("var a = new Array(65536).fill(0); var b = new Array(65536).fill(a); var c = new Array(65536).fill(b); c").unwrap_err();
+    // Refused by the value budget, or by the deadline now checked at each value on a slow machine.
+    assert!(e.contains("too many values") || e.contains("too long"), "{e}");
 }
