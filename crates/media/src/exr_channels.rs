@@ -539,8 +539,12 @@ struct Entry {
 
 impl Entry {
     /// Dropping it would free nothing or lose a decode in progress: an effect (or a picture
-    /// waiting for its effects) still holds its planes, or it is decoding.
+    /// waiting for its effects) still holds its planes, it is decoding, or a [`ChannelCache::get`]
+    /// that holds the slot hasn't taken its copy of the finished decode yet.
     fn in_use(&self) -> bool {
+        if Arc::strong_count(&self.slot) > 1 {
+            return true;
+        }
         match self.slot.get() {
             None => true,
             Some((None, _)) => false,
@@ -965,6 +969,21 @@ mod tests {
         });
         assert_eq!(cache.decodes(), frames as u64, "one decode per frame");
         assert_eq!(reads.load(Ordering::Relaxed), frames as u64);
+    }
+
+    /// A file whose decode has just finished, with its `get` yet to take a copy (it holds only
+    /// the slot), isn't dropped by another file's eviction: that decoded the file a second time.
+    #[test]
+    fn a_finished_decode_is_kept_until_its_get_has_it() {
+        let bytes: Arc<[u8]> = flat(&["R"], (8, 8), 1.0).into();
+        let cache = ChannelCache::new(8 * 8 * 4 + 4);
+        cache.get("/first.exr", Use::Channels, || Some(bytes.clone()));
+        let slot = cache.lock().entries[0].slot.clone();
+        cache.get("/second.exr", Use::Channels, || Some(bytes.clone()));
+        assert_eq!(cache.cached(), ["/first.exr", "/second.exr"], "a get still holds the first");
+        drop(slot);
+        cache.get("/third.exr", Use::Channels, || Some(bytes.clone()));
+        assert_eq!(cache.cached(), ["/third.exr"], "once it has its copy, the file can go");
     }
 
     /// #474: a decode that panics doesn't leave its file "decoding" in the cache (never dropped,
