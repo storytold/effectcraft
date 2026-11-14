@@ -1165,6 +1165,28 @@ fn seed_random_timeless() {
     assert_ne!(a, f.num("seedRandom(6, true); random(100)", 0.1));
 }
 
+/// Each `seedRandom` call restarts the sequence: the same seed gives the same numbers again, in
+/// one evaluation, as in After Effects.
+#[test]
+fn seed_random_restarts_the_sequence() {
+    let f = fx();
+    assert_eq!(f.num("seedRandom(7, true); var a = random(); seedRandom(7, true); var b = random(); a - b", 0.0), 0.0);
+    assert_eq!(f.num("seedRandom(7, true); random(); var a = random(); seedRandom(7, true); random(); var b = random(); a - b", 0.0), 0.0);
+    assert_eq!(f.num("seedRandom(7, true); var a = gaussRandom(); seedRandom(7, true); var b = gaussRandom(); a - b", 0.0), 0.0);
+    assert_ne!(f.num("seedRandom(7, true); var a = random(); seedRandom(8, true); var b = random(); a - b", 0.0), 0.0);
+    // Without a restart the draws still differ.
+    assert_ne!(f.num("seedRandom(7, true); random() - random()", 0.0), 0.0);
+}
+
+/// `thisComp.shutterAngle` / `shutterPhase` read the composition's motion blur settings (they were
+/// undefined, so the expression result was not a number).
+#[test]
+fn comp_shutter_attributes() {
+    let f = fx();
+    assert_eq!(f.num("thisComp.shutterAngle", 0.0), 180.0);
+    assert_eq!(f.num("thisComp.shutterPhase", 0.0), -90.0);
+}
+
 #[test]
 fn gauss_random_distribution() {
     let f = fx();
