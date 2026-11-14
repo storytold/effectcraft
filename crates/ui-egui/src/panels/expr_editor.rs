@@ -419,20 +419,7 @@ pub fn editor(ui: &mut egui::Ui, id: egui::Id, buf: &mut String, rect: Rect, opt
 #[cfg(test)]
 mod contrast_tests {
     use super::*;
-    use crate::theme::ThemeKind;
-
-    /// WCAG contrast ratio of two opaque sRGB colours.
-    fn contrast(a: Color32, b: Color32) -> f32 {
-        let lum = |c: Color32| {
-            let f = |v: u8| {
-                let v = v as f32 / 255.0;
-                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-            };
-            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
-        };
-        let (x, y) = (lum(a), lum(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
+    use crate::theme::{ThemeKind, contrast_ratio as contrast};
 
     /// #644: on every theme, effect names stay readable on Effect Controls' headers, and the
     /// expression field's text (every syntax colour, enabled and disabled expressions, matched

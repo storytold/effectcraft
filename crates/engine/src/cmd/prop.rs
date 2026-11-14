@@ -558,8 +558,9 @@ fn get(s: &mut Session, p: &Value) -> Result<Value> {
     } else if pr.has_expression()
         && let (Some(h), Some(comp)) = (s.expr.as_deref(), s.project.comp(cid))
     {
-        let mut ctx = crate::render::EvalCtx::new(&s.project, cid, comp, t);
-        ctx.expr = Some(h);
+        // The render's context, footage source included, so `sampleImage()` evaluates here as it
+        // renders and as `expr.errors` reports it (#3231).
+        let ctx = super::expr_tools::eval_ctx(s, cid, comp, t);
         match h.eval(&ctx, l, pr, &raw) {
             Ok(v) => out["evaluated"] = v.to_json(),
             Err(e) => {

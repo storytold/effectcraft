@@ -1,4 +1,4 @@
-use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, selected_layer};
+use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
@@ -38,12 +38,14 @@ pub(crate) fn handle_disclosure_key(app: &mut EffectcraftApp, key: egui::Key) ->
 
 // ---------------------------------------------------------------------------------------------
 
-/// Open the rename field on effect `uid` (Enter with the effect selected), name selected.
+/// Open the rename field on effect `uid` (Enter with the effect selected). It takes the keyboard,
+/// its whole name selected, the pass it is first drawn.
 pub fn start_rename(ctx: &egui::Context, uid: u64, name: &str) {
     let id = egui::Id::unique(("ec-rename", uid));
-    ctx.data_mut(|d| d.insert_temp(id, name.to_string()));
-    ctx.data_mut(|d| d.insert_temp(id.with("select"), true));
-    ctx.memory_mut(|m| m.request_focus(id.with("field")));
+    ctx.data_mut(|d| {
+        d.insert_temp(id, name.to_string());
+        d.insert_temp(id.with("start"), true);
+    });
 }
 
 /// Where an effect header's parts sit, for its rename field.
@@ -62,16 +64,22 @@ fn rename_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, h: &EffectHdr, mut 
     let EffectHdr { g, shown, r, tw, reset, rename_id, layer_id } = *h;
     let ctx = ui.ctx().clone();
     let name_rect = Rect::from_min_max(pos2(tw.max.x + 6.0, r.min.y + 2.0), pos2(reset.min.x - 6.0, r.max.y - 2.0));
-    let response = ui.put(name_rect, egui::TextEdit::singleline(&mut value).id(rename_id.with("field")).font(Tokens::semibold(12.0)));
-    // Focus the field the frame it first exists: focusing an id not yet on screen leaves
-    // the accessibility tree with a focus it doesn't contain.
-    if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("start"))).is_some() {
-        crate::widgets::select_all(&ctx, response.id, &value);
-        response.request_focus();
+    // The field opens with the name the header draws (in the interface language), however it
+    // was opened, so committing it untouched is not a rename.
+    let opening = ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("start"))).is_some();
+    if opening {
+        value = shown.to_string();
     }
+    let response = ui.put(name_rect, egui::TextEdit::singleline(&mut value).id(rename_id.with("field")).font(Tokens::semibold(12.0)));
     app.auto.add(&format!("effectControls.effect.{}.nameEdit", g.uid), name_rect, "Effect name");
-    if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("select"))).unwrap_or(false) {
+    // Focus the field the frame it first exists, its whole name selected so typing replaces it:
+    // focusing an id not yet on screen leaves the accessibility tree with a focus it doesn't
+    // contain. The Enter that opened it (it is drawn in that pass) doesn't also commit it.
+    if opening {
         widgets::select_all(&ctx, response.id, &value);
+        response.request_focus();
+        ctx.data_mut(|d| d.insert_temp(rename_id, value));
+        return;
     }
     // Escape cancels. egui drops the field's focus on Escape in the same frame, so the
     // key is checked on the focus being lost as well as held.
@@ -191,7 +199,8 @@ fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter,
     }
 }
 
-/// The Effect Controls panel for the selected layer: a header with the comp and layer names, then
+/// The Effect Controls panel for the selected layer (or the layer the panel is locked to, see
+/// `common::shown_layer_id`): a header with the comp and layer names, then
 /// one header per effect (Fx toggle, twirl, rename, Reset, About, label bar, reorder drag and its
 /// right-click menu) followed by that effect's custom editor and its property rows. Dragging
 /// effects or presets onto the panel applies them; a right-click on empty space opens the Effect
@@ -201,7 +210,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
-    let Some(layer) = selected_layer(app) else {
+    // A locked layer that was deleted unlocks the panel, which then follows the selection.
+    prune_lock(app);
+    let Some(layer) = shown_layer(app) else {
         p.text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr("Select a layer to see its effects"), Tokens::ui(12.0), t.text_faint);
         return;
     };

@@ -6,6 +6,7 @@ mod helpers;
 mod aepx;
 mod ai_mask;
 mod blend_modes;
+mod bounds;
 mod cameras;
 mod cases;
 mod combined;

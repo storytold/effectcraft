@@ -532,6 +532,7 @@ fn text_json(d: &TextDoc) -> J {
     doc
 }
 
+/// Returns the property's value at the requested time, evaluating its expression unless `pre` is set.
 fn value(s: &Session, a: &J) -> R {
     let (cid, c, l) = layer_of(s, a)?;
     let uid = u(a, "uid").ok_or("missing uid")?;
@@ -541,12 +542,9 @@ fn value(s: &Session, a: &J) -> R {
     let v = if pre || !p.has_expression() {
         p.value_at(l.layer_time(t))
     } else {
-        let mut ctx = EvalCtx::new(&s.project, cid, c, t);
-        ctx.expr = s.expr.as_deref();
         // Sample expressions (`sampleImage`) read footage through the session's source; without
         // it footage layers sample as transparent (#1000).
-        ctx.footage = Some(s.footage.as_ref());
-        ctx.value(l, p)
+        effectcraft_engine::commands::expr_tools::eval_ctx(s, cid, c, t).value(l, p)
     };
     Ok(js_value(c, &v))
 }

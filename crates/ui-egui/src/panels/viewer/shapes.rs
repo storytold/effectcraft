@@ -22,6 +22,12 @@ pub(crate) fn layers_at<'a, 'b>(ectx: &'b EvalCtx<'a>, cpt: [f64; 2]) -> impl It
     selectable_layers(ectx.comp, ectx.time).filter(move |l| layer_quad(ectx, l).is_some_and(|(_, q, _)| point_in_quad(cpt, &q)))
 }
 
+/// Whether `layer` is among the selectable layers under a comp point ([`layers_at`] for that one
+/// layer: its bounding quad, not its alpha).
+pub(crate) fn layer_hit(ectx: &EvalCtx, layer: LayerId, cpt: [f64; 2]) -> bool {
+    selectable_layers(ectx.comp, ectx.time).find(|l| l.id == layer).is_some_and(|l| layer_quad(ectx, l).is_some_and(|(_, q, _)| point_in_quad(cpt, &q)))
+}
+
 /// Topmost selectable layer under a comp point.
 pub(crate) fn layer_at<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Layer> {
     layers_at(ectx, cpt).next()

@@ -221,12 +221,24 @@ pub fn viewer_hook(
     let ctx = ui.ctx().clone();
     crate::color_picker::note_viewer(&ctx, map.area);
     let mut actions: Actions = vec![];
-    let point_preview = if let Some(pick) = app.ui.fx_pick.clone().filter(|p| p.kind == crate::panels::crypto_pick::KIND) {
+    // The armed Cryptomatte eyedropper, or the Selection tool while the effect is selected (#2839).
+    let crypto = app.ui.fx_pick.clone().filter(|p| p.kind == crate::panels::crypto_pick::KIND).map(|p| (p, false));
+    let crypto = crypto.or_else(|| crate::panels::crypto_pick::implicit_pick(app, &ctx).map(|p| (p, true)));
+    let point_preview = if let Some((pick, implicit)) = crypto {
         match ectx.comp.layer(effectcraft_engine::project::LayerId(pick.layer)) {
-            Some(l) => {
-                crate::panels::crypto_pick::viewer_hook(app, ui, painter, map, ectx, l, &crate::panels::viewer::from_effect_space(ectx, l, l2c(ectx, l)), &pick)
-            }
-            None => app.ui.fx_pick = None,
+            Some(l) => crate::panels::crypto_pick::viewer_hook(
+                app,
+                ui,
+                painter,
+                map,
+                ectx,
+                l,
+                &crate::panels::viewer::from_effect_space(ectx, l, l2c(ectx, l)),
+                &pick,
+                implicit,
+            ),
+            None if !implicit => app.ui.fx_pick = None,
+            None => {}
         }
         None
     } else {

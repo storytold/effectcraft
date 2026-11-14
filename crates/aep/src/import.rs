@@ -25,7 +25,7 @@
 //! for wasm32; it reads no files itself: the caller passes the bytes, a way to ask whether a
 //! footage path exists and one to ask whether a font is installed.
 
-mod build;
+pub(crate) mod build;
 mod camera;
 mod effects;
 mod lumetri;
