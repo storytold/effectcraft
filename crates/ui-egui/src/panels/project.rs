@@ -1205,7 +1205,8 @@ fn label_swatch(
         egui::WidgetInfo::labeled(egui::Role::Button, true, name)
     });
     let pop = egui::Id::unique(("plabel-pop", it.id.0));
-    if sresp.clicked() || sresp.secondary_clicked() {
+    widgets::open_on_press(ui, &sresp, pop);
+    if sresp.secondary_clicked() {
         widgets::open_popup(ui, pop);
     }
     if let Some(l) = widgets::label_popup(ui, pop, sw.left_bottom(), it.label, |l| app.session.prefs.label_name(l), &t) {

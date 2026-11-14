@@ -627,8 +627,8 @@ fn log_dropdown(app: &mut EffectcraftApp, ui: &mut egui::Ui, row: &ItemRow, it: 
     let lid = egui::Id::unique(("rq-log", it.id));
     let log_resp = widgets::dropdown(ui, ld, it.log.label(), &t, lid);
     a11y::combo_box(&log_resp, tr("Log:").trim_end_matches(':'), it.log.label(), !rendering);
-    if log_resp.clicked() && !rendering {
-        widgets::open_popup(ui, lid);
+    if !rendering {
+        widgets::open_on_press(ui, &log_resp, lid);
     }
     let llabels: Vec<String> = RenderLog::ALL.iter().map(|l| mark(it.log == *l, l.label())).collect();
     if let Some(i) = widgets::popup_menu(ui, lid, ld.left_bottom(), &llabels, None) {
@@ -676,8 +676,8 @@ fn output_to(
         &app.session.resolve_output(it).unwrap_or_else(|| "Not yet specified".into()),
         !rendering,
     );
-    if out_resp.clicked() && !rendering {
-        widgets::open_popup(ui, oid);
+    if !rendering {
+        widgets::open_on_press(ui, &out_resp, oid);
     }
     app.auto.add(&aid("outputTo"), odd, "Output To");
     let omenu = output_to_menu(it);
@@ -999,8 +999,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let shown: String = if summary.chars().count() > 31 { summary.chars().take(30).chain(std::iter::once('…')).collect() } else { summary.clone() };
             let dd_resp = widgets::dropdown(ui, dd, &shown, &t, did);
             a11y::combo_box(&dd_resp, label.trim_end_matches(':'), &summary, !rendering);
-            if dd_resp.clicked() && !rendering {
-                widgets::open_popup(ui, did);
+            if !rendering {
+                widgets::open_on_press(ui, &dd_resp, did);
             }
             let labels: Vec<String> = menu.iter().map(|(l, _)| l.clone()).collect();
             if let Some(i) = widgets::popup_menu(ui, did, dd.left_bottom(), &labels, None) {

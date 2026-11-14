@@ -11,9 +11,8 @@ pub fn dropdown(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str
     let t = app.tokens;
     let id = egui::Id::unique(("kit-dd", auto));
     let text = options.get(cur).copied().unwrap_or("");
-    if widgets::dropdown(ui, r, text, &t, id).clicked() {
-        widgets::open_popup(ui, id);
-    }
+    let resp = widgets::dropdown(ui, r, text, &t, id);
+    widgets::open_on_press(ui, &resp, id);
     app.auto.add(auto, r, text);
     let opts: Vec<String> = options.iter().map(|s| s.to_string()).collect();
     widgets::popup_menu(ui, id, r.left_bottom(), &opts, Some(cur)).filter(|i| *i != cur)
