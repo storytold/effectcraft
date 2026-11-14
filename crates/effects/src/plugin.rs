@@ -322,12 +322,209 @@ pub trait PluginHost {
     fn frame_range(&self) -> Option<(f64, f64)> {
         None
     }
+    /// The enabled masks of the effect's layer at the render time, in **buffer pixels** of the
+    /// frame (vertices mapped like point parameters: layer pixels × scale + origin; tangents,
+    /// feather and expansion × scale). Empty when the layer has none or the host doesn't know.
+    fn masks(&self) -> Vec<crate::MaskPath> {
+        vec![]
+    }
+    /// The masks of the layer chosen in Layer parameter `param_id` at **layer time**
+    /// `layer_time`, in buffer pixels of the frame, placed as [`PluginHost::layer_input`] places
+    /// that layer's pixels (centred when the layers differ in size); a text layer adds its glyph
+    /// outlines. `None` when unset or unavailable.
+    fn layer_masks(&self, _param_id: &str, _layer_time: f64) -> Option<Vec<crate::MaskPath>> {
+        None
+    }
+}
+
+/// Masks in effect space (layer pixels) moved by `shift` (layer pixels) and mapped onto a buffer
+/// grid: points × `scale` + `offset`, tangents, feather and expansion × `scale`.
+pub fn masks_to_buffer(masks: Vec<crate::MaskPath>, shift: [f64; 2], offset: [f64; 2], scale: f64) -> Vec<crate::MaskPath> {
+    let pt = |v: [f64; 2]| [(v[0] + shift[0]) * scale + offset[0], (v[1] + shift[1]) * scale + offset[1]];
+    let vec = |v: [f64; 2]| [v[0] * scale, v[1] * scale];
+    masks
+        .into_iter()
+        .map(|mut m| {
+            m.vertices = m.vertices.into_iter().map(pt).collect();
+            m.in_tangents = m.in_tangents.into_iter().map(vec).collect();
+            m.out_tangents = m.out_tangents.into_iter().map(vec).collect();
+            m.feather = vec(m.feather);
+            m.expansion *= scale;
+            m
+        })
+        .collect()
 }
 
 /// The [`PluginHost::instance_key`] of the effect `ctx` renders: its instance seed (stable per
 /// effect instance), offset so it is never 0.
 pub fn ctx_instance_key(ctx: &EffectCtx) -> u64 {
     (1u64 << 32) | u64::from(ctx.seed)
+}
+
+/// The [`PluginHost::instance_key`] of the effect instance whose property group has uid `uid`
+/// (renders seed an effect with its group's uid, so this is the key its renders have).
+pub fn instance_key_for(uid: u64) -> u64 {
+    (1u64 << 32) | (uid & u64::from(u32::MAX))
+}
+
+/// The user changed parameter `param` of an effect instance that asked to hear about it
+/// ([`EffectPlugin::notify_params`]): never sent while rendering or evaluating expressions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParamChange {
+    /// The parameter the user changed.
+    pub param: String,
+    /// The instance ([`PluginHost::instance_key`]).
+    pub instance_key: u64,
+    /// The layer time of the change, seconds.
+    pub time: f64,
+    /// The layer's size in layer pixels (the effect's layer bounds).
+    pub layer_size: [f64; 2],
+    /// Every parameter's value at `time` after the change, in property units, keyed by
+    /// parameter id (see [`param_values`]); text and hidden parameters are in `texts`.
+    pub values: serde_json::Map<String, serde_json::Value>,
+    /// One string per text / hidden parameter, in declaration order.
+    pub texts: Vec<String>,
+    /// How long the host still waits for the answer, at most ([`param_change_timeout`] when
+    /// `None`): what is left of the edit's wait. A plug-in that would take longer answers with an
+    /// error (or is cut off) and the user's change is applied alone.
+    pub budget: Option<std::time::Duration>,
+}
+
+/// [`set_param_change_timeout`] (milliseconds; 0 = not set).
+static CHANGE_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set the edit wait ([`param_change_timeout`]); it wins over `EFFECTCRAFT_HELPER_EDIT_TIMEOUT`
+/// (tests set it so the environment can't change them). Zero unsets it.
+pub fn set_param_change_timeout(t: std::time::Duration) {
+    CHANGE_TIMEOUT_MS.store(u64::try_from(t.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The longest one edit (or one command, such as a batch or a script, with all its edits) waits
+/// for plug-ins to answer [`EffectPlugin::param_changed`], in all: [`set_param_change_timeout`],
+/// else `EFFECTCRAFT_HELPER_EDIT_TIMEOUT` seconds (fractions allowed, at most 600), else 2 s.
+/// Edits run on the thread that draws the interface, so it is short.
+pub fn param_change_timeout() -> std::time::Duration {
+    use std::time::Duration;
+    match CHANGE_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {}
+        ms => return Duration::from_millis(ms),
+    }
+    let env = std::env::var("EFFECTCRAFT_HELPER_EDIT_TIMEOUT").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|s| s.is_finite() && *s > 0.0);
+    env.map_or(Duration::from_secs(2), |s| Duration::from_secs_f64(s.min(600.0)))
+}
+
+/// The values of an effect instance's parameters for a [`ParamChange`], in property units keyed
+/// by id: slider / angle numbers, checkbox `true`/`false`, popup 0-based index, point `[x, y]`
+/// and point3 `[x, y, z]` in layer pixels, colour `[r, g, b, a]` 0–1, layer id or `null`. Text and
+/// hidden parameters are left out (see [`flatten_texts`]).
+pub fn param_values(m: &PluginManifest, params: &Params) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::json;
+    let mut out = serde_json::Map::new();
+    for p in &m.params {
+        let v = params.get(&p.id);
+        let j = match &p.kind {
+            PluginParamKind::Slider { default, .. } | PluginParamKind::Angle { default } => json!(v.map(Value::as_f64).unwrap_or(*default)),
+            PluginParamKind::Checkbox { default } => json!(v.map(Value::as_bool).unwrap_or(*default)),
+            PluginParamKind::Popup { default, .. } => json!(v.map(Value::as_enum).unwrap_or(*default)),
+            PluginParamKind::Point { .. } => json!(v.map(Value::as_vec2).unwrap_or([0.0; 2])),
+            PluginParamKind::Point3 { default } => json!(v.map(Value::as_vec3).unwrap_or(*default)),
+            PluginParamKind::Color { default } => json!(match v {
+                Some(Value::Color(c)) => *c,
+                Some(o) => o.as_color().map(f64::from),
+                None => *default,
+            }),
+            PluginParamKind::Layer => json!(v.and_then(Value::as_layer)),
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => continue,
+        };
+        out.insert(p.id.clone(), j);
+    }
+    out
+}
+
+/// The longest string a text / hidden parameter may be set to by a [`ParamChange`] answer, and
+/// the most string bytes one answer may set in all. Hidden parameters carry opaque plug-in data
+/// (look-up tables of a few MB), so this is not smaller; it keeps one answer from growing the
+/// project (and every undo step) by more.
+pub const MAX_ANSWER_TEXT: usize = 16 << 20;
+
+/// The entries of `raw` (a JSON object of parameter id → value, as a plug-in answers a
+/// [`ParamChange`]) that are valid for manifest `m`, in the units of [`param_values`] (text and
+/// hidden parameters take a string). Unknown ids, values of the wrong type or shape, numbers that
+/// aren't finite, popup indices out of range or not whole and strings longer than
+/// [`MAX_ANSWER_TEXT`] are left out, and strings once [`MAX_ANSWER_TEXT`] bytes of them are
+/// taken; slider values are clamped to the slider's range. Anything but an object gives nothing.
+pub fn checked_values(m: &PluginManifest, raw: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    use serde_json::{Value as J, json};
+    let Some(obj) = raw.as_object() else { return vec![] };
+    let num = |j: &J| j.as_f64().filter(|v| v.is_finite());
+    let nums = |j: &J, n: &[usize]| -> Option<Vec<f64>> {
+        let a = j.as_array().filter(|a| n.contains(&a.len()))?;
+        a.iter().map(num).collect()
+    };
+    let mut out = vec![];
+    let mut text_left = MAX_ANSWER_TEXT;
+    for p in &m.params {
+        let Some(j) = obj.get(&p.id) else { continue };
+        let v = match &p.kind {
+            PluginParamKind::Slider { min, max, .. } => num(j).map(|v| json!(v.clamp(*min, *max))),
+            PluginParamKind::Angle { .. } => num(j).map(|v| json!(v)),
+            PluginParamKind::Checkbox { .. } => j.as_bool().or_else(|| num(j).map(|v| v != 0.0)).map(|b| json!(b)),
+            PluginParamKind::Popup { options, .. } => num(j).filter(|v| v.fract() == 0.0 && *v >= 0.0 && *v < options.len() as f64).map(|v| json!(v as u64)),
+            PluginParamKind::Point { .. } => nums(j, &[2]).map(|v| json!(v)),
+            PluginParamKind::Point3 { .. } => nums(j, &[3]).map(|v| json!(v)),
+            PluginParamKind::Color { .. } => nums(j, &[3, 4]).map(|mut v| {
+                if v.len() == 3 {
+                    v.push(1.0);
+                }
+                json!(v)
+            }),
+            PluginParamKind::Layer => match j {
+                J::Null => Some(J::Null),
+                _ => match num(j) {
+                    Some(-1.0) => Some(J::Null),
+                    Some(v) if v >= 0.0 && v.fract() == 0.0 && v < 9.0e15 => Some(json!(v as u64)),
+                    _ => None,
+                },
+            },
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => match j.as_str() {
+                Some(s) if s.len() <= text_left => {
+                    text_left -= s.len();
+                    Some(json!(s))
+                }
+                Some(s) => {
+                    log::warn!("plug-in `{}`: `{}` ({} bytes) is left out: an answer sets at most {MAX_ANSWER_TEXT} bytes of text", m.id, p.id, s.len());
+                    None
+                }
+                None => None,
+            },
+        };
+        if let Some(v) = v {
+            out.push((p.id.clone(), v));
+        }
+    }
+    out
+}
+
+/// Whether any registered plug-in declared [`EffectPlugin::notify_params`] (when none did, edits
+/// skip looking for changes to report).
+static ANY_NOTIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether some registered plug-in effect wants to hear about parameter changes
+/// ([`EffectPlugin::notify_params`]).
+pub fn any_notify_params() -> bool {
+    ANY_NOTIFY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The ids of the registered plug-in effects that declared [`EffectPlugin::notify_params`].
+fn notifying() -> &'static RwLock<std::collections::HashSet<String>> {
+    static N: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
+    N.get_or_init(Default::default)
+}
+
+/// Whether effect `id` is a registered plug-in that declared [`EffectPlugin::notify_params`]
+/// (a set lookup: edits ask this for every effect they look at).
+pub fn notifies(id: &str) -> bool {
+    !id.starts_with("ec.") && notifying().read().map(|n| n.contains(id)).unwrap_or(false)
 }
 
 /// Parameter values for one render, flattened (see the module docs) with typed accessors.
@@ -404,6 +601,11 @@ pub trait EffectPlugin: Send + Sync {
     fn padding(&self, _params: &PluginParams, _time: f64, _scale: f64, _layer_size: [f64; 2], _instance_key: u64) -> u32 {
         0
     }
+    /// API 2: [`EffectPlugin::padding`] with host services ([`PluginHost::masks`] in the
+    /// buffer before padding). The default calls `padding`.
+    fn padding_v2(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64, _host: &dyn PluginHost) -> u32 {
+        self.padding(params, time, scale, layer_size, instance_key)
+    }
     /// API 2: [`EffectPlugin::render`] with host services. The default calls `render`. May be
     /// called from several threads at once.
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, _host: &dyn PluginHost) -> Result<(), String> {
@@ -414,6 +616,20 @@ pub trait EffectPlugin: Send + Sync {
     /// ABI 2 plug-ins return true.
     fn reads_other_times(&self) -> bool {
         false
+    }
+    /// The parameters (ids) whose changes by the user the plug-in wants to hear about through
+    /// [`EffectPlugin::param_changed`] (a preset menu that sets other parameters, a "link"
+    /// checkbox). Default none. Read when the plug-in is registered and on every edit.
+    fn notify_params(&self) -> &[String] {
+        &[]
+    }
+    /// The user changed one of the [`EffectPlugin::notify_params`] (Effect Controls, the
+    /// timeline, `prop.set`, scripts; never while rendering or evaluating expressions). Returns
+    /// other parameter values to set with the change, in one undo step, as `(id, value)` pairs in
+    /// the units of [`param_values`]; the host checks them ([`checked_values`]) and ignores what
+    /// doesn't fit. The host waits for the answer, so it must be quick. Default: nothing.
+    fn param_changed(&self, _change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+        Ok(vec![])
     }
 }
 
@@ -508,6 +724,12 @@ pub fn register_plugin(plugin: Arc<dyn EffectPlugin>) -> Result<&'static EffectS
         .iter()
         .position(|s| s.get().is_none())
         .ok_or_else(|| format!("too many plug-in effects: a session registers at most {MAX_PLUGINS}; remove some plug-ins and restart EffectCraft"))?;
+    if !plugin.notify_params().is_empty() {
+        if let Ok(mut n) = notifying().write() {
+            n.insert(m.id.clone());
+        }
+        ANY_NOTIFY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     SLOTS[slot].set(plugin).map_err(|_| "plug-in slot taken".to_string())?;
     let spec: &'static EffectSpec = Box::leak(Box::new(EffectSpec {
         id: leak(&m.id),
@@ -693,6 +915,20 @@ impl PluginHost for RenderHost<'_, '_> {
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.ctx.env.layer_span
     }
+
+    fn masks(&self) -> Vec<crate::MaskPath> {
+        let Some(host) = self.ctx.env.host else { return vec![] };
+        masks_to_buffer(host.mask_paths(), [0.0; 2], self.offset, self.scale)
+    }
+
+    fn layer_masks(&self, param_id: &str, layer_time: f64) -> Option<Vec<crate::MaskPath>> {
+        let ctx = self.ctx;
+        let lid = ctx.params.get(param_id)?.as_layer()?;
+        let (masks, size) = ctx.env.host?.layer_mask_paths(lid, ctx.env.comp_time + (layer_time - ctx.time))?;
+        // Where `layer_input` puts that layer: centred on this one (see `fit_layer`).
+        let shift = [(ctx.layer_size[0] - size[0]) * 0.5, (ctx.layer_size[1] - size[1]) * 0.5];
+        Some(masks_to_buffer(masks, shift, self.offset, self.scale))
+    }
 }
 
 fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
@@ -701,7 +937,10 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let texts = flatten_texts(m, ctx.params);
     let flat = flatten(m, ctx, &buf);
     let key = ctx_instance_key(ctx);
-    let pad = plugin.padding(&PluginParams { manifest: m, flat: &flat, texts: &texts }, ctx.time, buf.scale, ctx.layer_size, key).min(MAX_PADDING);
+    let pad = {
+        let host = RenderHost { ctx, manifest: m, width: buf.img.width, height: buf.img.height, offset: buf.offset, scale: buf.scale };
+        plugin.padding_v2(&PluginParams { manifest: m, flat: &flat, texts: &texts }, ctx.time, buf.scale, ctx.layer_size, key, &host).min(MAX_PADDING)
+    };
     let before = buf.clone();
     // Padding moves the layer origin, which points are measured from.
     let flat = if pad > 0 {
@@ -723,4 +962,186 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
         set_plugin_error(&m.id, None);
     }
     buf
+}
+
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn m() -> PluginManifest {
+        let p = |id: &str, kind| PluginParam { id: id.into(), name: id.into(), group: String::new(), kind };
+        PluginManifest {
+            api: 2,
+            id: "org.test.values".into(),
+            name: "Values".into(),
+            category: "Test".into(),
+            version: String::new(),
+            author: String::new(),
+            description: String::new(),
+            params: vec![
+                p("s", PluginParamKind::Slider { default: 1.0, min: 0.0, max: 10.0, slider_min: None, slider_max: None, decimals: 1, integer: false }),
+                p("c", PluginParamKind::Checkbox { default: false }),
+                p("m", PluginParamKind::Popup { options: vec!["a".into(), "b".into()], default: 1 }),
+                p("pt", PluginParamKind::Point { default: [0.5, 0.5] }),
+                p("col", PluginParamKind::Color { default: [1.0; 4] }),
+                p("l", PluginParamKind::Layer),
+                p("t", PluginParamKind::Text { default: "x".into() }),
+            ],
+        }
+    }
+
+    #[test]
+    fn values_are_in_property_units_and_texts_left_out() {
+        let mut params = Params::default();
+        params.values.insert("pt".into(), Value::Vec2([12.0, 34.0]));
+        params.values.insert("m".into(), Value::Enum(1));
+        params.values.insert("col".into(), Value::Color([0.1, 0.2, 0.3, 0.4]));
+        params.values.insert("l".into(), Value::Layer(Some(5)));
+        let v = param_values(&m(), &params);
+        assert_eq!(v["s"], json!(1.0), "the default when unset");
+        assert_eq!(v["pt"], json!([12.0, 34.0]));
+        assert_eq!(v["m"], json!(1));
+        assert_eq!(v["col"], json!([0.1, 0.2, 0.3, 0.4]));
+        assert_eq!(v["l"], json!(5));
+        assert!(!v.contains_key("t"));
+    }
+
+    #[test]
+    fn only_values_that_fit_are_kept() {
+        let raw = json!({
+            "s": 99, "c": 1, "m": 2, "pt": [1, 2, 3], "col": [1, 0, 0], "l": -1, "t": "y", "zz": 1
+        });
+        let got = checked_values(&m(), &raw);
+        assert_eq!(
+            got,
+            vec![
+                ("s".to_string(), json!(10.0)),
+                ("c".to_string(), json!(true)),
+                ("col".to_string(), json!([1.0, 0.0, 0.0, 1.0])),
+                ("l".to_string(), serde_json::Value::Null),
+                ("t".to_string(), json!("y")),
+            ]
+        );
+        assert!(checked_values(&m(), &json!({"m": 0.5, "pt": [1, "x"], "l": 1.5, "t": 3, "s": "1"})).is_empty());
+        assert!(checked_values(&m(), &json!([1, 2])).is_empty());
+        assert_eq!(checked_values(&m(), &json!({"m": 1, "pt": [1.5, 2]})), vec![("m".into(), json!(1)), ("pt".into(), json!([1.5, 2.0]))]);
+    }
+
+    #[test]
+    fn an_answer_sets_at_most_16_mb_of_text() {
+        let mut man = m();
+        for id in ["h1", "h2", "h3"] {
+            man.params.push(PluginParam { id: id.into(), name: id.into(), group: String::new(), kind: PluginParamKind::Hidden { default: String::new() } });
+        }
+        let big = |n: usize| "x".repeat(n);
+        // 10 MB fits; another 10 MB would pass 16 MB in all and is left out; a short one still fits.
+        let got = checked_values(&man, &json!({"h1": big(10 << 20), "h2": big(10 << 20), "h3": "small"}));
+        let ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["h1", "h3"]);
+        // One string over the limit is left out.
+        assert!(checked_values(&man, &json!({"h1": big(MAX_ANSWER_TEXT + 1)})).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use crate::{EffectEnv, EffectHost, LayerPixels, MaskPath};
+    use std::sync::Mutex;
+
+    /// What the plug-in below saw: its masks, the other layer's, and its padding's.
+    static SEEN: Mutex<Option<(Vec<MaskPath>, Option<Vec<MaskPath>>, Vec<MaskPath>)>> = Mutex::new(None);
+    static PAD_SEEN: Mutex<Vec<MaskPath>> = Mutex::new(Vec::new());
+
+    struct Peek(PluginManifest);
+
+    impl EffectPlugin for Peek {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn padding_v2(&self, _: &PluginParams, _: f64, _: f64, _: [f64; 2], _: u64, host: &dyn PluginHost) -> u32 {
+            *PAD_SEEN.lock().unwrap() = host.masks();
+            2
+        }
+        fn render_v2(&self, _: &mut PluginFrame, _: &PluginParams, _: f64, host: &dyn PluginHost) -> Result<(), String> {
+            let pad = PAD_SEEN.lock().unwrap().clone();
+            *SEEN.lock().unwrap() = Some((host.masks(), host.layer_masks("other", 1.5), pad));
+            Ok(())
+        }
+    }
+
+    fn path(x: f64, y: f64) -> MaskPath {
+        MaskPath {
+            name: "M".into(),
+            closed: true,
+            mode: "add".into(),
+            opacity: 1.0,
+            feather: [1.0, 2.0],
+            expansion: 3.0,
+            vertices: vec![[x, y]],
+            in_tangents: vec![[1.0, -1.0]],
+            out_tangents: vec![[0.0, 2.0]],
+            ..Default::default()
+        }
+    }
+
+    /// Masks in effect space; the other layer (id 9) is 40×20 against this layer's 100×50, asked
+    /// for at comp time 11.5.
+    struct Host;
+
+    impl EffectHost for Host {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn mask_paths(&self) -> Vec<MaskPath> {
+            vec![path(10.0, 20.0)]
+        }
+        fn layer_mask_paths(&self, id: u64, comp_time: f64) -> Option<(Vec<MaskPath>, [f64; 2])> {
+            (id == 9 && (comp_time - 11.5).abs() < 1e-9).then(|| (vec![path(4.0, 6.0)], [40.0, 20.0]))
+        }
+    }
+
+    #[test]
+    fn masks_are_mapped_like_point_parameters() {
+        let p = |id: &str, kind| PluginParam { id: id.into(), name: id.into(), group: String::new(), kind };
+        let m = PluginManifest {
+            api: 2,
+            id: "org.test.maskpeek".into(),
+            name: "Mask Peek".into(),
+            category: "Test".into(),
+            version: String::new(),
+            author: String::new(),
+            description: String::new(),
+            params: vec![p("other", PluginParamKind::Layer), p("pt", PluginParamKind::Point { default: [0.0; 2] })],
+        };
+        let spec = register_plugin(Arc::new(Peek(m))).unwrap();
+        let mut params = crate::Params::default();
+        params.values.insert("other".into(), Value::Layer(Some(9)));
+        params.values.insert("pt".into(), Value::Vec2([10.0, 20.0]));
+        let env = EffectEnv { host: Some(&Host), comp_time: 11.0, ..Default::default() };
+        let ctx = EffectCtx { params: &params, time: 1.0, layer_size: [100.0, 50.0], seed: 3, adjustment: false, env };
+        let buf = Buf { img: crate::Image::new(8, 8), offset: [5.0, 7.0], scale: 2.0 };
+        // The point parameter at the mask's vertex lands where the vertex does.
+        let man = plugin(spec.id).unwrap().manifest().clone();
+        let flat = flatten_params(&man, &params, [7.0, 9.0], 2.0);
+        let _ = crate::apply(spec, &ctx, buf);
+        let (own, other, pad) = SEEN.lock().unwrap().clone().unwrap();
+        // Padding: the buffer before padding (offset 5, 7); render: after 2 px (offset 7, 9).
+        assert_eq!(pad[0].vertices, vec![[25.0, 47.0]]);
+        assert_eq!(own[0].vertices, vec![[27.0, 49.0]]);
+        assert_eq!(own[0].vertices[0].to_vec(), flat[1..3].to_vec(), "like the point parameter");
+        assert_eq!(own[0].in_tangents, vec![[2.0, -2.0]]);
+        assert_eq!(own[0].out_tangents, vec![[0.0, 4.0]]);
+        assert_eq!((own[0].feather, own[0].expansion), ([2.0, 4.0], 6.0));
+        // The other layer, centred on this one as `layer_input` places it: (4, 6) + (30, 15).
+        let other = other.unwrap();
+        assert_eq!(other[0].vertices, vec![[(4.0 + 30.0) * 2.0 + 7.0, (6.0 + 15.0) * 2.0 + 9.0]]);
+    }
 }

@@ -295,6 +295,68 @@ pub fn shapes(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::MaskShap
     out
 }
 
+/// The most glyph outlines [`glyph_paths`] returns (a long text has many contours).
+const MAX_GLYPH_PATHS: usize = 4096;
+
+/// The layer's enabled masks at the context time as Bezier paths with their settings, in layer
+/// space (for effects that take the shape itself: external effect helpers).
+pub fn paths(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::MaskPath> {
+    let Some(masks) = layer.masks() else { return Vec::new() };
+    let mut out = Vec::new();
+    for g in masks.groups().filter(|g| g.enabled) {
+        let GroupKind::Mask { mode, inverted, .. } = g.kind else { continue };
+        let Some(Value::Path(sp)) = ctx.group_value(layer, g, "path") else { continue };
+        out.push(effectcraft_effects::MaskPath {
+            name: g.name.clone(),
+            closed: sp.closed,
+            mode: mode.label().to_ascii_lowercase(),
+            inverted,
+            opacity: ctx.f(layer, g, "opacity", 100.0) / 100.0,
+            feather: ctx.v2(layer, g, "feather", [0.0; 2]),
+            expansion: ctx.f(layer, g, "expansion", 0.0),
+            vertices: sp.vertices,
+            in_tangents: sp.in_tangents,
+            out_tangents: sp.out_tangents,
+        });
+    }
+    out
+}
+
+/// A text layer's glyph outlines at the context time as closed paths in layer space, one per
+/// contour (what Create Masks from Text makes, so `difference`: counters stay open), named by
+/// their character. Empty for other layers.
+pub fn glyph_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::MaskPath> {
+    if !matches!(layer.source, effectcraft_project::LayerSource::Text) {
+        return Vec::new();
+    }
+    let Some(geom) = crate::text::text_geom(ctx, layer) else { return Vec::new() };
+    // Each glyph knows the character it came from (`char_index` into the whole text): spaces,
+    // zero-width characters and accents drawn with their letter make no glyph of their own.
+    let chars: Vec<char> = geom.doc.text.chars().collect();
+    let mut out = Vec::new();
+    for (i, g) in geom.glyphs.iter().enumerate() {
+        let name = chars.get(g.char_index).filter(|c| !c.is_whitespace()).map(|c| c.to_string()).unwrap_or_else(|| format!("Glyph {}", i.saturating_add(1)));
+        for sp in effectcraft_path::from_kurbo(&g.path()) {
+            if out.len() >= MAX_GLYPH_PATHS {
+                return out;
+            }
+            out.push(effectcraft_effects::MaskPath {
+                name: name.clone(),
+                closed: true,
+                mode: "difference".into(),
+                inverted: false,
+                opacity: 1.0,
+                feather: [0.0; 2],
+                expansion: 0.0,
+                vertices: sp.vertices,
+                in_tangents: sp.in_tangents,
+                out_tangents: sp.out_tangents,
+            });
+        }
+    }
+    out
+}
+
 /// Apply the layer's masks to its buffer.
 /// Returns whether any mask was applied.
 pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> bool {

@@ -45,6 +45,7 @@ mod models;
 mod motion_blur_depth;
 mod paint;
 mod panels;
+mod param_notify;
 mod project_items;
 mod proxy;
 mod quick_offset;

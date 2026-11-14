@@ -368,6 +368,27 @@ effects can be registered.
   frames pool their native instances by it) and `frame_range()` (the layer's source time range in
   layer-time seconds, `None` when it has none). Images are `PluginImage { width, height, pixels, origin, scale }`.
   It may run on several threads at once.
+* **`EffectPlugin::notify_params()`** (default none) lists parameters whose changes by the user
+  the plug-in wants to hear about; **`EffectPlugin::param_changed(change)`** then gets a
+  `ParamChange { param, instance_key, time, layer_size, values, texts }` (`values` keyed by id in
+  property units, see `plugin::param_values`) and returns other parameter values to set, as
+  `(id, JSON value)` pairs. EffectCraft applies them with the user's edit in one undo step (a
+  keyframe at the edit's time when the property is animated), checks every value against the
+  manifest and ignores what doesn't fit; a change it applies is not reported again. It is called
+  only for edits (never while rendering or evaluating expressions) and the edit waits for it, so it
+  must be quick: `change.budget` is what is left of the command's wait
+  (`plugin::param_change_timeout`, 2 s by default, for all the answers of one command). Text and
+  hidden values take at most 16 MB per answer (`plugin::MAX_ANSWER_TEXT`). This is how [external effect helpers](external-helpers.md#parameter-changes)
+  receive `param_changed`; WebAssembly modules can't use it.
+* **`PluginHost::masks()`** (default none) gives the layer's enabled masks at the render time as
+  `MaskPath { name, closed, mode, inverted, opacity, feather, expansion, vertices, in_tangents,
+  out_tangents }`, in buffer pixels of the frame (mapped like point parameters; tangents, feather
+  and expansion scaled), and **`PluginHost::layer_masks(param_id, layer_time)`** those of a layer
+  parameter's layer, placed where `layer_input` puts its pixels (a text layer adds its glyph
+  outlines). **`EffectPlugin::padding_v2(…, host)`** (default: calls `padding`) is `padding` with
+  a host whose `masks()` are in the buffer before padding. These are additions with defaults, for
+  Rust plug-ins and [external effect helpers](external-helpers.md#masks); the WebAssembly ABI does
+  not offer them.
 
 ### Compatibility
 

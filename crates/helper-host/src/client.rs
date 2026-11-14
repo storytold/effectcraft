@@ -9,16 +9,20 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParams};
+use effectcraft_effects::plugin::{EffectPlugin, ParamChange, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParams, checked_values};
 
 use crate::blocklist;
 use crate::frames::Exchange;
-use crate::protocol::{HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, parse_reply, request_line};
+use crate::protocol::{
+    FEATURE_MASKS, FEATURE_PARAM_CHANGED, HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, bounded_masks,
+    feature_list, parse_reply, request_line,
+};
 
 /// How deep renders through one helper may nest (an effect asking for its input, which another
 /// effect of the same helper renders, ...).
@@ -28,6 +32,9 @@ const MAX_RESTARTS_PER_MINUTE: usize = 5;
 /// A helper idle for longer than this is pinged before it is used again.
 const HEARTBEAT_AFTER: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most processes of one helper program EffectCraft runs at once, whatever it asks for in
+/// `hello` (`max_processes`).
+pub const MAX_PROCESSES: usize = 8;
 /// The longest piece of a helper's stderr logged as one line (longer lines are logged in parts).
 const MAX_LOG_LINE: u64 = 64 << 10;
 
@@ -49,6 +56,22 @@ fn render_timeout() -> Duration {
         0 => Duration::from_secs(120),
         ms => Duration::from_millis(ms),
     }
+}
+
+/// Set the edit timeout ([`edit_timeout`]); it wins over `EFFECTCRAFT_HELPER_EDIT_TIMEOUT`, so
+/// tests don't depend on the environment.
+pub fn set_edit_timeout(t: Duration) {
+    effectcraft_effects::plugin::set_param_change_timeout(t);
+}
+
+/// The longest the user's edit (or one command with all its edits: a batch, a script) waits for
+/// helpers to answer `param_changed`, the wait for a free process included:
+/// [`effectcraft_effects::plugin::param_change_timeout`] (`EFFECTCRAFT_HELPER_EDIT_TIMEOUT`
+/// seconds, default 2). Edits run on the thread that draws the interface, so this is short: a
+/// helper that needs longer has the user's change applied alone (and is stopped, as on every
+/// timeout, since its late answer would be out of step).
+pub fn edit_timeout() -> Duration {
+    effectcraft_effects::plugin::param_change_timeout()
 }
 
 /// Timeout for start-up, `describe` and `load`, `EFFECTCRAFT_HELPER_LOAD_TIMEOUT` seconds
@@ -85,22 +108,47 @@ struct Conn {
     top: u64,
     last_used: Instant,
     generation: u64,
+    /// The loads ([`Helper::load`], by their index in [`Helper::loaded`]) this process has done;
+    /// a process that lacks one is brought up to date before it is used.
+    loaded: Vec<usize>,
+    /// The loads this process answered with an error (a folder that went away): tried again before
+    /// its next turn, but an edit doesn't wait for them ([`Conn::tried_all_loads`]).
+    failed: Vec<usize>,
+    /// Lines handed to the writer thread without waiting for it ([`Conn::post`]); their results
+    /// come before those of later lines.
+    unacked: usize,
 }
 
 impl Conn {
-    /// Write one request, waiting at most `timeout` for the helper to take it.
+    /// Write one request, waiting at most `timeout` for the helper to take it (and the requests
+    /// posted before it).
     fn send(&mut self, r: &Request, timeout: Duration) -> Result<(), Failure> {
-        let line = request_line(r).map_err(Failure::Broken)?;
-        let closed = || Failure::Broken("can't write to the helper: its input is closed".into());
-        self.input.send(line.into_bytes()).map_err(|_| closed())?;
-        match self.written.recv_timeout(timeout) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(Failure::Broken(format!("can't write to the helper: {e}"))),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(Failure::Broken(format!("the helper did not answer within {} s (it stopped reading its input)", timeout.as_secs())))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err(closed()),
+        self.post(r)?;
+        let deadline = Instant::now().checked_add(timeout);
+        // The writer answers every line in order: first those posted without waiting.
+        while self.unacked > 0 {
+            let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
+            let r = match self.written.recv_timeout(left) {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(Failure::Broken(format!("can't write to the helper: {e}"))),
+                Err(RecvTimeoutError::Timeout) => {
+                    Err(Failure::Broken(format!("the helper did not answer within {} s (it stopped reading its input)", timeout.as_secs())))
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(Failure::Broken("can't write to the helper: its input is closed".into())),
+            };
+            self.unacked -= 1;
+            r?;
         }
+        Ok(())
+    }
+
+    /// Hand one request to the writer thread without waiting for the helper to take it. A write
+    /// that fails is reported by the next [`Conn::send`], which stops the process.
+    fn post(&mut self, r: &Request) -> Result<(), Failure> {
+        let line = request_line(r).map_err(Failure::Broken)?;
+        self.input.send(line.into_bytes()).map_err(|_| Failure::Broken("can't write to the helper: its input is closed".into()))?;
+        self.unacked = self.unacked.saturating_add(1);
+        Ok(())
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Reply, Failure> {
@@ -123,6 +171,28 @@ impl Conn {
     fn call(&mut self, r: &Request, timeout: Duration) -> Result<Reply, Failure> {
         self.send(r, timeout)?;
         self.recv(timeout)
+    }
+
+    /// [`Conn::call`] within `timeout` in all: the answer gets only what writing the request left.
+    fn call_within(&mut self, r: &Request, timeout: Duration) -> Result<Reply, Failure> {
+        let start = Instant::now();
+        self.send(r, timeout)?;
+        self.recv(timeout.saturating_sub(start.elapsed()))
+    }
+
+    /// Whether this process has tried every load of `loaded` (the number of loads so far): done,
+    /// or answered with an error (retried before renders, but nothing an edit waits for).
+    fn tried_all_loads(&self, loaded: usize) -> bool {
+        (0..loaded).all(|i| self.loaded.contains(&i) || self.failed.contains(&i))
+    }
+
+    /// Note that loading `path` (every index of it in `all`) failed on this process.
+    fn note_failed(&mut self, all: &[String], path: &str) {
+        for (i, _) in all.iter().enumerate().filter(|(_, p)| *p == path) {
+            if !self.failed.contains(&i) {
+                self.failed.push(i);
+            }
+        }
     }
 
     /// Reserve room for an image of `width × height` at the top of the exchange file.
@@ -152,7 +222,7 @@ enum Failure {
     Broken(String),
 }
 
-/// Whose turn it is to talk to the helper: one thread at a time, re-entered by that thread for
+/// Whose turn it is to talk to one process: one thread at a time, re-entered by that thread for
 /// nested renders.
 #[derive(Default)]
 struct Turn {
@@ -160,17 +230,74 @@ struct Turn {
     depth: u32,
 }
 
-struct TurnGuard<'a>(&'a Helper);
+/// One slot of a helper's process pool: at most one process, started when a render needs it.
+struct Slot {
+    index: usize,
+    conn: Mutex<Option<Conn>>,
+    /// Whether a process was launched in this slot before (a launch after that is a restart, see
+    /// [`Helper::spawn`]).
+    started: AtomicBool,
+}
+
+impl Slot {
+    /// Whether a process runs in this slot. One that is busy answering counts as running.
+    fn running(&self) -> bool {
+        match self.conn.try_lock() {
+            Ok(c) => c.is_some(),
+            Err(TryLockError::Poisoned(c)) => c.into_inner().is_some(),
+            Err(TryLockError::WouldBlock) => true,
+        }
+    }
+}
+
+struct Entry {
+    slot: Arc<Slot>,
+    turn: Turn,
+}
+
+/// The slots of a helper, in the order they were created.
+#[derive(Default)]
+struct Pool {
+    entries: Vec<Entry>,
+}
+
+/// A thread's hold on one slot (and so on one process).
+struct TurnGuard<'a> {
+    helper: &'a Helper,
+    slot: Arc<Slot>,
+    /// Whether this is the outermost turn of the thread on the slot (not a nested render).
+    fresh: bool,
+}
 
 impl Drop for TurnGuard<'_> {
     fn drop(&mut self) {
-        let mut t = lock(&self.0.turn);
-        t.depth = t.depth.saturating_sub(1);
-        if t.depth == 0 {
-            t.owner = None;
-            self.0.turn_cv.notify_all();
+        let mut p = lock(&self.helper.pool);
+        if let Some(e) = p.entries.get_mut(self.slot.index) {
+            e.turn.depth = e.turn.depth.saturating_sub(1);
+            if e.turn.depth == 0 {
+                e.turn.owner = None;
+                self.helper.turn_cv.notify_all();
+            }
         }
     }
+}
+
+/// How many processes to run from what the helper said in `hello`: 1 when it said nothing or
+/// something that isn't a whole number of at least 1; never more than [`MAX_PROCESSES`] or the
+/// machine's parallelism.
+pub fn clamp_processes(asked: Option<&serde_json::Value>) -> usize {
+    // `EFFECTCRAFT_HELPER_MAX_PROCESSES` stands in for the number of cores (tests, small machines).
+    let cores = std::env::var("EFFECTCRAFT_HELPER_MAX_PROCESSES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    clamp_processes_to(asked, cores)
+}
+
+fn clamp_processes_to(asked: Option<&serde_json::Value>, cores: usize) -> usize {
+    let n = asked.and_then(serde_json::Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(1);
+    n.clamp(1, MAX_PROCESSES).min(cores.max(1))
 }
 
 /// What [`Helper::status`] reports.
@@ -181,19 +308,27 @@ pub struct HelperStatus {
     pub version: String,
     pub loads: Vec<String>,
     pub running: bool,
+    /// Processes running now.
+    pub processes: usize,
+    /// The most processes this helper may run at once.
+    pub max_processes: usize,
     pub effects: usize,
     pub restarts: usize,
     pub last_error: Option<String>,
+    /// The protocol extensions the helper announced in `hello` (`features`).
+    pub features: Vec<String>,
 }
 
 /// One helper program and, while it runs, its process.
 pub struct Helper {
     program: PathBuf,
     info: Mutex<HelperStatus>,
-    conn: Mutex<Option<Conn>>,
-    turn: Mutex<Turn>,
+    pool: Mutex<Pool>,
     turn_cv: Condvar,
-    /// Paths loaded with [`Helper::load`], loaded again after a restart.
+    /// How many processes may run at once (from the helper's `hello`; 1 until it is known).
+    max_processes: AtomicUsize,
+    /// Every successful [`Helper::load`] in order (a path loaded twice is listed twice, so the
+    /// second load reaches every process too); replayed after a restart.
     loaded: Mutex<Vec<String>>,
     restarts: Mutex<Vec<Instant>>,
     generation: Mutex<u64>,
@@ -205,21 +340,21 @@ impl Helper {
         let h = Arc::new(Helper {
             program: program.to_path_buf(),
             info: Mutex::new(HelperStatus { program: program.to_path_buf(), ..Default::default() }),
-            conn: Mutex::new(None),
-            turn: Mutex::new(Turn::default()),
+            pool: Mutex::new(Pool::default()),
             turn_cv: Condvar::new(),
+            max_processes: AtomicUsize::new(1),
             loaded: Mutex::new(vec![]),
             restarts: Mutex::new(vec![]),
             generation: Mutex::new(0),
         });
         let (effects, errors) = {
-            let _turn = h.take_turn()?;
+            let turn = h.take_turn()?;
             // A helper that crashes while listing its effects (one bad plug-in) is given a
             // second and third chance: helpers remember what crashed them and skip it.
             let mut last = String::new();
             let mut out = None;
             for _ in 0..3 {
-                match h.with_conn(|c| c.call(&Request::Describe, load_timeout())) {
+                match h.with_conn(&turn.slot, turn.fresh, |c| c.call(&Request::Describe, load_timeout())) {
                     Ok(Reply::Effects { effects, errors }) => {
                         out = Some((effects, errors));
                         break;
@@ -240,18 +375,25 @@ impl Helper {
 
     pub fn status(&self) -> HelperStatus {
         let mut s = lock(&self.info).clone();
-        // A render holds the process for as long as the helper works on it: don't wait for it.
-        s.running = match self.conn.try_lock() {
-            Ok(c) => c.is_some(),
-            Err(TryLockError::Poisoned(c)) => c.into_inner().is_some(),
-            Err(TryLockError::WouldBlock) => true,
-        };
+        // A render holds its process for as long as the helper works on it: don't wait for it.
+        s.processes = self.slots().iter().filter(|slot| slot.running()).count();
+        s.running = s.processes > 0;
+        s.max_processes = self.max_processes.load(Ordering::Relaxed).max(1);
         s.restarts = lock(&self.restarts).len();
         s
     }
 
+    fn slots(&self) -> Vec<Arc<Slot>> {
+        lock(&self.pool).entries.iter().map(|e| e.slot.clone()).collect()
+    }
+
     pub fn loads(&self, ext: &str) -> bool {
         lock(&self.info).loads.iter().any(|e| e.eq_ignore_ascii_case(ext))
+    }
+
+    /// Whether the helper announced protocol extension `feature` in its `hello`.
+    pub fn has_feature(&self, feature: &str) -> bool {
+        lock(&self.info).features.iter().any(|f| f == feature)
     }
 
     pub(crate) fn add_effects(&self, n: usize) {
@@ -259,70 +401,196 @@ impl Helper {
         i.effects = i.effects.saturating_add(n);
     }
 
-    /// Load effects from a path through the helper ([`Request::Load`]).
+    /// Load effects from a path through the helper ([`Request::Load`]). Every running process
+    /// loads it; one that is busy, and one started later, does before it is used next. Loading
+    /// a path again (a folder with new plug-ins) reaches every process again.
     pub fn load(&self, path: &str) -> Result<(Vec<RemoteEffect>, Vec<String>), String> {
-        let _turn = self.take_turn()?;
-        let r = self.with_conn(|c| c.call(&Request::Load { path: path.to_string() }, load_timeout()));
-        match r {
-            Ok(Reply::Effects { effects, errors }) => {
+        let turn = self.take_turn()?;
+        let r = self.with_conn(&turn.slot, turn.fresh, |c| {
+            let r = c.call(&Request::Load { path: path.to_string() }, load_timeout());
+            if matches!(r, Ok(Reply::Effects { .. })) {
+                // A new load for the other processes; this one has done it (and every earlier
+                // load of the same path, should one still be pending here).
                 let mut l = lock(&self.loaded);
-                if !l.iter().any(|p| p == path) {
-                    l.push(path.to_string());
+                l.push(path.to_string());
+                for (i, _) in l.iter().enumerate().filter(|(_, p)| *p == path) {
+                    if !c.loaded.contains(&i) {
+                        c.loaded.push(i);
+                    }
                 }
-                Ok((effects, errors))
             }
+            r
+        });
+        let out = match r {
+            Ok(Reply::Effects { effects, errors }) => Ok((effects, errors)),
             Ok(Reply::Error { message }) => Err(message),
             Ok(other) => Err(format!("unexpected reply to load: {other:?}")),
             Err(Failure::Refused(e) | Failure::Broken(e)) => Err(e),
+        };
+        if out.is_ok() {
+            self.sync_idle(turn.slot.index);
         }
+        out
     }
 
-    /// Stop the process (it starts again when next needed).
-    pub fn stop(&self) {
-        if let Some(c) = lock(&self.conn).take() {
-            c.stop();
-        }
-    }
-
-    fn take_turn(&self) -> Result<TurnGuard<'_>, String> {
-        let me = std::thread::current().id();
-        // Bounded, so a thread that can't get the helper (its holder waiting for work that a
-        // blocked thread pool would have to do) fails instead of hanging forever.
-        let limit = load_timeout();
-        let deadline = Instant::now().checked_add(limit);
-        let mut t = lock(&self.turn);
-        loop {
-            match t.owner {
-                None => {
-                    t.owner = Some(me);
-                    t.depth = 1;
-                    break;
-                }
-                Some(o) if o == me => {
-                    if t.depth >= MAX_DEPTH {
-                        return Err("effects through this helper are nested too deeply".into());
-                    }
-                    t.depth += 1;
-                    break;
-                }
-                Some(_) => {
-                    let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
-                    if left.is_zero() {
-                        return Err(format!("the effect helper was busy for more than {} s", limit.as_secs()));
-                    }
-                    t = self.turn_cv.wait_timeout(t, left).unwrap_or_else(PoisonError::into_inner).0;
+    /// Bring the idle running processes (other than slot `except`) up to date with the loaded
+    /// paths, without waiting for busy ones: they catch up before their next use.
+    fn sync_idle(&self, except: usize) {
+        for slot in self.slots() {
+            if slot.index == except {
+                continue;
+            }
+            let Some(_turn) = self.try_turn(&slot) else { continue };
+            let mut g = lock(&slot.conn);
+            if let Some(c) = g.as_mut()
+                && let Err(Failure::Broken(e)) = self.catch_up(c)
+            {
+                self.note_error(&e);
+                if let Some(dead) = g.take() {
+                    dead.stop();
                 }
             }
         }
-        Ok(TurnGuard(self))
     }
 
-    /// Run `f` on the running process, starting it first if needed. A [`Failure::Broken`]
-    /// stops the process.
-    fn with_conn<T>(&self, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
-        let mut g = lock(&self.conn);
+    /// Tell every idle running process an effect instance is gone ([`Request::Destroy`]); best
+    /// effort and never waiting (not even for the helper to read the request): a process that is
+    /// busy rendering (or held by the calling thread,
+    /// which may be inside a render callback) is skipped, and a process that never saw the
+    /// instance, or starts later, ignores it. Returns how many processes were told.
+    pub fn destroy(&self, instance: u64) -> usize {
+        let mut told = 0;
+        for slot in self.slots() {
+            let Some(_turn) = self.try_turn(&slot) else {
+                log::info!("helper {}: process {} is busy; not told that instance {instance} is gone", self.program.display(), slot.index);
+                continue;
+            };
+            let mut g = lock(&slot.conn);
+            if let Some(c) = g.as_mut() {
+                // Handed to the writer thread: a process that stopped reading its input can't hold
+                // this up. A write that fails is found by the next request, which stops the process.
+                match c.post(&Request::Destroy { instance }) {
+                    Ok(()) => told += 1,
+                    Err(Failure::Broken(e) | Failure::Refused(e)) => {
+                        self.note_error(&e);
+                        if let Some(dead) = g.take() {
+                            dead.stop();
+                        }
+                    }
+                }
+            }
+        }
+        told
+    }
+
+    /// Stop every process (they start again when next needed).
+    pub fn stop(&self) {
+        for slot in self.slots() {
+            if let Some(c) = lock(&slot.conn).take() {
+                c.stop();
+            }
+        }
+    }
+
+    /// Do the loads ([`Helper::load`]) that `c` hasn't done yet: all of them for a process that
+    /// just started. A path loaded several times is loaded once. A load the helper answers with an
+    /// error stays pending and is tried again before the next turn; a process that breaks or
+    /// answers out of step is an error (the caller stops it).
+    fn catch_up(&self, c: &mut Conn) -> Result<(), Failure> {
+        // Copied: a load can take minutes, and `load` on another process must not wait for it.
+        let all = lock(&self.loaded).clone();
+        let mut done: Vec<&str> = vec![];
+        for (i, path) in all.iter().enumerate() {
+            if c.loaded.contains(&i) || done.contains(&path.as_str()) {
+                continue;
+            }
+            done.push(path);
+            match c.call(&Request::Load { path: path.clone() }, load_timeout()) {
+                Ok(Reply::Effects { .. }) => {
+                    let now: Vec<usize> = all.iter().enumerate().filter(|(j, p)| *p == path && !c.loaded.contains(j)).map(|(j, _)| j).collect();
+                    c.loaded.extend(now);
+                }
+                Ok(Reply::Error { message }) => {
+                    c.note_failed(&all, path);
+                    log::warn!("helper {}: loading {path} failed (tried again later): {message}", self.program.display())
+                }
+                Ok(other) => return Err(Failure::Broken(format!("unexpected reply to load: {other:?}"))),
+                Err(Failure::Refused(e)) => {
+                    c.note_failed(&all, path);
+                    log::warn!("helper {}: loading {path} failed (tried again later): {e}", self.program.display())
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// The turn of a free slot, without waiting (`None` when someone, the caller included, has it).
+    fn try_turn(&self, slot: &Arc<Slot>) -> Option<TurnGuard<'_>> {
+        let mut p = lock(&self.pool);
+        let e = p.entries.get_mut(slot.index)?;
+        if e.turn.owner.is_some() {
+            return None;
+        }
+        e.turn = Turn { owner: Some(std::thread::current().id()), depth: 1 };
+        Some(TurnGuard { helper: self, slot: slot.clone(), fresh: true })
+    }
+
+    /// The turn on a process: the one this thread already holds (a nested render), else a free
+    /// one that is running, else a free slot, else a new slot while there are fewer than
+    /// `max_processes`; otherwise wait.
+    fn take_turn(&self) -> Result<TurnGuard<'_>, String> {
+        let me = std::thread::current().id();
+        // Bounded, so a thread that can't get a process (the holders waiting for work that a
+        // blocked thread pool would have to do) fails instead of hanging forever.
+        let limit = load_timeout();
+        let deadline = Instant::now().checked_add(limit);
+        let mut p = lock(&self.pool);
+        loop {
+            if let Some((slot, fresh)) = self.pick(&mut p, me)? {
+                return Ok(TurnGuard { helper: self, slot, fresh });
+            }
+            let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Err(format!("the effect helper was busy for more than {} s", limit.as_secs()));
+            }
+            p = self.turn_cv.wait_timeout(p, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+
+    fn pick(&self, p: &mut Pool, me: ThreadId) -> Result<Option<(Arc<Slot>, bool)>, String> {
+        // A thread that holds a process keeps it for nested renders.
+        if let Some(e) = p.entries.iter_mut().find(|e| e.turn.owner == Some(me)) {
+            if e.turn.depth >= MAX_DEPTH {
+                return Err("effects through this helper are nested too deeply".into());
+            }
+            e.turn.depth += 1;
+            return Ok(Some((e.slot.clone(), false)));
+        }
+        let free = |e: &&Entry| e.turn.owner.is_none();
+        // A free process that is running before one that has to be started.
+        let found = p.entries.iter().filter(free).find(|e| e.slot.running()).or_else(|| p.entries.iter().find(free)).map(|e| e.slot.index);
+        let index = match found {
+            Some(i) => i,
+            None if p.entries.len() < self.max_processes.load(Ordering::Relaxed).max(1) => {
+                let index = p.entries.len();
+                p.entries.push(Entry { slot: Arc::new(Slot { index, conn: Mutex::new(None), started: AtomicBool::new(false) }), turn: Turn::default() });
+                index
+            }
+            None => return Ok(None),
+        };
+        Ok(p.entries.get_mut(index).map(|e| {
+            e.turn = Turn { owner: Some(me), depth: 1 };
+            (e.slot.clone(), true)
+        }))
+    }
+
+    /// Run `f` on the slot's process, starting it first if needed. A [`Failure::Broken`] stops
+    /// the process.
+    fn with_conn<T>(&self, slot: &Slot, outermost: bool, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
+        let mut g = lock(&slot.conn);
         if g.is_none() {
-            *g = Some(self.spawn().map_err(|e| self.not_started(e))?);
+            *g = Some(self.spawn(slot).map_err(|e| self.not_started(e))?);
         }
         let Some(c) = g.as_mut() else { return Err(Failure::Broken("the helper is not running".into())) };
         if c.last_used.elapsed() > HEARTBEAT_AFTER && !matches!(c.call(&Request::Ping, HEARTBEAT_TIMEOUT), Ok(Reply::Pong)) {
@@ -330,7 +598,18 @@ impl Helper {
                 dead.stop();
             }
             self.note_error("the helper stopped answering; restarting it");
-            *g = Some(self.spawn().map_err(|e| self.not_started(e))?);
+            *g = Some(self.spawn(slot).map_err(|e| self.not_started(e))?);
+        }
+        let Some(c) = g.as_mut() else { return Err(Failure::Broken("the helper is not running".into())) };
+        // Paths loaded meanwhile are loaded before the first request of a turn, never inside a
+        // render's conversation (a nested render): the helper is waiting for a callback answer
+        // there. A failure here is not the effect's doing.
+        if outermost && let Err(Failure::Broken(e) | Failure::Refused(e)) = self.catch_up(c) {
+            self.note_error(&e);
+            if let Some(dead) = g.take() {
+                dead.stop();
+            }
+            return Err(Failure::Refused(format!("the helper stopped while loading plug-ins: {e}")));
         }
         let Some(c) = g.as_mut() else { return Err(Failure::Broken("the helper is not running".into())) };
         let r = f(c);
@@ -348,8 +627,8 @@ impl Helper {
     /// pinging one: mid-render the helper is waiting for the answer to its question. A
     /// [`Failure::Broken`] stops the process. A process already gone was stopped by what broke it
     /// (a nested render, charged there): not charged again to this render's effect.
-    fn with_running<T>(&self, started: u64, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
-        let mut g = lock(&self.conn);
+    fn with_running<T>(&self, slot: &Slot, started: u64, f: impl FnOnce(&mut Conn) -> Result<T, Failure>) -> Result<T, Failure> {
+        let mut g = lock(&slot.conn);
         let Some(c) = g.as_mut().filter(|c| c.generation == started) else {
             return Err(Failure::Refused("the helper stopped during the render".into()));
         };
@@ -377,14 +656,23 @@ impl Helper {
         lock(&self.info).last_error = Some(e.to_string());
     }
 
-    fn spawn(&self) -> Result<Conn, String> {
+    fn spawn(&self, slot: &Slot) -> Result<Conn, String> {
         {
             let mut r = lock(&self.restarts);
             r.retain(|t| t.elapsed() < Duration::from_secs(60));
             if r.len() >= MAX_RESTARTS_PER_MINUTE {
                 return Err("the helper keeps stopping; it stays off until the next scan (Effect ▸ Scan for Effect Helpers)".into());
             }
-            r.push(Instant::now());
+            // Filling the pool is not restarting. The rule: every launch of slot 0 counts (as it
+            // always did); in the other slots, the first launch of a process doesn't, and every
+            // later one does, whether the process before it crashed, hung, or exited while it was
+            // starting up (`hello`, `describe`, replaying loads). The exemption is used up when the
+            // child process is launched (`started`, set below), so a try that never got that far
+            // (no exchange file, the program can't be run) doesn't use it up, and a slot whose
+            // first process keeps dying while starting can't retry forever without counting.
+            if slot.started.load(Ordering::Relaxed) || slot.index == 0 {
+                r.push(Instant::now());
+            }
         }
         let exchange = Exchange::create().map_err(|e| format!("can't create the frame exchange file: {e}"))?;
         let mut cmd = Command::new(&self.program);
@@ -399,6 +687,7 @@ impl Helper {
             cmd.creation_flags(0x0800_0000);
         }
         let mut child = cmd.spawn().map_err(|e| format!("can't start {}: {e}", self.program.display()))?;
+        slot.started.store(true, Ordering::Relaxed);
         let (Some(stdin), Some(stdout), stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
             let _ = child.kill();
             let _ = child.wait();
@@ -472,12 +761,13 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation, loaded: vec![], failed: vec![], unacked: 0 };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
-            Ok(Reply::Hello { version, name, helper_version, loads }) if version == PROTOCOL_VERSION => {
+            Ok(Reply::Hello { version, name, helper_version, loads, max_processes, features }) if version == PROTOCOL_VERSION => {
+                self.max_processes.store(clamp_processes(max_processes.as_ref()), Ordering::Relaxed);
                 let mut i = lock(&self.info);
-                (i.name, i.version, i.loads) = (name, helper_version, loads);
+                (i.name, i.version, i.loads, i.features) = (name, helper_version, loads, feature_list(features.as_ref()));
             }
             Ok(Reply::Hello { version, .. }) => {
                 c.stop();
@@ -503,18 +793,89 @@ impl Helper {
             c.stop();
             return Err("the restarted helper could not list its effects".into());
         }
-        for path in lock(&self.loaded).clone() {
-            if !matches!(c.call(&Request::Load { path: path.clone() }, load_timeout()), Ok(Reply::Effects { .. })) {
-                log::warn!("helper {}: reloading {path} failed", self.program.display());
-            }
+        // A load the helper refuses stays pending for the next turn; a process that breaks here
+        // is not used.
+        if let Err(Failure::Broken(e) | Failure::Refused(e)) = self.catch_up(&mut c) {
+            c.stop();
+            return Err(format!("the helper stopped while loading plug-ins: {e}"));
         }
         Ok(c)
     }
 
-    fn padding(&self, effect: &str, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance: u64) -> Result<u32, String> {
-        let _turn = self.take_turn()?;
-        let req = Request::Padding { effect: effect.to_string(), instance, time, scale, layer_size, flat: params.flat.to_vec(), texts: params.texts.to_vec() };
-        match self.with_conn(|c| c.call(&req, render_timeout())) {
+    /// A free turn on a process that is running, waiting for one until `deadline`. Never starts a
+    /// process, and fails at once when none runs or the calling thread already holds one (it is
+    /// inside a render: nothing may be sent into that conversation).
+    fn take_idle_turn(&self, deadline: Option<Instant>) -> Result<TurnGuard<'_>, String> {
+        let me = std::thread::current().id();
+        let mut p = lock(&self.pool);
+        loop {
+            if p.entries.iter().any(|e| e.turn.owner == Some(me)) {
+                return Err("the helper is in the middle of a render on this thread".into());
+            }
+            if !p.entries.iter().any(|e| e.slot.running()) {
+                return Err("the helper is not running".into());
+            }
+            // An idle process that has tried every load before one that still has to.
+            let loads = lock(&self.loaded).len();
+            let ready = |e: &Entry| match e.slot.conn.try_lock() {
+                Ok(c) => c.as_ref().is_some_and(|c| c.tried_all_loads(loads)),
+                Err(_) => false,
+            };
+            let free = |e: &Entry| e.turn.owner.is_none() && e.slot.running();
+            let pick = p.entries.iter().position(|e| free(e) && ready(e)).or_else(|| p.entries.iter().position(free));
+            if let Some(e) = pick.and_then(|i| p.entries.get_mut(i)) {
+                e.turn = Turn { owner: Some(me), depth: 1 };
+                return Ok(TurnGuard { helper: self, slot: e.slot.clone(), fresh: true });
+            }
+            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Err("every process of the helper stayed busy".into());
+            }
+            p = self.turn_cv.wait_timeout(p, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+
+    /// Ask the helper about a parameter the user changed ([`Request::ParamChanged`]) and return
+    /// the `values` of its [`Reply::SetParams`] (unchecked). Bounded by [`edit_timeout`] in all
+    /// (the wait for a free process included); uses a process that runs and has done every load,
+    /// never starts one and never sends into a render's conversation. A helper that misses the
+    /// time, breaks the protocol or exits is stopped like after any timeout (the next render
+    /// starts it again), but this is not charged to the effect.
+    fn param_changed(&self, req: &Request, budget: Option<Duration>) -> Result<serde_json::Value, String> {
+        let limit = budget.map_or_else(edit_timeout, |b| b.min(edit_timeout()));
+        if limit.is_zero() {
+            return Err("no time is left for the helper in this edit".into());
+        }
+        let deadline = Instant::now().checked_add(limit);
+        let turn = self.take_idle_turn(deadline)?;
+        let mut g = lock(&turn.slot.conn);
+        let Some(c) = g.as_mut() else { return Err("the helper is not running".into()) };
+        // Loads still to replay can take minutes: an edit doesn't wait for them. Loads the process
+        // tried and failed (a folder that went away) don't hold edits up.
+        if !c.tried_all_loads(lock(&self.loaded).len()) {
+            return Err("the helper is still loading plug-ins".into());
+        }
+        let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
+        let r = c.call_within(req, left);
+        c.last_used = Instant::now();
+        let broken = match r {
+            Ok(Reply::SetParams { values, .. }) => return Ok(values.unwrap_or(serde_json::Value::Null)),
+            Ok(Reply::Error { message }) => return Err(message),
+            Err(Failure::Refused(e)) => return Err(e),
+            Ok(other) => format!("unexpected reply to param_changed: {other:?}"),
+            Err(Failure::Broken(e)) => e,
+        };
+        self.note_error(&broken);
+        if let Some(dead) = g.take() {
+            dead.stop();
+        }
+        Err(broken)
+    }
+
+    /// Ask a [`Request::Padding`].
+    fn padding(&self, req: &Request) -> Result<u32, String> {
+        let turn = self.take_turn()?;
+        match self.with_conn(&turn.slot, turn.fresh, |c| c.call(req, render_timeout())) {
             Ok(Reply::Padding { pixels }) => Ok(pixels),
             Ok(Reply::Error { message }) => Err(message),
             Ok(other) => Err(format!("unexpected reply to padding: {other:?}")),
@@ -524,12 +885,13 @@ impl Helper {
 
     /// Render one frame through the helper. Images live on a stack in the exchange file: the
     /// frame first, then whatever the helper asks for, freed again when the render ends (nested
-    /// renders stack above).
-    fn render(&self, effect: &str, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), Failure> {
-        let _turn = self.take_turn().map_err(Failure::Refused)?;
+    /// renders stack above). `masks`: send the layer's masks ([`PluginHost::masks`]) with it.
+    fn render(&self, effect: &str, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost, masks: bool) -> Result<(), Failure> {
+        let turn = self.take_turn().map_err(Failure::Refused)?;
+        let slot = &*turn.slot;
         // The generation of the process this render runs on: taken inside `with_conn`, which
         // may start the process (after a crash or `stop`), so it is never that of a dead one.
-        let (at, base, started) = self.with_conn(|c| {
+        let (at, base, started) = self.with_conn(slot, turn.fresh, |c| {
             let base = c.top;
             let at = c.alloc(frame.width, frame.height, frame.origin, frame.scale).map_err(Failure::Refused)?;
             // Nothing is sent yet, so the helper is fine (a full disk, say): not its fault.
@@ -549,10 +911,11 @@ impl Helper {
             texts: params.texts.to_vec(),
             frame_rate: host.frame_rate(),
             frame_range: host.frame_range(),
+            masks: masks.then(|| bounded_masks(host.masks())),
         });
-        let result = self.converse(req, frame, &at, host, started);
+        let result = self.converse(slot, req, frame, &at, host, started);
         // Free this render's images (if the same process is still running).
-        if let Some(c) = lock(&self.conn).as_mut()
+        if let Some(c) = lock(&slot.conn).as_mut()
             && c.generation == started
         {
             c.top = base;
@@ -560,18 +923,19 @@ impl Helper {
         result
     }
 
-    fn converse(&self, req: Request, frame: &mut PluginFrame, at: &ImageRef, host: &dyn PluginHost, started: u64) -> Result<(), Failure> {
+    fn converse(&self, slot: &Slot, req: Request, frame: &mut PluginFrame, at: &ImageRef, host: &dyn PluginHost, started: u64) -> Result<(), Failure> {
         let mut next = req;
         loop {
-            let reply = self.with_running(started, |c| c.call(&next, render_timeout()))?;
+            let reply = self.with_running(slot, started, |c| c.call(&next, render_timeout()))?;
             next = match reply {
-                Reply::Done => return self.with_running(started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
+                Reply::Done => return self.with_running(slot, started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
                 Reply::Error { message } => return Err(Failure::Refused(message)),
                 // Host callbacks run without holding the process, so they may render through
                 // this helper again (on this thread: the turn is re-entered).
-                Reply::InputAt { time } => self.send_image(host.input_at(time), started)?,
-                Reply::LayerInput { param, time } => self.send_image(host.layer_input(&param, time), started)?,
+                Reply::InputAt { time } => self.send_image(slot, host.input_at(time), started)?,
+                Reply::LayerInput { param, time } => self.send_image(slot, host.layer_input(&param, time), started)?,
                 Reply::ParamsAt { time } => Request::Params { values: host.params_at(time) },
+                Reply::LayerMasks { param, time } => Request::Masks { masks: host.layer_masks(&param, time).map(bounded_masks) },
                 other => return Err(Failure::Broken(format!("unexpected reply during a render: {other:?}"))),
             };
         }
@@ -580,11 +944,11 @@ impl Helper {
     /// Put a callback's image in the exchange file and make the answer. The helper is waiting
     /// for one, so an image that can't be passed on is answered with none (failing here would
     /// leave it waiting, out of step with the next request).
-    fn send_image(&self, img: Option<PluginImage>, started: u64) -> Result<Request, Failure> {
+    fn send_image(&self, slot: &Slot, img: Option<PluginImage>, started: u64) -> Result<Request, Failure> {
         let Some(img) = img.filter(|i| u64::from(i.width).saturating_mul(u64::from(i.height)) == i.pixels.len() as u64) else {
             return Ok(Request::Image { image: None });
         };
-        self.with_running(started, |c| {
+        self.with_running(slot, started, |c| {
             let base = c.top;
             let written = c.alloc(img.width, img.height, img.origin, img.scale).and_then(|at| c.exchange.write(&at, &img.pixels).map(|()| at));
             Ok(match written {
@@ -610,11 +974,22 @@ pub struct HelperEffect {
     helper: Arc<Helper>,
     manifest: PluginManifest,
     padding: bool,
+    /// The valid [`RemoteEffect::notify_params`].
+    notify: Vec<String>,
+    /// [`RemoteEffect::masks`].
+    masks: bool,
 }
 
 impl HelperEffect {
     pub fn new(helper: Arc<Helper>, remote: RemoteEffect) -> HelperEffect {
-        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding }
+        let (notify, masks) = (remote.notify_ids(), remote.wants_masks());
+        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, notify, masks }
+    }
+
+    /// Whether `render` / `padding` carry the layer's masks: the effect asked for them and the
+    /// helper understands them.
+    fn sends_masks(&self) -> bool {
+        self.masks && self.helper.has_feature(FEATURE_MASKS)
     }
 }
 
@@ -653,16 +1028,52 @@ impl EffectPlugin for HelperEffect {
     }
 
     fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64) -> u32 {
+        self.padding_v2(params, time, scale, layer_size, instance_key, &NoHost)
+    }
+
+    fn padding_v2(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64, host: &dyn PluginHost) -> u32 {
         if !self.padding || blocklist::is_blocked(&self.manifest.id) {
             return 0;
         }
-        match self.helper.padding(&self.manifest.id, params, time, scale, layer_size, instance_key) {
+        let req = Request::Padding {
+            effect: self.manifest.id.clone(),
+            instance: instance_key,
+            time,
+            scale,
+            layer_size,
+            flat: params.flat.to_vec(),
+            texts: params.texts.to_vec(),
+            masks: self.sends_masks().then(|| bounded_masks(host.masks())),
+        };
+        match self.helper.padding(&req) {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("helper effect `{}`: padding: {e}", self.manifest.id);
                 0
             }
         }
+    }
+
+    fn notify_params(&self) -> &[String] {
+        // Only helpers that said they answer `param_changed` are asked.
+        if self.notify.is_empty() || !self.helper.has_feature(FEATURE_PARAM_CHANGED) { &[] } else { &self.notify }
+    }
+
+    fn param_changed(&self, change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+        if !self.notify.contains(&change.param) || !self.helper.has_feature(FEATURE_PARAM_CHANGED) || blocklist::is_blocked(&self.manifest.id) {
+            return Ok(vec![]);
+        }
+        let req = Request::ParamChanged {
+            effect: self.manifest.id.clone(),
+            instance: change.instance_key,
+            param: change.param.clone(),
+            time: change.time,
+            layer_size: change.layer_size,
+            values: change.values.clone(),
+            texts: change.texts.clone(),
+        };
+        let values = self.helper.param_changed(&req, change.budget).map_err(|e| format!("{}: {e}", self.manifest.name))?;
+        Ok(checked_values(&self.manifest, &values))
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {
@@ -674,7 +1085,7 @@ impl EffectPlugin for HelperEffect {
                 blocklist::CRASH_LIMIT
             ));
         }
-        match self.helper.render(id, frame, params, time, host) {
+        match self.helper.render(id, frame, params, time, host, self.sends_masks()) {
             Ok(()) => Ok(()),
             Err(Failure::Refused(e)) => Err(e),
             Err(Failure::Broken(e)) => {
@@ -682,5 +1093,27 @@ impl EffectPlugin for HelperEffect {
                 Err(format!("{}: the effect helper failed: {e}", self.manifest.name))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn max_processes_is_clamped_and_garbage_means_one() {
+        assert_eq!(clamp_processes_to(None, 16), 1);
+        assert_eq!(clamp_processes_to(Some(&json!(4)), 16), 4);
+        assert_eq!(clamp_processes_to(Some(&json!(4)), 2), 2);
+        assert_eq!(clamp_processes_to(Some(&json!(100)), 64), MAX_PROCESSES);
+        for bad in [json!(0), json!(-3), json!(2.5), json!("4"), json!(null), json!([4]), json!(u64::MAX)] {
+            let n = clamp_processes_to(Some(&bad), 16);
+            assert!(n == 1 || n == MAX_PROCESSES, "{bad} -> {n}");
+        }
+        assert_eq!(clamp_processes_to(Some(&json!(0)), 16), 1);
+        assert_eq!(clamp_processes_to(Some(&json!(-3)), 16), 1);
+        assert_eq!(clamp_processes_to(Some(&json!("4")), 16), 1);
+        assert_eq!(clamp_processes_to(Some(&json!(4)), 0), 1);
     }
 }

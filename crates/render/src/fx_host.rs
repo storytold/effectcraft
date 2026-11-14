@@ -145,6 +145,26 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
     }
 
+    fn mask_paths(&self) -> Vec<effectcraft_effects::MaskPath> {
+        // In effect space, as `EffectEnv::masks`.
+        let o = self.origin;
+        crate::masks::paths(self.ctx, self.layer).into_iter().map(|m| m.shifted([-o[0], -o[1]])).collect()
+    }
+
+    fn layer_mask_paths(&self, id: u64, comp_time: f64) -> Option<(Vec<effectcraft_effects::MaskPath>, [f64; 2])> {
+        let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
+        if !comp_time.is_finite() {
+            return None;
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        let mut paths = crate::masks::paths(&ctx, other);
+        paths.extend(crate::masks::glyph_paths(&ctx, other));
+        // In the other layer's effect space, rebased exactly as `layer_at` rebases its pixels
+        // ([`FxHost::pixels`]: the bounds of this render's context), so masks and pixels line up.
+        let (size, o) = self.ctx.effect_bounds(other);
+        Some((paths.into_iter().map(|m| m.shifted([-o[0], -o[1]])).collect(), size))
+    }
+
     fn layer_at(&self, id: u64, comp_time: f64, masks_and_effects: bool) -> Option<LayerPixels> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         if (other.id == self.layer.id && masks_and_effects) || !comp_time.is_finite() || self.r.depth > MAX_FX_DEPTH {

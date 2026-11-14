@@ -507,6 +507,7 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         // Clamp to slider ranges.
         if let effectcraft_project::ParamUi::Slider { min, max, .. } = pr.ui
             && let effectcraft_keyframe::Value::Scalar(x) = nv
+            && min <= max
         {
             nv = effectcraft_keyframe::Value::Scalar(x.clamp(min, max));
         }
