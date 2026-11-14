@@ -732,6 +732,9 @@ pub struct GpuContext {
     /// `Device::maintain` when two callers poll the same device at once). Shared by every
     /// context on the same device.
     poll_lock: Arc<Mutex<()>>,
+    /// Command buffers between finish and submit (#2746). Shared by every context on the same
+    /// device, as the limit is the device's.
+    command_budget: Arc<crate::command_budget::CommandBudget>,
     memcap: crate::memcap::MemCap,
 }
 
@@ -1043,6 +1046,7 @@ impl GpuContext {
             deferred: None,
             readbacks,
             poll_lock: Default::default(),
+            command_budget: Default::default(),
             memcap,
         })
     }
@@ -1595,6 +1599,7 @@ impl GpuContext {
             software: self.software,
             yuv: std::sync::OnceLock::new(),
             poll_lock: self.poll_lock.clone(),
+            command_budget: self.command_budget.clone(),
             memcap: self.memcap.fresh(),
         }
     }
@@ -1935,6 +1940,9 @@ impl Drop for Enc<'_> {
 }
 
 impl<'g> Enc<'g> {
+    /// Recorded steps (passes and copies) after which the work is submitted.
+    const BATCH: usize = 256;
+
     pub fn new(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.register()).unwrap_or(0);
         Enc { g, enc: None, last_submit: None, pending: 0, missing: false, owner, lent: false }
@@ -1976,10 +1984,23 @@ impl<'g> Enc<'g> {
         for img in imgs {
             self.uses(img);
         }
+        self.steps(1)
+    }
+
+    /// The encoder, to record `n` more steps (passes or copies) on: within this module only,
+    /// after [`Enc::uses`] on every pooled image. Every step counts towards the batch, not only
+    /// `dispatch_ext`'s: each costs command buffers, and the share `submit` takes of the
+    /// device's budget is sized by this count (#2746). Work that would overfill the batch is
+    /// submitted first.
+    fn steps(&mut self, n: usize) -> &mut wgpu::CommandEncoder {
+        if self.pending > 0 && self.pending.saturating_add(n) > Self::BATCH {
+            self.submit();
+        }
+        self.pending = self.pending.saturating_add(n);
         self.encoder()
     }
 
-    /// The raw encoder: within this module only, after [`Enc::uses`] on every pooled image.
+    /// The raw encoder, uncounted: only [`Enc::steps`] calls it.
     fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
         let g = self.g;
         &mut self
@@ -2087,9 +2108,8 @@ impl<'g> Enc<'g> {
             }
             pass.dispatch_workgroups(groups.0.max(1), groups.1.max(1), 1);
         }
-        self.pending += 1;
         // Keep command buffers (and the transient textures they hold) bounded.
-        if self.pending >= 256 {
+        if self.pending >= Self::BATCH {
             self.submit();
         }
     }
@@ -2136,6 +2156,9 @@ impl<'g> Enc<'g> {
     /// Submit recorded work.
     pub fn submit(&mut self) {
         if let Some((enc, id)) = self.enc.take() {
+            // Finishing creates the batch's command buffers: wait for room on the device, or
+            // the workers' batches together pass Metal's limit and the device is lost (#2746).
+            let _share = self.g.command_budget.take(self.pending);
             self.last_submit = Some(self.g.queue.submit([enc.finish()]));
             if let Ok(mut p) = self.g.pool.lock() {
                 p.close(id);
@@ -2232,7 +2255,7 @@ impl<'g> Enc<'g> {
                 mapped_at_creation: false,
             })
         });
-        self.encoder().copy_texture_to_buffer(
+        self.steps(1).copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -2284,7 +2307,7 @@ impl<'g> Enc<'g> {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.encoder().copy_texture_to_buffer(
+        self.steps(1).copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -2337,7 +2360,7 @@ impl<'g> Enc<'g> {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.encoder().copy_texture_to_buffer(
+        self.steps(1).copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture: &img.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo {
                 buffer: &buf,
@@ -2378,7 +2401,7 @@ impl<'g> Enc<'g> {
         for l in 1..levels {
             steps.push((&g.display_mip, level(l - 1), level(l), (img.width >> l).max(1), (img.height >> l).max(1)));
         }
-        let enc = self.encoder();
+        let enc = self.steps(steps.len());
         for (pipeline, src, dst, w, h) in &steps {
             let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
