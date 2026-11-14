@@ -198,8 +198,8 @@ impl EffectPlugin for HostEffect {
             _ => {
                 let mut bytes: Vec<u8> = frame.pixels.iter().flat_map(|p| convert(*p).map(to_u8)).collect();
                 self.run(format, &mut bytes, scale, &params, time)?;
-                for (p, q) in frame.pixels.iter_mut().zip(bytes.chunks_exact(4)) {
-                    let q = [q[0], q[1], q[2], q[3]].map(|b| f32::from(b) / 255.0);
+                for (p, q) in frame.pixels.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                    let q = q.map(|b| f32::from(b) / 255.0);
                     *p = if alpha == Alpha::Straight { premultiplied(q) } else { q };
                 }
                 Ok(())

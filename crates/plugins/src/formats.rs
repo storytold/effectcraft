@@ -19,7 +19,7 @@ pub fn attach(book: &Arc<FormatBook>) {
             return None;
         }
         Some(book.read(name, bytes).map_err(|e| e.to_string()).map(|doc| {
-            let has_alpha = doc.rgba8.chunks_exact(4).any(|p| p[3] != 255);
+            let has_alpha = doc.rgba8.as_chunks::<4>().0.iter().any(|p| p[3] != 255);
             Raster { width: doc.width, height: doc.height, rgba8: doc.rgba8, has_alpha }
         }))
     }));
