@@ -53,18 +53,42 @@ pub fn specs() -> Vec<CommandSpec> {
             has_comp,
             new_text
         ),
-        cmd!("layer.newSolid", "Solid...", ["Layer", "New"], Some("Cmd+Y"), "{name?, color? #hex|[r,g,b], width?, height?, pixelAspect?}", has_comp, new_solid),
-        cmd!("layer.newNull", "Null Object", ["Layer", "New"], Some("Cmd+Alt+Shift+Y"), "{name?}", has_comp, new_null),
+        cmd!(
+            "layer.newSolid",
+            "Solid...",
+            ["Layer", "New"],
+            Some("Cmd+Y"),
+            "{name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it), color? #hex|[r,g,b], width?, height?, pixelAspect?}",
+            has_comp,
+            new_solid
+        ),
+        cmd!(
+            "layer.newNull",
+            "Null Object",
+            ["Layer", "New"],
+            Some("Cmd+Alt+Shift+Y"),
+            "{name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it)}",
+            has_comp,
+            new_null
+        ),
         cmd!(
             "layer.newShape",
             "Shape Layer",
             ["Layer", "New"],
             None,
-            "{kind?: rect|rounded|ellipse|star|polygon|none, name?, size?, fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth?, position?}",
+            "{kind?: rect|rounded|ellipse|star|polygon|none, name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it), size?, fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth?, position?}",
             has_comp,
             new_shape
         ),
-        cmd!("layer.newAdjustment", "Adjustment Layer", ["Layer", "New"], Some("Cmd+Alt+Y"), "{name?}", has_comp, new_adjustment),
+        cmd!(
+            "layer.newAdjustment",
+            "Adjustment Layer",
+            ["Layer", "New"],
+            Some("Cmd+Alt+Y"),
+            "{name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it)}",
+            has_comp,
+            new_adjustment
+        ),
         cmd!(
             "layer.settings",
             "Layer Settings...",

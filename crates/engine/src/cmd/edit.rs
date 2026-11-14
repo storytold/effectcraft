@@ -659,9 +659,14 @@ fn paste_svg(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let cid = super::comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
-    let name = match str_p(p, "name") {
-        Some(n) => n.to_string(),
-        None => {
+    let name = match (str_p(p, "name"), str_p(p, "base").filter(|b| !b.is_empty())) {
+        (Some(n), _) => n.to_string(),
+        (None, Some(base)) => {
+            let count = comp.layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
+            comp.unique_layer_name(&format!("{base} {}", count.saturating_add(1)))
+        }
+        // Headless keeps the count-based default it had before the interface localized it.
+        (None, None) => {
             let count = comp.layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
             comp.unique_layer_name(&format!("Shape Layer {}", count.saturating_add(1)))
         }
@@ -989,7 +994,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Paste SVG as Shapes",
             [],
             None,
-            "{svg: SVG markup, name?, comp?} → {layer, skipped} (Edit ▸ Paste runs it for SVG on the system clipboard)",
+            "{svg: SVG markup, name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it), comp?} → {layer, skipped} (Edit ▸ Paste runs it for SVG on the system clipboard)",
             has_comp,
             paste_svg
         ),
