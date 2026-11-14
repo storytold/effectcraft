@@ -100,9 +100,39 @@ fn target(link_id: &str, result_path: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Part file, then rename. The part is removed first, so a leftover (or a symlink planted at
-/// that name) is replaced, never followed.
+/// Part file, then rename. See [`stage`].
 pub(crate) fn write_atomic(sidecar: &Path, link_id: &str, bytes: &[u8]) -> Result<(), String> {
+    stage(sidecar, link_id, bytes)?.rename()
+}
+
+/// A part file written in full and synced, waiting for [`Staged::rename`]. Dropping it removes the
+/// part file, so a write that stops half way leaves only the old sidecar.
+pub(crate) struct Staged {
+    part: PathBuf,
+    sidecar: PathBuf,
+    renamed: bool,
+}
+
+impl Staged {
+    /// Replace the sidecar with the part file, in one rename.
+    pub(crate) fn rename(mut self) -> Result<(), String> {
+        std::fs::rename(&self.part, &self.sidecar).map_err(|e| format!("could not replace {}: {e}", self.sidecar.display()))?;
+        self.renamed = true;
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.renamed {
+            let _ = std::fs::remove_file(&self.part);
+        }
+    }
+}
+
+/// Write `bytes` to `<link_id>.ecproj.part` next to `sidecar`. The part is removed first, so a
+/// leftover (or a symlink planted at that name) is replaced, never followed.
+pub(crate) fn stage(sidecar: &Path, link_id: &str, bytes: &[u8]) -> Result<Staged, String> {
     let Some(dir) = sidecar.parent() else {
         return Err("the sidecar path has no directory".to_string());
     };
@@ -120,10 +150,7 @@ pub(crate) fn write_atomic(sidecar: &Path, link_id: &str, bytes: &[u8]) -> Resul
         let _ = std::fs::remove_file(&part);
         return Err(format!("could not write {}: {e}", part.display()));
     }
-    std::fs::rename(&part, sidecar).map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        format!("could not replace {}: {e}", sidecar.display())
-    })
+    Ok(Staged { part, sidecar: sidecar.to_path_buf(), renamed: false })
 }
 
 #[cfg(test)]

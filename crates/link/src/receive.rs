@@ -3,15 +3,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use effectcraft_engine::{EngineError, Importer, Services, Session};
+use effectcraft_engine::{EditorState, EngineError, History, Importer, Services, Session};
 use effectcraft_interchange::{ImportOptions, TimelineFormat, import};
-use effectcraft_project::{Comp, CraftLinkBinding, Footage, ItemId, LayerId};
+use effectcraft_project::{Comp, CraftLinkBinding, Footage, ItemId, LayerId, Project};
 use effectcraft_time::{FrameRate, Tick};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::sidecar;
+
 /// `payload.data` larger than this is rejected before import and before any project file is written.
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Cause of the change that puts the session back after a failed `link.open`.
+const ROLLBACK_CAUSE: &str = "link.open rollback";
 
 /// Successful `link.open` body. `selection_applied` is not part of the protocol reply.
 #[derive(Debug, Serialize)]
@@ -141,23 +146,94 @@ impl Prober {
     }
 }
 
+/// The session before `link.open` changed it. A `link.open` that fails after its edit is
+/// committed puts all of it back, so a failed hand-off leaves no comp, binding or undo step.
+struct Checkpoint {
+    project: Arc<Project>,
+    state: EditorState,
+    history: History,
+    /// Lengths of the lists an edit only appends to.
+    events: usize,
+    warp_pending: usize,
+    camera_pending: usize,
+    roto_pending: usize,
+    clean: bool,
+}
+
+impl Checkpoint {
+    fn take(session: &Session) -> Self {
+        Self {
+            project: Arc::clone(&session.project),
+            state: session.state.clone(),
+            history: session.history.clone(),
+            events: session.events.len(),
+            warp_pending: session.warp_pending.len(),
+            camera_pending: session.camera_pending.len(),
+            roto_pending: session.roto_pending.len(),
+            clean: !session.is_dirty(),
+        }
+    }
+
+    /// Put the session back. The revision still goes up, so the change feed reports the revert.
+    fn restore(self, session: &mut Session) {
+        let hooks = session.hooks.clone();
+        hooks.with_cause(craft_command::Cause::Job(ROLLBACK_CAUSE), || {
+            session.set_project(self.project);
+            session.state = self.state;
+            session.history = self.history;
+            session.events.truncate(self.events);
+            session.warp_pending.truncate(self.warp_pending);
+            session.camera_pending.truncate(self.camera_pending);
+            session.roto_pending.truncate(self.roto_pending);
+            session.bump();
+            if self.clean {
+                session.saved_revision = session.revision;
+            }
+        });
+    }
+}
+
 /// Import `params` into `session` and write `<link_id>.ecproj` next to `result_path`.
+///
+/// The sidecar's part file is written inside the edit, from the project the edit makes, so a disk
+/// that refuses it fails the edit and nothing is committed. After the commit only the rename of
+/// the part file is left. If it fails, the session goes back to how it was before the call.
 pub fn open_link(session: &mut Session, params: &Value) -> Result<OpenedLink, LinkOpenError> {
     let parsed = parse_params(params)?;
     let prober = Prober::of(session);
+    let before = Checkpoint::take(session);
     let mut failed: Option<LinkOpenError> = None;
-    let edit_result = session.edit("link.open", None, |project, _state| match import_into(project, &parsed, &prober) {
-        Ok(imported) => Ok(imported),
-        Err(e) => {
+    let mut staged: Option<(Project, sidecar::Staged)> = None;
+    let edit_result = session.edit("link.open", None, |project, _state| {
+        let step = import_into(project, &parsed, &prober).and_then(|imported| {
+            staged = Some((project.clone(), stage_sidecar(project, &parsed.sidecar)?));
+            Ok(imported)
+        });
+        step.map_err(|e| {
             failed = Some(e);
-            Err(EngineError::Other("link.open".into()))
-        }
+            EngineError::Other("link.open".into())
+        })
     });
     let imported = match edit_result {
         Ok(imported) => imported,
         Err(_) => return Err(failed.unwrap_or_else(|| LinkOpenError::io("link.open did not import"))),
     };
+    match finish_open(session, &parsed, imported, staged) {
+        Ok(opened) => Ok(opened),
+        Err(e) => {
+            before.restore(session);
+            Err(e)
+        }
+    }
+}
 
+/// The part of [`open_link`] after the edit is committed: show the comp and rename the sidecar.
+fn finish_open(
+    session: &mut Session,
+    parsed: &OpenParams,
+    imported: Imported,
+    staged: Option<(Project, sidecar::Staged)>,
+) -> Result<OpenedLink, LinkOpenError> {
     session.open_comp(imported.comp);
     if session.active_comp_id() != Some(imported.comp) {
         return Err(LinkOpenError::payload_invalid("could not open the imported composition"));
@@ -171,8 +247,18 @@ pub fn open_link(session: &mut Session, params: &Value) -> Result<OpenedLink, Li
         };
         (comp.width, comp.height, comp.frame_rate.num, comp.frame_rate.den, comp.duration.0)
     };
-    write_sidecar(session, &parsed.sidecar)?;
     let project = parsed.sidecar.to_str().ok_or_else(|| LinkOpenError::io("the sidecar path is not utf-8"))?.to_string();
+    // `Session::edit` can still adjust the project after the import (derived data such as Global
+    // Light). Then the part file is not the committed project, and it is written again.
+    let part = match staged {
+        Some((written, part)) if written == **session.project => part,
+        stale => {
+            // The old part file goes first: it has the name the new one takes.
+            drop(stale);
+            stage_sidecar(&session.project, &parsed.sidecar)?
+        }
+    };
+    part.rename().map_err(|e| LinkOpenError::io(format!("could not write the sidecar project: {e}")))?;
     Ok(OpenedLink {
         comp: imported.comp.0.to_string(),
         project,
@@ -414,17 +500,18 @@ fn unsupported_from(warnings: &[String]) -> Vec<UnsupportedPart> {
     warnings.iter().map(|name| UnsupportedPart { what: "import".to_string(), name: name.clone(), kept_as: "none".to_string() }).collect()
 }
 
-fn write_sidecar(session: &Session, sidecar: &Path) -> Result<(), LinkOpenError> {
-    let Some(parent) = sidecar.parent() else {
+/// Write `project` to the sidecar's part file. [`sidecar::Staged::rename`] puts it in place.
+fn stage_sidecar(project: &Project, path: &Path) -> Result<sidecar::Staged, LinkOpenError> {
+    let Some(parent) = path.parent() else {
         return Err(LinkOpenError::io("the sidecar path has no directory"));
     };
     std::fs::create_dir_all(parent).map_err(|e| LinkOpenError::io(format!("could not create the link directory: {e}")))?;
-    let text = session.project.to_json();
+    let text = project.to_json();
     if text.is_empty() {
         return Err(LinkOpenError::io("the project could not be saved"));
     }
-    let link_id = sidecar.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
-    crate::sidecar::write_atomic(sidecar, link_id, text.as_bytes()).map_err(|e| LinkOpenError::io(format!("could not write the sidecar project: {e}")))
+    let link_id = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    sidecar::stage(path, link_id, text.as_bytes()).map_err(|e| LinkOpenError::io(format!("could not write the sidecar project: {e}")))
 }
 
 #[cfg(test)]
@@ -694,6 +781,127 @@ mod tests {
         assert_eq!(fresh.project.craft_links.len(), 1);
         assert_eq!(fresh.project.craft_links[LINK_ID].comp.0.to_string(), opened.comp);
         assert!(Path::new(&sidecar).is_file(), "the second open writes the sidecar again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The session as a user sees it: what `link.open` must leave alone when it fails.
+    struct Seen {
+        project: Arc<Project>,
+        undo: Vec<(String, Arc<Project>)>,
+        redo: Vec<(String, Arc<Project>)>,
+        active: Option<effectcraft_project::ItemId>,
+        time: Tick,
+        selected: Vec<effectcraft_project::LayerId>,
+        dirty: bool,
+    }
+
+    impl Seen {
+        fn of(session: &Session) -> Self {
+            Self {
+                project: Arc::clone(&session.project),
+                undo: session.history.undo.clone(),
+                redo: session.history.redo.clone(),
+                active: session.active_comp_id(),
+                time: session.time(),
+                selected: session.state.selected_layers.clone(),
+                dirty: session.is_dirty(),
+            }
+        }
+
+        fn assert_same(&self, session: &Session) {
+            let same_steps = |a: &[(String, Arc<Project>)], b: &[(String, Arc<Project>)]| {
+                a.len() == b.len() && a.iter().zip(b).all(|((la, pa), (lb, pb))| la == lb && Arc::ptr_eq(pa, pb))
+            };
+            assert!(Arc::ptr_eq(&session.project, &self.project), "the project is not the one from before the request");
+            assert!(session.project.craft_links.is_empty(), "a binding stayed: {:?}", session.project.craft_links.keys().collect::<Vec<_>>());
+            assert!(same_steps(&session.history.undo, &self.undo), "undo: {:?}", session.history.undo.iter().map(|s| &s.0).collect::<Vec<_>>());
+            assert!(same_steps(&session.history.redo, &self.redo), "redo: {:?}", session.history.redo.iter().map(|s| &s.0).collect::<Vec<_>>());
+            assert_eq!(session.active_comp_id(), self.active);
+            assert_eq!(session.time(), self.time);
+            assert_eq!(session.state.selected_layers, self.selected);
+            assert_eq!(session.is_dirty(), self.dirty);
+        }
+    }
+
+    /// A session with one comp of its own at 1 s, a layer selected, one step to undo and one to
+    /// redo, saved.
+    fn busy_session() -> Session {
+        use effectcraft_engine::color::Label;
+        use effectcraft_project::{Comp, ItemKind, LayerSource, Solid};
+        let mut session = Session::default();
+        let rate = effectcraft_time::FrameRate::new(24, 1);
+        let comp = session
+            .edit("new comp", None, |project, _| {
+                let solid =
+                    project.add_item("Red", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 32, height: 18, pixel_aspect: 1.0 }));
+                let mut comp = Comp::new(32, 18, rate, rate.tick_of(48));
+                let layer = effectcraft_project::build::layer(project, &comp, "Red", LayerSource::Solid { item: solid }, (32, 18), None);
+                comp.layers.push(layer);
+                Ok(project.add_item("Mine", Label::Sandstone, None, ItemKind::Comp(Arc::new(comp))))
+            })
+            .unwrap();
+        session
+            .edit("rename", None, |project, _| {
+                project.item_mut(comp).unwrap().name = "Mine, renamed".into();
+                Ok(())
+            })
+            .unwrap();
+        assert!(session.undo());
+        session.open_comp(comp);
+        session.set_time(Tick::from_seconds_f64(1.0));
+        let layer = session.project.comp(comp).unwrap().layers[0].id;
+        session.state.selected_layers = vec![layer];
+        session.mark_saved();
+        assert_eq!((session.history.undo.len(), session.history.redo.len()), (1, 1));
+        session
+    }
+
+    /// The import is committed before the sidecar's final rename. When the rename fails, the
+    /// session is put back: no comp, no binding, no undo step, the same comp, time and selection.
+    #[test]
+    fn a_failed_sidecar_rename_leaves_the_session_as_it_was() {
+        let dir = format!("/tmp/ec-open-{}-rename-fails", std::process::id());
+        let _ = std::fs::remove_dir_all(&dir);
+        // A directory with something in it where the sidecar goes: the part file is written, the
+        // rename over it fails.
+        let sidecar = format!("{dir}/{LINK_ID}.ecproj");
+        std::fs::create_dir_all(format!("{sidecar}/keep")).unwrap();
+        let mut session = busy_session();
+        let seen = Seen::of(&session);
+
+        let err = open_link(&mut session, &open_params(otio_json(), &format!("{dir}/{LINK_ID}.mov"), json!([]))).unwrap_err();
+        assert_eq!(err.code, "io_error", "{err}");
+        assert!(err.message.contains("could not replace"), "the failure must come from the rename: {err}");
+        seen.assert_same(&session);
+        assert!(Path::new(&format!("{sidecar}/keep")).is_dir(), "the failed write touched what was at the sidecar path");
+        assert!(!Path::new(&format!("{dir}/{LINK_ID}.ecproj.part")).exists(), "the part file stayed");
+
+        // Undo and redo walk the same steps as before the request.
+        assert!(session.redo());
+        assert_eq!(session.project.item(session.active_comp_id().unwrap()).unwrap().name, "Mine, renamed");
+        assert!(session.undo());
+        assert!(session.undo());
+        assert!(session.project.items.is_empty());
+        assert!(!session.undo());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The part file cannot be written: nothing is committed at all, so the revision does not move.
+    #[test]
+    fn a_sidecar_that_cannot_be_staged_commits_nothing() {
+        let dir = format!("/tmp/ec-open-{}-stage-fails", std::process::id());
+        let _ = std::fs::remove_dir_all(&dir);
+        // A directory with something in it where the part file goes: it cannot be cleared.
+        std::fs::create_dir_all(format!("{dir}/{LINK_ID}.ecproj.part/keep")).unwrap();
+        let mut session = busy_session();
+        let seen = Seen::of(&session);
+        let revision = session.revision;
+
+        let err = open_link(&mut session, &open_params(otio_json(), &format!("{dir}/{LINK_ID}.mov"), json!([]))).unwrap_err();
+        assert_eq!(err.code, "io_error", "{err}");
+        seen.assert_same(&session);
+        assert_eq!(session.revision, revision, "a staging failure must not commit and roll back, it must not commit");
+        assert!(!Path::new(&format!("{dir}/{LINK_ID}.ecproj")).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
