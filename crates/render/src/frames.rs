@@ -99,12 +99,13 @@ pub fn blend_frames(mode: FrameBlend, a: &Image, b: &Image, w: f32) -> Image {
 }
 
 /// Convenience: render one frame of a comp with no footage source.
-/// Adaptive motion-blur sample count for a layer whose corners travel `travel` output pixels
-/// during the shutter: one sample per pixel, clamped to Samples Per Frame … Adaptive Sample Limit.
-pub fn adaptive_samples(travel: f64, per_frame: u32, limit: u32) -> usize {
-    let lo = per_frame.clamp(2, 64) as f64;
-    let hi = (limit.clamp(16, 256) as f64).max(lo);
-    travel.ceil().clamp(lo, hi) as usize
+/// Adaptive motion-blur sample count for a 2D layer whose corners travel `travel` output pixels
+/// during the shutter: `ceil(0.8 × travel)`, at least 2 and at most the Adaptive Sample Limit.
+/// Samples Per Frame does not apply to a 2D layer. Measured in After Effects 2026 from the steps of
+/// a moving edge: 2 samples up to 2.1 px of travel, then 3 at 3 px, 4 at 4, 5 at 6, 7 at 8, 10 at
+/// 12, 13 at 16, 20 at 24; the same with Samples Per Frame at 2, 16 and 64.
+pub fn adaptive_samples(travel: f64, limit: u32) -> usize {
+    (travel * 0.8).ceil().clamp(2.0, limit.clamp(16, 256) as f64) as usize
 }
 
 /// A region of interest `[x, y, w, h]` lies within a `w`×`h` comp frame.
