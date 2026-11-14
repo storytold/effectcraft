@@ -608,6 +608,17 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
 
 /// Commands that need a file or folder path: ask the host's file dialog when `params` lacks one.
 pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    file_dialog_with_presets(app, id, params, crate::panels::effects_presets::presets_dir)
+}
+
+/// [`file_dialog`], with the presets folder that Save Animation Preset starts in from
+/// `presets_dir`, read only when that dialog is shown (tests pass a temporary folder).
+pub(super) fn file_dialog_with_presets(
+    app: &mut EffectcraftApp,
+    id: &str,
+    params: &Value,
+    presets_dir: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<Result<Value, String>> {
     enum Ask {
         Folder,
         /// Footage, or a file with one of these extensions.
@@ -626,6 +637,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Untitled Project".into());
         path.with_file_name(format!("{stem}{suffix}.{ext}")).to_string_lossy().into_owned().into()
     };
+    // The command already names its file or folder: no dialog.
+    let given = |key: &str| ["path", "paths", "steps", "preset"].into_iter().chain([key]).any(|k| params.get(k).is_some());
     let (key, ask) = match id {
         // Projects too, as After Effects' File… takes an .aep: they import as projects
         // (`run_with_picked`, and `file.import` for EffectCraft projects).
@@ -638,7 +651,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "comp.saveFrameAsPsd" => ("path", Ask::Save("Frame.psd".into())),
         "comp.saveFrameAsExr" => ("path", Ask::Save("Frame.exr".into())),
         "file.watchFolder" if params.get("stop").is_none() => ("folder", Ask::Save("Watch Folder".into())),
-        "anim.savePreset" => ("path", Ask::Save("Preset.ecpreset".into())),
+        // Making the default creates the presets folder, so only when a dialog is needed.
+        "anim.savePreset" if !given("path") => ("path", Ask::Save(preset_save_default(presets_dir().as_deref()))),
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
         "view.exportGuides" => ("path", Ask::Save("Guides.json".into())),
         "view.importGuides" => ("path", Ask::Open(&["json"])),
@@ -670,12 +684,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.setProxy" => ("path", Ask::OpenFootage(&["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"])),
         _ => return None,
     };
-    if params.get(key).is_some()
-        || params.get("path").is_some()
-        || params.get("paths").is_some()
-        || params.get("steps").is_some()
-        || params.get("preset").is_some()
-    {
+    if given(key) {
         return None;
     }
     // Importable files besides movies.
@@ -738,6 +747,24 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     };
     let Some(v) = picked else { return Some(Ok(Value::Null)) };
     Some(run_with_picked(app, id, key, params, v))
+}
+
+/// Where Animation ▸ Save Animation Preset's dialog starts: in `dir`, the presets folder that
+/// Effects & Presets lists, created first when it is missing, so the dialog opens there and the
+/// saved preset shows up in the panel (#3347). Without a usable folder (none configured, the web,
+/// or it cannot be created) the dialog gets only the file name, as before.
+pub(super) fn preset_save_default(dir: Option<&std::path::Path>) -> std::borrow::Cow<'static, str> {
+    const NAME: &str = "Preset.ecpreset";
+    let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty() && !cfg!(target_arch = "wasm32")) else { return NAME.into() };
+    // A relative `EC_PRESETS_DIR` names the same folder the panel scans and the dialog opens.
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => dir.join(NAME).to_string_lossy().into_owned().into(),
+        Err(e) => {
+            log::warn!("cannot create the presets folder {}: {e}", dir.display());
+            NAME.into()
+        }
+    }
 }
 
 /// The dialog's answer as the command's `key` parameter (`None`: cancelled).
