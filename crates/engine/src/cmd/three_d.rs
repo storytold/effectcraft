@@ -512,9 +512,15 @@ impl ToolMode {
 }
 
 /// The 3D layers that make up the scene at comp time `t`: active, visible (Video on, not a guide)
-/// and with pixels (no cameras, lights or nulls).
+/// and with pixels (no cameras, lights or nulls). Solo applies as the renderer's
+/// `Renderer::visible_layers` does (`Comp::any_solo`): with a layer soloed, only soloed layers count.
 fn scene_layers(comp: &Comp, t: Tick) -> Vec<LayerId> {
-    comp.layers.iter().filter(|l| l.is_active_at(t) && l.switches.three_d && l.switches.video && !l.switches.guide && l.source.is_av()).map(|l| l.id).collect()
+    let any_solo = comp.any_solo();
+    comp.layers
+        .iter()
+        .filter(|l| l.is_active_at(t) && l.switches.three_d && l.switches.video && !l.switches.guide && l.source.is_av() && (!any_solo || l.switches.solo))
+        .map(|l| l.id)
+        .collect()
 }
 
 /// World-space rectangles of the layers' content at comp time `t` (for picking the point under

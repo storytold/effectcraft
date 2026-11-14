@@ -489,6 +489,29 @@ fn the_point_under_the_cursor_skips_hidden_and_guide_layers() {
     assert!(dist3(arr3(&r["pivot"]), [320.0, 180.0, 0.0]) < 1e-6, "{}", r["pivot"]);
 }
 
+/// With a layer soloed, a nearer non-solo plane is not drawn and so not picked: the cursor modes
+/// take the soloed plane's depth, and Orbit Around Scene's centre ignores the hidden plane (#2586).
+#[test]
+fn the_camera_tool_pivot_respects_solo() {
+    let mut s = session();
+    let far = solid3d(&mut s, 640, 360, [320.0, 180.0, 0.0]);
+    let near = solid3d(&mut s, 200, 200, [320.0, 180.0, -300.0]);
+    s.execute("layer.newCamera", json!({})).unwrap();
+    // Nothing soloed: the nearer plane under the cursor is picked.
+    let r = s.execute("camera.orbit", json!({"yaw": 0, "mode": "aroundCursor", "cursor": [320, 180]})).unwrap();
+    assert!((arr3(&r["pivot"])[2] + 300.0).abs() < 1e-6, "{}", r["pivot"]);
+    s.execute("layer.setSwitch", json!({"layer": far, "switch": "solo", "value": true})).unwrap();
+    assert_ne!(far, near);
+    for (cmd, mode) in [("camera.orbit", "aroundCursor"), ("camera.pan", "underCursor"), ("camera.dolly", "towardsCursor")] {
+        let r = s.execute(cmd, json!({"yaw": 0, "dx": 0, "dy": 0, "amount": 0, "mode": mode, "cursor": [320, 180]})).unwrap();
+        let pivot = arr3(&r["pivot"]);
+        assert!(pivot[2].abs() < 1e-6, "{cmd}: the soloed plane's depth, not the hidden one's: {pivot:?}");
+    }
+    // The scene centre is the soloed plane's, not the middle of both.
+    let r = s.execute("camera.orbit", json!({"yaw": 0, "mode": "aroundScene"})).unwrap();
+    assert!(dist3(arr3(&r["pivot"]), [320.0, 180.0, 0.0]) < 1e-6, "{}", r["pivot"]);
+}
+
 /// Orbit Around Scene without 3D layers turns about the comp's centre (#2586).
 #[test]
 fn orbit_around_scene_without_3d_layers_uses_the_comp_centre() {
