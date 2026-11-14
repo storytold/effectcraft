@@ -1165,6 +1165,41 @@ fn seed_random_timeless() {
     assert_ne!(a, f.num("seedRandom(6, true); random(100)", 0.1));
 }
 
+/// The text names that follow the document: point or paragraph text, vertical text, auto leading,
+/// the margins and the line join.
+#[test]
+fn text_layout_attributes() {
+    let f = fx();
+    let n = |code: &str| f.num(&format!("thisComp.layer('Title').text.sourceText.{code}"), 0.0);
+    assert_eq!(n("isPointText ? 1 : 0"), 1.0, "no text box");
+    assert_eq!(n("isParagraphText ? 1 : 0"), 0.0);
+    assert_eq!(n("isHorizontalText ? 1 : 0"), 1.0);
+    assert_eq!(n("isVerticalText ? 1 : 0"), 0.0);
+    assert_eq!(n("style.isAutoLeading ? 1 : 0"), 1.0);
+    assert_eq!(n("style.leftMargin"), 0.0);
+    assert_eq!(n("style.rightMargin"), 0.0);
+    assert_eq!(n("style.lineJoin == 'miter' ? 1 : 0"), 1.0, "a new document's stroke join");
+    // A box, vertical type, a margin and a different join.
+    let mut f = fx();
+    let title = f.title;
+    let l = f.layer_mut(title);
+    let p = l.props.prop_mut("text/sourceText").unwrap();
+    let Value::Text(d) = &mut p.value else { panic!() };
+    d.box_size = Some([100.0, 50.0]);
+    d.vertical = true;
+    d.indent_left = 6.0;
+    d.indent_right = 9.0;
+    d.line_join = effectcraft_keyframe::LineJoin::Bevel;
+    let n = |code: &str| f.num(&format!("thisComp.layer('Title').text.sourceText.{code}"), 0.0);
+    assert_eq!(n("isParagraphText ? 1 : 0"), 1.0);
+    assert_eq!(n("isPointText ? 1 : 0"), 0.0);
+    assert_eq!(n("isVerticalText ? 1 : 0"), 1.0);
+    assert_eq!(n("isHorizontalText ? 1 : 0"), 0.0);
+    assert_eq!(n("style.leftMargin"), 6.0);
+    assert_eq!(n("style.rightMargin"), 9.0);
+    assert_eq!(n("style.lineJoin == 'bevel' ? 1 : 0"), 1.0);
+}
+
 #[test]
 fn gauss_random_distribution() {
     let f = fx();

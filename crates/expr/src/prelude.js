@@ -948,6 +948,11 @@ Prop.prototype = {
     return JSON.parse(d);
   },
   get style() { return this.getStyleAt(0); },
+  // Point text has no text box; paragraph text does. Vertical text runs in columns.
+  get isPointText() { return this.__docAt(time).doc.box_size === null; },
+  get isParagraphText() { return this.__docAt(time).doc.box_size !== null; },
+  get isVerticalText() { return !!this.__docAt(time).doc.vertical; },
+  get isHorizontalText() { return !this.__docAt(time).doc.vertical; },
   getStyleAt: function (i, t) {
     if (t === undefined) t = time;
     return new __TextStyle(this.__docAt(__v(t)), i === undefined ? 0 : Math.floor(__v(i)), [], false);
@@ -1062,6 +1067,7 @@ __TextStyle.prototype = {
   get isSmallCaps() { return this.__get('smallCaps'); },
   get tracking() { return this.__get('tracking'); },
   get autoLeading() { return this.__get('leading') === 'auto'; },
+  get isAutoLeading() { return this.__get('leading') === 'auto'; },
   get leading() { var l = this.__get('leading'); return l === 'auto' ? this.fontSize * 1.2 : l; },
   get baselineShift() { return this.__get('baselineShift'); },
   get applyFill() { return this.__get('applyFill'); },
@@ -1082,6 +1088,10 @@ __TextStyle.prototype = {
   get firstLineIndent() { return this.__get('indentFirst', true); },
   get startIndent() { return this.__get('indentLeft', true); },
   get endIndent() { return this.__get('indentRight', true); },
+  get leftMargin() { return this.__get('indentLeft', true); },
+  get rightMargin() { return this.__get('indentRight', true); },
+  // The stroke's corner shape: 'miter', 'round' or 'bevel'.
+  get lineJoin() { return String(this.__d.doc.line_join).toLowerCase(); },
   get spaceBefore() { return this.__get('spaceBefore', true); },
   get spaceAfter() { return this.__get('spaceAfter', true); },
   get direction() { var d = this.__get('direction', true); return d === 'rtl' ? 'right-to-left' : d === 'ltr' ? 'left-to-right' : d; },
