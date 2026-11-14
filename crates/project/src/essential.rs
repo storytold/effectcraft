@@ -16,11 +16,13 @@
 //!   into the instance's value ([`TextDoc::merge_master`]). The instance keeps its characters and
 //!   the attributes it changed itself; the others follow the master's restyles. A Set of an
 //!   overridden Source Text rebases what it changed ([`TextDoc::rebase`]), so the value set
-//!   stays the instance's own. Limits: only the master's Source Text at time 0 is compared (a
+//!   stays the instance's own. A keyframed override has a base per key
+//!   ([`EssentialBase::keys`]). Limits: only the master's Source Text at time 0 is compared (a
 //!   style that changes at a later master keyframe does not reach instances); character and
-//!   paragraph attributes are merged only where uniform in base and master; and the base is one
-//!   document per override, so in an instance with mixed formatting a run that followed moves
-//!   the base on for every run.
+//!   paragraph attributes are merged only where uniform in the master, and where mixed in the
+//!   base only when the instance kept that formatting as it is; and the base is one document per
+//!   override (or key), so in an instance with mixed formatting a run that followed moves the
+//!   base on for every run.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +30,7 @@ use std::collections::HashMap;
 
 use effectcraft_keyframe::TextDoc;
 
-use crate::props::{EssentialBase, GroupKind, Node, ParamUi, PropGroup, Property, Uid};
+use crate::props::{EssentialBase, EssentialKeyBase, GroupKind, Node, ParamUi, PropGroup, Property, Uid};
 use crate::{ItemId, ItemKind, Layer, LayerId, LayerSource, Project, Value};
 
 /// Match id of the Essential Properties group on precomp layers.
@@ -518,16 +520,26 @@ fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Opt
             continue;
         };
         let base_in = old_base.map_or_else(|| master.clone(), |b| (*b.doc).clone());
-        let mut base_out = base_in.clone();
-        // Keyframes (else the value) all merge against the same base into one: the base takes
-        // every attribute any of them followed.
-        let docs: Vec<&mut Value> = if p.keys.is_empty() { vec![&mut p.value] } else { p.keys.iter_mut().map(|k| &mut k.value).collect() };
-        for v in docs {
-            if let Value::Text(d) = v {
+        if p.keys.is_empty() {
+            let mut base_out = base_in.clone();
+            if let Value::Text(d) = &mut p.value {
                 d.merge_master(&base_in, &mut base_out, master);
             }
+            bases.push(EssentialBase { prop: p.uid, doc: Box::new(base_out), keys: vec![] });
+            continue;
         }
-        bases.push(EssentialBase { prop: p.uid, doc: Box::new(base_out) });
+        // Every key merges against its own base (one made by keying the override starts from
+        // the value's), so a key's own value stays its own whatever another key followed.
+        let mut keys = Vec::with_capacity(p.keys.len());
+        for k in &mut p.keys {
+            let Value::Text(d) = &mut k.value else { continue };
+            let key_in = old_base.and_then(|b| b.keys.iter().find(|kb| kb.time == k.time)).map_or_else(|| base_in.clone(), |kb| (*kb.doc).clone());
+            let mut key_out = key_in.clone();
+            d.merge_master(&key_in, &mut key_out, master);
+            keys.push(EssentialKeyBase { time: k.time, doc: Box::new(key_out) });
+        }
+        // A key added later starts from the master as it is now.
+        bases.push(EssentialBase { prop: p.uid, doc: Box::new(master.clone()), keys });
     }
     // Mirrors show their master's instance value (and override state).
     for c in eg.flat() {
@@ -786,7 +798,7 @@ pub fn init_bases(p: &mut Project) {
                     return;
                 }
                 if let Some(doc) = master_text(p, item, c) {
-                    add.push(EssentialBase { prop: pr.uid, doc });
+                    add.push(EssentialBase { prop: pr.uid, doc, keys: vec![] });
                 }
             });
             if !add.is_empty() {

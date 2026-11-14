@@ -214,6 +214,19 @@ pub enum GroupKind {
 pub struct EssentialBase {
     /// The instance property (uid of the Essential Properties child).
     pub prop: Uid,
+    /// The base of the property's value. For a keyframed override, the base a key without its
+    /// own (a new or moved key) starts from: the master as it was at the last sync.
+    pub doc: Box<effectcraft_keyframe::TextDoc>,
+    /// A keyframed override: each key's own base, by key time, so what one key followed never
+    /// makes another key's own value count as following.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<EssentialKeyBase>,
+}
+
+/// The base of one keyframe of an overridden Source Text ([`EssentialBase::keys`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EssentialKeyBase {
+    pub time: effectcraft_time::Tick,
     pub doc: Box<effectcraft_keyframe::TextDoc>,
 }
 

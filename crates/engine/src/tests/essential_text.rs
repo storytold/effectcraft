@@ -211,6 +211,52 @@ fn keyframed_override_merges_every_key() {
     assert_fill(&keys[1], [0x01, 0x1f, 0x26]);
 }
 
+/// A keyframed override where one key owns its fill and the other follows: the master's fill
+/// passes through the owned value (red, then green). Each key has its own base, so the owned red
+/// stays (with one base shared by the keys, the follower moved it to red and the owner then
+/// counted as following).
+#[test]
+fn keyframed_override_keeps_a_keys_own_fill_when_the_master_passes_through_it() {
+    let (mut s, bubble, text, body, main, inst) = bubble(json!({"text": "Placeholder", "size": 54, "fill": "#2471a3"}));
+    let (doc, _) = instance_value(&s, main, inst, body);
+    let uid = child_uid(essential::group(s.project.comp(main).unwrap().layer(LayerId(inst)).unwrap()).unwrap(), body);
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let first = TextDoc { text: "First".into(), fill: red, ..doc.clone() };
+    let second = TextDoc { text: "Second".into(), ..doc.clone() };
+    s.edit("Keys", None, |p, _| {
+        let pr = p.comp_mut(main).unwrap().layer_mut(LayerId(inst)).unwrap().props.find_mut(uid).unwrap();
+        pr.keys = vec![
+            effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::ZERO, KV::Text(Box::new(first.clone()))),
+            effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::from_seconds_f64(0.5), KV::Text(Box::new(second.clone()))),
+        ];
+        Ok(())
+    })
+    .unwrap();
+
+    let keys = |s: &Session| -> Vec<TextDoc> {
+        let layer = s.project.comp(main).unwrap().layer(LayerId(inst)).unwrap();
+        layer
+            .props
+            .find(uid)
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| match &k.value {
+                KV::Text(d) => (**d).clone(),
+                o => panic!("{o:?}"),
+            })
+            .collect()
+    };
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000", "size": 60})).unwrap();
+    let k = keys(&s);
+    assert_eq!((k[0].fill, k[1].fill, k[1].size), (red, red, 60.0));
+
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00", "size": 70})).unwrap();
+    let k = keys(&s);
+    assert_eq!((k[0].text.as_str(), k[0].fill, k[0].size), ("First", red, 70.0), "the first key's own red stays");
+    assert_eq!((k[1].text.as_str(), k[1].fill, k[1].size), ("Second", [0.0, 1.0, 0.0, 1.0], 70.0));
+}
+
 /// Precomps three deep, the outer comp created first (so visited first): the outer instance's
 /// override of the middle comp's control (which shows the inner text) follows a restyle of the
 /// inner text layer in the same edit.
