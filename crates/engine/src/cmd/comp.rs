@@ -44,6 +44,11 @@ fn apply_settings(c: &mut Comp, p: &Value) {
     }
     if let Some(t) = f_p(p, "startTime") {
         c.display_start = Tick::from_seconds_f64(t);
+    } else if let Some(f) = f_p(p, "startFrame").filter(|f| f.is_finite()) {
+        // A whole frame: its first tick, so the start still reads as that frame at rates whose frame
+        // boundaries fall between ticks (rounding seconds to the nearest tick can land just before it).
+        // At the frame rate this same command sets, not the one it replaces below.
+        c.display_start = rate_p(p).unwrap_or(c.frame_rate).tick_of(f.round() as i64);
     } else if let Some(tc) = str_p(p, "startTimecode")
         && let Ok(f) = effectcraft_time::parse_timecode(tc, c.frame_rate, c.frame_rate.supports_drop_frame(), 0)
     {
@@ -293,7 +298,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Composition...",
             ["Composition"],
             Some("Cmd+N"),
-            "{name?, width?, height?, frameRate?, duration? (s), startTime? (s) | startTimecode?, background? [r,g,b]|#hex, pixelAspect?, shutterAngle?, shutterPhase?, motionBlurSamples?, adaptiveSampleLimit? (16–256), preserveFrameRate?: bool, preserveResolution?: bool, renderer?: classic3D|advanced3D, anchor?, open?}",
+            "{name?, width?, height?, frameRate?, duration? (s), startTime? (s) | startFrame? | startTimecode?, background? [r,g,b]|#hex, pixelAspect?, shutterAngle?, shutterPhase?, motionBlurSamples?, adaptiveSampleLimit? (16–256), preserveFrameRate?: bool, preserveResolution?: bool, renderer?: classic3D|advanced3D, anchor?, open?}",
             always,
             new_comp
         ),
@@ -302,7 +307,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Composition Settings...",
             ["Composition"],
             Some("Cmd+K"),
-            "{comp?, name?, width?, height?, anchor? 0-8 (resize anchor, 4 = center), frameRate?, duration?, startTime? (s) | startTimecode?, background?, shutterAngle?, shutterPhase?, motionBlurSamples?, adaptiveSampleLimit? (16–256), preserveFrameRate?: bool (nested or in the render queue it shows only its own frames), preserveResolution?: bool (nested, it renders at full size), pixelAspect?, renderer?: classic3D|advanced3D}",
+            "{comp?, name?, width?, height?, anchor? 0-8 (resize anchor, 4 = center), frameRate?, duration?, startTime? (s) | startFrame? | startTimecode?, background?, shutterAngle?, shutterPhase?, motionBlurSamples?, adaptiveSampleLimit? (16–256), preserveFrameRate?: bool (nested or in the render queue it shows only its own frames), preserveResolution?: bool (nested, it renders at full size), pixelAspect?, renderer?: classic3D|advanced3D}",
             has_comp,
             settings
         ),
