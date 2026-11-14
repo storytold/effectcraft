@@ -167,7 +167,7 @@ fn left_ramp(p: &Project, cid: ItemId, block: usize) -> Vec<f32> {
     m.iter().step_by(2).copied().collect()
 }
 
-/// Keyframed Audio Levels and Stereo Mixer levels ramp smoothly inside a block (export mixes one
+/// Keyframed Audio Levels and per-sample effects ramp smoothly inside a block (export mixes one
 /// second at a time), instead of holding the value at the block's first sample.
 #[test]
 fn animated_levels_ramp_within_a_block() {
@@ -175,7 +175,11 @@ fn animated_levels_ramp_within_a_block() {
     key(&mut levels, lc, false, "levels", Value::Vec2([-60.0, -60.0]), Value::Vec2([0.0, 0.0]));
     let (mut mixer, mc) = comp_with(Some("ec.audio.stereomixer"), &[], false);
     key(&mut mixer, mc, true, "leftLevel", Value::Scalar(0.0), Value::Scalar(100.0));
-    for (name, p, cid, mid) in [("levels", &levels, lc, 0.5 * 10f32.powf(-1.5)), ("stereo mixer", &mixer, mc, 0.25)] {
+    let (mut dist, dc) = comp_with(Some("ec.audio.distortion"), &[], false);
+    key(&mut dist, dc, true, "volume", Value::Scalar(0.0), Value::Scalar(11.0));
+    for (name, p, cid, mid) in
+        [("levels", &levels, lc, 0.5 * 10f32.powf(-1.5)), ("stereo mixer", &mixer, mc, 0.25), ("distortion", &dist, dc, 0.5 * 3.5f32.tanh())]
+    {
         let one = left_ramp(p, cid, SR as usize);
         assert!(one.windows(2).all(|w| w[1] >= w[0]), "{name}: not monotonic");
         assert!(one[100] < one[4000] && one[4000] < one[7900], "{name}: {} {} {}", one[100], one[4000], one[7900]);
