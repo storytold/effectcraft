@@ -611,6 +611,39 @@ fn an_image_sequence_becomes_a_sequence_of_its_files() {
     assert!(r.report.missing_footage.iter().any(|m| m.ends_with("shot_0101.exr")), "{:?}", r.report.missing_footage);
 }
 
+/// A project moved together with its footage: footage missing at the stored path is found below
+/// the `.aep`'s folder by the end of that path, the longest match first, as After Effects finds it.
+#[test]
+fn footage_that_moved_with_the_project_is_found_beside_it() {
+    use effectcraft_aep::import::{ImportOptions, import as import_aep};
+    if crate::common::try_fixture("126-footage-png-layer.aep").is_none() || crate::common::try_fixture("603-footage-exrseq-0101-as-layer.aep").is_none() {
+        return;
+    }
+    let import = |name: &str, present: &[&str]| {
+        let mut project = Project::default();
+        let bytes = crate::common::try_fixture(name).unwrap();
+        let exists = |path: &str| present.contains(&path);
+        let opts = ImportOptions { project_folder: Some(r"D:\moved"), ..ImportOptions::new(&exists) };
+        let r = import_aep(&mut project, &bytes, &opts).unwrap();
+        let f = project.items.values().find_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.clone()) } else { None }).unwrap();
+        (r, f)
+    };
+    // Stored: C:\fixtures\dirdirdirdirdirdirdi\test8x8.png.
+    let (r, f) = import("126-footage-png-layer.aep", &[r"D:\moved\test8x8.png"]);
+    assert!(r.report.missing_footage.is_empty());
+    assert_eq!((f.path.as_str(), f.missing), (r"D:\moved\test8x8.png", false));
+    let (_, f) = import("126-footage-png-layer.aep", &[r"D:\moved\test8x8.png", r"D:\moved\dirdirdirdirdirdirdi\test8x8.png"]);
+    assert_eq!(f.path, r"D:\moved\dirdirdirdirdirdirdi\test8x8.png");
+    // Nothing there: still missing, at the stored path.
+    let (r, f) = import("126-footage-png-layer.aep", &[]);
+    assert_eq!(r.report.missing_footage, ["C:\\fixtures\\dirdirdirdirdirdirdi\\test8x8.png"]);
+    assert!(f.missing);
+    // A sequence moves with its first file.
+    let (_, f) = import("603-footage-exrseq-0101-as-layer.aep", &[r"D:\moved\exrseq\shot_0101.exr"]);
+    assert!(!f.missing);
+    assert_eq!(f.sequence, [r"D:\moved\exrseq\shot_0101.exr", r"D:\moved\exrseq\shot_0102.exr", r"D:\moved\exrseq\shot_0103.exr"]);
+}
+
 #[test]
 fn project_settings_come_with_the_result_not_into_the_project() {
     use effectcraft_project::{BitDepth, ProjectSettings, TimeDisplayStyle};

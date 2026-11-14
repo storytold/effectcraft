@@ -35,7 +35,9 @@
 //! import. Hue/Saturation's master values and Levels' values are arbitrary data, decoded by the
 //! reader (444-446, 512-516).
 
-use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, ParamMap, popup_alias, popup_key};
+use crate::effect_map::{
+    CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, IMPORT_ONLY, LEVELS_RGB, ParamMap, import_row, popup_alias, popup_key,
+};
 use crate::{
     CryptomatteData, CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, ExtractorChannels, HueSaturationData,
     Layer as AepLayer, LayerRef, LevelsData, MeshData, ParamKind, ParamValue,
@@ -50,7 +52,7 @@ use crate::import::time::TimeMap;
 
 /// The match names of the effects the importer converts (the others are reported).
 pub fn supported_effects() -> impl Iterator<Item = (&'static str, &'static str)> {
-    EFFECTS.iter().map(|e| (e.match_name, e.effect))
+    EFFECTS.iter().chain(IMPORT_ONLY).map(|e| (e.match_name, e.effect))
 }
 
 /// Everything about the layer the effects need.
@@ -83,7 +85,7 @@ pub(crate) fn import_effects<'f, 'a>(
             continue;
         }
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
-        let found = EFFECTS.iter().find(|m| m.match_name == fx.match_name()).and_then(|m| Some((m, effectcraft_effects::find(m.effect)?)));
+        let found = import_row(fx.match_name()).and_then(|m| Some((m, effectcraft_effects::find(m.effect)?)));
         let lost = format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
         if defs.source(&fx) == DefinitionSource::Missing {
             match found {
@@ -236,8 +238,17 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         }
         ok
     };
-    // The popup's items: the file's, else After Effects' when the item count agrees.
+    // The popup's items: the file's, else After Effects' when the item count agrees. A file saved
+    // by After Effects in another language names its items in that language (Gradient Ramp's
+    // Linear Ramp | Radial Ramp in Japanese, say): the stored value is the item's position, which
+    // does not depend on the language, so when the file's names do not match but the count does,
+    // the table's (English) names give the positions their meaning.
     let items: Vec<String> = match (m.conv, &p.items) {
+        (Conv::Popup { items: table, .. }, Some(items))
+            if items.len() == table.len() && !popup_names_match(items, &group.prop(m.target).map(|p| p.ui.clone())) =>
+        {
+            table.iter().map(|s| s.to_string()).collect()
+        }
         (Conv::Popup { .. }, Some(items)) => items.clone(),
         (Conv::Popup { items, .. }, None) => {
             if p.popup_item_count().map(usize::from) != Some(items.len()) {
@@ -440,6 +451,12 @@ fn popup_mapping(file_items: &[String], ui: &ParamUi) -> Option<Vec<Option<u32>>
             })
             .collect(),
     )
+}
+
+/// Whether every item of `file_items` (separators aside) has an EffectCraft item of the same name.
+fn popup_names_match(file_items: &[String], ui: &Option<ParamUi>) -> bool {
+    let Some(ui) = ui else { return false };
+    popup_mapping(file_items, ui).is_some_and(|map| map.iter().zip(file_items).all(|(m, item)| m.is_some() || item.trim() == "(-"))
 }
 
 /// Keys of a popup were imported as file indices (0-based); maps them to EffectCraft's items.

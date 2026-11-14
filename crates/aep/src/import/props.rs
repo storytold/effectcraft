@@ -8,7 +8,8 @@
 
 use crate::{Interpolation, Keyframe as AepKey, KeyframeKind, Layer as AepLayer, PropGroup, PropNode, Property as AepProp, ValueSource};
 use effectcraft_keyframe::{Ease, Interp, Keyframe, Value};
-use effectcraft_project::{Expression, PropGroup as EcGroup, Property as EcProp};
+use effectcraft_project::build::Ids;
+use effectcraft_project::{Expression, Node, ParamUi, PropGroup as EcGroup, Property as EcProp};
 
 use crate::import::report::{Collector, LossCategory};
 use crate::import::time::TimeMap;
@@ -297,11 +298,77 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
     prop.keys = keys;
 }
 
+/// The X, Y and Z Position of Separate Dimensions: stored match name, project property id and
+/// name (the ids `prop.separateDimensions` gives them).
+const SEPARATED: [(&str, &str, &str); 3] =
+    [("ADBE Position_0", "positionX", "X Position"), ("ADBE Position_1", "positionY", "Y Position"), ("ADBE Position_2", "positionZ", "Z Position")];
+
+/// Whether the layer's Position is separated into X, Y (and Z) Position (Transform ▸ Separate
+/// Dimensions). The combined `ADBE Position` then carries bit `0x800` in its `tdsb` flags (2051
+/// where it is 1 or 3 otherwise) and `ADBE Position_0` / `_1` hold stored values or keys; both
+/// were seen together on every separated layer of the projects that showed it and on no other
+/// layer. Either one is taken as the switch.
+fn position_separated(group: &PropGroup<'_, '_>) -> bool {
+    let combined = matches!(group.get("ADBE Position"), Some(PropNode::Property(p)) if p.flags().is_some_and(|f| f & 0x800 != 0));
+    combined || SEPARATED.iter().any(|(m, _, _)| matches!(group.get(m), Some(PropNode::Property(p)) if p.is_animated() || p.flags() == Some(1)))
+}
+
+/// Separate Dimensions: X, Y and Z Position become EffectCraft's `positionX` / `positionY` /
+/// `positionZ` (the renderer then reads them instead of Position, as After Effects does). Each is
+/// one component in pixels with the plain keyframe template; a part without a stored value takes
+/// the combined Position's. Before this, the parts were reported and the stale combined keys moved
+/// the layer (a layer animated on X Position slid in from the wrong side).
+pub(crate) fn import_separated_position(
+    layer: &AepLayer<'_, '_>,
+    layer_name: &str,
+    tm: &TimeMap,
+    target: &mut EcGroup,
+    ids: &mut Ids<'_>,
+    col: &mut Collector,
+) {
+    let Some(PropNode::Group(group)) = layer.properties().and_then(|p| p.get("ADBE Transform Group")) else { return };
+    if !position_separated(&group) || target.get("positionX").is_some() {
+        return;
+    }
+    let Some(position) = target.get("position") else { return };
+    let combined = position.value.components();
+    let at = target.children.iter().position(|c| c.uid() == position.uid).map_or(target.children.len(), |i| i + 1);
+    let mut parts = Vec::with_capacity(SEPARATED.len());
+    for (d, (match_name, id, name)) in SEPARATED.iter().enumerate() {
+        let mut prop = ids.prop(id, name, Value::Scalar(combined.get(d).copied().unwrap_or(0.0))).with_ui(ParamUi::Number);
+        prop.three_d_only = d == 2;
+        if let Some(PropNode::Property(node)) = group.get(match_name) {
+            if node.is_animated() {
+                import_keys(&node, Kind::Number, layer_name, match_name, tm, &mut prop, col);
+            } else if node.flags() == Some(1)
+                && let Some(v) = node.static_value().and_then(|v| v.first().copied())
+            {
+                let value = Value::Scalar(v);
+                if sane(&value) {
+                    prop.value = value;
+                } else {
+                    col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} holds a number that is not valid, default used"));
+                }
+            }
+            import_expression(&node, &mut prop, col);
+        }
+        parts.push(Node::Prop(prop));
+    }
+    for (i, part) in parts.into_iter().enumerate() {
+        target.children.insert(at.saturating_add(i).min(target.children.len()), part);
+    }
+}
+
 /// Stored transform properties that are not imported are reported.
 fn report_other_properties(group: &PropGroup<'_, '_>, layer_name: &str, col: &mut Collector) {
+    let separated = position_separated(group);
     for entry in group.entries() {
         let name = entry.match_name.as_str();
         if SPECS.iter().chain(ROTATIONS.iter()).any(|(m, _)| *m == name) || name == "ADBE Group End" {
+            continue;
+        }
+        // Imported by `import_separated_position`.
+        if separated && SEPARATED.iter().any(|(m, _, _)| *m == name) {
             continue;
         }
         let PropNode::Property(p) = entry.node else { continue };
