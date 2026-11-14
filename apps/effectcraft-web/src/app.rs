@@ -126,7 +126,6 @@ impl eframe::App for WebApp {
             self.document_title = self.app.window_title().to_owned();
             set_document_title(&self.document_title);
         }
-        api::poll_replies();
         // Render Queue outputs written this frame (here or by a worker) → downloads.
         files::flush_downloads();
         // The user's own work after a demo start is worth keeping too: turn the snapshot on.
@@ -330,9 +329,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                     app.frames.set_remote(Some(Arc::new(frames::WebFrames::start(n, !query_flag("nogpuworkers")))));
                 }
                 app.frames.set_virtual_id(Arc::new(|path| files::STORE.file_identity(path)));
-                let (tx, rx) = std::sync::mpsc::channel();
-                api::set_sender(tx);
-                app = app.with_control(rx);
+                app = app.with_control(api::install(cc.egui_ctx.clone()));
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
                 Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session, document_title: String::new() }))

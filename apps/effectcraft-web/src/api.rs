@@ -1,24 +1,85 @@
-//! `window.effectcraft`: the desktop control channel (`docs/control-protocol.md`) as promises,
-//! for agents and browser tests. `web/index.html` wraps the exported [`request`] as
-//! `effectcraft.request(method, params)`, `effectcraft.execute(command, params)` and friends.
+//! `window.effectcraft`: the page command API (`craft-web-api`, storytold/craft-libs#413) over the
+//! desktop control channel (`docs/control-protocol.md`), for agents and browser tests.
+//!
+//! The crate owns `request`, `execute`, `commands`, `uiInspect` and `screenshot`, as promises with a
+//! timeout (EffectCraft has no `document.inspect`, so no `docInspect`); [`install`] is EffectCraft's part: a `Request` that queues a
+//! `ControlRequest` for the app, which answers it on its next frame, and waits for the reply.
+//! EffectCraft's control request has no abandon state, so a call the page gave up on still runs when
+//! the app reaches it, as it does for a desktop client that timed out. `web/index.html` adds
+//! EffectCraft's own functions (`files`, `addFile`, `info`, `saveToBrowser`, …) to the same object.
 
 use std::cell::RefCell;
-use std::sync::mpsc::{Receiver, Sender};
+use std::rc::Rc;
+use std::sync::mpsc::{Receiver, TryRecvError, TrySendError, sync_channel};
 
+use craft_web_api::methods::Methods;
+use craft_web_api::page::{PageApi, Request};
 use effectcraft_ui_egui::ControlRequest;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-
-type Pending = (Receiver<Value>, js_sys::Function, js_sys::Function);
+use wasm_bindgen_futures::JsFuture;
 
 thread_local! {
-    static TX: RefCell<Option<Sender<ControlRequest>>> = const { RefCell::new(None) };
-    static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
     static INFO: RefCell<Value> = const { RefCell::new(Value::Null) };
 }
 
-pub(crate) fn set_sender(tx: Sender<ControlRequest>) {
-    TX.with(|t| *t.borrow_mut() = Some(tx));
+/// How often a waiting call looks for the app's reply, in milliseconds (about a frame).
+const POLL_MS: i32 = 16;
+
+/// How many control requests may wait for the app at once. `craft-web-api` already refuses calls past its own
+/// in-flight limit; this bounds the app's queue too, so a flood of calls can't grow it without limit.
+const QUEUE: usize = 64;
+
+/// Put the crate's functions on `window.effectcraft` and return the queue the app drains each frame
+/// (hand it to `with_control`). An existing `window.effectcraft` keeps the functions it already has.
+pub(crate) fn install(ctx: egui::Context) -> Receiver<ControlRequest> {
+    let (queue, requests) = sync_channel::<ControlRequest>(QUEUE);
+    let request: Request = Rc::new(move |method, params| {
+        let (control, reply) = ControlRequest::new(method, params);
+        if let Err(refused) = queue.try_send(control) {
+            let error = match refused {
+                TrySendError::Full(_) => format!("effectcraft is busy: {QUEUE} requests are already waiting for the app"),
+                TrySendError::Disconnected(_) => "the app is not running".to_string(),
+            };
+            return Box::pin(async move { json!({"ok": false, "error": error}) });
+        }
+        ctx.request_repaint();
+        Box::pin(wait(reply))
+    });
+    if let Err(e) = Rc::new(PageApi::new("effectcraft", Methods { doc_inspect: None, ..Methods::default() }, request)).install() {
+        log::warn!("couldn't install window.effectcraft: {e:?}");
+    }
+    requests
+}
+
+/// The app's reply, polled about once a frame.
+async fn wait(reply: Receiver<Value>) -> Value {
+    loop {
+        match reply.try_recv() {
+            Ok(reply) => return reply,
+            Err(TryRecvError::Empty) => {
+                if !sleep(POLL_MS).await {
+                    return json!({"ok": false, "error": "this page has no timer to wait for the app with"});
+                }
+            }
+            Err(TryRecvError::Disconnected) => return json!({"ok": false, "error": "the app dropped the request"}),
+        }
+    }
+}
+
+async fn sleep(ms: i32) -> bool {
+    // `false` when this page has no timer to wait with (no window, or the timer is refused): the caller ends the
+    // call with an error instead of going round again at once.
+    let timer = std::cell::Cell::new(false);
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let set = web_sys::window().is_some_and(|w| w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms).is_ok());
+        timer.set(set);
+        if !set {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+    timer.get()
 }
 
 /// Environment facts reported by `effectcraft.info()`.
@@ -41,23 +102,6 @@ fn from_js(v: &JsValue) -> Value {
         return json!({});
     }
     js_sys::JSON::stringify(v).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}))
-}
-
-/// Send a control request to the app; the promise resolves with its `result` or rejects with its
-/// `error`.
-#[wasm_bindgen]
-pub fn request(method: String, params: JsValue) -> js_sys::Promise {
-    let params = from_js(&params);
-    js_sys::Promise::new(&mut |resolve, reject| {
-        let (req, rx) = ControlRequest::new(method.clone(), params.clone());
-        let sent = TX.with(|t| t.borrow().as_ref().is_some_and(|tx| tx.send(req).is_ok()));
-        if !sent {
-            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("EffectCraft is not running yet"));
-            return;
-        }
-        PENDING.with(|p| p.borrow_mut().push((rx, resolve, reject)));
-        crate::repaint();
-    })
 }
 
 /// Files in the in-memory file table: `[{path, size}]` (picked, dropped, saved and rendered files).
@@ -153,26 +197,4 @@ pub fn remove_stored(path: String) -> bool {
 #[wasm_bindgen]
 pub fn flush() -> js_sys::Promise {
     crate::persist::flushed()
-}
-
-/// Settle the promises whose replies arrived (called every frame).
-pub(crate) fn poll_replies() {
-    PENDING.with(|p| {
-        p.borrow_mut().retain(|(rx, resolve, reject)| match rx.try_recv() {
-            Ok(v) => {
-                if v["ok"].as_bool() == Some(true) {
-                    let _ = resolve.call1(&JsValue::NULL, &to_js(&v["result"]));
-                } else {
-                    let msg = v["error"].as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
-                    let _ = reject.call1(&JsValue::NULL, &JsValue::from_str(&msg));
-                }
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("request dropped"));
-                false
-            }
-        });
-    });
 }
