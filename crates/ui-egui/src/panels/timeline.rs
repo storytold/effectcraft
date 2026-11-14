@@ -325,9 +325,27 @@ fn expr_focus_id() -> egui::Id {
     egui::Id::unique("tl-expr-focus")
 }
 
+/// Asks the expression editor of property `prop` to take the keyboard when the Timeline next
+/// draws it, selecting `select` (counts of characters before the end).
 fn focus_expression(ctx: &egui::Context, prop: u64, select: [usize; 2]) {
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.insert_temp(expr_focus_id(), ExprFocus { prop, select, pass }));
+    // The editor takes it in a later pass: make sure one comes without waiting for input.
+    ctx.request_repaint();
+}
+
+/// After a `prop.setExpression` toggle of `prop` was queued (an Alt-click on its stopwatch, in the
+/// Timeline or in Effect Controls): adding one, its editor opens, comes into view and takes the
+/// keyboard with the new expression selected (#1072, #1460); removing it, a pending request for
+/// its editor goes, as nothing is left to take the keyboard.
+pub(crate) fn expression_toggled(app: &mut EffectcraftApp, ctx: &egui::Context, prop: &Property) {
+    let uid = prop.uid;
+    if prop.expr.is_none() {
+        app.ui.timeline.expr_closed.remove(&uid);
+        focus_expression(ctx, uid, [usize::MAX, 0]);
+    } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == uid) {
+        ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3985,7 +4003,10 @@ fn expr_editor_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc:
     gp.rect_filled(Rect::from_min_max(pos2(graph_x0, r.min.y), r.max), 0.0, t.expr_bg);
     let er = Rect::from_min_max(pos2(graph_x0 + 8.0, r.min.y + 3.0), pos2(rect.max.x - 14.0, r.max.y - 3.0));
     let mut buf: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| ex.text.clone());
-    if let Some(f) = ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).filter(|f| f.prop == *uid) {
+    // Not in the pass it was asked for in: a click that asked for it from another panel (an
+    // Alt-click on a stopwatch in Effect Controls, drawn before the Timeline) would take the
+    // keyboard straight back as a click elsewhere (#1460).
+    if let Some(f) = ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).filter(|f| f.prop == *uid && ctx.cumulative_pass_nr() > f.pass) {
         // Asked for once (a pick whip put a reference in, or an Alt-click added the
         // expression): editing starts in the expression as it is now.
         ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
@@ -4137,15 +4158,7 @@ fn prop_stopwatch(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &
         if ui.input(|i| i.modifiers.alt) {
             if resp.clicked() {
                 actions.push(("prop.setExpression".into(), json!({"layer": layer.id.0, "prop": uid})));
-                if prop.expr.is_none() {
-                    // Adding one: its editor opens, comes into view and takes the
-                    // keyboard with the new expression selected (#1072).
-                    app.ui.timeline.expr_closed.remove(uid);
-                    focus_expression(&ctx, *uid, [usize::MAX, 0]);
-                } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == *uid) {
-                    // Removing it: nothing is left to take the keyboard.
-                    ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
-                }
+                expression_toggled(app, &ctx, prop);
             }
         } else if let Some((value, merge)) = switch_gesture(ui, &resp, r, "stopwatch", prop.is_animated()) {
             actions.push(("prop.toggleAnimation".into(), json!({"layer": layer.id.0, "prop": uid, "value": value, "merge": merge})));
