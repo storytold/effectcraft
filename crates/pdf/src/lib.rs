@@ -18,7 +18,6 @@ mod font;
 mod image;
 mod object;
 mod page;
-mod ps;
 mod read;
 mod shading;
 mod type1;
@@ -188,13 +187,58 @@ fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error>
     Ok(finish(nodes, flags, skipped, dw.max(1.0), dh.max(1.0), to_doc))
 }
 
+fn eps_fallback_font(name: &[u8]) -> Option<&'static [u8]> {
+    use effectcraft_text::fonts::{INTER_BOLD, INTER_ITALIC, INTER_REGULAR, INTER_SEMIBOLD, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR};
+    let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+    Some(if name.contains("courier") || name.contains("mono") || name.contains("consol") {
+        JETBRAINS_MONO_REGULAR
+    } else if name.contains("times")
+        || name.contains("serif") && !name.contains("sans")
+        || name.contains("georgia")
+        || name.contains("garamond")
+        || name.contains("minion")
+        || name.contains("roman")
+    {
+        NOTO_SERIF_REGULAR
+    } else if name.contains("bold") || name.contains("black") || name.contains("heavy") {
+        INTER_BOLD
+    } else if name.contains("semibold") || name.contains("demi") {
+        INTER_SEMIBOLD
+    } else if name.contains("italic") || name.contains("oblique") {
+        INTER_ITALIC
+    } else {
+        INTER_REGULAR
+    })
+}
+
 fn parse_eps(bytes: &[u8]) -> Result<Doc, Error> {
-    let (ps, bb) = ps::eps_parts(bytes).ok_or(Error::NoBoundingBox)?;
-    let mut it = ps::Interp::new(bb);
-    it.run(ps);
-    let (nodes, flags, skipped) = it.b.finish();
-    let to_doc = Affine::new([1.0, 0.0, 0.0, -1.0, -bb[0], bb[3]]);
-    Ok(finish(nodes, flags, skipped, (bb[2] - bb[0]).max(1.0), (bb[3] - bb[1]).max(1.0), to_doc))
+    let limits = craft_ps::read::Limits {
+        // Preserve EffectCraft's established 8,000,000-unit PostScript execution budget.
+        steps: 8_000_000,
+        stack_overflow_noop: true,
+        skip_images: true,
+        keep_unpainted: true,
+        zero_division_zero: true,
+        fallback_font: Some(eps_fallback_font),
+        ..Default::default()
+    };
+    let converted = craft_ps::read::eps_to_pdf(bytes, limits).map_err(|message| match message.as_str() {
+        "not PostScript" | "the EPS has no bounding box" => Error::NoBoundingBox,
+        _ => Error::Read(message),
+    })?;
+    let mut doc = parse_pdf(&converted.pdf, 0, Framing::Placed)?;
+    for skipped in &mut doc.skipped {
+        if skipped == "content (path limit)" {
+            *skipped = "PostScript (path limit)".to_string();
+        }
+    }
+    doc.skipped.extend(converted.warnings.into_iter().map(|warning| match warning.as_str() {
+        "the program runs too long" | "out of memory" => "PostScript (operation limit)".to_string(),
+        "executable name resolution limit" => "PostScript (recursion limit)".to_string(),
+        "content (path limit)" => "PostScript (path limit)".to_string(),
+        _ => warning,
+    }));
+    Ok(doc)
 }
 
 /// The document's layer names (the root's children), bottom first.

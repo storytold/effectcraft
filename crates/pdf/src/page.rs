@@ -499,12 +499,23 @@ impl<'a> Interp<'a> {
                         (Some("OC"), Some(Obj::Dict(ocg))) => self.ocg_name(ocg),
                         _ => None,
                     };
-                    match layer {
-                        Some(name) => {
+                    let actual_text = match (args.first().and_then(Obj::name), args.get(1)) {
+                        (Some("Span"), Some(Obj::Dict(props))) => props.get("ActualText").and_then(|v| match self.file.resolve(v) {
+                            Obj::Str(bytes) => Some(crate::color::text_string(bytes)),
+                            _ => None,
+                        }),
+                        _ => None,
+                    };
+                    match (layer, actual_text) {
+                        (Some(name), _) => {
                             self.marked.push(Some(self.b.depth()));
                             self.b.open(&name, true);
                         }
-                        None => self.marked.push(None),
+                        (None, Some(text)) => {
+                            self.marked.push(Some(self.b.depth()));
+                            self.b.open(&format!("Text: {text}"), false);
+                        }
+                        (None, None) => self.marked.push(None),
                     }
                 }
                 "EMC" => {

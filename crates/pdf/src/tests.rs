@@ -83,6 +83,21 @@ fn pdf_paths_clip_gradient_and_layers() {
 }
 
 #[test]
+fn pdf_actual_text_is_exposed_as_a_logical_group() {
+    let content = "/Span << /ActualText (Logical text) >> BDC\n1 0 0 rg 10 10 20 20 re f\nEMC";
+    let objs = vec![
+        (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(), None),
+        (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> /Contents 4 0 R >>".to_string(), None),
+        (4, "<< >>".to_string(), Some(content.as_bytes().to_vec())),
+    ];
+
+    let doc = parse(&pdf(&objs, 1)).unwrap();
+
+    assert_eq!(shape_names(&doc), vec!["Text: Logical text"]);
+}
+
+#[test]
 fn pdf_forms_rotation_cmyk_and_alpha() {
     let content = "q 2 0 0 2 0 0 cm /Fm0 Do Q\n/GS0 gs 0 0 0 1 k 0 0 10 10 re f\n";
     let form = "0 1 1 0 k 0 0 20 20 re f";
@@ -229,6 +244,12 @@ fn eps_postscript_subset() {
     assert_eq!(codec("art.eps", &dos), Some("EPS"));
     assert_eq!(codec("art.ai", &sample_pdf(false)), Some("AI"));
     assert_eq!(parse(b"hello"), Err(Error::NotVector));
+}
+
+#[test]
+fn eps_without_a_bounding_box_keeps_the_public_error_variant() {
+    let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%EndComments\n0 0 10 10 rectfill\n";
+    assert_eq!(parse(eps), Err(Error::NoBoundingBox));
 }
 
 #[test]
@@ -450,6 +471,9 @@ pub(crate) fn shape_names(doc: &Doc) -> Vec<String> {
     fn walk(g: &effectcraft_svg::Group, out: &mut Vec<String>) {
         for c in &g.children {
             match c {
+                // Marked text from the shared PostScript adapter is a logical text object whose
+                // outlined glyph paths remain children for rendering and editing.
+                Node::Group(s) if s.name.starts_with("Text: ") => out.push(s.name.clone()),
                 Node::Group(s) => walk(s, out),
                 Node::Shape(s) => out.push(s.name.clone()),
                 Node::Image(i) => out.push(i.name.clone()),

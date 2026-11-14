@@ -5,8 +5,8 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const REV: &str = "47107f660191de2f0b425569506f4daa4faadac9";
-const PACKAGES: &[(&str, &str)] = &[("craft-pdf", "0.1.0"), ("hayro-syntax", "0.7.2"), ("hayro-jbig2", "0.3.0")];
+const REV: &str = "41fb227542efb8a7748caa1c659f271d8605303c";
+const PACKAGES: &[(&str, &str)] = &[("craft-pdf", "0.1.0"), ("craft-ps", "0.1.0"), ("hayro-syntax", "0.7.2"), ("hayro-jbig2", "0.3.0")];
 
 pub fn run(root: &Path) -> Result<(), String> {
     let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
@@ -33,7 +33,7 @@ fn validate(metadata: &Value) -> Result<(), String> {
             return Err(format!("{name}: expected exactly {version} from {source}"));
         }
     }
-    for (name, allowed) in [("craft-pdf", "read"), ("hayro-syntax", "std")] {
+    for (name, allowed) in [("craft-pdf", "read"), ("craft-ps", "read"), ("hayro-syntax", "std")] {
         let package = packages.iter().find(|p| p["name"] == name).ok_or_else(|| format!("missing {name}"))?;
         let node = nodes.iter().find(|n| n["id"] == package["id"]).ok_or_else(|| format!("{name}: missing resolved node"))?;
         let features = node["features"].as_array().ok_or_else(|| format!("{name}: missing resolved features"))?;
@@ -61,7 +61,8 @@ mod tests {
             json!({"id": name, "name": name, "version": version, "source": format!("git+https://github.com/storytold/craft-libs?rev={REV}#{REV}")})
         }).collect();
         json!({"packages": packages, "resolve": {"nodes": [
-            {"id": "hayro-syntax", "features": ["std"]}, {"id": "craft-pdf", "features": ["read"]}
+            {"id": "hayro-syntax", "features": ["std"]}, {"id": "craft-pdf", "features": ["read"]},
+            {"id": "craft-ps", "features": ["read"]}
         ]}})
     }
 

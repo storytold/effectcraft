@@ -350,36 +350,6 @@ impl Font {
         }
     }
 
-    /// A simple font outside a PDF (EPS text): `program` is an embedded font program (CFF when
-    /// the flag is set, else Type 1), otherwise the bundled stand-in for `name` is used;
-    /// `names` is the encoding (code → glyph name), else the program's built-in encoding or
-    /// StandardEncoding. Advances are the program's.
-    pub fn standalone(name: &str, program: Option<(&[u8], bool)>, names: Option<Vec<Option<String>>>) -> Font {
-        let mut f = Font::blank(name, false);
-        f.program = match program {
-            Some((data, true)) => Cff::parse(data).map(|c| Program::Cff(Box::new(c))),
-            Some((data, false)) => Type1::parse(data).map(|t| Program::Type1(Box::new(t))),
-            None => None,
-        }
-        .unwrap_or_else(|| Program::Fallback(fallback(name)));
-        match &f.program {
-            Program::Cff(c) => f.matrix = Affine::new(c.font_matrix),
-            Program::Type1(t) => f.matrix = t.font_matrix.map(Affine::new).unwrap_or(f.matrix),
-            _ => {}
-        }
-        let symbol = matches!(f.program, Program::Fallback(_)) && (name.contains("Symbol") || name.contains("Dingbats"));
-        f.names = match names {
-            // Unencoded codes draw .notdef (not the built-in encoding).
-            Some(n) => (0..256).map(|c| Some(n.get(c).cloned().flatten().unwrap_or_else(|| ".notdef".into()))).collect(),
-            None => match &f.program {
-                Program::Type1(t) if !t.encoding.is_empty() => (0..256).map(|c| t.encoding.get(&(c as u8)).cloned()).collect(),
-                _ if symbol => vec![None; 256],
-                _ => (0..256).map(|c| Base::Standard.name(c as u8)).collect(),
-            },
-        };
-        f
-    }
-
     pub fn load(file: &File, d: &Dict, skipped: &mut Vec<String>) -> Font {
         let subtype = file.get(d, "Subtype").and_then(Obj::name).unwrap_or("Type1").to_string();
         let base_name = file.get(d, "BaseFont").and_then(Obj::name).unwrap_or("").to_string();
