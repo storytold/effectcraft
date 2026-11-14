@@ -26,7 +26,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 
 | Category | Effects | On the GPU | Known differences or bugs |
 |---|---:|---:|---|
-| 3D Channel | 8 | 8 | Cryptomatte's GPU path is slow (#473; the Selection is picked in the viewer with an eyedropper, quoted names with commas fixed); multi-layer EXR: one decode per frame for the picture and the channels, cache softly bounded at 1 GB (#474; holding channels as f16 is still to do) |
+| 3D Channel | 8 | 8 | Cryptomatte's GPU path is slow (#473; the Selection is picked in the viewer with an eyedropper, or with the Selection tool while the effect is selected as in After Effects (#2839), quoted names with commas fixed); multi-layer EXR: one decode per frame for the picture and the channels, cache softly bounded at 1 GB (#474; holding channels as f16 is still to do) |
 | Audio | 13 | 0 | CPU by design (applied in the mixdown) |
 | Blur & Sharpen | 16 | 15 | Radial Blur keeps the layer edges as After Effects 2026 (713 now pixel-identical); Gaussian Blur interaction and output to be measured first ([fidelity/ae-2026-acceptance.md](fidelity/ae-2026-acceptance.md)) |
 | Channel | 13 | 13 | — |
@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-12 | minor | Parameters take After Effects' recorded valid ranges (hard range; defaults and sliders unchanged): Levels (Individual Controls) levels −10000..10000 and Gamma from 0; 4-Color Gradient Blend to 10000 and Jitter to 500 %; Change Color Hue Transform ±1800°; Noise HLS (and Auto) amounts to 1000 % and Grain Size from 0; Grid Border to 2000; Venetian Blinds Width 1..32000 and Feather to 32000; Radial Wipe Feather to 32000; Scatter Amount to 1000; Beam thicknesses to 4000; Transform Scale ±30000 %; Turbulent Displace Random Seed to 100000. A test checks every mapped parameter's range against the recorded table (CPU and GPU) |
 | 2026-10-19 | minor | Glow (original colours): bright pass per channel, 8 × (value − threshold + 0.061), measured against After Effects 2026 (CPU and GPU) |
 | 2026-10-19 | minor | Glow (colour channels): the glow covers the layer's blurred alpha, blur σ = 0.384 × radius, measured against After Effects 2026 renders (CPU and GPU) |
 | 2026-10-19 | minor | Radial Blur repeats the edge instead of sampling transparency outside the layer, measured against After Effects 2026 renders (CPU; Radial Blur has no GPU path) |

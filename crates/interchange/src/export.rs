@@ -303,16 +303,41 @@ impl Exporter<'_> {
     }
 
     /// The bin mirroring a Project panel folder.
+    ///
+    /// Walks up the folder's parents without recursion: a damaged or hostile project can hold a
+    /// parent cycle (or a very long chain), which recursed until the stack ran out. A folder seen
+    /// twice in one walk ends it, and the cycle's topmost folder becomes a top-level bin.
     fn bin(&mut self, folder: Option<ItemId>) -> Option<fp::BinId> {
         let f = folder?;
-        if let Some(b) = self.bins.get(&f) {
-            return Some(*b);
+        // The uncached folders from `f` up, and the bin they hang from.
+        let mut chain: Vec<ItemId> = vec![];
+        let mut in_chain = std::collections::HashSet::new();
+        let mut parent = None;
+        let mut at = Some(f);
+        while let Some(id) = at {
+            if let Some(b) = self.bins.get(&id) {
+                parent = Some(*b);
+                break;
+            }
+            if !in_chain.insert(id) {
+                self.warn("a folder that contains itself was exported as a top-level bin");
+                break;
+            }
+            let Some(it) = self.p.item(id) else { break };
+            chain.push(id);
+            at = it.parent;
         }
-        let it = self.p.item(f)?;
-        let parent = self.bin(it.parent);
-        let b = self.fp.add_bin(&it.name, parent);
-        self.bins.insert(f, b);
-        Some(b)
+        if chain.is_empty() {
+            // `f` is cached already (`parent` is its bin), or is not an item (`None`).
+            return parent;
+        }
+        for id in chain.into_iter().rev() {
+            let name = self.p.item(id).map(|it| it.name.clone()).unwrap_or_default();
+            let b = self.fp.add_bin(&name, parent);
+            self.bins.insert(id, b);
+            parent = Some(b);
+        }
+        parent
     }
 
     fn footage_item(&mut self, item: ItemId, f: &Footage) -> fp::ItemId {
@@ -615,12 +640,34 @@ impl Exporter<'_> {
     }
 }
 
+/// Whether `c` or a comp nested in it (at any depth) has a layer of footage with audio.
+///
+/// A walk with a stack and a visited set, as in `Project::comp_contains`: recursion never ended
+/// on a precomp cycle, and re-walked a comp shared by many layers once per path (exponential
+/// for a chain of comps that each use the next one twice).
 fn comp_has_audio(p: &Project, c: &Comp) -> bool {
-    c.layers.iter().any(|l| match &l.source {
-        LayerSource::Footage { item } => matches!(p.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio),
-        LayerSource::Comp { item } => p.comp(*item).is_some_and(|c| comp_has_audio(p, c)),
-        _ => false,
-    })
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![c];
+    while let Some(c) = stack.pop() {
+        for l in &c.layers {
+            match &l.source {
+                LayerSource::Footage { item } => {
+                    if matches!(p.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.has_audio) {
+                        return true;
+                    }
+                }
+                LayerSource::Comp { item } => {
+                    if seen.insert(*item)
+                        && let Some(nested) = p.comp(*item)
+                    {
+                        stack.push(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 fn differs(v: &Value, def: [f64; 2]) -> bool {
@@ -702,4 +749,38 @@ fn media_info(name: &str, kind: MediaKind, duration: Tick, video: Option<VideoSp
 
 fn media_clip(media: fp::MediaRef, info: MediaInfo) -> fp::MediaClip {
     fp::MediaClip { media, info, interpret: Default::default(), mark_in: None, mark_out: None, markers: vec![], offline: false, proxy: None, identity: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder's bin is the same one each time it is asked for (a cached folder once answered
+    /// `None`, so a folder's second item went to the project root); a non-item has no bin.
+    #[test]
+    fn folder_bins_are_reused_once_cached() {
+        let mut p = Project::default();
+        let a = p.add_item("A", effectcraft_color::Label::None, None, ItemKind::Folder);
+        let b = p.add_item("B", effectcraft_color::Label::None, Some(a), ItemKind::Folder);
+        let (opts, pre) = (ExportOptions::default(), HashMap::new());
+        let mut ex = Exporter {
+            p: &p,
+            opts: &opts,
+            pre: &pre,
+            fp: fp::Project::new("x"),
+            out: ExportOutput::default(),
+            seqs: HashMap::new(),
+            media: HashMap::new(),
+            bins: HashMap::new(),
+            stack: vec![],
+        };
+        let bb = ex.bin(Some(b));
+        assert!(bb.is_some());
+        assert_eq!(ex.bin(Some(b)), bb);
+        let ba = ex.bin(Some(a));
+        assert!(ba.is_some() && ba != bb);
+        assert_eq!(ex.bin(Some(a)), ba);
+        assert_eq!(ex.bin(Some(ItemId(u64::MAX))), None);
+        assert_eq!(ex.bin(None), None);
+    }
 }

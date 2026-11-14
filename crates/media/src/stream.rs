@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use effectcraft_render::reads::FileStamp;
 use filmcraft_media::SharedSource;
 
 use crate::Result;
@@ -19,17 +20,22 @@ use crate::Result;
 pub(crate) struct FileReader {
     file: std::fs::File,
     len: u64,
+    /// The file's identity when it was opened.
+    stamp: FileStamp,
 }
 
 #[cfg(any(unix, windows))]
 impl FileReader {
+    /// Opens `path` for reading and records its length and modification time.
     pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+        #[cfg(test)]
+        crate::count_open(path);
         let file = std::fs::File::open(path)?;
         let m = file.metadata()?;
         if !m.is_file() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
         }
-        Ok(Self { file, len: m.len() })
+        Ok(Self { file, len: m.len(), stamp: FileStamp::of_metadata(&m) })
     }
 }
 
@@ -72,16 +78,19 @@ fn name_of(path: &Path) -> String {
 /// Open a movie/audio file for the media pool, reading only what its container needs; files the
 /// reader openers don't handle are read whole and opened from memory, exactly as before. `None`
 /// when the file can't be opened in place (the caller reads it whole, which reports the error).
+/// With the file's identity as opened.
 #[cfg(any(unix, windows))]
-pub(crate) fn open_source(path: &Path) -> Option<Result<SharedSource>> {
+pub(crate) fn open_source(path: &Path) -> Option<(Result<SharedSource>, FileStamp)> {
     let reader = FileReader::open(path).ok()?;
+    let stamp = reader.stamp;
     let reader: filmcraft_media::SharedReader = std::sync::Arc::new(reader);
     let opened = filmcraft_media::reader::open_reader(&name_of(path), reader, &filmcraft_codecs::reader_openers(), &filmcraft_codecs::openers());
-    Some(opened.map_err(Into::into))
+    Some((opened.map_err(Into::into), stamp))
 }
 
+/// Without a native file system there is no in-place source: always `None`.
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn open_source(_path: &Path) -> Option<Result<SharedSource>> {
+pub(crate) fn open_source(_path: &Path) -> Option<(Result<SharedSource>, FileStamp)> {
     None
 }
 

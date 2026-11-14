@@ -6,10 +6,11 @@
 //! analyzer (step 1 of 2, "Analyzing in background"); step 2 ("Stabilizing") derives the
 //! stabilization plan once to validate and cache the result. When the job finishes, the analysis is
 //! written into the effect's hidden Analysis parameter as one undo step, together with a key of
-//! what it was made from (the layer's source, In/Out, start, stretch and Time Remap). Edits that
-//! change those clear the analysis (`invalidate`, run after every edit) and queue the effect
-//! for re-analysis, which frontends start with [`Session::poll_warp`] (After Effects re-analyses
-//! automatically too).
+//! what it was made from (the layer's source, In/Out, start, stretch and Time Remap, its masks, the
+//! effects above the Warp Stabilizer and a precomp's contents: `analysis::frames_key::analysis_key`,
+//! shared with the 3D Camera Tracker). Edits that change those clear the analysis (`invalidate`, run after every edit) and queue the effect for
+//! re-analysis, which frontends start with [`Session::poll_warp`] (After Effects re-analyses
+//! automatically too). Footage going offline is not such a change.
 
 use crate::offload::{JobKind, rate};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,13 +18,14 @@ use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::warp_stab::{self, ANALYSIS, ANALYSIS_KEY};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Project, PropGroup, Uid};
+use effectcraft_project::{GroupKind, ItemId, ItemKind, Layer, LayerId, Project, PropGroup, Uid};
 use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost, FootageSource, LayerCache, Renderer};
 use effectcraft_time::Tick;
 use effectcraft_track::stabilize::{AnalyzeOpts, Analyzer, WarpAnalysis};
 use serde::Serialize;
 
+use crate::analysis::frames_key;
 use crate::tracking::lock;
 use crate::{Event, Session};
 
@@ -69,7 +71,7 @@ pub struct WarpJob {
     pub comp: ItemId,
     pub layer: LayerId,
     pub effect: Uid,
-    /// The layer signature the analysis is made from.
+    /// What the analysis is made from (`frames_key::analysis_key`).
     key: String,
 }
 
@@ -98,40 +100,6 @@ pub(crate) struct WarpWork {
     pub times: Vec<Tick>,
 }
 
-fn fnv(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
-/// What an analysis of `layer` depends on (its frames): source (and the footage item's
-/// interpretation), In/Out, start time, stretch, Time Remap and the comp frame rate.
-pub fn signature(p: &Project, comp: ItemId, layer: &Layer) -> String {
-    let src = match &layer.source {
-        LayerSource::Footage { item } | LayerSource::Solid { item } | LayerSource::Comp { item } => match p.item(*item).map(|i| &i.kind) {
-            Some(ItemKind::Footage(f)) => format!("{f:?}"),
-            Some(ItemKind::Solid(s)) => format!("{s:?}"),
-            Some(ItemKind::Comp(c)) => format!("{}x{}@{:?}/{:?}", c.width, c.height, c.frame_rate, c.duration),
-            _ => String::new(),
-        },
-        _ => String::new(),
-    };
-    let rate = p.comp(comp).map(|c| format!("{:?}", c.frame_rate)).unwrap_or_default();
-    let s = format!(
-        "{:?}|{src}|{:?}|{:?}|{:?}|{}|{:?}|{rate}",
-        layer.source,
-        layer.in_point,
-        layer.out_point,
-        layer.start_time,
-        layer.stretch,
-        layer.props.get("timeRemap")
-    );
-    format!("{:016x}", fnv(&s))
-}
-
 fn is_warp(g: &PropGroup) -> bool {
     matches!(&g.kind, GroupKind::Effect { effect } if effect == warp_stab::ID)
 }
@@ -155,11 +123,10 @@ pub(crate) fn invalidate(before: &Project, after: &mut Project) -> Vec<(ItemId, 
             if !fx.groups().any(is_warp) {
                 continue;
             }
-            let sig = signature(after, *cid, l);
             let old_layer = before.comp(*cid).and_then(|bc| bc.layer(l.id));
             for g in fx.groups().filter(|g| is_warp(g)) {
                 let analysed = !str_of(g, ANALYSIS).is_empty();
-                if analysed && str_of(g, ANALYSIS_KEY) != sig {
+                if analysed && !frames_key::analysis_key_matches(before, after, *cid, l, g.uid, &str_of(g, ANALYSIS_KEY), |k| k) {
                     clear.push((*cid, l.id, g.uid));
                     todo.push((*cid, l.id, g.uid));
                 } else if !analysed && old_layer.and_then(|ol| ol.props.find_group(g.uid)).is_none() {
@@ -338,7 +305,7 @@ impl Session {
             detailed,
             times,
         };
-        let key = signature(&self.project, comp, l);
+        let key = frames_key::analysis_key(&self.project, comp, l, effect);
         if !wait && self.offloads() {
             drop(work);
             self.offload_analysis(crate::offload::WorkerJob::Warp { comp, layer, effect })?;

@@ -22,6 +22,7 @@ pub mod bridge;
 pub mod confine;
 mod long_job;
 pub mod server;
+pub mod sheet;
 pub mod tools;
 
 pub use backend::{Backend, Frame};
@@ -53,12 +54,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn encode_png(w: u32, h: u32, rgba: Vec<u8>, max_side: u32) -> Result<Vec<u8>> {
     use image::ImageEncoder;
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-    let mut img = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| Error::Other("bad image buffer".into()))?;
-    if max_side > 0 && w.max(h) > max_side {
-        let s = max_side as f64 / w.max(h) as f64;
-        let (nw, nh) = (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1));
-        img = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
-    }
+    let img = fit(image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| Error::Other("bad image buffer".into()))?, max_side);
     let (w, h) = img.dimensions();
     let mut out = Vec::new();
     let enc = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
@@ -71,6 +67,17 @@ pub fn encode_png(w: u32, h: u32, rgba: Vec<u8>, max_side: u32) -> Result<Vec<u8
     };
     r.map_err(|e| Error::Other(format!("png: {e}")))?;
     Ok(out)
+}
+
+/// `img` downscaled so the longest side is at most `max_side` (0 = keep).
+pub(crate) fn fit(img: image::RgbaImage, max_side: u32) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    if max_side == 0 || w.max(h) <= max_side {
+        return img;
+    }
+    let s = max_side as f64 / w.max(h) as f64;
+    let (nw, nh) = (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1));
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
 }
 
 /// Decode any PNG and re-encode it compressed and capped to `max_side`. Returns (png, w, h).

@@ -1,6 +1,6 @@
 //! Blur & Sharpen, batch 2: edge-preserving blurs (Bilateral, Smart), per-channel and map-driven
 //! blurs (Channel, Compound, CC Vector), bokeh (Camera Lens Blur), radial streaks and small
-//! utilities (Reduce Interlace Flicker, CC Cross Blur).
+//! utilities (Reduce Interlace Flicker, Cross Blur).
 
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
@@ -228,8 +228,21 @@ fn compound_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 // ---------------------------------------------------------------------------------------------
 // Camera Lens Blur
 
-/// Half-open horizontal spans (dy, x_left, x_right) of a polygonal / round iris of radius `r`.
+/// Largest Camera Lens Blur radius in buffer pixels. Blur Radius goes to 500 in the UI; a project
+/// or expression value far beyond it would otherwise build an iris table of one row per pixel of
+/// radius (and sum that many rows per output pixel) before any image size check.
+pub const CAMERA_LENS_MAX_RADIUS: f64 = 2000.0;
+
+/// Camera Lens Blur's iris radius in buffer pixels: Blur Radius at the buffer's `scale`, capped
+/// at [`CAMERA_LENS_MAX_RADIUS`]. Shared by the CPU and GPU paths.
+pub fn camera_lens_radius(ctx: &EffectCtx, scale: f64) -> f64 {
+    (ctx.params.f("blurRadius").max(0.0) * scale).clamp(0.0, CAMERA_LENS_MAX_RADIUS)
+}
+
+/// Half-open horizontal spans (dy, x_left, x_right) of a polygonal / round iris of radius `r`
+/// (capped at [`CAMERA_LENS_MAX_RADIUS`]).
 fn iris_spans(r: f64, sides: u32, rotation_deg: f64, roundness: f64) -> Vec<(i64, i64, i64)> {
+    let r = if r.is_nan() { 0.0 } else { r.clamp(0.0, CAMERA_LENS_MAX_RADIUS) };
     let ri = r.ceil() as i64;
     let rot = rotation_deg.to_radians();
     let verts: Vec<(f64, f64)> = (0..sides)
@@ -292,7 +305,8 @@ pub fn camera_lens_spans(ctx: &EffectCtx, r: f64) -> (Vec<(i64, i64, i64)>, f64)
             s.2 = (s.2 as f64 * aspect).round() as i64;
         }
     }
-    (spans, r * aspect.max(1.0))
+    // Same cap as iris_spans, so the reach matches the spans for unbounded radii.
+    (spans, r.clamp(0.0, CAMERA_LENS_MAX_RADIUS) * aspect.max(1.0))
 }
 
 /// Whether Camera Lens Blur needs more than plain iris spans (Diffraction Fringe or a Blur
@@ -302,7 +316,7 @@ pub fn camera_lens_plain(ctx: &EffectCtx) -> bool {
 }
 
 fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let r = ctx.params.f("blurRadius").max(0.0) * b.scale;
+    let r = camera_lens_radius(ctx, b.scale);
     if r < 0.5 {
         return b;
     }
@@ -507,9 +521,9 @@ fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CC Radial Fast Blur
+// Fast Radial Blur
 
-/// Transparent pixels CC Radial Fast Blur adds on every side of a `w` × `h` buffer with Center
+/// Transparent pixels Fast Radial Blur adds on every side of a `w` × `h` buffer with Center
 /// at `c` (buffer pixels) and smear `s`: content `r` from Center streaks out to `r / (1 − s)`,
 /// so the farthest corner reaches `d · s / (1 − s)` past itself (at most 4096, as the other
 /// growing effects). Shared with the GPU path so both grow the same way.
@@ -562,7 +576,7 @@ fn radial_fast_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CC Vector Blur
+// Vector Blur
 
 fn vector_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let amount = ctx.params.f("amount").max(0.0) * b.scale;
@@ -616,7 +630,7 @@ fn vector_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Reduce Interlace Flicker / CC Cross Blur
+// Reduce Interlace Flicker / Cross Blur
 
 fn reduce_flicker(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = ctx.params.f("softness").max(0.0) * b.scale;
@@ -735,7 +749,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.blur.ccradialfast",
-            "CC Radial Fast Blur",
+            "Fast Radial Blur",
             vec![
                 p("center", "Center", Value::Vec2([0.5, 0.5]), ParamUi::Point),
                 p("amount", "Amount", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
@@ -745,7 +759,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.blur.ccvector",
-            "CC Vector Blur",
+            "Vector Blur",
             vec![
                 p("type", "Type", Value::Enum(0), popup(&["Natural", "Constant Length", "Perpendicular", "Direction Center", "Direction Fading"])),
                 p("amount", "Amount", num(10.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
@@ -765,7 +779,7 @@ pub fn specs() -> Vec<EffectSpec> {
         },
         spec(
             "ec.blur.cccross",
-            "CC Cross Blur",
+            "Cross Blur",
             vec![
                 p("radiusX", "Radius X", num(10.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
                 p("radiusY", "Radius Y", num(10.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
@@ -908,6 +922,19 @@ mod tests {
         let (o, d) = (out.offset[0] as i64, out.offset[1] as i64);
         assert!((out.img.get(4 + o, 10 + d)[0] - 1.0).abs() < 1e-4, "dark map keeps the line sharp");
         assert!(out.img.get(15 + o, 10 + d)[0] < 0.9, "bright map blurs");
+    }
+
+    #[test]
+    fn iris_spans_cap_a_huge_radius() {
+        // A project's Blur Radius far beyond the UI's 500 builds a bounded table.
+        let max_rows = 2 * CAMERA_LENS_MAX_RADIUS as usize + 1;
+        assert!(iris_spans(1e12, 6, 0.0, 0.0).len() <= max_rows);
+        assert!(iris_spans(f64::INFINITY, 0, 0.0, 0.0).len() <= max_rows);
+        assert_eq!(iris_spans(f64::NAN, 0, 0.0, 0.0), vec![(0, 0, 0)]);
+        let params = Params { values: [("blurRadius".into(), num(1e15))].into_iter().collect() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 4.0], seed: 1, adjustment: false, env: Default::default() };
+        assert_eq!(camera_lens_radius(&ctx, 1.0), CAMERA_LENS_MAX_RADIUS);
+        assert!(camera_lens_spans(&ctx, camera_lens_radius(&ctx, 1.0)).0.len() <= max_rows);
     }
 
     #[test]

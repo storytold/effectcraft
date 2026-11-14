@@ -104,6 +104,8 @@ fn project() -> (Project, ItemId) {
 fn run(p: &Project, cid: ItemId, accel: Option<&dyn Accelerator>, s: &RenderSettings, path: &Path) -> Vec<u8> {
     let om = OutputModule { bitrate_kbps: 4000, ..OutputModule::for_format(OutputFormat::H264) };
     let path = path.to_string_lossy().to_string();
+    // These tests are about the accelerator's own path: no measuring against the CPU (#3335).
+    let gpu = std::sync::Mutex::new(Some(effectcraft_render::Backend::Gpu));
     let job = Job {
         project: p,
         footage: &NoFootage,
@@ -114,7 +116,7 @@ fn run(p: &Project, cid: ItemId, accel: Option<&dyn Accelerator>, s: &RenderSett
         output: &om,
         path: &path,
         sink: None,
-        options: Default::default(),
+        options: effectcraft_export::JobOptions { renderer: Some(&gpu), ..Default::default() },
         nested_switches: true,
     };
     export(&job, &mut |_| true).expect("export");

@@ -723,6 +723,29 @@ fn the_union_of_objects_is_their_largest_extent() {
     assert_eq!(FrameSeg::union(vec![seg(&[1]), odd]).matte, vec![0, 255, 0, 0]);
 }
 
+#[test]
+fn a_stored_span_reaches_a_bounded_number_of_frames() {
+    // A project can store any span: the chain stops MAX_CHAIN frames either side of the base.
+    let d = RotoData { base: Some(0), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    let k = d.chain_keys(1);
+    assert_eq!(k.len() as i64, 2 * super::MAX_CHAIN + 1);
+    assert_eq!(k.keys().next(), Some(&-super::MAX_CHAIN));
+}
+
+#[test]
+fn in_span_matches_the_frames_that_have_keys_and_extreme_bases_do_not_overflow() {
+    let d = RotoData { base: Some(0), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    assert!(d.in_span(super::MAX_CHAIN) && !d.in_span(super::MAX_CHAIN + 1));
+    assert!(d.in_span(-super::MAX_CHAIN) && !d.in_span(-super::MAX_CHAIN - 1));
+    assert_eq!(d.source_of(super::MAX_CHAIN + 1), None);
+    assert!(d.chain_keys(1).keys().all(|f| d.in_span(*f)));
+    // A base at the end of i64: no forward frames, and no `base + 1` overflow.
+    let d = RotoData { base: Some(i64::MAX), span: [i64::MIN, i64::MAX], strokes: vec![] };
+    let k = d.chain_keys(1);
+    assert_eq!(k.len() as i64, super::MAX_CHAIN + 1);
+    assert!(k.contains_key(&i64::MAX));
+}
+
 /// A scene for the band re-cut: `rgb` of a `w`×`h` frame where the foreground is `inside`, with
 /// a background that turns red left of `x = 30` (far from most shapes), and a soft prior that is
 /// `inside` shifted by (3, 2) px with an edge `soft_edge` px wide.

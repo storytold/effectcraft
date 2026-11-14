@@ -241,7 +241,14 @@ fn waiting_commands_report_only_their_own_completion_errors() {
         let other = if kind == JobKind::Track { JobKind::Warp } else { JobKind::Track };
         let mut app = EffectcraftApp::new(Session::default());
         app.session.offload_log = vec![(kind, Some("old error".into())), (other, Some("unrelated failure".into())), (kind, None)];
-        let waiter = || JobWaiter { command: "analysis".into(), params: json!({}), result: json!({"running": true}), jobs: vec![job_id.into()], log_cursor: 1 };
+        let waiter = || JobWaiter {
+            command: "analysis".into(),
+            params: json!({}),
+            result: json!({"running": true}),
+            jobs: vec![job_id.into()],
+            log_cursor: 1,
+            render: None,
+        };
         let result = waiter().finish(&mut app);
         assert_eq!(result, json!({"ok": true, "result": {"running": false}}), "{kind:?}");
         app.session.offload_log.push((kind, Some("nothing was applied".into())));
@@ -258,6 +265,6 @@ fn waiting_command_sees_its_error_after_the_completion_log_rolls_over() {
     app.session.offload_log = vec![(JobKind::Warp, None); 31];
     app.session.offload_log.push((JobKind::Track, Some("nothing was applied".into())));
     app.session.offload_log_start = 1;
-    let waiter = JobWaiter { command: "track.analyze".into(), params: json!({}), result: json!({}), jobs: vec!["track".into()], log_cursor: 32 };
+    let waiter = JobWaiter { command: "track.analyze".into(), params: json!({}), result: json!({}), jobs: vec!["track".into()], log_cursor: 32, render: None };
     assert_eq!(waiter.finish(&mut app), json!({"ok": false, "error": "nothing was applied"}));
 }
