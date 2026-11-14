@@ -459,7 +459,9 @@ fn microsoft_families_resolve_to_metric_compatible_substitutes() {
 
         let resolved = resolve(requested, style);
         let family = &face(resolved.face).info.family;
-        if family.eq_ignore_ascii_case(requested) {
+        let installed = all_faces().iter().any(|f| f.info.family.eq_ignore_ascii_case(requested));
+        if installed {
+            assert!(family.eq_ignore_ascii_case(requested), "an installed {requested} wins over {family}");
             assert!(!resolved.missing, "an installed original family is available");
         } else {
             assert_eq!(family, substitute);
@@ -469,6 +471,24 @@ fn microsoft_families_resolve_to_metric_compatible_substitutes() {
     let unknown = resolve("No Such Family 1677", "Regular");
     assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
     assert!(unknown.missing);
+}
+
+/// An installed Microsoft family is used as is and not reported missing, even when its
+/// substitute is also available (#1677). It runs in a child process so the Calibri fixture does
+/// not reach the substitute test above.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn an_installed_microsoft_family_wins_over_its_substitute() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_CALIBRI";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_child(CHILD, "fonts::tests::an_installed_microsoft_family_wins_over_its_substitute");
+        return;
+    }
+    add_font_data(test_font("Carlito"));
+    add_font_data(test_font("Calibri"));
+    let resolved = resolve("Calibri", "Regular");
+    assert_eq!(face(resolved.face).info.family, "Calibri");
+    assert!(!resolved.missing, "the installed family is available");
 }
 
 #[test]
