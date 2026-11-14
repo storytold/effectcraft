@@ -249,6 +249,16 @@ fn tint_offset(c: [f32; 4]) -> [f32; 3] {
     [c[0] - l, c[1] - l, c[2] - l]
 }
 
+/// Scale a colour's distance from its Rec. 709 luminance by `k`, in linear light with a pure 2.4
+/// gamma. This is where Lumetri's Hue vs Sat works: measured on After Effects 2026 with 45 600
+/// colour patches, it matches to within rounding.
+fn scale_saturation_linear(c: [f32; 3], k: f32) -> [f32; 3] {
+    const GAMMA: f32 = 2.4;
+    let l = c.map(|v| v.max(0.0).powf(GAMMA));
+    let y = 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
+    l.map(|v| (y + (v - y) * k).max(0.0).powf(1.0 / GAMMA))
+}
+
 /// Control points `x,y x,y …` (0..1, whitespace or `;` separated), sorted by x.
 fn parse_points(s: &str) -> Vec<(f32, f32)> {
     let mut pts: Vec<(f32, f32)> = s
@@ -468,8 +478,8 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
         ]
     };
     let (cm, cr, cg, cb) = (curve("curveMaster"), curve("curveRed"), curve("curveGreen"), curve("curveBlue"));
-    let rgb_curves =
-        ["curves/rgbCurves/master", "curves/rgbCurves/red", "curves/rgbCurves/green", "curves/rgbCurves/blue"].map(|id| crate::color2::Curve::parse(pr.s(id)));
+    let rgb_curves = ["curves/rgbCurves/master", "curves/rgbCurves/red", "curves/rgbCurves/green", "curves/rgbCurves/blue"]
+        .map(|id| crate::color2::Curve::parse_natural(pr.s(id)));
     let hs = |id: &str, periodic: bool| OffsetCurve::parse(pr.s(&format!("curves/hueSaturationCurves/{id}")), periodic);
     let (hue_sat, hue_hue, hue_luma, luma_sat, sat_sat) =
         (hs("hueVsSat", true), hs("hueVsHue", true), hs("hueVsLuma", true), hs("lumaVsSat", false), hs("satVsSat", false));
@@ -577,8 +587,8 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
             let chroma = (s * 20.0).min(1.0);
             let off = |cv: &Option<OffsetCurve>, x: f32| cv.as_ref().map(|cv| cv.at(x)).unwrap_or(0.0);
             // y = 1 doubles saturation, y = 0 removes it.
-            let mut ms = (1.0 + 2.0 * off(&hue_sat, h) * chroma) * (1.0 + 2.0 * off(&luma_sat, l)) * (1.0 + 2.0 * off(&sat_sat, s));
-            ms = ms.max(0.0);
+            let hue_scale = (1.0 + 2.0 * off(&hue_sat, h) * chroma).max(0.0);
+            let ms = ((1.0 + 2.0 * off(&luma_sat, l)) * (1.0 + 2.0 * off(&sat_sat, s))).max(0.0);
             let dh = off(&hue_hue, h) * chroma;
             let dl = off(&hue_luma, h) * chroma;
             let luma = luminance(c[0], c[1], c[2]);
@@ -587,6 +597,9 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
                 // Keep values outside 0..1 (HDR) by moving only the in-range part.
                 let base = [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)];
                 c = [c[0] + r - base[0], c[1] + g - base[1], c[2] + b2 - base[2]];
+            }
+            if hue_scale != 1.0 {
+                c = scale_saturation_linear(c, hue_scale);
             }
             if ms != 1.0 {
                 c = c.map(|v| luma + (v - luma) * ms);
@@ -974,6 +987,32 @@ mod tests {
         assert!((m[0] - 0.75).abs() < 1e-3 && (m[2] - 0.75).abs() < 1e-3);
         let r = run("ec.color.lumetri", &[("curves/rgbCurves/red", s("0,0 0.5,0.25 1,1"))], g).get(0, 0);
         assert!((r[0] - 0.25).abs() < 1e-3 && (r[1] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lumetri_rgb_curves_are_natural_splines() {
+        // Measured on After Effects 2026: the natural spline through these points dips under the
+        // diagonal in the shadows and rises above a monotone spline in the highlights.
+        let red = "0,0 0.4256,0.4508 0.5487,0.7213 1,1";
+        for (input, want) in [(64.0f32, 46.0f32), (128.0, 158.0), (200.0, 250.0)] {
+            let v = input / 255.0;
+            let g = Image::filled(2, 2, [v, v, v, 1.0]);
+            let out = run("ec.color.lumetri", &[("curves/rgbCurves/red", s(red))], g).get(0, 0);
+            assert!((out[0] * 255.0 - want).abs() < 1.0, "{input}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn lumetri_hue_vs_sat_scales_in_linear_light() {
+        // Measured on After Effects 2026 with one point at y = -0.5 (0.25 here, where 0.5 is
+        // neutral): the same scale at every hue, towards the colour's linear luminance.
+        for (from, want) in [([1.0f32, 0.0, 0.0], [207.0f32, 100.0, 100.0]), ([1.0, 1.0, 0.0], [251.0, 251.0, 185.0]), ([0.0, 0.0, 1.0], [64.0, 64.0, 197.0])] {
+            let img = Image::filled(2, 2, [from[0], from[1], from[2], 1.0]);
+            let out = run("ec.color.lumetri", &[("curves/hueSaturationCurves/hueVsSat", s("0.6,0.25"))], img).get(0, 0);
+            for k in 0..3 {
+                assert!((out[k] * 255.0 - want[k]).abs() < 1.0, "{from:?}: {out:?}");
+            }
+        }
     }
 
     #[test]
