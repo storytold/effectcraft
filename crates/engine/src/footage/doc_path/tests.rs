@@ -212,3 +212,38 @@ fn relative_proxy_is_resolved_and_checked_next_to_the_project() {
     assert_eq!(std::path::Path::new(&reopened.project.item(id).unwrap().proxy.as_ref().unwrap().footage.path), dir.join("proxy.png"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Settings ▸ Import ▸ Trusted Network Folders: a project saved on the local disk finds its
+/// footage on a NAS again after it is opened (it was marked missing and drawn black);
+/// other shares, and paths that step out of the trusted one, stay refused.
+#[test]
+fn footage_on_a_trusted_share_is_followed() {
+    let doc = std::env::temp_dir().join("art").join("intro.ecproj");
+    let doc = doc.to_str().unwrap();
+    let nas = r"\\nas\media\job\clip.mov";
+    let refused = Err(super::NotFollowed::Refused(super::Refused::Network));
+    assert_eq!(super::resolve_trusting(nas, Some(doc), &[]), refused);
+    assert_eq!(super::resolve_trusting(r"\\other\media\clip.mov", Some(doc), &[r"\\nas\media".into()]), refused);
+    assert_eq!(super::resolve_trusting(r"\\nas\other\clip.mov", Some(doc), &[r"\\nas\media".into()]), refused);
+    assert_eq!(super::trusted_shares(r" \\nas\media ; C:\local;not a share"), vec![r"\\nas\media".to_string()]);
+    assert_eq!(super::trusted_shares("//nas/a\n\\\\nas\\b\r\n"), vec!["//nas/a".to_string(), r"\\nas\b".to_string()]);
+    #[cfg(windows)]
+    {
+        for root in [r"\\nas\media", r"\\NAS\media\", "//nas/media"] {
+            assert!(super::resolve_trusting(nas, Some(doc), &[root.into()]).is_ok(), "{root}");
+        }
+        for out in [r"\\nas\media\..\other\x.mov", r"\\nas\media\..\..\other\x.mov"] {
+            assert!(super::resolve_trusting(out, Some(doc), &[r"\\nas\media".into()]).is_err(), "{out}");
+        }
+        // Through the session: the setting reaches the stored paths.
+        let mut s = Session::default();
+        s.execute("prefs.set", json!({"key": "import.trustedShares", "value": r"\\nas\media"})).unwrap();
+        let mut paths = s.stored_paths.clone();
+        let mut p = effectcraft_project::Project::default();
+        p.add_item("clip", crate::color::Label::None, None, ItemKind::Footage(Footage { path: nas.into(), ..Default::default() }));
+        paths.add(&p, Some(doc));
+        assert!(paths.follow(nas).is_ok());
+        let refused = super::resolve_footage(&mut p, Some(doc), &s.stored_paths.trusted());
+        assert!(refused.is_empty(), "{refused:?}");
+    }
+}

@@ -147,6 +147,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            confine the agent's file access: reads under a read or write root,
                                            writes under a write root (each repeatable); scripts are refused
 options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge PORT   --json   --gpu
+         --trust-share \\\\server\\share (repeatable: footage on that network share is found from any project)
 <comp>: id or name, '-' = active comp; <layer>: id, '#n' or name; <value>: JSON or bare string";
 
 /// Options that take a value.
@@ -177,6 +178,7 @@ const VALUED: &[&str] = &[
     "--eval",
     "--args-file",
     "--commands",
+    "--trust-share",
     // render
     "--template",
     "--values",
@@ -474,6 +476,13 @@ fn backend(args: &Args, default_demo: bool) -> Result<Backend, Failure> {
 /// renderer setting, GPU Acceleration by default).
 fn session(args: &Args) -> Result<effectcraft_engine::Session, Failure> {
     let mut s = effectcraft_host::session();
+    // Settings ▸ Import ▸ Trusted Network Folders for this run (the desktop app keeps it in its
+    // settings): footage on these shares is found from a project saved anywhere.
+    let shares = args.opts("--trust-share");
+    if !shares.is_empty() {
+        s.prefs.import.trusted_shares = shares.join(";");
+        s.prefs_changed();
+    }
     if args.flag("--autosave") {
         let dir = effectcraft_host::config_dir().ok_or_else(|| Failure::Error("--autosave: no config directory; set EFFECTCRAFT_CONFIG_DIR".into()))?;
         // Read only auto-save settings. Opting in must not change headless rendering or load
