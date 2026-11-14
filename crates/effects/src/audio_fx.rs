@@ -244,7 +244,8 @@ pub fn preroll(id: &str, params: &Params) -> f64 {
 }
 
 /// Run audio effect `id` over interleaved stereo `buf` (L R L R …) at `rate` Hz, from a cleared
-/// state. `start` is the layer time (seconds) of the first sample (oscillator phase).
+/// state. `start` is the time (seconds) of the first sample since the layer's start, counted at
+/// comp speed whatever the layer's time stretch (oscillator phase).
 pub fn process(id: &str, params: &Params, buf: &mut [f32], rate: u32, start: f64) {
     if rate == 0 || buf.len() < 2 {
         return;
