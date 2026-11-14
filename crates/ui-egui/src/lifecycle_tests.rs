@@ -239,6 +239,29 @@ fn the_close_guard_answers_a_close_request_without_a_pass() {
     assert_eq!(app.ui_passes(), 0);
 }
 
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn the_update_result_dialog_shows_every_status_but_idle() {
+    use craft_update::updater::Status;
+    let shown = [
+        Status::Checking,
+        Status::UpToDate,
+        Status::Failed("offline".into()),
+        Status::Installing,
+        Status::Ready,
+        Status::Managed,
+        Status::Updated("1.2.3".into()),
+        Status::InstallFailed("access denied".into()),
+    ];
+    for status in &shown {
+        assert!(updates_ui::result_window_open(false, status, false), "{status:?} opens the dialog without a requested check");
+    }
+    assert!(!updates_ui::result_window_open(false, &Status::Idle, false));
+    assert!(!updates_ui::result_window_open(true, &Status::Idle, false), "a check that found a release closes it");
+    assert!(updates_ui::result_window_open(true, &Status::Idle, true), "a queued check keeps it open");
+    assert!(!updates_ui::result_window_open(false, &Status::Idle, true), "a queued check does not open it");
+}
+
 // ---------------------------------------------------------------- screenshots
 
 fn screenshot_request(app: &mut EffectcraftApp, ctx: &egui::Context, path: Option<&str>, target: ShotTarget) -> std::sync::mpsc::Receiver<serde_json::Value> {

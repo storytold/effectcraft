@@ -72,6 +72,15 @@ pub(crate) fn tick(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let _ = (app, ctx);
 }
 
+/// Whether the check result dialog shows this frame. It answers Help ▸ Check for Updates until the
+/// requested check ends, and it shows whenever the status is not idle: at the first start after an
+/// update, the check at start leaves `Updated` or `InstallFailed`. A check that finds a release
+/// leaves the status idle and the startup prompt takes over, so the dialog closes then.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn result_window_open(open: bool, status: &Status, check_requested: bool) -> bool {
+    !matches!(status, Status::Idle) || (open && check_requested)
+}
+
 pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -83,6 +92,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
             Action::None => {}
         }
         let rt = &mut app.updates_rt;
+        rt.manual_window_open = result_window_open(rt.manual_window_open, rt.updater.status(), rt.check_requested);
         if rt.manual_window_open {
             match CheckResultDialog::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).show(ctx, rt.updater.status()) {
                 CheckResultResponse::None => {}
@@ -92,10 +102,6 @@ pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
                 }
                 CheckResultResponse::CheckAgain => rt.updater.check_now(ctx),
                 CheckResultResponse::RestartToUpdate => rt.updater.restart_to_update(),
-            }
-            // A check that found a release leaves the status idle and the startup prompt takes over.
-            if matches!(rt.updater.status(), Status::Idle) && !rt.check_requested {
-                rt.manual_window_open = false;
             }
         }
     }
