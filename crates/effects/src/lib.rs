@@ -517,6 +517,20 @@ pub struct LayerPixels {
     pub size: [f64; 2],
 }
 
+/// Where another layer sits relative to the running effect's layer (see
+/// [`EffectHost::layer_transform`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerXf {
+    /// The other layer's effect-space pixels (x, y, and z away from the viewer) → the running
+    /// effect's effect-space pixels (x, y, z): rows of an affine 3 × 4 matrix (its layer
+    /// transform, parents, 3D rotation and the running layer's own transform undone).
+    pub to_self: [[f64; 4]; 3],
+    /// The other layer's effect-space size ([`LayerPixels::size`]).
+    pub size: [f64; 2],
+    /// Its opacity at that time (0–1).
+    pub opacity: f64,
+}
+
 /// Services the renderer offers effects that look beyond their own pixels.
 pub trait EffectHost: Sync {
     /// Pixels entering the effect stack, in effect space, before any effects. For an
@@ -546,6 +560,11 @@ pub trait EffectHost: Sync {
     /// Layer `id` of the same composition at comp time `comp_time` (seconds), like
     /// [`EffectHost::layer`] but at another time.
     fn layer_at(&self, _id: u64, _comp_time: f64, _masks_and_effects: bool) -> Option<LayerPixels> {
+        None
+    }
+    /// Where layer `id` sits relative to the running effect's layer at comp time `comp_time`
+    /// (an emitter layer's transform for a particle system). `None` when unknown.
+    fn layer_transform(&self, _id: u64, _comp_time: f64) -> Option<LayerXf> {
         None
     }
     /// Auxiliary 3D channels (depth, object / material IDs, normals, Cryptomatte, any named

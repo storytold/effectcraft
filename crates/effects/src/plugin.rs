@@ -292,6 +292,21 @@ impl PluginImage {
     }
 }
 
+/// Where the layer of a Layer parameter sits relative to the effect's own layer
+/// ([`PluginHost::layer_transform`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerTransform {
+    /// A point of the image [`PluginHost::layer_input`] hands over (x, y in its pixel grid:
+    /// pixel (i, j) spans i..i+1 and j..j+1) at depth z (the other layer's own pixels, away from
+    /// the viewer) → this layer's buffer-independent layer pixels (x, y, as a point parameter
+    /// before mapping to the buffer, divided back by the scale) and depth z (away from the
+    /// viewer): rows of an affine 3 × 4 matrix. It carries the other layer's position, anchor
+    /// point, scale, rotation, orientation and parents, and undoes this layer's own transform.
+    pub matrix: [[f64; 4]; 3],
+    /// The other layer's opacity (0–1).
+    pub opacity: f64,
+}
+
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
 pub trait PluginHost {
     /// This effect's input (its layer with masks and the effects above this one) at another
@@ -303,6 +318,11 @@ pub trait PluginHost {
     /// (same size, origin and scale as the frame, centred when the layers differ in size).
     /// `None` when unset or unavailable.
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage>;
+    /// Where the layer chosen in Layer parameter `param_id` sits at **layer time** `layer_time`
+    /// relative to this layer ([`LayerTransform`]). `None` when unset or unknown.
+    fn layer_transform(&self, _param_id: &str, _layer_time: f64) -> Option<LayerTransform> {
+        None
+    }
     /// All flattened parameter values (and texts) at another layer time.
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)>;
     /// Composition frame rate (30 when unknown).
@@ -671,6 +691,22 @@ impl PluginHost for RenderHost<'_, '_> {
         };
         let img = crate::util::fit_layer(ctx, &self.grid(), &other, false);
         Some(PluginImage { width: img.width, height: img.height, pixels: img.data, origin: self.offset, scale: self.scale })
+    }
+
+    fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<LayerTransform> {
+        let ctx = self.ctx;
+        let key = self.manifest.params.iter().find(|p| p.id == param_id).map(param_key)?;
+        let lid = ctx.params.get(&key)?.as_layer()?;
+        let x = ctx.env.host?.layer_transform(lid, ctx.env.comp_time + (layer_time - ctx.time))?;
+        // An image point u (buffer grid) is effect-space p = (u - origin) / scale of this layer,
+        // the other layer's effect-space q = p + d with d its centring offset (`fit_layer`).
+        let inv = 1.0 / self.scale.max(1e-9);
+        let d = [(x.size[0] - ctx.layer_size[0]) * 0.5, (x.size[1] - ctx.layer_size[1]) * 0.5];
+        let m = x.to_self;
+        let matrix = std::array::from_fn(|i| {
+            [m[i][0] * inv, m[i][1] * inv, m[i][2], m[i][0] * (d[0] - self.offset[0] * inv) + m[i][1] * (d[1] - self.offset[1] * inv) + m[i][3]]
+        });
+        Some(LayerTransform { matrix, opacity: x.opacity })
     }
 
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {

@@ -57,7 +57,7 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 
 | Request | Reply | |
 |---|---|---|
-| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. A different `version` means EffectCraft won't use the helper. |
+| `{"op":"hello","version":1,"frames":"<path>","features":["layer_transform"]}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. A different `version` means EffectCraft won't use the helper. `features` lists optional callbacks EffectCraft answers (absent in older builds: ask only for what is listed). |
 | `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. |
 | `{"op":"load","path":"…"}` | `effects` (only the new ones) or `error` | A file or folder the user picked. Replayed after a restart. |
 | `{"op":"padding","effect":"…","instance":7,"time":1.0,"scale":1.0,"layer_size":[w,h],"flat":[…],"texts":[…]}` | `{"op":"padding","pixels":3}` | Transparent pixels to add on each side before the render (at most 4096). |
@@ -73,6 +73,7 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 | `{"op":"input_at","time":t}` | `{"op":"image","image":<image ref>\|null}`: the effect's input (the layer, its masks, the effects above) at layer time `t`, in its own extent. |
 | `{"op":"layer_input","param":"<layer param id>","time":t}` | `image`: that layer at layer time `t` with effects and masks, resampled into this frame's grid. |
 | `{"op":"params_at","time":t}` | `{"op":"params","values":[[flat…],[texts…]]\|null}` |
+| `{"op":"layer_transform","param":"<layer param id>","time":t}` (only when `hello` listed `layer_transform`) | `{"op":"transform","transform":{"matrix":[[…4],[…4],[…4]],"opacity":o}\|null}`: where that layer sits at layer time `t`. `matrix` (rows of an affine 3 × 4) takes a point of the image `layer_input` hands over (x, y in its pixel grid, pixel (i, j) spanning i..i+1) at depth z (the other layer's own pixels, away from the viewer) to this layer's pixels (x, y, as a point parameter in layer pixels) and depth z. It carries the other layer's position, anchor, scale, rotation, orientation and parents, and undoes this layer's own transform; `opacity` is the other layer's (0–1). A particle emitter places particles on an emitter layer where it is drawn. |
 
 While a helper waits for an answer, EffectCraft may send another `render` (or `padding`). This
 happens when producing the answer needs an effect of the same helper: for example, motion blur

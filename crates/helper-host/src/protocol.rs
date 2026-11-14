@@ -88,7 +88,14 @@ pub struct RenderRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// First message: the protocol version and the frame exchange file to open (read + write).
-    Hello { version: u32, frames: String },
+    /// `features` lists optional callbacks this host answers (`"layer_transform"`:
+    /// [`Reply::LayerTransform`]); hosts without the field answer none of them.
+    Hello {
+        version: u32,
+        frames: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     /// List the effects the helper offers → [`Reply::Effects`].
     Describe,
     /// Load more effects from a file or folder the user picked → [`Reply::Effects`] (only the
@@ -103,6 +110,8 @@ pub enum Request {
     Image { image: Option<ImageRef> },
     /// The answer to [`Reply::ParamsAt`]: flattened values and texts, or `None`.
     Params { values: Option<(Vec<f64>, Vec<String>)> },
+    /// The answer to [`Reply::LayerTransform`], or `None`.
+    Transform { transform: Option<effectcraft_effects::plugin::LayerTransform> },
     /// The effect instance is gone; the helper may free what it keeps for it. No reply.
     Destroy { instance: u64 },
     /// Heartbeat → [`Reply::Pong`].
@@ -156,6 +165,13 @@ pub enum Reply {
     ParamsAt {
         time: f64,
     },
+    /// During a render: where the layer chosen in a layer parameter sits at a layer time,
+    /// relative to the effect's layer (only when the host listed `"layer_transform"` in
+    /// [`Request::Hello`]) → [`Request::Transform`].
+    LayerTransform {
+        param: String,
+        time: f64,
+    },
     /// The render finished; the result is in the request's frame.
     Done,
     /// The request failed (the helper keeps running).
@@ -196,6 +212,25 @@ mod tests {
         assert_eq!(parse_reply(&format!("loading...{line}")).unwrap().unwrap(), r);
         assert!(parse_reply("plug-in chatter").is_none());
         assert!(parse_reply("@ec-helper {nope").unwrap().is_err());
+    }
+
+    /// `features` and the layer transform callback are optional: an older host's hello still
+    /// parses, and a helper that never asks is unaffected.
+    #[test]
+    fn hello_features_and_layer_transform() {
+        let old: Request = serde_json::from_str(r#"{"op":"hello","version":1,"frames":"f"}"#).unwrap();
+        assert_eq!(old, Request::Hello { version: 1, frames: "f".into(), features: vec![] });
+        let new = Request::Hello { version: 1, frames: "f".into(), features: vec!["layer_transform".into()] };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&new).unwrap()).unwrap(), new);
+        let r = Reply::LayerTransform { param: "emitter_layer".into(), time: 0.5 };
+        assert_eq!(parse_reply(&reply_line(&r).unwrap()).unwrap().unwrap(), r);
+        let t = Request::Transform {
+            transform: Some(effectcraft_effects::plugin::LayerTransform {
+                matrix: [[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 3.0], [0.0, 0.0, 1.0, 0.0]],
+                opacity: 0.5,
+            }),
+        };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&t).unwrap()).unwrap(), t);
     }
 
     #[test]

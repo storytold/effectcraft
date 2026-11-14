@@ -145,6 +145,22 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
     }
 
+    fn layer_transform(&self, id: u64, comp_time: f64) -> Option<effectcraft_effects::LayerXf> {
+        let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
+        if !comp_time.is_finite() {
+            return None;
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        // other layer → world → this layer, both at that time
+        let m = (ctx.world_matrix(self.layer).inverse()? * ctx.world_matrix(other)).0;
+        let (size, o) = ctx.effect_bounds(other);
+        // from the other layer's effect space (layer point = q + o) to this layer's effect space
+        // (layer point - self.origin)
+        let shift = [self.origin[0], self.origin[1], 0.0];
+        let to_self = std::array::from_fn(|i| [m[i][0], m[i][1], m[i][2], m[i][0] * o[0] + m[i][1] * o[1] + m[i][3] - shift[i]]);
+        Some(effectcraft_effects::LayerXf { to_self, size, opacity: ctx.opacity(other) })
+    }
+
     fn layer_at(&self, id: u64, comp_time: f64, masks_and_effects: bool) -> Option<LayerPixels> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         if (other.id == self.layer.id && masks_and_effects) || !comp_time.is_finite() || self.r.depth > MAX_FX_DEPTH {
