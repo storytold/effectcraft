@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 use effectcraft_engine::Session;
-use effectcraft_engine::scriptui::{ScriptUiEvent, ScriptWindow, layout};
+use effectcraft_engine::scriptui::{FILE_DIALOG_EVENT, FileDialogKind, ScriptFileDialog, ScriptUiEvent, ScriptWindow, layout};
 use serde_json::{Value as J, json};
 use web_time::Instant;
 
@@ -122,6 +122,116 @@ pub(crate) fn native_modal(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
                 a.output.push(format!("Error{line}: {}", e.message));
                 Ok(())
             });
+        }
+    }
+}
+
+/// The extensions a ScriptUI file filter names, lower case: `"*.wav"`, `"Audio:*.mp3;*.wav,All
+/// files:*.*"` (Windows), `"Audio (*.mp3, *.wav)|*.mp3;*.wav"`… Wildcard-only patterns (`*.*`)
+/// name none; a filter without extensions (or a macOS filter function) offers every file.
+pub(crate) fn filter_exts(filter: &str) -> Vec<String> {
+    const MAX_EXTS: usize = 64;
+    const MAX_LEN: usize = 16;
+    let mut out: Vec<String> = vec![];
+    for part in filter.split("*.").skip(1) {
+        let ext: String = part.chars().take_while(char::is_ascii_alphanumeric).collect();
+        if ext.is_empty() || ext.len() > MAX_LEN {
+            continue;
+        }
+        let ext = ext.to_ascii_lowercase();
+        if !out.contains(&ext) {
+            out.push(ext);
+        }
+        if out.len() >= MAX_EXTS {
+            break;
+        }
+    }
+    out
+}
+
+/// The name a ScriptUI file filter gives its first entry (`"Audio"` in `"Audio:*.mp3;*.wav"`,
+/// `"Audio (*.mp3)|*.mp3"`); empty when it gives none.
+pub(crate) fn filter_label(filter: &str) -> String {
+    const MAX_LEN: usize = 64;
+    let Some(end) = filter.find([':', '|']) else { return String::new() };
+    // "Audio (*.mp3, *.wav)": the name without its list of patterns.
+    let label = filter.get(..end).unwrap_or_default();
+    let label = label.split('(').next().unwrap_or_default().trim();
+    if label.contains('*') { String::new() } else { label.chars().take(MAX_LEN).collect() }
+}
+
+/// Whether a ScriptUI file filter also offers every file (`*.*`, or a bare `*` pattern).
+pub(crate) fn filter_any(filter: &str) -> bool {
+    filter.contains("*.*") || filter.split([':', '|', ';', ',']).any(|p| p.trim() == "*")
+}
+
+static NEXT_FILE_DIALOG: AtomicU32 = AtomicU32::new(1);
+
+/// Argument `i` as text; empty when null or missing.
+fn text_arg(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<String> {
+    match args.get(i) {
+        None => Ok(String::new()),
+        Some(v) if v.is_null() || v.is_undefined() => Ok(String::new()),
+        Some(v) => Ok(v.to_string(ctx)?.to_std_string_escaped()),
+    }
+}
+
+/// `__fileDialog(kind, prompt, filter, multiSelect, start)` → `[path…]` JSON or `null`:
+/// `File.openDialog`, `File.saveDialog`, `Folder.selectDialog` and the instance `openDlg` /
+/// `saveDlg` / `selectDlg` (#2778). On a script-host thread, with a frontend that shows the
+/// scripts' file dialogs ([`effectcraft_engine::scriptui::ScriptUi::answers_file_dialogs`]), it
+/// asks for the dialog ([`ScriptFileDialog`]), hands the session back to the caller like a modal
+/// dialog does and waits for `scriptui.fileDialog`'s answer. Elsewhere (the Script Console, the
+/// web, headless runs) there is no dialog to wait on: `null`, as a cancelled dialog.
+pub(crate) fn native_file_dialog(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let kind = match arg_string(args, 0, ctx)?.as_str() {
+        "save" => FileDialogKind::Save,
+        "folder" => FileDialogKind::Folder,
+        _ => FileDialogKind::Open,
+    };
+    let prompt = text_arg(args, 1, ctx)?;
+    let filter = text_arg(args, 2, ctx)?;
+    let start = text_arg(args, 4, ctx)?;
+    let many = kind == FileDialogKind::Open && args.get(3).is_some_and(JsValue::to_boolean);
+    let id = NEXT_FILE_DIALOG.fetch_add(1, Ordering::Relaxed);
+    let asked = with_active(|a| {
+        if a.link.is_none() || !a.session.script_ui.answers_file_dialogs {
+            return Ok(false);
+        }
+        // One dialog at a time per script.
+        a.session.script_ui.file_dialogs.retain(|d| d.host != a.host);
+        let folder = kind == FileDialogKind::Folder;
+        let (exts, label, any) = if folder { (vec![], String::new(), false) } else { (filter_exts(&filter), filter_label(&filter), filter_any(&filter)) };
+        a.session.script_ui.file_dialogs.push(ScriptFileDialog { id, host: a.host, kind, prompt, exts, label, any, many, start, shown: false });
+        Ok(true)
+    })
+    .unwrap_or(false);
+    if !asked {
+        return Ok(JsValue::null());
+    }
+    let forget = || {
+        let _ = with_active(|a| {
+            a.session.script_ui.file_dialogs.retain(|d| d.id != id);
+            Ok(())
+        });
+    };
+    loop {
+        let windows = snapshot(ctx);
+        let out = crate::Outcome { output: settle(), waiting: true, ..Default::default() };
+        // The caller went away: as cancelled.
+        let Some(ev) = yield_wait(out, windows, false) else { return Ok(JsValue::null()) };
+        if ev.kind == FILE_DIALOG_EVENT {
+            // An answer to an earlier dialog of this script is not this one's.
+            if ev.value.get("id").and_then(J::as_u64) == Some(u64::from(id)) {
+                forget();
+                let paths = ev.value.get("paths").cloned().unwrap_or(J::Null);
+                return Ok(js_str(&paths.to_string()));
+            }
+        } else if ev.kind == "close" {
+            // `dispatch_ui` refuses the script's window events while it waits; a close that got
+            // here all the same ends the wait as cancelled, so the window can be closed.
+            forget();
+            return Ok(JsValue::null());
         }
     }
 }
@@ -320,8 +430,7 @@ fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
             }
             publish(session, host, &name, windows);
             if done {
-                session.script_ui.windows.retain(|w| w.host != host);
-                session.script_ui.revision += 1;
+                forget_host(session, host);
             } else if let Ok(mut h) = hosts().lock() {
                 h.insert(host, HostEnd { next_due, epoch: session.script_ui.project_epoch, ..end });
             }
@@ -329,6 +438,13 @@ fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
         }
         Err(_) => crate::Outcome { error: Some(ScriptError { message: "the script host stopped".into(), ..Default::default() }), ..Default::default() },
     }
+}
+
+/// A script host has ended: its windows close and nothing waits on its file dialogs.
+fn forget_host(session: &mut Session, host: u32) {
+    session.script_ui.windows.retain(|w| w.host != host);
+    session.script_ui.file_dialogs.retain(|d| d.host != host);
+    session.script_ui.revision += 1;
 }
 
 /// Run a script file on a new script-host thread (see the module docs). Not on the web, where
@@ -434,22 +550,33 @@ pub fn dispatch_ui(session: &mut Session, ev: &ScriptUiEvent) -> Result<J, Strin
     if ACTIVE.with(|a| a.try_borrow().map(|g| g.is_some()).unwrap_or(true)) {
         return Err("scripts can't drive script windows".into());
     }
-    let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;
-    let (host, name) = (w.host, w.script.clone());
-    let inline = host == CONSOLE_HOST || INLINE.with(|m| m.borrow().contains_key(&host));
-    if inline {
-        return Ok(dispatch_inline(session, host, &name, ev).to_json());
-    }
+    let host = if ev.kind == FILE_DIALOG_EVENT {
+        // The answer to a file dialog goes to the script waiting on it (only script-host
+        // threads wait on one, see [`native_file_dialog`]).
+        let id = ev.value.get("id").and_then(J::as_u64);
+        let asked = session.script_ui.file_dialogs.iter().find(|d| Some(u64::from(d.id)) == id);
+        asked.map(|d| d.host).ok_or("no such file dialog")?
+    } else {
+        let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;
+        let (host, name) = (w.host, w.script.clone());
+        // The script is inside its file dialog's call: its windows wait for the answer.
+        if session.script_ui.file_dialogs.iter().any(|d| d.host == host) {
+            return Err("the script is waiting for its file dialog".into());
+        }
+        let inline = host == CONSOLE_HOST || INLINE.with(|m| m.borrow().contains_key(&host));
+        if inline {
+            return Ok(dispatch_inline(session, host, &name, ev).to_json());
+        }
+        host
+    };
     let end = hosts().lock().ok().and_then(|mut h| h.remove(&host));
     let Some(end) = end else {
-        session.script_ui.windows.retain(|w| w.host != host);
-        session.script_ui.revision += 1;
+        forget_host(session, host);
         return Err("the script that made this window has ended".into());
     };
     if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Event(std::mem::take(session), ev.clone())) {
         *session = msg.into_session();
-        session.script_ui.windows.retain(|w| w.host != host);
-        session.script_ui.revision += 1;
+        forget_host(session, host);
         return Err("the script that made this window has ended".into());
     }
     Ok(receive(session, host, end).to_json())
@@ -487,7 +614,10 @@ fn dispatch_inline(session: &mut Session, host: u32, name: &str, ev: &ScriptUiEv
 /// Whether `host`'s tasks stop now that the project it ran with was closed: it has no window
 /// open and is not a Startup script's.
 fn ends_with_project(session: &Session, host: u32) -> bool {
-    !session.script_ui.windows.iter().any(|w| w.host == host) && !session.script_ui.startup_hosts.contains(&host)
+    // A script waiting on its file dialog goes on when it is answered.
+    !session.script_ui.windows.iter().any(|w| w.host == host)
+        && !session.script_ui.startup_hosts.contains(&host)
+        && !session.script_ui.file_dialogs.iter().any(|d| d.host == host)
 }
 
 /// Run the due tasks of the script-host threads; hosts without windows whose project was closed
@@ -501,13 +631,16 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
             let Some(end) = h.get(&host) else { continue };
             if end.epoch != epoch && ends_with_project(session, host) {
                 // Dropping its end lets the host thread finish.
-                stale.extend(h.remove(&host));
+                stale.extend(h.remove(&host).map(|end| (host, end)));
             } else if end.next_due.is_some_and(|d| d <= now) {
                 due.push(host);
             }
         }
     }
-    drop(stale);
+    for end in stale {
+        forget_host(session, end.0);
+        drop(end.1);
+    }
     for host in due {
         if session.script_ui.render_host.is_some() {
             break;
@@ -515,8 +648,7 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
         let Some(end) = hosts().lock().ok().and_then(|mut h| h.remove(&host)) else { continue };
         if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Tick(std::mem::take(session), now)) {
             *session = msg.into_session();
-            session.script_ui.windows.retain(|w| w.host != host);
-            session.script_ui.revision += 1;
+            forget_host(session, host);
             continue;
         }
         report.add(receive(session, host, end));

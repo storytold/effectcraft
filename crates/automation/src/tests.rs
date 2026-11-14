@@ -1587,6 +1587,7 @@ fn automation_roots_refuse_running_script_code() {
         ("scriptui.set", json!({"window": 1, "widget": 2, "value": 1})),
         ("scriptui.mouse", json!({"window": 1, "widget": 2, "type": "click"})),
         ("scriptui.close", json!({"window": 1})),
+        ("scriptui.fileDialog", json!({"host": 1, "paths": null})),
     ] {
         let msg = refused(&mut s, "execute_command", json!({"command": command, "params": params}));
         assert!(msg.contains("not available while file access is confined"), "`{command}`: {msg}");

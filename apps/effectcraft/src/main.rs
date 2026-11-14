@@ -402,7 +402,9 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
                 app.ui.status = note.into();
             }
             app.hooks.pick_files = Some(Box::new(|exts: &[&str]| {
-                rfd::FileDialog::new().add_filter("Media", exts).pick_files().unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect()
+                // No extensions (a script's File.openDialog without a filter): every file.
+                let d = if exts.is_empty() { rfd::FileDialog::new() } else { rfd::FileDialog::new().add_filter("Media", exts) };
+                d.pick_files().unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect()
             }));
             app.hooks.pick_save = Some(Box::new(|name: &str| {
                 rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj"]).set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string())
@@ -430,6 +432,8 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
             app.hooks.audio_device = Some(Box::new(audio_out::open));
             app.hooks.audio_devices = Some(Box::new(audio_out::devices));
             app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
+            // Scripts' file dialogs where they block (Windows; see [`install_file_dialogs`]).
+            app.hooks.pick_file_dialog = Some(Box::new(sheet_dialogs::pick_blocking));
             app.hooks.pick_save_file = Some(Box::new(|name: &str, ext: &str| {
                 // A default with a folder that exists opens the dialog there.
                 let path = std::path::Path::new(name);

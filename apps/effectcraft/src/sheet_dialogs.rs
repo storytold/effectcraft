@@ -59,11 +59,107 @@ fn path(file: Option<FileHandle>) -> Vec<String> {
     paths(file.map(|f| vec![f]))
 }
 
+/// The filters of a script's file dialog (#2778): its own, under the script's name for it (else
+/// "Files"), then "All Files" when the script's filter offers every file. Without extensions, no
+/// filter: every file. macOS takes all the filters' extensions together as the allowed types, so a
+/// dialog that also offers every file gets no filter there.
+macro_rules! script_filters {
+    ($dialog:expr, $label:expr, $exts:expr, $any:expr) => {{
+        let (d, label, exts, any): (_, &str, &[String], bool) = ($dialog, $label, $exts, $any);
+        if exts.is_empty() || (any && cfg!(target_os = "macos")) {
+            d
+        } else {
+            let d = d.add_filter(if label.is_empty() { "Files" } else { label }, exts);
+            if any { d.add_filter("All Files", &["*"]) } else { d }
+        }
+    }};
+}
+
+/// The folder a script's dialog starts in: its `start` when that is a folder, else the folder
+/// the file `start` names lives in; `None` when neither exists (the system's choice).
+fn start_dir(start: &str) -> Option<std::path::PathBuf> {
+    if start.is_empty() {
+        return None;
+    }
+    let at = std::path::Path::new(start);
+    if at.is_dir() { Some(at.to_path_buf()) } else { at.parent().filter(|d| d.is_dir()).map(std::path::Path::to_path_buf) }
+}
+
+/// The filters of a script's save dialog: the script's own ([`script_filters!`]), else the
+/// extension of the default name.
+fn save_exts(exts: &[String], default: &str) -> Vec<String> {
+    if exts.is_empty() { std::path::Path::new(default).extension().map(|e| vec![e.to_string_lossy().to_string()]).unwrap_or_default() } else { exts.to_vec() }
+}
+
+/// A script's file dialog, blocking until it closes (`Hooks::pick_file_dialog`, Windows): its
+/// paths, empty when cancelled. Other dialogs have their own blocking hooks in `main.rs`.
+pub fn pick_blocking(dialog: FileDialog) -> Vec<String> {
+    let all =
+        |files: Option<Vec<std::path::PathBuf>>| -> Vec<String> { files.unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect() };
+    let one = |file: Option<std::path::PathBuf>| all(file.map(|f| vec![f]));
+    match dialog {
+        FileDialog::Script { label, exts, any, many, prompt, start } => {
+            let mut d = script_filters!(rfd::FileDialog::new(), &label, &exts, any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            if many { all(d.pick_files()) } else { one(d.pick_file()) }
+        }
+        FileDialog::ScriptFolder { prompt, start } => {
+            let mut d = rfd::FileDialog::new();
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            one(d.pick_folder())
+        }
+        FileDialog::ScriptSave { default, prompt, label, exts, any } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = script_filters!(rfd::FileDialog::new(), &label, &save_exts(&exts, &default), any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&default) {
+                d = d.set_directory(dir);
+            }
+            one(d.set_file_name(name).save_file())
+        }
+        FileDialog::Open { exts, many } => {
+            let d = if exts.is_empty() { rfd::FileDialog::new() } else { rfd::FileDialog::new().add_filter("Media", &exts) };
+            if many { all(d.pick_files()) } else { one(d.pick_file()) }
+        }
+        FileDialog::OpenProject => one(rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file()),
+        FileDialog::Folder => one(rfd::FileDialog::new().pick_folder()),
+        FileDialog::Save { default, ext, project } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = if project {
+                rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj"])
+            } else if ext.is_empty() {
+                rfd::FileDialog::new()
+            } else {
+                rfd::FileDialog::new().add_filter(&ext, &[ext.as_str()])
+            };
+            if let Some(dir) = at.parent().filter(|d| d.is_dir()) {
+                d = d.set_directory(dir);
+            }
+            one(d.set_file_name(name).save_file())
+        }
+    }
+}
+
 /// The dialog, as the blocking hooks in `main.rs` show it.
 fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
     match dialog {
         FileDialog::Open { exts, many } => {
-            let d = parented(frame).add_filter("Media", &exts);
+            // No extensions (a script's File.openDialog without a filter): every file.
+            let d = if exts.is_empty() { parented(frame) } else { parented(frame).add_filter("Media", &exts) };
             if many {
                 let f = d.pick_files();
                 Box::pin(async move { paths(f.await) })
@@ -71,6 +167,46 @@ fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
                 let f = d.pick_file();
                 Box::pin(async move { path(f.await) })
             }
+        }
+        FileDialog::Script { label, exts, any, many, prompt, start } => {
+            let mut d = script_filters!(parented(frame), &label, &exts, any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            if many {
+                let f = d.pick_files();
+                Box::pin(async move { paths(f.await) })
+            } else {
+                let f = d.pick_file();
+                Box::pin(async move { path(f.await) })
+            }
+        }
+        FileDialog::ScriptFolder { prompt, start } => {
+            let mut d = parented(frame);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            let f = d.pick_folder();
+            Box::pin(async move { path(f.await) })
+        }
+        FileDialog::ScriptSave { default, prompt, label, exts, any } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = script_filters!(parented(frame), &label, &save_exts(&exts, &default), any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&default) {
+                d = d.set_directory(dir);
+            }
+            let f = d.set_file_name(name).save_file();
+            Box::pin(async move { path(f.await) })
         }
         FileDialog::OpenProject => {
             let f = parented(frame).add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file();

@@ -687,7 +687,15 @@ Scripts that build ScriptUI windows publish them to the session; agents drive th
 
 A dialog's `show()` waits for the user: the `script.run` / `file.runScript` reply carries
 `"waiting": true`, and the script continues (its final output arrives in the reply of the click
-that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
+that closes the dialog). A script's file dialog (`File.openDialog`, `File.saveDialog`,
+`Folder.selectDialog`, `openDlg` / `saveDlg` / `selectDlg`, as a Browse… button calls them) waits
+the same way in the app, which shows it. `scriptui.fileDialogs` lists the dialogs scripts wait on
+(`{id, host, kind: open|save|folder, prompt, exts, label, any, many, start, shown}`; `shown`: the
+app has shown it) and `scriptui.fileDialog {"id": …, "paths": […]}` (or `null`: cancelled) answers
+one. On Windows the system dialog blocks the app's window until a person closes it, so an agent
+can't answer it there; on macOS and Linux it doesn't block. The script's windows refuse events
+meanwhile, except `scriptui.close`, which cancels the file dialog first. Without the app (headless
+runs), in the Script Console and in Shutdown scripts these return `null` at once. File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
 `file.installScript` / `file.installScriptUIPanel {"path": …}`, `window.scriptPanel {"name": …}`,
 `window.restoreScriptPanels` (the panels open when the app last quit), `file.runStartupScripts` and
 `file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes

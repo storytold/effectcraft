@@ -288,3 +288,18 @@ fn empty_or_missing_folders_run_nothing() {
     crate::install(&mut s);
     assert_eq!(s.execute("file.runShutdownScripts", json!({})).unwrap(), none);
 }
+
+/// #2778: the app is quitting, so nothing would show a Shutdown script's file dialog: it gets null
+/// at once instead of waiting for good.
+#[test]
+fn a_shutdown_script_file_dialog_does_not_wait() {
+    let store = Arc::new(MemoryConfig::default());
+    let probe = r#"var f = File.saveDialog("Save the log", "*.txt"); app.settings.saveSetting("Startup Test", "log", f === null ? "none" : "asked");"#;
+    store.write(&format!("{SHUTDOWN_DIR}/Save Log.jsx"), probe).unwrap();
+    let mut s = session(&store);
+    s.script_ui.answers_file_dialogs = true;
+    let r = s.execute("file.runShutdownScripts", json!({})).unwrap();
+    assert_eq!(r, json!({"ran": ["Save Log.jsx"], "waiting": [], "failed": []}));
+    assert_eq!(setting(&mut s, "log"), "none");
+    assert!(s.script_ui.file_dialogs.is_empty());
+}
