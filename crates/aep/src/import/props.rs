@@ -200,12 +200,12 @@ pub(crate) fn import_transform(
         }
         if source_of == ValueSource::Unreadable {
             // Present in the file but not decodable: the reader gave the default in its place.
-            col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} unreadable, default used"));
+            col.lose_with(LossCategory::DamagedData, || format!("{layer_name}: {match_name} unreadable, default used"));
         }
         if sane(&base) {
             prop.value = base;
         } else {
-            col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} holds a number that is not valid, default used"));
+            col.lose_with(LossCategory::DamagedData, || format!("{layer_name}: {match_name} holds a number that is not valid, default used"));
         }
         let Some(PropNode::Property(node)) = group.get(match_name) else { continue };
         if source_of == ValueSource::Keyframed {
@@ -216,7 +216,7 @@ pub(crate) fn import_transform(
     for (match_name, id) in ROTATIONS {
         let Some(PropNode::Property(node)) = group.get(match_name) else { continue };
         let Some(prop) = target.get_mut(id) else {
-            col.lose(LossCategory::TransformProperties, format!("{layer_name}: {match_name}"));
+            col.lose_with(LossCategory::TransformProperties, || format!("{layer_name}: {match_name}"));
             continue;
         };
         if node.is_animated() {
@@ -226,7 +226,7 @@ pub(crate) fn import_transform(
             if sane(&value) {
                 prop.value = value;
             } else {
-                col.lose(LossCategory::DamagedData, format!("{layer_name}: {match_name} holds a number that is not valid, default used"));
+                col.lose_with(LossCategory::DamagedData, || format!("{layer_name}: {match_name} holds a number that is not valid, default used"));
             }
         }
         import_expression(&node, prop, col);
@@ -246,7 +246,7 @@ pub(crate) fn import_transform(
             }
             // A layer without an orientation (an ambient light) loses nothing with the default.
             (Some(o), None) if !o.animated && !o.has_expression && o.degrees == [0.0; 3] => {}
-            _ => col.lose(LossCategory::TransformProperties, format!("{layer_name}: ADBE Orientation")),
+            _ => col.lose_with(LossCategory::TransformProperties, || format!("{layer_name}: ADBE Orientation")),
         }
     }
     report_other_properties(&group, layer_name, col);
@@ -259,7 +259,7 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
     let what = format!("{layer_name}: ADBE Orientation");
     let stored = layer.orientation_keys();
     if stored.is_empty() {
-        col.lose(LossCategory::TransformProperties, format!("{what} keys unreadable, the static value is used"));
+        col.lose_with(LossCategory::TransformProperties, || format!("{what} keys unreadable, the static value is used"));
         return;
     }
     // Key times count in the property's time scale (a stretched layer's is scaled), as in
@@ -270,7 +270,7 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
     for k in &stored {
         let value = Value::Vec3(k.degrees);
         if !sane(&value) {
-            col.lose(LossCategory::DamagedData, format!("{what}: keyframe value is not a number"));
+            col.lose_with(LossCategory::DamagedData, || format!("{what}: keyframe value is not a number"));
             continue;
         }
         let mut key = Keyframe::new(tm.units(i64::from(k.time_units), scale), value);
@@ -286,10 +286,10 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
         keys.push(key);
     }
     if approximated {
-        col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: bezier key read as linear (the Orientation ease is not sampled)"));
+        col.lose_with(LossCategory::ApproximatedKeyframes, || format!("{what}: bezier key read as linear (the Orientation ease is not sampled)"));
     }
-    keys.sort_by_key(|k| k.time);
-    keys.dedup_by_key(|k| k.time);
+    // Reported as on every other property (`import_keys`, mask paths).
+    sort_unique(&mut keys, &what, "keyframes", col);
     col.imported.keyframes = col.imported.keyframes.saturating_add(keys.len());
     if let Some(first) = keys.first() {
         prop.value = first.value.clone();
@@ -308,7 +308,7 @@ fn report_other_properties(group: &PropGroup<'_, '_>, layer_name: &str, col: &mu
         // A property in its default state (`tdsb` 3) holds nothing to lose.
         let stored = p.is_animated() || p.flags() == Some(1) || p.expression().is_some();
         if stored && !(IGNORED.contains(&name) && p.flags() != Some(1) && !p.is_animated()) {
-            col.lose(LossCategory::TransformProperties, format!("{layer_name}: {name}"));
+            col.lose_with(LossCategory::TransformProperties, || format!("{layer_name}: {name}"));
         }
     }
 }
@@ -327,14 +327,26 @@ pub(crate) fn interp(i: Option<Interpolation>, col: &mut Collector, what: &str) 
         Some(Interpolation::Bezier) => Interp::Bezier,
         Some(Interpolation::Hold) => Interp::Hold,
         Some(Interpolation::Other(code)) => {
-            col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: unknown interpolation {code} read as linear"));
+            col.lose_with(LossCategory::ApproximatedKeyframes, || format!("{what}: unknown interpolation {code} read as linear"));
             Interp::Linear
         }
     }
 }
 
-/// An ease that can be evaluated: finite speed, influence within 0.1 % and 100 %.
-fn ease(speed: f64, influence: f64, factor: f64) -> Option<Ease> {
+/// Puts `keys` in time order and keeps the first of keys at the same time, reporting that some
+/// were dropped (`noun` names them: "keyframes", "path keyframes").
+pub(crate) fn sort_unique(keys: &mut Vec<Keyframe>, what: &str, noun: &str, col: &mut Collector) {
+    keys.sort_by_key(|k| k.time);
+    let before = keys.len();
+    keys.dedup_by_key(|k| k.time);
+    if keys.len() != before {
+        col.lose_with(LossCategory::DamagedData, || format!("{what}: {noun} at the same time"));
+    }
+}
+
+/// An ease that can be evaluated: finite speed within `LIMIT * 100`, influence within 0.1 % and
+/// 100 % (also the rule for mask path keys, `import/masks.rs`).
+pub(crate) fn ease(speed: f64, influence: f64, factor: f64) -> Option<Ease> {
     let speed = speed * factor;
     (speed.is_finite() && speed.abs() <= LIMIT * 100.0 && influence.is_finite()).then(|| Ease { speed, influence: influence.clamp(0.001, 1.0) })
 }
@@ -376,11 +388,11 @@ pub(crate) fn import_keys(node: &AepProp<'_, '_>, kind: Kind, layer_name: &str, 
     let mut keys: Vec<Keyframe> = Vec::new();
     for rec in list.keyframes() {
         let (Some(units), Some(raw)) = (rec.time_units(), rec.value()) else {
-            col.lose(LossCategory::DamagedData, format!("{what}: unreadable keyframe"));
+            col.lose_with(LossCategory::DamagedData, || format!("{what}: unreadable keyframe"));
             continue;
         };
         let Some(value) = kind.value(&raw) else {
-            col.lose(LossCategory::DamagedData, format!("{what}: keyframe value is missing or not a number"));
+            col.lose_with(LossCategory::DamagedData, || format!("{what}: keyframe value is missing or not a number"));
             continue;
         };
         let mut key = Keyframe::new(tm.units(i64::from(units), scale), value);
@@ -422,7 +434,7 @@ pub(crate) fn import_keys(node: &AepProp<'_, '_>, kind: Kind, layer_name: &str, 
                 None => {
                     // The ease cannot be used, so the bezier sides become linear.
                     let why = if undecoded { "the ease of this effect parameter is not decoded" } else { "ease data not decodable" };
-                    col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: bezier key read as linear ({why})"));
+                    col.lose_with(LossCategory::ApproximatedKeyframes, || format!("{what}: bezier key read as linear ({why})"));
                     if key.in_interp == Interp::Bezier {
                         key.in_interp = Interp::Linear;
                     }
@@ -437,12 +449,7 @@ pub(crate) fn import_keys(node: &AepProp<'_, '_>, kind: Kind, layer_name: &str, 
     if keys.is_empty() {
         return;
     }
-    keys.sort_by_key(|k| k.time);
-    let before = keys.len();
-    keys.dedup_by_key(|k| k.time);
-    if keys.len() != before {
-        col.lose(LossCategory::DamagedData, format!("{what}: keyframes at the same time"));
-    }
+    sort_unique(&mut keys, &what, "keyframes", col);
     // The first key's incoming and the last key's outgoing ease mean nothing.
     if let Some(first) = keys.first_mut() {
         first.in_ease.clear();
@@ -455,4 +462,26 @@ pub(crate) fn import_keys(node: &AepProp<'_, '_>, kind: Kind, layer_name: &str, 
         prop.value = first.value.clone();
     }
     prop.keys = keys;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_time::Tick;
+
+    #[test]
+    fn keys_at_the_same_time_are_merged_and_reported() {
+        let key = |t: i64, v: f64| Keyframe::new(Tick(t), Value::Scalar(v));
+        let mut keys = vec![key(5, 1.0), key(0, 2.0), key(5, 3.0)];
+        let mut col = Collector::default();
+        sort_unique(&mut keys, "L: ADBE Orientation", "keyframes", &mut col);
+        assert_eq!(keys.iter().map(|k| (k.time.0, k.value.clone())).collect::<Vec<_>>(), [(0, Value::Scalar(2.0)), (5, Value::Scalar(1.0))]);
+        let report = col.finish();
+        assert_eq!(report.count(LossCategory::DamagedData), 1);
+        assert_eq!(report.losses[0].details, ["L: ADBE Orientation: keyframes at the same time"]);
+        // Distinct times: nothing reported.
+        let mut col = Collector::default();
+        sort_unique(&mut vec![key(1, 0.0), key(0, 0.0)], "L", "keyframes", &mut col);
+        assert!(col.finish().losses.is_empty());
+    }
 }

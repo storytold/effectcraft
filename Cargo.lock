@@ -2106,6 +2106,7 @@ dependencies = [
  "effectcraft-segment",
  "effectcraft-text",
  "effectcraft-time",
+ "effectcraft-ui-egui",
  "eframe",
  "egui",
  "egui_extras",
