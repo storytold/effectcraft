@@ -1,6 +1,6 @@
 //! Character, Paragraph and Align panels. While a text layer is edited in the viewer the
 //! Character and Paragraph panels show and change the selected text (creating style runs);
-//! otherwise they apply to the whole selected text layer.
+//! otherwise they show the first selected text layer and apply to every selected text layer.
 
 use crate::i18n::tr;
 use effectcraft_engine::keyframe::{BaselineOption, Composer, Direction, FigureStyle, FigureWidth, Justify, Kerning, LineJoin, TextDoc};
@@ -22,17 +22,20 @@ pub struct TextTarget {
 }
 
 impl TextTarget {
-    /// `layer.setText` params for this target.
+    /// `layer.setText` params for this target: the edited characters, else every selected text
+    /// layer.
     pub fn params(&self, mut v: serde_json::Value) -> serde_json::Value {
         v["layer"] = json!(self.layer);
-        if let Some(r) = self.range {
-            v["range"] = json!(r);
+        match self.range {
+            Some(r) => v["range"] = json!(r),
+            None => v["selected"] = json!(true),
         }
         v
     }
 }
 
-/// The edited text layer's selection, else the selected text layer's Source Text at the CTI.
+/// The edited text layer's selection, else the Source Text at the CTI of the first selected text
+/// layer that isn't locked (the first one a change reaches), or of the first when all are.
 pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
     let comp = app.session.active_comp()?;
     let cid = app.session.active_comp_id()?;
@@ -56,7 +59,8 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
         .selected_layers
         .iter()
         .filter_map(|id| comp.layer(*id))
-        .find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))?;
+        .filter(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))
+        .min_by_key(|l| l.switches.locked)?;
     let ectx = EvalCtx {
         project: &app.session.project,
         comp_id: cid,
@@ -231,9 +235,9 @@ fn stroke_order_field(
         Some(i @ (3 | 4)) => Some(i as u32 - 2),
         Some(i) => {
             actions.push(json!({"strokeOverFill": i == 1}));
-            // A per-character order puts the layer back on the Per Character Palette, or it
-            // would have no visible effect.
-            (fill_stroke != 0).then_some(0)
+            // A per-character order puts the layers back on the Per Character Palette, or it
+            // would have no visible effect (on another selected layer too, whatever this one's).
+            Some(0)
         }
         None => None,
     }
@@ -256,7 +260,16 @@ fn line_join_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
 /// Sets the layer's More Options > Fill & Stroke to `v` together with the per-character order
 /// it changes, as one undo step.
 fn apply_layer_fill_stroke(app: &mut EffectcraftApp, ctx: &egui::Context, tt: &TextTarget, v: u32, actions: Vec<serde_json::Value>) {
-    let set = json!({"command": "prop.set", "params": {"layer": tt.layer, "path": "text/moreOptions/fillStroke", "value": v}});
+    let mut params = json!({"layer": tt.layer, "path": "text/moreOptions/fillStroke", "value": v});
+    if tt.range.is_none() {
+        params["selected"] = json!(true);
+        // `prop.set` writes the layer it names, locked or not: name one `selected` may change.
+        let comp = app.session.active_comp();
+        let mut selected = app.session.state.selected_layers.iter().filter_map(|id| comp?.layer(*id));
+        let Some(l) = selected.find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text) && !l.switches.locked) else { return };
+        params["layer"] = json!(l.id.0);
+    }
+    let set = json!({"command": "prop.set", "params": params});
     let steps: Vec<serde_json::Value> =
         std::iter::once(set).chain(actions.into_iter().map(|a| json!({"command": "layer.setText", "params": tt.params(a)}))).collect();
     if let Err(e) = crate::menus::invoke(app, ctx, "engine.batch", json!({"steps": steps, "label": "Stroke Order"})) {

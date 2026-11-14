@@ -165,8 +165,9 @@ fn text_color_pick(
         {
             let mut params = json!({"layer": pick.layer});
             params[&pick.field] = json!([s[0], s[1], s[2]]);
-            if let Some(range) = pick.range {
-                params["range"] = json!(range);
+            match pick.range {
+                Some(range) => params["range"] = json!(range),
+                None => params["selected"] = json!(true),
             }
             actions.push(("layer.setText".into(), params));
             app.ui.text_color_pick = None;
