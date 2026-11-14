@@ -103,6 +103,61 @@ fn ctrl_backslash_maximizes_or_restores_the_window() {
     assert!(cmds.contains(&egui::ViewportCommand::Maximized(false)), "{cmds:?}");
 }
 
+/// Review on #1105: off macOS `Ctrl` now parses like `Cmd` (egui reports both for the Ctrl
+/// key), so a Ctrl binding fires there; one that would collide with a Cmd binding of the same
+/// keys is dropped and the Cmd binding keeps working. On macOS nothing changes.
+#[test]
+fn ctrl_shortcuts_never_take_over_cmd_ones() {
+    let (cm, ck) = parse_shortcut("Cmd+K").unwrap();
+    let (tm, tk) = parse_shortcut("Ctrl+K").unwrap();
+    assert_eq!(ck, tk);
+    assert_eq!(cm == tm, !cfg!(target_os = "macos"));
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let before: Vec<(egui::Modifiers, egui::Key, String)> = bindings(&app.session).into_iter().map(|b| (b.0, b.1, b.2)).collect();
+    // No default binding is dropped as a Ctrl/Cmd duplicate.
+    for (sc, b) in app.session.shortcuts().bindings() {
+        if let Some((m, k)) = parse_shortcut(sc)
+            && !(sc.contains("Ctrl") && sc.contains("Cmd"))
+            && !sc.starts_with("Physical+")
+        {
+            assert!(before.iter().any(|x| (x.0, x.1, x.2.as_str()) == (m, k, b.command.as_str())), "{sc} → {}", b.command);
+        }
+    }
+    let cmd_k: Vec<String> = before.iter().filter(|b| (b.0, b.1) == (cm, ck)).map(|b| b.2.clone()).collect();
+    // A custom Ctrl+K never steals Cmd+K's command.
+    app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+K"})).unwrap();
+    let after = bindings(&app.session);
+    let hand_k = after.iter().any(|b| b.2 == "tool.hand" && (b.0, b.1) == (tm, tk));
+    let first_k = after.iter().find(|b| (b.0, b.1) == (cm, ck)).map(|b| b.2.clone());
+    if cfg!(target_os = "macos") || cmd_k.is_empty() {
+        assert!(hand_k, "Ctrl+K binds where nothing else uses those keys");
+    } else {
+        assert!(!hand_k);
+        assert_eq!(first_k, cmd_k.first().cloned());
+    }
+}
+
+/// Regression for the shifted-alias collision edge case reported in review on #1983:
+/// `Ctrl+Shift+}` (CloseCurlyBracket) must be treated as colliding with `Cmd+Shift+]`
+/// (CloseBracket, whose shifted alias IS CloseCurlyBracket), and therefore dropped on
+/// non-macOS. Before the fix, `cmd_bindings` only held CloseBracket so the Ctrl binding
+/// slipped through and could silently replace the layer-arrange shortcut.
+#[test]
+fn ctrl_shift_curly_collides_with_cmd_shift_bracket() {
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+Shift+}"})).unwrap();
+    let bound = bindings(&app.session);
+    let (tm, tk) = parse_shortcut("Ctrl+Shift+}").unwrap();
+    let hand = bound.iter().any(|b| b.2 == "tool.hand" && (b.0, b.1) == (tm, tk));
+    let arrange = bound.iter().any(|b| b.2.starts_with("layer.arrange"));
+    if cfg!(target_os = "macos") {
+        assert!(hand, "Ctrl+Shift+}} binds on macOS (distinct from Cmd)");
+    } else {
+        assert!(!hand, "Ctrl+Shift+}} must not bind when Cmd+Shift+] exists");
+        assert!(arrange, "Cmd+Shift+] (layer.arrange) must survive");
+    }
+}
+
 /// The default keys of the keyboard-only commands parse and reach them.
 #[test]
 fn keyboard_only_commands_are_bound() {
@@ -235,9 +290,10 @@ fn dispatch_uses_the_active_custom_preset() {
     let (m, k) = parse_shortcut("Cmd+Alt+Shift+Y").unwrap();
     assert!(find(&app, "layer.newNull").contains(&(m, k)));
     // A UI command rebound in a custom preset.
-    app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+Alt+H"})).unwrap();
+    // (Ctrl+Alt+J: off macOS Ctrl+Alt+H is Cmd+Alt+H, Toggle Hold Keyframe's, and wouldn't bind.)
+    app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+Alt+J"})).unwrap();
     assert_eq!(app.session.keymaps.active, "Custom");
-    let (m2, k2) = parse_shortcut("Ctrl+Alt+H").unwrap();
+    let (m2, k2) = parse_shortcut("Ctrl+Alt+J").unwrap();
     assert_eq!(find(&app, "tool.hand"), vec![(m2, k2)]);
     app.session.execute("shortcuts.set", json!({"command": "layer.newNull", "keys": "F6"})).unwrap();
     assert_eq!(find(&app, "layer.newNull"), vec![(egui::Modifiers::NONE, egui::Key::F6)]);

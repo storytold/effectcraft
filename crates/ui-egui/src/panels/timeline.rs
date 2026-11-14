@@ -471,7 +471,7 @@ struct Cols {
 }
 
 fn cols(x0: f32, width: f32, vis: Vis) -> Cols {
-    let name_w = (width - vis.fixed()).max(120.0);
+    let name_w = (width - vis.fixed()).max(NAME_FLOOR);
     let mut x = x0;
     let mut next = |on: bool, w: f32| {
         let at = x;
@@ -1777,6 +1777,57 @@ struct KeyHit<'a> {
     this_key: serde_json::Value,
 }
 
+/// Narrowest the layer columns get; the header controls need this much room.
+const MIN_LEFT_W: f32 = 420.0;
+
+/// Narrowest the name column gets when the divider is dragged left; its text fades out.
+const NAME_FLOOR: f32 = 40.0;
+
+/// `text` at `pos`, clipped to `rect`; when it doesn't fit, its last 24 px fade out instead of
+/// being cut off.
+fn fade_text(p: &egui::Painter, pos: Pos2, text: String, font: egui::FontId, color: Color32, rect: Rect) {
+    const FADE: f32 = 24.0;
+    const STEPS: usize = 6;
+    let clip = p.clip_rect();
+    let fits = p.layout_no_wrap(text.clone(), font.clone(), color).size().x <= rect.width();
+    if fits || rect.width() <= FADE {
+        p.with_clip_rect(rect.intersect(clip)).text(pos, Align2::LEFT_CENTER, text, font, color);
+        return;
+    }
+    let solid_end = rect.max.x - FADE;
+    p.with_clip_rect(Rect::from_min_max(rect.min, pos2(solid_end, rect.max.y)).intersect(clip)).text(pos, Align2::LEFT_CENTER, text.clone(), font.clone(), color);
+    let step = FADE / STEPS as f32;
+    for i in 0..STEPS {
+        let x0 = solid_end + step * i as f32;
+        let strip = Rect::from_min_max(pos2(x0, rect.min.y), pos2(x0 + step, rect.max.y)).intersect(clip);
+        let alpha = 1.0 - (i as f32 + 0.5) / STEPS as f32;
+        p.with_clip_rect(strip).text(pos, Align2::LEFT_CENTER, text.clone(), font.clone(), color.gamma_multiply(alpha));
+    }
+}
+
+/// The divider between the layer columns and the time graph: drag it to give the columns or the
+/// graph more room, double-click to follow the visible columns again.
+fn split_handle(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &Rw) {
+    let tl = &g.tl;
+    let hit = Rect::from_min_max(pos2(tl.graph_x0 - 4.0, tl.rect.min.y), pos2(tl.graph_x0 + 3.0, tl.rect.max.y - tl.footer_h));
+    let resp = ui.interact(hit, egui::Id::new("timeline-split"), Sense::click_and_drag());
+    app.auto.add("timeline.split", hit, "Timeline divider");
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if resp.double_clicked() {
+        app.ui.timeline.split_w = None;
+    } else if resp.dragged() {
+        let max_left = (tl.rect.width() * 0.72).max(MIN_LEFT_W);
+        let min_left = (tl.vis.fixed() + NAME_FLOOR).max(MIN_LEFT_W).min(max_left);
+        app.ui.timeline.split_w = Some((tl.left_w + resp.drag_delta().x).clamp(min_left, max_left));
+        ui.ctx().request_repaint();
+    }
+    if resp.hovered() || resp.dragged() {
+        tl.p.line_segment([pos2(tl.graph_x0 - 1.0, tl.rect.min.y), pos2(tl.graph_x0 - 1.0, tl.rect.max.y - tl.footer_h)], Stroke::new(2.0, tl.t.accent));
+    }
+}
+
 /// Computes this frame's layout: zoom, scroll and the panel's regions.
 fn layout(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, cid: ItemId, comp: &Arc<Comp>) -> Tl {
     let t = app.tokens;
@@ -1790,10 +1841,18 @@ fn layout(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, cid: ItemId, comp
     let colhdr_h = 22.0;
     let footer_h = 24.0;
     let vis = Vis::of(&app.ui.timeline);
-    let left_w = (vis.fixed() + 190.0).clamp(420.0, (rect.width() * 0.72).max(420.0));
+    // The divider next to the time graph sets the width when dragged ([`split_handle`]): the
+    // other columns keep their width and the name column takes the difference.
+    let max_left = (rect.width() * 0.72).max(MIN_LEFT_W);
+    let min_left = (vis.fixed() + NAME_FLOOR).max(MIN_LEFT_W).min(max_left);
+    let user_w = app.ui.timeline.split_w.filter(|w| w.is_finite());
+    let left_w = match user_w {
+        Some(w) => w.clamp(min_left, max_left),
+        None => (vis.fixed() + 190.0).clamp(MIN_LEFT_W, max_left),
+    };
     // Columns wider than the pane scroll horizontally (Shift+wheel / trackpad over the outline,
     // or the scroll bar above the footer); the name column keeps its minimum width.
-    let natural_w = vis.fixed() + 190.0;
+    let natural_w = if user_w.is_some() { left_w.max(vis.fixed() + NAME_FLOOR) } else { vis.fixed() + 190.0 };
     let overflow = (natural_w - left_w).max(0.0);
     app.ui.timeline.outline_scroll = app.ui.timeline.outline_scroll.clamp(0.0, overflow);
     let oscroll = app.ui.timeline.outline_scroll;
@@ -2020,6 +2079,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     comp_markers_ui(app, ui, g);
     hand_tool_pan(app, ui, g);
     drop_targets(app, ui, g);
+    split_handle(app, ui, g);
     let Rw { tl, ui_actions, .. } = rw;
     apply_ui_acts(app, &tl.comp, ui_actions);
     apply_actions(app, ui, &tl.ctx, tl.actions);
@@ -3090,8 +3150,7 @@ fn layer_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &RowC
             );
             lp.rect_filled(cell, 0.0, SELECTED_NAME_BG);
         }
-        let lpn = lp.with_clip_rect(name_rect.intersect(lp.clip_rect()));
-        lpn.text(pos2(name_rect.min.x, cy), Align2::LEFT_CENTER, display_name(app, layer), Tokens::ui(12.0), name_col);
+        fade_text(&lp, pos2(name_rect.min.x, cy), display_name(app, layer), Tokens::ui(12.0), name_col, name_rect);
     }
 }
 

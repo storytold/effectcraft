@@ -192,6 +192,17 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.dialog = Some(crate::Dialog::CommandPalette);
             Value::Null
         }
+        "app.fxConsole" => {
+            // The native menu bar (macOS) takes Ctrl+Space before the console sees it, so the
+            // command itself toggles: with no query, running it while open closes the console.
+            let query = p.get("query").and_then(Value::as_str);
+            if query.is_none() && app.dialog_state.fx_console.is_some() {
+                app.dialog_state.fx_console = None;
+            } else {
+                crate::panels::fx_console::open(app, ctx, query.unwrap_or_default());
+            }
+            Value::Null
+        }
         "app.keyboardShortcuts" => {
             crate::panels::shortcut_editor::open(app);
             Value::Null
