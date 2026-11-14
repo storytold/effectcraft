@@ -220,7 +220,7 @@ fn another_comp_made_active_closes_the_dialog() {
 fn a_replaced_project_closes_the_dialog_even_when_the_comp_id_is_reused() {
     closes_when(|s| {
         let before = s.active_comp_id().unwrap();
-        s.execute("file.newProject", json!({})).unwrap();
+        s.execute("file.newProject", json!({"discard": true})).unwrap();
         s.execute("comp.new", json!({"name": "Scene", "width": 640, "height": 360, "duration": 2})).unwrap();
         assert_eq!(s.active_comp_id(), Some(before), "the new project reuses the comp's id");
     });
