@@ -378,6 +378,34 @@ struct Item {
     range: Range<usize>,
     rtl: bool,
     glyphs: Vec<ShapedGlyph>,
+    /// Whether the glyphs' clusters never decrease (`Some(true)`) or never increase
+    /// (`Some(false)`) along `glyphs`: the glyphs of a cluster range are then contiguous.
+    cluster_order: Option<bool>,
+}
+
+impl Item {
+    fn new(range: Range<usize>, rtl: bool, glyphs: Vec<ShapedGlyph>) -> Self {
+        let cluster_order = if glyphs.windows(2).all(|w| w[0].cluster <= w[1].cluster) {
+            Some(true)
+        } else if glyphs.windows(2).all(|w| w[0].cluster >= w[1].cluster) {
+            Some(false)
+        } else {
+            None
+        };
+        Self { range, rtl, glyphs, cluster_order }
+    }
+
+    /// The glyphs whose cluster lies in `run`, in glyph order, found by bisection when the clusters
+    /// are ordered (a line of a long paragraph otherwise scanned the whole item).
+    fn glyphs_in(&self, run: &Range<usize>) -> impl Iterator<Item = &ShapedGlyph> {
+        let g = &self.glyphs;
+        let (lo, hi) = match self.cluster_order {
+            Some(true) => (g.partition_point(|x| x.cluster < run.start), g.partition_point(|x| x.cluster < run.end)),
+            Some(false) => (g.partition_point(|x| x.cluster >= run.end), g.partition_point(|x| x.cluster >= run.start)),
+            None => (0, g.len()),
+        };
+        g[lo..hi].iter().filter(|x| run.contains(&x.cluster))
+    }
 }
 
 fn upper_single(c: char) -> char {
@@ -628,9 +656,31 @@ fn is_hanging_open(c: char) -> bool {
     matches!(c, '"' | '\'' | '\u{2018}' | '\u{201c}' | '(' | '\u{ab}')
 }
 
+/// Whether no run is reversed and each starts at or after the end of the one before it (the runs
+/// of a document): the precondition of [`run_at`]'s bisection.
+fn runs_ordered(runs: &[(Range<usize>, TextStyle)]) -> bool {
+    runs.iter().all(|(r, _)| r.start <= r.end) && runs.windows(2).all(|w| w[0].0.end <= w[1].0.start)
+}
+
+/// Style runs with whether they are [`runs_ordered`].
+#[derive(Clone, Copy)]
+struct Runs<'a> {
+    list: &'a [(Range<usize>, TextStyle)],
+    ordered: bool,
+}
+
 /// The style run index covering global byte `b` (the run before it at a boundary, for empty
-/// paragraphs at the end).
-fn run_at(runs: &[(Range<usize>, TextStyle)], b: usize) -> usize {
+/// paragraphs at the end). `ordered` is [`runs_ordered`] of `runs`.
+fn run_at(runs: &[(Range<usize>, TextStyle)], ordered: bool, b: usize) -> usize {
+    // Ordered, non-overlapping runs: the last one starting at or before `b` is the only one that
+    // can hold it, found by bisection (a scan from the first run per character was quadratic).
+    // Anything else (a gap, overlapping or unordered runs) takes the scan, whose first match wins.
+    if ordered {
+        let i = runs.partition_point(|(r, _)| r.start <= b).saturating_sub(1);
+        if runs.get(i).is_some_and(|(r, _)| r.contains(&b)) {
+            return i;
+        }
+    }
     runs.iter().position(|(r, _)| b >= r.start && b < r.end).unwrap_or_else(|| runs.iter().rposition(|(r, _)| r.start <= b).unwrap_or(0))
 }
 
@@ -706,7 +756,7 @@ impl<'a> Para<'a> {
     fn new(
         text: &'a str,
         base: usize,
-        runs: &'a [(Range<usize>, TextStyle)],
+        runs: Runs<'a>,
         primaries: &'a [Resolved],
         variation_ids: &'a [u32],
         para: &'a ParagraphStyle,
@@ -716,7 +766,7 @@ impl<'a> Para<'a> {
         let bidi = BidiInfo::new(text, default_level);
         let base_rtl = bidi.paragraphs[0].level.is_rtl();
         let chars = char_forms(text, base, runs, primaries, &bidi);
-        let items = build_items(text, &chars, runs);
+        let items = build_items(text, &chars, runs.list);
         // Prefix widths and the preceding non-whitespace boundary make candidate line widths O(1).
         // Every-line composition evaluates O(n²) candidate breaks; summing each candidate's bytes
         // or rescanning its trailing whitespace would otherwise add another factor of text length.
@@ -739,7 +789,7 @@ impl<'a> Para<'a> {
             }
             previous_non_ws[b + c.len_utf8()] = non_ws_end;
         }
-        Para { text, base, runs, primaries, variation_ids, para, width, bidi, base_rtl, chars, items, char_adv, prefix_adv, previous_non_ws }
+        Para { text, base, runs: runs.list, primaries, variation_ids, para, width, bidi, base_rtl, chars, items, char_adv, prefix_adv, previous_non_ws }
     }
 
     fn range_w(&self, r: Range<usize>) -> f32 {
@@ -907,7 +957,7 @@ impl<'a> Para<'a> {
                 idx.reverse();
             }
             for k in idx {
-                for g in self.items[k].glyphs.iter().filter(|g| run.contains(&g.cluster)) {
+                for g in self.items[k].glyphs_in(&run) {
                     let st = &self.runs[g.run].1;
                     let x0 = pen;
                     pen += g.pre;
@@ -968,9 +1018,10 @@ impl<'a> Para<'a> {
             }
         }
         // end of line caret
-        let end_x = match self.chars.iter().rev().find(|c| c.0 < r.end && c.0 >= r.start) {
+        let last_char = self.chars.partition_point(|c| c.0 < r.end).checked_sub(1).and_then(|i| self.chars.get(i)).filter(|c| c.0 >= r.start);
+        let end_x = match last_char {
             Some(c) => {
-                let cs = cluster_starts.iter().rev().find(|s| **s <= c.0).copied();
+                let cs = cluster_starts.partition_point(|s| *s <= c.0).checked_sub(1).and_then(|i| cluster_starts.get(i)).copied();
                 match cs.and_then(|s| extents.get(&s)) {
                     Some(&(x0, x1, rtl)) => {
                         if rtl {
@@ -1021,11 +1072,11 @@ impl<'a> Para<'a> {
 }
 
 /// Each char with its shaped form, face, direction and run.
-fn char_forms(text: &str, base: usize, runs: &[(Range<usize>, TextStyle)], primaries: &[Resolved], bidi: &BidiInfo) -> Vec<CharInfo> {
+fn char_forms(text: &str, base: usize, runs: Runs, primaries: &[Resolved], bidi: &BidiInfo) -> Vec<CharInfo> {
     text.char_indices()
         .map(|(b, c)| {
-            let si = run_at(runs, base + b);
-            let style = &runs[si].1;
+            let si = run_at(runs.list, runs.ordered, base + b);
+            let style = &runs.list[si].1;
             let primary = primaries[si].face;
             let face_of = |ch: char| if ch.is_whitespace() { primary } else { fonts::fallback_for(ch, primary) };
             let all_small = style.opentype.all_small_caps && style.caps != Caps::All;
@@ -1073,23 +1124,15 @@ fn build_items(text: &str, chars: &[CharInfo], runs: &[(Range<usize>, TextStyle)
         let mut glyphs = shape_item(&sub, rtl, face, size, style, si, form);
         space_item(&mut glyphs, style, text, true);
         let end = if j < chars.len() { chars[j].0 } else { text.len() };
-        items.push(Item { range: chars[i].0..end, rtl, glyphs });
+        items.push(Item::new(chars[i].0..end, rtl, glyphs));
         i = j;
     }
     items
 }
 
-fn paragraph(
-    text: &str,
-    base: usize,
-    runs: &[(Range<usize>, TextStyle)],
-    primaries: &[Resolved],
-    variation_ids: &[u32],
-    para: &ParagraphStyle,
-    width: Option<f32>,
-) -> Vec<ParaLine> {
+fn paragraph(text: &str, base: usize, runs: Runs, primaries: &[Resolved], variation_ids: &[u32], para: &ParagraphStyle, width: Option<f32>) -> Vec<ParaLine> {
     if text.is_empty() {
-        let si = run_at(runs, base);
+        let (runs, si) = (runs.list, run_at(runs.list, runs.ordered, base));
         let pm = style_metrics(primaries, runs, si);
         // No text to resolve a direction from: the explicit one.
         let rtl = para.rtl == Some(true);
@@ -1167,18 +1210,20 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     });
     let runs = cleared.as_deref().unwrap_or(runs);
     let variation_ids: Vec<u32> = runs.iter().map(|(_, s)| crate::variable::intern(&s.variations)).collect();
+    let ordered = runs_ordered(runs);
     let mut lay = Layout { missing_font: primaries.iter().any(|p| p.missing), text_len: text.len(), ..Default::default() };
     let mut plines: Vec<(usize, ParaLine)> = Vec::new();
     for (pi, span) in paragraph_ranges(text).enumerate() {
         let p = text.get(span.bytes.clone()).unwrap_or_default();
-        plines.extend(paragraph(p, span.bytes.start, runs, &primaries, &variation_ids, para_at(pi), width).into_iter().map(|l| (pi, l)));
+        plines
+            .extend(paragraph(p, span.bytes.start, Runs { list: runs, ordered }, &primaries, &variation_ids, para_at(pi), width).into_iter().map(|l| (pi, l)));
     }
     let mut baseline = 0.0f32;
     for (i, (pi, pl)) in plines.into_iter().enumerate() {
         let para = para_at(pi);
         if i == 0 {
             // Vertical type keeps its first column at the font ascent (not measured in AE).
-            let vertical = runs.get(run_at(runs, pl.range.start)).is_some_and(|r| r.1.vertical)
+            let vertical = runs.get(run_at(runs, ordered, pl.range.start)).is_some_and(|r| r.1.vertical)
                 || runs.iter().any(|r| r.1.vertical && r.0.start < pl.range.end && r.0.end > pl.range.start);
             baseline = if width.is_some() { if vertical { pl.ascent } else { pl.first } } else { 0.0 };
         } else {
@@ -1198,7 +1243,7 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
         }));
         let x = shift + pl.left_trim;
         if let Some((u0, u1)) = pl.underline {
-            let si = run_at(runs, pl.range.start);
+            let si = run_at(runs, ordered, pl.range.start);
             let pm = fonts::face(primaries[si].face).metrics(runs[si].1.size);
             lay.underlines.push([u0 + shift, baseline + pm.underline_pos, u1 + shift, baseline + pm.underline_pos + pm.underline_thickness]);
         }

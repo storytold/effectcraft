@@ -1,4 +1,4 @@
-//! Opening a file that must be a regular file, without ever blocking on a FIFO.
+//! Opening a file that must be a regular file, with nonblocking FIFO protection on supported Unix targets.
 
 use std::fs::File;
 use std::io::{Error, ErrorKind};
@@ -12,8 +12,9 @@ const O_NONBLOCK: i32 = 0o4000;
 const O_NONBLOCK: i32 = 0x4;
 
 /// Opens `path` for reading and returns the file with its metadata, only when it is a regular file.
-/// A path swapped for a FIFO between a check and the open cannot hang the caller: the open does not
-/// block, and the descriptor is validated before anything reads it.
+/// On the Unix targets listed above, a path swapped for a FIFO between the check and the open
+/// cannot hang the caller: the open is nonblocking, and the descriptor is validated before reading.
+/// Other Unix targets have only the preliminary file-type check, not the swap-race protection.
 pub fn open_regular_file(path: &Path) -> std::io::Result<(File, std::fs::Metadata)> {
     let not_file = || Error::new(ErrorKind::InvalidInput, format!("{} is not a file", path.display()));
     if !std::fs::metadata(path)?.is_file() {
@@ -80,5 +81,23 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod regular_file_tests {
+    use super::*;
+
+    #[test]
+    fn plain_files_open_but_directories_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("ec-regular-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(open_regular_file(&dir).is_err());
+        let path = dir.join("plain");
+        std::fs::write(&path, b"abc").unwrap();
+        let (file, metadata) = open_regular_file(&path).unwrap();
+        assert_eq!(metadata.len(), 3);
+        drop(file);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

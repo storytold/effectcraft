@@ -84,7 +84,14 @@ pub(crate) fn swedish(app: &EffectcraftApp) -> bool {
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
 /// where EffectCraft has it, else English (#229), as After Effects installs in the system's
 /// language. The browser build follows the locales its page passes in ([`set_system_locales`]).
+///
+/// Test builds (this crate's unit tests, and its integration tests through the `test-support`
+/// feature) resolve Match System to English, so tests that look up English labels pass on any
+/// system language (#3244); tests about a translation choose their language explicitly.
 fn system_language() -> &'static str {
+    if cfg!(any(test, feature = "test-support")) {
+        return "en";
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         static LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
@@ -701,7 +708,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "隐藏锁定的蒙版"),
     ("", "Mask and Shape Path", "蒙版和形状路径"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "已关闭"),
+    ("path.toggleClosed", "Closed", "已关闭"),
     ("path.convertToBezier", "Convert To Bezier Path", "转换为贝塞尔曲线路径"),
     ("path.setFirstVertex", "Set First Vertex", "设置第一个顶点"),
     ("path.freeTransform", "Free Transform Points", "自由变换点"),
@@ -1339,7 +1346,7 @@ const SWEDISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Dölj låsta masker"),
     ("", "Mask and Shape Path", "Mask- och formbana"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Sluten"),
+    ("path.toggleClosed", "Closed", "Sluten"),
     ("path.convertToBezier", "Convert To Bezier Path", "Konvertera till Bezierbana"),
     ("path.setFirstVertex", "Set First Vertex", "Ange första hörnpunkt"),
     ("path.freeTransform", "Free Transform Points", "Fri transformering av punkter"),
@@ -1983,7 +1990,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "隱藏鎖定的遮色片"),
     ("", "Mask and Shape Path", "遮色片和形狀路徑"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "封閉"),
+    ("path.toggleClosed", "Closed", "封閉"),
     ("path.convertToBezier", "Convert To Bezier Path", "轉換為貝茲路徑"),
     ("path.setFirstVertex", "Set First Vertex", "設定第一個頂點"),
     ("path.freeTransform", "Free Transform Points", "自由變換點"),
@@ -2622,7 +2629,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "ロックしたマスクを非表示"),
     ("", "Mask and Shape Path", "マスクとシェイプのパス"),
     ("path.rotoBezier", "RotoBezier", "ロトベジェ"),
-    ("mask.setClosed", "Closed", "閉じたパス"),
+    ("path.toggleClosed", "Closed", "閉じたパス"),
     ("path.convertToBezier", "Convert To Bezier Path", "ベジェパスに変換"),
     ("path.setFirstVertex", "Set First Vertex", "最初の頂点を設定"),
     ("path.freeTransform", "Free Transform Points", "ポイントを自由変形"),
@@ -3264,7 +3271,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Приховати заблоковані маски"),
     ("", "Mask and Shape Path", "Контур маски та фігури"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Замкнений"),
+    ("path.toggleClosed", "Closed", "Замкнений"),
     ("path.convertToBezier", "Convert To Bezier Path", "Перетворити на контур Безьє"),
     ("path.setFirstVertex", "Set First Vertex", "Задати першу вершину"),
     ("path.freeTransform", "Free Transform Points", "Вільне трансформування точок"),
@@ -3907,7 +3914,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ocultar máscaras bloqueadas"),
     ("", "Mask and Shape Path", "Trazado de máscara y de forma"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Cerrado"),
+    ("path.toggleClosed", "Closed", "Cerrado"),
     ("path.convertToBezier", "Convert To Bezier Path", "Convertir en trazado Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Establecer primer vértice"),
     ("path.freeTransform", "Free Transform Points", "Transformar puntos libremente"),
@@ -4548,7 +4555,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ocultar máscaras bloqueadas"),
     ("", "Mask and Shape Path", "Caminho da máscara e da forma"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Fechado"),
+    ("path.toggleClosed", "Closed", "Fechado"),
     ("path.convertToBezier", "Convert To Bezier Path", "Converter em caminho Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Definir primeiro vértice"),
     ("path.freeTransform", "Free Transform Points", "Pontos de transformação livre"),
@@ -5196,7 +5203,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Скрыть заблокированные маски"),
     ("", "Mask and Shape Path", "Контур маски и фигуры"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Замкнутый"),
+    ("path.toggleClosed", "Closed", "Замкнутый"),
     ("path.convertToBezier", "Convert To Bezier Path", "Преобразовать в кривую Безье"),
     ("path.setFirstVertex", "Set First Vertex", "Задать первую вершину"),
     ("path.freeTransform", "Free Transform Points", "Свободное трансформирование точек"),
@@ -5837,7 +5844,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Masquer les masques verrouillés"),
     ("", "Mask and Shape Path", "Trajectoire de masque et de forme"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Fermé"),
+    ("path.toggleClosed", "Closed", "Fermé"),
     ("path.convertToBezier", "Convert To Bezier Path", "Convertir en trajectoire Bézier"),
     ("path.setFirstVertex", "Set First Vertex", "Définir le premier sommet"),
     ("path.freeTransform", "Free Transform Points", "Transformation libre des points"),
@@ -6478,7 +6485,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Gesperrte Masken ausblenden"),
     ("", "Mask and Shape Path", "Masken- und Formpfad"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Geschlossen"),
+    ("path.toggleClosed", "Closed", "Geschlossen"),
     ("path.convertToBezier", "Convert To Bezier Path", "In Bézier-Pfad konvertieren"),
     ("path.setFirstVertex", "Set First Vertex", "Ersten Scheitelpunkt festlegen"),
     ("path.freeTransform", "Free Transform Points", "Punkte frei transformieren"),
@@ -7118,7 +7125,7 @@ const POLISH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Ukryj zablokowane maski"),
     ("", "Mask and Shape Path", "Ścieżka maski i kształtu"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Zamknięta"),
+    ("path.toggleClosed", "Closed", "Zamknięta"),
     ("path.convertToBezier", "Convert To Bezier Path", "Konwertuj na ścieżkę Béziera"),
     ("path.setFirstVertex", "Set First Vertex", "Ustaw pierwszy wierzchołek"),
     ("path.freeTransform", "Free Transform Points", "Swobodne przekształcanie punktów"),
@@ -7758,7 +7765,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "Skrýt zamknuté masky"),
     ("", "Mask and Shape Path", "Cesta masky a tvaru"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "Uzavřená"),
+    ("path.toggleClosed", "Closed", "Uzavřená"),
     ("path.convertToBezier", "Convert To Bezier Path", "Převést na Bézierovu cestu"),
     ("path.setFirstVertex", "Set First Vertex", "Nastavit první vrchol"),
     ("path.freeTransform", "Free Transform Points", "Volně transformovat body"),
@@ -8395,7 +8402,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("layer.mask.hideLocked", "Hide Locked Masks", "ჩაკეტილი ნიღბების დამალვა"),
     ("", "Mask and Shape Path", "ნიღაბი და ფიგურის ტრაექტორია"),
     ("path.rotoBezier", "RotoBezier", "RotoBezier"),
-    ("mask.setClosed", "Closed", "შეკრული"),
+    ("path.toggleClosed", "Closed", "შეკრული"),
     ("path.convertToBezier", "Convert To Bezier Path", "ბეზიეს ტრაექტორიად გარდაქმნა"),
     ("path.setFirstVertex", "Set First Vertex", "პირველი წვეროს დაყენება"),
     ("path.freeTransform", "Free Transform Points", "წერტილების თავისუფალი გარდაქმნა"),
@@ -9184,13 +9191,22 @@ mod tests {
         }
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         assert_eq!(app.session.prefs.general.language, "system", "the default");
-        assert_eq!(japanese(&app), system_language() == "ja");
-        assert_eq!(simplified(&app), system_language() == "zh-hans");
-        assert_eq!(traditional(&app), system_language() == "zh-hant");
-        assert_eq!(spanish(&app), system_language() == "es");
-        assert_eq!(czech(&app), system_language() == "cs");
-        assert_eq!(polish(&app), system_language() == "pl");
-        assert_eq!(swedish(&app), system_language() == "sv");
+        assert_eq!(system_language(), "en", "test builds pin Match System to English (#3244)");
+        assert_eq!(language(&app), "en");
+        for (flag, name) in [
+            (japanese(&app), "ja"),
+            (simplified(&app), "zh-hans"),
+            (traditional(&app), "zh-hant"),
+            (ukrainian(&app), "uk"),
+            (spanish(&app), "es"),
+            (brazilian_portuguese(&app), "pt-br"),
+            (czech(&app), "cs"),
+            (polish(&app), "pl"),
+            (georgian(&app), "ka"),
+            (swedish(&app), "sv"),
+        ] {
+            assert!(!flag, "Match System shows {name} in a test build");
+        }
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ja"})).unwrap();
         assert!(japanese(&app));
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"zh-hans"})).unwrap();
@@ -9308,12 +9324,16 @@ mod tests {
             alt_shortcuts: Vec::new(),
         };
         let new_comp = menu_entry("comp.new", "New Composition...");
+        let closed_path = menu_entry("path.toggleClosed", "Closed");
         let undo = menu_entry("edit.undo", "Undo");
         for code in CATALOG_CODES {
             app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
             let drawn = entry(&app, &new_comp, new_comp.label.clone());
             assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
             assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+            let closed_label = entry(&app, &closed_path, closed_path.label.clone());
+            assert_eq!(closed_label, label(&app, "path.toggleClosed", "Closed"), "{code}");
+            assert_ne!(closed_label, closed_path.label, "{code}: Closed is drawn in English");
         }
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
         assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");

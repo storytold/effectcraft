@@ -262,3 +262,32 @@ fn corrupt_mesh_data_draws_what_parses() {
     let doc = parse(&bytes).unwrap();
     assert!(doc.skipped.iter().any(|s| s.contains("layout")), "{:?}", doc.skipped);
 }
+
+#[test]
+fn overlapping_mesh_triangles_stop_at_the_raster_budget() {
+    // 20,000 triangles each covering the whole page would test every sample 20,000 times; the
+    // raster budget stops after about 64 passes, and the shading is still drawn.
+    let mut m = Mesh::default();
+    for _ in 0..20_000 {
+        m.flag(0).pt(0, 0).c(&[255, 0, 0]);
+        m.flag(0).pt(400, 0).c(&[255, 0, 0]);
+        m.flag(0).pt(0, 400).c(&[255, 0, 0]);
+    }
+    let sh = format!("<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 /BitsPerComponent 8 /BitsPerFlag 8 {RGB_DECODE} >>");
+    let bytes = page_pdf("/Sh sh", "/Shading << /Sh 10 0 R >>", vec![(10, sh, Some(m.0))]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(parse(&bytes)).ok());
+    let doc = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the mesh finishes").unwrap();
+    assert!(render(&doc).get(50, 50)[0] > 0.99);
+}
+
+#[test]
+fn a_lattice_row_longer_than_the_triangle_limit_draws_nothing() {
+    let mut m = Mesh::default();
+    for i in 0..8 {
+        m.pt(i * 10, 0).c(&[255, 0, 0]);
+    }
+    let sh = format!("<< /ShadingType 5 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 /BitsPerComponent 8 /VerticesPerRow 3000000 {RGB_DECODE} >>");
+    let doc = parse(&page_pdf("/Sh sh", "/Shading << /Sh 10 0 R >>", vec![(10, sh, Some(m.0))])).unwrap();
+    assert!(doc.flatten().is_empty());
+}

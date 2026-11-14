@@ -480,3 +480,29 @@ fn camera_light_and_material_options_are_written_as_after_effects_does() {
         assert!(text.contains(block), "{block}in\n{text}");
     }
 }
+
+/// The unit column of `name`'s block in copied keyframe text.
+fn unit_of<'a>(text: &'a str, name: &str) -> &'a str {
+    let mut lines = text.lines().skip_while(|l| !l.contains(&format!("\t{name} #")));
+    lines.next().unwrap_or_else(|| panic!("no {name} in\n{text}"));
+    lines.next().and_then(|l| l.strip_prefix("\tFrame\t")).and_then(|l| l.strip_suffix('\t')).unwrap_or_else(|| panic!("{name} in\n{text}"))
+}
+
+/// Widening a 0..100 slider to After Effects' range (#3479, #3483, #3484) keeps the unit the
+/// keyframe text writes for it.
+#[test]
+fn widened_effect_ranges_keep_their_keyframe_text_units() {
+    let (mut s, l) = session();
+    s.execute("effect.apply", json!({"layer": l.0, "effect": "ec.generate.fourcolor"})).unwrap();
+    let text = copy_props(&mut s, l, &["effects/#1/blend", "effects/#1/jitter"]);
+    assert_eq!(unit_of(&text, "Blend"), "percent");
+    assert_eq!(unit_of(&text, "Jitter"), "percent");
+    for fx in ["ec.noise.noisehls", "ec.noise.noisehlsauto"] {
+        let (mut s, l) = session();
+        s.execute("effect.apply", json!({"layer": l.0, "effect": fx})).unwrap();
+        let text = copy_props(&mut s, l, &["effects/#1/hue", "effects/#1/lightness", "effects/#1/saturation", "effects/#1/grainSize"]);
+        for (name, unit) in [("Hue", "percent"), ("Lightness", "percent"), ("Saturation", "percent"), ("Grain Size", "")] {
+            assert_eq!(unit_of(&text, name), unit, "{fx} {name}");
+        }
+    }
+}

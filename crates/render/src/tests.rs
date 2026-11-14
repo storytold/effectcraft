@@ -927,6 +927,30 @@ fn effects_see_layer_masks() {
     assert!(img.get(150, 50)[3] > 0.99, "mode None mask does not cut the layer");
 }
 
+/// Masks come before effects: Grid (Blending Mode None) draws only inside a masked solid (#3121).
+#[test]
+fn grid_stays_inside_the_layer_mask() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    let mut next = p.next_id;
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    l.props.sub_mut("masks").unwrap().children.push(m.into());
+    // Inverted, the grid covers nearly every pixel, so the check does not depend on where the
+    // lines fall.
+    let set = [("width", Value::Scalar(10.0)), ("border", Value::Scalar(2.0)), ("invertGrid", Value::Bool(true))];
+    add_effect(&mut p, &mut l, "ec.generate.grid", [200.0, 100.0], &set);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    for y in 0..100 {
+        for x in 100..200 {
+            assert!(img.get(x, y)[3] < 0.01, "grid outside the mask at ({x}, {y}): {:?}", img.get(x, y));
+        }
+    }
+    assert!(img.get(15, 15)[3] < 0.01, "grid left of and above the mask: {:?}", img.get(15, 15));
+    assert!(img.get(55, 55)[3] > 0.5, "grid inside the mask: {:?}", img.get(55, 55));
+}
+
 /// An open mask (the Pen still drawing it) leaves the layer whole; closed, it masks (#290).
 #[test]
 fn open_masks_make_no_transparency() {
@@ -2001,4 +2025,18 @@ fn a_copy_of_an_overridden_clip_is_not_served_the_keyed_clips_pixels() {
     let (keyed, overridden) = (collapsed_clip_scene(false, true), collapsed_clip_scene(true, true));
     assert_same(&render(&keyed, Some(&cache)), &render(&keyed, None), "the keyed clip's copy");
     assert_same(&render(&overridden, Some(&cache)), &render(&overridden, None), "the overridden clip's copy");
+}
+
+#[test]
+fn elongated_solids_stay_within_the_pixel_cap_after_rounding() {
+    use crate::pipeline::solid_size;
+    // 1 × 100 million at full scale: rounding up used to leave 40 million pixels.
+    for (w, h) in [(1u32, 100_000_000u32), (100_000_000, 1), (u32::MAX, u32::MAX), (1, u32::MAX)] {
+        let (s, pw, ph) = solid_size(w, h, 1.0);
+        assert!(s > 0.0 && f64::from(pw) * f64::from(ph) <= 16.0e6, "{w}x{h} -> {pw}x{ph} at {s}");
+    }
+    // A solid within the cap keeps its scale; an over-cap square is lowered by the exact ratio.
+    assert_eq!(solid_size(4000, 4000, 1.0), (1.0, 4000, 4000));
+    let (s, pw, ph) = solid_size(5000, 5000, 1.0);
+    assert!((s - 0.8).abs() < 0.01 && pw * ph <= 16_000_000);
 }

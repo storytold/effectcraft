@@ -950,3 +950,78 @@ fn ai_composition_retains_layer_sizes_and_positions() {
         assert!(frame.get(39, 10)[0] > 0.99, "reload invalidates cached pixels");
     }
 }
+
+/// An A4 page (595.28 × 841.89 pt) whose artwork sits inside a page clip and ten nested
+/// clipping groups, as PDFs exported from layout and office applications nest them: a black bar
+/// whose left edge is at x = 30 pt, from 41.89 to 191.89 pt down the page.
+fn a4_clipped_pdf() -> Vec<u8> {
+    let mut content = String::from(
+        "q 0 0 595.28 841.89 re W n
+",
+    );
+    for i in 0..10 {
+        content.push_str(&format!(
+            "q {} {} {} {} re W n
+",
+            20 + i,
+            600 + i,
+            300 - 2 * i,
+            230 - 2 * i
+        ));
+    }
+    content.push_str(
+        "0 0 0 rg 30 650 40 150 re f
+",
+    );
+    content.push_str(
+        &"Q
+"
+        .repeat(11),
+    );
+    effectcraft_pdf::write::pdf(
+        &[
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".into(), None),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), None),
+            (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << >> /Contents 4 0 R >>".into(), None),
+            (4, "<< >>".into(), Some(content.into_bytes())),
+        ],
+        1,
+    )
+}
+
+/// #2895: an A4 PDF imports at its size in points, rounded up (596 × 842 px; After Effects
+/// also takes a point as a pixel), and scaled 200 % with Continuously Rasterize on it is drawn
+/// at that scale: the bar's left edge stays one pixel wide. It used to come out empty: at
+/// 200 % (a 32 MB page) each nested clipping group copied the whole page and drew on a second
+/// page-size surface, so the eighth level of clips ran past the rasteriser's 512 MB surface
+/// budget. With the switch off the layer is the page's pixels enlarged, soft as before.
+#[test]
+fn a4_pdf_scaled_200_percent_continuously_rasterizes_sharp() {
+    let path = tmp("a4-clipped.pdf");
+    std::fs::write(&path, a4_clipped_pdf()).unwrap();
+    let mut s = effectcraft_host::session();
+    let r = s.execute_checked("file.import", json!({"paths": [path]})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let item = r["items"][0].as_u64().unwrap();
+    let effectcraft_project::ItemKind::Footage(f) = &s.project.item(ItemId(item)).unwrap().kind else { panic!("footage") };
+    assert_eq!((f.codec.as_str(), f.width, f.height), ("PDF", 596, 842), "A4 in points");
+    s.execute("comp.new", json!({"name": "A4", "width": 400, "height": 400, "frameRate": 30, "duration": 1})).unwrap();
+    let lid = s.execute_checked("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    for (k, v) in [("transform/anchor", json!([0, 0])), ("transform/position", json!([0, 0])), ("transform/scale", json!([200, 200]))] {
+        s.execute("prop.set", json!({"layer": lid, "path": k, "value": v})).unwrap();
+    }
+    let cid = s.active_comp_id().unwrap();
+    let t = effectcraft_time::Tick::ZERO;
+    // Row 240 (120 pt down the page) crosses the bar's left edge at x = 60 (30 pt × 2).
+    let soft_pixels = |img: &Image| (50..70).filter(|&x| (0.05..0.95).contains(&img.get(x, 240)[3])).count();
+    let off = s.render(cid, t, RenderOpts::default());
+    assert!(off.get(100, 240)[3] > 0.99, "the bar shows with the switch off");
+    assert!(soft_pixels(&off) >= 2, "off: the page's pixels enlarged, a soft edge ({} partial pixels)", soft_pixels(&off));
+    s.execute("layer.setSwitch", json!({"layers": [lid], "switch": "collapse", "value": true})).unwrap();
+    let on = s.render(cid, t, RenderOpts::default());
+    assert!(on.get(100, 240)[3] > 0.99, "the clipped bar is drawn at 200 %: {:?}", on.get(100, 240));
+    assert!(on.get(61, 240)[3] > 0.99 && on.get(58, 240)[3] < 0.01, "a hard edge at x = 60: {:?} {:?}", on.get(58, 240), on.get(61, 240));
+    assert!(soft_pixels(&on) <= 1, "on: the edge is at most one pixel wide ({} partial pixels)", soft_pixels(&on));
+    // Outside the clips (x = 10 pt) nothing is drawn.
+    assert!(on.get(20, 240)[3] < 0.01);
+}

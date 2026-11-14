@@ -202,6 +202,8 @@ pub(crate) fn fractal(e: &mut Enc, ctx: &EffectCtx, b: GBuf, turbulent: bool) ->
 
 /// noise::median_image (of the straight colour with alpha 1 when `straight`).
 pub(crate) fn median_image(e: &mut Enc, img: &GpuImage, r: usize, straight: bool) -> GpuImage {
+    // As on the CPU: the window's radius is capped, so its first fill stays bounded.
+    let r = r.min(effectcraft_effects::MEDIAN_MAX_RADIUS);
     let q = run(e, "fxn_quant", &with_u0([straight as u32, 0, 0, 0]), img, None, None);
     // Preserve the CPU's rounded level / 511 values before the strict Dust & Scratches
     // threshold. GPU division (even residual-corrected) may differ by one ulp.

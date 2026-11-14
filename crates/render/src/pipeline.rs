@@ -56,6 +56,29 @@ pub struct MediaOverride {
     pub(crate) item: ItemId,
 }
 
+/// The most pixels a solid layer's buffer holds (as the other layer buffers are held to).
+const MAX_SOLID_PIXELS: f64 = 16.0e6;
+
+/// The scale and whole-pixel size of a `width`×`height` solid rendered at `scale`, lowered until
+/// the rounded size (each side at least one pixel) is within [`MAX_SOLID_PIXELS`].
+pub(crate) fn solid_size(width: u32, height: u32, mut scale: f64) -> (f64, u32, u32) {
+    let size = |s: f64| (((width as f64 * s).ceil() as u32).max(1), ((height as f64 * s).ceil() as u32).max(1));
+    // Rounding up leaves an elongated solid over the cap after one step; each step shrinks the
+    // overshoot geometrically, so a few are enough.
+    for i in 0..64 {
+        let (w, h) = size(scale);
+        let area = w as f64 * h as f64;
+        if area <= MAX_SOLID_PIXELS {
+            break;
+        }
+        // The first step is the exact area ratio; later ones undershoot a little so rounding up
+        // cannot leave the size stuck just over the cap.
+        scale *= (MAX_SOLID_PIXELS / area).sqrt() * if i == 0 { 1.0 } else { 0.99 };
+    }
+    let (w, h) = size(scale);
+    (scale, w, h)
+}
+
 impl MediaOverride {
     /// A Media Replacement of `layer`'s footage by `item`.
     pub fn new(layer: LayerId, item: ItemId) -> Self {
@@ -68,6 +91,26 @@ pub struct Collapsed {
     pub item: ItemId,
     pub(crate) property_overrides: Vec<PropertyOverride>,
     pub(crate) media_overrides: Vec<MediaOverride>,
+}
+
+/// Cache key of a frame-blended footage frame: `seed` (which frames, how they mix, the footage
+/// file) and the Interpret Footage settings that change the decoded pixels.
+fn blended_frame_key(f: &Footage, seed: impl std::hash::Hash) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut h);
+    // Every file of a sequence: the key must tell two projects apart whose items share an id
+    // and a first frame (on disk, no project-wide salt does, #3184).
+    f.sequence.hash(&mut h);
+    (f.alpha as u8).hash(&mut h);
+    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
+        f.premul_color.map(f32::to_bits).hash(&mut h);
+    }
+    if f.cineon_applies() {
+        let c = &f.cineon;
+        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
+    }
+    h.finish()
 }
 
 /// The property and media overrides of a collapsed precomp layer. `None` when its Essential
@@ -757,6 +800,15 @@ impl<'a> Renderer<'a> {
             return;
         }
         let Some(fx) = layer.effects() else { return };
+        // The LUT files the stack reads go to this render's files: a frame on disk made with one
+        // that changed since is not used (#3493).
+        if let Some(log) = self.reads {
+            for g in fx.groups().take(limit).filter(|g| g.enabled) {
+                for f in super::reads::lut_files(ctx, layer, g) {
+                    log.note(f);
+                }
+            }
+        }
         let lt = layer.layer_time(ctx.time);
         let layer_size = ctx.effect_bounds(layer).0;
         // #659 / #1205: an authored layer's buffer spans only its painted content. Effects that
@@ -890,8 +942,9 @@ impl<'a> Renderer<'a> {
         match &layer.source {
             LayerSource::Solid { item } => {
                 let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
-                let w = ((sol.width as f64 * s).ceil() as u32).max(1);
-                let h = ((sol.height as f64 * s).ceil() as u32).max(1);
+                // One colour: a solid larger than MAX_SOLID_PIXELS is made at a lower scale (the
+                // buffer carries it) instead of allocating gigabytes for a uniform plane.
+                let (s, w, h) = solid_size(sol.width, sol.height, s);
                 if layer.switches.adjustment {
                     return Some(Buf { img: Image::filled(w, h, [1.0; 4]), offset: [0.0; 2], scale: s });
                 }
@@ -1190,26 +1243,16 @@ impl<'a> Renderer<'a> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
         if mode != FrameBlend::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
+            // Many source frames per comp frame (footage interpreted much faster than the comp,
+            // #3180): the frames the comp frame spans are averaged.
+            if let Some(img) = self.mixed_span_frame(ctx, layer, item, f, t, size) {
+                return Some(img);
+            }
             let (i, w) = frame_position(t, f.frame_rate);
             if w > 1e-6 {
                 // Blended frames are cached (Pixel Motion is expensive).
-                let key = self.cache.map(|_| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float).hash(&mut h);
-                    // Every file of a sequence: the key must tell two projects apart whose items
-                    // share an id and a first frame (on disk, no project-wide salt does, #3184).
-                    f.sequence.hash(&mut h);
-                    (f.alpha as u8).hash(&mut h);
-                    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
-                        f.premul_color.map(f32::to_bits).hash(&mut h);
-                    }
-                    if f.cineon_applies() {
-                        let c = &f.cineon;
-                        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
-                    }
-                    h.finish()
-                });
+                let seed = (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float);
+                let key = self.cache.map(|_| blended_frame_key(f, seed));
                 if let Some((b, _)) = self.cached(key) {
                     return Some(Arc::new(b.img.clone()));
                 }
@@ -1226,6 +1269,58 @@ impl<'a> Renderer<'a> {
             }
         }
         self.read(|| self.footage.frame_with(item, f, t, size, float)).map(|img| cineon_frame(img, f))
+    }
+
+    /// A frame-blended footage frame at source time `t` when one comp frame runs through many
+    /// source frames: the average of the source frames the comp frame spans, each weighted by
+    /// the share of it the span covers ([`super::frames::mix_window`]). Both Frame Mix and
+    /// Pixel Motion average real frames here (there is no in-between frame to synthesise).
+    /// `size`: the frames may come resampled to it ([`FootageSource::frame_at_size`]). `None`
+    /// when the span is too short (or a jump) to mix, or no frame decodes.
+    fn mixed_span_frame(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
+        use rayon::prelude::*;
+        let float = self.pipe.float_curve(f);
+        let spans = super::frames::blend_spans(ctx, layer);
+        let frames = super::frames::mix_window(t, spans, f.frame_rate)?;
+        let seed = (0x00f8_a3e6_u64, item, t.0, spans, size, f.frame_rate.num, f.frame_rate.den, &f.path, float);
+        let key = self.cache.map(|_| blended_frame_key(f, seed));
+        if let Some((b, _)) = self.cached(key) {
+            return Some(Arc::new(b.img.clone()));
+        }
+        // A weighted sum in one buffer, divided by the total weight at the end. A frame that does
+        // not decode, or has another size than the first (a sequence of mixed sizes), is left
+        // out and the mix renormalises over the rest. Log scans are converted before they mix.
+        let ((acc, total), files) = self.recorded(key, |r| {
+            let mut acc: Option<Image> = None;
+            let mut total = 0.0;
+            for (j, w) in frames {
+                let Some(img) = r.read(|| r.footage.frame_with(item, f, f.frame_rate.tick_of(j), size, float)).map(|a| cineon_frame(a, f)) else { continue };
+                let sum = acc.get_or_insert_with(|| Image::new(img.width, img.height));
+                if (sum.width, sum.height) != (img.width, img.height) {
+                    continue;
+                }
+                let wf = w as f32;
+                sum.data.par_iter_mut().zip(img.data.par_iter()).for_each(|(s, p)| {
+                    for (a, b) in s.iter_mut().zip(p) {
+                        *a += b * wf;
+                    }
+                });
+                total += w;
+            }
+            (acc, total)
+        });
+        let mut img = acc?;
+        if total <= 1e-9 {
+            return None;
+        }
+        let norm = (1.0 / total) as f32;
+        img.data.par_iter_mut().for_each(|s| {
+            for c in s.iter_mut() {
+                *c *= norm;
+            }
+        });
+        let _kept = self.keep(key, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }), &files);
+        Some(Arc::new(img))
     }
 
     /// Source → masks, clamped/quantised to the project depth.

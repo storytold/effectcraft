@@ -137,6 +137,17 @@ pub(crate) fn cpu_inflight(var: Option<&str>) -> Option<usize> {
     }
 }
 
+/// Auto's CPU frames in flight (#1615): as many frames as half of the `free` bytes the system
+/// can hand out hold at `frame` bytes each, 1 to `threads`. `frame` is a GPU frame's measured
+/// working memory: both compositors keep 16-byte RGBA pixels (`[f32; 4]`, `Rgba32Float`), and
+/// the other half is headroom for the layer caches, decoded footage, the encoder and the
+/// estimate being low. `None` (not capped) when either is unknown or `frame` is 0.
+pub(crate) fn auto_cpu_frames(frame: Option<u64>, free: Option<u64>, threads: usize) -> Option<usize> {
+    let (frame, free) = (frame.filter(|&f| f > 0)?, free?);
+    let n = free / 2 / frame;
+    Some(usize::try_from(n).unwrap_or(usize::MAX).clamp(1, threads.max(1)))
+}
+
 /// The frames-in-flight caps of a batch: `gpu` (#879) for the GPU's memory, `cpu` (#1615) for
 /// the process's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -253,6 +264,9 @@ pub(crate) struct Cx<'a> {
     gpu_frames: Mutex<Option<(usize, String)>>,
     /// A frame has rendered on the GPU compositor: its memory can be measured.
     gpu_rendered: std::sync::atomic::AtomicBool,
+    /// Auto's CPU frames in flight once settled ([`Cx::auto_cpu_frames`]; `Some(None)`: not
+    /// capped).
+    cpu_frames: Mutex<Option<Option<usize>>>,
     /// (output frame, seconds) of every rendered frame (Plus Per Frame Info logs).
     pub frame_times: Option<Mutex<Vec<(u64, f64)>>>,
     /// Files written to an overflow folder.
@@ -337,6 +351,7 @@ impl<'a> Cx<'a> {
             choice: Mutex::new(None),
             gpu_frames: Mutex::new(None),
             gpu_rendered: Default::default(),
+            cpu_frames: Mutex::new(None),
             frame_times,
             overflowed: Mutex::new(vec![]),
             written: Mutex::new(vec![]),
@@ -555,9 +570,11 @@ impl<'a> Cx<'a> {
         let timed = |on: crate::JobRenderer, frames: &[u64]| {
             let warm = render(first, on);
             // The GPU's frames in flight settle with its warm-up frame (Auto measures it).
+            // The CPU's frames are held to what the job would render at once on it, from the
+            // GPU frames just measured (#1615): uncapped, they could exhaust RAM here already.
             let caps = match on {
                 crate::JobRenderer::Gpu => Inflight { gpu: Some(self.gpu_inflight()), cpu: cpu_cap },
-                crate::JobRenderer::Cpu => Inflight { gpu: None, cpu: cpu_cap },
+                crate::JobRenderer::Cpu => Inflight { gpu: None, cpu: cpu_cap.or_else(|| self.auto_cpu_frames()) },
             };
             let t0 = Instant::now();
             let gpu_live = || on == crate::JobRenderer::Cpu || self.job.accel.is_some_and(|a| a.available());
@@ -660,7 +677,48 @@ impl<'a> Cx<'a> {
 
     /// The GPU and CPU frames-in-flight caps every frame loop shares (#1615).
     fn inflight(&self) -> Inflight {
-        Inflight { gpu: self.gpu_cap(), cpu: cpu_inflight(std::env::var(CPU_INFLIGHT_ENV).ok().as_deref()) }
+        Inflight { gpu: self.gpu_cap(), cpu: self.cpu_cap() }
+    }
+
+    /// CPU frames in flight (#1615): `EFFECTCRAFT_CPU_INFLIGHT`, else Auto's
+    /// ([`Cx::auto_cpu_frames`]) while the job renders on the CPU (it chose the CPU's
+    /// compositor, or the GPU stopped for good). `None`: not capped.
+    fn cpu_cap(&self) -> Option<usize> {
+        if let Some(n) = cpu_inflight(std::env::var(CPU_INFLIGHT_ENV).ok().as_deref()) {
+            return Some(n);
+        }
+        let on_cpu = self.backend() == crate::JobRenderer::Cpu || self.job.accel.is_some_and(|a| !a.available());
+        if on_cpu { self.auto_cpu_frames() } else { None }
+    }
+
+    /// Auto's CPU frames in flight ([`auto_cpu_frames`]), settled once per job from the working
+    /// memory a GPU frame measured and the memory the system has free
+    /// ([`crate::JobOptions::free_memory`]). `None` (not capped, as before #1615) until a GPU
+    /// frame has rendered, and in a job that never renders one (a Software Rendering project):
+    /// there is no per-frame estimate then.
+    fn auto_cpu_frames(&self) -> Option<usize> {
+        if let Some(n) = *self.cpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            return n;
+        }
+        if !self.gpu_rendered.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        // Read outside the lock: the allocator report walks every allocation, and reading the
+        // system's memory can take a second (PowerShell on Windows).
+        let frame = self.job.accel.and_then(|a| a.frame_memory()).map(|m| m.frame);
+        let free = self.job.options.free_memory.and_then(|read| read());
+        let n = auto_cpu_frames(frame, free, rayon::current_num_threads());
+        let mut slot = self.cpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot.get_or_insert_with(|| {
+            let mib = |b: Option<u64>| b.map_or_else(|| "unknown".to_string(), |b| format!("{} MiB", b >> 20));
+            let (frame, free) = (mib(frame), mib(free));
+            let label = &self.job.options.label;
+            match n {
+                Some(n) => log::info!(target: "effectcraft_export", "{label}: {n} CPU frame(s) at once (Auto: {frame} per frame on the GPU, {free} free)"),
+                None => log::info!(target: "effectcraft_export", "{label}: CPU frames not capped (Auto: {frame} per frame on the GPU, {free} free)"),
+            }
+            n
+        })
     }
 
     /// Output frame `i`: sampled (fields, pulldown), at the colour depth, cropped and resized.
@@ -834,6 +892,20 @@ impl<'a> Cx<'a> {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// Whether Skip Existing finds `path` already written: at its own place or, with Use Storage
+    /// Overflow, in any overflow folder (checked before a frame is placed, so a skipped frame
+    /// reserves no quota).
+    pub fn frame_exists(&self, path: &str) -> bool {
+        if out::exists(self.sink, path) {
+            return true;
+        }
+        if !self.job.settings.storage_overflow {
+            return false;
+        }
+        let Some(name) = std::path::Path::new(path).file_name() else { return false };
+        self.job.options.overflow.iter().any(|dir| out::exists(self.sink, &std::path::Path::new(dir).join(name).to_string_lossy()))
     }
 
     /// Where a file goes: `path`, or (Use Storage Overflow) the first overflow folder with room
@@ -1283,6 +1355,75 @@ mod tests {
         assert_eq!(cx.gpu_cap(), None);
         assert_eq!(cx.renderer().active_accel().map(|a| a.name()), None, "CPU frames don't use the accelerator");
         assert_eq!(describe_choice(&cx.choice().unwrap()), "Software Rendering (measured on the first frames: GPU 117.0 ms/frame, CPU 68.0 ms/frame)");
+    }
+
+    #[test]
+    fn auto_cpu_frames_fit_half_the_free_memory() {
+        // #1615: 16 threads at 1378 MiB a frame (a GTX 1050 Ti user's comp) with 10 GiB free
+        // render 3 frames at once, not 16.
+        assert_eq!(auto_cpu_frames(Some(1378 << 20), Some(10 << 30), 16), Some(3));
+        assert_eq!(auto_cpu_frames(Some(1 << 28), Some(64 << 30), 16), Some(16), "at most one per thread");
+        assert_eq!(auto_cpu_frames(Some(4 << 30), Some(2 << 30), 16), Some(1), "at least one");
+        assert_eq!(auto_cpu_frames(Some(1 << 30), Some(0), 8), Some(1));
+        assert_eq!(auto_cpu_frames(Some(1 << 20), Some(u64::MAX), 0), Some(1));
+        // Unknown: not capped, as before.
+        assert_eq!(auto_cpu_frames(None, Some(8 << 30), 16), None);
+        assert_eq!(auto_cpu_frames(Some(1 << 30), None, 16), None);
+        assert_eq!(auto_cpu_frames(Some(0), Some(8 << 30), 16), None);
+    }
+
+    #[test]
+    fn a_job_that_chose_the_cpu_after_measuring_the_gpu_caps_its_frames() {
+        // #1615: a GPU project that measured the CPU faster rendered one frame per thread at
+        // once, so a heavy comp ran out of RAM (an exit without an error, 0.23.1 on Windows).
+        // Its frames now fit half the free memory at the GPU's measured size per frame.
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        if std::env::var_os(CPU_INFLIGHT_ENV).is_some() || std::env::var_os(RENDERER_ENV).is_some() {
+            return;
+        }
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let accel = MemAccel(effectcraft_render::FrameMemory { budget: 3 << 30, peak: 2 << 30, frame: 1 << 30, reserve: 0 });
+        let reads = AtomicUsize::new(0);
+        let free = || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Some(6u64 << 30)
+        };
+        let job = Job {
+            project: &p,
+            footage: &effectcraft_render::NoFootage,
+            expr: None,
+            accel: Some(&accel),
+            comp: cid,
+            settings: &settings,
+            output: &output,
+            path: "/c/f_[#####].png",
+            sink: None,
+            nested_switches: true,
+            options: crate::JobOptions { free_memory: Some(&free), ..Default::default() },
+        };
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(16).build().unwrap();
+        pool.install(|| {
+            let cx = Cx::new(&job);
+            assert_eq!(cx.inflight().cpu, None, "nothing measured yet");
+            let c = cx.comp().unwrap();
+            cx.frame_on(c, 0, crate::JobRenderer::Gpu);
+            assert_eq!(cx.inflight().cpu, None, "the GPU renders: its own cap holds");
+            assert_eq!(reads.load(Ordering::SeqCst), 0, "the free memory is read only for CPU frames");
+            cx.decide(Choice { renderer: crate::JobRenderer::Cpu, gpu_ms: Some(1417.3), cpu_ms: Some(655.8), why: "measured on the first frames" });
+            assert_eq!(cx.inflight(), Inflight { gpu: None, cpu: Some(3) }, "3 GiB of 6 GiB free at 1 GiB a frame");
+            assert_eq!(cx.inflight().cpu, Some(3));
+            assert_eq!(reads.load(Ordering::SeqCst), 1, "settled once per job");
+        });
+        // Without a free-memory reading the job renders uncapped, as before.
+        let job = Job { options: Default::default(), ..job };
+        let cx = Cx::new(&job);
+        cx.frame_on(cx.comp().unwrap(), 0, crate::JobRenderer::Gpu);
+        cx.decide(Choice { renderer: crate::JobRenderer::Cpu, gpu_ms: Some(2.0), cpu_ms: Some(1.0), why: "measured on the first frames" });
+        assert_eq!(cx.inflight().cpu, None);
     }
 
     #[test]
