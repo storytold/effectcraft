@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-export"
-description = "Render Queue jobs and output modules: H.264 MP4 (+AAC), ProRes and uncompressed MOV (+PCM) via FilmCraft, HEVC / AV1 MP4 (+AAC) and WebM (VP9 or AV1 + Opus) via EffectCraft encoders, PNG/JPEG/TIFF/EXR/Targa sequences, animated GIF, WAV/AIFF"
+description = "Render Queue jobs and output modules: H.264 MP4 (+AAC), ProRes and uncompressed MOV (+PCM) , HEVC / AV1 MP4 (+AAC) and WebM (VP9 or AV1) via craft-libs codecs, Opus via effectcraft-opusenc, PNG/JPEG/TIFF/EXR/Targa sequences, animated GIF, WAV/AIFF"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,14 +14,10 @@ effectcraft-time = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-render = { workspace = true }
-filmcraft-h264enc = { workspace = true }
-filmcraft-prores = { workspace = true }
-filmcraft-aac = { workspace = true }
-filmcraft-isobmff = { workspace = true }
+craft-video = { workspace = true }
+craft-audio = { workspace = true }
+craft-media = { workspace = true }
 effectcraft-opusenc = { workspace = true }
-effectcraft-vp9enc = { workspace = true }
-effectcraft-hevcenc = { workspace = true }
-effectcraft-av1enc = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
 exr = { workspace = true }
 gif = { workspace = true }
@@ -31,9 +27,11 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 effectcraft-media = { workspace = true }
 effectcraft-effects = { workspace = true }
 effectcraft-color = { workspace = true }
-filmcraft-opus = { workspace = true }
+filmcraft-hevc = { workspace = true }
+filmcraft-av1 = { workspace = true }
 filmcraft-vp9 = { workspace = true }
 effectcraft-keyframe = { workspace = true }

@@ -45,16 +45,44 @@ fn timing(h: &Harness<'_, EffectcraftApp>, layer: u64) -> (f64, f64, f64) {
 }
 
 fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
+    drag_with(h, from, to, Modifiers::NONE);
+}
+
+fn drag_with(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: Modifiers) {
     h.event(Event::PointerMoved(from));
+    h.event(Event::ModifiersChanged(modifiers));
     h.step();
-    h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers });
     h.step();
     for k in 1..=10 {
         h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
         h.step();
     }
-    h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
     h.run_steps(3);
+}
+
+/// Shift-dragging a bar end or the bar snaps it to another layer's In / Out point a few pixels
+/// away; without Shift it stops on the frame the pointer reached (#1828).
+#[test]
+fn shift_dragging_a_bar_snaps_to_other_layers() {
+    for shift in [false, true] {
+        let (mut h, solid, pre) = harness();
+        let mods = if shift { Modifiers::SHIFT } else { Modifiers::NONE };
+        let (b, p) = (bar(&h, solid), bar(&h, pre));
+        let y = b.center().y;
+        // The solid's Out end (6 s), grabbed 2 px inside, to 6 px short of the precomp's Out (7 s).
+        drag_with(&mut h, pos2(b.max.x - 2.0, y), pos2(p.max.x - 8.0, y), mods);
+        let (i, o, _) = timing(&h, solid);
+        assert!((i - 2.0).abs() < 1e-6, "shift {shift}: in stays at 2 s, got {i}");
+        assert_eq!((o - 7.0).abs() < 1e-6, shift, "shift {shift}: out {o} snaps to 7 s only with Shift");
+        // The whole bar, so its In (2 s) lands 5 px short of the precomp's In (3 s).
+        let b = bar(&h, solid);
+        drag_with(&mut h, pos2(b.center().x, y), pos2(b.center().x + p.min.x - b.min.x - 5.0, y), mods);
+        let (i, _, _) = timing(&h, solid);
+        assert_eq!((i - 3.0).abs() < 1e-6, shift, "shift {shift}: in {i} snaps to 3 s only with Shift");
+    }
 }
 
 /// Both ends of every bar show the trim cursor, just inside and just outside the end; the middle
@@ -118,6 +146,19 @@ fn dragging_bar_ends_trims_in_and_out() {
     drag(&mut h, pos2(b.max.x + 3.0, y), pos2(b.max.x + 3.0 + pps as f32, y));
     let (i, o, s) = timing(&h, pre);
     assert!((i - 3.0).abs() < 1e-6 && (o - 8.0).abs() < 1.5 / 30.0 && s.abs() < 1e-6, "out extended to ~8 s, not slipped: in {i} out {o} start {s}");
+}
+
+/// A Shift-drag on an unselected bar adds it to the selection and moves the whole selection
+/// together, so the other selected layers keep their offset (#1828).
+#[test]
+fn shift_dragging_an_unselected_bar_moves_the_selection() {
+    let (mut h, solid, pre) = harness();
+    h.state_mut().session.execute("layer.select", json!({"layers": [pre]})).unwrap();
+    h.run_steps(2);
+    let b = bar(&h, solid);
+    drag_with(&mut h, b.center(), b.center() + vec2(b.width() / 4.0 * 2.5, 0.0), Modifiers::SHIFT);
+    let ((si, ..), (pi, ..)) = (timing(&h, solid), timing(&h, pre));
+    assert!(si > 4.0 && (pi - si - 1.0).abs() < 1e-6, "both moved by the same amount: solid in {si}, precomp in {pi}");
 }
 
 /// With Frames and Frame Count Start at 1, In moves to 00061 but the Duration column still counts

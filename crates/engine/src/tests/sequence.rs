@@ -269,30 +269,31 @@ fn dpx_and_cineon_runs_import_as_sequences() {
     assert_eq!(got, [("plate.[0001-0003].dpx".to_string(), 3), ("scan_[01-02].cin".to_string(), 2)], "{r}");
 }
 
-/// #1926: an edit that leaves the footage alone doesn't stamp every frame of its image sequences
-/// again for the disk cache's salt (with large sequences each keystroke in a text field took over
-/// half a second); Reload Footage does, and so does new footage.
+/// #1926, #3184: an edit does no file work at all for the disk cache (it used to stamp every
+/// frame of the project's image sequences for a salt; with large sequences each keystroke in a
+/// text field took over half a second): the cache stays attached and no file is looked at, after
+/// edits, after a frame of the sequence was rewritten, after Reload Footage and new footage.
+/// Entries check the files they list when they are read instead.
 #[test]
-fn edits_keep_the_disk_salt_and_reload_stamps_the_files_again() {
+fn edits_do_no_disk_cache_file_work() {
     let dir = folder(&RUN);
-    let cache = std::env::temp_dir().join(format!("ec-seq-salt-{}", std::process::id()));
+    let cache = std::env::temp_dir().join(format!("ec-seq-nofiles-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache);
     let mut s = session();
     s.execute_checked("prefs.set", json!({"values": {"disk.diskCacheFolder": cache.to_string_lossy(), "disk.diskCacheEnabled": true}})).unwrap();
+    let dc = s.disk_cache.clone().expect("a disk cache");
+    let attached = |s: &Session| s.layer_cache.disk().is_some_and(|d| std::sync::Arc::ptr_eq(&d, &dc));
     s.execute("comp.new", json!({"name": "C", "width": 64, "height": 32, "frameRate": 30, "duration": 1})).unwrap();
     let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "sequence": true, "addToComp": true})).unwrap();
     let item = r["items"][0].clone();
-    let salt = s.refresh_disk_salt(false).expect("a disk cache");
     // A frame rewritten in place: same footage settings, another size on disk.
     std::fs::write(at(&dir, "shot_0004.png"), b"a new render of this frame").unwrap();
     s.execute("layer.newText", json!({"text": "title"})).unwrap();
     s.execute("layer.setText", json!({"text": "title 2"})).unwrap();
-    assert_eq!(s.refresh_disk_salt(false), Some(salt), "edits don't stamp the files again");
     s.execute("file.reloadFootage", json!({"items": [item]})).unwrap();
-    let reloaded = s.refresh_disk_salt(false).unwrap();
-    assert_ne!(reloaded, salt, "Reload Footage stamps them again");
     std::fs::write(at(&dir, "extra.png"), b"").unwrap();
     s.execute("file.import", json!({"paths": [at(&dir, "extra.png")]})).unwrap();
-    assert_ne!(s.refresh_disk_salt(false), Some(reloaded), "new footage counts");
+    assert!(attached(&s), "attached all along");
+    assert_eq!(dc.file_checks(), 0, "no file looked at for the disk cache");
     let _ = std::fs::remove_dir_all(&cache);
 }

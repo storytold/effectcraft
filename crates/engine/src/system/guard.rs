@@ -4,7 +4,20 @@
 //! panics leaves the project as it was. This is a safety net, not a substitute for returning
 //! errors (AGENTS.md, "Never crash").
 
+use std::cell::Cell;
+
 use crate::{EngineError, Result};
+
+thread_local! {
+    /// Panics [`guarded`] caught on this thread (see [`caught`]).
+    static CAUGHT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many panics [`guarded`] has caught on this thread so far: compare two readings to learn
+/// whether a call panicked (crash repros, `effectcraft-cli replay`).
+pub fn caught() -> u64 {
+    CAUGHT.with(Cell::get)
+}
 
 /// Run `f`; a panic inside it becomes an error naming `what`. The panic itself is logged by
 /// the panic hook ([`crate::logging::install_panic_hook`]).
@@ -12,6 +25,7 @@ pub fn guarded<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(payload) => {
+            CAUGHT.with(|c| c.set(c.get().saturating_add(1)));
             let msg = payload
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())

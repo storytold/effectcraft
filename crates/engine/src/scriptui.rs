@@ -195,6 +195,15 @@ impl ImageRef {
     }
 }
 
+/// Most edges a ScriptUI `fillPath` is filled with (a path past it fills its first edges).
+pub const MAX_FILL_EDGES: usize = 65_536;
+/// Most horizontal bands a ScriptUI fill is cut into (vertices and edge crossings); the topmost are filled.
+pub const MAX_FILL_BANDS: usize = 262_144;
+/// Most triangles a ScriptUI fill produces.
+pub const MAX_FILL_TRIANGLES: usize = 1 << 22;
+/// Most band-by-edge steps a fill takes while cutting bands.
+pub const MAX_FILL_WORK: usize = 1 << 31;
+
 impl PathSeg {
     /// The subpaths of `path` as polylines (ellipses flattened to `n` segments), each with
     /// whether it is closed.
@@ -248,8 +257,16 @@ impl PathSeg {
     /// self-intersecting and holed paths fill correctly (frontends' polygon fills are often
     /// convex-only). Exact trapezoid decomposition: the plane is cut into horizontal bands at
     /// every vertex and edge crossing; inside a band no edges cross, so each inside span is a
-    /// trapezoid (two triangles).
+    /// trapezoid (two triangles). Edges are compared pairwise and every band looks at every edge,
+    /// on the UI thread, for geometry a script chooses, so a path past [`MAX_FILL_EDGES`] edges,
+    /// [`MAX_FILL_BANDS`] bands, [`MAX_FILL_TRIANGLES`] triangles or [`MAX_FILL_WORK`] steps (edge
+    /// pairs compared, then edges looked at per band) is filled only as far as the limit allows
+    /// (topmost part first) and a warning is logged.
     pub fn fill_triangles(path: &[PathSeg], n: usize, even_odd: bool) -> Vec<[[f64; 2]; 3]> {
+        Self::fill_triangles_within(path, n, even_odd, [MAX_FILL_EDGES, MAX_FILL_BANDS, MAX_FILL_TRIANGLES, MAX_FILL_WORK])
+    }
+
+    fn fill_triangles_within(path: &[PathSeg], n: usize, even_odd: bool, [max_edges, max_bands, max_triangles, max_work]: [usize; 4]) -> Vec<[[f64; 2]; 3]> {
         // Non-horizontal edges, top to bottom, with their winding direction.
         let mut edges: Vec<([f64; 2], [f64; 2], i32)> = vec![];
         for (pts, _) in PathSeg::polylines(path, n) {
@@ -261,15 +278,37 @@ impl PathSeg {
                 edges.push(if a[1] < b[1] { (a, b, 1) } else { (b, a, -1) });
             }
         }
+        if edges.len() > max_edges {
+            log::warn!("fillPath: {} edges, filling only the first {max_edges}", edges.len());
+            edges.truncate(max_edges);
+        }
         if edges.len() < 2 {
             return vec![];
         }
         let x_at = |e: &([f64; 2], [f64; 2], i32), y: f64| e.0[0] + (e.1[0] - e.0[0]) * (y - e.0[1]) / (e.1[1] - e.0[1]);
         let mut ys: Vec<f64> = edges.iter().flat_map(|e| [e.0[1], e.1[1]]).collect();
-        // Where two edges cross, a band boundary.
-        for i in 0..edges.len() {
-            for j in i + 1..edges.len() {
+        // Where two edges cross, a band boundary. Edges by top, so each is compared only with the
+        // ones that start above its bottom (the pairs that share some height); the pairs and the
+        // boundaries found are counted against the budgets, and past one the rest are not looked
+        // for. A band that holds a crossing that was not looked for is not filled (its edges
+        // change order inside it, which the band loop below tells), so what is drawn is never
+        // outside the path.
+        let mut truncated = false;
+        let mut order: Vec<usize> = (0..edges.len()).collect();
+        order.sort_by(|&a, &b| edges[a].0[1].total_cmp(&edges[b].0[1]));
+        let mut pairs = 0usize;
+        'cross: for (k, &i) in order.iter().enumerate() {
+            for &j in &order[k + 1..] {
                 let (a, b) = (&edges[i], &edges[j]);
+                if b.0[1] >= a.1[1] {
+                    break;
+                }
+                pairs += 1;
+                if pairs > max_work || ys.len() > max_bands {
+                    log::warn!("fillPath: over its crossing budget; bands with crossings that were not cut are left unfilled");
+                    truncated = true;
+                    break 'cross;
+                }
                 let (lo, hi) = (a.0[1].max(b.0[1]), a.1[1].min(b.1[1]));
                 if hi <= lo {
                     continue;
@@ -282,6 +321,11 @@ impl PathSeg {
         }
         ys.sort_by(f64::total_cmp);
         ys.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        if ys.len() > max_bands {
+            log::warn!("fillPath: {} bands, filling only the topmost {max_bands}", ys.len());
+            ys.truncate(max_bands);
+        }
+        let mut work = 0usize;
         let mut out = vec![];
         let mut row: Vec<(f64, f64, f64, i32)> = vec![];
         for w in ys.windows(2) {
@@ -290,8 +334,14 @@ impl PathSeg {
             row.clear();
             row.extend(edges.iter().filter(|e| e.0[1] < ym && ym < e.1[1]).map(|e| (x_at(e, ym), x_at(e, ya), x_at(e, yb), e.2)));
             row.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // With crossings missing, edges that swap places inside the band make its trapezoids
+            // wrong: it is left out.
+            let swapped = truncated && !row.windows(2).all(|w| w[0].1 <= w[1].1 + 1e-9 && w[0].2 <= w[1].2 + 1e-9);
             let mut wind = 0;
             for k in 0..row.len().saturating_sub(1) {
+                if swapped {
+                    break;
+                }
                 wind += row[k].3;
                 let inside = if even_odd { wind % 2 != 0 } else { wind != 0 };
                 if inside {
@@ -299,6 +349,13 @@ impl PathSeg {
                     out.push([[l.1, ya], [r.1, ya], [r.2, yb]]);
                     out.push([[l.1, ya], [r.2, yb], [l.2, yb]]);
                 }
+            }
+            // (Every band's edge scan counts, a band left out included.)
+            work = work.saturating_add(edges.len());
+            if out.len() > max_triangles || work > max_work {
+                log::warn!("fillPath: over its triangle or work budget, filled down to y = {yb}");
+                out.truncate(max_triangles);
+                break;
             }
         }
         out
@@ -388,6 +445,18 @@ pub type ScriptUiDispatch = fn(&mut Session, &ScriptUiEvent) -> std::result::Res
 /// and updates [`Session::script_ui`]. Frontends call it every frame (see [`ScriptUi::run_tasks`]).
 pub type ScriptTaskRunner = fn(&mut Session) -> Value;
 
+/// Resume a suspended script once its Render Queue worker has finished. `None` means the
+/// script is still rendering; `Some` is its eventual result (or a real modal-dialog yield).
+pub type ScriptRenderPoll = fn(&mut Session) -> Option<Value>;
+
+pub const RENDER_WAIT_MESSAGE: &str = "A script is rendering. Stop the render or wait for it to finish before editing.";
+
+/// These inspections do not run callbacks or collect unrelated background edits. In
+/// particular, `journal: false` is not a read-only guarantee (`engine.batch`, `jobs.wait`).
+pub fn allowed_during_render(command: &str) -> bool {
+    matches!(command, "renderQueue.stop" | "renderQueue.list" | "editor.state" | "app.capabilities" | "command.list" | "scriptui.list" | "scriptui.get")
+}
+
 /// The open script windows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -401,6 +470,16 @@ pub struct ScriptUi {
     /// The scripting engine's scheduled-task runner (set with [`Session::script`]).
     #[serde(skip)]
     pub tasks: Option<ScriptTaskRunner>,
+    /// A frontend that services [`Self::poll_render`] may opt a script invocation into yielding
+    /// during a blocking Render Queue call. Headless and lifecycle scripts remain synchronous.
+    #[serde(skip)]
+    pub yield_renders: bool,
+    /// The script host suspended in a Render Queue call. While set, frontends must not allow
+    /// other edits or script callbacks to interleave with its open undo groups.
+    #[serde(skip)]
+    pub render_host: Option<u32>,
+    #[serde(skip)]
+    pub poll_render: Option<ScriptRenderPoll>,
     /// Bumped whenever the project is closed or replaced (New / Open / Close Project): repeating
     /// tasks of scripts without an open window stop then, except those of Startup scripts.
     #[serde(skip)]
@@ -928,5 +1007,51 @@ mod tests {
         assert!((a - 8.0 - std::f64::consts::PI * 100.0).abs() < 1.0, "{a}");
         let open = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 4.0, y: 0.0 }, PathSeg::L { x: 0.0, y: 4.0 }];
         assert!((area(&PathSeg::fill_triangles(&open, 48, false)) - 8.0).abs() < 1e-9);
+    }
+
+    /// A script's path past the fill budgets is filled as far as they allow, never emptied.
+    #[test]
+    fn a_fill_past_its_budgets_draws_what_fits() {
+        let area = |t: &[[[f64; 2]; 3]]| {
+            t.iter().map(|t| ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs() / 2.0).sum::<f64>()
+        };
+        let rect = |x: f64, y: f64, w: f64, h: f64| PathSeg::R { x, y, w, h };
+        let rects: Vec<PathSeg> = (0..8).map(|i| rect(2.0 * i as f64, 0.0, 1.0, 10.0)).collect();
+        let full = PathSeg::fill_triangles(&rects, 48, false);
+        assert!((area(&full) - 80.0).abs() < 1e-9);
+        // Edges over the limit: the first edges still fill (4 edges = 2 rectangles).
+        let t = PathSeg::fill_triangles_within(&rects, 48, false, [4, usize::MAX, usize::MAX, usize::MAX]);
+        assert!((area(&t) - 20.0).abs() < 1e-9, "{}", area(&t));
+        // Triangles over the limit: truncated, not empty.
+        let t = PathSeg::fill_triangles_within(&rects, 48, false, [usize::MAX, usize::MAX, 6, usize::MAX]);
+        assert_eq!(t.len(), 6);
+        // Bands over the limit: the topmost band fills.
+        let stair: Vec<PathSeg> = (0..4).map(|i| rect(0.0, i as f64, 1.0, 1.0)).collect();
+        let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(!t.is_empty() && area(&t) < 4.0);
+        // Work over the limit stops the cut.
+        let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, usize::MAX, usize::MAX, 1]);
+        assert!(!t.is_empty() && area(&t) < 4.0);
+        // Many crossing edges (every pair of 120 diagonals meets): the crossing scan is held to the
+        // band and work budgets too.
+        let fan: Vec<PathSeg> = (0..60)
+            .flat_map(|i| {
+                let x = i as f64;
+                [PathSeg::M { x, y: 0.0 }, PathSeg::L { x: 60.0 - x, y: 100.0 }, PathSeg::L { x: x + 0.5, y: 100.0 }]
+            })
+            .collect();
+        for limits in [[usize::MAX, 50, usize::MAX, usize::MAX], [usize::MAX, usize::MAX, usize::MAX, 500]] {
+            let t = PathSeg::fill_triangles_within(&fan, 48, false, limits);
+            assert!(area(&t) <= area(&PathSeg::fill_triangles(&fan, 48, false)) + 1e-6, "{limits:?}");
+        }
+        // Bands whose crossings were not looked for are not filled: a bow tie (area 50, crossing at
+        // y = 5) under a crossing budget of one boundary gives no overlapping triangles.
+        let bow = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 10.0, y: 10.0 }, PathSeg::L { x: 0.0, y: 10.0 }, PathSeg::L { x: 10.0, y: 0.0 }];
+        assert!((area(&PathSeg::fill_triangles(&bow, 48, false)) - 50.0).abs() < 1e-9);
+        let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
+        // Bands left out still count against the work budget (it ends the scan after the first).
+        let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, 1]);
+        assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
     }
 }
