@@ -242,6 +242,7 @@ mod tests {
             transform: Some(effectcraft_effects::plugin::LayerTransform {
                 matrix: [[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 3.0], [0.0, 0.0, 1.0, 0.0]],
                 opacity: 0.5,
+                rect: [0.0, 0.0, 400.0, 200.0],
             }),
         };
         assert_eq!(serde_json::from_str::<Request>(&request_line(&t).unwrap()).unwrap(), t);

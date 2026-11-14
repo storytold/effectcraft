@@ -305,6 +305,10 @@ pub struct LayerTransform {
     pub matrix: [[f64; 4]; 3],
     /// The other layer's opacity (0–1).
     pub opacity: f64,
+    /// The other layer's own extent (its pixels 0..width, 0..height) in the same image grid:
+    /// x0, y0, x1, y1. A Bounce floor in Layer Size mode stops at its edges.
+    #[serde(default)]
+    pub rect: [f64; 4],
 }
 
 /// The composition's camera as this layer sees it ([`PluginHost::comp_camera`]).
@@ -730,7 +734,14 @@ impl PluginHost for RenderHost<'_, '_> {
         let matrix = std::array::from_fn(|i| {
             [m[i][0] * inv, m[i][1] * inv, m[i][2], m[i][0] * (d[0] - self.offset[0] * inv) + m[i][1] * (d[1] - self.offset[1] * inv) + m[i][3]]
         });
-        Some(LayerTransform { matrix, opacity: x.opacity })
+        // its own pixel q is the image point (q - d) * scale + origin
+        let rect = [
+            -d[0] * self.scale + self.offset[0],
+            -d[1] * self.scale + self.offset[1],
+            (x.size[0] - d[0]) * self.scale + self.offset[0],
+            (x.size[1] - d[1]) * self.scale + self.offset[1],
+        ];
+        Some(LayerTransform { matrix, opacity: x.opacity, rect })
     }
 
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
