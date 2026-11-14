@@ -52,6 +52,8 @@ pub enum Req {
     Xform { comp: u64, layer: u64, t: Secs },
     /// `[top, left, width, height]` in layer space.
     SourceRect { comp: u64, layer: u64, t: Secs, extents: bool },
+    /// A layer's source time in seconds at comp time `t` (`Layer.sourceTime`).
+    SourceTime { comp: u64, layer: u64, t: Secs },
     /// `[[time, duration, comment, chapter, url], …]` for a layer, or the comp when `layer` is None.
     Markers { comp: u64, layer: Option<u64> },
     /// A Source Text value as JSON `{doc, text, runs: [{len, style}], paras}` (styles as
@@ -501,6 +503,11 @@ impl<'a> Resolver<'a> {
                 let (m3, _) = ctx.layer_to_comp(l);
                 let m4 = ctx.world_matrix(l);
                 Resp::List(vec![mat3(&m3), mat3(&m3.inverse().unwrap_or_default()), mat4(&m4), mat4(&m4.inverse().unwrap_or_default())])
+            }
+            Req::SourceTime { comp, layer, t } => {
+                let l = self.layer(*comp, *layer)?;
+                let ctx = self.ctx_at(*comp, f64::from_bits(*t))?;
+                Resp::Num(ctx.source_time(l).seconds())
             }
             Req::SourceRect { comp, layer, t, extents: _ } => {
                 let l = self.layer(*comp, *layer)?;
