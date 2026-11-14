@@ -191,3 +191,25 @@ fn commit_edits(click_away: bool) {
         }
     }
 }
+
+/// #3367: on a negative angle the minus sign is part of the degrees typing replaces, so typing
+/// 50 into `0x-20.0°` sets +50°. It used to keep the sign (-50°). Committing the text as it
+/// opened keeps the angle.
+#[test]
+fn typing_into_a_negative_angle_replaces_its_sign() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for (start, text, expected) in
+            [(-20.0, Some("50"), 50.0), (-20.0, Some("-50"), -50.0), (-20.0, None, -20.0), (-400.0, None, -400.0), (45.0, Some("-30"), -30.0)]
+        {
+            let (mut h, layer, uid) = harness(panel, start);
+            let p = component(&h, panel, uid, false);
+            click(&mut h, p);
+            if let Some(text) = text {
+                h.input_mut().events.push(Event::Text(text.into()));
+                h.step();
+            }
+            key(&mut h, Key::Enter, Modifiers::NONE);
+            assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: {start} then {text:?}");
+        }
+    }
+}
