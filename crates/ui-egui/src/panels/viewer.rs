@@ -67,6 +67,57 @@ fn map_id() -> egui::Id {
 /// the viewer opens its context menu there on the next pass.
 pub(crate) const FORWARDED_SECONDARY: &str = "viewer-forwarded-secondary";
 
+/// The egui data key (`(egui::Pos2, egui::Modifiers, u64)`: point, keys, egui pass) of a primary
+/// press an overlay sensed but does not want (the Selection tool's Cryptomatte picking, #2839, when
+/// the pointer left the layer in the pass of the press): the viewer clicks there on the next pass.
+pub(crate) const FORWARDED_PRIMARY: &str = "viewer-forwarded-primary";
+
+/// The egui data key (`()`) of a primary press an overlay claimed although egui handed it to the
+/// viewer (the Selection tool's Cryptomatte picking, #2839, when the pointer arrived on the layer
+/// and pressed in one pass, as a touch or a pen without hover does): the viewer neither clicks
+/// nor drags with it, and lets go of the claim once the button is up.
+pub(crate) const CLAIMED_PRIMARY: &str = "viewer-claimed-primary";
+
+/// Whether an overlay claimed the primary press in progress ([`CLAIMED_PRIMARY`]).
+fn press_claimed(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<()>(egui::Id::unique(CLAIMED_PRIMARY))).is_some()
+}
+
+/// What the viewer's own handles reach this pass, for overlays drawn on top of it.
+#[derive(Clone, Default)]
+struct Grabs {
+    handles: Vec<Pos2>,
+    vertices: Vec<Pos2>,
+    keys: Vec<Pos2>,
+    axes: Vec<(LayerId, [Pos2; 2], [f64; 3], [f64; 3])>,
+    /// Region-of-interest handles.
+    roi: Vec<Pos2>,
+    /// Visible, unlocked guides on screen: (x or y, vertical).
+    guides: Vec<(f32, bool)>,
+}
+
+/// The egui data key of the viewer's [`Grabs`] for the current pass.
+fn grabs_id() -> egui::Id {
+    egui::Id::unique("viewer-grabs")
+}
+
+/// Whether a Selection-tool press at `pos` grabs one of the viewer's own controls (a layer's
+/// bounding-box handle or gizmo arrow, a mask vertex or tangent, a motion-path key, a guide, a
+/// region-of-interest handle) instead of the layer under it, with the reach the viewer gives
+/// them. An overlay that takes presses on a layer leaves these to the viewer.
+pub(crate) fn grabs_at(ctx: &egui::Context, pos: Pos2) -> bool {
+    ctx.data(|d| {
+        let Some(g) = d.get_temp::<Grabs>(grabs_id()) else { return false };
+        let reach = vertex_grab_radius(pos, g.handles.iter().copied());
+        g.handles.iter().any(|h| h.distance(pos) < HANDLE + 2.0)
+            || g.vertices.iter().any(|v| v.distance(pos) < reach)
+            || g.keys.iter().any(|k| k.distance(pos) < 6.0)
+            || axis_at(&g.axes, pos).is_some()
+            || g.roi.iter().any(|h| h.distance(pos) < 6.0)
+            || g.guides.iter().any(|&(at, vertical)| (if vertical { pos.x } else { pos.y } - at).abs() < 4.0)
+    })
+}
+
 pub fn comp_to_screen(ctx: &egui::Context, p: [f32; 2]) -> Option<Pos2> {
     let m: ViewerMap = ctx.data(|d| d.get_temp(map_id()))?;
     Some(m.to_screen([p[0] as f64, p[1] as f64]))
@@ -1135,6 +1186,8 @@ fn led_by_a_moved_ancestor(comp: &Comp, layers: &[MoveLayer]) -> Vec<bool> {
     layers.iter().map(|l| led(l.0)).collect()
 }
 
+/// Starts the gesture a new primary drag begins (pan, move, scale, a handle, a vertex, a marquee),
+/// unless an overlay claimed the press.
 fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let comp_rect = v.comp_rect;
     let zoom = v.zoom;
@@ -1169,6 +1222,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
     };
     if resp.drag_started()
         && !text_owns
+        && !press_claimed(ui.ctx())
         && let Some(pos) = resp.interact_pointer_pos()
     {
         let cpt = map.to_comp(pos);
@@ -1734,6 +1788,8 @@ fn phase_stopped(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, re
     v.pin_hits = pin_hits;
 }
 
+/// Acts on a click in the viewer for the active tool (select, zoom, add or delete vertices),
+/// including a click an overlay passed on, and not one an overlay claimed.
 fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let area = v.area;
     let zoom = v.zoom;
@@ -1764,10 +1820,16 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
             layers_at(ectx, cpt).any(|h| h.id == l.id) && super::puppet_tool::takes_pin(app, ectx, l, cpt)
         })
     };
-    if resp.clicked()
-        && !text_owns
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
+    // A press an overlay passed on in the pass before (FORWARDED_PRIMARY) is a click here.
+    let pass = ctx.cumulative_pass_nr();
+    let forwarded = ctx
+        .data_mut(|d| d.remove_temp::<(Pos2, egui::Modifiers, u64)>(egui::Id::unique(FORWARDED_PRIMARY)))
+        .filter(|f| f.2.saturating_add(1) == pass)
+        .map(|f| (f.0, f.1));
+    // A press an overlay claimed (CLAIMED_PRIMARY) is not a click here.
+    let claimed = press_claimed(&ctx);
+    let clicked = if resp.clicked() && !text_owns && !claimed { resp.interact_pointer_pos().map(|p| (p, mods)) } else { None };
+    if let Some((pos, mods)) = clicked.or(forwarded) {
         let cpt = map.to_comp(pos);
         match app.ui.tool {
             Tool::Zoom => {
@@ -1878,10 +1940,18 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
     v.puppet_layers = puppet_layers;
 }
 
+/// Acts on a double-click: a path's points into a Free Transform box, or a precomp opened; lets
+/// go of an overlay's claim on the press once the button is up.
 fn phase_dblclick(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let map = v.map;
-    let text_owns = v.text_owns;
     let ctx = v.ctx.clone();
+    // A press an overlay claimed (CLAIMED_PRIMARY) is no double-click here either; the claim
+    // ends with the button up (after this pass's click and double-click).
+    let claimed = press_claimed(&ctx);
+    if claimed && !ctx.input(|i| i.pointer.primary_down()) {
+        ctx.data_mut(|d| d.remove::<()>(egui::Id::unique(CLAIMED_PRIMARY)));
+    }
+    let text_owns = v.text_owns || claimed;
     let handle_hits = std::mem::take(&mut v.handle_hits);
     let vertex_hits = std::mem::take(&mut v.vertex_hits);
     let paths = std::mem::take(&mut v.paths);
@@ -1933,6 +2003,8 @@ fn phase_dblclick(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Respons
     v.paths = paths;
 }
 
+/// Runs the overlays drawn on top of the viewer (effect, gradient and text handles), after
+/// recording the viewer's own controls for them, and draws the status chips.
 fn phase_tail(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &mut Vw<'_>) {
     let t = v.t;
     let cid = v.cid;
@@ -1947,6 +2019,32 @@ fn phase_tail(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     let ctx = v.ctx.clone();
     let painter = v.painter.clone();
     let comp = v.comp;
+    // The viewer's own controls, which overlays on top leave to it (#2839).
+    let roi = app.session.state.region_of_interest.map(|[rx, ry, rw, rh]| {
+        let r = Rect::from_min_size(v.comp_rect.min + vec2(rx as f32 * zoom, ry as f32 * zoom), vec2(rw as f32 * zoom, rh as f32 * zoom));
+        roi_handles(r).to_vec()
+    });
+    let guides = if app.ui.viewer.guides && !app.ui.viewer.lock_guides {
+        comp.guides
+            .iter()
+            .map(|g| {
+                let px = g.px(comp.width, comp.height);
+                let s = map.to_screen([px, px]);
+                (if g.vertical { s.x } else { s.y }, g.vertical)
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let grabs = Grabs {
+        handles: v.handle_hits.iter().map(|h| h.2).collect(),
+        vertices: v.vertex_hits.iter().map(|h| h.pos).collect(),
+        keys: v.key_hits.iter().map(|h| h.pos).collect(),
+        axes: v.axis_hits.clone(),
+        roi: roi.unwrap_or_default(),
+        guides,
+    };
+    ctx.data_mut(|d| d.insert_temp(grabs_id(), grabs));
     // 3D Camera Tracker points, targets and their menu (on top of the viewer's gestures while
     // the effect is selected), and its analysis banner.
     super::camera_tracker_ui::viewer_hook(app, ui, &painter, &map, ectx, &|c, l| l2c(c, l).0);
@@ -2010,7 +2108,7 @@ use geometry::{
 use geometry::{box_corners, project_clipped};
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};
-pub(crate) use shapes::{click_pick, layer_at, layer_at_including_locked, layers_at, pick, selectable_layers};
+pub(crate) use shapes::{click_pick, layer_at, layer_at_including_locked, layer_hit, layers_at, pick, selectable_layers};
 use shapes::{create_shape, draw_shape_ghost, shape_drag};
 #[cfg(test)]
 use tools::constrain_45;

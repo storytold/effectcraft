@@ -26,6 +26,7 @@ mod ui_contrast;
 mod ui_control_modifiers;
 mod ui_crypto_pick;
 mod ui_crypto_pick_undo;
+mod ui_crypto_select;
 mod ui_dialog_preview;
 mod ui_dock_resize;
 mod ui_drag_drop;
