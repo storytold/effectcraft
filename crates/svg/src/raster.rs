@@ -69,14 +69,33 @@ pub fn try_rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Result<Image,
 
 /// Render `doc`, returning the image drawn so far and the first budget refusal, if any.
 fn render(doc: &Doc, w: u32, h: u32, m: Affine) -> (Image, Option<RasterError>) {
+    render_with_limit(doc, w, h, m, MAX_LIVE_SURFACE_BYTES)
+}
+
+/// [`rasterize_with`] with at most `limit_bytes` of image surfaces (the destination included)
+/// live at once.
+#[cfg(test)]
+pub(crate) fn rasterize_with_budget(doc: &Doc, w: u32, h: u32, m: Affine, limit_bytes: usize) -> Image {
+    render_with_limit(doc, w, h, m, limit_bytes).0
+}
+
+/// [`render`] with the live surface limit set to `limit_bytes`.
+fn render_with_limit(doc: &Doc, w: u32, h: u32, m: Affine, limit_bytes: usize) -> (Image, Option<RasterError>) {
     // Nested knockout and non-isolated groups draw their children more than once; the number of
     // node draws is bounded by a multiple of the tree's size, past which drawing stops.
     let mut budget = SurfaceBudget::new();
+    budget.limit_bytes = limit_bytes;
     budget.draws_left = node_count(&doc.root).saturating_mul(MAX_DRAWS_PER_NODE).max(MIN_DRAWS);
     let Some(mut img) = budget.image(w, h, None) else { return (Image::default(), budget.refusal) };
     draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
     (img, budget.refusal)
 }
+
+/// The deepest group nesting drawn: drawing recurses, and a crafted document can nest groups
+/// without end, so groups deeper than this are not drawn. Above the 256 levels the SVG parser
+/// and the PDF builder let a document nest, so everything they keep is drawn (the root group
+/// and wrappers come on top).
+const MAX_GROUP_DEPTH: usize = 288;
 
 /// Bound the simultaneously live offscreen image surfaces created by nested groups.
 const MAX_LIVE_SURFACE_BYTES: usize = 512 * 1024 * 1024;
@@ -248,6 +267,11 @@ struct SurfaceBudget {
     refusal: Option<RasterError>,
     /// Node draws left (see [`MAX_DRAWS_PER_NODE`]).
     draws_left: usize,
+    /// Groups entered on the way to the one being drawn.
+    depth: usize,
+    /// Every group being drawn below the current one composites Normal, without knockout
+    /// (known once for a whole subtree, so it isn't walked again at every level).
+    plain: bool,
 }
 
 impl SurfaceBudget {
@@ -268,6 +292,8 @@ impl SurfaceBudget {
             limit_bytes: MAX_LIVE_SURFACE_BYTES,
             refusal: None,
             draws_left: usize::MAX,
+            depth: 0,
+            plain: false,
         }
     }
 
@@ -420,6 +446,15 @@ impl SurfaceBudget {
 }
 
 fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
+    if budget.depth >= MAX_GROUP_DEPTH {
+        return;
+    }
+    budget.depth += 1;
+    draw_group_entered(g, m, opacity, dst, budget);
+    budget.depth -= 1;
+}
+
+fn draw_group_entered(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     let m = m * g.transform;
     let o = opacity * g.opacity;
     if o <= 0.0 {
@@ -436,7 +471,156 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut 
         }
         return;
     }
+    let only_clip = !g.clip.is_empty() && g.mask.is_none() && g.blend == BlendMode::Normal && o >= 1.0 && !g.knockout;
+    let plain = only_clip && (budget.plain || !needs_backdrop(&g.children, MAX_GROUP_DEPTH.saturating_sub(budget.depth)));
+    if plain {
+        let outer = std::mem::replace(&mut budget.plain, true);
+        let left = MAX_GROUP_DEPTH.saturating_sub(budget.depth);
+        if clips_cover_content(g, m, dst.width, dst.height, left) {
+            for c in &g.children {
+                draw_node(c, m, 1.0, dst, budget);
+            }
+        } else {
+            draw_clip_local(g, m, dst, budget);
+        }
+        budget.plain = outer;
+        return;
+    }
     draw_offscreen_group(g, m, o, dst, budget);
+}
+
+/// Whether every clip of `g` is a rectangle along the pixel grid's axes that fully covers each
+/// pixel of a `w`×`h` image its children can draw on: the clips change nothing there, so the
+/// children are drawn straight onto the image, without a surface (a page or artboard clip
+/// around the artwork inside it, the outermost groups of most PDF pages). `levels`: how many
+/// levels of groups below are drawn.
+fn clips_cover_content(g: &Group, m: Affine, w: u32, h: u32, levels: usize) -> bool {
+    let Some(rects) = g.clip.iter().map(|(p, _)| axis_rect(p, m)).collect::<Option<Vec<_>>>() else { return false };
+    // Children that draw nothing need no clip.
+    let Some(b) = draw_bounds(&g.children, m, levels) else { return true };
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    // The pixels the children can touch (a pixel of margin for anti-aliasing), on the image.
+    let (bx0, by0) = ((b.x0.floor() - 1.0).max(0.0), (b.y0.floor() - 1.0).max(0.0));
+    let (bx1, by1) = ((b.x1.ceil() + 1.0).min(fw), (b.y1.ceil() + 1.0).min(fh));
+    if !(bx0 < bx1 && by0 < by1) {
+        // Nothing reaches the image (or the bounds aren't numbers): keep the clip.
+        return false;
+    }
+    rects.iter().all(|r| r.x0.ceil() <= bx0 && bx1 <= r.x1.floor() && r.y0.ceil() <= by0 && by1 <= r.y1.floor())
+}
+
+/// A device-space rectangle holding every pixel `nodes` drawn with `m` can cover, `None` when
+/// they draw nothing. Cheap rather than tight: a stroke counts as its path's bounds grown by half
+/// its width times its miter limit (at least √2, for square caps), and anything it can't
+/// bound (more than `levels` levels deep, a transform that isn't finite) as the whole plane.
+fn draw_bounds(nodes: &[Node], m: Affine, levels: usize) -> Option<kurbo::Rect> {
+    let everything = kurbo::Rect::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY);
+    if !m.as_coeffs().iter().all(|v| v.is_finite()) {
+        return Some(everything);
+    }
+    let mut out: Option<kurbo::Rect> = None;
+    for n in nodes {
+        let r = match n {
+            Node::Group(g) if levels == 0 => (!g.children.is_empty()).then_some(everything),
+            Node::Group(g) => {
+                let gm = m * g.transform;
+                let mut r = draw_bounds(&g.children, gm, levels - 1);
+                for (clip, _) in &g.clip {
+                    r = r.map(|r| r.intersect(gm.transform_rect_bbox(clip.bounding_box())));
+                }
+                r
+            }
+            Node::Shape(s) => {
+                let sm = m * s.transform;
+                let b = s.geom.to_path().bounding_box();
+                let fill = s.fill.as_ref().map(|_| sm.transform_rect_bbox(b));
+                let stroke = s.stroke.as_ref().map(|st| {
+                    let pad = (st.width.abs() * 0.5 * st.miter.max(std::f64::consts::SQRT_2)).max(0.0);
+                    sm.transform_rect_bbox(b.inflate(pad, pad))
+                });
+                match (fill, stroke) {
+                    (Some(a), Some(b)) => Some(a.union(b)),
+                    (a, b) => a.or(b),
+                }
+            }
+            Node::Image(im) => Some((m * im.transform).transform_rect_bbox(kurbo::Rect::new(0.0, 0.0, f64::from(im.width), f64::from(im.height)))),
+        };
+        if let Some(r) = r {
+            let r = if [r.x0, r.y0, r.x1, r.y1].iter().any(|v| v.is_nan()) { everything } else { r };
+            out = Some(out.map_or(r, |o| o.union(r)));
+        }
+    }
+    out
+}
+
+/// The device-space rectangle a clip path is when it is one along the pixel grid's axes: a
+/// move, three or four lines and an optional close, its sides alternately horizontal and
+/// vertical.
+pub(crate) fn axis_rect(path: &kurbo::BezPath, m: Affine) -> Option<kurbo::Rect> {
+    use kurbo::PathEl;
+    let els = path.elements();
+    let mut pts: Vec<Point> = Vec::with_capacity(5);
+    for (i, el) in els.iter().enumerate() {
+        match el {
+            PathEl::MoveTo(p) if i == 0 => pts.push(m * *p),
+            PathEl::LineTo(p) if i > 0 && pts.len() < 5 => pts.push(m * *p),
+            PathEl::ClosePath if i > 0 && i + 1 == els.len() => {}
+            _ => return None,
+        }
+    }
+    const EPS: f64 = 1e-6;
+    let same = |a: Point, b: Point| (a.x - b.x).abs() <= EPS && (a.y - b.y).abs() <= EPS;
+    if pts.len() == 5 && pts.first().zip(pts.last()).is_some_and(|(a, b)| same(*a, *b)) {
+        pts.pop();
+    }
+    let p: [Point; 4] = pts.try_into().ok()?;
+    let sides = [(p[0], p[1]), (p[1], p[2]), (p[2], p[3]), (p[3], p[0])];
+    // Each side horizontal or vertical (and not a point), the next one the other way.
+    let horizontal = |(a, b): (Point, Point)| -> Option<bool> {
+        let (dx, dy) = ((b.x - a.x).abs(), (b.y - a.y).abs());
+        match (dx > EPS, dy > EPS) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
+    };
+    let kinds = sides.map(horizontal);
+    let [Some(k0), Some(k1), Some(k2), Some(k3)] = kinds else { return None };
+    if k0 == k1 || k1 == k2 || k2 == k3 || k3 == k0 {
+        return None;
+    }
+    let r = kurbo::Rect::from_points(p[0], p[2]);
+    [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()).then_some(r)
+}
+
+/// Whether drawing `nodes` reads what is below them beyond Normal compositing: a blend mode or
+/// a knockout group anywhere inside. Past `levels` levels of groups the answer is yes.
+fn needs_backdrop(nodes: &[Node], levels: usize) -> bool {
+    nodes.iter().any(|n| match n {
+        Node::Group(g) => levels == 0 || g.blend != BlendMode::Normal || g.knockout || needs_backdrop(&g.children, levels - 1),
+        Node::Shape(_) | Node::Image(_) => false,
+    })
+}
+
+/// A plain clipping group (no soft mask, blend mode, group opacity or knockout) whose content
+/// composites Normal throughout: drawn into a surface the size of its clip's region and
+/// composited over `dst`. With Normal content that is the same as drawing it over a copy of
+/// the backdrop and keeping the clip (`(C over B)·c + B·(1 − c) = (C·c) over B`), without two
+/// full-size copies per nesting level: a page continuously rasterised at 400 % lost its
+/// nested clipped artwork to the surface budget (#2895).
+fn draw_clip_local(g: &Group, m: Affine, dst: &mut Image, budget: &mut SurfaceBudget) {
+    let Some(region) = clip_region(g, m, dst.width, dst.height) else { return };
+    let Some(mut tmp) = budget.image(region.width(), region.height(), None) else { return };
+    let local = region.origin_shift() * m;
+    for c in &g.children {
+        draw_node(c, local, 1.0, &mut tmp, budget);
+    }
+    if let Some(clip) = clip_coverage(g, local, tmp.width, tmp.height, budget) {
+        apply_clip(&mut tmp, &clip);
+        budget.release_coverage(clip.reserved);
+        over_region(dst, &tmp, region, 1.0);
+    }
+    budget.release(&tmp);
 }
 
 /// Draws a group through an offscreen buffer, then composites it onto `dst`. A clipped group can
@@ -611,7 +795,10 @@ fn apply_soft_mask(sm: &SoftMask, m: Affine, tmp: &mut Image, budget: &mut Surfa
     let Some(mut mk) = budget.image(tmp.width, tmp.height, None) else {
         return false;
     };
+    // The mask's content is a tree of its own: what is known of the masked group's isn't.
+    let plain = std::mem::replace(&mut budget.plain, false);
     draw_group(&sm.content, m, 1.0, &mut mk, budget);
+    budget.plain = plain;
     let bc = sm.backdrop.map(|v| v as f32);
     let lum = sm.luminosity;
     tmp.data.par_iter_mut().zip(mk.data.par_iter()).for_each(|(p, q)| {
@@ -1185,7 +1372,11 @@ fn paint_pattern(dst: &mut Image, cov: &Mask, region: Region, pattern: &Pattern,
         fallback_paint(dst, budget);
         return;
     }
+    // The tile's content is a tree of its own, drawn on a fresh transparent tile: what is known
+    // of the enclosing groups (all Normal) says nothing about the backdrop inside it.
+    let plain = std::mem::replace(&mut budget.plain, false);
     draw_group(&pattern.content, content_to_tile, 1.0, &mut tile, budget);
+    budget.plain = plain;
     let shader = Shader::Pattern(pattern, &tile, device_to_pattern);
     paint_shader(dst, cov, region, &shader, opacity);
     budget.release(&tile);

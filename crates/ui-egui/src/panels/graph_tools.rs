@@ -71,6 +71,7 @@ pub(crate) fn transform_box(
     vmap: &dyn Fn(f32) -> f64,
     speed: bool,
     handles: bool,
+    pal: &super::graph::GraphPalette,
     actions: &mut Actions,
 ) {
     if !app.ui.timeline.graph_transform_box {
@@ -79,7 +80,7 @@ pub(crate) fn transform_box(
     let Some(b) = bounds(keys) else { return };
     let r = Rect::from_min_max(pos2(tm.x(b[0]), ymap(b[3])), pos2(tm.x(b[2]), ymap(b[1]))).expand(6.0);
     let value_ok = !speed && keys.iter().all(|k| k.editable);
-    let col = Color32::from_rgb(0xd8, 0xd8, 0xd8);
+    let col = pal.box_line;
     let ctx = ui.ctx().clone();
     let drag_id = egui::Id::unique("graph-dragging");
     let hp = handle_points(r);
@@ -116,7 +117,7 @@ pub(crate) fn transform_box(
                 continue;
             }
             let hr = Rect::from_center_size(*h, vec2(7.0, 7.0));
-            p.rect_filled(hr, 0.0, Color32::from_gray(0x20));
+            p.rect_filled(hr, 0.0, pal.box_fill);
             p.rect_stroke(hr, 0.0, Stroke::new(1.0, col), StrokeKind::Middle);
             let resp = ui.interact(hr.expand(2.0), egui::Id::unique(("graph-box-handle", i)), Sense::drag());
             app.auto.add(&format!("timeline.graph.transformBox.{i}"), hr, "Transform box handle");
