@@ -325,27 +325,44 @@ enum Source {
     File(PathBuf),
 }
 
-/// `file:///C:/x` or `file:///home/x` as a path (percent-decoded; no remote hosts).
-fn file_url_path(url: &str) -> Option<PathBuf> {
-    let rest = url.strip_prefix("file://")?;
+/// `file:///C:/x` or `file:///home/x` as a path (percent-decoded; no remote hosts). A path that
+/// starts with two separators or holds a `\` (raw or percent-encoded), or a percent-encoded `/`,
+/// is refused: on Windows such a path can name a network share, and reading it contacts that host.
+fn file_url_path(url: &str) -> std::result::Result<PathBuf, String> {
+    let bad = |why: &str| format!("bad file URL `{url}`: {why}");
+    let rest = url.strip_prefix("file://").ok_or_else(|| bad("it doesn't start with file://"))?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     if !rest.starts_with('/') {
-        return None;
+        return Err(bad("only local files can be read (file:///path)"));
     }
     let b = rest.as_bytes();
     // `/C:/…` on Windows.
-    let rest = if b.len() > 2 && b.get(2) == Some(&b':') { rest.get(1..)? } else { rest };
+    let rest =
+        if b.get(1).is_some_and(u8::is_ascii_alphabetic) && b.get(2) == Some(&b':') { rest.get(1..).ok_or_else(|| bad("bad drive letter"))? } else { rest };
     let mut out = Vec::with_capacity(rest.len());
     let mut bytes = rest.bytes();
     while let Some(c) = bytes.next() {
         if c == b'%' {
-            let hex = [bytes.next()?, bytes.next()?];
-            out.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+            let hex = [bytes.next(), bytes.next()];
+            let [Some(hi), Some(lo)] = hex else { return Err(bad("a % isn't followed by two hex digits")) };
+            let byte =
+                std::str::from_utf8(&[hi, lo]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or_else(|| bad("a % isn't followed by two hex digits"))?;
+            if matches!(byte, b'/' | b'\\') {
+                return Err(bad("a percent-encoded / or \\ isn't allowed"));
+            }
+            out.push(byte);
         } else {
             out.push(c);
         }
     }
-    String::from_utf8(out).ok().map(PathBuf::from)
+    let path = String::from_utf8(out).map_err(|_| bad("the path isn't UTF-8"))?;
+    if path.contains('\\') {
+        return Err(bad("use / between folders, not \\"));
+    }
+    if path.starts_with("//") {
+        return Err(bad("network paths can't be read, only local files"));
+    }
+    Ok(PathBuf::from(path))
 }
 
 /// Check `url` against the rules: `https://` on GitHub's hosts; `file://` when the catalog
@@ -360,7 +377,7 @@ fn source(url: &str, catalog: Option<&str>) -> std::result::Result<Source, Strin
     }
     let local_catalog = catalog.is_none_or(|c| c.starts_with("file://"));
     if url.starts_with("file://") && local_catalog {
-        return file_url_path(url).map(Source::File).ok_or_else(|| format!("bad file URL `{url}`"));
+        return file_url_path(url).map(Source::File);
     }
     Err(format!("`{url}` isn't an https:// URL"))
 }
@@ -1033,7 +1050,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Refresh Plug-in Catalog",
             [],
             None,
-            "{catalog?: https:// or file:// URL of an index.json (default: the community catalog), wait?}",
+            "{catalog?: https:// or file:// URL of an index.json (default: the community catalog; file:// takes a local path, not a network path such as //server/share), wait?}",
             always,
             refresh
         ),
@@ -1180,10 +1197,47 @@ mod tests {
         assert_eq!(source("file:///C:/p/x.wasm", None), Ok(Source::File(PathBuf::from("C:/p/x.wasm"))));
         assert!(source("file://", None).is_err());
         // Percent-decoded; no remote hosts.
-        assert_eq!(file_url_path("file:///C:/My%20Plug-ins/Jos%C3%A9%23.wasm"), Some(PathBuf::from("C:/My Plug-ins/José#.wasm")));
-        assert_eq!(file_url_path("file://localhost/home/x.wasm"), Some(PathBuf::from("/home/x.wasm")));
+        assert_eq!(file_url_path("file:///C:/My%20Plug-ins/Jos%C3%A9%23.wasm"), Ok(PathBuf::from("C:/My Plug-ins/José#.wasm")));
+        assert_eq!(file_url_path("file://localhost/home/x.wasm"), Ok(PathBuf::from("/home/x.wasm")));
         for no in ["file://server/share/x.wasm", "file:///bad%2", "file:///bad%zz"] {
-            assert_eq!(file_url_path(no), None, "{no}");
+            assert!(file_url_path(no).is_err(), "{no}");
+        }
+    }
+
+    #[test]
+    fn file_urls_cannot_name_a_network_path() {
+        for ok in [
+            ("file:///C:/p/x.wasm", "C:/p/x.wasm"),
+            ("file:///c:/p/x.wasm", "c:/p/x.wasm"),
+            ("file:///home/me/x.wasm", "/home/me/x.wasm"),
+            ("file://localhost/C:/p/x.wasm", "C:/p/x.wasm"),
+            ("file:///home/me/a%20b/x.wasm", "/home/me/a b/x.wasm"),
+            ("file:///C:/p//x.wasm", "C:/p//x.wasm"),
+        ] {
+            assert_eq!(file_url_path(ok.0), Ok(PathBuf::from(ok.1)), "{}", ok.0);
+        }
+        for no in [
+            // Two separators at the start: `//server/share/…`.
+            "file:////server/share/x.wasm",
+            "file://localhost//server/share/x.wasm",
+            "file://///server/share/x.wasm",
+            "file:////:x.wasm",
+            // Backslashes, raw or percent-encoded.
+            "file:///\\\\server\\share\\x.wasm",
+            "file:///\\server/share/x.wasm",
+            "file:///C:\\p\\x.wasm",
+            "file:///%5C%5Cserver/share/x.wasm",
+            "file:///%5c%5cserver/share/x.wasm",
+            "file:///C:/p%5Cx.wasm",
+            // Percent-encoded slashes.
+            "file:///%2F%2Fserver/share/x.wasm",
+            "file:///%2fserver/share/x.wasm",
+            "file:///C:/p%2Fx.wasm",
+        ] {
+            let e = file_url_path(no).expect_err(no);
+            assert!(e.starts_with("bad file URL"), "{no}: {e}");
+            assert!(source(no, None).is_err(), "{no}");
+            assert!(source(no, Some("file:///tmp/index.json")).is_err(), "{no}");
         }
     }
 
