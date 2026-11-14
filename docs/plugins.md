@@ -378,6 +378,15 @@ effects can be registered.
   only for edits (never while rendering or evaluating expressions) and the edit waits for it, so it
   must be quick. This is how [external effect helpers](external-helpers.md#parameter-changes)
   receive `param_changed`; WebAssembly modules can't use it.
+* **`PluginHost::masks()`** (default none) gives the layer's enabled masks at the render time as
+  `MaskPath { name, closed, mode, inverted, opacity, feather, expansion, vertices, in_tangents,
+  out_tangents }`, in buffer pixels of the frame (mapped like point parameters; tangents, feather
+  and expansion scaled), and **`PluginHost::layer_masks(param_id, layer_time)`** those of a layer
+  parameter's layer, placed where `layer_input` puts its pixels (a text layer adds its glyph
+  outlines). **`EffectPlugin::padding_v2(…, host)`** (default: calls `padding`) is `padding` with
+  a host whose `masks()` are in the buffer before padding. These are additions with defaults, for
+  Rust plug-ins and [external effect helpers](external-helpers.md#masks); the WebAssembly ABI does
+  not offer them.
 
 ### Compatibility
 

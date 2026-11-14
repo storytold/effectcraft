@@ -64,11 +64,11 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 
 | Request | Reply | |
 |---|---|---|
-| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"],"max_processes":4,"features":["param_changed"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. `max_processes` (optional, default 1) is how many processes of the helper EffectCraft may run at once, see [Parallel rendering](#parallel-rendering). `features` (optional) lists the [extensions](#extensions) the helper understands. A different `version` means EffectCraft won't use the helper. |
-| `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true,"notify_params":["p114"]}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. `notify_params` (optional): see [Parameter changes](#parameter-changes). |
+| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"],"max_processes":4,"features":["param_changed","masks"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. `max_processes` (optional, default 1) is how many processes of the helper EffectCraft may run at once, see [Parallel rendering](#parallel-rendering). `features` (optional) lists the [extensions](#extensions) the helper understands. A different `version` means EffectCraft won't use the helper. |
+| `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true,"notify_params":["p114"],"masks":true}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. `notify_params` (optional): see [Parameter changes](#parameter-changes). `masks: true` (optional): see [Masks](#masks). |
 | `{"op":"load","path":"…"}` | `effects` (only the new ones) or `error` | A file or folder the user picked. Replayed after a restart. |
-| `{"op":"padding","effect":"…","instance":7,"time":1.0,"scale":1.0,"layer_size":[w,h],"flat":[…],"texts":[…]}` | `{"op":"padding","pixels":3}` | Transparent pixels to add on each side before the render (at most 4096). |
-| `{"op":"render","effect":"…","instance":7,"time":1.0,"frame":<image ref>,"layer_size":[w,h],"flat":[…],"texts":[…],"frame_rate":30,"frame_range":[0,10]}` | callbacks, then `{"op":"done"}` or `{"op":"error","message":"…"}` | Process `frame` in place: read it, write the result to the same ref, reply `done`. `flat` / `texts` are the parameter values flattened by plug-in API 2 rules. `instance` identifies the applied effect (stable across frames). `frame_range` is the layer's source range in layer-time seconds, or `null`. |
+| `{"op":"padding","effect":"…","instance":7,"time":1.0,"scale":1.0,"layer_size":[w,h],"flat":[…],"texts":[…]}` | `{"op":"padding","pixels":3}` | Transparent pixels to add on each side before the render (at most 4096). With [masks](#masks), also `"masks":[…]`. |
+| `{"op":"render","effect":"…","instance":7,"time":1.0,"frame":<image ref>,"layer_size":[w,h],"flat":[…],"texts":[…],"frame_rate":30,"frame_range":[0,10]}` | callbacks, then `{"op":"done"}` or `{"op":"error","message":"…"}` | Process `frame` in place: read it, write the result to the same ref, reply `done`. `flat` / `texts` are the parameter values flattened by plug-in API 2 rules. `instance` identifies the applied effect (stable across frames). `frame_range` is the layer's source range in layer-time seconds, or `null`. With [masks](#masks), also `"masks":[…]`. |
 | `{"op":"param_changed","effect":"…","instance":7,"param":"p114","time":1.0,"layer_size":[w,h],"values":{…},"texts":[…]}` | `{"op":"set_params","values":{"p3":[1,0.4,0,1],"p4":36}}` or `error` | The user changed a parameter listed in `notify_params`; only to helpers with the `param_changed` [extension](#extensions). See [Parameter changes](#parameter-changes). |
 | `{"op":"destroy","instance":7}` | none | The instance is gone; free what it holds. Not sent by EffectCraft yet (see [Parallel rendering](#parallel-rendering)). |
 | `{"op":"ping"}` | `{"op":"pong"}` | Heartbeat. |
@@ -81,6 +81,7 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 | `{"op":"input_at","time":t}` | `{"op":"image","image":<image ref>\|null}`: the effect's input (the layer, its masks, the effects above) at layer time `t`, in its own extent. |
 | `{"op":"layer_input","param":"<layer param id>","time":t}` | `image`: that layer at layer time `t` with effects and masks, resampled into this frame's grid. |
 | `{"op":"params_at","time":t}` | `{"op":"params","values":[[flat…],[texts…]]\|null}` |
+| `{"op":"layer_masks","param":"<layer param id>","time":t}` | `{"op":"masks","masks":[…]\|null}`: the masks of that layer at layer time `t`, see [Masks](#masks). |
 
 While a helper waits for an answer, EffectCraft may send another `render` (or `padding`). This
 happens when producing the answer needs an effect of the same helper: for example, motion blur
@@ -91,7 +92,7 @@ when the render ends.
 
 ### Extensions
 
-A helper lists the protocol extensions it understands in `hello`: `"features": ["param_changed"]`.
+A helper lists the protocol extensions it understands in `hello`: `"features": ["param_changed", "masks"]`.
 EffectCraft uses an extension only with helpers that list it, so a helper without `features` (or
 with an empty list) is spoken to exactly as described above; the protocol version stays 1.
 Entries EffectCraft doesn't know are ignored, as is anything that isn't an array of strings.
@@ -99,6 +100,7 @@ Entries EffectCraft doesn't know are ignored, as is anything that isn't an array
 | Feature | What it adds |
 |---|---|
 | `param_changed` | [Parameter changes](#parameter-changes): `notify_params` in `describe` / `load`, the `param_changed` request and the `set_params` reply. |
+| `masks` | [Masks](#masks): `masks: true` in `describe` / `load`, `masks` in `render` / `padding`, the `layer_masks` callback. |
 
 ### Parameter changes
 
@@ -144,6 +146,47 @@ values, a "link" checkbox, a mode menu that resets dependent controls. A helper 
 
 Rust helpers built on `serve` announce `param_changed` and answer it with
 `EffectPlugin::notify_params` / `EffectPlugin::param_changed` of their effects (see
+[plug-ins](plugins.md)).
+
+### Masks
+
+Effects that work on shapes (stroke or fill along a mask, follow a path) get mask paths from a
+helper with the `masks` extension:
+
+- **The effect's own layer.** An effect described with `"masks": true` gets its layer's enabled
+  masks in every `render` and `padding`, evaluated at the render time (the layer's mask
+  animation, top to bottom):
+
+  ```json
+  "masks": [{"name":"Mask 1","closed":true,"mode":"add","inverted":false,
+             "opacity":1.0,"feather":[0,0],"expansion":0,
+             "vertices":[[x,y],…],"in":[[dx,dy],…],"out":[[dx,dy],…]}]
+  ```
+
+  `mode` is `none`, `add`, `subtract`, `intersect`, `lighten`, `darken` or `difference`;
+  `opacity` 0-1. Vertices are in buffer pixels, mapped exactly like point parameters in `flat`
+  (layer pixels × `scale` + `origin`; for text and shape layers measured in the effect's
+  comp-sized layer bounds, like their point parameters); `in` / `out` tangents are relative to
+  their vertex and, like `feather` and `expansion`, in buffer pixels (× `scale`). In `padding`
+  they are in the buffer before padding (where `flat`'s points are); in `render`, in `frame`.
+  Effects without `masks: true` (and every effect of a helper without the extension) get no
+  `masks` field.
+- **Another layer.** During a render the helper may ask `layer_masks` for the layer chosen in
+  one of the effect's layer parameters, at a layer time. The answer is that layer's masks in the
+  same format, in buffer pixels of this render's frame, placed where `layer_input` puts that
+  layer's pixels (centred when the layers differ in size), or `null` when no layer is chosen. For
+  a text layer the glyph outlines at that time follow its masks, one closed path per contour,
+  named by the character and in `difference` mode (what Create Masks from Text makes, but live).
+  An effect reading another layer's masks keeps that layer as a dependency like `layer_input`:
+  its cached frames are made again when that layer's masks (or text) change.
+- **Bounds.** One message carries at most 1024 masks and 65 536 vertices in all (about 8 MB of
+  JSON); masks beyond that are left out, in order. A mask whose numbers aren't all finite, or
+  whose tangent lists don't match its vertices, is left out.
+- A manifest parameter kind for picking one of the layer's masks isn't there yet: use a popup or
+  a slider for the mask number.
+
+Rust helpers built on `serve` announce `masks`; `Provider::wants_masks` decides which effects
+ask for them, and the effects read them with `PluginHost::masks` / `PluginHost::layer_masks` (see
 [plug-ins](plugins.md)).
 
 ### Parallel rendering

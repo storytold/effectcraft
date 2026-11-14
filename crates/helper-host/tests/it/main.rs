@@ -63,6 +63,32 @@ enum Kind {
     Ask,
     /// Parameter-change checks: answers `param_changed` for `preset` (see [`preset_answer`]).
     Preset,
+    /// Mask checks: writes what it got into the frame (see [`mask_pixels`]); its padding is the
+    /// number of masks it got.
+    Masks,
+}
+
+/// What [`Kind::Masks`] writes: pixel 0 = the layer's masks (count, first vertex x, y, all
+/// vertices), pixel 1 = the masks of the layer in parameter `layer` at 0.5 s (count or -1 for
+/// none, first vertex x, y, its first in tangent x), pixel 2 = the first mask's out tangent x,
+/// feather x, expansion, opacity.
+fn mask_pixels(host: &dyn PluginHost) -> [[f32; 4]; 3] {
+    let own = host.masks();
+    let first = |m: &[effectcraft_effects::MaskPath]| m.first().and_then(|m| m.vertices.first().copied()).unwrap_or([-1.0; 2]);
+    let total: usize = own.iter().map(|m| m.vertices.len()).sum();
+    let o = first(&own);
+    let other = host.layer_masks("layer", 0.5);
+    let (n, p, t) = match &other {
+        Some(m) => (m.len() as f32, first(m), m.first().and_then(|m| m.in_tangents.first().copied()).unwrap_or([0.0; 2])),
+        None => (-1.0, [-1.0; 2], [0.0; 2]),
+    };
+    let m0 = own.first().cloned().unwrap_or_default();
+    let out0 = m0.out_tangents.first().copied().unwrap_or([0.0; 2]);
+    [
+        [own.len() as f32, o[0] as f32, o[1] as f32, total as f32],
+        [n, p[0] as f32, p[1] as f32, t[0] as f32],
+        [out0[0] as f32, m0.feather[0] as f32, m0.expansion as f32, m0.opacity as f32],
+    ]
 }
 
 struct Fake {
@@ -155,6 +181,11 @@ impl EffectPlugin for Fake {
                 IN_ASK.store(false, Ordering::SeqCst);
             }
             Kind::Preset => {}
+            Kind::Masks => {
+                for (px, v) in frame.pixels.iter_mut().zip(mask_pixels(host)) {
+                    *px = v;
+                }
+            }
             Kind::Crash => std::process::exit(3),
             Kind::Hang => {
                 let mut out = std::io::stdout();
@@ -173,6 +204,9 @@ impl EffectPlugin for Fake {
             }
         }
         Ok(())
+    }
+    fn padding_v2(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], key: u64, host: &dyn PluginHost) -> u32 {
+        if self.kind == Kind::Masks { host.masks().len() as u32 } else { self.padding(params, time, scale, layer_size, key) }
     }
     fn notify_params(&self) -> &[String] {
         &self.notify
@@ -360,6 +394,33 @@ impl Provider for NotifyProvider {
         fx.notify = vec!["preset".into(), "no_such_param".into()];
         let ask = Fake::new(manifest(&format!("org.test.{}.ask", self.tag), vec![amount()]), Kind::Ask);
         (vec![Arc::new(fx), Arc::new(ask)], vec![])
+    }
+}
+
+/// The fake helper of the mask checks (`EC_FAKE_MODE` `masks`, or `nomasks`: a helper that
+/// announces no features): `org.test.<tag>.shape` asks for its layer's masks, `.blind` doesn't;
+/// both are [`Kind::Masks`] with a layer parameter `layer`.
+struct MasksProvider {
+    tag: &'static str,
+}
+
+impl Provider for MasksProvider {
+    fn name(&self) -> String {
+        "Masks".into()
+    }
+    fn features(&self) -> Vec<String> {
+        if self.tag == "nomasks" { vec![] } else { vec![effectcraft_helper_host::protocol::FEATURE_MASKS.into()] }
+    }
+    fn wants_masks(&self, effect: &dyn EffectPlugin) -> bool {
+        effect.manifest().id.ends_with(".shape")
+    }
+    fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+        let layer = || PluginParam { id: "layer".into(), name: "Layer".into(), group: String::new(), kind: PluginParamKind::Layer };
+        let v: Vec<Arc<dyn EffectPlugin>> = ["shape", "blind"]
+            .into_iter()
+            .map(|n| Arc::new(Fake::new(manifest(&format!("org.test.{}.{n}", self.tag), vec![amount(), layer()]), Kind::Masks)) as Arc<dyn EffectPlugin>)
+            .collect();
+        (v, vec![])
     }
 }
 
@@ -553,6 +614,8 @@ fn run_checks() -> bool {
     all &= pool_group("startup");
     all &= pool_group("notify");
     all &= pool_group("old");
+    all &= pool_group("masks");
+    all &= pool_group("nomasks");
     let _ = std::fs::remove_dir_all(&state);
     all
 }
@@ -906,6 +969,120 @@ fn run_notify_checks(exe: &Path, mode: &str) -> bool {
     all
 }
 
+/// A mask with `n` vertices from (x, y), 1 px apart, tangents (0.5, 0.25) in and (-0.5, 0) out.
+fn mask(n: usize, x: f64, y: f64) -> effectcraft_effects::MaskPath {
+    effectcraft_effects::MaskPath {
+        name: "Mask 1".into(),
+        closed: true,
+        mode: "add".into(),
+        inverted: false,
+        opacity: 0.75,
+        feather: [2.5, 2.5],
+        expansion: -1.5,
+        vertices: (0..n).map(|i| [x + i as f64, y]).collect(),
+        in_tangents: vec![[0.5, 0.25]; n],
+        out_tangents: vec![[-0.5, 0.0]; n],
+    }
+}
+
+/// The host of the mask checks: the layer's masks are `own`, the layer in parameter `layer` has
+/// `other`.
+struct MaskHost {
+    own: Vec<effectcraft_effects::MaskPath>,
+    other: Option<Vec<effectcraft_effects::MaskPath>>,
+}
+
+impl PluginHost for MaskHost {
+    fn input_at(&self, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn layer_input(&self, _: &str, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn params_at(&self, _: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        None
+    }
+    fn frame_rate(&self) -> f64 {
+        10.0
+    }
+    fn time(&self) -> f64 {
+        1.0
+    }
+    fn masks(&self) -> Vec<effectcraft_effects::MaskPath> {
+        self.own.clone()
+    }
+    fn layer_masks(&self, param: &str, t: f64) -> Option<Vec<effectcraft_effects::MaskPath>> {
+        if param == "layer" && t == 0.5 { self.other.clone() } else { None }
+    }
+}
+
+/// Render mask effect `id` on a 2×2 frame (no padding) with `host`; the first three pixels.
+fn render_masks(id: &str, host: &MaskHost) -> Result<Vec<[f32; 4]>, String> {
+    let p = plugin(id).ok_or_else(|| format!("{id} is not registered"))?;
+    let m = p.manifest().clone();
+    let mut px = vec![[0.0; 4]; 4];
+    let mut f = PluginFrame { width: 2, height: 2, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0; 2] };
+    p.render_v2(&mut f, &PluginParams { manifest: &m, flat: &[1.0, 3.0], texts: &[] }, 1.0, host)?;
+    px.truncate(3);
+    Ok(px)
+}
+
+/// Masks for helper effects (#3665), run in a child of the test with `EC_FAKE_MODE` `masks` or
+/// `nomasks` (a helper that announces no features).
+fn run_mask_checks(exe: &Path, mode: &str) -> bool {
+    let mut all = true;
+    let Ok(dir) = pool_dir() else { return check("EC_FAKE_DIR", false, "not set") };
+    effectcraft_helper_host::blocklist::set_state_dir(dir.join("state"));
+    let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe.to_path_buf()), false);
+    all &= check(&format!("{mode}: scan registers the helper's effects"), r["loaded"].as_array().map_or(0, Vec::len) == 2, &r);
+    let (shape, blind) = (format!("org.test.{mode}.shape"), format!("org.test.{mode}.blind"));
+    let host = MaskHost { own: vec![mask(4, 10.5, 20.25), mask(3, 0.0, 0.0)], other: Some(vec![mask(5, 7.0, 8.0)]) };
+    let r = render_masks(&shape, &host);
+
+    if mode == "nomasks" {
+        // Without the feature: no masks in the render or padding (the effect asked in vain).
+        all &= check("no feature: render carries no masks", r.as_ref().is_ok_and(|p| p[0][0] == 0.0), &r);
+        let pad = plugin(&shape).map(|p| {
+            let m = p.manifest().clone();
+            p.padding_v2(&PluginParams { manifest: &m, flat: &[1.0, 3.0], texts: &[] }, 1.0, 1.0, [2.0; 2], 7, &host)
+        });
+        all &= check("no feature: padding carries no masks", pad == Some(0), pad);
+        effectcraft_helper_host::stop_all();
+        return all;
+    }
+
+    // The layer's masks arrive as the host gave them (buffer pixels), with their settings.
+    all &= check("render carries the layer's masks", r.as_ref().is_ok_and(|p| p[0] == [2.0, 10.5, 20.25, 7.0] && p[2] == [-0.5, 2.5, -1.5, 0.75]), &r);
+    // The masks of another layer, asked for during the render.
+    all &= check("layer_masks answers with the other layer's masks", r.as_ref().is_ok_and(|p| p[1] == [1.0, 7.0, 8.0, 0.5]), &r);
+    let none = render_masks(&shape, &MaskHost { own: vec![], other: None });
+    all &= check("layer_masks without a layer answers null", none.as_ref().is_ok_and(|p| p[0][0] == 0.0 && p[1][0] == -1.0), &none);
+    // An effect that didn't ask gets none of its own, but may still ask for another layer's.
+    let r = render_masks(&blind, &host);
+    all &= check("an effect that didn't ask gets no masks", r.as_ref().is_ok_and(|p| p[0][0] == 0.0 && p[1][0] == 1.0), &r);
+    // Padding carries them too.
+    let pad = |id: &str| {
+        plugin(id).map(|p| {
+            let m = p.manifest().clone();
+            p.padding_v2(&PluginParams { manifest: &m, flat: &[1.0, 3.0], texts: &[] }, 1.0, 1.0, [2.0; 2], 7, &host)
+        })
+    };
+    all &= check("padding carries the layer's masks", pad(&shape) == Some(2) && pad(&blind) == Some(0), (pad(&shape), pad(&blind)));
+
+    // Bounds: masks with numbers that aren't finite or tangents that don't match are dropped,
+    // then at most 1024 masks and 65536 vertices go out, in order.
+    let mut own = vec![mask(3, f64::NAN, 0.0)];
+    let mut short = mask(3, 0.0, 0.0);
+    short.in_tangents.pop();
+    own.push(short);
+    own.extend((0..2000).map(|i| mask(100, i as f64, 1.0)));
+    let big = MaskHost { own, other: Some((0..3000).map(|i| mask(1, i as f64, 2.0)).collect()) };
+    let r = render_masks(&shape, &big);
+    all &= check("huge masks are bounded", r.as_ref().is_ok_and(|p| p[0] == [655.0, 0.0, 1.0, 65_500.0] && p[1][0] == 1024.0), &r);
+    effectcraft_helper_host::stop_all();
+    all
+}
+
 /// Run the pool checks of one mode in a child of this test, so its helpers (this same program)
 /// see the mode in their environment.
 fn pool_group(mode: &str) -> bool {
@@ -938,6 +1115,8 @@ fn main() {
             Ok("startup") => serve(&mut PoolProvider::new("startup", 4)),
             Ok("notify") => serve(&mut NotifyProvider { tag: "notify" }),
             Ok("old") => serve(&mut NotifyProvider { tag: "old" }),
+            Ok("masks") => serve(&mut MasksProvider { tag: "masks" }),
+            Ok("nomasks") => serve(&mut MasksProvider { tag: "nomasks" }),
             _ => serve(&mut FakeProvider),
         };
         if let Err(e) = r {
@@ -950,6 +1129,7 @@ fn main() {
         let (Ok(exe), Ok(mode)) = (std::env::current_exe(), std::env::var("EC_FAKE_MODE")) else { std::process::exit(2) };
         let ok = match mode.as_str() {
             "notify" | "old" => run_notify_checks(&exe, &mode),
+            "masks" | "nomasks" => run_mask_checks(&exe, &mode),
             _ => run_pool_checks(&exe, &mode),
         };
         if !ok {

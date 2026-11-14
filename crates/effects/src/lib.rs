@@ -509,6 +509,41 @@ pub struct MaskShape {
     pub inverted: bool,
 }
 
+/// A layer mask as a path, for effects that take the shape itself (external effect helpers):
+/// Bezier vertices with tangents relative to their vertex, and the mask's settings. Points are in
+/// the coordinates the producer says (effect space for [`EffectHost::mask_paths`], buffer pixels
+/// for [`plugin::PluginHost::masks`]).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaskPath {
+    pub name: String,
+    pub closed: bool,
+    /// `none`, `add`, `subtract`, `intersect`, `lighten`, `darken` or `difference`.
+    pub mode: String,
+    pub inverted: bool,
+    /// 0–1.
+    pub opacity: f64,
+    /// Horizontal and vertical feather.
+    pub feather: [f64; 2],
+    pub expansion: f64,
+    pub vertices: Vec<[f64; 2]>,
+    /// In tangents, relative to their vertex.
+    #[serde(rename = "in")]
+    pub in_tangents: Vec<[f64; 2]>,
+    /// Out tangents, relative to their vertex.
+    #[serde(rename = "out")]
+    pub out_tangents: Vec<[f64; 2]>,
+}
+
+impl MaskPath {
+    /// The path with every point moved by `d` (tangents are relative and stay).
+    pub fn shifted(mut self, d: [f64; 2]) -> MaskPath {
+        for v in &mut self.vertices {
+            *v = [v[0] + d[0], v[1] + d[1]];
+        }
+        self
+    }
+}
+
 /// Pixels of another layer referenced by a layer parameter: its buffer (layer space, see
 /// [`Buf`]) and its source size in layer pixels.
 #[derive(Clone, Debug, Default)]
@@ -580,6 +615,17 @@ pub trait EffectHost: Sync {
     /// A particle simulation backend (GPU particles; see [`psim`]). `None` = simulate on the
     /// CPU.
     fn particles(&self) -> Option<&dyn psim::ParticleSim> {
+        None
+    }
+    /// The effect's own layer's enabled masks at the current time as paths, in effect space
+    /// (the coordinates of [`EffectEnv::masks`]). Empty when unknown.
+    fn mask_paths(&self) -> Vec<MaskPath> {
+        vec![]
+    }
+    /// Layer `id`'s enabled masks at comp time `comp_time` (seconds) in its own effect space,
+    /// with that layer's effect size ([`LayerPixels::size`]); a text layer adds its glyph
+    /// outlines as closed paths. `None` when unavailable.
+    fn layer_mask_paths(&self, _id: u64, _comp_time: f64) -> Option<(Vec<MaskPath>, [f64; 2])> {
         None
     }
 }

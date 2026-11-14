@@ -322,6 +322,37 @@ pub trait PluginHost {
     fn frame_range(&self) -> Option<(f64, f64)> {
         None
     }
+    /// The enabled masks of the effect's layer at the render time, in **buffer pixels** of the
+    /// frame (vertices mapped like point parameters: layer pixels × scale + origin; tangents,
+    /// feather and expansion × scale). Empty when the layer has none or the host doesn't know.
+    fn masks(&self) -> Vec<crate::MaskPath> {
+        vec![]
+    }
+    /// The masks of the layer chosen in Layer parameter `param_id` at **layer time**
+    /// `layer_time`, in buffer pixels of the frame, placed as [`PluginHost::layer_input`] places
+    /// that layer's pixels (centred when the layers differ in size); a text layer adds its glyph
+    /// outlines. `None` when unset or unavailable.
+    fn layer_masks(&self, _param_id: &str, _layer_time: f64) -> Option<Vec<crate::MaskPath>> {
+        None
+    }
+}
+
+/// Masks in effect space (layer pixels) moved by `shift` (layer pixels) and mapped onto a buffer
+/// grid: points × `scale` + `offset`, tangents, feather and expansion × `scale`.
+pub fn masks_to_buffer(masks: Vec<crate::MaskPath>, shift: [f64; 2], offset: [f64; 2], scale: f64) -> Vec<crate::MaskPath> {
+    let pt = |v: [f64; 2]| [(v[0] + shift[0]) * scale + offset[0], (v[1] + shift[1]) * scale + offset[1]];
+    let vec = |v: [f64; 2]| [v[0] * scale, v[1] * scale];
+    masks
+        .into_iter()
+        .map(|mut m| {
+            m.vertices = m.vertices.into_iter().map(pt).collect();
+            m.in_tangents = m.in_tangents.into_iter().map(vec).collect();
+            m.out_tangents = m.out_tangents.into_iter().map(vec).collect();
+            m.feather = vec(m.feather);
+            m.expansion *= scale;
+            m
+        })
+        .collect()
 }
 
 /// The [`PluginHost::instance_key`] of the effect `ctx` renders: its instance seed (stable per
@@ -515,6 +546,11 @@ pub trait EffectPlugin: Send + Sync {
     /// and `instance_key` the [`PluginHost::instance_key`] this render will have.
     fn padding(&self, _params: &PluginParams, _time: f64, _scale: f64, _layer_size: [f64; 2], _instance_key: u64) -> u32 {
         0
+    }
+    /// API 2: [`EffectPlugin::padding`] with host services ([`PluginHost::masks`] in the
+    /// buffer before padding). The default calls `padding`.
+    fn padding_v2(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64, _host: &dyn PluginHost) -> u32 {
+        self.padding(params, time, scale, layer_size, instance_key)
     }
     /// API 2: [`EffectPlugin::render`] with host services. The default calls `render`. May be
     /// called from several threads at once.
@@ -822,6 +858,20 @@ impl PluginHost for RenderHost<'_, '_> {
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.ctx.env.layer_span
     }
+
+    fn masks(&self) -> Vec<crate::MaskPath> {
+        let Some(host) = self.ctx.env.host else { return vec![] };
+        masks_to_buffer(host.mask_paths(), [0.0; 2], self.offset, self.scale)
+    }
+
+    fn layer_masks(&self, param_id: &str, layer_time: f64) -> Option<Vec<crate::MaskPath>> {
+        let ctx = self.ctx;
+        let lid = ctx.params.get(param_id)?.as_layer()?;
+        let (masks, size) = ctx.env.host?.layer_mask_paths(lid, ctx.env.comp_time + (layer_time - ctx.time))?;
+        // Where `layer_input` puts that layer: centred on this one (see `fit_layer`).
+        let shift = [(ctx.layer_size[0] - size[0]) * 0.5, (ctx.layer_size[1] - size[1]) * 0.5];
+        Some(masks_to_buffer(masks, shift, self.offset, self.scale))
+    }
 }
 
 fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
@@ -830,7 +880,10 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let texts = flatten_texts(m, ctx.params);
     let flat = flatten(m, ctx, &buf);
     let key = ctx_instance_key(ctx);
-    let pad = plugin.padding(&PluginParams { manifest: m, flat: &flat, texts: &texts }, ctx.time, buf.scale, ctx.layer_size, key).min(MAX_PADDING);
+    let pad = {
+        let host = RenderHost { ctx, manifest: m, width: buf.img.width, height: buf.img.height, offset: buf.offset, scale: buf.scale };
+        plugin.padding_v2(&PluginParams { manifest: m, flat: &flat, texts: &texts }, ctx.time, buf.scale, ctx.layer_size, key, &host).min(MAX_PADDING)
+    };
     let before = buf.clone();
     // Padding moves the layer origin, which points are measured from.
     let flat = if pad > 0 {
@@ -916,5 +969,107 @@ mod notify_tests {
         assert!(checked_values(&m(), &json!({"m": 0.5, "pt": [1, "x"], "l": 1.5, "t": 3, "s": "1"})).is_empty());
         assert!(checked_values(&m(), &json!([1, 2])).is_empty());
         assert_eq!(checked_values(&m(), &json!({"m": 1, "pt": [1.5, 2]})), vec![("m".into(), json!(1)), ("pt".into(), json!([1.5, 2.0]))]);
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use crate::{EffectEnv, EffectHost, LayerPixels, MaskPath};
+    use std::sync::Mutex;
+
+    /// What the plug-in below saw: its masks, the other layer's, and its padding's.
+    static SEEN: Mutex<Option<(Vec<MaskPath>, Option<Vec<MaskPath>>, Vec<MaskPath>)>> = Mutex::new(None);
+    static PAD_SEEN: Mutex<Vec<MaskPath>> = Mutex::new(Vec::new());
+
+    struct Peek(PluginManifest);
+
+    impl EffectPlugin for Peek {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn padding_v2(&self, _: &PluginParams, _: f64, _: f64, _: [f64; 2], _: u64, host: &dyn PluginHost) -> u32 {
+            *PAD_SEEN.lock().unwrap() = host.masks();
+            2
+        }
+        fn render_v2(&self, _: &mut PluginFrame, _: &PluginParams, _: f64, host: &dyn PluginHost) -> Result<(), String> {
+            let pad = PAD_SEEN.lock().unwrap().clone();
+            *SEEN.lock().unwrap() = Some((host.masks(), host.layer_masks("other", 1.5), pad));
+            Ok(())
+        }
+    }
+
+    fn path(x: f64, y: f64) -> MaskPath {
+        MaskPath {
+            name: "M".into(),
+            closed: true,
+            mode: "add".into(),
+            opacity: 1.0,
+            feather: [1.0, 2.0],
+            expansion: 3.0,
+            vertices: vec![[x, y]],
+            in_tangents: vec![[1.0, -1.0]],
+            out_tangents: vec![[0.0, 2.0]],
+            ..Default::default()
+        }
+    }
+
+    /// Masks in effect space; the other layer (id 9) is 40×20 against this layer's 100×50, asked
+    /// for at comp time 11.5.
+    struct Host;
+
+    impl EffectHost for Host {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn mask_paths(&self) -> Vec<MaskPath> {
+            vec![path(10.0, 20.0)]
+        }
+        fn layer_mask_paths(&self, id: u64, comp_time: f64) -> Option<(Vec<MaskPath>, [f64; 2])> {
+            (id == 9 && (comp_time - 11.5).abs() < 1e-9).then(|| (vec![path(4.0, 6.0)], [40.0, 20.0]))
+        }
+    }
+
+    #[test]
+    fn masks_are_mapped_like_point_parameters() {
+        let p = |id: &str, kind| PluginParam { id: id.into(), name: id.into(), group: String::new(), kind };
+        let m = PluginManifest {
+            api: 2,
+            id: "org.test.maskpeek".into(),
+            name: "Mask Peek".into(),
+            category: "Test".into(),
+            version: String::new(),
+            author: String::new(),
+            description: String::new(),
+            params: vec![p("other", PluginParamKind::Layer), p("pt", PluginParamKind::Point { default: [0.0; 2] })],
+        };
+        let spec = register_plugin(Arc::new(Peek(m))).unwrap();
+        let mut params = crate::Params::default();
+        params.values.insert("other".into(), Value::Layer(Some(9)));
+        params.values.insert("pt".into(), Value::Vec2([10.0, 20.0]));
+        let env = EffectEnv { host: Some(&Host), comp_time: 11.0, ..Default::default() };
+        let ctx = EffectCtx { params: &params, time: 1.0, layer_size: [100.0, 50.0], seed: 3, adjustment: false, env };
+        let buf = Buf { img: crate::Image::new(8, 8), offset: [5.0, 7.0], scale: 2.0 };
+        // The point parameter at the mask's vertex lands where the vertex does.
+        let man = plugin(spec.id).unwrap().manifest().clone();
+        let flat = flatten_params(&man, &params, [7.0, 9.0], 2.0);
+        let _ = crate::apply(spec, &ctx, buf);
+        let (own, other, pad) = SEEN.lock().unwrap().clone().unwrap();
+        // Padding: the buffer before padding (offset 5, 7); render: after 2 px (offset 7, 9).
+        assert_eq!(pad[0].vertices, vec![[25.0, 47.0]]);
+        assert_eq!(own[0].vertices, vec![[27.0, 49.0]]);
+        assert_eq!(own[0].vertices[0].to_vec(), flat[1..3].to_vec(), "like the point parameter");
+        assert_eq!(own[0].in_tangents, vec![[2.0, -2.0]]);
+        assert_eq!(own[0].out_tangents, vec![[0.0, 4.0]]);
+        assert_eq!((own[0].feather, own[0].expansion), ([2.0, 4.0], 6.0));
+        // The other layer, centred on this one as `layer_input` places it: (4, 6) + (30, 15).
+        let other = other.unwrap();
+        assert_eq!(other[0].vertices, vec![[(4.0 + 30.0) * 2.0 + 7.0, (6.0 + 15.0) * 2.0 + 9.0]]);
     }
 }

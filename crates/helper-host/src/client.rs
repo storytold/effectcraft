@@ -20,8 +20,8 @@ use effectcraft_effects::plugin::{EffectPlugin, ParamChange, PluginFrame, Plugin
 use crate::blocklist;
 use crate::frames::Exchange;
 use crate::protocol::{
-    FEATURE_PARAM_CHANGED, HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, feature_list, parse_reply,
-    request_line,
+    FEATURE_MASKS, FEATURE_PARAM_CHANGED, HELPER_ARG, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, bounded_masks,
+    feature_list, parse_reply, request_line,
 };
 
 /// How deep renders through one helper may nest (an effect asking for its input, which another
@@ -837,10 +837,10 @@ impl Helper {
         Err(broken)
     }
 
-    fn padding(&self, effect: &str, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance: u64) -> Result<u32, String> {
+    /// Ask a [`Request::Padding`].
+    fn padding(&self, req: &Request) -> Result<u32, String> {
         let turn = self.take_turn()?;
-        let req = Request::Padding { effect: effect.to_string(), instance, time, scale, layer_size, flat: params.flat.to_vec(), texts: params.texts.to_vec() };
-        match self.with_conn(&turn.slot, turn.fresh, |c| c.call(&req, render_timeout())) {
+        match self.with_conn(&turn.slot, turn.fresh, |c| c.call(req, render_timeout())) {
             Ok(Reply::Padding { pixels }) => Ok(pixels),
             Ok(Reply::Error { message }) => Err(message),
             Ok(other) => Err(format!("unexpected reply to padding: {other:?}")),
@@ -850,8 +850,8 @@ impl Helper {
 
     /// Render one frame through the helper. Images live on a stack in the exchange file: the
     /// frame first, then whatever the helper asks for, freed again when the render ends (nested
-    /// renders stack above).
-    fn render(&self, effect: &str, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), Failure> {
+    /// renders stack above). `masks`: send the layer's masks ([`PluginHost::masks`]) with it.
+    fn render(&self, effect: &str, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost, masks: bool) -> Result<(), Failure> {
         let turn = self.take_turn().map_err(Failure::Refused)?;
         let slot = &*turn.slot;
         // The generation of the process this render runs on: taken inside `with_conn`, which
@@ -876,6 +876,7 @@ impl Helper {
             texts: params.texts.to_vec(),
             frame_rate: host.frame_rate(),
             frame_range: host.frame_range(),
+            masks: masks.then(|| bounded_masks(host.masks())),
         });
         let result = self.converse(slot, req, frame, &at, host, started);
         // Free this render's images (if the same process is still running).
@@ -899,6 +900,7 @@ impl Helper {
                 Reply::InputAt { time } => self.send_image(slot, host.input_at(time), started)?,
                 Reply::LayerInput { param, time } => self.send_image(slot, host.layer_input(&param, time), started)?,
                 Reply::ParamsAt { time } => Request::Params { values: host.params_at(time) },
+                Reply::LayerMasks { param, time } => Request::Masks { masks: host.layer_masks(&param, time).map(bounded_masks) },
                 other => return Err(Failure::Broken(format!("unexpected reply during a render: {other:?}"))),
             };
         }
@@ -939,12 +941,20 @@ pub struct HelperEffect {
     padding: bool,
     /// The valid [`RemoteEffect::notify_params`].
     notify: Vec<String>,
+    /// [`RemoteEffect::masks`].
+    masks: bool,
 }
 
 impl HelperEffect {
     pub fn new(helper: Arc<Helper>, remote: RemoteEffect) -> HelperEffect {
-        let notify = remote.notify_ids();
-        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, notify }
+        let (notify, masks) = (remote.notify_ids(), remote.wants_masks());
+        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, notify, masks }
+    }
+
+    /// Whether `render` / `padding` carry the layer's masks: the effect asked for them and the
+    /// helper understands them.
+    fn sends_masks(&self) -> bool {
+        self.masks && self.helper.has_feature(FEATURE_MASKS)
     }
 }
 
@@ -983,10 +993,24 @@ impl EffectPlugin for HelperEffect {
     }
 
     fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64) -> u32 {
+        self.padding_v2(params, time, scale, layer_size, instance_key, &NoHost)
+    }
+
+    fn padding_v2(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64, host: &dyn PluginHost) -> u32 {
         if !self.padding || blocklist::is_blocked(&self.manifest.id) {
             return 0;
         }
-        match self.helper.padding(&self.manifest.id, params, time, scale, layer_size, instance_key) {
+        let req = Request::Padding {
+            effect: self.manifest.id.clone(),
+            instance: instance_key,
+            time,
+            scale,
+            layer_size,
+            flat: params.flat.to_vec(),
+            texts: params.texts.to_vec(),
+            masks: self.sends_masks().then(|| bounded_masks(host.masks())),
+        };
+        match self.helper.padding(&req) {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("helper effect `{}`: padding: {e}", self.manifest.id);
@@ -1026,7 +1050,7 @@ impl EffectPlugin for HelperEffect {
                 blocklist::CRASH_LIMIT
             ));
         }
-        match self.helper.render(id, frame, params, time, host) {
+        match self.helper.render(id, frame, params, time, host, self.sends_masks()) {
             Ok(()) => Ok(()),
             Err(Failure::Refused(e)) => Err(e),
             Err(Failure::Broken(e)) => {
