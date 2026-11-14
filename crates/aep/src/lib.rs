@@ -2,7 +2,8 @@
 //! export back to `.aep`, in one crate (like `effectcraft-lottie`).
 //!
 //! - [`container`]: the RIFX `Egg!` chunk tree (lossless, byte-identical round trip) and its typed,
-//!   read-only view. Its API is re-exported at the crate root.
+//!   read-only view, from `craft-aep`, re-exported at the crate root, plus the effect and
+//!   layer-style tables that map them onto EffectCraft's.
 //! - [`import`]: maps the typed view into an EffectCraft project and reports what it drops.
 //! - [`export`]: writes an EffectCraft project as an `.aep`, every chunk built in code.
 //!

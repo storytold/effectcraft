@@ -54,7 +54,7 @@ single-case files some cases are merged from, and the contributor's own animatio
 5. Scrub: `python -I scrub.py <saved>.aep <fixture>.aep <base project>.aep` (and
    `layers-comps-scrub-aepx.py` for the `.aepx`). Set `SCRUB_FORBID` to the local folder and
    machine names that must not remain; the script fails if one does.
-6. Strip the colour profiles: `cargo run -p effectcraft-aep --example stubicc -- <fixture>.aep <fixture>.aep.new`
+6. Strip the colour profiles: `cargo run -p craft-aep --example stubicc -- <fixture>.aep <fixture>.aep.new` (in craft-libs)
    (and the `.aepx`) replaces the working-space profile (and the profile of imported images) by a
    stub with the same description and no colour data. It stops without writing if a profile cannot
    be replaced. Then scan the final files independently (the corpus repository's

@@ -743,7 +743,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("evolution", "Evolution", num(0.0), ParamUi::Angle),
                 p("evolutionOptions/cycleEvolution", "Cycle Evolution", Value::Bool(false), ParamUi::Checkbox),
                 p("evolutionOptions/cycle", "Cycle (in Revolutions)", num(1.0), slider(1.0, 1000.0, 1.0, 20.0, 0)),
-                p("evolutionOptions/randomSeed", "Random Seed", num(0.0), slider(0.0, 10000.0, 0.0, 1000.0, 0)),
+                p("evolutionOptions/randomSeed", "Random Seed", num(0.0), slider(0.0, 100000.0, 0.0, 1000.0, 0)),
                 p("pinning", "Pinning", Value::Enum(1), popup(&TURBULENT_PINNING)),
                 p("resizeLayer", "Resize Layer", Value::Bool(false), ParamUi::Checkbox),
             ],

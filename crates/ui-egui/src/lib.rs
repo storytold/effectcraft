@@ -36,6 +36,7 @@ pub mod icons;
 pub mod menu_keys;
 pub mod menus;
 pub mod native_menu;
+pub mod num_math;
 pub mod panels;
 mod pointer_wrap;
 pub mod prefs_live;
@@ -169,7 +170,8 @@ pub(crate) struct DialogAnswer {
     pub command: String,
     pub key: &'static str,
     pub params: serde_json::Value,
-    pub paths: Vec<String>,
+    /// The picked paths (empty: cancelled), or why the dialog couldn't open (#3084).
+    pub paths: Result<Vec<String>, String>,
 }
 
 #[derive(Default)]
@@ -409,8 +411,8 @@ pub struct EffectcraftApp {
     applied_prefs: Option<(u64, Option<bool>)>,
     /// A previous run that didn't exit cleanly (shown by `Dialog::Recovery`).
     pub recovery: Option<effectcraft_engine::autosave::Recovery>,
-    /// Docked groups laid out last frame: (active panel, group rect) — `~` maximizes the one
-    /// under the pointer.
+    /// Panels drawn last frame, docked and floating: (panel, body rect). `~` maximizes the one
+    /// under the pointer; Effect Controls' arrow keys work only while it is on screen.
     pub(crate) dock_rects: Vec<(PanelKind, egui::Rect)>,
     /// The floating panels' OS windows that drew a panel last frame; one that is gone releases
     /// its IME state.

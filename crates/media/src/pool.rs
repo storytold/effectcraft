@@ -1110,7 +1110,7 @@ impl FootageSource for MediaPool {
     }
 
     fn problem(&self, footage: &Footage) -> Option<String> {
-        if footage.missing || footage.kind != FootageKind::Video {
+        if footage.missing || (footage.kind != FootageKind::Video && !effectcraft_render::is_vector_footage(footage)) {
             return None;
         }
         lock(&self.inner.problems).get(footage.path.as_str()).cloned()
@@ -1121,7 +1121,19 @@ impl FootageSource for MediaPool {
             return None;
         }
         let bytes = self.inner.read(&footage.path).ok()?;
-        crate::layered::rasterize_vector(&footage.path, &bytes, footage, scale).map(Arc::new)
+        let path: Arc<str> = footage.path.as_str().into();
+        match crate::layered::rasterize_vector(&footage.path, &bytes, footage, scale)? {
+            Ok(img) => {
+                lock(&self.inner.problems).remove(&path);
+                Some(Arc::new(img))
+            }
+            // Refused by a render budget (a layer scaled too far): no frame, with the reason
+            // reported through `problem` rather than showing a partial image as complete.
+            Err(e) => {
+                self.inner.note_problem(&path, "", &e);
+                None
+            }
+        }
     }
 
     fn set_aux_footage(&self, paths: &[String]) {

@@ -3,8 +3,18 @@
 //! the viewer names the ID under the cursor, and a click picks it into the Selection: a plain
 //! click replaces it, Shift adds, Alt or Ctrl (Option or Cmd on a Mac) removes. It stays armed
 //! for the next click until Esc or the button again, and highlights the hovered ID's coverage.
-//! Arming it whenever the effect is selected (After Effects' behaviour, #1811) would only need
-//! to set the same pick.
+//!
+//! As in After Effects, the Selection tool picks the same way without arming anything while the
+//! Cryptomatte effect is selected in Effect Controls (#2839, [`implicit_pick`]): over the
+//! effect's layer (selected, so the viewer's press acts on it) a click picks and a drag moves nothing;
+//! elsewhere the viewer keeps its clicks (selecting and moving layers). Esc has nothing to end.
+//! "Over the layer" is its bounding quad, as the viewer's own hit test (not its alpha), less the
+//! viewer's handles on it ([`super::viewer::grabs_at`]: bounding-box handles, mask vertices,
+//! motion-path keys, guides), which keep scaling, reshaping and moving. A press in the very pass
+//! the pointer leaves the layer is passed on to the viewer as a click; one in the pass it arrives
+//! on the layer (a touch, a pen without hover) is claimed from the viewer and picks. While the effect is
+//! selected (or the eyedropper armed), a double-click on the layer picks (one step: the second
+//! click changes nothing) instead of opening its precomp or editing its text.
 //!
 //! The hover needs the frame's Cryptomatte probe ([`effectcraft_engine::Session::crypto_probe_job`]):
 //! it is built off the UI thread, one at a time, not while playing or scrubbing; the chip says so
@@ -21,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use effectcraft_engine::commands::CryptoProbeJob;
 use effectcraft_engine::geom::Mat3;
-use effectcraft_engine::project::Layer;
+use effectcraft_engine::project::{GroupKind, Layer};
 use effectcraft_engine::render::EvalCtx;
 use egui::{Color32, Rect, Sense, vec2};
 use serde_json::{Value, json};
@@ -34,6 +44,9 @@ use crate::theme::Tokens;
 
 /// [`FxPick::kind`] of the Cryptomatte eyedropper.
 pub const KIND: &str = "crypto";
+
+/// The Cryptomatte effect's match name.
+const EFFECT: &str = "ec.3d.cryptomatte";
 
 /// How long the time must stay put before a probe is built for it (scrubbing).
 const SETTLE: f64 = 0.1;
@@ -111,6 +124,15 @@ struct State {
     seen: Option<((u64, u64), u64)>,
     /// The hovered ID's highlight: its hash and probe query, coverage texture, size and uv.
     mask: Option<HighlightMask>,
+    /// Picking with the Selection tool while the effect is selected ([`implicit_pick`]), not with
+    /// the armed eyedropper.
+    implicit: bool,
+    /// The last egui pass the overlay took clicks in (egui hands a press to what sensed it the
+    /// pass before).
+    sensed: Option<u64>,
+    /// The query of the last click queued: the second click of a double-click on the same pixel
+    /// with the same keys is not queued again.
+    last_click: Option<Value>,
 }
 
 /// Clears the busy flag and repaints when a build ends, a panic included.
@@ -185,9 +207,20 @@ pub fn upkeep(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
         ctx.data_mut(|d| d.insert_temp(eid, epoch));
     }
-    if app.ui.fx_pick.as_ref().is_none_or(|p| p.kind != KIND) && ctx.data(|d| d.get_temp::<State>(sid)).is_some() {
+    // Picking with the Selection tool (the effect selected) keeps its state while the viewer runs
+    // it, every pass.
+    let old = ctx.data(|d| d.get_temp::<State>(sid));
+    let implicit = old.as_ref().is_some_and(|s| s.implicit && s.seen.is_some_and(|(_, n)| n == ctx.cumulative_pass_nr()));
+    if app.ui.fx_pick.as_ref().is_none_or(|p| p.kind != KIND)
+        && !implicit
+        && let Some(mut old) = old
+    {
         ctx.data_mut(|d| d.remove::<State>(sid));
         app.session.drop_crypto_probe();
+        // The effect deselected (or the tool changed) while clicks waited: say they're not made.
+        if old.implicit && !old.pending.is_empty() {
+            drop_waiting(app, ctx, &mut old);
+        }
     }
     // The clicks waiting in the viewer, after everything else this pass did (its keys, edits and
     // frame steps included).
@@ -273,10 +306,20 @@ fn viewer_pan_and_secondary(app: &mut EffectcraftApp, ctx: &egui::Context, resp:
     }
 }
 
-/// Whether Space / Hand / Zoom (`tools`) or middle/right buttons (`nav`) own the pointer.
-struct PointerNav {
+/// Whether Space / Hand / Zoom (`tools`) or middle/right buttons (`nav`) own the pointer, and
+/// whether a press at a point is the overlay's (`owned`: the Selection tool picking only over the
+/// effect's layer, off the viewer's own handles there).
+struct PointerNav<'a> {
     tools: bool,
     nav: bool,
+    owned: &'a dyn Fn(egui::Pos2) -> bool,
+    /// The overlay took the pass's presses from the viewer (it sensed clicks the pass before):
+    /// one it does not own is passed on to the viewer ([`super::viewer::FORWARDED_PRIMARY`]).
+    forward: bool,
+    /// The overlay did not sense clicks the pass before, so egui hands the pass's presses to the
+    /// viewer: one it owns (a touch, or a pen without hover, arriving on the layer and pressing in
+    /// one pass) is claimed from the viewer ([`super::viewer::CLAIMED_PRIMARY`]).
+    claim: bool,
 }
 
 /// Queues Cryptomatte picks from primary presses and releases on the armed eyedropper overlay.
@@ -290,7 +333,7 @@ fn viewer_click_to_pick(
     map: &super::viewer::ViewerMap,
     ectx: &EvalCtx,
     st: &mut State,
-    pointer: PointerNav,
+    pointer: PointerNav<'_>,
     at: &dyn Fn(egui::Pos2) -> Option<Value>,
 ) {
     let ctx = ui.ctx().clone();
@@ -320,7 +363,18 @@ fn viewer_click_to_pick(
             continue;
         };
         if pressed {
-            let ours = map.area.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id());
+            let in_viewer = map.area.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id());
+            let ours = in_viewer && (pointer.owned)(pos);
+            // Taken from the viewer but not ours (the pointer left the layer in this very pass):
+            // the viewer clicks there next pass, so it isn't swallowed.
+            if pointer.forward && in_viewer && !ours && !pointer.nav {
+                let pass = ctx.cumulative_pass_nr();
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique(super::viewer::FORWARDED_PRIMARY), (pos, keys, pass)));
+            }
+            // Handed to the viewer but ours: the viewer leaves it alone, so it only picks.
+            if pointer.claim && ours && !pointer.nav {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique(super::viewer::CLAIMED_PRIMARY), ()));
+            }
             st.press = (!pointer.nav && ours).then(|| Press {
                 pos,
                 keys,
@@ -348,6 +402,11 @@ fn viewer_click_to_pick(
             "replace"
         });
         let same_frame = q["time"].as_f64() == Some(ectx.time.seconds());
+        let double = ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+        if double && st.last_click.as_ref() == Some(&q) {
+            // The second click of a double-click, same pixel and keys: it would change nothing.
+            continue;
+        }
         if pos.distance(from) > SLOP {
             app.say(&ctx, tr("Drag cancelled the pick").to_string());
         } else if app.playback.playing && !(same_frame && app.session.crypto_probe_ready(&q).unwrap_or(false)) {
@@ -361,6 +420,7 @@ fn viewer_click_to_pick(
                 st.pending_rev = rev;
             }
             st.after_typing |= typing || ctx.text_edit_focused();
+            st.last_click = Some(q.clone());
             st.pending.push(q);
         }
     }
@@ -522,7 +582,8 @@ fn handle_escape(app: &mut EffectcraftApp, ui: &mut egui::Ui, st: &mut State) {
     }
 }
 
-/// The armed eyedropper's part of the viewer. `m` maps the layer's effect space to the comp.
+/// The armed eyedropper's part of the viewer, or (`implicit`) the Selection tool's while the
+/// effect is selected ([`implicit_pick`]). `m` maps the layer's effect space to the comp.
 #[allow(clippy::too_many_arguments)]
 pub fn viewer_hook(
     app: &mut EffectcraftApp,
@@ -533,6 +594,7 @@ pub fn viewer_hook(
     layer: &Layer,
     m: &Mat3,
     pick: &FxPick,
+    implicit: bool,
 ) {
     let ctx = ui.ctx().clone();
     let sid = pick_id();
@@ -540,7 +602,9 @@ pub fn viewer_hook(
     reset_stale_state(app, &ctx, &mut st, pick);
     // The Cryptomatte effect that owns the Selection (gone: the pick ends).
     let Some(fx) = layer.effects().and_then(|f| f.groups().find(|g| g.find(pick.prop).is_some())).map(|g| g.uid) else {
-        app.ui.fx_pick = None;
+        if !implicit {
+            app.ui.fx_pick = None;
+        }
         return;
     };
     let start = track_scrub_settle(app, &ctx, &mut st, ectx.time.seconds());
@@ -565,19 +629,82 @@ pub fn viewer_hook(
     // The Hand and Zoom tools (Space held too) and other buttons keep their own clicks and drags.
     let tools = super::space_hand(&ctx) || matches!(app.ui.tool, Tool::Hand | Tool::Zoom);
     let nav = tools || ctx.input(|i| i.pointer.middle_down() || i.pointer.secondary_down());
-    // Drags too: a click that drifts must not move the layer under it. (egui hands a press to
-    // what sensed it the pass before, so middle and right presses land here: passed on below.)
-    let resp = ui.interact(map.area, egui::Id::unique("viewer-fx-pick"), if tools { Sense::hover() } else { Sense::click_and_drag() });
-    viewer_pan_and_secondary(app, &ctx, &resp);
-    app.auto.add("viewer.fxPick", map.area, &pick.name);
-    let mut reading = hover_read(app, &ctx, map, &mut st, &resp, start, &at);
-    viewer_click_to_pick(app, ui, map, ectx, &mut st, PointerNav { tools, nav }, &at);
+    let oid = egui::Id::unique("viewer-fx-pick");
+    // The Selection tool picks only over the effect's layer (#2839): the viewer's press there acts
+    // on it, a selected layer, even where layers in front cover it ([`super::viewer::pick`]).
+    // Elsewhere, and on the viewer's own handles there, the viewer keeps its clicks. The armed
+    // eyedropper picks anywhere.
+    let ui_layer = ui.layer_id();
+    let on_layer = |p: egui::Pos2| {
+        !implicit
+            || (map.area.contains(p)
+                && ctx.layer_id_at(p) == Some(ui_layer)
+                && super::viewer::layer_hit(ectx, layer.id, map.to_comp(p))
+                && !super::viewer::grabs_at(&ctx, p))
+    };
+    // A press the overlay holds (or its middle-button pan) stays its own wherever the pointer goes.
+    let panning = ctx.is_being_dragged(oid) && ctx.input(|i| i.pointer.middle_down());
+    let over = st.press.is_some() || panning || ctx.pointer_hover_pos().is_some_and(on_layer);
+    let pass = ctx.cumulative_pass_nr();
+    // Whether the overlay sensed clicks the pass before: egui handed it the pass's presses, not the
+    // viewer underneath (which would select or move the layer as well). If it didn't, a press of
+    // ours is claimed from the viewer; if it did, one not ours is passed on to the viewer.
+    let owned_before = !implicit || st.sensed.is_some_and(|n| n.saturating_add(1) == pass);
+    st.implicit = implicit;
+    let mut reading = false;
+    if !implicit || over {
+        // Drags too: a click that drifts must not move the layer under it. (egui hands a press to
+        // what sensed it the pass before, so middle and right presses land here: passed on below.)
+        let resp = ui.interact(map.area, oid, if tools { Sense::hover() } else { Sense::click_and_drag() });
+        if !tools {
+            st.sensed = Some(pass);
+        }
+        viewer_pan_and_secondary(app, &ctx, &resp);
+        app.auto.add(if implicit { "viewer.cryptoSelect" } else { "viewer.fxPick" }, map.area, &pick.name);
+        reading = hover_read(app, &ctx, map, &mut st, &resp, start, &at);
+    } else {
+        (st.asked, st.reply) = (None, None);
+    }
+    let pointer = PointerNav { tools, nav, owned: &on_layer, forward: implicit && owned_before, claim: implicit && !owned_before };
+    viewer_click_to_pick(app, ui, map, ectx, &mut st, pointer, &at);
     // Clicks waiting for their probe ([`make_waiting`], at the end of the pass).
     reading |= !st.pending.is_empty();
     draw_coverage_highlight(app, &ctx, painter, map, m, &mut st);
-    draw_status_chip(app, &ctx, painter, map, &st, reading);
-    handle_escape(app, ui, &mut st);
+    if !implicit || over || reading {
+        draw_status_chip(app, &ctx, painter, map, &st, reading);
+    }
+    // (Selected, the effect has nothing for Esc to end.)
+    if !implicit {
+        handle_escape(app, ui, &mut st);
+    }
     ctx.data_mut(|d| d.insert_temp(sid, st));
+}
+
+/// The Cryptomatte effect selected in Effect Controls with the Selection tool active (After
+/// Effects: clicks in the Composition panel pick its IDs then, no eyedropper armed; #2839): the
+/// pick for its Selection. The last selected item on a selected layer counts, and only the
+/// effect itself (its header in Effect Controls or the Timeline): a press on one of its rows (the
+/// eyedropper's button, the Selection field) selects that property instead. An armed eyedropper
+/// or crosshair (of any kind) comes first.
+pub fn implicit_pick(app: &EffectcraftApp, ctx: &egui::Context) -> Option<FxPick> {
+    if app.ui.tool != Tool::Selection || app.ui.fx_pick.is_some() || app.ui.text_color_pick.is_some() || crate::color_picker::eyedropper_armed(ctx) {
+        return None;
+    }
+    // Drawing a region of interest or a Free Transform box: the viewer keeps every press.
+    if app.ui.viewer.roi_draw || super::viewer_overlays::free_transform_target(ctx).is_some() {
+        return None;
+    }
+    let comp = app.session.active_comp()?;
+    let time = app.session.time();
+    let st = &app.session.state;
+    let (lid, uid) = st.selected_props.iter().rev().find(|(l, _)| st.selected_layers.contains(l))?;
+    let layer = comp.layer(*lid).filter(|l| l.is_active_at(time))?;
+    let fx = layer.effects()?.groups().find(|g| g.uid == *uid)?;
+    if !fx.enabled || !matches!(&fx.kind, GroupKind::Effect { effect } if effect == EFFECT) {
+        return None;
+    }
+    let prop = fx.get("selection")?;
+    Some(FxPick { kind: KIND.into(), layer: lid.0, prop: prop.uid, name: prop.name.clone() })
 }
 
 #[cfg(test)]

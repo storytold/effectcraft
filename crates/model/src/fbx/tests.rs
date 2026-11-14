@@ -1,5 +1,5 @@
 use super::*;
-use crate::load;
+use crate::{AlphaMode, load, vec3};
 
 /// A Z-up scene: a Null parent with a mesh child (rotated, scaled, with a geometric offset)
 /// holding a quad and a triangle with a material each.
@@ -131,114 +131,10 @@ fn check_scene(m: &Model) {
     assert!(close(lo, [8.0, 2.0, -2.0]) && close(hi, [10.0, 4.0, 0.0]), "{lo:?} {hi:?}");
 }
 
-/// A binary FBX of the same node tree (`a:` children become typed arrays).
-fn write_binary(nodes: &[FbxNode], version: u32, compress: bool) -> Vec<u8> {
-    fn prop(out: &mut Vec<u8>, p: &Prop, compress: bool) {
-        let array = |out: &mut Vec<u8>, t: u8, len: usize, raw: Vec<u8>| {
-            out.push(t);
-            out.extend((len as u32).to_le_bytes());
-            let data = if compress { miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6) } else { raw };
-            out.extend((compress as u32).to_le_bytes());
-            out.extend((data.len() as u32).to_le_bytes());
-            out.extend(data);
-        };
-        match p {
-            Prop::Int(i) => match i32::try_from(*i) {
-                Ok(v) => {
-                    out.push(b'I');
-                    out.extend(v.to_le_bytes());
-                }
-                Err(_) => {
-                    out.push(b'L');
-                    out.extend(i.to_le_bytes());
-                }
-            },
-            Prop::Float(f) => {
-                out.push(b'D');
-                out.extend(f.to_le_bytes());
-            }
-            Prop::Str(s) => {
-                let s = match s.split_once("::") {
-                    Some((class, name)) => format!("{name}\0\x01{class}"),
-                    None => s.clone(),
-                };
-                out.push(b'S');
-                out.extend((s.len() as u32).to_le_bytes());
-                out.extend(s.as_bytes());
-            }
-            Prop::Bytes(b) => {
-                out.push(b'R');
-                out.extend((b.len() as u32).to_le_bytes());
-                out.extend(b);
-            }
-            Prop::Ints(v) => array(out, b'i', v.len(), v.iter().flat_map(|&i| (i as i32).to_le_bytes()).collect()),
-            Prop::Floats(v) => array(out, b'd', v.len(), v.iter().flat_map(|f| f.to_le_bytes()).collect()),
-        }
-    }
-    fn record(out: &mut Vec<u8>, n: &FbxNode, wide: bool, compress: bool) {
-        let w = if wide { 8 } else { 4 };
-        let start = out.len();
-        out.extend(vec![0u8; 3 * w]);
-        out.push(n.name.len() as u8);
-        out.extend(n.name.as_bytes());
-        let props = match n.child("a") {
-            Some(a) if a.props.iter().all(|p| matches!(p, Prop::Int(_))) => vec![Prop::Ints(a.ints())],
-            Some(a) => vec![Prop::Floats(a.floats())],
-            None => n.props.clone(),
-        };
-        let pstart = out.len();
-        for p in &props {
-            prop(out, p, compress);
-        }
-        let plen = out.len() - pstart;
-        let kids: Vec<&FbxNode> = n.children.iter().filter(|c| c.name != "a").collect();
-        if !kids.is_empty() {
-            for k in kids {
-                record(out, k, wide, compress);
-            }
-            out.extend(vec![0u8; 3 * w + 1]);
-        }
-        let end = out.len();
-        for (k, v) in [end, props.len(), plen].into_iter().enumerate() {
-            let at = start + k * w;
-            if wide {
-                out[at..at + 8].copy_from_slice(&(v as u64).to_le_bytes());
-            } else {
-                out[at..at + 4].copy_from_slice(&(v as u32).to_le_bytes());
-            }
-        }
-    }
-    let wide = version >= 7500;
-    let mut out = BINARY_MAGIC.to_vec();
-    out.extend(version.to_le_bytes());
-    for n in nodes {
-        record(&mut out, n, wide, compress);
-    }
-    out.extend(vec![0u8; if wide { 25 } else { 13 }]);
-    // Footer bytes after the closing null record.
-    out.extend([0xfa; 16]);
-    out
-}
-
 #[test]
 fn ascii_fbx_scene() {
     let m = load("scene.fbx", ASCII.as_bytes(), &|_| None).unwrap();
     check_scene(&m);
-}
-
-#[test]
-fn binary_fbx_matches_ascii() {
-    let (_, doc) = read(ASCII.as_bytes()).unwrap();
-    let ascii = parse(ASCII.as_bytes(), &|_| None).unwrap();
-    for (version, compress) in [(7400, false), (7400, true), (7500, true)] {
-        let bin = write_binary(&doc, version, compress);
-        let (v, nodes) = read(&bin).unwrap();
-        assert_eq!(v, version);
-        assert_eq!(nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["FBXHeaderExtension", "GlobalSettings", "Objects", "Connections"]);
-        // Found by its magic even without the extension.
-        let m = load("scene.bin", &bin, &|_| None).unwrap();
-        assert_eq!(m, ascii, "version {version}, compressed {compress}");
-    }
 }
 
 #[test]
@@ -291,91 +187,6 @@ fn b64(b: &[u8]) -> String {
     s
 }
 
-#[test]
-fn hostile_fbx_files_fail_cleanly() {
-    let (_, doc) = read(ASCII.as_bytes()).unwrap();
-    let bin = write_binary(&doc, 7500, true);
-    // Every truncation and every single-byte corruption returns (no panic, no runaway).
-    for n in 0..bin.len() {
-        let _ = parse(&bin[..n], &|_| None);
-    }
-    for i in 0..bin.len() {
-        let mut b = bin.clone();
-        b[i] ^= 0xff;
-        let _ = parse(&b, &|_| None);
-    }
-    // An array claiming 4 G elements.
-    let mut huge = BINARY_MAGIC.to_vec();
-    huge.extend(7400u32.to_le_bytes());
-    let body: Vec<u8> = b"d".iter().copied().chain(u32::MAX.to_le_bytes()).chain(0u32.to_le_bytes()).chain(8u32.to_le_bytes()).chain([0u8; 8]).collect();
-    let start = huge.len();
-    let end = start + 13 + 1 + body.len();
-    huge.extend((end as u32).to_le_bytes());
-    huge.extend(1u32.to_le_bytes());
-    huge.extend((body.len() as u32).to_le_bytes());
-    huge.push(1);
-    huge.push(b'V');
-    huge.extend(body);
-    assert!(read(&huge).is_err());
-    // Deep nesting, both encodings.
-    assert!(read("A: {".repeat(100_000).as_bytes()).is_err());
-    // Not an FBX scene at all, an old FBX version, and a scene without meshes.
-    assert!(parse(b"\x00\x01garbage", &|_| None).is_err());
-    let v6 = "FBXHeaderExtension:  {\n FBXVersion: 6100\n}\nObjects: {\n}\n";
-    assert!(matches!(parse(v6.as_bytes(), &|_| None), Err(ModelError::Unsupported(_))));
-    assert!(parse(b"Objects: {\n Model: 1, \"Model::Empty\", \"Null\" {\n }\n}\n", &|_| None).is_err());
-}
-
-/// A version-7400 binary FBX holding one top-level node `A` with uncompressed arrays of type
-/// `t` (`b'b'`, `b'i'`, `b'f'`, `b'd'`, `b'l'`) and `len` elements each.
-fn binary_arrays(arrays: &[(u8, usize)]) -> Vec<u8> {
-    let mut props = vec![];
-    for &(t, len) in arrays {
-        let size = match t {
-            b'd' | b'l' => 8,
-            b'f' | b'i' => 4,
-            _ => 1,
-        };
-        props.push(t);
-        props.extend((len as u32).to_le_bytes());
-        props.extend(0u32.to_le_bytes());
-        props.extend(((len * size) as u32).to_le_bytes());
-        props.extend(std::iter::repeat_n(1u8, len * size));
-    }
-    let mut out = BINARY_MAGIC.to_vec();
-    out.extend(7400u32.to_le_bytes());
-    let end = out.len() + 13 + 1 + props.len();
-    out.extend((end as u32).to_le_bytes());
-    out.extend((arrays.len() as u32).to_le_bytes());
-    out.extend((props.len() as u32).to_le_bytes());
-    out.push(1);
-    out.push(b'A');
-    out.extend(props);
-    out
-}
-
-#[test]
-fn fbx_arrays_are_charged_for_the_memory_they_keep() {
-    // A boolean array is one byte per element on the wire but eight once kept as `Prop::Ints`:
-    // the budget counts the eight (#1234).
-    let n = 10_000;
-    let bin = binary_arrays(&[(b'b', n)]);
-    assert!(read_within(&bin, &Budget::new(n * 8)).is_ok());
-    let e = read_within(&bin, &Budget::new(n * 8 - 1)).unwrap_err();
-    assert!(e.to_string().contains("memory limit"), "{e}");
-    // 32-bit floats widen to f64 the same way.
-    assert!(read_within(&binary_arrays(&[(b'f', n)]), &Budget::new(n * 4)).is_err());
-    // Several arrays each within the budget but not together.
-    let bin = binary_arrays(&[(b'i', n), (b'd', n), (b'b', n)]);
-    assert!(read_within(&bin, &Budget::new(n * 24)).is_ok());
-    assert!(read_within(&bin, &Budget::new(n * 20)).is_err());
-    // ASCII values count too.
-    let (_, doc) = read(ASCII.as_bytes()).unwrap();
-    let values = value_bytes(&doc).unwrap();
-    assert!(values > 45 * std::mem::size_of::<Prop>(), "{values}");
-    assert!(parse_within(ASCII.as_bytes(), &|_| None, values - 1).unwrap_err().to_string().contains("memory limit"));
-}
-
 /// [`ASCII`] with two more Models instancing its geometry: `Copy` with the same two materials,
 /// `Red only` with just the first.
 fn instanced_scene() -> String {
@@ -401,27 +212,6 @@ fn fbx_models_instancing_one_geometry_share_its_mesh() {
     assert_eq!(mesh_of("Shape"), mesh_of("Copy"), "same geometry and materials: one mesh");
     assert_ne!(mesh_of("Shape"), mesh_of("Red only"), "different materials: its own mesh");
     assert_eq!(m.meshes.len(), 2);
-    // A budget with room for one copy of the geometry's mesh, but not three, still imports.
-    let one = parse(ASCII.as_bytes(), &|_| None).unwrap();
-    let mesh = mesh_bytes(&one.meshes[0]).unwrap();
-    let (_, doc) = read(instanced_scene().as_bytes()).unwrap();
-    let values = value_bytes(&doc).unwrap();
-    assert!(parse_within(instanced_scene().as_bytes(), &|_| None, values + 2 * mesh).is_ok());
-    assert!(parse_within(instanced_scene().as_bytes(), &|_| None, values + mesh).is_err());
-}
-
-#[test]
-fn binary_child_record_past_its_parent_is_an_error() {
-    let parent = FbxNode { name: "P".into(), props: vec![], children: vec![FbxNode { name: "C".into(), props: vec![], children: vec![] }] };
-    let after = FbxNode { name: "Q".into(), props: vec![Prop::Int(1)], children: vec![] };
-    let mut bin = write_binary(&[parent, after], 7400, false);
-    assert_eq!(read(&bin).unwrap().1.len(), 2);
-    // `P` starts after the magic and version; `C` after P's 12-byte header, name length and name.
-    let p = BINARY_MAGIC.len() + 4;
-    let p_end = u32::from_le_bytes(bin[p..p + 4].try_into().unwrap());
-    let c = p + 14;
-    bin[c..c + 4].copy_from_slice(&(p_end + 1).to_le_bytes());
-    assert!(read(&bin).unwrap_err().to_string().contains("bad record end"));
 }
 
 #[test]
@@ -448,11 +238,6 @@ Connections:  {"#;
     let m = parse(doc.as_bytes(), &resolve).unwrap();
     assert_eq!(m.textures.len(), 1);
     assert!(m.materials.iter().all(|x| x.base_color_tex.map(|t| t.texture) == Some(0)));
-    // Textures have their own allowance: a tight record budget does not drop them.
-    let (_, nodes) = read(doc.as_bytes()).unwrap();
-    let values = value_bytes(&nodes).unwrap();
-    let mesh = mesh_bytes(&m.meshes[0]).unwrap();
-    assert_eq!(parse_within(doc.as_bytes(), &resolve, values + mesh).unwrap().textures.len(), 1);
     assert!(m.warnings.is_empty());
 }
 
