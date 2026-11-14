@@ -13,7 +13,7 @@ use effectcraft_effects::roto::{self as fx, FROZEN, Stroke, StrokeKind};
 use effectcraft_keyframe::Value as KV;
 use effectcraft_project::build::Ids;
 use effectcraft_project::{ItemId, Layer, LayerId, PropGroup, Uid};
-use effectcraft_track::roto::{RotoData, iou, rle};
+use effectcraft_track::roto::{MAX_SPAN_FRAMES, RotoData, iou, rle};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, b_p, bad, f_p, has_comp, layer_mut, layer_p, str_p};
@@ -236,6 +236,12 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
         if frozen_of(g) {
             return Err(bad(cmd, "the Roto Brush is frozen: Unfreeze it to edit strokes"));
         }
+        // `RotoData::add` would clip the span short of this frame and keep a stroke that never takes effect.
+        if let Some(base) = data_of(g).base
+            && frame.abs_diff(base) > MAX_SPAN_FRAMES.unsigned_abs()
+        {
+            return Err(bad(cmd, format!("frame {frame} is more than {MAX_SPAN_FRAMES} frames from the base frame {base}")));
+        }
     }
     if existing.is_none() && !kind.is_segmentation() {
         return Err(bad(cmd, "draw a foreground stroke with the Roto Brush tool first"));
@@ -294,6 +300,7 @@ fn propagate(s: &mut Session, p: &Value) -> Result<Value> {
         let before = d.span;
         d.span[0] = d.span[0].min(to);
         d.span[1] = d.span[1].max(to);
+        d.bound_span();
         if d.span != before {
             if frozen_of(g) {
                 return Err(bad(cmd, "the Roto Brush is frozen: Unfreeze it to change the span"));
@@ -335,6 +342,7 @@ fn span(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(b) = f_p(p, "end") {
         *end = (b.round() as i64).clamp(last, hi);
     }
+    d.bound_span();
     write_data(s, "Segmentation Span", cid, lid, uid, &d)?;
     Ok(json!({"layer": lid.0, "effect": uid, "span": d.span, "base": base}))
 }
