@@ -34,10 +34,14 @@ fn flat(rgba: [f32; 4], extra: bool) -> Vec<u8> {
     write(&d)
 }
 
-/// Write `bytes` to `path` so its modification time moves even on coarse file systems.
+/// Write `bytes` to `path` so its modification time moves even on coarse file systems. The file
+/// is replaced in one step, as an application's save does: written in place, a watcher looking
+/// every 20 ms can see it empty or half written and report the one save twice.
 fn save(path: &str, bytes: &[u8]) {
     std::thread::sleep(std::time::Duration::from_millis(30));
-    std::fs::write(path, bytes).unwrap();
+    let part = format!("{path}.part");
+    std::fs::write(&part, bytes).unwrap();
+    std::fs::rename(&part, path).unwrap();
 }
 
 fn footage(s: &Session, id: ItemId) -> Footage {

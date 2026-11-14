@@ -36,6 +36,7 @@ pub mod icons;
 pub mod menu_keys;
 pub mod menus;
 pub mod native_menu;
+pub mod num_math;
 pub mod panels;
 mod pointer_wrap;
 pub mod prefs_live;
@@ -169,7 +170,8 @@ pub(crate) struct DialogAnswer {
     pub command: String,
     pub key: &'static str,
     pub params: serde_json::Value,
-    pub paths: Vec<String>,
+    /// The picked paths (empty: cancelled), or why the dialog couldn't open (#3084).
+    pub paths: Result<Vec<String>, String>,
 }
 
 #[derive(Default)]

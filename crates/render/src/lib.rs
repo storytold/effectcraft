@@ -53,7 +53,7 @@ pub use footage::{
 };
 pub use frames::{
     adaptive_samples, blend_frames, cineon_frame, content_bounds, extended_region, field_frame, frame_position, frame_size, interpret_pixels, kurbo_path,
-    render_frame, roi_inside,
+    mix_window, render_frame, roi_inside,
 };
 #[cfg(test)]
 use fx_host::FxHost;
