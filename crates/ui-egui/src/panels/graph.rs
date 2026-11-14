@@ -491,11 +491,14 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 let hresp = ui.interact(hr, egui::Id::unique(("ghandle", uid, d, k.idx, side)), Sense::drag());
                 app.auto.add(&format!("timeline.graph.handle.{uid}.{d}.{}.{side}", k.idx), hr, "Bezier handle");
                 // The same side's handles of every selected key move with it, by as much as the
-                // pointer moved (After Effects), in one undo step.
+                // pointer moved (After Effects), in one undo step. A multi-dimensional property
+                // draws one curve per dimension, and only the dragged curve's dimension is
+                // grabbed: the sibling dimensions' easing stays independent (#3376).
                 if unlocked && hresp.drag_started() {
                     let grabs: Vec<HandleGrab> = cs
                         .iter()
                         .filter(|c2| !c2.layer.switches.locked)
+                        .filter(|c2| c2.layer.id != lid || c2.prop.uid != uid || c2.dim == d)
                         .flat_map(|c2| {
                             c2.keys.iter().flat_map(move |k2| {
                                 k2.handles.iter().filter(|h2| h2.out == h.out).map(move |h2| HandleGrab {
