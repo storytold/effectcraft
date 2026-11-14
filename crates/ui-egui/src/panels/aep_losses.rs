@@ -107,7 +107,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let import = id == "file.importAep";
     let title = if import { "Import Adobe After Effects Project" } else { "Export Adobe After Effects Project" };
     let mut answer: Option<bool> = None;
-    super::dialogs::modal(ctx, title, vec2(520.0, 340.0), t, |ui| {
+    super::dialogs::modal(ctx, tr(title), vec2(520.0, 340.0), t, |ui| {
         let text = if import {
             tr("Some parts of this project cannot be imported exactly (left out or changed):")
         } else {

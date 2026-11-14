@@ -9,15 +9,25 @@ use serde_json::json;
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
+/// Mirrored visual positions, without changing tutorial IDs or click-target semantics.
+fn learn_card_regions(r: Rect, rtl: bool) -> (Rect, Rect) {
+    let badge_x = if rtl { r.max.x - 60.0 } else { r.min.x + 16.0 };
+    let button_x = if rtl { r.min.x + 16.0 } else { r.max.x - 104.0 };
+    (Rect::from_min_size(pos2(badge_x, r.min.y + 16.0), vec2(44.0, 44.0)), Rect::from_min_size(pos2(button_x, r.min.y + 16.0), vec2(88.0, 28.0)))
+}
+
 /// The Learn tab of the Home screen: one card per tutorial with its steps and a Start button.
 pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(area);
     let (x, mut y, w) = (area.min.x, area.min.y, area.width());
-    p.text(pos2(x, y + 6.0), Align2::LEFT_CENTER, tr("Learn"), Tokens::semibold(16.0), Color32::WHITE);
+    let rtl = crate::i18n::language(app) == "he";
+    let heading_x = if rtl { x + w } else { x };
+    let heading_align = if rtl { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
+    p.text(pos2(heading_x, y + 6.0), heading_align, tr("Learn"), Tokens::semibold(16.0), Color32::WHITE);
     p.text(
-        pos2(x, y + 26.0),
-        Align2::LEFT_CENTER,
+        pos2(heading_x, y + 26.0),
+        heading_align,
         crate::i18n::tr("Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me."),
         Tokens::ui(11.5),
         t.text_faint,
@@ -34,23 +44,23 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
         let resp = ui.interact(r, egui::Id::unique(("learn-card", &tut.id)), Sense::click());
         p.rect_filled(r, 8.0, if resp.hovered() { Color32::from_rgb(0x2c, 0x2e, 0x37) } else { Color32::from_rgb(0x24, 0x26, 0x2e) });
         // A small original badge: the step count in a circle.
-        let badge = Rect::from_min_size(pos2(r.min.x + 16.0, r.min.y + 16.0), vec2(44.0, 44.0));
+        let (badge, br) = learn_card_regions(r, rtl);
         p.circle_filled(badge.center(), 22.0, t.accent.gamma_multiply(0.25));
         p.circle_stroke(badge.center(), 22.0, Stroke::new(1.5, t.accent));
         p.text(badge.center() - vec2(0.0, 5.0), Align2::CENTER_CENTER, tut.steps.len().to_string(), Tokens::semibold(15.0), Color32::WHITE);
         p.text(badge.center() + vec2(0.0, 10.0), Align2::CENTER_CENTER, crate::i18n::tr("steps"), Tokens::ui(9.0), t.text_dim);
-        let tx = badge.max.x + 16.0;
-        p.text(pos2(tx, r.min.y + 22.0), Align2::LEFT_CENTER, &tut.title, Tokens::semibold(14.0), Color32::WHITE);
-        p.text(pos2(tx, r.min.y + 40.0), Align2::LEFT_CENTER, format!("{} min", tut.minutes), Tokens::ui(11.0), t.text_faint);
-        let text_w = (r.max.x - tx - 120.0).max(120.0);
-        let g = p.layout(tut.summary.clone(), Tokens::ui(12.0), t.text_dim, text_w);
-        p.galley(pos2(tx, r.min.y + 52.0), g, t.text_dim);
-        let steps: Vec<String> = tut.steps.iter().map(|s| s.title.clone()).collect();
+        let tx = if rtl { badge.min.x - 16.0 } else { badge.max.x + 16.0 };
+        let text_align = if rtl { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
+        p.text(pos2(tx, r.min.y + 22.0), text_align, tr(&tut.title), Tokens::semibold(14.0), Color32::WHITE);
+        p.text(pos2(tx, r.min.y + 40.0), text_align, tr_args("{} min", &[&tut.minutes]), Tokens::ui(11.0), t.text_faint);
+        let text_w = if rtl { tx - r.min.x - 120.0 } else { r.max.x - tx - 120.0 }.max(120.0);
+        let g = p.layout(tr(&tut.summary).to_owned(), Tokens::ui(12.0), t.text_dim, text_w);
+        p.galley(pos2(if rtl { tx - g.size().x } else { tx }, r.min.y + 52.0), g, t.text_dim);
+        let steps: Vec<String> = tut.steps.iter().map(|s| tr(&s.title).to_owned()).collect();
         let g = p.layout(steps.join("  ·  "), Tokens::ui(10.5), t.text_faint, text_w);
-        p.galley(pos2(tx, r.min.y + 84.0), g, t.text_faint);
-        let br = Rect::from_min_size(pos2(r.max.x - 104.0, r.min.y + 16.0), vec2(88.0, 28.0));
+        p.galley(pos2(if rtl { tx - g.size().x } else { tx }, r.min.y + 84.0), g, t.text_faint);
         let label = if running.as_deref() == Some(tut.id.as_str()) { "Resume" } else { "Start" };
-        let clicked = widgets::text_button(ui, br, label, true, &t, egui::Id::unique(("learn-start", &tut.id))).clicked();
+        let clicked = widgets::text_button(ui, br, tr(label), true, &t, egui::Id::unique(("learn-start", &tut.id))).clicked();
         app.auto.add(&format!("home.learn.{}", tut.id), r, &tut.title);
         app.auto.add(&format!("home.learn.{}.start", tut.id), br, label);
         if clicked || resp.clicked() {
@@ -102,7 +112,7 @@ pub fn coach(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let mut action: Option<&str> = None;
     let area = egui::Area::new(egui::Id::unique("learn-coach"))
         .order(egui::Order::Foreground)
-        .fixed_pos(pos2(screen.max.x - w - 20.0, screen.max.y - 250.0))
+        .fixed_pos(pos2(if crate::i18n::language(app) == "he" { screen.min.x + 20.0 } else { screen.max.x - w - 20.0 }, screen.max.y - 250.0))
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(Color32::from_rgb(0x26, 0x28, 0x30))
@@ -114,7 +124,7 @@ pub fn coach(app: &mut EffectcraftApp, ctx: &egui::Context) {
                     ui.set_width(w - 28.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(tr("LEARN")).font(Tokens::semibold(10.0)).color(t.accent));
-                        ui.label(egui::RichText::new(&tut.title).font(Tokens::ui(11.0)).color(t.text_dim));
+                        ui.label(egui::RichText::new(tr(&tut.title)).font(Tokens::ui(11.0)).color(t.text_dim));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (cr, r) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
                             let r = r.on_hover_text(tr("Close tutorial"));
@@ -142,12 +152,12 @@ pub fn coach(app: &mut EffectcraftApp, ctx: &egui::Context) {
                     match &step {
                         Some(st) => {
                             ui.label(
-                                egui::RichText::new(tr_args("Step {} of {}: {}", &[&(i + 1), &n, &st.title]))
+                                egui::RichText::new(tr_args("Step {} of {}: {}", &[&(i + 1), &n, &tr(&st.title)]))
                                     .font(Tokens::semibold(13.0))
                                     .color(Color32::WHITE),
                             );
                             ui.add_space(2.0);
-                            ui.label(egui::RichText::new(&st.text).font(Tokens::ui(12.0)).color(t.text));
+                            ui.label(egui::RichText::new(tr(&st.text)).font(Tokens::ui(12.0)).color(t.text));
                         }
                         None => {
                             ui.label(egui::RichText::new(tr("Tutorial complete")).font(Tokens::semibold(13.0)).color(Color32::WHITE));
@@ -203,5 +213,22 @@ pub fn coach(app: &mut EffectcraftApp, ctx: &egui::Context) {
             }
         }
         None => {}
+    }
+}
+
+#[cfg(test)]
+mod hebrew_learn_card_tests {
+    use super::*;
+
+    #[test]
+    fn mirrored_cards_keep_clickable_regions_inside_the_card() {
+        let card = Rect::from_min_size(pos2(100.0, 200.0), vec2(680.0, 118.0));
+        for rtl in [false, true] {
+            let (badge, button) = learn_card_regions(card, rtl);
+            assert!(card.contains(badge.min) && card.contains(badge.max));
+            assert!(card.contains(button.min) && card.contains(button.max));
+            assert!(!badge.intersects(button));
+            assert_eq!(badge.min.x > button.max.x, rtl);
+        }
     }
 }
