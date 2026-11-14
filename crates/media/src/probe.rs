@@ -9,6 +9,15 @@ use image::metadata::Orientation;
 
 use crate::{MediaError, Result, ext_of, rate_from_fc};
 
+/// Most pixels a still may decode to: 4 GiB as the renderer's float RGBA (2^28, 16384 × 16384;
+/// 150-megapixel medium-format frames, stitched panoramas and large scans decode). A browser tab's
+/// wasm32 heap can't hold one allocation that large (and the decoded input beside it): 512 MiB
+/// there, and on 32-bit targets, where one allocation may not pass `isize::MAX` (2 GiB).
+#[cfg(not(any(target_arch = "wasm32", target_pointer_width = "32")))]
+pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 28;
+#[cfg(any(target_arch = "wasm32", target_pointer_width = "32"))]
+pub(crate) const MAX_STILL_PIXELS: u64 = 1 << 25;
+
 /// Frame rate given to image sequences on import (After Effects' default preference).
 pub const DEFAULT_SEQUENCE_RATE: FrameRate = FrameRate::FPS_30;
 
@@ -43,11 +52,25 @@ fn side_file_reader(model: &Path) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
     }
 }
 
+thread_local! {
+    /// What the last model probed on this thread left out (see [`probe_noting`]).
+    static MODEL_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`probe`], and what the import left out of the file (a 3D model's textures over the limits),
+/// for the user.
+pub fn probe_noting(path: impl AsRef<Path>) -> Result<(Footage, Option<String>)> {
+    MODEL_WARNING.with(|w| w.borrow_mut().take());
+    let f = probe(path)?;
+    Ok((f, MODEL_WARNING.with(|w| w.borrow_mut().take())))
+}
+
 /// Probe a 3D model (glTF 2.0 / OBJ / STL / FBX): a [`FootageKind::Model`] item whose duration is its
 /// longest animation. `resolve` reads sibling resources.
 pub fn probe_model(path: &str, bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Footage> {
     let m = effectcraft_model::load(path, bytes, resolve).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
     let s = m.summary();
+    MODEL_WARNING.with(|w| *w.borrow_mut() = (!m.warnings.is_empty()).then(|| format!("{path}: {}", m.warnings.join("; "))));
     let dur = s.animations.iter().map(|a| a.1).fold(0.0f64, f64::max);
     let codec = match effectcraft_model::format_of(path) {
         Some("obj") => "OBJ",
@@ -134,12 +157,12 @@ fn trim_to_edits(f: &mut Footage, shown: Option<Tick>) {
 /// How long the video track's edit list shows its media (`elst` segments, movie timescale):
 /// `None` without edits, or with an empty edit (a delayed start keeps the reader's duration).
 fn video_shown(bytes: &[u8]) -> Option<Tick> {
-    let file = filmcraft_isobmff::open(bytes).ok()?;
-    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    let file = craft_media::isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty())?;
     edits_shown(&t.edits, file.timescale)
 }
 
-fn edits_shown(edits: &[filmcraft_isobmff::Edit], timescale: u32) -> Option<Tick> {
+fn edits_shown(edits: &[craft_media::isobmff::Edit], timescale: u32) -> Option<Tick> {
     if edits.is_empty() || timescale == 0 || edits.iter().any(|e| e.media_time < 0) {
         return None;
     }
@@ -291,6 +314,12 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
         None => image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?,
     };
     let mut dec = reader.into_decoder()?;
+    // `from_decoder` skips the reader's allocation limit, and some decoders (BMP) allocate
+    // whatever size their header claims: refuse a still the renderer could not hold as floats.
+    let (w, h) = dec.dimensions();
+    if u64::from(w) * u64::from(h) > MAX_STILL_PIXELS {
+        return Err(image::ImageError::Limits(image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError)));
+    }
     let orientation = dec.orientation().unwrap_or(Orientation::NoTransforms);
     let mut img = image::DynamicImage::from_decoder(dec)?;
     img.apply_orientation(orientation);
@@ -303,8 +332,8 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
 /// containers have none. FilmCraft turns the frames of a pure 0/90/180/270° header itself, so this
 /// is only the quarter turn nearest to a header it does not turn.
 pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
-    let Ok(file) = filmcraft_isobmff::open(bytes) else { return Orientation::NoTransforms };
-    let Some(track) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video) else {
+    let Ok(file) = craft_media::isobmff::open(bytes) else { return Orientation::NoTransforms };
+    let Some(track) = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video) else {
         return Orientation::NoTransforms;
     };
     // A pure rotation is already applied by FilmCraft's decoder (frames and size come out
@@ -329,8 +358,8 @@ pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
 /// median reads as 30.303 or 58.824 fps. `None` for other containers and for movies the median
 /// reads right.
 fn video_rate(bytes: &[u8]) -> Option<FrameRate> {
-    let file = filmcraft_isobmff::open(bytes).ok()?;
-    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    let file = craft_media::isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty())?;
     averaged_rate(t.timescale, t.samples.iter().take(240).map(|s| s.duration))
 }
 
@@ -364,11 +393,28 @@ fn averaged_rate(timescale: u32, durations: impl Iterator<Item = u32>) -> Option
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_still_larger_than_the_renderer_holds_is_refused_before_decoding() {
+        // A 24-bit BMP header claiming 20000×20000 pixels (within the BMP decoder's own limit)
+        // over no pixel data.
+        let mut bmp = b"BM".to_vec();
+        bmp.extend(54u32.to_le_bytes());
+        bmp.extend([0u8; 4]);
+        bmp.extend(54u32.to_le_bytes());
+        bmp.extend(40u32.to_le_bytes());
+        bmp.extend(20_000i32.to_le_bytes());
+        bmp.extend(20_000i32.to_le_bytes());
+        bmp.extend(1u16.to_le_bytes());
+        bmp.extend(24u16.to_le_bytes());
+        bmp.extend([0u8; 24]);
+        assert!(matches!(load_oriented(&bmp, Some(image::ImageFormat::Bmp)), Err(image::ImageError::Limits(_))));
+    }
+
     /// #2592: an encoder-delayed H.264 track's edit list shows 75 frames at 25 fps (3 s at a
     /// 1000 timescale), though its media runs a frame longer; empty edits and no edits leave it.
     #[test]
     fn the_edit_list_trims_a_movie_to_the_frames_it_shows() {
-        let edit = |segment_duration, media_time| filmcraft_isobmff::Edit { segment_duration, media_time, media_rate: 0x0001_0000 };
+        let edit = |segment_duration, media_time| craft_media::isobmff::Edit { segment_duration, media_time, media_rate: 0x0001_0000 };
         let shown = edits_shown(&[edit(3000, 1024)], 1000);
         assert_eq!(shown, Some(Tick::from_units(3, 1)));
         let mut f = Footage { kind: FootageKind::Video, duration: Tick::from_units(76, 25), ..Footage::default() };
@@ -454,5 +500,22 @@ mod tests {
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX, u32::MAX - 1, 1, 0].into_iter()), None);
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX; 300].into_iter()), None);
         assert_eq!(video_rate(b"not a movie"), None);
+    }
+
+    /// A 150-megapixel still (a medium-format frame) is not refused for its size: only its (absent)
+    /// pixel data fails, not the dimension check. A still past the limit is.
+    #[cfg(not(any(target_arch = "wasm32", target_pointer_width = "32")))]
+    #[test]
+    fn stills_up_to_the_limit_pass_the_size_check() {
+        let bmp = |w: u32, h: u32| {
+            let mut b = vec![b'B', b'M', 0, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0];
+            b.extend_from_slice(&w.to_le_bytes());
+            b.extend_from_slice(&h.to_le_bytes());
+            b.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            b
+        };
+        let limit = |e: image::ImageError| matches!(e, image::ImageError::Limits(_));
+        assert!(!load_oriented(&bmp(14_000, 10_800), None).err().is_some_and(limit), "150 MP passes the check");
+        assert!(load_oriented(&bmp(20_000, 20_000), None).err().is_some_and(limit), "400 MP is refused");
     }
 }

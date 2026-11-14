@@ -119,7 +119,7 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
         if u64::from(w) * u64::from(h) > u64::from(MAX_VECTOR_SIDE) * u64::from(MAX_VECTOR_SIDE) {
             return Err(MediaError::Decode(format!("{path}: {w}×{h} pixels is larger than vector footage can be drawn ({MAX_VECTOR_SIDE}×{MAX_VECTOR_SIDE})")));
         }
-        let img = effectcraft_svg::rasterize_with(&doc, w, h, to_image);
+        let img = effectcraft_svg::try_rasterize_with(&doc, w, h, to_image).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
         // The rasteriser produces premultiplied pixels already.
         let _ = op;
         return Ok(Some(img));
@@ -132,10 +132,15 @@ const MAX_VECTOR_SIDE: u32 = 16384;
 
 /// The vector footage `footage` (of the file `path` with these `bytes`) rasterised at `scale` ×
 /// its size as [`effectcraft_render::vector_fit`] draws it (Continuously Rasterize).
-pub(crate) fn rasterize_vector(path: &str, bytes: &[u8], footage: &Footage, scale: f64) -> Option<Image> {
+///
+/// `None` when the file cannot be read as a vector document. `Some(Err(_))` when a render budget
+/// refused part of the drawing (for example a layer scaled past the surface limit), so the caller
+/// can report it instead of showing a partial or empty image as if it were complete.
+pub(crate) fn rasterize_vector(path: &str, bytes: &[u8], footage: &Footage, scale: f64) -> Option<Result<Image>> {
     let doc = footage_doc(path, bytes, footage)?.ok()?;
     let ((sw, sh), to_image) = fit(&doc, footage, scale);
-    Some(effectcraft_svg::rasterize_with(&doc, sw.clamp(1, MAX_VECTOR_SIDE), sh.clamp(1, MAX_VECTOR_SIDE), to_image))
+    let drawn = effectcraft_svg::try_rasterize_with(&doc, sw.clamp(1, MAX_VECTOR_SIDE), sh.clamp(1, MAX_VECTOR_SIDE), to_image);
+    Some(drawn.map_err(|e| MediaError::Decode(format!("{path}: {e}"))))
 }
 
 /// The page framing of vector footage: as After Effects places it for footage from an After
@@ -171,6 +176,18 @@ mod tests {
         let footage = probe("small.svg", small).unwrap().unwrap();
         let img = decode("small.svg", small, &footage, AlphaOp::new(footage.alpha, footage.premul_color)).unwrap().unwrap();
         assert_eq!((img.width, img.height), (40, 20));
+    }
+
+    /// Continuously Rasterize reports a layer scaled past the render budget as an error instead of
+    /// returning a partial or empty image, and still draws the same layer at an ordinary scale.
+    #[test]
+    fn rasterizing_vector_footage_past_the_budget_is_reported() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100"/></svg>"#;
+        let footage = probe("scaled.svg", svg).unwrap().unwrap();
+        let ok = rasterize_vector("scaled.svg", svg, &footage, 1.0).unwrap().unwrap();
+        assert_eq!((ok.width, ok.height), (100, 100));
+        let e = rasterize_vector("scaled.svg", svg, &footage, 1000.0).unwrap().err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(e.contains("scaled.svg"), "{e}");
     }
 
     /// A 200 × 100 pt page: red left half, blue right half.
@@ -214,7 +231,7 @@ mod tests {
         (footage.width, footage.height) = (100, 80);
         let unplaced = decode("art.ai", &pdf, &footage, op).unwrap().unwrap();
         assert!(unplaced == own, "not placed: drawn as before");
-        assert_eq!(rasterize_vector("art.ai", &pdf, &footage, 0.5).map(|i| (i.width, i.height)), Some((100, 50)));
+        assert_eq!(rasterize_vector("art.ai", &pdf, &footage, 0.5).and_then(|r| r.ok()).map(|i| (i.width, i.height)), Some((100, 50)));
 
         footage.placed_page = true;
         let img = decode("art.ai", &pdf, &footage, op).unwrap().unwrap();
@@ -226,7 +243,7 @@ mod tests {
             assert!(is_blue(img.get(x, y)), "blue at ({x}, {y}): {:?}", img.get(x, y));
         }
 
-        let sharp = rasterize_vector("art.ai", &pdf, &footage, 2.0).unwrap();
+        let sharp = rasterize_vector("art.ai", &pdf, &footage, 2.0).unwrap().unwrap();
         assert_eq!((sharp.width, sharp.height), (200, 160));
         assert!(is_red(sharp.get(50, 155)) && is_blue(sharp.get(150, 155)));
         // Placed at the page's own size: 1:1.

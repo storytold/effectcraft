@@ -506,6 +506,25 @@ fn a_later_vertical_run_keeps_the_first_line_baseline() {
     assert!((mixed.lines[0].baseline - plain.lines[0].baseline).abs() < 1e-3, "{} vs {}", mixed.lines[0].baseline, plain.lines[0].baseline);
 }
 
+/// `Item::glyphs_in` finds a cluster range by bisection when the clusters are ordered, and agrees
+/// with a full scan for ascending, descending and unordered clusters.
+#[test]
+fn item_glyphs_in_matches_a_full_scan() {
+    let glyph = |cluster| ShapedGlyph { face: 0, id: cluster as u32, cluster, adv: 1.0, pre: 0.0, dx: 0.0, dy: 0.0, size: 10.0, run: 0, rise: 0.0 };
+    let asc: Vec<usize> = vec![0, 0, 1, 3, 3, 3, 5, 8];
+    let desc: Vec<usize> = asc.iter().rev().copied().collect();
+    let mixed: Vec<usize> = vec![3, 0, 5, 1, 8, 3, 0, 3];
+    for (clusters, order) in [(&asc, Some(true)), (&desc, Some(false)), (&mixed, None)] {
+        let item = Item::new(0..9, false, clusters.iter().map(|&c| glyph(c)).collect());
+        assert_eq!(item.cluster_order, order);
+        for (a, b) in [(0, 9), (0, 1), (1, 4), (3, 4), (4, 9), (6, 8), (9, 9), (2, 3)] {
+            let got: Vec<usize> = item.glyphs_in(&(a..b)).map(|g| g.cluster).collect();
+            let want: Vec<usize> = clusters.iter().copied().filter(|c| (a..b).contains(c)).collect();
+            assert_eq!(got, want, "{clusters:?} {a}..{b}");
+        }
+    }
+}
+
 #[test]
 fn run_lookup_by_bisection_matches_the_scan() {
     let scan = |runs: &[(Range<usize>, TextStyle)], b: usize| {

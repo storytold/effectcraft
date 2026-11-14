@@ -8,8 +8,8 @@
 //! (`Renderer::layer_input`, source → masks → the effects above it). `roto.freeze` runs the same
 //! pass and stores the final mattes in the effect (one undo step). `sync`, run after every
 //! edit, keeps each instance's hidden Input Key equal to a signature of what its frames are made
-//! of (the layer's source and timing, its masks and the effects above it) and drops frozen
-//! mattes made from other frames.
+//! of (the layer's source and timing, its masks and the effects above it: `analysis::frames_key`),
+//! and drops frozen mattes made from other frames. Footage going offline keeps them.
 //!
 //! Object Matte instances run through the same jobs (`objectMatte.propagate` / `.freeze`): the
 //! frames are [`om::job_frames`] around the reference frame, each segmented through
@@ -31,6 +31,7 @@ use effectcraft_render::{EvalCtx, ExprHost, FootageSource, LayerCache, RenderOpt
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::frames_key::{self, Era};
 use crate::tracking::lock;
 use crate::{Event, Session};
 
@@ -207,40 +208,10 @@ fn set_str(g: &mut PropGroup, m: &str, v: String) {
     }
 }
 
-fn fnv(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
 /// What the effect's input frames are made of: the layer's source and timing, its masks and the
 /// effects above the Roto Brush.
 pub fn input_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
-    input_key_with_signature(crate::warp::signature(p, comp, layer), layer, uid)
-}
-
-/// Recognize the input key serialized before 0.23 without re-keying its frozen matte.
-fn input_key_before_placed_page(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> Option<String> {
-    let signature = crate::warp::signature_before_placed_page(p, comp, layer)?;
-    Some(input_key_with_signature(signature, layer, uid))
-}
-
-fn input_key_with_signature(mut s: String, layer: &Layer, uid: Uid) -> String {
-    if let Some(m) = layer.masks() {
-        s.push_str(&format!("{m:?}"));
-    }
-    if let Some(fx) = layer.effects() {
-        for g in fx.groups() {
-            if g.uid == uid {
-                break;
-            }
-            s.push_str(&format!("{g:?}"));
-        }
-    }
-    format!("{:016x}", fnv(&s))
+    frames_key::input_key(p, comp, layer, uid)
 }
 
 /// After an edit: refresh Input Keys (Roto Brush and Object Matte); frozen mattes made from
@@ -258,7 +229,11 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
                 let old = before.comp(*cid).and_then(|bc| bc.layer(l.id)).and_then(|ol| ol.props.find_group(g.uid));
                 let saved_key = str_of(g, INPUT_KEY);
                 // Keep a matching old key: the frozen cache itself also hashes that key.
-                if saved_key != key && input_key_before_placed_page(after, *cid, l, g.uid).as_deref() != Some(saved_key.as_str()) {
+                let key_of = |s, era| match era {
+                    Era::Current => frames_key::input_key_of(s, l, g.uid),
+                    Era::Legacy => frames_key::legacy::input_key_of(s, l, g.uid),
+                };
+                if !frames_key::key_matches(after, *cid, l, &saved_key, key_of) {
                     set.push((*cid, l.id, g.uid, key));
                     todo.push((*cid, l.id, g.uid));
                 } else if old.is_none_or(|o| guard_of(o) != guard_of(g)) {

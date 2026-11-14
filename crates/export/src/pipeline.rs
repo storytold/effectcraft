@@ -894,6 +894,20 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Whether Skip Existing finds `path` already written: at its own place or, with Use Storage
+    /// Overflow, in any overflow folder (checked before a frame is placed, so a skipped frame
+    /// reserves no quota).
+    pub fn frame_exists(&self, path: &str) -> bool {
+        if out::exists(self.sink, path) {
+            return true;
+        }
+        if !self.job.settings.storage_overflow {
+            return false;
+        }
+        let Some(name) = std::path::Path::new(path).file_name() else { return false };
+        self.job.options.overflow.iter().any(|dir| out::exists(self.sink, &std::path::Path::new(dir).join(name).to_string_lossy()))
+    }
+
     /// Where a file goes: `path`, or (Use Storage Overflow) the first overflow folder with room
     /// for `bytes` when the quota hook says the output volume is full.
     pub fn place(&self, path: &str, bytes: u64) -> String {

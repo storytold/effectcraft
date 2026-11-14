@@ -1,0 +1,8 @@
+asset: analysed-0.24.ecproj
+title: The tracked-0.22 clip with Time Remap, a mask, Gaussian Blur and Roto Brush, keyed by EffectCraft 0.24.1
+author: arnav-hiwarkar
+source: original work
+license: MIT OR Apache-2.0
+license-file: ../../../../../LICENSE-MIT
+added: 2026-11-12 by arnav-hiwarkar
+notes: Made from tracked-0.22.ecproj with 0.24.1 engine commands (enable Time Remap, a rectangle mask, Gaussian Blur and Roto Brush), its saved analyses replaced by short stand-in strings, and the Warp Stabilizer, 3D Camera Tracker and Roto Brush keys that 0.24.1 computed for it. Written as compact JSON. No media is needed: the tests only check that the keys are kept or cleared.
