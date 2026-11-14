@@ -124,6 +124,8 @@ impl Dependencies<'_> {
         Some(())
     }
 
+    /// Folds what the layer contributes at this time into the dependency cache key, including its source, effects and frame blend state.
+    /// Returns `None` when the layer cannot be keyed: past the depth limit, in a reference cycle, or with expressions that read other times.
     fn layer(&mut self, ctx: &EvalCtx, layer: &Layer) -> Option<()> {
         let id = (ctx.comp_id, layer.id);
         if self.path.len() > crate::MAX_FX_DEPTH || self.path.contains(&id) {
@@ -167,7 +169,10 @@ impl Dependencies<'_> {
                 hash_debug(self.h, &source);
                 if let Some(source) = source {
                     match &source.kind {
-                        ItemKind::Footage(_) => ctx.source_time(layer).0.hash(self.h),
+                        ItemKind::Footage(_) => {
+                            ctx.source_time(layer).0.hash(self.h);
+                            super::hash_blend_spans(self.h, ctx, layer);
+                        }
                         ItemKind::Comp(comp) => {
                             let time = ctx.source_time(layer);
                             time.0.hash(self.h);
