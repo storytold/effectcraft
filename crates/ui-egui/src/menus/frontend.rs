@@ -700,7 +700,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
             Ask::Save(default) => crate::FileDialog::save(&default),
         };
         let tx = app.dialog_answers.0.clone();
-        let answer = crate::DialogAnswer { command: id.to_string(), key, params: params.clone(), paths: Vec::new() };
+        let answer = crate::DialogAnswer { command: id.to_string(), key, params: params.clone(), paths: Ok(Vec::new()) };
         app.file_dialogs.opened();
         spawn(
             request,
@@ -750,9 +750,18 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 }
 
 /// A file dialog shown without blocking ([`crate::Hooks::file_dialog_async`]) answered: run its
-/// command with the picked path (nothing when it was cancelled).
+/// command with the picked path (nothing when it was cancelled). A dialog that couldn't open
+/// says why in the status line, and the command doesn't run (#3084).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
-    let Some(v) = picked_value(answer.key, answer.paths) else { return };
+    let paths = match answer.paths {
+        Ok(paths) => paths,
+        // The host logged it.
+        Err(e) => {
+            app.ui.status = e;
+            return;
+        }
+    };
+    let Some(v) = picked_value(answer.key, paths) else { return };
     match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
         Ok(result) => show_result_errors(app, &result),
         Err(e) => app.ui.status = e,
