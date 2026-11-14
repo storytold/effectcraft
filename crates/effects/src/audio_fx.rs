@@ -209,7 +209,7 @@ pub fn reverses(id: &str) -> bool {
 /// Does each output sample depend only on the input sample at the same time (no state), so the
 /// mixer may run the effect in short pieces with parameters animated between them?
 pub fn per_sample(id: &str) -> bool {
-    matches!(id, "ec.audio.stereomixer" | "ec.audio.backwards")
+    matches!(id, "ec.audio.stereomixer" | "ec.audio.backwards" | "ec.audio.distortion" | "ec.audio.tone")
 }
 
 /// Seconds of input history the effect needs before a block to reach the state it would have
@@ -239,6 +239,26 @@ pub fn preroll(id: &str, params: &Params) -> f64 {
             let t60 = if fb > 1e-3 { -3.0 * 0.0367 / fb.log10() } else { 0.05 };
             (t60 + pre).min(4.0)
         }
+        _ => 0.0,
+    }
+}
+
+/// The worst-case preroll for an effect regardless of its current parameter values.
+/// Used when the effect's parameters are animated so the actual `preroll()` value (computed
+/// at the block start) might underestimate the history needed at some point within the block,
+/// which would leave insufficient pre-roll and produce a glitch at every block boundary.
+pub fn max_preroll(id: &str) -> f64 {
+    match id {
+        "ec.audio.basstreble" | "ec.audio.highlowpass" | "ec.audio.parametriceq" => 0.05,
+        "ec.audio.flangechorus" | "ec.audio.modulator" => 0.06,
+        "ec.audio.distortion" => 0.01,
+        // Worst case: max release (4000 ms) + max attack (400 ms) + max hold (2500 ms for gate).
+        "ec.audio.compressor" => (9.0 * 4.0 + 9.0 * 0.4 + 0.01f64).min(10.0),
+        "ec.audio.gate" => (9.0 * 4.0 + 9.0 * 1.0 + 2.5 + 0.01f64).min(10.0),
+        // Worst case: max delay (10 s) × taps at max feedback (0.99 ≈ 1000 taps → cap at 10 s).
+        "ec.audio.delay" => 10.0,
+        // Worst case: max reverb T60 (longest comb at fb=0.98) + max pre-delay (5 s → cap 4 s).
+        "ec.audio.reverb" => 4.0,
         _ => 0.0,
     }
 }

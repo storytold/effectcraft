@@ -157,9 +157,9 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
             for p in venc.encode(px, k)? {
                 blocks.push(Block { ms: frame_ms(k), track: 1, key: p.key, data: p.data });
             }
+            let t_end = if k + 1 >= total { span_end } else { job.settings.frame_time(comp, k + 1) };
+            audio_until(t_end, &mut blocks, k + 1 >= total);
         }
-        let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut blocks, end >= total);
         flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
         st.advance(end - i)?;
         i = end;
