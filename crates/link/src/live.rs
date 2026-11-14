@@ -6,8 +6,9 @@
 //! all of this and nothing blocks:
 //!
 //! 1. Drain the document change feed. Any change except the one a result render stores
-//!    ([`RESULT_CAUSE`]) bumps the epoch of every bound link and emits `link.changed`.
-//! 2. Publish the project, with the epochs, to the frame workers.
+//!    ([`RESULT_CAUSE`]) bumps the epoch of every bound link.
+//! 2. Publish the project, with the epochs, to the frame workers. Only then emit `link.changed`
+//!    for the new epochs: a peer that asks for a frame at once must find the epoch published.
 //! 3. Take in a finished result render: store its epoch, emit `link.result`.
 //! 4. After [`SETTLE`] without changes, start a result render on a thread. A new change cancels
 //!    a render that runs.
@@ -29,7 +30,7 @@ use serde_json::{Value, json};
 use crate::frames::{CompFrames, FrameWorld};
 use crate::result::{RESULT_CAUSE, RenderError, RenderOutcome, RenderPlan, prepare_render};
 use crate::sidecar::{self, SidecarError};
-use crate::track::Tracker;
+use crate::track::{Stamp, Tracker};
 
 /// Sends a push event to the peers that subscribed (`Server::emit`).
 pub type Emitter = Arc<dyn Fn(&str, Value) + Send + Sync>;
@@ -226,9 +227,7 @@ impl Live {
         let added = state.tracker.sync(bound.iter().map(|(link_id, epoch)| (link_id.as_str(), *epoch)));
         self.forget_unbound(&mut state);
         // A link that was just bound is not an edit: the change that bound it came with it.
-        if drained.edits && !added {
-            self.edited(&mut state, now);
-        }
+        let announce = if drained.edits && !added { self.edited(&mut state, now) } else { Vec::new() };
         // Any change, a stored result epoch included, makes the sidecar older than the project.
         if drained.any && !added {
             state.sidecar_at = Some(now + sidecar::SETTLE);
@@ -238,6 +237,7 @@ impl Live {
         self.write_due_sidecar(session, &mut state, now);
         self.report_sidecar_errors(session, &mut state);
         self.publish(session, &mut state);
+        self.announce(announce);
         let busy = state.closing && state.running.is_some();
         let next = [state.tracker.wake_at(), state.sidecar_at, busy.then(|| now + Duration::from_millis(50))].into_iter().flatten().min();
         next.map(|at| at.saturating_duration_since(now).max(Duration::from_millis(1)))
@@ -275,12 +275,15 @@ impl Live {
                 .filter(|(_, binding)| !std::fs::symlink_metadata(&binding.result_path).is_ok_and(|meta| meta.is_file()))
                 .map(|(link_id, _)| link_id.clone())
                 .collect();
+            let mut announce = Vec::new();
             for link_id in missing {
                 if let Some((link_id, epoch)) = state.tracker.needs_render(&link_id) {
-                    (self.emit)("link.changed", json!({"link_id": link_id, "epoch": epoch}));
-                    lock(&EPOCHS).insert(link_id, epoch);
+                    lock(&EPOCHS).insert(link_id.clone(), epoch);
+                    announce.push((link_id, epoch));
                 }
             }
+            self.publish(session, &mut state);
+            self.announce(announce);
         }
         self.tick(session, now);
         self.close_state()
@@ -395,16 +398,24 @@ impl Live {
         Drained { any: !changes.is_empty(), edits: changes.iter().any(|change| change.cause != Cause::Job(RESULT_CAUSE)) }
     }
 
-    fn edited(&self, state: &mut State, now: Instant) {
-        for (link_id, epoch) in state.tracker.changed(now) {
-            (self.emit)("link.changed", json!({"link_id": link_id, "epoch": epoch}));
-        }
+    /// Bump the epochs after an edit. Returns the new epochs for [`Self::announce`], which runs
+    /// after [`Self::publish`].
+    fn edited(&self, state: &mut State, now: Instant) -> Vec<Stamp> {
+        let changed = state.tracker.changed(now);
         if let Some(running) = &state.running {
             running.cancel.store(true, Ordering::SeqCst);
         }
         let mut epochs = lock(&EPOCHS);
         for (link_id, epoch) in state.tracker.epochs() {
             epochs.insert(link_id.to_string(), epoch);
+        }
+        changed
+    }
+
+    /// Emit `link.changed` for epochs the frame workers already have.
+    fn announce(&self, changed: Vec<Stamp>) {
+        for (link_id, epoch) in changed {
+            (self.emit)("link.changed", json!({"link_id": link_id, "epoch": epoch}));
         }
     }
 
@@ -738,6 +749,111 @@ mod tests {
         let state = live.begin_close(&mut session, t0);
         assert!(state == Closing::Ready || drive_close(&live, &mut session, t0) == Closing::Ready);
         assert!(!result.exists());
+    }
+
+    /// What a peer gets when it asks for a frame the moment `link.changed` reaches it.
+    #[derive(Debug)]
+    struct AskedOnAnnounce {
+        announced: u64,
+        /// The epoch on the frame the source rendered for an ask of epoch 0.
+        rendered: u64,
+        pixel: [u8; 4],
+        /// The ticket path's answer to an ask of the announced epoch: the reply epoch, or the error.
+        ticket: Result<u64, String>,
+    }
+
+    /// A live link whose emitter asks its own frame source for a frame on every `link.changed`,
+    /// before the emit returns, as a fast peer on another thread can.
+    fn live_asking_on_announce(link: &'static str) -> (Live, Arc<Mutex<Vec<AskedOnAnnounce>>>) {
+        use craft_ipc::server::Frames;
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let source: Arc<Mutex<Option<Arc<CompFrames>>>> = Arc::new(Mutex::new(None));
+        let (sink, slot) = (Arc::clone(&asked), Arc::clone(&source));
+        let emit: Emitter = Arc::new(move |name, data| {
+            let Some(frames) = lock(&slot).clone() else { return };
+            if name != "link.changed" {
+                return;
+            }
+            let announced = data["epoch"].as_u64().unwrap();
+            let spec = FrameSpec { link_id: link.into(), format: FrameFormat::Rgba8Premul, scale: 1.0 };
+            let frame = frames.render(&spec, &FrameRequest { req: 1, time_s: 0.0, epoch: 0, region: None }).unwrap();
+            let tickets = craft_ipc::bulk::FrameTickets::new(Arc::clone(&frames) as Arc<dyn FrameSource>);
+            let opened = tickets.open(json!({"link_id": link, "format": "rgba8_premul", "scale": 1.0}).as_object().unwrap()).unwrap();
+            let ticket = tickets
+                .render(&opened.ticket, &json!({"req": 2, "time_s": 0.0, "epoch": announced, "region": null}))
+                .map(|(header, _)| header["epoch"].as_u64().unwrap())
+                .map_err(|e| e.to_string());
+            let pixel = [frame.pixels[0], frame.pixels[1], frame.pixels[2], frame.pixels[3]];
+            lock(&sink).push(AskedOnAnnounce { announced, rendered: frame.epoch, pixel, ticket });
+        });
+        let live = Live::new(emit, Arc::new(|| {}));
+        *lock(&source) = Some(live.frames());
+        (live, asked)
+    }
+
+    fn first_pixel(live: &Live, link: &str) -> [u8; 4] {
+        let spec = FrameSpec { link_id: link.into(), format: FrameFormat::Rgba8Premul, scale: 1.0 };
+        let frame = live.frames().render(&spec, &FrameRequest { req: 1, time_s: 0.0, epoch: 0, region: None }).unwrap();
+        [frame.pixels[0], frame.pixels[1], frame.pixels[2], frame.pixels[3]]
+    }
+
+    /// `link.changed` announces an epoch. A peer that asks for it at once must get the frame of
+    /// the edited project at that epoch, never the frame of the old project labelled with it.
+    #[test]
+    fn a_frame_asked_for_when_an_edit_is_announced_comes_from_the_edited_project() {
+        const LINK: &str = "9191-4444-4444-8444-444444444444";
+        let dir = scratch("announce-edit");
+        let mut session = session_with_link(LINK, &dir.join(format!("{LINK}.mov")));
+        let comp = session.project.craft_links[LINK].comp;
+        let (live, asked) = live_asking_on_announce(LINK);
+        let t0 = Instant::now();
+        live.tick(&mut session, t0);
+        let old = first_pixel(&live, LINK);
+        // The comp is empty, so its frame is transparent. A solid over all of it changes the picture.
+        let project = session.project_mut();
+        let solid = project.add_item(
+            "Red",
+            Label::Red,
+            None,
+            ItemKind::Solid(effectcraft_project::Solid { color: [1.0, 0.0, 0.0], width: 64, height: 36, pixel_aspect: 1.0 }),
+        );
+        let mut edited = project.comp(comp).unwrap().clone();
+        let layer = effectcraft_project::build::layer(project, &edited, "Red", effectcraft_project::LayerSource::Solid { item: solid }, (64, 36), None);
+        edited.layers.push(layer);
+        *project.comp_mut(comp).unwrap() = edited;
+        edit(&mut session);
+        live.tick(&mut session, t0 + Duration::from_millis(10));
+        let new = first_pixel(&live, LINK);
+        assert_ne!(old, new, "the edit must change the picture, or the test proves nothing");
+
+        let asked = lock(&asked);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let ask = &asked[0];
+        assert_eq!(ask.announced, 1);
+        assert_eq!(ask.rendered, 1, "the frame workers did not have the announced epoch yet: {ask:?}");
+        assert_eq!(ask.pixel, new, "the announced epoch showed the project from before the edit: {ask:?}");
+        assert_eq!(ask.ticket, Ok(1));
+    }
+
+    /// The close bumps the epoch of a link that has no result yet and announces it. The frame
+    /// workers must hold that epoch before the announcement goes out.
+    #[test]
+    fn a_frame_asked_for_when_a_close_announces_an_epoch_carries_that_epoch() {
+        const LINK: &str = "9292-4444-4444-8444-444444444444";
+        let dir = scratch("announce-close");
+        let mut session = session_with_link(LINK, &dir.join(format!("{LINK}.mov")));
+        let (live, asked) = live_asking_on_announce(LINK);
+        let t0 = Instant::now();
+        live.tick(&mut session, t0);
+        assert_eq!(live.begin_close(&mut session, t0), Closing::Rendering);
+        drive_close(&live, &mut session, t0);
+
+        let asked = lock(&asked);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let ask = &asked[0];
+        assert_eq!(ask.announced, 1);
+        assert_eq!(ask.rendered, 1, "the frame workers did not have the announced epoch yet: {ask:?}");
+        assert_eq!(ask.ticket, Ok(1));
     }
 
     #[test]

@@ -156,11 +156,10 @@ impl FrameSource for CompFrames {
 
     fn render(&self, spec: &FrameSpec, request: &FrameRequest) -> Result<RenderedFrame, LinkError> {
         let world = self.world()?;
-        let mut frame = catch_unwind(AssertUnwindSafe(|| world.render(&spec.link_id, spec.scale, request.time_s, request.region)))
-            .map_err(|_| LinkError::NotReady("the renderer failed on this frame".into()))??;
-        // The contract: the epoch is at least the one asked for.
-        frame.epoch = frame.epoch.max(request.epoch);
-        Ok(frame)
+        // The frame keeps the epoch of the world it was rendered from (PROTOCOL section 6). An ask
+        // for a newer epoch gets this older one, and `FrameTickets` answers it with `not_ready`.
+        catch_unwind(AssertUnwindSafe(|| world.render(&spec.link_id, spec.scale, request.time_s, request.region)))
+            .map_err(|_| LinkError::NotReady("the renderer failed on this frame".into()))?
     }
 
     fn close(&self, _spec: &FrameSpec) {}
@@ -232,8 +231,42 @@ mod tests {
         // A binding's stored epoch is used when the tracker has none.
         frames.publish(FrameWorld::of(&session, &BTreeMap::new()));
         assert_eq!(frames.render(&spec(0.25), &request(0.0, 0, None)).unwrap().epoch, 4);
-        // The reply is never older than the ask.
-        assert_eq!(frames.render(&spec(0.25), &request(0.0, 12, None)).unwrap().epoch, 12);
+        // The reply carries the epoch the frame was rendered at, even when a newer one was asked for.
+        assert_eq!(frames.render(&spec(0.25), &request(0.0, 12, None)).unwrap().epoch, 4);
+    }
+
+    /// PROTOCOL section 6: the reply epoch is the one the frame was rendered at. A world published
+    /// at epoch 4 cannot answer an ask for epoch 12 with pixels, or a peer caches them as epoch 12.
+    #[test]
+    fn an_ask_for_a_newer_epoch_than_the_world_is_not_ready_through_the_tickets() {
+        use craft_ipc::server::Frames;
+        let mut session = Session::default();
+        let rate = effectcraft_time::FrameRate::new(24, 1);
+        let comp = effectcraft_project::Comp::new(4, 3, rate, rate.tick_of(2));
+        let comp =
+            session.project_mut().add_item("Small", effectcraft_engine::color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(Arc::new(comp)));
+        session.project_mut().craft_links.insert(
+            LINK.to_string(),
+            effectcraft_project::CraftLinkBinding {
+                link_id: LINK.to_string(),
+                comp,
+                source: json!({"app": "filmcraft", "doc_id": "0", "item": "1"}),
+                result_path: "/tmp/never-written.mov".to_string(),
+                epoch: 4,
+            },
+        );
+        let frames = Arc::new(served(&session));
+        let tickets = craft_ipc::bulk::FrameTickets::new(Arc::clone(&frames) as Arc<dyn FrameSource>);
+        let params = json!({"link_id": LINK, "format": "rgba8_premul", "scale": 1.0});
+        let opened = tickets.open(params.as_object().unwrap()).unwrap();
+        assert_eq!((opened.w, opened.h), (4, 3));
+
+        let stale = tickets.render(&opened.ticket, &json!({"req": 1, "time_s": 0.0, "epoch": 12, "region": null}));
+        assert!(matches!(stale, Err(LinkError::NotReady(_))), "pixels from epoch 4 answered an ask for epoch 12: {:?}", stale.map(|(header, _)| header));
+
+        let (header, pixels) = tickets.render(&opened.ticket, &json!({"req": 2, "time_s": 0.0, "epoch": 4, "region": null})).unwrap();
+        assert_eq!(header["epoch"], 4);
+        assert_eq!(pixels.len(), 4 * 3 * 4);
     }
 
     #[test]
