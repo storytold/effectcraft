@@ -639,7 +639,9 @@ impl Text {
             GroupKind::Effect { effect } => self.str("effect", effect),
             // A motion tracker's settings say how to track, not how to draw the layer.
             GroupKind::Tracker { settings: _ } => self.word("tracker"),
-            GroupKind::Essential { overridden } => {
+            // The bases only say how a later master restyle merges into an overridden Source
+            // Text; the value drawn is the child property's, written below.
+            GroupKind::Essential { overridden, bases: _ } => {
                 self.word("essential");
                 for u in overridden {
                     self.field("overridden", u);
