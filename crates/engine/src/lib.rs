@@ -267,7 +267,9 @@ pub struct Session {
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
     /// The wait for plug-ins' answers to parameter changes in the command running (#3663).
-    pub(crate) param_notify: session::param_notify::NotifyBudget,
+    /// Public only so that other crates can build a `Session { .. }`; its type is crate-private.
+    #[doc(hidden)]
+    pub param_notify: session::param_notify::NotifyBudget,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.

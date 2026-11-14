@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::plugin::{
-    EffectPlugin, ParamChange, PluginFrame, PluginManifest, PluginParam, PluginParamKind, PluginParams, instance_key_for, register_plugin,
+    EffectPlugin, MAX_ANSWER_TEXT, ParamChange, PluginFrame, PluginManifest, PluginParam, PluginParamKind, PluginParams, instance_key_for, register_plugin,
 };
 use effectcraft_keyframe::Value as KV;
 use effectcraft_project::{Layer, LayerId, PropGroup};
@@ -26,6 +26,8 @@ enum Mode {
     Slow,
     /// Takes all the time it is given, then answers nothing.
     Spend,
+    /// Answers more text than an answer may set, and a short label.
+    Huge,
 }
 
 struct Notifier {
@@ -62,6 +64,7 @@ impl EffectPlugin for Notifier {
                 Ok(vec![])
             }
             Mode::Fail => Err("the helper did not answer within 2 s".into()),
+            Mode::Huge => Ok(vec![("secret".into(), json!("x".repeat(MAX_ANSWER_TEXT + 1))), ("label".into(), json!("short"))]),
             Mode::Preset => Ok(if change.values["preset"] == json!(1) {
                 vec![
                     ("amount".into(), json!(75.0)),
@@ -328,4 +331,44 @@ fn a_batch_waits_for_plugins_once() {
     // A new command has its own wait again.
     set(&mut s, l, fx, "preset", json!(2)).unwrap();
     assert_eq!(spend.budgets.lock().unwrap().len(), 2);
+}
+
+/// CodeRabbit on #3664: the answer of an in-process plug-in goes through the same checks as a
+/// helper's ([`effectcraft_effects::plugin::checked_values`]): a string over the text limit is
+/// left out (it used to be written into the project and every undo step), the rest is applied.
+#[test]
+fn an_in_process_answer_keeps_to_the_text_limit() {
+    let n = notifier("huge", Mode::Huge);
+    let (mut s, l, fx) = setup("org.test.notify.huge");
+    set(&mut s, l, fx, "preset", json!(1)).unwrap();
+    assert_eq!(n.calls.load(Ordering::SeqCst), 1);
+    let secret = match value(&s, l, fx, "secret") {
+        KV::Str(t) => t.len(),
+        _ => usize::MAX,
+    };
+    assert_eq!(secret, 0, "over the limit: left out");
+    assert_eq!(value(&s, l, fx, "label"), KV::Str("short".into()));
+}
+
+/// CodeRabbit on #3664: an edit that sets several keys is reported at the first one (in time)
+/// whose value changed, not skipped because its first new key holds the value it had.
+#[test]
+fn an_edit_setting_several_keys_is_reported_at_the_first_changed_one() {
+    let n = notifier("multikey", Mode::Preset);
+    let (mut s, l, fx) = setup("org.test.notify.multikey");
+    let cid = s.active_comp_id().unwrap();
+    s.edit("Keys", None, |proj, _| {
+        let layer = &mut proj.comp_mut(cid).unwrap().layers[0];
+        let pr = layer.props.find_group_mut(fx).unwrap().get_mut("speed").unwrap();
+        let t = |sec: f64| effectcraft_time::Tick::from_seconds_f64(sec);
+        // 0 s keeps the value the parameter had; 1 s and 2 s change it.
+        for (sec, v) in [(2.0, 30.0), (0.0, 0.0), (1.0, 50.0)] {
+            effectcraft_keyframe::set_key(&mut pr.keys, effectcraft_keyframe::Keyframe::new(t(sec), KV::Scalar(v)));
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(key_count(&s, l, fx, "speed"), 3);
+    assert_eq!(n.calls.load(Ordering::SeqCst), 1, "a changed value");
+    assert_eq!(n.last.lock().unwrap().as_ref().map(|c| c.time), Some(1.0));
 }

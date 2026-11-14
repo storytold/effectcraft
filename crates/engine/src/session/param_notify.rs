@@ -28,7 +28,7 @@ use super::Session;
 /// The plug-in wait of the command running ([`Session::execute`]): one deadline for all its
 /// edits, and whether a plug-in already failed in it.
 #[derive(Debug, Default)]
-pub(crate) struct NotifyBudget {
+pub struct NotifyBudget {
     /// Nesting of [`Session::execute`] (a batch or a script runs commands inside a command).
     depth: u32,
     deadline: Option<Instant>,
@@ -87,7 +87,15 @@ impl Session {
             let now = Instant::now();
             now.checked_add(plugin::param_change_timeout()).unwrap_or(now)
         });
-        for c in changes.into_iter().take(MAX_NOTIFICATIONS) {
+        for (i, c) in changes.into_iter().enumerate() {
+            if i >= MAX_NOTIFICATIONS {
+                log::warn!(
+                    "effect `{}`: the change of `{}` and any after it were not reported: one edit reports at most {MAX_NOTIFICATIONS} changes",
+                    c.effect,
+                    c.param
+                );
+                return;
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if self.param_notify.stalled || left == Duration::ZERO {
                 self.param_notify.stalled = true;
@@ -107,7 +115,8 @@ impl Session {
 
 /// The notifying parameters `p` changed against `before`: effects that exist in both (same
 /// property group), whose plug-in lists the parameter in its `notify_params`, whose value at the
-/// edit's time changed (the time of a keyframe the edit set, else the current time). Changing a
+/// edit's time changed (the first keyframe the edit set, in time, whose value changed; the
+/// current time when it set none). Changing a
 /// keyframe's interpolation, ease or label, or turning the stopwatch on, doesn't change a value,
 /// and an expression's text doesn't count. Comps and layers the edit didn't touch (still shared
 /// with `before`) and effects that don't notify are skipped without looking inside.
@@ -139,13 +148,22 @@ fn changes(before: &Project, p: &Project, cti: &dyn Fn(ItemId) -> Tick) -> Vec<C
                     if now.value == was.value && now.keys == was.keys {
                         continue;
                     }
-                    // A keyframe the edit set or changed the value of is where it happened; else
-                    // the current time.
-                    let keyed = now.keys.iter().find(|k| !was.keys.iter().any(|o| o.time == k.time && o.value == k.value)).map(|k| k.time);
-                    let time = keyed.unwrap_or_else(|| layer.layer_time(cti(*cid)));
-                    if now.value_at(time) == was.value_at(time) {
-                        continue;
-                    }
+                    // The keyframes the edit set or changed the value of, in time order: the
+                    // change is at the first whose value differs from before. With no such key,
+                    // it is at the current time.
+                    let mut keyed: Vec<Tick> =
+                        now.keys.iter().filter(|k| !was.keys.iter().any(|o| o.time == k.time && o.value == k.value)).map(|k| k.time).collect();
+                    let time = if keyed.is_empty() {
+                        let t = layer.layer_time(cti(*cid));
+                        if now.value_at(t) == was.value_at(t) {
+                            continue;
+                        }
+                        t
+                    } else {
+                        keyed.sort();
+                        let Some(t) = keyed.into_iter().find(|t| now.value_at(*t) != was.value_at(*t)) else { continue };
+                        t
+                    };
                     out.push(Change { comp: *cid, layer: layer.id, group: g.uid, effect: effect.clone(), param: id.clone(), time });
                 }
             }
@@ -171,7 +189,9 @@ fn notify(p: &mut Project, c: &Change, budget: Duration) -> Result<(), String> {
         texts: plugin::flatten_texts(m, &params),
         budget: Some(budget),
     };
-    let answer = pl.param_changed(&change)?;
+    // The answer is checked as a helper's is (types, ranges, text limits), in-process or not.
+    let raw: serde_json::Map<String, serde_json::Value> = pl.param_changed(&change)?.into_iter().collect();
+    let answer = plugin::checked_values(m, &serde_json::Value::Object(raw));
     let layers: Vec<u64> = comp.layers.iter().map(|l| l.id.0).collect();
     let layer = p.comp_mut(c.comp).and_then(|cm| cm.layer_mut(c.layer)).ok_or("no layer")?;
     let g = layer.props.find_group_mut(c.group).ok_or("no effect")?;
