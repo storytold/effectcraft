@@ -823,7 +823,7 @@ fn import_file_dialog_offers_and_imports_after_effects_projects() {
     assert!(many && exts.iter().any(|e| e == "aep") && exts.iter().any(|e| e == "aepx"), "{exts:?}");
     assert!(exts.iter().any(|e| e == "png"), "footage too");
 
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: vec![aep] });
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(vec![aep]) });
     let comp = app.session.project.item(app.session.active_comp_id().expect("a composition is open")).unwrap();
     assert_eq!(comp.name, "Intro");
     assert_eq!(app.session.project.item(comp.parent.expect("in a folder")).unwrap().name, "Intro.aep");
@@ -884,7 +884,10 @@ fn picked_projects_report_every_error() {
     std::fs::write(&aep, b"not an aep").unwrap();
     std::fs::write(&ecproj, b"not a project").unwrap();
     let paths = vec![aep.to_string_lossy().to_string(), ecproj.to_string_lossy().to_string()];
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: paths.clone() });
+    super::frontend::dialog_answered(
+        &mut app,
+        crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(paths.clone()) },
+    );
     let status = &app.ui.status;
     assert!(status.contains("broken.aep") && status.contains("broken.ecproj"), "{status}");
     assert!(!status.contains('"'), "messages, not quoted JSON: {status}");
@@ -915,7 +918,7 @@ fn a_picked_project_with_losses_asks_and_the_next_waits() {
     source.execute("comp.new", json!({"name": "Intro", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
     source.execute("file.exportAep", json!({"path": intro, "allowLosses": true})).unwrap();
     let paths = vec![lossy.to_string_lossy().to_string(), intro.clone()];
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths });
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(paths) });
     assert_eq!(app.dialog, Some(crate::Dialog::AepLosses));
     assert_eq!(app.dialog_state.aep_losses.queue, [intro]);
     assert!(app.session.project.items.is_empty(), "nothing imported before the answer");
