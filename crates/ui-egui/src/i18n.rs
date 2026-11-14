@@ -8148,6 +8148,21 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("help.appPage", "EffectCraft Home Page", "Domovská stránka EffectCraft"),
     ("help.github", "EffectCraft on GitHub", "EffectCraft na GitHubu"),
     ("file.openDemoProject", "Open Demo Project", "Otevřít ukázkový projekt"),
+    // Czech catch-up: Quick Set Anchor, Un-precompose and the plug-in installers (2026-11-07).
+    ("", "Quick Set Anchor", "Rychle nastavit kotevní bod"),
+    ("layer.quickSetAnchor", "Top Left", "Vlevo nahoře"),
+    ("layer.quickSetAnchor", "Top", "Nahoře"),
+    ("layer.quickSetAnchor", "Top Right", "Vpravo nahoře"),
+    ("layer.quickSetAnchor", "Left", "Vlevo"),
+    ("layer.quickSetAnchor", "Center", "Uprostřed"),
+    ("layer.quickSetAnchor", "Right", "Vpravo"),
+    ("layer.quickSetAnchor", "Bottom Left", "Vlevo dole"),
+    ("layer.quickSetAnchor", "Bottom", "Dole"),
+    ("layer.quickSetAnchor", "Bottom Right", "Vpravo dole"),
+    ("layer.unprecompose", "Un-precompose", "Rozbalit předkompozici"),
+    ("effect.plugins.install", "Install Effect Plug-in...", "Nainstalovat zásuvný modul efektu..."),
+    ("effect.plugins.install", "Install Effect Plug-in Bundle (Folder)...", "Nainstalovat balíček zásuvných modulů efektů (složka)..."),
+    ("prefs.open", "Plug-in Library...", "Knihovna zásuvných modulů..."),
 ];
 
 /// Georgian (ka): the same (command, English label) keys as `JAPANESE`, one entry per fixed menu row.
