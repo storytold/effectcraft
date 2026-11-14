@@ -54,6 +54,9 @@ pub const BLEND_MODES: [&str; 24] = [
     "Alpha Add",
     "Luminescent Premul",
 ];
+/// Indices of "Clip" and "Allow HDR Results" in [`OVERFLOWS`].
+const OVERFLOW_CLIP: u32 = 0;
+const OVERFLOW_HDR: u32 = 3;
 /// Index of "None" / "Normal" in [`BLEND_MODES`].
 pub const BLEND_NONE: u32 = 0;
 pub const BLEND_NORMAL: u32 = 1;
@@ -238,7 +241,12 @@ impl Fractal {
             noise_type: pr.get("noiseType").map(Value::as_enum).unwrap_or(NOISE_SOFT_LINEAR),
             contrast: pr.f("contrast") as f32 / 100.0,
             brightness: pr.f("brightness") as f32 / 100.0,
-            overflow: pr.e("overflow"),
+            // Allow HDR Results only exists in 32 bpc: After Effects 2026 renders it the same as Clip
+            // at 8 and 16 bpc, where a negative value would otherwise darken an Add over white.
+            overflow: match pr.e("overflow") {
+                OVERFLOW_HDR if !ctx.env.float_depth => OVERFLOW_CLIP,
+                o => o,
+            },
             invert: pr.b("invert"),
             rot: rot.sin_cos(),
             size: [(sw * NOISE_CELL * b.scale).max(1.0) as f32, (sh * NOISE_CELL * b.scale).max(1.0) as f32],
@@ -589,10 +597,27 @@ mod tests {
         assert!(dh < dv * 0.5, "{dh} {dv}");
     }
 
+    /// After Effects 2026 at 8 bpc: high-contrast noise added to white stays white. Unclipped
+    /// negative noise drew dark streaks through the white.
     #[test]
-    fn overflow_hdr_keeps_out_of_range_values() {
-        let hi = run("ec.noise.fractal", &[("contrast", num(400.0)), ("blendingMode", Value::Enum(BLEND_NONE))]);
+    fn hdr_noise_added_to_white_stays_white_below_float() {
+        let vals = [("contrast", num(712.0)), ("brightness", num(26.0)), ("blendingMode", Value::Enum(2))];
+        let img = || Image::filled(400, 200, [1.0, 1.0, 1.0, 1.0]);
+        let low = run_fx("ec.noise.fractal", &vals, img(), 0.0, EffectEnv::default()).img;
+        assert!(low.data.iter().all(|p| p[0] >= 0.999), "8 bpc must stay white");
+        let float = EffectEnv { float_depth: true, ..EffectEnv::default() };
+        let hi = run_fx("ec.noise.fractal", &vals, img(), 0.0, float).img;
+        assert!(hi.data.iter().any(|p| p[0] < 0.9), "32 bpc keeps the negative values");
+    }
+
+    #[test]
+    fn overflow_hdr_keeps_out_of_range_values_only_in_float() {
+        let vals = [("contrast", num(400.0)), ("blendingMode", Value::Enum(BLEND_NONE))];
+        let float = EffectEnv { float_depth: true, ..EffectEnv::default() };
+        let hi = run_fx("ec.noise.fractal", &vals, Image::filled(40, 24, [0.2, 0.4, 0.6, 1.0]), 0.0, float).img;
         assert!(hi.data.iter().any(|p| p[0] > 1.0 || p[0] < 0.0));
+        let low = run("ec.noise.fractal", &vals);
+        assert!(low.data.iter().all(|p| (0.0..=1.0).contains(&p[0])));
         let clip = run("ec.noise.fractal", &[("contrast", num(400.0)), ("overflow", Value::Enum(0)), ("blendingMode", Value::Enum(BLEND_NONE))]);
         assert!(clip.data.iter().all(|p| (0.0..=1.0).contains(&p[0])));
     }
