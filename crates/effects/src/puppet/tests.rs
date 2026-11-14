@@ -1146,9 +1146,38 @@ fn a_cell_shared_by_two_sheets_mixes_both_colours() {
     let out = [[0.0, 0.0], [30.0, 0.0], [0.0, 30.0]];
     let red = RasterTri::new(&out, &out).unwrap();
     let blue = RasterTri::new(&out.map(|p| [p[0] + 40.0, p[1]]), &out).unwrap();
-    let owners: Vec<u32> = (0..16).map(|s| (s % 4 % 2) as u32).collect();
-    let c = resolve(&buf, &[red, blue], &owners, 5.0, 5.0);
-    for (got, want) in c.iter().zip([0.5, 0.0, 0.5, 1.0]) {
-        assert!((got - want).abs() < 1e-4, "{c:?}");
+    let tris = [red, blue];
+    // Alternate columns; then a narrow sheet over column 2 alone, which no corner sample shows.
+    for (column, want) in [(|s: usize| s % 4 % 2 == 1) as fn(usize) -> bool, |s| s % 4 == 2].into_iter().zip([[0.5, 0.0, 0.5, 1.0], [0.75, 0.0, 0.25, 1.0]]) {
+        let owners: Vec<u32> = (0..16).map(|s| u32::from(column(s))).collect();
+        let c = resolve(&buf, &tris, &owners, 5.0, 5.0);
+        for (got, w) in c.iter().zip(want) {
+            assert!((got - w).abs() < 1e-4, "{c:?}, want {want:?}");
+        }
+    }
+}
+
+#[test]
+fn two_points_held_in_one_triangle_both_stay_put() {
+    // Two held points close together in one triangle pull its gradients nearly the same way:
+    // correcting them one at a time for a fixed number of sweeps left the first 5 px off.
+    let verts = vec![[0.0, 0.0], [1000.0, 0.0], [0.0, 1000.0], [1000.0, 1000.0]];
+    let mesh = Mesh { verts, tris: vec![[0, 1, 2], [1, 3, 2]], outline: vec![] };
+    let def = vec![[0.0, 0.0], [1000.0, 0.0], [0.0, 1000.0], [1000.0, 3000.0]];
+    let held = vec![([0, 1, 2], [0.6, 0.25, 0.15]), ([0, 1, 2], [0.6, 0.15, 0.25])];
+    let mut g = vertex_gradients(&mesh, &def);
+    hold_points(&mesh, &mut g, &held);
+    for (t, l) in &held {
+        // The smoothed map at the point (see `smooth_mesh_holding`) against the solve's.
+        let v = &mesh.verts;
+        let q = [0, 1].map(|c| l[0] * v[t[0]][c] + l[1] * v[t[1]][c] + l[2] * v[t[2]][c]);
+        let mut off = [0.0, 0.0];
+        for k in 0..3 {
+            let (i, e) = (t[k], [q[0] - v[t[k]][0], q[1] - v[t[k]][1]]);
+            off[0] += l[k] * (g[i][0] * e[0] + g[i][1] * e[1]);
+            off[1] += l[k] * (g[i][2] * e[0] + g[i][3] * e[1]);
+        }
+        let off = off[0].hypot(off[1]);
+        assert!(off < 1e-6, "point {l:?}: drawn {off} px from where it holds");
     }
 }

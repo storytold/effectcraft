@@ -561,47 +561,97 @@ fn held_points(mesh: &Mesh, pins: &[Pin]) -> Vec<([usize; 3], [f64; 3])> {
     pins.iter().filter(|p| p.kind.moves()).filter_map(|p| held_point(mesh, p.rest)).collect()
 }
 
-/// Sweeps that settle the gradients of pins sharing a vertex.
-const HOLD_SWEEPS: usize = 8;
-
-/// Bend the vertex gradients so the smoothed map takes each held point where the solve did: for
-/// each point, the least change to its triangle's three gradients that cancels the curve's offset
-/// from the linear map there. The map along an edge still depends only on its two vertices, so the
-/// change leaves no cracks.
+/// Bend the vertex gradients so the smoothed map takes each held point where the solve did: the
+/// least change to the gradients that cancels the curve's offset from the linear map at every held
+/// point at once. A point's offset is linear in its triangle's three gradients, so the change is
+/// `Aᵀ y` with `A Aᵀ y` the offsets, one small system over the held points (points that share a
+/// vertex pull on the same gradient, and are solved together rather than one after another). The
+/// map along an edge still depends only on its two vertices, so the change leaves no cracks.
 fn hold_points(mesh: &Mesh, grads: &mut [[f64; 4]], held: &[([usize; 3], [f64; 3])]) {
-    for _ in 0..HOLD_SWEEPS {
-        for (t, l) in held {
-            let (Some(v), Some(g)) = (
-                t.iter().map(|i| mesh.verts.get(*i).copied()).collect::<Option<Vec<_>>>(),
-                t.iter().map(|i| grads.get(*i).copied()).collect::<Option<Vec<_>>>(),
-            ) else {
-                continue;
-            };
+    // Each point's row of `A`: its triangle's vertices with their coefficients `l_k (q − r_k)`,
+    // the same for x and y, and the offset to cancel.
+    let rows: Vec<([usize; 3], [[f64; 2]; 3], [f64; 2])> = held
+        .iter()
+        .filter_map(|(t, l)| {
+            let v = [*mesh.verts.get(t[0])?, *mesh.verts.get(t[1])?, *mesh.verts.get(t[2])?];
+            let g = [*grads.get(t[0])?, *grads.get(t[1])?, *grads.get(t[2])?];
             let q = [0, 1].map(|c| l[0] * v[0][c] + l[1] * v[1][c] + l[2] * v[2][c]);
-            let e: Vec<[f64; 2]> = v.iter().map(|r| [q[0] - r[0], q[1] - r[1]]).collect();
-            // The curve's offset from the chord at the point, cancelled.
-            let mut o = [0.0, 0.0];
-            for k in 0..3 {
-                o[0] -= l[k] * (g[k][0] * e[k][0] + g[k][1] * e[k][1]);
-                o[1] -= l[k] * (g[k][2] * e[k][0] + g[k][3] * e[k][1]);
-            }
-            let den: f64 = (0..3).map(|k| l[k] * l[k] * (e[k][0] * e[k][0] + e[k][1] * e[k][1])).sum();
-            if den < 1e-12 || !o[0].is_finite() || !o[1].is_finite() {
-                continue;
-            }
-            for k in 0..3 {
-                let s = l[k] / den;
-                let step = [o[0] * s * e[k][0], o[0] * s * e[k][1], o[1] * s * e[k][0], o[1] * s * e[k][1]];
-                if let Some(gk) = grads.get_mut(t[k])
-                    && step.iter().all(|x| x.is_finite())
-                {
-                    for (a, b) in gk.iter_mut().zip(step) {
-                        *a += b;
+            let a = [0, 1, 2].map(|k| [l[k] * (q[0] - v[k][0]), l[k] * (q[1] - v[k][1])]);
+            let o = [0, 1].map(|c| -(0..3).map(|k| a[k][0] * g[k][2 * c] + a[k][1] * g[k][2 * c + 1]).sum::<f64>());
+            let norm: f64 = a.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum();
+            (norm >= 1e-12 && o.iter().all(|x| x.is_finite())).then_some((*t, a, o))
+        })
+        .collect();
+    let n = rows.len();
+    // `A Aᵀ` beside the offsets: rows meet only through the vertices they share.
+    let mut m: Vec<Vec<f64>> = rows
+        .iter()
+        .map(|(ti, ai, oi)| {
+            let mut r: Vec<f64> = rows
+                .iter()
+                .map(|(tj, aj, _)| {
+                    let mut d = 0.0;
+                    for (ki, vi) in ti.iter().enumerate() {
+                        for (kj, vj) in tj.iter().enumerate() {
+                            if vi == vj {
+                                d += ai[ki][0] * aj[kj][0] + ai[ki][1] * aj[kj][1];
+                            }
+                        }
                     }
+                    d
+                })
+                .collect();
+            r.extend(oi);
+            r
+        })
+        .collect();
+    let Some(y) = solve_dense(&mut m, n) else { return };
+    for ((t, a, _), y) in rows.iter().zip(y) {
+        for k in 0..3 {
+            let step = [y[0] * a[k][0], y[0] * a[k][1], y[1] * a[k][0], y[1] * a[k][1]];
+            if let Some(gk) = grads.get_mut(t[k])
+                && step.iter().all(|x| x.is_finite())
+            {
+                for (g, d) in gk.iter_mut().zip(step) {
+                    *g += d;
                 }
             }
         }
     }
+}
+
+/// Solve `n` equations, each row of `m` its `n` coefficients and then two right-hand sides, by
+/// elimination with partial pivoting. A variable with no usable pivot (points that hold the same
+/// spot twice, say) stays 0, which the others then cover.
+fn solve_dense(m: &mut [Vec<f64>], n: usize) -> Option<Vec<[f64; 2]>> {
+    let scale = (0..n).map(|i| m.get(i).and_then(|r| r.get(i)).copied().unwrap_or(0.0).abs()).fold(0.0, f64::max);
+    if m.len() != n || m.iter().any(|r| r.len() != n + 2) || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let tiny = scale * 1e-12;
+    let mut pivots = vec![None; n];
+    let mut row = 0;
+    for col in 0..n {
+        let Some(p) = (row..n).max_by(|a, b| m[*a][col].abs().total_cmp(&m[*b][col].abs())) else { break };
+        if m[p][col].abs() <= tiny {
+            continue;
+        }
+        m.swap(row, p);
+        for r in 0..n {
+            if r != row {
+                let f = m[r][col] / m[row][col];
+                if f != 0.0 {
+                    for c in col..n + 2 {
+                        m[r][c] -= f * m[row][c];
+                    }
+                }
+            }
+        }
+        pivots[col] = Some(row);
+        row += 1;
+    }
+    let y: Vec<[f64; 2]> = pivots.iter().enumerate().map(|(col, p)| p.map_or([0.0; 2], |r| [m[r][n] / m[r][col], m[r][n + 1] / m[r][col]])).collect();
+    y.iter().flatten().all(|x| x.is_finite()).then_some(y)
 }
 
 /// Smooth the piecewise-linear solve for drawing: Phong deformation (James, "Phong Deformation: A
@@ -878,11 +928,14 @@ fn resolve(buf: &Buf, tris: &[RasterTri], owners: &[u32], x: f64, y: f64) -> [f3
             // Neighbouring triangles agree on the source along their shared edge: only sheets
             // of the mesh that overlap here disagree by more than a pixel or so.
             let sc = c.source(x + 0.5, y + 0.5);
-            let apart = [0usize, 3, 12, 15].into_iter().any(|s| {
-                tris.get(owners[s] as usize).is_some_and(|t| {
-                    let q = t.source(x + 0.5, y + 0.5);
-                    (q[0] - sc[0]).abs().max((q[1] - sc[1]).abs()) > 2.0
-                })
+            // Every sheet among the samples, not just the corners': a narrow one can own a
+            // column or row that no corner shows.
+            let apart = owners.iter().enumerate().any(|(i, o)| {
+                !owners[..i].contains(o)
+                    && tris.get(*o as usize).is_some_and(|t| {
+                        let q = t.source(x + 0.5, y + 0.5);
+                        (q[0] - sc[0]).abs().max((q[1] - sc[1]).abs()) > 2.0
+                    })
             });
             if apart {
                 grid = 2;
