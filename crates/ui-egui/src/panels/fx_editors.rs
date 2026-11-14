@@ -580,9 +580,8 @@ fn colorama_wheel(
     let sr = Rect::from_min_size(pos2(x0, c.y + size / 2.0 + 8.0), vec2(30.0, 16.0));
     if let Some((ph, col)) = pal.stops.get(sel).copied() {
         let pop = wid.with("color");
-        if widgets::swatch(ui, sr, col, wid.with("swatch"), &t).clicked() {
-            widgets::open_popup(ui, pop);
-        }
+        let sresp = widgets::swatch(ui, sr, col, wid.with("swatch"), &t);
+        widgets::open_on_press(ui, &sresp, pop);
         app.auto.add(&format!("{prefix}.color"), sr, "Stop color");
         p.text(
             pos2(sr.max.x + 8.0, sr.center().y),
@@ -885,12 +884,9 @@ fn extractor_layers(
     let vx = (r.min.x + r.width() * 0.48).max(r.min.x + 161.0);
     let dr = Rect::from_min_size(pos2(vx, r.center().y - 9.0), vec2((r.max.x - vx - 56.0).clamp(80.0, 200.0), 18.0));
     let pop = egui::Id::unique(("extractor-layers", euid));
-    if widgets::dropdown(ui, dr, &label, &t, egui::Id::unique(("extractor-layer", euid)))
-        .on_hover_text(tr("The OpenEXR layer shown in red, green, blue and alpha"))
-        .clicked()
-    {
-        widgets::open_popup(ui, pop);
-    }
+    let lresp = widgets::dropdown(ui, dr, &label, &t, egui::Id::unique(("extractor-layer", euid)))
+        .on_hover_text(tr("The OpenEXR layer shown in red, green, blue and alpha"));
+    widgets::open_on_press(ui, &lresp, pop);
     app.auto.add(&format!("effectControls.effect.{euid}.extractor.layer"), dr, "Layer");
     // The footage's layers, read only while the list is open (each frame of a sequence is a file).
     if !widgets::popup_is_open(ui, pop) {
@@ -927,9 +923,8 @@ pub fn channel_popup(
     let uid = prop.uid;
     let label = if cur.trim().is_empty() { NO_CHANNEL } else { cur };
     let pop = egui::Id::unique(("ec-chpop", uid));
-    if widgets::dropdown(ui, r, label, &t, egui::Id::unique(("ec-ch", uid))).clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    let dresp = widgets::dropdown(ui, r, label, &t, egui::Id::unique(("ec-ch", uid)));
+    widgets::open_on_press(ui, &dresp, pop);
     app.auto.add(&format!("effectControls.prop.{uid}.value"), r, &prop.name);
     if !widgets::popup_is_open(ui, pop) {
         return;
