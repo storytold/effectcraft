@@ -87,16 +87,17 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
                 .lock_focus(true),
         );
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
+        let touched_id = editing_id.with("touched");
+        let touched = r.changed() || ui.data(|d| d.get_temp::<bool>(touched_id)).unwrap_or(false);
         let mut out = None;
         if r.lost_focus() || tab.is_some() {
-            let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape))
-                && let Ok(v) = txt.parse::<f64>()
-                && v.is_finite()
-            {
-                out = Some(v.clamp(range.0, range.1));
+            if touched && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                out = typed_value(&buf, suffix, range);
             }
-            ui.data_mut(|d| d.remove::<String>(editing_id));
+            ui.data_mut(|d| {
+                d.remove::<String>(editing_id);
+                d.remove::<bool>(touched_id);
+            });
             if let Some(back) = tab {
                 r.surrender_focus();
                 let (key, pass) = (tab_order_id(ui), ui.ctx().cumulative_pass_nr());
@@ -104,7 +105,10 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
             }
         } else {
             keep_focus(ui.ctx(), &r, &buf);
-            ui.data_mut(|d| d.insert_temp(editing_id, buf));
+            ui.data_mut(|d| {
+                d.insert_temp(editing_id, buf);
+                d.insert_temp(touched_id, touched);
+            });
         }
         return (er, out, out.is_some());
     }
@@ -141,6 +145,14 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
         ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
     }
     (rect, out, resp.drag_stopped())
+}
+
+/// The value a touched hot-text field commits from its typed `buf`: none when it does not parse,
+/// else the number clamped to `range`. Equal-to-displayed values still commit: with several layers
+/// selected the others may differ from the displayed (first) one. Untouched fields never get here.
+fn typed_value(buf: &str, suffix: &str, range: (f64, f64)) -> Option<f64> {
+    let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
+    txt.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(range.0, range.1))
 }
 
 /// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
@@ -1108,6 +1120,16 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A touched field commits what was typed, clamped, even if equal to the displayed value.
+    #[test]
+    fn typed_hot_text_commits() {
+        let range = (0.0, 1e9);
+        assert_eq!(typed_value("-50.0px", "px", range), Some(0.0));
+        assert_eq!(typed_value("4,5%", "%", range), Some(4.5));
+        assert_eq!(typed_value("40", "", range), Some(40.0));
+        assert_eq!(typed_value("x", "", range), None);
+    }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
     fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {
