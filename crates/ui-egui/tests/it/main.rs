@@ -99,6 +99,7 @@ mod ui_time_zoom_controls;
 mod ui_timeline_audio_levels;
 mod ui_timeline_effect_label;
 mod ui_timeline_group_select;
+mod ui_timeline_interacting;
 mod ui_timeline_marquee;
 mod ui_timeline_pan;
 mod ui_timeline_shapes;
