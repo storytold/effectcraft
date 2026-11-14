@@ -58,7 +58,8 @@ fn substitute(v: &Value, results: &[Value]) -> Result<Value> {
 ///
 /// `engine.batch`, `file.runScript` and `script.run` are refused inside a batch. Successful
 /// steps are folded into one undo step named `label` (default "Batch"). With the default
-/// `atomic: true`, a failing step restores the project, history and editor state, drops the
+/// `atomic: true`, a failing step restores the project, its file and saved state, history and
+/// editor state, drops the
 /// events the batch published, sanitizes the editor against the failing intermediate state (so
 /// no pre-batch IME token is revived) and keeps the higher process IME revision; with
 /// `atomic: false` the steps before the failure stay applied. Either way the error names the
@@ -67,7 +68,10 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let steps = p.get("steps").and_then(Value::as_array).ok_or_else(|| bad("engine.batch", "missing `steps`: [{command, params?}, …]"))?.clone();
     let label = str_p(p, "label").unwrap_or("Batch").to_string();
     let atomic = p.get("atomic").and_then(Value::as_bool).unwrap_or(true);
+    // The document as it is: a step may replace the project (File ▸ Open, New, a template),
+    // so the rollback restores its file and saved state with its content (#1232).
     let (project, history, state) = (s.project.clone(), s.history.clone(), s.state.clone());
+    let (path, saved_project) = (s.path.clone(), s.saved_project.clone());
     // Rolled-back steps may have queued events (an `OpenComp`, a Toast) for the state that is
     // about to be dropped: the UI must not act on them.
     let event_mark = s.events.len();
@@ -102,9 +106,12 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                     s.project = project;
                     s.history = history;
                     s.state = state;
+                    s.path = path;
+                    s.saved_project = saved_project;
                     s.events.truncate(event_mark);
                     s.sanitize_after_replacement(edited.as_ref());
                     s.ime_revision = s.ime_revision.max(interim_revision);
+                    // Saved again exactly when the restored project is the saved one.
                     s.bump();
                     "; the batch was rolled back (nothing changed)".to_string()
                 } else {
@@ -220,5 +227,51 @@ mod tests {
         // Bad references are reported.
         let e = s.execute_checked("engine.batch", json!({"steps": [{"command": "layer.rename", "params": {"layer": "$3.layer", "name": "x"}}]})).unwrap_err();
         assert!(e.to_string().contains("refers to step 3"), "{e}");
+    }
+
+    fn tmp(name: &str) -> String {
+        let d = std::env::temp_dir().join(format!("ec-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join(name).to_string_lossy().into_owned()
+    }
+
+    /// A step that fails: no such layer.
+    fn failing() -> serde_json::Value {
+        json!({"command": "layer.rename", "params": {"layer": 999_999, "name": "x"}})
+    }
+
+    #[test]
+    fn a_rolled_back_batch_that_opened_another_project_restores_the_whole_document() {
+        // Project B on disk.
+        let b_path = tmp("b.ecproj");
+        let mut b = Session::default();
+        b.execute("comp.new", json!({"name": "B comp", "width": 32, "height": 32})).unwrap();
+        b.execute("file.saveAs", json!({"path": b_path})).unwrap();
+        for dirty in [false, true] {
+            // Project A, saved, then (or not) changed.
+            let a_path = tmp(&format!("a-{dirty}.ecproj"));
+            let mut s = Session::default();
+            s.execute("comp.new", json!({"name": "A comp", "width": 32, "height": 32})).unwrap();
+            s.execute("file.saveAs", json!({"path": a_path})).unwrap();
+            if dirty {
+                s.execute("layer.newSolid", json!({"name": "Unsaved"})).unwrap();
+            }
+            let (project, undo) = (s.project.clone(), s.history.undo.len());
+            assert_eq!(s.is_dirty(), dirty);
+            // Open B, then fail (#1232).
+            let e =
+                s.execute_checked("engine.batch", json!({"steps": [{"command": "file.open", "params": {"path": b_path}}, failing()]})).unwrap_err().to_string();
+            assert!(e.contains("rolled back"), "{e}");
+            assert!(std::sync::Arc::ptr_eq(&s.project, &project), "A's content");
+            assert_eq!(s.path.as_deref(), Some(a_path.as_str()), "A's file, not B's");
+            assert_eq!(s.is_dirty(), dirty, "A's saved state");
+            assert_eq!(s.history.undo.len(), undo);
+            // So saving writes A to A's file and leaves B alone.
+            let b_before = std::fs::read(&b_path).unwrap();
+            s.execute("file.save", json!({})).unwrap();
+            assert_eq!(std::fs::read(&b_path).unwrap(), b_before);
+            assert!(std::fs::read_to_string(&a_path).unwrap().contains("A comp"));
+            assert!(!s.is_dirty());
+        }
     }
 }
