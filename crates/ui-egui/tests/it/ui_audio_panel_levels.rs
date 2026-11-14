@@ -333,3 +333,53 @@ fn a_narrow_audio_panel_keeps_the_level_fields_inside_it() {
         }
     }
 }
+
+/// Stands in for `sampleImage()` on footage (this harness has no expression language): both
+/// channels come from the first frame's pixel through the context's footage source, red and green
+/// as minus dB x 100. Fails without the source, as the real one samples transparent.
+struct SampleFootage;
+
+impl effectcraft_engine::render::ExprHost for SampleFootage {
+    fn eval(
+        &self,
+        ctx: &effectcraft_engine::render::EvalCtx,
+        _: &effectcraft_engine::project::Layer,
+        _: &effectcraft_engine::project::Property,
+        _: &effectcraft_engine::keyframe::Value,
+    ) -> Result<effectcraft_engine::keyframe::Value, String> {
+        let src = ctx.footage.ok_or("sampleImage: no footage source")?;
+        let item = effectcraft_engine::project::ItemId(0);
+        let img = src.frame(item, &effectcraft_engine::project::Footage::default(), ctx.time).ok_or("no frame")?;
+        let px = img.get(0, 0);
+        Ok(effectcraft_engine::keyframe::Value::Vec2([-f64::from(px[0]) * 100.0, -f64::from(px[1]) * 100.0]))
+    }
+}
+
+/// One frame of nonzero footage for every request.
+struct Grey;
+
+impl effectcraft_engine::render::FootageSource for Grey {
+    fn frame(
+        &self,
+        _: effectcraft_engine::project::ItemId,
+        _: &effectcraft_engine::project::Footage,
+        _: effectcraft_engine::time::Tick,
+    ) -> Option<std::sync::Arc<effectcraft_engine::raster::Image>> {
+        Some(std::sync::Arc::new(effectcraft_engine::raster::Image::filled(4, 4, [0.25, 0.5, 0.0, 1.0])))
+    }
+}
+
+/// Audio Levels driven by an expression that samples footage pixels (#3234): the panel evaluates
+/// with the session's footage source, as the render does, so it shows the sampled
+/// values (-25 dB, -50 dB) rather than a failed evaluation's keyframed ones.
+#[test]
+fn levels_driven_by_footage_sampling_show_the_sampled_value() {
+    let mut s = Session::default();
+    let l = sound_layer(&mut s, [-6.0, -12.0]);
+    s.expr = Some(std::sync::Arc::new(SampleFootage));
+    s.footage = std::sync::Arc::new(Grey);
+    s.execute("prop.setExpression", json!({"layer": l, "path": "audio/levels", "expression": "sampleImage([0, 0])"})).unwrap();
+    let h = harness(s, l);
+    assert_eq!(label(&h, LEFT), db(-25.0));
+    assert_eq!(label(&h, RIGHT), db(-50.0));
+}

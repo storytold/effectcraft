@@ -382,13 +382,16 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
             let pr = layer.props.sub("audio")?.get("levels")?;
             let project = app.session.project.clone();
             let expr = app.session.expr.clone();
+            // The session's footage source, as the render and `prop.get` use it, so an expression
+            // that samples footage (`sampleImage`) shows what it evaluates to (#3234).
+            let footage = app.session.footage.clone();
             let ectx = effectcraft_engine::render::EvalCtx {
                 project: &project,
                 comp_id: cid,
                 comp,
                 time: app.session.time(),
                 expr: expr.as_deref(),
-                footage: None,
+                footage: Some(footage.as_ref()),
                 property_overrides: &[],
                 media_overrides: &[],
                 reads: None,
