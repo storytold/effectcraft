@@ -116,10 +116,14 @@ project file. It checks every output module and segment before dispatching the i
 item is marked Failed with its reason; other valid queued items can still render. Render logs
 are checked too. No render parameter overrides this protection.
 
-Checks compare normalized paths and native file identities, so an existing symbolic link,
-hard link, junction or Windows short name cannot disguise a source as another output file.
-Source identities are indexed once per check and matching identities are verified. The index
-does not keep file handles open for the lifetime of a long sequence.
+Checks compare paths by name once resolved: made absolute, `.` and `..` resolved, either
+separator, a Windows verbatim prefix (`\\?\`) as the plain path, and without case on Windows and
+macOS. No file is opened, so a check costs the same for a sequence of thousands of frames on a
+network share. On Windows a mapped network drive and its UNC path (`P:\` and `\\server\share\`)
+are one place, and so are a `subst` drive and its folder. A drive letter's root is looked up only
+when the output and the sources are not all on one letter, or not all UNC paths, and what it
+resolves to is kept for a minute. A link or hard link to a source under another name is not
+recognised, nor another Unicode normalization of its name on macOS.
 
 Default output names move aside when they would replace a protected file. This also applies to
 Create Proxy: recreating a proxy chooses a new default name and attaches the new proxy, leaving

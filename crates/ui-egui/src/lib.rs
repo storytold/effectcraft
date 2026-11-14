@@ -309,6 +309,12 @@ pub struct EffectcraftApp {
     last_viewer_scale: Option<f64>,
     pub(crate) control_rx: Option<Receiver<ControlRequest>>,
     pub(crate) deferred: Vec<(ControlRequest, f64)>,
+    /// Requests a tick left to the next one when it ran out of [`EffectcraftApp::control_budget`],
+    /// in the order they came, with their retry deadline once they ran (#3328).
+    pub(crate) control_backlog: Vec<(ControlRequest, Option<f64>)>,
+    /// How long one tick runs control requests before it leaves the rest to the next tick (the
+    /// window paints in between). It always runs one.
+    pub(crate) control_budget: std::time::Duration,
     pub(crate) synthetic: Vec<egui::Event>,
     /// Input from floating panels' own OS windows for the main window's next frame.
     pub(crate) forwarded: ForwardedInput,

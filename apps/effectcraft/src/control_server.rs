@@ -58,9 +58,14 @@ fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
     let Ok(read) = stream.try_clone() else { return };
     serve_lines(read, stream, |method, params| {
         let (req, rrx) = ControlRequest::new(method, params);
+        let abandoned = req.abandoned.clone();
         tx.send(req).ok()?;
         ctx.request_repaint();
-        Some(rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"})))
+        Some(rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| {
+            // Nobody waits for it any more: the UI doesn't run it if it hasn't begun (#3328).
+            abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!({"ok": false, "error": "timeout"})
+        }))
     });
 }
 

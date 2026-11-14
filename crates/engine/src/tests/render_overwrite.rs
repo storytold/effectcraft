@@ -157,35 +157,6 @@ impl Drop for Fixture {
     }
 }
 
-fn link(target: &Path, link: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(target, link);
-    #[cfg(windows)]
-    return std::os::windows::fs::symlink_file(target, link);
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (target, link);
-        Err(std::io::ErrorKind::Unsupported.into())
-    }
-}
-
-/// A folder that leads to `target`: a symbolic link, or on Windows, where that takes a privilege
-/// most accounts lack, a junction.
-fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(target, link);
-    #[cfg(windows)]
-    return std::os::windows::fs::symlink_dir(target, link).or_else(|_| {
-        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output()?;
-        if made.status.success() { Ok(()) } else { Err(std::io::Error::other(String::from_utf8_lossy(&made.stdout).into_owned())) }
-    });
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (target, link);
-        Err(std::io::ErrorKind::Unsupported.into())
-    }
-}
-
 /// The report: save a new project beside `footage.mp4`, import it, make a composition from it
 /// (it is named after the file), add that to the Render Queue and click Render. The composition's
 /// default output is `<project folder>/footage.mp4`, the footage itself.
@@ -482,44 +453,8 @@ fn a_sequence_that_skips_existing_frames_needs_no_flag() {
     assert_eq!(f.read("render_00002.png"), RENDERED);
 }
 
-/// A link is another name for the file it points to.
-#[test]
-fn a_link_to_the_footage_is_the_footage() {
-    let mut f = Fixture::new("link");
-    f.footage("clip.mov");
-    f.comp("Main");
-    let alias = f.path("render.mov");
-    if link(&f.path("clip.mov"), &alias).is_err() {
-        eprintln!("this account cannot make symbolic links: skipped");
-        return;
-    }
-    f.s.execute("renderQueue.add", json!({"format": "prores", "output": f.text("render.mov")})).unwrap();
-    let e = f.render(json!({"overwrite": true})).unwrap_err().to_string();
-    assert!(e.contains("render.mov") && e.contains("footage"), "{e}");
-    assert_eq!(f.read("clip.mov"), SOURCE);
-    assert!(std::fs::symlink_metadata(&alias).unwrap().file_type().is_symlink(), "the link was not replaced either");
-}
-
-/// A hard link to the footage under another name is the same file on disk: replacing it would truncate the footage.
-#[test]
-fn a_hard_link_to_the_footage_is_the_footage() {
-    let mut f = Fixture::new("hardlink");
-    f.footage("clip.mov");
-    f.comp("Main");
-    if std::fs::hard_link(f.path("clip.mov"), f.path("render.mov")).is_err() {
-        eprintln!("this volume cannot make hard links: skipped");
-        return;
-    }
-    f.s.execute("renderQueue.add", json!({"format": "prores", "output": f.text("render.mov")})).unwrap();
-    // not even with overwrite
-    let e = f.render(json!({"overwrite": true})).unwrap_err().to_string();
-    assert!(e.contains("render.mov") && e.contains("footage"), "{e}");
-    assert_eq!(f.read("clip.mov"), SOURCE);
-    assert_eq!(f.read("render.mov"), SOURCE, "the other name still leads to the footage");
-    assert!(f.exported().is_empty(), "nothing was rendered");
-}
-
 /// A copy of the footage has its size and bytes, but it is another file: an earlier render may replace it.
+/// (A link to footage under another name is not recognised: paths are compared, #3328.)
 #[test]
 fn a_copy_of_the_footage_is_not_the_footage() {
     let mut f = Fixture::new("copy");
@@ -530,26 +465,6 @@ fn a_copy_of_the_footage_is_not_the_footage() {
     f.render(json!({})).unwrap();
     assert_eq!(f.read("copy.mov"), RENDERED);
     assert_eq!(f.read("clip.mov"), SOURCE, "the footage is as it was");
-}
-
-/// Footage imported through a linked folder is the same file as the one in the real folder.
-#[test]
-fn footage_reached_through_a_linked_folder_is_still_footage() {
-    let mut f = Fixture::new("linked-folder");
-    std::fs::create_dir_all(f.path("real")).unwrap();
-    std::fs::write(f.path("real").join("clip.mov"), SOURCE).unwrap();
-    if link_dir(&f.path("real"), &f.path("linked")).is_err() {
-        eprintln!("this account cannot link folders: skipped");
-        return;
-    }
-    let via_link =
-        Footage { path: f.path("linked").join("clip.mov").to_string_lossy().into_owned(), kind: FootageKind::Video, has_video: true, ..Default::default() };
-    Arc::make_mut(&mut f.s.project).add_item("clip.mov", Label::None, None, ItemKind::Footage(via_link));
-    f.comp("Main");
-    f.s.execute("renderQueue.add", json!({"format": "prores", "output": f.path("real").join("clip.mov").to_string_lossy()})).unwrap();
-    let e = f.render(json!({"overwrite": true})).unwrap_err().to_string();
-    assert!(e.contains("footage"), "{e}");
-    assert_eq!(std::fs::read(f.path("real").join("clip.mov")).unwrap(), SOURCE);
 }
 
 /// Where the volume ignores case, `CLIP.MOV` is `clip.mov`.
