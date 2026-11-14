@@ -255,6 +255,80 @@ fn release_problem(r: &Release) -> Option<String> {
     None
 }
 
+/// An owner or repository name on GitHub: letters, digits, `.`, `-`, `_`, and not `.` or `..`.
+fn valid_repo_part(p: &str) -> bool {
+    !p.is_empty() && p != "." && p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// The rest of `s` after `prefix`, ignoring ASCII case.
+fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| s.get(prefix.len()..)).flatten()
+}
+
+/// A `.` or `..` path segment, also percent-encoded.
+fn dot_segment(p: &str) -> bool {
+    let p = p.to_ascii_lowercase().replace("%2e", ".");
+    p == "." || p == ".."
+}
+
+/// A character a release or repository URL may not contain: `?`, `#`, `\`, Unicode white space,
+/// or U+FEFF (the catalog schema's `\s` matches it too).
+fn bad_url_char(c: char) -> bool {
+    matches!(c, '?' | '#' | '\\' | '\u{feff}') || c.is_whitespace()
+}
+
+/// `(owner, name)` in lower case of a `https://github.com/<owner>/<name>` repository URL (an
+/// optional trailing `/` or `.git`) or of a folder in one, `https://github.com/<owner>/<name>/tree/<ref>/<path>`;
+/// `None` for anything else.
+fn github_repo(repo: &str) -> Option<(String, String)> {
+    let rest = strip_prefix_ignore_case(repo.trim(), "https://github.com/")?;
+    if rest.contains(bad_url_char) {
+        return None;
+    }
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (owner, name) = match parts.as_slice() {
+        [owner, name] => (*owner, name.strip_suffix(".git").unwrap_or(name)),
+        [owner, name, "tree", folder @ ..] if !folder.is_empty() && folder.iter().all(|p| !p.is_empty() && !dot_segment(p)) => (*owner, *name),
+        _ => return None,
+    };
+    (valid_repo_part(owner) && valid_repo_part(name)).then(|| (owner.to_ascii_lowercase(), name.to_ascii_lowercase()))
+}
+
+/// Why an `https://` release URL can't be used, if it can't: it must be a release asset,
+/// `https://github.com/<owner>/<name>/releases/download/<tag>/<file>`, and when the package
+/// names a `repo`, that must be a GitHub repository URL (see [`github_repo`]) of `<owner>/<name>`.
+fn release_url_problem(repo: &str, url: &str) -> Option<String> {
+    let not_asset = || Some(format!("`{url}` isn't a release asset (https://github.com/<owner>/<repo>/releases/download/<tag>/<file>)"));
+    let Some(rest) = strip_prefix_ignore_case(url, "https://github.com/") else { return not_asset() };
+    if rest.contains(bad_url_char) {
+        return not_asset();
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    // At least six segments, not exactly six: a tag may contain `/` (`release/v1`), and its assets are
+    // then at `releases/download/release/v1/<file>`. `.` and `..` (also percent-encoded) would move
+    // the download to another path.
+    if parts.len() < 6 || parts.iter().any(|p| p.is_empty() || dot_segment(p)) {
+        return not_asset();
+    }
+    let (Some(owner), Some(name), Some(releases), Some(download)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3)) else { return not_asset() };
+    if !valid_repo_part(owner) || !valid_repo_part(name) || *releases != "releases" || *download != "download" {
+        return not_asset();
+    }
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    match github_repo(repo) {
+        Some((o, n)) if o == owner.to_ascii_lowercase() && n == name.to_ascii_lowercase() => None,
+        Some(_) => Some(format!("`{url}` isn't a release asset of the package's repository {repo}")),
+        None => Some(format!(
+            "the package's `repo` {repo} isn't a GitHub repository URL (https://github.com/<owner>/<repo>), so `{url}` can't be checked against it"
+        )),
+    }
+}
+
 /// Read a catalog: packages and releases that are malformed are left out (and reported), so one
 /// bad entry doesn't hide the others.
 pub fn parse_catalog(bytes: &[u8]) -> std::result::Result<(Catalog, Vec<String>), String> {
@@ -801,7 +875,11 @@ fn pick(s: &Session, c: &str, p: &Value) -> Result<(String, Package, Release)> {
             ),
         ));
     }
-    source(&rel.url, Some(&url)).map_err(|e| bad(c, e))?;
+    if let Source::Https(u) = source(&rel.url, Some(&url)).map_err(|e| bad(c, e))?
+        && let Some(why) = release_url_problem(&pkg.repo, &u)
+    {
+        return Err(bad(c, format!("{}: {why}", pkg.name)));
+    }
     Ok((url, pkg, rel))
 }
 
@@ -1051,7 +1129,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Install Plug-in",
             [],
             None,
-            "{id, version?, wait?} — downloads the release, checks its SHA-256 against the catalog, loads it",
+            "{id, version?, wait?} — downloads the release (a GitHub release asset, in the package's repo when it names one), checks its SHA-256 against the catalog, loads it",
             always,
             install
         ),
@@ -1133,6 +1211,99 @@ mod tests {
         let j = package_json(&p, None, &Status::default());
         assert_eq!(j["needsNewerApp"], true);
         assert!(latest_compatible(&Package::default()).is_none());
+    }
+
+    #[test]
+    fn release_urls_are_assets_of_the_declared_repository() {
+        let asset = "https://github.com/Me/Glow/releases/download/v1.0.0/glow.wasm";
+        for repo in ["https://github.com/me/glow", "https://github.com/Me/Glow/", "https://GitHub.com/me/glow.git", ""] {
+            assert_eq!(release_url_problem(repo, asset), None, "{repo}");
+        }
+        assert_eq!(release_url_problem("", "https://github.com/a/b/releases/download/tags/v1/x.wasm"), None, "a tag with a slash");
+        assert!(
+            release_url_problem("https://github.com/me/glow", "https://github.com/me/other/releases/download/v1/x.wasm")
+                .unwrap()
+                .contains("package's repository")
+        );
+        assert!(release_url_problem("https://github.com/me/glow", "https://github.com/you/glow/releases/download/v1/x.wasm").is_some());
+        for no in [
+            "https://raw.githubusercontent.com/me/glow/main/x.wasm",
+            "https://objects.githubusercontent.com/x.wasm",
+            "https://github.com/me/glow/blob/main/x.wasm",
+            "https://github.com/me/glow/releases/download/v1",
+            "https://github.com/me/glow/releases/download//x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x.wasm?x=1",
+            "https://github.com/me/glow/releases/download/v1/x.wasm#x",
+            "https://github.com/me/glow/releases/download/../../../you/evil/releases/download/v1/x.wasm",
+            "https://github.com/me/glow/releases/download/%2e%2e/%2E./x/y/x.wasm",
+            "https://github.com/me/glow/releases/download/./v1/x.wasm",
+            "https://github.com/me/glow/releases/download/v1\\x.wasm",
+            "https://github.com/m e/glow/releases/download/v1/x.wasm",
+            "https://github.com/me/glow/releases/download/v 1/x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x\t.wasm",
+            "https://github.com/me/glow/releases/download/v1/x.wasm\n",
+            "https://github.com/me/glow/releases/download/v1\u{a0}/x.wasm",
+            "https://github.com/me/glow/releases/download/v1/\u{85}x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x\u{feff}.wasm",
+            "https://github.com/../glow/releases/download/v1/x.wasm",
+            "https://github.com.evil.com/me/glow/releases/download/v1/x.wasm",
+        ] {
+            assert!(release_url_problem("https://github.com/me/glow", no).is_some(), "{no}");
+            assert!(release_url_problem("", no).is_some(), "{no}");
+        }
+        assert_eq!(github_repo("https://github.com/Me/Glow.git"), Some(("me".into(), "glow".into())));
+        assert_eq!(github_repo("https://github.com/Me/Glow/tree/main/plugins/glow"), Some(("me".into(), "glow".into())));
+        for no in ["https://github.com/me", "https://github.com/me/glow/tree", "http://github.com/me/glow", "me/glow"] {
+            assert_eq!(github_repo(no), None, "{no}");
+        }
+    }
+
+    #[test]
+    fn a_repo_that_isnt_a_github_repository_url_refuses_every_release() {
+        let asset = "https://github.com/me/glow/releases/download/v1/glow.wasm";
+        for repo in [
+            "https://github.com/me/glow",
+            "https://github.com/me/glow/",
+            "https://github.com/me/glow.git",
+            "https://github.com/me/glow.git/",
+            " https://github.com/ME/glow ",
+            "https://github.com/me/glow/tree/main",
+            "https://github.com/me/glow/tree/main/plugins/glow/",
+            "",
+            "   ",
+        ] {
+            assert_eq!(release_url_problem(repo, asset), None, "{repo:?}");
+        }
+        let elsewhere = release_url_problem("https://github.com/me/glow/tree/main", "https://github.com/you/evil/releases/download/v1/glow.wasm");
+        assert!(elsewhere.as_deref().is_some_and(|w| w.contains("package's repository")), "{elsewhere:?}");
+        for repo in [
+            "https://github.com/me/glow/tree",
+            "https://github.com/me/glow/tree/",
+            "https://github.com/me/glow/tree//x",
+            "https://github.com/me/glow/tree/main/../../you/evil",
+            "https://github.com/me/glow/tree/main/%2e%2e",
+            "https://github.com/me/glow/blob/main/README.md",
+            "https://github.com/me/glow.git/x",
+            "https://github.com/me/glow/releases",
+            "https://github.com/me/glow//",
+            "https://github.com/me",
+            "https://github.com/me/",
+            "http://github.com/me/glow",
+            "github.com/me/glow",
+            "me/glow",
+            "https://www.github.com/me/glow",
+            "https://gitlab.com/me/glow",
+            "https://github.com/me/glow?tab=readme",
+            "https://github.com/me/glow#readme",
+            "https://github.com/me/gl ow",
+            "https://github.com/me/glow/tree/main/my plug-in",
+            "https://github.com/me/glow/tree/ma\tin",
+            "https://github.com/me/glow/tree/main/x\u{feff}",
+            "https://github.com/me/..",
+        ] {
+            let why = release_url_problem(repo, asset);
+            assert!(why.as_deref().is_some_and(|w| w.contains("isn't a GitHub repository URL")), "{repo:?}: {why:?}");
+        }
     }
 
     #[test]
