@@ -196,7 +196,7 @@ fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
 fn main() -> eframe::Result {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if crash_report::maybe_run(&args, |description| {
-        rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title("EffectCraft diagnostic report").set_description(description).show();
+        file_dialogs::message("EffectCraft diagnostic report", description);
     }) {
         return Ok(());
     }
