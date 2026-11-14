@@ -1913,6 +1913,52 @@ fn layer_control_property_stands_for_its_layer() {
 }
 
 #[test]
+fn an_empty_layer_control_stands_for_its_own_layer() {
+    // In After Effects a Layer Control set to None gives the layer the effect is on: truthy, named
+    // and callable as that layer. Rigs test it with `L ? … : …` and then read `L.sourceRectAtTime`.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut map = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Map", [20.0, 20.0]));
+    map.prop_mut("layer").unwrap().value = Value::Layer(None);
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(map.into());
+    assert_close!(f.num("effect('Map')(1) ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).name == thisLayer.name ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).index", 0.0), 1.0);
+    assert_close!(f.num("var L = effect('Map')(1); L ? L.transform.position[0] : -1", 0.0), 50.0);
+    assert_close!(f.num("effect('Map')(1).sourceRectAtTime(time).width == thisLayer.sourceRectAtTime(time).width ? 1 : 0", 0.0), 1.0);
+}
+
+#[test]
+fn a_layer_parameters_own_expression_reads_its_layer() {
+    // An expression on the layer parameter itself: `thisProperty.value` and
+    // `thisProperty.valueAtTime(time)` give the layer, as reads from other properties do.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut empty = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Empty", [20.0, 20.0]));
+    empty.prop_mut("layer").unwrap().value = Value::Layer(None);
+    let mut set = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Set", [20.0, 20.0]));
+    set.prop_mut("layer").unwrap().value = Value::Layer(Some(f.b.0));
+    let fx_group = f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap();
+    fx_group.children.push(empty.into());
+    fx_group.children.push(set.into());
+    let n = f.p.comp(f.cid).unwrap().layers[0].props.sub("effects").unwrap().children.len();
+    let (empty_path, set_path) = (format!("effects/#{}/layer", n - 1), format!("effects/#{n}/layer"));
+    // Each expression throws unless it reads the right layer's name.
+    for (path, read, want) in [
+        (&empty_path, "thisProperty.value", "A"),
+        (&empty_path, "thisProperty.valueAtTime(time)", "A"),
+        (&set_path, "thisProperty.value", "B"),
+        (&set_path, "thisProperty.valueAtTime(time)", "B"),
+    ] {
+        let e = format!("if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.0).unwrap_or_else(|err| panic!("{path} {read}: {err}"));
+        // After posterizeTime moves the sample time, `value` already holds the layer.
+        let e = format!("posterizeTime(1); if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.5).unwrap_or_else(|err| panic!("posterized {path} {read}: {err}"));
+    }
+}
+
+#[test]
 fn time_to_frames_rounds_durations_away_from_zero() {
     let f = fx();
     // Adobe's public expression reference distinguishes durations from absolute times.
