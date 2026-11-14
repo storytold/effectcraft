@@ -358,9 +358,10 @@ impl AudioPlayback {
     pub fn stop(&mut self) {
         self.device.stop();
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        // Not joined: the feeder sees `stop` after its current block, which may be decoding a
+        // whole FLAC/MP3; joining here froze the window on every Stop / restart. Dropping the
+        // handle detaches it and it exits on its own.
+        drop(self.thread.take());
     }
 }
 

@@ -92,20 +92,36 @@ impl Image {
     pub fn idx(&self, x: u32, y: u32) -> usize {
         y as usize * self.width as usize + x as usize
     }
+    /// The pixel at (`x`, `y`); transparent outside the image (and where `data` is shorter
+    /// than `width × height`: the fields are public, so a hand-built image may be).
     #[inline]
     pub fn get(&self, x: i64, y: i64) -> Px {
-        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 { [0.0; 4] } else { self.data[y as usize * self.width as usize + x as usize] }
+        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+            return [0.0; 4];
+        }
+        self.data.get(y as usize * self.width as usize + x as usize).copied().unwrap_or([0.0; 4])
     }
+    /// The pixel at (`x`, `y`) with the edge pixels repeated outside; transparent for an empty
+    /// image (`clamp` to `0..=-1` would panic).
     #[inline]
     pub fn get_clamped(&self, x: i64, y: i64) -> Px {
+        if self.width == 0 || self.height == 0 {
+            return [0.0; 4];
+        }
         let x = x.clamp(0, self.width as i64 - 1);
         let y = y.clamp(0, self.height as i64 - 1);
-        self.data[y as usize * self.width as usize + x as usize]
+        self.data.get(y as usize * self.width as usize + x as usize).copied().unwrap_or([0.0; 4])
     }
+    /// Set the pixel at (`x`, `y`); outside the image it does nothing.
     #[inline]
     pub fn set(&mut self, x: u32, y: u32, px: Px) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
         let i = self.idx(x, y);
-        self.data[i] = px;
+        if let Some(p) = self.data.get_mut(i) {
+            *p = px;
+        }
     }
     pub fn rows_mut(&mut self) -> impl IndexedParallelIterator<Item = (usize, &mut [Px])> {
         let w = self.width.max(1) as usize;
@@ -206,10 +222,14 @@ impl Image {
         let eff = self.effective_pad(pad);
         let mut out = Image::new(self.width + 2 * eff, self.height + 2 * eff);
         let ow = out.width as usize;
-        for y in 0..self.height as usize {
-            let src = &self.data[y * self.width as usize..(y + 1) * self.width as usize];
+        let w = self.width as usize;
+        // `chunks`, not `chunks_exact`: a short image's last, partial row keeps the pixels it
+        // has (the ones `get` reads).
+        for (y, src) in self.data.chunks(w.max(1)).take(self.height as usize).enumerate() {
             let o = (y + eff as usize) * ow + eff as usize;
-            out.data[o..o + self.width as usize].copy_from_slice(src);
+            if let Some(dst) = out.data.get_mut(o..o + src.len()) {
+                dst.copy_from_slice(src);
+            }
         }
         out
     }
@@ -507,6 +527,34 @@ mod tests {
             let n = hash_noise(i, i * 7, 3);
             assert!((0.0..1.0).contains(&n));
         }
+    }
+
+    /// Fail-before: `get_clamped` (and the clamped bilinear sample) of an empty image panicked
+    /// in `i64::clamp(0, -1)`; `set` outside the image panicked on the index; a hand-built image
+    /// with short `data` panicked in `get` and `padded`.
+    #[test]
+    fn empty_and_short_images_never_panic() {
+        for img in [Image::new(0, 0), Image::new(0, 5), Image::new(5, 0)] {
+            assert_eq!(img.get_clamped(0, 0), [0.0; 4]);
+            assert_eq!(img.get_clamped(-3, 7), [0.0; 4]);
+            assert_eq!(img.sample_bilinear_clamped(1.5, 2.5), [0.0; 4]);
+            assert_eq!(img.get(0, 0), [0.0; 4]);
+            let _ = img.padded(3);
+        }
+        let mut img = Image::new(2, 2);
+        img.set(2, 0, [1.0; 4]);
+        img.set(0, 9, [1.0; 4]);
+        assert!(img.data.iter().all(|p| *p == [0.0; 4]), "an out-of-bounds set wrote a pixel");
+        let short = Image { width: 4, height: 4, data: vec![[1.0; 4]; 5] };
+        assert_eq!(short.get(3, 3), [0.0; 4]);
+        assert_eq!(short.get_clamped(9, 9), [0.0; 4]);
+        assert_eq!(short.get(0, 0), [1.0; 4]);
+        let p = short.padded(1);
+        assert_eq!((p.width, p.height), (6, 6));
+        // The partial last row keeps its pixel, as `get` reads it.
+        assert_eq!(short.get(0, 1), [1.0; 4]);
+        assert_eq!(p.get(1, 2), [1.0; 4]);
+        assert_eq!(p.get(2, 2), [0.0; 4]);
     }
 
     #[test]
