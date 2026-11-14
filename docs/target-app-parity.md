@@ -760,6 +760,15 @@ layers); the Graph Editor has Auto-Select Graph Type (the default: the speed gra
 spatial properties are shown, else the value graph; choosing Value or Speed turns it off). Graph
 Editor keys are small squares whatever their interpolation, as in After Effects.
 
+Since: Graph Editor ▸ Allow Keyframes Between Frames (the bar's Between Frames button, off by
+default). With it on, keys dragged in the Graph Editor, keys moved or scaled with its transform
+box, and the keys inside a group scaled by an Alt-drag in the Timeline keep the exact time the
+gesture gives them, to the tick (`keys.transform {betweenFrames: true}`). With it off, a move goes
+by whole frames of the comp's rate (29.97 included), so keys on frames stay on frames and keys a
+Quick Offset put between frames keep their stagger, and a scale puts each key on the nearest
+frame. Changing only values never moves a key in time. The Alt-dragged key itself and plain
+Timeline key drags still move by whole frames.
+
 Since (M13.34): audio scrubbing. Ctrl-dragging the current-time indicator (Cmd on macOS) plays
 one frame (30–100 ms) of the comp's mix at each new frame, as in After Effects. Snippets fade in
 and out and replace what is still queued, so the sound follows the pointer without lagging.

@@ -32,6 +32,10 @@ struct BoxDrag {
     /// Where the drag started (comp s, value): the pointer for a move, the handle for a scale.
     /// Every step sends the whole transform since then (`keys.transform {fromStart}`).
     last: [f64; 2],
+    /// Where the pointer went down (comp s, value). A handle sits a few points outside the keys,
+    /// so it follows the pointer's travel from here, not the pointer itself: the keys don't jump
+    /// when the drag starts.
+    press: [f64; 2],
 }
 
 /// The `egui::Id` of the transform-box drag in progress ([`BoxDrag`]).
@@ -59,7 +63,8 @@ fn handle_points(r: Rect) -> [Pos2; 8] {
 /// The transform box for two or more selected keys. Call before the keys are drawn (its inside
 /// sits below them) with `handles = false`, and after them with `handles = true` (the handles sit
 /// on top). Dragging a corner scales time and value about the opposite corner, an edge one axis,
-/// the inside moves the keys; times land on frames.
+/// the inside moves the keys. Moves go by whole frames and scales put keys on frames, unless
+/// Allow Keyframes Between Frames is on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transform_box(
     app: &mut EffectcraftApp,
@@ -106,7 +111,7 @@ pub(crate) fn transform_box(
         if resp.drag_started()
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
-            start = Some(BoxDrag { handle: 8, anchor: [0.0; 2], last: data(o) });
+            start = Some(BoxDrag { handle: 8, anchor: [0.0; 2], last: data(o), press: data(o) });
         }
         resp_any = Some(resp);
     } else {
@@ -122,7 +127,8 @@ pub(crate) fn transform_box(
             app.auto.add(&format!("timeline.graph.transformBox.{i}"), hr, "Transform box handle");
             if resp.drag_started() {
                 let opp = [2, 3, 0, 1, 6, 7, 4, 5][i];
-                start = Some(BoxDrag { handle: i, anchor: corner(opp), last: corner(i) });
+                let press = data(ui.input(|i| i.pointer.press_origin()).unwrap_or(*h));
+                start = Some(BoxDrag { handle: i, anchor: corner(opp), last: corner(i), press });
             }
             if resp.dragged() || resp.drag_stopped() {
                 resp_any = Some(resp);
@@ -143,7 +149,8 @@ pub(crate) fn transform_box(
     if resp.dragged()
         && let Some(pt) = resp.interact_pointer_pos()
     {
-        let cur = data(pt);
+        let at = data(pt);
+        let cur = [st.last[0] + at[0] - st.press[0], st.last[1] + at[1] - st.press[1]];
         let mut params = json!({"merge": "graph-box", "fromStart": true});
         if st.handle == 8 {
             params["timeOffset"] = json!(cur[0] - st.last[0]);
@@ -175,6 +182,7 @@ pub(crate) fn transform_box(
         dims.dedup();
         params["dims"] = json!(dims);
         if params.as_object().is_some_and(|m| m.len() > 2) {
+            params["betweenFrames"] = json!(app.ui.timeline.graph_between_frames);
             actions.push(("keys.transform".into(), params));
         }
         ctx.data_mut(|d| d.insert_temp(box_id(), st));
@@ -306,7 +314,18 @@ pub(crate) fn alt_scale_update(app: &EffectcraftApp, ctx: &egui::Context, comp: 
     if span.abs() < 1e-9 || want.abs() < 1e-9 || want.signum() != span.signum() {
         return;
     }
-    actions.push(("keys.transform".into(), json!({"timeScale": want / span, "timeAnchor": st.anchor, "merge": "key-alt-scale", "fromStart": true})));
+    // The dragged key lands on a frame (Timeline drags move by frames); the keys between follow
+    // the scale onto subframes when Allow Keyframes Between Frames is on.
+    actions.push((
+        "keys.transform".into(),
+        json!({
+            "timeScale": want / span,
+            "timeAnchor": st.anchor,
+            "merge": "key-alt-scale",
+            "fromStart": true,
+            "betweenFrames": app.ui.timeline.graph_between_frames,
+        }),
+    ));
 }
 
 /// An Alt-drag group scale is in progress (the plain key move stands aside).

@@ -428,6 +428,11 @@ pub struct TimelineState {
     /// Graph Editor ▸ Show Transform Box When Multiple Keys Are Selected.
     #[serde(default = "yes")]
     pub graph_transform_box: bool,
+    /// Graph Editor ▸ Allow Keyframes Between Frames: Graph Editor key drags, its transform box
+    /// and the Timeline's Alt-drag scaling keep keys at the exact time they are moved or scaled
+    /// to. Off (the default), moves go by whole frames and scales put keys on frames.
+    #[serde(default)]
+    pub graph_between_frames: bool,
     /// Properties whose inline expression editor is collapsed.
     #[serde(default)]
     pub expr_closed: BTreeSet<u64>,
@@ -495,6 +500,7 @@ impl Default for TimelineState {
             graph_snap: true,
             graph_reference: false,
             graph_transform_box: true,
+            graph_between_frames: false,
             expr_closed: BTreeSet::new(),
             expr_lines: BTreeMap::new(),
             unlinked: BTreeSet::new(),
