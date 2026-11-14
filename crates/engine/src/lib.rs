@@ -61,6 +61,7 @@ pub use effectcraft_track as track;
 pub use footage::doc_path;
 pub use footage::footage_check;
 pub use footage::footage_reload;
+pub use footage::lut_reload;
 pub use footage::media_browser;
 pub use footage::media_cache;
 pub use footage::sequence;

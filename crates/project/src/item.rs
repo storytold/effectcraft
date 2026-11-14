@@ -8,12 +8,18 @@ use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Ti
 /// another layer of the same name. A number set off by a space is a counter and is replaced
 /// (`Red Solid 1` → `Red Solid 2`, `shot 2` → `shot 3`); digits that end a word belong to the
 /// name and stay (`v-b1.mp4` → `v-b1.mp4 2`, `clip2.mov` → `clip2.mov 2`).
-pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+/// `base` without a trailing ` N`: digits are dropped only when a space separates them from a
+/// nonempty stem, so `v-b1.mp4` and `Layer1` keep theirs.
+pub(crate) fn name_stem(base: &str) -> &str {
     let head = base.trim_end_matches(|c: char| c.is_ascii_digit());
-    let stem = match head.strip_suffix(' ') {
+    match head.strip_suffix(' ') {
         Some(stem) if head.len() < base.len() && !stem.trim_end().is_empty() => stem.trim_end(),
         _ => base.trim_end(),
-    };
+    }
+}
+
+pub(crate) fn numbered_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let stem = name_stem(base);
     (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
 }
 

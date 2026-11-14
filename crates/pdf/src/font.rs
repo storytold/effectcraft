@@ -211,6 +211,12 @@ fn utf16(b: &[u8]) -> String {
     String::from_utf16_lossy(&u)
 }
 
+/// The most code → text mappings a CMap keeps (more than Unicode has code points), and the
+/// longest destination string a `bfrange` is expanded with: a range of 65,536 codes would
+/// otherwise multiply a long destination into gigabytes of text.
+const MAX_UNICODE_MAPPINGS: usize = 1 << 20;
+const MAX_RANGE_DST: usize = 256;
+
 fn parse_cmap(data: &[u8]) -> CMap {
     let mut m = CMap::default();
     let mut lx = Lexer::new(data, 0);
@@ -239,6 +245,9 @@ fn parse_cmap(data: &[u8]) -> CMap {
                     }
                     "bfchar" => {
                         for p in a.as_chunks::<2>().0 {
+                            if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                break;
+                            }
                             if let (Obj::Str(src), Obj::Str(dst)) = (&p[0], &p[1]) {
                                 m.unicode.insert(be(src), utf16(dst));
                             }
@@ -252,9 +261,12 @@ fn parse_cmap(data: &[u8]) -> CMap {
                                 continue;
                             }
                             match &p[2] {
-                                Obj::Str(dst) => {
+                                Obj::Str(dst) if dst.len() <= MAX_RANGE_DST => {
                                     let mut d = dst.clone();
                                     for c in lo..=hi {
+                                        if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                            break;
+                                        }
                                         m.unicode.insert(c, utf16(&d));
                                         if let Some(last) = d.last_mut() {
                                             *last = last.wrapping_add(1);
@@ -263,6 +275,9 @@ fn parse_cmap(data: &[u8]) -> CMap {
                                 }
                                 Obj::Array(list) => {
                                     for (k, s) in list.iter().enumerate() {
+                                        if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                            break;
+                                        }
                                         if let (Obj::Str(s), Some(c)) = (s, lo.checked_add(k as u32)) {
                                             m.unicode.insert(c, utf16(s));
                                         }

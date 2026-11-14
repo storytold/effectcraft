@@ -55,35 +55,83 @@ pub fn trace(field: &[f32], w: usize, h: usize, o: &TraceOpts) -> Vec<Traced> {
         return vec![];
     }
     let loops = contours(field, w, h, o.threshold);
-    let mut polys: Vec<(Vec<[f64; 2]>, Vec<[f64; 2]>, f64)> = loops
+    // (raw loop, kept raw indices, simplified loop, area)
+    let mut polys: Vec<(Vec<[f64; 2]>, Vec<usize>, Vec<[f64; 2]>, f64)> = loops
         .into_iter()
         .filter_map(|raw| {
             let a = signed_area(&raw);
             if a.abs() < o.min_area.max(0.0) || raw.len() < 3 {
                 return None;
             }
-            let simp = simplify_closed(&raw, o.tolerance.max(0.01));
-            if simp.len() < 3 {
+            let idx = simplify_idx(&raw, o.tolerance.max(0.01));
+            if idx.len() < 3 {
                 return None;
             }
-            Some((raw, simp, a))
+            let simp = idx.iter().map(|&i| raw[i]).collect();
+            Some((raw, idx, simp, a))
         })
         .collect();
-    // Depth: how many other loops contain a point of this loop.
-    let depths: Vec<usize> = (0..polys.len())
-        .map(|i| {
-            let p = polys[i].1[0];
-            (0..polys.len()).filter(|&j| j != i && polys[j].2.abs() > polys[i].2.abs() && point_in_poly(p, &polys[j].1)).count()
-        })
-        .collect();
+    let depths = nesting_depths(&polys.iter().map(|p| (p.2.as_slice(), p.3.abs())).collect::<Vec<_>>(), w, h);
     let mut out: Vec<Traced> = polys
         .drain(..)
         .zip(depths)
-        .map(|((raw, simp, a), depth)| Traced { path: fit_loop(&raw, &simp, o.corner_roundness.clamp(0.0, 1.0)), depth, area: a })
+        .map(|((raw, idx, simp, a), depth)| Traced { path: fit_loop(&raw, &idx, &simp, o.corner_roundness.clamp(0.0, 1.0)), depth, area: a })
         .collect();
     // Outer outlines first, then holes, islands…; larger first within a depth.
     out.sort_by(|a, b| a.depth.cmp(&b.depth).then(b.area.abs().total_cmp(&a.area.abs())));
     out
+}
+
+/// Grid cell (pixels) of the index [`nesting_depths`] finds candidate containers with.
+const DEPTH_CELL: f64 = 32.0;
+
+/// Most grid cells one loop's box is entered into; a box covering more is kept in a short list
+/// every point is tested against, so nested full-image contours can't fill the grid.
+const MAX_BOX_CELLS: usize = 64;
+
+/// Per loop (simplified points, |area|): how many other, larger loops contain its first point.
+/// Only loops whose bounding box holds that point can contain it, so each loop's box is entered
+/// into a coarse grid over the `w × h` field and a point is tested against the loops of its
+/// cell alone: many separate regions no longer test every pair.
+fn nesting_depths(polys: &[(&[[f64; 2]], f64)], w: usize, h: usize) -> Vec<usize> {
+    // Loops lie within the field padded by half a pixel each side.
+    let (gw, gh) = (((w as f64 + 1.0) / DEPTH_CELL).ceil() as usize + 1, ((h as f64 + 1.0) / DEPTH_CELL).ceil() as usize + 1);
+    let cell = |v: f64, n: usize| (((v + 0.5) / DEPTH_CELL).floor().max(0.0) as usize).min(n - 1);
+    let boxes: Vec<[f64; 4]> = polys
+        .iter()
+        .map(|(p, _)| {
+            p.iter().fold([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY], |b, q| {
+                [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])]
+            })
+        })
+        .collect();
+    let mut grid: Vec<Vec<usize>> = vec![Vec::new(); gw * gh];
+    let mut wide: Vec<usize> = Vec::new();
+    for (j, b) in boxes.iter().enumerate() {
+        let (x0, x1, y0, y1) = (cell(b[0], gw), cell(b[2], gw), cell(b[1], gh), cell(b[3], gh));
+        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > MAX_BOX_CELLS {
+            wide.push(j);
+            continue;
+        }
+        for cy in y0..=y1 {
+            for cx in x0..=x1 {
+                grid[cy * gw + cx].push(j);
+            }
+        }
+    }
+    (0..polys.len())
+        .map(|i| {
+            let p = polys[i].0[0];
+            grid[cell(p[1], gh) * gw + cell(p[0], gw)]
+                .iter()
+                .chain(&wide)
+                .filter(|&&j| {
+                    let b = boxes[j];
+                    j != i && polys[j].1 > polys[i].1 && p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3] && point_in_poly(p, polys[j].0)
+                })
+                .count()
+        })
+        .collect()
 }
 
 /// Marching squares: closed polylines (pixel coordinates).
@@ -233,23 +281,37 @@ fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     ((p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dy).powi(2)).sqrt()
 }
 
-/// Douglas–Peucker on an open polyline: kept indices.
-fn dp(p: &[[f64; 2]], lo: usize, hi: usize, tol: f64, keep: &mut Vec<usize>) {
-    if hi <= lo + 1 {
-        return;
-    }
-    let (mut best, mut bi) = (0.0, lo);
-    for (k, q) in p.iter().enumerate().take(hi).skip(lo + 1) {
-        let d = seg_dist(*q, p[lo], p[hi]);
-        if d > best {
-            best = d;
-            bi = k;
+/// Distance evaluations Douglas–Peucker may spend per point of a loop. Balanced splits need
+/// about log2(n); splits that keep landing next to an end would need up to n.
+const DP_WORK_PER_POINT: usize = 64;
+
+/// Douglas–Peucker on an open polyline: kept indices (unordered). Spans wait on an explicit
+/// stack (no recursion depth to overflow), and once `budget` distance evaluations are spent the
+/// spans still waiting keep all their points: the outline stays exact, just less simplified.
+fn dp(p: &[[f64; 2]], lo: usize, hi: usize, tol: f64, budget: &mut usize, keep: &mut Vec<usize>) {
+    let mut spans = vec![(lo, hi)];
+    while let Some((lo, hi)) = spans.pop() {
+        if hi <= lo + 1 {
+            continue;
         }
-    }
-    if best > tol {
-        dp(p, lo, bi, tol, keep);
-        keep.push(bi);
-        dp(p, bi, hi, tol, keep);
+        if *budget < hi - lo - 1 {
+            keep.extend(lo + 1..hi);
+            continue;
+        }
+        *budget -= hi - lo - 1;
+        let (mut best, mut bi) = (0.0, lo);
+        for (k, q) in p.iter().enumerate().take(hi).skip(lo + 1) {
+            let d = seg_dist(*q, p[lo], p[hi]);
+            if d > best {
+                best = d;
+                bi = k;
+            }
+        }
+        if best > tol {
+            keep.push(bi);
+            spans.push((lo, bi));
+            spans.push((bi, hi));
+        }
     }
 }
 
@@ -265,27 +327,23 @@ fn simplify_idx(p: &[[f64; 2]], tol: f64) -> Vec<usize> {
     let mut ext: Vec<[f64; 2]> = p.to_vec();
     ext.push(p[0]);
     let mut keep = vec![0];
-    dp(&ext, 0, far, tol, &mut keep);
+    let mut budget = n.saturating_mul(DP_WORK_PER_POINT);
+    dp(&ext, 0, far, tol, &mut budget, &mut keep);
     keep.push(far);
-    dp(&ext, far, n, tol, &mut keep);
+    dp(&ext, far, n, tol, &mut budget, &mut keep);
     keep.sort_unstable();
     keep.dedup();
     keep.retain(|&i| i < n);
     keep
 }
 
-fn simplify_closed(p: &[[f64; 2]], tol: f64) -> Vec<[f64; 2]> {
-    simplify_idx(p, tol).into_iter().map(|i| p[i]).collect()
-}
-
-/// Fit cubics through the simplified vertices of a loop (`raw` holds the full contour).
-fn fit_loop(raw: &[[f64; 2]], simp: &[[f64; 2]], round: f64) -> ShapePath {
+/// Fit cubics through the simplified vertices of a loop (`raw` holds the full contour, `idx`
+/// the raw index of each simplified vertex, as [`simplify_idx`] kept them).
+fn fit_loop(raw: &[[f64; 2]], idx: &[usize], simp: &[[f64; 2]], round: f64) -> ShapePath {
     let n = simp.len();
     if round <= 1e-6 {
         return ShapePath::polygon(simp, true);
     }
-    // Raw index of each simplified vertex (they are raw points).
-    let idx: Vec<usize> = simp.iter().map(|s| raw.iter().position(|r| r == s).unwrap_or(0)).collect();
     let pt = |a: [f64; 2]| Point::new(a[0], a[1]);
     let v = |a: [f64; 2], b: [f64; 2]| Vec2::new(b[0] - a[0], b[1] - a[1]);
     // Per vertex: (direction leaving, direction arriving), blended between chord and smooth.
@@ -347,6 +405,86 @@ mod tests {
     fn raster(t: &[Traced], w: usize, h: usize) -> Vec<f32> {
         let paths: Vec<_> = t.iter().map(|t| to_kurbo(&t.path)).collect();
         fill_coverage(&paths, &Mat3::IDENTITY, w as u32, h as u32, FillRule::EvenOdd).data
+    }
+
+    #[test]
+    fn nesting_depths_match_every_pair() {
+        // Rings within rings beside many separate dots: the grid lookup gives the same depths
+        // as testing every pair.
+        let (w, h) = (200, 120);
+        let mut field = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f64 + 0.5 - 60.0, y as f64 + 0.5 - 60.0);
+                let r = (fx * fx + fy * fy).sqrt();
+                let ring = r < 56.0 && ((r / 8.0) as usize).is_multiple_of(2);
+                let dot = x >= 130 && x % 6 < 3 && y % 6 < 3;
+                field[y * w + x] = if ring || dot { 1.0 } else { 0.0 };
+            }
+        }
+        let opts = TraceOpts { min_area: 1.0, ..Default::default() };
+        let t = trace(&field, w, h, &opts);
+        assert!(t.len() > 200, "{}", t.len());
+        let polys: Vec<(Vec<[f64; 2]>, f64)> = t.iter().map(|t| (t.path.vertices.clone(), t.area.abs())).collect();
+        let refs: Vec<(&[[f64; 2]], f64)> = polys.iter().map(|(p, a)| (p.as_slice(), *a)).collect();
+        let fast = nesting_depths(&refs, w, h);
+        let pairs: Vec<usize> =
+            (0..refs.len()).map(|i| (0..refs.len()).filter(|&j| j != i && refs[j].1 > refs[i].1 && point_in_poly(refs[i].0[0], refs[j].0)).count()).collect();
+        assert_eq!(fast, pairs);
+        assert_eq!(fast, t.iter().map(|t| t.depth).collect::<Vec<_>>());
+        assert!(fast.iter().max() >= Some(&5));
+    }
+
+    #[test]
+    fn nesting_depths_count_wide_boxes_kept_out_of_the_grid() {
+        // Concentric squares whose boxes each cover far more than MAX_BOX_CELLS cells.
+        let (w, h) = (4000, 4000);
+        let squares: Vec<Vec<[f64; 2]>> = (0..40)
+            .map(|k| {
+                let (a, b) = (10.0 + 40.0 * k as f64, 3990.0 - 40.0 * k as f64);
+                vec![[a, a], [b, a], [b, b], [a, b]]
+            })
+            .collect();
+        let refs: Vec<(&[[f64; 2]], f64)> = squares.iter().map(|p| (p.as_slice(), (p[1][0] - p[0][0]).powi(2))).collect();
+        assert_eq!(nesting_depths(&refs, w, h), (0..40).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn simplification_work_is_bounded_and_keeps_the_outline() {
+        // Out of budget, the spans still waiting keep every point: nothing is lost, the outline
+        // is just less simplified.
+        let p: Vec<[f64; 2]> = (0..12).map(|i| [i as f64, if i % 2 == 0 { 0.0 } else { 5.0 }]).collect();
+        let (mut budget, mut keep) = (0, vec![]);
+        dp(&p, 0, 11, 0.01, &mut budget, &mut keep);
+        keep.sort_unstable();
+        assert_eq!(keep, (1..11).collect::<Vec<_>>());
+        // With a budget, the result matches the plain recursion's on an ordinary loop.
+        let (mut budget, mut keep) = (usize::MAX, vec![]);
+        dp(&p, 0, 11, 0.01, &mut budget, &mut keep);
+        keep.sort_unstable();
+        assert_eq!(keep, (1..11).collect::<Vec<_>>());
+        // A long, finely zig-zagging loop: simplified within a budget linear in its length.
+        let n = 200_000;
+        let ring: Vec<[f64; 2]> = (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                let r = 1000.0 + if i % 2 == 0 { 0.0 } else { 3.0 };
+                [r * a.cos(), r * a.sin()]
+            })
+            .collect();
+        let idx = simplify_idx(&ring, 0.5);
+        assert!(idx.windows(2).all(|w| w[0] < w[1]) && idx.len() >= 3 && *idx.last().unwrap() < n);
+    }
+
+    #[test]
+    fn fit_uses_the_kept_indices() {
+        // A contour that passes the same point twice: the fit follows the simplifier's index,
+        // not the first raw point with those coordinates.
+        let raw = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 0.0], [-10.0, 10.0], [-10.0, 0.0]];
+        let idx = vec![0, 2, 3, 4];
+        let simp: Vec<[f64; 2]> = idx.iter().map(|&i| raw[i]).collect();
+        let path = fit_loop(&raw, &idx, &simp, 0.5);
+        assert_eq!(path.vertices, simp);
     }
 
     #[test]

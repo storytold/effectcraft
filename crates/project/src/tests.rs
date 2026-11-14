@@ -146,6 +146,18 @@ fn unique_names_and_cycles() {
     let c = p.comp(cid).unwrap();
     assert_eq!(c.unique_layer_name("Red Solid 1"), "Red Solid 2");
     assert_eq!(c.unique_layer_name("Shape Layer 1"), "Shape Layer 1");
+    // A suffix written another way (`02`) is not the number taken.
+    let mut d = c.clone();
+    for n in ["Red Solid 02", "Red Solid 3"] {
+        let mut l = d.layers[0].clone();
+        l.name = n.into();
+        d.layers.push(l);
+    }
+    assert_eq!(d.unique_layer_name("Red Solid 1"), "Red Solid 2");
+    // Digits that end a word stay in the stem.
+    let mut e = c.clone();
+    e.layers[0].name = "v-b1.mp4".into();
+    assert_eq!(e.unique_layer_name("v-b1.mp4"), "v-b1.mp4 2");
     assert!(p.comp_contains(cid, cid));
 }
 

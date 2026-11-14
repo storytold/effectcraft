@@ -177,10 +177,12 @@ pub fn import(
     }
     let folder_name = if opts.name.is_empty() { "Imported Timeline".to_string() } else { opts.name.clone() };
     res.folder = project.add_item(&folder_name, Label::None, None, ItemKind::Folder);
+    let warned = res.warnings.iter().cloned().collect();
     let mut im = Importer {
         src: &imported.project,
         project,
         res,
+        warned,
         items: HashMap::new(),
         solids: HashMap::new(),
         solids_folder: None,
@@ -273,6 +275,8 @@ struct Importer<'a> {
     src: &'a fp::Project,
     project: &'a mut Project,
     res: ImportResult,
+    /// The warnings in `res`, to say each once without searching them all every time.
+    warned: HashSet<String>,
     /// Source item → created item (footage, comp).
     items: HashMap<fp::ItemId, ItemId>,
     /// Generator / adjustment solids by (source item, width, height).
@@ -290,7 +294,7 @@ struct Importer<'a> {
 impl Importer<'_> {
     fn warn(&mut self, m: impl Into<String>) {
         let m = m.into();
-        if !self.res.warnings.contains(&m) {
+        if self.warned.insert(m.clone()) {
             self.res.warnings.push(m);
         }
     }
@@ -429,23 +433,8 @@ impl Importer<'_> {
         comp.markers = seq.markers.iter().map(marker_in).collect();
         // Video: the top track's clips first (layer #1); later clips of a track above earlier ones
         // so incoming clips of dissolves cover outgoing ones.
-        for track in seq.video_tracks.iter().rev() {
-            let mut items: Vec<&fp::TrackItem> = track.items.iter().collect();
-            items.sort_by_key(|i| std::cmp::Reverse(i.start));
-            for ti in items {
-                if let Some(l) = self.clip_layer(&comp, seq, track, ti) {
-                    comp.layers.push(l);
-                }
-            }
-        }
-        for track in &seq.audio_tracks {
-            let mut items: Vec<&fp::TrackItem> = track.items.iter().collect();
-            items.sort_by_key(|i| std::cmp::Reverse(i.start));
-            for ti in items {
-                if let Some(l) = self.clip_layer(&comp, seq, track, ti) {
-                    comp.layers.push(l);
-                }
-            }
+        for track in seq.video_tracks.iter().rev().chain(&seq.audio_tracks) {
+            self.track_layers(&mut comp, seq, track);
         }
         if !seq.caption_tracks.is_empty() {
             self.warn("caption tracks are not imported");
@@ -508,7 +497,45 @@ impl Importer<'_> {
         }
     }
 
-    fn clip_layer(&mut self, comp: &Comp, seq: &fp::Sequence, track: &fp::Track, ti: &fp::TrackItem) -> Option<Layer> {
+    /// A track's clips as layers of `comp`, the latest first.
+    fn track_layers(&mut self, comp: &mut Comp, seq: &fp::Sequence, track: &fp::Track) {
+        let mut items: Vec<&fp::TrackItem> = track.items.iter().collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.start));
+        // Each clip's transitions, found once per track: scanning every transition of the track
+        // for every clip made a long flat edit (many clips and many transitions) quadratic.
+        let mut transitions: HashMap<fp::ClipId, Vec<&fp::Transition>> = HashMap::new();
+        for tr in &track.transitions {
+            for clip in [tr.from, tr.to].into_iter().flatten() {
+                let list = transitions.entry(clip).or_default();
+                // A transition from and to the same clip still counts once.
+                if !list.last().is_some_and(|last| std::ptr::eq(*last, tr)) {
+                    list.push(tr);
+                }
+            }
+        }
+        let mut any = false;
+        for ti in items {
+            let own = transitions.get(&ti.id).map(Vec::as_slice).unwrap_or_default();
+            if let Some(l) = self.clip_layer(comp, seq, track, ti, own) {
+                comp.layers.push(l);
+                any = true;
+            }
+        }
+        // What the track's transitions become, said once a clip of the track was imported.
+        if any && track.kind != fp::TrackKind::Audio {
+            for tr in &track.transitions {
+                let id = tr.effect.effect.as_str();
+                if !matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white" | "film_dissolve" | "additive_dissolve" | "non_additive_dissolve") {
+                    self.warn(format!("transition \"{}\" was imported as a cross dissolve", tr.effect.def().map(|d| d.name).unwrap_or(id)));
+                }
+            }
+        }
+        if any && track.transitions.iter().any(|tr| tr.effect.effect == "dip_to_white") {
+            self.warn("Dip to White was imported as a dip to the background");
+        }
+    }
+
+    fn clip_layer(&mut self, comp: &Comp, seq: &fp::Sequence, track: &fp::Track, ti: &fp::TrackItem, transitions: &[&fp::Transition]) -> Option<Layer> {
         let audio_track = track.kind == fp::TrackKind::Audio;
         let (source, size, has_audio) = self.source_of(ti, comp.width, comp.height)?;
         let is_adjustment = matches!(self.src.item(ti.item).map(|i| &i.kind), Some(fp::ItemKind::AdjustmentLayer { .. }));
@@ -561,18 +588,9 @@ impl Importer<'_> {
         }
         // Transitions extend the layer over their handles.
         let mut fades: Vec<(Tick, Tick, f64, f64)> = vec![];
-        for tr in &track.transitions {
+        for tr in transitions {
             let (ts, te) = (tick_in(tr.start), tick_in(tr.end()));
-            let id = tr.effect.effect.as_str();
-            let dip = id.starts_with("dip_to");
-            if !audio_track
-                && !matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white" | "film_dissolve" | "additive_dissolve" | "non_additive_dissolve")
-            {
-                self.warn(format!("transition \"{}\" was imported as a cross dissolve", tr.effect.def().map(|d| d.name).unwrap_or(id)));
-            }
-            if dip && id == "dip_to_white" {
-                self.warn("Dip to White was imported as a dip to the background");
-            }
+            let dip = tr.effect.effect.starts_with("dip_to");
             let mid = ts + Tick((te - ts).0 / 2);
             if tr.to == Some(ti.id) {
                 l.in_point = l.in_point.min(ts);

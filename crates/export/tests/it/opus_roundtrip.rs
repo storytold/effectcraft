@@ -20,9 +20,9 @@ fn encode(pcm: &[f32], channels: u8, bitrate: u32) -> (OpusEncoder, Vec<Vec<u8>>
     (enc, packets)
 }
 
-/// Decodes with filmcraft-opus, drops the pre-skip and returns planar channels of `len` samples.
+/// Decodes with craft-audio, drops the pre-skip and returns planar channels of `len` samples.
 fn decode(head: &[u8], packets: &[Vec<u8>], len: usize) -> Vec<Vec<f32>> {
-    let mut dec = filmcraft_opus::Decoder::new(head).expect("OpusHead");
+    let mut dec = craft_audio::opus::Decoder::new(head).expect("OpusHead");
     dec.set_trim_pre_skip(true);
     let mut out: Vec<Vec<f32>> = vec![Vec::new(); dec.channels()];
     for p in packets {
@@ -342,7 +342,8 @@ fn ffmpeg_oracle_decodes_ogg_opus() {
             }
         }
         let (enc, packets) = encode(&pcm, channels, rate);
-        let path = std::env::temp_dir().join(format!("effectcraft-opusenc-{}-{channels}.opus", std::process::id()));
+        let guard = tempfile::tempdir().unwrap();
+        let path = guard.path().join("out.opus");
         std::fs::write(&path, ogg_opus(&enc, &packets, len)).unwrap();
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-i"])

@@ -173,9 +173,9 @@ the same futures with `passes::block_on`; they never wait there).
 
 - **Render Queue**: `effectcraft_export::export_async` renders each frame in passes (frames
   with deferred readbacks render one by one instead of in parallel batches) and encodes as
-  before (`Exporter::export_async`). As on the desktop, a job renders every frame on the
-  project's renderer (the worker's GPU with GPU Acceleration), not on whichever
-  compositor measured faster, so runs don't differ by timing.
+  before (`Exporter::export_async`). Unlike the desktop, which times both compositors on a
+  job's first frames and keeps the faster, a job renders every frame on the project's renderer
+  (the worker's GPU with GPU Acceleration), so runs don't differ by timing.
 - **Analyses** (Warp Stabilizer, 3D Camera Tracker, Track Motion, mask and face tracking, Roto
   Brush freeze and propagation): their work functions are `async`; started with `wait` inside
   a job they are queued and awaited (`offload::run_or_queue`), and each input frame renders in

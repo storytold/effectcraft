@@ -156,7 +156,7 @@ MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, 
 rendering with 3:2 pulldown, effect/solo/guide/depth overrides, crop, region of interest and
 resize, Render Settings and Output Module templates with defaults, post-render actions, storage
 overflow and render logs. The same queue runs from the command line. Every encoder is pure
-Rust (FilmCraft's H.264, ProRes and AAC; EffectCraft's own VP9, AV1, HEVC and Opus); there is no
+Rust (craft-libs' H.264, ProRes, HEVC, VP9, AV1 and AAC; EffectCraft's own Opus); there is no
 FFmpeg inside.
 
 **Lottie** goes both ways: File ▸ Export ▸ Lottie JSON… writes a composition (precomps, shape,
