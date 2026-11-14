@@ -8051,7 +8051,7 @@ const SPANISH: &[(&str, &str)] = &[
 
 /// Georgian (ka): every row of the Chinese catalogs, in the same order (the tests keep them in step).
 const GEORGIAN: &[(&str, &str)] = &[
-    ("Click to sample color", "დააწკაპუნეთ ფერის ნიმუშის ასაღებად"),
+    ("Click to sample color", "დაწკაპეთ ფერის ნიმუშის ასაღებად"),
     ("Appearance Settings…", "იერსახის პარამეტრები…"),
     ("Add to favorites", "რჩეულებში დამატება"),
     ("Remove from favorites", "რჩეულებიდან ამოშლა"),
@@ -8215,7 +8215,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Essential Properties — {}", "ძირითადი თვისებები — {}"),
     ("Event", "მოვლენა"),
     ("Export Template…", "შაბლონის ექსპორტი…"),
-    ("Export...", "ექსპორტი..."),
+    ("Export...", "ექსპორტირება..."),
     ("Expression Language Menu", "ექსპრესიების ენის მენიუ"),
     ("Expression pick whip: drag onto a property", "ექსპრესიის ბმის სპირალი: გადაათრიეთ თვისებაზე"),
     ("Expression:", "ექსპრესია:"),
@@ -8731,7 +8731,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Default Drag Import As", "გადათრევით იმპორტი როგორც"),
     ("Footage", "ვიდეომასალა"),
     ("Composition - Retain Layer Sizes", "კომპოზიცია - შრეების ზომების შენარჩუნებით"),
-    ("Export", "ექსპორტი"),
+    ("Export", "ექსპორტირება"),
     ("Default Output Folder", "ნაგულისხმევი გამოტანის საქაღალდე"),
     ("Segment Sequences", "სეკვენციების სეგმენტებად დაყოფა"),
     ("Files per Segment", "ფაილი სეგმენტში"),
@@ -9015,6 +9015,10 @@ const GEORGIAN_PANELS: &[(&str, &str)] = &[
     ("Open in Essential Graphics", "ძირითად გრაფიკაში გახსნა"),
     ("Video preview is off (Preview panel): audio only", "ვიდეოს წინასწარი ნახვა გამორთულია (წინასწარი ნახვის პანელი): მხოლოდ აუდიო"),
     ("Solid…", "სოლიდი…"),
+    ("All", "ყველა"),
+    ("Available", "ხელმისაწვდომი"),
+    ("Missing", "აკლია"),
+    ("Filter by footage status", "ვიდეომასალის გაფილტვრა სტატუსის მიხედვით"),
 ];
 
 /// French: vouvoiement, infinitive for commands, sentence case; the same source strings as the other
