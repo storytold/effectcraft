@@ -786,7 +786,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "Radial Blur",
             "Blur & Sharpen",
             vec![
-                p("amount", "Amount", num(10.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                p("amount", "Amount", num(10.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
                 p("center", "Center", Value::Vec2([0.5, 0.5]), ParamUi::Point),
                 p("type", "Type", Value::Enum(0), popup(&["Spin", "Zoom"])),
                 // Our blur is always fully anti-aliased; the choice is kept for compatibility.
@@ -1043,6 +1043,16 @@ mod tests {
         assert_ne!(row(0.5), row(0.9));
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.4));
+    }
+
+    #[test]
+    fn radial_blur_amount_range_matches_after_effects() {
+        let spec = crate::find("ec.blur.radial").unwrap();
+        let p = spec.params.iter().find(|p| p.id == "amount").unwrap();
+        let ParamUi::Slider { min, max, slider_min, slider_max, .. } = &p.ui else {
+            panic!("radial amount ui is not a slider: {:?}", p.ui);
+        };
+        assert!(*min == 0.0 && *max == 1000.0 && *slider_min == 0.0 && *slider_max == 100.0, "radial amount range: {ui:?}", ui = p.ui);
     }
 
     /// A bright square on mid grey.
