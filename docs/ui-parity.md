@@ -49,6 +49,7 @@ Effects running; most of the rest parallelises.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-15 | minor | Effect Controls: plain Up/Down select the previous/next effect while the panel has focus (#3585) |
 | 2026-10-18 | minor | A shape group's inner Contents (After Effects' elided Vectors group) draws no row: the group's path, fill/stroke and Transform list directly under the group |
 | 2026-10-13 | minor | Accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable (#1335); no screen reader tested |
 | 2026-10-13 | minor | Accessibility row: AccessKit audit and contrast tests, Effects & Presets, Settings and Render Queue named and keyboard-operable (#1335); no screen reader tested |

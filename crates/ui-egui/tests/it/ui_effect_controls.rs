@@ -154,6 +154,67 @@ fn effect_header_arrows_only_disclose_selected_headers_on_the_displayed_layer() 
     assert_ne!(serde_json::to_value(&h.state().session.project).unwrap(), before, "the existing layer nudge still runs");
 }
 
+/// #3585: plain Up / Down select the previous / next effect header while Effect Controls has the
+/// focus, clamped at the ends, and change nothing but the selection.
+#[test]
+fn effect_header_up_and_down_select_the_previous_and_next_effect() {
+    let (mut h, lid, [(first, _), (second, _), (third, _)]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, first)];
+    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let time = h.state().session.time();
+    let history = (h.state().session.history.undo.len(), h.state().session.history.redo.len());
+    let closed = h.state().ui.fx_closed.clone();
+    for (key, want) in [
+        (egui::Key::ArrowDown, second),
+        (egui::Key::ArrowDown, third),
+        (egui::Key::ArrowDown, third),
+        (egui::Key::ArrowUp, second),
+        (egui::Key::ArrowUp, first),
+        (egui::Key::ArrowUp, first),
+    ] {
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, want)], "{key:?}");
+        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project, "{key:?}: no document change");
+        assert_eq!(h.state().session.time(), time, "{key:?}: no time change");
+        assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), history, "{key:?}: no history change");
+        assert_eq!(h.state().ui.fx_closed, closed, "{key:?}: no disclosure change");
+    }
+    // Up at the first effect and Down at the last consume the key without moving anything.
+}
+
+/// #3585: with only a parameter selected, plain Up / Down still nudge the layer.
+#[test]
+fn effect_header_up_and_down_leave_a_parameter_selection_to_the_layer_nudge() {
+    let (mut h, lid, [(_, prop), _, _]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, prop)];
+    let y = |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3()[1];
+    let before = y(&h);
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert!(y(&h) > before, "Down still nudges the layer");
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, prop)], "the parameter stays selected");
+    let before = y(&h);
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert!(y(&h) < before, "Up still nudges the layer");
+}
+
+/// #3585: modified Up / Down keep their shortcuts (Shift nudges ten pixels; Cmd/Ctrl+Down is
+/// unbound) and never move the effect selection.
+#[test]
+fn effect_header_up_and_down_preserve_modified_shortcuts() {
+    let (mut h, lid, [(first, _), _, _]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, first)];
+    let y = |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3()[1];
+    let before = y(&h);
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    assert!(y(&h) > before, "Shift+Down still nudges ten pixels");
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
+    let (before, time) = (y(&h), h.state().session.time());
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::COMMAND);
+    assert_eq!(y(&h), before, "Cmd/Ctrl+Down is not a nudge");
+    assert_eq!(h.state().session.time(), time);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
+}
+
 #[test]
 fn effect_header_arrows_ignore_hidden_panels_with_stale_focus() {
     // A maximized frame hides every other frame and every floating window, so a floating Effect
