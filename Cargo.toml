@@ -17,7 +17,7 @@ craft-quit = { version = "0.1.0", git = "https://github.com/storytold/craft-libs
 craft-ecproj-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c" }
 craft-dpx = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c" }
 craft-eps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c" }
-craft-ps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c", default-features = false, features = ["read"] }
+craft-ps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "1fdb3934b5a8154828dd1646289f84dbd1302b53", default-features = false, features = ["read"] }
 craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c", features = ["decode"] }
 craft-gif = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c", features = ["frames"] }
 craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c" }

@@ -1168,7 +1168,7 @@ dependencies = [
 [[package]]
 name = "craft-eps"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/storytold/craft-libs?rev=1fdb3934b5a8154828dd1646289f84dbd1302b53#1fdb3934b5a8154828dd1646289f84dbd1302b53"
 
 [[package]]
 name = "craft-exr"
@@ -1319,7 +1319,7 @@ dependencies = [
 [[package]]
 name = "craft-ps"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/storytold/craft-libs?rev=1fdb3934b5a8154828dd1646289f84dbd1302b53#1fdb3934b5a8154828dd1646289f84dbd1302b53"
 dependencies = [
  "craft-eps",
  "kurbo",
