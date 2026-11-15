@@ -18,7 +18,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
 use effectcraft_project::{Node, ParamUi, PropGroup, Property};
 
-use crate::{EffectSpec, ParamSpec, default_value, group_name, layer_source_id};
+use crate::{EffectSpec, ParamSpec, default_value, group_name, layer_source_id, nested_group};
 
 /// Parameter ids renamed since they were first saved: `(effect id, old id, new id)`. The new id
 /// is a spec id (it may include twirl-down group segments, `group/param`).
@@ -210,21 +210,6 @@ fn prop_at<'a>(g: &'a mut PropGroup, id: &str) -> Option<&'a mut Property> {
     }
 }
 
-fn group_at<'a>(spec: &EffectSpec, g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
-    let (first, rest) = match path.split_once('/') {
-        Some((a, b)) => (a, Some(b)),
-        None => (path, None),
-    };
-    if g.sub(first).is_none() {
-        g.children.push(ids.group(first, &group_name(spec, first)).into());
-    }
-    let sub = g.sub_mut(first)?;
-    match rest {
-        Some(r) => group_at(spec, sub, ids, r),
-        None => Some(sub),
-    }
-}
-
 /// Remap one stored popup value from `old` option labels to `new` ones.
 fn remap_enum(v: &mut Value, old: &[String], new: &[String], fx: &str, pid: &str) {
     let Value::Enum(i) = v else { return };
@@ -321,7 +306,7 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                 Some(i) if i <= sub.children.len() => sub.children.insert(i, pr.into()),
                 _ => sub.children.push(pr.into()),
             };
-            match path.and_then(|path| group_at(spec, g, ids, path)) {
+            match path.and_then(|path| nested_group(spec, g, ids, path)) {
                 Some(sub) => at(sub),
                 None => at(g),
             }
@@ -333,17 +318,22 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         let sid = layer_source_id(ps.id);
         if matches!(ps.ui, ParamUi::Layer) && !spec.params.iter().any(|q| q.id == sid) && prop_at(g, &sid).is_none() {
             let (path, leaf) = ps.id.rsplit_once('/').map(|(p, l)| (Some(p), l)).unwrap_or((None, ps.id));
-            // Companions of grouped layer parameters were once stored at top level.
-            let src = take_prop(g, &sid).map(|mut p| {
-                p.match_id = layer_source_id(leaf);
-                p
-            });
+            // Companions of grouped layer parameters were once stored at top level: under the
+            // grouped id, or under the bare one when the parameter itself was (a plug-in saved
+            // before it grouped the parameter), which moves into the group with its parameter.
+            let bare = layer_source_id(leaf);
+            let src = take_prop(g, &sid)
+                .or_else(|| (path.is_some() && !spec.params.iter().any(|q| q.id == leaf || q.id == bare)).then(|| take_prop(g, &bare)).flatten())
+                .map(|mut p| {
+                    p.match_id = bare.clone();
+                    p
+                });
             let src = src.unwrap_or_else(|| {
-                let mut src = Property::new(ids.alloc(), &layer_source_id(leaf), &format!("{} Source", ps.name), Value::Enum(2)).with_ui(ParamUi::Hidden);
+                let mut src = Property::new(ids.alloc(), &bare, &format!("{} Source", ps.name), Value::Enum(2)).with_ui(ParamUi::Hidden);
                 src.hold_only = true;
                 src
             });
-            match path.and_then(|path| group_at(spec, g, ids, path)) {
+            match path.and_then(|path| nested_group(spec, g, ids, path)) {
                 Some(sub) => sub.children.push(src.into()),
                 None => g.children.push(src.into()),
             }
@@ -355,19 +345,20 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         pr.value = Value::Bool(on);
     }
     // Refresh twirl-down group names.
-    fn names(spec: &EffectSpec, g: &mut PropGroup) {
+    fn names(spec: &EffectSpec, g: &mut PropGroup, parent: &str) {
         for c in &mut g.children {
             if let Node::Group(sg) = c {
-                let n = group_name(spec, &sg.match_id);
+                let path = if parent.is_empty() { sg.match_id.clone() } else { format!("{parent}/{}", sg.match_id) };
+                let n = group_name(spec, &path);
                 if n != sg.match_id {
                     sg.name = n;
                 }
-                names(spec, sg);
+                names(spec, sg, &path);
             }
         }
     }
     if !USER_EDITED_CATEGORIES.contains(&spec.category) && spec.params.iter().any(|p| p.id.contains('/')) {
-        names(spec, g);
+        names(spec, g, "");
     }
     *g != before
 }
@@ -685,6 +676,30 @@ mod tests {
         assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
         assert!(g.get("smoothness").is_none());
         assert_eq!(prop_at(&mut g, "stabilization/smoothness").unwrap().value, Value::Scalar(12.0));
+    }
+
+    /// A layer parameter saved at top level (by a plug-in that grouped it later) moves into its
+    /// group with its source companion, keeping the saved Source choice.
+    #[test]
+    fn upgrade_moves_a_layer_parameters_source_companion_into_its_group() {
+        let render = find(crate::warp_stab::ID).unwrap().render;
+        let spec = |id: &'static str| EffectSpec {
+            id: "org.test.grouped.layer",
+            name: "Grouped",
+            category: "Test",
+            params: vec![ParamSpec { id, name: "Floor", default: Value::Layer(None), ui: ParamUi::Layer }],
+            render,
+            gpu: false,
+            float: false,
+        };
+        let (flat, grouped) = (spec("floor"), spec("physics/floor"));
+        let mut next = 1;
+        let mut g = instantiate(&flat, &mut Ids(&mut next), "Grouped", SIZE);
+        g.get_mut("floorSource").unwrap().value = Value::Enum(0);
+        assert!(upgrade_instance(&grouped, &mut g, &mut Ids(&mut next), SIZE));
+        assert!(g.get("floor").is_none() && g.get("floorSource").is_none(), "nothing left at top level");
+        assert!(prop_at(&mut g, "physics/floor").is_some());
+        assert_eq!(prop_at(&mut g, "physics/floorSource").unwrap().value, Value::Enum(0), "the saved choice moved along");
     }
 
     /// A saved parameter id maps to the parameter `upgrade_instance` moves it to.

@@ -527,3 +527,19 @@ fn grouped_parameters_nest_in_twirl_down_groups() {
     assert!(saved.get("gain").is_none() && saved.sub("Look").unwrap().get("gain").is_some());
     assert_eq!(saved.sub("Look").unwrap().sub("RayColor").unwrap().name, "Ray Color");
 }
+
+#[test]
+fn groups_with_one_match_id_under_different_parents_keep_their_own_names() {
+    // `A/Ray Color` and `B/RayColor` both end in match id `RayColor`.
+    let manifest = gain_manifest("org.test.groups.paths")
+        .replace(r#""name":"Gain","#, r#""name":"Gain","group":"A/Ray Color","#)
+        .replace(r#""name":"Lift","#, r#""name":"Lift","group":"B/RayColor","#);
+    let spec = load_wasm(module_with(&manifest, "").as_bytes(), "paths.wat").unwrap();
+    let mut next = 1;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [4.0, 2.0]);
+    let names = |g: &effectcraft_project::PropGroup| ["A", "B"].map(|a| g.sub(a).unwrap().sub("RayColor").unwrap().name.clone());
+    assert_eq!(names(&g), ["Ray Color", "RayColor"]);
+    // Refreshing the names on upgrade keeps them apart too.
+    effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [4.0, 2.0]);
+    assert_eq!(names(&g), ["Ray Color", "RayColor"]);
+}

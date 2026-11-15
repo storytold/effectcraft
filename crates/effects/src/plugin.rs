@@ -505,17 +505,35 @@ pub fn param_key(p: &PluginParam) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The display name of twirl-down group `match_id` of plug-in effect `effect`, as its manifest
-/// writes it. `None` for other effects and groups.
-pub fn group_display_name(effect: &str, match_id: &str) -> Option<String> {
+/// The display name of the twirl-down group at match-id path `path` (`Advanced/RayColor`) of
+/// plug-in effect `effect`, as its manifest writes it. The whole path is matched, so groups with
+/// the same match id under different parents keep their own names. `None` for other effects and
+/// groups.
+pub fn group_display_name(effect: &str, path: &str) -> Option<String> {
     let p = plugin(effect)?;
-    p.manifest().params.iter().flat_map(|q| group_segments(&q.group)).find(|(m, _)| m == match_id).map(|(_, n)| n.to_string())
+    p.manifest().params.iter().find_map(|q| {
+        let mut at = String::new();
+        group_segments(&q.group).find_map(|(m, n)| {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(&m);
+            (at == path).then(|| n.to_string())
+        })
+    })
 }
 
 /// A parameter's value: under its spec id, or under its bare id in an instance saved before the
 /// parameter moved into a group (and not upgraded because the plug-in was not loaded then).
 fn param_value<'p>(params: &'p Params, p: &PluginParam) -> Option<&'p Value> {
     params.get(&param_key(p)).or_else(|| params.get(&p.id))
+}
+
+/// The key `p` is stored under in `params`, as [`param_value`] reads it: its group path, or the
+/// bare id of an instance saved before the parameter was grouped (and not upgraded yet).
+fn stored_key(params: &Params, p: &PluginParam) -> String {
+    let key = param_key(p);
+    if params.get(&key).is_none() && params.get(&p.id).is_some() { p.id.clone() } else { key.into_owned() }
 }
 
 fn param_spec(p: &PluginParam) -> ParamSpec {
@@ -709,8 +727,9 @@ impl PluginHost for RenderHost<'_, '_> {
 
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage> {
         let ctx = self.ctx;
-        // The plug-in names its own parameter id; a grouped parameter is stored under its key.
-        let key = self.manifest.params.iter().find(|p| p.id == param_id).map(param_key)?;
+        // The plug-in names its own parameter id; a grouped parameter is stored under its key
+        // (or its bare id, saved before it was grouped), and its source companion next to it.
+        let key = self.manifest.params.iter().find(|p| p.id == param_id).map(|p| stored_key(ctx.params, p))?;
         let param_id: &str = &key;
         let lid = ctx.params.get(param_id)?.as_layer()?;
         let other = if (layer_time - ctx.time).abs() < 1e-9 {
@@ -775,4 +794,20 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
         set_plugin_error(&m.id, None);
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grouped parameter is found under its group path, or under its bare id in an instance
+    /// saved before it was grouped.
+    #[test]
+    fn stored_key_falls_back_to_the_bare_id() {
+        let p = PluginParam { id: "floor".into(), name: "Floor".into(), kind: PluginParamKind::Layer, group: "Physics/Bounce".into() };
+        let with = |k: &str| Params { values: [(k.to_string(), Value::Scalar(1.0))].into_iter().collect() };
+        assert_eq!(stored_key(&with("Physics/Bounce/floor"), &p), "Physics/Bounce/floor");
+        assert_eq!(stored_key(&with("floor"), &p), "floor");
+        assert_eq!(stored_key(&with("other"), &p), "Physics/Bounce/floor");
+    }
 }

@@ -1128,12 +1128,13 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("strokeOptions", "Stroke Options"),
 ];
 
-/// Display name of nested parameter group `m` of `spec`: a plug-in's own (from its manifest),
-/// else by match id from the tables.
-fn group_name(spec: &EffectSpec, m: &str) -> String {
-    if let Some(n) = plugin::group_display_name(spec.id, m) {
+/// Display name of the nested parameter group at match-id path `path` (`borders/autoScale`) of
+/// `spec`: a plug-in's own (from its manifest), else by its match id from the tables.
+fn group_name(spec: &EffectSpec, path: &str) -> String {
+    if let Some(n) = plugin::group_display_name(spec.id, path) {
         return n;
     }
+    let m = path.rsplit('/').next().unwrap_or(path);
     warp_stab::GROUPS
         .iter()
         .chain(roto::GROUPS)
@@ -1146,19 +1147,17 @@ fn group_name(spec: &EffectSpec, m: &str) -> String {
 }
 
 /// The nested group at `path` (`borders/autoScale`) under `g`, created on first use.
-fn nested_group<'a>(spec: &EffectSpec, g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
-    let (first, rest) = match path.split_once('/') {
-        Some((a, b)) => (a, Some(b)),
-        None => (path, None),
-    };
-    if g.sub(first).is_none() {
-        g.children.push(ids.group(first, &group_name(spec, first)).into());
+fn nested_group<'a>(spec: &EffectSpec, mut g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
+    let mut end = 0;
+    for seg in path.split('/') {
+        end += seg.len();
+        if g.sub(seg).is_none() {
+            g.children.push(ids.group(seg, &group_name(spec, &path[..end])).into());
+        }
+        g = g.sub_mut(seg)?;
+        end += 1;
     }
-    let sub = g.sub_mut(first)?;
-    match rest {
-        Some(r) => nested_group(spec, sub, ids, r),
-        None => Some(sub),
-    }
+    Some(g)
 }
 
 /// Effects the GPU compositor (`effectcraft-gpu`) implements with the CPU effect's semantics
