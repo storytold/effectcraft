@@ -1580,6 +1580,41 @@ fn a_failed_picture_leaves_the_other_channels_readable() {
     assert!(rest.aux.get("Z").is_some());
 }
 
+/// #3749: a read over the fixed floor is allowed up to what the system's memory gives (the
+/// session's figure), never under the floor, and refused with a reason beyond it. The floor is
+/// small here: the real one is 8 GiB.
+#[test]
+fn a_read_over_the_floor_is_allowed_up_to_the_systems_memory() {
+    let bytes = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8));
+    let mut src = std::io::Cursor::new(bytes.as_slice());
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).unwrap();
+    // Four channels of 8×8 f32 are 1024 bytes; the floor is 512.
+    let request = ReadRequest { floor: 512, ..ReadRequest::full(vec![0, 1, 2, 3]) };
+    let read = |src: &mut std::io::Cursor<&[u8]>| crate::exr_read::read_planes(src, &index, &request).0;
+    effectcraft_render::memory::set_decode_limit(None);
+    effectcraft_render::memory::set_decode_limit_source(None);
+    assert!(matches!(read(&mut src), Err(crate::exr_read::ReadError::TooLarge(_))), "over the floor, memory unknown");
+    effectcraft_render::memory::set_decode_limit(Some(2048));
+    assert_eq!(read(&mut src).map(|p| p.len()).ok(), Some(4), "the system's memory allows it");
+    effectcraft_render::memory::set_decode_limit(Some(800));
+    assert!(matches!(read(&mut src), Err(crate::exr_read::ReadError::TooLarge(_))), "still more than the system's memory");
+    effectcraft_render::memory::set_decode_limit(None);
+}
+
+/// #3749: a plane the system cannot give is not an aborted process: `craft-exr` asks for the
+/// planes' memory first and reports what it can't get, a read that failed just now (asked again,
+/// not remembered); a plane over the read's limit (the decode limit handed to it) is a refusal
+/// for size with `craft-exr`'s reason.
+#[test]
+fn a_plane_the_system_cannot_give_is_refused_not_allocated() {
+    use crate::exr_read::{ReadError, read_error};
+    use craft_exr::seek::Error;
+    let gone = read_error(Error::OutOfMemory("4096 bytes of planes".into()));
+    assert!(matches!(&gone, ReadError::Io(why) if why.contains("4096 bytes of planes")), "{gone:?}");
+    let over = read_error(Error::LimitExceeded("the requested rows need 4096 bytes".into()));
+    assert!(matches!(&over, ReadError::TooLarge(why) if why.contains("4096 bytes")), "{over:?}");
+}
+
 /// A two-rank Cryptomatte file of `size` with a picture: "cube" and "sphere" meet along a
 /// diagonal whose pixels hold both IDs (rank 00 the nearer, 55-75 %, rank 01 the other one with
 /// the rest), IDs and coverage stored as 32-bit floats.

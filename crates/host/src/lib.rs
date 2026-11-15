@@ -117,7 +117,17 @@ pub fn session() -> Session {
     // the settings, and the caches have no limits of their own below it. Without a memory
     // reading yet, the budget for unknown RAM.
     s.apply_cache_budgets();
+    // The CLI and the MCP server read no memory: a request for a file's planes over the fixed
+    // limit asks for it once (#3749).
+    effectcraft_engine::render::memory::set_decode_limit_source(Some(installed_memory_budget));
     s
+}
+
+/// The memory budget of the installed RAM with the default settings: what one file's decoded
+/// planes may take when a request is over the fixed limit and the session read no memory.
+fn installed_memory_budget() -> Option<usize> {
+    let memory = effectcraft_engine::sysinfo::memory()?;
+    Some(effectcraft_engine::prefs::Prefs::default().memory_budget(Some(memory), false).bytes)
 }
 
 /// External effect helpers run as child processes: native builds only.

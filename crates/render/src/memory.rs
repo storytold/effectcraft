@@ -419,6 +419,44 @@ impl Accountant {
     }
 }
 
+/// What the system's memory allows one request for a file's decoded planes (an OpenEXR's
+/// channels) to take; 0: not known yet ([`decode_limit`]).
+static DECODE_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+/// Reads that limit from the system when nothing set it ([`set_decode_limit_source`]).
+static DECODE_SOURCE: Mutex<Option<fn() -> Option<usize>>> = Mutex::new(None);
+
+/// Set what the system's memory allows one request for a file's decoded planes to take
+/// (`None`: unknown again). The session sets it with the memory budget once the installed RAM
+/// is read.
+pub fn set_decode_limit(bytes: Option<usize>) {
+    DECODE_LIMIT.store(bytes.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Where [`decode_limit`] reads the limit from while nothing set it: the CLI and the MCP server
+/// read no memory otherwise. The reading may take a second, so it is only asked for when a
+/// request is over the fixed floor.
+pub fn set_decode_limit_source(source: Option<fn() -> Option<usize>>) {
+    *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner) = source;
+}
+
+/// The most bytes one request of `need` bytes for a file's decoded planes may take: `floor`
+/// (the fixed limit), or what the system's memory allows when that is more. The system is
+/// asked only when `need` is over `floor` (and once: the answer is kept, also "unknown", which
+/// leaves `floor`). The browser keeps `floor`.
+pub fn decode_limit(floor: usize, need: usize) -> usize {
+    if need <= floor || cfg!(target_arch = "wasm32") {
+        return floor;
+    }
+    let mut known = DECODE_LIMIT.load(Ordering::Relaxed);
+    if known == 0 {
+        let source = *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner);
+        known = source.and_then(|read| read()).unwrap_or(floor);
+        DECODE_LIMIT.store(known, Ordering::Relaxed);
+    }
+    floor.max(known)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,5 +868,49 @@ mod tests {
         PROCESS_NOW.store(10_000, Ordering::SeqCst);
         acc.set_process_memory(process_now, 1_000, 2_000);
         assert!(preview.held() <= 200, "{}", preview.held());
+    }
+
+    static ASKED: AtomicUsize = AtomicUsize::new(0);
+
+    fn ram_says() -> Option<usize> {
+        ASKED.fetch_add(1, Ordering::SeqCst);
+        Some(300)
+    }
+
+    fn ram_unknown() -> Option<usize> {
+        ASKED.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+
+    /// #3749: a request for a file's planes may take the fixed floor, or the system's memory
+    /// when that is more: the system is asked only for a request over the floor, once.
+    #[test]
+    fn a_request_over_the_floor_is_limited_by_the_systems_memory() {
+        let _serial = PROCESS_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        set_decode_limit(None);
+        set_decode_limit_source(Some(ram_says));
+        ASKED.store(0, Ordering::SeqCst);
+        // Under the floor: nobody is asked.
+        assert_eq!(decode_limit(100, 50), 100);
+        assert_eq!(ASKED.load(Ordering::SeqCst), 0, "a request under the floor reads no memory");
+        // Over it: the system's 300, asked once.
+        assert_eq!(decode_limit(100, 200), 300);
+        assert_eq!(decode_limit(100, 250), 300);
+        assert_eq!(ASKED.load(Ordering::SeqCst), 1, "asked once, then kept");
+        // A smaller figure than the floor never lowers it.
+        set_decode_limit(Some(40));
+        assert_eq!(decode_limit(100, 200), 100);
+        // The session's figure replaces the asked one.
+        set_decode_limit(Some(900));
+        assert_eq!(decode_limit(100, 200), 900);
+        // Unknown memory leaves the floor, and is not asked again.
+        set_decode_limit(None);
+        set_decode_limit_source(Some(ram_unknown));
+        ASKED.store(0, Ordering::SeqCst);
+        assert_eq!(decode_limit(100, 200), 100);
+        assert_eq!(decode_limit(100, 200), 100);
+        assert_eq!(ASKED.load(Ordering::SeqCst), 1, "an unknown reading is kept too");
+        set_decode_limit(None);
+        set_decode_limit_source(None);
     }
 }

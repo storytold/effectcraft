@@ -150,7 +150,8 @@ const MAX_DATA_PIXELS: usize = 4 * MAX_DISPLAY_PIXELS;
 /// blocks of at most `craft-exr`'s default ratio of bytes per byte of their chunk (four times
 /// that for DWA, plus 1 MiB): a hostile header declaring a block of gigabytes over a chunk of a
 /// few bytes is refused, by every read and by [`safe_to_decode`]. A read's planes are bounded by
-/// its own cap ([`crate::exr_read::MAX_DECODE_BYTES`]).
+/// its own cap ([`crate::exr_read::MAX_DECODE_BYTES`], or more with more memory:
+/// [`effectcraft_render::memory::decode_limit`]).
 fn limits() -> Limits {
     let mut limits = Limits::none();
     limits.max_pixels = MAX_DATA_PIXELS as u64;
