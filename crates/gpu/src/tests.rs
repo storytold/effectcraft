@@ -1486,6 +1486,55 @@ fn upload_budget_bounds_the_layer_textures_kept() {
     assert!(a == b && b == c, "the upload budget changed the frame");
 }
 
+/// #3731: layers of footage at 8 bpc (a layer buffer each, uploaded through the upload cache)
+/// upload once while they fit the budget and again every frame when they do not. The budget comes
+/// from the memory rule, so a child process sets `EFFECTCRAFT_GPU_UPLOAD_MB=1` (smaller than the
+/// layers) and must see the uploads repeat, the default must not. (At 32 bpc the layers share
+/// the footage picture, which the budget does not bound.)
+#[test]
+fn upload_budget_comes_from_the_memory_rule() {
+    const ENV: &str = "EFFECTCRAFT_GPU_UPLOAD_TEST_CHILD";
+    let tight = std::env::var_os(ENV).is_some();
+    if !tight && std::env::var_os("EFFECTCRAFT_GPU_UPLOAD_MB").is_some() {
+        return; // the caller set a budget of their own
+    }
+    if !tight {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .env(ENV, "1")
+            .env("EFFECTCRAFT_GPU_UPLOAD_MB", "1")
+            .args(["--exact", "tests::upload_budget_comes_from_the_memory_rule", "--nocapture"])
+            .output()
+            .expect("spawn child test process");
+        assert!(out.status.success(), "child test failed:\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+    let Some(g) = gpu() else { return };
+    let mut s = Scene::new(BitDepth::Bpc8);
+    for i in 0..3 {
+        let mut l = s.footage(600, 400); // 3.8 MB as RGBA f32 each
+        set(&mut l, "transform/position", v3(30.0 + 10.0 * i as f64, 30.0));
+        s.push(l);
+    }
+    let cache = effectcraft_render::cache::LayerCache::new(256 << 20);
+    let frame = |k: u64| {
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(g);
+        r.cache = Some(&cache);
+        let before = g.ctx.transfer_stats().upload_bytes;
+        g.render(&r, s.cid, Tick::from_seconds_f64(k as f64 / 30.0)).expect("the GPU renders the frame");
+        g.ctx.transfer_stats().upload_bytes - before
+    };
+    let _ = frame(0);
+    let up = frame(1);
+    if tight {
+        assert_eq!(g.ctx.upload_budget(), 1 << 20, "EFFECTCRAFT_GPU_UPLOAD_MB=1");
+        assert!(up > 0, "layers over the budget must upload again");
+    } else {
+        assert_eq!(g.ctx.upload_budget(), g.ctx.upload_budget_from_rule());
+        assert_eq!(up, 0, "layers within the budget re-uploaded");
+    }
+}
+
 /// Layers with effect stacks run them resident on the GPU (`walk::draw_resident_fx`): GPU
 /// effects, a CPU-only effect in the middle (read back, run, upload), opacity and a blend mode,
 /// a shape layer whose effects run in effect space from its bounds' corner; 8 and 32 bpc, full
