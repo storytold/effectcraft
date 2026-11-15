@@ -1466,13 +1466,16 @@ fn common_ends(old: &str, new: &str) -> (usize, usize, usize, usize) {
 }
 
 /// The edit from `old` to `new` as the texts' common start and end say: the start and the end
-/// map to themselves, what lies between is new (it takes what the character before it has).
+/// map to themselves, what lies between is new. Inserted text takes what the character before it
+/// has, replacing text what the first replaced character has (as [`TextDoc::replace_range`]
+/// gives its style, #3216 review).
 fn edit_segs(old: &str, new: &str) -> Vec<Seg> {
     let (p, s, ol, nl) = common_ends(old, new);
     let typed = nl.saturating_sub(p).saturating_sub(s);
+    let replaced = ol.saturating_sub(p).saturating_sub(s) > 0;
     let mut v = vec![
         Seg { len: p, old: 0, step: true },
-        Seg { len: typed, old: p.saturating_sub(1), step: false },
+        Seg { len: typed, old: if replaced { p } else { p.saturating_sub(1) }, step: false },
         Seg { len: s, old: ol.saturating_sub(s), step: true },
     ];
     v.retain(|g| g.len > 0);
@@ -1529,10 +1532,13 @@ fn para_map(before: &TextDoc, after: &TextDoc) -> Vec<usize> {
         .iter()
         .enumerate()
         .map(|(j, r)| {
-            let old = if r.start >= nl.saturating_sub(s) {
-                before.para_of(r.start.saturating_add(ol).saturating_sub(nl))
-            } else if r.start <= p {
+            // (the start first, as `replace_range` keeps the settings of the paragraph the edit
+            // starts in: deleting from the start of a paragraph through its line break leaves
+            // that paragraph's settings on the text that remains, #3216 review)
+            let old = if r.start <= p {
                 j
+            } else if r.start >= nl.saturating_sub(s) {
+                before.para_of(r.start.saturating_add(ol).saturating_sub(nl))
             } else {
                 before.para_of(p)
             };
@@ -2438,6 +2444,42 @@ three",
                 vec![Justify::Center, Justify::Left]
             )
         );
+    }
+
+    /// #3216 review: deleting from the start of the first paragraph through its line break leaves
+    /// that paragraph's settings on the text that remains (as `replace_range` does), and they stay
+    /// the instance's own, also when every paragraph looks the same at that moment.
+    #[test]
+    fn deleting_the_first_paragraph_keeps_its_own_settings_and_ownership() {
+        let master = |j: Justify| TextDoc { justify: j, ..bubble() };
+        let mut inst = TextDoc { text: "one
+two".into(), ..master(Justify::Left) };
+        inst.apply_para(0..1, |p| p.justify = Justify::Center);
+        let mut base = master(Justify::Left);
+        let justs = |d: &TextDoc| d.paras().iter().map(|p| p.justify).collect::<Vec<_>>();
+        merge(&mut inst, &mut base, &master(Justify::Center));
+        assert_eq!(justs(&inst), vec![Justify::Center; 2], "both look centered now");
+        edit(&mut inst, &mut base, &master(Justify::Center), |d| d.replace_range(0..4, "", None));
+        merge(&mut inst, &mut base, &master(Justify::Right));
+        assert_eq!((inst.text.as_str(), justs(&inst)), ("two", vec![Justify::Center]), "the own centered setting stays");
+    }
+
+    /// #3216 review: text typed over a selection takes what the first selected character has (as
+    /// `replace_range` styles it), not what the character before the selection has. Here the
+    /// word that follows the master is in front of an own red word, and the master is red too:
+    /// the text typed over the own word is red like the master's value, but it is the own
+    /// word's look and stays when the master changes again.
+    #[test]
+    fn text_typed_over_a_selection_takes_the_ownership_of_its_first_character() {
+        let mut base = TextDoc { fill: BLUE, ..bubble() };
+        let mut inst = TextDoc { fill: BLUE, text: "Red blue".into(), ..bubble() };
+        inst.apply_style(4..8, |s| s.fill = RED);
+        merge(&mut inst, &mut base, &master_with(RED));
+        assert!(inst.style_at(0).fill == RED && inst.style_at(5).fill == RED, "everything looks red");
+        edit(&mut inst, &mut base, &master_with(RED), |d| d.replace_range(4..8, "new", None));
+        merge(&mut inst, &mut base, &master_with(GREEN));
+        assert_eq!(inst.text, "Red new");
+        assert_eq!(fills(&inst), vec![(4, GREEN), (3, RED)], "the text over the own word stays the instance's own");
     }
 
     /// #3186: a base saved before per-run records existed has none (they are not written while
