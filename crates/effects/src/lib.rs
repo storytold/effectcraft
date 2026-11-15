@@ -598,6 +598,13 @@ pub trait EffectHost: Sync {
     fn params_at(&self, _layer_time: f64) -> Option<Params> {
         None
     }
+    /// A digest of the running effect's own parameter data (values, keyframes and everything
+    /// else stored on them), `None` when any parameter has an expression (it may follow other
+    /// layers) or the host can't tell. Equal digests mean [`EffectHost::params_at`] gives the
+    /// same values at every time, so a simulation needn't re-read its history.
+    fn params_digest(&self) -> Option<u64> {
+        None
+    }
     /// Parameter `id` (a [`flatten_params`] id such as `birthRate`) of effect `effect_index` in
     /// the layer's stack (the running effect's [`EffectEnv::effect_index`]) at another **layer
     /// time**: Particle Emitter 3D samples its Birth Rate at every step it simulates (#1373).

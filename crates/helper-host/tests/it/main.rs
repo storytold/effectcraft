@@ -127,6 +127,10 @@ impl Provider for FakeProvider {
                 .collect();
         (v, vec!["fake helper: a warning".into()])
     }
+    // Pad overwrites its whole (padded) frame
+    fn ignores_input(&self, e: &dyn EffectPlugin) -> bool {
+        e.manifest().id.ends_with(".pad")
+    }
 }
 
 /// The host side of a render in these checks: the input at any time is a flat grey of that

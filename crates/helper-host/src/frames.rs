@@ -87,6 +87,18 @@ impl Exchange {
         in_parallel(bytes.chunks(step).zip(handles).enumerate(), |(i, (part, f))| write_at(f, part, at.offset + (i * step) as u64))
     }
 
+    /// Make the file long enough to hold the image `at` describes, without writing it (zeros where
+    /// nothing was written yet): the frame of an effect that ignores its input isn't copied in,
+    /// but the helper still reads or maps it there.
+    pub fn reserve(&mut self, at: &ImageRef) -> Result<(), String> {
+        let n = at.pixels().ok_or_else(|| format!("image {}×{} is too large", at.width, at.height))?;
+        let end = (n as u64).checked_mul(16).and_then(|b| b.checked_add(at.offset)).ok_or("frame exchange: image past the end of a file")?;
+        if self.file.metadata().map_err(io)?.len() < end {
+            self.file.set_len(end).map_err(io)?;
+        }
+        Ok(())
+    }
+
     /// Read the image `at` describes into `out` (which must have its size).
     pub fn read_into(&mut self, at: &ImageRef, out: &mut [[f32; 4]]) -> Result<(), String> {
         if at.pixels() != Some(out.len()) {
@@ -96,6 +108,43 @@ impl Exchange {
         let step = slice_len(at, bytes.len())?;
         let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
         in_parallel(bytes.chunks_mut(step).zip(handles).enumerate(), |(i, (part, f))| read_at(f, part, at.offset + (i * step) as u64))
+    }
+
+    /// Read only the rectangle `bounds` (`[x0, y0, x1, y1]`, clamped to the image) of the image
+    /// `at` describes into `out`, and make the rest of `out` transparent: a helper that drew into
+    /// part of the frame only (a particle system's few puffs) costs a fraction of a full read.
+    pub fn read_bounds_into(&mut self, at: &ImageRef, out: &mut [[f32; 4]], bounds: [u32; 4]) -> Result<(), String> {
+        if at.pixels() != Some(out.len()) {
+            return Err(format!("image is {}×{} but the buffer has {} pixels", at.width, at.height, out.len()));
+        }
+        let (w, h) = (at.width as usize, at.height as usize);
+        let x0 = (bounds[0] as usize).min(w);
+        let x1 = (bounds[2] as usize).clamp(x0, w);
+        let y0 = (bounds[1] as usize).min(h);
+        let y1 = (bounds[3] as usize).clamp(y0, h);
+        // (empty: a fully transparent result)
+        if x0 == x1 || y0 == y1 {
+            out.fill([0.0; 4]);
+            return Ok(());
+        }
+        let (above, rest) = out.split_at_mut(y0 * w);
+        let (band, below) = rest.split_at_mut((y1 - y0) * w);
+        above.fill([0.0; 4]);
+        below.fill([0.0; 4]);
+        // Whole rows, one contiguous range in a few parallel slices: far fewer reads than row by
+        // row (a read per row cost more than the copying), then the columns outside cleared.
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(band);
+        let step = slice_len(bytes.len());
+        let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
+        let start = at.offset + (y0 * w * 16) as u64;
+        in_parallel(bytes.chunks_mut(step).zip(handles).enumerate(), |(i, (part, f))| read_at(f, part, start + (i * step) as u64))?;
+        if x0 > 0 || x1 < w {
+            for row in band.chunks_mut(w) {
+                row.get_mut(..x0).unwrap_or_default().fill([0.0; 4]);
+                row.get_mut(x1..).unwrap_or_default().fill([0.0; 4]);
+            }
+        }
+        Ok(())
     }
 
     /// `n` handles to the file, one per slice.
@@ -224,6 +273,23 @@ mod tests {
         let wraps = ImageRef { offset: u64::MAX - 16, ..big };
         assert!(a.write(&wraps, &px).is_err_and(|e| e.contains("out of range")));
         assert!(b.read(&wraps).is_err_and(|e| e.contains("out of range")));
+        // Bounds: only that rectangle is read and the rest of the buffer is made transparent,
+        // whatever it held; bounds past the image are clamped, empty ones clear everything.
+        let mut out = vec![[9.0f32; 4]; px.len()];
+        a.read_bounds_into(&big, &mut out, [100, 200, 900, 1000]).unwrap();
+        for (i, (o, p)) in out.iter().zip(&px).enumerate() {
+            let (x, y) = (i % 1023, i / 1023);
+            let inside = (100..900).contains(&x) && (200..1000).contains(&y);
+            assert_eq!(*o, if inside { *p } else { [0.0; 4] }, "pixel {x},{y}");
+        }
+        out.fill([9.0; 4]);
+        a.read_bounds_into(&big, &mut out, [1000, 1020, 5000, 9000]).unwrap();
+        assert_eq!(out[1024 * 1023 + 1022], px[1024 * 1023 + 1022]);
+        assert_eq!(out[1024 * 1023 + 999], [0.0; 4]);
+        out.fill([9.0; 4]);
+        a.read_bounds_into(&big, &mut out, [500, 500, 500, 900]).unwrap();
+        assert!(out.iter().all(|o| *o == [0.0; 4]));
+        assert!(a.read_bounds_into(&at, &mut out, [0, 0, 1, 1]).is_err(), "size mismatch is an error");
         let p = a.path().to_path_buf();
         a.unlink();
         drop(a);

@@ -478,8 +478,16 @@ impl Helper {
             &Request::Hello {
                 version: PROTOCOL_VERSION,
                 frames,
-                // `gradient_params`: manifests may declare `gradient` parameters
-                features: vec!["layer_transform".into(), "comp_camera".into(), "comp_camera_time".into(), "comp_lights".into(), "gradient_params".into()],
+                // `gradient_params`: manifests may declare `gradient` parameters; `frame_bounds`: it
+                // honours `ignores_input` and the `bounds` of `done`
+                features: vec![
+                    "layer_transform".into(),
+                    "comp_camera".into(),
+                    "comp_camera_time".into(),
+                    "comp_lights".into(),
+                    "gradient_params".into(),
+                    "frame_bounds".into(),
+                ],
             },
             load_timeout(),
         ) {
@@ -533,7 +541,17 @@ impl Helper {
     /// Render one frame through the helper. Images live on a stack in the exchange file: the
     /// frame first, then whatever the helper asks for, freed again when the render ends (nested
     /// renders stack above).
-    fn render(&self, effect: &str, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), Failure> {
+    /// Render `effect` on `frame` in place. `ignores_input`: the effect makes a new image, so the
+    /// frame isn't copied into the exchange file first.
+    fn render(
+        &self,
+        effect: &str,
+        frame: &mut PluginFrame,
+        params: &PluginParams,
+        time: f64,
+        host: &dyn PluginHost,
+        ignores_input: bool,
+    ) -> Result<(), Failure> {
         let _turn = self.take_turn().map_err(Failure::Refused)?;
         // The generation of the process this render runs on: taken inside `with_conn`, which
         // may start the process (after a crash or `stop`), so it is never that of a dead one.
@@ -541,7 +559,8 @@ impl Helper {
             let base = c.top;
             let at = c.alloc(frame.width, frame.height, frame.origin, frame.scale).map_err(Failure::Refused)?;
             // Nothing is sent yet, so the helper is fine (a full disk, say): not its fault.
-            if let Err(e) = c.exchange.write(&at, frame.pixels) {
+            let put = if ignores_input { c.exchange.reserve(&at) } else { c.exchange.write(&at, frame.pixels) };
+            if let Err(e) = put {
                 c.top = base;
                 return Err(Failure::Refused(e));
             }
@@ -557,6 +576,7 @@ impl Helper {
             texts: params.texts.to_vec(),
             frame_rate: host.frame_rate(),
             frame_range: host.frame_range(),
+            params_digest: host.params_digest(),
         });
         let result = self.converse(req, frame, &at, host, started);
         // Free this render's images (if the same process is still running).
@@ -573,7 +593,10 @@ impl Helper {
         loop {
             let reply = self.with_running(started, |c| c.call(&next, render_timeout()))?;
             next = match reply {
-                Reply::Done => return self.with_running(started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
+                Reply::Done { bounds: None } => return self.with_running(started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
+                Reply::Done { bounds: Some(b) } => {
+                    return self.with_running(started, |c| c.exchange.read_bounds_into(at, frame.pixels, b).map_err(Failure::Broken));
+                }
                 Reply::Error { message } => return Err(Failure::Refused(message)),
                 // Host callbacks run without holding the process, so they may render through
                 // this helper again (on this thread: the turn is re-entered).
@@ -623,11 +646,12 @@ pub struct HelperEffect {
     manifest: PluginManifest,
     padding: bool,
     time_varying: bool,
+    ignores_input: bool,
 }
 
 impl HelperEffect {
     pub fn new(helper: Arc<Helper>, remote: RemoteEffect) -> HelperEffect {
-        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, time_varying: remote.time_varying }
+        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, time_varying: remote.time_varying, ignores_input: remote.ignores_input }
     }
 }
 
@@ -691,7 +715,7 @@ impl EffectPlugin for HelperEffect {
                 blocklist::CRASH_LIMIT
             ));
         }
-        match self.helper.render(id, frame, params, time, host) {
+        match self.helper.render(id, frame, params, time, host, self.ignores_input) {
             Ok(()) => Ok(()),
             Err(Failure::Refused(e)) => Err(e),
             Err(Failure::Broken(e)) => {

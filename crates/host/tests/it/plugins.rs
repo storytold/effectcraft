@@ -131,6 +131,78 @@ fn plugins_take_gradient_parameters() {
     register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.plainramp", None) })).unwrap();
 }
 
+/// Records the parameter digest each render sees.
+struct Digests {
+    m: PluginManifest,
+}
+
+static SEEN: std::sync::Mutex<Vec<Option<u64>>> = std::sync::Mutex::new(Vec::new());
+
+impl EffectPlugin for Digests {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+        Ok(())
+    }
+    fn render_v2(
+        &self,
+        _frame: &mut PluginFrame,
+        _params: &PluginParams,
+        _time: f64,
+        host: &dyn effectcraft_engine::effects::plugin::PluginHost,
+    ) -> Result<(), String> {
+        SEEN.lock().unwrap().push(host.params_digest());
+        Ok(())
+    }
+    // (every frame renders: no cached frame hides a call)
+    fn reads_other_times(&self) -> bool {
+        true
+    }
+}
+
+/// A plug-in sees a digest of its parameter data: the same on every frame while nothing is
+/// edited, different after an edit, and absent while a parameter has an expression (helpers then
+/// re-read their parameter history).
+#[test]
+fn plugins_see_a_params_digest() {
+    let m = PluginManifest {
+        api: 2,
+        id: "org.test.digest".into(),
+        name: "Digest".into(),
+        category: "Utility".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![PluginParam {
+            id: "amount".into(),
+            name: "Amount".into(),
+            group: String::new(),
+            kind: PluginParamKind::Slider { default: 1.0, min: 0.0, max: 10.0, slider_min: None, slider_max: None, decimals: 2, integer: false },
+        }],
+    };
+    register_plugin(Arc::new(Digests { m })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.digest"})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |s: &Session, t: f64| {
+        let n = SEEN.lock().unwrap().len();
+        s.render(cid, Tick::from_seconds_f64(t), Default::default());
+        let seen = SEEN.lock().unwrap();
+        assert!(seen.len() > n, "the render at {t} called the plug-in");
+        *seen.last().unwrap()
+    };
+    let first = at(&s, 0.0);
+    assert!(first.is_some());
+    assert_eq!(at(&s, 0.5), first, "the same digest while nothing is edited");
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/amount", "value": 2.0})).unwrap();
+    let edited = at(&s, 0.6);
+    assert!(edited.is_some() && edited != first);
+    assert_eq!(at(&s, 0.7), edited);
+    s.execute("prop.setExpression", json!({"layer": l, "path": "effects/#1/amount", "expression": "time"})).unwrap();
+    assert_eq!(at(&s, 0.8), None);
+}
+
 /// Build the example plug-in (skipped when the wasm32 target isn't installed).
 fn build_example() -> Option<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/posterize-bands");

@@ -426,6 +426,10 @@ pub trait PluginHost {
     }
     /// All flattened parameter values (and texts) at another layer time.
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)>;
+    /// [`crate::EffectHost::params_digest`] of the effect being rendered.
+    fn params_digest(&self) -> Option<u64> {
+        None
+    }
     /// Composition frame rate (30 when unknown).
     fn frame_rate(&self) -> f64;
     /// Layer time of the current render, seconds.
@@ -853,6 +857,10 @@ impl PluginHost for RenderHost<'_, '_> {
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
         let p = self.ctx.env.host?.params_at(layer_time)?;
         Some((flatten_params(self.manifest, &p, self.offset, self.scale), flatten_texts(self.manifest, &p)))
+    }
+
+    fn params_digest(&self) -> Option<u64> {
+        self.ctx.env.host?.params_digest()
     }
 
     fn frame_rate(&self) -> f64 {

@@ -138,6 +138,27 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(self.layer, pr)))
     }
 
+    fn params_digest(&self) -> Option<u64> {
+        fn any_expression(g: &effectcraft_project::PropGroup) -> bool {
+            g.props().any(|p| p.has_expression()) || g.groups().any(any_expression)
+        }
+        /// Feeds formatted text straight into a hasher (no string is built).
+        struct Feed(std::collections::hash_map::DefaultHasher);
+        impl std::fmt::Write for Feed {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                std::hash::Hasher::write(&mut self.0, s.as_bytes());
+                Ok(())
+            }
+        }
+        let g = self.layer.effects()?.groups().nth(self.index)?;
+        if any_expression(g) {
+            return None;
+        }
+        let mut h = Feed(std::collections::hash_map::DefaultHasher::new());
+        std::fmt::Write::write_fmt(&mut h, format_args!("{g:?}")).ok()?;
+        Some(std::hash::Hasher::finish(&h.0))
+    }
+
     fn param_at(&self, effect_index: usize, id: &str, layer_time: f64) -> Option<effectcraft_keyframe::Value> {
         // Only the one property: a simulation samples it at every step. Its keyframes are read
         // at the requested layer time exactly (mapping it to comp time and back rounds under a

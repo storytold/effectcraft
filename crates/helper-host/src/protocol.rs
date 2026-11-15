@@ -81,6 +81,12 @@ pub struct RenderRequest {
     /// The layer's source range in layer-time seconds, when it has one.
     #[serde(default)]
     pub frame_range: Option<(f64, f64)>,
+    /// A digest of the instance's parameter data, absent when a parameter has an expression
+    /// ([`effectcraft_effects::EffectHost::params_digest`]): the same digest as the instance's
+    /// last render means every parameter has the same value at every time as then, so a
+    /// simulation can skip re-reading its history with `params_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params_digest: Option<u64>,
 }
 
 /// EffectCraft → helper.
@@ -89,8 +95,10 @@ pub struct RenderRequest {
 pub enum Request {
     /// First message: the protocol version and the frame exchange file to open (read + write).
     /// `features` lists optional callbacks this host answers (`"layer_transform"`:
-    /// [`Reply::LayerTransform`]) and optional manifest kinds it accepts (`"gradient_params"`:
-    /// `gradient` parameters, sent as JSON among the texts); hosts without the field have none.
+    /// [`Reply::LayerTransform`]), optional manifest kinds it accepts (`"gradient_params"`:
+    /// `gradient` parameters, sent as JSON among the texts) and `"frame_bounds"` (it honours
+    /// [`RemoteEffect::ignores_input`] and the `bounds` of [`Reply::Done`]); hosts without the
+    /// field have none.
     Hello {
         version: u32,
         frames: String,
@@ -138,6 +146,12 @@ pub struct RemoteEffect {
     /// renders every frame. Absent means false, as before; hosts without the field ignore it.
     #[serde(default)]
     pub time_varying: bool,
+    /// Whether the effect never reads its input frame (it makes a new image, as a particle
+    /// system does): EffectCraft then doesn't copy the layer into the exchange file, so the
+    /// helper must write every pixel it returns (the whole frame, or everything inside the
+    /// `bounds` of [`Reply::Done`]). Absent means false; hosts without the field always copy.
+    #[serde(default)]
+    pub ignores_input: bool,
 }
 
 /// Helper → EffectCraft.
@@ -194,8 +208,14 @@ pub enum Reply {
     CompLights {
         time: f64,
     },
-    /// The render finished; the result is in the request's frame.
-    Done,
+    /// The render finished; the result is in the request's frame. `bounds` (`[x0, y0, x1, y1]`,
+    /// pixels of that frame, end exclusive): only that rectangle was written and the result is
+    /// transparent outside it, so EffectCraft reads back just the rectangle. Absent: the whole
+    /// frame (hosts without the field always read it all).
+    Done {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bounds: Option<[u32; 4]>,
+    },
     /// The request failed (the helper keeps running).
     Error {
         message: String,
@@ -244,6 +264,13 @@ mod tests {
         assert_eq!(old, Request::Hello { version: 1, frames: "f".into(), features: vec![] });
         let new = Request::Hello { version: 1, frames: "f".into(), features: vec!["layer_transform".into()] };
         assert_eq!(serde_json::from_str::<Request>(&request_line(&new).unwrap()).unwrap(), new);
+        // `done` with or without bounds; an effect without `ignores_input` copies its input
+        let done = parse_reply(r#"@ec-helper {"op":"done"}"#).unwrap().unwrap();
+        assert_eq!(done, Reply::Done { bounds: None });
+        let b = Reply::Done { bounds: Some([1, 2, 30, 40]) };
+        assert_eq!(parse_reply(&reply_line(&b).unwrap()).unwrap().unwrap(), b);
+        let e: RemoteEffect = serde_json::from_str(r#"{"manifest":{"api":2,"id":"a.b","name":"B","category":"C"}}"#).unwrap();
+        assert!(!e.ignores_input && !e.time_varying);
         let r = Reply::LayerTransform { param: "emitter_layer".into(), time: 0.5 };
         assert_eq!(parse_reply(&reply_line(&r).unwrap()).unwrap().unwrap(), r);
         let c = Request::Camera {

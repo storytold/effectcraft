@@ -39,6 +39,11 @@ pub trait Provider {
     fn load(&mut self, _path: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
         Err("this helper does not load files".into())
     }
+    /// Whether `effect` never reads its input frame (it makes a new image): EffectCraft then
+    /// doesn't copy the layer in (`ignores_input`; the frame reads as zeros or stale pixels).
+    fn ignores_input(&self, _effect: &dyn EffectPlugin) -> bool {
+        false
+    }
     /// Whether EffectCraft should ask for padding before each render of `effect`.
     fn wants_padding(&self, _effect: &dyn EffectPlugin) -> bool {
         true
@@ -112,7 +117,12 @@ impl Server<'_> {
                 errors.push(format!("{}: needs a newer EffectCraft (gradient parameters)", manifest.id));
                 continue;
             }
-            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), time_varying: e.reads_other_times(), manifest: manifest.clone() });
+            effects.push(RemoteEffect {
+                padding: self.provider.wants_padding(e.as_ref()),
+                time_varying: e.reads_other_times(),
+                ignores_input: self.provider.ignores_input(e.as_ref()),
+                manifest: manifest.clone(),
+            });
             self.effects.insert(manifest.id, e);
         }
         self.send(&Reply::Effects { effects, errors })
@@ -150,7 +160,7 @@ impl Server<'_> {
                 self.send(&Reply::Padding { pixels })
             }
             Request::Render(r) => match self.render(&r) {
-                Ok(()) => self.send(&Reply::Done),
+                Ok(()) => self.send(&Reply::Done { bounds: None }),
                 Err(message) => self.send(&Reply::Error { message }),
             },
             Request::Destroy { instance } => {
