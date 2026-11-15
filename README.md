@@ -172,8 +172,9 @@ cannot express; File ▸ Import ▸ Lottie… opens one as a new composition.
 
 Engine commands are available through the CLI, JSON control channel and MCP. UI-only commands
 need the running app's frontend dispatcher: complete menu access requires the app's control
-channel or an attached MCP bridge. Headless sessions accept registered frontend-only commands such as
-`app.about` as no-ops; actual UI actions and bridge-only `ui_*` tools require the running app.
+channel or an attached MCP bridge. In headless sessions, registered frontend-only commands still
+undergo their normal enablement checks and perform no UI action. Actual UI actions and bridge-only
+`ui_*` tools require the running app.
 
 - **MCP server:** `effectcraft-cli mcp` speaks the Model Context Protocol over stdio, headless
   or bridged to the running app (`--bridge 9877`). Tools cover commands, the project and property
