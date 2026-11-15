@@ -128,6 +128,11 @@ const POOL_BUDGET: usize = 256 << 20;
 /// miss (a new allocation), never a wrong pixel.
 const STALE_FRAMES: u64 = 2;
 
+/// The pool owner of uploaded textures: never registered by an [`Enc`] (their ids start at 1),
+/// so an upload takes only from the shared free list ([`Pool::take`], textures no open encoder
+/// can read) and gives its texture back through the guarded [`Pool::release`].
+const UPLOAD_OWNER: u64 = 0;
+
 /// Readback staging buffers kept for reuse across sizes (bytes).
 const STAGING_BUDGET: u64 = 256 << 20;
 
@@ -693,6 +698,10 @@ pub struct GpuContext {
     dummy_tex: wgpu::TextureView,
     dummy_buf: wgpu::Buffer,
     uploads: Mutex<Uploads>,
+    /// Uploaded footage pictures, shared by the layers that show them (see [`crate::upload`]).
+    pictures: Mutex<crate::upload::Pictures>,
+    /// Reused staging buffers of large uploads (see [`crate::upload::Staging`]).
+    upload_staging: crate::upload::Staging,
     upload_budget: std::sync::atomic::AtomicUsize,
     upload_full_warned: std::sync::atomic::AtomicBool,
     pool: Arc<Mutex<Pool>>,
@@ -1017,6 +1026,8 @@ impl GpuContext {
             dummy,
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
+            pictures: Default::default(),
+            upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
             pool,
@@ -1124,6 +1135,24 @@ impl GpuContext {
         }
     }
 
+    /// The memory budget (the memory cap: a conservative share of the device, see `memcap`),
+    /// the allocator's peak, one frame's share of it and what the upload cache may still add.
+    /// `None` where any is unknown: no allocator report (Metal, WebGPU, GL) or the cap is off.
+    pub fn frame_memory(&self) -> Option<effectcraft_render::FrameMemory> {
+        let budget = self.memcap.cap();
+        let now = self.allocated_bytes();
+        self.memcap.note(now);
+        // The allocator's peak (sampled while frames render) holds a frame's working textures
+        // at their most; what is gone again after the frame (and at least what the pool keeps
+        // for the next) is one frame's share. Frames that had to wait for memory: no room.
+        let peak = self.memcap.peak();
+        let frame = if self.memcap.pressed() { budget } else { peak.saturating_sub(now).max(self.pool_retained_bytes() as u64) };
+        // The upload cache may still fill up to its budget.
+        let uploads = self.uploads.lock().map(|u| u.bytes).unwrap_or(0);
+        let reserve = self.upload_budget().saturating_sub(uploads) as u64;
+        (budget > 0 && peak > 0 && frame > 0).then_some(effectcraft_render::FrameMemory { budget, peak, frame, reserve })
+    }
+
     /// Bytes held by wgpu's device allocator (`0` on backends that do not report).
     pub(crate) fn allocated_bytes(&self) -> u64 {
         self.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
@@ -1132,11 +1161,11 @@ impl GpuContext {
     /// Bytes held in long-lived or still-referenced GPU caches/leases that submitting and waiting
     /// on `owner` (`closing_enc`) cannot free.
     fn kept_bytes(&self, owner: u64, closing_enc: Option<u64>) -> u64 {
-        let uploads = self.uploads.lock().map(|u| u.bytes as u64).unwrap_or(0);
+        // (uploaded layer and footage textures are pooled: the pool's leases count them)
         let pool = self.pool.lock().map(|p| p.kept_after_flush(owner, closing_enc) as u64).unwrap_or(0);
         let staging: u64 = self.staging.lock().map(|s| s.iter().map(|(k, v)| k * v.len() as u64).sum()).unwrap_or(0);
         let zeros: u64 = self.zeros.lock().map(|z| z.keys().map(|&(w, h)| w as u64 * h as u64 * 16).sum()).unwrap_or(0);
-        uploads + pool + staging + zeros
+        pool + staging + self.upload_staging.bytes() + zeros
     }
 
     #[cfg(test)]
@@ -1198,18 +1227,99 @@ impl GpuContext {
     /// never consumes the readback deadline or holds the mutex across the whole timeout.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read_buffer(&self, buffer: &wgpu::Buffer, row: usize, stride: usize, height: usize) -> Result<Vec<u8>, String> {
+        self.read_buffer_after(buffer, None, row, stride, height)
+    }
+
+    /// [`Self::read_buffer`] waiting only for `submission` (the one that wrote `buffer`), not
+    /// for every submission so far: another frame's GPU work submitted meanwhile doesn't hold
+    /// this readback up (#3335). `None`: wait for all submitted work.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_buffer_after(
+        &self,
+        buffer: &wgpu::Buffer,
+        submission: Option<wgpu::SubmissionIndex>,
+        row: usize,
+        stride: usize,
+        height: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.read_mapped(buffer, submission, |view| crate::readback::packed(view, row, stride, height))
+    }
+
+    /// Map `buffer`, wait for the mapping (only for `submission` when given) and hand the
+    /// mapped bytes to `read`, on this thread, before unmapping: `read` copies the rows
+    /// straight into their destination, once (#3335). The copy happens outside `poll_lock`, so
+    /// it doesn't hold up other threads' readbacks the way copying inside the map callback
+    /// (which runs during a device poll) would.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_mapped<R>(
+        &self,
+        buffer: &wgpu::Buffer,
+        submission: Option<wgpu::SubmissionIndex>,
+        read: impl FnOnce(&[u8]) -> Result<R, String>,
+    ) -> Result<R, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.map_readback(buffer, row, stride, height, move |r| {
+        let ticket = self.readbacks.start(move |r| {
             let _ = tx.send(r);
+        })?;
+        if !ticket.active() {
+            return Err("GPU readback cancelled".into());
+        }
+        let b = buffer.clone();
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            // Timed out or cancelled: nobody reads the mapping.
+            if !ticket.active() {
+                b.unmap();
+                return;
+            }
+            // Mapped: the waiting thread reads the rows and unmaps (an empty vector = mapped).
+            ticket.complete(r.map(|_| Vec::new()).map_err(|e| format!("GPU buffer mapping: {e}")));
         });
+        // On any failure, unmap (harmless when not mapped; cancels a pending map) so a mapped
+        // buffer can never be handed out again.
+        let fail = |e: String| {
+            buffer.unmap();
+            e
+        };
+        self.wait_mapped(&rx, submission).map_err(fail)?.map_err(fail)?;
+        let result = {
+            let view = buffer.get_mapped_range(..).map_err(|e| format!("GPU mapped range: {e}"));
+            view.and_then(|view| read(&view))
+        };
+        buffer.unmap();
+        result
+    }
+
+    /// Poll until `rx` reports the mapping (see [`Self::read_mapped`]): polling and receiving
+    /// share one deadline, started once `poll_lock` is first acquired and polled in
+    /// [`Self::POLL_SLICE`] slices so lock contention never consumes the readback deadline or
+    /// holds the mutex across the whole timeout. While another thread holds `poll_lock` it is
+    /// polling the device, which delivers this mapping too: wait for it instead of queueing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait_mapped(
+        &self,
+        rx: &std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+        submission: Option<wgpu::SubmissionIndex>,
+    ) -> Result<Result<Vec<u8>, String>, String> {
         let mut deadline = None;
         loop {
             self.readbacks.check()?;
             if let Ok(result) = rx.try_recv() {
-                return result;
+                return Ok(result);
             }
             let (remaining, slice, poll_res) = {
-                let _guard = self.poll_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let _guard = match self.poll_lock.try_lock() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        match rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                            Ok(result) => return Ok(result),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(e) => return Err(format!("GPU readback completion channel: {e}")),
+                        }
+                        // The ticket's own deadline still bounds a wait that never gets the lock.
+                        continue;
+                    }
+                };
                 self.readbacks.check()?;
                 let d = *deadline.get_or_insert_with(|| std::time::Instant::now() + crate::readback::TIMEOUT);
                 let remaining = d.saturating_duration_since(std::time::Instant::now());
@@ -1217,12 +1327,12 @@ impl GpuContext {
                     (remaining, std::time::Duration::ZERO, Ok(wgpu::PollStatus::Poll))
                 } else {
                     let slice = remaining.min(Self::POLL_SLICE);
-                    let res = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(slice) });
+                    let res = self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) });
                     (remaining, slice, res)
                 }
             };
             if let Ok(result) = rx.try_recv() {
-                return result;
+                return Ok(result);
             }
             if remaining.is_zero() {
                 let error = "GPU readback receive timed out; context retired".to_string();
@@ -1241,7 +1351,7 @@ impl GpuContext {
             }
             // The callback may be running on another thread that polled the same device.
             match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(1))) {
-                Ok(result) => return result,
+                Ok(result) => return Ok(result),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(e) => return Err(format!("GPU readback completion channel: {e}")),
             }
@@ -1250,6 +1360,28 @@ impl GpuContext {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn read_buffer(&self, _buffer: &wgpu::Buffer, _row: usize, _stride: usize, _height: usize) -> Result<Vec<u8>, String> {
+        Err("synchronous GPU readback is unavailable in the browser".into())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn read_buffer_after(
+        &self,
+        _buffer: &wgpu::Buffer,
+        _submission: Option<wgpu::SubmissionIndex>,
+        _row: usize,
+        _stride: usize,
+        _height: usize,
+    ) -> Result<Vec<u8>, String> {
+        Err("synchronous GPU readback is unavailable in the browser".into())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn read_mapped<R>(
+        &self,
+        _buffer: &wgpu::Buffer,
+        _submission: Option<wgpu::SubmissionIndex>,
+        _read: impl FnOnce(&[u8]) -> Result<R, String>,
+    ) -> Result<R, String> {
         Err("synchronous GPU readback is unavailable in the browser".into())
     }
 
@@ -1446,6 +1578,8 @@ impl GpuContext {
             dummy: self.dummy.clone(),
             dummy_buf: self.dummy_buf.clone(),
             uploads: Mutex::new(Uploads::default()),
+            pictures: Default::default(),
+            upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
             pool: self.pool.clone(),
@@ -1625,14 +1759,52 @@ impl GpuContext {
             return None;
         }
         self.transfers.count(true, img.data.len() * 16);
-        let g = self.image(img.width, img.height);
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &g.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&img.data),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width * 16), rows_per_image: Some(img.height) },
-            wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
-        );
+        // A texture from the pool's shared free list: no open encoder can still read it, and the
+        // copy below runs before anything recorded after this call.
+        let (g, _) = self.pooled(img.width, img.height, UPLOAD_OWNER);
+        if !self.upload_staging.write(&self.device, &self.queue, img, &g.texture) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &g.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&img.data),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width * 16), rows_per_image: Some(img.height) },
+                wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
+            );
+        }
         Some(g)
+    }
+
+    /// Upload a decoded footage picture once while the footage source keeps it: every layer
+    /// and effect input showing the same frame shares the texture (`Renderer::footage_picture`).
+    pub(crate) fn upload_picture(&self, img: &Arc<Image>) -> Option<GpuImage> {
+        if let Some(t) = self.pictures.lock().ok().and_then(|mut p| p.get(img)) {
+            return Some(t);
+        }
+        let tex = self.upload_image(img)?;
+        if let Ok(mut p) = self.pictures.lock() {
+            p.insert(img, tex.clone(), crate::upload::PICTURE_BUDGET.min(self.upload_budget() / 4));
+        }
+        Some(tex)
+    }
+
+    /// Entries in the footage picture cache.
+    #[cfg(test)]
+    pub(crate) fn picture_entries(&self) -> usize {
+        self.pictures.lock().map(|p| p.len()).unwrap_or_default()
+    }
+
+    /// The upload staging buffers (tests).
+    #[cfg(test)]
+    pub(crate) fn upload_staging(&self) -> &crate::upload::Staging {
+        &self.upload_staging
+    }
+
+    /// A render is done: drop the footage picture textures and the upload staging buffers
+    /// (the next render's pictures upload again; their textures come from the pool).
+    pub fn trim_uploads(&self) {
+        if let Ok(mut p) = self.pictures.lock() {
+            p.clear();
+        }
+        self.upload_staging.clear();
     }
 
     /// Entries in the layer upload cache.
@@ -1696,6 +1868,10 @@ impl GpuContext {
             u.map.clear();
             u.bytes = 0;
         }
+        if let Ok(mut p) = self.pictures.lock() {
+            p.clear();
+        }
+        self.upload_staging.clear();
         if let Ok(mut p) = self.pool.lock() {
             p.clear();
         }
@@ -1952,6 +2128,11 @@ impl<'g> Enc<'g> {
         dst
     }
 
+    /// The last submission of this encoder's work (what a readback after it waits for).
+    pub(crate) fn last_submission(&self) -> Option<wgpu::SubmissionIndex> {
+        self.last_submit.clone()
+    }
+
     /// Submit recorded work.
     pub fn submit(&mut self) {
         if let Some((enc, id)) = self.enc.take() {
@@ -1970,6 +2151,7 @@ impl<'g> Enc<'g> {
             return;
         }
         let allocated = self.g.allocated_bytes();
+        self.g.memcap.note(allocated);
         if allocated <= self.g.memcap.cap() {
             let _ = self.g.memcap.should_wait(allocated, 0);
             return;
@@ -1994,13 +2176,13 @@ impl<'g> Enc<'g> {
         let layout = crate::readback::Layout::new(img.width, img.height, 16, self.g.device.limits().max_buffer_size)
             .map_err(|e| log::error!("gpu image readback: {e}"))
             .ok()?;
-        let mut data = Vec::new();
-        data.try_reserve_exact(layout.len / 16).map_err(|e| log::error!("gpu image allocation: {e}")).ok()?;
-        data.resize(layout.len / 16, [0.0; 4]);
-        let mut out = Image { width: img.width, height: img.height, data };
-        let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out.data);
-        self.read_texture_into(&img.texture, [0, 0, img.width, img.height], 16, dst)?;
-        Some(out)
+        // The mapped rows go straight into the image's pixels: one copy (#3335).
+        let data: Vec<[f32; 4]> = self.read_texture_with(&img.texture, [0, 0, img.width, img.height], 16, crate::readback::rows::<[f32; 4]>)?;
+        if data.len() != layout.len / 16 {
+            log::error!("gpu image readback size mismatch");
+            return None;
+        }
+        Some(Image { width: img.width, height: img.height, data })
     }
 
     /// Tightly packed texel bytes of a texture (`bpp` bytes per pixel).
@@ -2013,27 +2195,32 @@ impl<'g> Enc<'g> {
     pub fn read_rect(&mut self, texture: &wgpu::Texture, x: u32, y: u32, w: u32, h: u32, bpp: u32) -> Option<Vec<u8>> {
         let layout =
             crate::readback::Layout::new(w, h, bpp, self.g.device.limits().max_buffer_size).map_err(|e| log::error!("gpu texture readback: {e}")).ok()?;
-        let mut out = Vec::new();
-        out.try_reserve_exact(layout.len).map_err(|e| log::error!("gpu readback allocation: {e}")).ok()?;
-        out.resize(layout.len, 0);
-        self.read_texture_into(texture, [x, y, w, h], bpp, &mut out)?;
+        let out: Vec<u8> = self.read_texture_with(texture, [x, y, w, h], bpp, crate::readback::rows::<u8>)?;
+        if out.len() != layout.len {
+            log::error!("gpu texture readback size mismatch");
+            return None;
+        }
         Some(out)
     }
 
-    /// [`Enc::read_rect`] into `out` (`w × bpp × h` bytes), through a reused staging buffer.
-    /// `rect` is `[x, y, w, h]`.
-    fn read_texture_into(&mut self, texture: &wgpu::Texture, rect: [u32; 4], bpp: u32, out: &mut [u8]) -> Option<()> {
+    /// Read `rect` (`[x, y, w, h]`) of `texture` back through a reused staging buffer: `read`
+    /// gets the mapped bytes, the row length, the padded row stride and the row count, and
+    /// copies the rows into their destination itself (one copy, #3335). Waits only for this
+    /// encoder's own submission, so frames rendering on other threads don't delay it.
+    fn read_texture_with<R>(
+        &mut self,
+        texture: &wgpu::Texture,
+        rect: [u32; 4],
+        bpp: u32,
+        read: impl FnOnce(&[u8], usize, usize, usize) -> Result<R, String>,
+    ) -> Option<R> {
         let [x, y, w, h] = rect;
         if !self.g.can_wait() {
             return None;
         }
-        self.g.transfers.count(false, out.len());
         let layout =
             crate::readback::Layout::new(w, h, bpp, self.g.device.limits().max_buffer_size).map_err(|e| log::error!("gpu texture readback: {e}")).ok()?;
-        if out.len() != layout.len {
-            log::error!("gpu readback destination size mismatch");
-            return None;
-        }
+        self.g.transfers.count(false, layout.len);
         let row = layout.row as usize;
         let padded = layout.stride;
         let size = layout.size;
@@ -2051,12 +2238,11 @@ impl<'g> Enc<'g> {
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
         self.submit();
-        let bytes = self.g.read_buffer(&buf, row, padded as usize, h as usize).map_err(|e| log::error!("gpu texture readback: {e}")).ok()?;
-        if bytes.len() != out.len() {
-            log::error!("gpu texture readback size mismatch");
-            return None;
-        }
-        out.copy_from_slice(&bytes);
+        let out = self
+            .g
+            .read_mapped(&buf, self.last_submit.clone(), |view| read(view, row, padded as usize, h as usize))
+            .map_err(|e| log::error!("gpu texture readback: {e}"))
+            .ok()?;
         // Keep a few staging buffers per size (frames read back at the same size every time).
         // Layers whose bounds change every frame read back at a new size each time: drop the
         // other sizes once over budget, or mapped host memory grows for the whole render (#2081).
@@ -2070,7 +2256,7 @@ impl<'g> Enc<'g> {
                 v.push(buf);
             }
         }
-        Some(())
+        Some(out)
     }
 
     /// [`Enc::read_texture`] without waiting for the GPU (the browser's main thread can't): `done`

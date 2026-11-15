@@ -133,7 +133,7 @@ fn radial_fast(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 }
 
 fn camera_lens(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
-    let r = ctx.params.f("blurRadius").max(0.0) * b.scale;
+    let r = effectcraft_effects::camera_lens_radius(ctx, b.scale);
     if r < 0.5 {
         return Some(b);
     }
@@ -385,7 +385,7 @@ fn four_color(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         p.f[4 + i] = ctx.params.color(&format!("positionsColors/color{}", i + 1));
     }
     let k = effectcraft_effects::four_color_softening(ctx.params.f("blend"), b.scale);
-    let jitter = (ctx.params.f("jitter") / 100.0).clamp(0.0, 1.0) as f32;
+    let jitter = effectcraft_effects::four_color_jitter(ctx.params.f("jitter"));
     p.u[0] = [gen_mode(ctx.params.e("blendingMode")), ctx.seed, 0, 0];
     p.f[8] = [k as f32, jitter, ctx.params.f("opacity") as f32 / 100.0, 0.0];
     run(e, "gen_fourcolor", &p, b, None, None)

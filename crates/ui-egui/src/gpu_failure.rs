@@ -2,7 +2,9 @@
 //! embedding host, never to a library borrowing its device. This bridge does no device work,
 //! document mutation, file I/O or renderer locking inside a notification.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub use effectcraft_gpu::{ScopedError, ScopedErrorObserver};
 
 type Notifier = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -25,11 +27,22 @@ struct State {
 pub struct GpuFailureBridge {
     state: Arc<Mutex<State>>,
     ctx: egui::Context,
+    scoped_observer: Arc<OnceLock<ScopedErrorObserver>>,
 }
 
 impl GpuFailureBridge {
     pub fn new(ctx: &egui::Context) -> Self {
-        Self { state: Arc::default(), ctx: ctx.clone() }
+        Self { state: Arc::default(), ctx: ctx.clone(), scoped_observer: Arc::default() }
+    }
+
+    /// Register the host observer before handing this bridge to the app. Scoped errors do
+    /// not retire the device: they remain recoverable per-frame observations.
+    pub fn set_scoped_error_observer(&self, observer: impl Fn(ScopedError) + Send + Sync + 'static) -> bool {
+        self.scoped_observer.set(Arc::new(observer)).is_ok()
+    }
+
+    pub(crate) fn scoped_error_observer(&self) -> Option<ScopedErrorObserver> {
+        self.scoped_observer.get().cloned()
     }
 
     pub fn failure(&self) -> Option<GpuFailure> {
@@ -89,6 +102,18 @@ fn notify(notifier: &Notifier, reason: String) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn scoped_observer_is_shared_without_retiring_the_device() {
+        let bridge = GpuFailureBridge::new(&egui::Context::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let copy = seen.clone();
+        assert!(bridge.set_scoped_error_observer(move |error| copy.lock().unwrap().push(error)));
+        assert!(!bridge.set_scoped_error_observer(|_| panic!("must not replace observer")));
+        bridge.clone().scoped_error_observer().unwrap()(ScopedError::Internal);
+        assert_eq!(*seen.lock().unwrap(), [ScopedError::Internal]);
+        assert!(bridge.failure().is_none());
+    }
 
     #[test]
     fn a_construction_failure_is_replayed_after_notifier_registration() {

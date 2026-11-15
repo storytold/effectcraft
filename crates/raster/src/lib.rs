@@ -31,15 +31,36 @@ pub const MAX_PADDED_SIDE: u32 = 30_000;
 /// Clamp (colour ≤ alpha ≤ 1, NaN → 0) and round half up to `levels` steps (`inv` = 1 / levels):
 /// one pixel of an 8/16 bpc buffer. Values are non-negative after the clamp, so the integer
 /// conversion rounds like `round()` and vectorises.
-#[allow(clippy::manual_clamp)] // max/min map NaN to 0; clamp would keep NaN
 #[inline(always)]
 pub fn quantize_px(p: &mut Px, levels: f32, inv: f32) {
-    let a = round_half_up(p[3].max(0.0).min(1.0) * levels) * inv;
+    *p = quantize_levels(*p, levels, inv).map(|n| n * inv);
+}
+
+/// [`quantize_px`]'s steps: the whole number of `levels` each channel rounds to (0..=levels).
+#[allow(clippy::manual_clamp)] // max/min map NaN to 0; clamp would keep NaN
+#[inline(always)]
+pub fn quantize_levels(p: Px, levels: f32, inv: f32) -> [f32; 4] {
+    let na = round_half_up(p[3].max(0.0).min(1.0) * levels);
+    let a = na * inv;
     let hi = [a, a, a, a];
+    let mut n = [0.0, 0.0, 0.0, na];
     for c in 0..3 {
-        p[c] = round_half_up(p[c].max(0.0).min(hi[c]) * levels) * inv;
+        n[c] = round_half_up(p[c].max(0.0).min(hi[c]) * levels);
     }
-    p[3] = a;
+    n
+}
+
+/// [`quantize_px`] at 8 bpc, as bytes: [`expand_u8`] gives back exactly the pixel
+/// [`quantize_px`] writes, so an 8 bpc buffer can be kept in a quarter of the memory.
+#[inline(always)]
+pub fn quantize_px_u8(p: Px) -> [u8; 4] {
+    quantize_levels(p, 255.0, 1.0 / 255.0).map(|n| n as u8)
+}
+
+/// The 8 bpc pixel of [`quantize_px_u8`]'s bytes.
+#[inline(always)]
+pub fn expand_u8(n: [u8; 4]) -> Px {
+    n.map(|v| f32::from(v) * (1.0 / 255.0))
 }
 
 /// `v` (0..=65 535) rounded half up. The same either way; the fastest on each target: x86-64's
@@ -402,6 +423,23 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pixels kept as `quantize_px_u8` bytes expand to the 8 bpc pixel `quantize_px` writes, bit
+    /// for bit: every level, exact halves, out-of-range, negative, NaN and premultiplied colour
+    /// brighter than its alpha.
+    #[test]
+    fn u8_levels_expand_to_the_quantised_pixel() {
+        let mut values: Vec<f32> = (0..=255 * 4).map(|i| i as f32 / (255.0 * 4.0)).collect();
+        values.extend([-0.0, -1.0, 1.0, 1.5, f32::NAN, f32::INFINITY, 0.5 / 255.0, 254.5 / 255.0]);
+        for &a in &[1.0, 0.5, 0.2, 0.0, 2.0, f32::NAN] {
+            for &v in &values {
+                let p = [v, 1.0 - v, v * 0.5, a];
+                let mut want = p;
+                quantize_px(&mut want, 255.0, 1.0 / 255.0);
+                assert_eq!(expand_u8(quantize_px_u8(p)).map(f32::to_bits), want.map(f32::to_bits), "{p:?}");
+            }
+        }
+    }
 
     #[test]
     fn dither_keeps_exact_codes_and_averages_the_rest() {

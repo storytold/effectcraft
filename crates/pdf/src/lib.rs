@@ -34,6 +34,8 @@ pub enum Error {
     NoPages,
     PageOutOfRange(usize),
     NoBoundingBox,
+    /// A VectorCraft document saved without Create PDF-Compatible File.
+    NoCarriedPdf,
     Read(String),
 }
 
@@ -45,6 +47,9 @@ impl std::fmt::Display for Error {
             Error::NoPages => write!(f, "the PDF has no pages"),
             Error::PageOutOfRange(n) => write!(f, "the PDF has no page {}", n.saturating_add(1)),
             Error::NoBoundingBox => write!(f, "the EPS file has no %%BoundingBox"),
+            Error::NoCarriedPdf => {
+                write!(f, "the VectorCraft document holds no PDF; save it in VectorCraft with Create PDF-Compatible File turned on")
+            }
             Error::Read(message) => f.write_str(message),
         }
     }
@@ -53,17 +58,24 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// File extensions read as vector footage by this crate.
-pub const EXTENSIONS: &[&str] = &["pdf", "ai", "eps", "epsf", "epsi"];
+pub const EXTENSIONS: &[&str] = &["pdf", "ai", "eps", "epsf", "epsi", "vectorcraft"];
 
 /// The format of a file, by its first bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Pdf,
     Eps,
+    /// A VectorCraft document (`.vectorcraft`), read through the PDF it carries when it was
+    /// saved with Create PDF-Compatible File: one page per artboard.
+    VectorCraft,
 }
 
-/// Sniff a PDF (`%PDF-` near the start, as PDF-compatible `.ai` files are) or an EPS file.
+/// Sniff a VectorCraft document, a PDF (`%PDF-` near the start, as PDF-compatible `.ai` files
+/// are) or an EPS file. The first 64 KiB suffice.
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
+    if craft_doc::sniff(bytes) == Some(craft_doc::Kind::VectorCraft) {
+        return Some(Format::VectorCraft);
+    }
     let head = &bytes[..bytes.len().min(1024)];
     if head.windows(5).any(|w| w == b"%PDF-") {
         return Some(Format::Pdf);
@@ -74,11 +86,12 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     None
 }
 
-/// A footage codec name for a sniffed file ("PDF", "AI", "EPS").
+/// A footage codec name for a sniffed file ("PDF", "AI", "EPS", "VectorCraft").
 pub fn codec(path: &str, bytes: &[u8]) -> Option<&'static str> {
     let f = sniff(bytes)?;
     let ai = path.to_ascii_lowercase().ends_with(".ai");
     Some(match (f, ai) {
+        (Format::VectorCraft, _) => "VectorCraft",
         (_, true) => "AI",
         (Format::Pdf, false) => "PDF",
         (Format::Eps, false) => "EPS",
@@ -92,20 +105,65 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
 
 /// Parse page `index` of a PDF (EPS files have one page).
 pub fn parse_page(bytes: &[u8], index: usize) -> Result<Doc, Error> {
+    parse_page_framed(bytes, index, Framing::Viewer)
+}
+
+/// Which region of a PDF page becomes the document, and whether `/Rotate` turns it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Framing {
+    /// As a PDF viewer shows the page: its CropBox (else MediaBox), turned by `/Rotate`.
+    #[default]
+    Viewer,
+    /// As After Effects places a PDF or `.ai` as footage: the page's ArtBox clipped to the
+    /// CropBox (else MediaBox) when it has one, else the CropBox, else the MediaBox, with
+    /// `/Rotate` ignored (measured in After Effects 2026 with own files, #3099).
+    Placed,
+}
+
+/// [`parse_page`] with the page framed as `framing` says (EPS files are their bounding box).
+pub fn parse_page_framed(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     match sniff(bytes) {
-        Some(Format::Pdf) => parse_pdf(bytes, index),
+        Some(Format::Pdf) => parse_pdf(bytes, index, framing),
         Some(Format::Eps) => parse_eps(bytes),
+        Some(Format::VectorCraft) => parse_pdf(&carried_pdf(bytes)?, index, framing),
         None => Err(Error::NotVector),
     }
 }
 
 /// Number of pages (1 for EPS).
 pub fn page_count(bytes: &[u8]) -> usize {
+    let pdf_pages = |bytes: &[u8]| object::File::parse(bytes).map(|file| page::pages(&file).len()).unwrap_or(0);
     match sniff(bytes) {
-        Some(Format::Pdf) => object::File::parse(bytes).map(|file| page::pages(&file).len()).unwrap_or(0),
+        Some(Format::Pdf) => pdf_pages(bytes),
         Some(Format::Eps) => 1,
+        Some(Format::VectorCraft) => carried_pdf(bytes).map(|pdf| pdf_pages(&pdf)).unwrap_or(0),
         None => 0,
     }
+}
+
+/// The PDF a VectorCraft document carries: [`Error::NoCarriedPdf`] when it was saved without
+/// Create PDF-Compatible File. The preview is not read, so a damaged preview does not stop the
+/// import.
+fn carried_pdf(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let pdf = craft_doc::rendition(bytes, craft_doc::RenditionKind::Pdf, &carried_limits())
+        .map_err(|e| Error::Read(format!("VectorCraft document: {e}")))?
+        .ok_or(Error::NoCarriedPdf)?;
+    if sniff(&pdf.bytes) != Some(Format::Pdf) {
+        return Err(Error::Read("VectorCraft document: its PDF member is not a PDF".into()));
+    }
+    Ok(pdf.bytes)
+}
+
+/// craft-doc's limits for [`carried_pdf`]: a PDF after the JSON (version 4) may be as large as a
+/// PDF file this crate opens (`craft_pdf::MAX_INPUT_BYTES`); one inline in the JSON as base64
+/// (version 3) stays within `max_json`, about 192 MiB of PDF. `max_total` allows `max_json` (craft-doc's default) for a
+/// compressed document's JSON, and twice `max_entry` for its data up to the PDF's end and the PDF
+/// copied out, which caps what a hostile file can make the import allocate.
+fn carried_limits() -> craft_doc::Limits {
+    let mut limits = craft_doc::Limits::default();
+    limits.max_entry = u64::try_from(craft_pdf::MAX_INPUT_BYTES).unwrap_or(u64::MAX);
+    limits.max_total = limits.max_json.saturating_add(limits.max_entry.saturating_mul(2));
+    limits
 }
 
 /// Build the document: `root` children become layer groups (see the crate docs).
@@ -142,17 +200,22 @@ fn finish(nodes: Vec<Node>, flags: Vec<bool>, skipped: Vec<String>, width: f64, 
     Doc { width, height, root, skipped }
 }
 
-fn parse_pdf(bytes: &[u8], index: usize) -> Result<Doc, Error> {
+/// Page `index` of a PDF framed as `framing` says, as a document in points (y down).
+fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     let file = object::File::parse(bytes)?;
     let pages = page::pages(&file);
     if pages.is_empty() {
         return Err(Error::NoPages);
     }
     let pg = pages.get(index).ok_or(Error::PageOutOfRange(index))?;
-    let [x0, y0, x1, y1] = pg.bbox;
+    let (frame, rotate) = match framing {
+        Framing::Viewer => (pg.bbox, pg.rotate),
+        Framing::Placed => (pg.art.unwrap_or(pg.bbox), 0),
+    };
+    let [x0, y0, x1, y1] = frame;
     let (w, h) = (x1 - x0, y1 - y0);
     // Default user space (y up) → document pixels (y down), with the page's /Rotate.
-    let (to_doc, dw, dh) = match pg.rotate {
+    let (to_doc, dw, dh) = match rotate {
         90 => (Affine::new([0.0, 1.0, 1.0, 0.0, -y0, -x0]), h, w),
         180 => (Affine::new([-1.0, 0.0, 0.0, 1.0, x1, -y0]), w, h),
         270 => (Affine::new([0.0, -1.0, -1.0, 0.0, y1, x1]), h, w),
