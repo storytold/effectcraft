@@ -33,6 +33,17 @@ fn rect_mask(x0: f64, y0: f64, x1: f64, y1: f64) -> MaskShape {
     MaskShape { name: "m".into(), points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]], closed: true, inverted: false }
 }
 
+/// #3492: CC Power Pin's Expansion fields take After Effects' -200..200 at the low end (the
+/// slider still shows 0..100), so `prop.set` and the value editors keep values such as -150.
+#[test]
+fn cc_power_pin_expansion_takes_after_effects_minimum() {
+    let spec = crate::find("ec.distort.ccpowerpin").unwrap();
+    for id in ["expandTop", "expandLeft", "expandRight", "expandBottom"] {
+        let ui = &spec.params.iter().find(|p| p.id == id).unwrap().ui;
+        assert!(matches!(ui, ParamUi::Slider { min, max, .. } if *min == -200.0 && *max == 1000.0), "{id}: {ui:?}");
+    }
+}
+
 #[test]
 fn identity_at_neutral_settings() {
     let im = img(40, 30);
