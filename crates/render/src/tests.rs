@@ -2259,3 +2259,67 @@ fn comp_sampling_space_keeps_a_subpixel_layers_grid() {
     assert_eq!(px.size, [1.0, 1.0]);
     assert_eq!((px.buf.img.width, px.buf.img.height, px.buf.offset, px.buf.scale), (1, 1, [0.0; 2], 0.5));
 }
+
+#[test]
+fn comp_sampling_space_of_a_layer_placed_like_the_owner_keeps_the_read() {
+    use crate::{Buf, EffectHost, FxHost, Image, NoFootage, RenderOpts, Renderer};
+    // Two 200x100 layers at the same place: nothing to resample, the read (here a 3x3 buffer
+    // off its layer's corner) is handed on as is.
+    let (mut p, cid, comp) = setup();
+    let l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    let other = solid(&mut p, &comp, [0.0, 1.0, 0.0], 200, 100);
+    let (lid, oid) = (l.id, other.id.0);
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(l);
+    c.layers.push(other);
+    let c = p.comp(cid).unwrap();
+    let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
+    let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: c.layer(lid).unwrap(), origin: [0.0; 2], index: Default::default(), original: None };
+    let read = effectcraft_effects::LayerPixels { buf: Buf { img: Image::new(3, 3), offset: [5.0, 5.0], scale: 1.0 }, size: [200.0, 100.0] };
+    let px = host.to_comp_space(oid, read);
+    assert_eq!((px.buf.img.width, px.buf.offset, px.size), (3, [5.0, 5.0], [200.0, 100.0]));
+}
+
+/// An adjustment layer's effects run on the comp below: in Comp space its Set Matte's matte
+/// sits where the matte layer is in the comp, not centred on the adjustment layer's footprint.
+#[test]
+fn comp_sampling_space_on_an_adjustment_layer_lines_up_with_the_comp() {
+    let render = |space: u32| {
+        let (mut p, cid, comp) = setup();
+        let mut matte = solid(&mut p, &comp, [1.0, 1.0, 1.0], 40, 40);
+        matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([150.0, 50.0, 0.0]);
+        matte.switches.video = false;
+        // The right half of the comp.
+        let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 100, 100);
+        adj.props.prop_mut("transform/position").unwrap().value = Value::Vec3([150.0, 50.0, 0.0]);
+        adj.switches.adjustment = true;
+        add_effect(
+            &mut p,
+            &mut adj,
+            "ec.channel.setmatte",
+            [100.0, 100.0],
+            &[
+                ("takeMatteFromLayer", Value::Layer(Some(matte.id.0))),
+                ("takeMatteFromLayerSource", Value::Enum(0)),
+                ("takeMatteFromLayerSpace", Value::Enum(space)),
+                ("stretchMatteToFit", Value::Bool(false)),
+                ("compositeMatteWithOriginal", Value::Bool(false)),
+            ],
+        );
+        let bg = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(matte);
+        c.layers.push(adj);
+        c.layers.push(bg);
+        render_frame(&p, cid, Tick::ZERO, 1.0)
+    };
+    let img = render(1);
+    assert!(img.get(150, 50)[3] > 0.99, "inside the matte layer's comp footprint");
+    assert!(img.get(115, 50)[3] < 0.01, "under the adjustment layer, outside the matte");
+    assert!(img.get(50, 50)[3] > 0.99, "outside the adjustment layer");
+    // Layer space: the 40x40 matte is centred on the adjustment layer's size at the comp's
+    // corner, left of the footprint.
+    let img = render(0);
+    assert!(img.get(150, 50)[3] < 0.01);
+}

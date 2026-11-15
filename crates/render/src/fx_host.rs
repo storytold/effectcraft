@@ -100,21 +100,27 @@ impl EffectHost for FxHost<'_, '_, '_> {
 
     fn to_comp_space(&self, id: u64, px: LayerPixels) -> LayerPixels {
         let Some(other) = self.ctx.layer(effectcraft_project::LayerId(id)) else { return px };
-        // Where each effect space sits in the comp. An adjustment layer's effects run on the
-        // comp below, which is already in comp space.
-        let (own_to_comp, size) = if self.layer.switches.adjustment {
+        // Where each effect space sits in the comp, and the pixels the result covers. An
+        // adjustment layer's effects run on the comp below, which is already in comp space; they
+        // still fit a layer parameter to the adjustment layer's own size (`fit_layer`), so the
+        // result reports that size to be used as it is.
+        let (size, _) = self.ctx.effect_bounds(self.layer);
+        let (own_to_comp, extent) = if self.layer.switches.adjustment {
             (Mat3::default(), [self.ctx.comp.width as f64, self.ctx.comp.height as f64])
         } else {
-            let (size, _) = self.ctx.effect_bounds(self.layer);
             (self.ctx.layer_to_comp(self.layer).0 * Mat3::translate(vec2(self.origin[0], self.origin[1])), size)
         };
         // A 3D model or primitive is read as the comp's pixels already (`Renderer::solo_3d`).
         let other_to_comp = if other.source.is_model() { Mat3::default() } else { self.ctx.effect_to_comp(other) };
+        // Both effect spaces sit in the same place in the comp: the read already lines up.
+        if own_to_comp == other_to_comp && px.size == size {
+            return px;
+        }
         // The result is the size of the running layer's own buffer, which the renderer already
         // holds (a layer under a pixel at this scale still gets one): past the largest side a
         // comp can have, keep the layer-space read.
         let scale = px.buf.scale;
-        let (w, h) = (size[0] * scale, size[1] * scale);
+        let (w, h) = (extent[0] * scale, extent[1] * scale);
         let max = f64::from(effectcraft_raster::MAX_PADDED_SIDE);
         if !(scale.is_finite() && scale > 0.0 && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 || w > max || h > max {
             return px;
