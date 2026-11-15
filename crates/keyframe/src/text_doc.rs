@@ -2454,8 +2454,12 @@ three",
     #[test]
     fn deleting_the_first_paragraph_keeps_its_own_settings_and_ownership() {
         let master = |j: Justify| TextDoc { justify: j, ..bubble() };
-        let mut inst = TextDoc { text: "one
-two".into(), ..master(Justify::Left) };
+        let mut inst = TextDoc {
+            text: "one
+two"
+            .into(),
+            ..master(Justify::Left)
+        };
         inst.apply_para(0..1, |p| p.justify = Justify::Center);
         let mut base = master(Justify::Left);
         let justs = |d: &TextDoc| d.paras().iter().map(|p| p.justify).collect::<Vec<_>>();
