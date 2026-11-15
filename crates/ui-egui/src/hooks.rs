@@ -26,8 +26,11 @@ impl FileDialog {
     }
 }
 
-/// Called with the paths a [`FileDialog`] picked (empty: cancelled), from any thread.
-pub type DialogDone = Box<dyn FnOnce(Vec<String>) + Send>;
+/// Called with the paths a [`FileDialog`] picked (empty: cancelled), from any thread, or with
+/// why the dialog couldn't open: the status line shows that and the command doesn't run. On
+/// macOS AppKit can fail to make the panel at all (`+[NSOpenPanel openPanel]` returned nil,
+/// #3084); the host catches that and answers with the error instead of taking the app down.
+pub type DialogDone = Box<dyn FnOnce(Result<Vec<String>, String>) + Send>;
 
 /// Host hooks provided by the native app (file pickers etc.).
 #[derive(Default)]

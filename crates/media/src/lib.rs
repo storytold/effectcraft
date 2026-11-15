@@ -34,7 +34,7 @@ mod webp_anim;
 /// Video decoder counters (time in decoders, samples decoded, seeks, cache hits), for benchmarks.
 pub use filmcraft_codecs::{GopStats, gop_stats};
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
-pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
+pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model, probe_noting};
 
 /// Errors from probing or decoding footage.
 #[derive(Debug, thiserror::Error)]
@@ -66,7 +66,7 @@ impl From<filmcraft_media::MediaError> for MediaError {
 
 /// File extensions recognised as stills.
 pub const STILL_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps"];
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps", "vectorcraft"];
 /// File extensions recognised as audio-only files.
 pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
 pub use effectcraft_project::VIDEO_EXTENSIONS;

@@ -8,6 +8,7 @@ mod groups;
 mod import;
 mod reader;
 mod shading;
+mod vectorcraft;
 
 const CONTENT: &str = "/OC /MC0 BDC\n0 1 0 rg 0 0 200 100 re f\nEMC\n\
 /OC /MC1 BDC\nq 10 10 80 80 re W n\n1 0 0 rg 0 0 50 100 re f\nQ\n\
@@ -748,6 +749,63 @@ fn tiling_patterns_coloured_and_uncoloured() {
     assert_eq!(at(115, 15)[3], 0.0);
 }
 
+/// A pattern cell nests under the page's open clipping groups and the pattern's own groups, and
+/// the render tree stays within the group depth limit that counts all of them.
+#[test]
+fn a_pattern_cell_counts_the_groups_it_is_nested_in() {
+    fn depth(g: &effectcraft_svg::Group) -> usize {
+        1 + g.children.iter().filter_map(|c| if let effectcraft_svg::Node::Group(g) = c { Some(depth(g)) } else { None }).max().unwrap_or(0)
+    }
+    let clips = "0 0 200 100 re W n ".repeat(250);
+    let cell = format!("{} 1 0 0 rg 0 0 10 10 re f", "0 0 20 20 re W n ".repeat(250)).into_bytes();
+    let bytes = page_pdf(
+        &format!("{clips} /Pattern cs /P1 scn 0 0 100 100 re f"),
+        "/Pattern << /P1 10 0 R >>",
+        vec![(10, "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >>".into(), Some(cell))],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(depth(&doc.root) <= 260, "{}", depth(&doc.root));
+    assert!(doc.skipped.iter().any(|s| s == "group nesting limit"), "{:?}", doc.skipped);
+}
+
+/// A pattern whose `Pattern` and `Tile` wrappers would pass the depth limit is skipped, not built
+/// past it.
+#[test]
+fn a_pattern_whose_wrappers_pass_the_depth_limit_is_skipped() {
+    let clips = "0 0 200 100 re W n ".repeat(255);
+    let bytes = page_pdf(
+        &format!("{clips} /Pattern cs /P1 scn 0 0 100 100 re f"),
+        "/Pattern << /P1 10 0 R >>",
+        vec![(
+            10,
+            "<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >>".into(),
+            Some(b"0 0 10 10 re f".to_vec()),
+        )],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(doc.skipped.iter().any(|s| s == "group nesting limit"), "{:?}", doc.skipped);
+}
+
+/// A soft mask replacing another is nested under what is open once the old one has closed, so
+/// groups inside the old mask don't count against the new mask's content.
+#[test]
+fn a_replaced_soft_mask_does_not_count_against_the_new_one() {
+    let form = |n: &str| {
+        (
+            n.parse().unwrap(),
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceGray >> >>".to_string(),
+            Some(format!("{} 1 g 0 0 100 100 re f", "0 0 200 100 re W n ".repeat(250)).into_bytes()),
+        )
+    };
+    let bytes = page_pdf(
+        &format!("/GS1 gs {} /GS2 gs 1 0 0 rg 0 0 200 100 re f", "0 0 200 100 re W n ".repeat(250)),
+        "/ExtGState << /GS1 << /SMask << /S /Luminosity /G 10 0 R >> >> /GS2 << /SMask << /S /Luminosity /G 11 0 R >> >> >>",
+        vec![form("10"), form("11")],
+    );
+    let doc = parse(&bytes).unwrap();
+    assert!(doc.skipped.iter().all(|s| s != "group nesting limit"), "{:?}", doc.skipped);
+}
+
 /// Build isolated interpreter objects without presenting a function or colour space as a
 /// document catalog. Complete-document parsing is covered by the page and reader fixtures.
 fn object_file(objs: Objs) -> object::File {
@@ -1069,6 +1127,35 @@ fn a_fanning_out_reference_graph_is_refused_within_the_budget() {
 }
 
 #[test]
+fn a_sampled_function_shorter_than_its_table_is_refused() {
+    // 4,096 8-bit samples declared, ten bytes given: the missing ones are not made up.
+    let f = "<< /FunctionType 0 /Domain [0 1] /Size [4096] /Range [0 1] /BitsPerSample 8 >>";
+    assert_eq!(read_function(vec![(1, f.into(), Some(vec![7; 10]))]), color::Func::Unsupported);
+    assert_ne!(read_function(vec![(1, f.into(), Some(vec![7; 4096]))]), color::Func::Unsupported);
+}
+
+#[test]
+fn a_calculator_program_past_the_operator_limit_is_refused() {
+    let f = "<< /FunctionType 4 /Domain [0 1] /Range [0 1] >>";
+    let long = format!("{{ {} }}", "1 pop ".repeat(3000));
+    assert_eq!(read_function(vec![(1, f.into(), Some(long.into_bytes()))]), color::Func::Unsupported);
+    assert_ne!(read_function(vec![(1, f.into(), Some(b"{ 1 exch sub }".to_vec()))]), color::Func::Unsupported);
+}
+
+#[test]
+fn copies_of_a_function_are_charged_for_its_coefficients() {
+    // A stitching function listing one object 1,000 times, whose coefficient arrays hold 2,000
+    // values: each copy is charged its values, so the budget refuses it instead of copying
+    // two million values.
+    let c = format!("[{}]", "0.5 ".repeat(1000));
+    let objs: Objs = vec![
+        (1, format!("<< /FunctionType 3 /Domain [0 1] /Functions [{}] >>", "2 0 R ".repeat(1000)), None),
+        (2, format!("<< /FunctionType 2 /Domain [0 1] /C0 {c} /C1 {c} /N 1 >>"), None),
+    ];
+    assert_eq!(read_function(objs), color::Func::Unsupported);
+}
+
+#[test]
 fn colour_space_chain_of_depth_3() {
     // Indexed → Separation → ICCBased → DeviceRGB: entry 0 is tint 1 (blue), entry 1 tint 0 (white).
     let doc = parse(&image_page(
@@ -1218,4 +1305,33 @@ fn cmap_entries_at_the_top_of_the_code_range_do_not_overflow() {
     assert_eq!((f.unicode(0xFFFF_FFFF), f.unicode(0)), ("A".to_string(), String::new()));
     // Code 0 is CID u32::MAX; code 2 would be past it, so it falls back to CID 0 like an unmapped code.
     assert_eq!((f.width(0), f.width(2)), (0.5, 0.7));
+}
+
+/// Never crash: a crafted page nests `q … W n` twenty thousand deep. The document is a tree
+/// that is drawn, measured and dropped recursively, so groups past the nesting limit are left
+/// out (said in the skip notes) and the page parses, draws and drops on a thread with a small
+/// stack; the artwork inside them still draws, clipped by the groups that were kept.
+#[test]
+fn clip_groups_nested_without_end_are_capped() {
+    let run = std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        let n = 20_000;
+        let mut content = "q 0 0 50 50 re W n\n".repeat(n);
+        content.push_str("0 0 1 rg 0 0 50 50 re f\n");
+        content.push_str(&"Q\n".repeat(n));
+        let bytes = pdf(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(), None),
+                (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>".to_string(), None),
+                (4, "<< >>".to_string(), Some(content.into_bytes())),
+            ],
+            1,
+        );
+        let doc = parse(&bytes).unwrap();
+        (doc.skipped.clone(), px(&doc, 25, 75), px(&doc, 75, 25))
+    });
+    let (skipped, inside, outside) = run.unwrap().join().unwrap();
+    assert!(skipped.iter().any(|s| s.contains("nesting limit")), "{skipped:?}");
+    assert!(inside[2] > 0.99 && inside[3] > 0.99, "the artwork draws inside the clips: {inside:?}");
+    assert!(outside[3] < 0.01, "and is clipped: {outside:?}");
 }

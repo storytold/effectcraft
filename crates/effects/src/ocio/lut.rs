@@ -1,5 +1,6 @@
 use super::cdl::{Cdl, parse_cdl_xml};
-use super::{Arc, HashMap, Lut, Mutex, OnceLock, parse_cube};
+use super::{Arc, Lut, parse_cube};
+use crate::file_cache::{self, Registered};
 
 // ---------------------------------------------------------------- LUT files
 
@@ -264,33 +265,38 @@ pub fn parse_file(text: &str, ext: &str) -> Option<FileXform> {
     parse_3dl(text).map(|lut| FileXform::Lut { lut, shaper: None })
 }
 
-type FileCache = Mutex<HashMap<String, Option<Arc<FileXform>>>>;
+/// [`load_file`]'s cache, by parameter text (bounded like [`crate::load_lut`]'s).
+static FILES: Registered<Option<Arc<FileXform>>> = Registered::new(64, 512 << 20);
 
-/// Load (and cache) a transform from a file path or inline content.
+/// The files the transform cached for `src` was read from.
+pub(crate) fn cached_files(src: &str) -> Option<Vec<String>> {
+    file_cache::lock(FILES.get()).files(src)
+}
+
+/// Load (and cache) a transform from a file path or inline content. A file is stamped (one
+/// `metadata` call) on every load and read again once its size or modification time moved (see
+/// [`crate::file_cache`]); inline content is its own content.
 pub fn load_file(src: &str) -> Option<Arc<FileXform>> {
     let src_t = src.trim();
     if src_t.is_empty() {
         return None;
     }
-    static CACHE: OnceLock<FileCache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
-    {
-        return v.clone();
-    }
-    let inline = src.contains('\n');
-    let parsed = if inline {
-        parse_file(src, "")
-    } else {
-        let ext = std::path::Path::new(src_t).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
-        std::fs::read_to_string(src_t).ok().and_then(|t| parse_file(&t, ext))
-    }
-    .map(Arc::new);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
-    }
-    parsed
+    file_cache::cached(FILES.get(), src, || {
+        let parsed = if src.contains('\n') {
+            parse_file(src, "")
+        } else {
+            let ext = std::path::Path::new(src_t).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
+            file_cache::read(src_t).ok().and_then(|t| parse_file(&t, ext))
+        }
+        .map(Arc::new);
+        let bytes = match parsed.as_deref() {
+            Some(FileXform::Lut { lut, shaper }) => crate::utility::lut_bytes(lut)
+                .saturating_add(shaper.as_ref().map_or(0, |s| s.iter().map(Vec::len).sum::<usize>().saturating_mul(std::mem::size_of::<(f32, f32)>()))),
+            Some(FileXform::Cdl(c)) => c.len().saturating_mul(std::mem::size_of::<(String, Cdl)>()),
+            Some(FileXform::Matrix { .. }) | None => 0,
+        };
+        (parsed, bytes)
+    })
 }
 
 impl FileXform {

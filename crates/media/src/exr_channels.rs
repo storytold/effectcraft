@@ -31,33 +31,13 @@ use crate::convert::{AlphaOp, float_to_image};
 /// stop at the same size).
 const MAX_DISPLAY_PIXELS: usize = 1 << 28;
 
-fn is_depth(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    last.eq_ignore_ascii_case("z") || name.to_ascii_lowercase().contains("depth")
-}
-
-/// Full plane name of a channel in a part: `part.channel`, except that Blender 5 writes one part
-/// per pass whose channels already carry the full name (part `ViewLayer.Depth` holds
-/// `ViewLayer.Depth.Z`), which is kept as is instead of doubling the prefix.
-fn channel_name(part: Option<&str>, channel: &str) -> String {
-    match part {
-        Some(p) if channel.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')) => channel.to_string(),
-        Some(p) => format!("{p}.{channel}"),
-        None => channel.to_string(),
-    }
-}
+// Channel naming and the Cryptomatte manifest are `craft-exr`'s.
+use craft_exr::channels::{is_depth, part_channel_name as channel_name};
+pub use craft_exr::cryptomatte::parse_manifest;
 
 /// The part name channels are prefixed with (`None`: unnamed).
 fn part_name(header: &Header) -> Option<String> {
     header.own_attributes.layer_name.as_ref().map(|t| t.to_string()).filter(|s| !s.is_empty())
-}
-
-/// Parse a Cryptomatte manifest (`{"name": "hexhash", …}`).
-pub fn parse_manifest(json: &str) -> Vec<(String, u32)> {
-    let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(json) else { return vec![] };
-    let mut v: Vec<(String, u32)> = m.iter().filter_map(|(k, h)| Some((k.clone(), u32::from_str_radix(h.as_str()?.trim(), 16).ok()?))).collect();
-    v.sort();
-    v
 }
 
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build
@@ -559,8 +539,15 @@ struct Entry {
 
 impl Entry {
     /// Dropping it would free nothing or lose a decode in progress: an effect (or a picture
-    /// waiting for its effects) still holds its planes, or it is decoding.
+    /// waiting for its effects) still holds its planes, someone is using the slot, or it is decoding.
     fn in_use(&self) -> bool {
+        // `get_or_init` hands an active caller a borrow of the OnceLock value before that caller
+        // can clone the decoded Arc. Keep the entry while any caller still holds this slot, or a
+        // concurrent account/eviction can remove it in that gap and make the next request decode
+        // the same file again.
+        if Arc::strong_count(&self.slot) > 1 {
+            return true;
+        }
         match self.slot.get() {
             None => true,
             Some((None, _)) => false,
@@ -985,6 +972,21 @@ mod tests {
         });
         assert_eq!(cache.decodes(), frames as u64, "one decode per frame");
         assert_eq!(reads.load(Ordering::Relaxed), frames as u64);
+    }
+
+    #[test]
+    fn cache_does_not_evict_a_slot_while_a_caller_is_using_it() {
+        let bytes: Arc<[u8]> = flat(&["R", "G", "B", "A"], (32, 32), 0.25).into();
+        let one = 4 * 32 * 32 * 4 + 4;
+        let cache = ChannelCache::new(one);
+        drop(cache.get("/active.exr", Use::Channels, || Some(bytes.clone())));
+        let active_slot = cache.lock().entries.iter().find(|entry| entry.path == "/active.exr").unwrap().slot.clone();
+        drop(cache.get("/next.exr", Use::Channels, || Some(bytes.clone())));
+        assert!(cache.cached().contains(&"/active.exr".to_string()), "an active caller pins the slot");
+
+        drop(active_slot);
+        drop(cache.get("/newest.exr", Use::Channels, || Some(bytes.clone())));
+        assert!(!cache.cached().contains(&"/active.exr".to_string()), "an idle slot is eligible for eviction");
     }
 
     /// #474: a decode that panics doesn't leave its file "decoding" in the cache (never dropped,

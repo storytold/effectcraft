@@ -10,11 +10,13 @@ use serde_json::{Value, json};
 
 use crate::{Outcome, run_code};
 
+mod ae_layer_order;
 mod callable;
 mod ease_presets;
 mod evalfile;
 mod include;
 mod panels;
+mod paragraph_justification;
 #[cfg(not(target_arch = "wasm32"))]
 mod render_wait;
 #[cfg(not(windows))]
@@ -1304,6 +1306,41 @@ fn sample_image_reads_footage_pixels_in_scripts() {
     assert_eq!(out.result, json!([0, 1, 0, 1, ""]), "green footage sampled, not transparent black");
 }
 
+/// `expressionError` reports what evaluating the expression at the comp's current time does, as
+/// After Effects: a non-finite result and an exception, not only a syntax error (#3219).
+#[test]
+fn expression_error_reports_evaluation_errors() {
+    let mut s = session();
+    let out = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("E", 320, 240, 1, 5, 30);
+        var p = c.layers.addSolid([1, 1, 1], "S", 320, 240, 1).transform.opacity;
+        p.expression = "Math.sqrt(-1)";
+        var nan = p.expressionError;
+        p.expression = 'throw new Error("boom")';
+        var thrown = p.expressionError;
+        p.expression = "value";
+        var fine = p.expressionError;
+        p.expression = "thisLayer.nope(";
+        var syntax = p.expressionError;
+        p.expression = "time > 1 ? Math.sqrt(-1) : value";
+        c.time = 0;
+        var early = p.expressionError;
+        c.time = 2;
+        var late = p.expressionError;
+        [nan, thrown, fine, syntax.length > 0, early, late];
+        "#,
+    );
+    let v = out.result;
+    assert!(v[0].as_str().is_some_and(|e| e.contains("not a finite number")), "{v}");
+    assert!(v[1].as_str().is_some_and(|e| e.contains("boom")), "{v}");
+    assert_eq!(v[2], json!(""), "{v}");
+    assert_eq!(v[3], json!(true), "a syntax error is still reported: {v}");
+    assert_eq!(v[4], json!(""), "evaluated at the current time (0), where it is fine: {v}");
+    assert!(v[5].as_str().is_some_and(|e| e.contains("not a finite number")), "evaluated at the current time (2): {v}");
+}
+
 #[test]
 fn binary_file_io_preserves_all_byte_values() {
     let dir = std::env::temp_dir().join(format!("ec-script-binary-{}", std::process::id()));
@@ -1998,6 +2035,51 @@ fn setting_comp_width_and_height_leaves_the_layers_where_they_are() {
     assert_eq!(o.result, json!(["100,100,0", "100,100,0", "10,20,0", "30,40,0", 800, 400]));
     let (_, c) = comp_named(&s, "w");
     assert_eq!(layer(c, "s").props.prop("transform/position").unwrap().value, KV::Vec3([100.0, 100.0, 0.0]));
+}
+
+#[test]
+fn a_hashbang_line_does_not_hide_deep_nesting_from_eval() {
+    // Boa reads a leading `#!` line of eval source as a comment, so the backtick on it opens no
+    // template: the brackets after it are counted and refused.
+    let mut s = session();
+    let code = "var deep = new Array(5000).join('(') + '1' + new Array(5000).join(')'); var r; \
+        try { eval('#! `\\n' + deep); r = 'ran'; } catch (e) { r = 'refused'; } r";
+    assert_eq!(ok(&mut s, code).result.as_str(), Some("refused"));
+    assert!(crate::runtime::check_nesting(&format!("#! `\n{}1{}", "(".repeat(5000), ")".repeat(5000))).is_err());
+    assert!(crate::runtime::check_nesting("#! `\n(1)").is_ok());
+}
+
+#[test]
+fn code_compiled_at_run_time_passes_the_nesting_check() {
+    // `eval` and `new Function` of a string nested past the limit are refused with a catchable
+    // error instead of overflowing the parser's stack; shallow code still compiles.
+    let mut s = session();
+    for call in ["eval(deep)", "new Function(deep)", "Function('a', deep)"] {
+        let code = format!(
+            "var deep = new Array(5000).join('(') + '1' + new Array(5000).join(')'); var r; try {{ {call}; r = 'ran'; }} catch (e) {{ r = 'refused'; }} r"
+        );
+        assert_eq!(ok(&mut s, &code).result.as_str(), Some("refused"), "{call}");
+    }
+    assert_eq!(ok(&mut s, "eval('1 + (2 * 3)') + new Function('return 4')()").result.as_f64(), Some(11.0));
+}
+
+#[test]
+fn file_masks_match_without_backtracking() {
+    let mut s = session();
+    let r = ok(
+        &mut s,
+        "[__globMatch('*.JSX', 'a.jsx'), __globMatch('a?c*', 'abcdef'), __globMatch('*a*b', 'xaxb'), __globMatch('*.png', 'a.jsx'), __globMatch('*a*a*a*a*a*a*a*a*a*a*a*b', new Array(60).join('a'))].join()",
+    );
+    assert_eq!(r.result.as_str(), Some("true,true,true,false,false"));
+    // `?` still matches one character that lowercases to two.
+    let r = ok(&mut s, "[__globMatch('?.txt', '\\u0130.txt'), __globMatch('\\u0130*', '\\u0130x')].join()");
+    assert_eq!(r.result.as_str(), Some("true,true"));
+    // Greek sigma matches in every case form, as the case-insensitive regular expression did.
+    let r = ok(
+        &mut s,
+        "[__globMatch('\\u03bf\\u03c2.txt', '\\u039f\\u03a3.txt'), __globMatch('\\u03a3*', '\\u03c2x'), __globMatch('k', '\\u212a'), __globMatch('a', 'b')].join()",
+    );
+    assert_eq!(r.result.as_str(), Some("true,true,false,false"));
 }
 
 /// #3395: setValue on a string effect parameter stores the text, or a File's path, as `prop.set`

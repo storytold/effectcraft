@@ -8,6 +8,7 @@ use effectcraft_project::{Comp, ItemId, Layer, LayerSource, MaskMode, Project, P
 use effectcraft_svg::{Affine, Doc, Geom, GradientKind, Node, Paint};
 use kurbo::{BezPath, Point};
 
+/// Convert a kurbo path into shape path property groups.
 fn shape_paths(ids: &mut Ids, path: &BezPath) -> Vec<PropGroup> {
     effectcraft_path::from_kurbo(path)
         .into_iter()
@@ -20,6 +21,7 @@ fn shape_paths(ids: &mut Ids, path: &BezPath) -> Vec<PropGroup> {
         .collect()
 }
 
+/// Uniform scale factor of a transform (square root of its determinant magnitude).
 fn det_scale(m: Affine) -> f64 {
     let c = m.as_coeffs();
     (c[0] * c[3] - c[1] * c[2]).abs().sqrt()
@@ -31,6 +33,7 @@ fn axis_aligned(m: Affine) -> Option<(f64, f64, f64, f64)> {
     (c[1].abs() < 1e-9 && c[2].abs() < 1e-9 && c[0] > 0.0 && c[3] > 0.0).then_some((c[0], c[3], c[4], c[5]))
 }
 
+/// Convert an SVG gradient into the engine's gradient value.
 fn gradient_value(g: &effectcraft_svg::Gradient) -> Gradient {
     Gradient {
         colors: g.stops.iter().map(|(o, c)| (*o, [c[0] as f32, c[1] as f32, c[2] as f32, 1.0])).collect(),
@@ -52,6 +55,7 @@ fn gradient_points(g: &effectcraft_svg::Gradient, m: Affine, bbox: kurbo::Rect) 
     }
 }
 
+/// Convert one SVG shape under transform `m` into shape-layer items.
 fn shape_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine) -> Vec<PropGroup> {
     use kurbo::Shape as _;
     let mut items = vec![];
@@ -72,48 +76,60 @@ fn shape_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine) -> Vec<Prop
     let bbox = s.geom.to_path().bounding_box();
     if let Some(st) = &s.stroke {
         let width = st.width * det_scale(m);
-        let mut g = match &st.paint {
-            Paint::Color(c) => build::shape_stroke(ids, [c[0], c[1], c[2], 1.0], width),
+        let paint = match &st.paint {
+            Paint::Color(c) => Some(build::shape_stroke(ids, [c[0], c[1], c[2], 1.0], width)),
             Paint::Gradient(gr) => {
                 let (radial, a, b) = gradient_points(gr, m, bbox);
-                build::shape_gradient_stroke(ids, radial, a, b, gradient_value(gr), width)
+                Some(build::shape_gradient_stroke(ids, radial, a, b, gradient_value(gr), width))
             }
+            // Editable shape layers do not yet have a pattern paint operator. Keep the geometry
+            // and any retained fallback as solid paint; SVG footage retains the rasterised pattern.
+            Paint::Pattern(pattern) => pattern.fallback.map(|c| build::shape_stroke(ids, [c[0], c[1], c[2], c[3]], width)),
         };
-        set(&mut g, "opacity", Value::Scalar(st.opacity * 100.0));
-        set(&mut g, "cap", Value::Enum(st.cap as u32));
-        set(&mut g, "join", Value::Enum(st.join as u32));
-        set(&mut g, "miter", Value::Scalar(st.miter));
-        if let Some((d, off)) = &st.dash
-            && let Some(dg) = g.sub_mut("dashes")
-        {
-            let k = det_scale(m);
-            set(dg, "dash", Value::Scalar(d.first().copied().unwrap_or(0.0) * k));
-            set(dg, "gap", Value::Scalar(d.get(1).or(d.first()).copied().unwrap_or(0.0) * k));
-            set(dg, "offset", Value::Scalar(off * k));
+        if let Some(mut g) = paint {
+            set(&mut g, "opacity", Value::Scalar(st.opacity * 100.0));
+            set(&mut g, "cap", Value::Enum(st.cap as u32));
+            set(&mut g, "join", Value::Enum(st.join as u32));
+            set(&mut g, "miter", Value::Scalar(st.miter));
+            if let Some((d, off)) = &st.dash
+                && let Some(dg) = g.sub_mut("dashes")
+            {
+                let k = det_scale(m);
+                set(dg, "dash", Value::Scalar(d.first().copied().unwrap_or(0.0) * k));
+                set(dg, "gap", Value::Scalar(d.get(1).or(d.first()).copied().unwrap_or(0.0) * k));
+                set(dg, "offset", Value::Scalar(off * k));
+            }
+            items.push(g);
         }
-        items.push(g);
     }
     if let Some(f) = &s.fill {
-        let mut g = match f {
-            Paint::Color(c) => build::shape_fill(ids, [c[0], c[1], c[2], 1.0]),
+        let paint = match f {
+            Paint::Color(c) => Some(build::shape_fill(ids, [c[0], c[1], c[2], 1.0])),
             Paint::Gradient(gr) => {
                 let (radial, a, b) = gradient_points(gr, m, bbox);
-                build::shape_gradient_fill(ids, radial, a, b, gradient_value(gr))
+                Some(build::shape_gradient_fill(ids, radial, a, b, gradient_value(gr)))
             }
+            // Pattern artwork is preserved in rasterised SVG footage; editable shapes keep only
+            // any retained fallback as solid paint.
+            Paint::Pattern(pattern) => pattern.fallback.map(|c| build::shape_fill(ids, [c[0], c[1], c[2], c[3]])),
         };
-        set(&mut g, "opacity", Value::Scalar(s.fill_opacity * 100.0));
-        set(&mut g, "rule", Value::Enum(u32::from(s.fill_rule == effectcraft_svg::FillRule::EvenOdd)));
-        items.push(g);
+        if let Some(mut g) = paint {
+            set(&mut g, "opacity", Value::Scalar(s.fill_opacity * 100.0));
+            set(&mut g, "rule", Value::Enum(u32::from(s.fill_rule == effectcraft_svg::FillRule::EvenOdd)));
+            items.push(g);
+        }
     }
     items
 }
 
+/// Set a child property's value if present.
 fn set(g: &mut PropGroup, k: &str, v: Value) {
     if let Some(p) = g.get_mut(k) {
         p.value = v;
     }
 }
 
+/// Wrap items in a named shape group with the given opacity (0..1).
 fn group(ids: &mut Ids, name: &str, items: Vec<PropGroup>, opacity: f64) -> PropGroup {
     let mut g = build::shape_group(ids, name, items);
     if let Some(p) = g.prop_mut("transform/opacity") {
@@ -165,6 +181,7 @@ fn clipped_items(ids: &mut Ids, s: &effectcraft_svg::Shape, m: Affine, clips: &[
 /// [`shapes_from_vector`]). Images are skipped (Layer ▸ Create makes them footage layers, see
 /// [`split_at_images`]); soft masks are not converted.
 pub fn svg_contents(ids: &mut Ids, doc: &Doc) -> Vec<PropGroup> {
+    /// Convert nodes to property groups, applying transform `m` and clip paths.
     fn walk(ids: &mut Ids, nodes: &[Node], m: Affine, clips: &[BezPath]) -> Vec<PropGroup> {
         let mut out = vec![];
         for n in nodes.iter().rev() {
@@ -406,6 +423,7 @@ fn copy_transform(proj: &mut Project, src: &Layer, dst: &mut Layer) {
     }
 }
 
+/// Copy timing and parenting from `src` to `dst`.
 fn like_source(dst: &mut Layer, src: &Layer) {
     dst.start_time = src.start_time;
     dst.in_point = src.in_point;
@@ -418,13 +436,17 @@ fn like_source(dst: &mut Layer, src: &Layer) {
 /// A raster image of a vector document (Create Shapes from Vector Layer makes it a footage
 /// layer: shape layers have no images).
 pub struct VectorImage {
+    /// Image name.
     pub name: String,
+    /// Pixel width.
     pub width: u32,
+    /// Pixel height.
     pub height: u32,
     /// Straight RGBA8.
     pub rgba: std::sync::Arc<Vec<u8>>,
     /// Image pixels → document pixels.
     pub transform: Affine,
+    /// Opacity, 0..1.
     pub opacity: f64,
     /// Inside a clipping group or under a soft mask (not carried over).
     pub clipped: bool,
@@ -432,6 +454,7 @@ pub struct VectorImage {
 
 /// The document's images, bottom first, and how many soft-masked groups it has.
 pub fn vector_images(doc: &Doc) -> (Vec<VectorImage>, usize) {
+    /// Collect images from a group tree, counting soft-masked groups.
     fn walk(g: &effectcraft_svg::Group, m: Affine, opacity: f64, clipped: bool, out: &mut Vec<VectorImage>, masks: &mut usize) {
         let m = m * g.transform;
         let opacity = opacity * g.opacity;
@@ -467,6 +490,7 @@ pub fn vector_images(doc: &Doc) -> (Vec<VectorImage>, usize) {
 /// layers and image footage layers can stack in the document's order. One more segment than
 /// images.
 pub fn split_at_images(doc: &Doc) -> Vec<Doc> {
+    /// Count the images in a group tree.
     fn count(g: &effectcraft_svg::Group) -> usize {
         g.children
             .iter()
@@ -477,35 +501,51 @@ pub fn split_at_images(doc: &Doc) -> Vec<Doc> {
             })
             .sum()
     }
-    /// Keep the shapes between images `seg − 1` and `seg`; `seen` counts images passed.
-    fn prune(g: &effectcraft_svg::Group, seg: usize, seen: &mut usize) -> effectcraft_svg::Group {
-        let mut out = g.clone();
-        out.children = vec![];
+    /// `g` without its children, holding `children` instead (nothing below `g` is copied).
+    fn shell(g: &effectcraft_svg::Group, children: Vec<Node>) -> effectcraft_svg::Group {
+        effectcraft_svg::Group {
+            name: g.name.clone(),
+            transform: g.transform,
+            opacity: g.opacity,
+            children,
+            clip: g.clip.clone(),
+            blend: g.blend,
+            mask: g.mask.clone(),
+            isolated: g.isolated,
+            knockout: g.knockout,
+        }
+    }
+    /// One traversal for every segment: the pieces of `g` as (segment, group), by ascending
+    /// segment; `seen` counts images passed. Each shape is copied once, into its own segment.
+    fn split(g: &effectcraft_svg::Group, seen: &mut usize) -> Vec<(usize, effectcraft_svg::Group)> {
+        let mut by: Vec<(usize, Vec<Node>)> = vec![];
+        let mut put = |seg: usize, node: Node| match by.last_mut() {
+            Some(last) if last.0 == seg => last.1.push(node),
+            _ => by.push((seg, vec![node])),
+        };
         for c in &g.children {
             match c {
                 Node::Image(_) => *seen += 1,
-                Node::Shape(_) => {
-                    if *seen == seg {
-                        out.children.push(c.clone());
-                    }
-                }
+                Node::Shape(_) => put(*seen, c.clone()),
                 Node::Group(s) => {
-                    let p = prune(s, seg, seen);
-                    if !p.children.is_empty() {
-                        out.children.push(Node::Group(p));
+                    for (seg, part) in split(s, seen) {
+                        put(seg, Node::Group(part));
                     }
                 }
             }
         }
-        out
+        by.into_iter().map(|(seg, children)| (seg, shell(g, children))).collect()
     }
     let n = count(&doc.root);
-    (0..=n)
-        .map(|seg| {
-            let mut d = doc.clone();
-            d.root = prune(&doc.root, seg, &mut 0);
-            d
-        })
+    let mut roots: Vec<Option<effectcraft_svg::Group>> = vec![None; n + 1];
+    for (seg, part) in split(&doc.root, &mut 0) {
+        if let Some(slot) = roots.get_mut(seg) {
+            *slot = Some(part);
+        }
+    }
+    roots
+        .into_iter()
+        .map(|root| Doc { width: doc.width, height: doc.height, root: root.unwrap_or_else(|| shell(&doc.root, vec![])), skipped: doc.skipped.clone() })
         .collect()
 }
 
@@ -654,4 +694,74 @@ pub fn masks_layer(proj: &mut Project, comp: &Comp, name: &str, outlines: Vec<Sh
         }
     }
     l
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_svg::{Geom, Group, Image, Shape};
+
+    fn shape(name: &str) -> Node {
+        let geom = Geom::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, rx: 0.0, ry: 0.0 };
+        Node::Shape(Shape {
+            name: name.into(),
+            geom,
+            transform: Affine::IDENTITY,
+            fill: None,
+            fill_opacity: 1.0,
+            fill_rule: effectcraft_svg::FillRule::NonZero,
+            stroke: None,
+            opacity: 1.0,
+        })
+    }
+    fn image() -> Node {
+        Node::Image(Image { name: "i".into(), transform: Affine::IDENTITY, width: 1, height: 1, rgba: std::sync::Arc::new(vec![0; 4]), opacity: 1.0 })
+    }
+    fn group(name: &str, children: Vec<Node>) -> Node {
+        let mut g = Group::new(name);
+        g.children = children;
+        Node::Group(g)
+    }
+    fn names(g: &Group, out: &mut Vec<String>) {
+        for c in &g.children {
+            match c {
+                Node::Shape(s) => out.push(s.name.clone()),
+                Node::Group(s) => {
+                    out.push(format!("<{}", s.name));
+                    names(s, out);
+                    out.push(format!("{}>", s.name));
+                }
+                Node::Image(_) => out.push("IMG".into()),
+            }
+        }
+    }
+
+    /// Segment `k` keeps the shapes between image `k - 1` and `k`, with the groups that hold them.
+    #[test]
+    fn split_keeps_each_segments_shapes_and_their_groups() {
+        let mut root = Group::new("root");
+        root.children = vec![
+            shape("a"),
+            image(),
+            group("g1", vec![shape("b"), image(), shape("c"), group("g2", vec![shape("d"), image(), shape("e")])]),
+            image(),
+            group("empty", vec![image()]),
+            shape("f"),
+        ];
+        let doc = Doc { width: 10.0, height: 10.0, root, skipped: vec![] };
+        let segs = split_at_images(&doc);
+        assert_eq!(segs.len(), 6);
+        let got: Vec<Vec<String>> = segs
+            .iter()
+            .map(|d| {
+                let mut v = vec![];
+                names(&d.root, &mut v);
+                v
+            })
+            .collect();
+        let want: Vec<Vec<&str>> =
+            vec![vec!["a"], vec!["<g1", "b", "g1>"], vec!["<g1", "c", "<g2", "d", "g2>", "g1>"], vec!["<g1", "<g2", "e", "g2>", "g1>"], vec![], vec!["f"]];
+        assert_eq!(got, want);
+        assert!(segs.iter().all(|d| d.root.name == "root" && d.width == 10.0));
+    }
 }

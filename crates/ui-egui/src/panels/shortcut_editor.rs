@@ -244,11 +244,13 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mods = if held.iter().any(|m| *m) && !st.recording { held } else { st.mods };
 
     let table = app.session.shortcuts().clone();
+    // Once per frame: the keyboard draw reads it for every key.
+    let bindings = table.bindings();
     let presets = app.session.keymaps.names();
     let active = app.session.keymaps.active.clone();
     // key name → (app?, panel?) for the current modifiers.
     let mut keymap: std::collections::HashMap<String, (bool, bool)> = Default::default();
-    for (sc, b) in table.bindings() {
+    for (sc, b) in bindings.iter().copied() {
         let (m, k) = split(sc);
         if m == mods {
             let e = keymap.entry(k).or_default();
@@ -395,8 +397,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 }
             }
             if !name.starts_with('#') {
-                let who: Vec<String> =
-                    table.bindings().into_iter().filter(|(sc, _)| split(sc) == (mods, name.to_string())).map(|(_, b)| b.label.clone()).collect();
+                let who: Vec<String> = bindings.iter().copied().filter(|(sc, _)| split(sc) == (mods, name.to_string())).map(|(_, b)| b.label.clone()).collect();
                 if !who.is_empty() {
                     resp.on_hover_text(who.join("\n"));
                 }
@@ -428,7 +429,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             p.text(info.left_top() + vec2(8.0, 6.0), Align2::LEFT_TOP, tr_args("Key: {}", &[&k]), Tokens::semibold(12.0), t.tab_text_active);
             let mut yy = info.min.y + 26.0;
             let mut list: Vec<(String, String, String)> =
-                table.bindings().into_iter().filter(|(sc, _)| split(sc).1 == *k).map(|(sc, b)| (sc.to_string(), b.label.clone(), b.scope.clone())).collect();
+                bindings.iter().copied().filter(|(sc, _)| split(sc).1 == *k).map(|(sc, b)| (sc.to_string(), b.label.clone(), b.scope.clone())).collect();
             list.sort();
             if list.is_empty() {
                 p.text(pos2(info.min.x + 8.0, yy), Align2::LEFT_TOP, tr("Not assigned"), Tokens::ui(11.5), t.text_dim);

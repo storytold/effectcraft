@@ -184,11 +184,15 @@ fn restored_original_and_active_proxy_render_new_pixels_through_media_and_disk_c
         let cached = s.render(comp, Tick::ZERO, RenderOpts::default());
         assert_eq!(cached.data, before.data);
         assert!(cache.stats().hits > 0, "the same media was read back through the disk cache");
+        let changed_time = std::fs::metadata(&active).unwrap().modified().unwrap() + std::time::Duration::from_secs(7);
         std::fs::remove_file(&active).unwrap();
         assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap()["reloaded"], 0, "availability alone drives recovery in this fixture");
         let offline = s.render(comp, Tick::ZERO, RenderOpts::default());
         assert_eq!(offline.data[8 * 16 + 8], [0.0, 0.0, 0.0, 0.0]);
         image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])).save(&active).unwrap();
+        // Changed media needs a distinct stamp, even when both writes land in one filesystem
+        // clock tick. Same-size, same-stamp replacements require explicit Reload Footage.
+        std::fs::File::options().append(true).open(&active).unwrap().set_modified(changed_time).unwrap();
         assert_eq!(s.execute("footage.reloadChanged", json!({})).unwrap()["reloaded"], 0, "availability alone drives recovery in this fixture");
         let restored = s.render(comp, Tick::ZERO, RenderOpts::default());
         assert_eq!(restored.data[8 * 16 + 8], [0.0, 0.0, 1.0, 1.0], "restored pixels replace decoded and composited cached frames");

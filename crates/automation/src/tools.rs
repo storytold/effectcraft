@@ -5,7 +5,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::backend::NEED_BRIDGE;
-use crate::{Backend, Error, Result, recompress_png};
+use crate::{Backend, Error, Result, recompress_png, sheet};
 
 /// A tool's output.
 pub enum Reply {
@@ -133,6 +133,18 @@ fn layer_s() -> Value {
 }
 fn path_s() -> Value {
     json!({"type": "string", "description": "Property path from get_layer: match ids joined by `/`, `#n` for the nth child, or `@uid`. E.g. `transform/position`, `transform/opacity`, `transform/scale`, `transform/rotation`, `effects/#1/blurriness`, `masks/#1/feather`, `@57`."})
+}
+fn times_s() -> Value {
+    json!({
+        "type": "array", "items": {"type": "number"}, "minItems": 1, "maxItems": sheet::MAX_CELLS,
+        "description": "Comp times in seconds: render each and return ONE contact-sheet PNG that tiles them row by row in this order. Not with `time`."
+    })
+}
+fn columns_s() -> Value {
+    json!({"type": "integer", "minimum": 1, "description": "Contact-sheet columns (with `times`; default near-square, at most the number of times)."})
+}
+fn labels_s() -> Value {
+    json!({"type": "boolean", "description": "Draw each contact-sheet cell's comp time on it (with `times`; default true)."})
 }
 fn value_s() -> Value {
     json!({"description": "Number for 1-D properties (50), array for vectors ([960,540]), \"#rrggbb\" or [r,g,b,a] (0-1) for colours, bool for checkboxes, string for text/menus."})
@@ -404,10 +416,18 @@ fn add_keyframe(b: &mut Backend, a: &Value) -> Result<Reply> {
 }
 
 fn render_frame(b: &mut Backend, a: &Value) -> Result<Reply> {
-    let max_side = get(a, "max_side").and_then(Value::as_u64).unwrap_or(960) as u32;
+    let max_side = get(a, "max_side").and_then(Value::as_u64).map(|m| m as u32);
     let transparent = get(a, "transparent").and_then(Value::as_bool).unwrap_or(false);
     let path = get(a, "path").and_then(Value::as_str);
     let comp = get(a, "comp");
+    if let Some(times) = get(a, "times") {
+        let max_side = max_side.unwrap_or(sheet::CELL_SIDE);
+        return contact_sheet(b, a, times, FrameArgs { comp, max_side, transparent, path });
+    }
+    if get(a, "columns").is_some() || get(a, "labels").is_some() {
+        return Err(Error::BadArgs("`columns` and `labels` lay out a contact sheet: give `times`".into()));
+    }
+    let max_side = max_side.unwrap_or(960);
     let time = get(a, "time").and_then(Value::as_f64);
     let f = match path {
         Some(path) => b.render_to_file(comp, time, max_side, transparent, path)?,
@@ -421,6 +441,75 @@ fn render_frame(b: &mut Backend, a: &Value) -> Result<Reply> {
         return json_reply(info);
     }
     Ok(Reply::Image { png: f.png, info })
+}
+
+/// The arguments a contact sheet shares with a single frame.
+struct FrameArgs<'a> {
+    comp: Option<&'a Value>,
+    max_side: u32,
+    transparent: bool,
+    path: Option<&'a str>,
+}
+
+const EMPTY_TIMES: &str = "`times` is empty: give at least one comp time in seconds";
+
+/// `times` as seconds: a non-empty array of numbers, at most [`sheet::MAX_CELLS`], without `time`.
+fn sheet_times(a: &Value, times: &Value) -> Result<Vec<f64>> {
+    if get(a, "time").is_some() {
+        return Err(Error::BadArgs("give `time` or `times`, not both".into()));
+    }
+    let list = times.as_array().ok_or_else(|| Error::BadArgs("`times` must be an array of comp times in seconds".into()))?;
+    if list.is_empty() {
+        return Err(Error::BadArgs(EMPTY_TIMES.into()));
+    }
+    if list.len() > sheet::MAX_CELLS {
+        return Err(Error::BadArgs(format!("`times` has {} entries; a contact sheet holds at most {}", list.len(), sheet::MAX_CELLS)));
+    }
+    list.iter().map(|t| t.as_f64().ok_or_else(|| Error::BadArgs(format!("`times` holds comp times in seconds, not {t}")))).collect()
+}
+
+/// `render_frame` / `render_preview` with `times`: one PNG tiling the frames at those comp times
+/// in the order given ([`sheet`]), with the grid in the metadata.
+fn contact_sheet(b: &mut Backend, a: &Value, times: &Value, f: FrameArgs) -> Result<Reply> {
+    let times = sheet_times(a, times)?;
+    let columns = match get(a, "columns") {
+        None => None,
+        Some(c) => Some(c.as_u64().filter(|c| *c >= 1).ok_or_else(|| Error::BadArgs(format!("`columns` must be a whole number of at least 1, not {c}")))?),
+    };
+    let labels = match get(a, "labels") {
+        None => true,
+        Some(l) => l.as_bool().ok_or_else(|| Error::BadArgs(format!("`labels` must be true or false, not {l}")))?,
+    };
+    // The destination is checked before anything renders, as a single frame's is.
+    let out = f.path.map(|p| b.composed_output(p)).transpose()?;
+    let first = times.first().ok_or_else(|| Error::BadArgs(EMPTY_TIMES.into()))?;
+    let frame = b.render_pixels(f.comp, *first, f.max_side, f.transparent)?;
+    let mut sheet = sheet::Sheet::new(sheet::Layout::new(times.len(), columns, frame.image.dimensions())?, f.transparent, labels);
+    sheet.place(0, &frame.image, frame.time);
+    let mut rendered = vec![json!(frame.time)];
+    // The other cells show the comp the first one did, even if the active comp changes meanwhile.
+    let pinned = frame.comp.is_u64().then(|| frame.comp.clone());
+    for (i, t) in times.iter().enumerate().skip(1) {
+        let next = b.render_pixels(pinned.as_ref().or(f.comp), *t, f.max_side, f.transparent)?;
+        sheet.place(i, &next.image, next.time);
+        rendered.push(json!(next.time));
+    }
+    let layout = sheet.layout();
+    let png = crate::encode_png(layout.width, layout.height, sheet.into_image().into_raw(), 0)?;
+    if let Some(out) = &out {
+        b.write_composed(out, &png)?;
+    }
+    let mut info = json!({
+        "comp": frame.comp, "times": rendered, "columns": layout.columns, "rows": layout.rows,
+        "cellWidth": layout.cell_width, "cellHeight": layout.cell_height, "width": layout.width, "height": layout.height,
+    });
+    if let Some(p) = f.path {
+        info["path"] = json!(p);
+    }
+    if get(a, "inline").and_then(Value::as_bool) == Some(false) {
+        return json_reply(info);
+    }
+    Ok(Reply::Image { png, info })
 }
 
 fn open_project(b: &mut Backend, a: &Value) -> Result<Reply> {
@@ -750,15 +839,18 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "render_frame",
-        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). `path` also writes the PNG to disk; `inline: false` returns only the metadata. Use it to check your work.",
+        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). With `times` (up to 64 comp times) it renders each and returns ONE contact-sheet PNG tiling them in that order: `columns` (default near-square), `max_side` per cell (default 320), `labels` (default true) draws each cell's time; the metadata gives comp, times, columns, rows, cellWidth, cellHeight, width and height. `path` also writes the PNG (or sheet) to disk; `inline: false` returns only the metadata. Use it to check your work, and `times` to check motion in one call.",
         bridge_only: false,
         schema: || {
             schema(
                 json!({
                     "comp": comp_s(),
                     "time": {"type": "number", "description": "Comp time in seconds (default: current time)."},
-                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size)."},
-                    "path": {"type": "string", "description": "Also write the PNG here."},
+                    "times": times_s(),
+                    "columns": columns_s(),
+                    "labels": labels_s(),
+                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size); with `times`, of each cell (default 320)."},
+                    "path": {"type": "string", "description": "Also write the PNG (with `times`, the contact sheet) here."},
                     "inline": {"type": "boolean", "description": "Include the image in the reply (default true)."},
                     "transparent": {"type": "boolean", "description": "Keep the frame's alpha (RGBA PNG, as an RGB + Alpha render writes it) instead of compositing over the comp's background colour."}
                 }),
@@ -967,14 +1059,17 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "render_preview",
-        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). Use it to check your work.",
+        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). With `times` (up to 64 comp times) it renders each and returns ONE contact-sheet PNG tiling them in that order: `columns` (default near-square), `max_side` per cell (default 320), `labels` (default true) draws each cell's time; the metadata gives comp, times, columns, rows, cellWidth, cellHeight, width and height. Use it to check your work, and `times` to check motion in one call.",
         bridge_only: false,
         schema: || {
             schema(
                 json!({
                     "comp": comp_s(),
                     "time": {"type": "number", "description": "Comp time in seconds (default: current time)."},
-                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size)."},
+                    "times": times_s(),
+                    "columns": columns_s(),
+                    "labels": labels_s(),
+                    "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size); with `times`, of each cell (default 320)."},
                     "transparent": {"type": "boolean", "description": "Keep the frame's alpha (RGBA PNG, as an RGB + Alpha render writes it) instead of compositing over the comp's background colour."}
                 }),
                 &[],

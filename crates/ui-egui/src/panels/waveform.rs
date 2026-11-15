@@ -76,11 +76,14 @@ pub fn summary(app: &EffectcraftApp, ctx: &egui::Context, item: ItemId) -> Optio
     None
 }
 
-/// Left/right gain of the layer's Audio Levels (dB) at comp time `t`; unity without the property.
-fn level_gains(levels: Option<&Property>, t: Tick) -> [f32; 2] {
+/// Left/right gain of `layer`'s Audio Levels (`levels`, dB) at comp time `t`; unity without the
+/// property. Keyframes are in layer time, so they are read at the layer time of `t` (start
+/// offset and stretch), as the mix reads them. A reversed layer (negative stretch) is still
+/// drawn, though the mix leaves it silent.
+fn level_gains(layer: &Layer, levels: Option<&Property>, t: Tick) -> [f32; 2] {
     match levels {
         Some(p) => {
-            let [l, r] = p.value_at(t).as_vec2();
+            let [l, r] = p.value_at(layer.layer_time(t)).as_vec2();
             [db_to_gain(l), db_to_gain(r)]
         }
         None => [1.0, 1.0],
@@ -114,7 +117,7 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
             agg[2] = agg[2].min(b[2]);
             agg[3] = agg[3].max(b[3]);
         }
-        let gain = level_gains(levels, Tick::from_seconds_f64((ta + tb) * 0.5));
+        let gain = level_gains(layer, levels, Tick::from_seconds_f64((ta + tb) * 0.5));
         for c in 0..2 {
             let (lo, hi) = ((agg[c * 2] * gain[c]).clamp(-1.0, 1.0), (agg[c * 2 + 1] * gain[c]).clamp(-1.0, 1.0));
             let (ya, yb) = (mid[c] - hi * half, mid[c] - lo * half);
@@ -126,14 +129,76 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use effectcraft_engine::project::Value;
+    use effectcraft_engine::color::Label;
+    use effectcraft_engine::project::{Comp, Footage, FootageKind, Keyframe, Value, build};
+    use effectcraft_engine::render::{FootageSource, Image, audio::mix_comp};
+    use effectcraft_engine::time::FrameRate;
 
     #[test]
     fn waveform_follows_audio_levels() {
         let p = Property::new(1, "levels", "Audio Levels", Value::Vec2([-6.0206, -96.0]));
-        let g = level_gains(Some(&p), Tick::ZERO);
+        let mut project = Project::default();
+        let comp = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let l = build::layer(&mut project, &comp, "a", LayerSource::Null, (0, 0), None);
+        let g = level_gains(&l, Some(&p), Tick::ZERO);
         assert!((g[0] - 0.5).abs() < 1e-3, "{}", g[0]);
         assert_eq!(g[1], 0.0);
-        assert_eq!(level_gains(None, Tick::ZERO), [1.0, 1.0]);
+        assert_eq!(level_gains(&l, None, Tick::ZERO), [1.0, 1.0]);
+    }
+
+    /// Constant 0.5 audio on both channels, at any source time.
+    struct Half;
+    impl FootageSource for Half {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+            Some(vec![0.5; frames * 2])
+        }
+    }
+
+    /// #3224: keyframed Audio Levels scale the drawn waveform at the layer time the mix reads
+    /// them, so on a layer that starts later (or is stretched) a column's gain is the gain the
+    /// rendered audio has at that comp time.
+    #[test]
+    fn keyed_levels_scale_the_waveform_as_the_mix_does() {
+        let mut p = Project::default();
+        let f = Footage {
+            path: "x.wav".into(),
+            kind: FootageKind::Audio,
+            has_audio: true,
+            frame_rate: FrameRate::new(25, 1),
+            duration: Tick::from_seconds_f64(10.0),
+            ..Default::default()
+        };
+        let fid = p.add_item("x.wav", Label::SeaFoam, None, ItemKind::Footage(f));
+        let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(10.0));
+        let mut l = build::layer(&mut p, &base, "a", LayerSource::Footage { item: fid }, (0, 0), None);
+        // -6 dB at layer time 0 s, 0 dB at layer time 1 s.
+        let Some(levels) = l.props.sub_mut("audio").and_then(|g| g.get_mut("levels")) else { panic!("no Audio Levels") };
+        levels.keys = vec![Keyframe::new(Tick::ZERO, Value::Vec2([-6.0206, -6.0206])), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Vec2([0.0, 0.0]))];
+        for stretch in [100.0, 200.0] {
+            let mut l = l.clone();
+            l.start_time = Tick::from_seconds_f64(2.0);
+            l.stretch = stretch;
+            l.in_point = l.start_time;
+            l.out_point = Tick::from_seconds_f64(9.0);
+            let mut comp = base.clone();
+            comp.layers = vec![l.clone()].into();
+            let cid = p.add_item("C", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+            let levels = l.props.sub("audio").and_then(|g| g.get("levels"));
+            // The layer's start, a quarter and half of its ramp, its end, and after it.
+            for s in [2.0, 2.25, 2.5, 3.0, 4.0, 6.0] {
+                let t = Tick::from_seconds_f64(s);
+                let drawn = level_gains(&l, levels, t);
+                let mixed = mix_comp(&p, &Half, None, cid, t, 1, 1000);
+                for c in 0..2 {
+                    let heard = mixed.get(c).copied().unwrap_or(f32::NAN) / 0.5;
+                    assert!((drawn[c] - heard).abs() < 2e-3, "stretch {stretch}, {s} s, channel {c}: drawn {} heard {heard}", drawn[c]);
+                }
+            }
+            // At the layer's start (layer time 0) it is the -6 dB key, not the 0 dB one.
+            assert!((level_gains(&l, levels, Tick::from_seconds_f64(2.0))[0] - 0.5).abs() < 1e-3);
+        }
     }
 }

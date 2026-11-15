@@ -35,9 +35,10 @@ impl FileStamp {
     }
 
     /// The identity of the file at `path` now: one `metadata` call. `None` when the file system
-    /// can't describe it (missing, or a path served from memory).
+    /// can't describe it (missing, not a regular file, or a path served from memory).
     pub fn native(path: &str) -> Option<FileStamp> {
-        std::fs::metadata(path).ok().map(|md| FileStamp::of_metadata(&md))
+        let md = std::fs::metadata(path).ok()?;
+        md.is_file().then(|| FileStamp::of_metadata(&md))
     }
 }
 
@@ -63,6 +64,34 @@ impl ReadFile {
     pub fn new(path: impl Into<Arc<str>>, stamp: FileStamp) -> ReadFile {
         ReadFile { path: path.into(), stamp }
     }
+}
+
+/// The files effect `g` of `layer` reads at the context time (Apply Color LUT, Lumetri's Input
+/// LUT and Look, OCIO File Transform, a custom OCIO config and its LUTs: see
+/// [`effectcraft_effects::lut_params`]), each with its identity now. A layer's cache key holds them and a render
+/// notes them, so what was made with a file that changed since is not used (#3493).
+pub(crate) fn lut_files(ctx: &crate::EvalCtx, layer: &effectcraft_project::Layer, g: &effectcraft_project::PropGroup) -> Vec<ReadFile> {
+    let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return Vec::new() };
+    effectcraft_effects::lut_params(effect)
+        .iter()
+        .filter_map(|param| match ctx.value(layer, g.prop(param)?) {
+            effectcraft_keyframe::Value::Str(src) => Some(source_files(&src)),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The files a file parameter set to `src` reads (an OCIO config's also the LUTs it names, #3538),
+/// each with its identity now.
+pub(crate) fn source_files(src: &str) -> Vec<ReadFile> {
+    effectcraft_effects::lut_files(src)
+        .into_iter()
+        .map(|path| {
+            let stamp = FileStamp::native(&path).unwrap_or(FileStamp::Missing);
+            ReadFile::new(path, stamp)
+        })
+        .collect()
 }
 
 /// At most this many files are listed per render or cached buffer; more mark the list
@@ -324,6 +353,15 @@ mod tests {
         }
         assert!(matches!(stamps[0], FileStamp::Native { modified: Some(t), .. } if t < 0), "{:?}", stamps[0]);
         assert_ne!(stamps[0], stamps[1], "two files from before 1970 with the same size");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_is_not_a_native_file_stamp() {
+        let dir = std::env::temp_dir().join(format!("effectcraft-stamp-directory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(FileStamp::native(&dir.to_string_lossy()), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

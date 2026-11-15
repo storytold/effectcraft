@@ -632,14 +632,30 @@ pub trait RemoteFrames: Send + Sync {
 
 /// Whether a comp (or a comp it nests) has a layer with enabled effects.
 pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
-    fn walk(p: &Project, comp: ItemId, depth: usize) -> bool {
-        let Some(c) = p.comp(comp) else { return false };
-        c.layers.iter().any(|l| {
-            l.switches.effects && l.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled))
-                || depth < 16 && matches!(l.source, effectcraft_engine::project::LayerSource::Comp { item } if walk(p, item, depth + 1))
-        })
+    // Breadth first with a visited set: each comp is looked at once, at its shallowest level, so a
+    // comp first met deep in one chain is still found by a shorter route (a result memoised by
+    // comp alone would depend on the depth it was first reached at).
+    let mut seen = std::collections::HashSet::from([comp]);
+    let mut level = vec![comp];
+    // Comps nested up to 16 levels below the first are searched.
+    for _ in 0..=16 {
+        let mut next = vec![];
+        for id in level {
+            let Some(c) = project.comp(id) else { continue };
+            for l in &c.layers {
+                if l.switches.effects && l.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled)) {
+                    return true;
+                }
+                if let effectcraft_engine::project::LayerSource::Comp { item } = l.source
+                    && seen.insert(item)
+                {
+                    next.push(item);
+                }
+            }
+        }
+        level = next;
     }
-    walk(project, comp, 0)
+    false
 }
 
 pub struct Frames {
