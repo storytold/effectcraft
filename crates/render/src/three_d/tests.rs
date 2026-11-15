@@ -874,6 +874,21 @@ fn camera_tools_never_produce_nan_cameras() {
     nan_free(&Rig { eye: super::camera::point_under(&cam, CW, CH, [10.0, 10.0], &[], down.poi), ..down });
 }
 
+/// #3259 review: a layer between the eye and the near plane is not on screen, so it is not under
+/// the cursor; the layer behind it is. An orthographic camera has no such cut.
+#[test]
+fn a_layer_nearer_than_the_near_plane_is_not_under_the_cursor() {
+    let r = Rig::from_view(&default_view_cam(View3D::Default, CW, CH));
+    let cam = r.state();
+    let quad = [vec3(0.0, 0.0, 0.0), vec3(CW, 0.0, 0.0), vec3(CW, CH, 0.0), vec3(0.0, CH, 0.0)];
+    // A big plane 0.5 in front of the eye (the near plane is 1).
+    let (f, rt, dn) = (cam.forward(), cam.right(), cam.down());
+    let c = cam.eye + f * 0.5;
+    let inside = [c - rt * 1e5 - dn * 1e5, c + rt * 1e5 - dn * 1e5, c + rt * 1e5 + dn * 1e5, c - rt * 1e5 + dn * 1e5];
+    let p = super::camera::point_under(&cam, CW, CH, [960.0, 540.0], &[quad, inside], r.poi);
+    assert!(cam.depth(p) > 1.0 && (p - vec3(960.0, 540.0, 0.0)).length() < 1e-6, "the layer behind it is picked: {p:?}");
+}
+
 /// Checks that the point under the cursor lies on the nearest layer it hits, else at the POI depth.
 #[test]
 fn the_point_under_the_cursor_is_on_the_layer_it_hits() {

@@ -760,6 +760,11 @@ pub fn point_under(cam: &CameraState, w: f64, h: f64, px: [f64; 2], quads: &[[Ve
         if !(t.is_finite() && t > 1e-6) || best.is_some_and(|b| b <= t) {
             continue;
         }
+        // (a perspective camera sees nothing nearer than its near plane: such a layer is not under
+        // the cursor; `t` is the view depth, as the direction's part along the view is 1)
+        if !cam.ortho && t < NEAR {
+            continue;
+        }
         let hit = o + dir * t;
         let side = |i: usize| {
             let (a, b) = (q[i % 4], q[(i + 1) % 4]);
