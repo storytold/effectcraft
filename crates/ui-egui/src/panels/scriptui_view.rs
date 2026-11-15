@@ -514,10 +514,40 @@ fn snug(r: Rect, text: &str) -> Rect {
     Rect::from_min_size(r.min, vec2(w, r.height()))
 }
 
+/// A canvas that listens for pointer events must see the pointer before its plain click: drawing
+/// queues the click, but `mouse_events` queues `mousedown` / `mouseup` after it, so a press and
+/// release in one frame would run `onClick` first. Move such clicks behind the events of this
+/// frame. A `click` listener replaces the plain click, so nothing is left to move in that case.
+fn defer_pointer_canvas_clicks(app: &EffectcraftApp, acts: Vec<Act>) -> Vec<Act> {
+    let mut queued = Vec::with_capacity(acts.len());
+    let mut deferred = Vec::new();
+    for a in acts {
+        let waits = match &a {
+            Act::Click(win, id) => app
+                .session
+                .script_ui
+                .windows
+                .iter()
+                .find(|w| w.id == *win)
+                .and_then(|w| w.root.find(*id))
+                .is_some_and(|w| w.kind == WidgetKind::Canvas && !w.mouse.is_empty()),
+            _ => false,
+        };
+        if waits {
+            deferred.push(a);
+        } else {
+            queued.push(a);
+        }
+    }
+    queued.extend(deferred);
+    queued
+}
+
 /// Runs the actions collected while drawing a ScriptUI window as `scriptui.*` commands, in order.
 /// A reply carrying an `error` becomes a toast with the script's message; otherwise a non-empty
 /// `output` becomes the status line (its last line). Command failures also go to `app.ui.status`.
 fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
+    let acts = defer_pointer_canvas_clicks(app, acts);
     for a in acts {
         let (cmd, p) = match a {
             Act::Click(w, id) => ("scriptui.click", json!({"window": w, "widget": id})),

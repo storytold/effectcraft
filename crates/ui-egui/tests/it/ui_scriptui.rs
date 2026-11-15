@@ -285,6 +285,33 @@ fn scriptui_canvas_without_draw_takes_clicks() {
     h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
 }
 
+/// A canvas that listens for mousedown sees it before `onClick`, even when the press and release
+/// land in one frame (drawing queues the click, the pointer events are queued after it).
+#[test]
+fn canvas_click_waits_for_its_pointer_events() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Order");
+      var cv = w.add("canvas", undefined, undefined, { name: "order" });
+      cv.preferredSize = [120, 60];
+      var status = w.add("statictext", undefined, "", { name: "status" });
+      cv.onClick = function () { status.text = status.text + "C"; };
+      cv.addEventListener("mousedown", function () { status.text = status.text + "D"; });
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "order.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(3);
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "Order").unwrap().id;
+    let text = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.script_ui.windows.iter().find(|w| w.id == win).unwrap().root.lookup(&json!("status")).unwrap().text.clone()
+    };
+    assert_eq!(text(&h), "");
+    click(&mut h, &format!("scriptui.{win}.order"));
+    assert_eq!(text(&h), "DC", "mousedown runs before the plain click");
+    h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+}
+
 /// onDraw fills of concave paths and real images (drawImage, image controls), rendered.
 #[test]
 fn on_draw_concave_fills_and_images_render() {
