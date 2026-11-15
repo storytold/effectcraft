@@ -756,7 +756,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "Gaussian Blur",
             "Blur & Sharpen",
             vec![
-                p("blurriness", "Blurriness", num(0.0), slider(0.0, 3000.0, 0.0, 50.0, 1)),
+                p("blurriness", "Blurriness", num(0.0), slider(0.0, 30000.0, 0.0, 50.0, 1)),
                 p("dimensions", "Blur Dimensions", Value::Enum(0), dims()),
                 p("repeatEdge", "Repeat Edge Pixels", Value::Bool(false), ParamUi::Checkbox),
             ],
@@ -1034,6 +1034,18 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3460: After Effects' Blurriness takes 0..30000 (its slider shows 0..50), and `prop.set`
+    /// and the Effect Controls editors clamp to the hard range.
+    #[test]
+    fn gaussian_blurriness_range_matches_after_effects() {
+        let spec = crate::find("ec.blur.gaussian").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "blurriness").unwrap().ui;
+        assert!(
+            matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. } if *min == 0.0 && *max == 30000.0 && *slider_min == 0.0 && *slider_max == 50.0),
+            "{ui:?}"
+        );
     }
 
     #[test]
