@@ -70,6 +70,10 @@ fn settings() -> RenderSettings {
     RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() }
 }
 
+fn test_job<'a>(project: &'a Project, comp: ItemId, footage: &'a dyn FootageSource, settings: &'a RenderSettings, output: &'a OutputModule, path: &'a str) -> Job<'a> {
+    Job { project, footage, expr: None, accel: None, comp, settings, output, path, sink: None, options: Default::default(), nested_switches: true }
+}
+
 /// Exports the standard test comp and checks progress for all [`FRAMES`] frames.
 fn run(p: &Project, cid: ItemId, footage: &dyn FootageSource, om: &OutputModule, path: &Path) -> effectcraft_export::Report {
     run_frames(p, cid, footage, om, path, FRAMES)
@@ -79,19 +83,7 @@ fn run(p: &Project, cid: ItemId, footage: &dyn FootageSource, om: &OutputModule,
 fn run_frames(p: &Project, cid: ItemId, footage: &dyn FootageSource, om: &OutputModule, path: &Path, frames: u64) -> effectcraft_export::Report {
     let s = settings();
     let path = path.to_string_lossy().to_string();
-    let job = Job {
-        project: p,
-        footage,
-        expr: None,
-        accel: None,
-        comp: cid,
-        settings: &s,
-        output: om,
-        path: &path,
-        sink: None,
-        options: Default::default(),
-        nested_switches: true,
-    };
+    let job = test_job(p, cid, footage, &s, om, &path);
     let mut last = Progress::default();
     let mut calls = 0;
     let r = export(&job, &mut |pr| {
@@ -203,19 +195,7 @@ fn h264_odd_size_is_cropped_even() {
     let comp = p.comp(cid).expect("comp");
     assert_eq!(s.output_size(comp).0 % 2, 1);
     let path = d.join("odd.mp4").to_string_lossy().to_string();
-    let job = Job {
-        project: &p,
-        footage: &NoFootage,
-        expr: None,
-        accel: None,
-        comp: cid,
-        settings: &s,
-        output: &om,
-        path: &path,
-        sink: None,
-        options: Default::default(),
-        nested_switches: true,
-    };
+    let job = test_job(&p, cid, &NoFootage, &s, &om, &path);
     let r = export(&job, &mut |_| true).expect("export");
     assert_eq!((r.width % 2, r.height % 2), (0, 0));
 }
@@ -499,19 +479,7 @@ fn exr_centre(color: [f32; 3], channels: Channels, name: &str) -> [f32; 4] {
     om.channels = channels;
     let s = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
     let path = d.join("f_[#####].exr").to_string_lossy().to_string();
-    let job = Job {
-        project: &p,
-        footage: &NoFootage,
-        expr: None,
-        accel: None,
-        comp: cid,
-        settings: &s,
-        output: &om,
-        path: &path,
-        sink: None,
-        options: Default::default(),
-        nested_switches: true,
-    };
+    let job = test_job(&p, cid, &NoFootage, &s, &om, &path);
     export(&job, &mut |_| true).expect("export");
     let img = image::open(d.join("f_00000.exr")).expect("exr").to_rgba32f();
     img.get_pixel(W / 2, H / 2).0
@@ -625,19 +593,7 @@ fn cancel_stops_early() {
     let om = OutputModule::for_format(OutputFormat::PngSequence);
     let s = settings();
     let path = d.join("c_[#####].png").to_string_lossy().to_string();
-    let job = Job {
-        project: &p,
-        footage: &NoFootage,
-        expr: None,
-        accel: None,
-        comp: cid,
-        settings: &s,
-        output: &om,
-        path: &path,
-        sink: None,
-        options: Default::default(),
-        nested_switches: true,
-    };
+    let job = test_job(&p, cid, &NoFootage, &s, &om, &path);
     let r = export(&job, &mut |_| false);
     assert!(matches!(r, Err(effectcraft_export::ExportError::Cancelled)));
     let written = std::fs::read_dir(&d).map(|r| r.count()).unwrap_or(0);
