@@ -2747,6 +2747,22 @@ const HEBREW: &[(&str, &str)] = &[
     ("Double-click a layer to open it in the Layer panel", "לחצו פעמיים על שכבה כדי לפתוח אותה בחלונית השכבות"),
     ("Drop Frame", "דילוג על מספרי פריימים"),
     ("Effects & Presets options", "אפשרויות אפקטים והגדרות קבועות מראש"),
+    // Source-checked Hebrew Settings models and plug-in library controls (NIGHT-06).
+    ("Source", "מקור"),
+    ("Download", "הורדה"),
+    ("Install from File…", "התקנה מקובץ…"),
+    ("Models folder: {}", "תיקיית המודלים: \u{2068}{}\u{2069}"),
+    ("Plug-ins folder: {}", "תיקיית התוספים: \u{2068}{}\u{2069}"),
+    ("Update All ({})", "עדכון הכול ({})"),
+    ("Installed {}: update available", "גרסה {} מותקנת: עדכון זמין"),
+    ("Installed {}", "גרסה {} מותקנת"),
+    ("Needs a newer EffectCraft", "נדרשת גרסה חדשה יותר של EffectCraft"),
+    ("Open on GitHub", "פתיחה ב־GitHub"),
+    ("Watch video", "צפייה בסרטון"),
+    ("Hide Preview", "הסתרת תצוגה מקדימה"),
+    ("Preview", "תצוגה מקדימה"),
+    ("Install", "התקנה"),
+    ("Update", "עדכון"),
     // Additional source-checked Hebrew shortcuts, viewer tips and paint controls (NIGHT-02).
     ("Click a key to see its commands.", "לחצו על מקש כדי להציג את הפקודות המשויכות אליו."),
     (
@@ -10805,6 +10821,44 @@ mod tests {
         set_current("en");
         assert_eq!(tr("Composition Name:"), "Composition Name:");
         assert_eq!(tr("Width:"), "Width:");
+    }
+
+    /// The Native Settings models and plug-in library action labels must resolve in Hebrew
+    /// without changing the automation IDs or the LTR model-folder paths.
+    #[test]
+    fn hebrew_native_models_and_plugin_library_controls_are_localized() {
+        let settings = include_str!("../panels/settings.rs");
+        set_current("he");
+        for (english, translated) in [
+            ("Source", "מקור"),
+            ("Download", "הורדה"),
+            ("Install from File…", "התקנה מקובץ…"),
+            ("Models folder: {}", "תיקיית המודלים: \u{2068}{}\u{2069}"),
+            ("Plug-ins folder: {}", "תיקיית התוספים: \u{2068}{}\u{2069}"),
+            ("Update All ({})", "עדכון הכול ({})"),
+            ("Installed {}: update available", "גרסה {} מותקנת: עדכון זמין"),
+            ("Installed {}", "גרסה {} מותקנת"),
+            ("Needs a newer EffectCraft", "נדרשת גרסה חדשה יותר של EffectCraft"),
+            ("Open on GitHub", "פתיחה ב־GitHub"),
+            ("Watch video", "צפייה בסרטון"),
+            ("Hide Preview", "הסתרת תצוגה מקדימה"),
+            ("Preview", "תצוגה מקדימה"),
+            ("Install", "התקנה"),
+            ("Update", "עדכון"),
+        ] {
+            assert!(
+                settings.contains(&format!("tr(\"{english}\"")) || settings.contains(&format!("tr_args(\"{english}\"")),
+                "Missing Native Settings callsite: {english}"
+            );
+            assert_eq!(tr(english), translated, "Settings localization: {english}");
+        }
+        let folder = "C:/sample-models";
+        assert_eq!(tr_args("Models folder: {}", &[&folder]), "תיקיית המודלים: \u{2068}C:/sample-models\u{2069");
+        assert_eq!(tr_args("Plug-ins folder: {}", &[&folder]), "תיקיית התוספים: \u{2068}C:/sample-models\u{2069");
+        assert_eq!(tr_args("Update All ({})", &[&3]), "עדכון הכול (3)");
+        set_current("en");
+        assert_eq!(tr("Download"), "Download");
+        assert_eq!(tr_args("Models folder: {}", &[&folder]), "Models folder: C:/sample-models");
     }
 
     /// Hebrew preferences and crash recovery must be understandable without changing settings IDs.
