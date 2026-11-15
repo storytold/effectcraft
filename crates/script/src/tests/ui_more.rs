@@ -504,3 +504,42 @@ fn canvas_paints_only_when_dirty() {
     assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 2"), "repainted without repaint(): {:?}", cv.draw);
     s.execute("scriptui.close", json!({})).unwrap();
 }
+
+const CANVAS_TABS: &str = r#"
+var w = new Window("palette", "Canvas tabs");
+var tp = w.add("tabbedpanel", undefined, undefined, { name: "tabs" });
+var one = tp.add("tab", undefined, "One");
+var two = tp.add("tab", undefined, "Two", { name: "two" });
+var cv = two.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [60, 40];
+var paints = 0;
+cv.onDraw = function () {
+  paints++;
+  var g = this.graphics;
+  g.newPath();
+  g.rectPath(0, 0, this.size.width, this.size.height);
+  g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, [1, 0, 0, 1]));
+};
+w.show();
+"#;
+
+#[test]
+fn canvas_on_an_unselected_tab_waits_until_it_is_shown() {
+    let mut s = session();
+    let o = run_code(&mut s, CANVAS_TABS, "canvas-tabs.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    // The canvas lives on the second tab, so it must not paint while the first tab is showing.
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.kind, WidgetKind::Canvas);
+    assert!(cv.draw.is_empty(), "painted before its tab was selected: {:?}", cv.draw);
+    // Selecting its tab lets the first paint happen, without an explicit repaint().
+    s.execute("scriptui.click", json!({"widget": "two"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw.len(), 1, "did not paint after its tab was selected: {:?}", cv.draw);
+    assert!(matches!(&cv.draw[0], DrawOp::Fill { .. }), "{:?}", cv.draw);
+    // A second snapshot keeps the cached list.
+    s.execute("scriptui.click", json!({"widget": "two"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw.len(), 1, "repainted without repaint(): {:?}", cv.draw);
+    s.execute("scriptui.close", json!({})).unwrap();
+}

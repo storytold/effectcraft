@@ -259,6 +259,32 @@ fn scriptui_canvas_repaints_on_pointer_events() {
     h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
 }
 
+/// A canvas without `onDraw` still takes click handlers: a plain pointer click runs its
+/// `onClick`, with no mouse-event listeners needed (CodeRabbit finding on #3748).
+#[test]
+fn scriptui_canvas_without_draw_takes_clicks() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Plain");
+      var cv = w.add("canvas", undefined, undefined, { name: "plain" });
+      cv.preferredSize = [120, 60];
+      var status = w.add("statictext", undefined, "", { name: "status" });
+      cv.onClick = function () { status.text = "clicked"; };
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "plain.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(3);
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "Plain").unwrap().id;
+    let text = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.script_ui.windows.iter().find(|w| w.id == win).unwrap().root.lookup(&json!("status")).unwrap().text.clone()
+    };
+    assert_eq!(text(&h), "", "the status text starts empty");
+    click(&mut h, &format!("scriptui.{win}.plain"));
+    assert_eq!(text(&h), "clicked", "the canvas click ran onClick");
+    h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+}
+
 /// onDraw fills of concave paths and real images (drawImage, image controls), rendered.
 #[test]
 fn on_draw_concave_fills_and_images_render() {

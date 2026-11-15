@@ -257,8 +257,13 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                 ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
             }
         }
-        // A canvas without `onDraw` paints nothing (its script normally paints it).
-        WidgetKind::Canvas => {}
+        // A canvas without `onDraw` paints nothing; it still takes click handlers.
+        WidgetKind::Canvas => {
+            let r = ui.interact(rect, id, if w.enabled { Sense::click() } else { Sense::hover() });
+            if tip(r).clicked() && w.enabled {
+                acts.push(Act::Click(win, w.id));
+            }
+        }
     }
     if custom && !w.kind.is_container() {
         paint_draw(ui, rect, &w.draw, &t, &*services);

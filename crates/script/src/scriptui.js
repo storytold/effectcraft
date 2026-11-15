@@ -398,12 +398,26 @@ function __uiGraphics() {
   };
 }
 
+// Whether a canvas can be seen: it and its ancestors below the window are visible, and every
+// enclosing tab is the selected one of its tabbed panel.
+function __uiCanvasShown(c, win) {
+  for (var n = c; n && n !== win; n = n.parent) {
+    if (n.visible === false) return false;
+    if (n.parent && n.parent.type === "tabbedpanel") {
+      var sel = n.parent.__sel || [];
+      if (sel.length === 0 || sel[0] !== n.parent.children.indexOf(n)) return false;
+    }
+  }
+  return true;
+}
+
 // Run the onDraw handlers of a window's controls (after laying it out, so `size` is known),
 // recording what they paint.
 function __uiRunDraws(win) {
   var drawn = [];
   (function walk(c) {
-    if (typeof c.onDraw === "function") drawn.push(c);
+    // A hidden canvas keeps its dirty flag: its first paint happens once it is shown.
+    if (typeof c.onDraw === "function" && (c.type !== "canvas" || __uiCanvasShown(c, win))) drawn.push(c);
     for (var i = 0; i < (c.children || []).length; i++) walk(c.children[i]);
   })(win);
   if (!drawn.length) return;

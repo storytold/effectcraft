@@ -111,8 +111,9 @@ keys.
 editor, a gradient strip, a preview. Add it like any control, paint it in `onDraw` with
 ScriptUIGraphics, and call `canvas.repaint()` when what it shows changes. A canvas keeps its draw
 list between snapshots: `onDraw` runs when the canvas is first shown, after `repaint()`, and when
-its size changes, so a mouse handler that moves a handle repaints only the canvas instead of
-re-running every other control's `onDraw`. Mouse events reach it like any control, with
+its size changes. A mouse handler that moves a handle therefore re-runs only that canvas's
+`onDraw`: other canvases keep their draw lists, while non-canvas controls still redraw with
+every snapshot as before. Mouse events reach it like any control, with
 `clientX`/`clientY` in canvas coordinates; `preferredSize` (or `bounds`) sets its size.
 
 ```js
