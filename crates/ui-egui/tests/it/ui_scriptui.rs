@@ -208,6 +208,57 @@ fn history_panel_jumps_between_branches() {
     assert_eq!(layer_names(&h), ["C", "A"]);
 }
 
+/// A ScriptUI canvas paints its draw list, takes pointer events in canvas coordinates, and
+/// repaints on `repaint()` only (issue #2695): a press redraws it, an untouched snapshot does not.
+#[test]
+fn scriptui_canvas_repaints_on_pointer_events() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Plot");
+      var cv = w.add("canvas", undefined, undefined, { name: "plot" });
+      cv.preferredSize = [200, 120];
+      var paints = 0;
+      cv.onDraw = function () {
+        paints++;
+        var g = this.graphics;
+        g.newPath();
+        g.rectPath(0, 0, this.size.width, this.size.height);
+        g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, [0.2, 0.4, 0.8, 1]));
+        g.drawString("p" + paints, g.newPen(g.PenType.SOLID_COLOR, [1, 1, 1], 1), 4, 4,
+          ScriptUI.newFont("dialog", "REGULAR", 12));
+      };
+      cv.addEventListener("mousedown", function (e) { cv.helpTip = "down " + e.clientX + " " + e.clientY; cv.repaint(); });
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "plot.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(3);
+    let win = h.state().session.script_ui.windows.iter().find(|w| w.title == "Plot").unwrap().id;
+    let id = format!("scriptui.{win}.plot");
+    let r = rect(&h, &id);
+    assert!((r.width() - 200.0).abs() < 2.0 && (r.height() - 120.0).abs() < 2.0, "{r:?}");
+    let at = r.center();
+    h.input_mut().events.push(Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    h.run_steps(3);
+    let w = h.state().session.script_ui.windows.iter().find(|w| w.id == win).unwrap();
+    let cv = serde_json::to_value(w.root.lookup(&json!("plot")).unwrap()).unwrap();
+    assert_eq!(cv["type"], "canvas", "{cv}");
+    assert!(cv["draw"][0]["op"] == "fill", "{cv}");
+    let tip = cv["helpTip"].as_str().unwrap_or_default();
+    assert!(tip.starts_with("down "), "the press reached the script: {tip:?}");
+    assert!(cv["draw"].as_array().unwrap().iter().any(|op| op["op"] == "text" && op["text"] == "p2"), "{cv}");
+    // A snapshot the canvas did not ask for keeps its cached drawing.
+    h.state_mut().session.execute("scriptui.mouse", json!({"widget": "plot", "type": "mousemove", "x": 3, "y": 4})).unwrap();
+    h.run_steps(2);
+    let w = h.state().session.script_ui.windows.iter().find(|w| w.id == win).unwrap();
+    let cv = serde_json::to_value(w.root.lookup(&json!("plot")).unwrap()).unwrap();
+    assert!(cv["draw"].as_array().unwrap().iter().any(|op| op["op"] == "text" && op["text"] == "p2"), "repainted without repaint(): {cv}");
+    h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+}
+
 /// onDraw fills of concave paths and real images (drawImage, image controls), rendered.
 #[test]
 fn on_draw_concave_fills_and_images_render() {

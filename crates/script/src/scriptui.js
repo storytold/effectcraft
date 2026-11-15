@@ -52,7 +52,8 @@ var __uiTypes = {
   window: "Window", panel: "Panel", group: "Group", button: "Button", iconbutton: "IconButton",
   statictext: "StaticText", edittext: "EditText", checkbox: "Checkbox", radiobutton: "RadioButton",
   slider: "Slider", scrollbar: "Scrollbar", progressbar: "Progressbar", dropdownlist: "DropDownList",
-  listbox: "ListBox", tabbedpanel: "TabbedPanel", tab: "Tab", image: "ScriptUIImage"
+  listbox: "ListBox", tabbedpanel: "TabbedPanel", tab: "Tab", image: "ScriptUIImage",
+  canvas: "Canvas"
 };
 var __uiContainers = { window: 1, panel: 1, group: 1, tabbedpanel: 1, tab: 1 };
 
@@ -287,6 +288,8 @@ function DropDownList() {}
 function ListBox() {}
 function TabbedPanel() {}
 function Tab() {}
+// A script-painted canvas: `onDraw` paints it and `repaint()` asks for another pass.
+function Canvas() {}
 // ScriptUIImage: an image file (`src`) or embedded image bytes (`data`, a binary string as in
 // resource-string images: one character per byte).
 function ScriptUIImage(src, data, name) {
@@ -407,6 +410,15 @@ function __uiRunDraws(win) {
   __uiLayout(win);
   for (const elem of drawn) {
     var c = elem;
+    if (c.type === "canvas") {
+      // A canvas keeps its draw list until it asks for a repaint; a resize invalidates it.
+      var b = c.__lb;
+      var size = [b[2] - b[0], b[3] - b[1]];
+      if (c.__lastSize && (c.__lastSize[0] !== size[0] || c.__lastSize[1] !== size[1])) c.__dirty = true;
+      c.__lastSize = size;
+      if (!c.__dirty && c.__draw) continue;
+      c.__dirty = false;
+    }
     c.__draw = [];
     c.graphics.__rec = c.__draw;
     try {
@@ -446,6 +458,12 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   o.alignment = null;
   o.graphics = __uiGraphics();
   o.__listeners = {};
+  // A canvas paints on demand: onDraw runs when it is dirty (the first snapshot and after
+  // repaint()), not on every snapshot as the other controls do.
+  if (type === "canvas") {
+    o.__dirty = true;
+    o.__lastSize = null;
+  }
   if (o.properties.name) o.name = o.properties.name;
   if (__uiContainers[type]) {
     o.orientation = type === "group" ? "row" : type === "tabbedpanel" ? "stack" : "column";
@@ -594,6 +612,10 @@ function __uiProto() {
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);
       this.__fire(e);
     },
+    // A canvas repaints on the next snapshot; other controls redraw with every snapshot anyway.
+    repaint: function () {
+      if (this.type === "canvas") this.__dirty = true;
+    },
     // `capture`: the listener runs in the capture phase of mouse events (on the way down from
     // the window to the target) instead of the bubble phase.
     addEventListener: function (name, fn, capture) {
@@ -633,7 +655,7 @@ function __uiProto() {
 
 (function () {
   var all = ["Window", "Panel", "Group", "Button", "IconButton", "StaticText", "EditText", "Checkbox", "RadioButton", "Slider",
-    "Scrollbar", "Progressbar", "DropDownList", "ListBox", "TabbedPanel", "Tab", "ScriptUIImage"];
+    "Scrollbar", "Progressbar", "DropDownList", "ListBox", "Canvas", "TabbedPanel", "Tab", "ScriptUIImage"];
   for (const elem of all) {
     var C = __ecGlobal[elem];
     var p = __uiProto();

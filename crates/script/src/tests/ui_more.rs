@@ -453,3 +453,54 @@ fn socket_edge_cases() {
     assert_eq!(o.result, json!(0), "{:?}", o.error);
     assert!(t.elapsed().as_secs_f64() < 5.0);
 }
+
+const CANVAS: &str = r#"
+var w = new Window("palette", "Canvas");
+var cv = w.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [120, 80];
+var paints = 0;
+cv.onDraw = function () {
+  paints++;
+  var g = this.graphics;
+  var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.1, 0.1, 0.1, 1]);
+  g.newPath();
+  g.rectPath(0, 0, this.size.width, this.size.height);
+  g.fillPath(bg);
+  g.drawString("paint " + paints, g.newPen(g.PenType.SOLID_COLOR, [1, 1, 1], 1), 2, 2, ScriptUI.newFont("dialog", "REGULAR", 12));
+};
+cv.addEventListener("mousedown", function (e) { cv.helpTip = e.clientX + "x" + e.clientY; cv.repaint(); });
+var b = w.add("button", undefined, "Noop", { name: "noop" });
+b.onClick = function () { writeLn("noop"); };
+w.show();
+"#;
+
+#[test]
+fn canvas_paints_only_when_dirty() {
+    let mut s = session();
+    let o = run_code(&mut s, CANVAS, "canvas.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    let w = s.script_ui.windows[0].clone();
+    // The canvas is a leaf laid out at its preferred size, and it painted once.
+    let cv = w.root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.kind, WidgetKind::Canvas);
+    assert_eq!([cv.bounds[2], cv.bounds[3]], [120.0, 80.0]);
+    assert!(cv.handlers.contains(&"onDraw".to_string()));
+    assert_eq!(cv.mouse, ["mousedown"]);
+    assert_eq!(cv.draw.len(), 2, "{:?}", cv.draw);
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.1, 0.1, 0.1, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 120.0, h: 80.0 }] });
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 1"), "{:?}", cv.draw);
+    // Agents see the control type through scriptui.get.
+    let tree = s.execute("scriptui.get", json!({})).unwrap();
+    assert_eq!(tree["root"]["children"][0]["type"], "canvas", "{tree}");
+    // A mouse press repaints: the handler stores the pointer and calls repaint().
+    s.execute("scriptui.mouse", json!({"widget": "plot", "type": "mousedown", "x": 12.5, "y": 34})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.help_tip, "12.5x34");
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 2"), "{:?}", cv.draw);
+    // Snapshots that do not touch the canvas keep its cached draw list.
+    s.execute("scriptui.mouse", json!({"widget": "plot", "type": "mousemove", "x": 5, "y": 6})).unwrap();
+    s.execute("scriptui.click", json!({"widget": "noop"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 2"), "repainted without repaint(): {:?}", cv.draw);
+    s.execute("scriptui.close", json!({})).unwrap();
+}

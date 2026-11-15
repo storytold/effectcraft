@@ -105,7 +105,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             draw_children(app, ui, origin, win, w, acts);
             return;
         }
-        let clickable = matches!(w.kind, WidgetKind::Button | WidgetKind::IconButton | WidgetKind::Checkbox | WidgetKind::RadioButton);
+        let clickable = matches!(w.kind, WidgetKind::Button | WidgetKind::IconButton | WidgetKind::Checkbox | WidgetKind::RadioButton | WidgetKind::Canvas);
         let r = ui.interact(rect, id, if clickable && w.enabled { Sense::click() } else { Sense::hover() });
         paint_draw(ui, rect, &w.draw, &t, &*services);
         if tip(r).clicked() && clickable {
@@ -257,6 +257,8 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                 ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
             }
         }
+        // A canvas without `onDraw` paints nothing (its script normally paints it).
+        WidgetKind::Canvas => {}
     }
     if custom && !w.kind.is_container() {
         paint_draw(ui, rect, &w.draw, &t, &*services);
