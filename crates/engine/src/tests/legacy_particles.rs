@@ -165,5 +165,6 @@ fn only_a_writer_before_v0_10_0_gets_the_old_compositing() {
     let mut explicit = Project::from_json(&file_text(&s, Some("0.6.0"), true)).unwrap();
     crate::upgrade_effects(&mut explicit, Some("0.6.0"));
     let fx = explicit.comp(cid).unwrap().layer(LayerId(lid)).unwrap().effects().unwrap();
-    assert!(fx.groups().all(|g| g.get(COMPOSITE).is_none_or(|p| p.value == KV::Bool(false))), "an explicit choice wins");
+    let kept: Vec<_> = fx.groups().filter_map(|g| g.get(COMPOSITE).map(|p| p.value.clone())).collect();
+    assert_eq!(kept, vec![KV::Bool(false); PARTICLES.len()], "an explicit choice wins, and both controls are still there");
 }
