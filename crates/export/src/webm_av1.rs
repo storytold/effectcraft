@@ -4,13 +4,13 @@
 //! SimpleBlocks carry the key-frame flag only on AV1 key frames (the Cues-less layout of the
 //! VP9 writer: players seek by scanning clusters).
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 
 use effectcraft_project::Comp;
 use effectcraft_project::render_queue::Channels;
 
 use crate::encode::VideoEncoder;
-use crate::webm::{CLUSTER, EBML, INFO, OPUS_RATE, OpusPackets, SEGMENT, TRACK_ENTRY, TRACKS, el, el_float, el_str, el_uint, id_bytes, opus_encoder, vint};
+use crate::webm::{CLUSTER, OpusPackets, TRACK_ENTRY, TRACKS, append_opus_track, el, el_str, el_uint, finish_webm, opus_encoder, vint, webm_header};
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
 struct Block {
@@ -51,26 +51,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
 
     let path = job.place(job.path, 1);
     let mut file = job.create(&path)?;
-    let mut head = vec![];
-    let mut eb = vec![];
-    el_uint(&mut eb, 0x4286, 1);
-    el_uint(&mut eb, 0x42F7, 1);
-    el_uint(&mut eb, 0x42F2, 4);
-    el_uint(&mut eb, 0x42F3, 8);
-    el_str(&mut eb, 0x4282, "webm");
-    el_uint(&mut eb, 0x4287, 4);
-    el_uint(&mut eb, 0x4285, 2);
-    el(&mut head, EBML, &eb);
-    head.extend(id_bytes(SEGMENT));
-    let size_pos = head.len() as u64;
-    head.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
-    let seg_start = head.len() as u64;
-    let mut info = vec![];
-    el_uint(&mut info, 0x2AD7B1, 1_000_000);
-    el_float(&mut info, 0x4489, duration_ms);
-    el_str(&mut info, 0x4D80, "EffectCraft");
-    el_str(&mut info, 0x5741, "EffectCraft");
-    el(&mut head, INFO, &info);
+    let (mut head, size_pos, seg_start) = webm_header(duration_ms);
     let mut tracks = vec![];
     let mut v = vec![];
     el_uint(&mut v, 0xD7, 1);
@@ -85,22 +66,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     el_uint(&mut video, 0xBA, h as u64);
     el(&mut v, 0xE0, &video);
     el(&mut tracks, TRACK_ENTRY, &v);
-    if let Some(o) = &opus {
-        let mut a = vec![];
-        el_uint(&mut a, 0xD7, 2);
-        el_uint(&mut a, 0x73C5, 2);
-        el_uint(&mut a, 0x83, 2);
-        el_uint(&mut a, 0x9C, 0);
-        el_str(&mut a, 0x86, "A_OPUS");
-        el(&mut a, 0x63A2, &o.opus_head());
-        el_uint(&mut a, 0x56AA, o.pre_skip() as u64 * 1_000_000_000 / OPUS_RATE as u64);
-        el_uint(&mut a, 0x56BB, 80_000_000);
-        let mut au = vec![];
-        el_float(&mut au, 0xB5, OPUS_RATE as f64);
-        el_uint(&mut au, 0x9F, opus_channels as u64);
-        el(&mut a, 0xE1, &au);
-        el(&mut tracks, TRACK_ENTRY, &a);
-    }
+    append_opus_track(&mut tracks, opus.as_ref(), opus_channels);
     el(&mut head, TRACKS, &tracks);
     file.write_all(&head).map_err(io)?;
     let mut seg_len = head.len() as u64 - seg_start;
@@ -141,12 +107,6 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         audio.until(job, span_end, true, |ms, data| blocks.push(Block { ms, track: 2, key: true, data }))?;
         flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
     }
-    let mut size = [0u8; 8];
-    size[0] = 0x01;
-    size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
-    file.write_all(&size).map_err(io)?;
-    file.seek(SeekFrom::End(0)).map_err(io)?;
-    let bytes = file.finish()?;
+    let bytes = finish_webm(file, size_pos, seg_len)?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
 }

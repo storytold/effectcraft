@@ -123,6 +123,63 @@ fn cluster(frames: &mut [Frame]) -> Vec<u8> {
     out
 }
 
+/// Common WebM preamble; codec-specific track metadata follows it.
+pub(crate) fn webm_header(duration_ms: f64) -> (Vec<u8>, u64, u64) {
+    // EBML header.
+    let mut head = vec![];
+    let mut eb = vec![];
+    el_uint(&mut eb, 0x4286, 1);
+    el_uint(&mut eb, 0x42F7, 1);
+    el_uint(&mut eb, 0x42F2, 4);
+    el_uint(&mut eb, 0x42F3, 8);
+    el_str(&mut eb, 0x4282, "webm");
+    el_uint(&mut eb, 0x4287, 4);
+    el_uint(&mut eb, 0x4285, 2);
+    el(&mut head, EBML, &eb);
+    // Segment with an 8-byte size patched at the end.
+    head.extend(id_bytes(SEGMENT));
+    let size_pos = head.len() as u64;
+    head.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    let seg_start = head.len() as u64;
+    let mut info = vec![];
+    el_uint(&mut info, 0x2AD7B1, 1_000_000);
+    el_float(&mut info, 0x4489, duration_ms);
+    el_str(&mut info, 0x4D80, "EffectCraft");
+    el_str(&mut info, 0x5741, "EffectCraft");
+    el(&mut head, INFO, &info);
+    (head, size_pos, seg_start)
+}
+
+pub(crate) fn append_opus_track(tracks: &mut Vec<u8>, opus: Option<&craft_audio::opus::encoder::Encoder>, opus_channels: usize) {
+    if let Some(o) = opus {
+        let mut a = vec![];
+        el_uint(&mut a, 0xD7, 2);
+        el_uint(&mut a, 0x73C5, 2);
+        el_uint(&mut a, 0x83, 2);
+        el_uint(&mut a, 0x9C, 0);
+        el_str(&mut a, 0x86, "A_OPUS");
+        el(&mut a, 0x63A2, &o.opus_head());
+        el_uint(&mut a, 0x56AA, o.pre_skip() as u64 * 1_000_000_000 / OPUS_RATE as u64);
+        el_uint(&mut a, 0x56BB, 80_000_000);
+        let mut au = vec![];
+        el_float(&mut au, 0xB5, OPUS_RATE as f64);
+        el_uint(&mut au, 0x9F, opus_channels as u64);
+        el(&mut a, 0xE1, &au);
+        el(tracks, TRACK_ENTRY, &a);
+    }
+}
+
+pub(crate) fn finish_webm(mut file: crate::out::Out, size_pos: u64, seg_len: u64) -> Result<u64> {
+    // Patch the Segment size.
+    let mut size = [0u8; 8];
+    size[0] = 0x01;
+    size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
+    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
+    file.write_all(&size).map_err(io)?;
+    file.seek(SeekFrom::End(0)).map_err(io)?;
+    file.finish()
+}
+
 /// The Opus encoder of a WebM output: the module's channel count, bitrate and application.
 pub(crate) fn opus_encoder(job: &Cx) -> Result<craft_audio::opus::encoder::Encoder> {
     let channels = if job.output.audio_channels == 1 { 1 } else { 2 };
@@ -203,28 +260,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
 
     let path = job.place(job.path, 1);
     let mut file = job.create(&path)?;
-    // EBML header.
-    let mut head = vec![];
-    let mut eb = vec![];
-    el_uint(&mut eb, 0x4286, 1);
-    el_uint(&mut eb, 0x42F7, 1);
-    el_uint(&mut eb, 0x42F2, 4);
-    el_uint(&mut eb, 0x42F3, 8);
-    el_str(&mut eb, 0x4282, "webm");
-    el_uint(&mut eb, 0x4287, 4);
-    el_uint(&mut eb, 0x4285, 2);
-    el(&mut head, EBML, &eb);
-    // Segment with an 8-byte size patched at the end.
-    head.extend(id_bytes(SEGMENT));
-    let size_pos = head.len() as u64;
-    head.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
-    let seg_start = head.len() as u64;
-    let mut info = vec![];
-    el_uint(&mut info, 0x2AD7B1, 1_000_000);
-    el_float(&mut info, 0x4489, duration_ms);
-    el_str(&mut info, 0x4D80, "EffectCraft");
-    el_str(&mut info, 0x5741, "EffectCraft");
-    el(&mut head, INFO, &info);
+    let (mut head, size_pos, seg_start) = webm_header(duration_ms);
     let mut tracks = vec![];
     let mut v = vec![];
     el_uint(&mut v, 0xD7, 1);
@@ -244,22 +280,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     }
     el(&mut v, 0xE0, &video);
     el(&mut tracks, TRACK_ENTRY, &v);
-    if let Some(o) = &opus {
-        let mut a = vec![];
-        el_uint(&mut a, 0xD7, 2);
-        el_uint(&mut a, 0x73C5, 2);
-        el_uint(&mut a, 0x83, 2);
-        el_uint(&mut a, 0x9C, 0);
-        el_str(&mut a, 0x86, "A_OPUS");
-        el(&mut a, 0x63A2, &o.opus_head());
-        el_uint(&mut a, 0x56AA, o.pre_skip() as u64 * 1_000_000_000 / OPUS_RATE as u64);
-        el_uint(&mut a, 0x56BB, 80_000_000);
-        let mut au = vec![];
-        el_float(&mut au, 0xB5, OPUS_RATE as f64);
-        el_uint(&mut au, 0x9F, opus_channels as u64);
-        el(&mut a, 0xE1, &au);
-        el(&mut tracks, TRACK_ENTRY, &a);
-    }
+    append_opus_track(&mut tracks, opus.as_ref(), opus_channels);
     el(&mut head, TRACKS, &tracks);
     file.write_all(&head).map_err(io)?;
     let mut seg_len = head.len() as u64 - seg_start;
@@ -311,14 +332,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             seg_len += c.len() as u64;
         }
     }
-    // Patch the Segment size.
-    let mut size = [0u8; 8];
-    size[0] = 0x01;
-    size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
-    file.write_all(&size).map_err(io)?;
-    file.seek(SeekFrom::End(0)).map_err(io)?;
-    let bytes = file.finish()?;
+    let bytes = finish_webm(file, size_pos, seg_len)?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
 }
 
