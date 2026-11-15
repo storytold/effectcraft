@@ -423,14 +423,40 @@ impl Accountant {
 /// channels) to take; 0: not known yet ([`decode_limit`]).
 static DECODE_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
+/// Counts the changes of that limit: a refusal made under an older one is out of date
+/// ([`decode_limit_generation`]).
+static DECODE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How often the system was asked for the limit without an answer ([`decode_limit`]).
+static DECODE_UNANSWERED: AtomicUsize = AtomicUsize::new(0);
+
 /// Reads that limit from the system when nothing set it ([`set_decode_limit_source`]).
 static DECODE_SOURCE: Mutex<Option<fn() -> Option<usize>>> = Mutex::new(None);
+
+/// One reading of the system at a time: the second asker takes the first one's answer.
+static DECODE_ASKING: Mutex<()> = Mutex::new(());
+
+/// The system is asked this often at most for the limit when it does not answer.
+const DECODE_ASKS: usize = 2;
+
+fn store_decode_limit(bytes: usize) {
+    if DECODE_LIMIT.swap(bytes, Ordering::Relaxed) != bytes {
+        DECODE_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Set what the system's memory allows one request for a file's decoded planes to take
 /// (`None`: unknown again). The session sets it with the memory budget once the installed RAM
 /// is read.
 pub fn set_decode_limit(bytes: Option<usize>) {
-    DECODE_LIMIT.store(bytes.unwrap_or(0), Ordering::Relaxed);
+    store_decode_limit(bytes.unwrap_or(0));
+    DECODE_UNANSWERED.store(0, Ordering::Relaxed);
+}
+
+/// Changes whenever [`decode_limit`] gives another answer: a request refused for its size is
+/// asked again after that.
+pub fn decode_limit_generation() -> u64 {
+    DECODE_GENERATION.load(Ordering::Relaxed)
 }
 
 /// Where [`decode_limit`] reads the limit from while nothing set it: the CLI and the MCP server
@@ -438,23 +464,31 @@ pub fn set_decode_limit(bytes: Option<usize>) {
 /// request is over the fixed floor.
 pub fn set_decode_limit_source(source: Option<fn() -> Option<usize>>) {
     *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner) = source;
+    DECODE_UNANSWERED.store(0, Ordering::Relaxed);
 }
 
 /// The most bytes one request of `need` bytes for a file's decoded planes may take: `floor`
 /// (the fixed limit), or what the system's memory allows when that is more. The system is
-/// asked only when `need` is over `floor` (and once: the answer is kept, also "unknown", which
-/// leaves `floor`). The browser keeps `floor`.
+/// asked only when `need` is over `floor`, and the answer is kept; when it gives none (a reading
+/// that failed) it is asked once more later, then `floor` stays. The browser keeps `floor`.
 pub fn decode_limit(floor: usize, need: usize) -> usize {
     if need <= floor || cfg!(target_arch = "wasm32") {
         return floor;
     }
-    let mut known = DECODE_LIMIT.load(Ordering::Relaxed);
-    if known == 0 {
-        let source = *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner);
-        known = source.and_then(|read| read()).unwrap_or(floor);
-        DECODE_LIMIT.store(known, Ordering::Relaxed);
+    if DECODE_LIMIT.load(Ordering::Relaxed) == 0 && DECODE_UNANSWERED.load(Ordering::Relaxed) < DECODE_ASKS {
+        let _asking = DECODE_ASKING.lock().unwrap_or_else(PoisonError::into_inner);
+        // (another thread may have just read it)
+        if DECODE_LIMIT.load(Ordering::Relaxed) == 0 {
+            let source = *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner);
+            match source.and_then(|read| read()) {
+                Some(bytes) => store_decode_limit(bytes),
+                None => {
+                    DECODE_UNANSWERED.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
-    floor.max(known)
+    floor.max(DECODE_LIMIT.load(Ordering::Relaxed))
 }
 
 #[cfg(test)]
@@ -903,13 +937,24 @@ mod tests {
         // The session's figure replaces the asked one.
         set_decode_limit(Some(900));
         assert_eq!(decode_limit(100, 200), 900);
-        // Unknown memory leaves the floor, and is not asked again.
+        // Unknown memory leaves the floor; a reading that failed once is tried once more, then
+        // not asked again (and what is not known is never kept as the floor).
         set_decode_limit(None);
         set_decode_limit_source(Some(ram_unknown));
         ASKED.store(0, Ordering::SeqCst);
-        assert_eq!(decode_limit(100, 200), 100);
-        assert_eq!(decode_limit(100, 200), 100);
-        assert_eq!(ASKED.load(Ordering::SeqCst), 1, "an unknown reading is kept too");
+        for _ in 0..4 {
+            assert_eq!(decode_limit(100, 200), 100);
+        }
+        assert_eq!(ASKED.load(Ordering::SeqCst), 2, "a failed reading is tried twice");
+        // A source that answers later is not shut out by the floor kept earlier.
+        set_decode_limit_source(Some(ram_says));
+        assert_eq!(decode_limit(7, 200), 300, "a limit is not tied to the floor of an earlier request");
+        // The generation tells that the limit changed.
+        let before = decode_limit_generation();
+        set_decode_limit(Some(300));
+        assert_eq!(decode_limit_generation(), before, "the same figure is no change");
+        set_decode_limit(Some(500));
+        assert_ne!(decode_limit_generation(), before);
         set_decode_limit(None);
         set_decode_limit_source(None);
     }

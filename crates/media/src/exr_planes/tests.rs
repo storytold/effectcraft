@@ -1580,11 +1580,16 @@ fn a_failed_picture_leaves_the_other_channels_readable() {
     assert!(rest.aux.get("Z").is_some());
 }
 
+/// The tests that move the process-wide decode limit take turns (it also dates the remembered
+/// refusals).
+static LIMIT_TESTS: Mutex<()> = Mutex::new(());
+
 /// #3749: a read over the fixed floor is allowed up to what the system's memory gives (the
 /// session's figure), never under the floor, and refused with a reason beyond it. The floor is
 /// small here: the real one is 8 GiB.
 #[test]
 fn a_read_over_the_floor_is_allowed_up_to_the_systems_memory() {
+    let _only = LIMIT_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
     let bytes = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8));
     let mut src = std::io::Cursor::new(bytes.as_slice());
     let index = crate::exr_index::build(&mut src, FileStamp::Virtual).unwrap();
@@ -1598,6 +1603,31 @@ fn a_read_over_the_floor_is_allowed_up_to_the_systems_memory() {
     assert_eq!(read(&mut src).map(|p| p.len()).ok(), Some(4), "the system's memory allows it");
     effectcraft_render::memory::set_decode_limit(Some(800));
     assert!(matches!(read(&mut src), Err(crate::exr_read::ReadError::TooLarge(_))), "still more than the system's memory");
+    effectcraft_render::memory::set_decode_limit(None);
+}
+
+/// #3749: a refusal for the request's size is remembered only while the decode limit stays as it
+/// was: when the system's memory figure arrives or changes, the request is decided anew.
+#[test]
+fn a_refusal_for_size_is_decided_anew_when_the_decode_limit_changes() {
+    let _only = LIMIT_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let bytes: Arc<[u8]> = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8)).into();
+    let path = "/3749-refusal-generation.exr";
+    // Room for one plane of 8×8 f32: four are refused.
+    set_cap(path, 8 * 8 * 4);
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let source = ExrSource::Bytes(bytes);
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let want = Want { all: false, ids: (0..4).collect() };
+    let refused = || matches!(store.get(path, &source, &index, &want, Use::Other), Err(Refused::TooLarge(_)));
+    assert!(refused());
+    assert!(refused());
+    assert_eq!(decodes_of(path).len(), 1, "the second refusal came from memory");
+    // (figures under the fixed floor: only the change counts, no other test's limit moves)
+    effectcraft_render::memory::set_decode_limit(Some(1000));
+    effectcraft_render::memory::set_decode_limit(Some(2000));
+    assert!(refused(), "still over the caller's own limit");
+    assert_eq!(decodes_of(path).len(), 2, "decided anew after the limit changed");
     effectcraft_render::memory::set_decode_limit(None);
 }
 

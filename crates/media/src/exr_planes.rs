@@ -183,6 +183,10 @@ struct Flight {
     /// When the decode was asked for ([`effectcraft_render::memory::tick`]): what it took is the
     /// planes' cost to the memory accountant.
     asked: u64,
+    /// The decode limit's generation when the decode was asked for
+    /// ([`effectcraft_render::memory::decode_limit_generation`]): a refusal for its size holds
+    /// only while the limit stays as it was.
+    limit_generation: u64,
 }
 
 /// [`Flight::phase`] values.
@@ -219,6 +223,7 @@ impl Flight {
             since,
             hints: filmcraft_media::cancel::Context::current(),
             asked: effectcraft_render::memory::tick(),
+            limit_generation: effectcraft_render::memory::decode_limit_generation(),
         })
     }
 
@@ -276,8 +281,9 @@ struct Entry {
     flight: Option<Arc<Flight>>,
     /// Requests that failed for good (unreadable, too large), the index they were made with, and
     /// why: a request of that index (the file as it was) asking for at
-    /// least as much fails the same way until the file is forgotten.
-    failed: Vec<(Arc<ExrIndex>, Want, Refused)>,
+    /// least as much fails the same way until the file is forgotten, or the decode limit changed
+    /// (the last number: its generation when the request was made).
+    failed: Vec<(Arc<ExrIndex>, Want, Refused, u64)>,
     bytes: usize,
     /// When it was last asked for or finished decoding ([`effectcraft_render::memory::tick`]).
     used: u64,
@@ -522,7 +528,8 @@ impl PlaneStore {
             return Step::Done(Ok(b));
         }
         // (a failure of the file as it was before: the file changed since, it is read again)
-        if let Some((_, _, why)) = e.failed.iter().find(|(of, failed, _)| Arc::ptr_eq(of, index) && asks_at_least(index, want, failed)) {
+        let limit = effectcraft_render::memory::decode_limit_generation();
+        if let Some((_, _, why, _)) = e.failed.iter().find(|(of, failed, _, made_at)| Arc::ptr_eq(of, index) && *made_at == limit && asks_at_least(index, want, failed)) {
             return Step::Done(Err(why.clone()));
         }
         if let Some(flight) = e.flight.clone() {
@@ -671,11 +678,11 @@ impl PlaneStore {
                     (fs.index.clone(), fs.want.clone())
                 };
                 // (failures of another version of the file no longer apply)
-                e.failed.retain(|(of, _, _)| Arc::ptr_eq(of, &index));
+                e.failed.retain(|(of, _, _, made_at)| Arc::ptr_eq(of, &index) && *made_at == flight.limit_generation);
                 if e.failed.len() >= FAILED_KEPT {
                     e.failed.remove(0);
                 }
-                e.failed.push((index, want, why.clone()));
+                e.failed.push((index, want, why.clone(), flight.limit_generation));
             }
             // (the file changed: what is held is of the old one)
             Err(Refused::Changed) => {
