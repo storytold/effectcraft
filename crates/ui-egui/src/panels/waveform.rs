@@ -151,7 +151,8 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
         for c in 0..2 {
             let (lo, hi) = ((agg[c * 2] * gain[c]).clamp(-1.0, 1.0), (agg[c * 2 + 1] * gain[c]).clamp(-1.0, 1.0));
             let (ya, yb) = (mid[c] - hi * half, mid[c] - lo * half);
-            p.line_segment([pos2(x as f32 + 0.5, ya), pos2(x as f32 + 0.5, yb.max(ya + 1.0))], Stroke::new(1.0, color));
+            // A filled one-pixel column (not a hairline), so adjacent columns join into a solid envelope.
+            p.rect_filled(Rect::from_min_max(pos2(x as f32, ya), pos2(x as f32 + 1.0, yb.max(ya + 1.0))), 0.0, color);
         }
     }
 }
