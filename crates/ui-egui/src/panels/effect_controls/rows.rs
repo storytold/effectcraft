@@ -247,7 +247,8 @@ fn prop_row(
         // A text parameter (Cryptomatte's Selection, Colorama's Output Cycle, config names):
         // typed in a field, set when it loses the focus (Esc keeps the old text).
         Value::Str(_) if matches!(prop.ui, ParamUi::Text) => value_text(app, ui, &cx, &value, actions),
-        Value::Gradient(_) => value_gradient(app, &cx, &value),
+        // A gradient (a plug-in's gradient parameter): its strip opens the Gradient Editor.
+        Value::Gradient(_) => value_gradient(app, ui, &cx, &value, actions),
         _ => {}
     }
     dims
@@ -574,11 +575,11 @@ fn value_text(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     }
 }
 
-fn value_gradient(app: &mut EffectcraftApp, cx: &PropCx, value: &Value) {
+fn value_gradient(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
     let Value::Gradient(g) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, r, p, prop, .. } = *cx;
+    let PropCx { t, uid, cy, vx, r, p, layer, prop, .. } = *cx;
     let gr = Rect::from_min_size(pos2(vx, cy - 7.0), vec2((r.max.x - vx - 56.0).clamp(60.0, 180.0), 14.0));
     let n = 48;
     for k in 0..n {
@@ -589,6 +590,13 @@ fn value_gradient(app: &mut EffectcraftApp, cx: &PropCx, value: &Value) {
         p.rect_filled(Rect::from_min_max(pos2(x0, gr.min.y), pos2(x1, gr.max.y)), 0.0, c);
     }
     p.rect_stroke(gr, 2.0, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    let resp = ui.interact(gr, egui::Id::unique(("ec-gradient", uid)), Sense::click()).on_hover_text(crate::i18n::tr("Edit Gradient…"));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        actions.push(("prop.editGradient".into(), json!({"layer": layer.id.0, "prop": uid})));
+    }
     app.auto.add(&format!("effectControls.prop.{uid}.value"), gr, &prop.name);
 }
 

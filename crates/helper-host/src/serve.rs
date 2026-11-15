@@ -113,7 +113,7 @@ impl Server<'_> {
     /// Answer one request (anything but `shutdown`).
     fn handle(&mut self, req: Request) -> Result<(), String> {
         match req {
-            Request::Hello { version, frames } => {
+            Request::Hello { version, frames, .. } => {
                 if version != PROTOCOL_VERSION {
                     return self.send(&Reply::Error { message: format!("this helper speaks protocol {PROTOCOL_VERSION}, not {version}") });
                 }

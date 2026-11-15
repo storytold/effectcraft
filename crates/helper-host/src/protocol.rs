@@ -88,7 +88,14 @@ pub struct RenderRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// First message: the protocol version and the frame exchange file to open (read + write).
-    Hello { version: u32, frames: String },
+    /// `features` lists optional manifest kinds this host accepts (`"gradient_params"`:
+    /// `gradient` parameters, sent as JSON among the texts); hosts without the field have none.
+    Hello {
+        version: u32,
+        frames: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     /// List the effects the helper offers → [`Reply::Effects`].
     Describe,
     /// Load more effects from a file or folder the user picked → [`Reply::Effects`] (only the
