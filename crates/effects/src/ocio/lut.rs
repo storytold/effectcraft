@@ -18,18 +18,8 @@ pub enum FileXform {
 /// Parse a Sony Imageworks `.spimtx` matrix: three rows of four numbers, three matrix columns
 /// and an offset in 16-bit code values (÷ 65535).
 pub fn parse_spimtx(text: &str) -> Option<FileXform> {
-    let v: Vec<f64> = text.split_whitespace().map(|t| t.parse().ok()).collect::<Option<_>>()?;
-    if v.len() != 12 || v.iter().any(|x| !x.is_finite()) {
-        return None;
-    }
-    let mut m = [0.0; 16];
-    let mut offset = [0.0; 4];
-    for (r, row) in v.as_chunks::<4>().0.iter().enumerate() {
-        m[r * 4..r * 4 + 3].copy_from_slice(&row[..3]);
-        offset[r] = row[3] / 65535.0;
-    }
-    m[15] = 1.0;
-    Some(FileXform::Matrix { m, offset })
+    let value = craft_cms::sony_lut::parse_spimtx(text)?;
+    Some(FileXform::Matrix { m: value.matrix, offset: value.offset })
 }
 
 /// Parse a Sony Imageworks `.spi1d` 1D LUT: `From <min> <max>`, `Length <n>`, `Components
@@ -73,30 +63,8 @@ pub fn parse_spi1d(text: &str) -> Option<Lut> {
 /// Parse a Sony Imageworks `.spi3d` lattice: `SPILUT 1.0`, `3 3`, the sizes, then one
 /// `r g b  R G B` line per lattice point (indices, then the colour).
 pub fn parse_spi3d(text: &str) -> Option<Lut> {
-    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-    if !lines.next()?.starts_with("SPILUT") {
-        return None;
-    }
-    lines.next()?;
-    let size: Vec<usize> = lines.next()?.split_whitespace().map(|t| t.parse().ok()).collect::<Option<_>>()?;
-    let n = *size.first()?;
-    if size.len() != 3 || size.iter().any(|s| *s != n) || !(2..=MAX_LATTICE).contains(&n) {
-        return None;
-    }
-    let mut d3 = vec![[0.0f32; 3]; n * n * n];
-    let mut seen = 0usize;
-    for line in lines {
-        let v: Vec<&str> = line.split_whitespace().collect();
-        let [r, g, b, cr, cg, cb] = v.as_slice() else { return None };
-        let (r, g, b): (usize, usize, usize) = (r.parse().ok()?, g.parse().ok()?, b.parse().ok()?);
-        if r >= n || g >= n || b >= n {
-            return None;
-        }
-        // Our lattice is red fastest.
-        *d3.get_mut(r + g * n + b * n * n)? = [cr.parse().ok()?, cg.parse().ok()?, cb.parse().ok()?];
-        seen += 1;
-    }
-    (seen == n * n * n).then_some(Lut { n1: 0, d1: vec![], n3: n, d3, dmin: [0.0; 3], dmax: [1.0; 3] })
+    let value = craft_cms::sony_lut::parse_spi3d(text)?;
+    Some(Lut { n1: 0, d1: vec![], n3: value.size, d3: value.values, dmin: [0.0; 3], dmax: [1.0; 3] })
 }
 
 /// Parse an Autodesk `.3dl` lattice (integers, blue fastest; an optional input-mesh line).
