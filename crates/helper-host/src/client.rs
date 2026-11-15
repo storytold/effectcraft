@@ -39,15 +39,15 @@ pub fn set_render_timeout(t: Duration) {
     RENDER_TIMEOUT_MS.store(u64::try_from(t.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Timeout for one render step, `EFFECTCRAFT_HELPER_TIMEOUT` seconds (default 120: heavy
-/// plug-ins take a while on their first frame).
 /// The most processes of one helper that run at once (`EFFECTCRAFT_HELPER_PROCESSES`; the
 /// helper may allow fewer, [`Reply::Hello`]).
-fn max_processes() -> usize {
+pub fn max_processes() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| std::env::var("EFFECTCRAFT_HELPER_PROCESSES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(4).max(1))
 }
 
+/// Timeout for one render step, `EFFECTCRAFT_HELPER_TIMEOUT` seconds (default 120: heavy
+/// plug-ins take a while on their first frame).
 fn render_timeout() -> Duration {
     if let Some(s) = env_secs("EFFECTCRAFT_HELPER_TIMEOUT") {
         return Duration::from_secs(s);
@@ -78,6 +78,15 @@ enum Line {
     Closed,
 }
 
+/// Where an image of `len` bytes goes in the exchange file: at `top`, or just above the image
+/// being read (`reading`) when it would overlap it.
+fn place(top: u64, len: u64, reading: Option<&std::ops::Range<u64>>) -> u64 {
+    match reading {
+        Some(r) if top < r.end && top.saturating_add(len) > r.start => r.end.div_ceil(64).saturating_mul(64),
+        _ => top,
+    }
+}
+
 /// A running helper process.
 struct Conn {
     child: Child,
@@ -90,9 +99,9 @@ struct Conn {
     exchange: Exchange,
     /// The first free byte of the exchange file (images are stacked, see [`Helper::render`]).
     top: u64,
-    /// A finished render is reading its result back after letting the helper go: its image
-    /// stays below `top` until it is done.
-    reading: bool,
+    /// A finished render is reading its result back after letting the helper go: the bytes of
+    /// its image, which [`Conn::alloc`] skips until it is done.
+    reading: Option<std::ops::Range<u64>>,
     last_used: Instant,
     generation: u64,
 }
@@ -137,10 +146,12 @@ impl Conn {
 
     /// Reserve room for an image of `width × height` at the top of the exchange file.
     fn alloc(&mut self, width: u32, height: u32, origin: [f64; 2], scale: f64) -> Result<ImageRef, String> {
-        let at = ImageRef { offset: self.top, width, height, origin, scale };
+        let mut at = ImageRef { offset: self.top, width, height, origin, scale };
         let bytes = at.bytes().ok_or_else(|| format!("image {width}×{height} is too large for a helper"))?;
         // Keep images 64-byte aligned for helpers that map the file.
-        self.top = self.top.checked_add(bytes.div_ceil(64).saturating_mul(64)).ok_or("frame exchange file too large")?;
+        let len = bytes.div_ceil(64).saturating_mul(64);
+        at.offset = place(self.top, len, self.reading.as_ref());
+        self.top = at.offset.checked_add(len).ok_or("frame exchange file too large")?;
         Ok(at)
     }
 
@@ -295,11 +306,14 @@ impl Helper {
         let r = self.with_conn(|c| c.call(&Request::Load { path: path.to_string() }, load_timeout()));
         match r {
             Ok(Reply::Effects { effects, errors }) => {
-                let mut l = lock(&self.loaded);
-                if !l.iter().any(|p| p == path) {
-                    l.push(path.to_string());
+                {
+                    let mut l = lock(&self.loaded);
+                    if !l.iter().any(|p| p == path) {
+                        l.push(path.to_string());
+                    }
                 }
-                // (lanes load it when they start again)
+                // (lanes load it when they start again; `loaded` is released first: a lane
+                // starting holds its connection and waits for it, and `stop` waits for that)
                 for lane in lock(&self.lanes).iter() {
                     lane.stop();
                 }
@@ -541,7 +555,7 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, input, written, rx, exchange, top: 0, reading: false, last_used: Instant::now(), generation };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, reading: None, last_used: Instant::now(), generation };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(
             &Request::Hello {
@@ -632,9 +646,9 @@ impl Helper {
         // The generation of the process this render runs on: taken inside `with_conn`, which
         // may start the process (after a crash or `stop`), so it is never that of a dead one.
         let (at, base, started) = self.with_conn(|c| {
-            // (a render not nested in another starts at the bottom, unless a result is being
-            // read there)
-            if top_level && !c.reading {
+            // (a render not nested in another starts at the bottom: `alloc` steps over a result
+            // being read, so the file holds about two frames however renders overlap)
+            if top_level {
                 c.top = 0;
             }
             let base = c.top;
@@ -672,7 +686,7 @@ impl Helper {
         // at a time; more measured no faster).
         if let Ok(bounds) = done
             && top_level
-            && let Some(mut x) = self.reader(started)
+            && let Some(mut x) = self.reader(started, &at)
         {
             drop(turn);
             let r = read(&mut x, bounds);
@@ -680,7 +694,7 @@ impl Helper {
             if let Some(c) = lock(&self.conn).as_mut()
                 && c.generation == started
             {
-                c.reading = false;
+                c.reading = None;
             }
             return r.map_err(Failure::Broken);
         }
@@ -696,14 +710,15 @@ impl Helper {
 
     /// Handles for reading process `started`'s exchange file outside the turn, marking it read
     /// ([`Conn::reading`]); `None` while another result is being read (or the process stopped).
-    fn reader(&self, started: u64) -> Option<Exchange> {
+    fn reader(&self, started: u64, at: &ImageRef) -> Option<Exchange> {
+        let range = at.offset..at.offset.saturating_add(at.bytes()?);
         let mut g = lock(&self.conn);
-        let c = g.as_mut().filter(|c| c.generation == started && !c.reading)?;
+        let c = g.as_mut().filter(|c| c.generation == started && c.reading.is_none())?;
         let x = match lock(&self.reader).take() {
             Some((g, x)) if g == started => x,
             _ => c.exchange.reader().ok()?,
         };
-        c.reading = true;
+        c.reading = Some(range);
         Some(x)
     }
 
@@ -862,5 +877,28 @@ impl HelperEffect {
                 Err(format!("{}: the effect helper failed: {e}", self.manifest.name))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place;
+
+    /// Top-level renders that each start while the previous result is read back alternate
+    /// between two frame slots instead of climbing the file.
+    #[test]
+    fn overlapping_readbacks_stay_in_two_slots() {
+        let f = 1920 * 1080 * 16;
+        let mut reading = None;
+        let mut ends = vec![];
+        for _ in 0..6 {
+            let at = place(0, f, reading.as_ref());
+            ends.push(at + f);
+            reading = Some(at..at + f);
+        }
+        assert_eq!(ends, [f, 2 * f, f, 2 * f, f, 2 * f]);
+        // (an image that fits below the one being read stays there; one that doesn't goes above)
+        assert_eq!(place(0, 64, Some(&(128..256))), 0);
+        assert_eq!(place(100, 64, Some(&(128..250))), 256);
     }
 }

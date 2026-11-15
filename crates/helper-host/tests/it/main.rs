@@ -284,8 +284,8 @@ fn run_checks() -> bool {
     let results: Vec<_> = threads.into_iter().map(|t| t.join().map_err(|_| "thread panicked".to_string()).and_then(|r| r)).collect();
     all &= check("concurrent renders", results.iter().all(Result::is_ok), &results);
 
-    // A helper that allows two processes gets its instances spread over two, each instance
-    // staying on its own.
+    // A helper that allows two processes gets its instances spread over two (fewer if
+    // `EFFECTCRAFT_HELPER_PROCESSES` says so), each instance staying on its own.
     let pid = |key: u64| {
         let mut px = vec![[0.0; 4]; 4];
         render_as(key, "org.test.helper.pid", &mut px, 2, 2, 1.0, false).map(|_| px[0][0] as u32)
@@ -293,8 +293,12 @@ fn run_checks() -> bool {
     let pids: Vec<_> = (100..104).map(pid).collect();
     let again: Vec<_> = (100..104).map(pid).collect();
     let distinct: std::collections::BTreeSet<_> = pids.iter().flatten().collect();
-    all &=
-        check("instances spread over the processes a helper allows", pids.iter().all(Result::is_ok) && distinct.len() == 2 && pids == again, (&pids, &again));
+    let processes = effectcraft_helper_host::client::max_processes().min(2);
+    all &= check(
+        "instances spread over the processes a helper allows",
+        pids.iter().all(Result::is_ok) && distinct.len() == processes && pids == again,
+        (&pids, &again),
+    );
 
     // A crash mid-render is an error, the frame is untouched, and the helper comes back.
     let mut px = vec![[0.5; 4]; 4];
