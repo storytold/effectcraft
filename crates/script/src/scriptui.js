@@ -421,7 +421,12 @@ function __uiRunDraws(win) {
     for (var i = 0; i < (c.children || []).length; i++) walk(c.children[i]);
   })(win);
   if (!drawn.length) return;
-  __uiLayout(win);
+  // Laying out the whole window costs a full JSON round trip; a draw pass only needs it once
+  // (or after the tree changed), since the controls' sizes cannot change just by being redrawn.
+  if (!win.__laidOut) {
+    __uiLayout(win);
+    win.__laidOut = true;
+  }
   for (const elem of drawn) {
     var c = elem;
     if (c.type === "canvas") {
@@ -447,6 +452,7 @@ function __uiRunDraws(win) {
 function __uiInit(o, type, win, parent, bounds, text, props) {
   o.type = type;
   o.window = win || o;
+  if (win) win.__laidOut = false;
   o.parent = parent || null;
   o.__id = win ? win.__next++ : 0;
   if (!win) {
