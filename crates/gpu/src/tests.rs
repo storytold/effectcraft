@@ -1499,6 +1499,8 @@ fn upload_budget_comes_from_the_memory_rule() {
         return; // the caller set a budget of their own
     }
     if !tight {
+        // The child uses the GPU: tests of this process wait until it is done (#3737 review).
+        hold_gpu_lock();
         let exe = std::env::current_exe().expect("test binary path");
         let out = std::process::Command::new(exe)
             .env(ENV, "1")
