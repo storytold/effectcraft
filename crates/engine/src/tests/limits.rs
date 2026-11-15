@@ -103,6 +103,24 @@ fn commands_cap_sizes_at_30000_px() {
     assert_eq!((f.width, f.height, f.frame_rate), (limits::MAX_SIZE, 8, FrameRate::FPS_29_97));
 }
 
+/// Time Stretch takes After Effects' range, ±1 % to ±9900 %: before, 1e300 % was set, and a
+/// project file holding it opened at 9900 % (#3247).
+#[test]
+fn time_stretch_refuses_more_than_9900_percent() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 32, "frameRate": 30, "duration": 2})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    let stretch = |s: &Session| s.active_comp().unwrap().layers.iter().find(|l| l.id.0 == layer).unwrap().stretch;
+    for pct in [1e300, -1e300, 9900.5] {
+        assert!(s.execute("layer.timeStretch", json!({"layers": [layer], "percent": pct})).is_err(), "{pct}");
+        assert_eq!(stretch(&s), 100.0, "{pct}");
+    }
+    for pct in [limits::MAX_STRETCH, -limits::MAX_STRETCH] {
+        s.execute("layer.timeStretch", json!({"layers": [layer], "percent": pct})).unwrap();
+        assert_eq!(stretch(&s), pct);
+    }
+}
+
 #[test]
 fn a_project_with_a_precomp_cycle_opens_adds_and_renders_without_running_out_of_stack() {
     // Comps A and B nest each other (a damaged file); C is unrelated. Checking whether A

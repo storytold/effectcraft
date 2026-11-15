@@ -56,6 +56,7 @@ pub mod text_panels;
 pub mod text_range_handles;
 pub mod timeline;
 pub mod tracker;
+pub mod unprecompose;
 pub mod unsaved;
 pub mod viewer;
 pub mod viewer_drop;

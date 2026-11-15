@@ -434,6 +434,34 @@ fn cti_snaps_to_the_nearest_candidate() {
     assert!(c.contains(&comp.duration.seconds()) && c.contains(&0.0));
 }
 
+/// A dragged layer's own In / Out points are no snap targets; moved, neither are its markers
+/// (#1828).
+#[test]
+fn bar_drags_dont_snap_to_their_own_layer() {
+    let mut app = app();
+    let bx = app.session.active_comp().unwrap().layers.iter().find(|l| l.name == "Box").unwrap().id.0;
+    app.session.execute("layer.addMarker", json!({"layers": [bx], "time": 1.0})).unwrap();
+    let comp = app.session.active_comp().unwrap().clone();
+    let rows = build_rows(&app, &comp);
+    let all = snap_targets(&comp, &rows, &[], false);
+    let trimmed = snap_targets(&comp, &rows, &[bx], false);
+    let moved = snap_targets(&comp, &rows, &[bx], true);
+    assert_eq!(trimmed.len(), all.len() - 2, "trimming drops only the layer's In and Out");
+    assert!(trimmed.contains(&1.0) && !moved.contains(&1.0), "moving drops the layer's marker: {moved:?}");
+}
+
+/// Shift snaps a bar drag's nearest end to a target within 8 px of the pointer; farther away, or
+/// without Shift, the bar moves by the whole frames the pointer covered (#1828).
+#[test]
+fn bar_drags_snap_their_ends_with_shift() {
+    let (pps, fd, ends) = (100.0, 0.1, [2.0, 6.0]);
+    assert_eq!(bar_drag_frames(95.0, pps, fd, &ends, &[3.0], true), 10, "5 px short of 2 → 3 s snaps");
+    assert_eq!(bar_drag_frames(95.0, pps, fd, &ends, &[3.0], false), 9, "no snap without Shift");
+    assert_eq!(bar_drag_frames(88.0, pps, fd, &ends, &[3.0], true), 8, "12 px away lets go");
+    assert_eq!(bar_drag_frames(104.0, pps, fd, &ends, &[3.0, 7.06], true), 11, "the target nearest the pointer wins");
+    assert_eq!(bar_drag_frames(5.0, 0.0, 0.0, &ends, &[0.0], true), i64::MAX, "zero zoom saturates, no panic");
+}
+
 /// Every string drawn by one frame of `draw`.
 fn drawn_text(mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
     fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
@@ -904,4 +932,88 @@ fn mask_reveal_collapsing_a_mask_hides_its_children_under_mixed_filters() {
     assert!(!names.iter().any(|r| r.trim() == "Mask Feather"));
     app.ui.timeline.open_groups.insert(mask);
     assert_eq!(labels(&app).iter().filter(|r| r.trim() == "Mask Feather").count(), 1);
+}
+
+/// Every icon-only column header says what it is on hover, over the icon it explains, and every
+/// layer switch under one shows the same text.
+#[test]
+fn every_icon_only_header_has_a_hover_text() {
+    let all = crate::state::TimelineState { columns: COLUMNS.iter().map(|c| c.0.to_string()).collect(), show_modes: true, ..Default::default() };
+    let cw = cols(0.0, 2000.0, Vis::of(&all));
+    let ch = Rect::from_min_max(pos2(0.0, 0.0), pos2(2000.0, 20.0));
+    let rects = header_tip_rects(&cw, ch);
+    assert_eq!(rects.len(), HEADER_TIPS.len(), "every header icon is placed with every column shown");
+    for (col, key, r) in &rects {
+        assert_eq!(column_at(&cw, r.center().x), Some(*col), "{key} sits in its column");
+        let (_, _, name, tip) = HEADER_TIPS.iter().find(|t| t.1 == *key).unwrap();
+        assert!(tip.starts_with(&format!("{name}:")) || *key == "num", "{key}: {tip}");
+    }
+    for (i, (_, a, ra)) in rects.iter().enumerate() {
+        for (_, b, rb) in &rects[i + 1..] {
+            assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() < 1.0, "{a} and {b} overlap");
+        }
+    }
+    // The icons the header draws over the A/V and switch columns, left to right.
+    let av: Vec<&str> = rects.iter().filter(|r| r.0 == "av").map(|r| r.1).collect();
+    assert_eq!(av, ["video", "audio", "solo", "lock"]);
+    let sw: Vec<&str> = rects.iter().filter(|r| r.0 == "switches").map(|r| r.1).collect();
+    assert_eq!(sw, ["shy", "collapse", "quality", "fx", "frameBlend", "motionBlur", "adjustment", "threeD"]);
+    for name in av.iter().chain(&sw).chain(&["preserveTransparency"]) {
+        assert!(switch_tip(name).is_some(), "the {name} switch has a hover text");
+    }
+    // A hidden column has no hover targets.
+    let none = crate::state::TimelineState { columns: Default::default(), show_modes: false, ..Default::default() };
+    assert!(header_tip_rects(&cols(0.0, 800.0, Vis::of(&none)), ch).is_empty());
+}
+
+/// One box spans the outline and the time graph (#3056): rows it crosses are selected on both
+/// sides of the boundary, and only keys in the time graph count (the part over the outline is cut).
+#[test]
+fn a_box_over_both_columns_selects_the_rows_it_crosses_and_the_keys_inside() {
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 4, "frameRate": 30})).unwrap();
+    let mut layers = vec![];
+    for name in ["A", "B", "C"] {
+        let id = s.execute("layer.newSolid", json!({"name": name, "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": 0.0, "value": 50})).unwrap();
+        layers.push(id);
+    }
+    s.execute("layer.setSwitch", json!({"layers": [layers[2]], "switch": "lock", "value": true})).unwrap();
+    let comp = s.active_comp().unwrap();
+    let uid = |id: u64| comp.layer(LayerId(id)).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let mut rows = vec![];
+    for id in &layers {
+        rows.push(Row { layer: LayerId(*id), depth: 0, kind: RowKind::Layer });
+        rows.push(Row { layer: LayerId(*id), depth: 1, kind: RowKind::Prop { uid: uid(*id) } });
+    }
+    // Rows are 20 pt and 400 pt wide: the outline is left of x 200, a key at 0 s sits at x 205.
+    let tm = TMap { x0: 205.0, start: 0.0, pps: 100.0 };
+    let view = marquee::View { tm, top: 0.0, graph_x0: 200.0, graph_on: false };
+    // Press at `from` with the rows scrolled by `s0`, release at `to` scrolled by `s1`.
+    let drag = |from: Pos2, s0: f32, to: Pos2, s1: f32| {
+        let (paint, sel) = marquee::Anchor::press(&view, s0, from).selection(&view, s1, to);
+        marquee::targets(comp, &rows, &tm, -s1, 20.0, paint, &sel)
+    };
+    let go = |from: Pos2, to: Pos2| drag(from, 0.0, to, 0.0);
+    let keyed = |ks: &[effectcraft_engine::KeyRef]| ks.iter().map(|k| k.layer.0).collect::<Vec<_>>();
+    // From the outline across the boundary: layer A's row (y 0..20) and B's row, and their keys.
+    let (ls, ks) = go(pos2(10.0, 5.0), pos2(260.0, 65.0));
+    assert_eq!(ls, [layers[0], layers[1]]);
+    assert_eq!(keyed(&ks), [layers[0], layers[1]]);
+    // The same box dragged the other way: the same rows, the same keys.
+    let (ls, ks) = go(pos2(260.0, 65.0), pos2(10.0, 5.0));
+    assert_eq!((ls, keyed(&ks)), (vec![layers[0], layers[1]], vec![layers[0], layers[1]]));
+    // Only over the outline: rows, no keys; only over the graph: keys, and the rows crossed.
+    let (ls, ks) = go(pos2(10.0, 5.0), pos2(150.0, 65.0));
+    assert_eq!((ls.len(), ks.len()), (2, 0), "a key under the outline isn't touched");
+    // Kept inside the time graph: keys only, no rows (a marquee over empty track area).
+    let (ls, ks) = go(pos2(204.0, 5.0), pos2(260.0, 65.0));
+    assert_eq!((ls.len(), keyed(&ks)), (0, vec![layers[0], layers[1]]));
+    // A locked layer is not selected as a row (the engine drops its keys in keys.select).
+    let (ls, _) = go(pos2(10.0, 5.0), pos2(260.0, 119.0));
+    assert_eq!(ls, [layers[0], layers[1]]);
+    // Scrolled 20 pt mid-drag: the pressed corner stays on layer A's row (#2859), so A is still
+    // selected; a screen-fixed anchor would start the box below A and select only B.
+    let (ls, _) = drag(pos2(10.0, 5.0), 0.0, pos2(260.0, 45.0), 20.0);
+    assert_eq!(ls, [layers[0], layers[1]]);
 }

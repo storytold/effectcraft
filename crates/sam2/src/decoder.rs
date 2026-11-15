@@ -144,6 +144,25 @@ fn add_bias(x: Tensor, b: &Tensor) -> Result<Tensor> {
     Ok(x.broadcast_add(&b.reshape((1, b.dim(0)?, 1, 1))?)?)
 }
 
+/// `conv_transpose2d` with a 2 x 2 kernel, stride 2, no padding, on tokens `[h * w, c]` (the image
+/// laid out row by row) with weight `[c, o, 2, 2]`, as one matrix product plus a pixel shuffle:
+/// every input pixel owns its own 2 x 2 output block, so there is no overlap to add up. Returns
+/// `[1, o, 2h, 2w]` without the bias. candle's transposed convolution takes about twice as long.
+fn conv_transpose_2x2(tokens: &Tensor, h: usize, w: usize, weight: &Tensor) -> Result<Tensor> {
+    let (c, o, kh, kw) = weight.dims4()?;
+    if (kh, kw) != (2, 2) || tokens.dims() != [h * w, c] {
+        return Err(Error::Input(format!("a 2x2 transposed convolution got tokens {:?} for a {c}x{o}x{kh}x{kw} weight on {h}x{w}", tokens.dims())));
+    }
+    let y = tokens.matmul(&weight.reshape((c, o * 4))?)?; // [h * w, (o, 2, 2)]
+    Ok(y.reshape((h, w, o, 2, 2))?.permute((2, 0, 3, 1, 4))?.contiguous()?.reshape((1, o, 2 * h, 2 * w))?)
+}
+
+/// The same convolution on an image `[1, c, h, w]`.
+fn conv_transpose_2x2_image(x: &Tensor, weight: &Tensor) -> Result<Tensor> {
+    let (_, c, h, w) = x.dims4()?;
+    conv_transpose_2x2(&x.reshape((c, h * w))?.t()?.contiguous()?, h, w, weight)
+}
+
 impl MaskDecoder {
     pub fn load(w: &Weights) -> Result<MaskDecoder> {
         let layers = (0..2)
@@ -194,6 +213,22 @@ impl MaskDecoder {
     /// no-memory embedding already added when there is no memory), `sparse`: `[1, n, 256]`,
     /// `dense`: `[1, 256, g, g]`, `high`: the skip features from [`MaskDecoder::high_res`].
     pub fn forward(&self, image: &Tensor, pos: &Tensor, sparse: &Tensor, dense: &Tensor, high: &(Tensor, Tensor), multimask: bool) -> Result<DecoderOutput> {
+        self.forward_with(image, pos, sparse, dense, high, multimask, true)
+    }
+
+    /// [`MaskDecoder::forward`]; `matmul_upscale` picks the matrix-product transposed convolutions
+    /// (the normal path) or candle's `conv_transpose2d` (the reference the tests compare with).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_with(
+        &self,
+        image: &Tensor,
+        pos: &Tensor,
+        sparse: &Tensor,
+        dense: &Tensor,
+        high: &(Tensor, Tensor),
+        multimask: bool,
+        matmul_upscale: bool,
+    ) -> Result<DecoderOutput> {
         let (_, c, g, gw) = image.dims4()?;
         if c != DIM || g != gw {
             return Err(Error::Input(format!("image embedding must be 256 x g x g, got {:?}", image.dims())));
@@ -214,13 +249,19 @@ impl MaskDecoder {
         let mask_tokens_out = queries.narrow(1, 2, MASK_TOKENS)?;
         let obj_out = queries.narrow(1, 0, 1)?.squeeze(1)?;
 
-        let emb = keys.transpose(1, 2)?.contiguous()?.reshape((1, DIM, g, g))?;
         let (s0, s1) = high;
-        let up = add_bias(emb.conv_transpose2d(&self.up1.0, 0, 0, 2, 1)?, &self.up1.1)?;
+        let up = if matmul_upscale {
+            // the keys are already the image's tokens, row by row: no transpose needed
+            conv_transpose_2x2(&keys.reshape((g * g, DIM))?, g, g, &self.up1.0)?
+        } else {
+            keys.transpose(1, 2)?.contiguous()?.reshape((1, DIM, g, g))?.conv_transpose2d(&self.up1.0, 0, 0, 2, 1)?
+        };
+        let up = add_bias(up, &self.up1.1)?;
         let up = (up + s1)?;
         let up = self.up_ln.forward(&up.permute((0, 2, 3, 1))?)?.permute((0, 3, 1, 2))?.contiguous()?;
         let up = gelu(&up)?;
-        let up = (add_bias(up.conv_transpose2d(&self.up2.0, 0, 0, 2, 1)?, &self.up2.1)? + s0)?;
+        let up = if matmul_upscale { conv_transpose_2x2_image(&up, &self.up2.0)? } else { up.conv_transpose2d(&self.up2.0, 0, 0, 2, 1)? };
+        let up = (add_bias(up, &self.up2.1)? + s0)?;
         let up = gelu(&up)?;
 
         let hyper: Vec<Tensor> = self.hyper.iter().enumerate().map(|(i, m)| m.forward(&mask_tokens_out.narrow(1, i, 1)?.squeeze(1)?)).collect::<Result<_>>()?;
@@ -257,4 +298,102 @@ fn dynamic_single(masks: &Tensor, iou: &Tensor) -> Result<(Tensor, Tensor)> {
     let multi_iou = iou.narrow(1, 1, 3)?.flatten_all()?.to_vec1::<f32>()?;
     let best = multi_iou.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |b, (i, v)| if *v > b.1 { (i, *v) } else { b }).0;
     Ok((masks.narrow(1, 1 + best, 1)?, iou.narrow(1, 1 + best, 1)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use candle_core::{DType, Device};
+
+    use super::*;
+
+    fn max_diff(a: &Tensor, b: &Tensor) -> f32 {
+        assert_eq!(a.dims(), b.dims());
+        (a - b).unwrap().abs().unwrap().flatten_all().unwrap().max(0).unwrap().to_scalar::<f32>().unwrap()
+    }
+
+    /// The matrix-product form equals `conv_transpose2d` (kernel 2, stride 2, no padding, the only
+    /// variant the decoder uses) to rounding, for the decoder's two sizes and for odd ones.
+    #[test]
+    fn matmul_transposed_convolution_matches_conv_transpose2d() {
+        let d = &Device::Cpu;
+        // (in channels, out channels, height, width)
+        let cases =
+            [(256, 64, 64, 64), (64, 32, 128, 128), (256, 64, 16, 16), (3, 5, 7, 11), (5, 3, 1, 9), (4, 2, 9, 1), (1, 1, 1, 1), (17, 1, 3, 5), (1, 19, 6, 2)];
+        for (c, o, h, w) in cases {
+            for (std, scale) in [(1.0, 0.05), (30.0, 3.0)] {
+                let x = Tensor::randn(0f32, std, (1, c, h, w), d).unwrap();
+                let k = Tensor::randn(0f32, scale, (c, o, 2, 2), d).unwrap();
+                let want = x.conv_transpose2d(&k, 0, 0, 2, 1).unwrap();
+                let got = conv_transpose_2x2_image(&x, &k).unwrap();
+                // 1e-6 of the largest output value (at least 1e-6 absolute): float rounding only
+                let peak = want.abs().unwrap().flatten_all().unwrap().max(0).unwrap().to_scalar::<f32>().unwrap();
+                let tol = 1e-6 * peak.max(1.0);
+                let diff = max_diff(&want, &got);
+                assert!(diff <= tol, "c{c} o{o} {h}x{w} std {std}: max diff {diff:e} > {tol:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn matmul_transposed_convolution_edge_values() {
+        let d = &Device::Cpu;
+        // zeros, a single hot pixel and negative values land in the right 2x2 block
+        let k = Tensor::randn(0f32, 1.0, (3, 2, 2, 2), d).unwrap();
+        let zero = Tensor::zeros((1, 3, 4, 5), DType::F32, d).unwrap();
+        assert_eq!(max_diff(&zero.conv_transpose2d(&k, 0, 0, 2, 1).unwrap(), &conv_transpose_2x2_image(&zero, &k).unwrap()), 0.0);
+        let mut v = vec![0f32; 3 * 4 * 5];
+        v[2 * 20 + 3 * 5 + 1] = -7.5;
+        let hot = Tensor::from_vec(v, (1, 3, 4, 5), d).unwrap();
+        assert!(max_diff(&hot.conv_transpose2d(&k, 0, 0, 2, 1).unwrap(), &conv_transpose_2x2_image(&hot, &k).unwrap()) <= 1e-6);
+        // other kernels are refused, not computed wrongly
+        let k3 = Tensor::zeros((3, 2, 3, 3), DType::F32, d).unwrap();
+        assert!(conv_transpose_2x2_image(&hot, &k3).is_err());
+    }
+
+    /// Random weights for every tensor the decoder asks for, found by loading until nothing is missing.
+    fn random_decoder() -> MaskDecoder {
+        let d = &Device::Cpu;
+        let mut map: HashMap<String, Tensor> = HashMap::new();
+        for _ in 0..1000 {
+            match MaskDecoder::load(&Weights::from_map(map.clone()).unwrap()) {
+                Ok(m) => return m,
+                Err(Error::Weights(m)) => {
+                    let name = m.split('`').nth(1).unwrap().to_string();
+                    let shape: Vec<usize> = match m.split("expected [").nth(1) {
+                        Some(e) => e.trim_end_matches(']').split(',').map(|s| s.trim().parse().unwrap()).collect(),
+                        None => vec![1],
+                    };
+                    let t = if name.contains("layer_norm") && name.ends_with("weight") {
+                        Tensor::ones(shape, DType::F32, d)
+                    } else {
+                        Tensor::randn(0f32, 0.05, shape, d)
+                    };
+                    map.insert(name, t.unwrap());
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        panic!("the decoder kept asking for tensors");
+    }
+
+    #[test]
+    fn decoder_output_is_the_same_with_either_transposed_convolution() {
+        let d = &Device::Cpu;
+        let dec = random_decoder();
+        let g = 16;
+        let r = |dims: &[usize]| Tensor::randn(0f32, 1.0, dims, d).unwrap();
+        let (image, pos, dense) = (r(&[1, DIM, g, g]), r(&[1, DIM, g, g]), r(&[1, DIM, g, g]));
+        let sparse = r(&[1, 3, DIM]);
+        let high = dec.high_res(&r(&[1, DIM, 4 * g, 4 * g]), &r(&[1, DIM, 2 * g, 2 * g])).unwrap();
+        for multimask in [false, true] {
+            let a = dec.forward_with(&image, &pos, &sparse, &dense, &high, multimask, false).unwrap();
+            let b = dec.forward_with(&image, &pos, &sparse, &dense, &high, multimask, true).unwrap();
+            assert!(max_diff(&a.masks, &b.masks) <= 2e-5, "masks differ by {:e}", max_diff(&a.masks, &b.masks));
+            assert!(max_diff(&a.iou, &b.iou) <= 1e-5);
+            assert!(max_diff(&a.sam_tokens, &b.sam_tokens) <= 1e-5);
+            assert!(max_diff(&a.object_score, &b.object_score) <= 1e-5);
+        }
+    }
 }

@@ -1,5 +1,5 @@
 //! Multichannel AAC reaches stereo by where each channel plays, whatever order its channel
-//! configuration decodes in (#1701). Fixtures are tones encoded with FilmCraft's AAC encoder (no
+//! configuration decodes in (#1701). Fixtures are tones encoded with craft-audio's AAC encoder (no
 //! ffmpeg needed, so nothing is skipped), with the configuration rewritten where the coded
 //! elements fit another: configurations 11 and 12 code the same elements as the encoder's 7- and
 //! 8-channel output, and a program config element can name any of them.
@@ -9,9 +9,9 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use craft_audio::aac::{AudioSpecificConfig, Encoder, EncoderConfig, ProgramConfig};
 use effectcraft_media::{MediaPool, probe, probe_bytes};
 use effectcraft_time::Tick;
-use filmcraft_aac::{AudioSpecificConfig, Encoder, EncoderConfig, ProgramConfig};
 
 const RATE: u32 = 48_000;
 /// Tone frequencies by channel; an LFE gets [`LFE_TONE`], which its element can carry.
@@ -61,7 +61,9 @@ fn lc(config: u8) -> Option<AudioSpecificConfig> {
 
 fn pce(front: Vec<(bool, u8)>, side: Vec<(bool, u8)>, back: Vec<(bool, u8)>, lfe: Vec<u8>, comment: &[u8]) -> Option<AudioSpecificConfig> {
     let pce = ProgramConfig { object_type: 1, sf_index: 3, front, side, back, lfe, comment: comment.to_vec(), ..Default::default() };
-    Some(AudioSpecificConfig { pce: Some(pce), ..AudioSpecificConfig::lc(3, 0) })
+    let mut asc = AudioSpecificConfig::lc(3, 0);
+    asc.pce = Some(pce);
+    Some(asc)
 }
 
 use Ch::*;
@@ -115,7 +117,7 @@ fn mp4(asc: Vec<u8>, channels: u32, units: &[Vec<u8>]) -> Vec<u8> {
 /// As [`mp4`], after an audio track with the configuration and channel count `empty` and no
 /// samples, if any.
 fn mp4_after(empty: Option<(Vec<u8>, u32)>, asc: Vec<u8>, channels: u32, units: &[Vec<u8>]) -> Vec<u8> {
-    use filmcraft_isobmff::{Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use craft_media::isobmff::{Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
     let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).expect("writer");
     if let Some((asc, channels)) = empty {
         w.add_track(TrackConfig::new(SampleEntry::aac(asc, channels, RATE), RATE)).expect("empty track");
@@ -134,7 +136,7 @@ fn mkv(asc: Vec<u8>, channels: u32, units: &[Vec<u8>]) -> Vec<u8> {
 /// As [`mkv`], after an audio track with the configuration and channel count `empty` and no
 /// frames, if any.
 fn mkv_after(empty: Option<(Vec<u8>, u32)>, asc: Vec<u8>, channels: u32, units: &[Vec<u8>]) -> Vec<u8> {
-    use filmcraft_matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
+    use craft_media::matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
     let track = |asc: Vec<u8>, channels: u32| {
         let mut t = TrackSpec::new(TrackKind::Audio, "A_AAC");
         t.codec_private = asc;
@@ -210,7 +212,7 @@ fn lfe_is_coded(case: &Case, bytes: Vec<u8>) {
 fn every_aac_layout_mixes_by_speaker_in_mp4() {
     for case in cases() {
         let (asc, units) = encode(case.content, false);
-        let asc = case.asc.as_ref().map_or(asc, AudioSpecificConfig::to_bytes);
+        let asc = case.asc.as_ref().map_or(asc, |a| a.to_bytes().expect("ASC"));
         let bytes = mp4(asc, case.content.len() as u32, &units);
         lfe_is_coded(&case, bytes.clone());
         let p = write(&format!("{}.mp4", case.name), &bytes);
@@ -227,7 +229,7 @@ fn every_aac_layout_mixes_by_speaker_in_mp4() {
 fn matroska_aac_layouts_mix_by_speaker() {
     for case in cases().into_iter().filter(|c| matches!(c.name, "config12" | "pce61-centre-first" | "pce61-ffmpeg")) {
         let (asc, units) = encode(case.content, false);
-        let asc = case.asc.as_ref().map_or(asc, AudioSpecificConfig::to_bytes);
+        let asc = case.asc.as_ref().map_or(asc, |a| a.to_bytes().expect("ASC"));
         let p = write(&format!("{}.mkv", case.name), &mkv(asc, case.content.len() as u32, &units));
         check(case.name, case.content, &mix(&MediaPool::new(), &probe(&p).expect("probe")));
     }
@@ -251,9 +253,9 @@ fn an_empty_audio_track_lends_its_configuration_to_no_other() {
     for (name, empty) in [("config12", 7), ("pce61-centre-first", 11)] {
         let case = cases().into_iter().find(|c| c.name == name).expect("case");
         let n = case.content.len() as u32;
-        let empty = Some((AudioSpecificConfig::lc(3, empty).to_bytes(), n));
+        let empty = Some((AudioSpecificConfig::lc(3, empty).to_bytes().expect("ASC"), n));
         let (asc, units) = encode(case.content, false);
-        let asc = case.asc.as_ref().map_or(asc, AudioSpecificConfig::to_bytes);
+        let asc = case.asc.as_ref().map_or(asc, |a| a.to_bytes().expect("ASC"));
         let p = write(&format!("{name}-after-empty.mp4"), &mp4_after(empty.clone(), asc.clone(), n, &units));
         check(&format!("{name} MP4"), case.content, &mix(&MediaPool::new(), &probe(&p).expect("probe")));
         let p = write(&format!("{name}-after-empty.mkv"), &mkv_after(empty, asc, n, &units));

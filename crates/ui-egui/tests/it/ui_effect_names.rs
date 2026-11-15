@@ -9,7 +9,7 @@ use effectcraft_ui_egui::dock::PanelKind;
 use effectcraft_ui_egui::native_menu::{NativeNode, build as native_menu};
 use egui::vec2;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 /// The effect under test, and the names the registry and the catalog give it.
@@ -120,6 +120,37 @@ fn the_effect_context_menu_follows_the_interface_language() {
     for label in ENGLISH {
         assert!(en.query_by_label(label).is_some(), "{label} missing from the English menu");
     }
+}
+
+/// #3198: Enter opens an effect's rename field on its translated name, as a double-click does,
+/// so Enter again without typing renames nothing: the effect keeps its English group name (and
+/// so its translation) and there is no undo step.
+#[test]
+fn renaming_a_translated_effect_without_typing_keeps_its_name() {
+    let (mut h, fx) = harness("zh-hans");
+    let name = |h: &Harness<'_, EffectcraftApp>| {
+        let s = &h.state().session;
+        let layer = s.state.selected_layers.first().copied().expect("the selected layer");
+        s.active_comp().and_then(|c| c.layer(layer)).and_then(|l| l.props.find_group(fx)).map(|g| g.name.clone())
+    };
+    let edit = format!("effectControls.effect.{fx}.nameEdit");
+    let editing = |h: &Harness<'_, EffectcraftApp>| h.state().auto.elements.iter().any(|e| e.id == edit);
+    let layer = h.state().session.state.selected_layers.first().map(|l| l.0).expect("the selected layer");
+    h.state_mut().session.execute("prop.select", json!({"layer": layer, "prop": fx, "selectKeys": false})).unwrap();
+    h.run_steps(3);
+    let undo = h.state().session.history.undo.len();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(editing(&h), "Enter opens the rename field");
+    assert!(h.ctx.egui_wants_keyboard_input(), "the rename field has the keyboard");
+    let field = h.query_by(|n| n.is_focused()).and_then(|n| n.accesskit_node().value());
+    assert_eq!(field.as_deref(), Some(BLUR_ZH), "the field opens on the drawn (Chinese) name");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(!editing(&h), "Enter closes the rename field");
+    assert_eq!(name(&h).as_deref(), Some(BLUR_EN), "the effect keeps its name");
+    assert_eq!(h.state().session.history.undo.len(), undo, "no undo step");
+    assert!(drawn(&h, BLUR_ZH) > 0, "the header still draws the Chinese name");
 }
 
 /// Everything an agent or a script addresses stays English: the automation label, the property

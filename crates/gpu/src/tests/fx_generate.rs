@@ -69,6 +69,13 @@ fn wipes() {
     effect_case("ec.transition.linearwipe", &[("completion", n(40.0)), ("angle", n(30.0)), ("feather", n(12.0))]);
     effect_case("ec.transition.linearwipe", &[("completion", n(55.0)), ("angle", n(-120.0))]);
     effect_case("ec.transition.linearwipe", &[("completion", n(20.0)), ("angle", n(90.0)), ("feather", n(3.0))]);
+    // #3125: After Effects' feather (blurred matte, edges repeated), 0 % and 100 %, and the legacy ramp.
+    effect_case("ec.transition.linearwipe", &[("completion", n(10.0)), ("angle", n(77.0)), ("feather", n(16.0))]);
+    effect_case("ec.transition.linearwipe", &[("completion", n(100.0)), ("feather", n(32000.0))]);
+    effect_case("ec.transition.linearwipe", &[("completion", n(0.0)), ("feather", n(40.0))]);
+    // 100 % clears the layer also when the angle is not a number (the CPU clears before reading it).
+    effect_case("ec.transition.linearwipe", &[("completion", n(100.0)), ("angle", n(f64::NAN))]);
+    effect_case("ec.transition.linearwipe", &[("completion", n(40.0)), ("angle", n(30.0)), ("feather", n(12.0)), ("legacyFeather", b(true))]);
     effect_case("ec.transition.venetian", &[("completion", n(35.0)), ("direction", n(30.0)), ("width", n(11.0)), ("feather", n(2.0))]);
     effect_case("ec.transition.venetian", &[("completion", n(60.0)), ("width", n(17.0))]);
     effect_case("ec.transition.venetian", &[("completion", n(25.0)), ("direction", n(-70.0)), ("width", n(9.0)), ("feather", n(0.5))]);
@@ -76,6 +83,11 @@ fn wipes() {
     effect_case("ec.transition.radialwipe", &[("completion", n(45.0)), ("wipe", e(1)), ("center", pt(30.2, 19.6))]);
     effect_case("ec.transition.radialwipe", &[("completion", n(60.0)), ("wipe", e(2)), ("startAngle", n(-40.0)), ("feather", n(3.0))]);
     effect_case("ec.transition.radialwipe", &[("completion", n(0.0)), ("feather", n(20.0))]);
+    // #3472-#3474: the ends of After Effects' ranges (a Feather wider than 8 blinds is the CPU's
+    // even veil).
+    effect_case("ec.transition.venetian", &[("completion", n(40.0)), ("width", n(1.0)), ("feather", n(6.0))]);
+    effect_case("ec.transition.venetian", &[("completion", n(40.0)), ("width", n(32000.0)), ("feather", n(32000.0))]);
+    effect_case("ec.transition.radialwipe", &[("completion", n(40.0)), ("feather", n(32000.0))]);
     effect_case("ec.transition.gradientwipe", &[("completion", n(40.0))]);
     effect_case("ec.transition.gradientwipe", &[("completion", n(55.0)), ("softness", n(30.0)), ("invert", b(true))]);
     effect_case("ec.transition.gradientwipe", &[("completion", n(100.0))]);
@@ -140,6 +152,8 @@ fn generators() {
     );
     effect_case("ec.generate.checkerboard", &[("sizeFrom", e(0)), ("corner", pt(16.0, 11.0)), ("color", c(0.9, 0.3, 0.1)), ("blendingMode", e(1))]);
     effect_case("ec.generate.grid", &[("width", n(12.0)), ("border", n(3.0))]);
+    // #3476: a border wider than the cells (After Effects' maximum).
+    effect_case("ec.generate.grid", &[("width", n(12.0)), ("border", n(2000.0))]);
     effect_case(
         "ec.generate.grid",
         &[
@@ -160,6 +174,8 @@ fn generators() {
     effect_case("ec.generate.fourcolor", &[]);
     effect_case("ec.generate.fourcolor", &[("blend", n(40.0)), ("jitter", n(50.0)), ("opacity", n(80.0)), ("blendingMode", e(3))]);
     effect_case("ec.generate.fourcolor", &[("blend", n(600.0)), ("blendingMode", e(16)), ("positionsColors/point2", pt(30.0, 20.0))]);
+    // #3478, #3479: the top of After Effects' ranges.
+    effect_case("ec.generate.fourcolor", &[("blend", n(10000.0)), ("jitter", n(500.0))]);
 }
 
 #[test]

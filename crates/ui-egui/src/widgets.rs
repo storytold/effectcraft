@@ -63,8 +63,23 @@ pub struct HotSpec<'a> {
 
 /// "Hot text": a blue number you drag horizontally to scrub, click to type. Tab / Shift+Tab
 /// while typing commits and types in the panel's next / previous one, as in After Effects.
+/// Typed text may be arithmetic, `960/2` or `*2` for twice the value ([`crate::num_math`]).
 /// Returns (response, Some(new value) when changed, drag finished).
 pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64, spec: &HotSpec, t: &Tokens) -> (Rect, Option<f64>, bool) {
+    let (rect, out, done, _) = hot_number_step_at(ui, rect_min, id, value, spec, t);
+    (rect, out, done)
+}
+
+/// [`hot_number_at`], also returning the typed step (`*2`, `+50`) the new value came from, so
+/// that other selected layers can take the same step from their own value (#3195).
+pub fn hot_number_step_at(
+    ui: &mut Ui,
+    rect_min: egui::Pos2,
+    id: egui::Id,
+    value: f64,
+    spec: &HotSpec,
+    t: &Tokens,
+) -> (Rect, Option<f64>, bool, Option<crate::num_math::Step>) {
     let HotSpec { speed, range, decimals, suffix } = *spec;
     let editing_id = id.with("editing");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
@@ -89,10 +104,19 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
         let touched_id = editing_id.with("touched");
         let touched = r.changed() || ui.data(|d| d.get_temp::<bool>(touched_id)).unwrap_or(false);
-        let mut out = None;
+        let (mut out, mut step) = (None, None);
         if r.lost_focus() || tab.is_some() {
-            if touched && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                out = typed_value(&buf, suffix, range);
+            // Typed arithmetic reads too (`960/2`), a leading `*`, `/` or `+` applied to the value
+            // shown (#3195).
+            if touched
+                && !ui.input(|i| i.key_pressed(egui::Key::Escape))
+                && let Some(typed) = crate::num_math::read(buf.trim().trim_end_matches(suffix), true)
+            {
+                let v = match typed {
+                    crate::num_math::Typed::Value(v) => Some(v),
+                    crate::num_math::Typed::Step(s) => s.apply(value).inspect(|_| step = Some(s)),
+                };
+                out = v.map(|v| v.clamp(range.0, range.1));
             }
             ui.data_mut(|d| {
                 d.remove::<String>(editing_id);
@@ -110,7 +134,7 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
                 d.insert_temp(touched_id, touched);
             });
         }
-        return (er, out, out.is_some());
+        return (er, out, out.is_some(), step);
     }
     let resp = ui.interact(rect, id, Sense::click_and_drag());
     crate::pointer_wrap::track(&resp);
@@ -144,15 +168,21 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
     if resp.clicked() {
         ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
     }
-    (rect, out, resp.drag_stopped())
+    (rect, out, resp.drag_stopped(), None)
 }
 
-/// The value a touched hot-text field commits from its typed `buf`: none when it does not parse,
-/// else the number clamped to `range`. Equal-to-displayed values still commit: with several layers
-/// selected the others may differ from the displayed (first) one. Untouched fields never get here.
-fn typed_value(buf: &str, suffix: &str, range: (f64, f64)) -> Option<f64> {
-    let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
-    txt.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(range.0, range.1))
+/// Mark a queued `prop.set` (with `selected`) as the typed `step` it came from, so every other
+/// selected layer takes that step from its own value rather than the edited layer's result
+/// (#3195): `+n` adds `n` to each (`addend`; not the edited layer's change, which its range may
+/// have clamped), `*n` and `/n` multiply each by the same `factor`.
+pub fn mark_step(action: Option<&mut (String, serde_json::Value)>, step: Option<crate::num_math::Step>) {
+    let (Some((_, a)), Some(step)) = (action, step) else { return };
+    match (step, step.factor()) {
+        (crate::num_math::Step::Add(n), _) => a["addend"] = serde_json::json!(n),
+        (_, Some(k)) => a["factor"] = serde_json::json!(k),
+        // (A factor too large to send: the other layers take the typed result.)
+        (_, None) => {}
+    }
 }
 
 /// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
@@ -174,10 +204,19 @@ pub fn slider_scrub_speed(ui: &ParamUi) -> f64 {
 
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
 /// `1 / speed` pixels however slowly the pointer moves (the fractions add up between frames),
-/// and a typed value is truncated. Returns (rect, Some(new value) when changed, drag finished).
+/// and a typed value is rounded (`5/2` is 3). Returns (rect, Some(new value) when changed, drag
+/// finished).
 pub fn hot_int_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: i64, speed: f64, suffix: &str, t: &Tokens) -> (Rect, Option<i64>, bool) {
     let (rect, nv, done) = hot_number_at(ui, rect_min, id, value as f64, &HotSpec { speed, range: (-1e6, 1e6), decimals: 0, suffix }, t);
     let acc_id = id.with("acc");
+    if let Some(n) = nv
+        && !ui.ctx().is_being_dragged(id)
+    {
+        // Typed (a drag changes the value only while it is dragged). (Within ±1e6: the cast is exact.)
+        ui.data_mut(|d| d.remove::<f64>(acc_id));
+        let typed = n.round() as i64;
+        return (rect, (typed != value).then_some(typed), done);
+    }
     let acc = ui.data(|d| d.get_temp::<f64>(acc_id)).unwrap_or(0.0) + nv.map_or(0.0, |n| n - value as f64);
     // (Ten 0.1 steps add up to just under 1.)
     let step = (acc + acc.signum() * 1e-9).trunc();
@@ -189,8 +228,11 @@ pub fn hot_int_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: i64, s
     (rect, (step != 0.0).then(|| value.saturating_add(step as i64)), done)
 }
 
-/// Standard numeric editors use the same continuous native scrubbing as hot text.
+/// Standard numeric editors use the same continuous native scrubbing as hot text, and read typed
+/// arithmetic (`960/2`) too. They read their text on every keystroke, so a leading `*` or `/`
+/// (relative to the value) is left to hot text, where it would otherwise compound (#3195).
 pub fn drag_value(value: egui::DragValue<'_>) -> impl egui::Widget {
+    let value = value.custom_parser(|text| crate::num_math::calc(text, None));
     move |ui: &mut Ui| {
         let response = ui.add(value);
         crate::pointer_wrap::track(&response);
@@ -1120,16 +1162,6 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A touched field commits what was typed, clamped, even if equal to the displayed value.
-    #[test]
-    fn typed_hot_text_commits() {
-        let range = (0.0, 1e9);
-        assert_eq!(typed_value("-50.0px", "px", range), Some(0.0));
-        assert_eq!(typed_value("4,5%", "%", range), Some(4.5));
-        assert_eq!(typed_value("40", "", range), Some(40.0));
-        assert_eq!(typed_value("x", "", range), None);
-    }
 
     /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
     fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {

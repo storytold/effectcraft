@@ -801,7 +801,7 @@ fn read_buffer(e: &mut Enc, buf: &wgpu::Buffer, size: u64) -> Option<Vec<u8>> {
     });
     e.record(&[]).copy_buffer_to_buffer(buf, 0, &rb, 0, size);
     e.submit();
-    let out = e.g.read_buffer(&rb, row, row, 1).map_err(|e| log::error!("gpu 3d readback: {e}")).ok()?;
+    let out = e.g.read_buffer_after(&rb, e.last_submission(), row, row, 1).map_err(|e| log::error!("gpu 3d readback: {e}")).ok()?;
     Some(out)
 }
 

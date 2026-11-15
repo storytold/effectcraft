@@ -27,8 +27,8 @@ pub(crate) use entries::{entry_checked, entry_enabled, entry_label, entry_shortc
 pub use frontend::frontend;
 #[cfg(test)]
 use frontend::zoom_step;
-pub(crate) use frontend::{dialog_answered, run_engine};
-pub use invoke::{invoke, panel_command_id, reveal};
+pub(crate) use frontend::{dialog_answered, import_aep_projects, run_engine};
+pub use invoke::{invoke, panel_command_id, reveal, waits_on_dialog};
 #[cfg(test)]
 use shortcuts::modifiers_at_start;
 pub use shortcuts::{Binding, bindings, chord_matches, forwardable_during_text_edit, handle_shortcuts, handle_tab_shortcut, parse_shortcut, shortcut_text};

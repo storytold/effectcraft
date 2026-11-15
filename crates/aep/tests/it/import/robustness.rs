@@ -626,9 +626,10 @@ fn bogus_effect_structure_is_reported_not_imported_blindly() {
         "{r:?}"
     );
 
-    // No project-level definitions: a Ramp with an empty parT cannot be read and is reported; one
-    // with its own parT still arrives. (In the single-case file one of the two had its own; in
-    // the combined file an earlier case holds the definitions, so both take the project copy.)
+    // No project-level definitions: a Ramp with an empty parT borrows the definitions of a Ramp
+    // in the file that has its own parT (#3170). In the single-case file one of the two has its
+    // own, so both arrive; in the case cut from the combined file an earlier case (not kept)
+    // held them, so neither has readable definitions and both are reported.
     let own = {
         let bytes = skip!(crate::common::try_fixture("383-fx-ramp-on-100x100-start-10-20.aep"));
         let file = parse(&bytes).unwrap();
@@ -646,8 +647,9 @@ fn bogus_effect_structure_is_reported_not_imported_blindly() {
         }
     }));
     let r = report_of(&bytes);
-    assert_eq!(r.imported.effects, own, "{r:?}");
-    assert_eq!(r.count(effectcraft_aep::import::LossCategory::Effects), 2 - own, "{r:?}");
+    let arrive = if own > 0 { 2 } else { 0 };
+    assert_eq!(r.imported.effects, arrive, "{r:?}");
+    assert_eq!(r.count(effectcraft_aep::import::LossCategory::Effects), 2 - arrive, "{r:?}");
     assert!(try_all(&bytes)); // 368, the first Gradient Ramp of its file, has its own parT: it still arrives.
     let bytes = skip!(mutate("368-fx-ramp-default.aep", &mut |c| {
         if let Body::List { list_type, .. } = &mut c.body

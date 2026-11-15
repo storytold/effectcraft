@@ -6,6 +6,10 @@ use super::{Affine, BezPath, Builder, Cap, HashMap, Interp, Join};
 /// The deepest procedure nesting run (deeper recursion stops the program).
 const MAX_CALL_DEPTH: usize = 256;
 
+/// The most values the operand stack holds: a push past it is dropped, and `copy` copies
+/// nothing rather than grow the stack past it.
+pub(super) const MAX_STACK: usize = 100_000;
+
 impl Interp {
     pub fn new(page: [f64; 4]) -> Interp {
         Interp {
@@ -56,9 +60,15 @@ impl Interp {
     }
 
     pub(super) fn push(&mut self, v: V) {
-        if self.st.len() < 100_000 {
+        if self.st.len() < MAX_STACK {
             self.st.push(v);
         }
+    }
+
+    /// Count `n` units of work (values copied, storage allocated) against the budget without
+    /// stopping the program here: once it is spent, the next operator stops it.
+    pub(super) fn charge(&mut self, n: usize) {
+        self.budget = self.budget.saturating_sub(n);
     }
 
     pub(super) fn lookup(&self, k: &str) -> Option<V> {

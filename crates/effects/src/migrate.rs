@@ -161,8 +161,13 @@ pub fn legacy_default(effect: &str, param: &str) -> Option<Value> {
         ("ec.key.advancedspill", "ultraSettings/tolerance") => Value::Scalar(100.0),
         // Transition: Block Dissolve's blocks had hard edges.
         ("ec.transition.blockdissolve", "softEdges") => Value::Bool(false),
+        // Linear Wipe's feather was a linear ramp with the travel extended by it (#3125).
+        ("ec.transition.linearwipe", "legacyFeather") => Value::Bool(true),
         // 3D Channel: Cryptomatte's Matte Only put the matte in alpha too (#3127).
         ("ec.3d.cryptomatte", crate::channel3d::MATTE_ONLY_IN_ALPHA) => Value::Bool(true),
+        // Utility: Cineon Converter version 1, where Gamma 1.7 gave linear output
+        // (`crate::utility::cineon_gamma`).
+        ("ec.utility.cineon", "version") => Value::Scalar(1.0),
         _ => return None,
     })
 }
@@ -608,6 +613,18 @@ mod tests {
         assert_eq!(current_param_id(stab, "other/smoothness"), None);
     }
 
+    /// #3125: a Linear Wipe saved before its feather followed After Effects keeps the old ramp;
+    /// a new one doesn't.
+    #[test]
+    fn old_linear_wipes_keep_the_legacy_feather() {
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.transition.linearwipe", &mut next);
+        assert_eq!(g.get("legacyFeather").unwrap().value, Value::Bool(false));
+        take_prop(&mut g, "legacyFeather");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        assert_eq!(g.get("legacyFeather").unwrap().value, Value::Bool(true));
+    }
+
     #[test]
     fn card_wipe_back_layer_popup_becomes_a_layer_parameter() {
         let spec = find("ec.transition.cardwipe").unwrap();
@@ -804,5 +821,31 @@ not a stroke",
         let before = twirl.clone();
         to_effect_space(spec, &mut twirl, SIZE, [0.0; 2], &|_| [0.0; 2]);
         assert_eq!(twirl, before);
+    }
+
+    #[test]
+    fn cineon_converter_saved_before_its_version_upgrades_to_version_1() {
+        let spec = find("ec.utility.cineon").unwrap();
+        let mut next = 1;
+        let fresh = instantiate(spec, &mut Ids(&mut next), "Cineon Converter", [100.0, 50.0]);
+        assert_eq!(fresh.get("version").unwrap().value, Value::Scalar(2.0));
+        assert_eq!(fresh.get("gamma").unwrap().value, Value::Scalar(1.7));
+        // Gamma, its keyframes and its expression are kept as saved.
+        let mut g = fresh.clone();
+        take_prop(&mut g, "version");
+        let gamma = g.get_mut("gamma").unwrap();
+        gamma.value = Value::Scalar(2.2);
+        gamma.keys = vec![effectcraft_keyframe::Keyframe::new(Default::default(), Value::Scalar(3.4))];
+        gamma.expr = Some(effectcraft_project::Expression { text: "value * 2".into(), enabled: true });
+        let saved = gamma.clone();
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        assert_eq!(g.get("version").unwrap().value, Value::Scalar(1.0));
+        assert_eq!(g.get("gamma"), Some(&saved));
+        // Saved without Gamma too: it takes version 1's default, which gave linear output.
+        let mut g = fresh.clone();
+        take_prop(&mut g, "version");
+        take_prop(&mut g, "gamma");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        assert_eq!(g.get("gamma").unwrap().value, Value::Scalar(1.7));
     }
 }

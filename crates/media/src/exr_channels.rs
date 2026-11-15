@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use effectcraft_raster::channels3d::{BACKGROUND_DEPTH, split_channel};
 use effectcraft_raster::{AuxChannels, Image};
+use effectcraft_render::reads::{ReadFile, ReadFiles};
 use exr::block::UncompressedBlock;
 use exr::block::chunk::TileCoordinates;
 use exr::image::read::image::ReadImage;
@@ -30,33 +31,13 @@ use crate::convert::{AlphaOp, float_to_image};
 /// stop at the same size).
 const MAX_DISPLAY_PIXELS: usize = 1 << 28;
 
-fn is_depth(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    last.eq_ignore_ascii_case("z") || name.to_ascii_lowercase().contains("depth")
-}
-
-/// Full plane name of a channel in a part: `part.channel`, except that Blender 5 writes one part
-/// per pass whose channels already carry the full name (part `ViewLayer.Depth` holds
-/// `ViewLayer.Depth.Z`), which is kept as is instead of doubling the prefix.
-fn channel_name(part: Option<&str>, channel: &str) -> String {
-    match part {
-        Some(p) if channel.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')) => channel.to_string(),
-        Some(p) => format!("{p}.{channel}"),
-        None => channel.to_string(),
-    }
-}
+// Channel naming and the Cryptomatte manifest are `craft-exr`'s.
+use craft_exr::channels::{is_depth, part_channel_name as channel_name};
+pub use craft_exr::cryptomatte::parse_manifest;
 
 /// The part name channels are prefixed with (`None`: unnamed).
 fn part_name(header: &Header) -> Option<String> {
     header.own_attributes.layer_name.as_ref().map(|t| t.to_string()).filter(|s| !s.is_empty())
-}
-
-/// Parse a Cryptomatte manifest (`{"name": "hexhash", …}`).
-pub fn parse_manifest(json: &str) -> Vec<(String, u32)> {
-    let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(json) else { return vec![] };
-    let mut v: Vec<(String, u32)> = m.iter().filter_map(|(k, h)| Some((k.clone(), u32::from_str_radix(h.as_str()?.trim(), 16).ok()?))).collect();
-    v.sort();
-    v
 }
 
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build
@@ -477,8 +458,8 @@ fn layered_picture_of(aux: &AuxChannels, op: AlphaOp) -> Option<Image> {
 /// decoded anyway), else of the picture's channels alone (also when the cache has no channels
 /// for the file: a read that failed, or a broken part the picture doesn't use). `Err(Some(why))`
 /// when the file is too large to decode, `Err(None)` when it isn't a readable multi-layer EXR.
-pub(crate) fn layered_picture(path: &str, bytes: Arc<[u8]>, op: AlphaOp, shared: bool) -> Result<Image, Option<String>> {
-    if shared && let Some(d) = cache().get(path, Use::Picture, || Some(bytes.clone())) {
+pub(crate) fn layered_picture(path: &str, bytes: Arc<[u8]>, file: &ReadFile, op: AlphaOp, shared: bool) -> Result<Image, Option<String>> {
+    if shared && let Some(d) = cache().get(path, Use::Picture, || read_as(file, bytes.clone())) {
         return layered_picture_of(&d.aux, op).ok_or(None);
     }
     let (d, rgb, a) = picture_only(&bytes).map_err(|r| match r {
@@ -499,8 +480,8 @@ pub(crate) fn layered_picture(path: &str, bytes: Arc<[u8]>, op: AlphaOp, shared:
 /// decoder shows for a file it reads, [`layered_image`]'s rule for one it refuses. `None` when
 /// the planes can't stand in for the `image` crate's picture (decode with it), or the file is
 /// not a readable EXR.
-pub(crate) fn cached_picture(path: &str, bytes: Arc<[u8]>, op: AlphaOp) -> Option<Image> {
-    let d = cache().get(path, Use::Picture, || Some(bytes))?;
+pub(crate) fn cached_picture(path: &str, bytes: Arc<[u8]>, file: &ReadFile, op: AlphaOp) -> Option<Image> {
+    let d = cache().get(path, Use::Picture, || read_as(file, bytes))?;
     let aux = &d.aux;
     match d.rgb {
         Rgb::None => layered_picture_of(aux, op),
@@ -536,8 +517,16 @@ const CACHE_FILES: usize = 64;
 /// rendered at once. The oldest stops being kept when another comes.
 const HELD_FILES: usize = 4;
 
-/// A file's decode: done once, by the first caller; the others wait for it.
-type Slot = Arc<OnceLock<Option<Arc<Decoded>>>>;
+/// A file's decode: done once, by the first caller; the others wait for it. With the files read
+/// for it (see [`crate::reads`]), noted again on every hit.
+type Slot = Arc<OnceLock<(Option<Arc<Decoded>>, ReadFiles)>>;
+
+/// Bytes the caller already read from `file`, given to the cache as read from it (so the entry
+/// keeps the file's identity).
+fn read_as(file: &ReadFile, bytes: Arc<[u8]>) -> Option<Arc<[u8]>> {
+    crate::reads::note(file.clone());
+    Some(bytes)
+}
 
 struct Entry {
     path: String,
@@ -550,12 +539,19 @@ struct Entry {
 
 impl Entry {
     /// Dropping it would free nothing or lose a decode in progress: an effect (or a picture
-    /// waiting for its effects) still holds its planes, or it is decoding.
+    /// waiting for its effects) still holds its planes, someone is using the slot, or it is decoding.
     fn in_use(&self) -> bool {
+        // `get_or_init` hands an active caller a borrow of the OnceLock value before that caller
+        // can clone the decoded Arc. Keep the entry while any caller still holds this slot, or a
+        // concurrent account/eviction can remove it in that gap and make the next request decode
+        // the same file again.
+        if Arc::strong_count(&self.slot) > 1 {
+            return true;
+        }
         match self.slot.get() {
             None => true,
-            Some(None) => false,
-            Some(Some(d)) => Arc::strong_count(d) > 1 || Arc::strong_count(&d.aux) > 1,
+            Some((None, _)) => false,
+            Some((Some(d), _)) => Arc::strong_count(d) > 1 || Arc::strong_count(&d.aux) > 1,
         }
     }
 }
@@ -648,30 +644,18 @@ impl ChannelCache {
         // is safe because the decode never waits on rayon's global pool (the exr crate
         // decompresses on a pool of its own and this thread only receives the blocks), so the
         // decoding thread can't be waiting for this one.
-        let v = slot
-            .get_or_init(|| {
-                decoded_here = true;
-                self.decodes.fetch_add(1, Ordering::Relaxed);
-                #[cfg(test)]
-                count_decode(true);
-                let _abandon = Abandon { cache: self, slot: &slot };
-                let bytes = read()?;
-                // The planes it will allocate count against the budget while it decodes.
-                if let Ok(meta) = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(&bytes[..]), false)
-                    && let Some(need) = planes_bytes(&meta, &|_| true)
-                {
-                    self.account(&slot, need.min(MAX_DECODE_BYTES));
-                }
-                match decode(&bytes, &|_| true) {
-                    Ok(d) => Some(Arc::new(d)),
-                    Err(Refused::TooLarge(why)) => {
-                        log::warn!("media: {path}: {why}");
-                        None
-                    }
-                    Err(Refused::Unreadable) => None,
-                }
-            })
-            .clone();
+        let (v, files) = slot.get_or_init(|| {
+            decoded_here = true;
+            self.decodes.fetch_add(1, Ordering::Relaxed);
+            #[cfg(test)]
+            count_decode(true);
+            let _abandon = Abandon { cache: self, slot: &slot };
+            let (bytes, files) = crate::reads::captured(read);
+            (bytes.and_then(|bytes| self.decode_file(path, &slot, &bytes)), files)
+        });
+        // The file(s) the decode was made of, read now or for an earlier caller.
+        crate::reads::note_all(files);
+        let v = v.clone();
         if decoded_here {
             self.account(&slot, v.as_ref().map_or(0, |d| d.bytes()));
         }
@@ -690,6 +674,24 @@ impl ChannelCache {
         }
         drop(state);
         v
+    }
+
+    /// Decode the file at `path` whose bytes are `bytes` for `slot` (see [`ChannelCache::get`]).
+    fn decode_file(&self, path: &str, slot: &Slot, bytes: &[u8]) -> Option<Arc<Decoded>> {
+        // The planes it will allocate count against the budget while it decodes.
+        if let Ok(meta) = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false)
+            && let Some(need) = planes_bytes(&meta, &|_| true)
+        {
+            self.account(slot, need.min(MAX_DECODE_BYTES));
+        }
+        match decode(bytes, &|_| true) {
+            Ok(d) => Some(Arc::new(d)),
+            Err(Refused::TooLarge(why)) => {
+                log::warn!("media: {path}: {why}");
+                None
+            }
+            Err(Refused::Unreadable) => None,
+        }
     }
 
     /// Drop least recently used files not in use until the rest fit the budget, keeping `newest`.
@@ -972,6 +974,21 @@ mod tests {
         assert_eq!(reads.load(Ordering::Relaxed), frames as u64);
     }
 
+    #[test]
+    fn cache_does_not_evict_a_slot_while_a_caller_is_using_it() {
+        let bytes: Arc<[u8]> = flat(&["R", "G", "B", "A"], (32, 32), 0.25).into();
+        let one = 4 * 32 * 32 * 4 + 4;
+        let cache = ChannelCache::new(one);
+        drop(cache.get("/active.exr", Use::Channels, || Some(bytes.clone())));
+        let active_slot = cache.lock().entries.iter().find(|entry| entry.path == "/active.exr").unwrap().slot.clone();
+        drop(cache.get("/next.exr", Use::Channels, || Some(bytes.clone())));
+        assert!(cache.cached().contains(&"/active.exr".to_string()), "an active caller pins the slot");
+
+        drop(active_slot);
+        drop(cache.get("/newest.exr", Use::Channels, || Some(bytes.clone())));
+        assert!(!cache.cached().contains(&"/active.exr".to_string()), "an idle slot is eligible for eviction");
+    }
+
     /// #474: a decode that panics doesn't leave its file "decoding" in the cache (never dropped,
     /// its planes counted): the entry goes, and the next request decodes the file.
     #[test]
@@ -996,7 +1013,7 @@ mod tests {
         let path = "/474-shared-fallback.exr";
         assert!(cache().get(path, Use::Channels, || None).is_none(), "a read that failed");
         let op = AlphaOp::of(&Footage::default(), FloatCurve::Linear);
-        let img = layered_picture(path, bytes, op, true).unwrap();
+        let img = layered_picture(path, bytes, &ReadFile::new(path, effectcraft_render::reads::FileStamp::Virtual), op, true).unwrap();
         assert_eq!(img.get(1, 1), [0.5, 0.5, 0.5, 1.0]);
     }
 
@@ -1174,7 +1191,8 @@ mod tests {
                 for curve in [FloatCurve::Srgb, FloatCurve::Linear, FloatCurve::Gamma24] {
                     let op = AlphaOp::of(&Footage { alpha, premul_color: [0.2, 0.4, 0.6], ..Default::default() }, curve);
                     let want = crate::convert::dynamic_to_image(&img, op);
-                    let got = cached_picture(&path, bytes.as_slice().into(), op).unwrap();
+                    let got = cached_picture(&path, bytes.as_slice().into(), &ReadFile::new(path.as_str(), effectcraft_render::reads::FileStamp::Virtual), op)
+                        .unwrap();
                     assert_eq!((got.width, got.height), (want.width, want.height));
                     assert_eq!(bits(&got), bits(&want), "file {k} {alpha:?} {curve:?}");
                 }

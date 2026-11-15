@@ -18,6 +18,8 @@ const MAX_SIDE: f64 = 1024.0;
 const MAX_SCALE: f64 = 4.0;
 /// The most triangles one shading draws.
 const MAX_TRIANGLES: usize = 2_000_000;
+/// How many times over the mesh raster may be covered by triangle bounding boxes in all.
+const MAX_RASTER_PASSES: usize = 64;
 
 /// A mesh vertex: page-space position and its value (RGB, or `t` in `[0]` with a function).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -234,13 +236,17 @@ fn free_form(r: &mut Bits, l: &Layout, colors: &Colors, m: Affine) -> Vec<[V; 3]
 
 /// Type 5: a lattice of `per_row` vertices per row, two triangles per cell.
 fn lattice(r: &mut Bits, l: &Layout, colors: &Colors, m: Affine, per_row: usize) -> Vec<[V; 3]> {
-    if per_row < 2 {
+    if !(2..=MAX_TRIANGLES).contains(&per_row) {
         return vec![];
     }
     let mut rows: Vec<Vec<V>> = vec![];
     let mut row = vec![];
     while let (Some(p), Some(c)) = (l.point(r), l.comps(r)) {
         r.align();
+        // Vertices kept, the unfinished row's included, stay within the triangle limit.
+        if (rows.len() * per_row).saturating_add(row.len()) >= MAX_TRIANGLES {
+            break;
+        }
         row.push(V { p: m * p, c: colors.value(&c) });
         if row.len() == per_row {
             rows.push(std::mem::take(&mut row));
@@ -447,6 +453,9 @@ fn rasterize(tris: &[[V; 3]], colors: &Colors, page_box: [f64; 4]) -> Option<Svg
     let ss = s * 2.0;
     let mut val = vec![[0.0f32; 3]; sw * sh];
     let mut cov = vec![false; sw * sh];
+    // Samples tested across all triangles: overlapping triangles that each cover the raster
+    // would otherwise test it once per triangle. Past the budget the later triangles are left out.
+    let mut work = (sw * sh).saturating_mul(MAX_RASTER_PASSES).saturating_add(tris.len().saturating_mul(16));
     for t in tris {
         let q = t.map(|v| Point::new((v.p.x - o.x) * ss, (o.y - v.p.y) * ss));
         let area = (q[1].x - q[0].x) * (q[2].y - q[0].y) - (q[2].x - q[0].x) * (q[1].y - q[0].y);
@@ -457,6 +466,8 @@ fn rasterize(tris: &[[V; 3]], colors: &Colors, page_box: [f64; 4]) -> Option<Svg
         let by0 = q.iter().map(|p| p.y).fold(f64::MAX, f64::min).floor().max(0.0) as usize;
         let bx1 = (q.iter().map(|p| p.x).fold(f64::MIN, f64::max).ceil().max(0.0) as usize).min(sw);
         let by1 = (q.iter().map(|p| p.y).fold(f64::MIN, f64::max).ceil().max(0.0) as usize).min(sh);
+        let Some(left) = work.checked_sub(bx1.saturating_sub(bx0).saturating_mul(by1.saturating_sub(by0))) else { break };
+        work = left;
         let eps = 1e-9 * area.abs();
         for y in by0..by1 {
             for x in bx0..bx1 {

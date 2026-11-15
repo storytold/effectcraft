@@ -197,6 +197,22 @@ fn write_on_and_glue_gun_draw_at_brush() {
     assert_eq!(g.img.get(0, 0), src.get(0, 0));
 }
 
+/// #2980: Brush Size of Write-on and Stroke goes up to 200 px as in After Effects (read back from
+/// After Effects 2026: setting 201 is refused with "out of range 0 to 200"), and a brush that
+/// wide paints that wide.
+#[test]
+fn brush_size_goes_up_to_200() {
+    for id in ["ec.generate.writeon", "ec.generate.stroke"] {
+        let spec = crate::find(id).unwrap();
+        let size = spec.params.iter().find(|p| p.id == "brushSize").unwrap();
+        assert!(matches!(size.ui, ParamUi::Slider { min, max, .. } if min == 0.0 && max == 200.0), "{id}: {:?}", size.ui);
+    }
+    let set = [("brushSize", num(120.0)), ("brushHardness", num(100.0)), ("brushPosition", Value::Vec2([128.0, 128.0]))];
+    let wide = run("ec.generate.writeon", &set, Image::new(256, 256));
+    assert!(wide.img.get(128 + 55, 128)[3] > 0.9, "radius 60 reaches 55 px from the centre");
+    assert!(wide.img.get(128 + 70, 128)[3] == 0.0);
+}
+
 /// #536: an animated Brush Position draws a stroke that stays (Stroke Length 0), expires
 /// after Stroke Length, and lays its dabs Brush Spacing seconds apart.
 #[test]
