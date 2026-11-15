@@ -319,10 +319,19 @@ impl EffectcraftApp {
             || !self.synthetic.is_empty()
             || !self.input_waiters.is_empty()
             || self.pending_screenshots.iter().any(|s| s.slot.is_none())
+            || self.script_file_dialog_waits()
             || (self.playback.playing && child_viewports);
         if paint {
             self.request_hidden_paint(ctx);
         }
+    }
+
+    /// A script waits for a file dialog nobody has shown yet: dialogs are served in a UI pass
+    /// (`serve_file_dialogs`), so a minimized window must paint for it (#3253 review). Not while
+    /// a non-blocking dialog is up: the next one waits for it.
+    fn script_file_dialog_waits(&self) -> bool {
+        let one_at_a_time = self.hooks.file_dialog_async.is_some() && self.file_dialogs.any();
+        !one_at_a_time && self.session.script_ui.file_dialogs.iter().any(|d| !d.shown)
     }
 
     /// Ask the host for a UI pass even when the window is minimized or occluded.
