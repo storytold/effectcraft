@@ -47,7 +47,7 @@ fn key(p: &Project, uid: u64, saved: Saved) -> String {
 /// Give the Warp Stabilizer and the tracker an analysis of the clip as it is now, saved with
 /// `saved` keys, and reopen the project.
 fn analyse(s: &mut Session, saved: Saved) {
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     let set = |p: &mut Project, uid: u64, data: &str, id: &str, key: &str| {
         let g = p.comp_mut(COMP).unwrap().layer_mut(CLIP).unwrap().props.find_group_mut(uid).unwrap();
         g.prop_mut(data).unwrap().value = Value::Str(format!("saved {data}"));
@@ -187,7 +187,7 @@ fn shared_deep_and_cyclic_precomps_are_keyed_in_bounded_time() {
     let mut s = open(ANALYSED);
     let r = run(&mut s, "layer.precompose", json!({"layers": [CLIP.0], "mode": "leave"}));
     let inner = ItemId(r["comp"].as_u64().unwrap());
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     let template = p.comp(inner).unwrap().clone();
     // 40 comps, each drawing the next one twice (2^40 paths if each were walked), the last
     // drawing the first.

@@ -441,7 +441,7 @@ fn vector_footage_thumbnails_are_drawn_at_thumbnail_size() {
     let source = Arc::new(Vector(Mutex::new(vec![])));
     let mut s = Session { footage: source.clone(), ..Default::default() };
     let f = Footage { path: "/m/huge.svg".into(), codec: "SVG".into(), width: 16_000, height: 8_000, has_video: true, ..Default::default() };
-    let item = std::sync::Arc::make_mut(&mut s.project).add_item("huge.svg", effectcraft_color::Label::Sandstone, None, ItemKind::Footage(f));
+    let item = s.project_mut().add_item("huge.svg", effectcraft_color::Label::Sandstone, None, ItemKind::Footage(f));
     let (w, h, _) = (s.thumbnail_job(item, Tick::ZERO, 64).unwrap())().unwrap();
     assert_eq!((w, h), (64, 32));
     assert_eq!(*source.0.lock().unwrap(), [64.0 / 16_000.0]);
@@ -468,7 +468,7 @@ fn a_vector_thumbnail_one_pixel_over_is_not_halved() {
     }
     let mut s = Session { footage: Arc::new(Over), ..Default::default() };
     let f = Footage { path: "/m/sq.svg".into(), codec: "SVG".into(), width: 121, height: 121, has_video: true, ..Default::default() };
-    let item = std::sync::Arc::make_mut(&mut s.project).add_item("sq.svg", effectcraft_color::Label::Sandstone, None, ItemKind::Footage(f));
+    let item = s.project_mut().add_item("sq.svg", effectcraft_color::Label::Sandstone, None, ItemKind::Footage(f));
     let (w, h, px) = (s.thumbnail_job(item, Tick::ZERO, 63).unwrap())().unwrap();
     assert_eq!((w, h), (63, 63));
     assert_eq!(px.len(), 63 * 63 * 4);

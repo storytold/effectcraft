@@ -64,7 +64,7 @@ fn new_folder_with_items_moves_them_into_it_in_one_undo_step() {
     assert_eq!(s.state.project_selection, [f], "the new folder is selected");
     assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.project, before, "one undo takes back the folder and the move");
+    assert_eq!(*s.project, before, "one undo takes back the folder and the move");
 
     // A folder dropped on New Folder goes into the new folder; a new folder made inside the
     // folder that is moving into it is refused, and nothing changes.
@@ -83,7 +83,7 @@ fn new_folder_with_items_moves_them_into_it_in_one_undo_step() {
     assert!(s.execute("project.newFolder", json!({"parent": bin.0, "items": [bin.0]})).is_err());
     assert!(s.execute("project.newFolder", json!({"items": [999_999]})).is_err(), "an unknown item");
     assert!(s.execute("project.newFolder", json!({"items": a.0})).is_err(), "not an array");
-    assert_eq!(s.project, before);
+    assert_eq!(*s.project, before);
 }
 
 #[test]

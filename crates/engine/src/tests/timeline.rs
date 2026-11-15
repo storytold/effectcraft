@@ -1646,8 +1646,7 @@ fn convert_expression_to_keyframes_refuses_a_layer_of_millions_of_frames() {
     s.execute("prop.setExpression", json!({"layer": l, "path": "transform/rotation", "expression": "value"})).unwrap();
     // A saved Out point a million seconds after the In point.
     let cid = s.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().out_point =
-        effectcraft_time::Tick::from_seconds_f64(1e6);
+    s.project_mut().comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().out_point = effectcraft_time::Tick::from_seconds_f64(1e6);
     let e = s.execute("prop.convertExpressionToKeyframes", json!({"layer": l, "path": "transform/rotation"})).unwrap_err().to_string();
     assert!(e.contains("at most"), "{e}");
     assert!(prop(&s, l, "transform/rotation").keys.is_empty());
@@ -1659,7 +1658,7 @@ fn convert_expression_to_keyframes_refuses_a_zero_frame_duration() {
     s.execute("prop.setExpression", json!({"layer": l, "path": "transform/rotation", "expression": "value"})).unwrap();
     // A saved frame rate of 0/1 s has a frame duration of 0: the sampling loop never advanced.
     let cid = s.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().frame_rate.den = 0;
+    s.project_mut().comp_mut(cid).unwrap().frame_rate.den = 0;
     let e = s.execute("prop.convertExpressionToKeyframes", json!({"layer": l, "path": "transform/rotation"})).unwrap_err().to_string();
     assert!(e.contains("frame duration"), "{e}");
     assert!(prop(&s, l, "transform/rotation").keys.is_empty());

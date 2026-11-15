@@ -126,7 +126,7 @@ fn effect_parameters_keep_both_ends_of_the_after_effects_range() {
 fn projects_saved_with_the_narrower_ranges_open_with_the_new_ones() {
     let (mut s, low, _) = session();
     let cid = s.active_comp_id().unwrap();
-    let mut old = (*s.project).clone();
+    let mut old = (**s.project).clone();
     let stored: Vec<f64> = ROWS.iter().map(|&(_, e, p, ..)| read(&mut s, low, e, p)).collect();
     {
         let effectcraft_project::ItemKind::Comp(comp) = &mut old.items.get_mut(&cid).unwrap().kind else { panic!("not a composition") };
