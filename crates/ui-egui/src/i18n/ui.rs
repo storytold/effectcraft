@@ -2774,6 +2774,18 @@ const HEBREW: &[(&str, &str)] = &[
     ("Click to reveal the expression in the timeline", "לחצו כדי להציג את הביטוי בציר הזמן"),
     ("Clone Source Overlay:", "שכבת־על של מקור השכפול:"),
 
+    // Original Hebrew Settings and plug-in catalog feedback from English source (NIGHT-02).
+    ("Limited by free disk space: EffectCraft keeps 5% of the disk free (at least {} GB, at most {} GB).", "המגבלה תלויה במקום הפנוי בדיסק: EffectCraft משאירה 5% מנפח הדיסק פנויים (לפחות {} GB ולכל היותר {} GB)."),
+    ("The Plug-in Library is available in the desktop app.", "ספריית התוספים זמינה ביישום למחשב."),
+    ("Catalog fetched {} (UTC)", "הקטלוג אוחזר ב־\u{2068}{}\u{2069} (UTC)"),
+    ("Test catalog: {} (Refresh returns to the community catalog)", "קטלוג בדיקה: \u{2068}{}\u{2069} (רענון מחזיר לקטלוג הקהילה)"),
+    ("The catalog lists no plug-ins yet.", "עדיין אין תוספים בקטלוג."),
+    ("By {}", "מאת \u{2068}{}\u{2069}"),
+    ("Rendering a preview in the sandbox…", "מתבצע רינדור של תצוגה מקדימה בסביבת הבידוד…"),
+    ("{} ({}) at default settings, on a sample frame", "{} ({}) בהגדרות ברירת המחדל, בפריים לדוגמה"),
+    ("Parameters: {}", "פרמטרים: {}"),
+    ("At its default settings this effect leaves the sample frame unchanged.", "בהגדרות ברירת המחדל, אפקט זה אינו משנה את הפריים לדוגמה."),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -10859,6 +10871,35 @@ mod tests {
         set_current("en");
         assert_eq!(tr("Download"), "Download");
         assert_eq!(tr_args("Models folder: {}", &[&folder]), "Models folder: C:/sample-models");
+    }
+
+    /// Native Settings plug-in catalog status, preview and disk-space feedback in Hebrew.
+    #[test]
+    fn hebrew_plugin_catalog_feedback_resolves_and_preserves_dynamic_values() {
+        let settings = include_str!("../panels/settings.rs");
+        set_current("he");
+        for (english, hebrew) in [
+            ("Limited by free disk space: EffectCraft keeps 5% of the disk free (at least {} GB, at most {} GB).", "המגבלה תלויה במקום הפנוי בדיסק: EffectCraft משאירה 5% מנפח הדיסק פנויים (לפחות {} GB ולכל היותר {} GB)."),
+            ("The Plug-in Library is available in the desktop app.", "ספריית התוספים זמינה ביישום למחשב."),
+            ("Catalog fetched {} (UTC)", "הקטלוג אוחזר ב־\u{2068}{}\u{2069} (UTC)"),
+            ("Test catalog: {} (Refresh returns to the community catalog)", "קטלוג בדיקה: \u{2068}{}\u{2069} (רענון מחזיר לקטלוג הקהילה)"),
+            ("The catalog lists no plug-ins yet.", "עדיין אין תוספים בקטלוג."),
+            ("By {}", "מאת \u{2068}{}\u{2069}"),
+            ("Rendering a preview in the sandbox…", "מתבצע רינדור של תצוגה מקדימה בסביבת הבידוד…"),
+            ("{} ({}) at default settings, on a sample frame", "{} ({}) בהגדרות ברירת המחדל, בפריים לדוגמה"),
+            ("Parameters: {}", "פרמטרים: {}"),
+            ("At its default settings this effect leaves the sample frame unchanged.", "בהגדרות ברירת המחדל, אפקט זה אינו משנה את הפריים לדוגמה."),
+        ] {
+            assert!(settings.contains(english), "Native Settings source key absent: {english}");
+            assert_eq!(tr(english), hebrew, "Hebrew catalog missing source key: {english}");
+        }
+        assert_eq!(
+            tr_args("Catalog fetched {} (UTC)", &[&"2026-11-16"]),
+            "הקטלוג אוחזר ב־\u{2068}2026-11-16\u{2069} (UTC)"
+        );
+        assert_eq!(tr_args("Parameters: {}", &[&3]), "פרמטרים: 3");
+        set_current("en");
+        assert_eq!(tr("The Plug-in Library is available in the desktop app."), "The Plug-in Library is available in the desktop app.");
     }
 
     /// Hebrew preferences and crash recovery must be understandable without changing settings IDs.
