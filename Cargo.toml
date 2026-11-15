@@ -25,6 +25,8 @@ craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs
 craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
 craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
 craft-aep = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "47107f660191de2f0b425569506f4daa4faadac9", features = ["egui"] }
 # internal

@@ -1104,6 +1104,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-doc"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+dependencies = [
+ "craft-ecproj-format",
+ "craft-pcraft-format",
+ "craft-vectorcraft-format",
+ "flate2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-docpath"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
@@ -1207,6 +1221,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-pcraft-format"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-pdf"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
@@ -1295,6 +1319,17 @@ dependencies = [
  "winreg",
  "winsafe",
  "zip 9.1.3",
+]
+
+[[package]]
+name = "craft-vectorcraft-format"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1770,6 +1805,7 @@ dependencies = [
 name = "effectcraft-host"
 version = "0.24.1"
 dependencies = [
+ "craft-vectorcraft-format",
  "effectcraft-engine",
  "effectcraft-export",
  "effectcraft-expr",
@@ -1915,14 +1951,18 @@ dependencies = [
 name = "effectcraft-pdf"
 version = "0.24.1"
 dependencies = [
+ "craft-doc",
  "craft-eps",
  "craft-pdf",
+ "craft-vectorcraft-format",
  "effectcraft-raster",
  "effectcraft-svg",
  "effectcraft-text",
+ "flate2",
  "image",
  "kurbo",
  "miniz_oxide 0.9.1",
+ "serde_json",
  "skrifa",
  "wasm-bindgen-test",
  "zune-jpeg",
