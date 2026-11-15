@@ -534,6 +534,12 @@ pub trait EffectPlugin: Send + Sync {
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, _host: &dyn PluginHost) -> Result<(), String> {
         self.render(frame, params, time)
     }
+    /// [`EffectPlugin::render_v2`] that may also say where it drew: `[x0, y0, x1, y1]` in frame
+    /// pixels (end exclusive), the result being transparent outside, where the frame holds
+    /// anything (the host clears or crops it). The default renders with `render_v2`: `None`.
+    fn render_bounded(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<Option<[u32; 4]>, String> {
+        self.render_v2(frame, params, time, host).map(|_| None)
+    }
     /// Whether rendering reads the layer at other times (its neighbouring frames). Default
     /// false; the render cache keys a layer with such an effect on its layer time. WebAssembly
     /// ABI 2 plug-ins return true.
@@ -544,6 +550,11 @@ pub trait EffectPlugin: Send + Sync {
     /// copy of it to put back (a frame-sized copy per render). Default false: plug-ins that
     /// process in place may fail halfway.
     fn untouched_on_error(&self) -> bool {
+        false
+    }
+    /// Whether the effect makes a new image without reading its input (a generator), so the
+    /// host needn't fill the layer's source first when it comes first in the stack.
+    fn ignores_input(&self) -> bool {
         false
     }
 }
@@ -588,6 +599,11 @@ fn set_plugin_error(id: &str, error: Option<String>) {
 /// The plug-in behind a registered effect id.
 pub fn plugin(id: &str) -> Option<Arc<dyn EffectPlugin>> {
     SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).cloned()
+}
+
+/// Whether the registered plug-in `id` ignores its input ([`EffectPlugin::ignores_input`]).
+pub fn ignores_input(id: &str) -> bool {
+    SLOTS.iter().filter_map(|s| s.get()).any(|p| p.manifest().id == id && p.ignores_input())
 }
 
 /// Whether the registered plug-in `id` reads the layer at other times (its neighbouring frames),
@@ -906,13 +922,62 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let (width, height, offset, scale) = (buf.img.width, buf.img.height, buf.offset, buf.scale);
     let host = RenderHost { ctx, manifest: m, width, height, offset, scale };
     let mut frame = PluginFrame { width, height, pixels: &mut buf.img.data, scale, origin: offset, layer_size: ctx.layer_size };
-    if let Err(e) = plugin.render_v2(&mut frame, &params, ctx.time, &host) {
-        log::warn!("plug-in `{}`: {e}", m.id);
-        set_plugin_error(&m.id, Some(e));
-        return before.unwrap_or(buf);
-    }
+    let bounds = match plugin.render_bounded(&mut frame, &params, ctx.time, &host) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("plug-in `{}`: {e}", m.id);
+            set_plugin_error(&m.id, Some(e));
+            return before.unwrap_or(buf);
+        }
+    };
     if plugin_error(&m.id).is_some() {
         set_plugin_error(&m.id, None);
     }
-    buf
+    match bounds {
+        // The last effect of a layer's own stack keeps only what it drew (less to composite);
+        // otherwise (an adjustment layer's comp below, or effects to follow that may fill the
+        // rest of the layer) the rest is cleared.
+        Some(b) if ctx.env.last && !ctx.adjustment => crop(buf, b),
+        Some(b) => {
+            clear_outside(&mut buf.img, b);
+            buf
+        }
+        None => buf,
+    }
+}
+
+/// `b` clamped to a `w` × `h` image: (x0, y0, x1, y1), empty when x0 == x1 or y0 == y1.
+fn clamp_rect(b: [u32; 4], w: u32, h: u32) -> (usize, usize, usize, usize) {
+    let (x0, y0) = (b[0].min(w), b[1].min(h));
+    (x0 as usize, y0 as usize, b[2].clamp(x0, w) as usize, b[3].clamp(y0, h) as usize)
+}
+
+/// Make everything outside `b` transparent.
+fn clear_outside(img: &mut crate::Image, b: [u32; 4]) {
+    let w = img.width as usize;
+    let (x0, y0, x1, y1) = clamp_rect(b, img.width, img.height);
+    for (y, row) in img.data.chunks_mut(w.max(1)).enumerate() {
+        if (y0..y1).contains(&y) && x0 < x1 {
+            row[..x0].fill([0.0; 4]);
+            row[x1..].fill([0.0; 4]);
+        } else {
+            row.fill([0.0; 4]);
+        }
+    }
+}
+
+/// The part of `buf` inside `b` (a transparent pixel there when `b` is empty); content keeps
+/// its place.
+fn crop(buf: Buf, b: [u32; 4]) -> Buf {
+    let (x0, y0, x1, y1) = clamp_rect(b, buf.img.width, buf.img.height);
+    let (w, h) = ((x1 - x0).max(1), (y1 - y0).max(1));
+    let mut img = crate::Image::new(w as u32, h as u32);
+    if x0 < x1 && y0 < y1 {
+        let sw = buf.img.width as usize;
+        for (y, row) in img.data.chunks_mut(w).enumerate() {
+            let s = (y0 + y) * sw + x0;
+            row.copy_from_slice(&buf.img.data[s..s + w]);
+        }
+    }
+    Buf { img, offset: [buf.offset[0] - x0 as f64, buf.offset[1] - y0 as f64], scale: buf.scale }
 }

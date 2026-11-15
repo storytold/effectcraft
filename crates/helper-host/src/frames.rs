@@ -140,7 +140,9 @@ impl Exchange {
     /// Read only the rectangle `bounds` (`[x0, y0, x1, y1]`, clamped to the image) of the image
     /// `at` describes into `out`, and make the rest of `out` transparent: a helper that drew into
     /// part of the frame only (a particle system's few puffs) costs a fraction of a full read.
-    pub fn read_bounds_into(&mut self, at: &ImageRef, out: &mut [[f32; 4]], bounds: [u32; 4]) -> Result<(), String> {
+    /// With `clear` false only the rows of `bounds` are read and nothing is cleared: the caller
+    /// treats the rest as transparent itself.
+    pub fn read_bounds_into(&mut self, at: &ImageRef, out: &mut [[f32; 4]], bounds: [u32; 4], clear: bool) -> Result<(), String> {
         if at.pixels() != Some(out.len()) {
             return Err(format!("image is {}×{} but the buffer has {} pixels", at.width, at.height, out.len()));
         }
@@ -151,13 +153,17 @@ impl Exchange {
         let y1 = (bounds[3] as usize).clamp(y0, h);
         // (empty: a fully transparent result)
         if x0 == x1 || y0 == y1 {
-            out.fill([0.0; 4]);
+            if clear {
+                out.fill([0.0; 4]);
+            }
             return Ok(());
         }
         let (above, rest) = out.split_at_mut(y0 * w);
         let (band, below) = rest.split_at_mut((y1 - y0) * w);
-        above.fill([0.0; 4]);
-        below.fill([0.0; 4]);
+        if clear {
+            above.fill([0.0; 4]);
+            below.fill([0.0; 4]);
+        }
         // Whole rows, one contiguous range in a few parallel slices: far fewer reads than row by
         // row (a read per row cost more than the copying), then the columns outside cleared.
         let bytes: &mut [u8] = bytemuck::cast_slice_mut(band);
@@ -165,7 +171,7 @@ impl Exchange {
         let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
         let start = at.offset + (y0 * w * 16) as u64;
         in_parallel(bytes.chunks_mut(step).zip(handles).enumerate(), |(i, (part, f))| read_at(f, part, start + (i * step) as u64))?;
-        if x0 > 0 || x1 < w {
+        if clear && (x0 > 0 || x1 < w) {
             for row in band.chunks_mut(w) {
                 row.get_mut(..x0).unwrap_or_default().fill([0.0; 4]);
                 row.get_mut(x1..).unwrap_or_default().fill([0.0; 4]);
@@ -303,20 +309,20 @@ mod tests {
         // Bounds: only that rectangle is read and the rest of the buffer is made transparent,
         // whatever it held; bounds past the image are clamped, empty ones clear everything.
         let mut out = vec![[9.0f32; 4]; px.len()];
-        a.read_bounds_into(&big, &mut out, [100, 200, 900, 1000]).unwrap();
+        a.read_bounds_into(&big, &mut out, [100, 200, 900, 1000], true).unwrap();
         for (i, (o, p)) in out.iter().zip(&px).enumerate() {
             let (x, y) = (i % 1023, i / 1023);
             let inside = (100..900).contains(&x) && (200..1000).contains(&y);
             assert_eq!(*o, if inside { *p } else { [0.0; 4] }, "pixel {x},{y}");
         }
         out.fill([9.0; 4]);
-        a.read_bounds_into(&big, &mut out, [1000, 1020, 5000, 9000]).unwrap();
+        a.read_bounds_into(&big, &mut out, [1000, 1020, 5000, 9000], true).unwrap();
         assert_eq!(out[1024 * 1023 + 1022], px[1024 * 1023 + 1022]);
         assert_eq!(out[1024 * 1023 + 999], [0.0; 4]);
         out.fill([9.0; 4]);
-        a.read_bounds_into(&big, &mut out, [500, 500, 500, 900]).unwrap();
+        a.read_bounds_into(&big, &mut out, [500, 500, 500, 900], true).unwrap();
         assert!(out.iter().all(|o| *o == [0.0; 4]));
-        assert!(a.read_bounds_into(&at, &mut out, [0, 0, 1, 1]).is_err(), "size mismatch is an error");
+        assert!(a.read_bounds_into(&at, &mut out, [0, 0, 1, 1], true).is_err(), "size mismatch is an error");
         let p = a.path().to_path_buf();
         a.unlink();
         drop(a);

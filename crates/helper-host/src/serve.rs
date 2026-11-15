@@ -29,6 +29,10 @@ pub trait Provider {
     fn version(&self) -> String {
         String::new()
     }
+    /// [`Reply::Hello`]'s `processes`: how many processes of this helper may run at once.
+    fn processes(&self) -> Option<u32> {
+        None
+    }
     /// File extensions [`Provider::load`] accepts (`["ofx"]`).
     fn loads(&self) -> Vec<String> {
         vec![]
@@ -141,7 +145,7 @@ impl Server<'_> {
                     Err(e) => return self.send(&Reply::Error { message: format!("can't open the frame exchange file: {e}") }),
                 }
                 let (name, helper_version, loads) = (self.provider.name(), self.provider.version(), self.provider.loads());
-                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads })
+                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads, processes: self.provider.processes() })
             }
             Request::Describe => {
                 let (list, errors) = self.provider.effects();

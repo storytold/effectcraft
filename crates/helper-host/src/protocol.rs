@@ -167,6 +167,11 @@ pub enum Reply {
         helper_version: String,
         #[serde(default)]
         loads: Vec<String>,
+        /// How many processes of the helper EffectCraft may run at once (absent: one). Each
+        /// effect instance renders on one of them, but any may get it (a nested render stays on
+        /// the process its thread holds), so a process may keep per-instance state only as a cache.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        processes: Option<u32>,
     },
     Effects {
         effects: Vec<RemoteEffect>,

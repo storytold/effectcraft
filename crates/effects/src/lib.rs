@@ -652,6 +652,9 @@ pub struct EffectEnv<'a> {
     /// source has no duration (stills, solids, text, shapes) or the renderer does not know it.
     /// Retimers clamp their source requests to it.
     pub layer_span: Option<(f64, f64)>,
+    /// The effect is the last of its layer's stack: its result goes straight on to the layer
+    /// (styles, compositing), so it may shrink the buffer to what it drew.
+    pub last: bool,
 }
 
 /// What an effect gets to render with.

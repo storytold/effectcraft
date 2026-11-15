@@ -50,6 +50,8 @@ enum Kind {
     Hang,
     /// Writes a long line of bytes that aren't UTF-8 to stderr, then more, then inverts.
     Noisy,
+    /// Puts its process id in red.
+    Pid,
 }
 
 struct Fake {
@@ -108,6 +110,7 @@ impl EffectPlugin for Fake {
                 err.write_all(b"still talking\n").map_err(|e| format!("stderr: {e}"))?;
                 frame.pixels.iter_mut().for_each(|p| *p = [1.0, 0.0, 0.0, 1.0]);
             }
+            Kind::Pid => frame.pixels.iter_mut().for_each(|p| p[0] = std::process::id() as f32),
         }
         Ok(())
     }
@@ -120,12 +123,23 @@ impl Provider for FakeProvider {
         "Fake".into()
     }
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
-        let v: Vec<Arc<dyn EffectPlugin>> =
-            [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang), ("noisy", Kind::Noisy)]
-                .into_iter()
-                .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
-                .collect();
+        let v: Vec<Arc<dyn EffectPlugin>> = [
+            ("invert", Kind::Invert),
+            ("pad", Kind::Pad),
+            ("echo", Kind::Echo),
+            ("crash", Kind::Crash),
+            ("hang", Kind::Hang),
+            ("noisy", Kind::Noisy),
+            ("pid", Kind::Pid),
+        ]
+        .into_iter()
+        .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
+        .collect();
         (v, vec!["fake helper: a warning".into()])
+    }
+    // Instances may be spread over two processes.
+    fn processes(&self) -> Option<u32> {
+        Some(2)
     }
     // Pad overwrites its whole (padded) frame
     fn ignores_input(&self, e: &dyn EffectPlugin) -> bool {
@@ -139,6 +153,7 @@ struct TestHost {
     w: u32,
     h: u32,
     nest: bool,
+    key: u64,
 }
 
 impl PluginHost for TestHost {
@@ -170,15 +185,20 @@ impl PluginHost for TestHost {
         1.0
     }
     fn instance_key(&self) -> u64 {
-        7
+        self.key
     }
 }
 
 fn render(id: &str, pixels: &mut Vec<[f32; 4]>, w: u32, h: u32, amount: f64, nest: bool) -> Result<(), String> {
+    render_as(7, id, pixels, w, h, amount, nest)
+}
+
+/// [`render`] as effect instance `key`.
+fn render_as(key: u64, id: &str, pixels: &mut Vec<[f32; 4]>, w: u32, h: u32, amount: f64, nest: bool) -> Result<(), String> {
     let p = plugin(id).ok_or_else(|| format!("{id} is not registered"))?;
     let m = p.manifest().clone();
     let params = PluginParams { manifest: &m, flat: &[amount], texts: &[] };
-    let host = TestHost { w, h, nest };
+    let host = TestHost { w, h, nest, key };
     let pad = p.padding(&params, 1.0, 1.0, [w as f64, h as f64], 7);
     let (w, h) = (w + 2 * pad, h + 2 * pad);
     pixels.resize((w * h) as usize, [0.0; 4]);
@@ -203,7 +223,7 @@ fn run_checks() -> bool {
     // Discovery + describe.
     let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe), false);
     let loaded = r["loaded"].as_array().map_or(0, Vec::len);
-    all &= check("scan registers the helper's effects", loaded == 6, &r);
+    all &= check("scan registers the helper's effects", loaded == 7, &r);
     all &= check("helper warnings are reported", r["errors"].to_string().contains("a warning"), &r);
     all &= check(
         "time_varying reaches the render cache",
@@ -264,6 +284,18 @@ fn run_checks() -> bool {
     let results: Vec<_> = threads.into_iter().map(|t| t.join().map_err(|_| "thread panicked".to_string()).and_then(|r| r)).collect();
     all &= check("concurrent renders", results.iter().all(Result::is_ok), &results);
 
+    // A helper that allows two processes gets its instances spread over two, each instance
+    // staying on its own.
+    let pid = |key: u64| {
+        let mut px = vec![[0.0; 4]; 4];
+        render_as(key, "org.test.helper.pid", &mut px, 2, 2, 1.0, false).map(|_| px[0][0] as u32)
+    };
+    let pids: Vec<_> = (100..104).map(pid).collect();
+    let again: Vec<_> = (100..104).map(pid).collect();
+    let distinct: std::collections::BTreeSet<_> = pids.iter().flatten().collect();
+    all &=
+        check("instances spread over the processes a helper allows", pids.iter().all(Result::is_ok) && distinct.len() == 2 && pids == again, (&pids, &again));
+
     // A crash mid-render is an error, the frame is untouched, and the helper comes back.
     let mut px = vec![[0.5; 4]; 4];
     let r = render("org.test.helper.crash", &mut px, 2, 2, 1.0, false);
@@ -277,7 +309,7 @@ fn run_checks() -> bool {
         let m = p.manifest().clone();
         let mut px = vec![[0.0, 0.0, 0.0, 1.0]; 4];
         let mut f = PluginFrame { width: 2, height: 2, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0; 2] };
-        let host = TestHost { w: 2, h: 2, nest: false };
+        let host = TestHost { w: 2, h: 2, nest: false, key: 7 };
         p.render_v2(&mut f, &PluginParams { manifest: &m, flat: &[1.0], texts: &[] }, 1.0, &host).map_err(|_| "render failed")?;
         Ok(px[0][0])
     });

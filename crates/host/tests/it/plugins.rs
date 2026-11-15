@@ -642,3 +642,81 @@ fn comp_camera_w_is_the_depth_for_2d_and_3d_layers() {
     assert!((w - 2.0 * zoom).abs() < 1e-6 * zoom, "3D, one zoom further back: {w} vs {}", 2.0 * zoom);
     assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
 }
+
+/// A generator: ignores its input, scribbles green over the whole frame, draws a red square at
+/// x 10..14, y 5..9 and says only that square is its result. Notes the first pixel it was given.
+struct Dot {
+    m: PluginManifest,
+}
+
+static DOT_SAW: std::sync::Mutex<Vec<[f32; 4]>> = std::sync::Mutex::new(vec![]);
+
+impl EffectPlugin for Dot {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+        Err("needs render_bounded".into())
+    }
+    fn ignores_input(&self) -> bool {
+        true
+    }
+    fn render_bounded(
+        &self,
+        frame: &mut PluginFrame,
+        _: &PluginParams,
+        _: f64,
+        _: &dyn effectcraft_engine::effects::plugin::PluginHost,
+    ) -> Result<Option<[u32; 4]>, String> {
+        DOT_SAW.lock().unwrap().push(frame.pixels[0]);
+        let w = frame.width as usize;
+        for (i, p) in frame.pixels.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            *p = if (10..14).contains(&x) && (5..9).contains(&y) { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0, 1.0] };
+        }
+        Ok(Some([10, 5, 14, 9]))
+    }
+}
+
+fn manifest(id: &str, name: &str) -> PluginManifest {
+    PluginManifest {
+        api: 2,
+        id: id.into(),
+        name: name.into(),
+        category: "Generate".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true }, group: String::new() }],
+    }
+}
+
+/// A generator plug-in that says where it drew: alone on a solid it gets a blank buffer (the
+/// solid isn't filled for it) and only its square shows; with an effect after it the rest is
+/// cleared before that effect runs; after another effect it sees the solid.
+#[test]
+fn bounded_generators_keep_only_what_they_drew() {
+    register_plugin(Arc::new(Dot { m: manifest("org.test.dot", "Dot") })).unwrap();
+    register_plugin(Arc::new(Swap { m: manifest("org.test.swap2", "Swap Again") })).unwrap();
+    let cid_px = |s: &Session, x: i64, y: i64| s.render(s.active_comp_id().unwrap(), Tick::ZERO, Default::default()).get(x, y);
+    let saw = || *DOT_SAW.lock().unwrap().last().unwrap();
+
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
+    assert_eq!(cid_px(&s, 11, 6), [1.0, 0.0, 0.0, 1.0], "its square");
+    assert_eq!(cid_px(&s, 20, 15), [0.0; 4], "nothing outside it");
+    assert_eq!(saw(), [0.0; 4], "a blank buffer, not the orange solid");
+
+    // an effect after it sees the square on transparency
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.swap2"})).unwrap();
+    assert_eq!(cid_px(&s, 11, 6), [0.0, 0.0, 1.0, 1.0], "its square, swapped");
+    assert_eq!(cid_px(&s, 20, 15), [0.0; 4], "cleared outside it");
+
+    // after another effect it gets the layer as that effect left it
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.swap2"})).unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
+    assert_eq!(cid_px(&s, 20, 15), [0.0; 4]);
+    let p = saw();
+    assert!(p[2] > 0.99 && (p[1] - 0.5).abs() < 0.01 && p[3] == 1.0, "the swapped solid: {p:?}");
+}

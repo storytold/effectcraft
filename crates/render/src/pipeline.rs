@@ -861,6 +861,7 @@ impl<'a> Renderer<'a> {
             float_depth: self.pipe.levels.is_none(),
             shutter: self.mb_on(ctx, layer).then_some((ctx.comp.shutter_angle, ctx.comp.shutter_phase, ctx.comp.motion_blur_samples)),
             layer_span: crate::eval::layer_span(self.project, layer),
+            last: false,
         };
         // Video effects in stack order (index, group, spec); disabled and audio effects skipped.
         let stack: Vec<(usize, &effectcraft_project::PropGroup, &'static effectcraft_effects::EffectSpec)> = fx
@@ -915,7 +916,7 @@ impl<'a> Renderer<'a> {
             k += 1;
             let params = self.effect_params(ctx, layer, g);
             let host = FxHost { index: i, ..host };
-            let env = EffectEnv { host: Some(&host), effect_index: i, ..env };
+            let env = EffectEnv { host: Some(&host), effect_index: i, last: k == stack.len(), ..env };
             let ectx = EffectCtx { params: &params, time: lt.seconds(), layer_size, seed: g.uid as u32, adjustment, env };
             let t0 = web_time::Instant::now();
             target.cpu(&mut |buf| {
@@ -1324,6 +1325,26 @@ impl<'a> Renderer<'a> {
     }
 
     /// Source → masks, clamped/quantised to the project depth.
+    /// A transparent buffer the size of a solid layer's source when the first effect of its
+    /// stack makes a new image without reading it (a generator plug-in): filling a comp-sized
+    /// solid every frame for nothing costs milliseconds per layer. `None` otherwise.
+    fn blank_solid(&self, layer: &Layer) -> Option<Buf> {
+        let LayerSource::Solid { item } = &layer.source else { return None };
+        if layer.switches.adjustment || !layer.switches.effects {
+            return None;
+        }
+        let first = layer.effects()?.groups().filter(|g| g.enabled).find_map(|g| match &g.kind {
+            GroupKind::Effect { effect } => effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)),
+            _ => None,
+        })?;
+        if !effectcraft_effects::plugin::ignores_input(first.id) {
+            return None;
+        }
+        let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
+        let (s, w, h) = solid_size(sol.width, sol.height, self.opts.scale);
+        Some(Buf { img: Image::new(w, h), offset: [0.0; 2], scale: s })
+    }
+
     fn masked_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
         let (mut buf, quantized) = match self.content_times(ctx, layer) {
             Some(times) => (self.blurred_source(ctx, layer, &times)?, false),
@@ -1438,7 +1459,10 @@ impl<'a> Renderer<'a> {
         let (buf, files) = self.recorded(key, |r| {
             // (what expressions read while it is made, at shutter times too, goes to its files)
             let ctx = &r.with_reads(ctx);
-            let buf = r.masked_source(ctx, layer)?;
+            let buf = match r.blank_solid(layer) {
+                Some(b) => b,
+                None => r.masked_source(ctx, layer)?,
+            };
             Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)))
         });
         let (buf, files) = self.keep(key, Arc::new(buf?), &files);
