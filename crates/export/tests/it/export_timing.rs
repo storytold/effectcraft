@@ -115,6 +115,25 @@ fn gif_and_webm_time_the_stages_they_have() {
     assert!(e <= t.wall_seconds && w <= t.wall_seconds && t.render_seconds <= t.wall_seconds, "{t:?}");
 }
 
+/// #3724 review: a failed export's render log carries the timing line too (with the compositor
+/// that ran), not only a finished one's.
+#[test]
+fn a_failed_export_logs_its_timing_line_too() {
+    let (p, _) = project();
+    let settings = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
+    let om = OutputModule::for_format(OutputFormat::H264);
+    let files: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::default();
+    let sink_files = files.clone();
+    let sink: &Sink = &move |path: &str, data: Vec<u8>| sink_files.lock().unwrap().push((path.to_string(), data));
+    // A composition that is not there: the export fails before it renders anything.
+    let job = job_of(&p, ItemId(9999), &settings, &om, "/out/failed.mp4", sink);
+    assert!(export(&job, &mut |_| true).is_err(), "no such composition");
+    let files = files.lock().unwrap();
+    let log = files.iter().find(|(path, _)| path.ends_with(".txt")).map(|(_, d)| String::from_utf8_lossy(d).into_owned()).expect("a failed job writes its log");
+    assert!(log.contains("Result: Failed"), "{log}");
+    assert!(log.contains("Timing: export failed after"), "{log}");
+}
+
 #[test]
 fn a_stopped_export_has_a_summary_without_a_frame_count() {
     let t = effectcraft_export::render_queue::RenderTiming {

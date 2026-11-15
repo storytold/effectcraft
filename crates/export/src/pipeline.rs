@@ -1033,11 +1033,10 @@ impl<'a> Cx<'a> {
             s.push_str(&format!("Renderer: {}\n", describe_choice(&c)));
         }
         if let Some(t) = timing {
-            s.push_str(&format!(
-                "Timing: {}
-",
-                t.summary()
-            ));
+            // (a failed job has no frame count: the line says what ran before it stopped)
+            let line = if result.is_err() { t.summary_of_unfinished("failed") } else { t.summary() };
+            s.push_str(&format!("Timing: {line}
+"));
         }
         if self.backend() == crate::JobRenderer::Gpu
             && let Some((n, why)) = &*self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1078,7 +1077,7 @@ impl<'a> Cx<'a> {
 /// The render log's account of the encoder: every encoder here is built in and runs on the
 /// CPU (no hardware encoder is used), with the codec settings of the Output Module.
 pub(crate) fn describe_encoder(om: &OutputModule) -> String {
-    use effectcraft_project::render_queue::{Channels, ProResProfile, WebmVideoCodec};
+    use effectcraft_project::render_queue::{ProResProfile, WebmVideoCodec};
     let rate = |om: &OutputModule| match om.codec.rate_control {
         effectcraft_project::render_queue::RateControlMode::Bitrate => format!("{} kbps", om.bitrate_kbps),
         effectcraft_project::render_queue::RateControlMode::Quality => format!("constant quality {}", om.codec.quality),
