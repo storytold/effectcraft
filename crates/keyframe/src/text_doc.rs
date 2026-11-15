@@ -1071,7 +1071,8 @@ impl TextDoc {
     /// **per run and paragraph** (where the master's is uniform): the base's per-run records
     /// ([`TextDoc::follow_runs`], [`TextDoc::follow_paras`]) are carried through the edit by
     /// comparing the texts (what both share at the start and at the end keeps its records, typed
-    /// text takes the record of the character before it, deleted text drops its), and only the
+    /// text takes the record of the character before it, or of the first replaced character when it
+    /// replaces text, deleted text drops its), and only the
     /// runs whose value the edit changed take the master's value. Splitting a run, merging runs
     /// and typing therefore keep every other run's ownership; typing alone is no restyle.
     pub fn rebase(base: &mut TextDoc, before: &TextDoc, after: &TextDoc, master: &TextDoc) {
@@ -1498,7 +1499,8 @@ fn remap_runs(items: &[StyleRun], segs: &[Seg]) -> Vec<StyleRun> {
                 }
             }
         } else {
-            // Typed text: the run of the character before it (the nearest one at the ends).
+            // Typed text: the run of the character before it, or of the first replaced character (the
+            // nearest one at the ends).
             let mut pos = 0usize;
             let mut found = None;
             for r in items {
@@ -2418,7 +2420,7 @@ mod tests {
         merge(&mut d, &mut b, &master(Justify::Left));
         assert_eq!(justs(&d), vec![Justify::Center, Justify::Center, Justify::Left]);
         // Deleting the own paragraph with its line break: the text left takes the deleted
-        // paragraph's settings (the edit's own doing), which stay the instance's own.
+        // paragraph's settings, which stay the instance's own (that paragraph's own record).
         let (mut d, mut b) = (inst.clone(), base.clone());
         edit(&mut d, &mut b, &master(Justify::Right), |d| d.replace_range(0..4, "", None));
         merge(&mut d, &mut b, &master(Justify::Left));
