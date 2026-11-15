@@ -133,7 +133,9 @@ fn in_parallel<T: Send>(items: impl Iterator<Item = T>, f: impl Fn(T) -> std::io
     }
     std::thread::scope(|s| {
         let jobs: Vec<_> = items.into_iter().map(|t| s.spawn(|| f(t))).collect();
-        jobs.into_iter().try_for_each(|j| j.join().unwrap_or_else(|_| Err(std::io::Error::other("copy thread panicked"))))
+        // Join every job, keeping the first error: one left unjoined that panicked would make
+        // `scope` itself panic.
+        jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| Err(std::io::Error::other("copy thread panicked")))).fold(Ok(()), Result::and)
     })
     .map_err(io)
 }
@@ -218,5 +220,17 @@ mod tests {
         drop(a);
         drop(b);
         assert!(!p.exists());
+    }
+
+    /// A failed slice doesn't stop the others being joined: a later one that panics is reported as
+    /// an error, not as a panic out of the thread scope.
+    #[test]
+    fn every_copy_thread_is_joined() {
+        let r = super::in_parallel(0..3, |i| match i {
+            0 => Err(std::io::Error::other("first")),
+            1 => panic!("copy slice"),
+            _ => Ok(()),
+        });
+        assert!(r.unwrap_err().contains("first"));
     }
 }
