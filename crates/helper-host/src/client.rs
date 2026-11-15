@@ -478,7 +478,8 @@ impl Helper {
             &Request::Hello {
                 version: PROTOCOL_VERSION,
                 frames,
-                features: vec!["layer_transform".into(), "comp_camera".into(), "comp_camera_time".into(), "comp_lights".into()],
+                // `gradient_params`: manifests may declare `gradient` parameters
+                features: vec!["layer_transform".into(), "comp_camera".into(), "comp_camera_time".into(), "comp_lights".into(), "gradient_params".into()],
             },
             load_timeout(),
         ) {

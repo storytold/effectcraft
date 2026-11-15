@@ -89,7 +89,8 @@ pub struct RenderRequest {
 pub enum Request {
     /// First message: the protocol version and the frame exchange file to open (read + write).
     /// `features` lists optional callbacks this host answers (`"layer_transform"`:
-    /// [`Reply::LayerTransform`]); hosts without the field answer none of them.
+    /// [`Reply::LayerTransform`]) and optional manifest kinds it accepts (`"gradient_params"`:
+    /// `gradient` parameters, sent as JSON among the texts); hosts without the field have none.
     Hello {
         version: u32,
         frames: String,

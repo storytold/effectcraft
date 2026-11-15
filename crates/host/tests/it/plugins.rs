@@ -66,6 +66,68 @@ fn rust_plugins_apply_by_id() {
     assert!(s.execute("effect.list", json!({"filter": "swap red"})).unwrap().as_array().unwrap().len() == 1);
 }
 
+/// Fills the frame with its `ramp` gradient's first colour stop, read from the JSON text.
+struct FirstStop {
+    m: PluginManifest,
+}
+
+impl EffectPlugin for FirstStop {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, frame: &mut PluginFrame, params: &PluginParams, _time: f64) -> Result<(), String> {
+        let g: serde_json::Value = serde_json::from_str(params.text("ramp")).map_err(|e| e.to_string())?;
+        if g["opacities"].as_array().is_none_or(Vec::is_empty) {
+            return Err("no opacity stops".into());
+        }
+        let c = &g["colors"][0][1];
+        let c = [0, 1, 2, 3].map(|i| c[i].as_f64().unwrap_or(-1.0) as f32);
+        for p in frame.pixels.iter_mut() {
+            *p = c;
+        }
+        Ok(())
+    }
+}
+
+fn gradient_manifest(id: &str, default: Option<serde_json::Value>) -> PluginManifest {
+    PluginManifest {
+        api: 2,
+        id: id.into(),
+        name: format!("First Stop {id}"),
+        category: "Generate".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![PluginParam { id: "ramp".into(), name: "Ramp".into(), kind: PluginParamKind::Gradient { default }, group: String::new() }],
+    }
+}
+
+/// A gradient parameter is a gradient property (default, set and keyframed like a shape's) that
+/// reaches the plug-in as JSON; a default that isn't a gradient is refused.
+#[test]
+fn plugins_take_gradient_parameters() {
+    register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.firststop", Some(json!(["#ff0000", "#0000ff"]))) })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.firststop"})).unwrap();
+    let p = px(&s);
+    assert!(p[0] > 0.99 && p[1] < 0.01 && p[2] < 0.01, "{p:?}");
+    let v = s.execute("prop.get", json!({"layer": l, "path": "effects/#1/ramp"})).unwrap();
+    assert!(v.to_string().contains("colors"), "{v}");
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/ramp", "value": [[0.0, "#00ff00"], [1.0, "#ffffff"]]})).unwrap();
+    let p = px(&s);
+    assert!(p[0] < 0.01 && p[1] > 0.99 && p[2] < 0.01, "{p:?}");
+    // keyframed: a key at 0 s (green) and 1 s (blue), halfway between at 0.5 s
+    s.execute("prop.addKey", json!({"layer": l, "path": "effects/#1/ramp", "time": 0.0, "value": ["#00ff00", "#ffffff"]})).unwrap();
+    s.execute("prop.addKey", json!({"layer": l, "path": "effects/#1/ramp", "time": 1.0, "value": ["#0000ff", "#ffffff"]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let p = s.render(cid, Tick::from_seconds_f64(0.5), Default::default()).get(20, 10);
+    assert!((p[1] - 0.5).abs() < 0.02 && (p[2] - 0.5).abs() < 0.02, "{p:?}");
+    let bad = register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.badramp", Some(json!(["#ff0000"]))) })).err();
+    assert!(bad.as_deref().is_some_and(|e| e.contains("gradient `ramp`")), "{bad:?}");
+    // no default: white to black
+    register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.plainramp", None) })).unwrap();
+}
+
 /// Build the example plug-in (skipped when the wasm32 target isn't installed).
 fn build_example() -> Option<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/posterize-bands");

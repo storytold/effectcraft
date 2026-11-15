@@ -346,12 +346,18 @@ effects can be registered.
 
 * **New parameter types**: `point3` (`default` `[x, y, z]`; x, y arrive in buffer pixels, z as is),
   `layer` (another layer of the composition; flattens to its id, -1 for none, read with
-  `PluginParams::layer`), `text` (a string field) and `hidden` (a string that is not shown, for
-  opaque plug-in data). `text` / `hidden` take no slot in `flat`; their strings are in
-  `PluginParams::texts`, one per such parameter in declaration order, read with
-  `PluginParams::text(id)`. `slider` gains `"integer": true` (shown with 0 decimals) and every
-  parameter an optional `"group"` path (`"Advanced/Edges"`; informational). WebAssembly modules
-  can't use `point3`, `layer`, `text` or `hidden`.
+  `PluginParams::layer`), `text` (a string field), `hidden` (a string that is not shown, for
+  opaque plug-in data) and `gradient` (colour and opacity stops, shown as a strip that opens the
+  Gradient Editor and animated like a shape's gradient; `default` written as a gradient property
+  takes it: `["#ff0000", "#ffffff"]`, `[[pos, colour]…]` or `{"colors": …, "opacities": …}`,
+  white to black when left out). `text` / `hidden` / `gradient` take no slot in `flat`; their
+  strings are in `PluginParams::texts`, one per such parameter in declaration order, read with
+  `PluginParams::text(id)`: a gradient's is JSON, `{"colors": [[pos, [r, g, b, a]]…],
+  "opacities": [[pos, alpha]…]}` (positions 0–1, straight colour). `slider` gains
+  `"integer": true` (shown with 0 decimals) and every parameter an optional `"group"` path
+  (`"Advanced/Edges"`; informational). WebAssembly modules can't use `point3`,
+  `layer`, `text`, `hidden` or `gradient`. External helpers may declare `gradient` only when
+  `hello` lists `gradient_params` (older hosts refuse the manifest).
 * **`PluginFrame`** also carries `origin` (buffer pixels of layer pixel (0, 0); padding shifts it)
   and `layer_size` (layer pixels).
 * **`EffectPlugin::padding(params, time, scale, layer_size, instance_key) -> u32`** asks for that
