@@ -9,7 +9,7 @@
 //! | OpenEXR sequence | one file per frame, scan lines | 32-bit float (default) or half float, linear light, premultiplied; compression None, RLE, ZIPS, ZIP (default), PIZ, PXR24, B44, B44A, DWAA, DWAB | yes | — |
 //! | Targa sequence | one file per frame | uncompressed 8-bit: 24-bit RGB, 32-bit RGB + Alpha (8 alpha bits), 8-bit grey for Alpha; top-left origin | yes (straight or premultiplied) | — |
 //! | Animated GIF | GIF89a | 256-colour palette per frame (NeuQuant) | 1-bit | — |
-//! | WebM | WebM (Matroska) | VP9 profile 0 (`craft_video::vp9`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`craft_video::av1`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
+//! | WebM | WebM (Matroska) | VP9 profile 0 (`craft_video::vp9`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`craft_video::av1`) | VP9 alpha (BlockAdditional) | Opus (`craft_audio::opus::Encoder`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
 //! | HEVC | MP4 (`hvc1`) | `craft_video::hevc` Main / Main 10 4:2:0, I + P slices, bitrate or constant quality, level, key-frame interval | no | AAC-LC (`craft_audio::aac`) |
 //! | AV1 | MP4 (`av01`) | `craft_video::av1` Main 8/10-bit 4:2:0, key + inter frames | no | AAC-LC (`craft_audio::aac`) |
 //! | WAV / AIFF | RIFF WAVE / AIFF (AIFF-C for float) | — | — | PCM 16/24-bit or 32-bit float, mono/stereo (audio only) |
