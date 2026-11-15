@@ -12,7 +12,7 @@ use effectcraft_render::render_frame;
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value as Json, json};
 
-use crate::{ExportOptions, export_comp, import};
+use crate::{ExportOptions, LottieError, export_comp, import};
 
 fn s(x: f64) -> Tick {
     Tick::from_seconds_f64(x)
@@ -796,6 +796,32 @@ fn dotlottie_archive_roundtrip() {
     assert!(zip.starts_with(b"PK"));
     let mut q = Project::default();
     let imp = import(&mut q, &zip, "x", "", &mut |_| None).unwrap();
+    assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
+}
+
+#[test]
+fn dotlottie_archive_without_animation_is_rejected() {
+    let zip = craft_lottie::zip::try_store(&[("manifest.json".into(), b"{}".to_vec())]).unwrap();
+    let mut project = Project::default();
+    let err = import(&mut project, &zip, "empty archive", "", &mut |_| None).unwrap_err();
+    assert!(matches!(err, LottieError::Parse(message) if message.contains("without a JSON animation")));
+}
+
+#[test]
+fn deflated_dotlottie_archive_imports() {
+    let (mut p, cid) = setup();
+    let l = solid_layer(&mut p, cid, [0.0, 1.0, 0.0], 40, 40);
+    push(&mut p, cid, l);
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({"version":"1","animations":[{"id":"main"}]})).unwrap();
+    let animation = serde_json::to_vec(&res.json).unwrap();
+    let zip = craft_lottie::zip::try_store_with_compression(
+        &[("manifest.json".into(), manifest), ("animations/main.json".into(), animation)],
+        craft_lottie::zip::Compression::Deflated,
+    )
+    .unwrap();
+    let mut q = Project::default();
+    let imp = import(&mut q, &zip, "compressed", "", &mut |_| None).unwrap();
     assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
 }
 

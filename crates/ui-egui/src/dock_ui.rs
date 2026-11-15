@@ -333,8 +333,11 @@ impl EffectcraftApp {
             }
         }
         let Some(comp) = self.session.active_comp() else { return out };
-        if let Some(l) = self.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) {
+        // Effect Controls names the layer it shows (the one it is locked to, if any).
+        if let Some(l) = panels::effect_controls::shown_layer_id(self).and_then(|id| comp.layer(id)) {
             out.push((PanelKind::EffectControls, format!("{} {}", crate::i18n::command_label("window.panel", "Effect Controls"), l.name)));
+        }
+        if let Some(l) = self.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) {
             out.push((PanelKind::Properties, format!("{}: {}", crate::i18n::command_label("window.panel", "Properties"), l.name)));
         }
         out
@@ -492,7 +495,13 @@ impl EffectcraftApp {
             }
         }
         for p in locks {
-            if !self.ui.locked_tabs.remove(&p.id()) {
+            if p == PanelKind::EffectControls {
+                // Locks on the layer the panel shows (nothing to lock without one).
+                let on = self.ui.effect_controls_lock.is_none();
+                if panels::effect_controls::set_lock(self, on) != on {
+                    self.ui.status = crate::i18n::tr("Select a layer to lock Effect Controls").to_string();
+                }
+            } else if !self.ui.locked_tabs.remove(&p.id()) {
                 self.ui.locked_tabs.insert(p.id().to_string());
             }
         }
@@ -638,10 +647,19 @@ fn dock_style(ui: &egui::Ui, t: &Tokens) -> DockStyle {
     style
 }
 
-/// Panels with a viewer lock: the Composition viewers and the Timeline keep their comp while
-/// locked.
+/// Panels with a lock: the Composition viewers and the Timeline keep their comp while locked,
+/// Effect Controls its layer.
 fn has_lock(panel: PanelKind) -> bool {
-    matches!(panel, PanelKind::Composition | PanelKind::Viewer(_) | PanelKind::Timeline)
+    matches!(panel, PanelKind::Composition | PanelKind::Viewer(_) | PanelKind::Timeline | PanelKind::EffectControls)
+}
+
+/// Whether `panel`'s tab lock is on. Effect Controls keeps the layer it is locked to
+/// (`UiState::effect_controls_lock`), the others are in `UiState::locked_tabs`.
+fn is_locked(app: &EffectcraftApp, panel: PanelKind) -> bool {
+    match panel {
+        PanelKind::EffectControls => app.ui.effect_controls_lock.is_some(),
+        _ => app.ui.locked_tabs.contains(&panel.id()),
+    }
 }
 
 /// EffectCraft's side of the dock area for one frame.
@@ -865,7 +883,7 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         let menu = Rect::from_min_max(pos2((header.max.x - MENU_W).max(header.min.x), header.min.y), header.max);
         if has_lock(*active) {
             let lock = Rect::from_center_size(pos2(menu.min.x - LOCK_W / 2.0, header.center().y), vec2(14.0, 14.0));
-            let locked = self.app.ui.locked_tabs.contains(&active.id());
+            let locked = is_locked(self.app, *active);
             if dock::lock_button(ui, lock, *active, locked, &t, &mut self.app.auto) {
                 self.locks.push(*active);
             }
