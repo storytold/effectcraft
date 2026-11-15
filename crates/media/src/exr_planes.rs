@@ -529,7 +529,9 @@ impl PlaneStore {
         }
         // (a failure of the file as it was before: the file changed since, it is read again)
         let limit = effectcraft_render::memory::decode_limit_generation();
-        if let Some((_, _, why, _)) = e.failed.iter().find(|(of, failed, _, made_at)| Arc::ptr_eq(of, index) && (!matches!(why, Refused::TooLarge(_)) || *made_at == limit) && asks_at_least(index, want, failed)) {
+        if let Some((_, _, why, _)) = e.failed.iter().find(|(of, failed, refusal, made_at)| {
+            Arc::ptr_eq(of, index) && (!matches!(refusal, Refused::TooLarge(_)) || *made_at == limit) && asks_at_least(index, want, failed)
+        }) {
             return Step::Done(Err(why.clone()));
         }
         if let Some(flight) = e.flight.clone() {
@@ -679,7 +681,8 @@ impl PlaneStore {
                 };
                 // (failures of another version of the file no longer apply)
                 // (a refusal for the size counts under the limit it was made under only)
-                e.failed.retain(|(of, _, old, made_at)| Arc::ptr_eq(of, &index) && (!matches!(old, Refused::TooLarge(_)) || *made_at == flight.limit_generation));
+                e.failed
+                    .retain(|(of, _, old, made_at)| Arc::ptr_eq(of, &index) && (!matches!(old, Refused::TooLarge(_)) || *made_at == flight.limit_generation));
                 if e.failed.len() >= FAILED_KEPT {
                     e.failed.remove(0);
                 }
