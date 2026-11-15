@@ -88,16 +88,19 @@ enum Refused {
     TooLarge(String),
 }
 
-/// Bytes the selected channels occupy in the first part's display window. The channel cache
+/// Bytes the selected channels occupy in each part's own display window. The channel cache
 /// reserves this before decoding so concurrent imports cannot exceed its soft budget.
 fn planes_bytes(infos: &[craft_exr::decode::PartInfo], keep: &dyn Fn(&str) -> bool) -> Option<usize> {
-    let display = infos.first()?.display_window;
-    let pixels = u64::from(display.width).checked_mul(u64::from(display.height))?;
-    let selected = infos.iter().try_fold(0u64, |total, part| {
+    infos.first()?;
+    let total = infos.iter().try_fold(0u64, |total, part| {
         let count = part.channels.iter().filter(|channel| keep(&channel_name(part.name.as_deref(), &channel.name))).count() as u64;
-        total.checked_add(count)
+        if count == 0 {
+            return Some(total);
+        }
+        let pixels = u64::from(part.display_window.width).checked_mul(u64::from(part.display_window.height))?;
+        total.checked_add(pixels.checked_mul(count)?.checked_mul(4)?)
     })?;
-    usize::try_from(pixels.checked_mul(selected)?.checked_mul(4)?).ok()
+    usize::try_from(total).ok()
 }
 
 /// Decode selected EXR channels through craft-exr, which places each selected block directly
@@ -151,6 +154,14 @@ fn decode(bytes: &[u8], keep: &dyn Fn(&str) -> bool) -> Result<Decoded, Refused>
         let rgb_indices = ["R", "G", "B"].map(|wanted| info.channels.iter().position(|channel| channel.name == wanted));
         let has_rgb = rgb_indices.iter().all(Option::is_some);
         let alpha_index = info.channels.iter().position(|channel| channel.name == "A");
+        // Metadata above still belongs to the file, but an ignored part must not allocate or
+        // impose its pixel/deep-data limits on the selected picture channels.
+        if !info.channels.iter().any(|channel| keep(&channel_name(prefix, &channel.name))) {
+            if rgb == Rgb::None && has_rgb {
+                rgb = Rgb::Unsupported;
+            }
+            continue;
+        }
         let mut part = decode::decode_display_part(
             bytes,
             info.index,
@@ -1171,6 +1182,25 @@ mod tests {
         let parts = craft_exr::decode::parts(&bytes, &limits).unwrap();
         assert_eq!(planes_bytes(&parts, &|name| name == "Beauty.R"), Some(3 * 2 * 4));
         assert_eq!(planes_bytes(&parts, &|_| false), Some(0));
+
+        // Different display windows must not reserve every part at the first part's size.
+        let mut varied = parts.clone();
+        varied[0].display_window.width = 1;
+        varied[0].display_window.height = 1;
+        varied[1].display_window.width = 10;
+        varied[1].display_window.height = 20;
+        assert_eq!(planes_bytes(&varied, &|_| true), Some(4 + 10 * 20 * 3 * 4));
+        assert_eq!(planes_bytes(&varied, &|name| name == "Beauty.R"), Some(10 * 20 * 4));
+        varied[1].display_window.width = u32::MAX;
+        varied[1].display_window.height = u32::MAX;
+        assert_eq!(planes_bytes(&varied, &|_| true), None);
+        assert_eq!(planes_bytes(&varied, &|name| name == "Depth.Z"), Some(4));
+
+        // Skipping the RGB part preserves the first-RGB fallback state and depth samples.
+        let depth = decode(&bytes, &|name| name == "Depth.Z").unwrap();
+        assert_eq!(depth.rgb, Rgb::Unsupported);
+        assert_eq!(depth.aux.channels.len(), 1);
+        assert_eq!(depth.aux.get("Depth.Z").unwrap()[0], 7.0);
 
         let selected = decode(&bytes, &|name| name == "Beauty.R").unwrap();
         assert_eq!(selected.aux.channels.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Beauty.R"]);
