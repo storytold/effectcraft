@@ -56,15 +56,39 @@ fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
     }
 }
 
+/// `project.newFolder {name?, parent?, items?}`. With `items` (ids or names), they move into the
+/// new folder in the same undo step: Project items dropped on the panel's New Folder button, as
+/// in After Effects (#3196). A folder can't end up inside itself.
 fn new_folder(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "project.newFolder";
     let name = str_p(p, "name").unwrap_or("Untitled Folder").to_string();
     let parent = p.get("parent").and_then(Value::as_u64).map(ItemId).filter(|i| s.project.item(*i).is_some_and(|x| x.is_folder()));
+    let mut items: Vec<ItemId> = vec![];
+    if let Some(v) = p.get("items") {
+        let Value::Array(a) = v else { return Err(bad(c, "`items` must be an array of item ids or names")) };
+        for v in a {
+            let id = super::project_items::item_ref(s, v, c)?;
+            if !items.contains(&id) {
+                items.push(id);
+            }
+        }
+        if let Some(f) = parent
+            && let Some(inside) = items.iter().find(|i| super::project_items::is_within(&s.project, f, **i))
+        {
+            return Err(bad(c, format!("can't move folder {} into a folder inside itself", inside.0)));
+        }
+    }
     let id = s.edit("New Folder", None, |proj, st| {
         let id = proj.add_item(&name, Label::Yellow, parent, ItemKind::Folder);
+        for i in &items {
+            if let Some(it) = proj.item_mut(*i) {
+                it.parent = Some(id);
+            }
+        }
         st.project_selection = vec![id];
         Ok(id)
     })?;
-    Ok(json!({"item": id.0}))
+    if p.get("items").is_some() { Ok(json!({"item": id.0, "moved": items.len()})) } else { Ok(json!({"item": id.0})) }
 }
 
 fn close(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1211,7 +1235,15 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("project.newFolder", "New Folder", ["File", "New"], Some("Cmd+Alt+Shift+N"), "{name?, parent?}", always, new_folder),
+        cmd!(
+            "project.newFolder",
+            "New Folder",
+            ["File", "New"],
+            Some("Cmd+Alt+Shift+N"),
+            "{name?, parent?, items?: [id|name] (moved into it)}",
+            always,
+            new_folder
+        ),
         cmd!("file.close", "Close", ["File"], Some("Cmd+W"), "{comp?}", has_comp, close),
         cmd!("file.closeProject", "Close Project", ["File"], None, "{}", always, close_project),
         cmd!("file.saveCopy", "Save a Copy...", ["File", "Save As"], None, "{path}", always, save_copy),

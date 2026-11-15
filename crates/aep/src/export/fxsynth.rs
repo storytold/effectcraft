@@ -39,7 +39,17 @@ pub(crate) fn value_spec(code: u8, range: Option<(f64, f64)>) -> Option<RecSpec>
 }
 
 fn fixed(v: f64) -> [u8; 4] {
-    ((v * 65536.0).round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32).to_be_bytes()
+    fixed_i32(v).to_be_bytes()
+}
+
+/// A number as the 16.16 `i32` a `pard` stores it in (rounded, within the `i32` range).
+pub(crate) fn fixed_i32(v: f64) -> i32 {
+    (v * 65536.0).round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
+/// A number as the `i32` of an integer slider's `pard` (rounded).
+pub(crate) fn int_i32(v: f64) -> i32 {
+    v.round() as i32
 }
 
 /// The 148-byte `pard` of a parameter: the type at 12, the default at 56 and the copies After
@@ -71,7 +81,7 @@ fn pard_layout(p: &PDef, popup_items: Option<u16>) -> Fixed {
             b.put(56, &fixed(d(0)));
             b.put(60, &fixed(d(0)));
         }
-        1 => b.put(56, &(d(0).round() as i32).to_be_bytes()),
+        1 => b.put(56, &int_i32(d(0)).to_be_bytes()),
         // A checkbox: the default again as a byte at 60.
         4 => {
             b.put(56, &(d(0).round().max(0.0) as u32).to_be_bytes());
@@ -116,7 +126,7 @@ fn pard_layout(p: &PDef, popup_items: Option<u16>) -> Fixed {
             }
         }
         1 | 2 => {
-            let enc = |v: f64| if p.code == 2 { fixed(v) } else { (v.round() as i32).to_be_bytes() };
+            let enc = |v: f64| if p.code == 2 { fixed(v) } else { int_i32(v).to_be_bytes() };
             if let Some(m) = p.valid_min {
                 b.put(124, &enc(m));
             }
