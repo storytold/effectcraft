@@ -2743,6 +2743,10 @@ const HEBREW: &[(&str, &str)] = &[
     ("Chapter:", "פרק:"),
     ("Clear", "נקה"),
     ("Clone Options", "אפשרויות שכפול"),
+    // Additional source-checked Hebrew panel labels (DAY-04).
+    ("Double-click a layer to open it in the Layer panel", "לחצו פעמיים על שכבה כדי לפתוח אותה בחלונית השכבות"),
+    ("Drop Frame", "דילוג על מספרי פריימים"),
+    ("Effects & Presets options", "אפשרויות אפקטים והגדרות קבועות מראש"),
 ];
 
 /// Swedish (`sv`), written from the English source.
