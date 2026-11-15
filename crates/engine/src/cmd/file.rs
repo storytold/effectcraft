@@ -20,7 +20,8 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
         crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
-        s.replace_project(proj, None);
+        // A template is a project file: one written before v0.10.0 needs the same upgrades (#1898).
+        s.replace_project_written_by(proj, None, effectcraft_project::saved_by(&text).as_deref());
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
         return Ok(json!({"template": tpl}));
@@ -52,7 +53,9 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
-    s.replace_project(proj, Some(path.to_string()));
+    // The version that wrote the file decides some of the upgrades (see `upgrade_effects`).
+    let saved_by = effectcraft_project::saved_by(&text);
+    s.replace_project_written_by(proj, Some(path.to_string()), saved_by.as_deref());
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));
     s.note_project_path(path);
@@ -68,7 +71,6 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         s.toast(format!("{n} footage item{} marked missing: {}.", if n == 1 { "" } else { "s" }, crate::doc_path::refusal(first, *why)));
     }
     // Written by a newer EffectCraft: what this version doesn't know would be lost on saving.
-    let saved_by = effectcraft_project::saved_by(&text);
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         s.toast(format!(
             "This project was saved by EffectCraft {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
