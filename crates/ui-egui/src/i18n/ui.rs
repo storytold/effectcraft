@@ -2747,6 +2747,17 @@ const HEBREW: &[(&str, &str)] = &[
     ("Double-click a layer to open it in the Layer panel", "לחצו פעמיים על שכבה כדי לפתוח אותה בחלונית השכבות"),
     ("Drop Frame", "דילוג על מספרי פריימים"),
     ("Effects & Presets options", "אפשרויות אפקטים והגדרות קבועות מראש"),
+    // Additional source-checked Hebrew shortcuts, viewer tips and paint controls (NIGHT-02).
+    ("Click a key to see its commands.", "לחצו על מקש כדי להציג את הפקודות המשויכות אליו."),
+    (
+        "Changing a shortcut creates a custom preset; the default stays as it is.",
+        "שינוי קיצור מקשים יוצר ערכת קיצורים מותאמת אישית; ברירת המחדל נשארת ללא שינוי.",
+    ),
+    ("Click to make this viewer active", "לחצו כדי להפעיל את המציג הזה"),
+    ("Click to show the active composition here", "לחצו כדי להציג כאן את הקומפוזיציה הפעילה"),
+    ("Click to reveal the expression in the timeline", "לחצו כדי להציג את הביטוי בציר הזמן"),
+    ("Clone Source Overlay:", "שכבת־על של מקור השכפול:"),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
