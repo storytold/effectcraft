@@ -1078,18 +1078,29 @@ impl<'a> Cx<'a> {
 /// The render log's account of the encoder: every encoder here is built in and runs on the
 /// CPU (no hardware encoder is used), with the codec settings of the Output Module.
 pub(crate) fn describe_encoder(om: &OutputModule) -> String {
+    use effectcraft_project::render_queue::{Channels, ProResProfile, WebmVideoCodec};
     let rate = |om: &OutputModule| match om.codec.rate_control {
         effectcraft_project::render_queue::RateControlMode::Bitrate => format!("{} kbps", om.bitrate_kbps),
         effectcraft_project::render_queue::RateControlMode::Quality => format!("constant quality {}", om.codec.quality),
     };
+    let mut label = om.format.label().to_string();
     let settings = match om.format {
         OutputFormat::H264 => format!(", {} kbps", om.bitrate_kbps),
         OutputFormat::Hevc | OutputFormat::Av1 => format!(", profile {}, {}", om.codec.profile.label(), rate(om)),
-        OutputFormat::ProRes => format!(", profile {}", om.prores_profile.label()),
+        // (alpha needs a 4444 flavour: the encoder promotes the profile, so the log names that one)
+        OutputFormat::ProRes => {
+            let profile = if om.channels == Channels::Rgba && !om.prores_profile.is_4444() { ProResProfile::P4444 } else { om.prores_profile };
+            format!(", profile {}", profile.label())
+        }
+        // (WebM carries VP9 or AV1: the log names the one that is written)
+        OutputFormat::WebM if om.webm_codec == WebmVideoCodec::Av1 => {
+            label = "WebM (AV1 + Opus)".to_string();
+            format!(", profile {}, {}", om.codec.profile.label(), rate(om))
+        }
         OutputFormat::WebM => format!(", {:?}{}", om.webm_codec, if om.webm_bitrate { format!(", {} kbps", om.bitrate_kbps) } else { String::new() }),
         _ => String::new(),
     };
-    format!("{}{settings}, built-in software encoder (not a hardware encoder)", om.format.label())
+    format!("{label}{settings}, built-in software encoder (not a hardware encoder)")
 }
 
 /// The render log's account of a job's compositor: which, why, and what was measured.
@@ -1186,6 +1197,25 @@ mod tests {
     use super::*;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// #3724 review: the log names the profile and codec that are written: alpha promotes ProRes
+    /// to 4444, and WebM with AV1 says AV1 (not VP9).
+    #[test]
+    fn the_encoder_description_names_what_is_written() {
+        use effectcraft_project::render_queue::{Channels, ProResProfile, WebmVideoCodec};
+        let mut om = OutputModule { format: OutputFormat::ProRes, prores_profile: ProResProfile::Hq, channels: Channels::Rgb, ..OutputModule::default() };
+        let hq = describe_encoder(&om);
+        assert!(hq.contains(ProResProfile::Hq.label()) && !hq.contains("4444"), "{hq}");
+        om.channels = Channels::Rgba;
+        let alpha = describe_encoder(&om);
+        assert!(alpha.contains(ProResProfile::P4444.label()) && !alpha.contains(ProResProfile::Hq.label()), "{alpha}");
+        let mut web = OutputModule { format: OutputFormat::WebM, webm_codec: WebmVideoCodec::Av1, ..OutputModule::default() };
+        let av1 = describe_encoder(&web);
+        assert!(av1.starts_with("WebM (AV1 + Opus)") && !av1.contains("VP9") && av1.contains("profile"), "{av1}");
+        web.webm_codec = WebmVideoCodec::Vp9;
+        let vp9 = describe_encoder(&web);
+        assert!(vp9.starts_with("WebM (VP9 + Opus)") && !vp9.contains("AV1"), "{vp9}");
+    }
 
     /// Dither may round a colour up while alpha rounds down; premultiplied colour stays at or
     /// below the written alpha at every pixel.
