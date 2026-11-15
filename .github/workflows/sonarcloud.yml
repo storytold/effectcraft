@@ -17,7 +17,7 @@ concurrency:
 jobs:
   sonarcloud:
     # Track shared CI improvements on main.
-    uses: storytold/craft-common-actions/.github/workflows/sonarcloud.yml@72d2fbfb3dd1bf27e1bdc7107be72c70749c6876
+    uses: storytold/craft-common-actions/.github/workflows/sonarcloud.yml@main
     with:
       timeout-minutes: 120
       # GPU tests share a process-local lock; separate coverage shards create independent
