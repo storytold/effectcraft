@@ -471,7 +471,7 @@ fn edit_menu_is_disabled_while_a_file_dialog_is_open() {
     assert!(entry_enabled(&app, import), "only the Edit menu steps aside");
     // Cancelled: the menu is back.
     let done = pending.lock().unwrap().pop().expect("a dialog was shown");
-    done(Vec::new());
+    done(Ok(Vec::new()));
     app.run_dialog_answers();
     assert!(entry_enabled(&app, select_all));
     // Ended without answering: the menu is back once the dialog is taken for gone.
