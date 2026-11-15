@@ -1,6 +1,6 @@
 use super::eps::embedded_fonts;
 use super::scanner::Src;
-use super::value::{Flow, GState, V, new_dict};
+use super::value::{Flow, GState, ImageCs, V, new_dict};
 use super::{Affine, BezPath, Builder, Cap, HashMap, Interp, Join};
 
 /// The deepest procedure nesting run (deeper recursion stops the program).
@@ -19,6 +19,8 @@ impl Interp {
             gs: GState {
                 ctm: Affine::IDENTITY,
                 color: [0.0; 3],
+                image_cs: ImageCs::Gray,
+                cmyk: None,
                 lw: 1.0,
                 cap: Cap::Butt,
                 join: Join::Miter,
@@ -38,11 +40,15 @@ impl Interp {
             font_cache: HashMap::new(),
             page,
             unknown: vec![],
+            reading_image: false,
+            journal: vec![],
+            save_marks: vec![],
         }
     }
 
     pub fn run(&mut self, data: &[u8]) {
         self.embedded = embedded_fonts(data);
+        self.budget = op_budget(data.len());
         let mut src = Src { d: data, pos: 0 };
         while let Some(t) = src.token(0) {
             if let Err(Flow::Quit) = self.exec_token(t, &mut src) {
@@ -179,4 +185,11 @@ impl Interp {
             }
         }
     }
+}
+
+/// The operations a program of `len` bytes may run: enough for the procedure call behind every
+/// path operator of a large file (Illustrator's EPS prolog runs about thirty operations per
+/// curve), and still a bound for one that loops forever.
+fn op_budget(len: usize) -> usize {
+    len.saturating_mul(4).clamp(8_000_000, 256_000_000)
 }

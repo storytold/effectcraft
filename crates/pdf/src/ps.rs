@@ -4,8 +4,7 @@
 //! dictionaries, the graphics state, path construction (including arcs) and painting, clipping
 //! and device colours, and text (`findfont` / `selectfont`, `show` and its variants, `charpath`,
 //! `stringwidth`, re-encoded fonts) with embedded Type 1 and CFF programs or the bundled
-//! stand-in fonts. Images are skipped (their inline data is stepped over), as is
-//! Level 3 smooth shading (`shfill`).
+//! stand-in fonts, and sampled images. Level 3 smooth shading (`shfill`) is skipped.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,6 +20,7 @@ use crate::object::{ascii85, is_white, parse_num};
 mod builtin;
 mod eps;
 mod exec;
+mod image;
 mod paths;
 mod scanner;
 mod text;
@@ -46,4 +46,10 @@ pub(crate) struct Interp {
     font_cache: HashMap<String, Rc<Font>>,
     page: [f64; 4],
     pub unknown: Vec<String>,
+    /// An image operator is reading its data: `readstring` on `currentfile` takes real bytes.
+    reading_image: bool,
+    /// Dictionary entries changed while a `save` is open (dictionary, key, previous value), and
+    /// where each open `save` starts in that list.
+    journal: Vec<(DictRef, String, Option<V>)>,
+    save_marks: Vec<usize>,
 }

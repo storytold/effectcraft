@@ -494,7 +494,7 @@ pub fn salvage_len(data_len: usize, max: usize) -> usize {
     data_len.saturating_mul(8).saturating_add(1024).min(max)
 }
 
-fn ascii_hex(data: &[u8], max: usize) -> Option<Vec<u8>> {
+pub(crate) fn ascii_hex(data: &[u8], max: usize) -> Option<Vec<u8>> {
     let mut out = vec![];
     let mut high = None;
     for c in data.iter().copied().take_while(|c| *c != b'>').filter(u8::is_ascii_hexdigit) {
@@ -569,7 +569,7 @@ fn ascii85_within(data: &[u8], max: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn lzw(data: &[u8], early: bool, max: usize) -> Option<Vec<u8>> {
+pub(crate) fn lzw(data: &[u8], early: bool, max: usize) -> Option<Vec<u8>> {
     let mut out = vec![];
     let mut table: Vec<Vec<u8>> = (0..=255u16).map(|b| vec![b as u8]).collect();
     table.push(vec![]);
@@ -623,7 +623,7 @@ fn lzw(data: &[u8], early: bool, max: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn run_length(data: &[u8], max: usize) -> Option<Vec<u8>> {
+pub(crate) fn run_length(data: &[u8], max: usize) -> Option<Vec<u8>> {
     let mut out = vec![];
     let mut i = 0;
     while i < data.len() {

@@ -20,7 +20,9 @@ impl Src<'_> {
                 }
                 // DSC: skip embedded binary / data sections.
                 let line = &self.d[s..self.pos];
-                if line.starts_with(b"%%BeginData:") || line.starts_with(b"%%BeginBinary:") || line.starts_with(b"%%BeginPreview") {
+                if (line.starts_with(b"%%BeginData:") || line.starts_with(b"%%BeginBinary:") || line.starts_with(b"%%BeginPreview"))
+                    && !self.image_operator_follows()
+                {
                     let end: &[u8] = if line.starts_with(b"%%BeginData:") {
                         b"%%EndData"
                     } else if line.starts_with(b"%%BeginBinary:") {
@@ -37,6 +39,43 @@ impl Src<'_> {
                 break;
             }
         }
+    }
+
+    /// Whether the next word is an operator that reads the data after it: the section is then
+    /// run, not stepped over. (`img` is the image operator of Illustrator's EPS prolog.)
+    fn image_operator_follows(&self) -> bool {
+        let rest = self.d.get(self.pos..).unwrap_or_default();
+        let Some(s) = rest.iter().position(|c| !is_white(*c)) else { return false };
+        let e = rest[s..].iter().position(|c| is_white(*c)).map_or(rest.len(), |p| s + p);
+        matches!(&rest[s..e], b"image" | b"colorimage" | b"imagemask" | b"img")
+    }
+
+    /// Up to `want` bytes of raw data from the file.
+    pub(super) fn read_bytes(&mut self, want: usize) -> Vec<u8> {
+        let start = self.pos.min(self.d.len());
+        let end = start.saturating_add(want).min(self.d.len());
+        self.pos = end;
+        self.d[start..end].to_vec()
+    }
+
+    /// Up to `want` bytes of hexadecimal data from the file (other characters are ignored; `>`
+    /// ends the data).
+    pub(super) fn read_hex(&mut self, want: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(want.min(1 << 16));
+        let mut high = None;
+        while out.len() < want {
+            let Some(&c) = self.d.get(self.pos) else { break };
+            self.pos += 1;
+            if c == b'>' {
+                break;
+            }
+            let Some(v) = (c as char).to_digit(16) else { continue };
+            match high.take() {
+                Some(h) => out.push((h << 4 | v) as u8),
+                None => high = Some(v),
+            }
+        }
+        out
     }
 
     fn word(&mut self) -> &[u8] {
