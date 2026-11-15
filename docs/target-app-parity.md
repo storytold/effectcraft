@@ -1,6 +1,6 @@
 # Parity with After Effects
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-12 · **Change:** minor (Timeline keyframe-button drag, #3439; previously: issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
 left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
@@ -129,6 +129,10 @@ compositing and effects dominate; audio is light). Hours are to full parity for 
 | **Weighted** | 100% | **≈ 91%** | **≈ 50%** | **≈ 360–660** | |
 
 Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensions below.
+
+Timeline keyframe navigator diamonds can be pressed and dragged across properties to add or
+remove keys consistently in one undo step (#3439), skipping locked layers. The gesture uses
+`prop.toggleKey` with explicit state and an undo merge token; no project-format change.
 
 ## By dimension
 

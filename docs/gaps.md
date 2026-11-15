@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-30 · **Change:** minor (gap 25, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named, described and keyboard-operable, #1335; earlier change: gap 4 closed: every pull request and push to `main` runs `cargo xtask ci` in CI, #2204; earlier change: gap 25: an AccessKit audit test and a theme contrast test, Effects & Presets, Settings and Render Queue named and keyboard-operable, #1335; earlier change: path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-12 · **Change:** minor (Timeline keyframe-button drag, #3439; previously: gap 25, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named, described and keyboard-operable, #1335; earlier change: gap 4 closed: every pull request and push to `main` runs `cargo xtask ci` in CI, #2204; earlier change: gap 25: an AccessKit audit test and a theme contrast test, Effects & Presets, Settings and Render Queue named and keyboard-operable, #1335; earlier change: path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -105,6 +105,10 @@ The most important missing piece: it turns every other estimate here into a meas
   one command, and target-app-parity.md reports breadth and measured fidelity side by side.
 
 ### G2. Real-user reliability on every platform
+
+- Timeline keyframe navigator diamonds support press-and-drag across properties, giving them
+  the first button's new state in one undo step (#3439). Locked layers are skipped; explicit
+  `prop.toggleKey` states and merge tokens expose the same operation headlessly.
 
 - Fix user issues as they come in, each with a regression test, and answer the reporter (#41–#47
   and #63–#68 are handled, as are the Windows report that the font menus missed installed fonts
