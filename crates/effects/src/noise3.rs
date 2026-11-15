@@ -88,7 +88,7 @@ fn params(turbulent: bool) -> Vec<ParamSpec> {
         p("transform/perspectiveOffset", "Perspective Offset", Value::Bool(false), ParamUi::Checkbox),
         p("complexity", "Complexity", num(6.0), slider(1.0, 20.0, 1.0, 10.0, 1)),
         p("subSettings/subInfluence", "Sub Influence (%)", num(70.0), slider(0.0, 100.0, 25.0, 100.0, 1)),
-        p("subSettings/subScaling", "Sub Scaling", num(56.0), slider(10.0, 100.0, 25.0, 100.0, 1)),
+        p("subSettings/subScaling", "Sub Scaling", num(56.0), slider(10.0, 10000.0, 25.0, 100.0, 1)),
     ];
     if !turbulent {
         v.extend([
@@ -595,6 +595,18 @@ mod tests {
         assert!(hi.data.iter().any(|p| p[0] > 1.0 || p[0] < 0.0));
         let clip = run("ec.noise.fractal", &[("contrast", num(400.0)), ("overflow", Value::Enum(0)), ("blendingMode", Value::Enum(BLEND_NONE))]);
         assert!(clip.data.iter().all(|p| (0.0..=1.0).contains(&p[0])));
+    }
+
+    /// #3486: After Effects' Sub Scaling takes 10..10000 (its slider shows 25..100), and
+    /// `prop.set` and the Effect Controls editors clamp to the hard range.
+    #[test]
+    fn fractal_noise_sub_scaling_range_matches_after_effects() {
+        let spec = crate::find("ec.noise.fractal").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "subSettings/subScaling").unwrap().ui;
+        assert!(
+            matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. } if *min == 10.0 && *max == 10000.0 && *slider_min == 25.0 && *slider_max == 100.0),
+            "{ui:?}"
+        );
     }
 
     #[test]

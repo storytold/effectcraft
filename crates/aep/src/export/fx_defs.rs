@@ -736,7 +736,6 @@ mod tests {
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
         ("ec.noise.fractal", "subSettings/subInfluence", 3485),
-        ("ec.noise.fractal", "subSettings/subScaling", 3486),
         ("ec.distort.ccpowerpin", "expandTop", 3492),
         ("ec.distort.ccpowerpin", "expandLeft", 3492),
         ("ec.distort.ccpowerpin", "expandRight", 3492),
