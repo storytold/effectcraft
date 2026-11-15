@@ -83,7 +83,14 @@ impl Image {
         Image { width, height, data: vec![[0.0; 4]; width as usize * height as usize] }
     }
     pub fn filled(width: u32, height: u32, px: Px) -> Image {
-        Image { width, height, data: vec![px; width as usize * height as usize] }
+        let n = width as usize * height as usize;
+        // A frame-sized fill on one thread is several ms (comp-sized solids, every frame).
+        if n < 1 << 16 {
+            return Image { width, height, data: vec![px; n] };
+        }
+        let mut data = Vec::with_capacity(n);
+        rayon::iter::ParallelExtend::par_extend(&mut data, rayon::iter::repeat_n(px, n));
+        Image { width, height, data }
     }
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0

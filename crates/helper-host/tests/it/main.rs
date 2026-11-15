@@ -244,17 +244,25 @@ fn run_checks() -> bool {
     let r = render("org.test.helper.echo", &mut px, 2, 2, 1.0, true);
     all &= check("nested renders through one helper", r.is_ok() && (px[1][0] - 0.1).abs() < 1e-5, (&r, &px));
 
-    // Several threads at once share the helper.
+    // Several threads at once share the helper, each getting its own result back (results are
+    // read back after the next render has the helper, from another place in the file).
     let threads: Vec<_> = (0..4)
         .map(|i| {
             std::thread::spawn(move || {
-                let mut px = vec![[0.0, 0.0, 0.0, 1.0]; 16];
-                render("org.test.helper.invert", &mut px, 4, 4, 0.5, false).map(|_| (i, px[0][0]))
+                let amount = 0.1 * (i + 1) as f64;
+                (0..20).try_for_each(|_| {
+                    let mut px = vec![[0.0, 0.0, 0.0, 1.0]; 64 * 64];
+                    render("org.test.helper.invert", &mut px, 64, 64, amount, false)?;
+                    match px.iter().all(|p| (p[0] as f64 - amount).abs() < 1e-6) {
+                        true => Ok(()),
+                        false => Err(format!("thread {i} got another render's pixels")),
+                    }
+                })
             })
         })
         .collect();
     let results: Vec<_> = threads.into_iter().map(|t| t.join().map_err(|_| "thread panicked".to_string()).and_then(|r| r)).collect();
-    all &= check("concurrent renders", results.iter().all(|r| matches!(r, Ok((_, v)) if (*v - 0.5).abs() < 1e-6)), &results);
+    all &= check("concurrent renders", results.iter().all(Result::is_ok), &results);
 
     // A crash mid-render is an error, the frame is untouched, and the helper comes back.
     let mut px = vec![[0.5; 4]; 4];

@@ -540,6 +540,12 @@ pub trait EffectPlugin: Send + Sync {
     fn reads_other_times(&self) -> bool {
         false
     }
+    /// Whether a failed render leaves the frame untouched on its own, so the host needn't keep a
+    /// copy of it to put back (a frame-sized copy per render). Default false: plug-ins that
+    /// process in place may fail halfway.
+    fn untouched_on_error(&self) -> bool {
+        false
+    }
 }
 
 static SLOTS: [OnceLock<Arc<dyn EffectPlugin>>; MAX_PLUGINS] = [const { OnceLock::new() }; MAX_PLUGINS];
@@ -887,7 +893,8 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let flat = flatten(m, ctx, &buf);
     let key = ctx_instance_key(ctx);
     let pad = plugin.padding(&PluginParams { manifest: m, flat: &flat, texts: &texts }, ctx.time, buf.scale, ctx.layer_size, key).min(MAX_PADDING);
-    let before = buf.clone();
+    // (what an error gives back: the unpadded input)
+    let before = (pad > 0 || !plugin.untouched_on_error()).then(|| buf.clone());
     // Padding moves the layer origin, which points are measured from.
     let flat = if pad > 0 {
         buf.pad(pad);
@@ -902,7 +909,7 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     if let Err(e) = plugin.render_v2(&mut frame, &params, ctx.time, &host) {
         log::warn!("plug-in `{}`: {e}", m.id);
         set_plugin_error(&m.id, Some(e));
-        return before;
+        return before.unwrap_or(buf);
     }
     if plugin_error(&m.id).is_some() {
         set_plugin_error(&m.id, None);

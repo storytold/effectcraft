@@ -83,6 +83,9 @@ struct Conn {
     exchange: Exchange,
     /// The first free byte of the exchange file (images are stacked, see [`Helper::render`]).
     top: u64,
+    /// A finished render is reading its result back after letting the helper go: its image
+    /// stays below `top` until it is done.
+    reading: bool,
     last_used: Instant,
     generation: u64,
 }
@@ -197,6 +200,9 @@ pub struct Helper {
     loaded: Mutex<Vec<String>>,
     restarts: Mutex<Vec<Instant>>,
     generation: Mutex<u64>,
+    /// Handles to the exchange file for reading a result back outside the turn, with the
+    /// generation of the process whose file it is.
+    reader: Mutex<Option<(u64, Exchange)>>,
 }
 
 impl Helper {
@@ -211,6 +217,7 @@ impl Helper {
             loaded: Mutex::new(vec![]),
             restarts: Mutex::new(vec![]),
             generation: Mutex::new(0),
+            reader: Mutex::new(None),
         });
         let (effects, errors) = {
             let _turn = h.take_turn()?;
@@ -472,7 +479,7 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, reading: false, last_used: Instant::now(), generation };
         let frames = c.exchange.path().to_string_lossy().into_owned();
         match c.call(
             &Request::Hello {
@@ -552,10 +559,20 @@ impl Helper {
         host: &dyn PluginHost,
         ignores_input: bool,
     ) -> Result<(), Failure> {
-        let _turn = self.take_turn().map_err(Failure::Refused)?;
+        // What the request needs from the host is gathered before taking the helper (the
+        // parameter digest hashes the instance's whole parameter data).
+        let (instance, frame_rate, frame_range, params_digest) = (host.instance_key(), host.frame_rate(), host.frame_range(), host.params_digest());
+        let (flat, texts) = (params.flat.to_vec(), params.texts.to_vec());
+        let turn = self.take_turn().map_err(Failure::Refused)?;
+        let top_level = lock(&self.turn).depth == 1;
         // The generation of the process this render runs on: taken inside `with_conn`, which
         // may start the process (after a crash or `stop`), so it is never that of a dead one.
         let (at, base, started) = self.with_conn(|c| {
+            // (a render not nested in another starts at the bottom, unless a result is being
+            // read there)
+            if top_level && !c.reading {
+                c.top = 0;
+            }
             let base = c.top;
             let at = c.alloc(frame.width, frame.height, frame.origin, frame.scale).map_err(Failure::Refused)?;
             // Nothing is sent yet, so the helper is fine (a full disk, say): not its fault.
@@ -568,17 +585,39 @@ impl Helper {
         })?;
         let req = Request::Render(RenderRequest {
             effect: effect.to_string(),
-            instance: host.instance_key(),
+            instance,
             time,
             frame: at,
             layer_size: frame.layer_size,
-            flat: params.flat.to_vec(),
-            texts: params.texts.to_vec(),
-            frame_rate: host.frame_rate(),
-            frame_range: host.frame_range(),
-            params_digest: host.params_digest(),
+            flat,
+            texts,
+            frame_rate,
+            frame_range,
+            params_digest,
         });
-        let result = self.converse(req, frame, &at, host, started);
+        let done = self.converse(req, host, started);
+        let mut read = |x: &mut Exchange, bounds: Option<[u32; 4]>| match bounds {
+            None => x.read_into(&at, frame.pixels),
+            Some(b) => x.read_bounds_into(&at, frame.pixels, b),
+        };
+        // A top-level render reads its result back after letting the helper go, so the next
+        // render runs meanwhile (above it in the file, which keeps at most two frames: one read
+        // at a time; more measured no faster).
+        if let Ok(bounds) = done
+            && top_level
+            && let Some(mut x) = self.reader(started)
+        {
+            drop(turn);
+            let r = read(&mut x, bounds);
+            *lock(&self.reader) = Some((started, x));
+            if let Some(c) = lock(&self.conn).as_mut()
+                && c.generation == started
+            {
+                c.reading = false;
+            }
+            return r.map_err(Failure::Broken);
+        }
+        let result = done.and_then(|bounds| self.with_running(started, |c| read(&mut c.exchange, bounds).map_err(Failure::Broken)));
         // Free this render's images (if the same process is still running).
         if let Some(c) = lock(&self.conn).as_mut()
             && c.generation == started
@@ -588,15 +627,26 @@ impl Helper {
         result
     }
 
-    fn converse(&self, req: Request, frame: &mut PluginFrame, at: &ImageRef, host: &dyn PluginHost, started: u64) -> Result<(), Failure> {
+    /// Handles for reading process `started`'s exchange file outside the turn, marking it read
+    /// ([`Conn::reading`]); `None` while another result is being read (or the process stopped).
+    fn reader(&self, started: u64) -> Option<Exchange> {
+        let mut g = lock(&self.conn);
+        let c = g.as_mut().filter(|c| c.generation == started && !c.reading)?;
+        let x = match lock(&self.reader).take() {
+            Some((g, x)) if g == started => x,
+            _ => c.exchange.reader().ok()?,
+        };
+        c.reading = true;
+        Some(x)
+    }
+
+    /// Talk the render through to the helper's `done` (its bounds, if any).
+    fn converse(&self, req: Request, host: &dyn PluginHost, started: u64) -> Result<Option<[u32; 4]>, Failure> {
         let mut next = req;
         loop {
             let reply = self.with_running(started, |c| c.call(&next, render_timeout()))?;
             next = match reply {
-                Reply::Done { bounds: None } => return self.with_running(started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
-                Reply::Done { bounds: Some(b) } => {
-                    return self.with_running(started, |c| c.exchange.read_bounds_into(at, frame.pixels, b).map_err(Failure::Broken));
-                }
+                Reply::Done { bounds } => return Ok(bounds),
                 Reply::Error { message } => return Err(Failure::Refused(message)),
                 // Host callbacks run without holding the process, so they may render through
                 // this helper again (on this thread: the turn is re-entered).
@@ -691,6 +741,12 @@ impl EffectPlugin for HelperEffect {
 
     fn reads_other_times(&self) -> bool {
         self.time_varying
+    }
+
+    // A render writes the frame only once the helper is done, reading its result back (only a
+    // read that fails halfway leaves part of it written).
+    fn untouched_on_error(&self) -> bool {
+        true
     }
 
     fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64) -> u32 {

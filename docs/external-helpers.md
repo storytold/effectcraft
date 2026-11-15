@@ -50,7 +50,8 @@ The image is `width × height` pixels starting `offset` bytes into the file. Eac
 premultiplied RGBA as four `f32`s in native byte order (16 bytes), rows top to bottom, and an
 image is at most 2²⁸ pixels. `origin` is the buffer position of layer pixel (0, 0); `scale` is
 buffer pixels per layer pixel. EffectCraft decides every offset, so the helper only reads and
-writes where it's told. On Unix, EffectCraft unlinks the file once the helper has opened it, so
+writes where it's told (EffectCraft may still be reading an earlier render's result from
+elsewhere in the file while the next render runs). On Unix, EffectCraft unlinks the file once the helper has opened it, so
 nothing is left behind if either side dies. Helpers may map the file instead of reading it.
 
 ### Messages

@@ -26,6 +26,9 @@ pub struct Exchange {
     path: PathBuf,
     /// Remove the file when dropped (the side that created it).
     owned: bool,
+    /// The file is known to be at least this long ([`Exchange::reserve`] skips asking: the
+    /// question waits for reads in flight on Windows).
+    reserved: u64,
 }
 
 impl Exchange {
@@ -49,6 +52,7 @@ impl Exchange {
             more: vec![],
             path,
             owned: true,
+            reserved: 0,
         })
     }
 
@@ -61,6 +65,25 @@ impl Exchange {
             more: vec![],
             path: path.to_path_buf(),
             owned: false,
+            reserved: 0,
+        })
+    }
+
+    /// More handles to the same file (for reading on another thread while this one is busy).
+    pub fn reader(&self) -> std::io::Result<Exchange> {
+        // (Windows: a handle of its own, as a clone shares the file object, whose synchronous
+        // I/O is serialised; Unix: the name may be gone, and positional I/O doesn't serialise)
+        #[cfg(windows)]
+        let file = OpenOptions::new().read(true).open(&self.path)?;
+        #[cfg(not(windows))]
+        let file = self.file.try_clone()?;
+        Ok(Exchange {
+            file,
+            #[cfg(windows)]
+            more: vec![],
+            path: self.path.clone(),
+            owned: false,
+            reserved: 0,
         })
     }
 
@@ -93,9 +116,13 @@ impl Exchange {
     pub fn reserve(&mut self, at: &ImageRef) -> Result<(), String> {
         let n = at.pixels().ok_or_else(|| format!("image {}×{} is too large", at.width, at.height))?;
         let end = (n as u64).checked_mul(16).and_then(|b| b.checked_add(at.offset)).ok_or("frame exchange: image past the end of a file")?;
+        if end <= self.reserved {
+            return Ok(());
+        }
         if self.file.metadata().map_err(io)?.len() < end {
             self.file.set_len(end).map_err(io)?;
         }
+        self.reserved = end;
         Ok(())
     }
 
