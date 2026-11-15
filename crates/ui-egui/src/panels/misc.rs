@@ -418,12 +418,16 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
     // Linked channels move together; Alt edits one alone (Ctrl+Alt is a proportional scrub).
     let linked = app.ui.timeline.is_linked(uid, false) && !ui.input(|i| i.modifiers.alt && !widgets::proportional_scrub(i.modifiers));
     let mut actions: Vec<serde_json::Value> = vec![];
+    // A scrub ended this frame: the edits below still join its undo step, the next scrub starts
+    // another (#3234 review).
+    let mut released = false;
     let (channels, field_x) = if compact { (["L", "R"], 14.0) } else { (["Left", "Right"], 44.0) };
     for (d, (k, v)) in channels.into_iter().zip(values).enumerate() {
         let y = top + 12.0 + d as f32 * 20.0;
         p.text(pos2(lx, y), Align2::LEFT_CENTER, k, Tokens::ui(12.0), t.text_dim);
         let spec = widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: " dB" };
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(lx + field_x, y - 9.0), egui::Id::unique(("audio-level", uid, d)), v, &spec, &vt);
+        let (r, nv, done) = widgets::hot_number_at(ui, pos2(lx + field_x, y - 9.0), egui::Id::unique(("audio-level", uid, d)), v, &spec, &vt);
+        released |= done;
         app.auto.add(if d == 0 { "audio.levelLeft" } else { "audio.levelRight" }, r, &format!("{v:.1} dB"));
         if let Some(nv) = nv {
             let merge = format!("audio-levels-{uid}");
@@ -454,6 +458,9 @@ fn audio_levels(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
         if let Err(e) = crate::menus::invoke(app, &ctx, "prop.set", params) {
             app.ui.status = e;
         }
+    }
+    if released {
+        app.session.history.merge_key = None;
     }
 }
 

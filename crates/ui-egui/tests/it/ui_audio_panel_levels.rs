@@ -272,6 +272,26 @@ fn a_scrub_of_expression_driven_levels_moves_every_selected_layer_by_the_scrub()
     assert!((moved[1] - change / 2.0).abs() < 1e-6, "the middle one moves by half: {moved:?}");
 }
 
+/// #3234 review: each scrub is its own undo step. A second scrub with nothing between it and
+/// the first must not fold into it (one Undo would take both back).
+#[test]
+fn two_scrubs_are_two_undo_steps() {
+    let mut s = effectcraft_host::session();
+    let l = sound_layer(&mut s, [-20.0, -20.0]);
+    let mut h = harness(s, l);
+    let left = |h: &Harness<'_, EffectcraftApp>| levels(h, l).value.components()[0];
+    let start = left(&h);
+    scrub_left(&mut h, Modifiers::NONE);
+    let first = left(&h);
+    assert!(first > start + 1.0, "the first scrub raised Left: {start} -> {first}");
+    scrub_left(&mut h, Modifiers::NONE);
+    let second = left(&h);
+    assert!(second > first + 1.0, "the second scrub raised it again: {first} -> {second}");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    assert!((left(&h) - first).abs() < 1e-9, "one Undo takes back the second scrub only: {start} / {first} / {second} -> {}", left(&h));
+}
+
 /// With Link Channels on, a scrub of Left moves Right by the same dB; Alt scrubs Left alone.
 #[test]
 fn a_linked_scrub_moves_both_channels_and_alt_moves_one() {
