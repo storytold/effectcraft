@@ -84,6 +84,14 @@ fn pdf_paths_clip_gradient_and_layers() {
 }
 
 #[test]
+fn eps_semibold_and_demi_names_select_semibold_fallback() {
+    use effectcraft_text::fonts::{INTER_BOLD, INTER_SEMIBOLD};
+    assert_eq!(eps_fallback_font(b"Inter-SemiBold"), Some(INTER_SEMIBOLD));
+    assert_eq!(eps_fallback_font(b"Example-DemiBold"), Some(INTER_SEMIBOLD));
+    assert_eq!(eps_fallback_font(b"Inter-Bold"), Some(INTER_BOLD));
+}
+
+#[test]
 fn pdf_actual_text_is_exposed_as_a_logical_group() {
     let content = "/Span << /ActualText (Logical text) >> BDC\n1 0 0 rg 10 10 20 20 re f\nEMC";
     let objs = vec![

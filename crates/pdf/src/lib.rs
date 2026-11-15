@@ -241,10 +241,10 @@ fn eps_fallback_font(name: &[u8]) -> Option<&'static [u8]> {
         || name.contains("roman")
     {
         NOTO_SERIF_REGULAR
-    } else if name.contains("bold") || name.contains("black") || name.contains("heavy") {
-        INTER_BOLD
     } else if name.contains("semibold") || name.contains("demi") {
         INTER_SEMIBOLD
+    } else if name.contains("bold") || name.contains("black") || name.contains("heavy") {
+        INTER_BOLD
     } else if name.contains("italic") || name.contains("oblique") {
         INTER_ITALIC
     } else {

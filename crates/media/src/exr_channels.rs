@@ -103,11 +103,14 @@ fn planes_bytes(infos: &[craft_exr::decode::PartInfo], keep: &dyn Fn(&str) -> bo
 /// Decode selected EXR channels through craft-exr, which places each selected block directly
 /// into its bounded display-window plane.
 fn decode(bytes: &[u8], keep: &dyn Fn(&str) -> bool) -> Result<Decoded, Refused> {
-    use craft_exr::decode::{self, Error as ExrError, Limits};
-
-    let mut limits = Limits::default();
+    let mut limits = craft_exr::decode::Limits::default();
     limits.max_pixels = MAX_DISPLAY_PIXELS as u64;
     limits.max_bytes = MAX_DECODE_BYTES as u64;
+    decode_with_limits(bytes, keep, limits)
+}
+
+fn decode_with_limits(bytes: &[u8], keep: &dyn Fn(&str) -> bool, limits: craft_exr::decode::Limits) -> Result<Decoded, Refused> {
+    use craft_exr::decode::{self, Error as ExrError};
     // Header-only checks must not charge channels this caller does not decode. The shared display
     // decoder independently checks the exact selected display planes before allocating them.
     let mut header_limits = limits;
@@ -121,14 +124,14 @@ fn decode(bytes: &[u8], keep: &dyn Fn(&str) -> bool) -> Result<Decoded, Refused>
     })?;
     let display = infos.first().ok_or(Refused::Unreadable)?.display_window;
     let needed = planes_bytes(&infos, keep).filter(|bytes| *bytes > 0).ok_or(Refused::Unreadable)?;
-    if needed > MAX_DECODE_BYTES {
+    if needed as u64 > limits.max_bytes {
         let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
         return Err(Refused::TooLarge(format!(
             "its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use",
             display.width,
             display.height,
             gb(needed as u64),
-            gb(MAX_DECODE_BYTES as u64),
+            gb(limits.max_bytes),
         )));
     }
 
@@ -147,6 +150,11 @@ fn decode(bytes: &[u8], keep: &dyn Fn(&str) -> bool) -> Result<Decoded, Refused>
             }
         }
         let prefix = info.name.as_deref();
+        // The shared decoder checks the whole part's data window before selecting channels.
+        // Do not charge an unused part, but retain the metadata collected above.
+        if !info.channels.iter().any(|channel| keep(&channel_name(prefix, &channel.name))) {
+            continue;
+        }
         let exact = info.display_window == display;
         let rgb_indices = ["R", "G", "B"].map(|wanted| info.channels.iter().position(|channel| channel.name == wanted));
         let has_rgb = rgb_indices.iter().all(Option::is_some);
@@ -1137,6 +1145,24 @@ mod tests {
         assert_eq!(aux.get("ViewLayer.Depth.Z").unwrap(), [4.0; 4].as_slice());
         assert!(aux.get("ViewLayer.Depth.ViewLayer.Depth.Z").is_none());
         assert!(aux.get("ViewLayer.Combined.R").is_some());
+    }
+
+    #[test]
+    fn unselected_part_does_not_exhaust_decode_limit() {
+        use exr::prelude::*;
+        let part = |name: &str, names: &[&str]| {
+            let channels: Vec<_> = names.iter().map(|name| AnyChannel::new(*name, FlatSamples::F32(vec![1.0]))).collect();
+            Layer::new((1, 1), LayerAttributes::named(name), Encoding::FAST_LOSSLESS, AnyChannels::sort(channels.into()))
+        };
+        let image =
+            Image::from_layers(ImageAttributes::with_size((1, 1)), vec![part("Depth", &["Z", "Z1", "Z2", "Z3", "Z4"]), part("Beauty", &["R", "G", "B"])]);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write().to_buffered(&mut bytes).unwrap();
+        let mut limits = craft_exr::decode::Limits::default();
+        limits.max_bytes = 12;
+        let selected = decode_with_limits(bytes.get_ref(), &|name| name.starts_with("Beauty."), limits).unwrap();
+        assert_eq!(selected.aux.channels.len(), 3);
+        assert!(selected.aux.get("Beauty.R").is_some());
     }
 
     #[test]
