@@ -3790,6 +3790,21 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Y: {}", "Y: {}"),
     ("{}, {}", "{}, {}"),
     ("{}, {}, uses {}", "{}, {}, använder {}"),
+    ("Disk cache limit in effect: {} MB", "Gällande gräns för diskcache: {} MB"),
+    ("Effect Controls is locked to {}", "Effektkontroller är låsta till {}"),
+    (
+        "Limited by free disk space: EffectCraft keeps 5% of the disk free (at least {} GB, at most {} GB).",
+        "Begränsas av ledigt diskutrymme: EffectCraft lämnar 5 % av disken ledigt (minst {} GB, högst {} GB).",
+    ),
+    (
+        "Limited by free disk space: EffectCraft keeps {} GB of this disk free.",
+        "Begränsas av ledigt diskutrymme: EffectCraft lämnar {} GB ledigt på den här disken.",
+    ),
+    (
+        "No room left: nothing is written to the disk cache until disk space is freed.",
+        "Inget utrymme kvar: ingenting skrivs till diskcachen förrän diskutrymme har frigjorts.",
+    ),
+    ("Select a layer to lock Effect Controls", "Markera ett lager för att låsa Effektkontroller"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
