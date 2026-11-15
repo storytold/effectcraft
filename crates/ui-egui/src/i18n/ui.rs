@@ -10853,8 +10853,8 @@ mod tests {
             assert_eq!(tr(english), translated, "Settings localization: {english}");
         }
         let folder = "C:/sample-models";
-        assert_eq!(tr_args("Models folder: {}", &[&folder]), "תיקיית המודלים: \u{2068}C:/sample-models\u{2069");
-        assert_eq!(tr_args("Plug-ins folder: {}", &[&folder]), "תיקיית התוספים: \u{2068}C:/sample-models\u{2069");
+        assert_eq!(tr_args("Models folder: {}", &[&folder]), "תיקיית המודלים: \u{2068}C:/sample-models\u{2069}");
+        assert_eq!(tr_args("Plug-ins folder: {}", &[&folder]), "תיקיית התוספים: \u{2068}C:/sample-models\u{2069}");
         assert_eq!(tr_args("Update All ({})", &[&3]), "עדכון הכול (3)");
         set_current("en");
         assert_eq!(tr("Download"), "Download");
