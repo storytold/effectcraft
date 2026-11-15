@@ -1018,7 +1018,10 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
         match &it.status {
             RenderStatus::Done => {
                 note!("done: {name} → {} in {:.2}s", it.last_output.as_deref().unwrap_or("?"), it.render_time.unwrap_or(0.0));
-                results.push(json!({"comp": name, "output": it.last_output, "seconds": it.render_time}));
+                if let Some(t) = &it.last_timing {
+                    note!("timing: {}", t.summary());
+                }
+                results.push(json!({"comp": name, "output": it.last_output, "seconds": it.render_time, "timing": it.last_timing, "timingSummary": it.last_timing.as_ref().map(|t| t.summary())}));
             }
             RenderStatus::Failed(e) => failed.push(format!("{name}: {e}")),
             other => failed.push(format!("{name}: {}", other.label())),

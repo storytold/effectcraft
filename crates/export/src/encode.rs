@@ -9,7 +9,9 @@ use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, Pro
 use effectcraft_project::{Comp, ProjectSettings};
 use effectcraft_time::{FrameRate, Tick};
 use rayon::prelude::*;
+use web_time::Instant;
 
+use crate::pipeline::Stage;
 use crate::{Cx, ExportError, Report, Result, State, batch_size, wants_audio};
 
 fn enc(e: impl std::fmt::Display) -> ExportError {
@@ -381,7 +383,7 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         .beside(beside, batch_frames((first_end..next_end).collect()), || -> Result<Vec<Packet>> {
             let mut pending = Vec::new();
             for (k, px) in first.iter().enumerate() {
-                pending.extend(encode(&mut venc, px, k as u64)?);
+                pending.extend(job.timed(Stage::Encode, || encode(&mut venc, px, k as u64))?);
             }
             Ok(pending)
         })
@@ -465,8 +467,8 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         Ok(())
     };
     let frame_end_time = |k: u64| -> Tick { if k >= total { span_end } else { job.settings.frame_time(comp, k) } };
-    write_video(&mut mux, pending)?;
-    write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor)?;
+    job.timed(Stage::Write, || write_video(&mut mux, pending))?;
+    job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor))?;
     let mut i = first_end;
     while i < total {
         let end = (i + batch).min(total);
@@ -475,10 +477,10 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         let (done, next) = job
             .beside(beside, batch_frames((end..next_end).collect()), || -> Result<()> {
                 for (k, px) in frames.iter().enumerate() {
-                    let ps = encode(&mut venc, px, i + k as u64)?;
-                    write_video(&mut mux, ps)?;
+                    let ps = job.timed(Stage::Encode, || encode(&mut venc, px, i + k as u64))?;
+                    job.timed(Stage::Write, || write_video(&mut mux, ps))?;
                 }
-                write_audio_until(&mut mux, frame_end_time(end), &mut cursor)
+                job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, frame_end_time(end), &mut cursor))
             })
             .await?;
         done?;
@@ -486,17 +488,22 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         st.advance(end - i)?;
         i = end;
     }
-    write_video(&mut mux, venc.flush()?)?;
-    write_audio_until(&mut mux, span_end, &mut cursor)?;
+    let tail = job.timed(Stage::Encode, || venc.flush())?;
+    job.timed(Stage::Write, || write_video(&mut mux, tail))?;
+    job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, span_end, &mut cursor))?;
     if let Some((Audio::Aac(e), at)) = audio.as_mut() {
+        let t = Instant::now();
         for au in e.flush() {
             mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
         }
+        job.add_time(Stage::Audio, t);
     }
+    let t = Instant::now();
     let out = mux.finish().map_err(mux_err)?;
     out.flush().map_err(mux_err)?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    job.add_time(Stage::Write, t);
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
 }
 
 #[cfg(test)]

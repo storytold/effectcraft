@@ -83,6 +83,7 @@ impl Exporter for FileExporter {
                     audio: r.audio,
                     log: r.log,
                     overflow: r.overflow,
+                    timing: Some(r.timing),
                 }),
                 Err(effectcraft_export::ExportError::Cancelled) => Err(effectcraft_engine::render_queue::CANCELLED.into()),
                 Err(e) => Err(e.to_string()),

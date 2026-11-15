@@ -44,7 +44,9 @@ mod webm_av1;
 
 use web_time::Instant;
 
-use effectcraft_project::render_queue::{AudioOutput, Channels, OutputFormat, OutputModule, RenderLog, RenderQuality, RenderSettings, sequence_path};
+use effectcraft_project::render_queue::{
+    AudioOutput, Channels, OutputFormat, OutputModule, RenderLog, RenderQuality, RenderSettings, RenderTiming, sequence_path,
+};
 use effectcraft_project::{Comp, ItemId, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{ExprHost, FootageSource};
@@ -168,7 +170,7 @@ impl Progress {
 }
 
 /// What an export produced.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     /// The movie file, or the first file of a sequence.
     pub path: String,
@@ -182,6 +184,8 @@ pub struct Report {
     pub log: Option<String>,
     /// Files that went to an overflow folder.
     pub overflow: Vec<String>,
+    /// Where the time went and what ran the job; the same as the summary line in the render log.
+    pub timing: RenderTiming,
 }
 
 /// Formats this build can write (all of them; kept as the hook for optional encoders).
@@ -220,12 +224,23 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
     let render = RenderEnd(job.accel.filter(|_| job.options.caches.is_none()));
     let mut r = export_with(&cx, progress, t0).await;
     drop(render);
+    let wall = t0.elapsed().as_secs_f64();
+    if let Err(e) = &r {
+        // A stopped or failed export gets its line too: slow ones are the ones people stop.
+        let how = if matches!(e, ExportError::Cancelled) { "stopped" } else { "failed" };
+        log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, cx.timing(wall, 0).summary_of_unfinished(how));
+    }
     if matches!(r, Err(ExportError::Cancelled)) {
         cx.remove_cancelled_outputs()?;
         return r;
     }
-    let log = cx.write_log(&r, t0.elapsed().as_secs_f64());
+    let timing = r.as_ref().ok().map(|rep| cx.timing(wall, rep.frames));
+    if let Some(t) = &timing {
+        log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, t.summary());
+    }
+    let log = cx.write_log(&r, wall, timing.as_ref());
     if let Ok(rep) = &mut r {
+        rep.timing = timing.unwrap_or_default();
         rep.log = log;
         rep.overflow = cx.overflowed.lock().unwrap_or_else(|e| e.into_inner()).clone();
     }
@@ -341,7 +356,18 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
         st.advance(end - i)?;
         i = end;
     }
-    Ok(Report { path: sequence_path(cx.path, f0), frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    Ok(Report {
+        path: sequence_path(cx.path, f0),
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
 
 struct StillOutput {
@@ -443,6 +469,7 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
                 gif::Frame::from_rgba_speed(w as u16, h as u16, &mut px, 10)
             })
             .await;
+        let t = Instant::now();
         for mut f in frames {
             clock += cs_per_frame;
             let d = (clock.round() as u64).saturating_sub(emitted).max(1);
@@ -453,12 +480,16 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
             }
             enc.write_frame(&f).map_err(|e| ExportError::Encode(e.to_string()))?;
         }
+        // The GIF writer compresses as it writes: the two are not measured apart.
+        job.add_time(pipeline::Stage::EncodeWrite, t);
         st.advance(end - i)?;
         i = end;
     }
+    let t = Instant::now();
     drop(enc);
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    job.add_time(pipeline::Stage::EncodeWrite, t);
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![], timing: Default::default() })
 }
 
 #[cfg(test)]

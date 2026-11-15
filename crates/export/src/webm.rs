@@ -17,8 +17,10 @@ use std::io::{Seek, SeekFrom, Write};
 use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
+use web_time::Instant;
 
 use crate::encode::{mix, pcm_bytes};
+use crate::pipeline::Stage;
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
 pub(crate) const OPUS_RATE: u32 = 48_000;
@@ -263,6 +265,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         let pixels: Vec<Vec<u8>> =
             job.frames(comp, (i..end).collect(), |_, img| job.pixels(&img, comp, if alpha { Channels::Rgba } else { colour_channels }, w, h)).await;
         let mut frames: Vec<Frame> = Vec::with_capacity(pixels.len());
+        let t = Instant::now();
         for (j, px) in pixels.iter().enumerate() {
             let (color, a) = rayon::join(
                 || {
@@ -280,11 +283,14 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             frames.push(Frame { ms: frame_ms(k), track: 1, key: color.key, prev_ms: (k > 0).then(|| frame_ms(k - 1)), data: color.data, alpha: a });
         }
         drop(pixels);
+        job.add_time(Stage::Encode, t);
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut frames, end >= total);
+        job.timed_if(with_audio, Stage::Audio, || audio_until(t_end, &mut frames, end >= total));
+        let t = Instant::now();
         let c = cluster(&mut frames);
         file.write_all(&c).map_err(io)?;
         seg_len += c.len() as u64;
+        job.add_time(Stage::Write, t);
         st.advance(end - i)?;
         i = end;
     }
@@ -305,7 +311,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     file.write_all(&size).map_err(io)?;
     file.seek(SeekFrom::End(0)).map_err(io)?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
 }
 
 // ---------------------------------------------------------------- audio-only outputs
@@ -349,7 +355,7 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         let sample = start + done as i64;
         let t = Tick::from_units(sample, i64::from(sr));
         let t = if t.to_units_floor(i64::from(sr)) < sample { Tick(t.0.saturating_add(1)) } else { t };
-        pcm.extend(pcm_bytes(&mix(job, t, k, sr), fmt, aiff));
+        pcm.extend(job.timed(Stage::Audio, || pcm_bytes(&mix(job, t, k, sr), fmt, aiff)));
         done += k;
         let now = (done as u64 * total_frames / n.max(1) as u64).min(total_frames);
         if now > reported && st.total > 0 {
@@ -421,11 +427,13 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
             out.push(0);
         }
     }
+    let t = Instant::now();
     let path = job.place(job.path, out.len() as u64);
     let mut file = job.create(&path)?;
     file.write_all(&out).map_err(io)?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: 0, height: 0, seconds: 0.0, bytes, audio: true, log: None, overflow: vec![] })
+    job.add_time(Stage::Write, t);
+    Ok(Report { path, frames: 0, width: 0, height: 0, seconds: 0.0, bytes, audio: true, log: None, overflow: vec![], timing: Default::default() })
 }
 
 #[cfg(test)]

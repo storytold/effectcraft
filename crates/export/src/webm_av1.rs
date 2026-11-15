@@ -12,6 +12,7 @@ use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
 use crate::encode::VideoEncoder;
 use crate::encode::mix;
+use crate::pipeline::Stage;
 use crate::webm::{CLUSTER, EBML, INFO, OPUS_RATE, SEGMENT, TRACK_ENTRY, TRACKS, el, el_float, el_str, el_uint, id_bytes, opus_encoder, vint};
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
@@ -154,13 +155,13 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), |_, img| job.pixels(&img, comp, channels, w, h)).await;
         for (j, px) in frames.iter().enumerate() {
             let k = i + j as u64;
-            for p in venc.encode(px, k)? {
+            for p in job.timed(Stage::Encode, || venc.encode(px, k))? {
                 blocks.push(Block { ms: frame_ms(k), track: 1, key: p.key, data: p.data });
             }
         }
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut blocks, end >= total);
-        flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
+        job.timed_if(with_audio, Stage::Audio, || audio_until(t_end, &mut blocks, end >= total));
+        job.timed(Stage::Write, || flush_blocks(&mut blocks, &mut file, &mut seg_len))?;
         st.advance(end - i)?;
         i = end;
     }
@@ -175,5 +176,5 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     file.write_all(&size).map_err(io)?;
     file.seek(SeekFrom::End(0)).map_err(io)?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
 }

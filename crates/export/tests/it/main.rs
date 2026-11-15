@@ -3,6 +3,7 @@
 mod audio_sample_positions;
 mod av1_encoder;
 mod banding;
+mod export_timing;
 mod exr_scene_linear;
 mod h264_gpu_yuv;
 mod hevc_av1_roundtrip;

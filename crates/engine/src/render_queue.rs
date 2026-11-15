@@ -10,7 +10,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use effectcraft_project::render_queue::{OutputFormat, OutputModule, PostRenderAction, RenderQueueItem, RenderStatus, TemplateVars, expand_template};
+use effectcraft_project::render_queue::{
+    OutputFormat, OutputModule, PostRenderAction, RenderQueueItem, RenderStatus, RenderTiming, TemplateVars, expand_template,
+};
 use effectcraft_project::{ItemId, ItemKind, LayerSource, Project};
 use effectcraft_render::{ExprHost, FootageSource};
 use serde::{Deserialize, Serialize};
@@ -88,6 +90,9 @@ pub struct ExportResult {
     /// Files that went to storage overflow folders.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overflow: Vec<String>,
+    /// Where the time went and what ran the job (the render log's summary line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<RenderTiming>,
 }
 
 /// Encodes render queue items (implemented by the export layer).
@@ -141,8 +146,19 @@ pub struct JobState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum ItemUpdate {
-    Started { id: u64, unix: u64 },
-    Finished { id: u64, status: RenderStatus, seconds: f64, output: Option<String> },
+    Started {
+        id: u64,
+        unix: u64,
+    },
+    Finished {
+        id: u64,
+        status: RenderStatus,
+        seconds: f64,
+        output: Option<String>,
+        /// Where the time went (done items only).
+        #[serde(default)]
+        timing: Option<RenderTiming>,
+    },
 }
 
 #[derive(Default)]
@@ -194,8 +210,12 @@ impl JobShared {
                     item.insert("statusLabel".into(), json!(RenderStatus::Rendering.label()));
                     item.insert("started".into(), json!(unix));
                     item.insert("render_time".into(), Value::Null);
+                    item.remove("last_timing");
                 }
-                ItemUpdate::Finished { status, seconds, output, .. } => {
+                ItemUpdate::Finished { status, seconds, output, timing, .. } => {
+                    if let Some(timing) = timing {
+                        item.insert("last_timing".into(), json!(timing));
+                    }
                     item.insert("status".into(), json!(status));
                     item.insert("statusLabel".into(), json!(status.label()));
                     item.insert("render_time".into(), json!(seconds));
@@ -361,7 +381,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
     for (k, modules) in w.items.iter().enumerate() {
         let Some((item, _)) = modules.first() else { continue };
         if shared.cancel.load(Ordering::Relaxed) {
-            lock(&shared.updates).push(ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds: 0.0, output: None });
+            lock(&shared.updates).push(ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds: 0.0, output: None, timing: None });
             continue;
         }
         let t1 = web_time::Instant::now();
@@ -422,11 +442,11 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         }
         let seconds = t1.elapsed().as_secs_f64();
         let up = match r {
-            Ok(res) => ItemUpdate::Finished { id: item.id, status: RenderStatus::Done, seconds, output: Some(res.path) },
-            Err(e) if e == CANCELLED => ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds, output: None },
+            Ok(res) => ItemUpdate::Finished { id: item.id, status: RenderStatus::Done, seconds, output: Some(res.path), timing: res.timing },
+            Err(e) if e == CANCELLED => ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds, output: None, timing: None },
             Err(e) => {
                 log::warn!("render queue: item {} failed: {e}", item.id);
-                ItemUpdate::Finished { id: item.id, status: RenderStatus::Failed(e), seconds, output: None }
+                ItemUpdate::Finished { id: item.id, status: RenderStatus::Failed(e), seconds, output: None, timing: None }
             }
         };
         lock(&shared.updates).push(up);
@@ -675,7 +695,13 @@ impl Session {
                         let mut updates = lock(&sh.updates);
                         for id in pending.into_iter().skip(completed) {
                             if !updates.iter().any(|u| matches!(u, ItemUpdate::Finished { id: done, .. } if *done == id)) {
-                                updates.push(ItemUpdate::Finished { id, status: RenderStatus::Failed(error.to_string()), seconds: 0.0, output: None });
+                                updates.push(ItemUpdate::Finished {
+                                    id,
+                                    status: RenderStatus::Failed(error.to_string()),
+                                    seconds: 0.0,
+                                    output: None,
+                                    timing: None,
+                                });
                             }
                         }
                         lock(&sh.state).finished = true;
@@ -707,7 +733,13 @@ impl Session {
                         let done = finished.contains(id)
                             || self.project.render_queue.iter().any(|i| i.id == *id && matches!(i.status, RenderStatus::Done | RenderStatus::Failed(_)));
                         if !done {
-                            lock(&j.shared.updates).push(ItemUpdate::Finished { id: *id, status: RenderStatus::UserStopped, seconds: 0.0, output: None });
+                            lock(&j.shared.updates).push(ItemUpdate::Finished {
+                                id: *id,
+                                status: RenderStatus::UserStopped,
+                                seconds: 0.0,
+                                output: None,
+                                timing: None,
+                            });
                         }
                     }
                     lock(&j.shared.state).finished = true;
@@ -739,14 +771,18 @@ impl Session {
                             i.status = RenderStatus::Rendering;
                             i.started = Some(*unix);
                             i.render_time = None;
+                            i.last_timing = None;
                         }
                     }
-                    ItemUpdate::Finished { id, status, seconds, output } => {
+                    ItemUpdate::Finished { id, status, seconds, output, timing } => {
                         if let Some(i) = p.render_queue.iter_mut().find(|i| i.id == *id) {
                             i.status = status.clone();
                             i.render_time = Some(*seconds);
                             if output.is_some() {
                                 i.last_output = output.clone();
+                            }
+                            if timing.is_some() {
+                                i.last_timing = timing.clone();
                             }
                             if let (RenderStatus::Done, Some(o)) = (status, output)
                                 && !i.post_render.is_none()
