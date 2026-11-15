@@ -53,21 +53,22 @@ fn exchange_files(dir: &Path) -> Vec<String> {
 fn check() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let cli = std::env::var_os("NEXTEST_BIN_EXE_effectcraft_cli").unwrap_or_else(|| env!("CARGO_BIN_EXE_effectcraft-cli").into());
-    let tmp = std::env::temp_dir().join(format!("ec-cli-helper-exit-{}", std::process::id()));
-    std::fs::create_dir_all(tmp.join("config")).map_err(|e| e.to_string())?;
+    // A new folder of our own (never an earlier run's), removed when `dir` drops, on every return.
+    let dir = tempfile::Builder::new().prefix("ec-cli-helper-exit-").tempdir().map_err(|e| e.to_string())?;
+    let tmp = dir.path();
+    std::fs::create_dir(tmp.join("config")).map_err(|e| e.to_string())?;
     let out = Command::new(cli)
         .args(["run", "--empty", "effect.helpers.scan", "{}", "comp.new", r#"{"name":"C","width":8,"height":8}"#])
         .args(["layer.newSolid", "{}", "effect.apply", r#"{"effect":"org.test.cli.keep"}"#])
         .env("EFFECTCRAFT_HELPER_PATH", &exe)
         .env("EFFECTCRAFT_CONFIG_DIR", tmp.join("config"))
-        .env("TMP", &tmp)
-        .env("TEMP", &tmp)
-        .env("TMPDIR", &tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .env("TMPDIR", tmp)
         .output()
         .map_err(|e| e.to_string())?;
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    let left = exchange_files(&tmp);
-    let _ = std::fs::remove_dir_all(&tmp);
+    let left = exchange_files(tmp);
     if !out.status.success() || !said.contains("org.test.cli.keep") {
         return Err(format!("the CLI didn't load the helper's effect: {said}"));
     }
