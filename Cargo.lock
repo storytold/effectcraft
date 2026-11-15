@@ -1104,6 +1104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-audio"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=8cfbbc7597221c64f9360657e9acb11a7c79e79b#8cfbbc7597221c64f9360657e9acb11a7c79e79b"
+dependencies = [
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8cfbbc7597221c64f9360657e9acb11a7c79e79b)",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-doc"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
@@ -1202,6 +1211,11 @@ source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b4255
 dependencies = [
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "craft-media"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=8cfbbc7597221c64f9360657e9acb11a7c79e79b#8cfbbc7597221c64f9360657e9acb11a7c79e79b"
 
 [[package]]
 name = "craft-media"
@@ -1717,7 +1731,7 @@ dependencies = [
 name = "effectcraft-export"
 version = "0.24.1"
 dependencies = [
- "craft-audio",
+ "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
  "craft-video",
  "effectcraft-color",
@@ -1883,7 +1897,8 @@ dependencies = [
 name = "effectcraft-media"
 version = "0.24.1"
 dependencies = [
- "craft-audio",
+ "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
+ "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8cfbbc7597221c64f9360657e9acb11a7c79e79b)",
  "craft-docpath",
  "craft-dpx",
  "craft-exr",
@@ -1932,7 +1947,7 @@ dependencies = [
 name = "effectcraft-opusenc"
 version = "0.24.1"
 dependencies = [
- "craft-audio",
+ "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
 ]
 
 [[package]]
