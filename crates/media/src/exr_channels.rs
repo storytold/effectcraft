@@ -409,8 +409,15 @@ struct Entry {
 
 impl Entry {
     /// Dropping it would free nothing or lose a decode in progress: an effect (or a picture
-    /// waiting for its effects) still holds its planes, or it is decoding.
+    /// waiting for its effects) still holds its planes, someone is using the slot, or it is decoding.
     fn in_use(&self) -> bool {
+        // `get_or_init` hands an active caller a borrow of the OnceLock value before that caller
+        // can clone the decoded Arc. Keep the entry while any caller still holds this slot, or a
+        // concurrent account/eviction can remove it in that gap and make the next request decode
+        // the same file again.
+        if Arc::strong_count(&self.slot) > 1 {
+            return true;
+        }
         match self.slot.get() {
             None => true,
             Some((None, _)) => false,
@@ -840,6 +847,21 @@ mod tests {
         });
         assert_eq!(cache.decodes(), frames as u64, "one decode per frame");
         assert_eq!(reads.load(Ordering::Relaxed), frames as u64);
+    }
+
+    #[test]
+    fn cache_does_not_evict_a_slot_while_a_caller_is_using_it() {
+        let bytes: Arc<[u8]> = flat(&["R", "G", "B", "A"], (32, 32), 0.25).into();
+        let one = 4 * 32 * 32 * 4 + 4;
+        let cache = ChannelCache::new(one);
+        drop(cache.get("/active.exr", Use::Channels, || Some(bytes.clone())));
+        let active_slot = cache.lock().entries.iter().find(|entry| entry.path == "/active.exr").unwrap().slot.clone();
+        drop(cache.get("/next.exr", Use::Channels, || Some(bytes.clone())));
+        assert!(cache.cached().contains(&"/active.exr".to_string()), "an active caller pins the slot");
+
+        drop(active_slot);
+        drop(cache.get("/newest.exr", Use::Channels, || Some(bytes.clone())));
+        assert!(!cache.cached().contains(&"/active.exr".to_string()), "an idle slot is eligible for eviction");
     }
 
     /// #474: a decode that panics doesn't leave its file "decoding" in the cache (never dropped,

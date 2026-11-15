@@ -11,11 +11,11 @@
 //! progress per second and reported.
 
 use crate::{Layer as AepLayer, MaskAtom, MaskMode as AepMode, PropNode, ShapePath as AepPath, ValueSource};
-use effectcraft_keyframe::{Ease, Interp, Keyframe, ShapePath, Value};
+use effectcraft_keyframe::{Interp, Keyframe, ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{GroupKind, MaskMode, Node, PropGroup as EcGroup};
 
-use crate::import::props::{Kind, LIMIT, import_expression, import_keys, interp};
+use crate::import::props::{Kind, LIMIT, ease, import_expression, import_keys, interp, sort_unique};
 use crate::import::report::{Collector, LossCategory};
 use crate::import::time::TimeMap;
 
@@ -132,7 +132,7 @@ fn import_mask(atom: &MaskAtom<'_, '_>, index: usize, name: &str, what: &str, ml
     let first = match first {
         Ok(p) => p,
         Err(why) => {
-            col.lose(LossCategory::Masks, format!("{what}: not imported, {why}"));
+            col.lose_with(LossCategory::Masks, || format!("{what}: not imported, {why}"));
             return None;
         }
     };
@@ -142,11 +142,11 @@ fn import_mask(atom: &MaskAtom<'_, '_>, index: usize, name: &str, what: &str, ml
                 AepMode::Other(c) => c,
                 _ => 0,
             };
-            col.lose(LossCategory::Masks, format!("{what}: mode code {shown} is not known, imported as Add"));
+            col.lose_with(LossCategory::Masks, || format!("{what}: mode code {shown} is not known, imported as Add"));
             MaskMode::Add
         }),
         None => {
-            col.lose(LossCategory::DamagedData, format!("{what}: mode and invert switch unreadable, Add used"));
+            col.lose_with(LossCategory::DamagedData, || format!("{what}: mode and invert switch unreadable, Add used"));
             MaskMode::Add
         }
     };
@@ -188,14 +188,14 @@ fn import_mask(atom: &MaskAtom<'_, '_>, index: usize, name: &str, what: &str, ml
 fn set_static(g: &mut EcGroup, id: &str, value: Value, source: ValueSource, valid: impl Fn(&Value) -> bool, what: &str, col: &mut Collector) {
     match source {
         ValueSource::Default | ValueSource::Keyframed => {}
-        ValueSource::Unreadable => col.lose(LossCategory::DamagedData, format!("{what}: {id} unreadable, default used")),
+        ValueSource::Unreadable => col.lose_with(LossCategory::DamagedData, || format!("{what}: {id} unreadable, default used")),
         ValueSource::Stored => {
             if crate::import::props::sane(&value) && valid(&value) {
                 if let Some(p) = g.get_mut(id) {
                     p.value = value;
                 }
             } else {
-                col.lose(LossCategory::DamagedData, format!("{what}: {id} holds a number that is not valid, default used"));
+                col.lose_with(LossCategory::DamagedData, || format!("{what}: {id} holds a number that is not valid, default used"));
             }
         }
     }
@@ -213,25 +213,25 @@ pub(crate) fn import_path_keys(
     col: &mut Collector,
 ) {
     let Some(list) = path.keys() else {
-        col.lose(LossCategory::DamagedData, format!("{what}: path keyframes unreadable, the first shape is static"));
+        col.lose_with(LossCategory::DamagedData, || format!("{what}: path keyframes unreadable, the first shape is static"));
         return;
     };
     let records: Vec<_> = list.keyframes().collect();
     if records.len() != shapes.len() {
-        col.lose(LossCategory::DamagedData, format!("{what}: {} path keyframes but {} shapes, the first shape is static", records.len(), shapes.len()));
+        col.lose_with(LossCategory::DamagedData, || format!("{what}: {} path keyframes but {} shapes, the first shape is static", records.len(), shapes.len()));
         return;
     }
     let scale = path.time_scale().filter(|s| *s != 0).unwrap_or(tm.timescale);
     let mut keys: Vec<Keyframe> = Vec::new();
     for (rec, shape) in records.iter().zip(shapes) {
         let Some(units) = rec.time_units() else {
-            col.lose(LossCategory::DamagedData, format!("{what}: unreadable path keyframe"));
+            col.lose_with(LossCategory::DamagedData, || format!("{what}: unreadable path keyframe"));
             continue;
         };
         let path = match shape.as_ref().ok_or("its shape is unreadable").and_then(|s| to_path(s, size)) {
             Ok(p) => p,
             Err(why) => {
-                col.lose(LossCategory::DamagedData, format!("{what}: a path keyframe was dropped, {why}"));
+                col.lose_with(LossCategory::DamagedData, || format!("{what}: a path keyframe was dropped, {why}"));
                 continue;
             }
         };
@@ -241,20 +241,25 @@ pub(crate) fn import_path_keys(
         if key.in_interp == Interp::Bezier || key.out_interp == Interp::Bezier {
             // The ease at byte 24 (599, 700): influences as fractions; a speed of 0 is exact, the
             // unit of another speed is not verified (taken as progress per second).
-            match rec.ease().filter(|e| [e.in_speed, e.in_influence, e.out_speed, e.out_influence].iter().all(|v| v.is_finite())) {
-                Some(e) => {
+            // The same rule as every other key's ease (`props::ease`): a speed beyond its limit is
+            // unreadable, not imported as it is.
+            match rec.ease().and_then(path_eases) {
+                Some((in_e, out_e)) => {
+                    let unverified = (key.in_interp == Interp::Bezier && in_e.speed != 0.0) || (key.out_interp == Interp::Bezier && out_e.speed != 0.0);
                     if key.in_interp == Interp::Bezier {
-                        key.in_ease = vec![Ease { speed: e.in_speed, influence: e.in_influence.clamp(0.001, 1.0) }];
+                        key.in_ease = vec![in_e];
                     }
                     if key.out_interp == Interp::Bezier {
-                        key.out_ease = vec![Ease { speed: e.out_speed, influence: e.out_influence.clamp(0.001, 1.0) }];
+                        key.out_ease = vec![out_e];
                     }
-                    if (key.in_interp == Interp::Bezier && e.in_speed != 0.0) || (key.out_interp == Interp::Bezier && e.out_speed != 0.0) {
-                        col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: path key ease speed imported unverified (only speed 0 is sampled)"));
+                    if unverified {
+                        col.lose_with(LossCategory::ApproximatedKeyframes, || {
+                            format!("{what}: path key ease speed imported unverified (only speed 0 is sampled)")
+                        });
                     }
                 }
                 None => {
-                    col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: bezier path key read as linear (its ease is unreadable)"));
+                    col.lose_with(LossCategory::ApproximatedKeyframes, || format!("{what}: bezier path key read as linear (its ease is unreadable)"));
                     key.in_interp = if key.in_interp == Interp::Bezier { Interp::Linear } else { key.in_interp };
                     key.out_interp = if key.out_interp == Interp::Bezier { Interp::Linear } else { key.out_interp };
                 }
@@ -267,12 +272,7 @@ pub(crate) fn import_path_keys(
     if keys.is_empty() {
         return;
     }
-    keys.sort_by_key(|k| k.time);
-    let before = keys.len();
-    keys.dedup_by_key(|k| k.time);
-    if keys.len() != before {
-        col.lose(LossCategory::DamagedData, format!("{what}: path keyframes at the same time"));
-    }
+    sort_unique(&mut keys, what, "path keyframes", col);
     // The first key's incoming and the last key's outgoing ease mean nothing.
     if let Some(first) = keys.first_mut() {
         first.in_ease.clear();
@@ -285,4 +285,27 @@ pub(crate) fn import_path_keys(
         prop.value = first.value.clone();
     }
     prop.keys = keys;
+}
+
+/// The in and out ease of a mask path key, under the rule of every other key's ease
+/// (`props::ease`); `None` when either side cannot be used.
+fn path_eases(e: crate::KeyEase) -> Option<(effectcraft_keyframe::Ease, effectcraft_keyframe::Ease)> {
+    Some((ease(e.in_speed, e.in_influence, 1.0)?, ease(e.out_speed, e.out_influence, 1.0)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_ease_speed_beyond_the_property_limit_is_unreadable() {
+        let e = |speed: f64| crate::KeyEase { in_speed: speed, in_influence: 0.5, out_speed: 0.0, out_influence: 2.0 };
+        let (i, o) = path_eases(e(3.0)).expect("usable");
+        assert_eq!((i.speed, i.influence, o.speed, o.influence), (3.0, 0.5, 0.0, 1.0));
+        // Finite but far beyond what a property key accepts (before, only finiteness was checked).
+        assert!(path_eases(e(1e12)).is_none());
+        assert!(path_eases(e(-1e12)).is_none());
+        assert!(path_eases(e(f64::NAN)).is_none());
+        assert!(path_eases(crate::KeyEase { out_speed: 1e12, ..e(0.0) }).is_none());
+    }
 }

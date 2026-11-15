@@ -23,7 +23,7 @@ effectcraft-model = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
 craft-dpx = { workspace = true }
-craft-exr = { workspace = true }
+craft-exr = { workspace = true, features = ["decode"] }
 craft-gif = { workspace = true }
 craft-webp = { workspace = true }
 craft-audio = { workspace = true }
