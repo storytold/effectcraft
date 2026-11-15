@@ -571,7 +571,7 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
 /// definition, OpenEXR premultiplied); TGA, TIFF and movies with alpha don't.
 fn alpha_is_labeled(path: &str, codec: &str) -> bool {
     let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    matches!(ext.as_str(), "png" | "gif" | "webp" | "psd" | "psb" | "exr" | "svg" | "jpg" | "jpeg" | "ai" | "pdf" | "eps" | "vectorcraft")
+    matches!(ext.as_str(), "png" | "gif" | "webp" | "psd" | "psb" | "exr" | "svg" | "jpg" | "jpeg" | "ai" | "pdf" | "eps" | "epsf" | "epsi" | "vectorcraft")
         || codec.eq_ignore_ascii_case("PSD")
 }
 
