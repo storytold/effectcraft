@@ -440,8 +440,10 @@ static DECODE_ASKING: Mutex<()> = Mutex::new(());
 const DECODE_ASKS: usize = 2;
 
 fn store_decode_limit(bytes: usize) {
-    if DECODE_LIMIT.swap(bytes, Ordering::Relaxed) != bytes {
-        DECODE_GENERATION.fetch_add(1, Ordering::Relaxed);
+    // (the limit before its generation, both sequentially consistent: whoever sees the new
+    // generation sees the new limit)
+    if DECODE_LIMIT.swap(bytes, Ordering::SeqCst) != bytes {
+        DECODE_GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -456,7 +458,7 @@ pub fn set_decode_limit(bytes: Option<usize>) {
 /// Changes whenever [`decode_limit`] gives another answer: a request refused for its size is
 /// asked again after that.
 pub fn decode_limit_generation() -> u64 {
-    DECODE_GENERATION.load(Ordering::Relaxed)
+    DECODE_GENERATION.load(Ordering::SeqCst)
 }
 
 /// Where [`decode_limit`] reads the limit from while nothing set it: the CLI and the MCP server
@@ -475,10 +477,10 @@ pub fn decode_limit(floor: usize, need: usize) -> usize {
     if need <= floor || cfg!(target_arch = "wasm32") {
         return floor;
     }
-    if DECODE_LIMIT.load(Ordering::Relaxed) == 0 && DECODE_UNANSWERED.load(Ordering::Relaxed) < DECODE_ASKS {
+    if DECODE_LIMIT.load(Ordering::SeqCst) == 0 {
         let _asking = DECODE_ASKING.lock().unwrap_or_else(PoisonError::into_inner);
-        // (another thread may have just read it)
-        if DECODE_LIMIT.load(Ordering::Relaxed) == 0 {
+        // (another thread may have just read it, or have used up the asks)
+        if DECODE_LIMIT.load(Ordering::SeqCst) == 0 && DECODE_UNANSWERED.load(Ordering::Relaxed) < DECODE_ASKS {
             let source = *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner);
             match source.and_then(|read| read()) {
                 Some(bytes) => store_decode_limit(bytes),
@@ -488,7 +490,7 @@ pub fn decode_limit(floor: usize, need: usize) -> usize {
             }
         }
     }
-    floor.max(DECODE_LIMIT.load(Ordering::Relaxed))
+    floor.max(DECODE_LIMIT.load(Ordering::SeqCst))
 }
 
 #[cfg(test)]
