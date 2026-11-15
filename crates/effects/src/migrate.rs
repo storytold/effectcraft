@@ -210,17 +210,17 @@ fn prop_at<'a>(g: &'a mut PropGroup, id: &str) -> Option<&'a mut Property> {
     }
 }
 
-fn group_at<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
+fn group_at<'a>(spec: &EffectSpec, g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
     let (first, rest) = match path.split_once('/') {
         Some((a, b)) => (a, Some(b)),
         None => (path, None),
     };
     if g.sub(first).is_none() {
-        g.children.push(ids.group(first, group_name(first)).into());
+        g.children.push(ids.group(first, &group_name(spec, first)).into());
     }
     let sub = g.sub_mut(first)?;
     match rest {
-        Some(r) => group_at(sub, ids, r),
+        Some(r) => group_at(spec, sub, ids, r),
         None => Some(sub),
     }
 }
@@ -321,7 +321,7 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                 Some(i) if i <= sub.children.len() => sub.children.insert(i, pr.into()),
                 _ => sub.children.push(pr.into()),
             };
-            match path.and_then(|path| group_at(g, ids, path)) {
+            match path.and_then(|path| group_at(spec, g, ids, path)) {
                 Some(sub) => at(sub),
                 None => at(g),
             }
@@ -343,7 +343,7 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                 src.hold_only = true;
                 src
             });
-            match path.and_then(|path| group_at(g, ids, path)) {
+            match path.and_then(|path| group_at(spec, g, ids, path)) {
                 Some(sub) => sub.children.push(src.into()),
                 None => g.children.push(src.into()),
             }
@@ -355,19 +355,19 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         pr.value = Value::Bool(on);
     }
     // Refresh twirl-down group names.
-    fn names(g: &mut PropGroup) {
+    fn names(spec: &EffectSpec, g: &mut PropGroup) {
         for c in &mut g.children {
             if let Node::Group(sg) = c {
-                let n = group_name(&sg.match_id);
+                let n = group_name(spec, &sg.match_id);
                 if n != sg.match_id {
-                    sg.name = n.to_string();
+                    sg.name = n;
                 }
-                names(sg);
+                names(spec, sg);
             }
         }
     }
     if !USER_EDITED_CATEGORIES.contains(&spec.category) && spec.params.iter().any(|p| p.id.contains('/')) {
-        names(g);
+        names(spec, g);
     }
     *g != before
 }
