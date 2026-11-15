@@ -183,14 +183,17 @@ pub(crate) struct ReadRequest {
     pub(crate) rows: Option<Range<i64>>,
     /// Every 2^level-th row and column of the display window (0: full resolution).
     pub(crate) level: u32,
-    /// The most bytes of planes the read may allocate.
+    /// The most bytes of planes the read may allocate (the caller's own limit; `usize::MAX`: only
+    /// the system's, [`effectcraft_render::memory::decode_limit`]).
     pub(crate) max_bytes: usize,
+    /// The fixed limit the system's memory may raise ([`MAX_DECODE_BYTES`]).
+    pub(crate) floor: usize,
 }
 
 impl ReadRequest {
     /// Every row of `channels` at full resolution.
     pub(crate) fn full(channels: Vec<usize>) -> ReadRequest {
-        ReadRequest { channels, rows: None, level: 0, max_bytes: MAX_DECODE_BYTES }
+        ReadRequest { channels, rows: None, level: 0, max_bytes: usize::MAX, floor: MAX_DECODE_BYTES }
     }
 }
 
@@ -219,8 +222,10 @@ pub(crate) enum ReadError {
     Cancelled,
 }
 
-/// The most bytes of planes one read allocates (every requested channel is a display-window
-/// plane of f32): a header can ask for far more than the file holds.
+/// The most bytes of planes one read allocates at least (every requested channel is a
+/// display-window plane of f32): a header can ask for far more than the file holds, and a file's
+/// size on disk says nothing about it. With more memory in the machine the limit is higher
+/// ([`effectcraft_render::memory::decode_limit`], #3749).
 #[cfg(target_pointer_width = "64")]
 pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
 #[cfg(not(target_pointer_width = "64"))]
@@ -264,6 +269,19 @@ pub(crate) fn read_planes(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRe
     (planes, stats)
 }
 
+fn gb(bytes: usize) -> f64 {
+    bytes as f64 / f64::from(1u32 << 30)
+}
+
+/// A plane of `n` samples of `fill`; `None` when the system cannot give that memory (an
+/// allocation that fails aborts the process, so it is asked for first).
+pub(crate) fn plane(n: usize, fill: f32) -> Option<Vec<f32>> {
+    let mut samples: Vec<f32> = Vec::new();
+    samples.try_reserve_exact(n).ok()?;
+    samples.resize(n, fill);
+    Some(samples)
+}
+
 fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats: &mut ReadStats) -> Result<Vec<Vec<f32>>, ReadError> {
     let level = req.level.min(16);
     let stride = 1i64 << level;
@@ -271,9 +289,8 @@ fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats:
     let (ow, oh) = level_size((w, h), level);
     let n = ow.checked_mul(oh).ok_or_else(|| ReadError::Unreadable("display window".into()))?;
     let need = n.saturating_mul(req.channels.len()).saturating_mul(std::mem::size_of::<f32>());
-    let most = req.max_bytes.min(MAX_DECODE_BYTES);
+    let most = req.max_bytes.min(effectcraft_render::memory::decode_limit(req.floor, need));
     if need > most {
-        let gb = |b: usize| b as f64 / f64::from(1u32 << 30);
         return Err(ReadError::TooLarge(format!(
             "its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use",
             w,
@@ -290,7 +307,9 @@ fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats:
         if let Some(s) = slots.get_mut(c.part).and_then(|p| p.get_mut(c.channel)) {
             *s = Some(slot);
         }
-        planes.push(vec![c.fill; n]);
+        planes.push(plane(n, c.fill).ok_or_else(|| {
+            ReadError::TooLarge(format!("its {}×{} OpenEXR channels need {:.1} GB of memory, and the system cannot provide that", w, h, gb(need)))
+        })?);
     }
     let rows = req.rows.clone().unwrap_or(0..h as i64);
     let (r0, r1) = (rows.start.max(0), rows.end.min(h as i64));

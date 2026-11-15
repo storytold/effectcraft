@@ -122,6 +122,11 @@ impl Session {
         let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
         accountant.register(&layers);
         accountant.set_budget(b.bytes);
+        // (what one file's decoded planes may take follows it once the RAM is read, at least the
+        // fixed limit; until then the host's reader asks when a request is over that, #3749)
+        if b.installed.is_some() {
+            effectcraft_render::memory::set_decode_limit(Some(b.bytes));
+        }
         // The process's measured memory as well (#3301: memory nobody accounts for, such as GPU
         // staging, effect buffers and the allocator's fragmentation): over the purge limit the
         // caches give way by what it is over, over the hard limit also the frames a playing

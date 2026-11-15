@@ -434,14 +434,15 @@ pub(crate) fn set_cap(path: &str, bytes: usize) {
     CAPS.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), bytes));
 }
 
-/// The most bytes of planes one read of `path` may allocate.
+/// The most bytes of planes one read of `path` may allocate by the caller's own limit (none: the
+/// system's, [`effectcraft_render::memory::decode_limit`]).
 fn cap_of(path: &str) -> usize {
     #[cfg(test)]
     if let Some((_, c)) = CAPS.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(p, _)| p == path) {
         return *c;
     }
     let _ = path;
-    crate::exr_read::MAX_DECODE_BYTES
+    usize::MAX
 }
 
 impl PlaneStore {
