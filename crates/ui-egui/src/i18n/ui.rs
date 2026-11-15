@@ -2712,6 +2712,37 @@ const HEBREW: &[(&str, &str)] = &[
         "Choose Composition ▸ New Composition. Any size works; 1920×1080 is a good start.",
         "בחרו קומפוזיציה ▸ קומפוזיציה חדשה. אפשר להשתמש בכל גודל; 1920×1080 היא נקודת פתיחה טובה.",
     ),
+    // Additional source-checked Hebrew EffectCraft panel controls.
+    ("Click to sample color", "לחץ לדגימת צבע"),
+    ("360 View Orientation", "כיוון תצוגת 360°"),
+    ("Active Camera", "מצלמה פעילה"),
+    ("Active Camera ({})", "מצלמה פעילה ({})"),
+    ("Add Comment", "הוסף הערה"),
+    ("Add Formatting", "הוסף עיצוב"),
+    ("Add Group", "הוסף קבוצה"),
+    ("Aperture", "צמצם"),
+    ("Appearance Mode: {}", "מצב תצוגה: {}"),
+    ("Arrange", "סדר"),
+    ("Blend Mode:", "מצב שילוב:"),
+    ("Blending Mode", "מצב שילוב"),
+    ("Blur Level", "רמת טשטוש"),
+    ("Brush Dynamics", "דינמיקת מברשת"),
+    ("Caching frames", "פריימים נשמרים במטמון"),
+    ("Constrain Proportions", "שמור על יחס ממדים"),
+    ("About...", "אודות..."),
+    ("Alpha", "אלפא"),
+    ("Advanced", "מתקדם"),
+    ("Assign", "הקצה"),
+    ("Auto", "אוטומטי"),
+    ("Blur", "טשטוש"),
+    ("Boundary", "גבול"),
+    ("Casts Shadows", "מטיל צללים"),
+    ("Change Renderer…", "שנה מנוע רינדור…"),
+    ("Channel", "ערוץ"),
+    ("Channel:", "ערוץ:"),
+    ("Chapter:", "פרק:"),
+    ("Clear", "נקה"),
+    ("Clone Options", "אפשרויות שכפול"),
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -10577,6 +10608,24 @@ const FRENCH: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Source-checked Hebrew panel increment: label lookup, interpolation and English fallback.
+    #[test]
+    fn hebrew_effect_panel_increment_resolves_in_catalog() {
+        set_current("he");
+        for (english, translated) in [
+            ("Active Camera", "מצלמה פעילה"),
+            ("Blend Mode:", "מצב שילוב:"),
+            ("Change Renderer…", "שנה מנוע רינדור…"),
+        ] {
+            assert_eq!(tr(english), translated, "Hebrew panel label: {english}");
+        }
+        assert_eq!(tr_args("Active Camera ({})", &[&2]), "מצלמה פעילה (2)");
+        assert_eq!(tr_args("Appearance Mode: {}", &[&"Dark"]), "מצב תצוגה: Dark");
+        set_current("en");
+        assert_eq!(tr("Active Camera"), "Active Camera");
+    }
+
 
     /// Screenshot-backed Hebrew empty-viewer and project-panel controls.
     #[test]
