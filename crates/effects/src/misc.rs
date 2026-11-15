@@ -871,7 +871,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("opacity", "Opacity", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
                 p("direction", "Direction", num(135.0), ParamUi::Angle),
                 p("distance", "Distance", num(5.0), slider(0.0, 32000.0, 0.0, 120.0, 1)),
-                p("softness", "Softness", num(0.0), slider(0.0, 1000.0, 0.0, 250.0, 1)),
+                p("softness", "Softness", num(0.0), slider(0.0, 30000.0, 0.0, 250.0, 1)),
                 p("shadowOnly", "Shadow Only", Value::Bool(false), ParamUi::Checkbox),
             ],
             drop_shadow,
@@ -1034,6 +1034,18 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3464: After Effects' Softness takes 0..30000 (its slider shows 0..250), and `prop.set`
+    /// and the Effect Controls editors clamp to the hard range.
+    #[test]
+    fn drop_shadow_softness_range_matches_after_effects() {
+        let spec = crate::find("ec.perspective.dropshadow").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "softness").unwrap().ui;
+        assert!(
+            matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. } if *min == 0.0 && *max == 30000.0 && *slider_min == 0.0 && *slider_max == 250.0),
+            "{ui:?}"
+        );
     }
 
     #[test]
