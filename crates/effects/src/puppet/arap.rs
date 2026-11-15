@@ -26,16 +26,18 @@
 //! Material should also keep its volume, like rubber, so the fit's target gives way to a change of
 //! shape at constant area and pushes back against a change of area (see [`fit_triangle`]).
 //!
-//! All of that pays only a bounded price for collapse, so a hard push folds the mesh at the pin however
-//! long the solve runs. Triangles close to collapse or far from their area are therefore stiffened and the solve
-//! repeated a bounded number of times (see [`barrier_weight`]). Pins are hard to the end: pins dragged
-//! through each other still land, with whatever folds that takes.
+//! Nothing stiffens a triangle as it nears collapse: every round is the same linear solve, so the
+//! result follows the pins smoothly even where they ask for more than the mesh can give, as two
+//! pins pulled far apart from close together do. (Stiffening each triangle from the shape the
+//! last solve gave it, again and again, kept hard pushes from folding, but there it swung from
+//! pass to pass and settled somewhere new at every small move.) Pins are hard to the end: pins
+//! dragged through each other still land, with whatever folds that takes.
 //!
 //! Triangle weights stiffen regions (Starch); edge-vector targets implement Bend/Advanced pin
 //! rotation and scale. Both systems are symmetric positive definite (a tiny regulariser towards
 //! the initial guess keeps under-constrained meshes well-posed). The matrices don't change
-//! between rounds, so each is factored once (banded Cholesky in reverse Cuthill-McKee order;
-//! stiffened weights refactor into the same storage, in the same order) and a round is two
+//! between rounds, so each is factored once (banded Cholesky in reverse Cuthill-McKee order) and a
+//! round is two
 //! back-substitutions; if a factor can't be built, or would be too large ([`MAX_FACTOR`]),
 //! Jacobi-preconditioned conjugate gradients solve the same system. The rounds stop early once
 //! one moves nothing visibly ([`SETTLED`]).
@@ -323,22 +325,12 @@ struct System {
     a: Sparse,
     free: Vec<bool>,
     factor: Option<Factor>,
-    max_factor: usize,
 }
 
 impl System {
     fn new(a: Sparse, free: Vec<bool>, max_factor: usize) -> System {
         let factor = Factor::new(&a, &free, max_factor);
-        System { a, free, factor, max_factor }
-    }
-
-    /// The system for `a`, a matrix with the same sparsity: refactored in place, in the same order.
-    fn update(&mut self, a: Sparse) {
-        let refactored = self.factor.as_mut().is_some_and(|f| f.factor(&a, &self.free));
-        if !refactored {
-            self.factor = Factor::new(&a, &self.free, self.max_factor);
-        }
-        self.a = a;
+        System { a, free, factor }
     }
 
     fn solve(&self, b: &[f64], x: &mut [f64]) {
@@ -378,20 +370,6 @@ const FIT_PRESSURE: f64 = 0.5;
 /// Bounds on what the fit reads from a triangle, so a collapsed one can't throw its target far.
 const FIT_SMALLEST: f64 = 0.05;
 const FIT_MOST_SHAPE: f64 = 25.0;
-/// Stiffening per squared log of a triangle's area ratio, past a slack of that log. Much more makes
-/// the passes swing rather than settle.
-const AREA_STIFFNESS: f64 = 16.0;
-const AREA_SLACK: f64 = 0.1;
-
-/// Smallest stretch at which a triangle starts getting stiffer. Higher spreads compression further
-/// and costs more of the shape's volume and locality.
-const BARRIER_FROM: f64 = 0.7;
-/// Stretch that counts as fully collapsed (or flipped), which bounds the weight.
-const BARRIER_FLOOR: f64 = 0.03;
-/// Times the weights are updated, each with a new factor, and rounds on each set of weights.
-const BARRIER_PASSES: usize = 4;
-const BARRIER_ROUNDS: usize = 3;
-
 /// Stiffness of a point held inside a triangle, against the mesh's own (Laplacian and bending).
 const POINT_STIFFNESS: f64 = 1e5;
 
@@ -600,8 +578,8 @@ pub(crate) fn deform_with(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64
         system.solve(&by, &mut ys);
         (0..n).map(|i| [xs[i], ys[i]]).collect()
     };
-    let mut tw: Vec<f64> = (0..tris.len()).map(w).collect();
-    let mut system = System::new(assemble(&tw), free, limits.max_factor);
+    let tw: Vec<f64> = (0..tris.len()).map(w).collect();
+    let system = System::new(assemble(&tw), free, limits.max_factor);
     for _ in 0..=refine {
         let next = round(&system, &tw, &cur);
         let step = next.iter().zip(&cur).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
@@ -610,47 +588,7 @@ pub(crate) fn deform_with(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64
             break;
         }
     }
-    // Triangles close to collapse or far from their area get stiffer, and the strain moves on to
-    // their neighbours.
-    for _ in 0..BARRIER_PASSES {
-        let mut active = false;
-        for (k, t) in tris.iter().enumerate() {
-            let stretch = smallest_stretch([rest[t[0]], rest[t[1]], rest[t[2]]], [cur[t[0]], cur[t[1]], cur[t[2]]]);
-            let area_ratio = (tri_area(&cur, t) / tri_area(rest, t).max(1e-12)).max(0.01);
-            let off = (area_ratio.ln().abs() - AREA_SLACK).max(0.0);
-            let next = w(k) * barrier_weight(stretch) * (1.0 + AREA_STIFFNESS * off * off);
-            active |= next != w(k) || tw[k] != w(k);
-            // Half way there in logs: all the way overshoots, and the weights swing.
-            tw[k] = (tw[k] * next).sqrt();
-        }
-        if !active {
-            break;
-        }
-        system.update(assemble(&tw));
-        for _ in 0..BARRIER_ROUNDS {
-            cur = round(&system, &tw, &cur);
-        }
-    }
     cur
-}
-
-/// The smaller singular value of a triangle's deformation gradient, negative if it's flipped.
-fn smallest_stretch(rest: [[f64; 2]; 3], cur: [[f64; 2]; 3]) -> f64 {
-    let g = gradient(rest, cur);
-    let (q, r) = (f64::hypot(g[0] + g[3], g[2] - g[1]) / 2.0, f64::hypot(g[0] - g[3], g[2] + g[1]) / 2.0);
-    if g[0] * g[3] - g[1] * g[2] < 0.0 { -(q - r).abs() } else { (q - r).abs() }
-}
-
-/// How much stiffer a triangle gets at smallest stretch `s`. Rigidity alone pays a bounded price for
-/// squashing a triangle flat or through itself, so the solve would rather fold the mesh at a pin than
-/// compress what's ahead of it. Below [`BARRIER_FROM`] this follows the curvature of the symmetric
-/// Dirichlet energy against rigidity's (the reweighting of Rabinovich et al., "Scalable Locally
-/// Injective Mappings", 2017, as a single weight per triangle so x and y stay separate systems), which
-/// grows as `s⁻³`. Above it nothing changes, so gentle drags stay as rigid as they were.
-fn barrier_weight(s: f64) -> f64 {
-    let curvature = |x: f64| (x - x.powi(-3)) / (x - 1.0);
-    let s = s.max(BARRIER_FLOOR);
-    if s >= BARRIER_FROM { 1.0 } else { curvature(s) / curvature(BARRIER_FROM) }
 }
 
 /// The longer side of the mesh's bounding box.
@@ -937,19 +875,5 @@ mod tests {
         for (p, q) in solved(&factored, n).iter().zip(&solved(&capped, n)) {
             assert!((p - q).abs() < 1e-8, "{p} vs {q}");
         }
-    }
-
-    #[test]
-    fn a_refactored_system_solves_as_a_new_one_does() {
-        let n = 60;
-        let free: Vec<bool> = (0..n).map(|i| i != 3).collect();
-        let stiffer = |i: usize| 1.0 + (i % 7) as f64;
-        let mut s = System::new(springs(n, 1, |_| 2.0), free.clone(), MAX_FACTOR);
-        // The same sparsity with new values: refactored in its storage, to the same numbers.
-        s.update(springs(n, 1, stiffer));
-        assert_eq!(solved(&s, n), solved(&System::new(springs(n, 1, stiffer), free.clone(), MAX_FACTOR), n));
-        // Couplings past the band it was ordered for: ordered and factored afresh.
-        s.update(springs(n, 9, stiffer));
-        assert_eq!(solved(&s, n), solved(&System::new(springs(n, 9, stiffer), free, MAX_FACTOR), n));
     }
 }

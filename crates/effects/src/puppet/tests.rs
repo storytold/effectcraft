@@ -667,7 +667,9 @@ fn the_s_curve_shares_its_strain_out() {
     // smallest singular value -0.73, -0.78 and -0.21, -0.88 (6, 15, 3 and 22 flipped triangles);
     // largest crease 2.82, 4.67 and 1.98, 1.78; largest ring 2.55, 5.62 and 1.15, 1.56 times the
     // mean strain. origin/main had 35 % and 26 % of the strain energy within an edge of the pins.
-    for (triangles, min_s, max_crease) in [(350.0, 0.2, 0.9), (2000.0, 0.25, 0.6)] {
+    // Stiffening triangles near collapse kept the smallest at 0.2 and up; without it one at 350
+    // comes close (1e-4), though none flips.
+    for (triangles, min_s, max_crease) in [(350.0, 0.0, 0.9), (2000.0, 0.2, 0.6)] {
         let (m, pins, d) = s_curve(triangles);
         let (s, crease, _) = creases(&m.verts, &d, &m.tris);
         assert!(s > min_s, "{triangles} triangles: smallest singular value {s}");
@@ -730,7 +732,7 @@ fn the_cross_keeps_its_volume_and_stays_local() {
         let (s, _, _) = creases(&m.verts, &d, &m.tris);
         // Last time: the outline grew 97 % and the corners moved 256 px.
         assert!(grown.abs() < 0.2, "{triangles} triangles: area changed by {grown}");
-        assert!(corner < 40.0 && side < 70.0, "{triangles} triangles: corners moved {corner} px, sides {side} px");
+        assert!(corner < 45.0 && side < 70.0, "{triangles} triangles: corners moved {corner} px, sides {side} px");
         assert!(s > min_s, "{triangles} triangles: smallest singular value {s}");
     }
 }
@@ -760,13 +762,14 @@ fn landed(m: &Mesh, d: &[[f64; 2]], p: [f64; 2]) -> [f64; 2] {
 
 #[test]
 fn a_hard_push_compresses_what_is_ahead_instead_of_folding() {
-    // Before the barrier, at the full drag and however many rounds: a flipped triangle at 350
-    // triangles, area ratios down to -0.02, and cell lengths 0.15 0.16 0.47 0.66 0.74 0.81.
+    // Before the bending and settling terms, at the full drag: a flipped triangle at 350 triangles,
+    // area ratios down to -0.02, and cell lengths 0.15 0.16 0.47 0.66 0.74 0.81. Stiffening
+    // triangles near collapse kept every ratio above 0.2; without it the least is 0.13.
     for triangles in [350.0, 2000.0] {
         for fraction in [0.25, 0.5, 0.75, 1.0] {
             let (m, d) = push_case(triangles, fraction);
             let low = m.tris.iter().map(|t| cross(d[t[0]], d[t[1]], d[t[2]]) / cross(m.verts[t[0]], m.verts[t[1]], m.verts[t[2]])).fold(f64::MAX, f64::min);
-            assert!(low > 0.2, "{triangles} triangles at {fraction}: area ratio {low}");
+            assert!(low > 0.1, "{triangles} triangles at {fraction}: area ratio {low}");
             // No two triangles over one point, on a coarse grid.
             let mut twice = 0;
             for y in (-100..1000).step_by(6) {
@@ -785,9 +788,10 @@ fn a_hard_push_compresses_what_is_ahead_instead_of_folding() {
         let (m, d) = push_case(triangles, 1.0);
         let along: Vec<[f64; 2]> = (0..7).map(|k| landed(&m, &d, [150.0 + 100.0 * k as f64, 450.0])).collect();
         let cells: Vec<f64> = along.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) / 100.0).collect();
-        // Spread along the way, least right ahead of the pin, and reaching the far cell.
-        assert!(cells[0] > 0.25 && cells[5] < 0.78, "{triangles} triangles: cells {cells:?}");
-        assert!(cells.windows(2).all(|w| w[0] < w[1] + 0.02), "{triangles} triangles: cells {cells:?}");
+        // Spread along the way, least just ahead of the pin (the cell it sits in it holds open a
+        // little), and reaching the far cell.
+        assert!(cells[0] > 0.2 && cells[5] < 0.82, "{triangles} triangles: cells {cells:?}");
+        assert!(cells[1..].windows(2).all(|w| w[0] < w[1] + 0.02), "{triangles} triangles: cells {cells:?}");
     }
 }
 
@@ -834,28 +838,48 @@ fn area_change(m: &Mesh, d: &[[f64; 2]]) -> (f64, f64) {
 #[test]
 fn triangles_keep_their_area_in_all_three_stress_tests() {
     // Mean and 95th percentile of |log(area ratio)| at 350 triangles without the area terms:
-    // push 0.205, 0.641; cross 0.277, 0.932; s_curve 0.182, 0.414.
+    // push 0.205, 0.641; cross 0.277, 0.932; s_curve 0.182, 0.414. Stiffening triangles far from
+    // their area brought them to 0.161, 0.385; 0.232, 0.780; 0.126, 0.351, but swung at the
+    // breaking point; the fit's give alone holds them about where they were.
     for triangles in [350.0, 2000.0] {
         let (m, d) = push_case(triangles, 1.0);
         let (mean, p95) = area_change(&m, &d);
-        assert!(mean < 0.18 && p95 < 0.42, "push at {triangles}: {mean} {p95}");
+        assert!(mean < 0.19 && p95 < 0.7, "push at {triangles}: {mean} {p95}");
         let (m, d) = cross_case(triangles);
         let (mean, p95) = area_change(&m, &d);
-        assert!(mean < 0.25 && p95 < 0.82, "cross at {triangles}: {mean} {p95}");
+        assert!(mean < 0.31 && p95 < 0.97, "cross at {triangles}: {mean} {p95}");
         let (m, _, d) = s_curve(triangles);
         let (mean, p95) = area_change(&m, &d);
-        assert!(mean < 0.14 && p95 < 0.38, "s_curve at {triangles}: {mean} {p95}");
+        assert!(mean < 0.18 && p95 < 0.76, "s_curve at {triangles}: {mean} {p95}");
     }
 }
 
 #[test]
 fn material_ahead_of_a_push_bulges_sideways() {
-    // Without the area terms the column ahead of the pin kept its height (1.07 at most).
+    // Without the area terms the column ahead of the pin kept its height (1.07 at most); with
+    // triangles stiffened far from their area it grew to 1.4.
     for triangles in [350.0, 2000.0] {
         let (m, d) = push_case(triangles, 1.0);
         let (a, b) = (landed(&m, &d, [350.0, 350.0]), landed(&m, &d, [350.0, 550.0]));
         let tall = (a[0] - b[0]).hypot(a[1] - b[1]) / 200.0;
-        assert!(tall > 1.35, "{triangles} triangles: height {tall}");
+        assert!(tall > 1.2, "{triangles} triangles: height {tall}");
+    }
+}
+
+#[test]
+fn pins_pulled_apart_past_what_the_mesh_gives_move_it_smoothly() {
+    // Two pins 10 px apart pulled 600 px apart: no mesh can follow, and stiffening triangles from
+    // the last solve's shape swung from pass to pass, so half a pixel more moved it 70 to 470 px.
+    // The pins' leverage alone moves it about 4 px a pixel.
+    let m = rect_mesh(500.0, 500.0, 200.0);
+    let at =
+        |y: f64| solve(&m, &[pin(PinKind::Position, [250.0, 255.0], [250.0, y]), pin(PinKind::Position, [250.0, 245.0], [250.0, -50.0])], default_rounds());
+    let mut last = at(545.0);
+    for k in 1..=10 {
+        let next = at(545.0 + k as f64 * 0.5);
+        let moved = next.iter().zip(&last).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f64::max);
+        assert!(moved < 4.0, "half a pixel more moved the mesh {moved} px");
+        last = next;
     }
 }
 
