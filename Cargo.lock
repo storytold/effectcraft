@@ -1104,6 +1104,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-codepage"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+
+[[package]]
 name = "craft-doc"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
@@ -1218,6 +1223,16 @@ source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b4255
 dependencies = [
  "miniz_oxide 0.9.1",
  "serde_json",
+]
+
+[[package]]
+name = "craft-mime"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+dependencies = [
+ "chrono",
+ "craft-codepage",
+ "encoding_rs",
 ]
 
 [[package]]
@@ -1604,6 +1619,7 @@ name = "effectcraft-aep"
 version = "0.24.1"
 dependencies = [
  "craft-aep",
+ "craft-mime",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-keyframe",
@@ -1619,6 +1635,7 @@ dependencies = [
 name = "effectcraft-automation"
 version = "0.24.1"
 dependencies = [
+ "craft-mime",
  "effectcraft-engine",
  "effectcraft-host",
  "effectcraft-model",
@@ -2116,6 +2133,7 @@ dependencies = [
 name = "effectcraft-track"
 version = "0.24.1"
 dependencies = [
+ "craft-mime",
  "effectcraft-raster",
  "effectcraft-segment",
  "rayon",
@@ -2130,6 +2148,7 @@ version = "0.24.1"
 dependencies = [
  "bytemuck",
  "chrono",
+ "craft-mime",
  "craft-quit",
  "craft-ui",
  "craft-update",
