@@ -209,7 +209,7 @@ pub(crate) struct Interp<'a> {
     cur: Option<Point>,
     start: Option<Point>,
     pending_clip: Option<FillRule>,
-    marked: Vec<Option<usize>>,
+    marked: Vec<Marked>,
     /// The page box in default user space (for `sh`).
     page_box: [f64; 4],
     budget: usize,
@@ -226,6 +226,12 @@ fn affine(v: &[f64]) -> Affine {
         return Affine::IDENTITY;
     }
     Affine::new([v[0], v[1], v[2], v[3], v[4], v[5]])
+}
+
+enum Marked {
+    Other,
+    Layer(usize),
+    Text(bool),
 }
 
 /// The most tiles one tiling-pattern fill draws.
@@ -488,7 +494,7 @@ impl<'a> Interp<'a> {
                 }
                 "d1" => self.gs.lock_color = true,
                 "BI" => self.inline_image(&mut lx, res),
-                "BMC" => self.marked.push(None),
+                "BMC" => self.marked.push(Marked::Other),
                 "BDC" => {
                     let layer = match (args.first().and_then(Obj::name), args.get(1)) {
                         (Some("OC"), Some(Obj::Name(prop))) => self
@@ -508,21 +514,21 @@ impl<'a> Interp<'a> {
                     };
                     match (layer, actual_text) {
                         (Some(name), _) => {
-                            self.marked.push(Some(self.b.depth()));
+                            self.marked.push(Marked::Layer(self.b.depth()));
                             self.b.open(&name, true);
                         }
                         (None, Some(text)) => {
-                            self.marked.push(Some(self.b.depth()));
-                            self.b.open(&format!("Text: {text}"), false);
+                            let opened = self.b.begin_text(format!("Text: {text}"));
+                            self.marked.push(Marked::Text(opened));
                         }
-                        (None, None) => self.marked.push(None),
+                        (None, None) => self.marked.push(Marked::Other),
                     }
                 }
-                "EMC" => {
-                    if let Some(Some(d)) = self.marked.pop() {
-                        self.close_to(d);
-                    }
-                }
+                "EMC" => match self.marked.pop() {
+                    Some(Marked::Layer(d)) => self.close_to(d),
+                    Some(Marked::Text(true)) => self.b.end_text(),
+                    _ => {}
+                },
                 _ => {}
             }
             // Colour operands set by the device-space shorthands.

@@ -81,6 +81,36 @@ fn blend_modes_inside_clips_reach_the_backdrop() {
 }
 
 #[test]
+fn actual_text_does_not_end_blend_clip_or_soft_mask() {
+    let content = |start: &str, end: &str| {
+        format!(
+            "1 1 0 rg 0 0 200 100 re f q {start} 0 0 150 100 re W n /M gs /Mask gs \
+         0 1 1 rg 0 0 50 100 re f {end} 50 0 150 100 re f Q 1 0 0 rg 175 0 25 100 re f"
+        )
+    };
+    let resources = "/ExtGState << /M << /BM /Multiply >> /Mask << /SMask << /S /Luminosity /G 10 0 R >> >> >>";
+    let objects = || {
+        vec![(
+            10,
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceGray >> >>".into(),
+            Some(b"0.5 g 0 0 200 100 re f".to_vec()),
+        )]
+    };
+    let marked = parse(&page_pdf(&content("/Span << /ActualText (inside) >> BDC", "EMC"), resources, objects())).unwrap();
+    let plain = parse(&page_pdf(&content("", ""), resources, objects())).unwrap();
+    let (a, b) = (render(&marked), render(&plain));
+    for x in [25, 75, 125, 160, 185] {
+        assert!(near(a.get(x, 50), b.get(x, 50)), "x={x}: {:?} != {:?}", a.get(x, 50), b.get(x, 50));
+    }
+    let names = crate::tests::shape_names(&marked);
+    assert_eq!(names.iter().filter(|name| name.as_str() == "Text: inside").count(), 1);
+    assert!(names.iter().any(|name| name == "Path"), "marks after EMC are not labeled: {names:?}");
+    assert!(near(a.get(75, 50), [0.5, 1.0, 0.0, 1.0]), "multiply and mask remain active: {:?}", a.get(75, 50));
+    assert!(near(a.get(160, 50), [1.0, 1.0, 0.0, 1.0]), "clip remains active: {:?}", a.get(160, 50));
+    assert!(near(a.get(185, 50), [1.0, 0.0, 0.0, 1.0]), "Q restores state: {:?}", a.get(185, 50));
+}
+
+#[test]
 fn soft_mask_applies_to_the_masked_group_result() {
     // Two overlapping opaque rectangles under a 50 % grey luminosity mask: the overlap is
     // the top rectangle at half opacity (the mask applies to their composite).
