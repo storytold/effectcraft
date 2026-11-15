@@ -1828,6 +1828,7 @@ dependencies = [
 name = "effectcraft-host"
 version = "0.24.1"
 dependencies = [
+ "craft-vectorcraft-format",
  "effectcraft-engine",
  "effectcraft-export",
  "effectcraft-expr",
@@ -1974,14 +1975,18 @@ dependencies = [
 name = "effectcraft-pdf"
 version = "0.24.1"
 dependencies = [
+ "craft-doc",
  "craft-eps",
  "craft-pdf",
+ "craft-vectorcraft-format",
  "effectcraft-raster",
  "effectcraft-svg",
  "effectcraft-text",
+ "flate2",
  "image",
  "kurbo",
  "miniz_oxide 0.9.1",
+ "serde_json",
  "skrifa",
  "wasm-bindgen-test",
  "zune-jpeg",
@@ -2165,6 +2170,7 @@ dependencies = [
  "effectcraft-segment",
  "effectcraft-text",
  "effectcraft-time",
+ "effectcraft-ui-egui",
  "eframe",
  "egui",
  "egui_extras",

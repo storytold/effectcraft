@@ -1,7 +1,7 @@
 //! Layered and vector stills: Photoshop documents (`effectcraft-psd`: the merged image, or one
 //! layer for footage imported as a composition) and vector files rasterised at any scale: SVG
-//! (`effectcraft-svg`), PDF / Illustrator / EPS (`effectcraft-pdf`; one layer of the file for
-//! footage imported as a composition).
+//! (`effectcraft-svg`), PDF / Illustrator / EPS and the PDF a VectorCraft document carries
+//! (`effectcraft-pdf`; one layer of the file for footage imported as a composition).
 
 use effectcraft_project::{AlphaMode, Footage};
 use effectcraft_raster::Image;
