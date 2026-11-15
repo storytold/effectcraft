@@ -391,6 +391,15 @@ fn warp_analysis_invalidates_and_cancels() {
     let fx = r["effect"].as_u64().unwrap();
     let cid = s.active_comp_id().unwrap();
     assert_eq!(s.execute("warp.status", json!({})).unwrap()["analyzed"], true);
+    // A mask is part of the analysed input (#3535): drawing one clears the analysis, undo keeps it.
+    s.execute_checked("mask.new", json!({"layer": clip.0, "vertices": [[10, 10], [200, 10], [200, 150]]})).unwrap();
+    assert_eq!(s.execute("warp.status", json!({})).unwrap()["analyzed"], false);
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(s.execute("warp.status", json!({})).unwrap()["analyzed"], true);
+    // An effect below it isn't.
+    s.execute_checked("effect.apply", json!({"layers": [clip.0], "effect": "ec.blur.gaussian"})).unwrap();
+    assert_eq!(s.execute("warp.status", json!({})).unwrap()["analyzed"], true);
+    s.execute_checked("edit.undo", json!({})).unwrap();
     // Trimming the layer clears the analysis and queues it again.
     s.execute("layer.timing", json!({"layers": [clip.0], "out": 0.8})).unwrap();
     let st = s.execute("warp.status", json!({})).unwrap();

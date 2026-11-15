@@ -1,6 +1,13 @@
 //! Effect Controls: the selected layer's effects with all parameters, in After Effects'
 //! conventions:
 //!
+//! - the tab's lock icon keeps the panel on the layer it shows whatever is selected next (a
+//!   pick whip from another layer's property can then reach its parameters); deleting that
+//!   layer or replacing the project unlocks it (see [`set_lock`]). The lock holds while the
+//!   locked layer's comp is the active comp: with another comp active the panel shows that
+//!   comp's selection (its edits address layers of the active comp), and the locked layer
+//!   again when its comp is back. The Effect menu of a right-click on empty space applies to
+//!   the selected layers, as in After Effects;
 //! - effect headers with the fx switch, twirl, Reset and About…; click selects the effect
 //!   (Edit ▸ Copy / Paste / Duplicate and Delete then act on it), drag reorders the stack, the
 //!   context menu copies, pastes, duplicates, resets and removes;
@@ -34,8 +41,9 @@ mod panel;
 mod rows;
 mod viewer;
 
-pub(crate) use common::gesture_key;
-pub use common::{choose_files_after_apply, reveal_applied};
+pub use common::{choose_files_after_apply, reveal_applied, set_lock};
+pub(crate) use common::{gesture_key, scope_lock, shown_layer_id};
+pub(crate) use panel::handle_disclosure_key;
 pub use panel::{show, start_rename};
 pub(crate) use rows::toggle_pick;
 pub use viewer::viewer_hook;

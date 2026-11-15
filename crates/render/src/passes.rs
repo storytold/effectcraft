@@ -59,11 +59,25 @@ pub async fn in_passes<'a, T>(accel: Option<&'a dyn Accelerator>, mut render: im
     Passed { value: render(None), passes: MAX_PASSES + 1, accelerated: false }
 }
 
+/// Ends the frame for the accelerator ([`Accelerator::frame_end`]) when dropped: also when the
+/// render panics or the future is dropped between passes.
+struct FrameEnd<'a>(&'a dyn Accelerator);
+impl Drop for FrameEnd<'_> {
+    fn drop(&mut self) {
+        self.0.frame_end();
+    }
+}
+
 /// A top-level comp frame through [`in_passes`] ([`Renderer::comp_frame`] in passes). Backend
 /// Auto picks CPU or GPU for the whole frame (all its passes) and is timed as a whole, as the
-/// frame workers do.
+/// frame workers do. Ends the frame for the accelerator ([`Accelerator::frame_end`]) on every
+/// exit, including a panic.
 pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
-    let Some(a) = r.accel.filter(|a| a.miss_gate().is_some()) else { return r.comp_frame(comp, t) };
+    let Some(a) = r.accel else { return r.comp_frame(comp, t) };
+    let _end = FrameEnd(a);
+    if a.miss_gate().is_none() {
+        return r.comp_frame(comp, t);
+    }
     let mut opts = r.opts;
     let mut auto = None;
     if opts.backend == Backend::Auto {
@@ -72,10 +86,10 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
         } else if opts.roi.is_none()
             && let Some(pick) = a.auto_pick()
         {
-            let key = AutoKey::new(comp, opts.scale, false);
-            let gpu = pick.choose(key);
-            opts.backend = if gpu { Backend::Gpu } else { Backend::Cpu };
-            auto = Some((key, gpu));
+            // (a frame cancelled or panicking between passes drops it: ended unmeasured)
+            let ticket = pick.ticket(AutoKey::new(comp, opts.scale, false));
+            opts.backend = if ticket.gpu() { Backend::Gpu } else { Backend::Cpu };
+            auto = Some(ticket);
         }
     }
     let t0 = web_time::Instant::now();
@@ -84,8 +98,8 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     } else {
         in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame(comp, t)).await.value
     };
-    if let (Some((key, chose)), Some(pick)) = (auto, a.auto_pick()) {
-        pick.record(key, chose, t0.elapsed().as_secs_f64() * 1e3);
+    if let Some(t) = auto {
+        t.record(t0.elapsed().as_secs_f64() * 1e3);
     }
     img
 }

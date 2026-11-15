@@ -171,10 +171,11 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             return;
         }
     };
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("mb-scroll"), list);
+    let list = scroll.content;
     let tile = vec2(140.0, 112.0);
     let cols = ((list.width() - 8.0) / tile.x).floor().max(1.0) as usize;
     let mut budget = 2u32;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("mb-scroll"), list);
     let lp = p.with_clip_rect(list);
     let mut actions: Vec<(&str, Value)> = vec![];
     for (i, e) in entries.iter().enumerate() {

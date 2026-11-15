@@ -1,6 +1,6 @@
 //! A fully wired [`Session`]: footage decoding through `effectcraft-media` (FilmCraft's codecs),
 //! the media importer, the expression engine, JavaScript scripting (`effectcraft-script`) and
-//! Render Queue export through `effectcraft-export` (FilmCraft's encoders). Frontends (desktop,
+//! Render Queue export through `effectcraft-export` (craft-libs' encoders). Frontends (desktop,
 //! CLI, MCP, web) start here.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -19,6 +19,9 @@ struct MediaImporter;
 impl Importer for MediaImporter {
     fn probe(&self, path: &str) -> Result<Footage, String> {
         effectcraft_media::probe(path).map_err(|e| e.to_string())
+    }
+    fn probe_noting(&self, path: &str) -> Result<(Footage, Option<String>), String> {
+        effectcraft_media::probe_noting(path).map_err(|e| e.to_string())
     }
 }
 
@@ -62,6 +65,10 @@ impl Exporter for FileExporter {
                     label: job.label.clone(),
                     storage: job.storage,
                     overflow: job.project.render_prefs.overflow_folders.clone(),
+                    caches: job.caches.map(|c| effectcraft_export::JobCaches { gpu: &c.gpu, cpu: &c.cpu }),
+                    renderer: job.renderer,
+                    gpu_frames: job.gpu_frames,
+                    free_memory: Some(&free_memory),
                 },
                 nested_switches: job.nested_switches,
             };
@@ -84,6 +91,11 @@ impl Exporter for FileExporter {
     }
 }
 
+/// The memory the system can hand out now, for an export's Auto CPU frames in flight (#1615).
+fn free_memory() -> Option<u64> {
+    effectcraft_engine::sysinfo::memory().map(|m| m.available)
+}
+
 /// A new session with media, import, expressions, scripting and export enabled.
 pub fn session() -> Session {
     let mut s = Session {
@@ -95,10 +107,38 @@ pub fn session() -> Session {
         expr: Some(Arc::new(effectcraft_expr::Expressions)),
         expr_check: Some(effectcraft_expr::check_syntax),
         plugin_loader: effectcraft_plugin::wasm_available().then_some(effectcraft_plugin::loader as effectcraft_engine::PluginLoader),
+        helpers: helper_hooks(),
+        plugin_previewer: effectcraft_plugin::wasm_available().then_some(effectcraft_plugin::preview as effectcraft_engine::PluginPreviewer),
+        plugins_dir: config_dir().map(|d| d.join("Plug-ins")),
         ..Default::default()
     };
     effectcraft_script::install(&mut s);
     s
+}
+
+/// External effect helpers run as child processes: native builds only.
+#[cfg(not(target_arch = "wasm32"))]
+fn helper_hooks() -> Option<effectcraft_engine::HelperHooks> {
+    use effectcraft_helper_host as hh;
+    // Effects that keep stopping their helper are remembered in the settings folder.
+    if let Some(dir) = config_dir() {
+        hh::blocklist::set_state_dir(dir);
+    }
+    fn scan(retry: bool) -> serde_json::Value {
+        hh::scan_paths(&hh::default_search_paths(config_dir().as_deref()), retry)
+    }
+    Some(effectcraft_engine::HelperHooks { scan, load: hh::load_path, list: hh::list })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn helper_hooks() -> Option<effectcraft_engine::HelperHooks> {
+    None
+}
+
+/// Stop the external effect helpers (when the app quits).
+pub fn stop_helpers() {
+    #[cfg(not(target_arch = "wasm32"))]
+    effectcraft_helper_host::stop_all();
 }
 
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):

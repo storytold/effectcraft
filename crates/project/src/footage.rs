@@ -172,12 +172,12 @@ impl CineonSettings {
     }
 }
 
-/// Cineon log to linear, shared by Interpret Footage ▸ Cineon Settings and the Cineon Converter
-/// effect. `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
+/// Cineon log to linear for Interpret Footage ▸ Cineon Settings and version 1 Cineon Converter
+/// effects. `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
 /// Black and White Points. The result is 0 at the black point and 1 at the white point, raised to
 /// `scale / gamma`, with values above `1 - rolloff / 100` ramped off toward 1 (Highlight Rolloff
 /// 0–100; 0 keeps over-range values). A Gamma below 0.01 is raised to 0.01. Cineon Settings passes
-/// a `scale` of 1 (Gamma 1 gives linear light) and the Cineon Converter passes 1.7 (its default
+/// a `scale` of 1 (Gamma 1 gives linear light) and a version 1 Cineon Converter passes 1.7 (its
 /// Gamma 1.7 gives linear light).
 pub fn cineon_log_to_lin(v: f32, black: f32, white: f32, scale: f32, gamma: f32, rolloff: f32) -> f32 {
     // Kodak printing density: 0.002 density per code value, negative gamma 0.6.
@@ -255,14 +255,27 @@ pub struct Footage {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub alphabetical: bool,
     /// Interpret Footage ▸ Start Timecode ▸ Override Start: the frame (at the footage's frame
-    /// rate) its timecode shows at its first frame. `None` = Use Source File Timecode (0: file
-    /// timecode isn't read). It only relabels source time, as in After Effects.
+    /// rate) its timecode shows at its first frame. `None` = Use Source File Timecode (shown
+    /// from 0: [`Footage::file_timecode`] isn't used here yet). It only relabels source time, as
+    /// in After Effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timecode: Option<i64>,
+    /// The start timecode recorded in the file, in frames at its own frame rate (`native_rate`,
+    /// else `frame_rate`). Read when probing; importing an EDL uses it to turn the list's source
+    /// timecodes into footage time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_timecode: Option<i64>,
     /// Markers the file carries (a WAV's cue points and XMP markers), at footage time. A layer
     /// made from the footage starts with them, and Update Markers From Source copies new ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// PDF / Illustrator footage (`.pdf`, `.ai`; not EPS) from an After Effects project: the page
+    /// is framed as After Effects places it (the ArtBox, `/Rotate` ignored) and drawn to fill
+    /// `width` × `height`, the size After Effects stored, which the layers' anchors and masks are
+    /// measured against (#3099). Other footage (and every project saved before this field) shows
+    /// the page as a PDF viewer does, at its own size.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub placed_page: bool,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -299,7 +312,9 @@ impl Default for Footage {
             page: 0,
             alphabetical: false,
             start_timecode: None,
+            file_timecode: None,
             markers: vec![],
+            placed_page: false,
         }
     }
 }

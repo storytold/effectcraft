@@ -70,6 +70,22 @@ fn flatten(sp: &ShapePath, m: &Mat3) -> Flat {
 }
 
 impl Flat {
+    /// Keep every other point (and the last), with their arc lengths.
+    fn thin(&mut self) {
+        let n = self.pts.len();
+        let keep = |i: usize| i.is_multiple_of(2) || i + 1 == n;
+        let mut i = 0;
+        self.pts.retain(|_| {
+            i += 1;
+            keep(i - 1)
+        });
+        let mut i = 0;
+        self.s.retain(|_| {
+            i += 1;
+            keep(i - 1)
+        });
+    }
+
     /// Arc length of a feather point.
     fn arc_of(&self, f: &FeatherPoint) -> Option<f64> {
         let table = self.seg_tables.get(f.segment)?;
@@ -123,14 +139,39 @@ impl Profile {
     }
 }
 
+/// Most pixel visits (summed over the flattened path's segments) a variable feather's distance
+/// pass may take: a few seconds of work, far beyond a feathered mask at 4K with a radius of a
+/// few hundred pixels. Past it the flattened path is thinned (see [`variable_feather_coverage`]).
+pub const FEATHER_WORK_BUDGET: u64 = 1 << 31;
+
+/// Pixel visits of the distance pass over the polyline `pts`: each segment's box grown by
+/// `reach`, clipped to the `w × h` mask.
+fn feather_work(pts: &[[f64; 2]], reach: f64, w: u32, h: u32) -> u64 {
+    let span = |lo: f64, hi: f64, n: u32| -> u64 {
+        let a = (lo - reach).floor().max(0.0);
+        let b = (hi + reach).ceil().min(f64::from(n) - 1.0);
+        if b >= a { (b - a + 1.0) as u64 } else { 0 }
+    };
+    pts.windows(2)
+        .map(|p| {
+            let (a, b) = (p[0], p[1]);
+            span(a[0].min(b[0]), a[0].max(b[0]), w).saturating_mul(span(a[1].min(b[1]), a[1].max(b[1]), h))
+        })
+        .fold(0u64, u64::saturating_add)
+}
+
 /// Coverage of a mask path with feather points, transformed by `m` (translate + uniform scale)
 /// into a `w × h` mask. `expansion` (layer pixels) grows (>0) or shrinks the mask first;
 /// `linear` selects the Linear feather falloff instead of Smooth.
 pub fn variable_feather_coverage(sp: &ShapePath, m: &Mat3, w: u32, h: u32, expansion: f64, linear: bool) -> Mask {
+    coverage_within(sp, m, (w, h), expansion, linear, FEATHER_WORK_BUDGET)
+}
+
+fn coverage_within(sp: &ShapePath, m: &Mat3, (w, h): (u32, u32), expansion: f64, linear: bool, budget: u64) -> Mask {
     let scale = m.mean_scale();
     let path = to_kurbo(sp);
     let hard = fill_coverage(std::slice::from_ref(&path), m, w, h, FillRule::NonZero);
-    let flat = flatten(sp, m);
+    let mut flat = flatten(sp, m);
     if flat.pts.len() < 2 {
         return hard;
     }
@@ -148,6 +189,16 @@ pub fn variable_feather_coverage(sp: &ShapePath, m: &Mat3, w: u32, h: u32, expan
     let rmax = prof.pts.iter().map(|p| p.1.max(p.2)).fold(0.0, f64::max);
     let exp = expansion * scale;
     let reach = rmax + exp.abs() + 2.0;
+    // Each flattened segment visits its box grown by the reach, so many segments with a reach
+    // spanning the mask would revisit every pixel once per segment. Past the budget the
+    // polyline is thinned (every other point, keeping their arc lengths) until it fits: the
+    // distances move by a fraction of the chords, small next to a feather that wide.
+    while feather_work(&flat.pts, reach, w, h) > budget {
+        if flat.pts.len() <= 8 {
+            return hard;
+        }
+        flat.thin();
+    }
     let (wu, hu) = (w as usize, h as usize);
     let mut dist = vec![f32::INFINITY; wu * hu];
     let mut arc = vec![0.0f32; wu * hu];
@@ -216,6 +267,32 @@ mod tests {
 
     fn at(m: &Mask, x: u32, y: u32) -> f32 {
         m.data[(y * m.width + x) as usize]
+    }
+
+    #[test]
+    fn feather_work_is_bounded_by_thinning_the_path() {
+        // Thousands of vertices with a feather reaching across the mask: the polyline is thinned
+        // until the distance pass fits the budget, and the result is still a feathered edge.
+        let n = 2000;
+        let verts: Vec<[f64; 2]> = (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                [100.0 + 50.0 * a.cos(), 100.0 + 50.0 * a.sin()]
+            })
+            .collect();
+        let mut sp = ShapePath::polygon(&verts, true);
+        sp.feather = vec![FeatherPoint { segment: 0, t: 0.5, radius: 40.0, tension: 0.0 }];
+        let budget = 1 << 22;
+        let full = flatten(&sp, &Mat3::IDENTITY);
+        assert!(feather_work(&full.pts, 42.0, 200, 200) > budget);
+        let m = coverage_within(&sp, &Mat3::IDENTITY, (200, 200), 0.0, true, budget);
+        let unbounded = coverage_within(&sp, &Mat3::IDENTITY, (200, 200), 0.0, true, u64::MAX);
+        // Outside the edge: 1 at the circle falling linearly to 0 at 40 px, close to the
+        // unthinned result.
+        assert!(at(&m, 100, 100) > 0.99);
+        let (thin, exact) = (at(&m, 100, 30), at(&unbounded, 100, 30));
+        assert!(thin > 0.4 && thin < 0.6 && (thin - exact).abs() < 0.05, "{thin} {exact}");
+        assert!(at(&m, 100, 5) < 0.01);
     }
 
     #[test]

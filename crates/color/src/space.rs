@@ -210,6 +210,14 @@ impl ColorSpace {
         }
     }
 
+    /// The primaries and white as the OpenEXR `chromaticities` attribute stores them: red, green,
+    /// blue, white (CIE xy). Every space has a defined mapping: the PQ and HLG spaces are BT.2020
+    /// primaries with D65, the ACES spaces carry the ACES white.
+    pub fn exr_chromaticities(self) -> [[f32; 2]; 4] {
+        let [r, g, b] = self.primaries();
+        [r, g, b, self.white()].map(|c| c.map(|v| v as f32))
+    }
+
     /// The transfer curve.
     pub fn curve(self) -> Curve {
         match self {

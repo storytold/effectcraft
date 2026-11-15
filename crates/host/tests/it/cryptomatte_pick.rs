@@ -82,7 +82,8 @@ fn a_pick_at_preview_resolution_reads_the_pixel_the_preview_shows() {
     let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "x": 2.5, "y": 1.5, "scale": 0.5})).unwrap();
     assert_eq!(r["name"], RIGHT, "{r}");
     let opts = effectcraft_engine::render::RenderOpts { scale: 0.5, ..Default::default() };
-    assert_eq!(s.render(s.active_comp_id().unwrap(), Tick::ZERO, opts).get(1, 0)[3], 1.0);
+    // Matte Only: the matte in RGB over alpha 1 (#3127).
+    assert_eq!(s.render(s.active_comp_id().unwrap(), Tick::ZERO, opts).get(1, 0), [1.0; 4]);
     // At full resolution the same point is Left's pixel.
     let r = s.execute_checked("effect.cryptomatteAt", json!({"effect": 1, "x": 2.5, "y": 1.5})).unwrap();
     assert_eq!(r["name"], "Left");
@@ -122,6 +123,6 @@ fn a_pick_on_a_precomp_follows_expressions() {
     let r = s.execute_checked("effect.pickCryptomatte", json!({"effect": 1, "x": 33.5, "y": 10.5})).unwrap();
     assert_eq!(r["selection"], "Ball", "{r}");
     let img = s.render(s.active_comp_id().unwrap(), Tick::ZERO, Default::default());
-    assert_eq!((img.get(33, 10)[3], img.get(20, 10)[3]), (1.0, 0.0));
+    assert_eq!((img.get(33, 10), img.get(20, 10)), ([1.0; 4], [0.0, 0.0, 0.0, 1.0]));
     assert_eq!(s.execute("effect.cryptomatteAt", json!({"effect": 1, "x": 20.5, "y": 10.5})).unwrap(), serde_json::Value::Null);
 }

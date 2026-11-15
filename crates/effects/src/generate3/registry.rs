@@ -83,7 +83,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 check("allMasks", "All Masks", false),
                 check("strokeSequentially", "Stroke Sequentially", true),
                 p("color", "Color", col(1.0, 1.0, 1.0), ParamUi::Color),
-                p("brushSize", "Brush Size", num(2.0), slider(0.0, 50.0, 0.0, 50.0, 1)),
+                p("brushSize", "Brush Size", num(2.0), slider(0.0, 200.0, 0.0, 50.0, 1)),
                 p("brushHardness", "Brush Hardness", num(75.0), pct()),
                 p("opacity", "Opacity", num(100.0), pct()),
                 p("start", "Start", num(0.0), pct()),
@@ -132,7 +132,7 @@ pub fn specs() -> Vec<EffectSpec> {
             vec![
                 p("brushPosition", "Brush Position", pt(0.5, 0.5), ParamUi::Point),
                 p("color", "Color", col(1.0, 1.0, 1.0), ParamUi::Color),
-                p("brushSize", "Brush Size", num(6.0), slider(0.0, 50.0, 0.0, 50.0, 1)),
+                p("brushSize", "Brush Size", num(6.0), slider(0.0, 200.0, 0.0, 50.0, 1)),
                 p("brushHardness", "Brush Hardness", num(75.0), pct()),
                 p("brushOpacity", "Brush Opacity", num(100.0), pct()),
                 p("strokeLength", "Stroke Length (secs)", num(0.0), slider(0.0, 30.0, 0.0, 30.0, 1)),
@@ -180,7 +180,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.ccgluegun",
-            "CC Glue Gun",
+            "Paint Beads",
             vec![
                 p("brushPosition", "Brush Position", pt(0.5, 0.5), ParamUi::Point),
                 p("strokeWidth", "Stroke Width", num(25.0), slider(0.0, 500.0, 0.0, 100.0, 1)),
@@ -194,7 +194,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.generate.ccthreads",
-            "CC Threads",
+            "Woven Threads",
             vec![
                 p("width", "Width", num(50.0), slider(1.0, 1000.0, 1.0, 200.0, 1)),
                 p("height", "Height", num(50.0), slider(1.0, 1000.0, 1.0, 200.0, 1)),

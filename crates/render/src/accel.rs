@@ -21,14 +21,33 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// The backend `s` names, whatever case it is written in: the project's own values (`cpu`,
+    /// `gpu`, `auto`), the labels Project Settings ▸ Video Rendering and Effects draws
+    /// (`GPU Acceleration`, `Software Rendering`) and the older After Effects wording.
     pub fn parse(s: &str) -> Option<Backend> {
         match s.to_ascii_lowercase().as_str() {
-            "cpu" | "software" | "mercury software only" => Some(Backend::Cpu),
-            "gpu" | "mercury gpu acceleration" => Some(Backend::Gpu),
+            "cpu" | "software" | "mercury software only" | "software rendering" => Some(Backend::Cpu),
+            "gpu" | "mercury gpu acceleration" | "gpu acceleration" => Some(Backend::Gpu),
             "auto" => Some(Backend::Auto),
             _ => None,
         }
     }
+}
+
+/// An accelerator's device memory, to size how many frames an export renders on it at once
+/// (see [`Accelerator::frame_memory`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameMemory {
+    /// Bytes the accelerator may use (a conservative share of the device, not its free memory).
+    pub budget: u64,
+    /// The most its allocator has held while frames rendered (one frame's working memory
+    /// included).
+    pub peak: u64,
+    /// Bytes of that peak one frame needed (what it released again), or the whole budget once
+    /// frames have had to wait for memory.
+    pub frame: u64,
+    /// Bytes long-lived caches (uploaded layers) may still grow by.
+    pub reserve: u64,
 }
 
 /// One effect of a GPU effect chain (see [`Accelerator::effects`]).
@@ -76,9 +95,25 @@ pub trait Accelerator: Send + Sync {
     fn particles(&self) -> Option<&dyn effectcraft_effects::psim::ParticleSim> {
         None
     }
+    /// A hardware backend for Content-Aware Fill's stages (the GPU compositor's kernels), with
+    /// the CPU fill's semantics. `None` = the fill runs on the CPU.
+    ///
+    /// The fill's input frames are read back to the CPU before it runs (analyses render on the
+    /// CPU by design, see `effectcraft_engine::background::offload::job_accel`), so a backend
+    /// here is about the fill's own work — PatchMatch and the flow's block matching today, one
+    /// stage at a time as each pays (`effectcraft_gpu::inpaint`) — not about compositing.
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        None
+    }
     /// Timing history [`Backend::Auto`] uses to send each comp's top-level frames to the
     /// faster compositor. `None` = Auto always tries the accelerator first.
     fn auto_pick(&self) -> Option<&AutoPick> {
+        None
+    }
+    /// The device memory budget and use, after at least one frame rendered: what an export
+    /// sizes its frames in flight by. `None` where it isn't known (no allocator report, no
+    /// budget): the export then renders one frame at a time.
+    fn frame_memory(&self) -> Option<FrameMemory> {
         None
     }
     /// Whether the accelerator can still render frames. `false` once it has stopped for good
@@ -96,6 +131,19 @@ pub trait Accelerator: Send + Sync {
     /// results, `pass_begin` clears the miss. Synchronous accelerators never miss.
     fn frame_begin(&self) {}
     fn pass_begin(&self) {}
+    /// A rendered comp frame is done (the GPU pool ages sizes no frame asks for, and evicts
+    /// only those once full). The multi-frame render paths call it once per comp frame:
+    /// [`crate::passes::comp_frame`] (exports; a field-rendered output frame is two), the
+    /// export's 4:2:0 frames ([`Accelerator::comp_frame_yuv420`]), remote frames and the
+    /// preview workers. One-off renders (`Session::render`, single-frame export,
+    /// thumbnails) don't, so they don't advance the pool's clock. Without it the pool never
+    /// finds a stale size and keeps its first sizes, dropping newcomers.
+    fn frame_end(&self) {}
+    /// A render of many frames (an export) is done: drop what is kept only to speed up the
+    /// next frame (pooled working textures). Exports call it, even when they fail, panic or
+    /// are dropped; other multi-frame paths (preview, remote frames) don't, so there the pool
+    /// keeps up to its budget until the next export ends.
+    fn render_end(&self) {}
     fn pass_missed(&self) -> bool {
         false
     }
@@ -174,6 +222,13 @@ impl<'a> Renderer<'a> {
         self.pipe
     }
 
+    /// The colour pipeline of the top-level output steps: the project's, with no HDR step under
+    /// [`crate::RenderOpts::skip_hdr_step`] (the consumer decodes with
+    /// [`color::Pipe::output_linear`] or applies the step itself).
+    pub fn output_pipe(&self) -> color::Pipe {
+        if self.opts.skip_hdr_step { self.pipe.without_hdr_step() } else { self.pipe }
+    }
+
     /// Nesting depth (0 = the top-level comp).
     pub fn depth(&self) -> usize {
         self.depth
@@ -194,7 +249,7 @@ impl<'a> Renderer<'a> {
             LayerSource::Footage { item } => {
                 let item = ctx.media_item(layer, *item);
                 let ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
-                let a = self.footage.aux(item, f, ctx.source_time(layer))?;
+                let a = self.read(|| self.footage.aux(item, f, ctx.source_time(layer)))?;
                 // Aux pixels per layer pixel (the layer is the footage at its nominal size). The
                 // planes are only copied when that changes the scale.
                 let scale = a.width as f64 / f.width as f64;
@@ -319,20 +374,19 @@ impl<'a> Renderer<'a> {
     pub fn adjustment_footprint(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
         // Cached, so an accelerator sees the same buffer (and uploads it once) every frame.
         let key = self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        if let (Some(c), Some(k)) = (self.cache, key)
-            && let Some(b) = c.get(k)
-        {
+        let key = self.mask_gate_key(ctx, layer, self.clipped_key(ctx, layer, key));
+        if let Some((b, _)) = self.cached(key) {
             return Some(b);
         }
-        let mut foot = self.source(ctx, layer)?;
-        let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
-        let foot = Arc::new(foot);
+        let (foot, files) = self.recorded(key, |r| {
+            // (what the masks' expressions read, at shutter times too, goes to the buffer's files)
+            let ctx = &r.with_reads(ctx);
+            let mut foot = r.source(ctx, layer)?;
+            let _ = masks::apply(ctx, layer, &mut foot, r.mask_blur(ctx, layer));
+            Some(foot)
+        });
         // The buffer the cache keeps (another worker's, if it kept one first).
-        let foot = match (self.cache_to_keep(), key) {
-            (Some(c), Some(k)) => c.insert(k, foot),
-            _ => foot,
-        };
-        Some(foot)
+        Some(self.keep(key, Arc::new(foot?), &files).0)
     }
 
     /// Draw one 2D layer into `canvas` on the CPU (any kind: adjustment, wireframe, styled…).

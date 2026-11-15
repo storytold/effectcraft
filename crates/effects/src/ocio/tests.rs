@@ -179,6 +179,14 @@ fn lut_files_parse_and_interpolate() {
     assert!((o[0] - 0.25).abs() < 1e-6 && (o[1] - 0.4).abs() < 1e-6, "{o:?}");
     let inv = x.apply(o, 2, true, "");
     assert!((inv[0] - 0.5).abs() < 1e-4, "{inv:?}");
+    // A .csp whose header claims a huge or fractional table is refused before anything is reserved.
+    let head = "CSPLUTV100\n{k}\n\n2\n0 1\n0 1\n2\n0 1\n0 1\n2\n0 1\n0 1\n\n";
+    for (k, size) in [("3D", "100000 100000 100000"), ("3D", "130 130 130"), ("3D", "2.5 2.5 2.5"), ("1D", "4000000000000")] {
+        let text = head.replace("{k}", k) + size + "\n0 0 0\n";
+        assert!(parse_file(&text, "csp").is_none(), "{k} {size}");
+    }
+    // A short file that claims a valid size is refused once its rows run out.
+    assert!(parse_file(&(head.replace("{k}", "3D") + "129 129 129\n0 0 0\n"), "csp").is_none());
     // CDL collection: pick by id.
     let ccc = r#"<ColorCorrectionCollection><ColorCorrection id="a"><SOPNode><Slope>2 2 2</Slope><Offset>0 0 0</Offset><Power>1 1 1</Power></SOPNode></ColorCorrection>
             <ColorCorrection id='b'><SOPNode><Slope>0.5 0.5 0.5</Slope></SOPNode><SatNode><Saturation>1</Saturation></SatNode></ColorCorrection></ColorCorrectionCollection>"#;
@@ -310,4 +318,218 @@ fn color_stabilizer_matches_the_reference_frame() {
     vals2.push(("sampleSize", num(1.0)));
     let b = run_fx("ec.color.colorstabilizer", &vals2, lifted, 0.0, env);
     assert!((b.img.get(5, 20)[0] - reference.get(5, 20)[0]).abs() < 0.01);
+}
+
+/// After Effects 2026's 320 × 180 test card from our importer samples (2026-11-05): a black to
+/// white ramp across, six 40 px colour squares at y 45 and a white 30 px square moving from
+/// x 20 to 300 at y 130 over 2 s.
+fn stabilizer_card(t: f64) -> Image {
+    let mut img = Image::new(320, 180);
+    let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0], [1.0, 0.0, 1.0]];
+    let mover = 20.0 + 140.0 * t;
+    for y in 0..180 {
+        for x in 0..320 {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let mut c = [(cx / 320.0) as f32; 3];
+            for (i, col) in cols.iter().enumerate() {
+                if (cx - (30.0 + 52.0 * i as f64)).abs() < 20.0 && (cy - 45.0).abs() < 20.0 {
+                    c = col.map(|v| v as f32);
+                }
+            }
+            if (cx - mover).abs() < 15.0 && (cy - 130.0).abs() < 15.0 {
+                c = [1.0; 3];
+            }
+            img.set(x, y, [c[0], c[1], c[2], 1.0]);
+        }
+    }
+    img
+}
+
+/// The sample's keyframed points: Black Point (64, 90) → (151, 99) and Mid Point (160, 90) →
+/// (188, 122) over the first second, White Point at (256, 90), Stabilize Levels.
+struct KeyedCard;
+impl EffectHost for KeyedCard {
+    fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+        None
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+        Some(Buf { img: stabilizer_card(t), offset: [0.0; 2], scale: 1.0 })
+    }
+    fn params_at(&self, t: f64) -> Option<crate::Params> {
+        let mut p = crate::Params { values: Default::default() };
+        let k = t.clamp(0.0, 1.0);
+        let lerp = |a: [f64; 2], b: [f64; 2]| Value::Vec2([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]);
+        p.values.insert("blackPoint".into(), lerp([64.0, 90.0], [151.0, 99.0]));
+        p.values.insert("midPoint".into(), lerp([160.0, 90.0], [188.0, 122.0]));
+        p.values.insert("whitePoint".into(), Value::Vec2([256.0, 90.0]));
+        Some(p)
+    }
+}
+
+/// #3125: with keyframed sample points After Effects samples the reference frame where the
+/// points were at the reference time, so a static card is corrected. Its render at 0.5 s (Black
+/// Point at (107.5, 94.5)) is a Levels map of the ramp: `out = a + b·v` with b 1.2935..1.2965
+/// and a −0.2365..−0.2350 (fitted on our 26-level export). EffectCraft sampled both frames at
+/// the current points and left the card unchanged.
+#[test]
+fn color_stabilizer_samples_the_reference_at_the_points_reference_positions() {
+    let host = KeyedCard;
+    let env = EffectEnv { host: Some(&host), ..Default::default() };
+    let p = host.params_at(0.5).unwrap();
+    let mut vals: Vec<(&str, Value)> = ["blackPoint", "midPoint", "whitePoint"].iter().map(|id| (*id, p.values[*id].clone())).collect();
+    vals.push(("stabilize", Value::Enum(1)));
+    vals.push(("sampleSize", num(3.0)));
+    vals.push(("referenceFrame", num(0.0)));
+    let out = run_fx("ec.color.colorstabilizer", &vals, stabilizer_card(0.5), 0.5, env);
+    // The ramp row between the squares: fit out = a + b·v from two far-apart pixels.
+    let v = |x: i64| (x as f64 + 0.5) / 320.0;
+    let o = |x: i64| out.img.get(x, 90)[0] as f64;
+    let b = (o(240) - o(80)) / (v(240) - v(80));
+    let a = o(80) - b * v(80);
+    assert!((b - 1.295).abs() < 0.005, "slope {b}");
+    assert!((a + 0.2357).abs() < 0.005, "offset {a}");
+    // Every ramp pixel of that row follows the line (no clamping in 32 bpc).
+    for x in (0..320).step_by(7) {
+        assert!((o(x) - (a + b * v(x))).abs() < 1e-3, "x {x}");
+    }
+}
+
+/// After Effects 2026's Sample Size samples (#3125): a horizontal ramp, Stabilize Levels, and a
+/// 6 px white square centred at `square` that appears after the reference frame (the card at
+/// `square: None` is the reference).
+fn sample_size_card(w: u32, h: u32, square: Option<[f64; 2]>) -> Image {
+    let mut img = Image::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let mut v = (cx / w as f64) as f32;
+            if square.is_some_and(|s| (cx - s[0]).abs() < 3.0 && (cy - s[1]).abs() < 3.0) {
+                v = 1.0;
+            }
+            img.set(x, y, [v, v, v, 1.0]);
+        }
+    }
+    img
+}
+
+/// Whether Color Stabilizer (Levels, Black Point at `bp`, Sample Size `size`) changes the
+/// `w` × `h` card when the square at `square` appears: the change is read on the right half of
+/// the layer, far from the square.
+fn stabilizer_reacts(w: u32, h: u32, square: [f64; 2], bp: [f64; 2], size: f64) -> bool {
+    let host = RefHost(sample_size_card(w, h, None));
+    let env = EffectEnv { host: Some(&host), ..Default::default() };
+    let vals = [
+        ("stabilize", Value::Enum(1)),
+        ("blackPoint", Value::Vec2(bp)),
+        ("whitePoint", Value::Vec2([w as f64 * 0.85, h as f64 * 0.5])),
+        ("sampleSize", num(size)),
+    ];
+    let input = sample_size_card(w, h, Some(square));
+    let out = run_fx("ec.color.colorstabilizer", &vals, input.clone(), 0.0, env);
+    let (x, y) = (w as i64 * 7 / 8, h as i64 / 4);
+    (out.img.get(x, y)[0] - input.get(x, y)[0]).abs() > 1e-5
+}
+
+/// #3125: Sample Size is the full width of the sampled square in layer pixels, at any layer
+/// size. After Effects 2026 (320 × 180 and 640 × 360, Black Point at 25 % width, mid-height)
+/// reacts to a square whose near edge is 7 px to the right of the point from Sample Size 13.5
+/// (not at 13), to one 17 px away by 35, and never to one 37 px away up to 50. EffectCraft used
+/// Sample Size as the half-width and reacted at 12 and 30.
+#[test]
+fn color_stabilizer_sample_size_is_the_full_width_in_pixels() {
+    for (w, h) in [(320u32, 180u32), (640, 360)] {
+        let (bx, by) = (w as f64 * 0.25, h as f64 * 0.5);
+        let r = |dx: f64, size: f64| stabilizer_reacts(w, h, [bx + dx, by], [bx, by], size);
+        assert!(r(10.0, 13.5), "{w}x{h}: d 10 at 13.5");
+        assert!(!r(10.0, 13.0), "{w}x{h}: d 10 at 13");
+        assert!(!r(10.0, 12.0), "{w}x{h}: d 10 at 12");
+        assert!(r(20.0, 35.0), "{w}x{h}: d 20 at 35");
+        assert!(!r(20.0, 33.0), "{w}x{h}: d 20 at 33");
+        assert!(!r(20.0, 30.0), "{w}x{h}: d 20 at 30");
+        for size in [1.0, 5.0, 12.0, 25.0, 40.0, 50.0] {
+            assert!(!r(40.0, size), "{w}x{h}: d 40 at {size}");
+        }
+    }
+}
+
+/// #3125: the sampled area is a square centred on the middle of the pixel the point names, half a
+/// pixel right of and below EffectCraft's layer point. After Effects 2026 with the Black Point at
+/// (80, 90) on a 320 × 180 card: a square 7 px to the right or below reacts from 13.5 (not at
+/// 13), one 7 px to the left or above only from 15.5 (not at 15). Diagonally, with the square's
+/// near corner 7, 10 and 14 px away on both axes, it reacts at 16, 26 and 38 and not at 13, 19
+/// and 27: a square area (a circle of that width would first react at 18.4, 26.9 and 38.2).
+#[test]
+fn color_stabilizer_samples_a_square_centred_on_the_pixel() {
+    let r = |square: [f64; 2], size: f64| stabilizer_reacts(320, 180, square, [80.0, 90.0], size);
+    for (square, no, yes) in [
+        ([90.0, 90.0], 13.0, 13.5),
+        ([80.0, 100.0], 13.0, 13.5),
+        ([70.0, 90.0], 15.0, 15.5),
+        ([80.0, 80.0], 15.0, 15.5),
+        ([90.0, 100.0], 13.0, 16.0),
+        ([93.0, 103.0], 19.0, 26.0),
+        ([97.0, 107.0], 27.0, 38.0),
+    ] {
+        assert!(!r(square, no), "{square:?} at {no}");
+        assert!(r(square, yes), "{square:?} at {yes}");
+    }
+}
+
+/// #3125: sub-pixel Black Points. After Effects 2026, square near edge at x 87 (or y 97): with
+/// the point at x (or y) + 0.25 it reacts from 13 (not 12.5), + 0.5 from 12.5 (not 12), + 0.75
+/// already at 12; each pixel counts with the share of it the area covers.
+#[test]
+fn color_stabilizer_sub_pixel_points_cover_partial_pixels() {
+    for (f, no, yes) in [(0.25, Some(12.5), 13.0), (0.5, Some(12.0), 12.5), (0.75, None, 12.0)] {
+        for (square, bp) in [([90.0, 90.0], [80.0 + f, 90.0]), ([80.0, 100.0], [80.0, 90.0 + f])] {
+            let r = |size: f64| stabilizer_reacts(320, 180, square, bp, size);
+            if let Some(no) = no {
+                assert!(!r(no), "{bp:?} at {no}");
+            }
+            assert!(r(yes), "{bp:?} at {yes}");
+        }
+    }
+}
+
+/// Writes `text` to `dir/name` with modification time `secs` (so an edit within the file system's
+/// time resolution still moves the stamp), returning the path.
+fn write_dated(dir: &std::path::Path, name: &str, text: &str, secs: u64) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    let f = std::fs::File::options().write(true).open(&path).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// #3538: OCIO File Transform read a file once per process; an edited, created, repaired or
+/// deleted file was never followed.
+#[test]
+fn an_ocio_transform_file_is_read_again_once_it_changes() {
+    const BLACK: &str = "LUT_1D_SIZE 2\n0 0 0\n0 0 0\n";
+    const WHITE: &str = "LUT_1D_SIZE 2\n1 1 1\n1 1 1\n";
+    let dir = std::env::temp_dir().join(format!("ec-fx-3538-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let at = |src: &str| load_file(src).map(|x| x.apply([0.5; 3], 1, false, ""));
+    let edited = write_dated(dir.as_path(), "edited.cube", BLACK, 1_000);
+    assert_eq!(at(&edited), Some([0.0; 3]));
+    write_dated(dir.as_path(), "edited.cube", WHITE, 2_000);
+    assert_eq!(at(&edited), Some([1.0; 3]), "an edited file, same size");
+    let created = dir.as_path().join("created.cube").to_string_lossy().into_owned();
+    assert_eq!(at(&created), None);
+    write_dated(dir.as_path(), "created.cube", WHITE, 1_000);
+    assert_eq!(at(&created), Some([1.0; 3]), "a file created after a failed load");
+    let repaired = write_dated(dir.as_path(), "repaired.cube", "not a lut", 1_000);
+    assert_eq!(at(&repaired), None);
+    write_dated(dir.as_path(), "repaired.cube", WHITE, 2_000);
+    assert_eq!(at(&repaired), Some([1.0; 3]), "a repaired file");
+    std::fs::remove_file(&repaired).unwrap();
+    assert_eq!(at(&repaired), None, "a deleted file");
+    // Inline text is its own content: the same text is the same transform.
+    let inline = load_file(BLACK).unwrap();
+    assert!(Arc::ptr_eq(&inline, &load_file(BLACK).unwrap()));
+    std::fs::remove_dir_all(&dir).unwrap();
 }

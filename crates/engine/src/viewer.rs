@@ -1,5 +1,5 @@
 //! Composition viewer maths shared by the frontends and tests: snapping (targets, tolerance and
-//! priority), the Show Channel / Exposure display transforms, and the viewer snapshot.
+//! priority), the display pass (Show Channel, exposure, display colour), and the viewer snapshot.
 //!
 //! Nothing here touches the project; edits go through commands.
 
@@ -14,6 +14,9 @@ use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
+
+mod display_pass;
+pub use display_pass::{DisplayPass, FrameEncoding, PassColor, PassConv, PassCurve, SHADER_EXPONENTS, hdr_step, lut_eval};
 
 // ---------------------------------------------------------------- snapping
 
@@ -48,7 +51,7 @@ pub struct SnapTarget {
     pub priority: u8,
     pub source: SnapSource,
     /// A line's extent along itself (y of a vertical line, x of a horizontal one): a layer's
-    /// edge without Snap Edges Extended. `None` runs across the whole comp.
+    /// edge or centre line without Snap Edges Extended. `None` runs across the whole comp.
     #[serde(default)]
     pub span: Option<[f64; 2]>,
 }
@@ -70,7 +73,7 @@ impl SnapTarget {
 }
 
 /// Tools bar ▸ Snapping options, the two After Effects' Snapping menu has: Snap Edges Extended
-/// (layer edges snap along their whole line, beyond the layer's bounds) and Snap to Features in
+/// (layer edge and centre lines snap along their whole line, beyond the layer's bounds) and Snap to Features in
 /// Collapsed Compositions and Text Layers (the layers inside a precomp layer with Collapse
 /// Transformations on are targets too). Both are on by default. Every layer feature snaps
 /// (corners, edge midpoints, centre, anchor point, mask and shape path points), as in After
@@ -125,10 +128,23 @@ fn better(a: (f64, u8), b: (f64, u8)) -> bool {
     if (a.0 - b.0).abs() < 1e-6 { a.1 < b.1 } else { a.0 < b.0 }
 }
 
+/// How much nearer (as a share of the tolerance: 2 of the viewer's 8 screen points, whatever the
+/// zoom) a vertical and a horizontal line together must be than a point target to win over it
+/// when one of the two lines runs through the point. A layer's point lies on that layer's own
+/// edge and centre lines, so such a pair is only as near as the point itself plus whatever a
+/// foreign line (the comp's centre row, a guide) gains on the other axis; without the margin that
+/// pair took the foreign axis and left the feature just off the point, more often the wider the
+/// tolerance is in comp pixels, i.e. at 100 % rather than zoomed in (#2681). A pair of lines that
+/// both miss the point (a guide crossing beside a layer's point) gets no margin, so such an
+/// intersection stays reachable right next to the point.
+pub const POINT_BIAS: f64 = 0.25;
+
 /// Snap feature points `sources` (comp pixels) to the nearest target within `tol` comp pixels.
-/// A point target snaps both axes and wins when it is at least as near as the best lines;
-/// otherwise the nearest vertical and horizontal lines snap x and y independently. Ties go to
-/// the lower priority value.
+/// A point target snaps both axes and wins unless a vertical and a horizontal line both resolve
+/// and together lie nearer than it, by more than [`POINT_BIAS`] of `tol` when one of them runs
+/// through the point (one line alone leaves the other axis free, so it never beats a point: a
+/// layer's edge midpoint lies on its edge line); otherwise the nearest vertical and horizontal
+/// lines snap x and y independently. Ties go to the lower priority value.
 pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Snap> {
     let mut best_pt: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
     let mut best_x: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
@@ -150,9 +166,16 @@ pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Sn
             }
         }
     }
-    let line_best = [best_x.map(|b| b.0.0), best_y.map(|b| b.0.0)].into_iter().flatten().fold(f64::INFINITY, f64::min);
+    let both_lines = best_x.zip(best_y).map_or(f64::INFINITY, |(x, y)| x.0.0.hypot(y.0.0));
+    // A line of the pair through the point: the point's own edge / centre line (`at`: the
+    // line's axis, 0 for x).
+    let through = |line: Option<((f64, u8), [f64; 2], SnapTarget)>, at: usize| {
+        best_pt.zip(line).is_some_and(|((_, _, p), (_, _, l))| (l.pos[at] - p.pos[at]).abs() < 1e-6)
+    };
+    // (At least a hair, so an exact tie goes to the point.)
+    let bias = if through(best_x, 0) || through(best_y, 1) { (tol * POINT_BIAS).max(1e-9) } else { 1e-9 };
     if let Some((k, s, t)) = best_pt
-        && k.0 <= line_best + 1e-9
+        && k.0 <= both_lines + bias
     {
         return Some(Snap { delta: [t.pos[0] - s[0], t.pos[1] - s[1]], hits: vec![t], at: t.pos });
     }
@@ -183,6 +206,50 @@ pub fn layer_features(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
     out.extend(anchor_feature(ctx, layer, &m));
     out.extend(layer_vertices(ctx, layer));
     out
+}
+
+/// [`snap`] for a drag Shift keeps to one axis (`along_x`: it moves along x and y stays put, else
+/// the other way round): only the free coordinate snaps, so the feature never leaves the axis
+/// (#3229). A point target acts as a line through it across the drag (a vertical line at its x
+/// for a drag along x) that reaches it only within `tol` on each axis (a square around the point),
+/// so the feature lines up with a point near the axis, not with every point in the comp; lines
+/// along the drag (horizontal ones for a drag along x) would only move the locked coordinate and
+/// are left out. The nearest target wins, ties to the lower priority value. A hit on a point
+/// reports the point (the feedback box) and the line from it to where the feature landed.
+pub fn snap_along(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64, along_x: bool) -> Option<Snap> {
+    // (Key, source, target, and the free coordinate it snaps to.)
+    let mut best: Option<((f64, u8), [f64; 2], SnapTarget, f64)> = None;
+    for s in sources {
+        let (free, along) = if along_x { (s[0], s[1]) } else { (s[1], s[0]) };
+        for t in targets {
+            // The line the target snaps as: its coordinate and extent along it.
+            let (line, span) = match (t.kind, along_x) {
+                (SnapKind::Point, true) => (t.pos[0], Some([t.pos[1] - tol, t.pos[1] + tol])),
+                (SnapKind::Point, false) => (t.pos[1], Some([t.pos[0] - tol, t.pos[0] + tol])),
+                (SnapKind::VLine, true) => (t.pos[0], t.span),
+                (SnapKind::HLine, false) => (t.pos[1], t.span),
+                (SnapKind::VLine, false) | (SnapKind::HLine, true) => continue,
+            };
+            let d = (line - free).abs();
+            if d > tol || span.is_some_and(|[a, b]| along < a || along > b) {
+                continue;
+            }
+            let key = (d, t.priority);
+            if best.as_ref().is_none_or(|(k, _, _, _)| better(key, *k)) {
+                best = Some((key, *s, *t, line));
+            }
+        }
+    }
+    let (_, s, t, line) = best?;
+    let (delta, at) = if along_x { ([line - s[0], 0.0], [line, s[1]]) } else { ([0.0, line - s[1]], [s[0], line]) };
+    let mut hits = vec![t];
+    if t.kind == SnapKind::Point {
+        // The alignment, drawn from the point to the feature.
+        let (from, to) = if along_x { (t.pos[1], at[1]) } else { (t.pos[0], at[0]) };
+        let l = if along_x { SnapTarget::vline(line, t.priority, t.source) } else { SnapTarget::hline(line, t.priority, t.source) };
+        hits.push(l.within(Some([from, to])));
+    }
+    Some(Snap { delta, hits, at })
 }
 
 /// A layer's content box in comp space: corners (top left, top right, bottom right, bottom
@@ -366,8 +433,8 @@ fn visible_layers<'a>(ctx: &EvalCtx<'a>, exclude: &'a [LayerId]) -> impl Iterato
     comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && (!any_solo || l.switches.solo) && !exclude.contains(&l.id))
 }
 
-/// A 2D layer's snap targets: its box points, its edges as lines while unrotated (across the
-/// comp with Snap Edges Extended, along the layer otherwise), its anchor point unless `anchor` is
+/// A 2D layer's snap targets: its box points, its edges and centre as lines while unrotated (across
+/// the comp with Snap Edges Extended, along the layer otherwise), its anchor point unless `anchor` is
 /// false (Pan Behind drags it, the box stays put), its mask and shape path vertices and, with
 /// Snap to Features in Collapsed Compositions, the targets of the visible layers inside a
 /// collapsed precomp layer. None for cameras, lights and 3D layers.
@@ -386,10 +453,10 @@ fn layer_targets_at(ctx: &EvalCtx, l: &Layer, anchor: bool, f: SnapFeatures, dep
         let [nw, ne, _, sw] = b.corners;
         if (nw[1] - ne[1]).abs() < 1e-6 && (nw[0] - sw[0]).abs() < 1e-6 {
             let (xs, ys) = if f.edges_extended { (None, None) } else { (Some([nw[0], ne[0]]), Some([nw[1], sw[1]])) };
-            for x in [nw[0], ne[0]] {
+            for x in [nw[0], b.center[0], ne[0]] {
                 out.push(SnapTarget::vline(x, PRI_LAYER, src).within(ys));
             }
-            for y in [nw[1], sw[1]] {
+            for y in [nw[1], b.center[1], sw[1]] {
                 out.push(SnapTarget::hline(y, PRI_LAYER, src).within(xs));
             }
         }
@@ -497,63 +564,6 @@ fn srgb_to_linear(v: f32) -> f32 {
 fn linear_to_srgb(v: f32) -> f32 {
     let v = v.max(0.0);
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
-}
-
-/// 8-bit exposure lookup table: `stops` applied in linear light.
-pub fn exposure_lut(stops: f32) -> [u8; 256] {
-    let k = 2f32.powf(stops);
-    let mut lut = [0u8; 256];
-    for (i, o) in lut.iter_mut().enumerate() {
-        let lin = srgb_to_linear(i as f32 / 255.0) * k;
-        *o = (linear_to_srgb(lin).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    }
-    lut
-}
-
-/// Apply the viewer's channel and exposure to premultiplied 8-bit RGBA pixels in place.
-/// RGB shows the image (exposure only); Red/Green/Blue/Alpha show one channel as an opaque
-/// grayscale image (or tinted in that channel's colour when `colorized`); RGB Straight shows the
-/// unpremultiplied colour, opaque.
-pub fn display_transform(px: &mut [[u8; 4]], channel: Channel, colorized: bool, stops: f32) {
-    let lut = (stops != 0.0).then(|| exposure_lut(stops));
-    let ex = |v: u8| lut.as_ref().map(|l| l[v as usize]).unwrap_or(v);
-    for p in px.iter_mut() {
-        let [r, g, b, a] = *p;
-        *p = match channel {
-            Channel::Rgb => {
-                if lut.is_none() {
-                    continue;
-                }
-                // Exposure on straight colour, re-premultiplied.
-                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                let pm = |c: u8| ((ex(un(c)) as u32 * a as u32 + 127) / 255) as u8;
-                [pm(r), pm(g), pm(b), a]
-            }
-            Channel::Red | Channel::Green | Channel::Blue => {
-                let (i, c) = match channel {
-                    Channel::Red => (0, r),
-                    Channel::Green => (1, g),
-                    _ => (2, b),
-                };
-                let v = ex(c);
-                if colorized {
-                    let mut o = [0, 0, 0, 255];
-                    o[i] = v;
-                    o
-                } else {
-                    [v, v, v, 255]
-                }
-            }
-            Channel::Alpha => {
-                let v = ex(a);
-                [v, v, v, 255]
-            }
-            Channel::RgbStraight => {
-                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                [ex(un(r)), ex(un(g)), ex(un(b)), 255]
-            }
-        };
-    }
 }
 
 // ---------------------------------------------------------------- display colour management
@@ -998,6 +1008,12 @@ impl DisplayColor {
         )
     }
 
+    /// A conversion that is a baked 3D LUT alone, as a LUT-based My Custom RGB profile makes
+    /// (tests of the display pass).
+    pub fn from_lut(lut: Arc<effectcraft_color::icc::Lut3d>) -> DisplayColor {
+        DisplayColor { sim: None, display: None, lut: Some(lut) }
+    }
+
     /// Whether the simulation runs a LUT-based ICC profile (baked into a 3D LUT).
     pub fn is_lut(&self) -> bool {
         self.lut.is_some()
@@ -1096,6 +1112,9 @@ pub struct Snapshot {
     /// Render scale the image was taken at.
     pub scale: f64,
     pub image: Arc<Image>,
+    /// How `image` is encoded: rendered without the HDR step in 32 bpc, so viewer exposure
+    /// reaches its over-range values; the display pass applies the step.
+    pub encoding: FrameEncoding,
 }
 
 #[cfg(test)]

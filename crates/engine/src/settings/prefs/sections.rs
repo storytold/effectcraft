@@ -36,6 +36,9 @@ page!(General {
     viewer_wheel_scrubbing: bool = false,
     /// Create New Layers at Composition Start Time (off: at the current time).
     create_layers_at_comp_start: bool = true,
+    /// Fit New Layers to Work Area: new text, solid, shape, null and adjustment layers span the
+    /// work area instead of the whole composition (off, as in After Effects).
+    fit_new_layers_to_work_area: bool = false,
     switches_affect_nested_comps: bool = true,
     /// Default Spatial Interpolation to Linear.
     default_spatial_linear: bool = false,
@@ -92,8 +95,14 @@ page!(CompositionPrefs {
 page!(Previews {
     /// Largest downsampling while playing back: `1/2`, `1/4`, `1/8`.
     adaptive_resolution_limit: String = "1/8".into(),
+    /// A preview at Resolution Auto that renders slower than real time steps down a resolution
+    /// (½, then ¼, no further than the Adaptive Resolution Limit) for the rest of that play. Off
+    /// by default: it never steps back up during a play, so a looping preview kept playing at ¼
+    /// after its first loop, where without it the first loop caches Full and the next ones play
+    /// in real time at Full, as in After Effects.
+    adaptive_playback: bool = false,
     show_internal_wireframes: bool = false,
-    cache_frames_when_idle: bool = false,
+    cache_frames_when_idle: bool = true,
     fast_previews: bool = false,
     /// `faster` or `moreAccurate`.
     zoom_quality: String = "moreAccurate".into(),
@@ -201,7 +210,23 @@ page!(Memory {
     /// RAM preview (viewer frame) cache budget (MB).
     preview_cache_mb: u32 = 3072,
     reduce_cache_when_low: bool = true,
+    /// GPU Frames Rendered at Once (Render Queue): `auto` (from the GPU memory a frame
+    /// measured, 1 to 3) or `1`, `2`, `3`. `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
+    gpu_frames_in_flight: String = "auto".into(),
 });
+
+impl Memory {
+    /// [`Memory::gpu_frames_in_flight`] as a count: 1 to 3, or `None` for Auto (and anything
+    /// else, as a hand-edited settings file may hold).
+    pub fn gpu_frames(&self) -> Option<usize> {
+        match self.gpu_frames_in_flight.trim() {
+            "1" => Some(1),
+            "2" => Some(2),
+            "3" => Some(3),
+            _ => None,
+        }
+    }
+}
 
 page!(Video {
     enable_output: bool = false,

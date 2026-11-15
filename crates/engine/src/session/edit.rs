@@ -30,6 +30,9 @@ impl Session {
     /// undo step under `label`, unless it merges with the current merge key (then the redo branch
     /// is dropped). An `Err` from `f` propagates with the session unchanged.
     fn edit_inner<T>(&mut self, label: &str, merge: Option<&str>, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<T>) -> Result<T> {
+        if self.script_ui.render_host.is_some() {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         let before = self.project.clone();
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
@@ -97,46 +100,17 @@ impl Session {
         if Arc::ptr_eq(&self.project, &self.saved_project) {
             self.saved_revision = self.revision;
         }
-        self.refresh_disk_salt(false);
+        self.refresh_aux_footage();
         self.events.push(Event::ProjectChanged { revision: self.revision });
-    }
-
-    /// Salt the disk cache's layer keys with the project's footage files
-    /// ([`effectcraft_render::disk_cache::footage_salt`]). Taking it reads the size and time of
-    /// every file, every frame of an image sequence included, so it is taken again only when the
-    /// footage items changed, or with `force` (a project opened, footage reloaded, the disk cache
-    /// attached), not at every edit: with a few large sequences that cost each keystroke in a
-    /// text field over half a second (#1926).
-    pub fn refresh_disk_salt(&mut self, force: bool) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        if self.disk_cache.is_none() {
-            self.disk_salt = None;
-            return None;
-        }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for (id, it) in &self.project.items {
-            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-                id.hash(&mut h);
-                format!("{f:?}").hash(&mut h);
-            }
-        }
-        let footage = h.finish();
-        if let Some((seen, salt)) = self.disk_salt
-            && seen == footage
-            && !force
-        {
-            return Some(salt);
-        }
-        let salt = effectcraft_render::disk_cache::footage_salt(&self.project);
-        self.disk_salt = Some((footage, salt));
-        self.layer_cache.set_disk_salt(salt);
-        Some(salt)
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
     /// modified) but is no undo step, and it changes no pixels: the comp's cached frames stay
     /// valid ([`effectcraft_project::Comp::same_pixels`]).
     pub fn set_resolution(&mut self, comp: ItemId, r: effectcraft_project::Resolution) -> Result<()> {
+        if self.script_ui.render_host.is_some() {
+            return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
+        }
         if self.project.comp(comp).ok_or(EngineError::NoComp)?.resolution == r {
             return Ok(());
         }
@@ -166,6 +140,9 @@ impl Session {
     /// on-canvas editor gets a new IME epoch only when its own document changed) and the session is
     /// bumped. Returns `false`, changing nothing, when there is nothing to undo.
     pub fn undo(&mut self) -> bool {
+        if self.script_ui.render_host.is_some() {
+            return false;
+        }
         let Some((label, p)) = self.history.undo.pop() else { return false };
         let edited = commands::text_edit::active_editor_snapshot(self);
         let probe = commands::kept_crypto_probe(self);
@@ -184,6 +161,9 @@ impl Session {
     /// text document starts a new IME epoch) and the session is bumped. Returns `false`, changing
     /// nothing, when there is nothing to redo.
     pub fn redo(&mut self) -> bool {
+        if self.script_ui.render_host.is_some() {
+            return false;
+        }
         let Some((label, p)) = self.history.redo.pop() else { return false };
         let edited = commands::text_edit::active_editor_snapshot(self);
         let probe = commands::kept_crypto_probe(self);
@@ -250,8 +230,8 @@ impl Session {
         }
         self.layer_cache.clear();
         self.project = Arc::new(p);
-        // Its files may have changed since they were last stamped.
-        self.disk_salt = None;
+        // The set of footage effects read the channels of is sent again, even when it is empty.
+        self.aux_footage = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;

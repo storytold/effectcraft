@@ -246,13 +246,18 @@ fn status(s: &mut Session, p: &Value) -> Result<Value> {
     out["deleted"] = json!(settings.deleted.len());
     out["lensDistortionSolved"] = json!(settings.lens_distortion);
     let solve = ct::solve(&params);
-    out["solved"] = json!(solve.is_some());
+    // The solver interpolates the frames it could not solve: only a solve of every frame is
+    // `solved` (what `camera.exportBlender` needs); one with gaps is `partial`.
+    let solved_frames = solve.as_ref().map_or(0, |sv| sv.frames.iter().filter(|c| c.solved).count());
+    let complete = solve.as_ref().is_some_and(|sv| solved_frames == sv.frames.len());
+    out["solved"] = json!(complete);
+    out["partial"] = json!(solve.is_some() && !complete);
     if let Some(sv) = &solve {
         let f = sv.focal();
         out["methodUsed"] = json!(sv.method_used.label());
         out["averageError"] = json!(sv.average_error);
         out["points"] = json!(sv.points.len());
-        out["solvedFrames"] = json!(sv.frames.iter().filter(|c| c.solved).count());
+        out["solvedFrames"] = json!(solved_frames);
         out["focalLength"] = json!(f);
         out["horizontalAngleOfView"] = json!(sv.hfov(f));
         out["groundPlane"] = json!(sv.ground.is_some());

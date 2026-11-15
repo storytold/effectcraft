@@ -5,6 +5,7 @@
 use effectcraft_engine::Session;
 use effectcraft_engine::color::Label;
 use effectcraft_keyframe::{Interp, TextDoc, Value as KV};
+use effectcraft_project::ae_order::{self, AeChild};
 use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, Node, ParamUi, PropGroup};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
@@ -32,6 +33,7 @@ fn layer_of<'a>(s: &'a Session, a: &J) -> Result<(ItemId, &'a Comp, &'a Layer), 
     Ok((cid, c, l))
 }
 
+/// Answers a script model query of the given `kind` against the session, dispatching to the matching reader, and errors on an unknown kind.
 pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
     match kind {
         "project" => Ok(project(s)),
@@ -51,13 +53,7 @@ pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
             let i = u(a, "index").unwrap_or(0) as usize;
             Ok(effectcraft_engine::command_specs().get(i.wrapping_sub(1)).map(|c| json!(c.id)).unwrap_or(J::Null))
         }
-        "exprError" => {
-            let code = a.get("code").and_then(J::as_str).unwrap_or("");
-            Ok(match s.expr_check {
-                Some(check) => json!(check(code).err().unwrap_or_default()),
-                None => json!(""),
-            })
-        }
+        "exprError" => expr_error(s, a),
         "labels" => Ok(json!(Label::ALL.iter().map(|l| l.name()).collect::<Vec<_>>())),
         "effects" => Ok(json!(
             effectcraft_engine::effects::all()
@@ -318,7 +314,8 @@ fn indexed_parade(g: &PropGroup) -> bool {
 
 fn node_json(c: &Comp, l: &Layer, uid: u64) -> R {
     if uid == 0 || uid == l.props.uid {
-        let n = l.props.children.len();
+        // After Effects' count (every slot, used or not); 3D model layers count their own groups.
+        let n = ae_order::ae_count(l).unwrap_or(l.props.children.len());
         return Ok(json!({
             "uid": l.props.uid, "kind": "group", "name": l.name, "matchName": matchnames::layer(&l.source), "matchId": "layer",
             "index": c.index_of(l.id).unwrap_or(0), "depth": 0, "parent": null, "isLayer": true, "numProperties": n,
@@ -329,7 +326,8 @@ fn node_json(c: &Comp, l: &Layer, uid: u64) -> R {
     let ch = chain(l, uid).ok_or("the property no longer exists (it was deleted)")?;
     let node = *ch.last().ok_or("bad property")?;
     let parent_group: &PropGroup = if ch.len() >= 2 { ch[ch.len() - 2].as_group().ok_or("bad tree")? } else { &l.props };
-    let index = parent_group.children.iter().position(|x| x.uid() == uid).map(|i| i + 1).unwrap_or(0);
+    let top = if ch.len() == 1 { ae_order::ae_index(l, node.match_id()) } else { None };
+    let index = top.unwrap_or_else(|| parent_group.children.iter().position(|x| x.uid() == uid).map(|i| i + 1).unwrap_or(0));
     let parent_uid = if ch.len() >= 2 { ch[ch.len() - 2].uid() } else { l.props.uid };
     let match_name = matchnames::node(&ch);
     let instance_parent = indexed_parade(parent_group) && ch.len() >= 2 || (ch.len() == 2 && ch[0].match_id() == "contents");
@@ -451,6 +449,9 @@ fn find_child<'a>(l: &'a Layer, g: &'a PropGroup, k: &str, depth: u8) -> Option<
     g.children
         .iter()
         .find(|n| chain_of(n) == k)
+        .or_else(|| matchnames::current_name(k).and_then(|m| g.children.iter().find(|n| chain_of(n) == m)))
+        // Match names that changed only in case (`ADBE Ellipse` is now `ADBE ELLIPSE`, #3113).
+        .or_else(|| g.children.iter().find(|n| chain_of(n).eq_ignore_ascii_case(k)))
         .or_else(|| g.children.iter().find(|n| n.name() == k))
         .or_else(|| g.children.iter().find(|n| n.match_id() == k))
         .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(k)))
@@ -472,6 +473,25 @@ fn child(s: &Session, a: &J) -> R {
     let uid = u(a, "uid").unwrap_or(0);
     let g: &PropGroup = if uid == 0 || uid == l.props.uid { &l.props } else { l.props.find_group(uid).ok_or("not a property group")? };
     let key = a.get("key").cloned().unwrap_or(J::Null);
+    // A layer's numbers and match names are After Effects' (Marker is 1, unused groups keep their
+    // slot and resolve to the same empty group by number or by match name).
+    let slot = match &key {
+        J::Number(n) => Some(n.as_u64().and_then(|i| usize::try_from(i).ok())),
+        J::String(name) => ae_order::ae_index_of_match_name(l, name).map(Some),
+        _ => None,
+    };
+    if std::ptr::eq(g, &l.props)
+        && ae_order::ae_slots(&l.source).is_some()
+        && let Some(slot) = slot
+    {
+        let Some(i) = slot else { return Ok(J::Null) };
+        return match ae_order::ae_child(l, i) {
+            Some(AeChild::Node(n)) => node_json(c, l, n.uid()),
+            Some(AeChild::Marker) => Ok(json!({"marker": true})),
+            Some(AeChild::Absent(s)) => Ok(json!({"absent": true, "name": s.name, "matchName": s.match_name, "index": i})),
+            None => Ok(J::Null),
+        };
+    }
     let found = match &key {
         J::Number(n) => n.as_u64().and_then(|i| g.children.get((i as usize).checked_sub(1)?)),
         J::String(k) => find_child(l, g, k, NESTED_CHILD_DEPTH),
@@ -507,6 +527,7 @@ fn text_json(d: &TextDoc) -> J {
     doc
 }
 
+/// Returns the property's value at the requested time, evaluating its expression unless `pre` is set.
 fn value(s: &Session, a: &J) -> R {
     let (cid, c, l) = layer_of(s, a)?;
     let uid = u(a, "uid").ok_or("missing uid")?;
@@ -516,14 +537,26 @@ fn value(s: &Session, a: &J) -> R {
     let v = if pre || !p.has_expression() {
         p.value_at(l.layer_time(t))
     } else {
-        let mut ctx = EvalCtx::new(&s.project, cid, c, t);
-        ctx.expr = s.expr.as_deref();
         // Sample expressions (`sampleImage`) read footage through the session's source; without
         // it footage layers sample as transparent (#1000).
-        ctx.footage = Some(s.footage.as_ref());
-        ctx.value(l, p)
+        effectcraft_engine::commands::expr_tools::eval_ctx(s, cid, c, t).value(l, p)
     };
     Ok(js_value(c, &v))
+}
+
+/// `Property.expressionError`: why the property's expression fails at the comp's current time
+/// (where After Effects evaluates it; the prelude sends no `time`, a direct query may give one
+/// in comp seconds). The message is the one `expr.errors` gives: an evaluation error (an
+/// exception or a non-finite result) or the syntax error that disabled it; `""` when it
+/// evaluates (#3219).
+fn expr_error(s: &Session, a: &J) -> R {
+    let (cid, c, l) = layer_of(s, a)?;
+    let uid = u(a, "uid").ok_or("missing uid")?;
+    let p = l.props.find(uid).ok_or("the property no longer exists (it was deleted)")?;
+    let t = f(a, "time").map(Tick::from_seconds_f64).unwrap_or_else(|| s.time_of(cid));
+    // With the footage source, like `value`: `sampleImage` must not fail for want of it (#1000).
+    let ctx = EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, c, t) };
+    Ok(json!(effectcraft_engine::commands::expr_tools::property_error(&ctx, s.expr_check, l, p).unwrap_or_default()))
 }
 
 fn interp(i: Interp) -> &'static str {

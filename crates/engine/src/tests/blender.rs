@@ -238,6 +238,23 @@ fn blender_export_rejects_malformed_solves_without_panicking() {
     }
 }
 
+/// A solve with unsolved (interpolated) frames is partial, not solved, so the status agrees with
+/// the export, which refuses it.
+#[test]
+fn solve_status_reports_unsolved_frames_as_partial() {
+    let (mut s, lid, uid) = fixture(false);
+    let st = s.execute("camera.solveStatus", json!({"layer": lid.0})).unwrap();
+    assert_eq!((&st["solved"], &st["partial"], &st["solvedFrames"]), (&json!(true), &json!(false), &json!(3)), "{st}");
+    let mut solve =
+        ct::solve(&crate::camera_track::static_params(s.active_comp().unwrap().layer(lid).unwrap().props.find_group(uid).unwrap())).unwrap().as_ref().clone();
+    solve.frames[1].solved = false;
+    s.execute("prop.set", json!({"layer": lid.0, "path": "effects/#1/solve", "value": solve.to_json()})).unwrap();
+    s.camera_pending.clear();
+    let st = s.execute("camera.solveStatus", json!({"layer": lid.0})).unwrap();
+    assert_eq!((&st["solved"], &st["partial"], &st["solvedFrames"]), (&json!(false), &json!(true), &json!(2)), "{st}");
+    assert!(s.execute_checked("camera.exportBlender", json!({"layer": lid.0, "path": path("partial.py")})).is_err());
+}
+
 #[test]
 fn blender_export_respects_script_write_permission() {
     let (mut s, lid, _) = fixture(false);

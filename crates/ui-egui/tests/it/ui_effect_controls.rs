@@ -90,6 +90,180 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
     h.step();
 }
 
+fn header_arrow_harness() -> (Harness<'static, EffectcraftApp>, LayerId, [(u64, u64); 3]) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Disclosure", "width": 32, "height": 18, "frameRate": 30, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"name": "Controls", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let mut effects = [(0, 0); 3];
+    for pair in &mut effects {
+        let fx = s.execute("effect.apply", json!({"layers": [lid], "effect": "Point Control"})).unwrap()["effects"][0].as_u64().unwrap();
+        let prop = layer(&s, lid).props.find_group(fx).unwrap().get("point").unwrap().uid;
+        *pair = (fx, prop);
+    }
+    s.state.selected_props.clear();
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    h.run_steps(4);
+    (h, LayerId(lid), effects)
+}
+
+fn header_arrow_key(h: &mut Harness<'_, EffectcraftApp>, key: egui::Key, modifiers: egui::Modifiers) {
+    h.key_press_modifiers(modifiers, key);
+    h.run_steps(2);
+}
+
+#[test]
+fn effect_header_arrows_collapse_and_expand_without_editing_the_document() {
+    let (mut h, lid, [(fx, prop), (_, other), _]) = header_arrow_harness();
+    let at = rect_of(&h, &format!("effectControls.effect.{fx}.name")).center();
+    click(&mut h, at);
+    assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)]);
+    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let time = h.state().session.time();
+    let undo = h.state().session.history.undo.len();
+    let redo = h.state().session.history.redo.len();
+    for key in [egui::Key::ArrowLeft, egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::ArrowRight] {
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), key == egui::Key::ArrowRight);
+        assert!(h.state().auto.find(&format!("effectControls.row.{other}")).is_some(), "unselected effect stays open");
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)]);
+        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project);
+        assert_eq!(h.state().session.time(), time);
+        assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), (undo, redo));
+    }
+}
+
+#[test]
+fn effect_header_arrows_only_disclose_selected_headers_on_the_displayed_layer() {
+    let (mut h, lid, [(first, _), (second, _), (third, prop)]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, first), (lid, second), (LayerId(0), third), (lid, u64::MAX)];
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![first, second]);
+    assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some());
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty());
+
+    // A parameter selection, stale header, or header on another layer must still fall through.
+    h.state_mut().session.state.selected_props = vec![(lid, prop), (LayerId(0), first), (lid, u64::MAX)];
+    let before = serde_json::to_value(&h.state().session.project).unwrap();
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty());
+    assert_ne!(serde_json::to_value(&h.state().session.project).unwrap(), before, "the existing layer nudge still runs");
+}
+
+#[test]
+fn effect_header_arrows_ignore_hidden_panels_with_stale_focus() {
+    // A maximized frame hides every other frame and every floating window, so a floating Effect
+    // Controls is hidden too.
+    for hidden in ["closed", "maximized", "floating under maximized", "home"] {
+        let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        match hidden {
+            "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
+            "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
+            "floating under maximized" => {
+                h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+                h.state_mut().toggle_maximize(PanelKind::Composition);
+            }
+            _ => h.state_mut().ui.start_screen = true,
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls, "{hidden}: stale focus is preserved");
+        assert!(h.state().auto.find("panel.EffectControls").is_none(), "{hidden}: Effect Controls is hidden");
+        let x = |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3()[0];
+        let before = x(&h);
+        header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert!(h.state().ui.fx_closed.is_empty(), "{hidden}: hidden effects keep their disclosure state");
+        assert!(x(&h) < before, "{hidden}: Left still nudges the layer");
+    }
+}
+
+#[test]
+fn effect_header_arrows_work_wherever_effect_controls_is_on_screen() {
+    for place in ["floating", "tab of a maximized frame"] {
+        let (mut h, lid, [(fx, prop), _, _]) = header_arrow_harness();
+        h.state_mut().toggle_maximize(PanelKind::EffectControls);
+        if place == "floating" {
+            h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+        } else {
+            let placement = craft_ui::docking::Placement::Tab { before: None };
+            h.state_mut().apply_dock(craft_ui::docking::Action::Move { panel: PanelKind::EffectControls, anchor: PanelKind::Composition, placement }).unwrap();
+            h.state_mut().toggle_maximize(PanelKind::Composition);
+            assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition), "the frame was maximized from its Composition tab");
+        }
+        // The moved tab is the front one; focus it as a click on it would.
+        h.state_mut().ui.focused = PanelKind::EffectControls;
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        h.run_steps(3);
+        assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), "{place}: Effect Controls is on screen");
+        header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_none(), "{place}: Left collapses");
+        header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), "{place}: Right expands");
+    }
+}
+
+#[test]
+fn effect_header_arrows_preserve_modified_shortcuts_and_keyboard_ownership() {
+    let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+    h.state_mut().session.state.selected_props = vec![(lid, fx)];
+    let time = h.state().session.time();
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::COMMAND);
+    assert!(h.state().session.time() > time, "Cmd/Ctrl+Right still advances a frame");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().session.time(), time);
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::SHIFT);
+    assert!(h.state().ui.fx_closed.is_empty(), "Shift+Left does not collapse effects");
+    h.state_mut().ui.focused = PanelKind::Composition;
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "another panel owns the arrows");
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "a dialog owns the arrows");
+    h.state_mut().dialog = None;
+    h.run_steps(3);
+    let at = rect_of(&h, &format!("effectControls.effect.{fx}.name")).center();
+    h.event(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(egui::Popup::is_any_open(&h.ctx), "the effect context menu is open");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "the context menu owns the arrows");
+    header_arrow_key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    h.run_steps(3);
+    assert!(!egui::Popup::is_any_open(&h.ctx), "Escape closed the context menu");
+    double_click(&mut h, at);
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("effectControls.effect.{fx}.nameEdit")).is_some(), "the rename field is open");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "Left moves the text caret instead of collapsing");
+    assert!(h.state().auto.find(&format!("effectControls.effect.{fx}.nameEdit")).is_some());
+}
+
+#[test]
+fn effect_header_arrows_leave_viewer_text_editing_alone() {
+    let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+    let text = h.state_mut().session.execute("layer.newText", json!({"text": "abcdef"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("text.edit", json!({"layer": text, "caret": 3})).unwrap();
+    h.state_mut().session.state.selected_layers = vec![lid];
+    h.state_mut().session.state.selected_props = vec![(lid, fx)];
+    h.state_mut().show_panel(PanelKind::EffectControls);
+    h.run_steps(2);
+    assert!(h.state().session.state.text_edit.is_some(), "the text is still being edited");
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty(), "the text edit owns the arrows");
+    h.state_mut().session.state.text_edit = None;
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![fx], "with the edit over, Left collapses the effect");
+}
+
 #[test]
 fn effect_controls_widgets_register_automation_ids() {
     let (app, x) = app();
@@ -260,14 +434,14 @@ fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
     }
 }
 
-/// Key Light's Screen Colour eyedropper picks from the effect's input: the shown frame is
+/// Screen Color Key's Screen Colour eyedropper picks from the effect's input: the shown frame is
 /// already keyed (the default screen colour takes most of a green), so sampling it would miss.
 #[test]
 fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Key", "width": 320, "height": 180, "frameRate": 30, "duration": 1})).unwrap();
     let screen = s.execute("layer.newSolid", json!({"name": "Screen", "color": "#30b050"})).unwrap()["layer"].as_u64().unwrap();
-    let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Key Light"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"layers": [screen], "effect": "Screen Color Key"})).unwrap()["effects"][0].as_u64().unwrap();
     let prop = layer(&s, screen).effects().unwrap().groups().find(|g| g.uid == fx).and_then(|g| g.get("screenColour")).map(|p| p.uid).unwrap();
     s.state.selected_layers = vec![LayerId(screen)];
     let mut app = EffectcraftApp::new(s);
@@ -295,7 +469,7 @@ fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
 fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
     let (app, x) = app();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
-    let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Lumetri Color"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Color Grading"})).unwrap()["effects"][0].as_u64().unwrap();
     // Only this effect open, so its header is on screen.
     let l = layer(&h.state().session, x.small);
     let others: Vec<u64> = l.effects().unwrap().groups().map(|g| g.uid).filter(|u| *u != fx).collect();
@@ -317,6 +491,37 @@ fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
     let closed = h.state().ui.fx_closed.clone();
     assert!(!closed.contains(&fx) && !inner.iter().any(|u| closed.contains(u)), "and open again together");
     assert!(others.iter().all(|u| closed.contains(u)), "other effects stay as they were");
+}
+
+/// Shift-clicking effect headers selects the range from the last effect picked, which stays the
+/// end the next range starts from; Cmd/Ctrl adds or takes out one effect and moves that end.
+#[test]
+fn shift_click_on_effect_headers_selects_a_range_and_command_toggles() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let fx: Vec<u64> = layer(&h.state().session, x.small).effects().unwrap().groups().map(|g| g.uid).collect();
+    // All twirled closed, so every header is on screen.
+    h.state_mut().ui.fx_closed.extend(fx.iter().copied());
+    h.run_steps(3);
+    let pick = |h: &mut Harness<'_, EffectcraftApp>, i: usize, modifiers: egui::Modifiers| {
+        let at = rect_of(h, &format!("effectControls.effect.{}", fx[i])).center();
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        click(h, at);
+        h.event(egui::Event::ModifiersChanged(Default::default()));
+        h.step();
+        let picked = h.state().session.state.selected_props.iter().map(|(_, u)| *u).collect::<std::collections::BTreeSet<_>>();
+        fx.iter().enumerate().filter(|(_, u)| picked.contains(u)).map(|(i, _)| i).collect::<Vec<_>>()
+    };
+    let (shift, command) = (egui::Modifiers::SHIFT, egui::Modifiers::COMMAND);
+    assert_eq!(pick(&mut h, 3, shift), [3], "with nothing picked, the range is the effect itself");
+    assert_eq!(pick(&mut h, 1, Default::default()), [1]);
+    assert_eq!(pick(&mut h, 3, shift), [1, 2, 3], "Shift takes in the effects between");
+    assert_eq!(pick(&mut h, 0, shift), [0, 1], "the next range starts from the same effect");
+    assert_eq!(pick(&mut h, 4, shift), [1, 2, 3, 4]);
+    assert_eq!(pick(&mut h, 2, command), [1, 3, 4], "Cmd/Ctrl takes one out");
+    assert_eq!(pick(&mut h, 5, command), [1, 3, 4, 5], "and adds one");
+    assert_eq!(pick(&mut h, 3, shift), [3, 4, 5], "which is where the next range starts");
+    assert_eq!(pick(&mut h, 0, Default::default()), [0], "a plain click picks one");
 }
 
 fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
@@ -521,6 +726,63 @@ fn extractor_offers_the_exr_layers_and_channels() {
     h.get_by_label("depth.Z").click();
     h.run_steps(3);
     assert_eq!(values(&h)[0], "depth.Z");
+    let _ = std::fs::remove_file(path);
+}
+
+/// #473: Cryptomatte's Layer popup lists the Cryptomatte layers of the footage's OpenEXR (a file
+/// with only CryptoMaterial shows CryptoMaterial, not CryptoObject), and the three standard ones
+/// when the layer has no such footage. The stored value stays the standard index.
+#[test]
+fn cryptomatte_layer_popup_follows_the_footage() {
+    use exr::prelude::*;
+    let (w, hh) = (8usize, 4usize);
+    let ch = |n: &str, v: f32| AnyChannel::new(n, FlatSamples::F32(vec![v; w * hh]));
+    let channels = AnyChannels::sort(vec![ch("R", 0.5), ch("G", 0.5), ch("B", 0.5), ch("CryptoMaterial00.R", 1.0), ch("CryptoMaterial00.G", 1.0)].into());
+    let mut exr_layer = exr::prelude::Layer::new((w, hh), LayerAttributes::default(), Encoding::FAST_LOSSLESS, channels);
+    exr_layer.attributes.other.insert(Text::from("cryptomatte/abc1234/name"), AttributeValue::Text(Text::from("CryptoMaterial")));
+    exr_layer.attributes.other.insert(Text::from("cryptomatte/abc1234/manifest"), AttributeValue::Text(Text::from(r#"{"wood":"13851a76"}"#)));
+    let path = std::env::temp_dir().join(format!("ec-ui-exr-crypto-{}.exr", std::process::id()));
+    Image::from_layer(exr_layer).write().to_file(&path).unwrap();
+
+    let mut s = effectcraft_host::session();
+    let item = s.execute("file.import", json!({"paths": [path.to_string_lossy()]})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "EXR", "width": 8, "height": 4, "frameRate": 24, "duration": 1})).unwrap();
+    let l = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "S", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    let apply = |s: &mut Session, l: u64| s.execute("effect.apply", json!({"layers": [l], "effect": "Cryptomatte"})).unwrap()["effects"][0].as_u64().unwrap();
+    let (fx, solid_fx) = (apply(&mut s, l), apply(&mut s, solid));
+    let layer_prop = |s: &Session, l: u64, fx: u64| {
+        layer(s, l).effects().and_then(|f| f.groups().find(|g| g.uid == fx)).and_then(|g| g.get("layer")).map(|p| (p.uid, p.value.as_enum())).unwrap()
+    };
+    let (uid, stored) = layer_prop(&s, l, fx);
+    assert_eq!(stored, 0, "a new effect stores CryptoObject");
+    let (solid_uid, _) = layer_prop(&s, solid, solid_fx);
+    s.state.selected_layers = vec![LayerId(l)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    settle(&mut h);
+    // The file has only CryptoMaterial, so that is what the closed popup shows, and all it lists.
+    assert!(h.query_by_label("CryptoMaterial").is_some() && h.query_by_label("CryptoObject").is_none());
+    let at = rect_of(&h, &format!("effectControls.prop.{uid}.value")).center();
+    click(&mut h, at);
+    assert!(h.query_by_label("CryptoObject").is_none() && h.query_by_label("CryptoAsset").is_none(), "only the file's layers");
+    assert_eq!(h.query_all_by_label("CryptoMaterial").count(), 2, "the popup and its entry");
+    h.query_all_by_label("CryptoMaterial").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(layer_prop(&h.state().session, l, fx).1, 1, "stored as the standard CryptoMaterial value");
+
+    // A layer without Cryptomatte footage lists the standard three.
+    h.state_mut().session.state.selected_layers = vec![LayerId(solid)];
+    settle(&mut h);
+    let at = rect_of(&h, &format!("effectControls.prop.{solid_uid}.value")).center();
+    click(&mut h, at);
+    for name in ["CryptoMaterial", "CryptoAsset"] {
+        assert!(h.query_by_label(name).is_some(), "the standard layer {name}");
+    }
+    h.get_by_label("CryptoAsset").click();
+    h.run_steps(3);
+    assert_eq!(layer_prop(&h.state().session, solid, solid_fx).1, 2);
     let _ = std::fs::remove_file(path);
 }
 
@@ -778,6 +1040,59 @@ fn effect_control_name_can_be_renamed_from_its_header() {
     assert_eq!(current_name(&h), "Point Control");
 }
 
+/// #3198: the effect rename field opens with the whole name selected, so typing replaces it (no
+/// Ctrl/Cmd+A first), whether Enter or a double-click on the header opens it, as in After
+/// Effects. Enter used to leave the field open without the keyboard, the caret after the name.
+#[test]
+fn effect_rename_opens_with_the_name_selected() {
+    let (app, x) = app();
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    settle(&mut h);
+    let edit = format!("effectControls.effect.{}.nameEdit", x.point_fx);
+    let current_name =
+        |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, x.small).effects().unwrap().groups().find(|g| g.uid == x.point_fx).unwrap().name.clone();
+    let type_and_commit = |h: &mut Harness<'_, EffectcraftApp>, text: &str| {
+        assert!(ids(h).contains(&edit), "the rename field is open");
+        assert!(h.ctx.egui_wants_keyboard_input(), "the rename field has the keyboard");
+        h.event(egui::Event::Text(text.into()));
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert!(!ids(h).contains(&edit), "Enter closes the rename field");
+    };
+    // Enter with the effect selected.
+    h.state_mut().session.execute("prop.select", json!({"layer": x.small, "prop": x.point_fx, "selectKeys": false})).unwrap();
+    h.run_steps(3);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    type_and_commit(&mut h, "Speed");
+    assert_eq!(current_name(&h), "Speed", "the typed text replaced the whole name");
+    // A double-click on the effect's name.
+    let point = rect_of(&h, &format!("effectControls.effect.{}.name", x.point_fx)).center();
+    double_click(&mut h, point);
+    h.run_steps(3);
+    type_and_commit(&mut h, "Drift");
+    assert_eq!(current_name(&h), "Drift", "the typed text replaced the whole name");
+    // The header's context menu ▸ Rename.
+    let header = rect_of(&h, &format!("effectControls.effect.{}", x.point_fx)).center();
+    right_click(&mut h, header);
+    let rename = h.query_by_label("Rename").expect("the effect menu's Rename").rect().center();
+    click(&mut h, rename);
+    h.run_steps(3);
+    type_and_commit(&mut h, "Wander");
+    assert_eq!(current_name(&h), "Wander", "the typed text replaced the whole name");
+    // Enter and Enter again without typing: no rename, no undo step.
+    let undo = h.state().session.history.undo.len();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(ids(&h).contains(&edit) && h.ctx.egui_wants_keyboard_input(), "Enter opens the rename field with the keyboard");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(!ids(&h).contains(&edit), "Enter closes the rename field");
+    assert_eq!(current_name(&h), "Wander", "the name stays");
+    assert_eq!(h.state().session.history.undo.len(), undo, "no undo step");
+}
+
 // Regression test for #1497: double-clicking an effect parameter's name in Effect Controls did
 // nothing; it should reveal that property in the Timeline, as After Effects does.
 #[test]
@@ -823,4 +1138,251 @@ fn double_click(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
         h.step();
     }
     h.run_steps(2);
+}
+
+/// Two solids in one comp, `A` with a Point Control and `B` with an Angle Control, `A` selected
+/// and Effect Controls open: the app, A, B and their effects.
+fn two_layers() -> (EffectcraftApp, u64, u64, u64, u64) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30, "duration": 5})).unwrap();
+    let a = s.execute("layer.newSolid", json!({"name": "A", "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.newSolid", json!({"name": "B", "color": "#0000ff"})).unwrap()["layer"].as_u64().unwrap();
+    let fa = s.execute("effect.apply", json!({"layers": [a], "effect": "Point Control"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fb = s.execute("effect.apply", json!({"layers": [b], "effect": "Angle Control"})).unwrap()["effects"][0].as_u64().unwrap();
+    s.state.selected_layers = vec![LayerId(a)];
+    s.state.selected_props.clear();
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    (app, a, b, fa, fb)
+}
+
+/// Whether Effect Controls drew effect `fx`'s header in the last frame (not the frame before:
+/// a stale id must not pass).
+fn shows_effect(h: &Harness<'_, EffectcraftApp>, fx: u64) -> bool {
+    let id = format!("effectControls.effect.{fx}");
+    h.state().auto.elements.iter().any(|e| e.id == id)
+}
+
+/// Selects `layer` through the `layer.select` command and runs a few frames.
+fn select_layer(h: &mut Harness<'_, EffectcraftApp>, layer: u64) {
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.run_steps(3);
+}
+
+/// #3193: the Effect Controls tab's lock keeps the panel (and its tab name) on the layer it showed
+/// when locked whatever is selected next, through undo; deleting that layer unlocks it without a
+/// crash and the panel follows the selection again.
+#[test]
+fn locked_effect_controls_keep_their_layer_until_it_is_deleted() {
+    let (app, a, b, fa, fb) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert!(shows_effect(&h, fa) && !shows_effect(&h, fb), "A is shown before locking");
+    let comp = h.state().session.active_comp_id().unwrap().0;
+    let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
+    click(&mut h, lock);
+    assert_eq!(h.state().ui.effect_controls_lock, Some(effectcraft_ui_egui::state::EffectControlsLock { comp, layer: a }));
+    // Selecting B keeps A in the panel and its tab.
+    select_layer(&mut h, b);
+    assert!(shows_effect(&h, fa) && !shows_effect(&h, fb), "the locked panel keeps A");
+    let tab = h.state().auto.elements.iter().find(|e| e.id == "panel.tab.EffectControls").map(|e| e.label.clone()).unwrap_or_default();
+    assert!(tab.ends_with(" A"), "the tab names the locked layer: {tab:?}");
+    // An edit and its undo leave the lock alone.
+    h.state_mut().session.execute("prop.set", json!({"layer": b, "path": "transform/opacity", "value": 50.0})).unwrap();
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(3);
+    assert!(shows_effect(&h, fa) && !shows_effect(&h, fb), "undo keeps the lock");
+    // The lock state is UI state: it survives a serde round trip.
+    let ui = serde_json::to_value(&h.state().ui).unwrap();
+    let back: effectcraft_ui_egui::state::UiState = serde_json::from_value(ui).unwrap();
+    assert_eq!(back.effect_controls_lock, h.state().ui.effect_controls_lock);
+    // Unlocking follows the selection again.
+    let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
+    click(&mut h, lock);
+    assert_eq!(h.state().ui.effect_controls_lock, None);
+    assert!(shows_effect(&h, fb) && !shows_effect(&h, fa), "unlocked, the panel shows the selection");
+    // Lock on A again, select B, delete A: no crash, the lock is gone, B is shown.
+    select_layer(&mut h, a);
+    let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
+    click(&mut h, lock);
+    assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
+    select_layer(&mut h, b);
+    h.state_mut().session.execute("edit.clear", json!({"layers": [a]})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.effect_controls_lock, None, "deleting the locked layer unlocks the panel");
+    assert!(!shows_effect(&h, fa), "A is gone from the panel");
+    // Deleting clears the selection; the panel follows the next one.
+    select_layer(&mut h, b);
+    assert!(shows_effect(&h, fb), "the panel follows the selection");
+    // Undoing the delete brings A back without bringing back (or breaking) the lock.
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.effect_controls_lock, None);
+    let selected = h.state().session.state.selected_layers.first().map(|l| l.0);
+    let (on, off) = if selected == Some(a) { (fa, fb) } else { (fb, fa) };
+    assert!(shows_effect(&h, on) && !shows_effect(&h, off), "the panel shows the selection ({selected:?})");
+}
+
+/// #3193: a new or opened project reuses comp and layer ids, so a lock does not carry into it,
+/// even onto a layer with the locked one's ids.
+#[test]
+fn replacing_the_project_unlocks_effect_controls() {
+    let (app, a, b, _, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
+    click(&mut h, lock);
+    assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
+    select_layer(&mut h, b);
+    // The same project opened again: every id is alive.
+    let project = (*h.state().session.project).clone();
+    h.state_mut().session.replace_project(project, None);
+    h.run_steps(3);
+    assert_eq!(h.state().ui.effect_controls_lock, None, "the lock belongs to the replaced project");
+}
+
+/// #3193: with the lock kept for a layer of another comp and no layer selected in the active one,
+/// Effect Controls shows no layer: a lock request is an error and the kept lock stays.
+#[test]
+fn a_lock_request_with_no_layer_shown_fails_and_keeps_the_other_comps_lock() {
+    use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request that locks Effect Controls and returns the immediate reply.
+    fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
+        let ctx = h.ctx.clone();
+        let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
+        let now = h.state().now();
+        match control::handle(h.state_mut(), &ctx, &req, now) {
+            Outcome::Done(v) => v,
+            _ => panic!("ui.set: no immediate reply"),
+        }
+    }
+    let (app, a, _, _, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert_eq!(send(&mut h)["ok"], true);
+    let kept = h.state().ui.effect_controls_lock;
+    assert_eq!(kept.map(|l| l.layer), Some(a));
+    // Another comp becomes active, nothing selected in it.
+    h.state_mut().session.execute("comp.new", json!({"name": "Other", "width": 320, "height": 180, "frameRate": 30, "duration": 5})).unwrap();
+    h.state_mut().session.state.selected_layers.clear();
+    h.run_steps(3);
+    assert_ne!(h.state().session.active_comp_id().map(|c| c.0), kept.map(|l| l.comp), "another comp is active");
+    let reply = send(&mut h);
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(h.state().ui.effect_controls_lock, kept, "the other comp's lock stays");
+}
+
+/// #3193: locked to a layer of another comp, the panel shows this comp's selection; a lock request
+/// does not claim to lock that layer: it is an error and the other comp's lock stays.
+#[test]
+fn a_lock_request_while_locked_in_another_comp_fails() {
+    use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request that locks Effect Controls and returns the immediate reply.
+    fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
+        let ctx = h.ctx.clone();
+        let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
+        let now = h.state().now();
+        match control::handle(h.state_mut(), &ctx, &req, now) {
+            Outcome::Done(v) => v,
+            _ => panic!("ui.set: no immediate reply"),
+        }
+    }
+    let (app, a, _, _, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert_eq!(send(&mut h)["ok"], true);
+    let kept = h.state().ui.effect_controls_lock;
+    assert_eq!(kept.map(|l| l.layer), Some(a));
+    // Another comp with a selected layer becomes active: the panel shows that layer.
+    h.state_mut().session.execute("comp.new", json!({"name": "Other", "width": 320, "height": 180, "frameRate": 30, "duration": 5})).unwrap();
+    let c = h.state_mut().session.execute("layer.newSolid", json!({"name": "C", "color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.state.selected_layers = vec![LayerId(c)];
+    h.run_steps(3);
+    assert_ne!(h.state().session.active_comp_id().map(|x| x.0), kept.map(|l| l.comp), "another comp is active");
+    let reply = send(&mut h);
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(h.state().ui.effect_controls_lock, kept, "the other comp's lock stays");
+}
+
+/// #3193: a lock request right after the project is replaced, before the next frame, is not
+/// answered with the old project's lock: the reply matches the lock the panel keeps.
+#[test]
+fn a_lock_request_after_a_project_replacement_does_not_report_the_old_lock() {
+    use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request that locks Effect Controls and returns the immediate reply.
+    fn send(h: &mut Harness<'_, EffectcraftApp>) -> serde_json::Value {
+        let ctx = h.ctx.clone();
+        let (req, _rx) = ControlRequest::new("ui.set", json!({"effectControlsLocked": true}));
+        let now = h.state().now();
+        match control::handle(h.state_mut(), &ctx, &req, now) {
+            Outcome::Done(v) => v,
+            _ => panic!("ui.set: no immediate reply"),
+        }
+    }
+    let (app, a, _, _, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert_eq!(send(&mut h)["ok"], true);
+    assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
+    let project = (*h.state().session.project).clone();
+    h.state_mut().session.replace_project(project, None);
+    let reply = send(&mut h);
+    h.run_steps(3);
+    assert_eq!(reply["ok"] == true, h.state().ui.effect_controls_lock.is_some(), "{reply}");
+}
+
+/// #3193: an effect dropped on the locked panel goes to the locked layer and leaves the selection
+/// alone; one applied to another layer says why the panel doesn't show it.
+#[test]
+fn applying_an_effect_while_locked_keeps_the_selection() {
+    let (app, a, b, fa, _) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
+    click(&mut h, lock);
+    select_layer(&mut h, b);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "effect.apply", json!({"effect": "Color Control", "layers": [a]})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(b)], "the selection stays on B");
+    assert!(shows_effect(&h, fa), "the panel still shows A");
+    assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
+    // Applied to the selected B: the panel stays on A and says so.
+    h.state_mut().ui.status.clear();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "effect.apply", json!({"effect": "Color Control", "layers": [b]})).unwrap();
+    h.run_steps(3);
+    assert!(shows_effect(&h, fa));
+    assert_eq!(h.state().ui.status, "Effect Controls is locked to A");
+}
+
+/// #3193: agents lock Effect Controls with `ui.set {effectControlsLocked}`; with no layer shown
+/// there is nothing to lock.
+#[test]
+fn effect_controls_lock_over_the_control_channel() {
+    use effectcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    /// Sends a `ui.set` request with `params` and returns the immediate reply.
+    fn send(h: &mut Harness<'_, EffectcraftApp>, params: serde_json::Value) -> serde_json::Value {
+        let ctx = h.ctx.clone();
+        let (req, _rx) = ControlRequest::new("ui.set", params);
+        let now = h.state().now();
+        match control::handle(h.state_mut(), &ctx, &req, now) {
+            Outcome::Done(v) => v,
+            _ => panic!("ui.set: no immediate reply"),
+        }
+    }
+    let (app, a, b, fa, fb) = two_layers();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    assert_eq!(send(&mut h, json!({"effectControlsLocked": true}))["ok"], true);
+    assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
+    select_layer(&mut h, b);
+    assert!(shows_effect(&h, fa) && !shows_effect(&h, fb));
+    assert_eq!(send(&mut h, json!({"effectControlsLocked": false}))["ok"], true);
+    h.run_steps(3);
+    assert!(shows_effect(&h, fb) && !shows_effect(&h, fa));
+    // Nothing selected: nothing to lock.
+    h.state_mut().session.state.selected_layers.clear();
+    h.run_steps(2);
+    assert_eq!(send(&mut h, json!({"effectControlsLocked": true}))["ok"], false);
+    assert_eq!(h.state().ui.effect_controls_lock, None);
 }

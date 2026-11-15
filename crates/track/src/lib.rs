@@ -359,6 +359,9 @@ impl<'a> Scorer<'a> {
     }
 }
 
+/// The largest pre-tracking blur (pixels), as the options command allows.
+const MAX_BLUR: f64 = 100.0;
+
 /// The pre-processed pixels around one point: a pyramid of a crop. Plane coordinates are image
 /// pixels minus `origin`, divided by `2^level`.
 struct Crop {
@@ -369,7 +372,10 @@ struct Crop {
 impl Crop {
     /// Crop image pixels `[c - ext, c + ext]` (image pixel coordinates), pre-processed.
     fn new(frame: &Frame, opts: &TrackOptions, c: [f64; 2], ext: [f64; 2], levels: usize) -> Crop {
-        let sigma = opts.blur.max(0.0) / 2.0;
+        // A stored blur or search area past the frame adds only repeated edge pixels: both are
+        // held to what the frame can use, so a few project numbers cannot size a huge crop.
+        let sigma = opts.blur.clamp(0.0, MAX_BLUR) / 2.0;
+        let ext = [ext[0].clamp(0.0, frame.img.width as f64), ext[1].clamp(0.0, frame.img.height as f64)];
         let margin = (sigma * 3.0).ceil() + 3.0 + if opts.enhance { 6.0 } else { 0.0 } + (1 << levels) as f64;
         let x0 = (c[0] - ext[0] - margin).floor();
         let y0 = (c[1] - ext[1] - margin).floor();

@@ -412,6 +412,8 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
     }
     let focused = ctx.memory(|m| m.focused());
     let on_row = focused.is_some_and(|f| nav.rows.iter().any(|r| r.id == f || r.star == Some(f)));
+    // Enter / Space on the star are the star button's (it toggles the favourite), not the row's.
+    let on_star = focused.is_some_and(|f| nav.rows.iter().any(|r| r.star == Some(f)));
     let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::EffectsPresets;
     if (!on_row && !by_mouse) || app.dialog.is_some() || widgets::any_menu_open(ctx) {
         return None;
@@ -470,11 +472,11 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
                         toggle(app, !*open);
                         None
                     }
-                    (Key::Enter, None) => {
+                    (Key::Enter, None) if !on_star => {
                         apply = row.apply.clone();
                         None
                     }
-                    (Key::Space, None) if on_row => {
+                    (Key::Space, None) if on_row && !on_star => {
                         apply = row.apply.clone();
                         None
                     }
@@ -636,8 +638,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let force_scan = contents_menu(app, ui, &ctx, rect, sr, &t);
     let view = app.ui.effects_view.clone();
     let list = Rect::from_min_max(pos2(rect.min.x, sr.max.y + 6.0), rect.max);
-    let lp = p.with_clip_rect(list);
     let mut scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("fx-scroll"), list);
+    let list = scroll.content;
+    let lp = p.with_clip_rect(list);
     let query = q.trim().to_lowercase();
     let searching = !query.is_empty();
     let mut y = list.min.y - scroll.offset;

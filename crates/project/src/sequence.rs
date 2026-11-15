@@ -114,6 +114,22 @@ impl Footage {
         self.sequence.get(k).filter(|p| frame_number(p) == Some(n)).map(String::as_str)
     }
 
+    /// The file an image sequence shows at its frame `i`, holding the last existing file across a
+    /// gap in the numbering (After Effects 2026: files 1, 2, 4, 5 show frame 2 at frame 3).
+    /// `None` only when no file precedes the frame (or there are no files).
+    pub fn sequence_file_held(&self, i: i64) -> Option<&str> {
+        if let Some(p) = self.sequence_file(i) {
+            return Some(p);
+        }
+        let first = self.numbered()?;
+        let k = self.first_file_from(first.saturating_add(i));
+        // The preceding number, then the file `sequence_file` picks for it (the first with that
+        // number), so files sharing a number (`shot_0002`, `shot_002`) don't switch at a gap.
+        let prev = self.file_number(k.checked_sub(1)?)?;
+        let j = self.first_file_from(prev);
+        self.sequence.get(j).filter(|p| frame_number(p) == Some(prev)).map(String::as_str)
+    }
+
     /// Set an image sequence's duration to its frames at its frame rate (after its files or
     /// frame rate changed).
     pub fn sync_sequence_duration(&mut self) {
@@ -129,6 +145,17 @@ mod tests {
 
     fn seq(numbers: &[i64]) -> Footage {
         Footage { kind: FootageKind::Sequence, sequence: numbers.iter().map(|n| format!("C:\\shots\\a_{n:04}.png")).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_gap_holds_the_file_shown_for_the_preceding_number() {
+        let mut f = seq(&[]);
+        f.sequence = ["a_0001.png", "a_0002.png", "a_002.png", "a_0005.png"].map(String::from).to_vec();
+        assert_eq!(f.sequence_file(1), Some("a_0002.png"));
+        // Frames 3 and 4 (numbers 3, 4) hold what number 2 shows: the first file with it.
+        assert_eq!(f.sequence_file_held(2), Some("a_0002.png"));
+        assert_eq!(f.sequence_file_held(3), Some("a_0002.png"));
+        assert_eq!(f.sequence_file_held(4), Some("a_0005.png"));
     }
 
     #[test]

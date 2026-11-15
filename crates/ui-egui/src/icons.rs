@@ -745,6 +745,12 @@ pub fn keyframe(
     painter.extend(keyframe_shapes(center, size, left, right, fill));
 }
 
+/// The screen rect a [`keyframe`] glyph covers, read off the shapes it draws.
+pub fn keyframe_bounds(center: Pos2, size: f32, left: effectcraft_engine::keyframe::KeyHalf, right: effectcraft_engine::keyframe::KeyHalf) -> Rect {
+    // Any opaque fill: a transparent shape would report no bounds.
+    egui::Shape::Vec(keyframe_shapes(center, size, left, right, Color32::WHITE)).visual_bounding_rect()
+}
+
 /// The halves of a [`keyframe`] glyph. Flat, without a dark outline (as in After Effects), so
 /// keys that overlap read as one shape instead of a tangle of borders (#284); the hairline in
 /// the fill colour closes the seam between the halves.
@@ -809,6 +815,23 @@ mod tests {
                 })
                 .collect();
             assert!(turns.iter().all(|t| *t < 0.0) || turns.iter().all(|t| *t > 0.0), "{piece:?} is not convex: {turns:?}");
+        }
+    }
+
+    /// Each half reaches as far as it is drawn, plus the hairline around it, and the halves are
+    /// independent (a key can come in linear and go out on hold).
+    #[test]
+    fn keyframe_bounds_follow_each_half() {
+        let c = egui::pos2(100.0, 50.0);
+        let r = 5.5;
+        // (half, how far it reaches sideways, how far up and down)
+        let extents = [(H::Linear, r, r), (H::Hold, r * 0.8, r * 0.8), (H::Bezier, r * 0.75, r), (H::Auto, r * 0.8, r * 0.8)];
+        for (l, lx, ly) in extents {
+            for (rt, rx, ry) in extents {
+                let b = super::keyframe_bounds(c, 11.0, l, rt);
+                let want = egui::Rect::from_min_max(c - egui::vec2(lx, ly.max(ry)), c + egui::vec2(rx, ly.max(ry))).expand(0.25);
+                assert!(b.min.distance(want.min) < 1e-3 && b.max.distance(want.max) < 1e-3, "{l:?}/{rt:?}: {b:?}, want {want:?}");
+            }
         }
     }
 

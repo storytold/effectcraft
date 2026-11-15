@@ -42,6 +42,47 @@ fn keys(h: &Harness<'_, EffectcraftApp>, uid: u64) -> Vec<Pos2> {
     ks
 }
 
+/// #2854: a middle-drag on a key, a layer bar, its trim edge or the marker bin edits nothing and
+/// adds no undo step; it only pans.
+#[test]
+fn middle_drag_on_a_key_or_layer_bar_changes_nothing() {
+    let (mut h, id, uid) = harness();
+    let center = |h: &Harness<'_, EffectcraftApp>, name: String| {
+        let e = h.state().auto.find(&name).unwrap_or_else(|| panic!("no {name}")).clone();
+        pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+    };
+    let bar = center(&h, format!("timeline.layer.{}.bar", id.0));
+    let trim = center(&h, format!("timeline.layer.{}.bar.in", id.0));
+    let bin = center(&h, "timeline.markerBin".to_string());
+    let key = keys(&h, uid)[1];
+    let state = |h: &Harness<'_, EffectcraftApp>| {
+        let comp = h.state().session.active_comp().unwrap();
+        let l = comp.layer(id).unwrap();
+        (l.in_point, l.out_point, l.start_time, comp.markers.len(), key_times(h, id), h.state().session.history.undo.len())
+    };
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(2);
+    let before = state(&h);
+    for from in [key, bar, trim, bin] {
+        let to = from + egui::vec2(90.0, 0.0);
+        h.input_mut().events.push(Event::PointerMoved(from));
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Middle, pressed: true, modifiers: Default::default() });
+        h.step();
+        for i in 1..=8 {
+            h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+            h.step();
+        }
+        h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Middle, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+        assert_eq!(state(&h), before, "from {from:?}");
+        assert!(h.state().session.state.selected_layers.is_empty(), "from {from:?}: the press selects nothing");
+    }
+    // The left button still drags the key.
+    drag(&mut h, key, key + egui::vec2(90.0, 0.0), egui::Modifiers::NONE);
+    assert_ne!(key_times(&h, id), before.4);
+}
+
 /// Press at `from`, move to `to` in small steps (a real drag), release.
 fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: egui::Modifiers) {
     h.input_mut().events.push(Event::PointerMoved(from));

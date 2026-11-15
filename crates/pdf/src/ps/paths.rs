@@ -22,7 +22,7 @@ impl Interp {
     }
 
     /// Stop the program when a path of `len` elements would be longer than [`MAX_PATH`].
-    fn path_fits(&mut self, len: usize) -> Result<(), Flow> {
+    pub(super) fn path_fits(&mut self, len: usize) -> Result<(), Flow> {
         if len <= MAX_PATH {
             return Ok(());
         }

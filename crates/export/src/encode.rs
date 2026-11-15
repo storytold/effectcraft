@@ -1,13 +1,13 @@
-//! Movie export: FilmCraft H.264, HEVC (`effectcraft-hevcenc`) and AV1 (`effectcraft-av1enc`)
+//! Movie export: H.264 (`craft_video::h264`), HEVC (`craft_video::hevc`) and AV1 (`craft_video::av1`)
 //! → MP4 (+ AAC), ProRes and uncompressed `raw ` → MOV (+ PCM), muxed by
-//! FilmCraft's ISO BMFF / QuickTime writer.
+//! craft-media's ISO BMFF / QuickTime writer.
 
 use std::io::Write;
 
+use craft_media::isobmff::{Brand, ColorInfo, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, ProResProfile};
 use effectcraft_project::{Comp, ProjectSettings};
 use effectcraft_time::{FrameRate, Tick};
-use filmcraft_isobmff::{Brand, ColorInfo, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
 
 use crate::{Cx, ExportError, Report, Result, State, batch_size, wants_audio};
@@ -19,14 +19,41 @@ fn mux_err(e: impl std::fmt::Display) -> ExportError {
     ExportError::Io(e.to_string())
 }
 
-/// Tag a video [`SampleEntry`] with the BT.709 limited-range `colr` (nclx) box every video
-/// encoder here outputs (`rgba_to_yuv420`, `rgba_to_yuv_10` and `rgba_to_yuv420_bits` all use
-/// the 0.2126/0.7152/0.0722 luma and a 16–235 luma range). Without it a re-import falls back to
-/// the container's resolution-based `default_matrix` — BT.601 below 1024×577 — and shifts the
+/// What a render's frames are, as ITU-T H.273 code points, for the `colr` box and the encoders'
+/// own colour description. The matrix is BT.709, the one every encoder here converts with
+/// (`rgba_to_yuv420`, `rgba_to_yuv_10` and `rgba_to_yuv420_bits` all use the 0.2126/0.7152/0.0722
+/// luma). Primaries and transfer follow the render path (`Pipe::output`): only a working space
+/// converts to the output space, so unmanaged frames pass through. sRGB output keeps transfer 1
+/// rather than 13 (#340), and an alpha matte is not in the output space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Codes {
+    pub(crate) primaries: u8,
+    pub(crate) transfer: u8,
+    pub(crate) matrix: u8,
+}
+
+pub(crate) fn output_codes(settings: &ProjectSettings, channels: Channels) -> Codes {
+    use effectcraft_project::ColorSpace as Space;
+    let output = settings.working_space.and(settings.output_space).filter(|_| channels != Channels::Alpha);
+    let (primaries, transfer) = match output {
+        None | Some(Space::Srgb | Space::Rec709) => (1, 1),
+        Some(Space::Rec2020) => (9, 1),
+        Some(Space::DisplayP3) => (12, 13),
+        Some(Space::Rec2100Pq) => (9, 16),
+        Some(Space::Rec2100Hlg) => (9, 18),
+        // H.273 has no code for the ACES primaries: unspecified, in linear light.
+        Some(Space::AcesCg | Space::Aces2065) => (2, 8),
+    };
+    Codes { primaries, transfer, matrix: 1 }
+}
+
+/// Tag a video [`SampleEntry`] with the limited-range (16–235 luma, as every encoder here
+/// writes) `colr` (nclx) box for `c` (#2879). Without it a re-import falls back to the
+/// container's resolution-based `default_matrix` — BT.601 below 1024×577 — and shifts the
 /// colours (pure red came back as [232,0,1]).
-pub(crate) fn tag_bt709_limited(entry: &mut SampleEntry) {
+pub(crate) fn tag_nclx_limited(entry: &mut SampleEntry, c: Codes) {
     if let Some(v) = entry.video.as_mut() {
-        v.color = Some(ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false });
+        v.color = Some(ColorInfo::Nclx { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.into(), full_range: false });
     }
 }
 
@@ -90,39 +117,41 @@ pub(crate) trait VideoEncoder: Send {
 // ---------------------------------------------------------------- H.264
 
 struct H264 {
-    enc: filmcraft_h264enc::Encoder,
+    enc: craft_video::h264::Encoder,
     w: u32,
     h: u32,
     rate: FrameRate,
+    codes: Codes,
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
 }
 
 impl H264 {
-    fn new(w: u32, h: u32, rate: FrameRate, kbps: u32) -> Result<H264> {
-        let mut cfg = filmcraft_h264enc::EncoderConfig::new(w, h, rate.num as u32, rate.den as u32);
-        cfg.format = filmcraft_h264enc::PacketFormat::LengthPrefixed;
+    fn new(w: u32, h: u32, rate: FrameRate, kbps: u32, codes: Codes) -> Result<H264> {
+        let mut cfg = craft_video::h264::EncoderConfig::new(w, h, rate.num as u32, rate.den as u32);
+        cfg.format = craft_video::h264::PacketFormat::LengthPrefixed;
         cfg.aud = false;
         cfg.keyint = (rate.as_f64() * 2.0).round().max(1.0) as u32;
         let kbps = kbps.max(100);
-        cfg.rate = filmcraft_h264enc::RateControl::Vbr { target_kbps: kbps, max_kbps: kbps * 3 / 2 };
-        let enc = filmcraft_h264enc::Encoder::new(cfg).map_err(enc)?;
-        Ok(H264 { enc, w, h, rate, y: vec![], u: vec![], v: vec![] })
+        cfg.rate = craft_video::h264::RateControl::Vbr { target_kbps: kbps, max_kbps: kbps * 3 / 2 };
+        cfg.color = craft_video::h264::ColorConfig { primaries: codes.primaries, transfer: codes.transfer, matrix: codes.matrix, full_range: false };
+        let enc = craft_video::h264::Encoder::new(cfg).map_err(enc)?;
+        Ok(H264 { enc, w, h, rate, codes, y: vec![], u: vec![], v: vec![] })
     }
-    fn packets(&self, ps: Vec<filmcraft_h264enc::Packet>) -> Vec<Packet> {
+    fn packets(&self, ps: Vec<craft_video::h264::Packet>) -> Vec<Packet> {
         ps.into_iter().map(|p| Packet { data: p.data, key: p.keyframe, cto: (p.pts - p.dts) as i32 }).collect()
     }
 }
 
 impl VideoEncoder for H264 {
     fn sample_entry(&self) -> SampleEntry {
-        let cfg = filmcraft_isobmff::AvcConfig::parse(&self.enc.avcc()).unwrap_or_else(|_| {
+        let cfg = craft_media::isobmff::AvcConfig::parse(&self.enc.avcc()).unwrap_or_else(|_| {
             let (sps, pps) = self.enc.sps_pps();
-            filmcraft_isobmff::AvcConfig::new(vec![sps], vec![pps], 4)
+            craft_media::isobmff::AvcConfig::new(vec![sps], vec![pps], 4)
         });
         let mut entry = SampleEntry::avc(cfg, self.w as u16, self.h as u16);
-        tag_bt709_limited(&mut entry);
+        tag_nclx_limited(&mut entry, self.codes);
         entry
     }
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>> {
@@ -141,7 +170,7 @@ impl VideoEncoder for H264 {
     fn encode_yuv420(&mut self, p: &Yuv420, index: u64) -> Result<Vec<Packet>> {
         let (w, cw) = (self.w as usize, (self.w as usize).div_ceil(2));
         let (y, u, v) = p.slices(w, self.h as usize);
-        let frame = filmcraft_h264enc::YuvFrame { y, u, v, y_stride: w, uv_stride: cw };
+        let frame = craft_video::h264::YuvFrame { y, u, v, y_stride: w, uv_stride: cw };
         let ps = self.enc.try_encode(&frame, index as i64 * self.rate.den).map_err(enc)?;
         Ok(self.packets(ps))
     }
@@ -159,37 +188,22 @@ pub(crate) use effectcraft_raster::yuv::rgba_to_yuv420;
 // ---------------------------------------------------------------- ProRes
 
 struct ProRes {
-    enc: filmcraft_prores::Encoder,
-    profile: filmcraft_prores::Profile,
+    enc: craft_video::prores::Encoder,
+    profile: craft_video::prores::Profile,
     w: u32,
     h: u32,
     alpha: bool,
     colr: ColorInfo,
 }
 
-/// The `colr` atom of a ProRes render: what its frames are, in H.273 code points. MOV uses
-/// QuickTime's `nclc`, which has no range flag; ProRes frames are limited range. The matrix is the
-/// one [`rgba_to_yuv_10`] always uses. Primaries and transfer follow the render path
-/// (`Pipe::output`): only a working space converts to the output space, so unmanaged frames pass
-/// through. sRGB output keeps transfer 1 rather than 13 (#340), and an alpha matte is not in the
-/// output space.
-fn prores_colr(settings: &ProjectSettings, channels: Channels) -> ColorInfo {
-    use effectcraft_project::ColorSpace as Space;
-    let output = settings.working_space.and(settings.output_space).filter(|_| channels != Channels::Alpha);
-    let (primaries, transfer) = match output {
-        None | Some(Space::Srgb | Space::Rec709) => (1, 1),
-        Some(Space::Rec2020) => (9, 1),
-        Some(Space::DisplayP3) => (12, 13),
-        Some(Space::Rec2100Pq) => (9, 16),
-        Some(Space::Rec2100Hlg) => (9, 18),
-        // H.273 has no code for the ACES primaries: unspecified, in linear light.
-        Some(Space::AcesCg | Space::Aces2065) => (2, 8),
-    };
-    ColorInfo::Nclc { primaries, transfer, matrix: 1 }
+/// The `colr` atom of a ProRes render ([`output_codes`]). MOV uses QuickTime's `nclc`, which has
+/// no range flag; ProRes frames are limited range.
+fn prores_colr(c: Codes) -> ColorInfo {
+    ColorInfo::Nclc { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.into() }
 }
 
-fn prores_profile(p: ProResProfile) -> filmcraft_prores::Profile {
-    use filmcraft_prores::Profile;
+fn prores_profile(p: ProResProfile) -> craft_video::prores::Profile {
+    use craft_video::prores::Profile;
     match p {
         ProResProfile::Proxy => Profile::Proxy,
         ProResProfile::Lt => Profile::Lt,
@@ -206,18 +220,18 @@ impl ProRes {
         let profile = if channels == Channels::Rgba && !profile.is_4444() { ProResProfile::P4444 } else { profile };
         let profile = prores_profile(profile);
         let alpha = channels == Channels::Rgba;
-        let mut cfg = filmcraft_prores::EncoderConfig::new(profile, w, h);
+        let mut cfg = craft_video::prores::EncoderConfig::new(profile, w, h);
         cfg.encode_alpha = alpha;
         // The frame header carries the same H.273 codes as the `colr` atom, so readers that trust
         // either one agree.
         if let ColorInfo::Nclc { primaries, transfer, matrix } = colr {
             let code = |c| u8::try_from(c).unwrap_or(2);
-            cfg.color = filmcraft_prores::ColorInfo { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix) };
+            cfg.color = craft_video::prores::ColorInfo { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix) };
         }
-        ProRes { enc: filmcraft_prores::Encoder::with_config(cfg), profile, w, h, alpha, colr }
+        ProRes { enc: craft_video::prores::Encoder::with_config(cfg), profile, w, h, alpha, colr }
     }
     fn is_444(&self) -> bool {
-        matches!(self.profile, filmcraft_prores::Profile::P4444 | filmcraft_prores::Profile::P4444Xq)
+        matches!(self.profile, craft_video::prores::Profile::P4444 | craft_video::prores::Profile::P4444Xq)
     }
 }
 
@@ -230,8 +244,8 @@ impl VideoEncoder for ProRes {
         entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
-        let chroma = if self.is_444() { filmcraft_prores::ChromaFormat::Yuv444 } else { filmcraft_prores::ChromaFormat::Yuv422 };
-        let mut fr = filmcraft_prores::Frame::new(self.w, self.h, chroma, 10, self.alpha);
+        let chroma = if self.is_444() { craft_video::prores::ChromaFormat::Yuv444 } else { craft_video::prores::ChromaFormat::Yuv422 };
+        let mut fr = craft_video::prores::Frame::new(self.w, self.h, chroma, 10, self.alpha).map_err(enc)?;
         rgba_to_yuv_10(rgba, self.w as usize, self.h as usize, self.is_444(), &mut fr.y, &mut fr.cb, &mut fr.cr);
         if let Some(a) = fr.alpha.as_mut() {
             for (d, s) in a.iter_mut().zip(rgba.as_chunks::<4>().0.iter()) {
@@ -277,7 +291,7 @@ fn rgba_to_yuv_10(rgba: &[u8], w: usize, h: usize, full_chroma: bool, y: &mut [u
 // ---------------------------------------------------------------- audio
 
 enum Audio {
-    Aac(Box<filmcraft_aac::Encoder>),
+    Aac(Box<craft_audio::aac::Encoder>),
     Pcm,
 }
 
@@ -328,15 +342,13 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         Channels::Rgba if !matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) => Channels::Rgb,
         c => c,
     };
+    let codes = output_codes(&job.project.settings, channels);
     let mut venc: Box<dyn VideoEncoder> = match fmt {
-        OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps)?),
-        OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output)?),
-        OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output)?),
+        OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps, codes)?),
+        OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output, codes)?),
+        OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output, codes)?),
         OutputFormat::Uncompressed => Box::new(crate::uncompressed::Raw::new(w, h, channels == Channels::Rgba)?),
-        _ => {
-            let colr = prores_colr(&job.project.settings, channels);
-            Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, colr))
-        }
+        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, prores_colr(codes))),
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();
@@ -389,7 +401,7 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         // from the media duration and drop the last frame.
         let frames_ts = st.total as i128 * rate.den as i128;
         let seg = (frames_ts * movie_ts + rate.num as i128 / 2) / rate.num as i128;
-        vcfg.edits = vec![filmcraft_isobmff::Edit { segment_duration: seg as u64, media_time: start, media_rate: 0x10000 }];
+        vcfg.edits = vec![craft_media::isobmff::Edit { segment_duration: seg as u64, media_time: start, media_rate: 0x10000 }];
     }
     let vt = mux.add_track(vcfg).map_err(mux_err)?;
     let sr = job.output.audio_sample_rate.clamp(8_000, 192_000);
@@ -399,7 +411,7 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let mut audio = None;
     if with_audio {
         let (a, entry, start) = if brand == Brand::Mp4 {
-            let e = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(sr, chans as usize, 160_000 * chans)).map_err(enc)?;
+            let e = craft_audio::aac::Encoder::new(craft_audio::aac::EncoderConfig::cbr(sr, chans as usize, 160_000 * chans)).map_err(enc)?;
             let entry = SampleEntry::aac(e.audio_specific_config(), chans, sr);
             let priming = e.priming_samples() as i64;
             (Audio::Aac(Box::new(e)), entry, Some(priming))
