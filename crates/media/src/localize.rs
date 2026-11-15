@@ -118,9 +118,17 @@ pub fn configure(config: Option<LocalizeConfig>) {
     };
     // (ends the adoption also when the scan or the free-space reader panics)
     let guard = adopt_from.is_some().then_some(Adopting);
+    #[cfg(test)]
+    let scanned = adopt_from.as_ref().map(|(f, _)| f.clone());
     let found = adopt_from.map(|(f, busy)| adopt(&f, busy.as_deref())).unwrap_or_default();
     let space = space_of.and_then(|read| read());
-    drop(guard);
+    #[cfg(test)]
+    {
+        let hook = AFTER_ADOPT.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let (Some(h), Some(f)) = (hook, scanned) {
+            h(&f);
+        }
+    }
     let gone = {
         let mut st = lock();
         // (set again meanwhile: that setting's call does the work)
@@ -145,6 +153,11 @@ pub fn configure(config: Option<LocalizeConfig>) {
         let max = limit(&mut st);
         evict_to(&mut st, max, &HashSet::new())
     };
+    // (released only now: until the adopted copies and the free-space reading are published, a
+    // copy made meanwhile would be counted into a reading taken before it, or admitted against a
+    // total that misses the adopted files; #3301 review. The guard wakes the worker under the
+    // lock, so it is dropped after the block's lock is released)
+    drop(guard);
     delete_evicted(gone, epoch);
 }
 
@@ -613,6 +626,11 @@ static BEFORE_COPY: Mutex<Option<CopyHook>> = Mutex::new(None);
 #[cfg(test)]
 static BEFORE_ADOPT: Mutex<Option<CopyHook>> = Mutex::new(None);
 
+/// Called by [`configure`] after the new folder is scanned and the free space read, before they
+/// are published (tests).
+#[cfg(test)]
+static AFTER_ADOPT: Mutex<Option<CopyHook>> = Mutex::new(None);
+
 /// The localizer state is process-wide: tests that use it take turns.
 #[cfg(test)]
 pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
@@ -743,6 +761,7 @@ mod tests {
         fn drop(&mut self) {
             *BEFORE_COPY.lock().unwrap_or_else(PoisonError::into_inner) = None;
             *BEFORE_ADOPT.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *AFTER_ADOPT.lock().unwrap_or_else(PoisonError::into_inner) = None;
             FAIL_REMOVE.lock().unwrap_or_else(PoisonError::into_inner).clear();
             configure(None);
         }
@@ -782,6 +801,45 @@ mod tests {
         switching.join().unwrap();
         let s = wait_for(|s| s.files == 1 && s.copying.is_none());
         assert_eq!((s.files, s.bytes), (1, 1500), "copied once, counted once: {s:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #3301 review: the adoption ends only when the adopted copies and the free-space reading
+    /// are published. Between the scan and that publication no copy starts: it would be counted
+    /// into a reading taken before it, or admitted against a total that misses the adopted files.
+    #[test]
+    fn no_copy_starts_between_the_scan_and_its_publication() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _hooks = HookGuard;
+        let root = std::env::temp_dir().join(format!("ec-3301-publish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (share, first, second) = (root.join("share"), root.join("first"), root.join("second"));
+        std::fs::create_dir_all(&share).unwrap();
+        treat_as_network(&share);
+        let file = share.join("plate_0007.exr");
+        std::fs::write(&file, vec![5u8; 1500]).unwrap();
+        configure(config(&first, 1 << 20, vec![]));
+        // The next folder is scanned; its copies are not published yet, until the test lets go.
+        let (entered, scanned) = std::sync::mpsc::channel::<()>();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        {
+            let (entered, wait) = (Mutex::new(entered), Mutex::new(wait));
+            *AFTER_ADOPT.lock().unwrap() = Some(std::sync::Arc::new(move |_: &Path| {
+                let _ = entered.lock().unwrap().send(());
+                let _ = wait.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10));
+            }));
+        }
+        let second_cfg = config(&second, 1 << 20, vec![]);
+        let switching = std::thread::spawn(move || configure(second_cfg));
+        scanned.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        request(&file);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let s = status().unwrap();
+        assert!(s.copying.is_none() && s.files == 0, "no copy before the scan is published: {s:?}");
+        go.send(()).unwrap();
+        switching.join().unwrap();
+        let s = wait_for(|s| s.files == 1 && s.copying.is_none());
+        assert_eq!((s.files, s.bytes), (1, 1500), "copied once, after the publication: {s:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
