@@ -117,7 +117,7 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     }
     if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params)) {
         match invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params }) {
-            Ok(result) => super::frontend::show_result_errors(app, &result),
+            Ok(result) => super::frontend::show_command_result_errors(app, &id, &result),
             Err(e) => app.ui.status = e,
         }
     }

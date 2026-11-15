@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-pdf"
-description = "Vector footage import: PDF and PDF-compatible Illustrator (.ai) pages and EPS (a PostScript subset) parsed into the SVG render tree (paths, fills, strokes, shadings, tiling patterns, clipping, text with embedded fonts, images, blend modes, soft masks, optional-content layers)"
+description = "Vector footage import: PDF and PDF-compatible Illustrator (.ai) pages, EPS (a PostScript subset) and the PDF a VectorCraft (.vectorcraft) document carries, parsed into the SVG render tree (paths, fills, strokes, shadings, tiling patterns, clipping, text with embedded fonts, images, blend modes, soft masks, optional-content layers)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,8 @@ workspace = true
 [dependencies]
 craft-eps = { workspace = true }
 craft-pdf.workspace = true
+# The PDF a VectorCraft document carries (Create PDF-Compatible File).
+craft-doc = { workspace = true }
 effectcraft-svg = { workspace = true }
 kurbo = { workspace = true }
 effectcraft-text = { workspace = true }
@@ -25,6 +27,10 @@ zune-jpeg = "0.5"
 # Encodes JPEG fixtures for the DCT image test.
 image = { workspace = true }
 effectcraft-raster = { workspace = true }
+# Writes the VectorCraft documents the tests read.
+craft-vectorcraft-format = { workspace = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"

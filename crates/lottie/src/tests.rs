@@ -1088,3 +1088,12 @@ fn only_image_bytes_are_embedded() {
     assert!(res.json["assets"].as_array().is_none_or(|a| a.is_empty()), "{}", res.json["assets"]);
     assert!(res.warnings.iter().any(|w| w.contains("not a PNG")), "{:?}", res.warnings);
 }
+
+#[test]
+fn dotlottie_export_rejects_an_unrepresentable_entry_name() {
+    let (p, cid) = setup();
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let err = crate::try_to_dotlottie(&res, &"a".repeat(usize::from(u16::MAX))).unwrap_err();
+    assert!(matches!(err, LottieError::Invalid(message) if message.contains("dotLottie ZIP")));
+    assert_eq!(crate::try_to_dotlottie(&res, "Main").unwrap(), crate::to_dotlottie(&res, "Main"));
+}
