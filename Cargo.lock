@@ -1637,6 +1637,7 @@ dependencies = [
  "effectcraft-automation",
  "effectcraft-engine",
  "effectcraft-gpu",
+ "effectcraft-helper-host",
  "effectcraft-host",
  "effectcraft-render",
  "effectcraft-sam2",

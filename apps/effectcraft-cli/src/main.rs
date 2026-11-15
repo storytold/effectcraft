@@ -323,7 +323,7 @@ fn main() {
     }
     if raw.is_empty() || raw.iter().any(|a| a == "-h" || a == "--help") {
         say!("{USAGE}");
-        std::process::exit(if raw.is_empty() { 2 } else { 0 });
+        exit(if raw.is_empty() { 2 } else { 0 });
     }
     let mut args = match Args::parse(raw) {
         Ok(a) => a,
@@ -335,22 +335,30 @@ fn main() {
     }
     let cmd = args.pos.remove(0);
     match run(&cmd, &args, json_out) {
-        Ok(()) if stdout_broken() => std::process::exit(1),
-        Ok(()) => {}
+        Ok(()) if stdout_broken() => exit(1),
+        Ok(()) => effectcraft_host::stop_helpers(),
         Err(Failure::Usage(e)) => fail_usage(&e),
         Err(Failure::Error(e)) => {
             if json_out {
                 say!("{}", json!({"error": e}));
             }
             note!("effectcraft-cli {cmd}: {e}");
-            std::process::exit(1);
+            exit(1);
         }
     }
 }
 
+/// Exit with `code`, stopping the effect helpers first: their frame exchange files are removed
+/// only when their connections drop, and statics never drop (left behind, each is a frame-sized
+/// file in the temp folder per helper and run).
+fn exit(code: i32) -> ! {
+    effectcraft_host::stop_helpers();
+    std::process::exit(code)
+}
+
 fn fail_usage(e: &str) -> ! {
     note!("effectcraft-cli: {e}\n{USAGE}");
-    std::process::exit(2)
+    exit(2)
 }
 
 enum Failure {
@@ -550,7 +558,7 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
         };
         let msg = format!("{}{pos}: {}", e["file"].as_str().unwrap_or(&name), e["message"].as_str().unwrap_or("script error"));
         if json_out {
-            std::process::exit(1);
+            exit(1);
         }
         return Err(Failure::Error(msg));
     }
@@ -605,7 +613,7 @@ fn replay_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
     );
     if json_out {
         note!("effectcraft-cli replay: {msg}");
-        std::process::exit(1);
+        exit(1);
     }
     Err(Failure::Error(msg))
 }

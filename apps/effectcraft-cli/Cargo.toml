@@ -26,3 +26,12 @@ effectcraft-sam2 = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }
 cpu-time = "1"
+
+[dev-dependencies]
+effectcraft-helper-host = { workspace = true }
+
+# Starts itself as an effect helper (see the file), so libtest can't run it.
+[[test]]
+name = "helper_exit"
+path = "tests/helper_exit.rs"
+harness = false
