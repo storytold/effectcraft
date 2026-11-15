@@ -8,6 +8,7 @@ mod groups;
 mod import;
 mod reader;
 mod shading;
+mod vectorcraft;
 
 const CONTENT: &str = "/OC /MC0 BDC\n0 1 0 rg 0 0 200 100 re f\nEMC\n\
 /OC /MC1 BDC\nq 10 10 80 80 re W n\n1 0 0 rg 0 0 50 100 re f\nQ\n\
@@ -1328,4 +1329,33 @@ fn cmap_entries_at_the_top_of_the_code_range_do_not_overflow() {
     assert_eq!((f.unicode(0xFFFF_FFFF), f.unicode(0)), ("A".to_string(), String::new()));
     // Code 0 is CID u32::MAX; code 2 would be past it, so it falls back to CID 0 like an unmapped code.
     assert_eq!((f.width(0), f.width(2)), (0.5, 0.7));
+}
+
+/// Never crash: a crafted page nests `q … W n` twenty thousand deep. The document is a tree
+/// that is drawn, measured and dropped recursively, so groups past the nesting limit are left
+/// out (said in the skip notes) and the page parses, draws and drops on a thread with a small
+/// stack; the artwork inside them still draws, clipped by the groups that were kept.
+#[test]
+fn clip_groups_nested_without_end_are_capped() {
+    let run = std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        let n = 20_000;
+        let mut content = "q 0 0 50 50 re W n\n".repeat(n);
+        content.push_str("0 0 1 rg 0 0 50 50 re f\n");
+        content.push_str(&"Q\n".repeat(n));
+        let bytes = pdf(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(), None),
+                (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>".to_string(), None),
+                (4, "<< >>".to_string(), Some(content.into_bytes())),
+            ],
+            1,
+        );
+        let doc = parse(&bytes).unwrap();
+        (doc.skipped.clone(), px(&doc, 25, 75), px(&doc, 75, 25))
+    });
+    let (skipped, inside, outside) = run.unwrap().join().unwrap();
+    assert!(skipped.iter().any(|s| s.contains("nesting limit")), "{skipped:?}");
+    assert!(inside[2] > 0.99 && inside[3] > 0.99, "the artwork draws inside the clips: {inside:?}");
+    assert!(outside[3] < 0.01, "and is clipped: {outside:?}");
 }

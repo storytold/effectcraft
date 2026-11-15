@@ -32,6 +32,12 @@ fn gen_blend(o: vec4<f32>, g: vec4<f32>, mode: u32) -> vec4<f32> {
     return blend_pixel(mode, o, g, 0.5);
 }
 
+// generate::gen_alpha: with None (mode 255) the generated alpha `a` is scaled by the layer's
+// alpha, so the pattern stays inside the layer and its masks; other modes keep `a`.
+fn gen_alpha(a: f32, layer_a: f32, mode: u32) -> f32 {
+    return select(a, a * layer_a, mode == 255u);
+}
+
 // A (hi, lo) pair from `data`.
 fn gen_hl(i: u32) -> vec2<f32> {
     return vec2<f32>(data[i], data[i + 1u]);
@@ -466,9 +472,10 @@ fn gen_checker(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let sx = gen_axis(f32(p.x) + P.f[0].x, P.f[0].z, P.f[1].x);
     let sy = gen_axis(f32(p.y) + P.f[0].y, P.f[0].w, P.f[1].y);
-    let cov = clamp(0.5 + 0.5 * sx * sy, 0.0, 1.0) * P.f[1].z;
+    let o = textureLoad(src, p, 0);
+    let a = gen_alpha(clamp(0.5 + 0.5 * sx * sy, 0.0, 1.0) * P.f[1].z, o.w, P.u[0].x);
     let c = P.f[2].xyz;
-    textureStore(out, p, gen_blend(textureLoad(src, p, 0), vec4<f32>(c * cov, cov), P.u[0].x));
+    textureStore(out, p, gen_blend(o, vec4<f32>(c * a, a), P.u[0].x));
 }
 
 // f32::rem_euclid.
@@ -502,8 +509,9 @@ fn gen_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (P.u[0].y != 0u) {
         cov = 1.0 - cov;
     }
-    let a = cov * P.f[1].z;
-    textureStore(out, p, gen_blend(textureLoad(src, p, 0), vec4<f32>(P.f[2].xyz * a, a), P.u[0].x));
+    let o = textureLoad(src, p, 0);
+    let a = gen_alpha(cov * P.f[1].z, o.w, P.u[0].x);
+    textureStore(out, p, gen_blend(o, vec4<f32>(P.f[2].xyz * a, a), P.u[0].x));
 }
 
 // u[0] = (mode, seed); f[0..4] = points (x, y); f[4..8] = colours;
@@ -535,7 +543,7 @@ fn gen_fourcolor(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let o = textureLoad(src, p, 0);
     // None keeps the layer's alpha, as the CPU path does (#1381).
-    let op = select(P.f[8].z, P.f[8].z * o.w, P.u[0].x == 255u);
+    let op = gen_alpha(P.f[8].z, o.w, P.u[0].x);
     textureStore(out, p, gen_blend(o, vec4<f32>(c * op, op), P.u[0].x));
 }
 

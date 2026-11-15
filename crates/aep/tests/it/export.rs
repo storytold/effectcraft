@@ -3,6 +3,7 @@
 #[macro_use]
 mod helpers;
 
+mod bounds;
 mod built;
 mod ease;
 mod effects;
