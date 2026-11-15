@@ -289,7 +289,8 @@ fn a_script_file_dialog_asks_for_a_pass_while_the_window_is_hidden() {
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
-    let asks = |out: &egui::LogicOutput| out.viewport_commands.values().flatten().filter(|c| matches!(c, egui::ViewportCommand::RequestPaintWhileHidden)).count();
+    let asks =
+        |out: &egui::LogicOutput| out.viewport_commands.values().flatten().filter(|c| matches!(c, egui::ViewportCommand::RequestPaintWhileHidden)).count();
     let size = egui::vec2(800.0, 480.0);
     assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 0, "nothing waits: a hidden window stays quiet");
     app.session.script_ui.file_dialogs.push(ScriptFileDialog {
