@@ -219,6 +219,7 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
             v.push(("-".into(), Value::Null));
             v.push((mark(o.gif_loop, "Loop Forever"), json!({"loop": !o.gif_loop})));
         }
+        OutputFormat::WebP => webp_menu(o, &mut v),
         _ => {}
     }
     if !o.format.is_audio_only() {
@@ -292,6 +293,26 @@ fn exr_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut
     for d in ExrBitDepth::ALL {
         v.push((mark(o.exr_bit_depth == d, &tr_args("EXR Bit Depth: {}", &[&(d.label())])), json!({"exrBitDepth": d.name()})));
     }
+}
+
+/// WebP options: lossy or lossless, lossy quality and alpha quality, looping.
+fn webp_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut Vec<(String, Value)>) {
+    v.push(("-".into(), Value::Null));
+    v.push((mark(!o.webp_lossless, "Compression: Lossy"), json!({"webpCompression": "lossy"})));
+    v.push((mark(o.webp_lossless, "Compression: Lossless"), json!({"webpCompression": "lossless"})));
+    if !o.webp_lossless {
+        for q in [50u8, 75, 90, 100] {
+            v.push((mark(o.quality == q, &format!("Quality: {q}")), json!({"quality": q})));
+        }
+        if o.channels == Channels::Rgba {
+            for q in [50u8, 75, 90, 100] {
+                let label = if q == 100 { "Alpha Quality: 100 (exact)".to_string() } else { format!("Alpha Quality: {q}") };
+                v.push((mark(o.webp_alpha_quality == q, &label), json!({"webpAlphaQuality": q})));
+            }
+        }
+    }
+    v.push(("-".into(), Value::Null));
+    v.push((mark(o.gif_loop, "Loop Forever"), json!({"loop": !o.gif_loop})));
 }
 
 /// HEVC / AV1 options: profile, level, rate control (bitrate or constant quality), key frames.
