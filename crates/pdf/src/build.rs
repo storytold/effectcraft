@@ -19,6 +19,9 @@ enum Kind {
 
 pub(crate) struct Builder {
     stack: Vec<(Group, Kind)>,
+    /// Logical text labels never share the graphics-state group stack.
+    text_labels: Vec<String>,
+    text_run: bool,
     /// Which of the finished top-level nodes are optional-content layers.
     pub top_layers: Vec<bool>,
     pub skipped: Vec<String>,
@@ -34,14 +37,14 @@ pub(crate) fn group(name: &str) -> Group {
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0, base: 0 }
+        Builder { stack: vec![(group("page"), Kind::Plain)], text_labels: vec![], text_run: false, top_layers: vec![], skipped: vec![], shapes: 0, base: 0 }
     }
 
     /// A builder for content that will be placed inside this one's open groups and `wrap` more
     /// groups (a pattern's `Pattern` and `Tile`, a soft mask's two), so its nesting limit counts
     /// them.
     pub fn nested(&self, wrap: usize) -> Builder {
-        Builder { base: self.base.saturating_add(self.stack.len()).saturating_add(wrap), ..Builder::new() }
+        Builder { base: self.base.saturating_add(self.stack.len()).saturating_add(self.text_labels.len()).saturating_add(wrap), ..Builder::new() }
     }
 
     pub fn depth(&self) -> usize {
@@ -50,7 +53,7 @@ impl Builder {
 
     /// `wrap` more groups fit under the open ones within [`MAX_DEPTH`].
     pub fn has_room(&self, wrap: usize) -> bool {
-        self.base.saturating_add(self.stack.len()).saturating_add(wrap) <= MAX_DEPTH
+        self.base.saturating_add(self.stack.len()).saturating_add(self.text_labels.len()).saturating_add(wrap) <= MAX_DEPTH
     }
 
     pub fn skip(&mut self, what: &str) {
@@ -60,6 +63,7 @@ impl Builder {
     }
 
     fn add(&mut self, n: Node, layer: bool) {
+        self.text_run = false;
         if self.stack.len() == 1 {
             self.top_layers.push(layer);
         }
@@ -70,6 +74,9 @@ impl Builder {
 
     /// Close every group opened above `depth`.
     pub fn close_to(&mut self, depth: usize) {
+        if self.stack.len() > depth.max(1) {
+            self.text_run = false;
+        }
         while self.stack.len() > depth.max(1) {
             let Some((g, k)) = self.stack.pop() else { break };
             // Empty clipping groups draw nothing.
@@ -83,6 +90,7 @@ impl Builder {
     /// Open `g` as the group drawn into from now on; past [`MAX_DEPTH`] the group is dropped
     /// (what would have been drawn inside it goes to the open group) and noted as skipped.
     fn push_group(&mut self, g: Group, kind: Kind) {
+        self.text_run = false;
         if self.base.saturating_add(self.stack.len()) >= MAX_DEPTH {
             self.skip("group nesting limit");
             return;
@@ -109,9 +117,71 @@ impl Builder {
         self.push_group(g, Kind::Plain);
     }
 
+    /// Start a bounded logical annotation independently of graphics-state nesting.
+    pub fn begin_text(&mut self, text: &str) -> bool {
+        self.text_run = false;
+        if self.text_labels.len() >= MAX_DEPTH {
+            self.skip("logical text nesting limit");
+            return false;
+        }
+        self.text_labels.push(format!("Text: {text}"));
+        true
+    }
+
+    pub fn end_text(&mut self) {
+        self.text_run = false;
+        self.text_labels.pop();
+    }
+
     /// Add a finished node (an image, pattern tiles).
-    pub fn push(&mut self, n: Node) {
+    pub fn push(&mut self, mut n: Node) {
+        // Marked content is metadata, not a transparency boundary. Wrap only the
+        // painted node, without closing, splitting or reopening any live state group.
+        // Finished forms may already contain groups: metadata cannot extend the cap.
+        fn group_depth(n: &Node, at: usize) -> usize {
+            match n {
+                Node::Group(g) => {
+                    if at >= MAX_DEPTH {
+                        return MAX_DEPTH;
+                    }
+                    1 + g.children.iter().map(|n| group_depth(n, at + 1)).max().unwrap_or(0)
+                }
+                _ => 0,
+            }
+        }
+        let contained = if self.text_labels.is_empty() { 0 } else { group_depth(&n, 0) };
+        let room = MAX_DEPTH.saturating_sub(self.base.saturating_add(self.stack.len()).saturating_add(contained));
+        if self.text_labels.len() > room {
+            self.skip("group nesting limit");
+        }
+        // Keep consecutive glyphs of one annotation together only inside the same
+        // graphics-state container. A knockout parent's children must stay separate.
+        let coalesce = !self.text_labels.is_empty() && self.text_labels.len() <= room;
+        if self.text_run
+            && coalesce
+            && let Some((parent, _)) = self.stack.last_mut()
+            && !parent.knockout
+        {
+            let mut target = parent.children.last_mut();
+            for _ in 1..self.text_labels.len() {
+                target = match target {
+                    Some(Node::Group(g)) => g.children.first_mut(),
+                    _ => None,
+                };
+            }
+            if let Some(Node::Group(g)) = target {
+                g.children.push(n);
+                return;
+            }
+        }
+        for label in self.text_labels.iter().take(room).rev() {
+            let mut g = group(label);
+            g.isolated = false;
+            g.children.push(n);
+            n = Node::Group(g);
+        }
         self.add(n, false);
+        self.text_run = coalesce;
     }
 
     pub fn fill_stroke(&mut self, path: BezPath, transform: Affine, fill: Option<(Paint, f64, FillRule)>, stroke: Option<Stroke>) {
@@ -128,7 +198,7 @@ impl Builder {
             None => (None, 1.0, FillRule::NonZero),
         };
         let s = Shape { name: name.into(), geom: Geom::Path(path), transform, fill: f, fill_opacity: fo, fill_rule: rule, stroke, opacity: 1.0 };
-        self.add(Node::Shape(s), false);
+        self.push(Node::Shape(s));
     }
 
     /// The finished top-level nodes and their layer flags.

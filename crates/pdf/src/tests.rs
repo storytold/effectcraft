@@ -1359,3 +1359,72 @@ fn clip_groups_nested_without_end_are_capped() {
     assert!(inside[2] > 0.99 && inside[3] > 0.99, "the artwork draws inside the clips: {inside:?}");
     assert!(outside[3] < 0.01, "and is clipped: {outside:?}");
 }
+
+#[test]
+fn actual_text_named_properties_and_fallback_weights() {
+    let data =
+        page_pdf("/Span /P BDC 1 0 0 rg 10 10 20 20 re f EMC", "/Properties << /P 10 0 R >>", vec![(10, "<< /ActualText (Logical text) >>".into(), None)]);
+    assert_eq!(shape_names(&parse(&data).unwrap()), vec!["Text: Logical text"]);
+    use effectcraft_text::fonts::{INTER_BOLD, INTER_SEMIBOLD};
+    for name in [b"Inter-Semibold".as_slice(), b"Inter-Demi"] {
+        assert_eq!(eps_fallback_font(name), Some(INTER_SEMIBOLD));
+    }
+    for name in [b"Inter-Bold".as_slice(), b"Inter-Black", b"Inter-Heavy"] {
+        assert_eq!(eps_fallback_font(name), Some(INTER_BOLD));
+    }
+}
+
+#[test]
+fn actual_text_does_not_change_graphics_state_or_compositing() {
+    let resources = "/ExtGState << /M << /BM /Multiply >> /N << /BM /Normal >> >>";
+    // Compare every pixel to the same operators without marked content. In particular,
+    // Multiply and the clip survive EMC, and a later graphics-state change still works.
+    for (marked, plain) in [
+        (
+            "/Span << /ActualText (A) >> BDC /M gs 0 1 1 rg 0 0 60 100 re f EMC 50 0 60 100 re f /N gs 0 0 1 rg 150 0 50 100 re f",
+            "/M gs 0 1 1 rg 0 0 60 100 re f 50 0 60 100 re f /N gs 0 0 1 rg 150 0 50 100 re f",
+        ),
+        (
+            "/Span << /ActualText (A) >> BDC 0 0 100 100 re W n /M gs 0 1 1 rg 0 0 60 100 re f EMC 50 0 150 100 re f",
+            "0 0 100 100 re W n /M gs 0 1 1 rg 0 0 60 100 re f 50 0 150 100 re f",
+        ),
+        (
+            "/Span << /ActualText (A) >> BDC q /M gs 0 1 1 rg 0 0 60 100 re f Q EMC 0 0 1 rg 100 0 100 100 re f",
+            "q /M gs 0 1 1 rg 0 0 60 100 re f Q 0 0 1 rg 100 0 100 100 re f",
+        ),
+    ] {
+        let draw = |ops| render(&parse(&page_pdf(&format!("1 1 0 rg 0 0 200 100 re f {ops}"), resources, vec![])).unwrap());
+        let (a, b) = (draw(marked), draw(plain));
+        for y in 0..100 {
+            for x in 0..200 {
+                assert_eq!(a.get(x, y), b.get(x, y), "pixel {x},{y}");
+            }
+        }
+    }
+}
+
+#[test]
+fn logical_text_cannot_extend_finished_node_depth_limit() {
+    use crate::build::Builder;
+    use effectcraft_svg::Group;
+    let mut b = Builder::new();
+    assert!(b.begin_text("label"));
+    assert!(!b.nested(0).has_room(254));
+    let mut node = Node::Group(Group::new("leaf"));
+    for _ in 1..255 {
+        let mut parent = Group::new("nested");
+        parent.children.push(node);
+        node = Node::Group(parent);
+    }
+    b.push(node);
+    b.end_text();
+    let (nodes, _, skipped) = b.finish();
+    assert!(skipped.iter().any(|s| s == "group nesting limit"));
+    let mut current = nodes.first();
+    let mut depth = 1;
+    while let Some(Node::Group(g)) = current {
+        depth += 1;
+        current = g.children.first();
+    }
+    assert_eq!(depth, 256);
+}

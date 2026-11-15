@@ -209,7 +209,7 @@ pub(crate) struct Interp<'a> {
     cur: Option<Point>,
     start: Option<Point>,
     pending_clip: Option<FillRule>,
-    marked: Vec<Option<usize>>,
+    marked: Vec<Marked>,
     /// The page box in default user space (for `sh`).
     page_box: [f64; 4],
     budget: usize,
@@ -235,6 +235,12 @@ const MAX_TILES: usize = 4096;
 enum TextItem {
     Str(Vec<u8>),
     Adjust(f64),
+}
+
+enum Marked {
+    None,
+    Layer(usize),
+    Text,
 }
 
 impl<'a> Interp<'a> {
@@ -488,7 +494,7 @@ impl<'a> Interp<'a> {
                 }
                 "d1" => self.gs.lock_color = true,
                 "BI" => self.inline_image(&mut lx, res),
-                "BMC" => self.marked.push(None),
+                "BMC" => self.marked.push(Marked::None),
                 "BDC" => {
                     let layer = match (args.first().and_then(Obj::name), args.get(1)) {
                         (Some("OC"), Some(Obj::Name(prop))) => self
@@ -499,30 +505,37 @@ impl<'a> Interp<'a> {
                         (Some("OC"), Some(Obj::Dict(ocg))) => self.ocg_name(ocg),
                         _ => None,
                     };
-                    let actual_text = match (args.first().and_then(Obj::name), args.get(1)) {
-                        (Some("Span"), Some(Obj::Dict(props))) => props.get("ActualText").and_then(|v| match self.file.resolve(v) {
-                            Obj::Str(bytes) => Some(crate::color::text_string(bytes)),
-                            _ => None,
-                        }),
-                        _ => None,
+                    let props = match args.get(1) {
+                        Some(Obj::Name(name)) => self.file.get_dict(res, "Properties").and_then(|p| self.file.get_dict(p, name)),
+                        Some(obj) => self.file.resolve(obj).dict(),
+                        None => None,
                     };
+                    let actual_text =
+                        (args.first().and_then(Obj::name) == Some("Span")).then_some(props).flatten().and_then(|p| self.file.get(p, "ActualText")).and_then(
+                            |v| match v {
+                                Obj::Str(bytes) => Some(text_string(bytes)),
+                                _ => None,
+                            },
+                        );
                     match (layer, actual_text) {
                         (Some(name), _) => {
-                            self.marked.push(Some(self.b.depth()));
+                            self.marked.push(Marked::Layer(self.b.depth()));
                             self.b.open(&name, true);
                         }
                         (None, Some(text)) => {
-                            self.marked.push(Some(self.b.depth()));
-                            self.b.open(&format!("Text: {text}"), false);
+                            let mark = if self.b.begin_text(&text) { Marked::Text } else { Marked::None };
+                            self.marked.push(mark);
                         }
-                        (None, None) => self.marked.push(None),
+                        (None, None) => self.marked.push(Marked::None),
                     }
                 }
-                "EMC" => {
-                    if let Some(Some(d)) = self.marked.pop() {
-                        self.close_to(d);
+                "EMC" => match self.marked.pop() {
+                    Some(Marked::Layer(d)) => self.close_to(d),
+                    Some(Marked::Text) => {
+                        self.b.end_text();
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
             // Colour operands set by the device-space shorthands.
