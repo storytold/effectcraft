@@ -539,7 +539,8 @@ pub trait EffectHost: Sync {
     /// `px`, layer `id`'s pixels as returned above (in its own effect space), resampled to where
     /// the layer appears in the comp and brought into the running layer's effect space, so the
     /// two line up wherever either sits (a layer parameter's "Comp" Sampling Space, the way a
-    /// track matte lines up). The result has the running layer's size. Defaults to `px` as is.
+    /// track matte lines up). A host that resamples returns the running layer's size; the
+    /// default, with no comp to place the layers in, returns `px` as is.
     fn to_comp_space(&self, _id: u64, px: LayerPixels) -> LayerPixels {
         px
     }
