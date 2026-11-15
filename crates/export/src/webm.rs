@@ -8,7 +8,7 @@
 //! with `AlphaMode` 1 on the track, as WebM defines. VP9 comes from `craft_video::vp9` (key
 //! frames every two seconds, inter frames between them: SimpleBlocks carry the key flag, inter
 //! BlockGroups a ReferenceBlock; the alpha stream's key frames line up with the colour stream's),
-//! Opus from `effectcraft-opusenc` (CELT, 48 kHz stereo, 20 ms packets,
+//! Opus from `craft-audio` (CELT, 48 kHz stereo, 20 ms packets,
 //! `CodecDelay` = pre-skip). WAV (RIFF, PCM or IEEE float) and AIFF (big-endian PCM, 80-bit
 //! extended sample rate; AIFF-C `fl32` for float) follow their published file layouts.
 
@@ -123,14 +123,111 @@ fn cluster(frames: &mut [Frame]) -> Vec<u8> {
     out
 }
 
+/// Common WebM preamble; codec-specific track metadata follows it.
+pub(crate) fn webm_header(duration_ms: f64) -> (Vec<u8>, u64, u64) {
+    // EBML header.
+    let mut head = vec![];
+    let mut eb = vec![];
+    el_uint(&mut eb, 0x4286, 1);
+    el_uint(&mut eb, 0x42F7, 1);
+    el_uint(&mut eb, 0x42F2, 4);
+    el_uint(&mut eb, 0x42F3, 8);
+    el_str(&mut eb, 0x4282, "webm");
+    el_uint(&mut eb, 0x4287, 4);
+    el_uint(&mut eb, 0x4285, 2);
+    el(&mut head, EBML, &eb);
+    // Segment with an 8-byte size patched at the end.
+    head.extend(id_bytes(SEGMENT));
+    let size_pos = head.len() as u64;
+    head.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    let seg_start = head.len() as u64;
+    let mut info = vec![];
+    el_uint(&mut info, 0x2AD7B1, 1_000_000);
+    el_float(&mut info, 0x4489, duration_ms);
+    el_str(&mut info, 0x4D80, "EffectCraft");
+    el_str(&mut info, 0x5741, "EffectCraft");
+    el(&mut head, INFO, &info);
+    (head, size_pos, seg_start)
+}
+
+pub(crate) fn append_opus_track(tracks: &mut Vec<u8>, opus: Option<&craft_audio::opus::encoder::Encoder>, opus_channels: usize) {
+    if let Some(o) = opus {
+        let mut a = vec![];
+        el_uint(&mut a, 0xD7, 2);
+        el_uint(&mut a, 0x73C5, 2);
+        el_uint(&mut a, 0x83, 2);
+        el_uint(&mut a, 0x9C, 0);
+        el_str(&mut a, 0x86, "A_OPUS");
+        el(&mut a, 0x63A2, &o.opus_head());
+        el_uint(&mut a, 0x56AA, o.pre_skip() as u64 * 1_000_000_000 / OPUS_RATE as u64);
+        el_uint(&mut a, 0x56BB, 80_000_000);
+        let mut au = vec![];
+        el_float(&mut au, 0xB5, OPUS_RATE as f64);
+        el_uint(&mut au, 0x9F, opus_channels as u64);
+        el(&mut a, 0xE1, &au);
+        el(tracks, TRACK_ENTRY, &a);
+    }
+}
+
+pub(crate) fn finish_webm(mut file: crate::out::Out, size_pos: u64, seg_len: u64) -> Result<u64> {
+    // Patch the Segment size.
+    let mut size = [0u8; 8];
+    size[0] = 0x01;
+    size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
+    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
+    file.write_all(&size).map_err(io)?;
+    file.seek(SeekFrom::End(0)).map_err(io)?;
+    file.finish()
+}
+
 /// The Opus encoder of a WebM output: the module's channel count, bitrate and application.
-pub(crate) fn opus_encoder(job: &Cx) -> effectcraft_opusenc::OpusEncoder {
+pub(crate) fn opus_encoder(job: &Cx) -> Result<craft_audio::opus::encoder::Encoder> {
     let channels = if job.output.audio_channels == 1 { 1 } else { 2 };
     let app = match job.output.opus_application {
-        effectcraft_project::render_queue::OpusApplication::Audio => effectcraft_opusenc::Application::Audio,
-        effectcraft_project::render_queue::OpusApplication::Voip => effectcraft_opusenc::Application::Voip,
+        effectcraft_project::render_queue::OpusApplication::Audio => craft_audio::opus::encoder::Application::Audio,
+        effectcraft_project::render_queue::OpusApplication::Voip => craft_audio::opus::encoder::Application::Voip,
     };
-    effectcraft_opusenc::OpusEncoder::with_application(channels, job.output.opus_bitrate_kbps.clamp(6, 510) * 1000, app)
+    craft_audio::opus::encoder::Encoder::with_application(channels, job.output.opus_bitrate_kbps.clamp(6, 510) * 1000, app)
+        .map_err(|e| crate::ExportError::Encode(format!("Opus: {e}")))
+}
+
+/// Mix and encode audio in 20 ms Opus packets, retaining incomplete samples between batches.
+pub(crate) struct OpusPackets {
+    encoder: Option<craft_audio::opus::encoder::Encoder>,
+    channels: usize,
+    cursor: i64,
+    pcm: Vec<f32>,
+    packets: u64,
+}
+
+impl OpusPackets {
+    pub(crate) fn new(encoder: Option<craft_audio::opus::encoder::Encoder>, channels: usize, start: Tick) -> Self {
+        Self { encoder, channels, cursor: start.to_units_floor(OPUS_RATE as i64), pcm: vec![], packets: 0 }
+    }
+
+    pub(crate) fn until(&mut self, job: &Cx<'_>, until: Tick, finish: bool, mut emit: impl FnMut(i64, Vec<u8>)) -> Result<()> {
+        let Some(enc) = self.encoder.as_mut() else { return Ok(()) };
+        let end = until.to_units_floor(OPUS_RATE as i64);
+        if end > self.cursor {
+            let n = (end - self.cursor) as usize;
+            let start = Tick(((self.cursor as i128 * TICKS_PER_SECOND as i128) / OPUS_RATE as i128) as i64);
+            self.pcm.extend(mix(job, start, n, OPUS_RATE));
+            self.cursor = end;
+        }
+        let fs = craft_audio::opus::encoder::Encoder::FRAME_SIZE * self.channels;
+        if finish && !self.pcm.is_empty() {
+            // Pad the last packet and cover the encoder delay.
+            let pad = (fs - self.pcm.len() % fs) % fs + fs;
+            self.pcm.extend(std::iter::repeat_n(0.0, pad));
+        }
+        for packet in self.pcm.chunks_exact(fs) {
+            let data = enc.encode_float(packet).map_err(|e| crate::ExportError::Encode(format!("Opus: {e}")))?;
+            emit(self.packets as i64 * 20, data);
+            self.packets += 1;
+        }
+        self.pcm.drain(..self.pcm.len() / fs * fs);
+        Ok(())
+    }
 }
 
 pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
@@ -156,35 +253,14 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let mut alpha_enc = alpha.then(|| craft_video::vp9::Vp9Encoder::new(cfg.clone()));
     let with_audio = wants_audio(job);
     let opus_channels = if job.output.audio_channels == 1 { 1usize } else { 2 };
-    let mut opus = with_audio.then(|| opus_encoder(job));
+    let opus = with_audio.then(|| opus_encoder(job)).transpose()?;
     let total = st.total;
     let frame_ms = |k: u64| -> i64 { ((k as i128 * 1000 * rate.den as i128 + rate.num as i128 / 2) / rate.num as i128) as i64 };
     let duration_ms = frame_ms(total) as f64;
 
     let path = job.place(job.path, 1);
     let mut file = job.create(&path)?;
-    // EBML header.
-    let mut head = vec![];
-    let mut eb = vec![];
-    el_uint(&mut eb, 0x4286, 1);
-    el_uint(&mut eb, 0x42F7, 1);
-    el_uint(&mut eb, 0x42F2, 4);
-    el_uint(&mut eb, 0x42F3, 8);
-    el_str(&mut eb, 0x4282, "webm");
-    el_uint(&mut eb, 0x4287, 4);
-    el_uint(&mut eb, 0x4285, 2);
-    el(&mut head, EBML, &eb);
-    // Segment with an 8-byte size patched at the end.
-    head.extend(id_bytes(SEGMENT));
-    let size_pos = head.len() as u64;
-    head.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
-    let seg_start = head.len() as u64;
-    let mut info = vec![];
-    el_uint(&mut info, 0x2AD7B1, 1_000_000);
-    el_float(&mut info, 0x4489, duration_ms);
-    el_str(&mut info, 0x4D80, "EffectCraft");
-    el_str(&mut info, 0x5741, "EffectCraft");
-    el(&mut head, INFO, &info);
+    let (mut head, size_pos, seg_start) = webm_header(duration_ms);
     let mut tracks = vec![];
     let mut v = vec![];
     el_uint(&mut v, 0xD7, 1);
@@ -204,55 +280,14 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     }
     el(&mut v, 0xE0, &video);
     el(&mut tracks, TRACK_ENTRY, &v);
-    if let Some(o) = &opus {
-        let mut a = vec![];
-        el_uint(&mut a, 0xD7, 2);
-        el_uint(&mut a, 0x73C5, 2);
-        el_uint(&mut a, 0x83, 2);
-        el_uint(&mut a, 0x9C, 0);
-        el_str(&mut a, 0x86, "A_OPUS");
-        el(&mut a, 0x63A2, &o.opus_head());
-        el_uint(&mut a, 0x56AA, o.pre_skip() as u64 * 1_000_000_000 / OPUS_RATE as u64);
-        el_uint(&mut a, 0x56BB, 80_000_000);
-        let mut au = vec![];
-        el_float(&mut au, 0xB5, OPUS_RATE as f64);
-        el_uint(&mut au, 0x9F, opus_channels as u64);
-        el(&mut a, 0xE1, &au);
-        el(&mut tracks, TRACK_ENTRY, &a);
-    }
+    append_opus_track(&mut tracks, opus.as_ref(), opus_channels);
     el(&mut head, TRACKS, &tracks);
     file.write_all(&head).map_err(io)?;
     let mut seg_len = head.len() as u64 - seg_start;
 
     // Audio: mixed in blocks, encoded in 20 ms packets.
     let (span_start, span_end) = job.settings.span(comp);
-    let mut cursor = span_start.to_units_floor(OPUS_RATE as i64);
-    let mut pcm_left: Vec<f32> = vec![];
-    let mut packets = 0u64;
-    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| {
-        let Some(enc) = opus.as_mut() else { return };
-        let end = until.to_units_floor(OPUS_RATE as i64);
-        if end > cursor {
-            let n = (end - cursor) as usize;
-            let start = Tick(((cursor as i128 * TICKS_PER_SECOND as i128) / OPUS_RATE as i128) as i64);
-            pcm_left.extend(mix(job, start, n, OPUS_RATE));
-            cursor = end;
-        }
-        let fs = effectcraft_opusenc::OpusEncoder::FRAME_SIZE * opus_channels;
-        if finish && !pcm_left.is_empty() {
-            // Pad the last packet (pre-skip + padding cover the encoder delay).
-            let pad = (fs - pcm_left.len() % fs) % fs + fs;
-            pcm_left.extend(std::iter::repeat_n(0.0, pad));
-        }
-        // Packets are read in place and the encoded samples dropped once: draining each packet
-        // from the front would shift the rest of the batch's audio every 20 ms.
-        for packet in pcm_left.chunks_exact(fs) {
-            let pkt = enc.encode_float(packet);
-            frames.push(Frame { ms: packets as i64 * 20, track: 2, key: true, prev_ms: None, data: pkt, alpha: None });
-            packets += 1;
-        }
-        pcm_left.drain(..pcm_left.len() / fs * fs);
-    };
+    let mut audio = OpusPackets::new(opus, opus_channels, span_start);
 
     let batch = batch_size();
     let mut i = 0;
@@ -281,7 +316,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         }
         drop(pixels);
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut frames, end >= total);
+        audio.until(job, t_end, end >= total, |ms, data| frames.push(Frame { ms, track: 2, key: true, prev_ms: None, data, alpha: None }))?;
         let c = cluster(&mut frames);
         file.write_all(&c).map_err(io)?;
         seg_len += c.len() as u64;
@@ -290,21 +325,14 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     }
     if total == 0 {
         let mut frames = vec![];
-        audio_until(span_end, &mut frames, true);
+        audio.until(job, span_end, true, |ms, data| frames.push(Frame { ms, track: 2, key: true, prev_ms: None, data, alpha: None }))?;
         if !frames.is_empty() {
             let c = cluster(&mut frames);
             file.write_all(&c).map_err(io)?;
             seg_len += c.len() as u64;
         }
     }
-    // Patch the Segment size.
-    let mut size = [0u8; 8];
-    size[0] = 0x01;
-    size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
-    file.write_all(&size).map_err(io)?;
-    file.seek(SeekFrom::End(0)).map_err(io)?;
-    let bytes = file.finish()?;
+    let bytes = finish_webm(file, size_pos, seg_len)?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
 }
 
