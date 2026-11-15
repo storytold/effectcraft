@@ -477,8 +477,9 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
                 for (k, px) in frames.iter().enumerate() {
                     let ps = encode(&mut venc, px, i + k as u64)?;
                     write_video(&mut mux, ps)?;
+                    write_audio_until(&mut mux, frame_end_time(i + k as u64 + 1), &mut cursor)?;
                 }
-                write_audio_until(&mut mux, frame_end_time(end), &mut cursor)
+                Ok(())
             })
             .await?;
         done?;

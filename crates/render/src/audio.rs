@@ -292,7 +292,18 @@ impl MixEnv<'_> {
             return self.layer_raw(l, i0, n, false);
         }
         let reversed = fx.iter().any(|(id, _, _)| audio_fx::reverses(id));
-        let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum::<f64>().clamp(0.0, MAX_PREROLL_SECONDS);
+        // For animated stateful effects (Delay, Reverb, Compressor, Gate) the preroll needed
+        // depends on parameters that may change over time.  Evaluating them only at i0 can
+        // underestimate the history required when, e.g., Delay Time is keyframed to a longer
+        // value earlier in the block, leaving insufficient pre-roll and causing a glitch at
+        // every block boundary during export.  When any effect in the chain is both stateful
+        // (not per_sample) and animated, use the maximum possible preroll for that effect so
+        // the history is always sufficient regardless of the parameter trajectory.
+        let pre_s: f64 = fx
+            .iter()
+            .map(|(id, g, p)| if !audio_fx::per_sample(id) && animated(g) { audio_fx::max_preroll(id) } else { audio_fx::preroll(id, p) })
+            .sum::<f64>()
+            .clamp(0.0, MAX_PREROLL_SECONDS);
         let pre = (pre_s * self.rate as f64).ceil() as usize;
         let b0 = i0 - pre as i64;
         let mut buf = self.layer_raw(l, b0, n + pre, reversed);

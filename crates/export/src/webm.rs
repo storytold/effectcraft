@@ -278,10 +278,10 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             );
             let k = i + j as u64;
             frames.push(Frame { ms: frame_ms(k), track: 1, key: color.key, prev_ms: (k > 0).then(|| frame_ms(k - 1)), data: color.data, alpha: a });
+            let t_end = if k + 1 >= total { span_end } else { job.settings.frame_time(comp, k + 1) };
+            audio_until(t_end, &mut frames, k + 1 >= total);
         }
         drop(pixels);
-        let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut frames, end >= total);
         let c = cluster(&mut frames);
         file.write_all(&c).map_err(io)?;
         seg_len += c.len() as u64;
@@ -339,8 +339,10 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
     let end = span_end.to_units_floor(sr as i64);
     let n = (end - start).max(0) as usize;
     let mut pcm = Vec::with_capacity(n * (channels * bytes_per_sample) as usize);
-    // Mix in one-second blocks, reporting progress in frames.
-    let block = sr as usize;
+    // Mix in frame-sized blocks (matching video export so keyframed effect parameters
+    // update smoothly instead of holding a 1-second staircase), reporting progress in frames.
+    let rate = job.settings.rate(comp);
+    let block = ((sr as u64 * rate.den as u64 / rate.num.max(1) as u64).clamp(512, 4096)) as usize;
     let mut done = 0usize;
     let total_frames = st.total.max(1);
     let mut reported = 0u64;
