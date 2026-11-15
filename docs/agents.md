@@ -2,9 +2,9 @@
 
 EffectCraft exposes engine commands with stable ids and JSON params through the CLI, the control
 channel and MCP. UI-only commands use the running app's frontend dispatcher through the control
-channel or an attached MCP bridge. Headless sessions accept registered frontend-only commands such as
-`app.about` as no-ops; actual UI actions and bridge-only `ui_*` tools require the running app. There
-are three ways in:
+channel or an attached MCP bridge. In headless sessions, registered frontend-only commands still
+undergo their normal enablement checks and perform no UI action. Actual UI actions and bridge-only
+`ui_*` tools require the running app. There are three ways in:
 
 Render-queue outputs cannot replace footage, proxies or the project file. See
 [render source protection](file-format-parity.md#render-source-protection) for aliases, default names and sequence
