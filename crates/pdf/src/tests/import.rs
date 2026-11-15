@@ -75,6 +75,35 @@ fn eps_exec_of_executable_names_stops_at_the_call_depth() {
 }
 
 #[test]
+fn eps_clipped_show_keeps_one_text_label_and_clip_afterwards() {
+    let doc = eps(b"0 0 50 50 rectclip /Helvetica findfont 12 scalefont setfont 10 10 moveto (Hi) show 1 0 0 setrgbcolor 0 0 100 100 rectfill");
+    let names = shape_names(&doc);
+    assert_eq!(names.iter().filter(|name| name.as_str() == "Text: Hi").count(), 1, "{names:?}");
+    let img = render(&doc);
+    assert!(img.get(25, 75)[0] > 0.99);
+    assert_eq!(img.get(75, 75)[3], 0.0, "the clip outlives the show");
+}
+
+#[test]
+fn eps_long_show_stores_one_label_for_many_painted_glyphs() {
+    let label = "H".repeat(1024);
+    let doc = eps(format!("/Helvetica findfont 2 scalefont setfont 1 10 moveto ({label}) show").as_bytes());
+    let names = shape_names(&doc);
+    assert_eq!(names, vec![format!("Text: {label}")]);
+}
+
+#[test]
+fn eps_type3_glyph_paints_with_its_own_clip_without_synthetic_text_label() {
+    let doc = eps(b"/T3 8 dict dup begin /FontType 3 def /FontMatrix [0.001 0 0 0.001 0 0] def /FontBBox [0 0 1000 1000] def /Encoding 256 array def 0 1 255 { Encoding exch /.notdef put } for Encoding 65 /A put /BuildChar { pop pop 1000 0 0 0 1000 1000 setcachedevice gsave 0 0 500 1000 rectclip 1 0 0 setrgbcolor 0 0 1000 1000 rectfill grestore 0 0 1 setrgbcolor 500 0 500 1000 rectfill } def end def /T3 T3 definefont pop /T3 findfont 20 scalefont setfont 10 10 moveto (AA) show");
+    assert!(!shape_names(&doc).iter().any(|name| name.starts_with("Text: ")));
+    let img = render(&doc);
+    assert!(img.get(15, 80)[0] > 0.99, "first glyph clipped red half");
+    assert!(img.get(25, 80)[2] > 0.99, "first glyph blue half");
+    assert!(img.get(35, 80)[0] > 0.99, "second glyph clipped red half");
+    assert!(img.get(45, 80)[2] > 0.99, "second glyph blue half");
+}
+
+#[test]
 fn eps_text_with_bundled_fonts_and_show_variants() {
     // Not embedded: drawn with the bundled stand-in, like the same text in a PDF.
     let doc = eps(b"/Helvetica findfont 40 scalefont setfont 10 30 moveto (Hi) show\n");

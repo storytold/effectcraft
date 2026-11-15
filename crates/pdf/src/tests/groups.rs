@@ -103,7 +103,7 @@ fn actual_text_does_not_end_blend_clip_or_soft_mask() {
         assert!(near(a.get(x, 50), b.get(x, 50)), "x={x}: {:?} != {:?}", a.get(x, 50), b.get(x, 50));
     }
     let names = crate::tests::shape_names(&marked);
-    assert_eq!(names.iter().filter(|name| name.as_str() == "Text: inside").count(), 1);
+    assert!(!names.iter().any(|name| name == "Text: inside"), "ordinary PDF marked text is not imported as a group");
     assert!(names.iter().any(|name| name == "Path"), "marks after EMC are not labeled: {names:?}");
     assert!(near(a.get(75, 50), [0.5, 1.0, 0.0, 1.0]), "multiply and mask remain active: {:?}", a.get(75, 50));
     assert!(near(a.get(160, 50), [1.0, 1.0, 0.0, 1.0]), "clip remains active: {:?}", a.get(160, 50));

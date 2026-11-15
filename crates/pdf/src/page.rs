@@ -210,6 +210,8 @@ pub(crate) struct Interp<'a> {
     start: Option<Point>,
     pending_clip: Option<FillRule>,
     marked: Vec<Marked>,
+    /// The shared PostScript bridge emits ActualText to label outlined shows.
+    eps_text: bool,
     /// The page box in default user space (for `sh`).
     page_box: [f64; 4],
     budget: usize,
@@ -231,7 +233,6 @@ fn affine(v: &[f64]) -> Affine {
 enum Marked {
     Other,
     Layer(usize),
-    Text(bool),
 }
 
 /// The most tiles one tiling-pattern fill draws.
@@ -244,7 +245,7 @@ enum TextItem {
 }
 
 impl<'a> Interp<'a> {
-    pub fn new(file: &'a File, page_box: [f64; 4]) -> Self {
+    pub fn new(file: &'a File, page_box: [f64; 4], eps_text: bool) -> Self {
         Interp {
             file,
             b: Builder::new(),
@@ -255,6 +256,7 @@ impl<'a> Interp<'a> {
             start: None,
             pending_clip: None,
             marked: vec![],
+            eps_text,
             page_box,
             budget: 20_000_000,
             tm: Affine::IDENTITY,
@@ -506,7 +508,7 @@ impl<'a> Interp<'a> {
                         _ => None,
                     };
                     let actual_text = match (args.first().and_then(Obj::name), args.get(1)) {
-                        (Some("Span"), Some(Obj::Dict(props))) => props.get("ActualText").and_then(|v| match self.file.resolve(v) {
+                        (Some("Span"), Some(Obj::Dict(props))) if self.eps_text => props.get("ActualText").and_then(|v| match self.file.resolve(v) {
                             Obj::Str(bytes) => Some(crate::color::text_string(bytes)),
                             _ => None,
                         }),
@@ -518,15 +520,14 @@ impl<'a> Interp<'a> {
                             self.b.open(&name, true);
                         }
                         (None, Some(text)) => {
-                            let opened = self.b.begin_text(format!("Text: {text}"));
-                            self.marked.push(Marked::Text(opened));
+                            self.marked.push(Marked::Layer(self.b.depth()));
+                            self.b.open(&format!("Text: {text}"), false);
                         }
                         (None, None) => self.marked.push(Marked::Other),
                     }
                 }
                 "EMC" => match self.marked.pop() {
                     Some(Marked::Layer(d)) => self.close_to(d),
-                    Some(Marked::Text(true)) => self.b.end_text(),
                     _ => {}
                 },
                 _ => {}

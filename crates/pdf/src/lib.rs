@@ -122,9 +122,9 @@ pub enum Framing {
 /// [`parse_page`] with the page framed as `framing` says (EPS files are their bounding box).
 pub fn parse_page_framed(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
     match sniff(bytes) {
-        Some(Format::Pdf) => parse_pdf(bytes, index, framing),
+        Some(Format::Pdf) => parse_pdf(bytes, index, framing, false),
         Some(Format::Eps) => parse_eps(bytes),
-        Some(Format::VectorCraft) => parse_pdf(&carried_pdf(bytes)?, index, framing),
+        Some(Format::VectorCraft) => parse_pdf(&carried_pdf(bytes)?, index, framing, false),
         None => Err(Error::NotVector),
     }
 }
@@ -200,7 +200,7 @@ fn finish(nodes: Vec<Node>, flags: Vec<bool>, skipped: Vec<String>, width: f64, 
 }
 
 /// Page `index` of a PDF framed as `framing` says, as a document in points (y down).
-fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error> {
+fn parse_pdf(bytes: &[u8], index: usize, framing: Framing, eps_text: bool) -> Result<Doc, Error> {
     let file = object::File::parse(bytes)?;
     let pages = page::pages(&file);
     if pages.is_empty() {
@@ -221,7 +221,7 @@ fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error>
         _ => (Affine::new([1.0, 0.0, 0.0, -1.0, -x0, y1]), w, h),
     };
     let content = page::page_content(&file, pg);
-    let mut it = page::Interp::new(&file, pg.bbox);
+    let mut it = page::Interp::new(&file, pg.bbox, eps_text);
     it.b.skipped.extend(file.repairs.iter().cloned());
     it.run(&content, &pg.resources, Affine::IDENTITY, 0);
     let (nodes, flags, skipped) = it.b.finish();
@@ -267,7 +267,7 @@ fn parse_eps(bytes: &[u8]) -> Result<Doc, Error> {
         "not PostScript" | "the EPS has no bounding box" => Error::NoBoundingBox,
         _ => Error::Read(message),
     })?;
-    let mut doc = parse_pdf(&converted.pdf, 0, Framing::Placed)?;
+    let mut doc = parse_pdf(&converted.pdf, 0, Framing::Placed, true)?;
     for skipped in &mut doc.skipped {
         if skipped == "content (path limit)" {
             *skipped = "PostScript (path limit)".to_string();

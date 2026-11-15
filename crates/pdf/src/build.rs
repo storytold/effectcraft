@@ -19,8 +19,6 @@ enum Kind {
 
 pub(crate) struct Builder {
     stack: Vec<(Group, Kind)>,
-    /// Active ActualText labels; these follow marked content, not graphics-state scopes.
-    text: Vec<String>,
     /// Which of the finished top-level nodes are optional-content layers.
     pub top_layers: Vec<bool>,
     pub skipped: Vec<String>,
@@ -36,7 +34,7 @@ pub(crate) fn group(name: &str) -> Group {
 
 impl Builder {
     pub fn new() -> Builder {
-        Builder { stack: vec![(group("page"), Kind::Plain)], text: vec![], top_layers: vec![], skipped: vec![], shapes: 0, base: 0 }
+        Builder { stack: vec![(group("page"), Kind::Plain)], top_layers: vec![], skipped: vec![], shapes: 0, base: 0 }
     }
 
     /// A builder for content that will be placed inside this one's open groups and `wrap` more
@@ -68,37 +66,6 @@ impl Builder {
         if let Some((g, _)) = self.stack.last_mut() {
             g.children.push(n);
         }
-    }
-
-    /// Keep marked text separate from the graphics-state group stack. Each painted node is
-    /// labeled at insertion so a clip, blend or mask can outlive its marked-content sequence.
-    pub fn begin_text(&mut self, name: String) -> bool {
-        if !self.has_room(self.text.len().saturating_add(1)) {
-            self.skip("group nesting limit");
-            return false;
-        }
-        self.text.push(name);
-        true
-    }
-
-    pub fn end_text(&mut self) {
-        self.text.pop();
-    }
-
-    fn add_painted(&mut self, mut node: Node) {
-        if !self.has_room(self.text.len()) {
-            self.skip("group nesting limit");
-            self.add(node, false);
-            return;
-        }
-        for name in self.text.iter().rev() {
-            let mut g = group(name);
-            // Logical labels must not isolate the painting from its backdrop.
-            g.isolated = false;
-            g.children.push(node);
-            node = Node::Group(g);
-        }
-        self.add(node, false);
     }
 
     /// Close every group opened above `depth`.
@@ -144,7 +111,7 @@ impl Builder {
 
     /// Add a finished node (an image, pattern tiles).
     pub fn push(&mut self, n: Node) {
-        self.add_painted(n);
+        self.add(n, false);
     }
 
     pub fn fill_stroke(&mut self, path: BezPath, transform: Affine, fill: Option<(Paint, f64, FillRule)>, stroke: Option<Stroke>) {
@@ -161,7 +128,7 @@ impl Builder {
             None => (None, 1.0, FillRule::NonZero),
         };
         let s = Shape { name: name.into(), geom: Geom::Path(path), transform, fill: f, fill_opacity: fo, fill_rule: rule, stroke, opacity: 1.0 };
-        self.add_painted(Node::Shape(s));
+        self.add(Node::Shape(s), false);
     }
 
     /// The finished top-level nodes and their layer flags.

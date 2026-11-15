@@ -92,7 +92,7 @@ fn eps_semibold_and_demi_names_select_semibold_fallback() {
 }
 
 #[test]
-fn pdf_actual_text_is_exposed_as_a_logical_group() {
+fn generic_pdf_actual_text_keeps_paint_without_a_logical_group() {
     let content = "/Span << /ActualText (Logical text) >> BDC\n1 0 0 rg 10 10 20 20 re f\nEMC";
     let objs = vec![
         (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
@@ -103,7 +103,7 @@ fn pdf_actual_text_is_exposed_as_a_logical_group() {
 
     let doc = parse(&pdf(&objs, 1)).unwrap();
 
-    assert_eq!(shape_names(&doc), vec!["Text: Logical text"]);
+    assert_eq!(shape_names(&doc), vec!["Path"]);
 }
 
 #[test]
