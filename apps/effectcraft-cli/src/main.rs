@@ -891,6 +891,9 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
         return usage_err("render runs headless; use `exec renderQueue.add` / `renderQueue.render` with --bridge");
     }
     let mut s = session(args)?;
+    if let Some(gpu) = &s.accel {
+        note!("GPU adapter: {}", gpu.name());
+    }
     if args.opt("--template").is_some() {
         template::prepare(&mut s, args)?;
     } else if let Some(p) = &args.project {

@@ -436,7 +436,7 @@ impl<'a> Cx<'a> {
             audio_seconds: self.phases.measured(Stage::Audio),
             frames,
             frames_per_second: if wall > 0.0 { frames as f64 / wall } else { 0.0 },
-            renderer: self.choice().map_or_else(|| "none was needed".to_string(), |c| describe_choice(&c)),
+            renderer: self.choice().map_or_else(|| "none was needed".to_string(), |c| self.describe(&c)),
             encoder: describe_encoder(self.job.output),
         }
     }
@@ -452,7 +452,10 @@ impl<'a> Cx<'a> {
     fn fixed_choice(&self, env: Option<&str>) -> Option<Choice> {
         let fixed = |renderer, why| Some(Choice { renderer, gpu_ms: None, cpu_ms: None, why });
         if self.project_renderer() == crate::JobRenderer::Cpu {
-            return fixed(crate::JobRenderer::Cpu, "the project's renderer");
+            // A project that asks for the GPU but has no accelerator in this session (the headless
+            // CLI without `--gpu`) renders on the CPU: say so, not "the project's renderer".
+            let why = if self.project.settings.gpu_acceleration { "no GPU compositor is attached to this session" } else { "the project's renderer" };
+            return fixed(crate::JobRenderer::Cpu, why);
         }
         if self.deferred() {
             return fixed(crate::JobRenderer::Gpu, "the project's renderer");
@@ -494,7 +497,17 @@ impl<'a> Cx<'a> {
                 });
             }
         }
-        log::info!(target: "effectcraft_export", "{}: {}", self.job.options.label, describe_choice(&c));
+        log::info!(target: "effectcraft_export", "{}: {}", self.job.options.label, self.describe(&c));
+    }
+
+    /// [`describe_choice`] with the GPU adapter a GPU project's job had, so a log shows which
+    /// device was measured.
+    fn describe(&self, c: &Choice) -> String {
+        let d = describe_choice(c);
+        match self.job.accel {
+            Some(a) if self.project.settings.gpu_acceleration => format!("{d}; GPU adapter: {}", a.name()),
+            _ => d,
+        }
     }
 
     /// The job's choice, once made.
@@ -1389,6 +1402,62 @@ mod tests {
             options: Default::default(),
         };
         assert_eq!(Cx::new(&job).gpu_cap(), None, "no accelerator");
+    }
+
+    /// #3706: a project that asks for the GPU but renders in a session without an accelerator (the
+    /// headless CLI without `--gpu`) said "the project's renderer": the log gives the real reason.
+    /// With an accelerator the log names the adapter.
+    #[test]
+    fn the_log_says_why_a_gpu_project_renders_on_the_cpu_and_on_which_adapter() {
+        if std::env::var_os(RENDERER_ENV).is_some() {
+            return;
+        }
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        use effectcraft_render::NoFootage;
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let accel = NoAccel;
+        let describe = |gpu: bool, with_accel: bool| {
+            let mut p = Project::default();
+            p.settings.gpu_acceleration = gpu;
+            let job = Job {
+                project: &p,
+                footage: &NoFootage,
+                expr: None,
+                accel: if with_accel { Some(&accel) } else { None },
+                comp: effectcraft_project::ItemId(0),
+                settings: &settings,
+                output: &output,
+                path: "/c/f_[#####].png",
+                sink: None,
+                nested_switches: true,
+                options: Default::default(),
+            };
+            let cx = Cx::new(&job);
+            cx.choice().map(|c| cx.describe(&c))
+        };
+        assert_eq!(describe(true, false).as_deref(), Some("Software Rendering (no GPU compositor is attached to this session)"));
+        assert_eq!(describe(false, true).as_deref(), Some("Software Rendering (the project's renderer)"));
+        assert_eq!(describe(false, false).as_deref(), Some("Software Rendering (the project's renderer)"));
+        // A GPU project with an accelerator measures first; the adapter shows once it chose.
+        assert_eq!(describe(true, true), None);
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: Some(&accel),
+            comp: effectcraft_project::ItemId(0),
+            settings: &settings,
+            output: &output,
+            path: "/c/f_[#####].png",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let cx = Cx::new(&job);
+        cx.decide(Choice { renderer: crate::JobRenderer::Cpu, gpu_ms: Some(164.5), cpu_ms: Some(115.6), why: "measured on the first frames" });
+        assert_eq!(cx.timing(1.0, 1).renderer, "Software Rendering (measured on the first frames: GPU 164.5 ms/frame, CPU 115.6 ms/frame); GPU adapter: none");
     }
 
     /// A resumed sequence can start with one or two missing frames. Once emitted, their
