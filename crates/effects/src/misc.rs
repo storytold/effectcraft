@@ -288,11 +288,17 @@ fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let opacity = ctx.params.f("opacity") as f32 / 100.0;
     let dir = ctx.params.f("direction").to_radians();
     let dist = ctx.params.f("distance") * b.scale;
-    let soft = ctx.params.f("softness") * b.scale;
+    let mut soft = ctx.params.f("softness") * b.scale;
     let only = ctx.params.b("shadowOnly");
     let pad = (dist + soft * 1.5).ceil() as u32 + 2;
+    let (w0, h0) = (b.img.width, b.img.height);
     if !ctx.adjustment {
         b.pad(pad);
+        // The shared allocation budget can cut the requested margin (#2261). Keep the Gaussian's
+        // 3σ extent inside the margin the buffer actually gained, so a large Softness is softer
+        // rather than a shadow cut off at the buffer edge.
+        let grown = f64::from((b.img.width - w0).min(b.img.height - h0)) / 2.0;
+        soft = soft.min(((grown - dist) / 1.5).max(0.0));
     }
     let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);
     let mut sh = Image::new(b.img.width, b.img.height);
@@ -1046,6 +1052,20 @@ mod tests {
             matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. } if *min == 0.0 && *max == 30000.0 && *slider_min == 0.0 && *slider_max == 250.0),
             "{ui:?}"
         );
+    }
+
+    /// #3464: the padding budget can be smaller than `Distance + 1.5 × Softness`. The blur then
+    /// uses the margin the buffer gained, so the shadow is not cut off at the buffer edge.
+    #[test]
+    fn drop_shadow_softness_fits_the_padding_the_buffer_gained() {
+        let layer = || Image::filled(128, 128, [1.0, 0.0, 0.0, 1.0]);
+        let shadow = |s: f64| {
+            run_fx("ec.perspective.dropshadow", &[("softness", num(s)), ("opacity", num(100.0))], layer(), 0.0, EffectEnv::default()).img
+        };
+        let (large, larger, slider_max) = (shadow(30_000.0), shadow(60_000.0), shadow(250.0));
+        assert!(large.data.iter().all(|p| p.iter().all(|v| v.is_finite())));
+        assert_eq!(large.data, larger.data, "past the budget the margin, and so the blur, is the buffer's");
+        assert_ne!(large.data, slider_max.data, "a slider-range Softness still blurs less than the fitted maximum");
     }
 
     #[test]
