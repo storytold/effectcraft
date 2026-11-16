@@ -351,9 +351,15 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         for c in &mut g.children {
             if let Node::Group(sg) = c {
                 let path = if parent.is_empty() { sg.match_id.clone() } else { format!("{parent}/{}", sg.match_id) };
-                let n = group_name(spec, &path);
-                if n != sg.match_id {
-                    sg.name = n;
+                // A plug-in's own name always applies; a built-in one only when it is known.
+                match crate::plugin::group_display_name(spec.id, &path) {
+                    Some(n) => sg.name = n,
+                    None => {
+                        let n = group_name(spec, &path);
+                        if n != sg.match_id {
+                            sg.name = n;
+                        }
+                    }
                 }
                 names(spec, sg, &path);
             }

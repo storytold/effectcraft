@@ -548,4 +548,9 @@ fn groups_with_one_match_id_under_different_parents_keep_their_own_names() {
     // Refreshing the names on upgrade keeps them apart too.
     effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [4.0, 2.0]);
     assert_eq!(names(&g), ["Ray Color", "RayColor"]);
+    // A name saved before the plug-in renamed its group follows the plug-in, even when the new
+    // name is the match id itself.
+    g.sub_mut("B").unwrap().sub_mut("RayColor").unwrap().name = "Ray Color".into();
+    effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [4.0, 2.0]);
+    assert_eq!(names(&g), ["Ray Color", "RayColor"]);
 }
