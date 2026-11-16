@@ -207,6 +207,8 @@ fn run_checks() -> bool {
         Err(e) => return check("current exe", false, e),
     };
     let state = std::env::temp_dir().join(format!("ec-fake-helper-state-{}", std::process::id()));
+    // Fresh on every run: an interrupted run with the same process id may have left files here.
+    let _ = std::fs::remove_dir_all(&state);
     effectcraft_helper_host::blocklist::set_state_dir(state.clone());
     let mut all = true;
 
@@ -316,7 +318,7 @@ fn run_checks() -> bool {
     // A helper still starting when shut_down runs (a copy of this binary, slow to describe) is
     // stopped once scan_paths publishes it.
     let slow = state.join("slow-helper").join(exe.file_name().unwrap_or_default());
-    let copied = std::fs::create_dir_all(state.join("slow-helper")).and_then(|()| std::fs::copy(&exe, &slow));
+    let copied = std::fs::create_dir_all(&state).and_then(|()| std::fs::create_dir(state.join("slow-helper"))).and_then(|()| std::fs::copy(&exe, &slow));
     all &= check("copy the slow helper", copied.is_ok(), &copied);
     let gate = state.join("slow-helper");
     let scan = std::thread::spawn(move || effectcraft_helper_host::scan_paths(&[slow], false));
@@ -330,7 +332,12 @@ fn run_checks() -> bool {
     all &= check("a helper started during shut_down is stopped", scanned.as_ref().is_ok_and(|n| *n == 1) && files() == 0, (&scanned, files()));
     let r = render("org.test.helper.invert", &mut vec![[0.0; 4]; 4], 2, 2, 1.0, false);
     all &= check("no helper starts after shut_down", r.as_ref().is_err_and(|e| e.contains("quitting")) && files() == 0, (&r, files()));
-    let _ = std::fs::remove_dir_all(&state);
+    // The stopped slow helper may still be exiting, and Windows can't delete a running exe.
+    let t0 = std::time::Instant::now();
+    while state.exists() && std::fs::remove_dir_all(&state).is_err() && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    all &= check("the state folder is removed", !state.exists(), &state);
     all
 }
 
