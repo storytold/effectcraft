@@ -221,6 +221,11 @@ pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
 #[cfg(not(target_pointer_width = "64"))]
 pub(crate) const MAX_DECODE_BYTES: usize = 512 << 20;
 
+/// The most threads one read decompresses on (beside the caller's), and the size of a file
+/// whose chunks are decompressed on the calling thread alone.
+const READ_WORKERS: usize = 4;
+const SMALL_FILE: u64 = 1 << 20;
+
 /// The size of the planes of a read at `level` of a `w` × `h` display window.
 #[cfg(test)]
 pub(crate) fn level_size(size: (usize, usize), level: u32) -> (usize, usize) {
@@ -265,8 +270,10 @@ fn read(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest) -> Result<(
     request.fill = &fill;
     request.rows = req.rows.clone();
     request.level = req.level;
-    // (as many decoding threads as the pool the caller runs on: the footage decode threads)
-    request.workers = Some(rayon::current_num_threads());
+    // craft-exr decompresses on threads of its own, started for this read, beside the decode
+    // pool the caller runs on: a few at most, and none for a small file (its chunks are
+    // decompressed on the calling thread).
+    request.workers = Some(if index.file.file_len() < SMALL_FILE { 0 } else { rayon::current_num_threads().min(READ_WORKERS) });
     let planes = seek::read_planes(src, &index.file, &request, &filmcraft_media::cancel::cancelled).map_err(|e| match e {
         seek::Error::Cancelled => ReadError::Cancelled,
         seek::Error::Io(why) => ReadError::Io(why),

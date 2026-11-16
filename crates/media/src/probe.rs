@@ -296,7 +296,12 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
             // shown black): its picture's size and alpha from the headers alone (#3271), no
             // pixels decoded.
             let size = (fmt == image::ImageFormat::OpenExr).then(|| crate::exr_channels::picture_size(bytes)).flatten();
-            size.ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?
+            let (w, h, alpha) = size.ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?;
+            // (as every still: no larger than the renderer can hold as floats)
+            if u64::from(w) * u64::from(h) > MAX_STILL_PIXELS {
+                return Err(MediaError::Decode(format!("{path}: a {w}×{h} OpenEXR picture is larger than a still may be")));
+            }
+            (w, h, alpha)
         }
     };
     Ok(still_footage(path, w, h, fmt, has_alpha))

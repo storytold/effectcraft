@@ -93,6 +93,10 @@ pub fn picture_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     let (w, h) = index.size();
     let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
     let n = (w as usize).checked_mul(h as usize)?;
+    // (the caller converts it to a float RGBA picture: a still's bound)
+    if n as u64 > crate::probe::MAX_STILL_PIXELS {
+        return None;
+    }
     let Some(picture) = &index.picture else {
         let len = n.checked_mul(3)?;
         let mut data: Vec<f32> = Vec::new();
@@ -112,10 +116,15 @@ pub fn picture_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     };
     let mut data = Vec::new();
     data.try_reserve_exact(n.checked_mul(if a.is_some() { 4 } else { 3 })?).ok()?;
+    // (0 outside the picture part's data window where its planes hold another fill)
+    let width = w as usize;
+    let shown = |i: usize| picture.inside.is_none_or(|[x0, y0, x1, y1]| (x0..x1).contains(&(i % width.max(1))) && (y0..y1).contains(&(i / width.max(1))));
     for i in 0..n {
-        data.extend([r.get(i)?, g.get(i)?, b.get(i)?].map(|v| *v));
+        let on = shown(i);
+        let pick = |v: &f32| if on { *v } else { 0.0 };
+        data.extend([r.get(i)?, g.get(i)?, b.get(i)?].map(pick));
         if let Some(a) = a {
-            data.push(*a.get(i)?);
+            data.push(pick(a.get(i)?));
         }
     }
     match a {
@@ -142,13 +151,16 @@ pub(crate) fn black_picture(w: u32, h: u32, op: AlphaOp) -> Image {
 /// The picture made of planes `rgb` and `a` (opaque without one) of `aux`, as
 /// [`crate::convert::dynamic_to_image`] makes it of the same values. `None` when a plane is
 /// missing or short.
-pub(crate) fn planes_picture(aux: &AuxChannels, rgb: [&[f32]; 3], a: Option<&[f32]>, op: AlphaOp) -> Option<Image> {
-    let n = (aux.width as usize).checked_mul(aux.height as usize)?;
+pub(crate) fn planes_picture(aux: &AuxChannels, rgb: [&[f32]; 3], a: Option<&[f32]>, inside: Option<[usize; 4]>, op: AlphaOp) -> Option<Image> {
+    let w = aux.width as usize;
+    let n = w.checked_mul(aux.height as usize)?;
     if rgb.iter().chain(&a).any(|p| p.len() < n) {
         return None;
     }
     let [r, g, b] = rgb;
-    let at = |p: &[f32], i: usize| p.get(i).copied().unwrap_or(0.0);
+    // (0 outside `inside`, the picture part's data window, where the planes hold another fill)
+    let shown = |i: usize| inside.is_none_or(|[x0, y0, x1, y1]| (x0..x1).contains(&(i % w.max(1))) && (y0..y1).contains(&(i / w.max(1))));
+    let at = |p: &[f32], i: usize| if shown(i) { p.get(i).copied().unwrap_or(0.0) } else { 0.0 };
     Some(float_to_image(aux.width, aux.height, op, |i| [at(r, i), at(g, i), at(b, i), a.map_or(1.0, |a| at(a, i))]))
 }
 

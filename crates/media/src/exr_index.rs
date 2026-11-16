@@ -47,6 +47,11 @@ pub(crate) struct IndexChannel {
 pub(crate) struct MainPicture {
     pub(crate) layout: ColorLayout,
     pub(crate) ids: Vec<usize>,
+    /// When a picture channel's plane isn't 0 outside the part's data window (a part whose name
+    /// reads as depth, `depth.R`: its planes keep the background depth for effects), the data
+    /// window in display pixels, `[x0, y0, x1, y1)`: the picture is 0 outside it, as the `image`
+    /// crate and After Effects show it.
+    pub(crate) inside: Option<[usize; 4]>,
 }
 
 impl MainPicture {
@@ -207,14 +212,7 @@ pub(crate) fn build(src: &mut dyn ReadSeek, stamp: FileStamp) -> Result<ExrIndex
             channels.push(IndexChannel { name, part: pi, channel: ci, fill });
         }
     }
-    let picture = main_picture(parts, &channels);
-    // The picture's channels are colour (0 outside the data window, as After Effects and the
-    // `image` crate show it), even in a part whose name reads as depth (`depth.R`).
-    for id in picture.iter().flat_map(|p| &p.ids) {
-        if let Some(c) = channels.get_mut(*id) {
-            c.fill = 0.0;
-        }
-    }
+    let picture = main_picture(parts, display, &channels);
     let mut names = AuxChannels::new(display.width, display.height, 1.0);
     names.channels = channels.iter().map(|c| (c.name.clone(), vec![])).collect();
     names.manifests = manifests;
@@ -245,10 +243,23 @@ fn manifests(parts: &[PartInfo]) -> Vec<(String, Vec<(String, u32)>)> {
 /// ([`craft_exr::channels::main_picture`]: the unprefixed `R`, `G`, `B` (`A`) of the first part
 /// that has them, else the first unprefixed `Y` (`A`)), as channel ids. The parts' channels are
 /// matched as stored (a part's own `R`, not the `part.R` plane name).
-fn main_picture(parts: &[PartInfo], channels: &[IndexChannel]) -> Option<MainPicture> {
+fn main_picture(parts: &[PartInfo], display: Window, channels: &[IndexChannel]) -> Option<MainPicture> {
     let (part, layout, picked) = craft_exr::channels::main_picture(parts.iter().map(|p| p.channels.iter().map(|c| c.name.as_str())))?;
     let ids = picked.iter().map(|ci| channels.iter().position(|c| c.part == part && c.channel == *ci)).collect::<Option<Vec<usize>>>()?;
-    Some(MainPicture { layout, ids })
+    let filled = ids.iter().any(|id| channels.get(*id).is_some_and(|c| c.fill != 0.0));
+    let inside = match filled {
+        true => Some(data_window_in_display(parts.get(part)?.data_window, display)),
+        false => None,
+    };
+    Some(MainPicture { layout, ids, inside })
+}
+
+/// The part of `data` inside `display`, in display pixels from its top left: `[x0, y0, x1, y1)`.
+fn data_window_in_display(data: Window, display: Window) -> [usize; 4] {
+    let clamp = |v: i64, size: u32| usize::try_from(v.clamp(0, i64::from(size))).unwrap_or(0);
+    let (x0, y0) = (i64::from(data.x) - i64::from(display.x), i64::from(data.y) - i64::from(display.y));
+    let (x1, y1) = (x0.saturating_add(i64::from(data.width)), y0.saturating_add(i64::from(data.height)));
+    [clamp(x0, display.width), clamp(y0, display.height), clamp(x1, display.width), clamp(y1, display.height)]
 }
 
 /// At most this many files are indexed, and their indexes take at most [`INDEXED_BYTES`]; the

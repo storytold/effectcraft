@@ -1153,6 +1153,9 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
             Err(_) => return Picture::Legacy,
         };
+        if let Err(why) = picture_fits(path, &index) {
+            return Picture::Done(Err(why));
+        }
         let mut want = Want { all: false, ids: index.picture_ids().into_iter().collect() };
         if let Some(need) = extra {
             match need_ids(&index, need) {
@@ -1208,7 +1211,23 @@ fn picture_of(index: &ExrIndex, batch: Option<&Batch>, op: AlphaOp) -> Option<Im
         Some(a) => Some(batch.plane(a)?),
         None => None,
     };
-    planes_picture(&batch.aux, [batch.plane(r)?, batch.plane(g)?, batch.plane(b)?], a, op)
+    planes_picture(&batch.aux, [batch.plane(r)?, batch.plane(g)?, batch.plane(b)?], a, main.inside, op)
+}
+
+/// The picture of the file `index` describes (float RGBA, 16 bytes a pixel, allocated whole) is
+/// no larger than a still may decode to ([`crate::probe::MAX_STILL_PIXELS`]) nor than one read of
+/// the file may allocate: else why not, to show. Checked before anything is read, also for the
+/// black picture of a file without a main picture.
+fn picture_fits(path: &str, index: &ExrIndex) -> Result<(), String> {
+    let (w, h) = index.size();
+    let pixels = (w as u64).saturating_mul(h as u64);
+    let need = pixels.saturating_mul(16);
+    let most = (cap_of(path) as u64).min(crate::probe::MAX_STILL_PIXELS.saturating_mul(16));
+    if need <= most {
+        return Ok(());
+    }
+    let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
+    Err(format!("its {w}×{h} OpenEXR picture needs {:.1} GB of memory, more than the {:.1} GB one file may use", gb(need), gb(most)))
 }
 
 /// The picture of the OpenEXR at `path` (as [`picture`]) of only the display rows `rows`: those
@@ -1221,6 +1240,9 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
         Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
         Err(_) => return Picture::Legacy,
     };
+    if let Err(why) = picture_fits(path, &index) {
+        return Picture::Done(Err(why));
+    }
     // (in file order: the planes are looked up by id)
     let ids = index.picture_ids();
     if ids.is_empty() {

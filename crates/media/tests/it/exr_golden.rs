@@ -248,8 +248,9 @@ fn files() -> Vec<(&'static str, Vec<u8>, bool)> {
             true,
         ),
         (
-            // The picture is the part "depth" (the first with R, G and B, as the image crate shows
-            // it): its channels are colour, 0 outside the data window, despite the part's name.
+            // The picture is the part "depth" (the first with R, G and B), 0 outside its data window
+            // as the image crate shows it, while its planes keep the background depth there for
+            // effects (the part's name reads as depth).
             "multipart_depth_named_rgb_zip16",
             write(
                 vec![
@@ -338,8 +339,7 @@ fn hashes(name: &str, bytes: &[u8], aux_first: bool) -> Vec<(String, u64, bool)>
 
 /// Hashes taken on main before #474's shared decode (`EXR_GOLDEN_PRINT=1`). The pictures of
 /// the files of named layers only (`layered_*`, `multipart_blender5_rle`) were re-pinned when the
-/// picture became After Effects' main picture (black for those files, their channels unchanged),
-/// and `multipart_depth_named_rgb_zip16`'s channels when the picture's channels kept a fill of 0.
+/// picture became After Effects' main picture (black for those files, their channels unchanged).
 const PINNED: &[(&str, &str, u64)] = &[
     ("rgba_half_zip16", "probe", 0x0a32e074a28c1f66),
     ("rgba_half_zip16", "probed/linear", 0xa84600283dce98f6),
@@ -487,7 +487,7 @@ const PINNED: &[(&str, &str, u64)] = &[
     ("multipart_depth_named_rgb_zip16", "premul/linear", 0x869374e9b0384cea),
     ("multipart_depth_named_rgb_zip16", "ignore/linear", 0x3b86057d18a16bf0),
     ("multipart_depth_named_rgb_zip16", "preserve_rgb", 0x3b86057d18a16bf0),
-    ("multipart_depth_named_rgb_zip16", "aux", 0x6651502f552749d5),
+    ("multipart_depth_named_rgb_zip16", "aux", 0x0fa56884e83b4417),
 ];
 
 #[test]

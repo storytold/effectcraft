@@ -214,6 +214,27 @@ fn a_depth_part_first_leaves_the_picture_to_the_rgba_part() {
     assert_eq!(d.last().unwrap().stats.chunks, [0, SIZE.1], "only the RGBA part's chunks");
 }
 
+/// The black picture of a file without a main picture is allocated whole like any picture: one
+/// larger than one read of the file may allocate is refused with the reason, not allocated (an
+/// abort in the browser); within it, it is black at the file's size.
+#[test]
+fn a_black_picture_too_large_is_refused_not_allocated() {
+    let bytes = write(vec![part(None, &[("depth.Z", false)], (8, 8), Compression::ZIP1)], (8, 8));
+    let path = "/no-picture-too-large.exr";
+    let source = ExrSource::Bytes(bytes.as_slice().into());
+    let op = AlphaOp::of(&Footage::default(), FloatCurve::Linear);
+    set_cap(path, 8 * 8 * 16 - 1);
+    match picture(path, &source, op, None) {
+        Picture::Done(Err(why)) => assert!(why.contains("8×8") && why.contains("GB"), "{why}"),
+        _ => panic!("refused"),
+    }
+    let fits = "/no-picture-fits.exr";
+    set_cap(fits, 8 * 8 * 16);
+    let Picture::Done(Ok(img)) = picture(fits, &source, op, None) else { panic!("a black picture") };
+    assert_eq!((img.width, img.height), (8, 8));
+    assert!(img.data.iter().all(|p| *p == [0.0, 0.0, 0.0, 1.0]));
+}
+
 /// A luminance file (`Y` only, no `R`, `G`, `B`) is grey, as before.
 #[test]
 fn a_luminance_file_is_grey() {
