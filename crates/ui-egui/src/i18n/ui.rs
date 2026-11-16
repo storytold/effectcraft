@@ -2786,6 +2786,24 @@ const HEBREW: &[(&str, &str)] = &[
     ("Parameters: {}", "פרמטרים: {}"),
     ("At its default settings this effect leaves the sample frame unchanged.", "בהגדרות ברירת המחדל, אפקט זה אינו משנה את הפריים לדוגמה."),
 
+    // Original English UI call sites: shortcut editor and paint panels (Hebrew draft).
+    ("Reset Preset", "איפוס ערכת קיצורים"),
+    ("Modifiers:", "מקשי שינוי:"),
+    ("Key: {}", "מקש: \u{2068}{}\u{2069}"),
+    ("Not assigned", "לא משויך"),
+    ("Search commands or shortcuts", "חיפוש פקודות או קיצורי מקשים"),
+    ("Select a command to change its shortcut.", "בחרו פקודה כדי לשנות את קיצור המקשים שלה."),
+    ("No shortcut", "אין קיצור מקשים"),
+    ("⚠ {} is used by:", "⚠ קיצור המקשים \u{2068}{}\u{2069} משמש את:"),
+    ("Reset to Default", "איפוס לברירת המחדל"),
+    ("Default: {}", "ברירת מחדל: \u{2068}{}\u{2069}"),
+    ("You can't undo this.", "לא ניתן לבטל פעולה זו."),
+    ("  Delete  ", "  מחיקה  "),
+    ("Swap Paint Colors (X)", "החלפת צבעי הציור (X)"),
+    ("Set Paint Colors to Black and White (D)", "איפוס צבעי הציור לשחור ולבן (D)"),
+    ("Offset:", "היסט:"),
+    ("Spacing:", "מרווח:"),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -11607,6 +11625,44 @@ mod tests {
                 let value = table.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
                 assert!(value.is_some_and(|v| !v.is_empty()), "{key} has an empty {name} row");
             }
+        }
+    }
+
+    #[test]
+    fn hebrew_shortcut_and_paint_controls_match_live_english_sources() {
+        let shortcuts = include_str!("../panels/shortcut_editor.rs");
+        let paint = include_str!("../panels/paint_panels.rs");
+        for (english, source) in [
+            ("Reset Preset", shortcuts),
+            ("Modifiers:", shortcuts),
+            ("Key: {}", shortcuts),
+            ("Not assigned", shortcuts),
+            ("Search commands or shortcuts", shortcuts),
+            ("Select a command to change its shortcut.", shortcuts),
+            ("No shortcut", shortcuts),
+            ("⚠ {} is used by:", shortcuts),
+            ("Reset to Default", shortcuts),
+            ("Default: {}", shortcuts),
+            ("You can't undo this.", shortcuts),
+            ("  Delete  ", shortcuts),
+            ("Swap Paint Colors (X)", paint),
+            ("Set Paint Colors to Black and White (D)", paint),
+            ("Offset:", paint),
+            ("Spacing:", paint),
+        ] {
+            let direct = format!("tr({english:?})");
+            let formatted = format!("tr_args({english:?}");
+            assert!(
+                source.contains(&direct) || source.contains(&formatted),
+                "{english:?} is no longer used by its original panel"
+            );
+            let hebrew = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, translated)| *translated);
+            assert!(
+                hebrew.is_some_and(|text| text.chars().any(|c| ('א'..='ת').contains(&c))),
+                "Missing Hebrew UI row for {english:?}"
+            );
+            let hebrew = hebrew.unwrap_or("");
+            assert_eq!(english.matches("{}").count(), hebrew.matches("{}").count(), "{english:?}: placeholder mismatch");
         }
     }
 
