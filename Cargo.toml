@@ -23,7 +23,7 @@ craft-gif = { version = "0.1.0", git = "https://github.com/storytold/craft-libs"
 craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
 craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
 craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
-craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "2284a6bf76b3d629b5e5bb2ca71e1c319d8dae5f" }
 craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
 craft-aep = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
 craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
