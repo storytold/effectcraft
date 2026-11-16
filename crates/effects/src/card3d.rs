@@ -345,7 +345,9 @@ pub struct CompScene {
     pub camera_layer: bool,
     pub light: Option<CompLight>,
     /// The camera's zoom (comp pixels): with `camera`'s W the depth in front of it, a length at
-    /// that depth shows `zoom / W` times as long. 0 when unknown.
+    /// that depth shows `zoom / W` times as long. 0 when unknown. W is the true depth for a 2D
+    /// layer and for a 3D layer facing the camera; across a tilted 3D layer's plane it is the
+    /// anchor's depth.
     pub zoom: f64,
     /// The camera's depth of field when it is on: focus distance (comp pixels from the eye),
     /// aperture (comp pixels) and Blur Level (1 = 100 %).

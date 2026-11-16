@@ -35,9 +35,14 @@ pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_eff
     let world = ctx.world_matrix(layer);
     let (cam, _, zoom) = ctx.camera();
     let p = (cam * world).0;
-    let back = ctx.layer_to_comp(layer).0.inverse()?.0;
+    let (to_comp, depth) = ctx.layer_to_comp(layer);
+    let back = to_comp.inverse()?.0;
+    // A 3D layer's own projection cancels on its plane (W = 1 there): scale the matrix by the
+    // anchor's camera-space depth so W reads as depth, as it does for a 2D layer. Scaling a
+    // homogeneous matrix leaves where every point shows unchanged.
+    let k = if layer.is_3d() && depth > 1e-9 { depth } else { 1.0 };
     let rows = [p[0], p[1], p[3]];
-    let camera: [[f64; 4]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| back[i][k] * rows[k][j]).sum()));
+    let camera: [[f64; 4]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| k * (0..3).map(|m| back[i][m] * rows[m][j]).sum::<f64>()));
     let inv = world.inverse();
     let light = three_d::light::lights_at(ctx).first().and_then(|l| {
         let inv = inv.as_ref()?;

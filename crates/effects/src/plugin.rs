@@ -316,7 +316,8 @@ pub struct LayerTransform {
 pub struct CompCamera {
     /// This layer's pixels (x, y, as a point parameter in layer pixels, and z away from the
     /// viewer) → homogeneous X, Y, W (rows of a 3 × 4 matrix): the point shows at (X / W, Y / W)
-    /// in this layer's pixels, and W is its depth in front of the camera (comp pixels).
+    /// in this layer's pixels, and W is its depth in front of the camera (comp pixels): exact for
+    /// a 2D layer and a 3D layer facing the camera, the anchor's depth across a tilted 3D layer.
     pub matrix: [[f64; 4]; 3],
     /// The camera's zoom (comp pixels): a length at depth W shows `zoom / W` times as long.
     pub zoom: f64,
