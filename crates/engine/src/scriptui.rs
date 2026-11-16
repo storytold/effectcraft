@@ -159,6 +159,9 @@ pub enum DrawOp {
         size: f64,
         #[serde(default)]
         style: String,
+        /// The face the font resolved to ([`UiFont::resolve`]), the one `measureString` measured.
+        #[serde(default)]
+        font: UiFont,
     },
     /// `drawOSControl()`: the control's default look.
     Os,
@@ -171,6 +174,110 @@ pub enum DrawOp {
         w: f64,
         h: f64,
     },
+}
+
+/// The bundled face ScriptUI text is measured and drawn with. Frontends paint these same font
+/// files, so `measureString` measures what `drawString` paints, headless or not, on every
+/// platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiFont {
+    #[default]
+    Regular,
+    Bold,
+    Italic,
+    /// Monospaced families (`Courier New`, `Consolas`, `Menlo`…). JetBrains Mono has one style.
+    Mono,
+}
+
+impl UiFont {
+    /// The face for a ScriptUI font's family name and style (`REGULAR`, `BOLD`, `ITALIC`,
+    /// `BOLDITALIC`, or a `ScriptUI.FontStyle` number). Bold italic draws bold: no bold italic
+    /// face is bundled.
+    pub fn resolve(family: &str, style: &str) -> Self {
+        let family = family.to_ascii_lowercase();
+        if ["mono", "courier", "consolas", "menlo", "monaco"].iter().any(|m| family.contains(m)) {
+            return Self::Mono;
+        }
+        let style = style.trim().to_ascii_lowercase();
+        if style.contains("bold") || style == "1" || style == "3" {
+            Self::Bold
+        } else if style.contains("italic") || style == "2" {
+            Self::Italic
+        } else {
+            Self::Regular
+        }
+    }
+
+    /// The face's font file.
+    pub fn bytes(self) -> &'static [u8] {
+        use effectcraft_text::fonts;
+        match self {
+            Self::Regular => fonts::INTER_REGULAR,
+            Self::Bold => fonts::INTER_BOLD,
+            Self::Italic => fonts::INTER_ITALIC,
+            Self::Mono => fonts::JETBRAINS_MONO_REGULAR,
+        }
+    }
+
+    /// The family and style the text engine knows the face by.
+    fn family_style(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Regular => ("Inter", "Regular"),
+            Self::Bold => ("Inter", "Bold"),
+            Self::Italic => ("Inter", "Italic"),
+            Self::Mono => ("JetBrains Mono", "Regular"),
+        }
+    }
+}
+
+/// Most text one `measureString` measures; the rest of a longer string is not measured.
+pub const MAX_MEASURE_BYTES: usize = 64 * 1024;
+/// The largest ScriptUI font size in pixels.
+pub const MAX_UI_FONT_SIZE: f64 = 1000.0;
+
+/// The pixel size ScriptUI text is measured and drawn at: `size` up to [`MAX_UI_FONT_SIZE`], 12
+/// when it is not a positive number.
+pub fn ui_font_size(size: f64) -> f64 {
+    if size.is_finite() && size > 0.0 { size.min(MAX_UI_FONT_SIZE) } else { 12.0 }
+}
+
+/// `measureString`: the `[width, height]` of `text` drawn in `font` at `size` pixels, wrapped at
+/// `wrap` pixels when given. Lines break at newlines (and wrap); the height is one row of the face
+/// per line, the width the widest line's advance. A line that ends its paragraph keeps its
+/// trailing spaces, as `drawString` paints them; a wrapped line ends at its last visible character.
+pub fn measure_text(text: &str, font: UiFont, size: f64, wrap: Option<f64>) -> [f64; 2] {
+    use effectcraft_text::layout::{ParagraphStyle, TextStyle};
+    let size = ui_font_size(size);
+    let mut end = text.len().min(MAX_MEASURE_BYTES);
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let text = text.get(..end).unwrap_or_default();
+    let (family, style) = font.family_style();
+    let style = TextStyle { family: family.into(), style: style.into(), size: size as f32, ..Default::default() };
+    let para = ParagraphStyle { width: wrap.filter(|w| w.is_finite() && *w > 0.0).map(|w| w.min(1e9) as f32), ..Default::default() };
+    // Uncached: scripts measure arbitrary strings, which must not crowd text layers' layouts out
+    // of the shared cache.
+    let lay = effectcraft_text::layout::layout_uncached(text, &style, &para);
+    let advance = |l: &effectcraft_text::layout::Line| {
+        if !l.para_end {
+            return l.width;
+        }
+        let (lo, hi) = l.carets.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| (lo.min(c.1), hi.max(c.1)));
+        l.width.max(hi - lo)
+    };
+    let width = lay.lines.iter().map(|l| f64::from(advance(l))).fold(0.0, f64::max);
+    [width, lay.lines.len().max(1) as f64 * row_height(&style)]
+}
+
+/// The height of one row of text, as the egui frontend lays it out: the face's ascent, descent
+/// and line gap each rounded to 1/32 pixel, the sum to a whole pixel.
+fn row_height(style: &effectcraft_text::layout::TextStyle) -> f64 {
+    use effectcraft_text::fonts;
+    let m = fonts::face(fonts::resolve(&style.family, &style.style).face).metrics(style.size);
+    let round = |v: f32| f64::from((v * 32.0).round() / 32.0);
+    (round(m.ascent) + round(m.descent) + round(m.line_gap)).round()
 }
 
 /// A ScriptUIImage (`ScriptUI.newImage`, an image control's or icon button's image, a
@@ -942,7 +1049,35 @@ mod tests {
         assert_eq!(j["path"][0], json!({"k": "M", "x": 0.0, "y": 0.0}));
         assert_eq!(serde_json::from_value::<DrawOp>(j).unwrap(), op);
         let t: DrawOp = serde_json::from_value(json!({"op": "text", "text": "Hi", "color": null, "x": 1, "y": 2, "size": 14})).unwrap();
-        assert!(matches!(t, DrawOp::Text { size, .. } if size == 14.0));
+        assert!(matches!(t, DrawOp::Text { size, font: UiFont::Regular, .. } if size == 14.0));
+        let t: DrawOp = serde_json::from_value(json!({"op": "text", "text": "Hi", "color": null, "x": 1, "y": 2, "size": 14, "font": "mono"})).unwrap();
+        assert!(matches!(t, DrawOp::Text { font: UiFont::Mono, .. }));
+    }
+
+    #[test]
+    fn script_fonts_resolve_to_bundled_faces() {
+        use effectcraft_text::fonts::{self, FaceData};
+        for (family, style, want) in [
+            ("dialog", "REGULAR", UiFont::Regular),
+            ("palette", "BOLD", UiFont::Bold),
+            ("Tahoma", "1", UiFont::Bold),
+            ("Arial", "ITALIC", UiFont::Italic),
+            ("", "2", UiFont::Italic),
+            ("dialog", "BOLDITALIC", UiFont::Bold),
+            ("dialog", "3", UiFont::Bold),
+            ("Courier New", "BOLD", UiFont::Mono),
+            ("Consolas", "", UiFont::Mono),
+            ("anything", "[object Object]", UiFont::Regular),
+        ] {
+            assert_eq!(UiFont::resolve(family, style), want, "{family} {style}");
+        }
+        for font in [UiFont::Regular, UiFont::Bold, UiFont::Italic, UiFont::Mono] {
+            let (family, style) = font.family_style();
+            let r = fonts::resolve(family, style);
+            assert!(!r.missing && !r.synth_bold && !r.synth_italic, "{font:?} {r:?}");
+            let face = fonts::face(r.face);
+            assert!(matches!(face.info.data, FaceData::Static(b) if b == font.bytes()), "{font:?} measures another file than it draws");
+        }
     }
 
     #[test]
