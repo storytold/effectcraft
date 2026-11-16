@@ -10,6 +10,9 @@ pub(crate) const MAX_PATH: usize = 1 << 20;
 /// The deepest the open groups nest (the render tree and its consumers recurse through them).
 const MAX_DEPTH: usize = 256;
 
+/// The most characters of a logical text label kept in a group name.
+pub(crate) const MAX_LABEL: usize = 256;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Plain,
@@ -124,6 +127,9 @@ impl Builder {
             self.skip("logical text nesting limit");
             return false;
         }
+        // Every paint wrapped by the annotation carries its own copy of the label, so a long
+        // /ActualText is cut to MAX_LABEL characters rather than copied whole into each.
+        let text: String = text.chars().take(MAX_LABEL).collect();
         self.text_labels.push(format!("Text: {text}"));
         true
     }
@@ -207,5 +213,19 @@ impl Builder {
         let root = self.stack.pop().map(|(g, _)| g.children).unwrap_or_default();
         let flags = self.top_layers;
         (root, flags, self.skipped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_logical_label_is_cut_once_at_begin_text() {
+        let mut b = Builder::new();
+        assert!(b.begin_text(&"é".repeat(MAX_LABEL * 4)));
+        assert_eq!(b.text_labels[0].chars().count(), "Text: ".len() + MAX_LABEL);
+        assert!(b.begin_text("short"));
+        assert_eq!(b.text_labels[1], "Text: short");
     }
 }
