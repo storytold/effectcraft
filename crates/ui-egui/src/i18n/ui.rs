@@ -2833,6 +2833,34 @@ const HEBREW: &[(&str, &str)] = &[
     ("Stretch Factor:", "מקדם מתיחה:"),
     ("Hold In Place", "קיבוע במקום"),
 
+    // Original English callsites: Preview and Project panels (Hebrew UI, 16 November 2026).
+    ("{} — coming soon", "{} — בקרוב"),
+    ("Shortcut", "קיצור דרך"),
+    ("Range", "טווח"),
+    ("Play From", "הפעלה החל מ־"),
+    ("Frame Rate", "קצב מסגרות"),
+    ("Skip", "דילוג"),
+    ("Resolution", "רזולוציה"),
+    ("Full Screen", "מסך מלא"),
+    ("On ({}) stop:", "בעת עצירה ({}):"),
+    ("If caching, play cached frames", "הפעלת מסגרות מהמטמון, אם הן זמינות"),
+    ("No audio layer selected", "לא נבחרה שכבת שמע"),
+    ("No composition markers", "אין סמנים בקומפוזיציה"),
+    ("used once", "בשימוש פעם אחת"),
+    ("used {} times", "בשימוש {} פעמים"),
+    ("Compositions that use this item", "קומפוזיציות המשתמשות בפריט זה"),
+    ("Sort by {}, {}", "מיון לפי {}, {}"),
+    ("Sort by {}", "מיון לפי {}"),
+    ("Resize the Name column", "שינוי רוחב העמודה ״שם״"),
+    ("Composition Settings…", "הגדרות קומפוזיציה…"),
+    ("Move to Project Root", "העברה לתיקיית השורש של הפרויקט"),
+    ("New Comp from Selection", "קומפוזיציה חדשה מהבחירה"),
+    ("Replace with Precomposition", "החלפה בקומפוזיציית ביניים"),
+    ("Label", "תווית"),
+    ("Project color depth: {}", "עומק הצבע בפרויקט: {}"),
+    ("Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings", "עומק הצבע בפרויקט: לחיצה למעבר בין 8/16/32 סיביות לערוץ; Alt+לחיצה לפתיחת הגדרות הפרויקט"),
+    ("Filter by footage status", "סינון לפי מצב קובצי המדיה"),
+    ("Columns", "עמודות"),
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -11654,6 +11682,53 @@ mod tests {
                 let value = table.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
                 assert!(value.is_some_and(|v| !v.is_empty()), "{key} has an empty {name} row");
             }
+        }
+    }
+
+    /// The Preview and Project panels use these English literals through tr/tr_args.
+    /// Keep the Hebrew rows linked to the actual callsites and preserve positional arguments.
+    #[test]
+    fn hebrew_preview_and_project_controls_match_live_english_sources() {
+        let preview = include_str!("../panels/misc.rs");
+        let project = include_str!("../panels/project.rs");
+        for (english, source) in [
+            ("{} — coming soon", preview),
+            ("Shortcut", preview),
+            ("Range", preview),
+            ("Play From", preview),
+            ("Frame Rate", preview),
+            ("Skip", preview),
+            ("Resolution", preview),
+            ("Full Screen", preview),
+            ("On ({}) stop:", preview),
+            ("If caching, play cached frames", preview),
+            ("No audio layer selected", preview),
+            ("No composition markers", preview),
+            ("used once", project),
+            ("used {} times", project),
+            ("Compositions that use this item", project),
+            ("Sort by {}, {}", project),
+            ("Sort by {}", project),
+            ("Resize the Name column", project),
+            ("Composition Settings…", project),
+            ("Move to Project Root", project),
+            ("New Comp from Selection", project),
+            ("Replace with Precomposition", project),
+            ("Label", project),
+            ("Project color depth: {}", project),
+            ("Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings", project),
+            ("Filter by footage status", project),
+            ("Columns", project),
+        ] {
+            let direct = format!("tr({english:?})");
+            let with_args = format!("tr_args({english:?},");
+            assert!(
+                source.contains(&direct) || source.contains(&with_args),
+                "{english:?} is no longer a translated Preview/Project callsite"
+            );
+            let value = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, v)| *v);
+            assert!(value.is_some_and(|text| text.chars().any(|c| ('א'..='ת').contains(&c))), "missing Hebrew for {english:?}");
+            assert_eq!(english.matches("{}").count(), value.unwrap_or("").matches("{}").count(), "placeholder mismatch for {english:?}");
         }
     }
 
