@@ -1153,9 +1153,13 @@ source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b4255
 [[package]]
 name = "craft-exr"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=bc3e521bd37e53f2b5b4c55278111b55fd9a40f9#bc3e521bd37e53f2b5b4c55278111b55fd9a40f9"
 dependencies = [
+ "exr",
+ "flate2",
+ "half",
  "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1197,8 +1201,9 @@ dependencies = [
 [[package]]
 name = "craft-lottie"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=2284a6bf76b3d629b5e5bb2ca71e1c319d8dae5f#2284a6bf76b3d629b5e5bb2ca71e1c319d8dae5f"
 dependencies = [
+ "craft-zip",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -1375,6 +1380,16 @@ source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b4255
 dependencies = [
  "quick-xml 0.41.0",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-zip"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=2284a6bf76b3d629b5e5bb2ca71e1c319d8dae5f#2284a6bf76b3d629b5e5bb2ca71e1c319d8dae5f"
+dependencies = [
+ "flate2",
+ "thiserror 2.0.21",
+ "zip 9.1.3",
 ]
 
 [[package]]
