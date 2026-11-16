@@ -128,55 +128,12 @@ impl Psd {
     /// Linked layer data records (spec: "Linked Layer"): length, kind (`liFD` embedded data,
     /// `liFE` external file, `liFA` alias), version, unique id, original file name, type,
     /// creator, data length, optional descriptors, then the data. A damaged record ends the list.
+    /// Ranges in [`LinkedFile::data`] are in the document bytes (`self.data`); craft-psd reports
+    /// them relative to the block, so the block's start is added back.
     fn linked_files(&mut self, data: &[u8], start: usize, end: usize) {
-        let mut pos = start;
-        while pos + 8 <= end {
-            let mut r = Reader::at(&data[..end], pos);
-            let Ok(len) = r.u64() else { break };
-            let body = r.pos;
-            let Some(rec_end) = body.checked_add(len as usize).filter(|e| *e <= end) else { break };
-            let mut r = Reader::at(&data[..rec_end], body);
-            let rec = (|| -> Result<LinkedFile> {
-                let kind = r.tag()?;
-                let version = r.u32()?;
-                let n = r.u8()? as usize;
-                let uuid = String::from_utf8_lossy(r.bytes(n)?).into_owned();
-                let name = descriptor::read_unicode(&mut r)?;
-                let file_type = String::from_utf8_lossy(&r.tag()?).trim().to_string();
-                let _creator = r.tag()?;
-                let dlen = r.u64()? as usize;
-                if r.u8()? != 0 {
-                    let _v = r.u32()?;
-                    descriptor::read_descriptor(&mut r)?;
-                }
-                let mut out = LinkedFile { uuid, name, file_type, data: None };
-                match &kind {
-                    b"liFD" => {
-                        let s = r.pos;
-                        r.skip(dlen)?;
-                        out.data = Some(s..s + dlen);
-                    }
-                    b"liFE" => {
-                        let _v = r.u32()?;
-                        descriptor::read_descriptor(&mut r)?;
-                        if version > 3 {
-                            r.skip(4 + 4 + 8)?;
-                        }
-                        let _size = r.u64()?;
-                        if version > 2 && r.remaining() >= dlen && dlen > 0 {
-                            let s = r.pos;
-                            out.data = Some(s..s + dlen);
-                        }
-                    }
-                    _ => {}
-                }
-                Ok(out)
-            })();
-            match rec {
-                Ok(f) => self.linked.push(f),
-                Err(_) => break,
-            }
-            pos = rec_end.div_ceil(4) * 4;
+        let Some(block) = data.get(start..end) else { return };
+        for f in craft_psd::smart::linked_files(block) {
+            self.linked.push(LinkedFile { uuid: f.uuid, name: f.name, file_type: f.file_type, data: f.data.map(|r| (start + r.start)..(start + r.end)) });
         }
     }
 
@@ -429,7 +386,7 @@ fn flattened(data: &[u8]) -> Option<(craft_psd::Header, Vec<u8>, usize)> {
 
 /// Linked-file blocks can be most of a file: leave them in the source, read in place.
 fn linked(key: &[u8; 4], _len: u64) -> bool {
-    matches!(key, b"lnk2" | b"lnkD" | b"lnk3" | b"lnkE")
+    craft_psd::smart::is_linked_layer_key(key)
 }
 
 /// Reads `data` with craft-psd. Where that loses what the old reader kept, it reads a copy with
