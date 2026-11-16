@@ -157,7 +157,10 @@ fn compression(doc: &WDoc) -> Compression {
 /// One channel of a `w`×`h` plane, encoded by craft-psd. An empty plane is written raw.
 fn channel(id: i16, v: &[f32], w: usize, h: usize, doc: &WDoc) -> craft_psd::Result<ChannelData> {
     let c = if w == 0 || h == 0 { Compression::Raw } else { compression(doc) };
-    ChannelData::encode(id, c, &encode_samples(v, doc.depth), w, h, doc.depth, Version::Psd)
+    let samples = encode_samples(v, doc.depth);
+    // A PSD RLE row holds at most 65535 bytes; a wider plane is written raw.
+    ChannelData::encode(id, c, &samples, w, h, doc.depth, Version::Psd)
+        .or_else(|_| ChannelData::encode(id, Compression::Raw, &samples, w, h, doc.depth, Version::Psd))
 }
 
 /// A legacy Pascal name: ASCII, anything else as `?`, at most 255 bytes.
@@ -261,17 +264,18 @@ fn build(doc: &WDoc) -> craft_psd::Result<PsdFile> {
         merged.extend(encode_samples(&planes.iter().map(|v| v[c]).collect::<Vec<_>>(), doc.depth));
     }
     merged.extend(encode_samples(&comp.iter().map(|p| p[3]).collect::<Vec<_>>(), doc.depth));
-    let image_data = ImageData::encode(compression(doc), &merged, &header)?;
+    let image_data = ImageData::encode(compression(doc), &merged, &header).or_else(|_| ImageData::encode(Compression::Raw, &merged, &header))?;
     Ok(PsdFile {
         header,
         color_mode_data: vec![],
         resources: vec![],
         layer_info: has_layers.then_some(LayerInfo { merged_alpha: true, layers, padding: None }),
-        // 16-bit layers go in an `Lr16` block, as Photoshop writes them.
-        layer_info_placement: if has_layers && doc.depth == 16 {
-            LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key: *b"Lr16", padding: None }
-        } else {
-            LayerInfoPlacement::Section
+        // 16- and 32-bit layers go in an `Lr16` / `Lr32` block, as Photoshop writes them.
+        layer_info_placement: match doc.depth {
+            16 | 32 if has_layers => {
+                LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key: craft_psd::tiff::layer_info_key(doc.depth), padding: None }
+            }
+            _ => LayerInfoPlacement::Section,
         },
         global_layer_mask: has_layers.then(GlobalLayerMask::default),
         global_blocks,

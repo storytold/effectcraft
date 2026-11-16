@@ -532,3 +532,35 @@ fn written_32_bit_documents_decode() {
         }
     }
 }
+
+#[test]
+fn deep_layers_go_in_their_global_block() {
+    for (depth, key) in [(16, b"Lr16"), (32, b"Lr32")] {
+        let bytes = write(&doc_with_layers(depth, ColorMode::Rgb, true));
+        let file = craft_psd::PsdFile::from_bytes(&bytes).expect("parse");
+        assert!(
+            matches!(file.layer_info_placement, craft_psd::LayerInfoPlacement::GlobalBlock { key: k, .. } if &k == key),
+            "{depth}-bit: {:?}",
+            file.layer_info_placement
+        );
+        assert_eq!(Psd::parse(bytes).expect("parse").layers.len(), doc_with_layers(depth, ColorMode::Rgb, true).layers.len());
+    }
+}
+
+#[test]
+fn rows_too_wide_for_rle_are_written_raw() {
+    // 20000 32-bit samples are 80000 bytes per row, past the 65535 an RLE row count holds.
+    let doc = |w: u32| {
+        let mut d = WDoc::new(w, 1);
+        d.depth = 32;
+        d.composite = Some(vec![[0.5, 0.25, 0.75, 1.0]; w as usize]);
+        d.layers.push(WLayer::solid("Wide", Rect::new(0, 0, w as i32, 1), [0.5, 0.25, 0.75, 1.0]));
+        d
+    };
+    let want = Psd::parse(write(&doc(100))).expect("narrow").composite().expect("composite").data[0];
+    let p = Psd::parse(write(&doc(20_000))).expect("parse");
+    let c = p.composite().expect("composite");
+    assert_eq!(c.data.len(), 20_000);
+    assert!(c.data.iter().all(|px| *px == want), "{:?} vs {want:?}", c.data[0]);
+    assert!(p.layer_pixels(0, false).is_ok());
+}
