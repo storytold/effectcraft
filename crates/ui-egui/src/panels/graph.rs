@@ -603,7 +603,7 @@ pub(crate) fn wheel_nav(app: &mut EffectcraftApp, ui: &egui::Ui, plot: Rect) {
 }
 
 /// Draw the value grid lines and their labels, bounded even if a bad range reaches here.
-fn value_grid(pc: &egui::Painter, plot: Rect, (lo, hi): (f64, f64), t: &Tokens) {
+fn value_grid(pc: &egui::Painter, plot: Rect, (lo, hi): (f64, f64), pal: &GraphPalette, t: &Tokens) {
     let span = hi - lo;
     let ymap = |v: f64| plot.max.y - ((v - lo) / span) as f32 * plot.height();
     let step = nice_step(span / 6.0);
@@ -613,7 +613,7 @@ fn value_grid(pc: &egui::Painter, plot: Rect, (lo, hi): (f64, f64), t: &Tokens) 
             break;
         }
         let y = ymap(gv);
-        pc.line_segment([pos2(plot.min.x, y), pos2(plot.max.x, y)], Stroke::new(1.0, Color32::from_white_alpha(12)));
+        pc.line_segment([pos2(plot.min.x, y), pos2(plot.max.x, y)], Stroke::new(1.0, pal.grid));
         pc.text(pos2(plot.min.x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, fmt(gv, step), Tokens::ui(10.0), t.text_faint);
         gv += step;
     }
@@ -670,7 +670,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
 
     // Grid + value labels.
     let pc = p.with_clip_rect(plot);
-    value_grid(&pc, plot, (lo, hi), &t);
+    value_grid(&pc, plot, (lo, hi), &pal, &t);
     if cs.is_empty() {
         p.text(
             plot.center(),
