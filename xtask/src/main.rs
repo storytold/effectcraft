@@ -37,7 +37,6 @@ const LAYERS: &[(&str, u8)] = &[
     ("geom", 0),
     ("color", 0),
     ("testkit", 0),
-    ("opusenc", 0),
     ("raster", 1),
     ("keyframe", 1),
     ("path", 1),

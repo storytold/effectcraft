@@ -25,8 +25,8 @@ filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
 craft-dpx = { workspace = true }
 craft-exr = { workspace = true, features = ["decode"] }
-craft-gif = { workspace = true }
-craft-webp = { workspace = true }
+craft-gif = { workspace = true, features = ["frames"] }
+craft-webp = { workspace = true, features = ["frames"] }
 craft-audio = { workspace = true }
 craft-media = { workspace = true }
 filmcraft-mpegts = { workspace = true }
