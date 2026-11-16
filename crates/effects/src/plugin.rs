@@ -970,14 +970,18 @@ fn clear_outside(img: &mut crate::Image, b: [u32; 4]) {
 /// its place.
 fn crop(buf: Buf, b: [u32; 4]) -> Buf {
     let (x0, y0, x1, y1) = clamp_rect(b, buf.img.width, buf.img.height);
-    let (w, h) = ((x1 - x0).max(1), (y1 - y0).max(1));
+    // The cut starts on the buffer's pixel grid (whole `GRID_ALIGN` steps), which a downscaled
+    // layer resamples along; the pixels between it and `b` stay transparent.
+    let g = crate::GRID_ALIGN as usize;
+    let (cx, cy) = if x0 < x1 && y0 < y1 { (x0 - x0 % g, y0 - y0 % g) } else { (x0, y0) };
+    let (w, h) = ((x1 - cx).max(1), (y1 - cy).max(1));
     let mut img = crate::Image::new(w as u32, h as u32);
     if x0 < x1 && y0 < y1 {
         let sw = buf.img.width as usize;
-        for (y, row) in img.data.chunks_mut(w).enumerate() {
+        for (y, row) in img.data.chunks_mut(w).skip(y0 - cy).enumerate() {
             let s = (y0 + y) * sw + x0;
-            row.copy_from_slice(&buf.img.data[s..s + w]);
+            row[x0 - cx..x1 - cx].copy_from_slice(&buf.img.data[s..s + (x1 - x0)]);
         }
     }
-    Buf { img, offset: [buf.offset[0] - x0 as f64, buf.offset[1] - y0 as f64], scale: buf.scale }
+    Buf { img, offset: [buf.offset[0] - cx as f64, buf.offset[1] - cy as f64], scale: buf.scale }
 }

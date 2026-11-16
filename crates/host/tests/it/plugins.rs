@@ -705,12 +705,20 @@ fn bounded_generators_keep_only_what_they_drew() {
     s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
     assert_eq!(cid_px(&s, 11, 6), [1.0, 0.0, 0.0, 1.0], "its square");
     assert_eq!(cid_px(&s, 20, 15), [0.0; 4], "nothing outside it");
+    assert_eq!(cid_px(&s, 5, 6), [0.0; 4], "nor beside it, where the grid-aligned cut starts");
     assert_eq!(saw(), [0.0; 4], "a blank buffer, not the orange solid");
 
     // an effect after it sees the square on transparency
     s.execute("effect.apply", json!({"layer": l, "effect": "org.test.swap2"})).unwrap();
     assert_eq!(cid_px(&s, 11, 6), [0.0, 0.0, 1.0, 1.0], "its square, swapped");
     assert_eq!(cid_px(&s, 20, 15), [0.0; 4], "cleared outside it");
+
+    // CC Composite after it reads the original layer, so the solid is filled for it
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "ec.channel.cccomposite"})).unwrap();
+    let _ = cid_px(&s, 0, 0);
+    assert_eq!(saw()[3], 1.0, "the solid CC Composite needs, not a blank buffer: {:?}", saw());
 
     // after another effect it gets the layer as that effect left it
     let (mut s, l) = setup();

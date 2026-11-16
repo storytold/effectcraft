@@ -1340,6 +1340,10 @@ impl<'a> Renderer<'a> {
         if !effectcraft_effects::plugin::ignores_input(first.id) {
             return None;
         }
+        // (CC Composite later in the stack reads the original layer: it gets the filled solid)
+        if layer.effects()?.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effect == "ec.channel.cccomposite")) {
+            return None;
+        }
         let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
         let (s, w, h) = solid_size(sol.width, sol.height, self.opts.scale);
         Some(Buf { img: Image::new(w, h), offset: [0.0; 2], scale: s })

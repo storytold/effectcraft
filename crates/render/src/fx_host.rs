@@ -150,8 +150,12 @@ impl EffectHost for FxHost<'_, '_, '_> {
                 Ok(())
             }
         }
+        fn has_prop(g: &effectcraft_project::PropGroup, uid: u64) -> bool {
+            g.props().any(|p| p.uid == uid) || g.groups().any(|s| has_prop(s, uid))
+        }
         let g = self.layer.effects()?.groups().nth(self.index)?;
-        if any_expression(g) {
+        // (an Essential Property override of a precomp instance changes values `g` doesn't hold)
+        if any_expression(g) || self.ctx.property_overrides.iter().any(|o| o.layer == self.layer.id && has_prop(g, o.prop)) {
             return None;
         }
         let mut h = Feed(std::collections::hash_map::DefaultHasher::new());
