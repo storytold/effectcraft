@@ -1619,16 +1619,90 @@ fn a_refusal_for_size_is_decided_anew_when_the_decode_limit_changes() {
     let source = ExrSource::Bytes(bytes);
     let index = crate::exr_index::get(path, &source).unwrap();
     let want = Want { all: false, ids: (0..4).collect() };
+    // (the refusal is made before anything is read: the decodes are counted as they begin)
+    let begun = Arc::new(AtomicU64::new(0));
+    {
+        let begun = begun.clone();
+        set_before_read(
+            path,
+            Some(Arc::new(move |_: &str| {
+                begun.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+    }
     let refused = || matches!(store.get(path, &source, &index, &want, Use::Other), Err(Refused::TooLarge(_)));
     assert!(refused());
     assert!(refused());
-    assert_eq!(decodes_of(path).len(), 1, "the second refusal came from memory");
+    assert_eq!(begun.load(Ordering::SeqCst), 1, "the second refusal came from memory");
     // (figures under the fixed floor: only the change counts, no other test's limit moves)
     effectcraft_render::memory::set_decode_limit(Some(1000));
     effectcraft_render::memory::set_decode_limit(Some(2000));
     assert!(refused(), "still over the caller's own limit");
-    assert_eq!(decodes_of(path).len(), 2, "decided anew after the limit changed");
+    assert_eq!(begun.load(Ordering::SeqCst), 2, "decided anew after the limit changed");
+    set_before_read(path, None);
     effectcraft_render::memory::set_decode_limit(None);
+}
+
+/// A file of an 8×8 picture and a depth plane: five planes of 256 bytes.
+fn picture_and_depth() -> Vec<u8> {
+    write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false)], (8, 8), Compression::ZIP1)], (8, 8))
+}
+
+/// #3749 (#3301 review): the limit is for the planes a request ends with, not for the ones read
+/// just now: channels added to the planes held count with them. When together they are over
+/// the limit the planes held are let go and the request is read on its own (it fits alone); a
+/// request that doesn't fit alone is refused, whatever is held.
+#[test]
+fn channels_added_to_the_planes_held_count_toward_the_limit() {
+    let path = "/3749-held-and-added.exr";
+    // Room for four planes: the picture fits, one more with it is five.
+    set_cap(path, 4 * 8 * 8 * 4);
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture = Want { all: false, ids: index.picture_ids().into_iter().collect() };
+    store.get(path, &source, &index, &picture, Use::Other).expect("the picture fits");
+    let rest = Want { all: true, ids: Default::default() };
+    let depth = store.get(path, &source, &index, &rest, Use::Other).expect("the depth plane fits alone");
+    assert!(depth.aux.get("Z").is_some());
+    assert!(depth.aux.get("R").is_none(), "the picture's planes were let go: four held and one more are five");
+    // The picture again: it fits alone, the depth plane is let go in turn.
+    let again = store.get(path, &source, &index, &picture, Use::Other).expect("the picture fits alone");
+    assert!(again.aux.get("R").is_some() && again.aux.get("Z").is_none());
+    // Everything at once is five planes: refused, however it is asked.
+    let everything = Want { all: true, ids: (0..5).collect() };
+    assert!(matches!(store.get(path, &source, &index, &everything, Use::Other).err(), Some(Refused::TooLarge(_))));
+}
+
+/// #3749 (#3301 review): planes the disk cache gives back count toward the limit of a request
+/// like the ones read from the file.
+#[test]
+fn planes_from_the_disk_cache_count_toward_the_limit() {
+    use effectcraft_render::disk_cache::DiskCache;
+    let dir = std::env::temp_dir().join(format!("ec-3749-disk-union-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("union_0001.exr");
+    std::fs::write(&file, picture_and_depth()).unwrap();
+    let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+    dc.set_read_us_per_mb(0);
+    use_disk_for(&dir.to_string_lossy());
+    set_disk_cache(Some(&dc));
+    let path = file.to_string_lossy().to_string();
+    let source = ExrSource::File(file.clone());
+    let index = crate::exr_index::get(&path, &source).unwrap();
+    let all = Want { all: true, ids: (0..5).collect() };
+    let first = PlaneStore::new(CACHE_BUDGET).get(&path, &source, &index, &all, Use::Other).is_ok();
+    dc.flush();
+    // All five planes are in the disk cache (a store without them in RAM reads them back)...
+    let warm = PlaneStore::new(CACHE_BUDGET).get(&path, &source, &index, &all, Use::Other).is_ok();
+    let from_disk = decodes_of(&path).last().is_some_and(|d| d.from_disk);
+    // ...and a request may use four.
+    set_cap(&path, 4 * 8 * 8 * 4);
+    let refused = PlaneStore::new(CACHE_BUDGET).get(&path, &source, &index, &all, Use::Other).err();
+    set_disk_cache(None);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(first && warm && from_disk, "decoded without a limit, then read back from the disk cache");
+    assert!(matches!(refused, Some(Refused::TooLarge(_))), "{refused:?}");
 }
 
 /// #3749: a plane the system cannot give is not an aborted process: `craft-exr` asks for the

@@ -907,6 +907,26 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
     decode(path, source, flight, base, opened)
 }
 
+/// What a failed read of `path` means for the request.
+fn refused(path: &str, e: ReadError) -> Refused {
+    match e {
+        ReadError::Cancelled => Refused::Cancelled,
+        // (a read that failed just now: the next request reads again)
+        ReadError::Io(why) => {
+            log::warn!("media: {path}: {why}");
+            Refused::Stopped
+        }
+        ReadError::TooLarge(why) => {
+            log::warn!("media: {path}: {why}");
+            Refused::TooLarge(why)
+        }
+        ReadError::Unreadable(why) => {
+            log::warn!("media: {path}: {why}");
+            Refused::Unreadable
+        }
+    }
+}
+
 /// Decode what `flight` asks for and `base` doesn't hold, and make the union of both.
 fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>, opened: Option<Opened>) -> Result<Arc<Batch>, Refused> {
     let _decoding = Decoding::new();
@@ -947,10 +967,25 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         want.ids.iter().copied().collect()
     };
     let wanted: Vec<usize> = wanted.into_iter().filter(|i| *i < index.channels.len()).collect();
-    let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
-    let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
-    let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
+    let mut base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
+    let mut missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
     let (w, h) = index.size();
+    // The planes the request ends with (those held plus those missing, whether they come from the
+    // disk cache or the file) must fit the limit, asked before any of them is allocated (#3749).
+    // The planes held are only kept for later requests: when they don't fit with the missing
+    // ones, they are let go and the request is read on its own.
+    if !missing.is_empty() {
+        let held = base.as_ref().map_or(0, |b| b.ids.len());
+        let together = crate::exr_read::check_total(w, h, held.saturating_add(missing.len()), cap_of(path));
+        if together.is_err() && base.is_some() {
+            base = None;
+            missing = wanted.clone();
+        }
+        if base.is_none() {
+            crate::exr_read::check_total(w, h, missing.len(), cap_of(path)).map_err(|e| refused(path, e))?;
+        }
+    }
+    let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
     // The disk tier first (#3271): what an earlier session or a decode RAM let go of kept, one
     // entry per channel (any request is assembled from them, whatever was asked before).
     // (a file naming two channels alike can't tell their entries apart: not kept)
@@ -984,22 +1019,7 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), DecodeRecord { channels: names.clone(), stats: stats.clone(), from_disk }));
     #[cfg(not(test))]
     let _ = (&stats, from_disk);
-    let read: Vec<Vec<f32>> = read.map_err(|e| match e {
-        ReadError::Cancelled => Refused::Cancelled,
-        // (a read that failed just now: the next request reads again)
-        ReadError::Io(why) => {
-            log::warn!("media: {path}: {why}");
-            Refused::Stopped
-        }
-        ReadError::TooLarge(why) => {
-            log::warn!("media: {path}: {why}");
-            Refused::TooLarge(why)
-        }
-        ReadError::Unreadable(why) => {
-            log::warn!("media: {path}: {why}");
-            Refused::Unreadable
-        }
-    })?;
+    let read: Vec<Vec<f32>> = read.map_err(|e| refused(path, e))?;
     let mut read = read.into_iter();
     let planes: Vec<Vec<f32>> = kept.iter_mut().map(|k| k.take().or_else(|| read.next()).unwrap_or_default()).collect();
     // The union, in file order: the planes held and the ones just read.
