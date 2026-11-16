@@ -199,6 +199,11 @@ fn plugins_see_a_params_digest() {
     let edited = at(&s, 0.6);
     assert!(edited.is_some() && edited != first);
     assert_eq!(at(&s, 0.7), edited);
+    // At another render scale `params_at` flattens points differently: so does the digest.
+    let n = SEEN.lock().unwrap().len();
+    s.render(cid, Tick::from_seconds_f64(0.7), effectcraft_engine::render::RenderOpts { scale: 0.5, ..Default::default() });
+    let half = *SEEN.lock().unwrap().get(n).expect("the half-resolution render called the plug-in");
+    assert!(half.is_some() && half != edited, "{half:?} vs {edited:?}");
     s.execute("prop.setExpression", json!({"layer": l, "path": "effects/#1/amount", "expression": "time"})).unwrap();
     assert_eq!(at(&s, 0.8), None);
 }
@@ -727,4 +732,32 @@ fn bounded_generators_keep_only_what_they_drew() {
     assert_eq!(cid_px(&s, 20, 15), [0.0; 4]);
     let p = saw();
     assert!(p[2] > 0.99 && (p[1] - 0.5).abs() < 0.01 && p[3] == 1.0, "the swapped solid: {p:?}");
+}
+
+/// A generator (it ignores its input) that always fails.
+struct Broken {
+    m: PluginManifest,
+}
+
+impl EffectPlugin for Broken {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+        Err("broken".into())
+    }
+    fn ignores_input(&self) -> bool {
+        true
+    }
+}
+
+/// A failing generator first on a solid passes the solid through, as any failed effect passes
+/// its input, although the solid isn't filled for a generator that works.
+#[test]
+fn a_failed_generator_shows_the_solid() {
+    register_plugin(Arc::new(Broken { m: manifest("org.test.broken", "Broken") })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.broken"})).unwrap();
+    let p = px(&s);
+    assert!(p[0] > 0.99 && (p[1] - 0.5).abs() < 0.01 && p[2] < 0.01 && p[3] == 1.0, "the orange solid: {p:?}");
 }

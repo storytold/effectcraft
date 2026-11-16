@@ -882,7 +882,13 @@ impl PluginHost for RenderHost<'_, '_> {
     }
 
     fn params_digest(&self) -> Option<u64> {
-        self.ctx.env.host?.params_digest()
+        // `params_at` flattens points with this render's scale and origin: equal digests must
+        // mean equal flattened values, so they go in too.
+        use std::hash::{Hash, Hasher};
+        let d = self.ctx.env.host?.params_digest()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (d, self.offset.map(f64::to_bits), self.scale.to_bits()).hash(&mut h);
+        Some(h.finish())
     }
 
     fn frame_rate(&self) -> f64 {

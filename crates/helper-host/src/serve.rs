@@ -302,6 +302,9 @@ impl PluginHost for Callbacks<'_, '_> {
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.req.frame_range
     }
+    fn params_digest(&self) -> Option<u64> {
+        self.req.params_digest
+    }
 }
 
 #[cfg(test)]

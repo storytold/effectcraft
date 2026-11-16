@@ -1327,8 +1327,9 @@ impl<'a> Renderer<'a> {
     /// Source → masks, clamped/quantised to the project depth.
     /// A transparent buffer the size of a solid layer's source when the first effect of its
     /// stack makes a new image without reading it (a generator plug-in): filling a comp-sized
-    /// solid every frame for nothing costs milliseconds per layer. `None` otherwise.
-    fn blank_solid(&self, layer: &Layer) -> Option<Buf> {
+    /// solid every frame for nothing costs milliseconds per layer. `None` otherwise. Also gives
+    /// the generator's id.
+    fn blank_solid(&self, layer: &Layer) -> Option<(Buf, &'static str)> {
         let LayerSource::Solid { item } = &layer.source else { return None };
         if layer.switches.adjustment || !layer.switches.effects {
             return None;
@@ -1346,7 +1347,7 @@ impl<'a> Renderer<'a> {
         }
         let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
         let (s, w, h) = solid_size(sol.width, sol.height, self.opts.scale);
-        Some(Buf { img: Image::new(w, h), offset: [0.0; 2], scale: s })
+        Some((Buf { img: Image::new(w, h), offset: [0.0; 2], scale: s }, first.id))
     }
 
     fn masked_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
@@ -1463,11 +1464,18 @@ impl<'a> Renderer<'a> {
         let (buf, files) = self.recorded(key, |r| {
             // (what expressions read while it is made, at shutter times too, goes to its files)
             let ctx = &r.with_reads(ctx);
-            let buf = match r.blank_solid(layer) {
-                Some(b) => b,
-                None => r.masked_source(ctx, layer)?,
+            let (buf, generator) = match r.blank_solid(layer) {
+                Some((b, id)) => (b, Some(id)),
+                None => (r.masked_source(ctx, layer)?, None),
             };
-            Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)))
+            let out = r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects));
+            // A generator that failed gave its blank input back: render again from the solid, as
+            // without the shortcut (a failed effect passes its input through).
+            if generator.is_some_and(|id| effectcraft_effects::plugin::plugin_error(id).is_some()) {
+                let buf = r.masked_source(ctx, layer)?;
+                return Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, None));
+            }
+            Some(out)
         });
         let (buf, files) = self.keep(key, Arc::new(buf?), &files);
         Some((buf, key, files))
