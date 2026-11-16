@@ -2858,7 +2858,10 @@ const HEBREW: &[(&str, &str)] = &[
     ("Replace with Precomposition", "החלפה בקומפוזיציית ביניים"),
     ("Label", "תווית"),
     ("Project color depth: {}", "עומק הצבע בפרויקט: {}"),
-    ("Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings", "עומק הצבע בפרויקט: לחיצה למעבר בין 8/16/32 סיביות לערוץ; Alt+לחיצה לפתיחת הגדרות הפרויקט"),
+    (
+        "Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings",
+        "עומק הצבע בפרויקט: לחיצה למעבר בין 8/16/32 סיביות לערוץ; Alt+לחיצה לפתיחת הגדרות הפרויקט",
+    ),
     ("Filter by footage status", "סינון לפי מצב קובצי המדיה"),
     ("Columns", "עמודות"),
 ];
@@ -11716,7 +11719,10 @@ mod tests {
             ("Replace with Precomposition", project),
             ("Label", project),
             ("Project color depth: {}", project),
-            ("Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings", project),
+            (
+                "Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings",
+                project,
+            ),
             ("Filter by footage status", project),
             ("Columns", project),
         ] {
@@ -11727,8 +11733,15 @@ mod tests {
                 "{english:?} is no longer a translated Preview/Project callsite"
             );
             let value = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, v)| *v);
-            assert!(value.is_some_and(|text| text.chars().any(|c| ('א'..='ת').contains(&c))), "missing Hebrew for {english:?}");
-            assert_eq!(english.matches("{}").count(), value.unwrap_or("").matches("{}").count(), "placeholder mismatch for {english:?}");
+            assert!(
+                value.is_some_and(|text| text.chars().any(|c| ('א'..='ת').contains(&c))),
+                "missing Hebrew for {english:?}"
+            );
+            assert_eq!(
+                english.matches("{}").count(),
+                value.unwrap_or("").matches("{}").count(),
+                "placeholder mismatch for {english:?}"
+            );
         }
     }
 
