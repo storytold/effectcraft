@@ -327,8 +327,11 @@ fn run_checks() -> bool {
     let _ = std::fs::write(gate.join("release"), "");
     let scanned = scan.join().map(|r| r["helpers"].as_array().map_or(0, Vec::len));
     let mine = format!("effectcraft-helper-{}-", std::process::id());
-    let files =
-        || std::fs::read_dir(std::env::temp_dir()).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&mine)).count()).unwrap_or(0);
+    let files = || {
+        std::fs::read_dir(effectcraft_helper_host::frames::dir())
+            .map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&mine)).count())
+            .unwrap_or(0)
+    };
     all &= check("a helper started during shut_down is stopped", scanned.as_ref().is_ok_and(|n| *n == 1) && files() == 0, (&scanned, files()));
     let r = render("org.test.helper.invert", &mut vec![[0.0; 4]; 4], 2, 2, 1.0, false);
     all &= check("no helper starts after shut_down", r.as_ref().is_err_and(|e| e.contains("quitting")) && files() == 0, (&r, files()));

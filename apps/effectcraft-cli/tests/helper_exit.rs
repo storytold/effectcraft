@@ -5,7 +5,7 @@
 //! reject the helper argument.)
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use effectcraft_engine::effects::plugin::{EffectPlugin, PluginFrame, PluginManifest, PluginParams};
@@ -44,9 +44,11 @@ impl Provider for One {
     }
 }
 
-fn exchange_files(dir: &Path) -> Vec<String> {
+/// The exchange files process `pid` left in `dir`.
+fn exchange_files(dir: &Path, pid: u32) -> Vec<String> {
+    let mine = format!("effectcraft-helper-{pid}-");
     std::fs::read_dir(dir)
-        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("effectcraft-helper-")).collect())
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&mine)).collect())
         .unwrap_or_default()
 }
 
@@ -57,7 +59,7 @@ fn check() -> Result<(), String> {
     let dir = tempfile::Builder::new().prefix("ec-cli-helper-exit-").tempdir().map_err(|e| e.to_string())?;
     let tmp = dir.path();
     std::fs::create_dir(tmp.join("config")).map_err(|e| e.to_string())?;
-    let out = Command::new(cli)
+    let child = Command::new(cli)
         .args(["run", "--empty", "effect.helpers.scan", "{}", "comp.new", r#"{"name":"C","width":8,"height":8}"#])
         .args(["layer.newSolid", "{}", "effect.apply", r#"{"effect":"org.test.cli.keep"}"#])
         .env("EFFECTCRAFT_HELPER_PATH", &exe)
@@ -65,16 +67,21 @@ fn check() -> Result<(), String> {
         .env("TMP", tmp)
         .env("TEMP", tmp)
         .env("TMPDIR", tmp)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
+    let pid = child.id();
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    let left = exchange_files(tmp);
+    // Where the CLI put them: /dev/shm on Linux, else its temp folder (ours).
+    let shared = effectcraft_helper_host::frames::dir();
+    let left = exchange_files(if shared == std::env::temp_dir() { tmp } else { &shared }, pid);
     if !out.status.success() || !said.contains("org.test.cli.keep") {
         return Err(format!("the CLI didn't load the helper's effect: {said}"));
     }
-    // (on Linux the files are in /dev/shm: nothing to see here)
     if !left.is_empty() {
-        return Err(format!("left in the temp folder: {left:?}"));
+        return Err(format!("exchange files left behind: {left:?}"));
     }
     Ok(())
 }
