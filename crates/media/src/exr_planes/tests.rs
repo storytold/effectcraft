@@ -1075,8 +1075,12 @@ fn a_new_frame_opens_its_file_once() {
 /// them go they are read back from there, bit for bit (Cryptomatte IDs included), whatever was
 /// asked for before (the picture first, then the channels, then all of it after an eviction);
 /// Reload Footage drops them.
+/// The tests that set the process-wide disk cache take turns (one would switch off another's).
+static DISK_TESTS: Mutex<()> = Mutex::new(());
+
 #[test]
 fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
+    let _disk = DISK_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
     use effectcraft_render::disk_cache::{DiskCache, Kind};
     let dir = std::env::temp_dir().join(format!("ec-3271-disk-planes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1549,7 +1553,7 @@ fn a_failure_is_forgotten_once_the_file_changes() {
 #[test]
 fn an_allocation_failure_is_not_remembered() {
     use crate::exr_read::{ReadError, read_error};
-    assert_eq!(read_error(craft_exr::seek::Error::OutOfMemory("planes".into())), ReadError::Io("planes".into()));
+    assert!(matches!(read_error(craft_exr::seek::Error::OutOfMemory("planes".into())), ReadError::OutOfMemory(why) if why.contains("planes")));
     assert!(matches!(read_error(craft_exr::seek::Error::LimitExceeded("planes".into())), ReadError::TooLarge(_)));
     // A read that failed just now (here: the file can't be opened) is a stop, and the next
     // request for the same channels reads them.
@@ -1678,6 +1682,7 @@ fn channels_added_to_the_planes_held_count_toward_the_limit() {
 /// like the ones read from the file.
 #[test]
 fn planes_from_the_disk_cache_count_toward_the_limit() {
+    let _disk = DISK_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
     use effectcraft_render::disk_cache::DiskCache;
     let dir = std::env::temp_dir().join(format!("ec-3749-disk-union-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1706,17 +1711,113 @@ fn planes_from_the_disk_cache_count_toward_the_limit() {
 }
 
 /// #3749: a plane the system cannot give is not an aborted process: `craft-exr` asks for the
-/// planes' memory first and reports what it can't get, a read that failed just now (asked again,
-/// not remembered); a plane over the read's limit (the decode limit handed to it) is a refusal
-/// for size with `craft-exr`'s reason.
+/// planes' memory first and reports what it can't get, memory refused just now (not remembered,
+/// not read again at once); a plane over the read's limit (the decode limit handed to it) is a
+/// refusal for size with `craft-exr`'s reason.
 #[test]
 fn a_plane_the_system_cannot_give_is_refused_not_allocated() {
     use crate::exr_read::{ReadError, read_error};
     use craft_exr::seek::Error;
     let gone = read_error(Error::OutOfMemory("4096 bytes of planes".into()));
-    assert!(matches!(&gone, ReadError::Io(why) if why.contains("4096 bytes of planes")), "{gone:?}");
+    assert!(matches!(&gone, ReadError::OutOfMemory(why) if why.contains("4096 bytes of planes")), "{gone:?}");
     let over = read_error(Error::LimitExceeded("the requested rows need 4096 bytes".into()));
     assert!(matches!(&over, ReadError::TooLarge(why) if why.contains("4096 bytes")), "{over:?}");
+}
+
+/// Reads of `path` fail for lack of memory when `fails` says so for the channels read; the reads
+/// asked for are counted.
+fn no_memory_when(path: &str, fails: impl Fn(&[usize]) -> bool + Send + Sync + 'static) -> Arc<AtomicU64> {
+    let asked = Arc::new(AtomicU64::new(0));
+    let counted = asked.clone();
+    set_read_error(
+        path,
+        Some(Arc::new(move |ids: &[usize]| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            fails(ids).then(|| crate::exr_read::ReadError::OutOfMemory("no memory just now".into()))
+        })),
+    );
+    asked
+}
+
+/// #3749 review: memory the system refuses during a read is neither read again at once (the
+/// store's retries, a copy) nor remembered: the request is refused with the reason, and the next
+/// request reads again.
+#[test]
+fn memory_the_system_cannot_give_is_neither_retried_nor_remembered() {
+    let path = "/3749-no-memory.exr";
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let want = Want { all: true, ids: (0..5).collect() };
+    let asked = no_memory_when(path, |_| true);
+    let refused = store.get(path, &source, &index, &want, Use::Other).err();
+    assert!(matches!(&refused, Some(Refused::NoMemory(why)) if why.contains("no memory just now")), "{refused:?}");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "read once, not again at once");
+    let asked = no_memory_when(path, |_| false);
+    assert!(store.get(path, &source, &index, &want, Use::Other).is_ok(), "not remembered: the memory is there now");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    set_read_error(path, None);
+}
+
+/// #3749 review: a picture whose channels the system has no memory for just now is read alone
+/// without the effects' channels, and refused with the reason when even that doesn't fit; never
+/// handed to the whole file's decode (which would ask for more memory, infallibly).
+#[test]
+fn a_picture_without_memory_is_read_alone_or_refused_never_decoded_whole() {
+    let path = "/3749-no-memory-picture.exr";
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let op = AlphaOp::of(&Footage::default(), FloatCurve::Linear);
+    // With the depth plane it is five planes, more than the system gives: the picture alone.
+    no_memory_when(path, |ids| ids.len() > 4);
+    let Picture::Done(Ok(img)) = picture(path, &source, op, Some(&AuxNeed::All)) else { panic!("the picture alone") };
+    assert_eq!((img.width, img.height), (8, 8));
+    // Not even the picture: refused with the reason, also for some of its rows.
+    no_memory_when(path, |_| true);
+    match picture(path, &source, op, None) {
+        Picture::Done(Err(why)) => assert!(why.contains("no memory just now"), "{why}"),
+        _ => panic!("refused with the reason"),
+    }
+    match picture_rows(path, &source, op, (0, 4)) {
+        Picture::Done(Err(why)) => assert!(why.contains("no memory just now"), "{why}"),
+        _ => panic!("rows refused with the reason"),
+    }
+    set_read_error(path, None);
+}
+
+/// #3749 review: only a refusal for size is decided anew when the decode limit changes; an
+/// unreadable request stays refused, also when another request fails under the new limit.
+#[test]
+fn an_unreadable_request_stays_refused_when_the_decode_limit_changes() {
+    let _only = LIMIT_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let path = "/3749-unreadable-generation.exr";
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let asked = Arc::new(AtomicU64::new(0));
+    {
+        let counted = asked.clone();
+        set_read_error(
+            path,
+            Some(Arc::new(move |_: &[usize]| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Some(crate::exr_read::ReadError::Unreadable("damaged".into()))
+            })),
+        );
+    }
+    let red = Want { all: false, ids: [0].into_iter().collect() };
+    let unreadable = |want: &Want| matches!(store.get(path, &source, &index, want, Use::Other), Err(Refused::Unreadable));
+    assert!(unreadable(&red));
+    // (figures under the fixed floor: only the change counts, no other test's limit moves)
+    effectcraft_render::memory::set_decode_limit(Some(1000));
+    effectcraft_render::memory::set_decode_limit(Some(2000));
+    assert!(unreadable(&red));
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "remembered across the change");
+    // Another request fails under the new limit: the first refusal is still remembered.
+    assert!(unreadable(&Want { all: false, ids: [4].into_iter().collect() }));
+    assert!(unreadable(&red));
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "only the other request was read");
+    effectcraft_render::memory::set_decode_limit(None);
+    set_read_error(path, None);
 }
 
 /// A two-rank Cryptomatte file of `size` with a picture: "cube" and "sphere" meet along a

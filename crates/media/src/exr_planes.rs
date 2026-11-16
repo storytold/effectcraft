@@ -150,6 +150,9 @@ pub(crate) enum Refused {
     Unreadable,
     /// More planes than one file may allocate (the reason; remembered).
     TooLarge(String),
+    /// The system refused the memory the planes need just now (the reason): not remembered,
+    /// but not asked again at once either, nor read as a whole file another way (#3749).
+    NoMemory(String),
     /// The request was called off.
     Cancelled,
     /// The file changed since it was indexed: index it again and ask again.
@@ -430,8 +433,9 @@ pub(crate) fn set_before_read(path: &str, hook: Option<Hook>) {
     }
 }
 
-/// Planes of `path` may take at most this many bytes in a read (tests: a small cap in place of
-/// [`crate::exr_read::MAX_DECODE_BYTES`]).
+/// Planes of `path` may take at most this many bytes in a read (tests: a cap of the caller's own,
+/// below the system's limit; outside tests there is none, `usize::MAX`, and only
+/// [`effectcraft_render::memory::decode_limit`] applies).
 #[cfg(test)]
 static CAPS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 
@@ -657,7 +661,7 @@ impl PlaneStore {
         let clock = effectcraft_render::memory::tick();
         let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.flight.as_ref().is_some_and(|f| Arc::ptr_eq(f, flight))) else {
             let outcome = match outcome {
-                Err(e @ (Refused::Cancelled | Refused::Stopped)) => Err(e),
+                Err(e @ (Refused::Cancelled | Refused::Stopped | Refused::NoMemory(_))) => Err(e),
                 _ => Err(Refused::Forgotten),
             };
             return (outcome, 0);
@@ -694,7 +698,8 @@ impl PlaneStore {
                 e.bytes = 0;
                 e.cost_us = 0;
             }
-            Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped) => {}
+            // (memory refused just now: another request may get it)
+            Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped | Refused::NoMemory(_)) => {}
         }
         let grown = st.entries.iter().find(|e| e.path == path).map_or(0, |e| e.bytes.saturating_sub(had));
         Self::drop_oldest(&mut st, self.budget(), CACHE_FILES, Some(path));
@@ -920,10 +925,61 @@ fn refused(path: &str, e: ReadError) -> Refused {
             log::warn!("media: {path}: {why}");
             Refused::TooLarge(why)
         }
+        ReadError::OutOfMemory(why) => {
+            log::warn!("media: {path}: {why}");
+            Refused::NoMemory(why)
+        }
         ReadError::Unreadable(why) => {
             log::warn!("media: {path}: {why}");
             Refused::Unreadable
         }
+    }
+}
+
+/// A copy of `plane`, or `None` when the system can't give the memory for it (an allocation that
+/// fails aborts the process, so it is asked for first).
+fn copy_plane(plane: &[f32]) -> Option<Vec<f32>> {
+    let mut copy: Vec<f32> = Vec::new();
+    copy.try_reserve_exact(plane.len()).ok()?;
+    copy.extend_from_slice(plane);
+    Some(copy)
+}
+
+/// Why `planes` planes of a `w` × `h` display window couldn't be had (to show).
+fn no_memory_for(w: usize, h: usize, planes: usize) -> String {
+    let bytes = w.saturating_mul(h).saturating_mul(planes).saturating_mul(std::mem::size_of::<f32>());
+    format!("its {w}×{h} OpenEXR channels need {:.1} GB more memory than the system can give just now", bytes as f64 / f64::from(1u32 << 30))
+}
+
+/// Fails the reads of a path as a test says, for the channels read ([`set_read_error`]).
+#[cfg(test)]
+pub(crate) type ForcedError = Arc<dyn Fn(&[usize]) -> Option<ReadError> + Send + Sync>;
+#[cfg(test)]
+static READ_ERRORS: Mutex<Vec<(String, ForcedError)>> = Mutex::new(Vec::new());
+
+/// Make reads of `path` fail as `error` says for the channels read, instead of reading (`None`:
+/// read again; tests: memory the system refuses). Keyed by path, so tests running at the same
+/// time don't see each other's.
+#[cfg(test)]
+pub(crate) fn set_read_error(path: &str, error: Option<ForcedError>) {
+    let mut errors = READ_ERRORS.lock().unwrap_or_else(PoisonError::into_inner);
+    errors.retain(|(p, _)| p != path);
+    if let Some(e) = error {
+        errors.push((path.to_string(), e));
+    }
+}
+
+/// How a test makes the read of `ids` of `path` fail ([`set_read_error`]); never outside tests.
+fn forced_read_error(path: &str, ids: &[usize]) -> Option<ReadError> {
+    #[cfg(test)]
+    {
+        let error = READ_ERRORS.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(p, _)| p == path).map(|(_, e)| e.clone());
+        error.and_then(|e| e(ids))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (path, ids);
+        None
     }
 }
 
@@ -1010,6 +1066,8 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     let read_from = effectcraft_render::memory::tick();
     let (read, stats) = if to_read.is_empty() {
         (Ok(vec![]), Default::default())
+    } else if let Some(e) = forced_read_error(path, &to_read) {
+        (Err(e), Default::default())
     } else {
         let request = ReadRequest { max_bytes: cap_of(path), ..ReadRequest::full(to_read.clone()) };
         read_planes(&mut *opened.reader, &index, &request)
@@ -1027,7 +1085,9 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     if let Some(b) = &base {
         for (at, id) in b.ids.iter().enumerate() {
             if let Some((_, p)) = b.aux.channels.get(at) {
-                new.push((*id, p.clone()));
+                // (the planes held are copied into the new set: memory the system may refuse)
+                let copy = copy_plane(p).ok_or_else(|| refused(path, ReadError::OutOfMemory(no_memory_for(w, h, b.ids.len()))))?;
+                new.push((*id, copy));
             }
         }
     }
@@ -1056,7 +1116,8 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
                 .par_iter()
                 .filter_map(|id| {
                     let (name, plane) = batch.aux.channels.get(batch.ids.binary_search(id).ok()?)?;
-                    Some((key(name), name.clone(), plane.clone()))
+                    // (a copy the system can't give now is not kept on disk: the planes are in hand)
+                    Some((key(name), name.clone(), copy_plane(plane)?))
                 })
                 .collect();
             // (only planes that cost more to decode again than to read back, #3301)
@@ -1204,11 +1265,13 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             Ok(b) => b,
             Err(Refused::Changed) => continue,
             // The channels with it are too many: the picture alone (the effects ask for theirs).
-            Err(Refused::TooLarge(_)) if extra.is_some() => {
+            // (also when the system has no memory for them just now, #3749)
+            Err(Refused::TooLarge(_) | Refused::NoMemory(_)) if extra.is_some() => {
                 extra = None;
                 continue;
             }
-            Err(Refused::TooLarge(why)) => return Picture::Done(Err(why)),
+            // (never the whole file's decode: the memory isn't there for it either)
+            Err(Refused::TooLarge(why) | Refused::NoMemory(why)) => return Picture::Done(Err(why)),
             Err(Refused::Cancelled | Refused::Forgotten) => return Picture::Cancelled,
             // (the whole file's decode says why)
             Err(Refused::Stopped | Refused::Unreadable) => return Picture::Legacy,
@@ -1290,7 +1353,10 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
         return picture(path, source, op, None);
     }
     let request = ReadRequest { rows: Some(rows.0..rows.1), max_bytes: cap_of(path), ..ReadRequest::full(ids.clone()) };
-    let (planes, stats) = read_planes(&mut *opened.reader, &index, &request);
+    let (planes, stats) = match forced_read_error(path, &ids) {
+        Some(e) => (Err(e), Default::default()),
+        None => read_planes(&mut *opened.reader, &index, &request),
+    };
     let names: Vec<String> = ids.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
     #[cfg(test)]
     DECODES.lock().unwrap_or_else(PoisonError::into_inner).push((path.to_string(), DecodeRecord { channels: names.clone(), stats, from_disk: false }));
@@ -1299,7 +1365,7 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
     let planes = match planes {
         Ok(p) => p,
         Err(ReadError::Cancelled) => return Picture::Cancelled,
-        Err(ReadError::TooLarge(why)) => return Picture::Done(Err(why)),
+        Err(ReadError::TooLarge(why) | ReadError::OutOfMemory(why)) => return Picture::Done(Err(why)),
         Err(_) => return Picture::Legacy,
     };
     let (w, h) = index.size();

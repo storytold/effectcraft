@@ -213,6 +213,9 @@ pub(crate) enum ReadError {
     Io(String),
     /// The planes need more memory than one read may allocate (the reason, to show).
     TooLarge(String),
+    /// The system refused the memory the planes need just now (the reason, to show): not a file
+    /// too large, but not to be asked again at once either (#3749).
+    OutOfMemory(String),
     /// The request was called off.
     Cancelled,
 }
@@ -226,13 +229,15 @@ pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
 #[cfg(not(target_pointer_width = "64"))]
 pub(crate) const MAX_DECODE_BYTES: usize = 512 << 20;
 
-/// What a failed `craft-exr` read means here. Memory the system refused just now is a read that
-/// failed ([`ReadError::Io`]: the plane store doesn't remember it, another read may succeed),
-/// not a file too large (remembered until the file changes).
+/// What a failed `craft-exr` read means here. Memory the system refused just now is
+/// [`ReadError::OutOfMemory`]: the plane store doesn't remember it (another request may
+/// succeed), but doesn't read it again at once nor fall back to decoding the whole file
+/// either; a file too large is remembered until the file or the limit changes.
 pub(crate) fn read_error(e: seek::Error) -> ReadError {
     match e {
         seek::Error::Cancelled => ReadError::Cancelled,
-        seek::Error::Io(why) | seek::Error::OutOfMemory(why) => ReadError::Io(why),
+        seek::Error::Io(why) => ReadError::Io(why),
+        seek::Error::OutOfMemory(why) => ReadError::OutOfMemory(format!("its OpenEXR channels need more memory than the system can give just now ({why})")),
         seek::Error::LimitExceeded(why) => ReadError::TooLarge(format!("its OpenEXR channels need more memory than one file may use ({why})")),
         seek::Error::Malformed(why) | seek::Error::Unsupported(why) | seek::Error::UnsupportedCompression(why) => ReadError::Unreadable(why),
         other => ReadError::Unreadable(other.to_string()),
