@@ -34,6 +34,7 @@ fn info(kind: filmcraft_media::MediaKind, video: bool, audio: bool) -> filmcraft
             codec: "png".into(),
             pixel_format: String::new(),
             color: Default::default(),
+            color_assumed: None,
             has_alpha: false,
             bitrate: None,
             hdr: None,
@@ -60,7 +61,7 @@ fn media(p: &mut fp::Project, name: &str, path: &str, kind: filmcraft_media::Med
         proxy: None,
         identity: None,
     };
-    p.add_item(name, fp::Label::Iris, fp::ItemKind::Media(clip), bin)
+    p.add_item(name, fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), bin)
 }
 
 fn rate() -> filmcraft_time::FrameRate {

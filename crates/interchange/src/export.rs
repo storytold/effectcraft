@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn synthesized_video_metadata_does_not_claim_an_inferred_color_profile() {
-        let info = media_info("clip", MediaKind::Video, Tick::ZERO, Some((1920, 1080, FrameRate::new(24, 1), 1.0, "raw".into(), true)), false);
+        let info = media_info("clip", MediaKind::Movie, Tick::ZERO, Some((1920, 1080, FrameRate::new(24, 1), 1.0, "raw".into(), true)), false);
         let video = info.video.unwrap();
         assert_eq!((video.width, video.height), (1920, 1080));
         assert!(video.color_assumed.is_none());
