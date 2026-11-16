@@ -254,11 +254,13 @@ Bit 1 (neighbours) makes the host fetch the neighbouring frames for `ec_render2`
 renders of the layer and two frame copies per frame. Without the export an ABI 2 module gets
 both bits and an ABI 1 module neither, as before. Bit 1 means nothing to an ABI 1 module.
 
-`ec_padding` is called before each render with the same parameters (`time` in layer seconds,
-`scale` in buffer pixels per layer pixel, `layer_w` × `layer_h` the layer's size in layer pixels)
-and returns how many transparent pixels to add on every side of the buffer, so rays, glows and
-blurs can draw past the layer's bounds. Points already account for the padding. The answer is
-clamped to 0–4096; a trap pads nothing. Without the export nothing is padded.
+`ec_padding` is called before each render (`time` in layer seconds, `scale` in buffer pixels per
+layer pixel, `layer_w` × `layer_h` the layer's size in layer pixels) and returns how many
+transparent pixels to add on every side of the buffer, so rays, glows and blurs can draw past the
+layer's bounds. Its points are in the input buffer's pixels, before any padding. When it pads,
+`ec_render` gets the parameters again with points shifted into the padded buffer, so the same
+point still names the same spot of the layer. The answer is clamped to 0–4096; a trap pads
+nothing. Without the export nothing is padded.
 
 Each call gets a fuel budget proportional to the frame size; a module that loops forever stops
 with an error instead of hanging the app.
