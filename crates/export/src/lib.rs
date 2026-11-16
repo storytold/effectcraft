@@ -225,10 +225,14 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
     let mut r = export_with(&cx, progress, t0).await;
     drop(render);
     let wall = t0.elapsed().as_secs_f64();
+    // (what a failed export got done: its render log carries the line too, with the compositor)
+    let mut unfinished = None;
     if let Err(e) = &r {
         // A stopped or failed export gets its line too: slow ones are the ones people stop.
         let how = if matches!(e, ExportError::Cancelled) { "stopped" } else { "failed" };
-        log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, cx.timing(wall, 0).summary_of_unfinished(how));
+        let t = cx.timing(wall, 0);
+        log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, t.summary_of_unfinished(how));
+        unfinished = Some(t);
     }
     if matches!(r, Err(ExportError::Cancelled)) {
         cx.remove_cancelled_outputs()?;
@@ -238,7 +242,7 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
     if let Some(t) = &timing {
         log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, t.summary());
     }
-    let log = cx.write_log(&r, wall, timing.as_ref());
+    let log = cx.write_log(&r, wall, timing.as_ref().or(unfinished.as_ref()));
     if let Ok(rep) = &mut r {
         rep.timing = timing.unwrap_or_default();
         rep.log = log;

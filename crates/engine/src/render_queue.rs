@@ -431,6 +431,8 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                     !shared.cancel.load(Ordering::Relaxed)
                 })
                 .await;
+            // (the item's timing and output are those of the first output module's export; the
+            // others, and the later segments of a split output, are not part of it)
             match rr {
                 Ok(res) if mi == 0 => r = Ok(res),
                 Ok(_) => {}
