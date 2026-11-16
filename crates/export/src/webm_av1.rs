@@ -105,7 +105,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         el(&mut tracks, TRACK_ENTRY, &a);
     }
     el(&mut head, TRACKS, &tracks);
-    file.write_all(&head).map_err(io)?;
+    job.timed(Stage::Write, || file.write_all(&head)).map_err(io)?;
     let mut seg_len = head.len() as u64 - seg_start;
 
     let (span_start, span_end) = job.settings.span(comp);
@@ -172,9 +172,13 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     let mut size = [0u8; 8];
     size[0] = 0x01;
     size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
-    file.write_all(&size).map_err(io)?;
-    file.seek(SeekFrom::End(0)).map_err(io)?;
-    let bytes = file.finish()?;
+    // (the size patch and the file's delivery are writing too: for a sink or a share the end is
+    // where the time goes, #3732 review)
+    let bytes = job.timed(Stage::Write, || -> Result<u64> {
+        file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
+        file.write_all(&size).map_err(io)?;
+        file.seek(SeekFrom::End(0)).map_err(io)?;
+        file.finish()
+    })?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
 }

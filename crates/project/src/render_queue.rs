@@ -1565,7 +1565,8 @@ pub struct RenderQueueItem {
     /// Resolved path of the last render (first file for sequences).
     #[serde(default)]
     pub last_output: Option<String>,
-    /// Where the last render's time went (see [`RenderTiming`]).
+    /// Where the last render's time went (see [`RenderTiming`]): of the first Output Module's
+    /// export; the item's own Render Time covers all of its Output Modules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_timing: Option<RenderTiming>,
     /// Further Output Modules (Composition ▸ Add Output Module): the same frames are encoded

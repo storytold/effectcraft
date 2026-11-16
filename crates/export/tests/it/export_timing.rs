@@ -115,6 +115,23 @@ fn gif_and_webm_time_the_stages_they_have() {
     assert!(e <= t.wall_seconds && w <= t.wall_seconds && t.render_seconds <= t.wall_seconds, "{t:?}");
 }
 
+/// #3732 review: delivering the finished file is writing time in both WebM paths (VP9 and AV1):
+/// for a sink, a share or a slow disk it is where the time goes. The sink here takes 200 ms.
+#[test]
+fn a_slow_sink_counts_as_writing_time_in_both_webm_paths() {
+    use effectcraft_export::render_queue::WebmVideoCodec;
+    let (p, cid) = project();
+    let settings = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
+    let sink: &Sink = &|_: &str, _: Vec<u8>| std::thread::sleep(std::time::Duration::from_millis(200));
+    for codec in [WebmVideoCodec::Vp9, WebmVideoCodec::Av1] {
+        let mut webm = OutputModule::for_format(OutputFormat::WebM);
+        webm.webm_codec = codec;
+        let t = export(&job_of(&p, cid, &settings, &webm, "/out/slow.webm", sink), &mut |_| true).expect("webm").timing;
+        let write = t.write_seconds.expect("write time");
+        assert!(write >= 0.19, "{codec:?}: the sink's 200 ms are writing time, got {write} s");
+    }
+}
+
 /// #3724 review: a failed export's render log carries the timing line too (with the compositor
 /// that ran), not only a finished one's.
 #[test]
