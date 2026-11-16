@@ -17,16 +17,17 @@ effectcraft-render = { workspace = true }
 craft-video = { workspace = true }
 craft-audio = { workspace = true }
 craft-media = { workspace = true }
+craft-gif = { workspace = true }
 effectcraft-opusenc = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
 exr = { workspace = true }
-gif = { workspace = true }
 rayon = { workspace = true }
 web-time = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+gif = { workspace = true }
 tempfile = { workspace = true }
 effectcraft-media = { workspace = true }
 effectcraft-effects = { workspace = true }

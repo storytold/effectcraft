@@ -1179,7 +1179,10 @@ source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b4255
 [[package]]
 name = "craft-gif"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=948b5c23c12dc8c87c8b1828892b1462113dd5a7#948b5c23c12dc8c87c8b1828892b1462113dd5a7"
+dependencies = [
+ "gif",
+]
 
 [[package]]
 name = "craft-i18n"
@@ -1760,6 +1763,7 @@ name = "effectcraft-export"
 version = "0.24.1"
 dependencies = [
  "craft-audio",
+ "craft-gif",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
  "craft-video",
  "effectcraft-color",
