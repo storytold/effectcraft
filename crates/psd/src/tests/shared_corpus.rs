@@ -161,3 +161,15 @@ fn damaged_section_records_fall_back_to_the_16_bit_block() {
     let p = Psd::parse(insert(&bytes, li_at + w, &[0, 1, 0, 0, 0, 0], &[(li_at, w), (ls, w)])).expect("parse");
     same_layers(&p, &want);
 }
+
+#[test]
+fn a_stray_byte_before_the_global_blocks_is_skipped() {
+    let (bytes, want, ls, w, _) = deep();
+    // Section layer info (empty) and global mask, then the first global block.
+    let li_at = ls + w;
+    let gm_at = li_at + w + bytes[li_at..li_at + w].iter().fold(0usize, |v, &b| v << 8 | usize::from(b));
+    let first = gm_at + 4 + u32::from_be_bytes(bytes[gm_at..gm_at + 4].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[first..first + 4], b"8BIM");
+    let p = Psd::parse(insert(&bytes, first, &[0], &[(ls, w)])).expect("parse");
+    same_layers(&p, &want);
+}

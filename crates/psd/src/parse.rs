@@ -437,8 +437,8 @@ fn linked(key: &[u8; 4], _len: u64) -> bool {
 /// - a damaged image resource (resources are not part of the model): no resources;
 /// - damaged layer records in the section: none there, so a global `Lr16`/`Lr32`/`Layr` block
 ///   can still give the layers;
-/// - a global layer block that starts with its own length (both layouts are accepted): the
-///   block without it.
+/// - a global layer block that starts with its own length (both layouts are accepted), or
+///   that follows up to three stray bytes: the block without them.
 fn read_file(data: &Arc<[u8]>) -> (std::result::Result<craft_psd::PsdFile, craft_psd::PsdError>, Splice) {
     let read = |d: Arc<[u8]>| craft_psd::PsdFile::from_source_deferring(craft_psd::source::Source::new(d), linked, |_| Ok(false), |_| false).map(|(f, _)| f);
     let layered = |f: &craft_psd::PsdFile| f.layer_info.as_ref().is_some_and(|i| !i.layers.is_empty());
@@ -484,19 +484,45 @@ fn without_section_layers(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
     Splice::apply(data, li_at + w, li_len, &[(li_at, w), (ls, w)])
 }
 
+/// The global layer block's repair, found by walking the top-level global blocks by their
+/// declared lengths (so a linked file's payload is never searched): up to three stray bytes
+/// before the first block, or the block's payload starting with its own length.
 fn prefixed_layer_block(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
     let head = craft_psd::head::HeadView::from_bytes(data).ok()?;
     let ls = usize::try_from(head.layer_section_offset).ok()?;
     let w = field(data);
     let end = be(data, ls, w)?.checked_add(ls + w)?.min(data.len());
-    // The block (signature, key, length), whose own first field reads as a length that fits in it.
-    let at = (ls..end.saturating_sub(8 + 2 * w)).find(|&i| {
-        matches!(&data[i..i + 4], b"8BIM" | b"8B64")
-            && matches!(&data[i + 4..i + 8], b"Lr16" | b"Lr32" | b"Layr")
-            && be(data, i + 8, w).zip(be(data, i + 8 + w, w)).is_some_and(|(len, inner)| inner > 0 && inner.checked_add(w).is_some_and(|e| e <= len))
-    })?;
-    Splice::apply(data, at + 8 + w, w, &[(at + 8, w), (ls, w)])
+    let li_at = ls + w;
+    let gm_at = be(data, li_at, w)?.checked_add(li_at + w)?;
+    let mut pos = be(data, gm_at, 4)?.checked_add(gm_at + 4)?;
+    let is_sig = |i: usize| matches!(data.get(i..i + 4), Some(b"8BIM" | b"8B64"));
+    // Stray bytes before the first block hide every block from craft-psd.
+    let mut lead = None;
+    while pos < end {
+        let skip = (0..=3).find(|&k| is_sig(pos + k))?;
+        let at = pos + skip;
+        let key = data.get(at + 4..at + 8)?;
+        let width = if w == 8 && PSB_LONG_KEYS.iter().any(|k| k[..] == *key) { 8 } else { 4 };
+        let len = be(data, at + 8, width)?;
+        let body = at + 8 + width;
+        if matches!(key, b"Lr16" | b"Lr32" | b"Layr") {
+            if let Some((at, n)) = lead {
+                return Splice::apply(data, at, n, &[(ls, w)]);
+            }
+            // The payload's first field reads as a length that fits in it.
+            be(data, body, w).filter(|&n| n > 0 && n.checked_add(w).is_some_and(|e| e <= len))?;
+            return Splice::apply(data, body, w, &[(at + 8, width), (ls, w)]);
+        }
+        if pos == gm_at + 4 + be(data, gm_at, 4)? && skip > 0 {
+            lead = Some((pos, skip));
+        }
+        pos = body.checked_add(len)?;
+    }
+    None
 }
+
+/// Keys whose block length is 8 bytes in a PSB.
+const PSB_LONG_KEYS: [&[u8; 4]; 13] = [b"LMsk", b"Lr16", b"Lr32", b"Layr", b"Mt16", b"Mt32", b"Mtrn", b"Alph", b"FMsk", b"lnk2", b"FEid", b"FXid", b"PxSD"];
 
 /// A copy of the file with one range taken out, and the way from the copy's offsets back to the
 /// original's.
