@@ -494,18 +494,23 @@ fn prefixed_layer_block(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
     let end = be(data, ls, w)?.checked_add(ls + w)?.min(data.len());
     let li_at = ls + w;
     let gm_at = be(data, li_at, w)?.checked_add(li_at + w)?;
-    let mut pos = be(data, gm_at, 4)?.checked_add(gm_at + 4)?;
+    let blocks = be(data, gm_at, 4)?.checked_add(gm_at + 4)?;
+    let mut pos = blocks;
     let is_sig = |i: usize| matches!(data.get(i..i + 4), Some(b"8BIM" | b"8B64"));
     // Stray bytes before the first block hide every block from craft-psd.
     let mut lead = None;
     while pos < end {
         let skip = (0..=3).find(|&k| is_sig(pos + k))?;
         let at = pos + skip;
-        let key = data.get(at + 4..at + 8)?;
-        let width = if w == 8 && PSB_LONG_KEYS.iter().any(|k| k[..] == *key) { 8 } else { 4 };
+        // Leading bytes before the first block are recorded before its key is looked at.
+        if lead.is_none() && pos == blocks && skip > 0 {
+            lead = Some((pos, skip));
+        }
+        let key: [u8; 4] = data.get(at + 4..at + 8)?.try_into().ok()?;
+        let width = if craft_psd::tagged::uses_long_length(head.header.version, &key) { 8 } else { 4 };
         let len = be(data, at + 8, width)?;
         let body = at + 8 + width;
-        if matches!(key, b"Lr16" | b"Lr32" | b"Layr") {
+        if matches!(&key, b"Lr16" | b"Lr32" | b"Layr") {
             if let Some((at, n)) = lead {
                 return Splice::apply(data, at, n, &[(ls, w)]);
             }
@@ -513,16 +518,10 @@ fn prefixed_layer_block(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
             be(data, body, w).filter(|&n| n > 0 && n.checked_add(w).is_some_and(|e| e <= len))?;
             return Splice::apply(data, body, w, &[(at + 8, width), (ls, w)]);
         }
-        if pos == gm_at + 4 + be(data, gm_at, 4)? && skip > 0 {
-            lead = Some((pos, skip));
-        }
         pos = body.checked_add(len)?;
     }
     None
 }
-
-/// Keys whose block length is 8 bytes in a PSB.
-const PSB_LONG_KEYS: [&[u8; 4]; 13] = [b"LMsk", b"Lr16", b"Lr32", b"Layr", b"Mt16", b"Mt32", b"Mtrn", b"Alph", b"FMsk", b"lnk2", b"FEid", b"FXid", b"PxSD"];
 
 /// A copy of the file with one range taken out, and the way from the copy's offsets back to the
 /// original's.

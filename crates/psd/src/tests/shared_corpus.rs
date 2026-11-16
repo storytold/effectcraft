@@ -173,3 +173,20 @@ fn a_stray_byte_before_the_global_blocks_is_skipped() {
     let p = Psd::parse(insert(&bytes, first, &[0], &[(ls, w)])).expect("parse");
     same_layers(&p, &want);
 }
+
+#[test]
+fn stray_bytes_before_a_leading_16_bit_block_are_skipped() {
+    let (bytes, want, ls, w, at) = deep();
+    let li_at = ls + w;
+    let gm_at = li_at + w + bytes[li_at..li_at + w].iter().fold(0usize, |v, &b| v << 8 | usize::from(b));
+    let first = gm_at + 4 + u32::from_be_bytes(bytes[gm_at..gm_at + 4].try_into().unwrap()) as usize;
+    // Drop the blocks before `Lr16` so it comes first, then put 1 to 3 stray bytes before it.
+    let mut lead = [&bytes[..first], &bytes[at..]].concat();
+    let lm = lead[ls..ls + w].iter().fold(0u64, |v, &b| v << 8 | u64::from(b)) - (at - first) as u64;
+    lead[ls..ls + w].copy_from_slice(&lm.to_be_bytes()[8 - w..]);
+    assert_eq!(&lead[first + 4..first + 8], b"Lr16");
+    for n in 1..=3 {
+        let p = Psd::parse(insert(&lead, first, &vec![0; n], &[(ls, w)])).expect("parse");
+        same_layers(&p, &want);
+    }
+}
