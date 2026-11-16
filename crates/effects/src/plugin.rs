@@ -213,7 +213,19 @@ impl PluginManifest {
             return Err(format!("plug-in `{}` has {} parameters (at most {max_params})", self.id, self.params.len()));
         }
         let mut seen = std::collections::HashSet::new();
+        // Each group's match-id path and its name: two names for one path would merge their groups.
+        let mut groups = std::collections::HashMap::new();
         for p in &self.params {
+            let mut at = String::new();
+            for (m, name) in group_segments(&p.group) {
+                at.push_str(&m);
+                at.push('/');
+                if let Some(other) = groups.insert(at.clone(), name)
+                    && other != name
+                {
+                    return Err(format!("plug-in `{}`: groups `{other}` and `{name}` have the same match id `{m}`", self.id));
+                }
+            }
             if p.id.is_empty() || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || !seen.insert(p.id.as_str()) {
                 return Err(format!("plug-in `{}`: bad or duplicate parameter id `{}`", self.id, p.id));
             }
@@ -481,10 +493,19 @@ fn leak(s: &str) -> &'static str {
 }
 
 /// The segments of a plug-in group path as (match id, display name): `"Advanced/Ray Color"` →
-/// `("Advanced", "Advanced"), ("RayColor", "Ray Color")`. Empty segments are skipped.
+/// `("Advanced", "Advanced"), ("RayColor", "Ray Color")`. Other ASCII characters are dropped and
+/// non-ASCII ones kept as `u<hex>` (`"Цвет"` → `u426u432u435u442`), so names in any script stay
+/// distinct. Empty segments are skipped.
 fn group_segments(group: &str) -> impl Iterator<Item = (String, &str)> {
     group.split('/').map(str::trim).filter(|s| !s.is_empty()).map(|s| {
-        let m: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let mut m = String::new();
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                m.push(c);
+            } else if !c.is_ascii() {
+                m.push_str(&format!("u{:x}", u32::from(c)));
+            }
+        }
         (if m.is_empty() { "group".to_string() } else { m }, s)
     })
 }
@@ -809,5 +830,14 @@ mod tests {
         assert_eq!(stored_key(&with("Physics/Bounce/floor"), &p), "Physics/Bounce/floor");
         assert_eq!(stored_key(&with("floor"), &p), "floor");
         assert_eq!(stored_key(&with("other"), &p), "Physics/Bounce/floor");
+    }
+
+    /// Group names in other scripts get distinct match ids (not all `group`).
+    #[test]
+    fn non_ascii_group_names_stay_distinct() {
+        let p = |group: &str| PluginParam { id: "x".into(), name: "X".into(), kind: PluginParamKind::Checkbox { default: false }, group: group.into() };
+        assert_eq!(param_key(&p("Цвет")), "u426u432u435u442/x");
+        assert_ne!(param_key(&p("Цвет")), param_key(&p("Свет")));
+        assert_eq!(param_key(&p("Ray Color/Edges")), "RayColor/Edges/x");
     }
 }

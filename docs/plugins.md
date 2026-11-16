@@ -219,8 +219,9 @@ Every plug-in describes itself with a JSON manifest:
 * `group` (optional, any parameter): a twirl-down group path such as `"Shimmer"` or
   `"Advanced/Edges"`. Effect Controls and the timeline show the parameter inside those groups,
   named as written. The group's match id is its letters, digits and `_` (`"Ray Color"` →
-  `RayColor`), so the parameter's path is `effects/#1/Advanced/Edges/edgeWidth`. A path has at
-  most 8 levels and 256 bytes. Parameters still arrive in declaration order, and a project
+  `RayColor`; a non-ASCII character becomes `u` and its hex code), so the parameter's path is
+  `effects/#1/Advanced/Edges/edgeWidth`. Two groups under one parent can't share a match id
+  (`"Ray Color"` and `"RayColor"`). A path has at most 8 levels and 256 bytes. Parameters still arrive in declaration order, and a project
   saved before a parameter moved into a group keeps its value (the property moves into the
   group when the project opens).
 

@@ -250,6 +250,7 @@ fn manifest_parameter_schemas_are_validated() {
         (r#"{"id":"s","name":"S","type":"wobble"}"#, "manifest JSON"),
         (r#"{"id":"s","name":"S","type":"slider"}"#, "manifest JSON"),
         (r#"{"id":"c","name":"C","type":"checkbox","group":"a/b/c/d/e/f/g/h/i"}"#, "deeper than 8"),
+        (r#"{"id":"a","name":"A","type":"checkbox","group":"X/Ray Color"},{"id":"b","name":"B","type":"checkbox","group":"X/RayColor"}"#, "same match id"),
     ];
     for (params, want) in bad {
         let m = module_with(&p(params), "");
