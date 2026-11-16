@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::support::write_tone;
 use effectcraft_color::Label;
 use effectcraft_export::render_queue::{AlphaMode, AudioOutput, Channels, OutputFormat, OutputModule, ProResProfile, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, Progress, export};
@@ -644,33 +645,6 @@ fn cancel_stops_early() {
     assert!(matches!(r, Err(effectcraft_export::ExportError::Cancelled)));
     let written = std::fs::read_dir(&d).map(|r| r.count()).unwrap_or(0);
     assert_eq!(written, 0, "cancelled before the first batch");
-}
-
-/// 16-bit stereo WAV with a 440 Hz sine at amplitude 0.5 (left) and silence (right).
-fn write_tone(path: &Path, secs: f64) {
-    let sr = 48_000u32;
-    let n = (secs * sr as f64) as usize;
-    let mut data = Vec::with_capacity(n * 4);
-    for i in 0..n {
-        let s = (0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr as f64).sin() * 32767.0).round() as i16;
-        data.extend_from_slice(&s.to_le_bytes());
-        data.extend_from_slice(&0i16.to_le_bytes());
-    }
-    let mut w = Vec::new();
-    w.extend_from_slice(b"RIFF");
-    w.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-    w.extend_from_slice(b"WAVEfmt ");
-    w.extend_from_slice(&16u32.to_le_bytes());
-    w.extend_from_slice(&1u16.to_le_bytes());
-    w.extend_from_slice(&2u16.to_le_bytes());
-    w.extend_from_slice(&sr.to_le_bytes());
-    w.extend_from_slice(&(sr * 4).to_le_bytes());
-    w.extend_from_slice(&4u16.to_le_bytes());
-    w.extend_from_slice(&16u16.to_le_bytes());
-    w.extend_from_slice(b"data");
-    w.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    w.extend_from_slice(&data);
-    std::fs::write(path, w).expect("write wav");
 }
 
 fn rms(v: impl Iterator<Item = f32>) -> f32 {
