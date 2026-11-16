@@ -130,12 +130,15 @@ fn fxl_shape(at: u32, n: u32, x: f32, flip: bool) -> f32 {
     // partition_point(|p| p.x < x).
     var lo = 0u;
     var hi = n;
-    while (lo < hi) {
-        let mid = (lo + hi) / 2u;
-        if (data[at + mid * 2u + kx] < x) {
-            lo = mid + 1u;
-        } else {
-            hi = mid;
+    // Bound the partition search as for inverse 1D LUTs below.
+    for (var step = 0u; step < 32u; step++) {
+        if (lo < hi) {
+            let mid = lo + (hi - lo) / 2u;
+            if (data[at + mid * 2u + kx] < x) {
+                lo = mid + 1u;
+            } else {
+                hi = mid;
+            }
         }
     }
     let i = clamp(lo, 1u, n - 1u);
@@ -156,13 +159,22 @@ fn fxl_shaper_at(s: u32, k: u32) -> vec2<u32> {
     return vec2<u32>(at, u32(data[s + k]));
 }
 
+// Evaluate independent shaper channels without dynamically writing vector lanes.
+fn fxl_shaper_apply(sh: u32, c: vec3<f32>, flip: bool) -> vec3<f32> {
+    let r = fxl_shaper_at(sh, 0u);
+    let g = fxl_shaper_at(sh, 1u);
+    let b = fxl_shaper_at(sh, 2u);
+    return vec3<f32>(
+        fxl_shape(r.x, r.y, c.x, flip),
+        fxl_shape(g.x, g.y, c.y, flip),
+        fxl_shape(b.x, b.y, c.z, flip)
+    );
+}
+
 fn fxl_file_fwd(o: u32, sh: i32, c0: vec3<f32>, interp: u32) -> vec3<f32> {
     var c = c0;
     if (sh >= 0) {
-        for (var k = 0u; k < 3u; k++) {
-            let a = fxl_shaper_at(u32(sh), k);
-            c[k] = fxl_shape(a.x, a.y, c[k], false);
-        }
+        c = fxl_shaper_apply(u32(sh), c, false);
     }
     return fxl_lut_apply(o, c, interp);
 }
@@ -209,10 +221,7 @@ fn fxl_file(o: u32, sh: i32, c: vec3<f32>, interp: u32, inverse: bool) -> vec3<f
             x = vec3<f32>(fxl_inv_1d(o, 0u, c.x), fxl_inv_1d(o, 1u, c.y), fxl_inv_1d(o, 2u, c.z));
         }
         if (sh >= 0) {
-            for (var k = 0u; k < 3u; k++) {
-                let a = fxl_shaper_at(u32(sh), k);
-                x[k] = fxl_shape(a.x, a.y, x[k], true);
-            }
+            x = fxl_shaper_apply(u32(sh), x, true);
         }
         return x;
     }

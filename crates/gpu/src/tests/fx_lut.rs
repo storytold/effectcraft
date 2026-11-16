@@ -112,6 +112,20 @@ fn profile_conversion_on_a_fresh_device_matches_cpu() {
     effect_direct("ec.utility.colorprofileconverter", &[("inputProfile", e(1)), ("outputProfile", e(3)), ("intent", e(0))], false);
 }
 
+// Unequal CSP channel point counts exercise shaper offsets on a fresh device.
+#[test]
+fn csp_shaper_on_a_fresh_device_matches_cpu() {
+    effect_direct("ec.color.ociofile", &[("file", s(&csp())), ("interpolation", e(1))], false);
+    effect_direct("ec.color.ociofile", &[("file", s(&csp())), ("direction", e(1))], false);
+}
+
+// A 1D CSP takes the direct inverse-shaper path (flip=true), unlike a 3D CSP.
+#[test]
+fn inverse_1d_csp_shaper_on_a_fresh_device_matches_cpu() {
+    let lut = "CSPLUTV100\n1D\n3\n0 0.5 1\n0 0.3 1\n2\n0 1\n0 1\n4\n0 0.2 0.6 1\n0 0.4 0.7 1\n2\n0 0 0\n1 1 1\n";
+    effect_direct("ec.color.ociofile", &[("file", s(lut)), ("direction", e(1))], false);
+}
+
 #[test]
 fn ocio_file_transform() {
     for interp in 1..4 {
