@@ -1,5 +1,5 @@
 //! Auxiliary channels from multi-layer OpenEXR files (depth, object / material IDs, normals,
-//! Cryptomatte, …) for the 3D Channel effects, read with the pure-Rust `exr` crate.
+//! Cryptomatte, …) for the 3D Channel effects, read with `craft-exr`.
 //!
 //! Every channel of every layer becomes a plane named `layer.channel` (or just `channel` for
 //! the unnamed layer), placed in the display window (pixels outside a layer's data window are
@@ -12,10 +12,10 @@
 //! which the picture of an EXR footage item shares with EXtractoR / Cryptomatte (#474, #3271).
 //! This module holds the naming and picture rules they share, and whole-file reads of bytes.
 
+use craft_exr::decode::PartInfo;
 use effectcraft_raster::channels3d::split_channel;
 use effectcraft_raster::{AuxChannels, Image};
 use effectcraft_render::reads::FileStamp;
-use exr::meta::header::Header;
 
 use crate::convert::{AlphaOp, float_to_image};
 use crate::exr_index::ExrIndex;
@@ -30,16 +30,16 @@ pub(crate) use craft_exr::channels::{is_depth, part_channel_name as channel_name
 pub use craft_exr::cryptomatte::parse_manifest;
 
 /// The part name channels are prefixed with (`None`: unnamed).
-pub(crate) fn part_name(header: &Header) -> Option<String> {
-    header.own_attributes.layer_name.as_ref().map(|t| t.to_string()).filter(|s| !s.is_empty())
+pub(crate) fn part_name(part: &PartInfo) -> Option<String> {
+    part.name.clone().filter(|s| !s.is_empty())
 }
 
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build
 /// can't decompress (HTJ2K, OpenEXR 3.4's High-Throughput JPEG 2000): the decoders only said
 /// "no non-deep rgb channels" or showed a transparent frame (#482). `None` for other files.
 pub fn unsupported_compression(bytes: &[u8]) -> Option<&'static str> {
-    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).ok()?;
-    crate::exr_index::unsupported(&meta)
+    let parts = craft_exr::decode::parts(bytes, &craft_exr::decode::Limits::none()).ok()?;
+    parts.iter().any(|p| p.compression.starts_with("HTJ2K")).then_some(crate::exr_index::HTJ2K)
 }
 
 /// How the `image` crate's OpenEXR decoder would show a file: the first part with exact `R`, `G`
@@ -75,7 +75,7 @@ pub const WEB_CACHE_CAP: usize = 256 << 20;
 /// not a readable EXR or the planes need too much memory.
 fn read_bytes(bytes: &[u8], ids: Option<Vec<usize>>) -> Option<(ExrIndex, Vec<usize>, Vec<Vec<f32>>)> {
     let mut src = std::io::Cursor::new(bytes);
-    let index = crate::exr_index::build(&mut src, bytes.len() as u64, FileStamp::Virtual).ok()?;
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
     let ids = ids.unwrap_or_else(|| (0..index.channels.len()).collect());
     let (planes, _) = read_planes(&mut src, &index, &ReadRequest::full(ids.clone()));
     Some((index, ids, planes.ok()?))
@@ -159,7 +159,7 @@ pub(crate) fn picture_names(aux: &AuxChannels) -> Option<([String; 3], Option<St
 /// Only the picture's channels are decoded (in a multi-part file the other parts aren't read).
 pub fn layered_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     let mut src = std::io::Cursor::new(bytes);
-    let index = crate::exr_index::build(&mut src, bytes.len() as u64, FileStamp::Virtual).ok()?;
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
     let (ids, rgb, a) = index.picture.clone()?;
     let (planes, _) = read_planes(&mut src, &index, &ReadRequest::full(ids.clone()));
     let aux = aux_of(&index, &ids, planes.ok()?);
@@ -186,7 +186,7 @@ pub fn layered_image(bytes: &[u8]) -> Option<image::DynamicImage> {
 /// (import). `None` when it is not a readable EXR.
 pub(crate) fn layered_size(bytes: &[u8]) -> Option<(u32, u32, bool)> {
     let mut src = std::io::Cursor::new(bytes);
-    let index = crate::exr_index::build(&mut src, bytes.len() as u64, FileStamp::Virtual).ok()?;
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
     let (_, _, a) = index.picture.as_ref()?;
     let (w, h) = index.size();
     Some((w as u32, h as u32, a.is_some()))
@@ -341,7 +341,7 @@ mod tests {
         let layer = Layer::new((1, 1), LayerAttributes::default(), Encoding::FAST_LOSSLESS, AnyChannels::sort(list.into()));
         let bytes = file(vec![layer], IntegerBounds::new((0, 0), (16384, 16384)));
         let mut src = std::io::Cursor::new(bytes.as_slice());
-        let index = crate::exr_index::build(&mut src, bytes.len() as u64, FileStamp::Virtual).unwrap();
+        let index = crate::exr_index::build(&mut src, FileStamp::Virtual).unwrap();
         let all = ReadRequest::full((0..index.channels.len()).collect());
         match read_planes(&mut src, &index, &all).0 {
             Err(crate::exr_read::ReadError::TooLarge(why)) => assert!(why.contains("16384×16384") && why.contains("GB"), "{why}"),

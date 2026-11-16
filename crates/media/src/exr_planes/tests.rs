@@ -58,6 +58,19 @@ fn write(parts: Vec<Layer<AnyChannels<FlatSamples>>>, size: (usize, usize)) -> V
     bytes.into_inner()
 }
 
+/// Each part's chunks of the OpenEXR `bytes`, in offset-table order: where each starts and how
+/// many bytes it takes (up to the next chunk, or the end of the file). Read with the `exr` crate:
+/// `craft-exr`'s index keeps them to itself.
+fn chunk_table(bytes: &[u8]) -> Vec<Vec<(u64, u64)>> {
+    let mut src = bytes;
+    let meta = exr::meta::MetaData::read_from_buffered(&mut src, false).unwrap();
+    let tables = exr::meta::MetaData::read_offset_tables(&mut exr::io::PeekRead::new(&mut src), &meta.headers).unwrap();
+    let mut starts: Vec<u64> = tables.iter().flatten().copied().collect();
+    starts.sort_unstable();
+    let end = |at: u64| starts.iter().copied().find(|s| *s > at).unwrap_or(bytes.len() as u64);
+    tables.iter().map(|t| t.iter().map(|at| (*at, end(*at) - at)).collect()).collect()
+}
+
 const SIZE: (usize, usize) = (64, 64);
 const RGBA: [(&str, bool); 4] = [("R", true), ("G", true), ("B", true), ("A", true)];
 const CRYPTO: [(&str, bool); 4] =
@@ -134,8 +147,7 @@ fn a_picture_reads_only_its_part() {
     assert_eq!(d.len(), 1, "{d:?}");
     assert_eq!(d[0].channels, ["beauty.A", "beauty.B", "beauty.G", "beauty.R"]);
     assert_eq!(d[0].stats.chunks, [SIZE.1, 0, 0], "only the beauty part's chunks");
-    let index = crate::exr_index::cached(&path).unwrap();
-    let beauty: u64 = index.parts[0].chunks.iter().map(|c| c.len).sum();
+    let beauty: u64 = chunk_table(&bytes)[0].iter().map(|(_, len)| len).sum();
     assert_eq!(d[0].stats.bytes, beauty, "the beauty part's bytes and nothing else");
 }
 
@@ -210,7 +222,7 @@ fn picture_and_aux_share_one_read_and_one_decode() {
 /// The index and an in-memory source of `bytes`.
 fn indexed(bytes: &[u8]) -> (Arc<ExrIndex>, std::io::Cursor<Vec<u8>>) {
     let mut src = std::io::Cursor::new(bytes.to_vec());
-    let ix = crate::exr_index::build(&mut src, bytes.len() as u64, FileStamp::Virtual).unwrap();
+    let ix = crate::exr_index::build(&mut src, FileStamp::Virtual).unwrap();
     (Arc::new(ix), src)
 }
 
@@ -832,7 +844,7 @@ fn a_hostile_data_window_is_refused_not_allocated() {
         let bytes = with_data_window_x_max(small, (1 << 30) - 3);
         let path = format!("/3271-hostile-{compression:?}.exr");
         assert!(!crate::exr_index::safe_to_decode(&bytes));
-        assert!(crate::exr_index::build(&mut std::io::Cursor::new(bytes.as_slice()), bytes.len() as u64, FileStamp::Virtual).is_err());
+        assert!(crate::exr_index::build(&mut std::io::Cursor::new(bytes.as_slice()), FileStamp::Virtual).is_err());
         assert!(crate::exr_channels::read_exr_channels(&bytes).is_none());
         assert!(crate::exr_channels::layered_image(&bytes).is_none());
         let b: Arc<[u8]> = bytes.into();
@@ -852,13 +864,7 @@ fn a_hostile_data_window_is_refused_not_allocated() {
 fn damaged_files_never_panic() {
     let files = [single_part_zips(), multipart(), write(vec![part(None, &RGBA, (16, 40), Compression::PIZ)], (16, 40))];
     for good in &files {
-        let start = crate::exr_index::build(&mut std::io::Cursor::new(good.as_slice()), good.len() as u64, FileStamp::Virtual)
-            .unwrap()
-            .parts
-            .iter()
-            .flat_map(|p| p.chunks.iter().map(|c| c.offset))
-            .min()
-            .unwrap() as usize;
+        let start = chunk_table(good).iter().flatten().map(|(at, _)| *at).min().unwrap() as usize;
         // From a little before the chunks (the offset tables) to the end, in steps.
         let from = start.saturating_sub(64);
         for (i, at) in (from..good.len()).step_by(((good.len() - from) / 150).max(1)).enumerate() {
@@ -867,7 +873,7 @@ fn damaged_files_never_panic() {
             let _ = crate::exr_channels::read_exr_channels(&bad);
             let _ = crate::exr_channels::layered_image(&bad);
             let mut src = std::io::Cursor::new(bad.as_slice());
-            if let Ok(ix) = crate::exr_index::build(&mut src, bad.len() as u64, FileStamp::Virtual) {
+            if let Ok(ix) = crate::exr_index::build(&mut src, FileStamp::Virtual) {
                 let req = ReadRequest { rows: Some(3..9), level: 1, ..ReadRequest::full((0..ix.channels.len()).collect()) };
                 let _ = crate::exr_read::read_planes(&mut src, &ix, &req);
             }
@@ -1229,19 +1235,20 @@ fn a_read_in_several_batches_is_whole_and_stops_between_them() {
     // Called off while the first batch is read: it stops before the next.
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut flaky = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: Some((1, flag.clone())), fail_from: None };
-    let (got, stats) = filmcraft_media::cancel::with_cancel(&flag, || crate::exr_read::read_planes(&mut flaky, &ix, &all));
+    let (got, _) = filmcraft_media::cancel::with_cancel(&flag, || crate::exr_read::read_planes(&mut flaky, &ix, &all));
     assert_eq!(got.err(), Some(ReadError::Cancelled));
-    assert!(stats.lines < h, "stopped early: {} lines", stats.lines);
     // Chunks that follow each other in the file are read in one go, not one read per chunk.
     let mut counted = Flaky { inner: std::io::Cursor::new(bytes.clone()), reads: 0, cancel_after: None, fail_from: None };
     assert!(crate::exr_read::read_planes(&mut counted, &ix, &all).0.is_ok());
     assert!(counted.reads <= 12, "{} reads for {h} chunks", counted.reads);
-    // A read failing in a later batch (at chunk 300): an I/O error after the first was decoded.
-    let at = ix.parts[0].chunks[300].offset;
+    // (a failed read has no stats: the reads it made tell how far it went)
+    assert!(flaky.reads < counted.reads, "stopped early: {} of {} reads", flaky.reads, counted.reads);
+    // A read failing in a later batch (at chunk 300): an I/O error after the first was read.
+    let at = chunk_table(&bytes)[0][300].0;
     let mut flaky = Flaky { inner: std::io::Cursor::new(bytes), reads: 0, cancel_after: None, fail_from: Some(at) };
-    let (got, stats) = crate::exr_read::read_planes(&mut flaky, &ix, &all);
+    let (got, _) = crate::exr_read::read_planes(&mut flaky, &ix, &all);
     assert!(matches!(got, Err(ReadError::Io(_))), "{got:?}");
-    assert!(stats.lines > 0, "the batches before it were decoded");
+    assert!(flaky.reads > 1, "the batches before it were read");
 }
 
 /// #3271: dropping entries for bytes (a decode over the budget, the memory accountant) drops
