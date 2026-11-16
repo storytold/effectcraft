@@ -124,6 +124,9 @@ fn plugins_take_gradient_parameters() {
     assert!((p[1] - 0.5).abs() < 0.02 && (p[2] - 0.5).abs() < 0.02, "{p:?}");
     let bad = register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.badramp", Some(json!(["#ff0000"]))) })).err();
     assert!(bad.as_deref().is_some_and(|e| e.contains("gradient `ramp`")), "{bad:?}");
+    // stops outside 0–1 are refused too
+    let out = register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.outramp", Some(json!([[-0.5, "#ff0000"], [1.5, "#0000ff"]]))) })).err();
+    assert!(out.as_deref().is_some_and(|e| e.contains("gradient `ramp`")), "{out:?}");
     // no default: white to black
     register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.plainramp", None) })).unwrap();
 }
