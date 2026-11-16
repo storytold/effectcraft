@@ -1597,7 +1597,7 @@ dependencies = [
 [[package]]
 name = "craft-time"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=57288edafdc45552e30481cc649021de446abfa0#57288edafdc45552e30481cc649021de446abfa0"
+source = "git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb#0d6dd8bed815b8366869a800d2bf22588ca62dcb"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1606,7 +1606,7 @@ dependencies = [
 [[package]]
 name = "craft-time"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=a2560df05b4c58631f53a57e65fb05f0e0e6cf76#a2560df05b4c58631f53a57e65fb05f0e0e6cf76"
+source = "git+https://github.com/storytold/craft-libs?rev=57288edafdc45552e30481cc649021de446abfa0#57288edafdc45552e30481cc649021de446abfa0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1624,20 +1624,20 @@ dependencies = [
 [[package]]
 name = "craft-timeline"
 version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb#0d6dd8bed815b8366869a800d2bf22588ca62dcb"
+dependencies = [
+ "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb)",
+]
+
+[[package]]
+name = "craft-timeline"
+version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=57288edafdc45552e30481cc649021de446abfa0#57288edafdc45552e30481cc649021de446abfa0"
 dependencies = [
  "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=57288edafdc45552e30481cc649021de446abfa0)",
  "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=57288edafdc45552e30481cc649021de446abfa0)",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "craft-timeline"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=a2560df05b4c58631f53a57e65fb05f0e0e6cf76#a2560df05b4c58631f53a57e65fb05f0e0e6cf76"
-dependencies = [
- "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=a2560df05b4c58631f53a57e65fb05f0e0e6cf76)",
 ]
 
 [[package]]
@@ -2269,7 +2269,7 @@ dependencies = [
 name = "effectcraft-interchange"
 version = "0.24.1"
 dependencies = [
- "craft-timeline 0.1.0 (git+https://github.com/storytold/craft-libs?rev=a2560df05b4c58631f53a57e65fb05f0e0e6cf76)",
+ "craft-timeline 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb)",
  "effectcraft-color",
  "effectcraft-keyframe",
  "effectcraft-project",
