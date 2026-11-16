@@ -2864,6 +2864,53 @@ const HEBREW: &[(&str, &str)] = &[
     ),
     ("Filter by footage status", "סינון לפי מצב קובצי המדיה"),
     ("Columns", "עמודות"),
+    // DAY-05: clean-room Hebrew from live English tracker, camera, roto, footage,
+    // dialog and VR UI callsites; AI-assisted, native-speaker/Native QA pending.
+    ("Track Name:", "שם המעקב:"),
+    ("Process Before Match", "עיבוד לפני התאמה"),
+    ("Enhance", "שיפור"),
+    ("Subpixel Positioning", "מיקום תת־פיקסלי"),
+    ("Adapt Feature On Every Frame", "התאמת המאפיין בכל פריים"),
+    ("Follow Feature Rotation and Scale", "מעקב אחר סיבוב המאפיין וקנה המידה שלו"),
+    ("If Confidence is Below", "אם רמת הביטחון נמוכה מ־"),
+    ("Apply Motion To:", "החלת התנועה על:"),
+    ("Layer:", "שכבה:"),
+    ("None", "ללא"),
+    ("Apply Dimensions:", "החלה בצירים:"),
+    ("X and Y", "צירי X ו־Y"),
+    ("X only", "ציר X בלבד"),
+    ("Y only", "ציר Y בלבד"),
+    ("Set Ground Plane and Origin", "הגדרת מישור הקרקע ונקודת הראשית"),
+    ("Delete Selected Points", "מחיקת הנקודות שנבחרו"),
+    ("Create Camera", "יצירת מצלמה"),
+    ("Export Scene to Blender...", "ייצוא הסצנה ל־Blender..."),
+    ("Method Used: {}    Average Error: {} pixels", "השיטה שנבחרה: {}    שגיאה ממוצעת: {} פיקסלים"),
+    ("Partial solve: {} of {} frames solved", "פתרון חלקי: עובדו {} מתוך {} פריימים"),
+    ("Overlay", "שכבת־על"),
+    ("Unfreeze", "ביטול הקפאה"),
+    ("Freeze", "הקפאה"),
+    ("Object {}", "אובייקט {}"),
+    ("Object {} ({})", "אובייקט {} ({})"),
+    ("Remove this object's strokes", "הסרת משיכות המכחול של אובייקט זה"),
+    ("Double-click footage in the Project panel to open it here", "לחצו פעמיים על קובץ מדיה בחלונית הפרויקט כדי לפתוח אותו כאן"),
+    ("Footage: {}", "קובץ מדיה: {}"),
+    ("No video", "אין וידאו"),
+    ("Edit Target: {}", "יעד עריכה: {}"),
+    ("Name:", "שם:"),
+    ("Size", "גודל"),
+    ("Make Comp Size", "התאמה לגודל הקומפוזיציה"),
+    ("Color:", "צבע:"),
+    ("Affect all layers that use this solid", "השפעה על כל השכבות שמשתמשות בצבע אחיד זה"),
+    ("Only this layer uses this solid.", "רק השכבה הזאת משתמשת בצבע אחיד זה."),
+    ("This change will create a new solid for this layer.", "השינוי ייצור צבע אחיד חדש עבור השכבה הזאת."),
+    ("Type a command or effect…", "הקלידו פקודה או אפקט…"),
+    ("Select a layer with a mask or shape path (or the path property), or Puppet pins.", "בחרו שכבה עם נתיב מסכה, נתיב צורה או מאפיין נתיב, או נקודות של כלי הבובה."),
+    ("Loop (Trace Path)", "לולאה (מעקב אחר נתיב)"),
+    ("No VR environments yet. Create one with Composition ▸ VR ▸ Create VR Environment…", "אין עדיין סביבות VR. צרו סביבה דרך קומפוזיציה ▸ VR ▸ יצירת סביבת VR…"),
+    ("VR Environments", "סביבות VR"),
+    ("Reset", "איפוס"),
+    ("All six face cameras turn together; the scene is not changed.", "כל שש מצלמות הפאות מסתובבות יחד; הסצנה אינה משתנה."),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -11849,4 +11896,78 @@ mod tests {
             );
         }
     }
+    /// Hebrew coverage must stay attached to real English source calls, never command IDs.
+    #[test]
+    fn hebrew_tracking_camera_roto_footage_dialogs_and_vr_use_original_keys() {
+        let tracker = include_str!("../panels/tracker.rs");
+        let camera_tracker_ui = include_str!("../panels/camera_tracker_ui.rs");
+        let roto_tool = include_str!("../panels/roto_tool.rs");
+        let footage_panel = include_str!("../panels/footage_panel.rs");
+        let dialogs = include_str!("../panels/dialogs.rs");
+        let path_vr_panels = include_str!("../panels/path_vr_panels.rs");
+        for (english, source) in [
+            ("Track Name:", tracker),
+            ("Process Before Match", tracker),
+            ("Enhance", tracker),
+            ("Subpixel Positioning", tracker),
+            ("Adapt Feature On Every Frame", tracker),
+            ("Follow Feature Rotation and Scale", tracker),
+            ("If Confidence is Below", tracker),
+            ("Apply Motion To:", tracker),
+            ("Layer:", tracker),
+            ("None", tracker),
+            ("Apply Dimensions:", tracker),
+            ("X and Y", tracker),
+            ("X only", tracker),
+            ("Y only", tracker),
+            ("Set Ground Plane and Origin", camera_tracker_ui),
+            ("Delete Selected Points", camera_tracker_ui),
+            ("Create Camera", camera_tracker_ui),
+            ("Export Scene to Blender...", camera_tracker_ui),
+            ("Method Used: {}    Average Error: {} pixels", camera_tracker_ui),
+            ("Partial solve: {} of {} frames solved", camera_tracker_ui),
+            ("Overlay", roto_tool),
+            ("Unfreeze", roto_tool),
+            ("Freeze", roto_tool),
+            ("Object {}", roto_tool),
+            ("Object {} ({})", roto_tool),
+            ("Remove this object's strokes", roto_tool),
+            ("Double-click footage in the Project panel to open it here", footage_panel),
+            ("Footage: {}", footage_panel),
+            ("No video", footage_panel),
+            ("Edit Target: {}", footage_panel),
+            ("Name:", dialogs),
+            ("Size", dialogs),
+            ("Make Comp Size", dialogs),
+            ("Color:", dialogs),
+            ("Affect all layers that use this solid", dialogs),
+            ("Only this layer uses this solid.", dialogs),
+            ("This change will create a new solid for this layer.", dialogs),
+            ("Type a command or effect…", dialogs),
+            ("Select a layer with a mask or shape path (or the path property), or Puppet pins.", path_vr_panels),
+            ("Loop (Trace Path)", path_vr_panels),
+            ("No VR environments yet. Create one with Composition ▸ VR ▸ Create VR Environment…", path_vr_panels),
+            ("VR Environments", path_vr_panels),
+            ("Reset", path_vr_panels),
+            ("All six face cameras turn together; the scene is not changed.", path_vr_panels),
+        ] {
+            let plain = format!("tr({english:?})");
+            let formatted = format!("tr_args({english:?},");
+            assert!(
+                source.contains(&plain) || source.contains(&formatted),
+                "Original English source callsite missing: {english:?}"
+            );
+            let translated = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, he)| *he);
+            assert!(
+                translated.is_some_and(|he| he.chars().any(|c| ('א'..='ת').contains(&c))),
+                "Hebrew label missing: {english:?}"
+            );
+            assert_eq!(
+                english.matches("{}").count(),
+                translated.unwrap_or("").matches("{}").count(),
+                "Value placeholders changed: {english:?}"
+            );
+        }
+    }
+
 }
