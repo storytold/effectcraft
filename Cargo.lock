@@ -1166,7 +1166,11 @@ source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b4255
 [[package]]
 name = "craft-gif"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=948b5c23c12dc8c87c8b1828892b1462113dd5a7#948b5c23c12dc8c87c8b1828892b1462113dd5a7"
+dependencies = [
+ "gif",
+ "image",
+]
 
 [[package]]
 name = "craft-i18n"
@@ -1361,8 +1365,9 @@ dependencies = [
 [[package]]
 name = "craft-webp"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=948b5c23c12dc8c87c8b1828892b1462113dd5a7#948b5c23c12dc8c87c8b1828892b1462113dd5a7"
 dependencies = [
+ "image",
  "thiserror 2.0.21",
 ]
 
