@@ -1,4 +1,5 @@
-//! Right-click actions in the blank Project and Timeline areas, and on Timeline property names.
+//! Right-click actions in the blank Project and Timeline areas, and on Timeline property and
+//! shape path names.
 use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemKind;
@@ -12,6 +13,8 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     let mut session = Session::default();
     session.execute("comp.new", json!({"name":"Empty", "width":640,"height":360,"duration":4})).unwrap();
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    // English whatever the system language: the menu items found below by label are translated.
+    h.state_mut().session.prefs.general.language = "en".into();
     h.run_steps(3);
     h
 }
@@ -228,6 +231,85 @@ fn timeline_property_names_have_the_property_menu() {
     menu(&mut h, scale);
     choose(&mut h, scale, "editValue");
     assert_eq!(h.state().dialog, Some(Dialog::Form));
+}
+
+/// #3237: right-clicking a Rectangle Path row in the Timeline offers After Effects' Convert To
+/// Bezier Path, which turns that path into an editable one; the shape group holding it offers the
+/// same and converts the parametric paths inside it.
+#[test]
+fn timeline_parametric_shape_path_menu_converts_to_bezier() {
+    use effectcraft_engine::project::{LayerId, PropGroup};
+    let mut h = harness();
+    let layer = h.state_mut().session.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let contents =
+        |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.sub("contents").unwrap().clone();
+    fn groups(g: &PropGroup, out: &mut Vec<(u64, String)>) {
+        out.push((g.uid, g.match_id.clone()));
+        for c in g.groups() {
+            groups(c, out);
+        }
+    }
+    let all = |h: &Harness<'_, EffectcraftApp>| {
+        let mut out = Vec::new();
+        groups(&contents(h), &mut out);
+        out
+    };
+    let find = |h: &Harness<'_, EffectcraftApp>, ids: &[&str]| all(h).into_iter().find(|(_, m)| ids.contains(&m.as_str())).map(|(u, _)| u);
+    let open = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().ui.timeline.open_layers.insert(layer);
+        for (uid, _) in all(&*h) {
+            h.state_mut().ui.timeline.open_groups.insert(uid);
+        }
+        h.run_steps(3);
+    };
+    let choose = |h: &mut Harness<'_, EffectcraftApp>, row: u64| {
+        let p = rect(h, &format!("timeline.group.{row}.name")).center();
+        right_click(h, p);
+        assert!(h.query_by_label("Convert To Bezier Path").is_some(), "the menu offers Convert To Bezier Path");
+        let p = rect(h, &format!("timeline.group.{row}.menu.convertToBezier")).center();
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerMoved(p));
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    let group = find(&h, &["group"]).expect("a shape group");
+    let path = find(&h, &["rect"]).expect("a Rectangle Path");
+    // The Rectangle Path's own row.
+    open(&mut h);
+    snapshot(&mut h, "shape-path-rows");
+    choose(&mut h, path);
+    assert!(find(&h, &["rect"]).is_none(), "the rectangle is converted");
+    assert!(find(&h, &["path"]).is_some(), "it is a bezier path now");
+    assert_eq!(h.state().session.history.undo.last().map(|u| u.0.as_str()), Some("Convert To Bezier Path"));
+    // A bezier path has nothing to convert: its row has no such entry.
+    let bezier = find(&h, &["path"]).unwrap();
+    open(&mut h);
+    let p = rect(&h, &format!("timeline.group.{bezier}.name")).center();
+    right_click(&mut h, p);
+    assert!(h.query_by_label("Convert To Bezier Path").is_none(), "a bezier path has no Convert To Bezier Path");
+    egui::Popup::close_all(&h.ctx);
+    // The shape group's row converts the rectangle inside it.
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(find(&h, &["rect"]), Some(path), "undo restores the rectangle");
+    open(&mut h);
+    choose(&mut h, group);
+    assert!(find(&h, &["rect"]).is_none(), "the group's rectangle is converted");
+    assert!(find(&h, &["path"]).is_some());
+    // A keyframed rectangle would lose its animation: the group leaves it out (and so has nothing
+    // to offer), while the path's own row still converts it, as After Effects does.
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    let size = contents(&h).find_group(path).unwrap().get("size").unwrap().uid;
+    h.state_mut().session.execute("prop.addKey", json!({"layer": layer, "path": format!("@{size}"), "time": 0.0, "value": [120, 80]})).unwrap();
+    open(&mut h);
+    let p = rect(&h, &format!("timeline.group.{group}.name")).center();
+    right_click(&mut h, p);
+    assert!(h.query_by_label("Convert To Bezier Path").is_none(), "nothing static to convert in the group");
+    egui::Popup::close_all(&h.ctx);
+    h.run_steps(3);
+    choose(&mut h, path);
+    assert!(find(&h, &["rect"]).is_none(), "the path's own row converts an animated rectangle");
 }
 
 /// The rows of a context menu touch: a gap between two entries highlighted neither and

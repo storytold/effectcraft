@@ -231,7 +231,7 @@ impl FootageSource for CancellableFootage<'_> {
 /// Footage that can be rasterised at any scale: SVG, PDF, Illustrator and EPS files, and a
 /// placed page of an After Effects project (its codec is not stored there).
 pub fn is_vector_footage(f: &Footage) -> bool {
-    matches!(f.codec.as_str(), "SVG" | "PDF" | "AI" | "EPS") || f.placed_page
+    matches!(f.codec.as_str(), "SVG" | "PDF" | "AI" | "EPS" | "VectorCraft") || f.placed_page
 }
 
 /// How vector footage `f` is drawn at `scale` × its size: the image size, and the x and y scale
