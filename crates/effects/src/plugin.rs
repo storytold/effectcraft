@@ -216,16 +216,6 @@ impl PluginManifest {
         // Each group's match-id path and its name: two names for one path would merge their groups.
         let mut groups = std::collections::HashMap::new();
         for p in &self.params {
-            let mut at = String::new();
-            for (m, name) in group_segments(&p.group) {
-                at.push_str(&m);
-                at.push('/');
-                if let Some(other) = groups.insert(at.clone(), name)
-                    && other != name
-                {
-                    return Err(format!("plug-in `{}`: groups `{other}` and `{name}` have the same match id `{m}`", self.id));
-                }
-            }
             if p.id.is_empty() || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || !seen.insert(p.id.as_str()) {
                 return Err(format!("plug-in `{}`: bad or duplicate parameter id `{}`", self.id, p.id));
             }
@@ -235,6 +225,17 @@ impl PluginManifest {
                     "plug-in `{}`: the group of `{}` is longer than {MAX_GROUP_LEN} bytes or deeper than {MAX_GROUP_DEPTH} levels",
                     self.id, p.id
                 ));
+            }
+            // Only after the size check: every prefix of the group is kept.
+            let mut at = String::new();
+            for (m, name) in group_segments(&p.group) {
+                at.push_str(&m);
+                at.push('/');
+                if let Some(other) = groups.insert(at.clone(), name)
+                    && other != name
+                {
+                    return Err(format!("plug-in `{}`: groups `{other}` and `{name}` have the same match id `{m}`", self.id));
+                }
             }
             if let PluginParamKind::Popup { options, default } = &p.kind
                 && (options.is_empty() || *default as usize >= options.len())
