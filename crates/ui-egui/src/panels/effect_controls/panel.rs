@@ -1,4 +1,4 @@
-use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer};
+use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer, shown_layer_id};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
@@ -21,18 +21,21 @@ pub(crate) fn handle_disclosure_key(app: &mut EffectcraftApp, key: egui::Key) ->
         return false;
     }
     let Some(comp) = app.session.active_comp() else { return false };
-    let Some(layer) = app.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) else { return false };
+    // The layer Effect Controls draws, which is the locked layer when the panel is locked.
+    let Some(layer_id) = shown_layer_id(app) else { return false };
+    let Some(layer) = comp.layer(layer_id) else { return false };
     let Some(effects) = layer.effects() else { return false };
     // Up / Down walk the effect headers in stacking order, from the header picked last. Only
     // headers count: a parameter's selection keeps the arrows nudging the layer.
     if matches!(key, egui::Key::ArrowUp | egui::Key::ArrowDown) {
         let headers: Vec<&PropGroup> = effects.groups().filter(|g| matches!(&g.kind, GroupKind::Effect { .. })).collect();
-        let at = app.session.state.selected_props.iter().rev().find_map(|(l, u)| headers.iter().position(|g| *l == layer.id && g.uid == *u));
+        let at = app.session.state.selected_props.iter().rev().find_map(|(l, u)| headers.iter().position(|g| *l == layer_id && g.uid == *u));
         let Some(at) = at else { return false };
         // Clamped at the ends, and the key is consumed even there (it must not nudge the layer).
         let to = if key == egui::Key::ArrowUp { at.saturating_sub(1) } else { (at + 1).min(headers.len().saturating_sub(1)) };
-        if let Some(g) = headers.get(to) {
-            app.session.state.selected_props = vec![(layer.id, g.uid)];
+        let next = headers.get(to).map(|g| g.uid);
+        if let Some(uid) = next {
+            app.session.state.selected_props = vec![(layer_id, uid)];
         }
         return true;
     }

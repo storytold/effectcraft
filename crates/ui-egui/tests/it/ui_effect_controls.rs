@@ -182,6 +182,20 @@ fn effect_header_up_and_down_select_the_previous_and_next_effect() {
     // Up at the first effect and Down at the last consume the key without moving anything.
 }
 
+/// #3585: the Up / Down header target is the layer Effect Controls shows, which is the locked
+/// layer when the panel is locked, even if a different layer is selected.
+#[test]
+fn effect_header_up_and_down_follow_the_locked_layer() {
+    let (mut h, lid, [(first, _), (second, _), _]) = header_arrow_harness();
+    let other = h.state_mut().session.execute("layer.newSolid", json!({"name": "Other", "color": "#000000"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.state.selected_layers = vec![LayerId(other)];
+    h.state_mut().session.state.selected_props = vec![(lid, first)];
+    let comp = h.state().session.active_comp_id().unwrap().0;
+    h.state_mut().ui.effect_controls_lock = Some(effectcraft_ui_egui::state::EffectControlsLock { comp, layer: lid.0 });
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, second)], "Down walks the locked layer's headers");
+}
+
 /// #3585: with only a parameter selected, plain Up / Down still nudge the layer.
 #[test]
 fn effect_header_up_and_down_leave_a_parameter_selection_to_the_layer_nudge() {
