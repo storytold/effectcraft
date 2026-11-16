@@ -1157,7 +1157,7 @@ dependencies = [
 [[package]]
 name = "craft-eps"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2ae56f9d63fdb100cae#808730f49b9637b7909fe2ae56f9d63fdb100cae"
 
 [[package]]
 name = "craft-exr"
@@ -1266,10 +1266,23 @@ dependencies = [
 [[package]]
 name = "craft-pdf"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2ae56f9d63fdb100cae#808730f49b9637b7909fe2ae56f9d63fdb100cae"
 dependencies = [
  "hayro-syntax",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-ps"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2ae56f9d63fdb100cae#808730f49b9637b7909fe2ae56f9d63fdb100cae"
+dependencies = [
+ "craft-eps",
+ "kurbo",
+ "miniz_oxide 0.8.9",
+ "pdf-writer",
+ "skrifa 0.47.0",
+ "weezl",
 ]
 
 [[package]]
@@ -1321,7 +1334,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde",
- "skrifa",
+ "skrifa 0.44.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1765,6 +1778,7 @@ name = "effectcraft-export"
 version = "0.24.1"
 dependencies = [
  "craft-audio",
+ "craft-gif",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
  "craft-video",
  "effectcraft-color",
@@ -1999,8 +2013,8 @@ name = "effectcraft-pdf"
 version = "0.24.1"
 dependencies = [
  "craft-doc",
- "craft-eps",
  "craft-pdf",
+ "craft-ps",
  "craft-vectorcraft-format",
  "effectcraft-raster",
  "effectcraft-svg",
@@ -2010,7 +2024,7 @@ dependencies = [
  "kurbo",
  "miniz_oxide 0.9.1",
  "serde_json",
- "skrifa",
+ "skrifa 0.44.0",
  "wasm-bindgen-test",
  "zune-jpeg",
 ]
@@ -2146,7 +2160,7 @@ dependencies = [
  "effectcraft-keyframe",
  "harfrust",
  "kurbo",
- "skrifa",
+ "skrifa 0.44.0",
  "unicode-bidi",
  "unicode-linebreak",
 ]
@@ -2484,7 +2498,7 @@ dependencies = [
  "parking_lot",
  "profiling",
  "self_cell",
- "skrifa",
+ "skrifa 0.44.0",
  "smallvec",
  "unicode-bidi",
  "unicode-general-category",
@@ -3331,7 +3345,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "log",
  "peniko",
- "skrifa",
+ "skrifa 0.44.0",
  "smallvec",
  "vello_common",
 ]
@@ -3460,7 +3474,7 @@ checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
- "read-fonts",
+ "read-fonts 0.41.0",
  "smallvec",
 ]
 
@@ -3512,7 +3526,7 @@ checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2ae56f9d63fdb100cae#808730f49b9637b7909fe2ae56f9d63fdb100cae"
 dependencies = [
  "hayro-ccitt",
 ]
@@ -3526,7 +3540,7 @@ checksum = "c75ab947623ef4ccaa7acf0579edf7cbb5a73838e3839a7be73335e522f433a1"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9#47107f660191de2f0b425569506f4daa4faadac9"
+source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2ae56f9d63fdb100cae#808730f49b9637b7909fe2ae56f9d63fdb100cae"
 dependencies = [
  "hayro-jbig2",
  "hayro-jpeg2000",
@@ -4900,6 +4914,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags 2.13.2",
+ "itoa",
+ "memchr",
+ "ryu",
+]
+
+[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5399,6 +5425,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-fonts"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a0cf4bb6cbce4c29756270d189a5e400ac05e91192161d83a0bcb6e68492e8"
+dependencies = [
+ "bytemuck",
+ "font-types",
+ "once_cell",
+]
+
+[[package]]
 name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5642,6 +5679,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
 name = "ryu-js"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5875,7 +5918,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
 dependencies = [
  "bytemuck",
- "read-fonts",
+ "read-fonts 0.41.0",
+]
+
+[[package]]
+name = "skrifa"
+version = "0.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "526e654b303ff4ad73a5a40b25de2b3ce3d039c5e3b6da5f89ae6e57004cb40f"
+dependencies = [
+ "bytemuck",
+ "read-fonts 0.44.0",
 ]
 
 [[package]]
