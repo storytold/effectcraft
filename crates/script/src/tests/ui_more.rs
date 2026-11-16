@@ -466,7 +466,7 @@ cv.onDraw = function () {
   g.newPath();
   g.rectPath(0, 0, this.size.width, this.size.height);
   g.fillPath(bg);
-  g.drawString("paint " + paints, g.newPen(g.PenType.SOLID_COLOR, [1, 1, 1], 1), 2, 2, ScriptUI.newFont("dialog", "REGULAR", 12));
+  g.drawString("paint " + paints, g.newPen(g.PenType.SOLID_COLOR, [1, 1, 1], 1), 2.3456, 2.9876, ScriptUI.newFont("dialog", "REGULAR", 12));
 };
 cv.addEventListener("mousedown", function (e) { cv.helpTip = e.clientX + "x" + e.clientY; cv.repaint(); });
 var b = w.add("button", undefined, "Noop", { name: "noop" });
@@ -488,7 +488,8 @@ fn canvas_paints_only_when_dirty() {
     assert_eq!(cv.mouse, ["mousedown"]);
     assert_eq!(cv.draw.len(), 2, "{:?}", cv.draw);
     assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.1, 0.1, 0.1, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 120.0, h: 80.0 }] });
-    assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 1"), "{:?}", cv.draw);
+    // Coordinates are rounded to hundredths of a pixel: the draw list is JSON in every snapshot.
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, x, y, .. } if text == "paint 1" && *x == 2.35 && *y == 2.99), "{:?}", cv.draw);
     // Agents see the control type through scriptui.get.
     let tree = s.execute("scriptui.get", json!({})).unwrap();
     assert_eq!(tree["root"]["children"][0]["type"], "canvas", "{tree}");

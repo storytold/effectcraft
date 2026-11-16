@@ -342,6 +342,10 @@ function __uiFontSize(f, g) {
   return x > 0 ? x : 12;
 }
 
+// Draw coordinates are rounded to hundredths of a pixel: the draw list travels as JSON inside
+// the window snapshot, and unrounded floats ("123.45678901234567") are most of its size.
+function __px(v) { return Math.round(__num(v) * 100) / 100; }
+
 // ScriptUIGraphics: what onDraw handlers paint with. Paths and paint calls are recorded into the
 // control's draw list (`draw` in the window snapshot), which frontends paint.
 function __uiGraphics() {
@@ -355,19 +359,19 @@ function __uiGraphics() {
     __rec: null,
     __push: function (op) { if (this.__rec) this.__rec.push(op); },
     newBrush: function (t, c) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "" }; },
-    newPen: function (t, c, w) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "", lineWidth: w === undefined ? 1 : __num(w) }; },
+    newPen: function (t, c, w) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "", lineWidth: w === undefined ? 1 : __px(w) }; },
     newPath: function () { this.currentPath = []; return this.currentPath; },
-    moveTo: function (x, y) { this.currentPath.push({ k: "M", x: __num(x), y: __num(y) }); this.currentPoint = [__num(x), __num(y)]; },
-    lineTo: function (x, y) { this.currentPath.push({ k: "L", x: __num(x), y: __num(y) }); this.currentPoint = [__num(x), __num(y)]; },
+    moveTo: function (x, y) { this.currentPath.push({ k: "M", x: __px(x), y: __px(y) }); this.currentPoint = [__px(x), __px(y)]; },
+    lineTo: function (x, y) { this.currentPath.push({ k: "L", x: __px(x), y: __px(y) }); this.currentPoint = [__px(x), __px(y)]; },
     closePath: function () { this.currentPath.push({ k: "Z" }); },
     rectPath: function (x, y, w, h) {
       if (x instanceof Array) { h = x[3] - x[1]; w = x[2] - x[0]; y = x[1]; x = x[0]; }
-      this.currentPath.push({ k: "R", x: __num(x), y: __num(y), w: __num(w), h: __num(h) });
+      this.currentPath.push({ k: "R", x: __px(x), y: __px(y), w: __px(w), h: __px(h) });
       return this.currentPath;
     },
     ellipsePath: function (x, y, w, h) {
       if (x instanceof Array) { h = x[3] - x[1]; w = x[2] - x[0]; y = x[1]; x = x[0]; }
-      this.currentPath.push({ k: "E", x: __num(x), y: __num(y), w: __num(w), h: __num(h) });
+      this.currentPath.push({ k: "E", x: __px(x), y: __px(y), w: __px(w), h: __px(h) });
       return this.currentPath;
     },
     fillPath: function (brush, path) {
@@ -378,10 +382,10 @@ function __uiGraphics() {
     },
     drawString: function (text, pen, x, y, font) {
       var f = font || this.font;
-      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f?.style !== undefined ? f.style : "") });
+      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __px(x || 0), y: __px(y || 0), size: __px(__uiFontSize(f, this)), style: String(f?.style !== undefined ? f.style : "") });
     },
     drawOSControl: function () { this.__push({ op: "os" }); },
-    drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __num(x || 0), y: __num(y || 0), w: w === undefined ? 0 : __num(w), h: h === undefined ? 0 : __num(h) }); },
+    drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __px(x || 0), y: __px(y || 0), w: w === undefined ? 0 : __px(w), h: h === undefined ? 0 : __px(h) }); },
     drawFocusRing: function () {},
     measureString: function (s, font, boundaryWidth) {
       var size = __uiFontSize(font, this);
