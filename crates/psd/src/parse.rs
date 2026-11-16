@@ -1,7 +1,5 @@
 use super::limits::{Error, Result};
-use super::model::{
-    Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SmartObject, SubPath, TextInfo, VectorMask,
-};
+use super::model::{Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SubPath, TextInfo, VectorMask};
 use super::{Psd, Reader, descriptor, engine_data, placed};
 use std::sync::Arc;
 
@@ -236,32 +234,10 @@ impl Psd {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
             }
             b"SoLd" | b"SoLE" => {
-                let _id = r.tag()?;
-                let _ver = r.u32()?;
-                let _dver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                let uuid = d.text("Idnt").unwrap_or_default().to_string();
-                let t = placed::eight(&d, "Trnf").unwrap_or([0.0; 8]);
-                // The non-affine transform when present (perspective), else the transform.
-                let t = placed::eight(&d, "nonAffineTransform").unwrap_or(t);
-                let size = d.obj("Sz  ").and_then(|s| Some([s.num("Wdth")?, s.num("Hght")?]));
-                let warp = d.obj("warp").and_then(placed::Warp::read);
-                l.smart_object = Some(SmartObject { uuid, quad: placed::quad_from(t), size, warp });
+                l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer_data(b).map_err(|e| error(&e))?));
             }
             b"PlLd" if l.smart_object.is_none() => {
-                let _id = r.tag()?;
-                let _ver = r.u32()?;
-                let n = r.u8()? as usize;
-                let uuid = String::from_utf8_lossy(r.bytes(n)?).into_owned();
-                let _page = r.u32()?;
-                let _pages = r.u32()?;
-                let _aa = r.u32()?;
-                let _ty = r.u32()?;
-                let mut t = [0.0; 8];
-                for v in &mut t {
-                    *v = r.f64_finite()?;
-                }
-                l.smart_object = Some(SmartObject { uuid, quad: placed::quad_from(t), size: None, warp: None });
+                l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer(b).map_err(|e| error(&e))?));
             }
             b"vmsk" | b"vsms" => {
                 let _ver = r.u32()?;

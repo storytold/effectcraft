@@ -641,11 +641,11 @@ fn placed_bake_solves_the_quad_once() {
     assert_eq!(counters::take(&QUAD), 1, "33×33 mapped points, one solve (was 1089)");
     so.placed_size(20.0, 10.0, 1.0);
     assert_eq!(counters::take(&QUAD), 1);
-    // The bounds, the size and the 49×49 grid of one bake share a single solve (was 1089 × 2 + 2401).
+    // The bake itself runs in craft-psd, so it no longer bumps this crate's quad counter.
     so.render_placed(&content(20, 10), 1.0, None).unwrap();
-    assert_eq!(counters::take(&QUAD), 1);
+    assert_eq!(counters::take(&QUAD), 0);
     so.render_placed(&content(20, 10), 1.0, Some((40, 40))).unwrap();
-    assert_eq!(counters::take(&QUAD), 1);
+    assert_eq!(counters::take(&QUAD), 0);
     // A single `map` still solves for itself.
     so.map([1.0, 1.0], 20.0, 10.0);
     assert_eq!(counters::take(&QUAD), 1);
