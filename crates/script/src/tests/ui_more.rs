@@ -56,6 +56,30 @@ fn resource_strings_build_windows_and_controls() {
     assert!(o.error.unwrap().message.contains("Bad window type"));
 }
 
+// A group has no text, so its creation properties are its third argument (#3781).
+const CREATION_PROPS: &str = r#"
+var w = new Window("palette", "Props");
+var a = w.add("group", undefined, { name: "row" });
+var b = w.add("group", undefined, undefined, { name: "row2" });
+var c = w.add("panel", undefined, "Title", { name: "box" });
+// Only a plain object is taken as the properties, not an object passed as the text.
+var d = w.add("statictext", undefined, new File("/tmp/named.txt"));
+w.show();
+[a.properties.name, a.name, b.properties.name, b.name, c.properties.name, c.name, c.text, a.text, typeof d.name].join("|")
+"#;
+
+#[test]
+fn a_group_takes_its_creation_properties_third() {
+    let mut s = session();
+    let o = run_code(&mut s, CREATION_PROPS, "props.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    assert_eq!(o.result, json!("row|row|row2|row2|box|box|Title||undefined"));
+    // Named, so agents can address it.
+    let names: Vec<&str> = s.script_ui.windows[0].root.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(&names[..3], ["row", "row2", "box"]);
+    s.execute("scriptui.mouse", json!({"widget": "row", "type": "mousedown"})).unwrap();
+}
+
 const DRAW: &str = r#"
 var w = new Window("palette", "Draw");
 var c = w.add("group");
