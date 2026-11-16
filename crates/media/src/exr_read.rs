@@ -244,6 +244,13 @@ pub(crate) fn read_error(e: seek::Error) -> ReadError {
     }
 }
 
+/// The most bytes one decompressed block of a read may take, whatever the read's limit
+/// ([`MAX_DECODE_BYTES`]: 8 GiB, 512 MiB in the browser): the decompressor allocates a block
+/// whole before it looks at the data, and a block is one strip of the file, so a larger one is a
+/// damaged or hostile header, not a file with more channels (#3749). A refusal for it doesn't
+/// depend on the limit: a request asking at least as much, refused for it before, would be again.
+pub(crate) const MAX_BLOCK_BYTES: usize = MAX_DECODE_BYTES;
+
 /// The most threads one read decompresses on (beside the caller's), and the size of a file
 /// whose chunks are decompressed on the calling thread alone.
 const READ_WORKERS: usize = 4;
@@ -293,7 +300,8 @@ fn read(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest) -> Result<(
     let n = ow.checked_mul(oh).ok_or_else(|| ReadError::Unreadable("display window".into()))?;
     let need = n.saturating_mul(req.channels.len()).saturating_mul(std::mem::size_of::<f32>());
     // (the limit is decided here and handed to `craft-exr` as the read's `max_bytes`: the planes
-    // it reserves, fallibly, and the largest block it decompresses follow it)
+    // it reserves, fallibly, follow it; one decompressed block stays at the fixed floor however
+    // much memory the machine has, see `MAX_BLOCK_BYTES`)
     let most = req.max_bytes.min(effectcraft_render::memory::decode_limit(req.floor, need));
     if need > most {
         return Err(too_large(w, h, need, most));
@@ -309,6 +317,7 @@ fn read(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest) -> Result<(
     request.fill = &fill;
     request.rows = req.rows.clone();
     request.level = req.level;
+    request.max_block_bytes = Some(MAX_BLOCK_BYTES);
     // craft-exr decompresses on threads of its own, started for this read, beside the decode
     // pool the caller runs on: a few at most, and none for a small file (its chunks are
     // decompressed on the calling thread).

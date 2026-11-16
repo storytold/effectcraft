@@ -1724,6 +1724,50 @@ fn a_plane_the_system_cannot_give_is_refused_not_allocated() {
     assert!(matches!(&over, ReadError::TooLarge(why) if why.contains("4096 bytes")), "{over:?}");
 }
 
+/// A source that counts the bytes read from it.
+struct Counted<R> {
+    inner: R,
+    read: usize,
+}
+
+impl<R: std::io::Read> std::io::Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n;
+        Ok(n)
+    }
+}
+
+impl<R: std::io::Seek> std::io::Seek for Counted<R> {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(to)
+    }
+}
+
+/// #3749 review: one decompressed block may take 8 GiB at most, whatever memory the read may
+/// use: a file whose block is larger (a data window a billion pixels wide over one large chunk,
+/// so that the chunk could hold it) is refused for its size before anything is read, also with a
+/// decode limit far above the block.
+#[test]
+fn a_block_over_the_fixed_limit_is_refused_whatever_the_decode_limit() {
+    let _only = LIMIT_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let f32s = [("R", false), ("G", false), ("B", false), ("A", false)];
+    let small = write(vec![part(None, &f32s, (1, 1), Compression::ZIP1)], (1, 1));
+    // One line of 2^30 - 2 pixels of four f32 channels: a block of 16 GiB...
+    let mut bytes = with_data_window_x_max(small, (1 << 30) - 3);
+    // ...over a chunk long enough to hold it at craft-exr's ratio (2^16 bytes a byte).
+    bytes.extend(std::iter::repeat_n(0u8, 300 << 10));
+    let index = crate::exr_index::build(&mut std::io::Cursor::new(bytes.as_slice()), FileStamp::Virtual).expect("indexed: the chunk can hold the block");
+    // The read may use 64 GiB (the floor is tiny, the system's figure high).
+    effectcraft_render::memory::set_decode_limit(Some(64 << 30));
+    let request = ReadRequest { floor: 8, ..ReadRequest::full(vec![0, 1, 2, 3]) };
+    let mut src = Counted { inner: std::io::Cursor::new(bytes.as_slice()), read: 0 };
+    let (read, _) = crate::exr_read::read_planes(&mut src, &index, &request);
+    effectcraft_render::memory::set_decode_limit(None);
+    assert!(matches!(&read, Err(crate::exr_read::ReadError::TooLarge(why)) if why.contains("one block of this read may use")), "{read:?}");
+    assert_eq!(src.read, 0, "refused before anything was read");
+}
+
 /// Reads of `path` fail for lack of memory when `fails` says so for the channels read; the reads
 /// asked for are counted.
 fn no_memory_when(path: &str, fails: impl Fn(&[usize]) -> bool + Send + Sync + 'static) -> Arc<AtomicU64> {
