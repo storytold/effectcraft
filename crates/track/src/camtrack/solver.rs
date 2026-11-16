@@ -932,7 +932,10 @@ fn solve_core(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBo
     }
     lap("keyframe adjustment");
     // Every other frame: resect from the points (nearest registered camera first).
-    let mut todo: Vec<usize> = (0..d.n).filter(|k| !r.cams.contains_key(k)).collect();
+    // A frame seeing fewer than six reconstructed points cannot be resected (`register`): it is
+    // skipped before the reconstruction is copied for it.
+    let mut todo: Vec<usize> =
+        (0..d.n).filter(|k| !r.cams.contains_key(k) && d.by_frame[*k].iter().filter(|(ti, _)| r.pts.contains_key(ti)).nth(5).is_some()).collect();
     todo.sort_by_key(|k| r.cams.keys().map(|c| c.abs_diff(*k)).min().unwrap_or(usize::MAX));
     let base = r.clone();
     let resected: Vec<(usize, Option<BaCam>)> = todo

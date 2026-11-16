@@ -66,36 +66,19 @@ impl AuxChannels {
     /// The layers of the channels (OpenEXR layers: the name before the last `.`; `""` for the
     /// unnamed layer), in channel order.
     pub fn layers(&self) -> Vec<&str> {
-        let mut out: Vec<&str> = vec![];
-        for (n, _) in &self.channels {
-            let (layer, _) = split_channel(n);
-            if !out.contains(&layer) {
-                out.push(layer);
-            }
-        }
-        out
+        craft_exr::channels::layers(self.channels.iter().map(|(n, _)| n.as_str()))
     }
 
     /// A layer's channels as the names to show in red, green, blue and alpha (`""` = none):
     /// its R, G, B, A channels (or red / green / blue / alpha, X / Y / Z, U / V); a layer of one
     /// channel (depth, an ID) shows it in all three colours.
     pub fn layer_rgba(&self, layer: &str) -> [String; 4] {
-        let chans: Vec<&str> = self.channels.iter().map(|(n, _)| n.as_str()).filter(|n| split_channel(n).0 == layer).collect();
-        let pick = |names: &[&str]| -> String {
-            chans.iter().find(|c| names.iter().any(|n| split_channel(c).1.eq_ignore_ascii_case(n))).map_or(String::new(), |c| c.to_string())
-        };
-        if let [one] = chans.as_slice() {
-            return [one.to_string(), one.to_string(), one.to_string(), String::new()];
-        }
-        [pick(&["R", "red", "X", "U"]), pick(&["G", "green", "Y", "V"]), pick(&["B", "blue", "Z"]), pick(&["A", "alpha"])]
+        craft_exr::channels::layer_rgba(self.channels.iter().map(|(n, _)| n.as_str()), layer)
+            .map(|i| i.and_then(|i| self.channels.get(i)).map_or(String::new(), |(n, _)| n.clone()))
     }
 }
 
-/// A channel name's layer and channel: `diffuse.R` → (`diffuse`, `R`), `ViewLayer.Combined.R`
-/// → (`ViewLayer.Combined`, `R`), `Z` → (`""`, `Z`).
-pub fn split_channel(name: &str) -> (&str, &str) {
-    name.rsplit_once('.').unwrap_or(("", name))
-}
+pub use craft_exr::channels::split_channel;
 
 impl AuxChannels {
     pub fn depth(&self) -> Option<&[f32]> {
@@ -206,42 +189,7 @@ impl AuxChannels {
     }
 }
 
-/// MurmurHash3 x86 32-bit (public-domain algorithm by Austin Appleby).
-pub fn murmur3_32(data: &[u8], seed: u32) -> u32 {
-    const C1: u32 = 0xcc9e_2d51;
-    const C2: u32 = 0x1b87_3593;
-    let mut h = seed;
-    let (chunks, tail) = data.as_chunks::<4>();
-    for c in chunks {
-        let mut k = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-        k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
-        h ^= k;
-        h = h.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);
-    }
-    let mut k = 0u32;
-    for (i, b) in tail.iter().enumerate() {
-        k ^= (*b as u32) << (8 * i);
-    }
-    if !tail.is_empty() {
-        k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
-        h ^= k;
-    }
-    h ^= data.len() as u32;
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85eb_ca6b);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xc2b2_ae35);
-    h ^= h >> 16;
-    h
-}
-
-/// Cryptomatte hash of a name (the manifest value).
-pub fn crypto_hash(name: &str) -> u32 {
-    let h = murmur3_32(name.as_bytes(), 0);
-    // Keep the float finite and normal: flip the low exponent bit when it is all 0s or 1s.
-    let e = (h >> 23) & 0xff;
-    if e == 0 || e == 255 { h ^ (1 << 23) } else { h }
-}
+pub use craft_exr::cryptomatte::{hash as crypto_hash, murmur3_32};
 
 /// The ID float stored in Cryptomatte channels for a hash.
 pub fn crypto_float(hash: u32) -> f32 {

@@ -276,12 +276,12 @@ pub(super) fn wat_plugin(id: &str, api: i32, render: &str) -> String {
 
 #[test]
 fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
-    let dir = std::env::temp_dir().join(format!("effectcraft-host-plugins-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let guard = tempfile::tempdir().unwrap();
+    let dir = guard.path().to_path_buf();
     let files = [
         ("a-good.wasm", wat_plugin("org.test.host.good", 1, "i32.const 0").into_bytes()),
         ("b-garbage.wasm", b"\0asm\x01\0\0\0garbage".to_vec()),
-        ("c-v2.wasm", wat_plugin("org.test.host.v2", 2, "i32.const 0").into_bytes()),
+        ("c-v3.wasm", wat_plugin("org.test.host.v3", 3, "i32.const 0").into_bytes()),
         ("d-empty.wasm", vec![]),
         ("e-trap.wasm", wat_plugin("org.test.host.trap", 1, "unreachable").into_bytes()),
         ("notes.txt", b"not a plug-in".to_vec()),
@@ -296,7 +296,7 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
     let errs: Vec<String> = r["errors"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap().to_string()).collect();
     assert_eq!(errs.len(), 3, "{r}");
     assert!(errs.iter().all(|p| !p.ends_with(".txt")));
-    assert!(r["errors"].to_string().contains("API 2"), "{r}");
+    assert!(r["errors"].to_string().contains("ABI 3"), "{r}");
     // A single file: errors come back as command errors; loading twice is refused.
     let good = dir.join("a-good.wasm").to_string_lossy().to_string();
     assert!(s.execute("effect.plugins.load", json!({"path": good})).unwrap_err().to_string().contains("already registered"));
@@ -310,4 +310,131 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
     s.execute("effect.apply", json!({"layer": l, "effect": "org.test.host.good"})).unwrap();
     assert_eq!(px(&s), before);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An ABI 2 plug-in (WebAssembly text) that shows the neighbouring frames it got: per pixel it
+/// writes |next.red − prev.red| into red, `flags / 8` into green, `prev_time` into blue and 1
+/// into alpha, so a render test can read the frames and their times back from the image.
+fn wat_neighbour_plugin(id: &str) -> String {
+    let manifest = format!(r#"{{"api":2,"id":"{id}","name":"Host {id}","category":"Test Plug-ins","version":"1","params":[]}}"#);
+    let len = manifest.len();
+    let escaped = manifest.replace('"', "\\\"");
+    format!(
+        r#"(module
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (func (export "ec_api_version") (result i32) i32.const 2)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_render2")
+    (param $px i32) (param $w i32) (param $h i32) (param $params i32) (param $np i32)
+    (param $t f64) (param $scale f64)
+    (param $prev i32) (param $prev_t f64) (param $next i32) (param $next_t f64) (param $flags i32)
+    (result i32)
+    (local $i i32)
+    (local $n i32)
+    local.get $w
+    local.get $h
+    i32.mul
+    local.set $n
+    block $done
+      loop $per_pixel
+        local.get $i
+        local.get $n
+        i32.ge_u
+        br_if $done
+        ;; red = |next.red - prev.red|
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        local.get $next
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        f32.load
+        local.get $prev
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        f32.load
+        f32.sub
+        f32.abs
+        f32.store
+        ;; green = flags / 8
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        local.get $flags
+        f32.convert_i32_s
+        f32.const 8
+        f32.div
+        f32.store offset=4
+        ;; blue = prev_time
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        local.get $prev_t
+        f32.demote_f64
+        f32.store offset=8
+        ;; alpha = 1
+        local.get $px
+        local.get $i
+        i32.const 16
+        i32.mul
+        i32.add
+        f32.const 1
+        f32.store offset=12
+        local.get $i
+        i32.const 1
+        i32.add
+        local.set $i
+        br $per_pixel
+      end
+    end
+    i32.const 0))"#
+    )
+}
+
+/// The neighbouring frames are the layer's own pixels at other times: here a precomp whose
+/// nested solid fades from 0 to 100 % over one second, at 4 fps. At 0.5 s the neighbours are
+/// 0.25 s and 0.75 s, so red (the current frame) was 0.5 and |next − prev| is 0.5.
+#[test]
+fn abi_v2_plugins_render_with_real_neighbour_frames() {
+    let mut s = effectcraft_host::session();
+    let inner = s.execute("comp.new", json!({"name": "Inner", "width": 40, "height": 20, "frameRate": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"color": [1.0, 0.0, 0.0], "width": 40, "height": 20})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.addKey", json!({"layer": solid, "path": "transform/opacity", "time": 0.0, "value": 0})).unwrap();
+    s.execute("prop.addKey", json!({"layer": solid, "path": "transform/opacity", "time": 1.0, "value": 100})).unwrap();
+    let outer = s.execute("comp.new", json!({"name": "Outer", "width": 40, "height": 20, "frameRate": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+    let layer = s.execute("layer.addItem", json!({"comp": outer, "item": inner, "time": 0})).unwrap()["layer"].as_u64().unwrap();
+    let outer = effectcraft_engine::project::ItemId(outer);
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let wasm = dir.path().join("neighbours.wasm");
+    std::fs::write(&wasm, wat_neighbour_plugin("org.test.host.neighbours")).unwrap();
+    let r = s.execute("effect.plugins.load", json!({"path": wasm.to_string_lossy()})).unwrap();
+    assert_eq!(r["loaded"][0]["id"], "org.test.host.neighbours", "{r}");
+    s.execute("effect.apply", json!({"layer": layer, "effect": "org.test.host.neighbours"})).unwrap();
+
+    let p = s.render(outer, Tick::from_seconds_f64(0.5), Default::default()).get(20, 10);
+    assert!((p[0] - 0.5).abs() < 0.02, "precomp neighbours: {p:?}");
+    // Both neighbours exist, the previous one is the 0.25 s frame, and the frame is opaque.
+    assert!((p[1] - 3.0 / 8.0).abs() < 0.01, "flags: {p:?}");
+    assert!((p[2] - 0.25).abs() < 0.01, "prev time: {p:?}");
+    assert_eq!(p[3], 1.0, "{p:?}");
+
+    // At the very start of the layer only the next frame exists (the previous one is zeroed);
+    // solids are filled with a quantised colour, hence the 8-bit step.
+    let p = s.render(outer, Tick::ZERO, Default::default()).get(20, 10);
+    assert!((p[0] - 0.25).abs() < 0.01, "the next frame's red, with no previous frame: {p:?}");
+    assert!((p[1] - 2.0 / 8.0).abs() < 0.01, "only the next frame is valid: {p:?}");
 }

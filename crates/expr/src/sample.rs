@@ -78,7 +78,7 @@ fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Opti
     r.reads = Some(&log);
     let ectx = r.eval_ctx(comp, Tick::from_seconds_f64(t))?;
     let out = if post {
-        r.content_buf(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img.clone()), offset: b.offset, scale: b.scale })
+        r.layer_content(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img.clone()), offset: b.offset, scale: b.scale })
     } else {
         r.layer_source(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img), offset: b.offset, scale: b.scale })
     };

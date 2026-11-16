@@ -1173,9 +1173,14 @@ fn reset(s: &mut Session, p: &Value) -> Result<Value> {
     }
     .ok_or_else(|| bad("effect.reset", "unknown effect"))?;
     let name = g.name.clone();
+    // Reset keeps a Cineon Converter's Version.
+    let cineon_version = if spec.id == "ec.utility.cineon" { g.get("version").map(|v| v.value.as_f64()) } else { None };
     s.edit(&format!("Reset {name}"), None, |proj, _| {
         let g = layer_mut(proj, cid, lid)?.props.find_group_mut(uid).ok_or_else(|| bad("effect.reset", "gone"))?;
         for ps in &spec.params {
+            if ps.id == "version" && cineon_version.is_some() {
+                continue;
+            }
             // (`group/param` ids live in twirl-down groups.)
             if let Some(pr) = g.prop_mut(ps.id) {
                 pr.set_value_at(lt, effectcraft_effects::default_value(ps, size));
@@ -1352,7 +1357,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Effect Plug-in...",
             [],
             None,
-            "{path (.wasm / .wat plug-in, API v1) | folder (loads every .wasm in it)}",
+            "{path (.wasm / .wat plug-in, WebAssembly ABI 1 or 2) | folder (loads every .wasm in it)}",
             super::always,
             plugins_load
         ),

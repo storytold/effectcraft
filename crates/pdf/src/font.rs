@@ -211,6 +211,12 @@ fn utf16(b: &[u8]) -> String {
     String::from_utf16_lossy(&u)
 }
 
+/// The most code → text mappings a CMap keeps (more than Unicode has code points), and the
+/// longest destination string a `bfrange` is expanded with: a range of 65,536 codes would
+/// otherwise multiply a long destination into gigabytes of text.
+const MAX_UNICODE_MAPPINGS: usize = 1 << 20;
+const MAX_RANGE_DST: usize = 256;
+
 fn parse_cmap(data: &[u8]) -> CMap {
     let mut m = CMap::default();
     let mut lx = Lexer::new(data, 0);
@@ -239,6 +245,9 @@ fn parse_cmap(data: &[u8]) -> CMap {
                     }
                     "bfchar" => {
                         for p in a.as_chunks::<2>().0 {
+                            if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                break;
+                            }
                             if let (Obj::Str(src), Obj::Str(dst)) = (&p[0], &p[1]) {
                                 m.unicode.insert(be(src), utf16(dst));
                             }
@@ -252,9 +261,12 @@ fn parse_cmap(data: &[u8]) -> CMap {
                                 continue;
                             }
                             match &p[2] {
-                                Obj::Str(dst) => {
+                                Obj::Str(dst) if dst.len() <= MAX_RANGE_DST => {
                                     let mut d = dst.clone();
                                     for c in lo..=hi {
+                                        if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                            break;
+                                        }
                                         m.unicode.insert(c, utf16(&d));
                                         if let Some(last) = d.last_mut() {
                                             *last = last.wrapping_add(1);
@@ -263,6 +275,9 @@ fn parse_cmap(data: &[u8]) -> CMap {
                                 }
                                 Obj::Array(list) => {
                                     for (k, s) in list.iter().enumerate() {
+                                        if m.unicode.len() >= MAX_UNICODE_MAPPINGS {
+                                            break;
+                                        }
                                         if let (Obj::Str(s), Some(c)) = (s, lo.checked_add(k as u32)) {
                                             m.unicode.insert(c, utf16(s));
                                         }
@@ -333,36 +348,6 @@ impl Font {
             has_widths: false,
             base_name: base_name.to_string(),
         }
-    }
-
-    /// A simple font outside a PDF (EPS text): `program` is an embedded font program (CFF when
-    /// the flag is set, else Type 1), otherwise the bundled stand-in for `name` is used;
-    /// `names` is the encoding (code → glyph name), else the program's built-in encoding or
-    /// StandardEncoding. Advances are the program's.
-    pub fn standalone(name: &str, program: Option<(&[u8], bool)>, names: Option<Vec<Option<String>>>) -> Font {
-        let mut f = Font::blank(name, false);
-        f.program = match program {
-            Some((data, true)) => Cff::parse(data).map(|c| Program::Cff(Box::new(c))),
-            Some((data, false)) => Type1::parse(data).map(|t| Program::Type1(Box::new(t))),
-            None => None,
-        }
-        .unwrap_or_else(|| Program::Fallback(fallback(name)));
-        match &f.program {
-            Program::Cff(c) => f.matrix = Affine::new(c.font_matrix),
-            Program::Type1(t) => f.matrix = t.font_matrix.map(Affine::new).unwrap_or(f.matrix),
-            _ => {}
-        }
-        let symbol = matches!(f.program, Program::Fallback(_)) && (name.contains("Symbol") || name.contains("Dingbats"));
-        f.names = match names {
-            // Unencoded codes draw .notdef (not the built-in encoding).
-            Some(n) => (0..256).map(|c| Some(n.get(c).cloned().flatten().unwrap_or_else(|| ".notdef".into()))).collect(),
-            None => match &f.program {
-                Program::Type1(t) if !t.encoding.is_empty() => (0..256).map(|c| t.encoding.get(&(c as u8)).cloned()).collect(),
-                _ if symbol => vec![None; 256],
-                _ => (0..256).map(|c| Base::Standard.name(c as u8)).collect(),
-            },
-        };
-        f
     }
 
     pub fn load(file: &File, d: &Dict, skipped: &mut Vec<String>) -> Font {

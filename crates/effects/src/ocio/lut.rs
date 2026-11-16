@@ -1,5 +1,6 @@
 use super::cdl::{Cdl, parse_cdl_xml};
-use super::{Arc, HashMap, Lut, Mutex, OnceLock, parse_cube};
+use super::{Arc, Lut, parse_cube};
+use crate::file_cache::{self, Registered};
 
 // ---------------------------------------------------------------- LUT files
 
@@ -34,39 +35,8 @@ pub fn parse_spimtx(text: &str) -> Option<FileXform> {
 /// Parse a Sony Imageworks `.spi1d` 1D LUT: `From <min> <max>`, `Length <n>`, `Components
 /// <1 | 3>`, then `{` the values `}`.
 pub fn parse_spi1d(text: &str) -> Option<Lut> {
-    let (mut from, mut len, mut comps) = ([0.0f32, 1.0], 0usize, 1usize);
-    let mut values: Vec<f32> = vec![];
-    let mut body = false;
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if body {
-            if line.starts_with('}') {
-                break;
-            }
-            for t in line.split_whitespace() {
-                values.push(t.parse().ok()?);
-            }
-            continue;
-        }
-        let mut t = line.split_whitespace();
-        match t.next()? {
-            "{" => body = true,
-            "From" => from = [t.next()?.parse().ok()?, t.next()?.parse().ok()?],
-            "Length" => len = t.next()?.parse().ok()?,
-            "Components" => comps = t.next()?.parse().ok()?,
-            _ => {}
-        }
-    }
-    // A 1D table is interpolated by index, so cap it like the lattices (2²⁴ entries).
-    if !(2..=MAX_1D).contains(&len)
-        || !matches!(comps, 1 | 3)
-        || values.len() != len.checked_mul(comps)?
-        || from[1] <= from[0]
-        || from.iter().any(|v| !v.is_finite())
-    {
-        return None;
-    }
-    let d1 = values.chunks_exact(comps).map(|c| if comps == 3 { [c[0], c[1], c[2]] } else { [c[0]; 3] }).collect();
-    Some(Lut { n1: len, d1, n3: 0, d3: vec![], dmin: [from[0]; 3], dmax: [from[1]; 3] })
+    let table = craft_cms::spi1d::parse(text)?;
+    Some(Lut { n1: table.values.len(), d1: table.values, n3: 0, d3: vec![], dmin: [table.domain[0]; 3], dmax: [table.domain[1]; 3] })
 }
 
 /// Parse a Sony Imageworks `.spi3d` lattice: `SPILUT 1.0`, `3 3`, the sizes, then one
@@ -264,33 +234,38 @@ pub fn parse_file(text: &str, ext: &str) -> Option<FileXform> {
     parse_3dl(text).map(|lut| FileXform::Lut { lut, shaper: None })
 }
 
-type FileCache = Mutex<HashMap<String, Option<Arc<FileXform>>>>;
+/// [`load_file`]'s cache, by parameter text (bounded like [`crate::load_lut`]'s).
+static FILES: Registered<Option<Arc<FileXform>>> = Registered::new(64, 512 << 20);
 
-/// Load (and cache) a transform from a file path or inline content.
+/// The files the transform cached for `src` was read from.
+pub(crate) fn cached_files(src: &str) -> Option<Vec<String>> {
+    file_cache::lock(FILES.get()).files(src)
+}
+
+/// Load (and cache) a transform from a file path or inline content. A file is stamped (one
+/// `metadata` call) on every load and read again once its size or modification time moved (see
+/// [`crate::file_cache`]); inline content is its own content.
 pub fn load_file(src: &str) -> Option<Arc<FileXform>> {
     let src_t = src.trim();
     if src_t.is_empty() {
         return None;
     }
-    static CACHE: OnceLock<FileCache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
-    {
-        return v.clone();
-    }
-    let inline = src.contains('\n');
-    let parsed = if inline {
-        parse_file(src, "")
-    } else {
-        let ext = std::path::Path::new(src_t).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
-        std::fs::read_to_string(src_t).ok().and_then(|t| parse_file(&t, ext))
-    }
-    .map(Arc::new);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
-    }
-    parsed
+    file_cache::cached(FILES.get(), src, || {
+        let parsed = if src.contains('\n') {
+            parse_file(src, "")
+        } else {
+            let ext = std::path::Path::new(src_t).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
+            file_cache::read(src_t).ok().and_then(|t| parse_file(&t, ext))
+        }
+        .map(Arc::new);
+        let bytes = match parsed.as_deref() {
+            Some(FileXform::Lut { lut, shaper }) => crate::utility::lut_bytes(lut)
+                .saturating_add(shaper.as_ref().map_or(0, |s| s.iter().map(Vec::len).sum::<usize>().saturating_mul(std::mem::size_of::<(f32, f32)>()))),
+            Some(FileXform::Cdl(c)) => c.len().saturating_mul(std::mem::size_of::<(String, Cdl)>()),
+            Some(FileXform::Matrix { .. }) | None => 0,
+        };
+        (parsed, bytes)
+    })
 }
 
 impl FileXform {

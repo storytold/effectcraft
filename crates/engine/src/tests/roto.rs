@@ -603,6 +603,35 @@ fn object_matte_background_job_cancel_and_freeze() {
     assert_eq!(status(&mut s)["frozen"], true);
 }
 
+/// A queue edit preserves a frozen matte made before the footage signature gained placed_page.
+#[test]
+fn render_queue_keeps_frozen_object_matte_with_legacy_footage_key() {
+    use effectcraft_effects::roto::{FROZEN, INPUT_KEY};
+    use effectcraft_keyframe::Value::Str;
+
+    hold_roto_cache_test_lock();
+    // Saved by the released 0.22.0 CLI, independently of the compatibility helper.
+    let project = effectcraft_project::Project::from_json(include_str!("fixtures/object-matte-0.22.ecproj")).unwrap();
+    let mut s = Session::default();
+    s.replace_project(project, None);
+    let cid = effectcraft_project::ItemId(1);
+    let clip = LayerId(3);
+    let uid = 26;
+    s.open_comp(cid);
+    let params = |s: &Session| crate::roto::params_static(s.project.comp(cid).unwrap().layer(clip).unwrap().props.find_group(uid).unwrap());
+    let legacy = params(&s).get(INPUT_KEY).unwrap().clone();
+    let saved = params(&s).get(FROZEN).unwrap().clone();
+    let layer = s.project.comp(cid).unwrap().layer(clip).unwrap();
+    assert_ne!(legacy, Str(crate::roto::input_key(&s.project, cid, layer, uid)));
+
+    s.execute_checked("renderQueue.add", json!({"comp": cid.0, "format": "png", "output": "matte.png"})).unwrap();
+    assert_eq!(params(&s).get(INPUT_KEY), Some(&legacy));
+    assert_eq!(params(&s).get(FROZEN), Some(&saved));
+
+    s.execute_checked("layer.timing", json!({"layer": clip.0, "out": 0.05})).unwrap();
+    assert_eq!(params(&s).get(FROZEN), Some(&Str(String::new())));
+}
+
 /// Computed Object Matte segmentations go to the persistent disk cache: a second session on the
 /// same folder and project gets them back without segmenting (its frames cannot even be read
 /// here), and another prompt (other keys) finds nothing.
