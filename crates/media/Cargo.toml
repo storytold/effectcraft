@@ -27,9 +27,8 @@ craft-dpx = { workspace = true }
 craft-exr = { workspace = true, features = ["decode"] }
 craft-gif = { workspace = true, features = ["frames"] }
 craft-webp = { workspace = true, features = ["frames"] }
-craft-audio = { workspace = true }
-craft-media = { workspace = true }
-filmcraft-mpegts = { workspace = true }
+craft-audio = { workspace = true, features = ["aac-decode"] }
+craft-media = { workspace = true, features = ["mpegts"] }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
