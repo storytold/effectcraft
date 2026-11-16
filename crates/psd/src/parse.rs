@@ -11,100 +11,112 @@ pub fn is_psd(bytes: &[u8]) -> bool {
 }
 
 impl Psd {
+    /// Reads the structure with [`craft_psd::PsdFile::from_source`]: header, colour mode data,
+    /// layer records with their additional information and the global blocks. Channel data and
+    /// the merged image stay in `data` (as ranges), decoded on demand.
     pub fn parse(data: impl Into<Arc<[u8]>>) -> Result<Psd> {
         let data: Arc<[u8]> = data.into();
-        let mut r = Reader::new(&data);
-        if r.bytes(4).ok() != Some(b"8BPS") {
+        if !is_psd(&data) {
             return Err(Error::NotPsd);
         }
-        let version = r.u16()?;
-        let psb = match version {
-            1 => false,
-            2 => true,
-            _ => return Err(Error::NotPsd),
+        let (read, splice) = read_file(&data);
+        let (head, file, warnings) = match read {
+            Ok(file) => {
+                // The compression field before the merged image's data.
+                let merged = file.image_data.stored.as_ref().map_or(data.len(), |s| (splice.map(s.offset) as usize).saturating_sub(2));
+                ((file.header.clone(), file.color_mode_data.clone(), merged), Some(file), vec![])
+            }
+            // A damaged layer section must not discard the document: keep the header and the
+            // merged image, drop the layers and say so. Without a merged image there is nothing to
+            // fall back to, so the original error stands.
+            Err(e) => match flattened(&data) {
+                Some(head) => (head, None, vec![format!("Layers could not be read ({}); only the flattened image is available", error(&e))]),
+                None => return Err(error(&e)),
+            },
         };
-        r.skip(6)?;
-        let channels = r.u16()?;
-        let height = r.u32()?;
-        let width = r.u32()?;
-        let depth = r.u16()?;
-        let mode_v = r.u16()?;
+        let (h, palette, merged_offset) = head;
+        let mode_v = h.color_mode.as_u16();
         let mode = ColorMode::from_u16(mode_v).ok_or_else(|| Error::Unsupported(format!("colour mode {mode_v}")))?;
-        if !matches!(depth, 1 | 8 | 16 | 32) {
-            return Err(Error::Unsupported(format!("{depth}-bit")));
+        if !matches!(h.depth, 1 | 8 | 16 | 32) {
+            return Err(Error::Unsupported(format!("{}-bit", h.depth)));
         }
-        if width == 0 || height == 0 || width > 300_000 || height > 300_000 {
-            return Err(Error::Invalid(format!("size {width}x{height}")));
+        if h.width == 0 || h.height == 0 || h.width > 300_000 || h.height > 300_000 {
+            return Err(Error::Invalid(format!("size {}x{}", h.width, h.height)));
         }
-        // Colour mode data.
-        let n = r.u32()? as usize;
-        let palette = r.bytes(n)?.to_vec();
-        // Image resources.
-        let n = r.u32()? as usize;
-        r.skip(n)?;
-        // Layer and mask information.
         let mut psd = Psd {
-            psb,
-            width,
-            height,
-            channels,
-            depth,
+            psb: h.version.is_psb(),
+            width: h.width,
+            height: h.height,
+            channels: h.channels,
+            depth: h.depth,
             mode,
             layers: vec![],
             merged_alpha: false,
             palette,
             linked: vec![],
-            warnings: vec![],
+            warnings,
             data: data.clone(),
-            merged_offset: 0,
+            merged_offset,
         };
-        let lm_len = r.length(psb)?;
-        let lm_end = r.pos.checked_add(lm_len).filter(|&e| e <= data.len()).ok_or(Error::Truncated)?;
-        if lm_len > 0 {
-            let li_len = r.length(psb)?;
-            let li_end = r.pos.checked_add(li_len).filter(|&e| e <= lm_end).ok_or(Error::Truncated)?;
-            if li_len > 0
-                && let Err(e) = psd.layer_info(&data, r.pos, li_end)
-            {
-                // A damaged layer section must not discard the document: keep the header and the
-                // merged image, drop the layers and say so. Without a merged image there is
-                // nothing to fall back to, so the original error stands.
-                if lm_end.checked_add(2).is_none_or(|n| n > data.len()) {
-                    return Err(e);
-                }
-                psd.layers.clear();
-                psd.warnings.push(format!("Layers could not be read ({e}); only the flattened image is available"));
-            }
-            r.pos = li_end;
-            if r.pos + 4 <= lm_end {
-                let g = r.u32()? as usize;
-                r.pos = (r.pos + g).min(lm_end);
-            }
-            // Global additional layer information (16/32-bit layer info lives here).
-            while let Some((key, start, end)) = next_block(&data, &mut r.pos, lm_end, psb) {
-                if matches!(&key, b"lnk2" | b"lnkD" | b"lnk3" | b"lnkE") {
-                    psd.linked_files(&data, start, end);
-                }
-                if matches!(&key, b"Lr16" | b"Lr32" | b"Layr") && psd.layers.is_empty() && end > start {
-                    // The block holds the layer info, normally without its length field; accept
-                    // both layouts.
-                    if psd.layer_info(&data, start, end).is_err() || psd.layers.is_empty() {
-                        psd.layers.clear();
-                        let skip = if psb { 8 } else { 4 };
-                        if start + skip < end && psd.layer_info(&data, start + skip, end).is_err() {
-                            psd.layers.clear();
-                        }
-                    }
-                }
-                r.pos = end;
+        let Some(file) = file else {
+            psd.merged_alpha = section_merged_alpha(&data);
+            return Ok(psd);
+        };
+        if let Some((block, e)) = file.unreadable_layer_block() {
+            // A 16/32-bit file's layers live in a global block; when it is damaged the file reads
+            // as flattened. Its layer count still says whether the merged image has alpha.
+            psd.merged_alpha = block.data.get(..2).is_some_and(|c| i16::from_be_bytes([c[0], c[1]]) < 0);
+            psd.warnings.push(format!("Layers could not be read ({}); only the flattened image is available", error(&e)));
+        }
+        if let Some(info) = &file.layer_info {
+            psd.merged_alpha = info.merged_alpha;
+            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect();
+        }
+        for b in &file.global_blocks {
+            if let Some(stored) = b.stored.as_ref().filter(|_| linked(&b.key, 0)) {
+                let start = splice.map(stored.offset) as usize;
+                psd.linked_files(&data, start, start.saturating_add(stored.len as usize).min(data.len()));
             }
         }
-        if !psd.layers.is_empty() {
-            // A 16/32-bit layer block recovered the layers.
-            psd.warnings.clear();
-        }
-        psd.merged_offset = lm_end;
         Ok(psd)
+    }
+
+    /// One layer record of the model, its additional information read into [`Layer`].
+    /// `splice` maps craft-psd's offsets back into `self.data` (see [`read_file`]).
+    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Layer {
+        let channels = rec
+            .channels
+            .iter()
+            .map(|c| match &c.stored {
+                // `ChannelInfo` covers the compression field and the data after it.
+                Some(s) => ChannelInfo { id: c.id, offset: (splice.map(s.offset) as usize).saturating_sub(2), len: s.len as usize + 2 },
+                None => ChannelInfo { id: c.id, offset: 0, len: 0 },
+            })
+            .collect();
+        let r = rec.rect;
+        let mut l = Layer {
+            index,
+            rect: Rect { top: r.top, left: r.left, bottom: r.bottom, right: r.right },
+            blend: rec.blend_mode.key(),
+            opacity: rec.opacity,
+            fill_opacity: 255,
+            clipping: rec.clipping != 0,
+            hidden: rec.flags.hidden(),
+            protect_transparency: rec.flags.transparency_protected(),
+            channels,
+            name: mac_roman_string(&rec.name),
+            ..Default::default()
+        };
+        if let craft_psd::MaskData::Mask(m) = &rec.mask {
+            let rect = Rect { top: m.rect.top, left: m.rect.left, bottom: m.rect.bottom, right: m.rect.right };
+            l.mask = Some(LayerMask { rect, default_color: m.default_color, disabled: m.flags & 2 != 0, inverted: m.flags & 4 != 0 });
+        }
+        for b in &rec.blocks {
+            l.keys.push(b.key);
+            // A malformed block only loses that block's information.
+            let _ = self.layer_block(&mut l, &b.key, &b.data);
+        }
+        l
     }
 
     /// The embedded bytes of linked file `uuid`.
@@ -166,88 +178,6 @@ impl Psd {
             }
             pos = rec_end.div_ceil(4) * 4;
         }
-    }
-
-    fn layer_info(&mut self, data: &[u8], start: usize, end: usize) -> Result<()> {
-        let mut r = Reader::at(&data[..end], start);
-        let count = r.i16()?;
-        self.merged_alpha = count < 0;
-        let n = count.unsigned_abs() as usize;
-        let mut layers = Vec::with_capacity(n);
-        for i in 0..n {
-            layers.push(self.layer_record(&mut r, i)?);
-        }
-        // Channel image data follows in record order.
-        for l in &mut layers {
-            for c in &mut l.channels {
-                c.offset = r.pos;
-                r.skip(c.len)?;
-            }
-        }
-        self.layers = layers;
-        Ok(())
-    }
-
-    fn layer_record(&self, r: &mut Reader, index: usize) -> Result<Layer> {
-        let psb = self.psb;
-        let (top, left, bottom, right) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
-        let nch = r.u16()? as usize;
-        if nch > 64 {
-            return Err(Error::Invalid("channel count".into()));
-        }
-        let mut channels = Vec::with_capacity(nch);
-        for _ in 0..nch {
-            let id = r.i16()?;
-            let len = r.length(psb)?;
-            channels.push(ChannelInfo { id, offset: 0, len });
-        }
-        if r.bytes(4)? != b"8BIM" {
-            return Err(Error::Invalid("layer record signature".into()));
-        }
-        let blend = r.tag()?;
-        let opacity = r.u8()?;
-        let clipping = r.u8()? != 0;
-        let flags = r.u8()?;
-        r.skip(1)?;
-        let extra = r.u32()? as usize;
-        let extra_end = r.pos.checked_add(extra).filter(|&e| e <= r.data.len()).ok_or(Error::Truncated)?;
-        let mut l = Layer {
-            index,
-            rect: Rect { top, left, bottom, right },
-            blend,
-            opacity,
-            fill_opacity: 255,
-            clipping,
-            hidden: flags & 2 != 0,
-            protect_transparency: flags & 1 != 0,
-            channels,
-            ..Default::default()
-        };
-        // Layer mask data.
-        let mlen = r.u32()? as usize;
-        let mstart = r.pos;
-        if mlen >= 18 {
-            let rect = Rect { top: r.i32()?, left: r.i32()?, bottom: r.i32()?, right: r.i32()? };
-            let default_color = r.u8()?;
-            let mflags = r.u8()?;
-            l.mask = Some(LayerMask { rect, default_color, disabled: mflags & 2 != 0, inverted: mflags & 4 != 0 });
-        }
-        r.pos = mstart + mlen;
-        // Blending ranges.
-        let blen = r.u32()? as usize;
-        r.skip(blen)?;
-        l.name = r.pascal(4)?;
-        let mut pos = r.pos;
-        let data = r.data;
-        while let Some((key, start, end)) = next_block(data, &mut pos, extra_end, psb) {
-            l.keys.push(key);
-            let block = &data[start..end];
-            // A malformed block only loses that block's information.
-            let _ = self.layer_block(&mut l, &key, block);
-            pos = end;
-        }
-        r.pos = extra_end;
-        Ok(l)
     }
 
     fn layer_block(&self, l: &mut Layer, key: &[u8; 4], b: &[u8]) -> Result<()> {
@@ -482,33 +412,166 @@ impl Psd {
     }
 }
 
-/// The next additional-information block at `*pos` (signature `8BIM`/`8B64`, key, length):
-/// returns (key, data start, data end). Skips up to 3 padding bytes before a signature.
-fn next_block(data: &[u8], pos: &mut usize, end: usize, psb: bool) -> Option<([u8; 4], usize, usize)> {
-    let mut p = *pos;
-    for _ in 0..4 {
-        if p + 12 > end {
-            return None;
+/// The header, colour mode data and merged image offset of a document whose layer and mask
+/// section cannot be read: `None` when the merged image cannot be reached either.
+fn flattened(data: &[u8]) -> Option<(craft_psd::Header, Vec<u8>, usize)> {
+    let head = craft_psd::head::HeadView::from_bytes(data).ok()?;
+    let at = usize::try_from(head.layer_section_offset).ok()?;
+    let len = if head.header.version.is_psb() {
+        u64::from_be_bytes(data.get(at..at + 8)?.try_into().ok()?)
+    } else {
+        u64::from(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+    };
+    let field = if head.header.version.is_psb() { 8 } else { 4 };
+    let merged = at.checked_add(field)?.checked_add(usize::try_from(len).ok()?)?;
+    (merged.checked_add(2)? <= data.len()).then(|| (head.header.clone(), head.color_mode_data.to_vec(), merged))
+}
+
+/// Linked-file blocks can be most of a file: leave them in the source, read in place.
+fn linked(key: &[u8; 4], _len: u64) -> bool {
+    matches!(key, b"lnk2" | b"lnkD" | b"lnk3" | b"lnkE")
+}
+
+/// Reads `data` with craft-psd. Where that loses what the old reader kept, it reads a copy with
+/// the obstacle taken out, and the [`Splice`] maps the copy's offsets back into `data`:
+/// - a damaged image resource (resources are not part of the model): no resources;
+/// - damaged layer records in the section: none there, so a global `Lr16`/`Lr32`/`Layr` block
+///   can still give the layers;
+/// - a global layer block that starts with its own length (both layouts are accepted), or
+///   that follows up to three stray bytes: the block without them.
+fn read_file(data: &Arc<[u8]>) -> (std::result::Result<craft_psd::PsdFile, craft_psd::PsdError>, Splice) {
+    let read = |d: Arc<[u8]>| craft_psd::PsdFile::from_source_deferring(craft_psd::source::Source::new(d), linked, |_| Ok(false), |_| false).map(|(f, _)| f);
+    let layered = |f: &craft_psd::PsdFile| f.layer_info.as_ref().is_some_and(|i| !i.layers.is_empty());
+    let retry = |copy: Option<(Vec<u8>, Splice)>, accept: &dyn Fn(&craft_psd::PsdFile) -> bool| {
+        let (copy, splice) = copy?;
+        read(copy.into()).ok().filter(|f| accept(f)).map(|f| (f, splice))
+    };
+    let first = read(data.clone());
+    let got = match &first {
+        Ok(f) if layered(f) => None,
+        Ok(_) => retry(prefixed_layer_block(data), &layered),
+        Err(_) => retry(without_resources(data), &|_| true).or_else(|| retry(without_section_layers(data), &layered)),
+    };
+    match got {
+        Some((file, splice)) => (Ok(file), splice),
+        None => (first, Splice::default()),
+    }
+}
+
+/// A big-endian unsigned field of `width` bytes at `at`.
+fn be(data: &[u8], at: usize, width: usize) -> Option<usize> {
+    let b = data.get(at..at.checked_add(width)?)?;
+    usize::try_from(b.iter().fold(0u64, |v, &b| v << 8 | u64::from(b))).ok()
+}
+
+/// The length-field width of the layer section and its long blocks.
+fn field(data: &[u8]) -> usize {
+    if data.get(4..6) == Some(&[0, 2]) { 8 } else { 4 }
+}
+
+fn without_resources(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
+    let res_at = be(data, 26, 4)?.checked_add(30)?;
+    let res_len = be(data, res_at, 4).filter(|&n| n > 0)?;
+    Splice::apply(data, res_at + 4, res_len, &[(res_at, 4)])
+}
+
+fn without_section_layers(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
+    let head = craft_psd::head::HeadView::from_bytes(data).ok()?;
+    let ls = usize::try_from(head.layer_section_offset).ok()?;
+    let w = field(data);
+    let li_at = ls.checked_add(w)?;
+    let li_len = be(data, li_at, w).filter(|&n| n > 0)?;
+    Splice::apply(data, li_at + w, li_len, &[(li_at, w), (ls, w)])
+}
+
+/// The global layer block's repair, found by walking the top-level global blocks by their
+/// declared lengths (so a linked file's payload is never searched): up to three stray bytes
+/// before the first block, or the block's payload starting with its own length.
+fn prefixed_layer_block(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
+    let head = craft_psd::head::HeadView::from_bytes(data).ok()?;
+    let ls = usize::try_from(head.layer_section_offset).ok()?;
+    let w = field(data);
+    let end = be(data, ls, w)?.checked_add(ls + w)?.min(data.len());
+    let li_at = ls + w;
+    let gm_at = be(data, li_at, w)?.checked_add(li_at + w)?;
+    let blocks = be(data, gm_at, 4)?.checked_add(gm_at + 4)?;
+    let mut pos = blocks;
+    let is_sig = |i: usize| matches!(data.get(i..i + 4), Some(b"8BIM" | b"8B64"));
+    // Stray bytes before the first block hide every block from craft-psd.
+    let mut lead = None;
+    while pos < end {
+        let skip = (0..=3).find(|&k| is_sig(pos + k))?;
+        let at = pos + skip;
+        // Leading bytes before the first block are recorded before its key is looked at.
+        if lead.is_none() && pos == blocks && skip > 0 {
+            lead = Some((pos, skip));
         }
-        if &data[p..p + 4] == b"8BIM" || &data[p..p + 4] == b"8B64" {
-            break;
+        let key: [u8; 4] = data.get(at + 4..at + 8)?.try_into().ok()?;
+        let width = if craft_psd::tagged::uses_long_length(head.header.version, &key) { 8 } else { 4 };
+        let len = be(data, at + 8, width)?;
+        let body = at + 8 + width;
+        if matches!(&key, b"Lr16" | b"Lr32" | b"Layr") {
+            if let Some((at, n)) = lead {
+                return Splice::apply(data, at, n, &[(ls, w)]);
+            }
+            // The payload's first field reads as a length that fits in it.
+            be(data, body, w).filter(|&n| n > 0 && n.checked_add(w).is_some_and(|e| e <= len))?;
+            return Splice::apply(data, body, w, &[(at + 8, width), (ls, w)]);
         }
-        p += 1;
+        pos = body.checked_add(len)?;
     }
-    if p + 12 > end || !(&data[p..p + 4] == b"8BIM" || &data[p..p + 4] == b"8B64") {
-        return None;
+    None
+}
+
+/// A copy of the file with one range taken out, and the way from the copy's offsets back to the
+/// original's.
+#[derive(Debug, Clone, Copy, Default)]
+struct Splice {
+    at: u64,
+    removed: u64,
+}
+
+impl Splice {
+    fn map(self, offset: u64) -> u64 {
+        if offset >= self.at { offset + self.removed } else { offset }
     }
-    let mut key = [0u8; 4];
-    key.copy_from_slice(&data[p + 4..p + 8]);
-    let wide =
-        psb && matches!(&key, b"LMsk" | b"Lr16" | b"Lr32" | b"Layr" | b"Mt16" | b"Mt32" | b"Mtrn" | b"Alph" | b"FMsk" | b"lnk2" | b"FEid" | b"FXid" | b"PxSD");
-    let mut r = Reader::at(&data[..end], p + 8);
-    let len = r.length(wide).ok()?;
-    let start = r.pos;
-    let stop = start.checked_add(len)?;
-    if stop > end {
-        return None;
+
+    /// `data` without the `removed` bytes at `at`, the length fields at `fixes` (offset, width;
+    /// all before `at`) shortened to match.
+    fn apply(data: &[u8], at: usize, removed: usize, fixes: &[(usize, usize)]) -> Option<(Vec<u8>, Splice)> {
+        let tail = data.get(at.checked_add(removed)?..)?;
+        let mut copy = Vec::with_capacity(at + tail.len());
+        copy.extend_from_slice(data.get(..at)?);
+        copy.extend_from_slice(tail);
+        for &(f, width) in fixes {
+            let v = (be(&copy, f, width)?.checked_sub(removed)? as u64).to_be_bytes();
+            copy.get_mut(f..f + width)?.copy_from_slice(&v[8 - width..]);
+        }
+        Some((copy, Splice { at: at as u64, removed: removed as u64 }))
     }
-    *pos = stop;
-    Some((key, start, stop))
+}
+
+/// Whether the layer section's (unreadable) layer count is negative, which marks the merged
+/// image's first extra channel as its transparency.
+fn section_merged_alpha(data: &[u8]) -> bool {
+    let Ok(head) = craft_psd::head::HeadView::from_bytes(data) else { return false };
+    let field = if head.header.version.is_psb() { 8 } else { 4 };
+    let Some(at) = usize::try_from(head.layer_section_offset).ok().and_then(|a| a.checked_add(2 * field)) else { return false };
+    let has_info = data.get(at - field..at).is_some_and(|l| l.iter().any(|&b| b != 0));
+    has_info && data.get(at..at + 2).is_some_and(|c| i16::from_be_bytes([c[0], c[1]]) < 0)
+}
+
+/// This crate's error for one from craft-psd.
+fn error(e: &craft_psd::PsdError) -> Error {
+    match e {
+        craft_psd::PsdError::UnexpectedEof { .. } => Error::Truncated,
+        craft_psd::PsdError::InvalidSignature { .. } | craft_psd::PsdError::UnsupportedVersion(_) => Error::NotPsd,
+        craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s.clone()),
+        other => Error::Invalid(other.to_string()),
+    }
+}
+
+/// A Pascal string's bytes in the system (Mac Roman) encoding; ASCII covers the common case.
+fn mac_roman_string(b: &[u8]) -> String {
+    b.iter().map(|&b| if b < 0x80 { b as char } else { super::read::mac_roman(b) }).collect()
 }
