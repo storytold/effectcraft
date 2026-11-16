@@ -19,13 +19,11 @@ impl Psd {
         if !is_psd(&data) {
             return Err(Error::NotPsd);
         }
-        let source = craft_psd::source::Source::new(data.clone());
-        // Linked-file blocks can be most of a file: leave them in the source, read in place.
-        let linked = |key: &[u8; 4], _len: u64| matches!(key, b"lnk2" | b"lnkD" | b"lnk3" | b"lnkE");
-        let (head, file, warnings) = match craft_psd::PsdFile::from_source_deferring(source, linked, |_| Ok(false), |_| false) {
-            Ok((file, _)) => {
+        let (read, shift) = read_file(&data);
+        let (head, file, warnings) = match read {
+            Ok(file) => {
                 // The compression field before the merged image's data.
-                let merged = file.image_data.stored.as_ref().map_or(data.len(), |s| (s.offset as usize).saturating_sub(2));
+                let merged = file.image_data.stored.as_ref().map_or(data.len(), |s| ((s.offset + shift) as usize).saturating_sub(2));
                 ((file.header.clone(), file.color_mode_data.clone(), merged), Some(file), vec![])
             }
             // A damaged layer section must not discard the document: keep the header and the
@@ -60,14 +58,23 @@ impl Psd {
             data: data.clone(),
             merged_offset,
         };
-        let Some(file) = file else { return Ok(psd) };
+        let Some(file) = file else {
+            psd.merged_alpha = section_merged_alpha(&data);
+            return Ok(psd);
+        };
+        if let Some((block, e)) = file.unreadable_layer_block() {
+            // A 16/32-bit file's layers live in a global block; when it is damaged the file reads
+            // as flattened. Its layer count still says whether the merged image has alpha.
+            psd.merged_alpha = block.data.get(..2).is_some_and(|c| i16::from_be_bytes([c[0], c[1]]) < 0);
+            psd.warnings.push(format!("Layers could not be read ({}); only the flattened image is available", error(&e)));
+        }
         if let Some(info) = &file.layer_info {
             psd.merged_alpha = info.merged_alpha;
-            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i)).collect();
+            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, shift)).collect();
         }
         for b in &file.global_blocks {
             if let Some(stored) = b.stored.as_ref().filter(|_| linked(&b.key, 0)) {
-                let start = stored.offset as usize;
+                let start = (stored.offset + shift) as usize;
                 psd.linked_files(&data, start, start.saturating_add(stored.len as usize).min(data.len()));
             }
         }
@@ -75,13 +82,14 @@ impl Psd {
     }
 
     /// One layer record of the model, its additional information read into [`Layer`].
-    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize) -> Layer {
+    /// `shift` moves craft-psd's offsets back into `self.data` (see [`read_file`]).
+    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, shift: u64) -> Layer {
         let channels = rec
             .channels
             .iter()
             .map(|c| match &c.stored {
                 // `ChannelInfo` covers the compression field and the data after it.
-                Some(s) => ChannelInfo { id: c.id, offset: (s.offset as usize).saturating_sub(2), len: s.len as usize + 2 },
+                Some(s) => ChannelInfo { id: c.id, offset: ((s.offset + shift) as usize).saturating_sub(2), len: s.len as usize + 2 },
                 None => ChannelInfo { id: c.id, offset: 0, len: 0 },
             })
             .collect();
@@ -417,6 +425,44 @@ fn flattened(data: &[u8]) -> Option<(craft_psd::Header, Vec<u8>, usize)> {
     let field = if head.header.version.is_psb() { 8 } else { 4 };
     let merged = at.checked_add(field)?.checked_add(usize::try_from(len).ok()?)?;
     (merged.checked_add(2)? <= data.len()).then(|| (head.header.clone(), head.color_mode_data.to_vec(), merged))
+}
+
+/// Linked-file blocks can be most of a file: leave them in the source, read in place.
+fn linked(key: &[u8; 4], _len: u64) -> bool {
+    matches!(key, b"lnk2" | b"lnkD" | b"lnk3" | b"lnkE")
+}
+
+/// Reads `data` with craft-psd. The image resources are not part of the model, so when the file
+/// does not read, it is read again with an empty resource section: a damaged resource must not
+/// cost the layers. The second value is how far that copy's offsets sit before `data`'s.
+fn read_file(data: &Arc<[u8]>) -> (std::result::Result<craft_psd::PsdFile, craft_psd::PsdError>, u64) {
+    let read = |d: Arc<[u8]>| craft_psd::PsdFile::from_source_deferring(craft_psd::source::Source::new(d), linked, |_| Ok(false), |_| false).map(|(f, _)| f);
+    let first = read(data.clone());
+    let be32 = |at: usize| data.get(at..at.checked_add(4)?).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    if first.is_ok() {
+        return (first, 0);
+    }
+    let Some(res_at) = be32(26).and_then(|cmd| cmd.checked_add(30)) else { return (first, 0) };
+    let Some(res_len) = be32(res_at).filter(|&n| n > 0) else { return (first, 0) };
+    let Some(rest) = res_at.checked_add(4 + res_len).and_then(|end| data.get(end..)) else { return (first, 0) };
+    let mut copy = Vec::with_capacity(res_at + 4 + rest.len());
+    copy.extend_from_slice(&data[..res_at]);
+    copy.extend_from_slice(&[0; 4]);
+    copy.extend_from_slice(rest);
+    match read(copy.into()) {
+        Ok(file) => (Ok(file), res_len as u64),
+        Err(_) => (first, 0),
+    }
+}
+
+/// Whether the layer section's (unreadable) layer count is negative, which marks the merged
+/// image's first extra channel as its transparency.
+fn section_merged_alpha(data: &[u8]) -> bool {
+    let Ok(head) = craft_psd::head::HeadView::from_bytes(data) else { return false };
+    let field = if head.header.version.is_psb() { 8 } else { 4 };
+    let Some(at) = usize::try_from(head.layer_section_offset).ok().and_then(|a| a.checked_add(2 * field)) else { return false };
+    let has_info = data.get(at - field..at).is_some_and(|l| l.iter().any(|&b| b != 0));
+    has_info && data.get(at..at + 2).is_some_and(|c| i16::from_be_bytes([c[0], c[1]]) < 0)
 }
 
 /// This crate's error for one from craft-psd.
