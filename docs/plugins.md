@@ -388,7 +388,8 @@ package can't read files, open the network or crash the app.
   [`storytold/effectcraft-plugins`](https://github.com/storytold/effectcraft-plugins) repository;
   packages are added by pull request and reviewed there. The app has no field for another
   catalog; `library.refresh {catalog}` (for plug-in authors testing an entry) takes an `index.json`
-  on GitHub or a local file, and the page then says it shows a test catalog until Refresh.
+  on GitHub or a local file, and the page then says it shows a test catalog until Refresh. A file
+  URL that names a network path (`file:////server/share/…`) is refused.
 * **Nothing is downloaded until you ask.** Fetch Catalog (`library.refresh`) reads the catalog;
   Install (`library.install`) downloads the package's `.wasm`, checks its SHA-256 (and its size, when the
   catalog gives one) against the catalog and loads it. Downloads use the system's `curl`,

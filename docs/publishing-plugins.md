@@ -226,7 +226,9 @@ Make a folder with an `index.json` that holds only your package:
 ```
 
 File URLs are absolute: `file:///home/me/glow-rings/index.json` on Linux and macOS,
-`file:///C:/Users/me/glow-rings/index.json` on Windows. Write a space as `%20`.
+`file:///C:/Users/me/glow-rings/index.json` on Windows. Write a space as `%20`. Separate folders
+with `/`: a file URL that holds a `\` or a percent-encoded `/` or `\`, or names a network path
+(`file:////server/share/…`), is refused.
 
 Use a separate settings folder, so the test doesn't touch your real installation:
 
