@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const REV: &str = "b850981f835f39859077cf62ff4e76462e76167c";
+const REV: &str = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87";
 const PACKAGES: &[(&str, &str)] = &[("craft-pdf", "0.1.0"), ("hayro-syntax", "0.7.2"), ("hayro-jbig2", "0.3.0")];
 
 pub fn run(root: &Path) -> Result<(), String> {
