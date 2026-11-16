@@ -127,6 +127,13 @@ fn spi_files_parse() {
     for (r, g, b) in (0..8).map(|i| (i & 1, (i >> 1) & 1, i >> 2)) {
         spi3d += &format!("{r} {g} {b} {} {} {}\n", r as f32 * 0.5, g, b);
     }
+    let lattice = parse_spi3d(&spi3d).unwrap();
+    assert_eq!(lattice.n1, 0);
+    assert!(lattice.d1.is_empty());
+    assert_eq!(lattice.n3, 2);
+    assert_eq!(lattice.dmin, [0.0; 3]);
+    assert_eq!(lattice.dmax, [1.0; 3]);
+    assert!(parse_spimtx("1 0 0 0 0 1 0 0 0 0 1 0 extra").is_none());
     let x = parse_file(&spi3d, "spi3d").unwrap();
     let o = x.apply([1.0, 0.5, 0.25], 1, false, "");
     assert!((o[0] - 0.5).abs() < 1e-6 && (o[1] - 0.5).abs() < 1e-6 && (o[2] - 0.25).abs() < 1e-6, "{o:?}");
