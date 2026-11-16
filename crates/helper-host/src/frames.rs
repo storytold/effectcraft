@@ -212,7 +212,7 @@ mod tests {
         a.write(&at, &[[0.1, 0.2, 0.3, 0.4], [1.0, 2.0, 3.0, 4.0]]).unwrap();
         assert_eq!(b.read(&at).unwrap()[1], [1.0, 2.0, 3.0, 4.0]);
         assert!(b.write(&at, &[[0.0; 4]]).is_err(), "size mismatch is an error");
-        // A large image goes in parallel slices (the last one shorter): same pixels back.
+        // A large image goes in parallel slices: same pixels back.
         let big = ImageRef { offset: 64 * 3, width: 1023, height: 1025, origin: [0.0; 2], scale: 1.0 };
         let px: Vec<[f32; 4]> = (0..1023 * 1025).map(|i| [i as f32, 1.0, 2.0, 3.0]).collect();
         assert!(px.len() * 16 >= PARALLEL_BYTES);
