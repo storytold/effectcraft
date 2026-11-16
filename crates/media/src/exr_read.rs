@@ -271,7 +271,8 @@ fn read(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest) -> Result<(
         seek::Error::Cancelled => ReadError::Cancelled,
         seek::Error::Io(why) => ReadError::Io(why),
         seek::Error::LimitExceeded(why) => ReadError::TooLarge(format!("its OpenEXR channels need more memory than one file may use ({why})")),
-        seek::Error::Malformed(why) | seek::Error::Unsupported(why) => ReadError::Unreadable(why),
+        seek::Error::Malformed(why) | seek::Error::Unsupported(why) | seek::Error::UnsupportedCompression(why) => ReadError::Unreadable(why),
+        other => ReadError::Unreadable(other.to_string()),
     })?;
     let stats = ReadStats { chunks: planes.stats.chunks, bytes: planes.stats.bytes, lines: planes.stats.lines };
     Ok((planes.planes, stats))

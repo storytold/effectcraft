@@ -132,23 +132,36 @@ fn index_file(src: &mut dyn ReadSeek) -> Result<seek::Index, seek::Error> {
     seek::Index::build(src, &limits(), &|| false)
 }
 
-/// The headers of the OpenEXR `bytes` are safe to hand to a decoder: no part's data window or
-/// block is larger than this reader takes. Damaged headers are left to the decoder to report.
+/// The headers of the OpenEXR `bytes` are safe to hand to a decoder: they can be read and no
+/// part's data window or block is larger than this reader takes (#3271 review). A file this
+/// reader doesn't cover (deep parts, HTJ2K) is left to the decoder; damaged headers, a part too
+/// large and a failed read are refused.
 pub(crate) fn safe_to_decode(bytes: &[u8]) -> bool {
-    !matches!(index_file(&mut std::io::Cursor::new(bytes)), Err(seek::Error::LimitExceeded(_)))
+    matches!(index_file(&mut std::io::Cursor::new(bytes)), Ok(_) | Err(seek::Error::Unsupported(_) | seek::Error::UnsupportedCompression(_)))
+}
+
+/// The channel list of `part` as the `exr` crate's validation took it (#3271): sorted by name,
+/// every sampling factor non-zero and dividing the data window's position and size. The headers
+/// are read leniently, and the crate's decompressors divide by the sampling of every channel of
+/// a chunk, requested or not (where panics abort, in the browser, that would end the app).
+fn channels_valid(part: &PartInfo) -> bool {
+    let w = part.data_window;
+    let divides = |s: usize, pos: i32, size: u32| i64::try_from(s).ok().filter(|s| *s > 0).is_some_and(|s| i64::from(pos) % s == 0 && i64::from(size) % s == 0);
+    let sorted = part.channels.windows(2).all(|pair| pair.first().zip(pair.get(1)).is_some_and(|(a, b)| a.name.as_bytes() <= b.name.as_bytes()));
+    sorted && part.channels.iter().all(|c| divides(c.sampling.0, w.x, w.width) && divides(c.sampling.1, w.y, w.height))
 }
 
 /// Index the OpenEXR file in `src` (identity `stamp`), reading its headers and offset tables
 /// only.
 pub(crate) fn build(src: &mut dyn ReadSeek, stamp: FileStamp) -> Result<ExrIndex, IndexError> {
     let file = index_file(src).map_err(|e| match e {
-        seek::Error::Unsupported(why) if why.contains("HTJ2K") => IndexError::Unsupported(HTJ2K),
+        seek::Error::UnsupportedCompression(name) if name.contains("HTJ2K") => IndexError::Unsupported(HTJ2K),
         seek::Error::Io(_) => IndexError::Io,
         _ => IndexError::Unreadable,
     })?;
     let parts = file.parts();
     // Deep data isn't read (the whole file was refused before).
-    if parts.iter().any(|p| p.deep) {
+    if parts.iter().any(|p| p.deep || !channels_valid(p)) {
         return Err(IndexError::Unreadable);
     }
     let display = file.display();

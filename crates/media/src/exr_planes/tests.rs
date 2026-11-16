@@ -864,9 +864,15 @@ fn a_hostile_data_window_is_refused_not_allocated() {
 fn damaged_files_never_panic() {
     let files = [single_part_zips(), multipart(), write(vec![part(None, &RGBA, (16, 40), Compression::PIZ)], (16, 40))];
     for good in &files {
+        // (the good file indexes and reads whole through the same path)
+        let (ix, mut src) = indexed(good);
+        let all = ReadRequest::full((0..ix.channels.len()).collect());
+        assert!(crate::exr_read::read_planes(&mut src, &ix, &all).0.is_ok());
+        assert!(crate::exr_channels::read_exr_channels(good).is_some());
         let start = chunk_table(good).iter().flatten().map(|(at, _)| *at).min().unwrap() as usize;
         // From a little before the chunks (the offset tables) to the end, in steps.
         let from = start.saturating_sub(64);
+        let (mut reads, mut read_ok) = (0, 0);
         for (i, at) in (from..good.len()).step_by(((good.len() - from) / 150).max(1)).enumerate() {
             let mut bad = good.clone();
             bad[at] ^= [0xff, 0x80, 0x01, 0x7f][i % 4];
@@ -875,9 +881,66 @@ fn damaged_files_never_panic() {
             let mut src = std::io::Cursor::new(bad.as_slice());
             if let Ok(ix) = crate::exr_index::build(&mut src, FileStamp::Virtual) {
                 let req = ReadRequest { rows: Some(3..9), level: 1, ..ReadRequest::full((0..ix.channels.len()).collect()) };
-                let _ = crate::exr_read::read_planes(&mut src, &ix, &req);
+                reads += 1;
+                read_ok += usize::from(crate::exr_read::read_planes(&mut src, &ix, &req).0.is_ok());
             }
         }
+        // Most damage lies in the chunks: the index stands and the reader meets the damage.
+        assert!(reads > 50 && read_ok > 0, "{reads} damaged files indexed, {read_ok} read");
+    }
+}
+
+/// #3271 review (never crash): damaged headers are refused before a decoder sees them
+/// ([`crate::exr_index::safe_to_decode`] guards the `image` crate's decoder), and so is a part
+/// larger than this reader takes; a file the reader doesn't cover but whose headers are sound
+/// (HTJ2K) is left to the decoders to report.
+#[test]
+fn damaged_headers_are_not_safe_to_decode() {
+    let good = write(vec![part(None, &RGBA, (8, 8), Compression::ZIP1)], (8, 8));
+    assert!(crate::exr_index::safe_to_decode(&good));
+    // Cut inside the headers.
+    let cut = good.windows(11).position(|w| w == b"compression").unwrap();
+    assert!(!crate::exr_index::safe_to_decode(&good[..cut]), "headers cut short");
+    // Not an OpenEXR file.
+    let mut magic = good.clone();
+    magic[0] ^= 0xff;
+    assert!(!crate::exr_index::safe_to_decode(&magic), "no signature");
+    // Offset tables longer than the file.
+    let first_chunk = chunk_table(&good)[0][0].0 as usize;
+    assert!(!crate::exr_index::safe_to_decode(&good[..first_chunk - 8]), "tables cut short");
+    assert!(!crate::exr_index::safe_to_decode(&with_data_window_x_max(good.clone(), (1 << 30) - 3)), "a part too large");
+    // HTJ2K (compression 11): sound headers, left to the decoders.
+    let mut htj2k = good.clone();
+    let tag = b"compression\0compression\0\x01\0\0\0";
+    let at = htj2k.windows(tag.len()).position(|w| w == tag).unwrap() + tag.len();
+    htj2k[at] = 11;
+    assert_eq!(
+        crate::exr_index::build(&mut std::io::Cursor::new(htj2k.as_slice()), FileStamp::Virtual).err(),
+        Some(crate::exr_index::IndexError::Unsupported(crate::exr_index::HTJ2K))
+    );
+    assert!(crate::exr_index::safe_to_decode(&htj2k));
+}
+
+/// #3271 review (never crash): the headers are read leniently, so a channel list the `exr`
+/// crate's validation refused (a zero sampling factor, which its decompressors divide by, or
+/// channels out of order) is refused when indexing, before any chunk is decompressed.
+#[test]
+fn an_invalid_channel_list_is_refused() {
+    let good = write(vec![part(None, &[("G", true), ("R", true)], (4, 4), Compression::ZIP1)], (4, 4));
+    let tag = b"channels\0chlist\0";
+    let list = good.windows(tag.len()).position(|w| w == tag).unwrap() + tag.len() + 4;
+    // Each entry: name, NUL, pixel type (4), linear (1), reserved (3), x and y sampling (4 + 4).
+    let mut zero = good.clone();
+    let x_sampling = list + 2 + 4 + 1 + 3;
+    zero[x_sampling..x_sampling + 4].copy_from_slice(&0i32.to_le_bytes());
+    let mut swapped = good.clone();
+    swapped[list] = b'R';
+    swapped[list + 2 + 16] = b'G';
+    assert!(crate::exr_index::build(&mut std::io::Cursor::new(good.as_slice()), FileStamp::Virtual).is_ok());
+    for bad in [zero, swapped] {
+        assert!(crate::exr_index::build(&mut std::io::Cursor::new(bad.as_slice()), FileStamp::Virtual).is_err());
+        assert!(crate::exr_channels::read_exr_channels(&bad).is_none());
+        assert!(crate::exr_channels::layered_image(&bad).is_none());
     }
 }
 
