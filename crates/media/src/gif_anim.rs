@@ -88,6 +88,14 @@ impl Anim {
         if crate::webp_anim::is_webp(bytes) {
             return crate::webp_anim::load(bytes);
         }
+        // The frame reader scans every image descriptor before it checks the canvas: refuse a
+        // logical screen too large to hold first, as the former decoder did.
+        if let Some(&[w0, w1, h0, h1]) = bytes.get(6..10).filter(|_| bytes.starts_with(b"GIF8")) {
+            let (w, h) = (u16::from_le_bytes([w0, w1]), u16::from_le_bytes([h0, h1]));
+            if u64::from(w) * u64::from(h) * 4 > MAX_BYTES as u64 {
+                return Err(MediaError::Unsupported(format!("GIF canvas of {w}×{h} is too large to hold in memory")));
+            }
+        }
         let mut limits = craft_gif::frames::FrameLimits::default();
         limits.max_frames = DECODE_FRAMES;
         limits.max_bytes = MAX_BYTES as u64;
@@ -330,7 +338,7 @@ mod tests {
             }
         }
         let e = super::Anim::load(&out).err().unwrap();
-        assert!(e.to_string().contains("too large"), "{e}");
+        assert!(e.to_string().contains("GIF canvas of 65535×65535 is too large"), "{e}");
     }
 
     /// A 1×1 GIF of `n` frames.
