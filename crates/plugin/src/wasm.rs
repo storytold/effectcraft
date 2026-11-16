@@ -22,6 +22,15 @@ const MAX_MANIFEST: i32 = 1 << 20;
 type RenderFn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64), i32>;
 /// ABI 2: the same call plus the previous and next frame buffers and their layer times.
 type Render2Fn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64, i32, f64, i32, f64, i32), i32>;
+/// Optional `ec_padding(params, nparams, time, scale, layer_w, layer_h) -> pixels`.
+type PaddingFn = TypedFunc<(i32, i32, f64, f64, f64, f64), i32>;
+
+/// `ec_flags` bit 0: the render depends on `time` (the render cache keys the layer on it).
+const FLAG_TIME_VARYING: i32 = 1;
+/// `ec_flags` bit 1: an ABI 2 module reads the previous and next frames.
+const FLAG_NEIGHBOURS: i32 = 2;
+/// The most transparent pixels `ec_padding` may ask for per side.
+const MAX_PADDING: i32 = 4096;
 
 enum Renderer {
     V1(RenderFn),
@@ -34,6 +43,7 @@ struct Inst {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     render: Renderer,
+    padding: Option<PaddingFn>,
 }
 
 /// An instance whose ABI version (and so its render export) is not selected yet.
@@ -50,14 +60,23 @@ impl Pending {
         self.instance.get_typed_func::<P, R>(&self.store, name).map_err(|_| missing(name))
     }
 
+    /// An optional export: `None` when absent, an error when it has the wrong signature.
+    fn optional<P: WasmParams, R: WasmResults>(&self, name: &str) -> Result<Option<TypedFunc<P, R>>, String> {
+        if self.instance.get_export(&self.store, name).is_none() {
+            return Ok(None);
+        }
+        self.func(name).map(Some)
+    }
+
     /// Select the render export for `abi`.
     fn finish(self, abi: u32) -> Result<Inst, String> {
         let render = match abi {
-            1 => Renderer::V1(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render").map_err(|_| missing("ec_render"))?),
-            2 => Renderer::V2(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render2").map_err(|_| missing("ec_render2"))?),
+            1 => Renderer::V1(self.func("ec_render")?),
+            2 => Renderer::V2(self.func("ec_render2")?),
             v => return Err(unsupported(v as i32)),
         };
-        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render })
+        let padding = self.optional("ec_padding")?;
+        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render, padding })
     }
 }
 
@@ -110,6 +129,11 @@ pub struct WasmPlugin {
     source: String,
     /// The WebAssembly ABI the module implements (`ec_api_version`).
     abi: u32,
+    /// `ec_flags` ([`FLAG_TIME_VARYING`], [`FLAG_NEIGHBOURS`]); without the export, both for
+    /// ABI 2 and none for ABI 1.
+    flags: i32,
+    /// Whether the module exports `ec_padding`.
+    pads: bool,
     engine: Engine,
     module: Module,
     /// Idle instances.
@@ -129,6 +153,11 @@ impl WasmPlugin {
         let mut pending = begin(&engine, &module)?;
         let version = pending.func::<(), i32>("ec_api_version")?;
         let abi = abi_of(version.call(&mut pending.store, ()).map_err(err)?)?;
+        let flags = match pending.optional::<(), i32>("ec_flags")? {
+            Some(f) => f.call(&mut pending.store, ()).map_err(err)?,
+            None if abi >= 2 => FLAG_TIME_VARYING | FLAG_NEIGHBOURS,
+            None => 0,
+        };
         let ptr = pending.func::<(), i32>("ec_manifest_ptr")?.call(&mut pending.store, ()).map_err(err)?;
         let len = pending.func::<(), i32>("ec_manifest_len")?.call(&mut pending.store, ()).map_err(err)?;
         if !(0..=MAX_MANIFEST).contains(&len) {
@@ -142,7 +171,13 @@ impl WasmPlugin {
             return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
         }
         let inst = pending.finish(abi)?;
-        Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
+        let pads = inst.padding.is_some();
+        Ok(WasmPlugin { manifest, source: source.to_string(), abi, flags, pads, engine, module, pool: Mutex::new(vec![inst]) })
+    }
+
+    /// Whether `ec_render2` gets the neighbouring frames.
+    fn wants_neighbours(&self) -> bool {
+        self.abi >= 2 && self.flags & FLAG_NEIGHBOURS != 0
     }
 
     /// An idle instance, or a fresh one when the pool is empty.
@@ -160,50 +195,31 @@ impl WasmPlugin {
         }
     }
 
-    /// ABI 1: parameters, then the pixels; `ec_render`.
-    fn render_v1(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
-        let n = frame.pixels.len();
+    /// `ec_padding`, clamped to 0..=[`MAX_PADDING`]; 0 without the export.
+    fn call_padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2]) -> Result<u32, String> {
+        if !self.pads {
+            return Ok(0);
+        }
         let params_bytes = params.flat.len() * 8;
-        let total = params_bytes + n * 16;
-        if total > i32::MAX as usize {
-            return Err("frame too large for a 32-bit plug-in".into());
-        }
         let mut inst = self.take()?;
-        inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * n as u64).map_err(err)?;
-        let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
-        // Parameters, then pixels (little-endian, as WebAssembly memory is).
-        let mut buf: Vec<u8> = Vec::with_capacity(total);
-        for v in params.flat {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        push_pixels(&mut buf, frame.pixels);
-        inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
-        let px_ptr = (base + params_bytes) as i32;
-        let r = match &inst.render {
-            Renderer::V1(f) => f
-                .call(&mut inst.store, (px_ptr, frame.width as i32, frame.height as i32, base as i32, params.flat.len() as i32, time, frame.scale))
-                .map_err(|e| format!("ec_render trapped: {e}")),
-            Renderer::V2(_) => return Err("the module implements WebAssembly ABI 1 but exports ec_render2".into()),
-        };
-        let r = match r {
-            Ok(0) => {
-                inst.memory.read(&inst.store, base + params_bytes, &mut buf[params_bytes..]).map_err(err)?;
-                read_pixels(&buf[params_bytes..], frame.pixels);
-                Ok(())
-            }
-            Ok(code) => Err(format!("ec_render returned error {code}")),
-            Err(e) => Err(e),
-        };
-        if r.is_ok() {
-            self.give_back(inst);
-        }
-        r
+        let Some(f) = inst.padding else { return Ok(0) };
+        inst.store.set_fuel(FUEL_BASE).map_err(err)?;
+        let base = inst.alloc.call(&mut inst.store, params_bytes as i32).map_err(err)? as u32 as usize;
+        let mem = inst.memory.data_mut(&mut inst.store);
+        let dst = base.checked_add(params_bytes).and_then(|end| mem.get_mut(base..end)).ok_or("ec_alloc returned a buffer out of bounds")?;
+        write_f64s(dst, params.flat);
+        let pad = f
+            .call(&mut inst.store, (base as i32, params.flat.len() as i32, time, scale, layer_size[0], layer_size[1]))
+            .map_err(|e| format!("ec_padding trapped: {e}"))?;
+        self.give_back(inst);
+        Ok(pad.clamp(0, MAX_PADDING) as u32)
     }
 
-    /// ABI 2: parameters, the current frame, then the previous and next frames; `ec_render2`.
-    /// The neighbour buffers are always allocated (zeroed when absent), so a module can read
-    /// both without a null check; `flags` says which hold real frames.
-    fn render_v2(
+    /// Parameters, the current frame and (for modules that read them) the previous and next
+    /// frames in one buffer, then the render export. A module that reads the neighbours always
+    /// gets both buffers (zeroed when a frame does not exist), so it can read them without a
+    /// null check; `flags` says which hold real frames. Other modules get null pointers.
+    fn render_with(
         &self,
         frame: &mut PluginFrame,
         params: &PluginParams,
@@ -213,94 +229,82 @@ impl WasmPlugin {
     ) -> Result<(), String> {
         let n = frame.pixels.len();
         let params_bytes = params.flat.len() * 8;
-        let frame_bytes = n * 16;
-        let total = params_bytes + frame_bytes * 3;
-        if total > i32::MAX as usize {
-            return Err("frame too large for a 32-bit plug-in".into());
-        }
-        let prev_px = prev.map(|(t, img)| (t, img.on_grid(frame.width, frame.height, frame.origin, frame.scale)));
-        let next_px = next.map(|(t, img)| (t, img.on_grid(frame.width, frame.height, frame.origin, frame.scale)));
-        let prev = prev_px.as_ref().filter(|(_, px)| px.len() == n);
-        let next = next_px.as_ref().filter(|(_, px)| px.len() == n);
+        let neighbours = self.wants_neighbours();
+        let frames = if neighbours { 3 } else { 1 };
+        let frame_bytes = n.checked_mul(16).ok_or("frame too large")?;
+        let total = frame_bytes
+            .checked_mul(frames)
+            .and_then(|b| b.checked_add(params_bytes))
+            .filter(|t| *t <= i32::MAX as usize)
+            .ok_or("frame too large for a 32-bit plug-in")?;
+        let on_grid = |(t, img): (f64, &PluginImage)| (t, img.on_grid(frame.width, frame.height, frame.origin, frame.scale));
+        let prev = prev.filter(|_| neighbours).map(on_grid).filter(|(_, px)| px.len() == n);
+        let next = next.filter(|_| neighbours).map(on_grid).filter(|(_, px)| px.len() == n);
         let mut inst = self.take()?;
-        inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * (n as u64 * 3)).map_err(err)?;
+        inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * (n * frames) as u64).map_err(err)?;
         let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
-        let mut buf: Vec<u8> = Vec::with_capacity(total);
-        for v in params.flat {
-            buf.extend_from_slice(&v.to_le_bytes());
+        // Straight into the module's memory, little-endian as WebAssembly memory is.
+        let mem = inst.memory.data_mut(&mut inst.store);
+        let buf = base.checked_add(total).and_then(|end| mem.get_mut(base..end)).ok_or("ec_alloc returned a buffer out of bounds")?;
+        let (p, rest) = buf.split_at_mut_checked(params_bytes).ok_or("buffer too small")?;
+        write_f64s(p, params.flat);
+        let (cur, rest) = rest.split_at_mut_checked(frame_bytes).ok_or("buffer too small")?;
+        write_pixels(cur, frame.pixels);
+        if neighbours {
+            let (a, b) = rest.split_at_mut_checked(frame_bytes).ok_or("buffer too small")?;
+            write_neighbour(a, prev.as_ref());
+            write_neighbour(b, next.as_ref());
         }
-        push_pixels(&mut buf, frame.pixels);
-        push_neighbour(&mut buf, prev, frame_bytes);
-        push_neighbour(&mut buf, next, frame_bytes);
-        inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
-        let px_ptr = (base + params_bytes) as i32;
-        let prev_ptr = (base + params_bytes + frame_bytes) as i32;
-        let next_ptr = (base + params_bytes + frame_bytes * 2) as i32;
-        let flags = i32::from(prev.is_some()) | (i32::from(next.is_some()) << 1);
-        let prev_time = prev.map_or(0.0, |(t, _)| *t);
-        let next_time = next.map_or(0.0, |(t, _)| *t);
-        let r = match &inst.render {
-            Renderer::V2(f) => f
-                .call(
-                    &mut inst.store,
-                    (
-                        px_ptr,
-                        frame.width as i32,
-                        frame.height as i32,
-                        base as i32,
-                        params.flat.len() as i32,
-                        time,
-                        frame.scale,
-                        prev_ptr,
-                        prev_time,
-                        next_ptr,
-                        next_time,
-                        flags,
-                    ),
-                )
-                .map_err(|e| format!("ec_render2 trapped: {e}")),
-            Renderer::V1(_) => return Err("the module implements WebAssembly ABI 2 but exports ec_render".into()),
-        };
-        let r = match r {
-            Ok(0) => {
-                let mut out = vec![0u8; frame_bytes];
-                inst.memory.read(&inst.store, base + params_bytes, &mut out).map_err(err)?;
-                read_pixels(&out, frame.pixels);
-                Ok(())
+        // `base + total` is inside memory (at most 1 GiB), so these pointers fit an i32.
+        let px = base + params_bytes;
+        let (w, h, np) = (frame.width as i32, frame.height as i32, params.flat.len() as i32);
+        let (name, r) = match &inst.render {
+            Renderer::V1(f) => ("ec_render", f.call(&mut inst.store, (px as i32, w, h, base as i32, np, time, frame.scale))),
+            Renderer::V2(f) => {
+                let (prev_ptr, next_ptr) = if neighbours { ((px + frame_bytes) as i32, (px + frame_bytes * 2) as i32) } else { (0, 0) };
+                let flags = i32::from(prev.is_some()) | (i32::from(next.is_some()) << 1);
+                let prev_time = prev.as_ref().map_or(0.0, |(t, _)| *t);
+                let next_time = next.as_ref().map_or(0.0, |(t, _)| *t);
+                ("ec_render2", f.call(&mut inst.store, (px as i32, w, h, base as i32, np, time, frame.scale, prev_ptr, prev_time, next_ptr, next_time, flags)))
             }
-            Ok(code) => Err(format!("ec_render2 returned error {code}")),
-            Err(e) => Err(e),
         };
-        if r.is_ok() {
-            self.give_back(inst);
+        match r.map_err(|e| format!("{name} trapped: {e}"))? {
+            0 => {}
+            code => return Err(format!("{name} returned error {code}")),
         }
-        r
+        let out = inst.memory.data(&inst.store).get(px..px + frame_bytes).ok_or("ec_alloc returned a buffer out of bounds")?;
+        read_pixels(out, frame.pixels);
+        self.give_back(inst);
+        Ok(())
     }
 }
 
-/// Append pixels to the little-endian buffer the module reads.
-fn push_pixels(buf: &mut Vec<u8>, px: &[[f32; 4]]) {
-    for p in px {
-        for c in p {
-            buf.extend_from_slice(&c.to_le_bytes());
-        }
+/// Write `f64`s little-endian into `dst`.
+fn write_f64s(dst: &mut [u8], v: &[f64]) {
+    for (d, x) in dst.as_chunks_mut::<8>().0.iter_mut().zip(v) {
+        *d = x.to_le_bytes();
     }
 }
 
-/// The neighbour's pixels, or `frame_bytes` zeroed bytes when there is no frame.
-fn push_neighbour(buf: &mut Vec<u8>, neighbour: Option<&(f64, Vec<[f32; 4]>)>, frame_bytes: usize) {
+/// Write pixels little-endian into `dst`.
+fn write_pixels(dst: &mut [u8], px: &[[f32; 4]]) {
+    for (d, c) in dst.as_chunks_mut::<4>().0.iter_mut().zip(px.as_flattened()) {
+        *d = c.to_le_bytes();
+    }
+}
+
+/// The neighbour's pixels, or zeros when there is no frame.
+fn write_neighbour(dst: &mut [u8], neighbour: Option<&(f64, Vec<[f32; 4]>)>) {
     match neighbour {
-        Some((_, px)) => push_pixels(buf, px),
-        None => buf.resize(buf.len() + frame_bytes, 0),
+        Some((_, px)) => write_pixels(dst, px),
+        None => dst.fill(0),
     }
 }
 
 /// Read the little-endian pixels the module wrote back.
-fn read_pixels(bytes: &[u8], pixels: &mut [[f32; 4]]) {
-    for (px, b) in pixels.iter_mut().zip(bytes.as_chunks::<16>().0.iter()) {
-        for (c, v) in px.iter_mut().zip(b.as_chunks::<4>().0.iter()) {
-            *c = f32::from_le_bytes([v[0], v[1], v[2], v[3]]);
-        }
+fn read_pixels(src: &[u8], pixels: &mut [[f32; 4]]) {
+    for (c, s) in pixels.as_flattened_mut().iter_mut().zip(src.as_chunks::<4>().0) {
+        *c = f32::from_le_bytes(*s);
     }
 }
 
@@ -328,23 +332,26 @@ impl EffectPlugin for WasmPlugin {
     }
 
     fn reads_other_times(&self) -> bool {
-        self.abi >= 2
+        self.flags & (FLAG_TIME_VARYING | FLAG_NEIGHBOURS) != 0
+    }
+
+    fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], _instance_key: u64) -> u32 {
+        // A failing `ec_padding` pads nothing; the render reports the module's errors.
+        self.call_padding(params, time, scale, layer_size).unwrap_or(0)
     }
 
     fn render(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
-        if self.abi == 1 { self.render_v1(frame, params, time) } else { self.render_v2(frame, params, time, None, None) }
+        self.render_with(frame, params, time, None, None)
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {
-        if self.abi == 1 {
-            return self.render_v1(frame, params, time);
+        if !self.wants_neighbours() {
+            return self.render_with(frame, params, time, None, None);
         }
         let (prev_time, next_time) = neighbour_times(time, host.frame_rate());
         let prev = host.input_at(prev_time);
         let next = host.input_at(next_time);
-        let prev = prev.as_ref().map(|img| (prev_time, img));
-        let next = next.as_ref().map(|img| (next_time, img));
-        self.render_v2(frame, params, time, prev, next)
+        self.render_with(frame, params, time, prev.as_ref().map(|img| (prev_time, img)), next.as_ref().map(|img| (next_time, img)))
     }
 }
 

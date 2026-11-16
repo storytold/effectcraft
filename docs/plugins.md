@@ -229,6 +229,8 @@ A module with **no imports** exports:
 | `ec_alloc` | `(bytes: i32) -> i32` | a buffer of at least `bytes` bytes, 8-byte aligned; it may reuse the previous one |
 | `ec_render` (ABI 1) | `(pixels: i32, width: i32, height: i32, params: i32, nparams: i32, time: f64, scale: f64) -> i32` | process the pixels in place; return 0 on success |
 | `ec_render2` (ABI 2) | `ec_render`'s arguments, then `prev: i32, prev_time: f64, next: i32, next_time: f64, flags: i32` | the same, with the neighbouring frames; return 0 on success |
+| `ec_padding` (optional) | `(params: i32, nparams: i32, time: f64, scale: f64, layer_w: f64, layer_h: f64) -> i32` | transparent buffer pixels to add on every side before rendering (0–4096) |
+| `ec_flags` (optional) | `() -> i32` | bit 0: the render depends on `time`; bit 1: ABI 2 reads the neighbouring frames |
 
 For each frame the host calls `ec_alloc` once for a buffer holding the parameters (`nparams`
 little-endian `f64`s) followed by the pixels (`width × height × 4` little-endian `f32`s,
@@ -244,6 +246,19 @@ when absent). The ABI version is the module's `ec_api_version` and is independen
 manifest's `api` (the native plug-in API): a module can use ABI 2 while its manifest says
 `"api": 1`. Because an ABI 2 module reads other times, its layer is keyed on the layer time in
 the render cache; ABI 1 modules keep the time-independent key.
+
+`ec_flags`, read once at load, refines that. Bit 0 (time-varying) keys the layer on the layer
+time without anything else, for effects that animate by themselves (shimmer, noise evolution).
+Bit 1 (neighbours) makes the host fetch the neighbouring frames for `ec_render2`; without it
+`prev` and `next` are 0, `flags` is 0 and only the current frame is copied, which saves two
+renders of the layer and two frame copies per frame. Without the export an ABI 2 module gets
+both bits and an ABI 1 module neither, as before. Bit 1 means nothing to an ABI 1 module.
+
+`ec_padding` is called before each render with the same parameters (`time` in layer seconds,
+`scale` in buffer pixels per layer pixel, `layer_w` × `layer_h` the layer's size in layer pixels)
+and returns how many transparent pixels to add on every side of the buffer, so rays, glows and
+blurs can draw past the layer's bounds. Points already account for the padding. The answer is
+clamped to 0–4096; a trap pads nothing. Without the export nothing is padded.
 
 Each call gets a fuel budget proportional to the frame size; a module that loops forever stops
 with an error instead of hanging the app.
@@ -375,7 +390,9 @@ The API version is checked when a plug-in loads: this build implements plug-in A
 WebAssembly ABI 1 and 2; a manifest or module for another version is refused with a message.
 ABI 1 modules load and render unchanged; ABI 2 modules add `ec_render2` and the neighbouring
 frames. Within a version the contract above does not change; additions (new parameter types,
-new optional exports) bump the version.
+new required exports) bump the version. Optional exports that an older host can safely ignore
+(`ec_padding`, `ec_flags`) do not: such a host renders the module as before, clipped to the layer
+and keyed as its ABI says.
 
 ## Plug-in Library
 

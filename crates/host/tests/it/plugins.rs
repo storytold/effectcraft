@@ -274,6 +274,87 @@ pub(super) fn wat_plugin(id: &str, api: i32, render: &str) -> String {
     )
 }
 
+/// A plug-in with one slider (`amount`) that fills its whole
+/// buffer with opaque-red × amount and asks for 5 pixels of padding.
+fn wat_fill_plugin(id: &str) -> String {
+    let manifest = format!(
+        r#"{{"api":1,"id":"{id}","name":"Host {id}","category":"Test Plug-ins","version":"1","params":[{{"id":"amount","name":"Amount","type":"slider","default":1,"min":0,"max":1}}]}}"#
+    );
+    let len = manifest.len();
+    let escaped = manifest.replace('"', "\\\"");
+    format!(
+        r#"(module
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (func (export "ec_api_version") (result i32) i32.const 1)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_padding") (param i32 i32 f64 f64 f64 f64) (result i32) i32.const 5)
+  (func (export "ec_render") (param $px i32) (param $w i32) (param $h i32) (param $p i32) (param i32 f64 f64) (result i32)
+    (local $end i32) (local $a f32)
+    local.get $p
+    f64.load
+    f32.demote_f64
+    local.set $a
+    local.get $px
+    local.get $w
+    local.get $h
+    i32.mul
+    i32.const 16
+    i32.mul
+    i32.add
+    local.set $end
+    block $done
+      loop $l
+        local.get $px
+        local.get $end
+        i32.ge_u
+        br_if $done
+        local.get $px
+        local.get $a
+        f32.store
+        local.get $px
+        f32.const 0
+        f32.store offset=4
+        local.get $px
+        f32.const 0
+        f32.store offset=8
+        local.get $px
+        local.get $a
+        f32.store offset=12
+        local.get $px
+        i32.const 16
+        i32.add
+        local.set $px
+        br $l
+      end
+    end
+    i32.const 0))"#
+    )
+}
+
+/// `ec_padding` lets a WebAssembly plug-in draw past the layer's bounds.
+#[test]
+fn wasm_plugins_draw_past_the_layer_with_ec_padding() {
+    let mut s = effectcraft_host::session();
+    let comp = s.execute("comp.new", json!({"name": "P", "width": 40, "height": 20, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+    // A 20 × 10 solid in the middle: x 10..30, y 5..15.
+    let l = s.execute("layer.newSolid", json!({"color": [0.0, 0.0, 1.0], "width": 20, "height": 10})).unwrap()["layer"].as_u64().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let wasm = dir.path().join("fill.wasm");
+    std::fs::write(&wasm, wat_fill_plugin("org.test.host.fill")).unwrap();
+    s.execute("effect.plugins.load", json!({"path": wasm.to_string_lossy()})).unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.host.fill"})).unwrap();
+    let at = |s: &Session, x: i64, y: i64| s.render(effectcraft_engine::project::ItemId(comp), Tick::ZERO, Default::default()).get(x, y);
+    assert_eq!(at(&s, 20, 10), [1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(at(&s, 7, 10), [1.0, 0.0, 0.0, 1.0], "padding: drawn 3 pixels left of the layer");
+    assert_eq!(at(&s, 2, 10)[3], 0.0, "beyond the 5 pixels of padding");
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/amount", "value": 0.5})).unwrap();
+    let p = at(&s, 20, 10);
+    assert!((p[0] - 0.5).abs() < 0.01 && (p[3] - 0.5).abs() < 0.01, "{p:?}");
+}
+
 #[test]
 fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
     let guard = tempfile::tempdir().unwrap();
