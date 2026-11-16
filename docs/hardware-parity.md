@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-11-16 · **Change:** minor (16 November: Linux tested on an NVIDIA RTX 3060: the GPU tests pass and #1319 doesn't reproduce; earlier change: minor (Content-Aware Fill's PatchMatch and flow search on the GPU)) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-11-16 · **Change:** minor (16 November: Linux tested on an NVIDIA RTX 3060: 318 of 319 GPU tests pass (the failure is OpenGL device creation) and #1319 doesn't reproduce; earlier change: minor (Content-Aware Fill's PatchMatch and flow search on the GPU)) · **Target:** Adobe After Effects 2026
 
 Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
