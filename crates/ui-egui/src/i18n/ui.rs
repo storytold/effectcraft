@@ -2804,6 +2804,35 @@ const HEBREW: &[(&str, &str)] = &[
     ("Offset:", "היסט:"),
     ("Spacing:", "מרווח:"),
 
+    // Original English callsites: Essential Graphics, Effects & Presets, and keyframe dialogs (Hebrew draft).
+    ("Open a composition to build Essential Graphics", "פתחו קומפוזיציה כדי ליצור גרפיקה חיונית"),
+    ("Primary:", "קומפוזיציה ראשית:"),
+    ("Solo Supported Properties", "בידוד מאפיינים נתמכים"),
+    ("Template name", "שם התבנית"),
+    ("Drag properties here from the timeline,\nor use Animation > Add Property to Essential Graphics.", "גררו לכאן מאפיינים מציר הזמן,\nאו בחרו אנימציה > הוספת מאפיין לגרפיקה חיונית."),
+    ("Add Selected As", "הוספת הבחירה בתור"),
+    ("Media Replacement", "החלפת מדיה"),
+    ("Export Template…", "ייצוא תבנית…"),
+    ("Add Mirror", "הוספת שיקוף"),
+    ("Link Selected Property", "קישור המאפיין שנבחר"),
+    ("Unlink {}", "ביטול הקישור ל־\u{2068}{}\u{2069}"),
+    ("Essential Properties — {}", "מאפיינים חיוניים — \u{2068}{}\u{2069}"),
+    ("Push All to Comp", "החלת כל המאפיינים על הקומפוזיציה"),
+    ("Revert All", "ביטול כל השינויים"),
+    ("Copy Presets Folder Path", "העתקת הנתיב לתיקיית הקביעות המוגדרות מראש"),
+    ("Search effects and presets", "חיפוש אפקטים וקביעות מוגדרות מראש"),
+    ("No matching effects or presets", "לא נמצאו אפקטים או קביעות מוגדרות מראש התואמים לחיפוש"),
+    ("Speed:", "מהירות:"),
+    ("Influence:", "השפעה:"),
+    ("Continuous (Lock Outgoing to Incoming)", "רציף (נעילת הערך היוצא לערך הנכנס)"),
+    ("Temporal Interpolation:", "אינטרפולציה בזמן:"),
+    ("Spatial Interpolation:", "אינטרפולציה במרחב:"),
+    ("Roving:", "נדידה:"),
+    ("Stretch", "מתיחה"),
+    ("Original Duration:", "משך מקורי:"),
+    ("Stretch Factor:", "מקדם מתיחה:"),
+    ("Hold In Place", "קיבוע במקום"),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -11663,6 +11692,60 @@ mod tests {
             );
             let hebrew = hebrew.unwrap_or("");
             assert_eq!(english.matches("{}").count(), hebrew.matches("{}").count(), "{english:?}: placeholder mismatch");
+        }
+    }
+
+    /// Guard the exact original English callsites and placeholder parity of the Hebrew increment.
+    #[test]
+    fn hebrew_essential_keyframe_and_presets_controls_match_live_english_sources() {
+        let essential = include_str!("../panels/essential.rs");
+        let keyframes = include_str!("../panels/key_dialogs.rs");
+        let presets = include_str!("../panels/effects_presets.rs");
+        for (english, source) in [
+            ("Open a composition to build Essential Graphics", essential),
+            ("Primary:", essential),
+            ("Solo Supported Properties", essential),
+            ("Template name", essential),
+            ("Drag properties here from the timeline,\nor use Animation > Add Property to Essential Graphics.", essential),
+            ("Add Selected As", essential),
+            ("Media Replacement", essential),
+            ("Export Template…", essential),
+            ("Add Mirror", essential),
+            ("Link Selected Property", essential),
+            ("Unlink {}", essential),
+            ("Essential Properties — {}", essential),
+            ("Push All to Comp", essential),
+            ("Revert All", essential),
+            ("Copy Presets Folder Path", presets),
+            ("Search effects and presets", presets),
+            ("No matching effects or presets", presets),
+            ("Speed:", keyframes),
+            ("Influence:", keyframes),
+            ("Continuous (Lock Outgoing to Incoming)", keyframes),
+            ("Temporal Interpolation:", keyframes),
+            ("Spatial Interpolation:", keyframes),
+            ("Roving:", keyframes),
+            ("Stretch", keyframes),
+            ("Original Duration:", keyframes),
+            ("Stretch Factor:", keyframes),
+            ("Hold In Place", keyframes),
+        ] {
+            let direct = format!("tr({english:?})");
+            let formatted = format!("tr_args({english:?},");
+            assert!(
+                source.contains(&direct) || source.contains(&formatted),
+                "{english:?} is no longer used by its original English UI panel"
+            );
+            let hebrew = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, translated)| *translated);
+            assert!(
+                hebrew.is_some_and(|value| value.chars().any(|c| ('א'..='ת').contains(&c))),
+                "Missing Hebrew UI row: {english:?}"
+            );
+            assert_eq!(
+                english.matches("{}").count(),
+                hebrew.unwrap_or("").matches("{}").count(),
+                "{english:?}: placeholder count mismatch"
+            );
         }
     }
 
