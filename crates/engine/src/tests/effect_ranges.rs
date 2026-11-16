@@ -60,6 +60,7 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3471, "ec.distort.transform", "scaleHeight", -30000.0, 30000.0),
     (3471, "ec.distort.transform", "scaleWidth", -30000.0, 30000.0),
     (3470, "ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 0.0, 100000.0),
+    (3469, "ec.distort.turbulentdisplace", "amount", -10000.0, 10000.0),
 ];
 
 fn path(effect: &str, param: &str) -> String {
