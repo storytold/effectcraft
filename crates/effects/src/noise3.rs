@@ -247,7 +247,7 @@ impl Fractal {
             perspective: pr.b("transform/perspectiveOffset"),
             octaves: pr.f("complexity").clamp(1.0, 20.0) as f32,
             influence: (pr.f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0),
-            sub_scaling: (pr.f("subSettings/subScaling") as f32 / 100.0).clamp(0.1, 1.0),
+            sub_scaling: (pr.f("subSettings/subScaling") as f32 / 100.0).clamp(0.1, 100.0),
             sub_rotation: (pr.f("subSettings/subRotation") as f32).to_radians(),
             sub_offset: [(so[0] * b.scale) as f32, (so[1] * b.scale) as f32],
             center_subscale: pr.b("subSettings/centerSubscale"),
@@ -607,6 +607,21 @@ mod tests {
             matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. } if *min == 10.0 && *max == 10000.0 && *slider_min == 25.0 && *slider_max == 100.0),
             "{ui:?}"
         );
+    }
+
+    /// #3486: the renderer used to clamp Sub Scaling at 100 %, so 200 rendered as 100. The
+    /// setting now keeps the whole accepted 10..10000 range, for Turbulent Noise too (it shares
+    /// the parameters and the same renderer setting), and the output stays finite at both ends.
+    #[test]
+    fn sub_scaling_above_100_changes_the_noise_and_stays_finite() {
+        let at = |id: &str, v: f64| run(id, &[("subSettings/subScaling", num(v))]);
+        assert_ne!(at("ec.noise.fractal", 100.0), at("ec.noise.fractal", 200.0));
+        assert_ne!(at("ec.noise.turbulent", 100.0), at("ec.noise.turbulent", 200.0));
+        for id in ["ec.noise.fractal", "ec.noise.turbulent"] {
+            for v in [10.0, 100.0, 200.0, 10_000.0] {
+                assert!(at(id, v).data.iter().all(|p| p.iter().all(|c| c.is_finite())), "{id} at {v}: non-finite output");
+            }
+        }
     }
 
     #[test]
