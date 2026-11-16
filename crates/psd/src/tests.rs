@@ -1,5 +1,6 @@
 use super::write::*;
 use super::*;
+use crate::pixels::srgb_encode;
 
 mod integration;
 mod opt;
@@ -563,4 +564,33 @@ fn rows_too_wide_for_rle_are_written_raw() {
     assert_eq!(c.data.len(), 20_000);
     assert!(c.data.iter().all(|px| *px == want), "{:?} vs {want:?}", c.data[0]);
     assert!(p.layer_pixels(0, false).is_ok());
+}
+
+#[test]
+fn written_32_bit_color_samples_keep_their_range() {
+    // The reader keeps finite 32-bit samples outside 0..1; the writer must be able to
+    // produce those fixtures. Integer depths stay clamped. A layer is present so the
+    // merged transparency flag is set and alpha is read back.
+    let want = [2.0, -0.5, 0.25, 1.5];
+    let mut d = WDoc::new(1, 1);
+    d.depth = 32;
+    d.rle = false;
+    d.composite = Some(vec![want]);
+    d.layers.push(WLayer::solid("HDR", Rect::new(0, 0, 1, 1), want));
+    let bytes = write(&d);
+    for v in want {
+        assert!(bytes.windows(4).any(|w| w == v.to_be_bytes()), "missing the {v} sample");
+    }
+    let p = Psd::parse(bytes).expect("parse");
+    assert!(p.merged_alpha);
+    let c = p.composite().expect("composite");
+    assert_eq!(c.data[0], [srgb_encode(2.0), srgb_encode(-0.5), srgb_encode(0.25), 1.5]);
+    assert_eq!(p.layer_pixels(0, false).expect("layer").data[0], c.data[0]);
+
+    let mut d8 = WDoc::new(1, 1);
+    d8.composite = Some(vec![want]);
+    d8.layers.push(WLayer::solid("HDR", Rect::new(0, 0, 1, 1), want));
+    let p8 = Psd::parse(write(&d8)).expect("parse 8-bit");
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+    assert_eq!(p8.composite().expect("composite").data[0], [q(2.0), q(-0.5), q(0.25), q(1.5)]);
 }

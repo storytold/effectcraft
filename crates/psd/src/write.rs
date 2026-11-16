@@ -10,8 +10,9 @@ use craft_psd::{
     BlendMode, BlendingRanges, ChannelData, Compression, GlobalLayerMask, Header, ImageData, LayerFlags, LayerInfoPlacement, MaskData, PsdFile, Version,
 };
 
-use crate::descriptor::{self, DValue, Descriptor, put_u16, put_u32, put_utf16};
-use crate::{ColorMode, Rect, Section, engine_data};
+use crate::descriptor::{self, put_u16, put_u32, put_utf16, DValue, Descriptor};
+use crate::limits::finite_sample;
+use crate::{engine_data, ColorMode, Rect, Section};
 
 /// A layer mask for [`WLayer`].
 #[derive(Clone, Debug)]
@@ -127,7 +128,11 @@ fn mode_channels(mode: ColorMode, p: [f32; 4]) -> Vec<f32> {
         ColorMode::Cmyk => {
             // Stored values are inverted ink amounts: k = max, c = r / max (reader: r = c * k).
             let m = p[0].max(p[1]).max(p[2]);
-            if m <= 0.0 { vec![0.0, 0.0, 0.0, 0.0] } else { vec![p[0] / m, p[1] / m, p[2] / m, m] }
+            if m <= 0.0 {
+                vec![0.0, 0.0, 0.0, 0.0]
+            } else {
+                vec![p[0] / m, p[1] / m, p[2] / m, m]
+            }
         }
         ColorMode::Grayscale => vec![p[0]],
         _ => vec![p[0], p[1], p[2]],
@@ -137,7 +142,9 @@ fn mode_channels(mode: ColorMode, p: [f32; 4]) -> Vec<f32> {
 fn encode_samples(v: &[f32], depth: u16) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * usize::from(depth.div_ceil(8)));
     for &x in v {
-        let x = x.clamp(0.0, 1.0);
+        // Integer depths are stored in 0..1. 32-bit documents keep finite samples
+        // outside that range (HDR); NaN and infinities use the reader's mapping.
+        let x = if depth == 32 { finite_sample(x) } else { x.clamp(0.0, 1.0) };
         if depth == 32 {
             out.extend_from_slice(&x.to_be_bytes());
         } else if depth == 16 {
@@ -151,7 +158,11 @@ fn encode_samples(v: &[f32], depth: u16) -> Vec<u8> {
 
 /// The layer and merged-image compression of `doc`.
 fn compression(doc: &WDoc) -> Compression {
-    if doc.rle { Compression::Rle } else { Compression::Raw }
+    if doc.rle {
+        Compression::Rle
+    } else {
+        Compression::Raw
+    }
 }
 
 /// One channel of a `w`×`h` plane, encoded by craft-psd. An empty plane is written raw.
