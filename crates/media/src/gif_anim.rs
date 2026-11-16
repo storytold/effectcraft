@@ -24,6 +24,10 @@ pub(crate) const MAX_BYTES: usize = 256 << 20;
 /// Frames read from a GIF's or animated WebP's headers when probing.
 pub(crate) const MAX_FRAMES: usize = 100_000;
 
+/// Frames kept when decoding a GIF or animated WebP: all of them. Only [`MAX_BYTES`] and the
+/// canvas budget bound decoding, as before the shared frame readers; [`MAX_FRAMES`] bounds probing.
+pub(crate) const DECODE_FRAMES: usize = usize::MAX;
+
 /// Whether `f` is an animated GIF or WebP imported by [`probe`] or [`crate::webp_anim::probe`]:
 /// its frames come from an [`Anim`].
 pub(crate) fn is_animated(f: &Footage) -> bool {
@@ -85,7 +89,7 @@ impl Anim {
             return crate::webp_anim::load(bytes);
         }
         let mut limits = craft_gif::frames::FrameLimits::default();
-        limits.max_frames = MAX_FRAMES;
+        limits.max_frames = DECODE_FRAMES;
         limits.max_bytes = MAX_BYTES as u64;
         limits.max_canvas_bytes = MAX_BYTES as u64;
         limits.max_decode_bytes = Some(MAX_BYTES as u64);
@@ -119,6 +123,12 @@ impl Anim {
             frames.push(DynamicImage::ImageRgba8(image));
         }
         Anim::new(frames, starts).ok_or_else(|| MediaError::Decode("GIF: no frames".into()))
+    }
+
+    /// How many frames were decoded.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.frames.len()
     }
 
     /// The frame shown at source time `t` (the first one before the start, the last one past the
@@ -321,5 +331,27 @@ mod tests {
         }
         let e = super::Anim::load(&out).err().unwrap();
         assert!(e.to_string().contains("too large"), "{e}");
+    }
+
+    /// A 1×1 GIF of `n` frames.
+    fn tiny_gif(n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, 1, 1, &[]).unwrap();
+            let frame = gif::Frame::from_rgb(1, 1, &RED);
+            for _ in 0..n {
+                enc.write_frame(&frame).unwrap();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn decoding_keeps_every_frame_past_the_probe_frame_count() {
+        // 1×1 frames fit the byte budget however many there are: the frame count refuses none.
+        for n in [MAX_FRAMES, MAX_FRAMES + 1] {
+            let anim = super::Anim::load(&tiny_gif(n)).unwrap();
+            assert_eq!(anim.len(), n);
+        }
     }
 }

@@ -13,7 +13,7 @@ use effectcraft_project::{AlphaMode, Footage, FootageKind};
 use effectcraft_time::{FrameRate, Tick};
 use image::DynamicImage;
 
-use crate::gif_anim::{Anim, MAX_BYTES, MAX_FRAMES, gcd};
+use crate::gif_anim::{Anim, DECODE_FRAMES, MAX_BYTES, MAX_FRAMES, gcd};
 use crate::{MediaError, Result};
 
 /// The `Footage::codec` of an animated WebP.
@@ -120,7 +120,7 @@ pub(crate) fn load(bytes: &[u8]) -> Result<Anim> {
         return Err(MediaError::Unsupported(format!("animated WebP of {} frames of {}×{} is too large to hold in memory", h.delays.len(), h.width, h.height)));
     }
     let mut limits = craft_webp::frames::FrameLimits::default();
-    limits.max_frames = MAX_FRAMES;
+    limits.max_frames = DECODE_FRAMES;
     limits.max_bytes = MAX_BYTES as u64;
     limits.max_canvas_bytes = MAX_BYTES as u64;
     let decoded = craft_webp::frames::read_frames(bytes, &limits).map_err(|e| match e {
@@ -380,5 +380,35 @@ mod tests {
         let riff = u32::try_from(bytes.len() - 8).unwrap();
         bytes[4..8].copy_from_slice(&riff.to_le_bytes());
         assert!(super::load(&bytes).is_err());
+    }
+
+    /// A 1×1 animated WebP of `n` identical frames.
+    fn tiny_webp(n: usize) -> Vec<u8> {
+        let mut anmf = vec![0; 6];
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(50));
+        anmf.push(0b10);
+        anmf.extend(vp8l(1, 1, RED));
+        let frame = chunk(b"ANMF", &anmf);
+        let mut vp8x = vec![0x12, 0, 0, 0];
+        vp8x.extend_from_slice(&u24(0));
+        vp8x.extend_from_slice(&u24(0));
+        let mut body = b"WEBP".to_vec();
+        body.extend(chunk(b"VP8X", &vp8x));
+        body.extend(chunk(b"ANIM", &[0; 6]));
+        for _ in 0..n {
+            body.extend_from_slice(&frame);
+        }
+        chunk(b"RIFF", &body)
+    }
+
+    #[test]
+    fn decoding_keeps_every_frame_past_the_probe_frame_count() {
+        // 1×1 frames fit the byte budget however many there are: the frame count refuses none.
+        for n in [crate::gif_anim::MAX_FRAMES, crate::gif_anim::MAX_FRAMES + 1] {
+            let anim = super::load(&tiny_webp(n)).unwrap();
+            assert_eq!(anim.len(), n);
+        }
     }
 }
