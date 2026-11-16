@@ -99,6 +99,13 @@ fn pdf_actual_text_is_exposed_as_a_logical_group() {
 }
 
 #[test]
+fn pdf_actual_text_without_a_bom_is_pdfdocencoding_in_the_label() {
+    // 0x80 is a bullet in PDFDocEncoding, 0x92 a trade mark sign, not C1 control characters.
+    let data = page_pdf("/Span << /ActualText <80204192> >> BDC 1 0 0 rg 10 10 20 20 re f EMC", "", vec![]);
+    assert_eq!(shape_names(&parse(&data).unwrap()), vec!["Text: \u{2022} A\u{2122}"]);
+}
+
+#[test]
 fn pdf_forms_rotation_cmyk_and_alpha() {
     let content = "q 2 0 0 2 0 0 cm /Fm0 Do Q\n/GS0 gs 0 0 0 1 k 0 0 10 10 re f\n";
     let form = "0 1 1 0 k 0 0 20 20 re f";
