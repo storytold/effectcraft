@@ -282,6 +282,23 @@ pub(crate) fn plane(n: usize, fill: f32) -> Option<Vec<f32>> {
     Some(samples)
 }
 
+fn too_large(w: usize, h: usize, need: usize, most: usize) -> ReadError {
+    ReadError::TooLarge(format!("its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use", w, h, gb(need), gb(most)))
+}
+
+/// Refuse a request whose planes together, those already in hand (held in memory or read back
+/// from the disk cache) and those still to read, `planes` of a `w` × `h` display window, need
+/// more memory than one file may use: the limit is for what a file's request ends with, not
+/// for the part of it read just now ([`effectcraft_render::memory::decode_limit`], #3749).
+pub(crate) fn check_total(w: usize, h: usize, planes: usize, max_bytes: usize) -> Result<(), ReadError> {
+    let need = w.saturating_mul(h).saturating_mul(planes).saturating_mul(std::mem::size_of::<f32>());
+    let most = max_bytes.min(effectcraft_render::memory::decode_limit(MAX_DECODE_BYTES, need));
+    if need > most {
+        return Err(too_large(w, h, need, most));
+    }
+    Ok(())
+}
+
 fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats: &mut ReadStats) -> Result<Vec<Vec<f32>>, ReadError> {
     let level = req.level.min(16);
     let stride = 1i64 << level;
@@ -291,13 +308,7 @@ fn read_into(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest, stats:
     let need = n.saturating_mul(req.channels.len()).saturating_mul(std::mem::size_of::<f32>());
     let most = req.max_bytes.min(effectcraft_render::memory::decode_limit(req.floor, need));
     if need > most {
-        return Err(ReadError::TooLarge(format!(
-            "its {}×{} OpenEXR channels need {:.1} GB of memory, more than the {:.1} GB one file may use",
-            w,
-            h,
-            gb(need),
-            gb(most)
-        )));
+        return Err(too_large(w, h, need, most));
     }
     // Per part: the plane slot of each of its channels (`None`: not requested).
     let mut slots: Vec<Vec<Option<usize>>> = index.meta.headers.iter().map(|h| vec![None; h.channels.list.len()]).collect();
