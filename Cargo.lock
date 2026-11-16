@@ -1207,6 +1207,7 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
 dependencies = [
  "gif",
+ "image",
 ]
 
 [[package]]
@@ -1476,6 +1477,7 @@ name = "craft-webp"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
 dependencies = [
+ "image",
  "thiserror 2.0.21",
 ]
 
