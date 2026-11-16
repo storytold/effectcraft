@@ -82,7 +82,7 @@ impl Exchange {
             return Err(format!("image is {}×{} but has {} pixels", at.width, at.height, pixels.len()));
         }
         let bytes: &[u8] = bytemuck::cast_slice(pixels);
-        let step = slice_len(bytes.len());
+        let step = slice_len(at, bytes.len())?;
         let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
         in_parallel(bytes.chunks(step).zip(handles).enumerate(), |(i, (part, f))| write_at(f, part, at.offset + (i * step) as u64))
     }
@@ -93,7 +93,7 @@ impl Exchange {
             return Err(format!("image is {}×{} but the buffer has {} pixels", at.width, at.height, out.len()));
         }
         let bytes: &mut [u8] = bytemuck::cast_slice_mut(out);
-        let step = slice_len(bytes.len());
+        let step = slice_len(at, bytes.len())?;
         let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
         in_parallel(bytes.chunks_mut(step).zip(handles).enumerate(), |(i, (part, f))| read_at(f, part, at.offset + (i * step) as u64))
     }
@@ -120,9 +120,13 @@ impl Exchange {
     }
 }
 
-/// The slice size for copying `len` bytes: whole below [`PARALLEL_BYTES`], else in [`SLICES`].
-fn slice_len(len: usize) -> usize {
-    if len < PARALLEL_BYTES { len.max(1) } else { len.div_ceil(SLICES) }
+/// The slice size for copying the `len` bytes of `at`: whole below [`PARALLEL_BYTES`], else in
+/// [`SLICES`]. The whole range is checked first, so no slice's offset can overflow.
+fn slice_len(at: &ImageRef, len: usize) -> Result<usize, String> {
+    if at.offset.checked_add(len as u64).is_none() {
+        return Err(format!("image offset {} is out of range", at.offset));
+    }
+    Ok(if len < PARALLEL_BYTES { len.max(1) } else { len.div_ceil(SLICES) })
 }
 
 /// Run `f` on every item, on scoped threads when there is more than one.
@@ -215,6 +219,11 @@ mod tests {
         a.write(&big, &px).unwrap();
         assert_eq!(b.read(&big).unwrap(), px);
         assert_eq!(a.read(&at).unwrap()[1], [1.0, 2.0, 3.0, 4.0], "the small image below is untouched");
+        // An offset whose image would end past the last byte offset is refused before any slice
+        // (its later slices would otherwise wrap to low offsets in release builds).
+        let wraps = ImageRef { offset: u64::MAX - 16, ..big };
+        assert!(a.write(&wraps, &px).is_err_and(|e| e.contains("out of range")));
+        assert!(b.read(&wraps).is_err_and(|e| e.contains("out of range")));
         let p = a.path().to_path_buf();
         a.unlink();
         drop(a);
