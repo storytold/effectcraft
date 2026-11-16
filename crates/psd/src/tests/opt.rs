@@ -385,7 +385,7 @@ fn stream(planes: &[Vec<u8>], w: usize, h: usize, depth: u16, comp: u16) -> Vec<
     match comp {
         0 => planes.iter().for_each(|p| out.extend(p)),
         1 => {
-            let rows: Vec<Vec<u8>> = planes.iter().flat_map(|p| p.chunks(rowb.max(1)).map(pack_bits)).collect();
+            let rows: Vec<Vec<u8>> = planes.iter().flat_map(|p| p.chunks(rowb.max(1)).map(craft_psd::compression::packbits::encode_vec)).collect();
             rows.iter().for_each(|r| out.extend((r.len() as u16).to_be_bytes()));
             rows.iter().for_each(|r| out.extend(r));
         }
