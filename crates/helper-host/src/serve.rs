@@ -13,7 +13,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginParams};
+use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginParamKind, PluginParams};
 
 use crate::frames::Exchange;
 use crate::protocol::{ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, reply_line};
@@ -73,7 +73,7 @@ struct Server<'p> {
     exchange: Option<Exchange>,
     effects: HashMap<String, Arc<dyn EffectPlugin>>,
     depth: u32,
-    /// The optional callbacks EffectCraft listed in `hello`.
+    /// What EffectCraft listed in `hello`: optional callbacks and manifest kinds (`gradient_params`…).
     features: Vec<String>,
 }
 
@@ -103,9 +103,15 @@ impl Server<'_> {
     }
 
     fn describe(&mut self, list: Vec<Arc<dyn EffectPlugin>>, errors: Vec<String>) -> Result<(), String> {
-        let mut effects = vec![];
+        let (mut effects, mut errors) = (vec![], errors);
+        let gradients = self.features.iter().any(|f| f == "gradient_params");
         for e in list {
             let manifest = e.manifest().clone();
+            // A host that didn't list `gradient_params` refuses such a manifest: say why here.
+            if !gradients && manifest.params.iter().any(|p| matches!(p.kind, PluginParamKind::Gradient { .. })) {
+                errors.push(format!("{}: needs a newer EffectCraft (gradient parameters)", manifest.id));
+                continue;
+            }
             effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), time_varying: e.reads_other_times(), manifest: manifest.clone() });
             self.effects.insert(manifest.id, e);
         }
@@ -281,5 +287,61 @@ impl PluginHost for Callbacks<'_, '_> {
     }
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.req.frame_range
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_effects::plugin::{PluginManifest, PluginParam};
+
+    struct Ramp(PluginManifest);
+
+    impl EffectPlugin for Ramp {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct OneRamp;
+
+    impl Provider for OneRamp {
+        fn name(&self) -> String {
+            "Ramps".into()
+        }
+        fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+            let ramp = PluginParam { id: "ramp".into(), name: "Ramp".into(), kind: PluginParamKind::Gradient { default: None }, group: String::new() };
+            let m = PluginManifest {
+                api: 2,
+                id: "org.test.ramp".into(),
+                name: "Ramp".into(),
+                category: "Test".into(),
+                version: "1".into(),
+                author: String::new(),
+                description: String::new(),
+                params: vec![ramp],
+            };
+            (vec![Arc::new(Ramp(m))], vec![])
+        }
+    }
+
+    /// The `effects` reply to `describe` after `hello`.
+    fn described(hello: &str) -> String {
+        let mut out = vec![];
+        serve_io(&mut OneRamp, format!("{hello}\n{{\"op\":\"describe\"}}\n").as_bytes(), &mut out).unwrap();
+        String::from_utf8(out).unwrap().lines().find(|l| l.contains(r#""op":"effects""#)).unwrap_or_default().to_string()
+    }
+
+    /// A manifest with a gradient parameter goes only to hosts that listed `gradient_params`
+    /// (older hosts refuse it); the others get an error saying why.
+    #[test]
+    fn gradient_effects_are_described_only_to_hosts_that_take_them() {
+        let old = described(r#"{"op":"hello","version":1,"frames":"no-such-file"}"#);
+        assert!(old.contains(r#""effects":[]"#) && old.contains("needs a newer EffectCraft"), "{old}");
+        let new = described(r#"{"op":"hello","version":1,"frames":"no-such-file","features":["gradient_params"]}"#);
+        assert!(new.contains(r#""id":"org.test.ramp""#) && !new.contains("needs a newer"), "{new}");
     }
 }

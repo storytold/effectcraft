@@ -130,13 +130,15 @@ pub enum PluginParamKind {
 }
 
 /// A gradient parameter's default: white to black when none is given, `None` when it is not a
-/// gradient (too many stops, bad colours).
+/// gradient (too many stops, bad colours, a stop outside 0–1).
 fn gradient_default(d: &Option<serde_json::Value>) -> Option<Gradient> {
     let Some(j) = d else {
         return Some(Gradient::default());
     };
     match Value::Gradient(Gradient::default()).coerce_json(j)? {
-        Value::Gradient(g) if !g.colors.is_empty() => Some(g),
+        Value::Gradient(g) if !g.colors.is_empty() && g.colors.iter().map(|c| c.0).chain(g.opacities.iter().map(|o| o.0)).all(|t| (0.0..=1.0).contains(&t)) => {
+            Some(g)
+        }
         _ => None,
     }
 }
@@ -261,7 +263,7 @@ impl PluginManifest {
                 && gradient_default(default).is_none()
             {
                 return Err(format!(
-                    "plug-in `{}`: gradient `{}` needs a default of 2 to {} stops (`[\"#ff0000\", \"#ffffff\"]`, `[[pos, colour]…]` or `{{colors, opacities}}`)",
+                    "plug-in `{}`: gradient `{}` needs a default of 2 to {} stops at 0–1 (`[\"#ff0000\", \"#ffffff\"]`, `[[pos, colour]…]` or `{{colors, opacities}}`)",
                     self.id,
                     p.id,
                     effectcraft_keyframe::value::MAX_GRADIENT_STOPS
