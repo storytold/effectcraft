@@ -11,6 +11,7 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/effectcraft"
 
 [workspace.dependencies]
+craft-timeline = { git = "https://github.com/storytold/craft-libs", rev = "a2560df05b4c58631f53a57e65fb05f0e0e6cf76", default-features = false }
 craft-mime = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "808730f49b9637b7909fe2ae56f9d63fdb100cae", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
