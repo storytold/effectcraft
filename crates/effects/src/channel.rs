@@ -446,7 +446,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.channel.channelsoffset",
-            "Channels Offset",
+            "RGB Displacement",
             vec![p("offsetX", "Offset X", num(0.0), ParamUi::Pixels), p("offsetY", "Offset Y", num(0.0), ParamUi::Pixels)],
             channels_offset,
         ),

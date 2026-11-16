@@ -72,10 +72,10 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Blend | `ec.channel.blend` | 4 | GPU | 32 | Implemented |
 | Calculations | `ec.channel.calculations` | 9 | GPU | 32 | Implemented |
 | Channel Combiner | `ec.channel.combiner` | 6 | GPU | 32 | Implemented |
-| Channels Offset | `ec.channel.channelsoffset` | 2 | GPU | 32 | Implemented |
 | Compound Arithmetic | `ec.channel.compoundarithmetic` | 6 | GPU | 32 | Implemented |
 | Invert | `ec.channel.invert` | 2 | GPU | 32 | Implemented |
 | Minimax | `ec.channel.minimax` | 5 | GPU | 32 | Implemented |
+| RGB Displacement | `ec.channel.channelsoffset` | 2 | GPU | 32 | Implemented |
 | Remove Color Matting | `ec.channel.removecolormatting` | 2 | GPU | 32 | Implemented |
 | Set Channels | `ec.channel.setchannels` | 9 | GPU | 32 | Implemented |
 | Set Matte | `ec.channel.setmatte` | 6 | GPU | 32 | Implemented |

@@ -180,7 +180,7 @@ fn fxk_overflow(op: u32, v: f32, how: u32) -> f32 {
 // coefficients from the box means (f[0].x = eps); 31 refined alpha (src = boxed coefficients,
 // aux = pack, data = edge band); 32 edge band (src.y − aux.y > 1e-3); 33 choke / contrast /
 // invert; 34 View Edge Region; 35 decontamination (aux.x = refined alpha, data = colour estimate)
-// 36 Channels Offset: f[0].xy = offset in buffer pixels; R follows it, G stays, B opposes it
+// 36 RGB Displacement: f[0].xy = offset in buffer pixels; R follows it, G stays, B opposes it
 @compute @workgroup_size(16, 16)
 fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
