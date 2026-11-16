@@ -97,6 +97,21 @@ fn apply_color_lut() {
     effect_case("ec.utility.applylut", &[("lut", s("/nonexistent/grade.cube"))]);
 }
 
+// Keep this separate so Nextest runs the inverse lookup in a fresh process/device,
+// without the preceding 3D LUT submissions in `ocio_file_transform`. The combined
+// test stays intact to cover ordering and shared-device state as well.
+#[test]
+fn inverse_1d_lut_on_a_fresh_device_matches_cpu() {
+    effect_direct("ec.color.ociofile", &[("file", s(&cube_1d())), ("direction", e(1))], false);
+}
+
+// Isolate the first profile conversion that failed in hosted llvmpipe coverage.
+// This retains the same oracle and tolerance as the broader profile test.
+#[test]
+fn profile_conversion_on_a_fresh_device_matches_cpu() {
+    effect_direct("ec.utility.colorprofileconverter", &[("inputProfile", e(1)), ("outputProfile", e(3)), ("intent", e(0))], false);
+}
+
 #[test]
 fn ocio_file_transform() {
     for interp in 1..4 {
