@@ -19,11 +19,11 @@ impl Psd {
         if !is_psd(&data) {
             return Err(Error::NotPsd);
         }
-        let (read, shift) = read_file(&data);
+        let (read, splice) = read_file(&data);
         let (head, file, warnings) = match read {
             Ok(file) => {
                 // The compression field before the merged image's data.
-                let merged = file.image_data.stored.as_ref().map_or(data.len(), |s| ((s.offset + shift) as usize).saturating_sub(2));
+                let merged = file.image_data.stored.as_ref().map_or(data.len(), |s| (splice.map(s.offset) as usize).saturating_sub(2));
                 ((file.header.clone(), file.color_mode_data.clone(), merged), Some(file), vec![])
             }
             // A damaged layer section must not discard the document: keep the header and the
@@ -70,11 +70,11 @@ impl Psd {
         }
         if let Some(info) = &file.layer_info {
             psd.merged_alpha = info.merged_alpha;
-            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, shift)).collect();
+            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect();
         }
         for b in &file.global_blocks {
             if let Some(stored) = b.stored.as_ref().filter(|_| linked(&b.key, 0)) {
-                let start = (stored.offset + shift) as usize;
+                let start = splice.map(stored.offset) as usize;
                 psd.linked_files(&data, start, start.saturating_add(stored.len as usize).min(data.len()));
             }
         }
@@ -82,14 +82,14 @@ impl Psd {
     }
 
     /// One layer record of the model, its additional information read into [`Layer`].
-    /// `shift` moves craft-psd's offsets back into `self.data` (see [`read_file`]).
-    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, shift: u64) -> Layer {
+    /// `splice` maps craft-psd's offsets back into `self.data` (see [`read_file`]).
+    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Layer {
         let channels = rec
             .channels
             .iter()
             .map(|c| match &c.stored {
                 // `ChannelInfo` covers the compression field and the data after it.
-                Some(s) => ChannelInfo { id: c.id, offset: ((s.offset + shift) as usize).saturating_sub(2), len: s.len as usize + 2 },
+                Some(s) => ChannelInfo { id: c.id, offset: (splice.map(s.offset) as usize).saturating_sub(2), len: s.len as usize + 2 },
                 None => ChannelInfo { id: c.id, offset: 0, len: 0 },
             })
             .collect();
@@ -432,26 +432,97 @@ fn linked(key: &[u8; 4], _len: u64) -> bool {
     matches!(key, b"lnk2" | b"lnkD" | b"lnk3" | b"lnkE")
 }
 
-/// Reads `data` with craft-psd. The image resources are not part of the model, so when the file
-/// does not read, it is read again with an empty resource section: a damaged resource must not
-/// cost the layers. The second value is how far that copy's offsets sit before `data`'s.
-fn read_file(data: &Arc<[u8]>) -> (std::result::Result<craft_psd::PsdFile, craft_psd::PsdError>, u64) {
+/// Reads `data` with craft-psd. Where that loses what the old reader kept, it reads a copy with
+/// the obstacle taken out, and the [`Splice`] maps the copy's offsets back into `data`:
+/// - a damaged image resource (resources are not part of the model): no resources;
+/// - damaged layer records in the section: none there, so a global `Lr16`/`Lr32`/`Layr` block
+///   can still give the layers;
+/// - a global layer block that starts with its own length (both layouts are accepted): the
+///   block without it.
+fn read_file(data: &Arc<[u8]>) -> (std::result::Result<craft_psd::PsdFile, craft_psd::PsdError>, Splice) {
     let read = |d: Arc<[u8]>| craft_psd::PsdFile::from_source_deferring(craft_psd::source::Source::new(d), linked, |_| Ok(false), |_| false).map(|(f, _)| f);
+    let layered = |f: &craft_psd::PsdFile| f.layer_info.as_ref().is_some_and(|i| !i.layers.is_empty());
+    let retry = |copy: Option<(Vec<u8>, Splice)>, accept: &dyn Fn(&craft_psd::PsdFile) -> bool| {
+        let (copy, splice) = copy?;
+        read(copy.into()).ok().filter(|f| accept(f)).map(|f| (f, splice))
+    };
     let first = read(data.clone());
-    let be32 = |at: usize| data.get(at..at.checked_add(4)?).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
-    if first.is_ok() {
-        return (first, 0);
+    let got = match &first {
+        Ok(f) if layered(f) => None,
+        Ok(_) => retry(prefixed_layer_block(data), &layered),
+        Err(_) => retry(without_resources(data), &|_| true).or_else(|| retry(without_section_layers(data), &layered)),
+    };
+    match got {
+        Some((file, splice)) => (Ok(file), splice),
+        None => (first, Splice::default()),
     }
-    let Some(res_at) = be32(26).and_then(|cmd| cmd.checked_add(30)) else { return (first, 0) };
-    let Some(res_len) = be32(res_at).filter(|&n| n > 0) else { return (first, 0) };
-    let Some(rest) = res_at.checked_add(4 + res_len).and_then(|end| data.get(end..)) else { return (first, 0) };
-    let mut copy = Vec::with_capacity(res_at + 4 + rest.len());
-    copy.extend_from_slice(&data[..res_at]);
-    copy.extend_from_slice(&[0; 4]);
-    copy.extend_from_slice(rest);
-    match read(copy.into()) {
-        Ok(file) => (Ok(file), res_len as u64),
-        Err(_) => (first, 0),
+}
+
+/// A big-endian unsigned field of `width` bytes at `at`.
+fn be(data: &[u8], at: usize, width: usize) -> Option<usize> {
+    let b = data.get(at..at.checked_add(width)?)?;
+    usize::try_from(b.iter().fold(0u64, |v, &b| v << 8 | u64::from(b))).ok()
+}
+
+/// The length-field width of the layer section and its long blocks.
+fn field(data: &[u8]) -> usize {
+    if data.get(4..6) == Some(&[0, 2]) { 8 } else { 4 }
+}
+
+fn without_resources(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
+    let res_at = be(data, 26, 4)?.checked_add(30)?;
+    let res_len = be(data, res_at, 4).filter(|&n| n > 0)?;
+    Splice::apply(data, res_at + 4, res_len, &[(res_at, 4)])
+}
+
+fn without_section_layers(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
+    let head = craft_psd::head::HeadView::from_bytes(data).ok()?;
+    let ls = usize::try_from(head.layer_section_offset).ok()?;
+    let w = field(data);
+    let li_at = ls.checked_add(w)?;
+    let li_len = be(data, li_at, w).filter(|&n| n > 0)?;
+    Splice::apply(data, li_at + w, li_len, &[(li_at, w), (ls, w)])
+}
+
+fn prefixed_layer_block(data: &[u8]) -> Option<(Vec<u8>, Splice)> {
+    let head = craft_psd::head::HeadView::from_bytes(data).ok()?;
+    let ls = usize::try_from(head.layer_section_offset).ok()?;
+    let w = field(data);
+    let end = be(data, ls, w)?.checked_add(ls + w)?.min(data.len());
+    // The block (signature, key, length), whose own first field reads as a length that fits in it.
+    let at = (ls..end.saturating_sub(8 + 2 * w)).find(|&i| {
+        matches!(&data[i..i + 4], b"8BIM" | b"8B64")
+            && matches!(&data[i + 4..i + 8], b"Lr16" | b"Lr32" | b"Layr")
+            && be(data, i + 8, w).zip(be(data, i + 8 + w, w)).is_some_and(|(len, inner)| inner > 0 && inner.checked_add(w).is_some_and(|e| e <= len))
+    })?;
+    Splice::apply(data, at + 8 + w, w, &[(at + 8, w), (ls, w)])
+}
+
+/// A copy of the file with one range taken out, and the way from the copy's offsets back to the
+/// original's.
+#[derive(Debug, Clone, Copy, Default)]
+struct Splice {
+    at: u64,
+    removed: u64,
+}
+
+impl Splice {
+    fn map(self, offset: u64) -> u64 {
+        if offset >= self.at { offset + self.removed } else { offset }
+    }
+
+    /// `data` without the `removed` bytes at `at`, the length fields at `fixes` (offset, width;
+    /// all before `at`) shortened to match.
+    fn apply(data: &[u8], at: usize, removed: usize, fixes: &[(usize, usize)]) -> Option<(Vec<u8>, Splice)> {
+        let tail = data.get(at.checked_add(removed)?..)?;
+        let mut copy = Vec::with_capacity(at + tail.len());
+        copy.extend_from_slice(data.get(..at)?);
+        copy.extend_from_slice(tail);
+        for &(f, width) in fixes {
+            let v = (be(&copy, f, width)?.checked_sub(removed)? as u64).to_be_bytes();
+            copy.get_mut(f..f + width)?.copy_from_slice(&v[8 - width..]);
+        }
+        Some((copy, Splice { at: at as u64, removed: removed as u64 }))
     }
 }
 

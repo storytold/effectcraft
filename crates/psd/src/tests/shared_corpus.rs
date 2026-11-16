@@ -107,3 +107,57 @@ fn a_damaged_16_bit_layer_block_is_reported() {
     assert_eq!(p.merged_alpha, want.merged_alpha);
     assert_eq!(p.composite().expect("composite").data, want.composite().expect("composite").data);
 }
+
+/// `bytes` with `insert` put at `at`, the length fields at `fixes` (offset, width) grown to match.
+fn insert(bytes: &[u8], at: usize, insert: &[u8], fixes: &[(usize, usize)]) -> Vec<u8> {
+    let mut out = [&bytes[..at], insert, &bytes[at..]].concat();
+    for &(f, w) in fixes {
+        let v = out[f..f + w].iter().fold(0u64, |v, &b| v << 8 | u64::from(b)) + insert.len() as u64;
+        out[f..f + w].copy_from_slice(&v.to_be_bytes()[8 - w..]);
+    }
+    out
+}
+
+/// A 16-bit layered case (layers in `Lr16`), its parse, the layer section offset, the length
+/// field width and the `Lr16` block's offset.
+fn deep() -> (Vec<u8>, Psd, usize, usize, usize) {
+    let bytes = layered(|f| f.header.depth == 16 && matches!(f.layer_info_placement, craft_psd::LayerInfoPlacement::GlobalBlock { .. }));
+    let want = Psd::parse(bytes.clone()).expect("intact");
+    let ls = craft_psd::head::HeadView::from_bytes(&bytes).expect("head").layer_section_offset as usize;
+    let w = if want.psb { 8 } else { 4 };
+    let at = bytes.windows(8).position(|x| x[4..] == *b"Lr16" && matches!(&x[..4], b"8BIM" | b"8B64")).expect("Lr16");
+    (bytes, want, ls, w, at)
+}
+
+fn same_layers(p: &Psd, want: &Psd) {
+    assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    assert_eq!(p.layers.len(), want.layers.len());
+    assert_eq!(p.merged_alpha, want.merged_alpha);
+    assert_eq!(p.composite().expect("composite").data, want.composite().expect("composite").data);
+    for i in 0..p.layers.len() {
+        assert_eq!(p.layers[i].name, want.layers[i].name);
+        assert_eq!(p.layer_pixels(i, false).map(|l| l.data).ok(), want.layer_pixels(i, false).map(|l| l.data).ok(), "layer {i}");
+    }
+}
+
+#[test]
+fn a_length_prefixed_16_bit_layer_block_reads() {
+    let (bytes, want, ls, w, at) = deep();
+    let body = at + 8 + w;
+    let len = u64::try_from(bytes.len()).unwrap().min(u64::from(u32::MAX));
+    let block_len = bytes[at + 8..body].iter().fold(0u64, |v, &b| v << 8 | u64::from(b));
+    assert!(block_len < len);
+    let prefix = &block_len.to_be_bytes()[8 - w..];
+    let p = Psd::parse(insert(&bytes, body, prefix, &[(at + 8, w), (ls, w)])).expect("parse");
+    same_layers(&p, &want);
+}
+
+#[test]
+fn damaged_section_records_fall_back_to_the_16_bit_block() {
+    let (bytes, want, ls, w, _) = deep();
+    // A section layer info claiming one record that is cut short.
+    let li_at = ls + w;
+    assert!(bytes[li_at..li_at + w].iter().all(|&b| b == 0), "the generated file keeps its layers only in Lr16");
+    let p = Psd::parse(insert(&bytes, li_at + w, &[0, 1, 0, 0, 0, 0], &[(li_at, w), (ls, w)])).expect("parse");
+    same_layers(&p, &want);
+}
