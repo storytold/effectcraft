@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-mime = { workspace = true }
 craft-ui = { workspace = true }
 craft-quit = { workspace = true, features = ["egui"] }
 effectcraft-time = { workspace = true }
