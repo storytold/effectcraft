@@ -109,6 +109,10 @@ impl EffectHost for FxHost<'_, '_, '_> {
         self.r.read(|| self.r.footage.audio(item, f, st, frames, rate))
     }
 
+    fn comp_time_of(&self, layer_time: f64) -> Option<f64> {
+        layer_time.is_finite().then(|| self.layer.comp_time(Tick::from_seconds_f64(layer_time)).seconds())
+    }
+
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
         if self.r.depth > MAX_FX_DEPTH || self.layer.switches.adjustment {
             return None;

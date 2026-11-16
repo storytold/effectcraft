@@ -729,6 +729,13 @@ impl RenderHost<'_, '_> {
     fn grid(&self) -> Buf {
         Buf { img: crate::Image { width: self.width, height: self.height, data: vec![] }, offset: self.offset, scale: self.scale }
     }
+
+    /// The comp time of layer time `t`: through the layer's stretch where the host knows it,
+    /// else the same distance from the current time.
+    fn comp_time(&self, t: f64) -> Option<f64> {
+        let ctx = self.ctx;
+        Some(ctx.env.host?.comp_time_of(t).unwrap_or(ctx.env.comp_time + (t - ctx.time)))
+    }
 }
 
 impl PluginHost for RenderHost<'_, '_> {
@@ -746,7 +753,7 @@ impl PluginHost for RenderHost<'_, '_> {
             let host = ctx.env.host?;
             // Source / Masks show no effects; the default (Effects & Masks) does.
             let with_effects = !matches!(ctx.params.get(&crate::layer_source_id(param_id)).map(Value::as_enum), Some(0 | 1));
-            host.layer_at(lid, ctx.env.comp_time + (layer_time - ctx.time), with_effects)?
+            host.layer_at(lid, self.comp_time(layer_time)?, with_effects)?
         };
         let img = crate::util::fit_layer(ctx, &self.grid(), &other, false);
         Some(PluginImage { width: img.width, height: img.height, pixels: img.data, origin: self.offset, scale: self.scale })
@@ -760,20 +767,19 @@ impl PluginHost for RenderHost<'_, '_> {
 
     fn comp_lights(&self, layer_time: f64) -> Option<Vec<CompLightInfo>> {
         let ctx = self.ctx;
-        Some(ctx.env.host?.comp_lights(ctx.env.comp_time + (layer_time - ctx.time)))
+        Some(ctx.env.host?.comp_lights(self.comp_time(layer_time)?))
     }
 
     fn comp_camera_at(&self, layer_time: f64) -> Option<CompCamera> {
         let ctx = self.ctx;
-        let sc = ctx.env.host?.comp_scene_at(ctx.env.comp_time + (layer_time - ctx.time))?;
+        let sc = ctx.env.host?.comp_scene_at(self.comp_time(layer_time)?)?;
         Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
     }
 
     fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<LayerTransform> {
         let ctx = self.ctx;
-        let key = self.manifest.params.iter().find(|p| p.id == param_id).map(param_key)?;
-        let lid = ctx.params.get(&key)?.as_layer()?;
-        let x = ctx.env.host?.layer_transform(lid, ctx.env.comp_time + (layer_time - ctx.time))?;
+        let lid = ctx.params.get(param_id)?.as_layer()?;
+        let x = ctx.env.host?.layer_transform(lid, self.comp_time(layer_time)?)?;
         // An image point u (buffer grid) is effect-space p = (u - origin) / scale of this layer,
         // the other layer's effect-space q = p + d with d its centring offset (`fit_layer`).
         let inv = 1.0 / self.scale.max(1e-9);

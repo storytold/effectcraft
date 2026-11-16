@@ -557,6 +557,11 @@ pub trait EffectHost: Sync {
     fn self_at(&self, _layer_time: f64, _effects: usize) -> Option<Buf> {
         None
     }
+    /// The comp time (seconds) of the running effect's layer at **layer time** `layer_time`,
+    /// through the layer's start and stretch (as [`EffectHost::self_at`]). `None` when unknown.
+    fn comp_time_of(&self, _layer_time: f64) -> Option<f64> {
+        None
+    }
     /// Layer `id` of the same composition at comp time `comp_time` (seconds), like
     /// [`EffectHost::layer`] but at another time.
     fn layer_at(&self, _id: u64, _comp_time: f64, _masks_and_effects: bool) -> Option<LayerPixels> {
