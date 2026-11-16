@@ -156,7 +156,13 @@ pub fn scan_paths(paths: &[PathBuf], retry: bool) -> Value {
                 errors.extend(errs.into_iter().map(|e| format!("{}: {e}", program.display())));
                 loaded.extend(register(&h, effects, &mut errors));
                 started.push(json!(program.to_string_lossy()));
-                lock(helpers()).push(h);
+                // Published under the registry lock: either `stop_all` sees this helper, or
+                // `SHUT_DOWN` (stored before `stop_all` takes the lock) is seen here.
+                let mut registry = lock(helpers());
+                if client::SHUT_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+                    h.stop();
+                }
+                registry.push(h);
             }
             Err(e) => errors.push(e),
         }

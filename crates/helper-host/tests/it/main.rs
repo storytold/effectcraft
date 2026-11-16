@@ -117,6 +117,9 @@ impl Provider for FakeProvider {
         "Fake".into()
     }
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+        if std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains("slow-helper")) {
+            std::thread::sleep(Duration::from_secs(1));
+        }
         let v: Vec<Arc<dyn EffectPlugin>> =
             [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang), ("noisy", Kind::Noisy)]
                 .into_iter()
@@ -296,10 +299,19 @@ fn run_checks() -> bool {
 
     // Quitting: a render after shut_down fails instead of starting the helper (and a new
     // exchange file nothing would remove).
+    // A helper still starting when shut_down runs (a copy of this binary, slow to describe) is
+    // stopped once scan_paths publishes it.
+    let slow = state.join("slow-helper").join(exe.file_name().unwrap_or_default());
+    let copied = std::fs::create_dir_all(state.join("slow-helper")).and_then(|()| std::fs::copy(&exe, &slow));
+    all &= check("copy the slow helper", copied.is_ok(), &copied);
+    let scan = std::thread::spawn(move || effectcraft_helper_host::scan_paths(&[slow], false));
+    std::thread::sleep(Duration::from_millis(300));
     effectcraft_helper_host::shut_down();
+    let scanned = scan.join().map(|r| r["helpers"].as_array().map_or(0, Vec::len));
     let mine = format!("effectcraft-helper-{}-", std::process::id());
     let files =
         || std::fs::read_dir(std::env::temp_dir()).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&mine)).count()).unwrap_or(0);
+    all &= check("a helper started during shut_down is stopped", scanned.as_ref().is_ok_and(|n| *n == 1) && files() == 0, (&scanned, files()));
     let r = render("org.test.helper.invert", &mut vec![[0.0; 4]; 4], 2, 2, 1.0, false);
     all &= check("no helper starts after shut_down", r.as_ref().is_err_and(|e| e.contains("quitting")) && files() == 0, (&r, files()));
     let _ = std::fs::remove_dir_all(&state);
