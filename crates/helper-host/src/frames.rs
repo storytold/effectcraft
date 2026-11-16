@@ -146,6 +146,8 @@ impl Exchange {
         if at.pixels() != Some(out.len()) {
             return Err(format!("image is {}×{} but the buffer has {} pixels", at.width, at.height, out.len()));
         }
+        // The whole image's byte range, so no offset inside the band below can overflow.
+        slice_len(at, std::mem::size_of_val(out))?;
         let (w, h) = (at.width as usize, at.height as usize);
         let x0 = (bounds[0] as usize).min(w);
         let x1 = (bounds[2] as usize).clamp(x0, w);
@@ -167,7 +169,7 @@ impl Exchange {
         // Whole rows, one contiguous range in a few parallel slices: far fewer reads than row by
         // row (a read per row cost more than the copying), then the columns outside cleared.
         let bytes: &mut [u8] = bytemuck::cast_slice_mut(band);
-        let step = slice_len(bytes.len());
+        let step = slice_len(at, bytes.len())?;
         let handles = self.handles(bytes.len().div_ceil(step)).map_err(io)?;
         let start = at.offset + (y0 * w * 16) as u64;
         in_parallel(bytes.chunks_mut(step).zip(handles).enumerate(), |(i, (part, f))| read_at(f, part, start + (i * step) as u64))?;
@@ -306,6 +308,8 @@ mod tests {
         let wraps = ImageRef { offset: u64::MAX - 16, ..big };
         assert!(a.write(&wraps, &px).is_err_and(|e| e.contains("out of range")));
         assert!(b.read(&wraps).is_err_and(|e| e.contains("out of range")));
+        let mut sink = vec![[0.0f32; 4]; px.len()];
+        assert!(b.read_bounds_into(&wraps, &mut sink, [0, 1000, 1, 1025], true).is_err_and(|e| e.contains("out of range")));
         // Bounds: only that rectangle is read and the rest of the buffer is made transparent,
         // whatever it held; bounds past the image are clamped, empty ones clear everything.
         let mut out = vec![[9.0f32; 4]; px.len()];
