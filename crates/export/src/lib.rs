@@ -421,13 +421,22 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
 }
 
 async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
-    if w > u16::MAX as u32 || h > u16::MAX as u32 {
-        return Err(ExportError::Unsupported("GIF frames are limited to 65535 px".into()));
-    }
+    use craft_gif::write::{AnimationWriter, Disposal, Options, PreparedFrame};
+
+    validate_gif_dimensions(w, h)?;
     let path = job.place(job.path, 1);
     let mut file = job.create(&path)?;
-    let mut enc = gif::Encoder::new(&mut file, w as u16, h as u16, &[]).map_err(|e| ExportError::Encode(e.to_string()))?;
-    enc.set_repeat(if job.output.gif_loop { gif::Repeat::Infinite } else { gif::Repeat::Finite(0) }).map_err(|e| ExportError::Encode(e.to_string()))?;
+    let mut enc = AnimationWriter::new(
+        &mut file,
+        w,
+        h,
+        Options {
+            loop_forever: job.output.gif_loop,
+            disposal: if job.output.channels == Channels::Rgba { Disposal::Background } else { Disposal::Keep },
+            speed: 10,
+        },
+    )
+    .map_err(|e| ExportError::Encode(e.to_string()))?;
     let rate = job.settings.rate(comp);
     // GIF delays are in 1/100 s: carry the rounding error so long animations keep their timing.
     let cs_per_frame = 100.0 * rate.den as f64 / rate.num as f64;
@@ -437,28 +446,29 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
     let mut i = 0;
     while i < st.total {
         let end = (i + batch).min(st.total);
-        let frames: Vec<gif::Frame<'static>> = job
-            .frames(comp, (i..end).collect(), |_, img| {
-                let mut px = job.pixels_with(&img, comp, job.output.channels, w, h, false);
-                gif::Frame::from_rgba_speed(w as u16, h as u16, &mut px, 10)
-            })
+        let frames: Vec<std::result::Result<PreparedFrame, craft_gif::write::Error>> = job
+            .frames(comp, (i..end).collect(), |_, img| craft_gif::write::prepare_frame(w, h, job.pixels_with(&img, comp, job.output.channels, w, h, false), 10))
             .await;
-        for mut f in frames {
+        for frame in frames {
             clock += cs_per_frame;
             let d = (clock.round() as u64).saturating_sub(emitted).max(1);
             emitted += d;
-            f.delay = d.min(u16::MAX as u64) as u16;
-            if job.output.channels == Channels::Rgba {
-                f.dispose = gif::DisposalMethod::Background;
-            }
-            enc.write_frame(&f).map_err(|e| ExportError::Encode(e.to_string()))?;
+            let frame = frame.map_err(|e| ExportError::Encode(e.to_string()))?;
+            enc.write_prepared_frame(frame, d.min(u16::MAX as u64) as u16).map_err(|e| ExportError::Encode(e.to_string()))?;
         }
         st.advance(end - i)?;
         i = end;
     }
-    drop(enc);
+    let _ = enc.finish().map_err(|e| ExportError::Encode(e.to_string()))?;
     let bytes = file.finish()?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+}
+
+fn validate_gif_dimensions(w: u32, h: u32) -> Result<()> {
+    if w > u16::MAX as u32 || h > u16::MAX as u32 {
+        return Err(ExportError::Unsupported("GIF frames are limited to 65535 px".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -477,5 +487,14 @@ mod tests {
         assert_eq!(&p[12..16], &[0, 0, 0, 0]);
         assert_eq!(OutputFormat::H264.coded_size(1, 101), (2, 100));
         assert_eq!(OutputFormat::Gif.coded_size(1, 101), (1, 101));
+    }
+
+    #[test]
+    fn gif_dimension_limit_keeps_the_existing_unsupported_error() {
+        assert!(validate_gif_dimensions(u16::MAX as u32, u16::MAX as u32).is_ok());
+        assert!(matches!(
+            validate_gif_dimensions(u16::MAX as u32 + 1, 1),
+            Err(ExportError::Unsupported(message)) if message == "GIF frames are limited to 65535 px"
+        ));
     }
 }
