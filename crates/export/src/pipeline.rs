@@ -1035,8 +1035,10 @@ impl<'a> Cx<'a> {
         if let Some(t) = timing {
             // (a failed job has no frame count: the line says what ran before it stopped)
             let line = if result.is_err() { t.summary_of_unfinished("failed") } else { t.summary() };
-            s.push_str(&format!("Timing: {line}
-"));
+            s.push_str(&format!(
+                "Timing: {line}
+"
+            ));
         }
         if self.backend() == crate::JobRenderer::Gpu
             && let Some((n, why)) = &*self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
