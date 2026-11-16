@@ -128,6 +128,18 @@ impl PropCx<'_> {
     }
 }
 
+/// Shows property `uid` of layer `layer` in the Timeline: its layer and groups twirled open, the
+/// property scrolled to and the Timeline brought forward (After Effects' Reveal in Timeline,
+/// which a double-click on the property's name does; #1497).
+fn reveal_in_timeline(app: &mut EffectcraftApp, ctx: &egui::Context, layer: u64, uid: u64) {
+    app.ui.timeline.search.clear();
+    app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+    if let Err(e) = crate::menus::frontend(app, ctx, "timeline.revealProps", json!({"props": [{"layer": layer, "prop": uid}]})) {
+        app.ui.status = e;
+    }
+    app.show_panel(crate::dock::PanelKind::Timeline);
+}
+
 /// One property row: stopwatch, name, value control (and the keyframe navigator). Returns the
 /// value fields of a vector, one per dimension, for the pick whip.
 #[allow(clippy::too_many_arguments)]
@@ -167,7 +179,16 @@ fn prop_row(
             },
         );
         app.auto.add(&format!("effectControls.prop.{uid}.stopwatch"), swr, &prop.name);
-        if resp.clicked() {
+        if resp.clicked() && ui.input(|i| i.modifiers.alt) {
+            // Alt+click adds an expression (or removes it), as in the Timeline. Effect Controls
+            // has no expression field: the property shows in the Timeline with its new
+            // expression's editor taking the keyboard, as After Effects does (#1460).
+            actions.push(("prop.setExpression".into(), json!({"layer": layer.id.0, "prop": uid})));
+            if prop.expr.is_none() {
+                reveal_in_timeline(app, ui.ctx(), layer.id.0, uid);
+            }
+            crate::panels::timeline::expression_toggled(app, ui.ctx(), prop);
+        } else if resp.clicked() {
             actions.push(("prop.toggleAnimation".into(), json!({"layer": layer.id.0, "prop": uid, "selected": true})));
         }
     }
@@ -201,12 +222,7 @@ fn prop_row(
     p.with_clip_rect(name_clip.intersect(p.clip_rect())).text(pos2(swr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text);
     let name_response = ui.interact(name_clip, egui::Id::unique(("ec-prop-name", uid)), Sense::click());
     if name_response.double_clicked() {
-        app.ui.timeline.search.clear();
-        app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
-        if let Err(e) = crate::menus::frontend(app, ui.ctx(), "timeline.revealProps", json!({"props": [{"layer": layer.id.0, "prop": uid}]})) {
-            app.ui.status = e;
-        }
-        app.show_panel(crate::dock::PanelKind::Timeline);
+        reveal_in_timeline(app, ui.ctx(), layer.id.0, uid);
     }
     app.auto.add(&format!("effectControls.prop.{uid}.name"), name_clip, &prop.name);
     // With several layers selected the edit applies to the same effect property of each (#491).

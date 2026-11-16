@@ -505,42 +505,6 @@ pub(crate) fn unpack_bits(src: &[u8], row: usize, out: &mut Vec<u8>) -> Result<(
     Ok(())
 }
 
-/// PackBits encoding of one row.
-pub(crate) fn pack_bits(src: &[u8]) -> Vec<u8> {
-    let mut out = vec![];
-    let mut i = 0;
-    while i < src.len() {
-        // run of identical bytes
-        let mut run = 1;
-        while i + run < src.len() && src[i + run] == src[i] && run < 128 {
-            run += 1;
-        }
-        if run >= 2 {
-            out.push((1 - run as isize) as i8 as u8);
-            out.push(src[i]);
-            i += run;
-            continue;
-        }
-        // literal run
-        let start = i;
-        let mut n = 0;
-        while i < src.len() && n < 128 {
-            if i + 1 < src.len() && src[i + 1] == src[i] {
-                break;
-            }
-            i += 1;
-            n += 1;
-        }
-        if n == 0 {
-            i += 1;
-            n = 1;
-        }
-        out.push((n - 1) as u8);
-        out.extend_from_slice(&src[start..start + n]);
-    }
-    out
-}
-
 pub(crate) fn srgb_encode(v: f32) -> f32 {
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }

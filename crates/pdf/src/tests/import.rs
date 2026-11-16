@@ -627,3 +627,19 @@ fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
         assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
 }
+
+#[test]
+fn eps_unembedded_reencoded_accent_uses_bundled_glyph() {
+    let doc = eps(b"/Helvetica findfont dup length dict begin {1 index /FID ne {def} {pop pop} ifelse} forall /Encoding 256 array def 0 1 255 {Encoding exch /.notdef put} for Encoding 65 /eacute put currentdict end /Accent exch definefont 40 scalefont setfont 10 30 moveto (A) show\n");
+    assert_eq!(shape_names(&doc), vec!["Text: é"]);
+    let reference = parse(&page_pdf(
+        "BT /F1 40 Tf 10 30 Td <E9> Tj ET",
+        "/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> >>",
+        vec![],
+    ))
+    .unwrap();
+    let (a, b) = (render(&doc), render(&reference));
+    let (ia, ib) = (coverage(&a, 0, 0, 200, 100), coverage(&b, 0, 0, 200, 100));
+    assert!(ia > 50.0 && (ia - ib).abs() < 1.0, "EPS accent {ia} vs PDF accent {ib}");
+    assert_eq!(ink_x(&a), ink_x(&b));
+}

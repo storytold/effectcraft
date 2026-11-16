@@ -286,6 +286,10 @@ struct CacheState {
     last: HashMap<Arc<str>, i64>,
     /// Movies whose frames can't be kept as 8-bit levels (more bits, or shown turned).
     wide: HashSet<Arc<str>>,
+    /// Counts [`MediaPool::forget`]s and frame clears: a decode keeps its frame only when none
+    /// came while it ran, so one in flight when a file is forgotten (a closed project's, or one
+    /// changed on disk) can't bring the frame back.
+    forgets: u64,
 }
 
 /// A whole still in [`CacheState::recent`].
@@ -783,6 +787,7 @@ impl MediaPool {
         c.lru = Lru::default();
         c.recent.clear();
         c.last.clear();
+        c.forgets = c.forgets.wrapping_add(1);
         drop(c);
         // Decoded GIFs sit outside the frame budget; Purge frees them too.
         lock(&self.inner.gifs).clear();
@@ -795,7 +800,9 @@ impl MediaPool {
         lock(&self.inner.problems).clear();
     }
 
-    /// Forget a file (after it changed on disk, or to retry a file that failed to open).
+    /// Forget a file (after it changed on disk or its project closed, or to retry a file that
+    /// failed to open). A decode of any file in flight meanwhile keeps nothing (see
+    /// [`CacheState::forgets`]).
     pub fn forget(&self, path: &str) {
         lock(&self.inner.sources).map.remove(path);
         lock(&self.inner.models).remove(path);
@@ -810,6 +817,7 @@ impl MediaPool {
         c.forgot(path);
         c.last.remove(path);
         c.wide.remove(path);
+        c.forgets = c.forgets.wrapping_add(1);
         drop(c);
         crate::exr_planes::forget(path);
     }
@@ -834,7 +842,7 @@ impl MediaPool {
         if lock(&self.inner.cache).wide.contains(footage.path.as_str()) {
             return None;
         }
-        match Inner::frame_px(&self.inner, footage, t, true, None, float, true, None) {
+        match Inner::frame_px(&self.inner, footage, t, true, None, float, true, None, None) {
             Ok(Pixels::Q8(f)) => Some(f),
             _ => None,
         }
@@ -1277,7 +1285,7 @@ impl Inner {
         float: FloatCurve,
         rows: Option<(i64, i64)>,
     ) -> Result<Arc<Image>> {
-        match Self::frame_px(self, footage, t, playback, size, float, false, rows)? {
+        match Self::frame_px(self, footage, t, playback, size, float, false, rows, None)? {
             Pixels::F32(img) => Ok(img),
             // (a float request's key never holds 8-bit levels)
             Pixels::Q8(_) => Err(MediaError::Decode(format!("{}: 8-bit frame for a float request", footage.path))),
@@ -1286,6 +1294,9 @@ impl Inner {
 
     /// [`Self::frame_at`], kept as 8-bit levels when `q8` is set and the frame has 8 bits (a
     /// float frame under the float key otherwise, and the movie is remembered as `wide`).
+    /// `since`: the [`CacheState::forgets`] count the read was asked at (a read-ahead's, when it
+    /// was queued); a read that missed is not decoded once a forget came after it, and a frame
+    /// decoded while one came is not kept.
     #[allow(clippy::too_many_arguments)]
     fn frame_px(
         self: &Arc<Self>,
@@ -1296,6 +1307,7 @@ impl Inner {
         float: FloatCurve,
         q8: bool,
         rows: Option<(i64, i64)>,
+        since: Option<u64>,
     ) -> Result<Pixels> {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
@@ -1391,6 +1403,10 @@ impl Inner {
                 Waited::Cancelled => return Err(MediaError::Cancelled),
             }
             c = lock(&self.cache);
+        }
+        let since = since.unwrap_or(c.forgets);
+        if c.forgets != since {
+            return Err(MediaError::Cancelled);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         let flight = Arc::new(Flight { generation, ..Flight::default() });
@@ -1507,23 +1523,23 @@ impl Inner {
             next.key.size = loc.key.size;
             next.key.q8 = loc.key.q8;
             if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains_key(&next.key) {
-                self.prefetch(footage, next_t, size, float, loc.key.q8);
+                self.prefetch(footage, next_t, size, float, loc.key.q8, c.forgets);
             }
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn prefetch(self: &Arc<Self>, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, q8: bool) {
+    fn prefetch(self: &Arc<Self>, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, q8: bool, since: u64) {
         let (me, f) = (self.clone(), footage.clone());
         self.prefetched.fetch_add(1, Ordering::Relaxed);
         // A plain thread, not a rayon job: it waits for the decode.
         std::thread::spawn(move || {
-            let _ = me.frame_px(&f, t, false, size, float, q8, None);
+            let _ = me.frame_px(&f, t, false, size, float, q8, None, Some(since));
         });
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn prefetch(self: &Arc<Self>, _footage: &Footage, _t: Tick, _size: Option<(u32, u32)>, _float: FloatCurve, _q8: bool) {}
+    fn prefetch(self: &Arc<Self>, _footage: &Footage, _t: Tick, _size: Option<(u32, u32)>, _float: FloatCurve, _q8: bool, _since: u64) {}
 
     /// A still (image file or sequence frame) at `loc.key.size` when one is set, made of its
     /// whole decoded picture `img`: resampled as the renderer would ([`FootageSource::frame_at_size`]),
@@ -1946,6 +1962,25 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2042: a read queued before its file was forgotten (as a read-ahead of a closed project's
+    /// movie is, by the read of the frame before) decodes nothing and keeps nothing; a read asked
+    /// after the forget decodes and keeps its frame. (A still stands in for the movie.)
+    #[test]
+    fn reads_queued_before_a_forget_keep_nothing() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(2, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let pool = MediaPool::new();
+        pool.add_bytes("/a.png", png.into_inner().into());
+        let f = Footage { path: "/a.png".into(), kind: FootageKind::Still, width: 2, height: 2, has_video: true, ..Default::default() };
+        let queued = lock(&pool.inner.cache).forgets;
+        pool.forget("/a.png");
+        let read = Inner::frame_px(&pool.inner, &f, Tick::ZERO, false, None, FloatCurve::Srgb, false, None, Some(queued));
+        assert!(matches!(read, Err(MediaError::Cancelled)), "{:?}", read.err());
+        assert_eq!(pool.stats().frames, 0, "the forgotten file's frame came back");
+        pool.frame_at(&f, Tick::ZERO).unwrap();
+        assert_eq!(pool.stats().frames, 1);
+    }
 
     /// Conforming a long file's audio reads every chunk at its own time: the sample index times
     /// ticks per second overflowed `i64` past 12:36 at 48 kHz, and later chunks came out silent

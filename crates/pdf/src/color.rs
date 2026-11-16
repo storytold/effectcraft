@@ -779,7 +779,24 @@ impl Func {
     }
 }
 
-/// PDF text string → Rust string (UTF-16BE with a byte-order mark, else PDFDocEncoding ≈ Latin-1).
+/// PDFDocEncoding (ISO 32000-2 Annex D) where it differs from Latin-1: bytes 0x18–0x1F and
+/// 0x80–0xA0 (0x9F is undefined).
+const PDFDOC_LOW: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
+const PDFDOC_HIGH: [char; 33] = [
+    '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚', '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž',
+    '\u{FFFD}', '€',
+];
+
+fn pdfdoc_char(c: u8) -> char {
+    match c {
+        0x18..=0x1F => PDFDOC_LOW[usize::from(c - 0x18)],
+        0x80..=0xA0 => PDFDOC_HIGH[usize::from(c - 0x80)],
+        _ => char::from(c),
+    }
+}
+
+/// PDF text string → Rust string (UTF-16BE with a byte-order mark, UTF-8 with one, else
+/// PDFDocEncoding).
 pub fn text_string(b: &[u8]) -> String {
     if b.starts_with(&[0xFE, 0xFF]) {
         let u: Vec<u16> = b[2..].as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
@@ -788,12 +805,18 @@ pub fn text_string(b: &[u8]) -> String {
     if let Some(rest) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(rest).into_owned();
     }
-    b.iter().map(|&c| c as char).collect()
+    b.iter().map(|&c| pdfdoc_char(c)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_strings_without_a_bom_are_pdfdocencoding() {
+        assert_eq!(text_string(b"a\x80b\x92\xa0\x18\xe9"), "a•b™€˘é");
+        assert_eq!(text_string(b"\xfe\xff\x00A\x20\x22"), "A•");
+    }
 
     #[test]
     fn sample_count_at_and_over_the_cap() {
