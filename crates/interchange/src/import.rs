@@ -201,8 +201,8 @@ const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media t
 /// The largest start timecode, in frames, a file may have: a day at 1000 fps.
 const MAX_FILE_TIMECODE: i64 = 24 * 3600 * 1000;
 
-/// The paths an EDL reader guessed (media it flags offline: a line without `SOURCE FILE` names
-/// only its clip) that are not inside the list's folder: a clip name of `../x.mov` or an absolute
+/// The paths an EDL reader guessed (identified by its `Tape Name` metadata: a line without
+/// `SOURCE FILE` names only its clip) that are not inside the list's folder: a clip name of `../x.mov` or an absolute
 /// one would link a file elsewhere on the disk. They stay placeholders. A `SOURCE FILE` path is
 /// the list's own choice and is kept, also when another clip guesses the same path.
 fn guessed_outside(project: &fp::Project, base_dir: Option<&str>) -> HashSet<String> {
@@ -219,7 +219,9 @@ fn guessed_outside(project: &fp::Project, base_dir: Option<&str>) -> HashSet<Str
         if let fp::ItemKind::Media(m) = &it.kind
             && let fp::MediaRef::File { path } = &m.media
         {
-            if m.offline && !inside(path) {
+            // Film reserves `offline` for an explicit user action now. Its EDL reader sets
+            // Tape Name only on reel/clip-name guesses, never on SOURCE FILE references.
+            if it.metadata.contains_key("Tape Name") && !inside(path) {
                 guessed.insert(path.clone());
             } else {
                 named.insert(path.clone());
