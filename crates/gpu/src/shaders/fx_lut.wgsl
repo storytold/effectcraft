@@ -176,12 +176,16 @@ fn fxl_inv_1d(o: u32, i: u32, y: f32) -> f32 {
     // partition_point over the table's values.
     var lo = 0u;
     var hi = n;
-    while (lo < hi) {
-        let mid = (lo + hi) / 2u;
-        if (data[b1 + mid * 3u + i] < y) {
-            lo = mid + 1u;
-        } else {
-            hi = mid;
+    // A u32 interval needs at most 32 halvings. A fixed trip count avoids
+    // a divergent data-dependent loop on software Vulkan without changing lookup.
+    for (var step = 0u; step < 32u; step++) {
+        if (lo < hi) {
+            let mid = lo + (hi - lo) / 2u;
+            if (data[b1 + mid * 3u + i] < y) {
+                lo = mid + 1u;
+            } else {
+                hi = mid;
+            }
         }
     }
     let k = clamp(lo, 1u, n - 1u);
@@ -444,12 +448,11 @@ fn fxl_run(c0: vec3<f32>) -> vec3<f32> {
             case 1u, 2u: {
                 let tf = u32(data[pc + 1u]);
                 let g = data[pc + 2u];
-                for (var i = 0u; i < 3u; i++) {
-                    if (op == 1u) {
-                        c[i] = fxl_decode(tf, g, c[i]);
-                    } else {
-                        c[i] = fxl_encode(tf, g, c[i]);
-                    }
+                // Explicit components avoid llvmpipe's dynamically indexed vector writes.
+                if (op == 1u) {
+                    c = vec3<f32>(fxl_decode(tf, g, c.x), fxl_decode(tf, g, c.y), fxl_decode(tf, g, c.z));
+                } else {
+                    c = vec3<f32>(fxl_encode(tf, g, c.x), fxl_encode(tf, g, c.y), fxl_encode(tf, g, c.z));
                 }
                 pc += 3u;
             }
