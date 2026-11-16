@@ -13,7 +13,6 @@
 //! This module holds the naming and picture rules they share, and whole-file reads of bytes.
 
 use craft_exr::decode::PartInfo;
-use effectcraft_raster::channels3d::split_channel;
 use effectcraft_raster::{AuxChannels, Image};
 use effectcraft_render::reads::FileStamp;
 
@@ -40,21 +39,6 @@ pub(crate) fn part_name(part: &PartInfo) -> Option<String> {
 pub fn unsupported_compression(bytes: &[u8]) -> Option<&'static str> {
     let parts = craft_exr::decode::parts(bytes, &craft_exr::decode::Limits::none()).ok()?;
     parts.iter().any(|p| p.compression.starts_with("HTJ2K")).then_some(crate::exr_index::HTJ2K)
-}
-
-/// How the `image` crate's OpenEXR decoder would show a file: the first part with exact `R`, `G`
-/// and `B` channels (alpha `A` when it has one, else opaque), placed in the display window with
-/// 0 outside the data window.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Rgb {
-    /// No part has R, G and B: the decoder refuses the file (a multi-layer file, shown with
-    /// [`layered_image`]'s rule).
-    None,
-    /// The channels (indices into [`ExrIndex::channels`]) hold exactly what it would show.
-    Planes([usize; 3], Option<usize>),
-    /// The planes can't stand in for it (a depth-named channel, whose plane is filled with the
-    /// background depth, or another display window): decode with the `image` crate.
-    Unsupported,
 }
 
 /// How many bytes of decoded planes the plane store keeps by itself until the caches' budget is
@@ -97,79 +81,37 @@ pub fn read_exr_channels(bytes: &[u8]) -> Option<AuxChannels> {
     Some(aux_of(&index, &ids, planes))
 }
 
-/// Names of the beauty pass, most preferred first, matched against the last part of a layer's
-/// name (Blender's `ViewLayer.Combined` is `Combined`): Blender's Combined pass and its
-/// compositor's File Output default `Image`, the beauty / rgba / rgb / color of Nuke, Arnold and
-/// V-Ray.
-const BEAUTY: [&str; 7] = ["combined", "beauty", "image", "rgba", "rgb", "color", "colour"];
-
-/// A data pass, never the picture: Cryptomatte (`CryptoMaterial00`), depth, mist, normals,
-/// motion vectors, positions, UVs and object / material indices.
-fn is_data_layer(layer: &str) -> bool {
-    let last = layer.rsplit('.').next().unwrap_or(layer).to_ascii_lowercase();
-    last.starts_with("crypto")
-        || ["z", "uv", "id", "mist", "indexob", "indexma"].contains(&last.as_str())
-        || ["depth", "normal", "vector", "position", "velocity", "motion", "objectid", "materialid"].iter().any(|k| last.contains(k))
-}
-
-/// The layer whose colour a multi-layer file shows (see [`layered_image`]).
-fn picture_layer<'a>(aux: &AuxChannels, layers: &[&'a str]) -> Option<&'a str> {
-    // Colour layers: three different channels (not one channel, such as depth, shown in all).
-    let rgb: Vec<&str> = layers
-        .iter()
-        .copied()
-        .filter(|l| {
-            let [r, g, b, _] = aux.layer_rgba(l);
-            !r.is_empty() && !g.is_empty() && !b.is_empty() && r != g
-        })
-        .collect();
-    let last = |l: &str| l.rsplit('.').next().unwrap_or(l).to_ascii_lowercase();
-    let pictures = || rgb.iter().filter(|l| !is_data_layer(l));
-    // The unnamed layer (plain R, G, B), then the beauty pass by name.
-    rgb.iter()
-        .find(|l| l.is_empty())
-        .or_else(|| BEAUTY.iter().find_map(|k| rgb.iter().find(|l| last(l) == *k)))
-        .or_else(|| pictures().find(|l| ["combined", "beauty"].iter().any(|k| last(l).contains(k))))
-        .or_else(|| pictures().next())
-        .or_else(|| layers.iter().find(|l| !is_data_layer(l)))
-        .or_else(|| rgb.first())
-        .or_else(|| layers.first())
-        .copied()
-}
-
-/// The planes a multi-layer file's picture is made of (see [`layered_image`]): red, green, blue
-/// (one channel thrice for grey) and alpha, by name. Only the names of `aux` are read.
-pub(crate) fn picture_names(aux: &AuxChannels) -> Option<([String; 3], Option<String>)> {
-    let layers = aux.layers();
-    let colour = picture_layer(aux, &layers)?;
-    let names = aux.layer_rgba(colour);
-    // A layer without R, G and B channels shows its first channel as grey.
-    let first = aux.names().into_iter().find(|n| split_channel(n).0 == colour).unwrap_or_default();
-    let pick = |k: usize| names.get(k).map(String::as_str).filter(|n| !n.is_empty()).unwrap_or(first).to_string();
-    let a = names.get(3).filter(|n| !n.is_empty() && aux.get(n).is_some()).cloned();
-    Some(([pick(0), pick(1), pick(2)], a))
-}
-
-/// The picture of a multi-layer OpenEXR file without an unnamed RGB layer (Blender's
-/// `ViewLayer.Combined.R`, the compositor's `Image.R`, Nuke's `beauty.R`, …), which the image
-/// decoder rejects. After Effects shows a file's main RGBA channels and leaves the other layers
-/// to EXtractoR; here that is the beauty pass by name (`BEAUTY`), else the first colour layer
-/// that is not a data pass (never Cryptomatte, depth or normals, #412), else the first channel
-/// as grey. Linear, straight RGBA as the file stores it. `None` when it is not a readable EXR.
-/// Only the picture's channels are decoded (in a multi-part file the other parts aren't read).
-pub fn layered_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+/// The main picture of an OpenEXR file's bytes ([`crate::exr_index::MainPicture`]), linear,
+/// straight RGB(A) as the file stores it (a `Y` picture as grey); a file without one (named
+/// layers only, as Blender's `ViewLayer.Combined.R`) is black at its display window's size, as
+/// After Effects shows it (its layers are reached by name, EXtractoR). Only the picture's
+/// channels are decoded (in a multi-part file the other parts aren't read). `None` when it is
+/// not a readable EXR.
+pub fn picture_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     let mut src = std::io::Cursor::new(bytes);
     let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
-    let (ids, rgb, a) = index.picture.clone()?;
+    let (w, h) = index.size();
+    let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    let n = (w as usize).checked_mul(h as usize)?;
+    let Some(picture) = &index.picture else {
+        let len = n.checked_mul(3)?;
+        let mut data: Vec<f32> = Vec::new();
+        data.try_reserve_exact(len).ok()?;
+        data.resize(len, 0.0);
+        return image::Rgb32FImage::from_raw(w, h, data).map(image::DynamicImage::ImageRgb32F);
+    };
+    let ([r, g, b], a) = picture.rgba()?;
+    let ids = index.picture_ids();
     let (planes, _) = read_planes(&mut src, &index, &ReadRequest::full(ids.clone()));
-    let aux = aux_of(&index, &ids, planes.ok()?);
-    let [r, g, b] = [aux.get(&rgb[0])?, aux.get(&rgb[1])?, aux.get(&rgb[2])?];
-    let a = match &a {
-        Some(n) => Some(aux.get(n)?),
+    let planes = planes.ok()?;
+    let plane = |id: usize| ids.iter().position(|i| *i == id).and_then(|at| planes.get(at));
+    let (r, g, b) = (plane(r)?, plane(g)?, plane(b)?);
+    let a = match a {
+        Some(a) => Some(plane(a)?),
         None => None,
     };
-    let n = (aux.width as usize).checked_mul(aux.height as usize)?;
-    let mut data = Vec::with_capacity(n.checked_mul(4)?);
+    let mut data = Vec::new();
+    data.try_reserve_exact(n.checked_mul(if a.is_some() { 4 } else { 3 })?).ok()?;
     for i in 0..n {
         data.extend([r.get(i)?, g.get(i)?, b.get(i)?].map(|v| *v));
         if let Some(a) = a {
@@ -177,19 +119,24 @@ pub fn layered_image(bytes: &[u8]) -> Option<image::DynamicImage> {
         }
     }
     match a {
-        Some(_) => image::Rgba32FImage::from_raw(aux.width, aux.height, data).map(image::DynamicImage::ImageRgba32F),
-        None => image::Rgb32FImage::from_raw(aux.width, aux.height, data).map(image::DynamicImage::ImageRgb32F),
+        Some(_) => image::Rgba32FImage::from_raw(w, h, data).map(image::DynamicImage::ImageRgba32F),
+        None => image::Rgb32FImage::from_raw(w, h, data).map(image::DynamicImage::ImageRgb32F),
     }
 }
 
-/// The size and alpha of a layered file's picture ([`layered_image`]) from its headers alone
-/// (import). `None` when it is not a readable EXR.
-pub(crate) fn layered_size(bytes: &[u8]) -> Option<(u32, u32, bool)> {
+/// The size and alpha of an OpenEXR file's main picture ([`picture_image`]) from its headers
+/// alone (import; a file without one is its display window, opaque). `None` when it is not a
+/// readable EXR.
+pub(crate) fn picture_size(bytes: &[u8]) -> Option<(u32, u32, bool)> {
     let mut src = std::io::Cursor::new(bytes);
     let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
-    let (_, _, a) = index.picture.as_ref()?;
     let (w, h) = index.size();
-    Some((w as u32, h as u32, a.is_some()))
+    Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?, index.picture.as_ref().is_some_and(|p| p.has_alpha())))
+}
+
+/// The black picture of a file without a main picture, `w` × `h`, opaque (no alpha channel).
+pub(crate) fn black_picture(w: u32, h: u32, op: AlphaOp) -> Image {
+    float_to_image(w, h, op, |_| [0.0, 0.0, 0.0, 1.0])
 }
 
 /// The picture made of planes `rgb` and `a` (opaque without one) of `aux`, as
@@ -375,8 +322,11 @@ mod tests {
         assert!(read_exr_channels(&bytes.into_inner()).is_none());
     }
 
+    /// A file of named layers only (Blender's single-part multilayer) imports at its display
+    /// window's size and shows black, opaque, as After Effects does; its layers stay readable by
+    /// effects (EXtractoR, Cryptomatte) and nothing is an error.
     #[test]
-    fn layered_exr_without_an_unnamed_rgb_layer_imports() {
+    fn layered_exr_without_an_unnamed_rgb_layer_imports_black() {
         use exr::prelude::*;
         let (w, h) = (4usize, 2usize);
         let ch = |n: &str, v: f32| AnyChannel::new(n, FlatSamples::F32(vec![v; w * h]));
@@ -389,8 +339,13 @@ mod tests {
         assert_eq!((f.width, f.height, f.alpha), (4, 2, effectcraft_project::AlphaMode::Ignore));
         let pool = crate::MediaPool::new();
         pool.add_bytes("/layers.exr", b.clone());
-        let px = pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap().get(1, 1);
-        assert!((px[0] - 1.0).abs() < 1e-4 && px[1] > 0.3 && px[1] < 0.6 && px[2] < 1e-4 && px[3] == 1.0, "diffuse, sRGB-encoded: {px:?}");
+        let img = pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap();
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(img.get(1, 1), [0.0, 0.0, 0.0, 1.0], "black, opaque");
+        use effectcraft_render::FootageSource;
+        let effects = pool.aux(effectcraft_project::ItemId(1), &f, effectcraft_time::Tick::ZERO).expect("the layers, for effects");
+        assert_eq!(effects.get("diffuse.R").unwrap(), [1.0; 8].as_slice());
+        assert_eq!(effects.get("depth.Z").unwrap(), [7.0; 8].as_slice());
         let aux = read_exr_channels(&b).unwrap();
         assert_eq!(aux.layers(), ["depth", "diffuse"]);
         assert_eq!(aux.layer_rgba("diffuse"), ["diffuse.R", "diffuse.G", "diffuse.B", ""].map(String::from));
@@ -427,7 +382,7 @@ mod tests {
         assert!(aux.get("ViewLayer.Combined.R").is_some());
     }
 
-    /// Straight RGBA of [`layered_image`] at pixel 0 for a file of single-value channels.
+    /// Straight RGBA of [`picture_image`] at pixel 0 for a file of single-value channels.
     fn picture<S: AsRef<str>>(channels: &[(S, f32)]) -> Vec<f32> {
         use exr::prelude::*;
         let (w, h) = (2usize, 2usize);
@@ -435,15 +390,17 @@ mod tests {
         let image = Image::from_layer(Layer::new((w, h), LayerAttributes::default(), Encoding::FAST_LOSSLESS, AnyChannels::sort(list.into())));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write().to_buffered(&mut bytes).unwrap();
-        let img = layered_image(bytes.get_ref()).unwrap().to_rgba32f();
+        let img = picture_image(bytes.get_ref()).unwrap().to_rgba32f();
+        assert_eq!(img.dimensions(), (2, 2), "the display window's size");
         img.get_pixel(0, 0).0.to_vec()
     }
 
-    /// #412: a Blender compositor File Output (multilayer) names its beauty pass `Image`, and its
-    /// Cryptomatte layers (lowercase `r, g, b, a`) sort first. The picture was CryptoMaterial00;
-    /// it is the Image layer, and data passes are never the picture.
+    /// The main picture is After Effects': the unprefixed `R`, `G`, `B` (`A`), else `Y` (`A`) as
+    /// grey. A file of named layers only (Blender's multilayer `ViewLayer.Combined.R`, a
+    /// compositor's `Image.R`, Cryptomatte, depth) has none and shows black, opaque (#412 chose a
+    /// beauty pass by name before; its layers are reached by name, EXtractoR).
     #[test]
-    fn layered_exr_shows_the_beauty_pass_not_cryptomatte() {
+    fn the_picture_is_the_unprefixed_channels_else_black() {
         let mut blender = vec![];
         for layer in ["CryptoMaterial00", "CryptoMaterial01", "CryptoMaterial02"] {
             blender.extend(["r", "g", "b", "a"].map(|c| (format!("{layer}.{c}"), 0.9)));
@@ -452,8 +409,8 @@ mod tests {
             blender.extend(["R", "G", "B", "A"].map(|c| (format!("{layer}.{c}"), v)));
         }
         blender.push(("Mist.Z".into(), 0.7));
-        assert_eq!(picture(&blender), [0.5; 4], "the Image layer");
-        // Blender's render-layer names and Nuke's beauty.
+        let black = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(picture(&blender), black, "named layers only: no Image or beauty pass by name");
         assert_eq!(
             picture(&[
                 ("ViewLayer.CryptoObject00.r", 0.9),
@@ -463,12 +420,15 @@ mod tests {
                 ("ViewLayer.Combined.G", 0.2),
                 ("ViewLayer.Combined.B", 0.2)
             ]),
-            [0.2, 0.2, 0.2, 1.0]
+            black,
+            "Blender's Combined pass"
         );
-        // No beauty name: the first colour layer that isn't a data pass.
-        let no_beauty: Vec<(String, f32)> = blender.iter().filter(|(n, _)| !n.starts_with("Image")).cloned().collect();
-        assert_eq!(picture(&no_beauty), [0.3; 4], "GlossCol, not Cryptomatte");
-        // Only data and a grey pass: the grey pass, not depth.
-        assert_eq!(picture(&[("Depth.Z", 9.0), ("AO.Y", 0.25)]), [0.25, 0.25, 0.25, 1.0]);
+        assert_eq!(picture(&[("Depth.Z", 9.0), ("AO.Y", 0.25)]), black, "a layer's Y is not the picture");
+        // Unprefixed channels are, whatever the named layers beside them.
+        assert_eq!(picture(&[("R", 0.1), ("G", 0.2), ("B", 0.3), ("Image.R", 0.9)]), [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(picture(&[("R", 0.1), ("G", 0.2), ("B", 0.3), ("A", 0.5)]), [0.1, 0.2, 0.3, 0.5]);
+        // Luminance: grey, with its alpha.
+        assert_eq!(picture(&[("Y", 0.25)]), [0.25, 0.25, 0.25, 1.0]);
+        assert_eq!(picture(&[("A", 0.5), ("Y", 0.25), ("diffuse.R", 0.9)]), [0.25, 0.25, 0.25, 0.5]);
     }
 }

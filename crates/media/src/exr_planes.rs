@@ -34,7 +34,7 @@ use effectcraft_render::reads::ReadFile;
 
 use crate::convert::AlphaOp;
 use crate::exr_channels::CACHE_BUDGET;
-use crate::exr_channels::{Rgb, planes_picture};
+use crate::exr_channels::{black_picture, planes_picture};
 use crate::exr_index::{self, ExrIndex, IndexError};
 use crate::exr_read::{ExrSource, Opened, ReadError, ReadRequest, read_planes};
 
@@ -1139,10 +1139,10 @@ pub(crate) enum Picture {
     Legacy,
 }
 
-/// The picture of the OpenEXR at `path` made of its planes: the channels the `image` crate's
-/// decoder would show, or a multi-layer file's colour layer (see
-/// [`crate::exr_channels::layered_image`]). With `extra` (an effect reads the footage's
-/// channels) those channels are read in the same pass and kept for the effects.
+/// The picture of the OpenEXR at `path` made of its planes: its main picture
+/// ([`crate::exr_index::MainPicture`]), or black for a file without one (named layers only).
+/// With `extra` (an effect reads the footage's channels) those channels are read in the same
+/// pass and kept for the effects.
 pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option<&AuxNeed>) -> Picture {
     let mut extra = extra;
     for _ in 0..3 {
@@ -1153,13 +1153,16 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
             Err(_) => return Picture::Legacy,
         };
-        let Some(ids) = index.picture_ids() else { return Picture::Legacy };
-        let mut want = Want { all: false, ids: ids.into_iter().collect() };
+        let mut want = Want { all: false, ids: index.picture_ids().into_iter().collect() };
         if let Some(need) = extra {
             match need_ids(&index, need) {
                 Some(more) => want.ids.extend(more),
                 None => want.all = true,
             }
+        }
+        // (no main picture and nothing for the effects: black, nothing read)
+        if !want.all && want.ids.is_empty() {
+            return Picture::Done(picture_of(&index, None, op).ok_or_else(|| "the picture can't be made".to_string()));
         }
         let by = if extra.is_some() { Use::Picture } else { Use::Other };
         let batch = match store().get_opened(path, source, &index, &want, by, opened, since) {
@@ -1175,12 +1178,12 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             // (the whole file's decode says why)
             Err(Refused::Stopped | Refused::Unreadable) => return Picture::Legacy,
         };
-        let img = picture_of(&index, &batch, op);
+        let img = picture_of(&index, Some(&batch), op);
         // The picture is kept by the pool once converted, not twice: its planes go, but for those
         // an effect names (EXtractoR reading "R").
         if img.is_some() {
             let named = extra.and_then(|n| need_ids(&index, n)).unwrap_or_default();
-            let picture: BTreeSet<usize> = index.picture_ids().unwrap_or_default().into_iter().filter(|id| !named.contains(id)).collect();
+            let picture: BTreeSet<usize> = index.picture_ids().into_iter().filter(|id| !named.contains(id)).collect();
             let keep: BTreeSet<usize> = batch.ids.iter().copied().filter(|id| !picture.contains(id)).collect();
             store().keep_only(path, batch, &keep);
         }
@@ -1192,27 +1195,20 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
     Picture::Legacy
 }
 
-/// The picture of the file `index` describes, made of the planes of `batch`.
-fn picture_of(index: &ExrIndex, batch: &Batch, op: AlphaOp) -> Option<Image> {
-    let aux = &batch.aux;
-    match index.rgb {
-        Rgb::Planes([r, g, b], a) => {
-            let a = match a {
-                Some(a) => Some(batch.plane(a)?),
-                None => None,
-            };
-            planes_picture(aux, [batch.plane(r)?, batch.plane(g)?, batch.plane(b)?], a, op)
-        }
-        Rgb::None => {
-            let (_, rgb, a) = index.picture.as_ref()?;
-            let a = match a {
-                Some(n) => Some(aux.get(n)?),
-                None => None,
-            };
-            planes_picture(aux, [aux.get(&rgb[0])?, aux.get(&rgb[1])?, aux.get(&rgb[2])?], a, op)
-        }
-        Rgb::Unsupported => None,
-    }
+/// The picture of the file `index` describes, made of the planes of `batch` (black, opaque, for
+/// a file without a main picture, which needs no planes).
+fn picture_of(index: &ExrIndex, batch: Option<&Batch>, op: AlphaOp) -> Option<Image> {
+    let Some(main) = &index.picture else {
+        let (w, h) = index.size();
+        return Some(black_picture(u32::try_from(w).ok()?, u32::try_from(h).ok()?, op));
+    };
+    let batch = batch?;
+    let ([r, g, b], a) = main.rgba()?;
+    let a = match a {
+        Some(a) => Some(batch.plane(a)?),
+        None => None,
+    };
+    planes_picture(&batch.aux, [batch.plane(r)?, batch.plane(g)?, batch.plane(b)?], a, op)
 }
 
 /// The picture of the OpenEXR at `path` (as [`picture`]) of only the display rows `rows`: those
@@ -1225,10 +1221,11 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
         Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
         Err(_) => return Picture::Legacy,
     };
-    let Some(mut ids) = index.picture_ids() else { return Picture::Legacy };
     // (in file order: the planes are looked up by id)
-    ids.sort_unstable();
-    ids.dedup();
+    let ids = index.picture_ids();
+    if ids.is_empty() {
+        return Picture::Done(picture_of(&index, None, op).ok_or_else(|| "the picture can't be made".to_string()));
+    }
     let opened = match opened {
         Some(o) => Ok(o),
         None => source.open(),
@@ -1257,7 +1254,7 @@ pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i
     let file = ReadFile::new(path, opened.stamp);
     crate::reads::note(file.clone());
     let batch = Batch { index: index.clone(), ids, all: false, aux: Arc::new(aux), file };
-    match picture_of(&index, &batch, op) {
+    match picture_of(&index, Some(&batch), op) {
         Some(img) => Picture::Done(Ok(img)),
         None => Picture::Legacy,
     }
@@ -1286,7 +1283,7 @@ fn aux_of(path: &str, source: &ExrSource, need: &AuxNeed, with_picture: bool) ->
             None => Want { all: true, ids: BTreeSet::new() },
         };
         if with_picture {
-            want.ids.extend(index.picture_ids().unwrap_or_default());
+            want.ids.extend(index.picture_ids());
         }
         match store().get_opened(path, source, &index, &want, Use::Other, opened, since) {
             Ok(b) => return Some(b.aux.clone()),

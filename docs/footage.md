@@ -117,11 +117,12 @@ false` goes back to Use Source File Timecode). Cineon Settings: `{"logConversion
 
 Float OpenEXR renders hold linear light; EffectCraft sRGB-encodes them as they are read, like
 After Effects with Interpret As Linear Light for 32 bpc, unless the item preserves RGB (above).
-A multi-layer file shows its main RGBA channels, as in After Effects. Renders that keep every
-pass in named layers (Blender's `ViewLayer.Combined`, its compositor's File Output `Image`,
-Nuke's `beauty`) show the beauty pass: the layer named Combined, Beauty, Image, RGBA, RGB or
-Color, else the first colour layer that isn't a data pass. Cryptomatte, depth, mist, normals,
-vectors, positions and IDs are never the picture. EXtractoR reads every other layer and channel.
+A multi-layer file shows its main picture, as in After Effects: the channels without a layer
+prefix, `R`, `G`, `B` (and `A`) of the first part that has all three, else the first part's `Y`
+(and `A`) as grey. Renders that keep every pass in named layers (Blender's
+`ViewLayer.Combined`, its compositor's File Output `Image`, Nuke's `beauty.R`) have no main
+picture and show black at the file's size, as After Effects shows them; EXtractoR (and
+Cryptomatte and the 3D Channel effects) read every layer and channel by name.
 
 Footage on its own keeps only the channels of its picture (a single-part file still
 decompresses all of its pixels to read them). Once an effect reads an item's channels

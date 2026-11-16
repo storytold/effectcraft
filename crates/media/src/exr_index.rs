@@ -18,13 +18,14 @@ use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use craft_exr::channels::ColorLayout;
 use craft_exr::decode::{Limits, PartInfo, Window};
 use craft_exr::seek;
 use effectcraft_raster::AuxChannels;
 use effectcraft_raster::channels3d::BACKGROUND_DEPTH;
 use effectcraft_render::reads::FileStamp;
 
-use crate::exr_channels::{MAX_DISPLAY_PIXELS, Rgb, channel_name, is_depth, parse_manifest, part_name, picture_names};
+use crate::exr_channels::{MAX_DISPLAY_PIXELS, channel_name, is_depth, parse_manifest, part_name};
 use crate::exr_read::{ExrSource, Opened, ReadSeek};
 
 /// One channel of the file, in file order (parts in order, each part's channels as its header
@@ -40,6 +41,30 @@ pub(crate) struct IndexChannel {
     pub(crate) fill: f32,
 }
 
+/// A file's main picture: its channels (indices into [`ExrIndex::channels`]) in the layout's
+/// order, `R`, `G`, `B` (`A`) or `Y` (`A`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MainPicture {
+    pub(crate) layout: ColorLayout,
+    pub(crate) ids: Vec<usize>,
+}
+
+impl MainPicture {
+    /// The red, green, blue and alpha channels (a `Y` picture is grey: `Y` three times).
+    pub(crate) fn rgba(&self) -> Option<([usize; 3], Option<usize>)> {
+        let id = |i: usize| self.ids.get(i).copied();
+        match self.layout {
+            ColorLayout::Rgb | ColorLayout::Rgba => Some(([id(0)?, id(1)?, id(2)?], id(3))),
+            ColorLayout::Y | ColorLayout::YA => Some(([id(0)?; 3], id(1))),
+        }
+    }
+
+    /// It has an alpha channel.
+    pub(crate) fn has_alpha(&self) -> bool {
+        matches!(self.layout, ColorLayout::Rgba | ColorLayout::YA)
+    }
+}
+
 /// What an OpenEXR file holds ([`get`]).
 pub(crate) struct ExrIndex {
     /// The headers and chunk tables, as `craft-exr` reads them.
@@ -49,12 +74,10 @@ pub(crate) struct ExrIndex {
     /// The first part's display window: every plane covers it.
     pub(crate) display: Window,
     pub(crate) channels: Vec<IndexChannel>,
-    /// How the `image` crate's decoder would show the file (indices into `channels`).
-    pub(crate) rgb: Rgb,
-    /// A file the decoder refuses ([`Rgb::None`]): the channels its picture is made of
-    /// ([`picture_names`]: red, green, blue and alpha by name) and every channel answering to
-    /// one of those names (lookups ignore case).
-    pub(crate) picture: Option<(Vec<usize>, [String; 3], Option<String>)>,
+    /// The file's main picture ([`craft_exr::channels::main_picture`]), as After Effects shows
+    /// it: `None` for a file of named layers only (it shows black; effects reach its layers by
+    /// name).
+    pub(crate) picture: Option<MainPicture>,
     /// The names only (planes empty), manifests and aliases: for the channel lists and for
     /// resolving what effects declare. Never handed to an effect.
     pub(crate) names: Arc<AuxChannels>,
@@ -66,20 +89,19 @@ impl ExrIndex {
         (self.display.width as usize, self.display.height as usize)
     }
 
-    /// The channels the picture is made of: the image crate's choice ([`Rgb::Planes`]) or the
-    /// layered rule's. `None`: the planes can't make it (decode with the `image` crate).
-    pub(crate) fn picture_ids(&self) -> Option<Vec<usize>> {
-        match self.rgb {
-            Rgb::Planes([r, g, b], a) => Some([Some(r), Some(g), Some(b), a].into_iter().flatten().collect()),
-            Rgb::None => self.picture.as_ref().map(|(ids, _, _)| ids.clone()),
-            Rgb::Unsupported => None,
-        }
+    /// The channels the picture is made of, in file order (none for a file without a main
+    /// picture).
+    pub(crate) fn picture_ids(&self) -> Vec<usize> {
+        let mut ids = self.picture.as_ref().map(|p| p.ids.clone()).unwrap_or_default();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// Every channel but the picture's (what [`crate::exr_planes`] means by all channels: the
     /// picture is kept converted, by the media pool, not as planes too).
     pub(crate) fn aux_ids(&self) -> Vec<usize> {
-        let picture = self.picture_ids().unwrap_or_default();
+        let picture = self.picture_ids();
         (0..self.channels.len()).filter(|i| !picture.contains(i)).collect()
     }
 
@@ -185,17 +207,19 @@ pub(crate) fn build(src: &mut dyn ReadSeek, stamp: FileStamp) -> Result<ExrIndex
             channels.push(IndexChannel { name, part: pi, channel: ci, fill });
         }
     }
-    let rgb = rgb_of(parts, display, &channels);
+    let picture = main_picture(parts, &channels);
+    // The picture's channels are colour (0 outside the data window, as After Effects and the
+    // `image` crate show it), even in a part whose name reads as depth (`depth.R`).
+    for id in picture.iter().flat_map(|p| &p.ids) {
+        if let Some(c) = channels.get_mut(*id) {
+            c.fill = 0.0;
+        }
+    }
     let mut names = AuxChannels::new(display.width, display.height, 1.0);
     names.channels = channels.iter().map(|c| (c.name.clone(), vec![])).collect();
     names.manifests = manifests;
     names.aliases = aliases;
-    let picture = picture_names(&names).map(|(rgb, a)| {
-        // Planes are looked up by name ignoring case, so every channel that could answer is read.
-        let ids = channels.iter().enumerate().filter(|(_, c)| rgb.iter().chain(&a).any(|k| k.eq_ignore_ascii_case(&c.name))).map(|(i, _)| i).collect();
-        (ids, rgb, a)
-    });
-    Ok(ExrIndex { file, stamp, display, channels, rgb, picture, names: Arc::new(names) })
+    Ok(ExrIndex { file, stamp, display, channels, picture, names: Arc::new(names) })
 }
 
 /// The Cryptomatte manifests of the headers (`cryptomatte/<key>/name` and `…/manifest`, in any
@@ -217,26 +241,14 @@ fn manifests(parts: &[PartInfo]) -> Vec<(String, Vec<(String, u32)>)> {
     out
 }
 
-/// How the `image` crate's decoder would show the file: the first part with exact `R`, `G` and
-/// `B` channels (alpha `A` when it has one), unless its planes can't stand in for it (a
-/// depth-named channel, filled with the background depth outside the data window, or a part
-/// with its own display window).
-fn rgb_of(parts: &[PartInfo], display: Window, channels: &[IndexChannel]) -> Rgb {
-    for (pi, p) in parts.iter().enumerate() {
-        let find = |c: &str| p.channels.iter().position(|ch| ch.name == c);
-        let (Some(r), Some(g), Some(b)) = (find("R"), find("G"), find("B")) else { continue };
-        let id = |ci: usize| channels.iter().position(|c| c.part == pi && c.channel == ci);
-        let picked = [Some(r), Some(g), Some(b), find("A")];
-        let ids: Vec<Option<usize>> = picked.iter().map(|c| c.and_then(id)).collect();
-        let (Some(Some(r)), Some(Some(g)), Some(Some(b))) = (ids.first(), ids.get(1), ids.get(2)) else { return Rgb::Unsupported };
-        let a = ids.get(3).copied().flatten();
-        let depth = [Some(*r), Some(*g), Some(*b), a].iter().flatten().any(|i| channels.get(*i).is_some_and(|c| is_depth(&c.name)));
-        if depth || p.display_window != display {
-            return Rgb::Unsupported;
-        }
-        return Rgb::Planes([*r, *g, *b], a);
-    }
-    Rgb::None
+/// The file's main picture by the OpenEXR convention, as After Effects shows it
+/// ([`craft_exr::channels::main_picture`]: the unprefixed `R`, `G`, `B` (`A`) of the first part
+/// that has them, else the first unprefixed `Y` (`A`)), as channel ids. The parts' channels are
+/// matched as stored (a part's own `R`, not the `part.R` plane name).
+fn main_picture(parts: &[PartInfo], channels: &[IndexChannel]) -> Option<MainPicture> {
+    let (part, layout, picked) = craft_exr::channels::main_picture(parts.iter().map(|p| p.channels.iter().map(|c| c.name.as_str())))?;
+    let ids = picked.iter().map(|ci| channels.iter().position(|c| c.part == part && c.channel == *ci)).collect::<Option<Vec<usize>>>()?;
+    Some(MainPicture { layout, ids })
 }
 
 /// At most this many files are indexed, and their indexes take at most [`INDEXED_BYTES`]; the

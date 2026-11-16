@@ -197,6 +197,42 @@ fn multipart_channels_are_found_by_their_stored_names() {
     assert!(names.channels.iter().all(|(_, p)| p.is_empty()), "no pixels decoded");
 }
 
+/// The main picture is the first part with unprefixed `R`, `G`, `B`: a depth part before it
+/// isn't the picture (nor read for it), the second part's RGBA is.
+#[test]
+fn a_depth_part_first_leaves_the_picture_to_the_rgba_part() {
+    let bytes = write(vec![part(Some("depth"), &[("Z", false)], SIZE, Compression::ZIP1), part(Some("beauty"), &RGBA, SIZE, Compression::ZIP1)], SIZE);
+    let file = Temp::new("depth-first", &bytes);
+    let f = crate::probe(&file.0).unwrap();
+    assert_eq!((f.width, f.height), (SIZE.0 as u32, SIZE.1 as u32));
+    let index = crate::exr_index::get(&f.path, &ExrSource::Bytes(bytes.as_slice().into())).unwrap();
+    let names: Vec<&str> = index.picture.as_ref().unwrap().ids.iter().map(|i| index.channels[*i].name.as_str()).collect();
+    assert_eq!(names, ["beauty.R", "beauty.G", "beauty.B", "beauty.A"]);
+    let img = crate::MediaPool::new().frame_at(&f, Tick::ZERO).unwrap();
+    assert_eq!(bits(&img), bits(&image_crates(&bytes, &f)), "the RGBA part, as the image crate shows it");
+    let d = decodes_of(&f.path);
+    assert_eq!(d.last().unwrap().stats.chunks, [0, SIZE.1], "only the RGBA part's chunks");
+}
+
+/// A luminance file (`Y` only, no `R`, `G`, `B`) is grey, as before.
+#[test]
+fn a_luminance_file_is_grey() {
+    let bytes = write(vec![part(None, &[("Y", true)], SIZE, Compression::ZIP1)], SIZE);
+    let file = Temp::new("luminance", &bytes);
+    let f = crate::probe(&file.0).unwrap();
+    let path = f.path.clone();
+    let source = ExrSource::Bytes(bytes.as_slice().into());
+    let Picture::Done(Ok(img)) = picture(&path, &source, AlphaOp::of(&f, FloatCurve::Linear), None) else { panic!("a picture") };
+    for (i, px) in img.data.iter().enumerate() {
+        let y = f16::from_f32(value(i, 0, false)).to_f32();
+        assert_eq!([px[0], px[1], px[2], px[3]], [y, y, y, 1.0], "pixel {i}");
+    }
+    assert_eq!(
+        bits(&crate::MediaPool::new().frame_at(&f, Tick::ZERO).unwrap()),
+        bits(&crate::convert::dynamic_to_image(&crate::exr_channels::picture_image(&bytes).unwrap(), AlphaOp::of(&f, FloatCurve::Srgb)))
+    );
+}
+
 /// #3271: footage whose effects read 3 channels decodes its picture with them in one pass: one
 /// read of the file's chunks, one decode, for the picture and the effect.
 #[test]
@@ -302,7 +338,7 @@ fn a_request_not_covered_decodes_only_what_is_missing() {
     let source = ExrSource::Bytes(bytes);
     let store = PlaneStore::new(CACHE_BUDGET);
     let index = crate::exr_index::get(path, &source).unwrap();
-    let picture: BTreeSet<usize> = index.picture_ids().unwrap().into_iter().collect();
+    let picture: BTreeSet<usize> = index.picture_ids().into_iter().collect();
     let normal: BTreeSet<usize> = index.ids_named(["normal.R", "normal.G"]).into_iter().collect();
     store.get(path, &source, &index, &Want { all: false, ids: picture.clone() }, Use::Other).unwrap();
     let b = store.get(path, &source, &index, &Want { all: false, ids: normal.clone() }, Use::Other).unwrap();
@@ -570,7 +606,7 @@ fn picture_from_planes_is_the_image_crates() {
     for (k, bytes) in files.iter().enumerate() {
         let path = format!("/3271-planes-{k}.exr");
         let source = ExrSource::Bytes(bytes.as_slice().into());
-        assert!(matches!(crate::exr_index::get(&path, &source).unwrap().rgb, Rgb::Planes(..)), "file {k}");
+        assert!(crate::exr_index::get(&path, &source).unwrap().picture.is_some(), "file {k}");
         let img = crate::probe::load_oriented(bytes, Some(image::ImageFormat::OpenExr)).unwrap();
         for alpha in [AlphaMode::Straight, AlphaMode::Premultiplied, AlphaMode::Ignore] {
             for curve in [FloatCurve::Srgb, FloatCurve::Linear, FloatCurve::Gamma24] {
@@ -761,7 +797,7 @@ fn picture_from_planes_with_data_window_offsets_is_the_image_crates() {
     for (k, bytes) in files.iter().enumerate() {
         let path = format!("/3271-offsets-{k}.exr");
         let source = ExrSource::Bytes(bytes.as_slice().into());
-        assert!(matches!(crate::exr_index::get(&path, &source).unwrap().rgb, Rgb::Planes(..)), "file {k}");
+        assert!(crate::exr_index::get(&path, &source).unwrap().picture.is_some(), "file {k}");
         let f = Footage::default();
         let Picture::Done(Ok(got)) = picture(&path, &source, AlphaOp::of(&f, FloatCurve::Linear), None) else { panic!("file {k}: a picture") };
         let img = crate::probe::load_oriented(bytes, Some(image::ImageFormat::OpenExr)).unwrap();
@@ -780,7 +816,7 @@ fn a_failed_request_fails_only_requests_as_large() {
     let source = ExrSource::Bytes(bytes.into());
     let store = PlaneStore::new(CACHE_BUDGET);
     let index = crate::exr_index::get(path, &source).unwrap();
-    let picture = Want { all: false, ids: index.picture_ids().unwrap().into_iter().collect() };
+    let picture = Want { all: false, ids: index.picture_ids().into_iter().collect() };
     let all = Want { all: true, ids: (0..4).collect() };
     let held = store.get(path, &source, &index, &picture, Use::Picture).unwrap();
     assert_eq!(store.get(path, &source, &index, &all, Use::Other).err(), Some(Refused::Unreadable));
@@ -846,7 +882,7 @@ fn a_hostile_data_window_is_refused_not_allocated() {
         assert!(!crate::exr_index::safe_to_decode(&bytes));
         assert!(crate::exr_index::build(&mut std::io::Cursor::new(bytes.as_slice()), FileStamp::Virtual).is_err());
         assert!(crate::exr_channels::read_exr_channels(&bytes).is_none());
-        assert!(crate::exr_channels::layered_image(&bytes).is_none());
+        assert!(crate::exr_channels::picture_image(&bytes).is_none());
         let b: Arc<[u8]> = bytes.into();
         assert!(crate::probe_bytes(&path, b.clone()).is_err(), "import refuses it");
         let pool = crate::MediaPool::new();
@@ -877,7 +913,7 @@ fn damaged_files_never_panic() {
             let mut bad = good.clone();
             bad[at] ^= [0xff, 0x80, 0x01, 0x7f][i % 4];
             let _ = crate::exr_channels::read_exr_channels(&bad);
-            let _ = crate::exr_channels::layered_image(&bad);
+            let _ = crate::exr_channels::picture_image(&bad);
             let mut src = std::io::Cursor::new(bad.as_slice());
             if let Ok(ix) = crate::exr_index::build(&mut src, FileStamp::Virtual) {
                 let req = ReadRequest { rows: Some(3..9), level: 1, ..ReadRequest::full((0..ix.channels.len()).collect()) };
@@ -940,7 +976,7 @@ fn an_invalid_channel_list_is_refused() {
     for bad in [zero, swapped] {
         assert!(crate::exr_index::build(&mut std::io::Cursor::new(bad.as_slice()), FileStamp::Virtual).is_err());
         assert!(crate::exr_channels::read_exr_channels(&bad).is_none());
-        assert!(crate::exr_channels::layered_image(&bad).is_none());
+        assert!(crate::exr_channels::picture_image(&bad).is_none());
     }
 }
 
@@ -1497,7 +1533,7 @@ fn a_failed_picture_leaves_the_other_channels_readable() {
     let store = PlaneStore::new(CACHE_BUDGET);
     let source = ExrSource::Bytes(bytes);
     let index = crate::exr_index::get(path, &source).unwrap();
-    let picture = Want { all: false, ids: index.picture_ids().unwrap().into_iter().collect() };
+    let picture = Want { all: false, ids: index.picture_ids().into_iter().collect() };
     assert!(matches!(store.get(path, &source, &index, &picture, Use::Other), Err(Refused::TooLarge(_))));
     assert!(store.get(path, &source, &index, &picture, Use::Other).is_err(), "remembered");
     let rest = store.get(path, &source, &index, &Want { all: true, ids: Default::default() }, Use::Other).expect("the other channels");

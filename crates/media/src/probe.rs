@@ -292,9 +292,10 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
             (w, h, dec.color_type().has_alpha())
         }
         Err(e) => {
-            // A multi-layer OpenEXR file without an unnamed RGB layer: its picture's size and
-            // alpha from the headers alone (#3271), no pixels decoded.
-            let size = (fmt == image::ImageFormat::OpenExr).then(|| crate::exr_channels::layered_size(bytes)).flatten();
+            // An OpenEXR file without an unnamed RGB part (a `Y` picture, or named layers only,
+            // shown black): its picture's size and alpha from the headers alone (#3271), no
+            // pixels decoded.
+            let size = (fmt == image::ImageFormat::OpenExr).then(|| crate::exr_channels::picture_size(bytes)).flatten();
             size.ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?
         }
     };
