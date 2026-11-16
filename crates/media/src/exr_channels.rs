@@ -112,7 +112,10 @@ fn decode(bytes: &[u8], keep: &dyn Fn(&str) -> bool) -> Result<Decoded, Refused>
     limits.max_pixels = MAX_DISPLAY_PIXELS as u64;
     limits.max_bytes = MAX_DECODE_BYTES as u64;
     // Header-only checks must not charge channels this caller does not decode. The shared display
-    // decoder independently checks the exact selected display planes before allocating them.
+    // decoder independently checks the exact selected display planes before allocating them. It
+    // also bounds a selected part's data window across all of its channels (decoded blocks carry
+    // every channel before the unused ones are dropped), so a part whose full channel set exceeds
+    // `max_bytes` is refused even when the kept planes alone would fit.
     let mut header_limits = limits;
     header_limits.max_width = u32::MAX;
     header_limits.max_height = u32::MAX;
