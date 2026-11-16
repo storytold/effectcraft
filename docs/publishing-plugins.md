@@ -181,7 +181,7 @@ Package fields:
 | `author` | no | You, or your group. |
 | `description` | no, but reviewed | One or two plain sentences that say what the effect does. |
 | `license` | no, but reviewed | The licence's SPDX id (`MIT`, `Apache-2.0`, `MIT OR Apache-2.0`…). |
-| `repo` | no, but reviewed | The public source repository. The details' "Open on GitHub" opens it. |
+| `repo` | no, but reviewed | The public source repository, as `https://github.com/<owner>/<repo>` (a trailing `/` or `.git` is allowed), or a folder in it, `https://github.com/<owner>/<repo>/tree/<ref>/<path>`. The details' "Open on GitHub" opens it. When `repo` is given in any other form, Install and Preview refuse every release of the package. |
 | `tags` | no | Lower-case words for the tag filter (`blur`, `stylize`, `light`, `distort`…). Reuse tags the catalog already has. |
 | `preview.video` | no | An `https://` link to a short demo video on YouTube, Vimeo or GitHub. "Watch video" opens it in the browser. A link that isn't `https://` (or is longer than 500 characters) is left out. The live preview doesn't need it. |
 | `versions` | yes | One entry per release, newest or oldest first. |
@@ -193,7 +193,7 @@ Release fields (one per entry in `versions`):
 | `version` | yes | Dotted numbers only, at most 32 characters: `1.0.0`, `1.2`. No `v` and no suffixes such as `-beta`. |
 | `api` | yes | The plug-in API the module implements: `1`. |
 | `minApp` | no | The oldest EffectCraft version the release needs (`0.17.0`). Leave it out if any version with this API works. |
-| `url` | yes | The release asset's `https://` URL on GitHub. |
+| `url` | yes | The release asset's `https://` URL on GitHub: `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. When the package has a `repo`, the asset must be in that repository. Install and Preview refuse any other `https://` URL. |
 | `sha256` | yes | The file's SHA-256, 64 hex digits. |
 | `size` | no, but reviewed | The file's size in bytes. When it is given, a download of another size is refused. |
 | `effects` | yes | The effect ids the module registers (its manifest's `id`). EffectCraft uses them to find the package that provides an effect a project needs. |
