@@ -635,7 +635,6 @@ fn clicks_wait_for_the_probe_and_edits_popups_dialogs_and_comp_switches_end_or_b
 /// each Resolution. Skips without a GPU adapter.
 #[test]
 fn picks_on_the_gpu_viewer() {
-    let _gpu = crate::gpu_test::lock();
     let Some(probe) = effectcraft_gpu::Gpu::headless() else {
         eprintln!("no GPU adapter: skipping");
         return;
