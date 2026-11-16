@@ -84,7 +84,7 @@ fn on_draw_handlers_record_a_draw_list() {
     let mut s = session();
     let o = run_code(&mut s, DRAW, "draw.jsx");
     assert!(o.error.is_none(), "{:?}", o.error);
-    let [w, h] = measure_text("Hello", UiFont::Regular, 12.0, None).map(f64::ceil);
+    let [w, h] = measure_text("Hello", UiFont::Regular, 12.0, None).unwrap().map(f64::ceil);
     assert_eq!(o.result, json!(format!("{w},{h}")));
     let w = s.script_ui.windows[0].clone();
     let g = &w.root.children[0];

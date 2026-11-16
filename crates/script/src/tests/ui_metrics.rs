@@ -1,6 +1,6 @@
 //! ScriptUI text metrics: `measureString` measures the face `drawString` paints with (#3782).
 
-use effectcraft_engine::scriptui::{DrawOp, UiFont, measure_text};
+use effectcraft_engine::scriptui::{DrawOp, MAX_UI_TEXT_UNITS, UiFont, measure_text};
 use serde_json::{Value, json};
 
 use super::ok;
@@ -14,7 +14,7 @@ fn measure(s: &mut effectcraft_engine::Session, args: &str) -> [f64; 2] {
 }
 
 fn native(text: &str, font: UiFont, size: f64, wrap: Option<f64>) -> [f64; 2] {
-    measure_text(text, font, size, wrap).map(f64::ceil)
+    measure_text(text, font, size, wrap).unwrap().map(f64::ceil)
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn hostile_measure_arguments_stay_finite() {
         "'abc def', undefined, Infinity",
         "'abc def', undefined, 1e300",
         "undefined",
-        "new Array(300001).join('W\\u0301\\u4e2d\\n')",
+        "new Array(16384).join('W\\u0301\\u4e2d\\n')",
     ] {
         let [w, h] = measure(&mut s, args);
         assert!(w.is_finite() && h.is_finite() && w >= 0.0 && h >= 0.0, "{args}: {w} {h}");
@@ -118,4 +118,60 @@ w.show();
         })
         .collect();
     assert_eq!(fonts, [(UiFont::Mono, 13.0), (UiFont::Italic, 13.0), (UiFont::Bold, 16.0)]);
+}
+
+/// Text past the limit is refused by measureString and drawString alike, never measured or drawn
+/// in part; text at the limit is measured and drawn (#3782).
+#[test]
+fn measure_and_draw_refuse_the_same_overlong_text() {
+    let mut s = super::session();
+    // onDraw runs when the window is painted, after the script: it draws its own error message.
+    let code = format!(
+        r#"
+var w = new Window("palette", "Long");
+var c = w.add("group");
+c.preferredSize = [100, 40];
+var g = c.graphics;
+var at = new Array({max} + 1).join("W"), over = at + "W";
+function tryIt(f) {{ try {{ f(); return "ok"; }} catch (e) {{ return e.name + ": " + e.message; }} }}
+c.onDraw = function () {{
+  this.graphics.drawString(at, null, 0, 0);
+  this.graphics.drawString(tryIt(function () {{ c.graphics.drawString(over, null, 0, 0); }}), null, 0, 0);
+}};
+writeLn(at.length);
+writeLn(tryIt(function () {{ g.measureString(at); }}));
+writeLn(tryIt(function () {{ g.measureString(over); }}));
+w.show();
+"#,
+        max = MAX_UI_TEXT_UNITS
+    );
+    let out = ok(&mut s, &code).output;
+    let msg = format!("RangeError: ScriptUI text is {} characters long; at most {MAX_UI_TEXT_UNITS} can be measured or drawn", MAX_UI_TEXT_UNITS + 1);
+    assert_eq!(out, [MAX_UI_TEXT_UNITS.to_string(), "ok".into(), msg.clone()]);
+    let texts: Vec<String> = s.script_ui.windows[0].root.children[0]
+        .draw
+        .iter()
+        .filter_map(|op| match op {
+            DrawOp::Text { text, .. } => Some(if text.len() > 100 { format!("{} chars", text.len()) } else { text.clone() }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, [format!("{MAX_UI_TEXT_UNITS} chars"), msg], "the text within the limit is drawn, the longer text refused");
+}
+
+/// The #3782 report: narrow and wide strings measured the same width.
+#[test]
+fn original_report_measures_narrow_and_wide_apart() {
+    let mut s = super::session();
+    let code = r#"
+var w = new Window("palette", "Original metric probe");
+var g = w.add("statictext", undefined, "probe").graphics;
+var f = ScriptUI.newFont("dialog", "REGULAR", 12);
+var narrow = g.measureString("iiiiiiii", f);
+var wide = g.measureString("WWWWWWWW", f);
+writeLn(JSON.stringify({narrow: narrow.width, wide: wide.width, sameWidth: narrow.width === wide.width}));
+"#;
+    let out = ok(&mut s, code).output;
+    let [n, w] = [native("iiiiiiii", UiFont::Regular, 12.0, None)[0], native("WWWWWWWW", UiFont::Regular, 12.0, None)[0]];
+    assert_eq!(out, [format!(r#"{{"narrow":{n},"wide":{w},"sameWidth":false}}"#)]);
 }

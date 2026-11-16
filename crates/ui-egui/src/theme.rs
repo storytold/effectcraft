@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use effectcraft_engine::scriptui::UiFont;
 #[cfg(not(target_arch = "wasm32"))]
 use egui::FontTweak;
 #[cfg(not(target_arch = "wasm32"))]
@@ -275,16 +274,6 @@ impl Tokens {
     pub fn ui(size: f32) -> FontId {
         FontId::new(size, FontFamily::Proportional)
     }
-    /// The font a ScriptUI `drawString` paints with: the face `measureString` measured.
-    pub fn script_ui(font: UiFont, size: f32) -> FontId {
-        let family = match font {
-            UiFont::Regular => FontFamily::Proportional,
-            UiFont::Bold => FontFamily::Name("scriptui-bold".into()),
-            UiFont::Italic => FontFamily::Name("scriptui-italic".into()),
-            UiFont::Mono => FontFamily::Monospace,
-        };
-        FontId::new(size, family)
-    }
     pub fn semibold(size: f32) -> FontId {
         FontId::new(size, FontFamily::Name("semibold".into()))
     }
@@ -384,15 +373,11 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
     fonts.font_data.insert("inter-semibold".into(), Arc::new(FontData::from_static(INTER_SEMIBOLD)));
     fonts.font_data.insert("jbmono".into(), Arc::new(FontData::from_static(JETBRAINS_MONO)));
     fonts.font_data.insert("noto-symbols2".into(), Arc::new(FontData::from_static(NOTO_SYMBOLS2)));
-    fonts.font_data.insert("scriptui-bold".into(), Arc::new(FontData::from_static(UiFont::Bold.bytes())));
-    fonts.font_data.insert("scriptui-italic".into(), Arc::new(FontData::from_static(UiFont::Italic.bytes())));
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".into());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "jbmono".into());
     // Named weights need the same symbol fallback chain as ordinary labels.
     // The bundled Inter subset and JetBrains Mono do not cover every UI symbol.
-    for (family, face) in
-        [("semibold", "inter-semibold"), ("medium", "inter-medium"), ("scriptui-bold", "scriptui-bold"), ("scriptui-italic", "scriptui-italic")]
-    {
+    for (family, face) in [("semibold", "inter-semibold"), ("medium", "inter-medium")] {
         let mut stack = vec![face.into(), "inter".into()];
         stack.extend(proportional_fallbacks.iter().cloned());
         fonts.families.insert(FontFamily::Name(family.into()), stack);

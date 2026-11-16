@@ -10,13 +10,15 @@
 
 use crate::i18n::tr;
 use effectcraft_engine::Services;
-use effectcraft_engine::scriptui::{DrawOp, ImageRef, PathSeg, ScriptWindow, Widget, WidgetKind, WindowKind, layout, ui_font_size};
+use effectcraft_engine::scriptui::{DrawOp, ImageRef, PathSeg, ScriptWindow, Widget, WidgetKind, WindowKind, layout};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
 use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::theme::Tokens;
+
+mod text;
 
 enum Act {
     Click(u32, u32),
@@ -298,9 +300,7 @@ fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &
                     p.add(if closed { egui::Shape::closed_line(pts, s) } else { egui::Shape::line(pts, s) });
                 }
             }
-            DrawOp::Text { text, color, x, y, size, font, .. } => {
-                p.text(at(*x, *y), Align2::LEFT_TOP, text, Tokens::script_ui(*font, ui_font_size(*size) as f32), draw_color(color, t.text));
-            }
+            DrawOp::Text { text: s, color, x, y, size, font, .. } => text::paint_text(&p, at(*x, *y), s, *font, *size, draw_color(color, t.text)),
             DrawOp::Image { image, x, y, w, h } => {
                 let tex = image.as_ref().and_then(|i| image_texture(ui.ctx(), i, services));
                 let size = match &tex {
@@ -763,102 +763,13 @@ mod tests {
         let (mut fill, mut stroke, mut text) = (false, false, false);
         for s in out.shapes {
             match s.shape {
-                egui::Shape::Mesh(m) => fill |= m.vertices.iter().all(|v| v.color == want),
+                egui::Shape::Mesh(m) if m.texture_id == egui::TextureId::default() => fill |= m.vertices.iter().all(|v| v.color == want),
+                // drawString: the glyph texture tinted with the colour.
+                egui::Shape::Mesh(m) => text |= m.vertices.iter().all(|v| v.color == want),
                 egui::Shape::Path(p) => stroke |= matches!(p.stroke.color, egui::epaint::ColorMode::Solid(c) if c == want),
-                egui::Shape::Text(t) => text |= t.fallback_color == want,
                 _ => {}
             }
         }
         assert!(fill && stroke && text, "fill {fill}, stroke {stroke}, text {text}");
-    }
-
-    /// What `measureString` reports is the size `drawString` paints: the same face, size, lines
-    /// and Unicode clusters (#3782). Wrapping is checked against egui's own wrap in that face.
-    #[test]
-    fn measured_text_matches_the_painted_galley() {
-        use effectcraft_engine::scriptui::{UiFont, measure_text};
-        let ctx = egui::Context::default();
-        let t = Tokens::for_kind(crate::theme::ThemeKind::Dark);
-        crate::theme::install(&ctx, &t, "en");
-        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
-        let texts = [
-            "iiiiiiii",
-            "WWWWWWWW",
-            "AVATAR Toyota 0123",
-            "ab\nWWWW",
-            "ab\nWWWW\n",
-            "",
-            "e\u{301}e\u{301} \u{e9}",
-            "\u{416}\u{436}\u{436} \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}",
-            "Total: ",
-            "a  \nb ",
-        ];
-        let fonts = [UiFont::Regular, UiFont::Bold, UiFont::Italic, UiFont::Mono];
-        let mut ops = vec![];
-        for font in fonts {
-            for size in [9.0, 12.0, 20.0] {
-                for text in texts {
-                    ops.push(DrawOp::Text { text: text.into(), color: None, x: 0.0, y: 0.0, size, style: String::new(), font });
-                }
-            }
-        }
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_draw(ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 50.0)), &ops, &t, &effectcraft_engine::FsServices);
-        });
-        out.textures_delta.clear();
-        let painted: Vec<egui::Vec2> = out
-            .shapes
-            .iter()
-            .filter_map(|s| match &s.shape {
-                egui::Shape::Text(t) => Some(t.galley.size()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(painted.len(), ops.len());
-        let close = |a: f64, b: f32| (a - f64::from(b)).abs() < 0.05;
-        for (op, got) in ops.iter().zip(&painted) {
-            let DrawOp::Text { text, size, font, .. } = op else { continue };
-            let [w, h] = measure_text(text, *font, *size, None);
-            assert!(close(w, got.x) && close(h, got.y), "{font:?} {size} {text:?}: measured [{w}, {h}], painted {got:?}");
-        }
-        // The frontend never wraps ScriptUI text. measureString wraps like paragraph text: at a
-        // space, once the words drawn so far no longer fit (the space itself may hang past the
-        // width). Each row is as tall and as wide as the frontend draws its words.
-        let text = "the quick brown fox jumps over the lazy dog";
-        for font in fonts {
-            let drawn = |s: &str| ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), Tokens::script_ui(font, 12.0), Color32::WHITE).size());
-            let row_h = drawn("x").y;
-            for wrap in [60.0_f32, 80.0, 150.0] {
-                let mut rows: Vec<String> = vec![];
-                for word in text.split(' ') {
-                    match rows.last_mut() {
-                        Some(row) if drawn(&format!("{row} {word}")).x <= wrap => *row = format!("{row} {word}"),
-                        _ => rows.push(word.to_string()),
-                    }
-                }
-                let widest = rows.iter().map(|r| drawn(r).x).fold(0.0, f32::max);
-                let [w, h] = measure_text(text, font, 12.0, Some(f64::from(wrap)));
-                assert!(rows.len() > 1, "{font:?} at {wrap} should wrap");
-                assert!(
-                    close(w, widest) && close(h, rows.len() as f32 * row_h),
-                    "{font:?} wrapped at {wrap}: measured [{w}, {h}], drawn rows {rows:?}, widest {widest}"
-                );
-            }
-        }
-    }
-
-    /// The fonts registered for ScriptUI text are the files `measure_text` measures.
-    #[test]
-    fn script_ui_faces_are_the_measured_font_files() {
-        use effectcraft_engine::scriptui::UiFont;
-        let ctx = egui::Context::default();
-        crate::theme::install(&ctx, &Tokens::for_kind(crate::theme::ThemeKind::Dark), "en");
-        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
-        let names = ctx.fonts(|f| f.definitions().clone());
-        for (font, data) in [(UiFont::Regular, "inter"), (UiFont::Bold, "scriptui-bold"), (UiFont::Italic, "scriptui-italic"), (UiFont::Mono, "jbmono")] {
-            let family = Tokens::script_ui(font, 12.0).family;
-            assert_eq!(names.families.get(&family).and_then(|f| f.first()).map(String::as_str), Some(data), "{font:?}");
-            assert!(names.font_data.get(data).is_some_and(|d| (*d.font).as_ref() == font.bytes()), "{font:?} draws other bytes than it measures");
-        }
     }
 }

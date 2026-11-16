@@ -17,9 +17,9 @@ use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use boa_engine::object::builtins::JsArray;
-use boa_engine::{Context, JsResult, JsValue, js_string};
+use boa_engine::{Context, JsNativeError, JsResult, JsValue, js_string};
 use effectcraft_engine::Session;
-use effectcraft_engine::scriptui::{ScriptUiEvent, ScriptWindow, UiFont, layout, measure_text};
+use effectcraft_engine::scriptui::{MAX_UI_TEXT_UNITS, ScriptUiEvent, ScriptWindow, UiFont, UiTextError, layout, measure_text};
 use serde_json::{Value as J, json};
 use web_time::Instant;
 
@@ -106,14 +106,18 @@ pub(crate) fn native_face(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> J
     })
 }
 
-/// `__uiMeasure(text, face, size, boundsWidth)` → `[width, height]` of the text as the face draws
-/// it ([`measure_text`]); a `boundsWidth` that is not a positive number does not wrap.
+/// `__uiMeasure(text, face, size, boundsWidth)` → `[width, height]` of the text as `drawString`
+/// paints it ([`UiText::layout`]); a `boundsWidth` that is not a positive number does not wrap.
+/// Text past [`MAX_UI_TEXT_UNITS`] throws a `RangeError`, checked before the string is copied.
 pub(crate) fn native_measure(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    let text = arg_string(args, 0, ctx)?;
+    let text = args.first().cloned().unwrap_or_default().to_string(ctx)?;
+    if text.len() > MAX_UI_TEXT_UNITS {
+        return Err(JsNativeError::range().with_message(UiTextError::TooLong { units: text.len() }.to_string()).into());
+    }
     let face = serde_json::from_value(J::String(arg_string(args, 1, ctx)?)).unwrap_or_default();
     let size = args.get(2).cloned().unwrap_or_default().to_number(ctx)?;
     let wrap = args.get(3).cloned().unwrap_or_default().to_number(ctx)?;
-    let [w, h] = measure_text(&text, face, size, Some(wrap));
+    let [w, h] = measure_text(&text.to_std_string_lossy(), face, size, Some(wrap)).map_err(|e| JsNativeError::range().with_message(e.to_string()))?;
     Ok(JsArray::from_iter([JsValue::from(w), JsValue::from(h)], ctx).into())
 }
 

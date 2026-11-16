@@ -345,6 +345,13 @@ function __uiFontFace(f, g) {
   var name = x.name !== undefined && x.name !== null ? x.name : x.family;
   return __uiFace(name === undefined || name === null ? "" : String(name), x.style === undefined || x.style === null ? "" : String(x.style));
 }
+// drawString text, refused past the length measureString refuses (MAX_UI_TEXT_UNITS in the engine)
+// rather than drawn in part.
+function __uiDrawText(s) {
+  var t = String(s);
+  if (t.length > 65536) throw new RangeError("ScriptUI text is " + t.length + " characters long; at most 65536 can be measured or drawn");
+  return t;
+}
 
 // ScriptUIGraphics: what onDraw handlers paint with. Paths and paint calls are recorded into the
 // control's draw list (`draw` in the window snapshot), which frontends paint.
@@ -382,7 +389,7 @@ function __uiGraphics() {
     },
     drawString: function (text, pen, x, y, font) {
       var f = font || this.font;
-      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f?.style !== undefined ? f.style : ""), font: __uiFontFace(font, this) });
+      this.__push({ op: "text", text: __uiDrawText(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f?.style !== undefined ? f.style : ""), font: __uiFontFace(font, this) });
     },
     drawOSControl: function () { this.__push({ op: "os" }); },
     drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __num(x || 0), y: __num(y || 0), w: w === undefined ? 0 : __num(w), h: h === undefined ? 0 : __num(h) }); },
