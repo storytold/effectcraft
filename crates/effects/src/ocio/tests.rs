@@ -116,6 +116,13 @@ fn spi_files_parse() {
     assert!((back[0] - 1.0).abs() < 1e-5 && (back[2] - 2.0).abs() < 1e-5, "{back:?}");
     let three = parse_spi1d("Version 1\nFrom 0 1\nLength 2\nComponents 3\n{\n0 0 0\n1 0.5 2\n}\n").unwrap();
     assert_eq!(three.d1, vec![[0.0; 3], [1.0, 0.5, 2.0]]);
+    let eof = parse_spi1d("Length 2\nFrom -1 2\n{\n0 1").unwrap();
+    assert_eq!(eof.n1, 2);
+    assert_eq!(eof.dmin, [-1.0; 3]);
+    assert_eq!(eof.dmax, [2.0; 3]);
+    assert_eq!(eof.n3, 0);
+    assert!(eof.d3.is_empty());
+    assert!(parse_spi1d("Length 2\n{\n0 1 2").is_none());
     let mut spi3d = String::from("SPILUT 1.0\n3 3\n2 2 2\n");
     for (r, g, b) in (0..8).map(|i| (i & 1, (i >> 1) & 1, i >> 2)) {
         spi3d += &format!("{r} {g} {b} {} {} {}\n", r as f32 * 0.5, g, b);

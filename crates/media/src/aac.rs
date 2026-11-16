@@ -62,15 +62,15 @@ fn matroska(file: &dyn ByteReader) -> Option<Vec<u8>> {
 /// first unit it can read. Only AAC is asked about, so the streams before that one were refused
 /// whatever their codec, and an ADTS stream played has no configuration outside its frames.
 fn latm(file: &dyn ByteReader) -> Option<Vec<u8>> {
-    use filmcraft_mpegts::Codec;
+    use craft_media::mpegts::{self, Codec};
     let head = Head(file, file.len().min(MPEG_HEAD));
-    let mpeg = filmcraft_mpegts::open(&head).ok()?;
-    let audio = mpeg.streams.iter().enumerate().filter(|(_, s)| s.kind() == filmcraft_mpegts::Kind::Audio && !s.units.is_empty());
+    let mpeg = mpegts::open(&head).ok()?;
+    let audio = mpeg.streams.iter().enumerate().filter(|(_, s)| s.kind() == mpegts::Kind::Audio && !s.units.is_empty());
     let played = audio.take(filmcraft_media::MAX_AUDIO_STREAMS).find_map(|(i, s)| {
         let first = mpeg.read_unit(&head, i, 0).ok()?;
         match s.codec {
-            Codec::AacAdts => filmcraft_mpegts::frame_info(&s.codec, &first).map(|_| None),
-            Codec::AacLatm => filmcraft_codecs::audio::latm_config(&first).map(|c| Some(c.asc)),
+            Codec::AacAdts => mpegts::frame_info(&s.codec, &first).map(|_| None),
+            Codec::AacLatm => craft_audio::aac::latm_config(&first).map(|c| Some(c.asc)),
             _ => None,
         }
     });
@@ -90,15 +90,6 @@ impl Head<'_> {
 }
 
 impl craft_media::ByteSource for Head<'_> {
-    fn len(&self) -> u64 {
-        self.1
-    }
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.read(offset, buf)
-    }
-}
-
-impl filmcraft_mpegts::ByteSource for Head<'_> {
     fn len(&self) -> u64 {
         self.1
     }

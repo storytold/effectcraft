@@ -25,39 +25,8 @@ pub fn parse_spimtx(text: &str) -> Option<FileXform> {
 /// Parse a Sony Imageworks `.spi1d` 1D LUT: `From <min> <max>`, `Length <n>`, `Components
 /// <1 | 3>`, then `{` the values `}`.
 pub fn parse_spi1d(text: &str) -> Option<Lut> {
-    let (mut from, mut len, mut comps) = ([0.0f32, 1.0], 0usize, 1usize);
-    let mut values: Vec<f32> = vec![];
-    let mut body = false;
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if body {
-            if line.starts_with('}') {
-                break;
-            }
-            for t in line.split_whitespace() {
-                values.push(t.parse().ok()?);
-            }
-            continue;
-        }
-        let mut t = line.split_whitespace();
-        match t.next()? {
-            "{" => body = true,
-            "From" => from = [t.next()?.parse().ok()?, t.next()?.parse().ok()?],
-            "Length" => len = t.next()?.parse().ok()?,
-            "Components" => comps = t.next()?.parse().ok()?,
-            _ => {}
-        }
-    }
-    // A 1D table is interpolated by index, so cap it like the lattices (2²⁴ entries).
-    if !(2..=MAX_1D).contains(&len)
-        || !matches!(comps, 1 | 3)
-        || values.len() != len.checked_mul(comps)?
-        || from[1] <= from[0]
-        || from.iter().any(|v| !v.is_finite())
-    {
-        return None;
-    }
-    let d1 = values.chunks_exact(comps).map(|c| if comps == 3 { [c[0], c[1], c[2]] } else { [c[0]; 3] }).collect();
-    Some(Lut { n1: len, d1, n3: 0, d3: vec![], dmin: [from[0]; 3], dmax: [from[1]; 3] })
+    let table = craft_cms::spi1d::parse(text)?;
+    Some(Lut { n1: table.values.len(), d1: table.values, n3: 0, d3: vec![], dmin: [table.domain[0]; 3], dmax: [table.domain[1]; 3] })
 }
 
 /// Parse a Sony Imageworks `.spi3d` lattice: `SPILUT 1.0`, `3 3`, the sizes, then one
