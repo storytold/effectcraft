@@ -650,3 +650,21 @@ fn placed_bake_solves_the_quad_once() {
     so.map([1.0, 1.0], 20.0, 10.0);
     assert_eq!(counters::take(&QUAD), 1);
 }
+
+#[test]
+fn shared_unpredict_keeps_tail_bytes_and_refuses_unbudgeted_scratch() {
+    for depth in [8u16, 16, 32] {
+        let p = Psd { depth, ..base() };
+        let (w, h) = (3, 2);
+        let row = w * usize::from(depth / 8);
+        let mut actual: Vec<u8> = (0..row * 3 + 1).map(|i| (i * 31 % 251) as u8).collect();
+        let mut expected = actual.clone();
+        ref_unpredict(depth, &mut expected, w, h);
+        p.unpredict(&mut actual, w, h, &mut Budget::new(u64::MAX)).unwrap();
+        assert_eq!(actual, expected, "complete extra rows and partial tails stay untouched");
+    }
+    let p = Psd { depth: 32, ..base() };
+    let mut bytes = vec![0x31; 24];
+    assert!(p.unpredict(&mut bytes, 3, 2, &mut Budget::new(11)).is_err());
+    assert_eq!(bytes, vec![0x31; 24], "budget refusal precedes mutation");
+}
