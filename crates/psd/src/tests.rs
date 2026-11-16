@@ -171,7 +171,7 @@ fn text_effects_fill_and_adjustments() {
 #[test]
 fn packbits_round_trip() {
     for src in [vec![], vec![1u8], vec![5; 300], (0..=255).collect::<Vec<u8>>(), vec![1, 1, 2, 3, 3, 3, 4, 5, 5]] {
-        let enc = pack_bits(&src);
+        let enc = craft_psd::compression::packbits::encode_vec(&src);
         let mut out = vec![];
         unpack_bits(&enc, src.len(), &mut out).unwrap();
         assert_eq!(out, src);
@@ -518,4 +518,17 @@ fn a_failed_inflate_reports_its_status_not_its_output() {
     z[n - 1] ^= 0xff;
     let Err(Error::Invalid(msg)) = crate::limits::inflate(&z, 1 << 21) else { panic!("the checksum fails") };
     assert!(msg.len() < 100, "{} bytes", msg.len());
+}
+
+#[test]
+fn written_32_bit_documents_decode() {
+    // 32-bit samples are written as floats, raw or RLE, so both read back whole.
+    for rle in [true, false] {
+        let p = Psd::parse(write(&doc_with_layers(32, ColorMode::Rgb, rle))).expect("parse");
+        assert_eq!(p.depth, 32);
+        assert!(p.composite().is_ok(), "rle={rle}");
+        for i in 0..p.layers.len() {
+            assert!(p.layer_pixels(i, false).is_ok(), "rle={rle} layer {i}");
+        }
+    }
 }

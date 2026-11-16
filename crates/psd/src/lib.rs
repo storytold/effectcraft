@@ -32,7 +32,6 @@ pub use model::{
     Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Pixels, Rect, Section, SmartObject, SubPath, TextInfo, VectorMask,
 };
 pub use parse::is_psd;
-pub(crate) use pixels::pack_bits;
 #[cfg(test)]
 use pixels::{lab_to_rgb, srgb_encode, unpack_bits};
 
