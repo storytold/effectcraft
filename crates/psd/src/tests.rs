@@ -3,6 +3,7 @@ use super::*;
 
 mod integration;
 mod opt;
+mod shared_corpus;
 
 fn gradient(w: u32, h: u32) -> Vec<[f32; 4]> {
     (0..w * h).map(|i| [(i % w) as f32 / (w - 1).max(1) as f32, (i / w) as f32 / (h - 1).max(1) as f32, 0.25, 1.0]).collect()
