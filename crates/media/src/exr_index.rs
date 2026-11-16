@@ -10,9 +10,11 @@
 //! it and never decode pixels. The reader ([`crate::exr_read`]) fetches the chunks it lists.
 //!
 //! Everything is validated before anything is sized by it: the display window
-//! ([`crate::exr_channels::MAX_DISPLAY_PIXELS`]), the data windows (four times that), the blocks,
-//! the chunk count (eight bytes of offset table each, so never more than the file can hold), and
-//! every offset (inside the chunk area; a chunk with a bad offset is never read).
+//! ([`crate::exr_channels::MAX_DISPLAY_PIXELS`]), the data windows (four times that), the chunk
+//! count (eight bytes of offset table each, so never more than the file can hold), and every
+//! offset (inside the chunk area; a chunk with a bad offset is never read). Every block is held
+//! to what its chunk's bytes can decompress to ([`limits`]) when the file is indexed and before
+//! it is handed to another decoder ([`safe_to_decode`]); each read checks it again.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
@@ -144,11 +146,15 @@ pub(crate) const HTJ2K: &str = "OpenEXR HTJ2K compression isn't supported yet: r
 const MAX_DATA_PIXELS: usize = 4 * MAX_DISPLAY_PIXELS;
 
 /// What `craft-exr` may index: data windows of at most [`MAX_DATA_PIXELS`], of any width or
-/// height (the display window is checked against [`MAX_DISPLAY_PIXELS`] in [`build`]).
-/// `craft-exr` bounds every block itself (256 MiB uncompressed).
+/// height (the display window is checked against [`MAX_DISPLAY_PIXELS`] in [`build`]), and
+/// blocks of at most `craft-exr`'s default ratio of bytes per byte of their chunk (four times
+/// that for DWA, plus 1 MiB): a hostile header declaring a block of gigabytes over a chunk of a
+/// few bytes is refused, by every read and by [`safe_to_decode`]. A read's planes are bounded by
+/// its own cap ([`crate::exr_read::MAX_DECODE_BYTES`]).
 fn limits() -> Limits {
     let mut limits = Limits::none();
     limits.max_pixels = MAX_DATA_PIXELS as u64;
+    limits.max_ratio = Limits::default().max_ratio;
     limits
 }
 
@@ -159,12 +165,17 @@ fn index_file(src: &mut dyn ReadSeek) -> Result<seek::Index, seek::Error> {
     seek::Index::build(src, &limits(), &|| false)
 }
 
-/// The headers of the OpenEXR `bytes` are safe to hand to a decoder: they can be read and no
-/// part's data window or block is larger than this reader takes (#3271 review). A file this
-/// reader doesn't cover (deep parts, HTJ2K) is left to the decoder; damaged headers, a part too
-/// large and a failed read are refused.
+/// The headers of the OpenEXR `bytes` are safe to hand to a decoder (the `image` crate, which
+/// allocates every block by its header): they can be read, no part's data window is larger than
+/// this reader takes, and no block is larger than its chunk can decompress to ([`limits`])
+/// (#3271 review). A file this reader doesn't cover (deep parts, HTJ2K) is left to the decoder;
+/// damaged headers, a part or a block too large, and a failed read are refused.
 pub(crate) fn safe_to_decode(bytes: &[u8]) -> bool {
-    matches!(index_file(&mut std::io::Cursor::new(bytes)), Ok(_) | Err(seek::Error::Unsupported(_) | seek::Error::UnsupportedCompression(_)))
+    match index_file(&mut std::io::Cursor::new(bytes)) {
+        Ok(index) => index.check_blocks().is_ok(),
+        Err(seek::Error::Unsupported(_) | seek::Error::UnsupportedCompression(_)) => true,
+        Err(_) => false,
+    }
 }
 
 /// The channel list of `part` as the `exr` crate's validation took it (#3271): sorted by name,
@@ -183,9 +194,13 @@ fn channels_valid(part: &PartInfo) -> bool {
 pub(crate) fn build(src: &mut dyn ReadSeek, stamp: FileStamp) -> Result<ExrIndex, IndexError> {
     let file = index_file(src).map_err(|e| match e {
         seek::Error::UnsupportedCompression(name) if name.contains("HTJ2K") => IndexError::Unsupported(HTJ2K),
-        seek::Error::Io(_) => IndexError::Io,
+        // (memory refused just now: another attempt may succeed, nothing is remembered)
+        seek::Error::Io(_) | seek::Error::OutOfMemory(_) => IndexError::Io,
         _ => IndexError::Unreadable,
     })?;
+    // A block larger than its chunk can decompress to (a hostile header): the file is refused
+    // as a whole, as every read of it would refuse that chunk.
+    file.check_blocks().map_err(|_| IndexError::Unreadable)?;
     let parts = file.parts();
     // Deep data isn't read (the whole file was refused before).
     if parts.iter().any(|p| p.deep || !channels_valid(p)) {

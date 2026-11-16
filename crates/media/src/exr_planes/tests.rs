@@ -1544,6 +1544,25 @@ fn a_failure_is_forgotten_once_the_file_changes() {
 /// #3271 review: a failed picture request (too large here) doesn't refuse a later request for
 /// the other channels: "all channels" is every channel but the picture's, so it doesn't ask for
 /// what failed.
+/// Memory the system refuses during a read is a read that failed just now, not a file too large:
+/// it isn't remembered, and the next request reads again (a file too large is remembered).
+#[test]
+fn an_allocation_failure_is_not_remembered() {
+    use crate::exr_read::{ReadError, read_error};
+    assert_eq!(read_error(craft_exr::seek::Error::OutOfMemory("planes".into())), ReadError::Io("planes".into()));
+    assert!(matches!(read_error(craft_exr::seek::Error::LimitExceeded("planes".into())), ReadError::TooLarge(_)));
+    // A read that failed just now (here: the file can't be opened) is a stop, and the next
+    // request for the same channels reads them.
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let path = "/oom-not-remembered.exr";
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let index = crate::exr_index::get(path, &ExrSource::Bytes(bytes.clone())).unwrap();
+    let want = Want { all: false, ids: index.picture_ids().into_iter().collect() };
+    let gone = ExrSource::File(std::env::temp_dir().join("ec-oom-not-remembered-missing.exr"));
+    assert_eq!(store.get(path, &gone, &index, &want, Use::Other).err(), Some(Refused::Stopped));
+    assert!(store.get(path, &ExrSource::Bytes(bytes), &index, &want, Use::Other).is_ok(), "read again, not refused from memory");
+}
+
 #[test]
 fn a_failed_picture_leaves_the_other_channels_readable() {
     let bytes: Arc<[u8]> =

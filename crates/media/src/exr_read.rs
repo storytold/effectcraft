@@ -221,6 +221,19 @@ pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
 #[cfg(not(target_pointer_width = "64"))]
 pub(crate) const MAX_DECODE_BYTES: usize = 512 << 20;
 
+/// What a failed `craft-exr` read means here. Memory the system refused just now is a read that
+/// failed ([`ReadError::Io`]: the plane store doesn't remember it, another read may succeed),
+/// not a file too large (remembered until the file changes).
+pub(crate) fn read_error(e: seek::Error) -> ReadError {
+    match e {
+        seek::Error::Cancelled => ReadError::Cancelled,
+        seek::Error::Io(why) | seek::Error::OutOfMemory(why) => ReadError::Io(why),
+        seek::Error::LimitExceeded(why) => ReadError::TooLarge(format!("its OpenEXR channels need more memory than one file may use ({why})")),
+        seek::Error::Malformed(why) | seek::Error::Unsupported(why) | seek::Error::UnsupportedCompression(why) => ReadError::Unreadable(why),
+        other => ReadError::Unreadable(other.to_string()),
+    }
+}
+
 /// The most threads one read decompresses on (beside the caller's), and the size of a file
 /// whose chunks are decompressed on the calling thread alone.
 const READ_WORKERS: usize = 4;
@@ -274,13 +287,7 @@ fn read(src: &mut dyn ReadSeek, index: &ExrIndex, req: &ReadRequest) -> Result<(
     // pool the caller runs on: a few at most, and none for a small file (its chunks are
     // decompressed on the calling thread).
     request.workers = Some(if index.file.file_len() < SMALL_FILE { 0 } else { rayon::current_num_threads().min(READ_WORKERS) });
-    let planes = seek::read_planes(src, &index.file, &request, &filmcraft_media::cancel::cancelled).map_err(|e| match e {
-        seek::Error::Cancelled => ReadError::Cancelled,
-        seek::Error::Io(why) => ReadError::Io(why),
-        seek::Error::LimitExceeded(why) => ReadError::TooLarge(format!("its OpenEXR channels need more memory than one file may use ({why})")),
-        seek::Error::Malformed(why) | seek::Error::Unsupported(why) | seek::Error::UnsupportedCompression(why) => ReadError::Unreadable(why),
-        other => ReadError::Unreadable(other.to_string()),
-    })?;
+    let planes = seek::read_planes(src, &index.file, &request, &filmcraft_media::cancel::cancelled).map_err(read_error)?;
     let stats = ReadStats { chunks: planes.stats.chunks, bytes: planes.stats.bytes, lines: planes.stats.lines };
     Ok((planes.planes, stats))
 }
