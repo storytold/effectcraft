@@ -196,6 +196,9 @@ impl Session {
 
     /// Replace the whole project (open/new), resetting history and state.
     pub fn replace_project(&mut self, mut p: Project, path: Option<String>) {
+        // Work still running for the closed project stops reading it (see `project_closed`).
+        self.project_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.project_closed = Arc::default();
         if self.stop_render()
             && let Some(mut job) = self.render_job.take()
         {
@@ -221,13 +224,13 @@ impl Session {
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
         upgrade_effects(&mut p);
-        // The media layer keys decoded frames by path: files of the new project may have changed
-        // since an earlier project decoded them (#1070).
-        for it in p.items.values() {
-            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-                self.forget_decoded(f);
-            }
+        // Let go of what the closed project's footage and proxies decoded (frames, decoders,
+        // models), and of what the new project's files decoded under an earlier project: the
+        // media layer keys them by path, and the files may have changed since (#1070).
+        for f in super::render::project_footage(&self.project).chain(super::render::project_footage(&p)) {
+            super::render::forget_files(self.footage.as_ref(), f);
         }
+        self.drop_crypto_probe();
         self.layer_cache.clear();
         self.project = Arc::new(p);
         // The set of footage effects read the channels of is sent again, even when it is empty.
@@ -237,6 +240,9 @@ impl Session {
         self.path = path;
         self.bump();
         self.mark_saved();
+        // The viewers' RAM preview shows the closed project's frames, whose comp ids can collide
+        // with the new project's.
+        self.events.push(Event::PurgeCaches);
         let first = self.project.comps().next().map(|(id, _)| *id);
         if let Some(c) = first {
             self.open_comp(c);
