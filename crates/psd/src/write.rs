@@ -163,6 +163,15 @@ fn channel(id: i16, v: &[f32], w: usize, h: usize, doc: &WDoc) -> craft_psd::Res
         .or_else(|_| ChannelData::encode(id, Compression::Raw, &samples, w, h, doc.depth, Version::Psd))
 }
 
+/// The `luni` block: the UTF-16 length and code units, unpadded, as this writer has always
+/// written it (`TaggedBlock::unicode_name` adds a terminator, which would change exported files).
+fn unicode_name(name: &str) -> TaggedBlock {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let mut data = (units.len() as u32).to_be_bytes().to_vec();
+    data.extend(units.iter().flat_map(|u| u.to_be_bytes()));
+    TaggedBlock::new(*b"luni", data)
+}
+
 /// A legacy Pascal name: ASCII, anything else as `?`, at most 255 bytes.
 fn legacy_name(s: &str) -> Vec<u8> {
     s.bytes().map(|c| if c < 0x80 { c } else { b'?' }).take(255).collect()
@@ -190,7 +199,7 @@ fn record(l: &WLayer, doc: &WDoc) -> craft_psd::Result<LayerRecord> {
     }
     let mut flags = LayerFlags(8);
     flags.set_hidden(l.hidden);
-    let mut blocks = vec![TaggedBlock::unicode_name(&l.name)];
+    let mut blocks = vec![unicode_name(&l.name)];
     let kind = match l.section {
         Section::Layer => None,
         Section::OpenFolder => Some(SectionType::OpenFolder),
