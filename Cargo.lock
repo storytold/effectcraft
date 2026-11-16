@@ -1848,6 +1848,7 @@ name = "effectcraft-export"
 version = "0.24.1"
 dependencies = [
  "craft-audio",
+ "craft-gif",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87)",
  "craft-video",
  "effectcraft-color",
