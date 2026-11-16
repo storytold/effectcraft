@@ -117,8 +117,10 @@ impl Provider for FakeProvider {
         "Fake".into()
     }
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
-        if std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains("slow-helper")) {
-            std::thread::sleep(Duration::from_secs(1));
+        // The slow copy says it is describing, then waits to be released (see `run_checks`).
+        if let Some(gate) = std::env::current_exe().ok().and_then(|p| p.parent().filter(|d| d.ends_with("slow-helper")).map(|d| d.to_path_buf())) {
+            let _ = std::fs::write(gate.join("describing"), "");
+            wait_for(&gate.join("release"));
         }
         let v: Vec<Arc<dyn EffectPlugin>> =
             [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang), ("noisy", Kind::Noisy)]
@@ -180,6 +182,18 @@ fn render(id: &str, pixels: &mut Vec<[f32; 4]>, w: u32, h: u32, amount: f64, nes
     pixels.resize((w * h) as usize, [0.0; 4]);
     let mut f = PluginFrame { width: w, height: h, pixels, scale: 1.0, origin: [pad as f64; 2], layer_size: [w as f64, h as f64] };
     p.render_v2(&mut f, &params, 1.0, &host)
+}
+
+/// Wait (up to 30 s, so a broken check can't hang) for `path` to exist.
+fn wait_for(path: &std::path::Path) -> bool {
+    let t0 = std::time::Instant::now();
+    while !path.exists() {
+        if t0.elapsed() > Duration::from_secs(30) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 fn check(name: &str, ok: bool, detail: impl std::fmt::Debug) -> bool {
@@ -304,9 +318,11 @@ fn run_checks() -> bool {
     let slow = state.join("slow-helper").join(exe.file_name().unwrap_or_default());
     let copied = std::fs::create_dir_all(state.join("slow-helper")).and_then(|()| std::fs::copy(&exe, &slow));
     all &= check("copy the slow helper", copied.is_ok(), &copied);
+    let gate = state.join("slow-helper");
     let scan = std::thread::spawn(move || effectcraft_helper_host::scan_paths(&[slow], false));
-    std::thread::sleep(Duration::from_millis(300));
+    all &= check("the slow helper is describing", wait_for(&gate.join("describing")), &gate);
     effectcraft_helper_host::shut_down();
+    let _ = std::fs::write(gate.join("release"), "");
     let scanned = scan.join().map(|r| r["helpers"].as_array().map_or(0, Vec::len));
     let mine = format!("effectcraft-helper-{}-", std::process::id());
     let files =
