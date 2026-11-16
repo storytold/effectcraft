@@ -386,6 +386,19 @@ fn db() -> &'static RwLock<Db> {
     })
 }
 
+/// Counts changes that can change which face [`fallback_for`] picks: faces added, the CJK locale set.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The font database's generation. A layout kept across frames is stale once this changes: its
+/// characters may fall back to other faces now.
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn bump_generation() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
 /// Adds a face to the database and returns its id.
 fn push(db: &mut Db, info: FaceInfo) -> FaceId {
     let id = db.faces.len();
@@ -408,6 +421,10 @@ pub fn add_source(src: &dyn FontSource) -> usize {
     }
     // A new face can belong to one of a script's usual families.
     family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    drop(d);
+    if n > 0 {
+        bump_generation();
+    }
     n
 }
 
@@ -418,6 +435,8 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
     let mut d = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let ids = names.into_iter().map(|n| push(&mut d, info_from(n, FaceData::Shared(data.clone()), "user"))).collect();
     family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    drop(d);
+    bump_generation();
     ids
 }
 
@@ -892,6 +911,7 @@ pub fn set_cjk_locale(tag: &str) {
     // fallbacks.
     fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    bump_generation();
 }
 
 fn requested_cjk_locale() -> Option<String> {
