@@ -1,4 +1,4 @@
-//! craft-video's AV1 encoder against the filmcraft-av1 decoder and ffmpeg's libdav1d.
+//! craft-video's AV1 encoder against craft-video's AV1 decoder and ffmpeg's libdav1d.
 
 mod bench;
 mod common;
