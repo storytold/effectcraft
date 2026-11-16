@@ -22,10 +22,21 @@ pub(crate) fn local_path(url: &str) -> Option<String> {
         return None;
     }
     let decoded = percent_decode(rest)?;
-    // `file:///C:/…`: a Windows drive path has no leading slash.
-    let bytes = decoded.as_bytes();
+    Some(without_drive_slash(decoded))
+}
+
+/// `file:///C:/…`: on Windows a drive path has no leading slash. Elsewhere `/C:/…` is an
+/// ordinary absolute path and stays as it is.
+#[cfg(target_os = "windows")]
+fn without_drive_slash(path: String) -> String {
+    let bytes = path.as_bytes();
     let drive = bytes.get(1).is_some_and(u8::is_ascii_alphabetic) && bytes.get(2) == Some(&b':');
-    Some(if drive { decoded.get(1..).unwrap_or_default().to_string() } else { decoded })
+    if drive { path.get(1..).unwrap_or_default().to_string() } else { path }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn without_drive_slash(path: String) -> String {
+    path
 }
 
 fn percent_decode(text: &str) -> Option<String> {
@@ -66,7 +77,13 @@ fn launch(path: &str) -> std::io::Result<()> {
         c.arg(path);
         c
     };
-    command.spawn().map(|_| ())
+    let mut child = command.spawn()?;
+    // Wait for the opener off the UI thread so it doesn't stay behind as a zombie on Unix. If the
+    // thread can't be started the opener still runs; only its exit status goes unread.
+    let _ = std::thread::Builder::new().name("open-local".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -75,9 +92,20 @@ mod tests {
 
     #[test]
     fn file_urls_become_local_paths() {
-        assert_eq!(local_path("file:///C:/Users/Ann/Footage/clip%201.mov").as_deref(), Some("C:/Users/Ann/Footage/clip 1.mov"));
         assert_eq!(local_path("file:///home/ann/a%23b%25c%3Fd.mov").as_deref(), Some("/home/ann/a#b%c?d.mov"));
         assert_eq!(local_path("file:///Users/ann/Caf%C3%A9/x.mov").as_deref(), Some("/Users/ann/Café/x.mov"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_paths_lose_the_leading_slash() {
+        assert_eq!(local_path("file:///C:/Users/Ann/Footage/clip%201.mov").as_deref(), Some("C:/Users/Ann/Footage/clip 1.mov"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn drive_like_paths_stay_absolute_elsewhere() {
+        assert_eq!(local_path("file:///C:/media/clip.mov").as_deref(), Some("/C:/media/clip.mov"));
     }
 
     #[test]
