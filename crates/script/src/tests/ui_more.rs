@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use effectcraft_engine::Session;
-use effectcraft_engine::scriptui::{DrawOp, PathSeg, WidgetKind, WindowKind};
+use effectcraft_engine::scriptui::{DrawOp, PathSeg, UiFont, WidgetKind, WindowKind, measure_text};
 use serde_json::json;
 
 use crate::run_code;
@@ -84,7 +84,8 @@ fn on_draw_handlers_record_a_draw_list() {
     let mut s = session();
     let o = run_code(&mut s, DRAW, "draw.jsx");
     assert!(o.error.is_none(), "{:?}", o.error);
-    assert_eq!(o.result, json!("35,15"));
+    let [w, h] = measure_text("Hello", UiFont::Regular, 12.0, None).map(f64::ceil);
+    assert_eq!(o.result, json!(format!("{w},{h}")));
     let w = s.script_ui.windows[0].clone();
     let g = &w.root.children[0];
     assert!(g.handlers.contains(&"onDraw".to_string()));
@@ -98,7 +99,7 @@ fn on_draw_handlers_record_a_draw_list() {
         }
         o => panic!("{o:?}"),
     }
-    assert!(matches!(&g.draw[2], DrawOp::Text { text, size, style, .. } if text == "Hi" && *size == 20.0 && style == "BOLD"));
+    assert!(matches!(&g.draw[2], DrawOp::Text { text, size, style, font, .. } if text == "Hi" && *size == 20.0 && style == "BOLD" && *font == UiFont::Bold));
     // scriptui.get carries it for agents.
     let tree = s.execute("scriptui.get", json!({})).unwrap();
     assert_eq!(tree["root"]["children"][0]["draw"][0]["op"], "fill");

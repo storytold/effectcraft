@@ -16,9 +16,10 @@ use std::collections::BTreeMap;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use boa_engine::object::builtins::JsArray;
 use boa_engine::{Context, JsResult, JsValue, js_string};
 use effectcraft_engine::Session;
-use effectcraft_engine::scriptui::{ScriptUiEvent, ScriptWindow, layout};
+use effectcraft_engine::scriptui::{ScriptUiEvent, ScriptWindow, UiFont, layout, measure_text};
 use serde_json::{Value as J, json};
 use web_time::Instant;
 
@@ -94,6 +95,26 @@ pub(crate) fn native_layout(_: &JsValue, args: &[JsValue], ctx: &mut Context) ->
     w.root.walk(&mut all);
     let map: serde_json::Map<String, J> = all.iter().map(|c| (c.id.to_string(), json!(c.bounds))).collect();
     Ok(js_str(&J::Object(map).to_string()))
+}
+
+/// `__uiFace(family, style)`: the bundled face a ScriptUI font draws with ([`UiFont::resolve`]).
+pub(crate) fn native_face(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let face = UiFont::resolve(&arg_string(args, 0, ctx)?, &arg_string(args, 1, ctx)?);
+    Ok(match serde_json::to_value(face) {
+        Ok(J::String(name)) => js_str(&name),
+        _ => js_str("regular"),
+    })
+}
+
+/// `__uiMeasure(text, face, size, boundsWidth)` → `[width, height]` of the text as the face draws
+/// it ([`measure_text`]); a `boundsWidth` that is not a positive number does not wrap.
+pub(crate) fn native_measure(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let text = arg_string(args, 0, ctx)?;
+    let face = serde_json::from_value(J::String(arg_string(args, 1, ctx)?)).unwrap_or_default();
+    let size = args.get(2).cloned().unwrap_or_default().to_number(ctx)?;
+    let wrap = args.get(3).cloned().unwrap_or_default().to_number(ctx)?;
+    let [w, h] = measure_text(&text, face, size, Some(wrap));
+    Ok(JsArray::from_iter([JsValue::from(w), JsValue::from(h)], ctx).into())
 }
 
 /// `__uiModal(windowId)`: a dialog's `show()`. On a script-host thread it hands the session back
