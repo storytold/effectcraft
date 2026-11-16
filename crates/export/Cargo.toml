@@ -31,7 +31,6 @@ tempfile = { workspace = true }
 effectcraft-media = { workspace = true }
 effectcraft-effects = { workspace = true }
 effectcraft-color = { workspace = true }
-filmcraft-hevc = { workspace = true }
-filmcraft-av1 = { workspace = true }
-filmcraft-vp9 = { workspace = true }
+# The decoders that check the VP9, HEVC and AV1 encoders round-trip (av1 is already on).
+craft-video = { workspace = true, features = ["vp9-decode", "hevc-decode"] }
 effectcraft-keyframe = { workspace = true }
