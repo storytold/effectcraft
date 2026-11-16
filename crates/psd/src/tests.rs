@@ -520,3 +520,17 @@ fn a_failed_inflate_reports_its_status_not_its_output() {
     let Err(Error::Invalid(msg)) = crate::limits::inflate(&z, 1 << 21) else { panic!("the checksum fails") };
     assert!(msg.len() < 100, "{} bytes", msg.len());
 }
+
+#[test]
+fn shared_packbits_keeps_padded_rows_and_truncated_packet_errors() {
+    let mut out = vec![42];
+    unpack_bits(&[0, 7], 3, &mut out).unwrap();
+    assert_eq!(out, [42, 7, 0, 0]);
+    unpack_bits(&[128], 2, &mut out).unwrap();
+    assert_eq!(out, [42, 7, 0, 0, 0, 0]);
+    assert_eq!(unpack_bits(&[3, 1], 1, &mut vec![]), Err(Error::Truncated));
+    assert_eq!(unpack_bits(&[255], 1, &mut vec![]), Err(Error::Truncated));
+    let mut row = vec![];
+    unpack_bits(&[0, 9, 255], 1, &mut row).unwrap();
+    assert_eq!(row, [9]);
+}
