@@ -149,7 +149,7 @@ impl EffectcraftApp {
                         self.toast = Some((message, self.now));
                     }
                 }
-                effectcraft_engine::Event::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+                effectcraft_engine::Event::OpenUrl(url) => crate::open_local::open(ctx, url),
                 // Frames are keyed by content: an edit keeps those of comps it doesn't touch.
                 effectcraft_engine::Event::ProjectChanged { .. } => {}
                 effectcraft_engine::Event::Frontend { command, params } => {
