@@ -124,7 +124,8 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (lx, ly, lw, lh) = layer_rect(ctx, &b);
     let edge = (lw.min(lh) * if locked { 0.25 } else { 0.1 }).max(1.0);
     // Locked: samples stay between the outermost pixel centres, or at the centre of a layer under
-    // a pixel across (half resolution), whose bounds would otherwise cross.
+    // a pixel across (a reduced resolution). Its bounds may still differ by rounding, so the
+    // clamp is max/min, which `f64::clamp` would panic on.
     let (ix, iy) = (0.5f64.min(lw * 0.5), 0.5f64.min(lh * 0.5));
     let lock = (lx + ix, lx + lw - ix, ly + iy, ly + lh - iy);
     let seed = (ctx.seed ^ 0x7d15).wrapping_add((ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(0x9e37_79b9));
@@ -173,7 +174,7 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
         };
         let (sx, sy) = (x + dx * k, y + dy * k);
         if locked {
-            return Some((sx.clamp(lock.0, lock.1), sy.clamp(lock.2, lock.3)));
+            return Some((sx.max(lock.0).min(lock.1), sy.max(lock.2).min(lock.3)));
         }
         Some((sx, sy))
     });
@@ -1077,8 +1078,9 @@ mod tests {
         }
     }
 
-    /// #3469: a locked pinning on a layer under a buffer pixel across (a 1-pixel layer at half
-    /// resolution) keeps samples inside it without inverted clamp bounds, at any Amount.
+    /// #3469: a locked pinning on a layer under a buffer pixel across (a 1-pixel layer at half or
+    /// third resolution, anywhere in the buffer) keeps samples inside it without its rounded
+    /// bounds crossing, at any Amount.
     #[test]
     fn turbulent_displace_locked_pinning_on_a_subpixel_layer_does_not_crash() {
         let spec = crate::find("ec.distort.turbulentdisplace").unwrap();
@@ -1086,9 +1088,12 @@ mod tests {
             let mut params = Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
             params.values.insert("amount".into(), num(amount));
             params.values.insert("pinning".into(), Value::Enum(8));
-            let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [1.0, 1.0], seed: 3, adjustment: false, env: Default::default() };
-            let o = crate::apply(spec, &ctx, Buf { img: test_img(1, 1), offset: [0.0, 0.0], scale: 0.5 });
-            assert!(o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{amount}");
+            for (size, scale, offset) in [(1.0, 0.5, 0.0), (1.0, 1.0 / 3.0, -8.0), (1.0, 1.0 / 3.0, 7.0), (0.9, 1.0, -8.0), (f64::NAN, 1.0, 0.0)] {
+                let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [size, size], seed: 3, adjustment: false, env: Default::default() };
+                let o = crate::apply(spec, &ctx, Buf { img: test_img(2, 2), offset: [offset, offset], scale });
+                // A layer size that is not a number only has to render without panicking.
+                assert!(size.is_nan() || o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{amount} {size} {scale} {offset}");
+            }
         }
     }
 
