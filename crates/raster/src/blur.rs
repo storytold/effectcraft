@@ -160,7 +160,7 @@ const MAX_BOX_SIGMA: f64 = 1e8;
 /// Box radii for `n` passes approximating a Gaussian of `sigma` (Kovesi / "boxes for Gauss").
 /// A NaN sigma doesn't blur, and a sigma above [`MAX_BOX_SIGMA`] blurs as that.
 pub fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
-    if sigma.is_nan() || sigma <= 0.0 {
+    if sigma.is_nan() || sigma <= 0.0 || n == 0 {
         return vec![0; n];
     }
     let sigma = sigma.min(MAX_BOX_SIGMA);
@@ -709,7 +709,8 @@ mod tests {
     }
 
     /// #3816: a sigma past what `i64` holds (from an expression or a file value) gives the
-    /// radii of the largest sigma that blurs, not an overflow; NaN doesn't blur.
+    /// radii of the largest sigma that blurs, not an overflow; NaN doesn't blur, and no passes
+    /// give no radii.
     #[test]
     fn huge_sigma_radii_are_capped() {
         let cap = box_radii(1e8, 3);
@@ -717,6 +718,7 @@ mod tests {
             assert_eq!(box_radii(sigma, 3), cap, "sigma {sigma}");
         }
         assert_eq!(box_radii(f64::NAN, 3), vec![0; 3]);
+        assert!(box_radii(10.0, 0).is_empty());
         let mut img = Image::new(5, 5);
         img.set(2, 2, [1.0; 4]);
         for sigma in [1e9, f64::INFINITY] {
