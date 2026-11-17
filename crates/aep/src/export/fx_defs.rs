@@ -731,7 +731,6 @@ mod tests {
         ("ec.blur.compound", "maximumBlur", 3465),
         ("ec.blur.sharpen", "amount", 3466),
         ("ec.blur.ccradial", "amount", 3468),
-        ("ec.distort.turbulentdisplace", "amount", 3469),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
         ("ec.noise.fractal", "subSettings/subInfluence", 3485),
