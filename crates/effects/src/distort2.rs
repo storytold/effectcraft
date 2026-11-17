@@ -123,6 +123,10 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let falloff = if (3..=5).contains(&kind) { 0.3 } else { 0.5 };
     let (lx, ly, lw, lh) = layer_rect(ctx, &b);
     let edge = (lw.min(lh) * if locked { 0.25 } else { 0.1 }).max(1.0);
+    // Locked: samples stay between the outermost pixel centres, or at the centre of a layer under
+    // a pixel across (half resolution), whose bounds would otherwise cross.
+    let (ix, iy) = (0.5f64.min(lw * 0.5), 0.5f64.min(lh * 0.5));
+    let lock = (lx + ix, lx + lw - ix, ly + iy, ly + lh - iy);
     let seed = (ctx.seed ^ 0x7d15).wrapping_add((ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(0x9e37_79b9));
     let n = |u: f64, v: f64, s: u32| {
         let s = seed.wrapping_add(s);
@@ -169,7 +173,7 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
         };
         let (sx, sy) = (x + dx * k, y + dy * k);
         if locked {
-            return Some((sx.clamp(lx + 0.5, lx + lw - 0.5), sy.clamp(ly + 0.5, ly + lh - 0.5)));
+            return Some((sx.clamp(lock.0, lock.1), sy.clamp(lock.2, lock.3)));
         }
         Some((sx, sy))
     });
@@ -1070,6 +1074,21 @@ mod tests {
         }
         for resize in [0.0, 1.0] {
             assert_eq!(run("ec.distort.turbulentdisplace", &[("amount", num(f64::NAN)), ("resizeLayer", num(resize))], img.clone()).img, img);
+        }
+    }
+
+    /// #3469: a locked pinning on a layer under a buffer pixel across (a 1-pixel layer at half
+    /// resolution) keeps samples inside it without inverted clamp bounds, at any Amount.
+    #[test]
+    fn turbulent_displace_locked_pinning_on_a_subpixel_layer_does_not_crash() {
+        let spec = crate::find("ec.distort.turbulentdisplace").unwrap();
+        for amount in [-10000.0, 50.0, 10000.0] {
+            let mut params = Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            params.values.insert("amount".into(), num(amount));
+            params.values.insert("pinning".into(), Value::Enum(8));
+            let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [1.0, 1.0], seed: 3, adjustment: false, env: Default::default() };
+            let o = crate::apply(spec, &ctx, Buf { img: test_img(1, 1), offset: [0.0, 0.0], scale: 0.5 });
+            assert!(o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{amount}");
         }
     }
 

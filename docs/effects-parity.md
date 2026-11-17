@@ -64,7 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-11-17 | minor | Turbulent Displace: Amount takes After Effects' recorded valid range, −10000..10000 (default and the −200..200 slider unchanged). Past it (an expression's value) the displacement is bounded to 2^24 px and a NaN Amount leaves the layer unchanged, so padding and sampling stay finite (CPU and GPU) |
+| 2026-11-17 | minor | Turbulent Displace: Amount takes After Effects' recorded valid range, −10000..10000 (default and the −200..200 slider unchanged). Past it (an expression's value) the displacement is bounded to 2^24 px and a NaN Amount leaves the layer unchanged, so padding and sampling stay finite (CPU and GPU). Locked pinning on a layer under a pixel across no longer crashes |
 | 2026-11-12 | minor | Parameters take After Effects' recorded valid ranges (hard range; defaults and sliders unchanged): Levels (Individual Controls) levels −10000..10000 and Gamma from 0; 4-Color Gradient Blend to 10000 and Jitter to 500 %; Change Color Hue Transform ±1800°; Noise HLS (and Auto) amounts to 1000 % and Grain Size from 0; Grid Border to 2000; Venetian Blinds Width 1..32000 and Feather to 32000; Radial Wipe Feather to 32000; Scatter Amount to 1000; Beam thicknesses to 4000; Transform Scale ±30000 %; Turbulent Displace Random Seed to 100000. A test checks every mapped parameter's range against the recorded table (CPU and GPU) |
 | 2026-10-19 | minor | Glow (original colours): bright pass per channel, 8 × (value − threshold + 0.061), measured against After Effects 2026 (CPU and GPU) |
 | 2026-10-19 | minor | Glow (colour channels): the glow covers the layer's blurred alpha, blur σ = 0.384 × radius, measured against After Effects 2026 renders (CPU and GPU) |
