@@ -1059,9 +1059,7 @@ mod tests {
     #[test]
     fn drop_shadow_softness_fits_the_padding_the_buffer_gained() {
         let layer = || Image::filled(128, 128, [1.0, 0.0, 0.0, 1.0]);
-        let shadow = |s: f64| {
-            run_fx("ec.perspective.dropshadow", &[("softness", num(s)), ("opacity", num(100.0))], layer(), 0.0, EffectEnv::default()).img
-        };
+        let shadow = |s: f64| run_fx("ec.perspective.dropshadow", &[("softness", num(s)), ("opacity", num(100.0))], layer(), 0.0, EffectEnv::default()).img;
         let (large, larger, slider_max) = (shadow(30_000.0), shadow(60_000.0), shadow(250.0));
         assert!(large.data.iter().all(|p| p.iter().all(|v| v.is_finite())));
         assert_eq!(large.data, larger.data, "past the budget the margin, and so the blur, is the buffer's");
