@@ -106,7 +106,8 @@ fn matrix_pixel(path: &Path, matrix: &str) -> Option<[u8; 3]> {
         .output()
         .ok()?;
     let err = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() && err.contains("no decoder found") {
+    // "no decoder found for: av1" today, "Decoder (codec av1) not found" from older ffmpeg.
+    if !out.status.success() && (err.contains("no decoder found") || (err.contains("Decoder (codec") && err.contains("not found"))) {
         eprintln!("ffmpeg cannot decode this codec here: skipping matrix oracle ({err})");
         return None;
     }
