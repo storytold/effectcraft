@@ -317,7 +317,7 @@ fn unmult(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Simple Wire Removal
+// ---------------------------------------------------------------- Line Removal
 
 fn wire_removal(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pa = ctx.params.v2("pointA");
@@ -464,7 +464,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.key.ccsimplewireremoval",
-            "CC Simple Wire Removal",
+            "Line Removal",
             vec![
                 p("pointA", "Point A", Value::Vec2([0.25, 0.25]), ParamUi::Point),
                 p("pointB", "Point B", Value::Vec2([0.75, 0.75]), ParamUi::Point),

@@ -44,6 +44,9 @@ pub const PARAM_ID_ALIASES: &[(&str, &str, &str)] = &[
     ("ec.key.innerouter", "additionalBackground", "additionalBackground/background1"),
     // Generate: Radio Waves' growth speed was called Velocity; Velocity now moves the wave.
     ("ec.generate.radiowaves", "velocity", "waveMotion/expansion"),
+    // Simulation: CC Ball Action's Instability State is treated as the control After Effects
+    // 24.2 calls Scatter Motion (#3197; an assumption: 24.2 shows no Instability State).
+    ("ec.sim.ccballaction", "instabilityState", "scatterMotion"),
 ];
 
 /// Popup option labels renamed since they were first saved:
@@ -161,6 +164,13 @@ pub fn legacy_default(effect: &str, param: &str) -> Option<Value> {
         ("ec.key.advancedspill", "ultraSettings/tolerance") => Value::Scalar(100.0),
         // Transition: Block Dissolve's blocks had hard edges.
         ("ec.transition.blockdissolve", "softEdges") => Value::Bool(false),
+        // Linear Wipe's feather was a linear ramp with the travel extended by it (#3125).
+        ("ec.transition.linearwipe", "legacyFeather") => Value::Bool(true),
+        // 3D Channel: Cryptomatte's Matte Only put the matte in alpha too (#3127).
+        ("ec.3d.cryptomatte", crate::channel3d::MATTE_ONLY_IN_ALPHA) => Value::Bool(true),
+        // Utility: Cineon Converter version 1, where Gamma 1.7 gave linear output
+        // (`crate::utility::cineon_gamma`).
+        ("ec.utility.cineon", "version") => Value::Scalar(1.0),
         _ => return None,
     })
 }
@@ -182,6 +192,14 @@ fn take_at(g: &mut PropGroup, id: &str) -> Option<Property> {
     match id.split_once('/') {
         None => take_prop(g, id),
         Some((first, rest)) => take_at(g.sub_mut(first)?, rest),
+    }
+}
+
+/// The position of the property at spec id `id` (`a/b/param`) among its siblings.
+fn index_at(g: &PropGroup, id: &str) -> Option<usize> {
+    match id.split_once('/') {
+        None => g.children.iter().position(|c| matches!(c, Node::Prop(p) if p.match_id == id)),
+        Some((first, rest)) => index_at(g.sub(first)?, rest),
     }
 }
 
@@ -272,6 +290,12 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         // before it moved into a twirl-down group.
         let found = prop_at(g, ps.id).is_some();
         if !found {
+            // A parameter renamed within its group keeps its place, so expressions that address
+            // it by index still read it.
+            let slot = PARAM_ID_ALIASES
+                .iter()
+                .filter(|(e, old, new)| *e == spec.id && *new == ps.id && old.rsplit_once('/').map(|(p, _)| p) == new.rsplit_once('/').map(|(p, _)| p))
+                .find_map(|(_, old, _)| index_at(g, old));
             let moved = PARAM_ID_ALIASES.iter().filter(|(e, _, new)| *e == spec.id && *new == ps.id).find_map(|(_, old, _)| take_at(g, old)).or_else(|| {
                 let leaf = ps.id.rsplit('/').next().unwrap_or(ps.id);
                 // Not when the top-level leaf is an old id of another parameter (Radio
@@ -293,9 +317,13 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                     pr
                 }
             };
+            let at = |sub: &mut PropGroup| match slot {
+                Some(i) if i <= sub.children.len() => sub.children.insert(i, pr.into()),
+                _ => sub.children.push(pr.into()),
+            };
             match path.and_then(|path| group_at(g, ids, path)) {
-                Some(sub) => sub.children.push(pr.into()),
-                None => g.children.push(pr.into()),
+                Some(sub) => at(sub),
+                None => at(g),
             }
         }
         if let Some(pr) = prop_at(g, ps.id) {
@@ -516,6 +544,21 @@ mod tests {
         assert_eq!(pr.ui, popup.ui);
     }
 
+    /// #3127: Cryptomatte's Matte Only moved the matte from RGBA to RGB over alpha 1; a project
+    /// saved before has no Matte Only In Alpha switch and gets it on, keeping its render. A fresh
+    /// instance has it off.
+    #[test]
+    fn cryptomatte_saved_before_matte_only_in_rgb_keeps_the_matte_in_alpha() {
+        let id = crate::channel3d::MATTE_ONLY_IN_ALPHA;
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.3d.cryptomatte", &mut next);
+        assert_eq!(g.get(id).map(|p| p.value.clone()), Some(Value::Bool(false)));
+        g.children.retain(|c| c.match_id() != id);
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        let pr = g.get(id).expect("added on upgrade");
+        assert_eq!((&pr.value, &pr.ui), (&Value::Bool(true), &ParamUi::Hidden));
+    }
+
     /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the
     /// option it chose, by label.
     #[test]
@@ -562,6 +605,27 @@ mod tests {
         assert_eq!((&pr.ui, &pr.value), (&ParamUi::Point, &Value::Vec2([20.0, -5.0])));
     }
 
+    /// #3197 review: an old CC Ball Action saved Instability State as its 8th property; renamed to
+    /// Scatter Motion it keeps that place, so an expression that reads `effect(..)(8)` still gets
+    /// the same control (new controls are appended after it).
+    #[test]
+    fn upgrade_renames_a_param_in_place_and_keeps_its_index() {
+        let spec = find("ec.sim.ccballaction").unwrap();
+        let mut next = 1;
+        let mut g = instantiate(spec, &mut Ids(&mut next), "Ball Grid", [100.0, 50.0]);
+        // The layout an earlier version saved: eight parameters, Instability State last.
+        let old = ["scatter", "rotationAxis", "rotation", "twistProperty", "twistAngle", "gridSpacing", "ballSize", "scatterMotion"];
+        let mut kept: Vec<Property> = old.iter().map(|id| take_prop(&mut g, id).unwrap()).collect();
+        g.children.clear();
+        kept[7].match_id = "instabilityState".into();
+        kept[7].value = Value::Scalar(33.0);
+        g.children.extend(kept.into_iter().map(Node::from));
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        let ids: Vec<&str> = g.children.iter().take(8).map(|c| c.match_id()).collect();
+        assert_eq!(ids, ["scatter", "rotationAxis", "rotation", "twistProperty", "twistAngle", "gridSpacing", "ballSize", "scatterMotion"]);
+        assert_eq!(g.get("scatterMotion").unwrap().value, Value::Scalar(33.0));
+    }
+
     #[test]
     fn upgrade_moves_params_into_twirl_down_groups() {
         let spec = find(crate::warp_stab::ID).unwrap();
@@ -589,6 +653,18 @@ mod tests {
         assert_eq!(current_param_id(waves, "velocity"), Some("waveMotion/expansion"));
         assert_eq!(current_param_id(stab, "noSuchParam"), None);
         assert_eq!(current_param_id(stab, "other/smoothness"), None);
+    }
+
+    /// #3125: a Linear Wipe saved before its feather followed After Effects keeps the old ramp;
+    /// a new one doesn't.
+    #[test]
+    fn old_linear_wipes_keep_the_legacy_feather() {
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.transition.linearwipe", &mut next);
+        assert_eq!(g.get("legacyFeather").unwrap().value, Value::Bool(false));
+        take_prop(&mut g, "legacyFeather");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        assert_eq!(g.get("legacyFeather").unwrap().value, Value::Bool(true));
     }
 
     #[test]
@@ -787,5 +863,31 @@ not a stroke",
         let before = twirl.clone();
         to_effect_space(spec, &mut twirl, SIZE, [0.0; 2], &|_| [0.0; 2]);
         assert_eq!(twirl, before);
+    }
+
+    #[test]
+    fn cineon_converter_saved_before_its_version_upgrades_to_version_1() {
+        let spec = find("ec.utility.cineon").unwrap();
+        let mut next = 1;
+        let fresh = instantiate(spec, &mut Ids(&mut next), "Cineon Converter", [100.0, 50.0]);
+        assert_eq!(fresh.get("version").unwrap().value, Value::Scalar(2.0));
+        assert_eq!(fresh.get("gamma").unwrap().value, Value::Scalar(1.7));
+        // Gamma, its keyframes and its expression are kept as saved.
+        let mut g = fresh.clone();
+        take_prop(&mut g, "version");
+        let gamma = g.get_mut("gamma").unwrap();
+        gamma.value = Value::Scalar(2.2);
+        gamma.keys = vec![effectcraft_keyframe::Keyframe::new(Default::default(), Value::Scalar(3.4))];
+        gamma.expr = Some(effectcraft_project::Expression { text: "value * 2".into(), enabled: true });
+        let saved = gamma.clone();
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        assert_eq!(g.get("version").unwrap().value, Value::Scalar(1.0));
+        assert_eq!(g.get("gamma"), Some(&saved));
+        // Saved without Gamma too: it takes version 1's default, which gave linear output.
+        let mut g = fresh.clone();
+        take_prop(&mut g, "version");
+        take_prop(&mut g, "gamma");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        assert_eq!(g.get("gamma").unwrap().value, Value::Scalar(1.7));
     }
 }

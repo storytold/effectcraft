@@ -63,3 +63,24 @@ fn time_remap_picks_the_source_frame() {
     assert!(img.get(90, 50)[3] > 0.99, "frozen at the end position");
     assert!(img.get(10, 50)[3] < 0.01);
 }
+
+#[test]
+fn layer_span_is_the_source_duration_in_layer_time() {
+    let mut p = Project::default();
+    let outer = Comp::new(100, 100, FrameRate::FPS_30, s(4.0));
+    let inner = Comp::new(100, 100, FrameRate::FPS_30, s(2.5));
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 10, height: 10, pixel_aspect: 1.0 }));
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (100, 100), None);
+    let sol = build::layer(&mut p, &outer, "S", LayerSource::Solid { item: sid }, (10, 10), None);
+    let (first, end) = crate::eval::layer_span(&p, &pre).expect("a nested comp has a duration");
+    assert!(first.abs() < 1e-9 && (end - 2.5).abs() < 1e-9);
+    assert_eq!(crate::eval::layer_span(&p, &sol), None, "solids have no duration");
+    // Time Remap: layer time is not source time any more, the visible span is reported.
+    let mut next = p.next_id;
+    let tr = Ids(&mut next).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+    p.next_id = next;
+    pre.props.children.push(Node::Prop(tr));
+    let (first, end) = crate::eval::layer_span(&p, &pre).expect("a remapped layer has a visible span");
+    assert!(end > first);
+}

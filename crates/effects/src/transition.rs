@@ -1,5 +1,5 @@
 //! Transition effects (batch 2): Block Dissolve, Gradient Wipe (gradient layer or self), Iris Wipe, Card
-//! Wipe (3D cards with camera, lighting and jitter), CC Grid Wipe, CC Radial ScaleWipe, CC Scale Wipe and CC Light Wipe.
+//! Wipe (3D cards with camera, lighting and jitter), Grid Wipe, Radial Scale Wipe, Scale Wipe and Light Wipe.
 //!
 //! Every transition is the identity at 0 % completion. Angles are clockwise from "up".
 
@@ -595,7 +595,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccgridwipe",
-            "CC Grid Wipe",
+            "Grid Wipe",
             vec![
                 cc_done(),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -609,13 +609,13 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccradialscalewipe",
-            "CC Radial ScaleWipe",
+            "Radial Scale Wipe",
             vec![cc_done(), p("center", "Center", pt(0.5, 0.5), ParamUi::Point), p("reverse", "Reverse Transition", Value::Bool(false), ParamUi::Checkbox)],
             radial_scale_wipe,
         ),
         spec(
             "ec.transition.ccscalewipe",
-            "CC Scale Wipe",
+            "Scale Wipe",
             vec![
                 p("stretch", "Stretch", num(0.0), slider(0.0, 1000.0, 0.0, 50.0, 2)),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -625,7 +625,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.cclightwipe",
-            "CC Light Wipe",
+            "Light Wipe",
             vec![
                 cc_done(),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),

@@ -1,4 +1,5 @@
-//! File ▸ Import ▸ After Effects Project… (`effectcraft_aep::import`).
+//! File ▸ Import ▸ Adobe After Effects Project… (`effectcraft_aep::import`) and File ▸ Export ▸
+//! Adobe After Effects Project… (`effectcraft_aep::export`).
 //!
 //! Adds the items of an `.aep` (or its XML form, `.aepx`) to the project in a folder named after
 //! the file (`docs/aep-import.md` lists what arrives). What the importer cannot bring over (effects
@@ -7,6 +8,7 @@
 //! in the report's `missingFonts` (not a loss: the text keeps the font name and is drawn with the
 //! fallback font).
 
+use effectcraft_aep::export::{AepExportError, ExportOptions};
 use effectcraft_aep::import::{AepImportError, ImportOptions};
 use effectcraft_project::{FootageKind, ItemKind};
 use serde_json::{Value, json};
@@ -14,6 +16,14 @@ use serde_json::{Value, json};
 use super::{CommandSpec, always, b_p, bad, str_p};
 use crate::{EngineError, Result, Session, cmd};
 
+/// Whether `path` is an After Effects project (`.aep`, or its XML form `.aepx`): imported as a
+/// project (`file.importAep`), not as footage.
+pub fn is_aep_path(path: &str) -> bool {
+    std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("aep") || e.eq_ignore_ascii_case("aepx"))
+}
+
+/// `file.importAep`: the `.aep` / `.aepx` at `path` into the open project, in a folder named after
+/// the file; refused ([`EngineError::Refused`]) when parts would be lost and `allowLosses` is not set.
 fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.importAep", "missing `path`"))?.to_string();
     let allow_losses = b_p(p, "allowLosses").unwrap_or(false);
@@ -38,11 +48,12 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(json!({"dryRun": true, "report": report}));
     }
     let importer = s.importer.clone();
-    let res = s.edit("Import After Effects Project", None, |proj, st| {
+    let res = s.edit("Import Adobe After Effects Project", None, |proj, st| {
         let r = effectcraft_aep::import::import(proj, &bytes, &options).map_err(|e| match e {
-            AepImportError::Refused(_) => {
-                EngineError::Other(format!("{e} (nothing was imported: pass `allowLosses` to import anyway, or `dryRun` for the full report)"))
-            }
+            AepImportError::Refused(_) => EngineError::Refused {
+                losses: e.to_string(),
+                advice: "nothing was imported: pass `allowLosses` to import anyway, or `dryRun` for the full report",
+            },
             other => EngineError::Other(format!("cannot import {path}: {other}")),
         })?;
         if apply {
@@ -88,14 +99,64 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+/// `file.exportAep`: the open project as an `.aep` at `path`; refused ([`EngineError::Refused`])
+/// when parts would be lost and `allowLosses` is not set.
+fn export_aep(s: &mut Session, p: &Value) -> Result<Value> {
+    let path = str_p(p, "path").ok_or_else(|| bad("file.exportAep", "missing `path`"))?.to_string();
+    let allow_losses = b_p(p, "allowLosses").unwrap_or(false);
+    let dry_run = b_p(p, "dryRun").unwrap_or(false);
+    if dry_run {
+        return Ok(json!({"dryRun": true, "report": effectcraft_aep::export::analyze(&s.project)}));
+    }
+    // Image-sequence folders keep their stored numbering in After Effects only with their actual
+    // modification time (otherwise it rescans them and warns about every gap on open). The folder
+    // is looked at only when the sequence's file passes the document-path policy (a path that came
+    // from a document is followed as import followed it; a refused one leaves the time unset).
+    let services = s.services.clone();
+    let stored = s.stored_paths.clone();
+    let folder_time = move |file: &str| {
+        let file = stored.follow(file).ok()?;
+        let file = file.to_str()?;
+        // Either separator, as the exporter splits the alias (a Windows path on another system).
+        let dir = file.get(..file.rfind(['/', '\\'])?).filter(|d| !d.is_empty())?;
+        services.stamp(dir).and_then(|(_, ns)| u64::try_from(ns / 1_000_000_000).ok())
+    };
+    let res = effectcraft_aep::export::export_with(&s.project, &ExportOptions { allow_losses }, &folder_time).map_err(|e| match e {
+        AepExportError::Refused(_) => {
+            EngineError::Refused { losses: e.to_string(), advice: "nothing was written: pass `allowLosses` to export anyway, or `dryRun` for the full report" }
+        }
+        other => EngineError::Other(format!("cannot export {path}: {other}")),
+    })?;
+    s.services.write_file(&path, &res.bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    let losses = res.report.total_losses();
+    s.toast(if losses == 0 {
+        format!("Exported After Effects project to {path}")
+    } else {
+        format!("Exported After Effects project to {path} ({losses} unsupported item{} not exported)", if losses == 1 { "" } else { "s" })
+    });
+    Ok(json!({"path": path, "bytes": res.bytes.len(), "report": res.report}))
+}
+
+/// File ▸ Import / Export ▸ Adobe After Effects Project….
 pub fn specs() -> Vec<CommandSpec> {
-    vec![cmd!(
-        "file.importAep",
-        "After Effects Project...",
-        ["File", "Import"],
-        None,
-        "{path (.aep or .aepx), allowLosses?: bool (import although parts cannot be imported), dryRun?: bool (only return the report), applySettings?: bool (take over the file's project settings; default: when the project has no compositions)}",
-        always,
-        import_aep
-    )]
+    vec![
+        cmd!(
+            "file.importAep",
+            "Adobe After Effects Project...",
+            ["File", "Import"],
+            None,
+            "{path (.aep or .aepx), allowLosses?: bool (import although parts cannot be imported), dryRun?: bool (only return the report), applySettings?: bool (take over the file's project settings; default: when the project has no compositions)}",
+            always,
+            import_aep
+        ),
+        cmd!(
+            "file.exportAep",
+            "Adobe After Effects Project...",
+            ["File", "Export"],
+            None,
+            "{path (.aep), allowLosses?: bool (export although parts cannot be exported), dryRun?: bool (only return the report)}",
+            always,
+            export_aep
+        ),
+    ]
 }

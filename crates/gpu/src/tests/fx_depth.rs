@@ -208,6 +208,13 @@ fn on() -> Value {
     Value::Bool(true)
 }
 
+/// #474: every effect done here reads aux channels, so the session gives the media layer its
+/// footage ([`effectcraft_effects::reads_aux`]).
+#[test]
+fn every_effect_here_reads_aux() {
+    assert!(crate::fx_depth::IDS.iter().all(|i| effectcraft_effects::reads_aux(i)));
+}
+
 #[test]
 fn channel_extract() {
     case("ec.3d.channelextract", &[("blackPoint", n(0.0)), ("whitePoint", n(1200.0))]);
@@ -253,12 +260,21 @@ fn ids_and_cryptomatte() {
 
 /// The GPU skips the ID colours for displays that do not read them
 /// ([`effectcraft_effects::CryptoAux::for_display`]): every display × Matte Only must still match
-/// the CPU effect, so a shader that starts reading RGB in another mode fails here.
+/// the CPU effect, so a shader that starts reading RGB in another mode fails here. Matte Only is
+/// checked both ways: the matte in RGB over alpha 1 (#3127) and, for older projects, in alpha too.
 #[test]
 fn cryptomatte_every_display_matches_the_cpu() {
     for display in 0..3 {
-        for matte_only in [false, true] {
-            case("ec.3d.cryptomatte", &[("selection", Value::Str("beta, delta".into())), ("display", e(display)), ("matteOnly", Value::Bool(matte_only))]);
+        for (matte_only, in_alpha) in [(false, false), (true, false), (true, true)] {
+            case(
+                "ec.3d.cryptomatte",
+                &[
+                    ("selection", Value::Str("beta, delta".into())),
+                    ("display", e(display)),
+                    ("matteOnly", Value::Bool(matte_only)),
+                    (effectcraft_effects::MATTE_ONLY_IN_ALPHA, Value::Bool(in_alpha)),
+                ],
+            );
         }
     }
 }
@@ -272,4 +288,7 @@ fn extractor() {
     );
     case("ec.3d.extractor", &[("red", Value::Str("A".into())), ("blackPoint", n(0.2)), ("whitePoint", n(0.8)), ("clip", on())]);
     case("ec.3d.extractor", &[("green", Value::Str("".into())), ("alpha", Value::Str("nothing".into()))]);
+    // `(copy)` reads the input's own channel, not the footage's R plane of aux_scene.
+    let copy = || Value::Str(effectcraft_effects::EXTRACTOR_COPY.into());
+    case("ec.3d.extractor", &[("red", copy()), ("green", Value::Str("Coverage".into())), ("alpha", copy())]);
 }

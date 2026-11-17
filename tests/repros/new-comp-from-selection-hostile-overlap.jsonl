@@ -1,0 +1,17 @@
+// File > New Comp from Selection with Sequence Layers: a huge `overlapDuration` times the layer
+// count overflowed the duration arithmetic (a panic with overflow checks, a wrapped, wrong comp
+// length without them), and `dimensionsFrom` past the selection indexed out of bounds
+// (fixed in b21e04b, M4.12).
+{"start": "new"}
+{"command": "comp.new", "params": {"name": "Holder", "width": 64, "height": 64, "frameRate": 30, "duration": 2}}
+{"command": "layer.newSolid", "params": {"color": "#ff0000", "name": "a"}}
+{"command": "layer.newSolid", "params": {"color": "#00ff00", "name": "b"}}
+{"command": "layer.newSolid", "params": {"color": "#0000ff", "name": "c"}}
+{"command": "project.select", "params": {"items": ["a", "b", "c"]}}
+{"command": "file.newCompFromSelection", "params": {"single": true, "sequence": true, "overlap": true, "overlapDuration": 1e30, "duration": 2}}
+{"expect": {"query": "comp.info", "pointer": "/width", "equals": 64}}
+{"command": "project.select", "params": {"items": ["a", "b", "c"]}}
+{"command": "file.newCompFromSelection", "params": {"single": true, "sequence": true, "overlap": true, "overlapDuration": -5, "duration": 2}}
+{"expect": {"query": "comp.info", "pointer": "/duration", "equals": 4}}
+{"command": "project.select", "params": {"items": ["a", "b"]}}
+{"command": "file.newCompFromSelection", "params": {"single": true, "dimensionsFrom": 99}, "expect_error": "dimensionsFrom"}

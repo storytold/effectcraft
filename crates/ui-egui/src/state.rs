@@ -265,6 +265,9 @@ pub struct ViewerState {
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
+    /// A drag outside the viewer changed the frame on screen: a property scrub in Effect Controls,
+    /// or any Timeline or Properties drag ([`crate::panels::drag_preview`]). Adaptive Resolution
+    /// draws a draft until the primary button is up, which clears it.
     #[serde(skip)]
     pub property_interacting: bool,
     /// Extended Viewer: the comp-space region the viewer renders this frame (comp frame plus
@@ -594,6 +597,44 @@ impl Default for AnimToolsState {
     }
 }
 
+/// The layer a locked Effect Controls panel keeps showing (the tab's lock icon, as After Effects'
+/// panel lock): comp item id and layer id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectControlsLock {
+    pub comp: u64,
+    pub layer: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectStatus {
+    #[default]
+    All,
+    Available,
+    Missing,
+}
+
+impl ProjectStatus {
+    pub const ALL: [Self; 3] = [Self::All, Self::Available, Self::Missing];
+    /// English catalog key; localization belongs at the widget rendering boundary.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Available => "Available",
+            Self::Missing => "Missing",
+        }
+    }
+    /// Filter the dependency inventory, including unused missing proxies. Generated items
+    /// count as available even though they have no external source file.
+    pub fn matches(self, item: &effectcraft_engine::project::Item) -> bool {
+        match self {
+            Self::All => true,
+            Self::Available => !item.has_missing_footage(),
+            Self::Missing => item.has_missing_footage(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiState {
     pub tool: Tool,
@@ -621,6 +662,17 @@ pub struct UiState {
     /// bring a locked panel forward (the tab's lock icon, as After Effects' viewer lock).
     #[serde(default)]
     pub locked_tabs: BTreeSet<String>,
+    /// Effect Controls locked to a layer (its tab's lock icon): the panel keeps showing that
+    /// layer whatever is selected while its comp is the active comp. Cleared when the layer or
+    /// its comp is deleted, and when the project is replaced (see
+    /// `panels::effect_controls::set_lock`).
+    #[serde(default)]
+    pub effect_controls_lock: Option<EffectControlsLock>,
+    /// The project the lock was made in (`ScriptUi::project_epoch`): a new or opened project
+    /// reuses comp and layer ids, so its lock is dropped (see
+    /// `panels::effect_controls::scope_lock`).
+    #[serde(skip)]
+    pub effect_controls_lock_epoch: u64,
     /// The comp each Composition viewer shows, by viewer id (0 = the Composition panel; see
     /// `panels::viewers`).
     #[serde(default)]
@@ -638,6 +690,8 @@ pub struct UiState {
     pub effects_search: String,
     pub effects_open: BTreeSet<String>,
     pub project_search: String,
+    #[serde(default)]
+    pub project_status: ProjectStatus,
     pub project_open_folders: BTreeSet<u64>,
     /// Project panel sort column (`name`, `type`, `size`, `fps`) and direction, as in AE's
     /// clickable column headers. Folders sort with everything else.
@@ -652,6 +706,10 @@ pub struct UiState {
     /// Horizontal scroll of the Project panel's optional columns (Name and Label stay put).
     #[serde(default)]
     pub project_hscroll: f32,
+    /// Width of the Project panel's Name column set by dragging its edge in the header (points);
+    /// `None` fits the longest name shown (double-clicking the edge goes back to that).
+    #[serde(default)]
+    pub project_name_w: Option<f32>,
     /// Vertical scroll of the Project panel's item list (points); only visible rows are drawn.
     #[serde(default)]
     pub project_scroll: f32,
@@ -720,7 +778,7 @@ pub struct UiState {
     /// Flowchart panel options (layers, effects, solids, direction, root comp).
     #[serde(default)]
     pub flowchart: crate::panels::flowchart::FlowOptions,
-    /// Lumetri Scopes panel options.
+    /// Video Scopes panel options.
     #[serde(default)]
     pub scopes: crate::panels::scopes_panel::ScopesState,
 }
@@ -737,6 +795,8 @@ impl Default for UiState {
             native_outer: Vec::new(),
             maximized: None,
             locked_tabs: BTreeSet::new(),
+            effect_controls_lock: None,
+            effect_controls_lock_epoch: 0,
             viewers: Default::default(),
             active_viewer: 0,
             focused: PanelKind::Composition,
@@ -748,10 +808,12 @@ impl Default for UiState {
             effects_search: String::new(),
             effects_open: BTreeSet::new(),
             project_search: String::new(),
+            project_status: ProjectStatus::All,
             project_open_folders: BTreeSet::new(),
             project_sort: default_project_sort(),
             project_sort_desc: false,
             project_hscroll: 0.0,
+            project_name_w: None,
             project_scroll: 0.0,
             project_columns: default_project_columns(),
             fx_closed: BTreeSet::new(),
@@ -768,7 +830,7 @@ impl Default for UiState {
             home_learn: false,
             home_templates: false,
             align_to_selection: false,
-            cache_when_idle: false,
+            cache_when_idle: true,
             tracker_source: None,
             layer_panel: None,
             layer_view: None,

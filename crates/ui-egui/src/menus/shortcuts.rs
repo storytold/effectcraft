@@ -345,7 +345,7 @@ fn numpad_star_marker(app: &mut EffectcraftApp, ctx: &egui::Context) {
 
 /// Panels that handle Enter themselves (rename, apply, open the row).
 fn panel_owns_enter(kind: PanelKind) -> bool {
-    matches!(kind, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+    matches!(kind, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue | PanelKind::Flowchart)
 }
 
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
@@ -401,6 +401,10 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             continue;
         }
         if app.dialog.is_some() {
+            continue;
+        }
+        if !mods.any() && crate::panels::effect_controls::handle_disclosure_key(app, key) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
             continue;
         }
         // Enter in the Project panel renames the selected item (handled by the panel).

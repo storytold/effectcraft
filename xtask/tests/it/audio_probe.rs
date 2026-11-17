@@ -58,7 +58,9 @@ impl Drop for FakeTools {
 /// and every variable the probe reads otherwise cleared, so a developer's own environment
 /// cannot leak into the scenario.
 fn run_audio_backend(tools: &FakeTools, set: &[(&str, &OsStr)]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
+    // nextest remaps this runtime path when running a relocated test archive.
+    let executable = std::env::var_os("NEXTEST_BIN_EXE_xtask").unwrap_or_else(|| env!("CARGO_BIN_EXE_xtask").into());
+    Command::new(executable)
         .arg("audio-backend")
         .env("PATH", &tools.dir)
         .env_remove("PKG_CONFIG")

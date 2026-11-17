@@ -459,7 +459,9 @@ fn microsoft_families_resolve_to_metric_compatible_substitutes() {
 
         let resolved = resolve(requested, style);
         let family = &face(resolved.face).info.family;
-        if family.eq_ignore_ascii_case(requested) {
+        let installed = all_faces().iter().any(|f| f.info.family.eq_ignore_ascii_case(requested));
+        if installed {
+            assert!(family.eq_ignore_ascii_case(requested), "an installed {requested} wins over {family}");
             assert!(!resolved.missing, "an installed original family is available");
         } else {
             assert_eq!(family, substitute);
@@ -469,6 +471,24 @@ fn microsoft_families_resolve_to_metric_compatible_substitutes() {
     let unknown = resolve("No Such Family 1677", "Regular");
     assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
     assert!(unknown.missing);
+}
+
+/// An installed Microsoft family is used as is and not reported missing, even when its
+/// substitute is also available (#1677). It runs in a child process so the Calibri fixture does
+/// not reach the substitute test above.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn an_installed_microsoft_family_wins_over_its_substitute() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_CALIBRI";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_child(CHILD, "fonts::tests::an_installed_microsoft_family_wins_over_its_substitute");
+        return;
+    }
+    add_font_data(test_font("Carlito"));
+    add_font_data(test_font("Calibri"));
+    let resolved = resolve("Calibri", "Regular");
+    assert_eq!(face(resolved.face).info.family, "Calibri");
+    assert!(!resolved.missing, "the installed family is available");
 }
 
 #[test]
@@ -566,4 +586,73 @@ fn unknown_face_id_returns_bundled_default() {
     assert_eq!(fallback.info.family, DEFAULT_FAMILY);
     assert!(fallback.font().is_some());
     assert!(Arc::ptr_eq(&fallback, &face(0)));
+}
+
+/// A scratch folder this test created itself (never one that already exists), removed on drop.
+struct Scratch(std::path::PathBuf);
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let d = (0u32..)
+            .map(|n| std::env::temp_dir().join(format!("effectcraft-{tag}-{}-{n}", std::process::id())))
+            .find_map(|d| match std::fs::create_dir(&d) {
+                Ok(()) => Some(d),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => panic!("create scratch dir {}: {e}", d.display()),
+            })
+            .unwrap();
+        Scratch(d)
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_reached_through_many_links_is_listed_once() {
+    // Six links back to the folder itself: 6^8 listings within the depth bound before.
+    let scratch = Scratch::new("font-walk");
+    let d = &scratch.0;
+    std::fs::write(d.join("a.ttf"), b"x").unwrap();
+    for i in 0..6 {
+        std::os::unix::fs::symlink(d, d.join(format!("l{i}"))).unwrap();
+    }
+    let mut out = Vec::new();
+    let start = std::time::Instant::now();
+    walk(std::slice::from_ref(d), &mut out);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
+fn a_folder_inside_another_root_keeps_its_own_depth() {
+    // root/a/b/c/d/e/f/g/h is also a root: the walk of `root` reaches it at depth 8 and could not
+    // go below it, so it must be listed from the shallower visit.
+    let scratch = Scratch::new("font-depth");
+    let root = &scratch.0;
+    let deep = root.join("a/b/c/d/e/f/g/h");
+    std::fs::create_dir_all(deep.join("sub")).unwrap();
+    std::fs::write(deep.join("sub/x.ttf"), b"x").unwrap();
+    let mut out = Vec::new();
+    walk(&[root.clone(), deep.clone()], &mut out);
+    assert_eq!(out, vec![deep.join("sub/x.ttf")]);
+}
+
+#[test]
+fn a_font_file_replaced_at_the_same_path_is_read_again() {
+    let scratch = Scratch::new("font-bytes");
+    let p = scratch.0.join("a.ttf");
+    std::fs::write(&p, b"old").unwrap();
+    let (old, old_meta) = file_bytes(&p).unwrap();
+    // Faces of one file share its bytes, and the metadata is that of the file the bytes came from.
+    let (again, _) = file_bytes(&p).unwrap();
+    assert!(Arc::ptr_eq(&old, &again));
+    assert_eq!(old_meta.len(), 3);
+    std::fs::write(&p, b"new, longer").unwrap();
+    let (new, new_meta) = file_bytes(&p).unwrap();
+    assert_eq!(new.as_slice(), b"new, longer");
+    assert_eq!(new_meta.len(), 11);
+    assert_eq!(old.as_slice(), b"old");
 }

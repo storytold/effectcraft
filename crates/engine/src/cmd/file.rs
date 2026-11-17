@@ -143,7 +143,8 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             _ => format!("Importing {total} files"),
         };
         let p = p.clone();
-        return s.spawn_task("import", label, false, move |ctl| {
+        let immediate_errors = pending.errors.clone();
+        let mut result = s.spawn_task("import", label, false, move |ctl| {
             let mut probed = Vec::with_capacity(total);
             for (k, src) in sources.iter().enumerate() {
                 ctl.message(format!("{} ({} of {total})", src.name(), k + 1));
@@ -162,13 +163,19 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
                 match errors.as_slice() {
                     [] => {}
                     [one] => toast = format!("{toast}. {one}"),
-                    [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)", rest.len()),
+                    [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)\n{}", rest.len(), errors.join("\n")),
                 }
                 r["toast"] = json!(toast);
                 Ok(r)
             });
             Ok(apply)
-        });
+        })?;
+        // Preparation can reject layered files before the remaining footage needs probing.
+        // Report those failures now as well as in the eventual job result.
+        if result["started"] == true {
+            result["errors"] = json!(immediate_errors);
+        }
+        return Ok(result);
     }
     let probed = pending.sources.iter().map(|src| pending.prober.probe(src)).collect();
     apply_import(s, pending, probed, target, p)
@@ -283,13 +290,14 @@ struct PendingImport {
     comps: Vec<u64>,
     items: Vec<u64>,
     errors: Vec<String>,
-    /// EffectCraft projects merged in (`file.importProject` results); never added to a comp.
+    /// Imported EffectCraft and After Effects projects; never added to a footage comp.
     projects: Vec<Value>,
     prepared: Vec<PreparedImport>,
 }
 
 enum PreparedImport {
     Project(String),
+    AfterEffects(String),
     Photoshop { path: String, bytes: Vec<u8>, retain: bool },
     Vector { path: String, bytes: Vec<u8>, page: u32, retain: bool },
 }
@@ -335,15 +343,19 @@ impl Prober {
             return f.map(|footage| Probed { name, footage, ask_alpha: false, warning: None }).map_err(fail);
         }
         let importer = self.importer.as_ref().ok_or_else(|| fail("media import is not available in this build".into()))?;
-        let mut f = crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?;
-        let mut warning = None;
+        // What the file's own import left out (a model's textures over the limits) is a warning too.
+        let (mut f, mut warning) = match src {
+            Source::File(_) => importer.probe_noting(path).map_err(fail)?,
+            _ => (crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?, None),
+        };
         // Settings ▸ Import ▸ Report Missing Frames (numbered sequences).
         if f.kind == FootageKind::Sequence
             && !f.alphabetical
             && self.report_missing_frames
             && let Some(gaps) = crate::sequence::missing_report(&f.sequence)
         {
-            warning = Some(format!("{name}: {gaps} (shown as placeholders)"));
+            let gaps = format!("{name}: {gaps} (the previous frame is held)");
+            warning = Some(warning.map_or(gaps.clone(), |w| format!("{w}; {gaps}")));
         }
         // Settings ▸ Import ▸ Interpret Unlabeled Alpha As: images only (a 3D model renders its
         // own alpha, and audio and data have none).
@@ -358,8 +370,9 @@ impl Prober {
                 None => ask_alpha = true,
             }
         }
-        // Page: another page of a PDF / Illustrator file.
-        if self.page > 0 && matches!(f.codec.as_str(), "PDF" | "AI") {
+        // Page: another page of a PDF / Illustrator file, or another artboard of a VectorCraft
+        // document's PDF.
+        if self.page > 0 && matches!(f.codec.as_str(), "PDF" | "AI" | "VectorCraft") {
             let doc = self
                 .services
                 .read_file(path)
@@ -417,9 +430,12 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
             _ => return Err(bad("file.import", "page: a page number from 1")),
         },
     };
-    // EffectCraft projects import as projects, as After Effects imports an .aep.
-    let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    // Both project formats import into their own folders. After Effects imports still
+    // require explicit consent through file.importAep when parts would be lost.
+    let (project_paths, paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    let (aep_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::is_aep_path(x));
     let mut prepared: Vec<PreparedImport> = project_paths.into_iter().map(PreparedImport::Project).collect();
+    prepared.extend(aep_paths.into_iter().map(PreparedImport::AfterEffects));
     if let Some(retain) = retain {
         let mut rest = vec![];
         for path in paths {
@@ -474,6 +490,14 @@ fn apply_prepared(s: &mut Session, pending: &mut PendingImport) {
         match import {
             PreparedImport::Project(path) => match s.execute("file.importProject", json!({"path": path})) {
                 Ok(r) => pending.projects.push(r),
+                Err(e) => pending.errors.push(format!("{path}: {e}")),
+            },
+            PreparedImport::AfterEffects(path) => match s.execute("file.importAep", json!({"path": path})) {
+                Ok(r) => pending.projects.push(r),
+                // The dedicated import command can list the losses and take consent.
+                Err(EngineError::Refused { losses, .. }) => pending.errors.push(format!(
+                    "{path}: {losses}; File ▸ Import ▸ Adobe After Effects Project… lists them and can import the rest (`file.importAep` with `allowLosses`)"
+                )),
                 Err(e) => pending.errors.push(format!("{path}: {e}")),
             },
             PreparedImport::Photoshop { path, bytes, retain } => match crate::guard::guarded("Photoshop import", || import_psd_comp(s, &path, bytes, retain)) {
@@ -576,7 +600,8 @@ fn add_footage(s: &mut Session, mut pending: PendingImport, probed: Vec<std::res
 /// definition, OpenEXR premultiplied); TGA, TIFF and movies with alpha don't.
 fn alpha_is_labeled(path: &str, codec: &str) -> bool {
     let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    matches!(ext.as_str(), "png" | "gif" | "webp" | "psd" | "psb" | "exr" | "svg" | "jpg" | "jpeg" | "ai" | "pdf" | "eps") || codec.eq_ignore_ascii_case("PSD")
+    matches!(ext.as_str(), "png" | "gif" | "webp" | "psd" | "psb" | "exr" | "svg" | "jpg" | "jpeg" | "ai" | "pdf" | "eps" | "vectorcraft")
+        || codec.eq_ignore_ascii_case("PSD")
 }
 
 /// A Photoshop layer by index or name (pixel layers only).
@@ -750,8 +775,8 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.project.settings).unwrap_or_default())
 }
 
-/// Video Rendering and Effects: report or set the renderer (Mercury GPU Acceleration when a GPU
-/// adapter exists, else Mercury Software Only).
+/// Video Rendering and Effects: report or set the renderer (GPU Acceleration when a GPU
+/// adapter exists, else Software Rendering).
 fn render_backend(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(b) = p.get("backend").or_else(|| p.get("renderer")) {
         let gpu = match b {
@@ -779,14 +804,14 @@ pub fn backend_status(s: &Session) -> Value {
     let gpu = s.project.settings.gpu_acceleration;
     // Why it renders on the CPU (#262).
     let why = if !gpu {
-        Some("the project's renderer is Mercury Software Only".to_string())
+        Some("the project's renderer is Software Rendering".to_string())
     } else if adapter.is_none() {
         Some(s.accel_note.clone().unwrap_or_else(|| "no GPU compositor is attached".into()))
     } else {
         None
     };
     json!({
-        "renderer": if gpu { "Mercury GPU Acceleration" } else { "Mercury Software Only" },
+        "renderer": if gpu { "GPU Acceleration" } else { "Software Rendering" },
         "gpuAcceleration": gpu,
         "adapter": adapter,
         "active": if gpu && adapter.is_some() { "gpu" } else { "cpu" },

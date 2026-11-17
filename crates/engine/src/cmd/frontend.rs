@@ -36,7 +36,7 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("app.commandPalette", "Quick Apply...", ["Edit"], Some("Cmd+Shift+Space"), "{query?}", always),
         fe!("app.keyboardShortcuts", "Keyboard Shortcuts", ["Edit"], Some("Cmd+Alt+'"), "{}", always),
         fe!("app.templates", "Templates", [], None, "{kind: renderSettings|outputModule}", always),
-        fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?}", always),
+        fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?: string, status?: all|available|missing}", always),
         fe!("effects.copyPresetsFolderPath", "Copy Presets Folder Path", [], None, "{}", always),
         // Preview.
         fe!(
@@ -106,6 +106,7 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("layer.openLayer", "Open Layer", ["Layer"], None, "{layer?}", has_layers),
         fe!("effect.manage", "Manage Effects...", ["Effect"], None, "{}", always),
         fe!("anim.browsePresets", "Browse Presets...", ["Animation"], None, "{}", always),
+        fe!("timeline.revealMask", "Reveal Created Mask", [], None, "{comp, layer, mask, projectEpoch} — engine-supplied creation identity", has_comp),
         // Project panel: delete the selected items without the prompt that Delete shows when
         // compositions use them. The UI runs `project.delete` (agents can run it directly).
         fe!(

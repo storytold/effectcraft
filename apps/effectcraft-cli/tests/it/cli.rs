@@ -1171,3 +1171,91 @@ fn render_without_progress_writes_no_progress_lines() {
     let stderr = render_demo_stderr("no-progress.gif", &[]);
     assert!(!stderr.lines().any(|l| l.starts_with("progress")), "{stderr}");
 }
+
+/// `render --exr-compression C --exr-depth half` writes OpenEXR frames with that compression and
+/// half-float channels (#2911); an unknown value is an error naming the parameter.
+#[test]
+fn render_exr_compression_and_depth() {
+    let root = tmp("render-exr-options");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("x.ecproj");
+    let p = project.to_str().unwrap();
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"T","width":64,"height":36,"duration":1}"#,
+        "layer.newSolid",
+        r#"{"width":64,"height":36}"#,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    let out = root.join("f_[#####].exr");
+    let reply = ok_json(&[
+        "render",
+        "--project",
+        p,
+        "--start",
+        "0",
+        "--end",
+        "0.01",
+        "--exr-compression",
+        "piz",
+        "--exr-depth",
+        "half",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(reply["rendered"].as_array().unwrap().len(), 1, "{reply}");
+    let bytes = std::fs::read(root.join("f_00000.exr")).unwrap();
+    // The `compression` attribute: name, type name, a 1-byte size, then PIZ (4).
+    let attr = b"compression\0compression\0\x01\0\0\0";
+    let at = bytes.windows(attr.len()).position(|w| w == attr).expect("compression attribute");
+    assert_eq!(bytes[at + attr.len()], 4, "PIZ");
+    // Each channel in `chlist`: its name, then the pixel type (1 = half).
+    for name in [&b"R\0"[..], b"G\0", b"B\0", b"A\0"] {
+        let half = [name, &[1, 0, 0, 0]].concat();
+        assert!(bytes.windows(half.len()).any(|w| w == half.as_slice()), "{:?} is half float", std::str::from_utf8(name));
+    }
+    let (code, reply) = run_json(&["render", "--project", p, "--exr-depth", "8", "--out", out.to_str().unwrap()]);
+    assert_eq!(code, 1, "{reply}");
+    assert!(reply["error"].as_str().unwrap().contains("exrBitDepth: half|float"), "{reply}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn replay_reports_steps_and_the_first_failure() {
+    let repro = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/repros/comp-zero-frame-rate.jsonl");
+    let v = ok_json(&["replay", repro.to_str().unwrap()]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(v["steps"].as_array().unwrap().len() > 5);
+    let bad = tmp("bad-repro.jsonl");
+    std::fs::write(
+        &bad,
+        "{\"start\": \"new\"}\n{\"command\": \"comp.new\"}\n{\"expect\": {\"query\": \"comp.info\", \"pointer\": \"/width\", \"equals\": 1}}\nnot json\n",
+    )
+    .unwrap();
+    let (code, v) = run_json(&["replay", bad.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["first_failure"]["line"], 3, "{v}");
+    assert_eq!(v["skipped"], 1);
+    let out = bin().args(["replay", bad.to_str().unwrap(), "--keep-going"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("line    2  ok    comp.new") && text.contains("line    4  FAIL  invalid: not JSON"), "{text}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("failed at line 3 (comp.info)"));
+    // The start line picks the project.
+    assert_eq!(bin().args(["replay", bad.to_str().unwrap(), "--demo"]).output().unwrap().status.code(), Some(2));
+}
+
+/// Text editors can prefix an exported JSON-lines repro with a UTF-8 BOM.
+#[test]
+fn replay_accepts_a_utf8_bom() {
+    let path = tmp("bom-repro.jsonl");
+    std::fs::write(&path, "\u{feff}{\"command\":\"comp.new\"}\n").unwrap();
+    let (code, report) = run_json(&["replay", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["ok"], true);
+}
