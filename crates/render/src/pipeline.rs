@@ -1238,7 +1238,8 @@ impl<'a> Renderer<'a> {
     /// declare its margin, or anything in the comp that reads layers' pixels (an effect's layer
     /// parameter, an expression).
     pub(crate) fn footage_rows(&self, ctx: &EvalCtx, layer: &Layer, f: &Footage) -> Option<(i64, i64)> {
-        let roi = self.opts.roi.filter(|_| self.top)?;
+        // (a caller that needs the whole layer: the Layer panel, sampleImage, effect inputs)
+        let roi = self.opts.roi.filter(|_| self.top && !self.whole_raster)?;
         // (a collapsed precomp's layers are placed through the outer layers too, and an
         // adjustment layer's footprint is keyed whole: the whole frame there)
         if self.outer.is_some() || self.collapse3d.is_some() || self.depth > 0 || layer.switches.adjustment {

@@ -172,6 +172,15 @@ impl FrameImage {
     fn is_gpu(&self) -> bool {
         matches!(self, FrameImage::Gpu(_))
     }
+    /// Held outside the cache too (a viewer showing it): dropping the cache's entry frees
+    /// nothing yet.
+    fn held_elsewhere(&self) -> bool {
+        match self {
+            FrameImage::Cpu(i) => Arc::strong_count(i) > 1,
+            FrameImage::CpuF16(i) => Arc::strong_count(i) > 1,
+            FrameImage::Gpu(i) => Arc::strong_count(i) > 1,
+        }
+    }
 }
 
 /// A viewer frame: its comp's content, the frame, scale, view and render options. `revision` is
@@ -364,9 +373,10 @@ impl Cache {
         }
         farthest.map(|(_, i)| i)
     }
-    /// [`Cache::victim`] among the frames in RAM (a GPU frame's bytes are video memory).
-    fn cpu_victim(&self) -> Option<usize> {
-        self.victim_of(|k| self.map.get(k).is_some_and(|c| !c.img.is_gpu()))
+    /// [`Cache::victim`] among the frames in RAM (a GPU frame's bytes are video memory) nobody
+    /// else holds: what the memory accountant may drop to free RAM now.
+    fn free_victim(&self) -> Option<usize> {
+        self.victim_of(|k| self.map.get(k).is_some_and(|c| !c.img.is_gpu() && !c.img.held_elsewhere()))
     }
     /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
     /// than the one on screen first (a zoom or resolution change).
@@ -456,7 +466,7 @@ impl Cache {
 
 /// The preview frames (in RAM; GPU frames have their own budget) in the common memory budget
 /// (#3271, #3298): each frame is worth what rendering it took, per byte. The frame offered is
-/// the one the cache would evict next ([`Cache::cpu_victim`]: it spares the frames a playing
+/// the one the cache would evict next ([`Cache::free_victim`]: it spares the frames a playing
 /// preview shows next).
 struct PreviewMemory(Arc<Mutex<Cache>>);
 
@@ -477,7 +487,7 @@ impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
     fn oldest(&self) -> Option<effectcraft_engine::render::memory::Candidate> {
         use effectcraft_engine::render::memory::{Candidate, DEFAULT_PREVIEW_US_PER_MB, default_cost};
         let c = self.0.lock().ok()?;
-        let k = c.order.get(c.cpu_victim()?)?;
+        let k = c.order.get(c.free_victim()?)?;
         let f = c.map.get(k)?;
         let bytes = f.img.bytes();
         let protected = c.playhead.as_ref().is_some_and(|p| p.ahead(k).is_some());
@@ -486,7 +496,7 @@ impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
     }
     fn drop_oldest(&self) -> usize {
         let Ok(mut c) = self.0.lock() else { return 0 };
-        let Some(old) = c.cpu_victim().and_then(|i| c.order.remove(i)) else { return 0 };
+        let Some(old) = c.free_victim().and_then(|i| c.order.remove(i)) else { return 0 };
         let bytes = c.map.get(&old).map_or(0, |f| f.img.bytes());
         c.remove(&old);
         bytes

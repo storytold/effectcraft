@@ -1727,7 +1727,19 @@ fn decompress_checked(p: &[u8], expected: Option<usize>) -> Option<Vec<u8>> {
         return None;
     }
     // A block that ends short of the size it states is damaged: callers index by that size.
-    lz4_flex::decompress(p.get(4..)?, size).ok().filter(|raw| raw.len() == size)
+    // (memory the system can't give is a miss, not an abort)
+    let mut raw = zeroed(size, 0u8)?;
+    let got = lz4_flex::block::decompress_into(p.get(4..)?, &mut raw).ok()?;
+    (got == size).then_some(raw)
+}
+
+/// `n` copies of `v`, or `None` when the system can't give the memory: a cache entry read back
+/// then counts as a miss.
+fn zeroed<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(n).ok()?;
+    out.resize(n, v);
+    Some(out)
 }
 
 fn decode_frame(p: &[u8]) -> Option<Frame8> {
@@ -1774,7 +1786,7 @@ fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
     let n = (w as usize).checked_mul(h as usize)?;
     let planes = decompress_checked(&p[8..], Some(n.checked_mul(8)?))?;
-    let mut rgba = vec![0u16; n * 4];
+    let mut rgba = zeroed(n.checked_mul(4)?, 0u16)?;
     for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         for (c, v) in px.iter_mut().enumerate() {
             *v = u16::from_le_bytes([planes[c * n + i], planes[(4 + c) * n + i]]);
@@ -1848,22 +1860,24 @@ fn decode_plane(p: &[u8], expect: (u32, u32)) -> Option<(String, Vec<f32>)> {
     if u32::from_le_bytes(body.get(..4)?.try_into().ok()?) as usize != want {
         return None;
     }
-    let s = lz4_flex::decompress_size_prepended(body).ok()?;
-    if s.len() != want {
-        return None;
-    }
-    let plane = if width == 2 {
+    // (every buffer taken fallibly: a plane the system can't give memory for is a miss)
+    let s = decompress_checked(body, Some(want))?;
+    let mut plane = zeroed(n, 0.0f32)?;
+    if width == 2 {
         let (lo, hi) = s.split_at_checked(n)?;
-        let halves: Vec<half::f16> = lo.iter().zip(hi).map(|(l, h)| half::f16::from_bits(u16::from_le_bytes([*l, *h]))).collect();
-        let mut plane = vec![0.0; n];
+        let mut halves = zeroed(n, half::f16::ZERO)?;
+        for ((x, l), h) in halves.iter_mut().zip(lo).zip(hi) {
+            *x = half::f16::from_bits(u16::from_le_bytes([*l, *h]));
+        }
         half::slice::HalfFloatSliceExt::convert_to_f32_slice(halves.as_slice(), &mut plane);
-        plane
     } else {
         let (b0, rest) = s.split_at_checked(n)?;
         let (b1, rest) = rest.split_at_checked(n)?;
         let (b2, b3) = rest.split_at_checked(n)?;
-        b0.iter().zip(b1).zip(b2).zip(b3).map(|(((a, b), c), d)| f32::from_bits(u32::from_le_bytes([*a, *b, *c, *d]))).collect()
-    };
+        for (o, (((a, b), c), d)) in plane.iter_mut().zip(b0.iter().zip(b1).zip(b2).zip(b3)) {
+            *o = f32::from_bits(u32::from_le_bytes([*a, *b, *c, *d]));
+        }
+    }
     Some((name, plane))
 }
 
@@ -2032,6 +2046,15 @@ pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3301 review: buffers for entries read back are taken fallibly; memory the system can't
+    /// give is a miss, not an abort.
+    #[test]
+    fn memory_that_cannot_be_had_is_a_miss() {
+        assert!(zeroed(usize::MAX, 0u8).is_none());
+        assert!(zeroed(usize::MAX / 2, 0.0f32).is_none());
+        assert_eq!(zeroed(3, 7u16), Some(vec![7; 3]));
+    }
 
     #[cfg(unix)]
     #[test]

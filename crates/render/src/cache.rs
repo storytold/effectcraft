@@ -90,6 +90,12 @@ impl Inner {
         self.order.first_key_value().map(|(_, k)| *k)
     }
 
+    /// The least recently used entry nobody else holds (a render using its buffer): what the
+    /// memory accountant may drop to free memory now.
+    fn oldest_free_key(&self) -> Option<u64> {
+        self.order.values().copied().find(|k| self.map.get(k).is_some_and(|e| Arc::strong_count(&e.buf) == 1))
+    }
+
     /// Mark the entry under `key` as used at `now` (the clock), for `order` and the accountant.
     fn touch(&mut self, key: u64, now: u64) {
         let Some(e) = self.map.get_mut(&key) else { return };
@@ -1060,15 +1066,16 @@ impl crate::memory::MemoryHolder for LayerCache {
     fn bytes(&self) -> usize {
         self.inner.lock().map(|g| g.bytes).unwrap_or(0)
     }
-    /// Its least recently used buffer, with what rendering it took.
+    /// Its least recently used buffer nobody else holds (dropping one a render holds would free
+    /// nothing yet), with what rendering it took.
     fn oldest(&self) -> Option<crate::memory::Candidate> {
         let g = self.inner.lock().ok()?;
-        let e = g.map.get(&g.oldest_key()?)?;
+        let e = g.map.get(&g.oldest_free_key()?)?;
         Some(crate::memory::Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false })
     }
     fn drop_oldest(&self) -> usize {
         let Ok(mut g) = self.inner.lock() else { return 0 };
-        match g.oldest_key() {
+        match g.oldest_free_key() {
             Some(k) => g.evict(k),
             None => 0,
         }
@@ -1085,6 +1092,24 @@ mod shared_insert_tests {
     use super::LayerCache;
     use effectcraft_effects::Buf;
     use effectcraft_raster::Image;
+
+    /// #3301 review: the memory accountant is offered only buffers nobody else holds; dropping
+    /// one a render still holds would free nothing, and its bytes would be counted as freed.
+    #[test]
+    fn a_buffer_held_elsewhere_is_not_offered_to_the_accountant() {
+        use crate::memory::MemoryHolder;
+        let cache = LayerCache::default();
+        let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
+        let held = cache.insert(1, buf(), Default::default()).0;
+        drop(cache.insert(2, buf(), Default::default()));
+        let bytes = cache.bytes();
+        let freed = cache.drop_oldest();
+        assert!(freed > 0 && cache.get(1).is_some() && cache.get(2).is_none(), "the free one goes, the held one stays");
+        assert_eq!(cache.bytes(), bytes - freed);
+        assert!(cache.oldest().is_none() && cache.drop_oldest() == 0, "only a held buffer left");
+        drop(held);
+        assert!(cache.drop_oldest() > 0, "let go: offered");
+    }
 
     /// Two renders of one layer kept under one key: both use the buffer kept first.
     #[test]

@@ -219,6 +219,10 @@ fn a_footage_layer_read_by_rows_is_not_the_shared_picture() {
     let Some(ItemKind::Footage(f)) = p.item(item).map(|it| &it.kind) else { panic!("footage") };
     assert!(region.footage_rows(&ctx, &comp.layers[0], f).is_some(), "read by rows");
     assert!(region.footage_picture(&ctx, &comp.layers[0]).is_none(), "a part of the frame is never shared");
+    // #3301 review: a caller that needs the whole layer (Layer panel, sampleImage, effect inputs)
+    // reads the whole frame under a region too.
+    let whole_layer = Renderer { whole_raster: true, ..region };
+    assert!(whole_layer.footage_rows(&ctx, &comp.layers[0], f).is_none(), "whole layer: the whole frame");
 }
 
 /// #3271 review: a render's channel reads (an effect's EXR channels) are called off with the

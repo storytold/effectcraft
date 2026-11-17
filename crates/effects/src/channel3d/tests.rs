@@ -403,6 +403,20 @@ fn box_filter_survives_hostile_scales() {
     assert!(t.elapsed() < std::time::Duration::from_secs(1));
 }
 
+/// #3301 review: a source whose layer has more pixels than a filtered plane may have (a 16K
+/// file at half resolution) is still filtered when the result fits: alternating selected and
+/// unselected rows give 0.5, not the 0 of a nearest-neighbour lookup of every second row.
+#[test]
+fn a_large_source_is_filtered_when_its_result_fits() {
+    let (w, h) = (8usize, 8usize);
+    let data = (0..w * h).map(|i| if (i / w) % 2 == 0 { 1.0 } else { 0.0 }).collect();
+    let src = CryptoPlane { width: w as u32, height: h as u32, scale: 1.0, output: CryptoOutput::Matte, data };
+    // (at most 16 output pixels: the 4 × 4 result fits, the 64 layer pixels don't)
+    let p = crypto_box_within(src, 0.5, 16);
+    assert_eq!((p.width, p.height), (4, 4), "filtered to half resolution");
+    assert!(p.data.iter().all(|m| (m - 0.5).abs() < 1e-6), "{:?}", p.data);
+}
+
 /// The CPU effect on a 20×10 layer over the 6×2 edge aux: pixels inside the aux area match
 /// the lookup by name bit for bit in every display mode, pixels outside it (no aux index)
 /// get an empty matte and no ID colour.

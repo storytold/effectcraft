@@ -392,6 +392,26 @@ fn cryptomatte_planes_are_kept_per_frame_and_selection() {
     assert!(Arc::ptr_eq(&one, &matte_cache::plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 1.0)), "the live frame's plane stays");
 }
 
+/// #3301 review: a plane over the cache's own byte limit is not kept by a render without a
+/// common budget (nothing would trim it); with a budget that holds it, it is kept and the budget
+/// trims it.
+#[test]
+fn a_plane_over_the_byte_limit_is_kept_only_under_a_budget() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let sel = vec![crypto_hash("beta")];
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    // (one Matte plane: 70 × 44 × 4 bytes, over a 100-byte limit)
+    let first = matte_cache::plane_held_to(&a, "CryptoObject", &sel, CryptoOutput::Matte, 100, usize::MAX);
+    let again = matte_cache::plane_held_to(&a, "CryptoObject", &sel, CryptoOutput::Matte, 100, usize::MAX);
+    assert!(!Arc::ptr_eq(&first, &again), "no budget: an oversized plane is not kept");
+    let b = Arc::new(aux_scene(70, 44, 1.0));
+    let first = matte_cache::plane_held_to(&b, "CryptoObject", &sel, CryptoOutput::Matte, 100, 1 << 30);
+    let again = matte_cache::plane_held_to(&b, "CryptoObject", &sel, CryptoOutput::Matte, 100, 1 << 30);
+    assert!(Arc::ptr_eq(&first, &again), "a budget that holds it: kept");
+}
+
 #[test]
 fn extractor() {
     case("ec.3d.extractor", &[("red", Value::Str("Z".into())), ("green", Value::Str("UV.U".into())), ("whitePoint", n(1000.0))]);
