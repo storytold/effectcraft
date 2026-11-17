@@ -17,7 +17,10 @@ pub mod yuv;
 use effectcraft_color::{BlendMode, blend_pixel};
 use rayon::prelude::*;
 
-pub use blur::{box_blur, directional_blur, gaussian_blur, gaussian_blur_exact, gaussian_is_exact, radial_blur};
+pub use blur::{
+    RADIAL_BLUR_SAMPLES, box_blur, directional_blur, gaussian_blur, gaussian_blur_exact, gaussian_is_exact, radial_blur, radial_blur_spin_angle,
+    radial_blur_zoom_scale,
+};
 pub use channels3d::AuxChannels;
 pub use warp::{Sampling, WarpOpts, accumulate_warp, composite_warp, composite_warp_changed, composite_warp_reference, resample};
 

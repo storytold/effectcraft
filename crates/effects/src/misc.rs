@@ -1148,6 +1148,26 @@ mod tests {
         }
     }
 
+    /// Amount takes After Effects' valid range up to 1000 (#3467), Zoom 1000 a spread of 10.
+    /// Zoom samples along the ray from the centre through the pixel, never past the centre: on a
+    /// layer white left of the centre and black right of it, the right half stays black (scales
+    /// below 0 sampled the white half mirrored through the centre). Both Antialiasing settings.
+    #[test]
+    fn radial_blur_zoom_at_the_largest_amount_stays_on_its_side_of_the_centre() {
+        let mut img = effectcraft_raster::Image::filled(64, 32, [0.0, 0.0, 0.0, 1.0]);
+        img.rows_mut().for_each(|(_, row)| row.iter_mut().take(32).for_each(|px| *px = [1.0, 1.0, 1.0, 1.0]));
+        for aa in 0..2 {
+            let vals = [("amount", num(1000.0)), ("type", Value::Enum(1)), ("center", Value::Vec2([32.5, 16.5])), ("antialiasing", Value::Enum(aa))];
+            let o = run_fx("ec.blur.radial", &vals, img.clone(), 0.0, EffectEnv::default());
+            for y in 0..32 {
+                for x in 33..64 {
+                    let p = o.img.get(x, y);
+                    assert!(p[0].abs() < 1e-5 && (p[3] - 1.0).abs() < 1e-5, "aa {aa} ({x}, {y}): {p:?}");
+                }
+            }
+        }
+    }
+
     /// Spin and Zoom at both ends of Amount (0..1000) and both Antialiasing settings give finite
     /// colours over an opaque layer and keep it opaque (#3467).
     #[test]

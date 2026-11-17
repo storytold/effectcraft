@@ -100,14 +100,14 @@ fn radial_blur(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     if amount.abs() < 1e-6 {
         return Some(b);
     }
-    let n = 32usize;
+    // The CPU's samples (`raster::radial_blur`).
+    let n = effectcraft_raster::RADIAL_BLUR_SAMPLES;
     let mut data = Vec::with_capacity(2 * n);
     for i in 0..n {
-        let t = i as f64 / (n - 1) as f64 - 0.5;
         if zoom {
-            data.push((1.0 + t * amount) as f32);
+            data.push(effectcraft_raster::radial_blur_zoom_scale(i, amount) as f32);
         } else {
-            let (s, c) = (t * amount).to_radians().sin_cos();
+            let (s, c) = effectcraft_raster::radial_blur_spin_angle(i, amount).to_radians().sin_cos();
             data.extend([s as f32, c as f32]);
         }
     }
