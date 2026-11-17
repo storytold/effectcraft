@@ -1408,6 +1408,12 @@ impl DiskCache {
         self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, None, |p| decode_plane(p, (width, height))).map(|(plane, _)| plane)
     }
 
+    /// The most plane bytes one queued write of decoded footage channels holds: a caller copying
+    /// planes for [`DiskCache::put_planes`] copies this much at a time.
+    pub fn plane_job_bytes(&self) -> usize {
+        PLANE_JOB_BYTES
+    }
+
     /// Queue decoded footage channels of `width` x `height` (each [`plane_key`], name and plane)
     /// for writing, with the source file they were read from; encoded on the writer thread.
     /// Planes stored already, of another size or larger than the cache may hold are left out;
@@ -1865,10 +1871,10 @@ fn encode_plane_after(mut out: Vec<u8>, w: u32, h: u32, name: &str, plane: &[f32
     Some(out)
 }
 
-/// Allocations [`zeroed`] refuses on this thread: those over this many bytes (tests: memory the
-/// system can't give).
 #[cfg(test)]
 thread_local! {
+    /// Allocations [`zeroed`] refuses on this thread: those over this many bytes (tests: memory
+    /// the system can't give).
     static NO_MEMORY_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
 }
 

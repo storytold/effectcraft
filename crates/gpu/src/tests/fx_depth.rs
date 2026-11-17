@@ -445,6 +445,23 @@ fn the_entry_limit_holds_while_renders_hold_every_plane() {
     drop(held);
 }
 
+/// #3750 review: a plane over the cache's byte limit kept under a common budget is kept also
+/// while a render holds another plane (only the entry limit, or a plane within the byte limit
+/// that can't fit beside the held ones, hands a new plane out without keeping it).
+#[test]
+fn an_oversized_plane_is_kept_beside_a_held_one_under_a_budget() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    // (each Matte plane: 70 × 44 × 4 bytes, over a 100-byte limit; the budget holds them)
+    let neighbour = matte_cache::plane_held_to(&a, "CryptoObject", &[crypto_hash("beta")], CryptoOutput::Matte, 100, 1 << 30);
+    let first = matte_cache::plane_held_to(&a, "CryptoObject", &[crypto_hash("gamma")], CryptoOutput::Matte, 100, 1 << 30);
+    let again = matte_cache::plane_held_to(&a, "CryptoObject", &[crypto_hash("gamma")], CryptoOutput::Matte, 100, 1 << 30);
+    assert!(Arc::ptr_eq(&first, &again), "kept beside the held plane");
+    drop(neighbour);
+}
+
 #[test]
 fn extractor() {
     case("ec.3d.extractor", &[("red", Value::Str("Z".into())), ("green", Value::Str("UV.U".into())), ("whitePoint", n(1000.0))]);
