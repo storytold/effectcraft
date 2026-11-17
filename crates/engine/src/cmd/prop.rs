@@ -1448,8 +1448,11 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("path").is_none() && p.get("prop").is_none() && p.get("layer").is_none() {
         let cid = comp_id(s, p)?;
         let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-        let sel: Vec<(LayerId, Uid)> =
-            selected_leaf_props(s).into_iter().filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(Property::has_expression)).collect();
+        // (a property that can't be animated is left out, as Add Keyframe leaves it out)
+        let sel: Vec<(LayerId, Uid)> = selected_leaf_props(s)
+            .into_iter()
+            .filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(|pr| pr.has_expression() && !pr.static_only))
+            .collect();
         if sel.is_empty() {
             return Err(bad(CMD, "no `path` given and no selected property has an expression"));
         }
@@ -1497,6 +1500,10 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();
     let pr = layer.props.find(uid).ok_or_else(|| bad("prop.convertExpressionToKeyframes", "no property"))?.clone();
+    // (an expression an older document left on a property that can't be animated: no keys)
+    if pr.static_only {
+        return Err(bad("prop.convertExpressionToKeyframes", format!("{} can't be animated", pr.name)));
+    }
     let fd = comp.frame_duration();
     check_convertible(fd.0, &layer)?;
     let mut keys = vec![];

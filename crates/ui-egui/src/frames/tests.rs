@@ -3218,6 +3218,32 @@ fn the_accountant_trims_only_frames_in_ram() {
     assert_eq!(memory.bytes(), 16);
 }
 
+/// #3301 review: a frame someone still holds (the viewer showing it, from `Frames::get`) is not
+/// offered to the memory accountant: dropping the cache's entry would free nothing, and its bytes
+/// would be counted as freed.
+#[test]
+fn a_frame_held_elsewhere_is_not_offered_to_the_accountant() {
+    use effectcraft_engine::render::memory::MemoryHolder;
+    let frames = Frames::default();
+    {
+        let mut c = frames.cache.lock().unwrap();
+        c.insert(key(1, 0, 0), img());
+        c.insert(key(1, 1, 0), img());
+    }
+    let shown = frames.get(&key(1, 0, 0)).unwrap();
+    // (the other one shown since and let go: the held frame is the least recently shown)
+    drop(frames.get(&key(1, 1, 0)));
+    let memory = PreviewMemory(frames.cache.clone());
+    assert_eq!(memory.drop_oldest(), 16, "the frame nobody holds goes");
+    {
+        let c = frames.cache.lock().unwrap();
+        assert!(c.map.contains_key(&key(1, 0, 0)) && !c.map.contains_key(&key(1, 1, 0)), "the shown frame stays");
+    }
+    assert!(memory.oldest().is_none() && memory.drop_oldest() == 0, "only a held frame left");
+    drop(shown);
+    assert_eq!(memory.drop_oldest(), 16, "let go: offered");
+}
+
 /// #3301: frames a playing preview shows next are protected: other caches give way first, even
 /// for items worth more, until the caches are more than the bounded overage over; past it the
 /// preview frames go too. A frame rendered quickly still costs a typical render.

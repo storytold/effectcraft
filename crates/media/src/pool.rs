@@ -214,6 +214,14 @@ impl Lru {
         self.remove(&k);
         had.saturating_sub(self.bytes)
     }
+    /// The bytes of the recycled buffers ([`Lru::spare`]).
+    fn spare_bytes(&self) -> usize {
+        self.spare.iter().map(|b| b.len().saturating_mul(std::mem::size_of::<Px>())).fold(0, usize::saturating_add)
+    }
+    /// Let one recycled buffer go; the bytes freed.
+    fn drop_spare(&mut self) -> usize {
+        self.spare.pop().map_or(0, |b| b.len().saturating_mul(std::mem::size_of::<Px>()).max(1))
+    }
     /// A recycled buffer of exactly `len` pixels, or an empty Vec.
     fn take_spare(&mut self, len: usize) -> Vec<Px> {
         match self.spare.iter().position(|b| b.len() == len) {
@@ -364,9 +372,10 @@ impl CacheState {
         }
     }
 
-    /// The bytes the frame cache and the whole stills beside it hold (the memory holder's).
+    /// The bytes the frame cache, its recycled buffers and the whole stills beside it hold (the
+    /// memory holder's).
     fn held_bytes(&self) -> usize {
-        self.lru.bytes.saturating_add(self.recent_bytes())
+        self.lru.bytes.saturating_add(self.lru.spare_bytes()).saturating_add(self.recent_bytes())
     }
 
     /// The bytes of the whole stills [`CacheState::recent`] holds.
@@ -1730,10 +1739,14 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
     }
     /// The older of the least recently used frame and the oldest whole still kept beside the
     /// frames (#3271: whichever was used last goes first); a whole still is kept for a moment
-    /// only, to resample other sizes, so it is offered as worth nothing.
+    /// only, to resample other sizes, so it is offered as worth nothing. Recycled buffers of
+    /// frames dropped go before either, at no cost.
     fn oldest(&self) -> Option<effectcraft_render::memory::Candidate> {
         use effectcraft_render::memory::Candidate;
         let c = lock(&self.cache);
+        if let Some(b) = c.lru.spare.last() {
+            return Some(Candidate { used: 0, bytes: b.len().saturating_mul(std::mem::size_of::<Px>()).max(1), cost_us: 0, protected: false });
+        }
         let frame =
             c.lru.oldest().and_then(|(k, _)| c.lru.map.get(k)).map(|e| Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false });
         let still = c.recent.front().map(|r| Candidate { used: r.used, bytes: r.bytes.max(1), cost_us: 0, protected: false });
@@ -1744,6 +1757,9 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
     }
     fn drop_oldest(&self) -> usize {
         let mut c = lock(&self.cache);
+        if !c.lru.spare.is_empty() {
+            return c.lru.drop_spare();
+        }
         let frame = c.lru.oldest().map(|(_, t)| t);
         let still = c.recent.front().map(|r| r.used);
         match (frame, still) {
@@ -2139,6 +2155,32 @@ mod tests {
         assert_eq!(c.spare.len(), MAX_SPARE);
         assert_eq!(c.take_spare(256).len(), 256);
         assert!(c.take_spare(17).is_empty());
+    }
+
+    /// #3301 review: the recycled buffers are in the memory budget: counted, and the first the
+    /// accountant lets go, at no cost, before any cached frame.
+    #[test]
+    fn recycled_buffers_are_held_bytes_and_go_first() {
+        let pool = MediaPool::unregistered(usize::MAX);
+        let holder = pool.memory_holder();
+        let px = 256 * std::mem::size_of::<Px>();
+        {
+            let mut c = lock(&pool.inner.cache);
+            let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None, q8: false };
+            for i in 0..3 {
+                c.lru.insert(k(i), Pixels::F32(Arc::new(Image::new(16, 16))), Arc::default(), usize::MAX);
+            }
+            c.lru.spare.push(vec![[0.0; 4]; 256]);
+            c.lru.spare.push(vec![[0.0; 4]; 256]);
+        }
+        let frames = 3 * (px + 64);
+        assert_eq!(holder.bytes(), frames + 2 * px, "frames and recycled buffers");
+        let next = holder.oldest().unwrap();
+        assert_eq!((next.bytes, next.cost_us), (px, 0), "a recycled buffer first, worth nothing");
+        assert_eq!(holder.drop_oldest(), px);
+        assert_eq!(holder.drop_oldest(), px);
+        assert_eq!(holder.bytes(), frames, "the frames stay until the buffers are gone");
+        assert_eq!(holder.drop_oldest(), px + 64, "then the oldest frame");
     }
 
     /// A frame kept as 8-bit levels is its own entry beside the float one, counted at 4 bytes

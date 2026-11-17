@@ -424,8 +424,8 @@ pub fn system_report(s: &Session) -> Value {
     let gb = |b: u64| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
     let export: Vec<&str> = s.exporter.as_ref().map(|e| e.formats().into_iter().map(|f| f.label()).collect()).unwrap_or_default();
     let gpu = s.accel.as_ref().map(|a| a.name());
-    let read = mem.or(s.sys_memory);
-    let budget = s.prefs.memory_budget(read, read.is_some_and(|m| m.still_low(s.memory_low)));
+    // (the budget in force: from the reading the session applied, not this fresh one)
+    let budget = s.memory_budget();
     let mut issues = vec![];
     if gpu.is_none() {
         issues.push(match &s.accel_note {

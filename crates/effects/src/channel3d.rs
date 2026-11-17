@@ -725,6 +725,13 @@ fn box_axis(layer_len: usize, src_len: usize, src_scale: f64, k: f64, out_len: u
 /// the mean of the render-scale-1 pixels it covers (the layer's pixels outside the aux image
 /// count as 0, as the effect shows them; the Colors display's alpha is 1 everywhere).
 fn crypto_box(src: CryptoPlane, s: f64) -> CryptoPlane {
+    crypto_box_within(src, s, MAX_BOX_PIXELS)
+}
+
+/// [`crypto_box`] with a result of at most `max_out` pixels. The filter's work, a visit of every
+/// layer pixel, is bounded by the source's size alone, which is in memory already: a 16K source
+/// at half resolution is filtered, not looked up nearest-neighbour.
+fn crypto_box_within(src: CryptoPlane, s: f64, max_out: usize) -> CryptoPlane {
     if !(src.scale.is_finite() && src.scale > 0.0) {
         return src;
     }
@@ -734,18 +741,24 @@ fn crypto_box(src: CryptoPlane, s: f64) -> CryptoPlane {
     let k = if (k - k.round()).abs() < 1e-9 * k { k.round() } else { k };
     let (lw, lh) = ((src.width as f64 / src.scale).ceil(), (src.height as f64 / src.scale).ceil());
     let (dw, dh) = ((lw / k * (1.0 - 1e-12)).ceil(), (lh / k * (1.0 - 1e-12)).ceil());
-    let limit = (src.width as usize).saturating_mul(src.height as usize).saturating_mul(4).min(MAX_BOX_PIXELS);
-    let fits = |v: f64| v.is_finite() && v >= 0.0 && v <= MAX_BOX_PIXELS as f64;
-    // (the filter visits every layer pixel: bounded by the source's size too)
-    if !(fits(lw) && fits(lh) && fits(dw) && fits(dh)) || (dw * dh) as usize > limit || (lw * lh) as usize > limit {
+    // (the filter visits every layer pixel: at most four per source pixel; a footage item
+    // claiming a far larger size than its file is left unscaled)
+    let work = (src.width as usize).saturating_mul(src.height as usize).saturating_mul(4);
+    let fits = |v: f64| v.is_finite() && v >= 0.0 && v <= work as f64;
+    if !(fits(lw) && fits(lh) && fits(dw) && fits(dh)) || (dw * dh) as usize > work.min(max_out) || (lw * lh) as usize > work {
         return src;
     }
     let (lw, lh, dw, dh) = (lw as usize, lh as usize, dw as usize, dh as usize);
     let ch = src.output.channels();
+    let n = dw.saturating_mul(dh).saturating_mul(ch);
+    let mut data = Vec::new();
+    if data.try_reserve_exact(n).is_err() {
+        return src;
+    }
+    data.resize(n, 0.0f32);
     let xs = box_axis(lw, src.width as usize, src.scale, k, dw);
     let ys = box_axis(lh, src.height as usize, src.scale, k, dh);
     let (sw, area) = (src.width as usize, k * k);
-    let mut data = vec![0.0f32; dw * dh * ch];
     data.par_chunks_mut((dw * ch).max(1)).zip(ys.par_iter()).for_each(|(row, ty)| {
         for (dx, tx) in xs.iter().enumerate() {
             for c in 0..ch {

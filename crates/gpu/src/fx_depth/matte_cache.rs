@@ -77,6 +77,11 @@ fn register() {
 /// Cryptomatte layer `layer`'s finished plane for selection `sel` (hashes) at `render_scale`
 /// ([`effectcraft_effects::crypto_plane`]), kept or made now.
 pub(crate) fn plane(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: CryptoOutput, render_scale: f64) -> Arc<CryptoPlane> {
+    plane_within(a, layer, sel, output, render_scale, MAX_BYTES, Accountant::global().budget())
+}
+
+/// [`plane`] with at most `max_bytes` kept, and the common `budget` (`usize::MAX`: none).
+fn plane_within(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: CryptoOutput, render_scale: f64, max_bytes: usize, budget: usize) -> Arc<CryptoPlane> {
     register();
     let key = Key { layer: layer.to_string(), sel: sel.to_vec(), output, scale: effectcraft_effects::crypto_box_scale(render_scale).map(f64::to_bits) };
     {
@@ -97,10 +102,15 @@ pub(crate) fn plane(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: Cryp
         // (planes of channels that are gone can't be asked for again; another thread may have
         // made this one meanwhile)
         c.entries.retain(|e| !e.gone() && !(e.of(a) && e.key == key));
+        // A plane over MAX_BYTES on its own (a 16K Colors plane) is kept only where the common
+        // budget trims it: a render without a budget hands it out and keeps nothing.
+        if bytes > max_bytes && (budget == usize::MAX || bytes > budget) {
+            return made;
+        }
         c.entries.push(Entry { aux: Arc::downgrade(a), key, plane: made.clone(), used: memory::tick(), cost_us });
         loop {
             let total: usize = c.entries.iter().map(|e| e.plane.bytes()).fold(0, usize::saturating_add);
-            if c.entries.len() <= 1 || (c.entries.len() <= MAX_ENTRIES && total <= MAX_BYTES) {
+            if c.entries.len() <= 1 || (c.entries.len() <= MAX_ENTRIES && total <= max_bytes) {
                 break;
             }
             let Some(i) = oldest(&c) else { break };
@@ -141,6 +151,12 @@ impl MemoryHolder for Holder {
         let Some(i) = oldest(&c) else { return 0 };
         c.entries.swap_remove(i).plane.bytes()
     }
+}
+
+/// [`plane_within`] (tests).
+#[cfg(test)]
+pub(crate) fn plane_held_to(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: CryptoOutput, max_bytes: usize, budget: usize) -> Arc<CryptoPlane> {
+    plane_within(a, layer, sel, output, 1.0, max_bytes, budget)
 }
 
 /// Planes made so far (tests).

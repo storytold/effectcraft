@@ -297,6 +297,30 @@ fn a_channel_selections_old_expression_can_be_removed() {
     assert!(expr(&s).is_none(), "removed");
 }
 
+/// #3301 review: Convert Expression to Keyframes makes no keys on a channel selection that has an
+/// expression from an older document: named, it is refused; in a selection, it is left out.
+#[test]
+fn a_channel_selections_old_expression_is_not_converted_to_keys() {
+    let rec = Arc::new(Recorder::default());
+    let mut s = session(&rec);
+    let item = import(&mut s, "/renders/old-expr-keys.exr");
+    let l = add_layer(&mut s, &item);
+    s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let red = "effects/#1/red";
+    {
+        let p = Arc::make_mut(&mut s.project);
+        let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut(red).unwrap();
+        pr.expr = Some(effectcraft_project::Expression { text: "'Z'".into(), enabled: true });
+    }
+    let keys = |s: &Session| s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap().props.prop(red).unwrap().keys.len();
+    assert!(s.execute_checked("prop.convertExpressionToKeyframes", json!({"layer": l, "path": red})).is_err(), "named: refused");
+    assert_eq!(keys(&s), 0);
+    s.execute_checked("prop.select", json!({"layer": l, "path": red})).unwrap();
+    let _ = s.execute_checked("prop.convertExpressionToKeyframes", json!({}));
+    assert_eq!(keys(&s), 0, "selected: left out");
+}
+
 /// An EXtractoR layer of `path` in a fresh session; the session and the layer.
 fn extractor_layer(rec: &Arc<Recorder>, path: &str) -> (Session, u64) {
     let mut s = session(rec);

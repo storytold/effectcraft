@@ -11,6 +11,7 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/effectcraft"
 
 [workspace.dependencies]
+craft-timeline = { git = "https://github.com/storytold/craft-libs", rev = "0d6dd8bed815b8366869a800d2bf22588ca62dcb", default-features = false }
 craft-mime = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "808730f49b9637b7909fe2ae56f9d63fdb100cae", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
@@ -18,10 +19,10 @@ craft-quit = { version = "0.1.0", git = "https://github.com/storytold/craft-libs
 craft-ecproj-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-dpx = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-ps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "808730f49b9637b7909fe2ae56f9d63fdb100cae", default-features = false, features = ["read"] }
-craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
+craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5fd8db24b1c952a480f90dbda4544660cbee1af8" }
 craft-gif = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
-craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "e836b6fd893eca3fbe5880f000dbf446c3a32fcc" }
-craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
+craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce2ec507c2e6a6a078a5f450f641487f8931816d" }
+craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "77686f24fe8665c21369f1b593f4d65a973e2a45" }
 craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
@@ -100,15 +101,15 @@ craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-lib
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
-filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
-filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
-filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
-filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
-filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
 # timeline interchange (EDL, FCP7 XML, FCPXML, OTIO) for Premiere Pro interop (crates/interchange only)
-filmcraft-interchange = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
-filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
-filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "d5ead4ba1ee2f1cd13cb86a4239aee2730a3d9f5" }
+filmcraft-interchange = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
+filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "3f137a7ed420cac79b32145f5243b7f98b31f71c" }
 
 # gpu (the same wgpu eframe / egui-wgpu use)
 wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }

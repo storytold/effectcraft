@@ -231,6 +231,20 @@ fn low_memory_budgets_hold_until_the_system_recovers() {
     assert!(!s.memory_budget().reduced, "recovered");
 }
 
+/// #3301 review: the System Compatibility Report shows the cache budget in force, the one the
+/// session applied from its last reading, not one worked out from a fresh reading.
+#[test]
+fn the_report_shows_the_budget_in_force() {
+    use crate::sysinfo::SysMemory;
+    let mut s = Session::default();
+    // (a reading no machine running the test has: 3 GiB, of which 0.1 GiB is free, low)
+    let applied = s.take_memory_reading(Some(SysMemory { total: 3 << 30, available: 100 << 20 }));
+    let report = crate::cmd::app_more::system_report(&s);
+    let gb = format!("{:.1} GB", applied.bytes as f64 / (1u64 << 30) as f64);
+    assert_eq!(report["caches"]["budget"], gb.as_str(), "{report}");
+    assert_eq!(report["caches"]["reduced"], applied.reduced);
+}
+
 /// The memory readings over a low-memory episode: the budget is halved once, stays halved while
 /// the system has not recovered (a reading between the low line and twice it), and the toast
 /// shows once; recovered, the budget is whole again, and the next episode toasts again.
