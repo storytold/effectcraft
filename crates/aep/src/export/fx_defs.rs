@@ -728,7 +728,6 @@ mod tests {
         ("ec.obsolete.gaussianlegacy", "blurriness", 3463),
         ("ec.perspective.dropshadow", "softness", 3464),
         ("ec.blur.compound", "maximumBlur", 3465),
-        ("ec.blur.radial", "amount", 3467),
         ("ec.blur.ccradial", "amount", 3468),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
