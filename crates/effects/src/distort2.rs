@@ -736,7 +736,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "Turbulent Displace",
             vec![
                 p("displacement", "Displacement", Value::Enum(0), popup(&TURBULENT_KINDS)),
-                p("amount", "Amount", num(50.0), slider(-1000.0, 1000.0, -200.0, 200.0, 1)),
+                p("amount", "Amount", num(50.0), slider(-10000.0, 10000.0, -200.0, 200.0, 1)),
                 p("size", "Size", num(100.0), slider(2.0, 4000.0, 2.0, 400.0, 1)),
                 p("offset", "Offset (Turbulence)", pt(0.5, 0.5), ParamUi::Point),
                 p("complexity", "Complexity", num(1.0), slider(1.0, 10.0, 1.0, 10.0, 1)),
@@ -1008,6 +1008,16 @@ mod tests {
         let img = test_img(32, 24);
         assert_eq!(run("ec.distort.turbulentdisplace", &[("amount", num(0.0))], img.clone()).img, img);
         assert!(max_diff(&run("ec.distort.turbulentdisplace", &[], img.clone()).img, &img) > 1e-3);
+    }
+
+    /// #3469: Amount's hard range is After Effects' recorded valid range, -10000..10000; the
+    /// slider keeps its -200..200 scrub range.
+    #[test]
+    fn turbulent_displace_amount_takes_the_after_effects_range() {
+        let spec = crate::find("ec.distort.turbulentdisplace").unwrap();
+        let amount = spec.params.iter().find(|p| p.id == "amount").unwrap();
+        let ParamUi::Slider { min, max, slider_min, slider_max, .. } = amount.ui else { panic!("{:?}", amount.ui) };
+        assert_eq!((min, max, slider_min, slider_max), (-10000.0, 10000.0, -200.0, 200.0));
     }
 
     #[test]
