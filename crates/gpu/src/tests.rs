@@ -760,6 +760,27 @@ fn box_blur_horizontal_rows_match_cpu_beyond_256() {
     }
 }
 
+/// #3460: a box radius far past the image (Gaussian Blur's at Blurriness 30000 is about 15000 px)
+/// starts each running sum as the CPU does, the pixels inside once and the repeated edges
+/// counted, so the GPU matches it along rows and columns, with and without repeated edges.
+#[test]
+fn box_passes_with_a_radius_far_past_the_image_match_cpu() {
+    let Some(g) = gpu() else { return };
+    let img = pattern(5, 96, 40);
+    let up = g.ctx.upload_image(&img).expect("upload");
+    let tol = tolerance(BitDepth::Bpc32);
+    for repeat in [true, false] {
+        let mut e = crate::context::Enc::new(&g.ctx);
+        let r = [15_000usize; 3];
+        let out = crate::effects::box_passes(&mut e, &up, &r, &r, repeat);
+        let got = e.download(&out).expect("download");
+        let want = effectcraft_raster::box_blur(&img, 15_000, 15_000, 3, repeat);
+        assert_eq!((got.width, got.height), (want.width, want.height));
+        let d = diff(&want, &got, tol);
+        assert_eq!(d.over, 0, "repeat {repeat}: max {} at {:?} on {}", d.max, d.worst, g.ctx.name);
+    }
+}
+
 #[test]
 fn gpu_effects_match_cpu() {
     // Sigma 3 px and up and even radii, so the half-scale pass stays on the GPU too (#1939).
