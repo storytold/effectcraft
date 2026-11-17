@@ -214,8 +214,8 @@ mod tests {
     /// A launch that never drew switches the next one to OpenGL, which then stays (#243).
     #[test]
     fn a_launch_that_never_drew_switches_the_next_to_opengl() {
-        let dir = std::env::temp_dir().join(format!("ec-launch-guard-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _spawn_lock = crate::test_child_spawn_lock();
+        let dir = fresh_dir("never-drew");
         // A first launch that draws: nothing changes. Its first frames don't settle it (a driver
         // may still crash as the window is shown); frames for `SETTLE` do.
         let mut l = Launch::begin(Some(&dir), false);
@@ -259,8 +259,8 @@ mod tests {
     /// normal quit in that time doesn't.
     #[test]
     fn a_launch_that_stops_after_its_first_frame_switches_the_next_to_opengl() {
-        let dir = std::env::temp_dir().join(format!("ec-launch-guard-3-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _spawn_lock = crate::test_child_spawn_lock();
+        let dir = fresh_dir("first-frame");
         let mut l = Launch::begin(Some(&dir), false);
         assert!(l.frame_drawn().is_some());
         drop(l);
@@ -286,8 +286,8 @@ mod tests {
     /// open a window either goes back to Automatic instead of failing every launch.
     #[test]
     fn a_second_copy_or_failed_opengl_doesnt_strand_window_graphics() {
-        let dir = std::env::temp_dir().join(format!("ec-launch-guard-2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _spawn_lock = crate::test_child_spawn_lock();
+        let dir = fresh_dir("second-copy");
         let _first = Launch::begin(Some(&dir), false);
         assert_eq!(Launch::begin(Some(&dir), false).backends, None);
         assert_eq!(window_graphics(&dir), "auto");
@@ -303,10 +303,7 @@ mod tests {
 
     /// A fresh settings folder for one test.
     fn fresh_dir(case: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ec-launch-guard-{case}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        tempfile::Builder::new().prefix(&format!("ec-launch-guard-{case}-")).tempdir().unwrap().keep()
     }
 
     /// Window Graphics saved as OpenGL.
@@ -318,6 +315,7 @@ mod tests {
 
     #[test]
     fn a_second_copy_reports_the_saved_backend_without_owning_the_guard() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("second-source");
         save_opengl(&dir);
         let mut first = Launch::begin(Some(&dir), false);
@@ -333,6 +331,7 @@ mod tests {
     /// one's marker (#477).
     #[test]
     fn a_second_copy_quitting_leaves_the_running_launchs_marker() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("second-quits");
         let mut first = Launch::begin(Some(&dir), false);
         let mut second = Launch::begin(Some(&dir), false);
@@ -346,6 +345,7 @@ mod tests {
     /// A second copy whose OpenGL window fails doesn't remove a running launch's marker.
     #[test]
     fn failed_opengl_in_a_second_copy_leaves_the_running_launchs_marker() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("second-gl-fails");
         let mut first = Launch::begin(Some(&dir), false);
         let second = Launch::begin(Some(&dir), false);
@@ -360,6 +360,7 @@ mod tests {
     /// With `WGPU_BACKEND` set, a stale marker and a saved OpenGL choice are left as they are.
     #[test]
     fn wgpu_backend_leaves_a_stale_marker_and_saved_opengl_alone() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("env-override");
         save_opengl(&dir);
         std::fs::write(dir.join(MARKER), b"stale-marker").unwrap();
@@ -376,6 +377,7 @@ mod tests {
     /// After OpenGL fails to open a window, the next launch is back on Automatic, without a notice.
     #[test]
     fn failed_opengl_puts_the_next_launch_back_on_automatic() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("gl-recovers");
         save_opengl(&dir);
         let l = Launch::begin(Some(&dir), false);
@@ -396,6 +398,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_guard_file_stays_the_same_file_across_launches() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         use std::os::unix::fs::MetadataExt;
         let dir = fresh_dir("guard-identity");
         let mut a = Launch::begin(Some(&dir), false);
@@ -417,6 +420,7 @@ mod tests {
     /// A second copy's frames and quit neither settle nor unlock the running launch.
     #[test]
     fn a_second_copys_frames_dont_settle_the_running_launch() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("second-frames");
         let mut a = Launch::begin(Some(&dir), false);
         std::fs::write(dir.join(MARKER), b"owner-marker").unwrap();
@@ -438,6 +442,7 @@ mod tests {
     /// once it has stopped without settling the next launch still switches to OpenGL.
     #[test]
     fn a_running_older_version_holding_the_marker_is_left_alone() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("older-version");
         std::fs::write(dir.join(MARKER), b"old-owner").unwrap();
         std::fs::write(dir.join(PREFS_FILE), Prefs::default().to_json()).unwrap();
@@ -468,6 +473,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_unopenable_marker_leaves_settings_and_marker_alone() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         use std::os::windows::fs::OpenOptionsExt;
 
         let dir = fresh_dir("marker-unopenable");
@@ -491,6 +497,7 @@ mod tests {
     /// A guard file that can't be opened leaves Window Graphics and the marker as they are.
     #[test]
     fn an_unusable_guard_file_leaves_settings_and_marker_alone() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("guard-unusable");
         std::fs::create_dir(dir.join(LOCK)).unwrap();
         std::fs::write(dir.join(MARKER), b"stale-marker").unwrap();
@@ -512,6 +519,7 @@ mod tests {
     /// Window Graphics to Automatic and removes the marker.
     #[test]
     fn failed_opengl_cleanup_waits_for_the_running_launch() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let dir = fresh_dir("gl-cleanup-waits");
         save_opengl(&dir);
         let launch = Launch::begin(Some(&dir), false);

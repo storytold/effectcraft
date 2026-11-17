@@ -265,6 +265,9 @@ pub struct ViewerState {
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
+    /// A drag outside the viewer changed the frame on screen: a property scrub in Effect Controls,
+    /// or any Timeline or Properties drag ([`crate::panels::drag_preview`]). Adaptive Resolution
+    /// draws a draft until the primary button is up, which clears it.
     #[serde(skip)]
     pub property_interacting: bool,
     /// Extended Viewer: the comp-space region the viewer renders this frame (comp frame plus
@@ -594,6 +597,14 @@ impl Default for AnimToolsState {
     }
 }
 
+/// The layer a locked Effect Controls panel keeps showing (the tab's lock icon, as After Effects'
+/// panel lock): comp item id and layer id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectControlsLock {
+    pub comp: u64,
+    pub layer: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProjectStatus {
@@ -651,6 +662,17 @@ pub struct UiState {
     /// bring a locked panel forward (the tab's lock icon, as After Effects' viewer lock).
     #[serde(default)]
     pub locked_tabs: BTreeSet<String>,
+    /// Effect Controls locked to a layer (its tab's lock icon): the panel keeps showing that
+    /// layer whatever is selected while its comp is the active comp. Cleared when the layer or
+    /// its comp is deleted, and when the project is replaced (see
+    /// `panels::effect_controls::set_lock`).
+    #[serde(default)]
+    pub effect_controls_lock: Option<EffectControlsLock>,
+    /// The project the lock was made in (`ScriptUi::project_epoch`): a new or opened project
+    /// reuses comp and layer ids, so its lock is dropped (see
+    /// `panels::effect_controls::scope_lock`).
+    #[serde(skip)]
+    pub effect_controls_lock_epoch: u64,
     /// The comp each Composition viewer shows, by viewer id (0 = the Composition panel; see
     /// `panels::viewers`).
     #[serde(default)]
@@ -773,6 +795,8 @@ impl Default for UiState {
             native_outer: Vec::new(),
             maximized: None,
             locked_tabs: BTreeSet::new(),
+            effect_controls_lock: None,
+            effect_controls_lock_epoch: 0,
             viewers: Default::default(),
             active_viewer: 0,
             focused: PanelKind::Composition,

@@ -366,14 +366,6 @@ pub struct Cff {
     pub encoding: [u16; 256],
 }
 
-/// The first font name in a CFF program's Name INDEX.
-pub fn font_name(data: &[u8]) -> Option<String> {
-    let hdr = *data.get(2)? as usize;
-    let (names, _) = index(data, hdr)?;
-    let r = names.first()?.clone();
-    Some(String::from_utf8_lossy(data.get(r)?).into_owned())
-}
-
 impl Cff {
     pub fn parse(data: &[u8]) -> Option<Cff> {
         let d = data;

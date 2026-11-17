@@ -18,7 +18,6 @@ mod font;
 mod image;
 mod object;
 mod page;
-mod ps;
 mod read;
 mod shading;
 mod type1;
@@ -34,6 +33,8 @@ pub enum Error {
     NoPages,
     PageOutOfRange(usize),
     NoBoundingBox,
+    /// A VectorCraft document saved without Create PDF-Compatible File.
+    NoCarriedPdf,
     Read(String),
 }
 
@@ -45,6 +46,9 @@ impl std::fmt::Display for Error {
             Error::NoPages => write!(f, "the PDF has no pages"),
             Error::PageOutOfRange(n) => write!(f, "the PDF has no page {}", n.saturating_add(1)),
             Error::NoBoundingBox => write!(f, "the EPS file has no %%BoundingBox"),
+            Error::NoCarriedPdf => {
+                write!(f, "the VectorCraft document holds no PDF; save it in VectorCraft with Create PDF-Compatible File turned on")
+            }
             Error::Read(message) => f.write_str(message),
         }
     }
@@ -53,17 +57,24 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// File extensions read as vector footage by this crate.
-pub const EXTENSIONS: &[&str] = &["pdf", "ai", "eps", "epsf", "epsi"];
+pub const EXTENSIONS: &[&str] = &["pdf", "ai", "eps", "epsf", "epsi", "vectorcraft"];
 
 /// The format of a file, by its first bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Pdf,
     Eps,
+    /// A VectorCraft document (`.vectorcraft`), read through the PDF it carries when it was
+    /// saved with Create PDF-Compatible File: one page per artboard.
+    VectorCraft,
 }
 
-/// Sniff a PDF (`%PDF-` near the start, as PDF-compatible `.ai` files are) or an EPS file.
+/// Sniff a VectorCraft document, a PDF (`%PDF-` near the start, as PDF-compatible `.ai` files
+/// are) or an EPS file. The first 64 KiB suffice.
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
+    if craft_doc::sniff(bytes) == Some(craft_doc::Kind::VectorCraft) {
+        return Some(Format::VectorCraft);
+    }
     let head = &bytes[..bytes.len().min(1024)];
     if head.windows(5).any(|w| w == b"%PDF-") {
         return Some(Format::Pdf);
@@ -74,11 +85,12 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     None
 }
 
-/// A footage codec name for a sniffed file ("PDF", "AI", "EPS").
+/// A footage codec name for a sniffed file ("PDF", "AI", "EPS", "VectorCraft").
 pub fn codec(path: &str, bytes: &[u8]) -> Option<&'static str> {
     let f = sniff(bytes)?;
     let ai = path.to_ascii_lowercase().ends_with(".ai");
     Some(match (f, ai) {
+        (Format::VectorCraft, _) => "VectorCraft",
         (_, true) => "AI",
         (Format::Pdf, false) => "PDF",
         (Format::Eps, false) => "EPS",
@@ -112,17 +124,45 @@ pub fn parse_page_framed(bytes: &[u8], index: usize, framing: Framing) -> Result
     match sniff(bytes) {
         Some(Format::Pdf) => parse_pdf(bytes, index, framing),
         Some(Format::Eps) => parse_eps(bytes),
+        Some(Format::VectorCraft) => parse_pdf(&carried_pdf(bytes)?, index, framing),
         None => Err(Error::NotVector),
     }
 }
 
 /// Number of pages (1 for EPS).
 pub fn page_count(bytes: &[u8]) -> usize {
+    let pdf_pages = |bytes: &[u8]| object::File::parse(bytes).map(|file| page::pages(&file).len()).unwrap_or(0);
     match sniff(bytes) {
-        Some(Format::Pdf) => object::File::parse(bytes).map(|file| page::pages(&file).len()).unwrap_or(0),
+        Some(Format::Pdf) => pdf_pages(bytes),
         Some(Format::Eps) => 1,
+        Some(Format::VectorCraft) => carried_pdf(bytes).map(|pdf| pdf_pages(&pdf)).unwrap_or(0),
         None => 0,
     }
+}
+
+/// The PDF a VectorCraft document carries: [`Error::NoCarriedPdf`] when it was saved without
+/// Create PDF-Compatible File. The preview is not read, so a damaged preview does not stop the
+/// import.
+fn carried_pdf(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let pdf = craft_doc::rendition(bytes, craft_doc::RenditionKind::Pdf, &carried_limits())
+        .map_err(|e| Error::Read(format!("VectorCraft document: {e}")))?
+        .ok_or(Error::NoCarriedPdf)?;
+    if sniff(&pdf.bytes) != Some(Format::Pdf) {
+        return Err(Error::Read("VectorCraft document: its PDF member is not a PDF".into()));
+    }
+    Ok(pdf.bytes)
+}
+
+/// craft-doc's limits for [`carried_pdf`]: a PDF after the JSON (version 4) may be as large as a
+/// PDF file this crate opens (`craft_pdf::MAX_INPUT_BYTES`); one inline in the JSON as base64
+/// (version 3) stays within `max_json`, about 192 MiB of PDF. `max_total` allows `max_json` (craft-doc's default) for a
+/// compressed document's JSON, and twice `max_entry` for its data up to the PDF's end and the PDF
+/// copied out, which caps what a hostile file can make the import allocate.
+fn carried_limits() -> craft_doc::Limits {
+    let mut limits = craft_doc::Limits::default();
+    limits.max_entry = u64::try_from(craft_pdf::MAX_INPUT_BYTES).unwrap_or(u64::MAX);
+    limits.max_total = limits.max_json.saturating_add(limits.max_entry.saturating_mul(2));
+    limits
 }
 
 /// Build the document: `root` children become layer groups (see the crate docs).
@@ -188,13 +228,58 @@ fn parse_pdf(bytes: &[u8], index: usize, framing: Framing) -> Result<Doc, Error>
     Ok(finish(nodes, flags, skipped, dw.max(1.0), dh.max(1.0), to_doc))
 }
 
+fn eps_fallback_font(name: &[u8]) -> Option<&'static [u8]> {
+    use effectcraft_text::fonts::{INTER_BOLD, INTER_ITALIC, INTER_REGULAR, INTER_SEMIBOLD, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR};
+    let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+    Some(if name.contains("courier") || name.contains("mono") || name.contains("consol") {
+        JETBRAINS_MONO_REGULAR
+    } else if name.contains("times")
+        || name.contains("serif") && !name.contains("sans")
+        || name.contains("georgia")
+        || name.contains("garamond")
+        || name.contains("minion")
+        || name.contains("roman")
+    {
+        NOTO_SERIF_REGULAR
+    } else if name.contains("semibold") || name.contains("demi") {
+        INTER_SEMIBOLD
+    } else if name.contains("bold") || name.contains("black") || name.contains("heavy") {
+        INTER_BOLD
+    } else if name.contains("italic") || name.contains("oblique") {
+        INTER_ITALIC
+    } else {
+        INTER_REGULAR
+    })
+}
+
 fn parse_eps(bytes: &[u8]) -> Result<Doc, Error> {
-    let (ps, bb) = ps::eps_parts(bytes).ok_or(Error::NoBoundingBox)?;
-    let mut it = ps::Interp::new(bb);
-    it.run(ps);
-    let (nodes, flags, skipped) = it.b.finish();
-    let to_doc = Affine::new([1.0, 0.0, 0.0, -1.0, -bb[0], bb[3]]);
-    Ok(finish(nodes, flags, skipped, (bb[2] - bb[0]).max(1.0), (bb[3] - bb[1]).max(1.0), to_doc))
+    let limits = craft_ps::read::Limits {
+        // Preserve EffectCraft's established 8,000,000-unit PostScript execution budget.
+        steps: 8_000_000,
+        stack_overflow_noop: true,
+        skip_images: true,
+        keep_unpainted: true,
+        zero_division_zero: true,
+        fallback_font: Some(eps_fallback_font),
+        ..Default::default()
+    };
+    let converted = craft_ps::read::eps_to_pdf(bytes, limits).map_err(|message| match message.as_str() {
+        "not PostScript" | "the EPS has no bounding box" => Error::NoBoundingBox,
+        _ => Error::Read(message),
+    })?;
+    let mut doc = parse_pdf(&converted.pdf, 0, Framing::Placed)?;
+    for skipped in &mut doc.skipped {
+        if skipped == "content (path limit)" {
+            *skipped = "PostScript (path limit)".to_string();
+        }
+    }
+    doc.skipped.extend(converted.warnings.into_iter().map(|warning| match warning.as_str() {
+        "the program runs too long" | "out of memory" => "PostScript (operation limit)".to_string(),
+        "executable name resolution limit" => "PostScript (recursion limit)".to_string(),
+        "content (path limit)" => "PostScript (path limit)".to_string(),
+        _ => warning,
+    }));
+    Ok(doc)
 }
 
 /// The document's layer names (the root's children), bottom first.

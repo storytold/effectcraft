@@ -107,7 +107,7 @@ pub use generate3::{
     Coverage, MarksPlan, PaintPlan, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
 };
 pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
-pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
+pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, glyph_strokes, text_passes};
 pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
@@ -131,7 +131,7 @@ pub use sim2::{
     CausticsSetup, FoamDisc, FoamEnv, FoamPlan, Piece, PiecePlan, PieceTex, PixelPlan, WavePlan, Waves, caustics_setup, foam_full_plan, piece_plan, pixel_plan,
     wave_world_plan,
 };
-pub use utility::{Lut, load_lut, lut_file, lut_files, lut_params};
+pub use utility::{Lut, cineon_gamma, cineon_gamma_scale, load_lut, lut_file, lut_files, lut_params};
 pub use vr::{equi_dir as vr_equi_dir, rotation as vr_rotation};
 
 /// Effect categories in Effects & Presets order.
