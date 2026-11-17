@@ -720,7 +720,6 @@ mod tests {
     /// issue is fixed; the test fails on a row that is no longer needed.
     #[rustfmt::skip]
     const KNOWN_NARROWER: &[(&str, &str, u32)] = &[
-        ("ec.blur.gaussian", "blurriness", 3460),
         ("ec.blur.fastbox", "radius", 3461),
         ("ec.blur.channel", "redBlurriness", 3462),
         ("ec.blur.channel", "greenBlurriness", 3462),
@@ -729,7 +728,6 @@ mod tests {
         ("ec.obsolete.gaussianlegacy", "blurriness", 3463),
         ("ec.perspective.dropshadow", "softness", 3464),
         ("ec.blur.compound", "maximumBlur", 3465),
-        ("ec.blur.sharpen", "amount", 3466),
         ("ec.blur.ccradial", "amount", 3468),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
