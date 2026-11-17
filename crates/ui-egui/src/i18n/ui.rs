@@ -8579,6 +8579,14 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Import PDF / Illustrator File", "PDF / Illustrator ფაილის იმპორტი"),
     ("Import Photoshop File", "Photoshop ფაილის იმპორტი"),
     ("Interpret Unlabeled Alpha As", "უცნობი ალფას ინტერპრეტაცია"),
+    (
+        "Imported footage has an unlabeled alpha channel: choose how to interpret it in File ▸ Interpret Footage ▸ Main…",
+        "იმპორტირებულ ვიდეომასალას უცნობი ალფა-არხი აქვს: მისი ინტერპრეტაცია აირჩიეთ აქ: ფაილი ▸ ვიდეომასალის ინტერპრეტაცია ▸ ძირითადი…",
+    ),
+    (
+        "Skipped {} more file(s) while a dialog is open; import them again after it",
+        "დიალოგი ღიაა, ამიტომ კიდევ {} ფაილი გამოტოვდა; დიალოგის დახურვის შემდეგ ხელახლა გააკეთეთ მათი იმპორტი",
+    ),
     ("Join the ArtCraft Discord", "შემოგვიერთდით Discord-ზე"),
     ("GPU Acceleration ({})", "GPU აჩქარება ({})"),
     ("Software Rendering", "პროგრამული რენდერი"),
