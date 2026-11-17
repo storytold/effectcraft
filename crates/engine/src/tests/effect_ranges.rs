@@ -60,6 +60,10 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3471, "ec.distort.transform", "scaleHeight", -30000.0, 30000.0),
     (3471, "ec.distort.transform", "scaleWidth", -30000.0, 30000.0),
     (3470, "ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 0.0, 100000.0),
+    (3492, "ec.distort.ccpowerpin", "expandTop", -200.0, 1000.0),
+    (3492, "ec.distort.ccpowerpin", "expandLeft", -200.0, 1000.0),
+    (3492, "ec.distort.ccpowerpin", "expandRight", -200.0, 1000.0),
+    (3492, "ec.distort.ccpowerpin", "expandBottom", -200.0, 1000.0),
     (3486, "ec.noise.fractal", "subSettings/subScaling", 10.0, 10000.0),
     (3486, "ec.noise.turbulent", "subSettings/subScaling", 10.0, 10000.0),
 ];
