@@ -299,6 +299,8 @@ impl Layer {
         let Layer {
             id,
             name,
+            // Whether the name follows the text changes no pixels until the name changes.
+            name_follows_text: _,
             source,
             label,
             comment,
@@ -470,10 +472,29 @@ pub enum AutoOrient {
     TowardsPointOfInterest,
 }
 
+/// A stretch written as `null` (a NaN or infinite stretch: JSON holds neither, and auto-saves
+/// write it so) reads as NaN, so the project still opens and loading brings it to 100 % with a
+/// note ([`crate::limits::stretch`], #3247) instead of the whole file being refused. An infinite
+/// stretch therefore also reopens at 100 %, not at ±9900 %.
+fn stretch_or_nan<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+}
+
+/// `t × mul / div` in ticks, within [`Tick::MIN`]..=[`Tick::MAX`] (the cast saturates, NaN is 0),
+/// so a layer time of an extreme stretch can't overflow later tick arithmetic.
+fn scaled(t: Tick, mul: f64, div: f64) -> Tick {
+    Tick(((t.0 as f64 * mul / div) as i64).clamp(Tick::MIN.0, Tick::MAX.0))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: LayerId,
     pub name: String,
+    /// A text layer's name follows the first line of its Source Text until the user renames it
+    /// (After Effects). `Some(true)`: it follows, `Some(false)`: the user named it. `None` (older
+    /// projects, layers made before this was recorded): see [`Layer::name_follows_text()`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_follows_text: Option<bool>,
     pub source: LayerSource,
     pub label: Label,
     #[serde(default)]
@@ -484,6 +505,7 @@ pub struct Layer {
     pub in_point: Tick,
     pub out_point: Tick,
     /// Time stretch in percent (100 = normal, negative = reversed).
+    #[serde(deserialize_with = "stretch_or_nan")]
     pub stretch: f64,
     pub switches: Switches,
     pub blend_mode: BlendMode,
@@ -512,7 +534,26 @@ pub struct Layer {
     pub props: PropGroup,
 }
 
+/// The name a text layer takes from its text: the first 40 characters of the first line. A line
+/// ends at a line feed or at a bare carriage return (After Effects' paragraph break).
+pub fn text_layer_name(text: &str) -> String {
+    text.split(['\r', '\n']).next().unwrap_or("").chars().take(40).collect()
+}
+
+/// A text layer's default name when its text gives none: "Text", numbered "Text 2", "Text 3"…
+fn is_default_text_name(name: &str) -> bool {
+    name == "Text" || name.strip_prefix("Text ").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 impl Layer {
+    /// Whether this text layer's name follows its Source Text, whose first line gives the name
+    /// `current` (see [`text_layer_name`]). Without a recorded state (an older project), a name
+    /// that is empty, the text's own, or the default "Text"/"Text 2"… follows; any other name was
+    /// given by the user.
+    pub fn name_follows_text(&self, current: &str) -> bool {
+        self.name_follows_text.unwrap_or_else(|| self.name.is_empty() || self.name == current || is_default_text_name(&self.name))
+    }
+
     /// The layers this layer reads: its parent, track matte, layer parameters (Displacement Map,
     /// Audio Spectrum's Audio Layer…) and tracker targets.
     pub fn referenced_layers(&self) -> Vec<LayerId> {
@@ -555,15 +596,24 @@ impl Layer {
         t >= self.in_point && t < self.out_point
     }
 
+    /// The time stretch the layer plays at: [`Layer::stretch`] within
+    /// [`limits::stretch`](crate::limits::stretch) (a damaged value that got past loading, 0 or
+    /// NaN, never divides the layer's time by zero).
+    pub fn effective_stretch(&self) -> f64 {
+        crate::limits::stretch(self.stretch)
+    }
+
     /// Layer time for a comp time (stretch-aware).
     pub fn layer_time(&self, comp_t: Tick) -> Tick {
         let d = comp_t - self.start_time;
-        if (self.stretch - 100.0).abs() < 1e-9 { d } else { Tick((d.0 as f64 * 100.0 / self.stretch) as i64) }
+        let s = self.effective_stretch();
+        if (s - 100.0).abs() < 1e-9 { d } else { scaled(d, 100.0, s) }
     }
 
     /// Comp time for a layer time.
     pub fn comp_time(&self, layer_t: Tick) -> Tick {
-        if (self.stretch - 100.0).abs() < 1e-9 { self.start_time + layer_t } else { self.start_time + Tick((layer_t.0 as f64 * self.stretch / 100.0) as i64) }
+        let s = self.effective_stretch();
+        if (s - 100.0).abs() < 1e-9 { self.start_time + layer_t } else { self.start_time + scaled(layer_t, s, 100.0) }
     }
 
     pub fn transform(&self) -> Option<&PropGroup> {

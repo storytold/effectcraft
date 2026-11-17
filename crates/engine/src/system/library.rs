@@ -255,6 +255,80 @@ fn release_problem(r: &Release) -> Option<String> {
     None
 }
 
+/// An owner or repository name on GitHub: letters, digits, `.`, `-`, `_`, and not `.` or `..`.
+fn valid_repo_part(p: &str) -> bool {
+    !p.is_empty() && p != "." && p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// The rest of `s` after `prefix`, ignoring ASCII case.
+fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| s.get(prefix.len()..)).flatten()
+}
+
+/// A `.` or `..` path segment, also percent-encoded.
+fn dot_segment(p: &str) -> bool {
+    let p = p.to_ascii_lowercase().replace("%2e", ".");
+    p == "." || p == ".."
+}
+
+/// A character a release or repository URL may not contain: `?`, `#`, `\`, Unicode white space,
+/// or U+FEFF (the catalog schema's `\s` matches it too).
+fn bad_url_char(c: char) -> bool {
+    matches!(c, '?' | '#' | '\\' | '\u{feff}') || c.is_whitespace()
+}
+
+/// `(owner, name)` in lower case of a `https://github.com/<owner>/<name>` repository URL (an
+/// optional trailing `/` or `.git`) or of a folder in one, `https://github.com/<owner>/<name>/tree/<ref>/<path>`;
+/// `None` for anything else.
+fn github_repo(repo: &str) -> Option<(String, String)> {
+    let rest = strip_prefix_ignore_case(repo.trim(), "https://github.com/")?;
+    if rest.contains(bad_url_char) {
+        return None;
+    }
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (owner, name) = match parts.as_slice() {
+        [owner, name] => (*owner, name.strip_suffix(".git").unwrap_or(name)),
+        [owner, name, "tree", folder @ ..] if !folder.is_empty() && folder.iter().all(|p| !p.is_empty() && !dot_segment(p)) => (*owner, *name),
+        _ => return None,
+    };
+    (valid_repo_part(owner) && valid_repo_part(name)).then(|| (owner.to_ascii_lowercase(), name.to_ascii_lowercase()))
+}
+
+/// Why an `https://` release URL can't be used, if it can't: it must be a release asset,
+/// `https://github.com/<owner>/<name>/releases/download/<tag>/<file>`, and when the package
+/// names a `repo`, that must be a GitHub repository URL (see [`github_repo`]) of `<owner>/<name>`.
+fn release_url_problem(repo: &str, url: &str) -> Option<String> {
+    let not_asset = || Some(format!("`{url}` isn't a release asset (https://github.com/<owner>/<repo>/releases/download/<tag>/<file>)"));
+    let Some(rest) = strip_prefix_ignore_case(url, "https://github.com/") else { return not_asset() };
+    if rest.contains(bad_url_char) {
+        return not_asset();
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    // At least six segments, not exactly six: a tag may contain `/` (`release/v1`), and its assets are
+    // then at `releases/download/release/v1/<file>`. `.` and `..` (also percent-encoded) would move
+    // the download to another path.
+    if parts.len() < 6 || parts.iter().any(|p| p.is_empty() || dot_segment(p)) {
+        return not_asset();
+    }
+    let (Some(owner), Some(name), Some(releases), Some(download)) = (parts.first(), parts.get(1), parts.get(2), parts.get(3)) else { return not_asset() };
+    if !valid_repo_part(owner) || !valid_repo_part(name) || *releases != "releases" || *download != "download" {
+        return not_asset();
+    }
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    match github_repo(repo) {
+        Some((o, n)) if o == owner.to_ascii_lowercase() && n == name.to_ascii_lowercase() => None,
+        Some(_) => Some(format!("`{url}` isn't a release asset of the package's repository {repo}")),
+        None => Some(format!(
+            "the package's `repo` {repo} isn't a GitHub repository URL (https://github.com/<owner>/<repo>), so `{url}` can't be checked against it"
+        )),
+    }
+}
+
 /// Read a catalog: packages and releases that are malformed are left out (and reported), so one
 /// bad entry doesn't hide the others.
 pub fn parse_catalog(bytes: &[u8]) -> std::result::Result<(Catalog, Vec<String>), String> {
@@ -304,7 +378,8 @@ pub fn parse_catalog(bytes: &[u8]) -> std::result::Result<(Catalog, Vec<String>)
 fn runs_here(r: &Release) -> bool {
     // Without a pre-release suffix (`0.18.0-dev` is 0.18.0).
     let app = env!("CARGO_PKG_VERSION").split(['-', '+']).next().unwrap_or_default();
-    r.api == crate::effects::plugin::WASM_API_VERSION && r.min_app.as_deref().is_none_or(|m| !newer(m, app))
+    (crate::effects::plugin::MIN_WASM_API_VERSION..=crate::effects::plugin::WASM_API_VERSION).contains(&r.api)
+        && r.min_app.as_deref().is_none_or(|m| !newer(m, app))
 }
 
 /// The newest release this build can run (plug-in API and minimum app version).
@@ -324,27 +399,44 @@ enum Source {
     File(PathBuf),
 }
 
-/// `file:///C:/x` or `file:///home/x` as a path (percent-decoded; no remote hosts).
-fn file_url_path(url: &str) -> Option<PathBuf> {
-    let rest = url.strip_prefix("file://")?;
+/// `file:///C:/x` or `file:///home/x` as a path (percent-decoded; no remote hosts). A path that
+/// starts with two separators or holds a `\` (raw or percent-encoded), or a percent-encoded `/`,
+/// is refused: on Windows such a path can name a network share, and reading it contacts that host.
+fn file_url_path(url: &str) -> std::result::Result<PathBuf, String> {
+    let bad = |why: &str| format!("bad file URL `{url}`: {why}");
+    let rest = url.strip_prefix("file://").ok_or_else(|| bad("it doesn't start with file://"))?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     if !rest.starts_with('/') {
-        return None;
+        return Err(bad("only local files can be read (file:///path)"));
     }
     let b = rest.as_bytes();
     // `/C:/…` on Windows.
-    let rest = if b.len() > 2 && b.get(2) == Some(&b':') { rest.get(1..)? } else { rest };
+    let rest =
+        if b.get(1).is_some_and(u8::is_ascii_alphabetic) && b.get(2) == Some(&b':') { rest.get(1..).ok_or_else(|| bad("bad drive letter"))? } else { rest };
     let mut out = Vec::with_capacity(rest.len());
     let mut bytes = rest.bytes();
     while let Some(c) = bytes.next() {
         if c == b'%' {
-            let hex = [bytes.next()?, bytes.next()?];
-            out.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+            let hex = [bytes.next(), bytes.next()];
+            let [Some(hi), Some(lo)] = hex else { return Err(bad("a % isn't followed by two hex digits")) };
+            let byte =
+                std::str::from_utf8(&[hi, lo]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or_else(|| bad("a % isn't followed by two hex digits"))?;
+            if matches!(byte, b'/' | b'\\') {
+                return Err(bad("a percent-encoded / or \\ isn't allowed"));
+            }
+            out.push(byte);
         } else {
             out.push(c);
         }
     }
-    String::from_utf8(out).ok().map(PathBuf::from)
+    let path = String::from_utf8(out).map_err(|_| bad("the path isn't UTF-8"))?;
+    if path.contains('\\') {
+        return Err(bad("use / between folders, not \\"));
+    }
+    if path.starts_with("//") {
+        return Err(bad("network paths can't be read, only local files"));
+    }
+    Ok(PathBuf::from(path))
 }
 
 /// Check `url` against the rules: `https://` on GitHub's hosts; `file://` when the catalog
@@ -359,7 +451,7 @@ fn source(url: &str, catalog: Option<&str>) -> std::result::Result<Source, Strin
     }
     let local_catalog = catalog.is_none_or(|c| c.starts_with("file://"));
     if url.starts_with("file://") && local_catalog {
-        return file_url_path(url).map(Source::File).ok_or_else(|| format!("bad file URL `{url}`"));
+        return file_url_path(url).map(Source::File);
     }
     Err(format!("`{url}` isn't an https:// URL"))
 }
@@ -789,17 +881,22 @@ fn pick(s: &Session, c: &str, p: &Value) -> Result<(String, Package, Release)> {
         return Err(bad(
             c,
             format!(
-                "{} {} needs plug-in API {} and EffectCraft {} or later; this is EffectCraft {} with WebAssembly plug-in API {}",
+                "{} {} needs WebAssembly ABI {} and EffectCraft {} or later; this is EffectCraft {} with WebAssembly ABI {} to {}",
                 pkg.name,
                 rel.version,
                 rel.api,
                 rel.min_app.as_deref().unwrap_or("(any)"),
                 env!("CARGO_PKG_VERSION"),
+                crate::effects::plugin::MIN_WASM_API_VERSION,
                 crate::effects::plugin::WASM_API_VERSION
             ),
         ));
     }
-    source(&rel.url, Some(&url)).map_err(|e| bad(c, e))?;
+    if let Source::Https(u) = source(&rel.url, Some(&url)).map_err(|e| bad(c, e))?
+        && let Some(why) = release_url_problem(&pkg.repo, &u)
+    {
+        return Err(bad(c, format!("{}: {why}", pkg.name)));
+    }
     Ok((url, pkg, rel))
 }
 
@@ -1031,7 +1128,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Refresh Plug-in Catalog",
             [],
             None,
-            "{catalog?: https:// or file:// URL of an index.json (default: the community catalog), wait?}",
+            "{catalog?: https:// or file:// URL of an index.json (default: the community catalog; file:// takes a local path, not a network path such as //server/share), wait?}",
             always,
             refresh
         ),
@@ -1049,7 +1146,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Install Plug-in",
             [],
             None,
-            "{id, version?, wait?} — downloads the release, checks its SHA-256 against the catalog, loads it",
+            "{id, version?, wait?} — downloads the release (a GitHub release asset, in the package's repo when it names one), checks its SHA-256 against the catalog, loads it",
             always,
             install
         ),
@@ -1125,11 +1222,105 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(latest_compatible(&p).map(|r| r.version.as_str()), Some("1.2.0"));
-        assert!(runs_here(&rel("1.0.0", 1, None)), "API 1 modules still run on a build with a newer plug-in API");
-        assert!(!runs_here(&rel("1.0.0", 2, None)), "WebAssembly modules are API 1: an API 2 release can't load");
+        assert!(runs_here(&rel("1.0.0", 1, None)), "ABI 1 modules still run on a build with a newer ABI");
+        assert!(runs_here(&rel("1.0.0", 2, None)), "ABI 2 modules run on this build");
+        assert!(!runs_here(&rel("1.0.0", 3, None)), "a WebAssembly ABI this build doesn't implement can't load");
         let j = package_json(&p, None, &Status::default());
         assert_eq!(j["needsNewerApp"], true);
         assert!(latest_compatible(&Package::default()).is_none());
+    }
+
+    #[test]
+    fn release_urls_are_assets_of_the_declared_repository() {
+        let asset = "https://github.com/Me/Glow/releases/download/v1.0.0/glow.wasm";
+        for repo in ["https://github.com/me/glow", "https://github.com/Me/Glow/", "https://GitHub.com/me/glow.git", ""] {
+            assert_eq!(release_url_problem(repo, asset), None, "{repo}");
+        }
+        assert_eq!(release_url_problem("", "https://github.com/a/b/releases/download/tags/v1/x.wasm"), None, "a tag with a slash");
+        assert!(
+            release_url_problem("https://github.com/me/glow", "https://github.com/me/other/releases/download/v1/x.wasm")
+                .unwrap()
+                .contains("package's repository")
+        );
+        assert!(release_url_problem("https://github.com/me/glow", "https://github.com/you/glow/releases/download/v1/x.wasm").is_some());
+        for no in [
+            "https://raw.githubusercontent.com/me/glow/main/x.wasm",
+            "https://objects.githubusercontent.com/x.wasm",
+            "https://github.com/me/glow/blob/main/x.wasm",
+            "https://github.com/me/glow/releases/download/v1",
+            "https://github.com/me/glow/releases/download//x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x.wasm?x=1",
+            "https://github.com/me/glow/releases/download/v1/x.wasm#x",
+            "https://github.com/me/glow/releases/download/../../../you/evil/releases/download/v1/x.wasm",
+            "https://github.com/me/glow/releases/download/%2e%2e/%2E./x/y/x.wasm",
+            "https://github.com/me/glow/releases/download/./v1/x.wasm",
+            "https://github.com/me/glow/releases/download/v1\\x.wasm",
+            "https://github.com/m e/glow/releases/download/v1/x.wasm",
+            "https://github.com/me/glow/releases/download/v 1/x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x\t.wasm",
+            "https://github.com/me/glow/releases/download/v1/x.wasm\n",
+            "https://github.com/me/glow/releases/download/v1\u{a0}/x.wasm",
+            "https://github.com/me/glow/releases/download/v1/\u{85}x.wasm",
+            "https://github.com/me/glow/releases/download/v1/x\u{feff}.wasm",
+            "https://github.com/../glow/releases/download/v1/x.wasm",
+            "https://github.com.evil.com/me/glow/releases/download/v1/x.wasm",
+        ] {
+            assert!(release_url_problem("https://github.com/me/glow", no).is_some(), "{no}");
+            assert!(release_url_problem("", no).is_some(), "{no}");
+        }
+        assert_eq!(github_repo("https://github.com/Me/Glow.git"), Some(("me".into(), "glow".into())));
+        assert_eq!(github_repo("https://github.com/Me/Glow/tree/main/plugins/glow"), Some(("me".into(), "glow".into())));
+        for no in ["https://github.com/me", "https://github.com/me/glow/tree", "http://github.com/me/glow", "me/glow"] {
+            assert_eq!(github_repo(no), None, "{no}");
+        }
+    }
+
+    #[test]
+    fn a_repo_that_isnt_a_github_repository_url_refuses_every_release() {
+        let asset = "https://github.com/me/glow/releases/download/v1/glow.wasm";
+        for repo in [
+            "https://github.com/me/glow",
+            "https://github.com/me/glow/",
+            "https://github.com/me/glow.git",
+            "https://github.com/me/glow.git/",
+            " https://github.com/ME/glow ",
+            "https://github.com/me/glow/tree/main",
+            "https://github.com/me/glow/tree/main/plugins/glow/",
+            "",
+            "   ",
+        ] {
+            assert_eq!(release_url_problem(repo, asset), None, "{repo:?}");
+        }
+        let elsewhere = release_url_problem("https://github.com/me/glow/tree/main", "https://github.com/you/evil/releases/download/v1/glow.wasm");
+        assert!(elsewhere.as_deref().is_some_and(|w| w.contains("package's repository")), "{elsewhere:?}");
+        for repo in [
+            "https://github.com/me/glow/tree",
+            "https://github.com/me/glow/tree/",
+            "https://github.com/me/glow/tree//x",
+            "https://github.com/me/glow/tree/main/../../you/evil",
+            "https://github.com/me/glow/tree/main/%2e%2e",
+            "https://github.com/me/glow/blob/main/README.md",
+            "https://github.com/me/glow.git/x",
+            "https://github.com/me/glow/releases",
+            "https://github.com/me/glow//",
+            "https://github.com/me",
+            "https://github.com/me/",
+            "http://github.com/me/glow",
+            "github.com/me/glow",
+            "me/glow",
+            "https://www.github.com/me/glow",
+            "https://gitlab.com/me/glow",
+            "https://github.com/me/glow?tab=readme",
+            "https://github.com/me/glow#readme",
+            "https://github.com/me/gl ow",
+            "https://github.com/me/glow/tree/main/my plug-in",
+            "https://github.com/me/glow/tree/ma\tin",
+            "https://github.com/me/glow/tree/main/x\u{feff}",
+            "https://github.com/me/..",
+        ] {
+            let why = release_url_problem(repo, asset);
+            assert!(why.as_deref().is_some_and(|w| w.contains("isn't a GitHub repository URL")), "{repo:?}: {why:?}");
+        }
     }
 
     #[test]
@@ -1177,10 +1368,47 @@ mod tests {
         assert_eq!(source("file:///C:/p/x.wasm", None), Ok(Source::File(PathBuf::from("C:/p/x.wasm"))));
         assert!(source("file://", None).is_err());
         // Percent-decoded; no remote hosts.
-        assert_eq!(file_url_path("file:///C:/My%20Plug-ins/Jos%C3%A9%23.wasm"), Some(PathBuf::from("C:/My Plug-ins/José#.wasm")));
-        assert_eq!(file_url_path("file://localhost/home/x.wasm"), Some(PathBuf::from("/home/x.wasm")));
+        assert_eq!(file_url_path("file:///C:/My%20Plug-ins/Jos%C3%A9%23.wasm"), Ok(PathBuf::from("C:/My Plug-ins/José#.wasm")));
+        assert_eq!(file_url_path("file://localhost/home/x.wasm"), Ok(PathBuf::from("/home/x.wasm")));
         for no in ["file://server/share/x.wasm", "file:///bad%2", "file:///bad%zz"] {
-            assert_eq!(file_url_path(no), None, "{no}");
+            assert!(file_url_path(no).is_err(), "{no}");
+        }
+    }
+
+    #[test]
+    fn file_urls_cannot_name_a_network_path() {
+        for ok in [
+            ("file:///C:/p/x.wasm", "C:/p/x.wasm"),
+            ("file:///c:/p/x.wasm", "c:/p/x.wasm"),
+            ("file:///home/me/x.wasm", "/home/me/x.wasm"),
+            ("file://localhost/C:/p/x.wasm", "C:/p/x.wasm"),
+            ("file:///home/me/a%20b/x.wasm", "/home/me/a b/x.wasm"),
+            ("file:///C:/p//x.wasm", "C:/p//x.wasm"),
+        ] {
+            assert_eq!(file_url_path(ok.0), Ok(PathBuf::from(ok.1)), "{}", ok.0);
+        }
+        for no in [
+            // Two separators at the start: `//server/share/…`.
+            "file:////server/share/x.wasm",
+            "file://localhost//server/share/x.wasm",
+            "file://///server/share/x.wasm",
+            "file:////:x.wasm",
+            // Backslashes, raw or percent-encoded.
+            "file:///\\\\server\\share\\x.wasm",
+            "file:///\\server/share/x.wasm",
+            "file:///C:\\p\\x.wasm",
+            "file:///%5C%5Cserver/share/x.wasm",
+            "file:///%5c%5cserver/share/x.wasm",
+            "file:///C:/p%5Cx.wasm",
+            // Percent-encoded slashes.
+            "file:///%2F%2Fserver/share/x.wasm",
+            "file:///%2fserver/share/x.wasm",
+            "file:///C:/p%2Fx.wasm",
+        ] {
+            let e = file_url_path(no).expect_err(no);
+            assert!(e.starts_with("bad file URL"), "{no}: {e}");
+            assert!(source(no, None).is_err(), "{no}");
+            assert!(source(no, Some("file:///tmp/index.json")).is_err(), "{no}");
         }
     }
 

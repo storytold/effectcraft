@@ -1,16 +1,78 @@
-use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, selected_layer};
+use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer, shown_layer_id};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
+use crate::dock::{PanelKind, WorkspaceExt as _};
+
+/// Plain arrows in Effect Controls, as in After Effects, before their layer nudge runs: Right /
+/// Left expand / collapse the selected effects, and Down / Up select the next / previous effect
+/// in the stacking order, from the lowest / highest selected one, stopping at the last / first.
+/// Only while Effect Controls has the focus and is on screen: the front tab of its frame, drawn
+/// last frame (a maximized frame hides every other frame and every floating window), not behind
+/// Home. Only the effect headers selected on the layer the panel shows (the locked one when it is
+/// locked) count: with none the arrows still nudge.
+pub(crate) fn handle_arrow_key(app: &mut EffectcraftApp, ctx: &egui::Context, key: egui::Key) -> bool {
+    use egui::Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
+    let panel = PanelKind::EffectControls;
+    if app.ui.focused != panel
+        || app.ui.start_screen
+        || app.session.state.text_edit.is_some()
+        || !app.ui.dock.is_visible(panel)
+        || !app.dock_rects.iter().any(|(p, _)| *p == panel)
+        || !matches!(key, ArrowLeft | ArrowRight | ArrowUp | ArrowDown)
+    {
+        return false;
+    }
+    let Some(layer_id) = shown_layer_id(app) else { return false };
+    let Some(effects) = app.session.active_comp().and_then(|c| c.layer(layer_id)).and_then(|l| l.effects()) else { return false };
+    let headers: Vec<u64> = effects.groups().filter(|g| matches!(&g.kind, GroupKind::Effect { .. })).map(|g| g.uid).collect();
+    let selected = &app.session.state.selected_props;
+    let picked: Vec<usize> = headers.iter().enumerate().filter(|(_, u)| selected.contains(&(layer_id, **u))).map(|(i, _)| i).collect();
+    let (Some(&top), Some(&bottom)) = (picked.first(), picked.last()) else { return false };
+    match key {
+        ArrowUp | ArrowDown => {
+            // Clamped at the ends, where the key still doesn't nudge the layer.
+            let to = if key == ArrowUp { top.saturating_sub(1) } else { bottom.saturating_add(1).min(headers.len().saturating_sub(1)) };
+            if let Some(&uid) = headers.get(to) {
+                // A selection, as a click on the header makes it: no undo step.
+                app.session.state.selected_props = vec![(layer_id, uid)];
+                reveal_effect(ctx, uid);
+            }
+        }
+        _ => {
+            for uid in picked.iter().filter_map(|i| headers.get(*i)) {
+                if key == ArrowLeft {
+                    app.ui.fx_closed.insert(*uid);
+                } else {
+                    app.ui.fx_closed.remove(uid);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The effect header the next Effect Controls pass scrolls into view.
+fn reveal_id() -> egui::Id {
+    egui::Id::unique("ec-reveal")
+}
+
+/// Scroll Effect Controls so effect `uid`'s header is in view, once it has been laid out.
+fn reveal_effect(ctx: &egui::Context, uid: u64) {
+    ctx.data_mut(|d| d.insert_temp(reveal_id(), uid));
+    ctx.request_repaint();
+}
 
 // ---------------------------------------------------------------------------------------------
 
-/// Open the rename field on effect `uid` (Enter with the effect selected), name selected.
+/// Open the rename field on effect `uid` (Enter with the effect selected). It takes the keyboard,
+/// its whole name selected, the pass it is first drawn.
 pub fn start_rename(ctx: &egui::Context, uid: u64, name: &str) {
     let id = egui::Id::unique(("ec-rename", uid));
-    ctx.data_mut(|d| d.insert_temp(id, name.to_string()));
-    ctx.data_mut(|d| d.insert_temp(id.with("select"), true));
-    ctx.memory_mut(|m| m.request_focus(id.with("field")));
+    ctx.data_mut(|d| {
+        d.insert_temp(id, name.to_string());
+        d.insert_temp(id.with("start"), true);
+    });
 }
 
 /// Where an effect header's parts sit, for its rename field.
@@ -29,16 +91,22 @@ fn rename_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, h: &EffectHdr, mut 
     let EffectHdr { g, shown, r, tw, reset, rename_id, layer_id } = *h;
     let ctx = ui.ctx().clone();
     let name_rect = Rect::from_min_max(pos2(tw.max.x + 6.0, r.min.y + 2.0), pos2(reset.min.x - 6.0, r.max.y - 2.0));
-    let response = ui.put(name_rect, egui::TextEdit::singleline(&mut value).id(rename_id.with("field")).font(Tokens::semibold(12.0)));
-    // Focus the field the frame it first exists: focusing an id not yet on screen leaves
-    // the accessibility tree with a focus it doesn't contain.
-    if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("start"))).is_some() {
-        crate::widgets::select_all(&ctx, response.id, &value);
-        response.request_focus();
+    // The field opens with the name the header draws (in the interface language), however it
+    // was opened, so committing it untouched is not a rename.
+    let opening = ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("start"))).is_some();
+    if opening {
+        value = shown.to_string();
     }
+    let response = ui.put(name_rect, egui::TextEdit::singleline(&mut value).id(rename_id.with("field")).font(Tokens::semibold(12.0)));
     app.auto.add(&format!("effectControls.effect.{}.nameEdit", g.uid), name_rect, "Effect name");
-    if ctx.data_mut(|d| d.remove_temp::<bool>(rename_id.with("select"))).unwrap_or(false) {
+    // Focus the field the frame it first exists, its whole name selected so typing replaces it:
+    // focusing an id not yet on screen leaves the accessibility tree with a focus it doesn't
+    // contain. The Enter that opened it (it is drawn in that pass) doesn't also commit it.
+    if opening {
         widgets::select_all(&ctx, response.id, &value);
+        response.request_focus();
+        ctx.data_mut(|d| d.insert_temp(rename_id, value));
+        return;
     }
     // Escape cancels. egui drops the field's focus on Escape in the same frame, so the
     // key is checked on the focus being lost as well as held.
@@ -158,7 +226,8 @@ fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter,
     }
 }
 
-/// The Effect Controls panel for the selected layer: a header with the comp and layer names, then
+/// The Effect Controls panel for the selected layer (or the layer the panel is locked to, see
+/// `common::shown_layer_id`): a header with the comp and layer names, then
 /// one header per effect (Fx toggle, twirl, rename, Reset, About, label bar, reorder drag and its
 /// right-click menu) followed by that effect's custom editor and its property rows. Dragging
 /// effects or presets onto the panel applies them; a right-click on empty space opens the Effect
@@ -168,7 +237,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
-    let Some(layer) = selected_layer(app) else {
+    // A locked layer that was deleted unlocks the panel, which then follows the selection.
+    prune_lock(app);
+    let Some(layer) = shown_layer(app) else {
         p.text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr("Select a layer to see its effects"), Tokens::ui(12.0), t.text_faint);
         return;
     };
@@ -186,6 +257,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let hdr = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
     p.text(pos2(hdr.min.x + 10.0, hdr.center().y), Align2::LEFT_CENTER, format!("{} • {}", comp_name, layer.name), Tokens::ui(11.5), t.text_dim);
@@ -389,7 +461,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         actions.extend(crate::menus::menu_contents(app, ui, "Effect"));
     });
     let content_h = y + scroll.offset - body.min.y;
+    let offset = scroll.offset;
     scroll.end(ui, &mut app.auto, "effectControls.scroll", content_h, &t);
+    // Up / Down picked an effect: bring its header into view from the next pass (after `end`,
+    // which stores this pass's offset).
+    if let Some(uid) = ctx.data_mut(|d| d.remove_temp::<u64>(reveal_id()))
+        && let Some(&(_, top)) = tops.iter().find(|(u, _)| *u == uid)
+    {
+        // (With the 4-point gap above it: the panel starts with one and every effect ends with one.)
+        let top = top - body.min.y + offset;
+        widgets::PanelScroll::reveal(&ctx, egui::Id::unique("ec-scroll"), top - 4.0, top + ROW + 2.0, body.height());
+        ctx.request_repaint();
+    }
     drop_payload(ui, rect, &p, &t, layer.id.0, &mut actions);
     if ui.input(|i| i.pointer.primary_down()) && actions.iter().any(|(id, _)| id == "prop.set") {
         app.ui.viewer.property_interacting = true;

@@ -1,16 +1,7 @@
 //! Standard base64 (RFC 4648 §4, padded): MCP image content and the control channel's inline PNGs.
 
-const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 pub fn encode(data: &[u8]) -> String {
-    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            s.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    s
+    craft_mime::base64::STANDARD.encode(data)
 }
 
 /// Decode, ignoring ASCII whitespace; `None` on any other invalid input.
@@ -48,6 +39,18 @@ pub fn decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_encoder_round_trips_every_byte_and_remainder() {
+        let all: Vec<u8> = (0..=255).cycle().take(513).collect();
+        for length in 0..=all.len() {
+            let input = &all[..length];
+            let encoded = super::encode(input);
+            assert_eq!(encoded.len(), length.div_ceil(3) * 4);
+            assert_eq!(super::decode(&encoded).as_deref(), Some(input));
+            assert_eq!(encoded.bytes().rev().take_while(|b| *b == b'=').count(), (3 - length % 3) % 3);
+        }
+    }
+
     #[test]
     fn rfc4648_vectors() {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {

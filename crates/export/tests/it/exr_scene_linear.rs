@@ -202,6 +202,12 @@ fn bits_hash(v: &[f32]) -> u64 {
     fnv(&v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect::<Vec<u8>>())
 }
 
+/// [`bits_hash`] of the samples rounded to 15 mantissa bits. 32 bpc samples go through `powf`, and
+/// the last bits of its result differ between platforms' math libraries (macOS on Apple silicon).
+fn near_hash(v: &[f32]) -> u64 {
+    bits_hash(&v.iter().map(|x| f32::from_bits(x.to_bits().wrapping_add(0x80) & !0xff)).collect::<Vec<f32>>())
+}
+
 /// Clip-mode EXR samples with an sRGB output, for each colour setup × bit depth × channels.
 fn exr_clip_hashes(build: Build, channels: &[Channels]) -> Vec<u64> {
     let mut out = vec![];
@@ -210,7 +216,7 @@ fn exr_clip_hashes(build: Build, channels: &[Channels]) -> Vec<u64> {
             let (p, cid) = build(depth, HdrMode::Clip, ws, linearize, None);
             for &ch in channels {
                 let d = out_dir(&format!("clip-{ws:?}-{linearize}-{depth:?}-{ch:?}"));
-                out.push(bits_hash(&exr_samples(&render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr"))));
+                out.push(near_hash(&exr_samples(&render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr"))));
                 let _ = std::fs::remove_dir_all(&d);
             }
         }
@@ -220,41 +226,41 @@ fn exr_clip_hashes(build: Build, channels: &[Channels]) -> Vec<u64> {
 
 /// [`exr_clip_hashes`] before: Clip-mode EXRs with an sRGB output keep every sample.
 const EXR_CLIP_GOLDEN: [u64; 36] = [
-    0x9f54fea3d3abcb25,
-    0x9f54fea3d3abcb25,
+    0x008b8f887b9f6d25,
+    0x008b8f887b9f6d25,
     0x7d40ad9df8600325,
-    0x379f5ef9e35ce325,
-    0x379f5ef9e35ce325,
+    0x5d55eb1dddaa5f25,
+    0x5d55eb1dddaa5f25,
     0x7d40ad9df8600325,
-    0xb60de6a90263b525,
-    0xb60de6a90263b525,
+    0x41734aa4aa58c525,
+    0x41734aa4aa58c525,
     0x7d40ad9df8600325,
-    0x9f54fea3d3abcb25,
-    0x9f54fea3d3abcb25,
+    0x008b8f887b9f6d25,
+    0x008b8f887b9f6d25,
     0x7d40ad9df8600325,
-    0x379f5ef9e35ce325,
-    0x379f5ef9e35ce325,
+    0x5d55eb1dddaa5f25,
+    0x5d55eb1dddaa5f25,
     0x7d40ad9df8600325,
-    0xb60de6a90263b525,
-    0xb60de6a90263b525,
+    0x41734aa4aa58c525,
+    0x41734aa4aa58c525,
     0x7d40ad9df8600325,
-    0x27858400549ac325,
-    0x27858400549ac325,
+    0x6f6623e2a3f91d25,
+    0x6f6623e2a3f91d25,
     0x7d40ad9df8600325,
-    0x379f5ef9e35ce325,
-    0x379f5ef9e35ce325,
+    0x5d55eb1dddaa5f25,
+    0x5d55eb1dddaa5f25,
     0x7d40ad9df8600325,
-    0xb60de6a90263b525,
-    0xb60de6a90263b525,
+    0x41734aa4aa58c525,
+    0x41734aa4aa58c525,
     0x7d40ad9df8600325,
-    0x31d03697119d9325,
-    0x31d03697119d9325,
+    0x283ae54f8c799325,
+    0x283ae54f8c799325,
     0x7d40ad9df8600325,
-    0xff61dc513c834b25,
-    0xff61dc513c834b25,
+    0xa33e57ad0ed75f25,
+    0xa33e57ad0ed75f25,
     0x7d40ad9df8600325,
-    0x0c57d24a44f45925,
-    0x0c57d24a44f45925,
+    0xb394d882f55d9d25,
+    0xb394d882f55d9d25,
     0x7d40ad9df8600325,
 ];
 
@@ -267,30 +273,30 @@ fn exr_clip_with_srgb_output_is_unchanged() {
 
 /// [`exr_clip_hashes`] of [`half_project`] before (RGBA premultiplied, RGB over the background).
 const HALF_EXR_CLIP_GOLDEN: [u64; 24] = [
-    0xe7f7d517df7baf25,
-    0xc9d6dcb2671f9925,
-    0x2fe5733c26d16325,
-    0x8b267197d2645925,
-    0x6fe736332cb80f25,
-    0x30d5f66395d92d25,
-    0xe7f7d517df7baf25,
-    0xc9d6dcb2671f9925,
-    0x2fe5733c26d16325,
-    0x8b267197d2645925,
-    0x6fe736332cb80f25,
-    0x30d5f66395d92d25,
-    0x8c261c1cd9674b25,
-    0xace550c3a8e72925,
-    0xb9bd0b7863b78325,
-    0xdf8e948c5e8af125,
-    0x6fe736332cb80f25,
-    0x30d5f66395d92d25,
-    0xe4aedfefacc80725,
-    0x95ddfccddc885525,
-    0x81fa3c39c1d09725,
-    0x49cc0014f05a1d25,
-    0x4ed1b417cc847725,
-    0x2df6df5ce394d925,
+    0xff7aaead9ab01325,
+    0x3acad0d73898c925,
+    0x43f9a05a72195325,
+    0x3ecc7469546f8125,
+    0x53f3d9bb0c539325,
+    0xc39f1146174d9525,
+    0xff7aaead9ab01325,
+    0x3acad0d73898c925,
+    0x43f9a05a72195325,
+    0x3ecc7469546f8125,
+    0x53f3d9bb0c539325,
+    0xc39f1146174d9525,
+    0x2f1672447511f325,
+    0x24cd9261bb6a2125,
+    0x7860797209347f25,
+    0xfb0c8f2dcb2e5125,
+    0x53f3d9bb0c539325,
+    0xc39f1146174d9525,
+    0xad649b2be4ec3f25,
+    0x604f764e18b99925,
+    0x65d354406ce81b25,
+    0x4d30fabdbcdbe125,
+    0xf125e2282bdd9725,
+    0x00276de880e5e125,
 ];
 
 /// An Alpha-only EXR holds the alpha (coverage) as it is in every output space: no transfer
@@ -416,4 +422,59 @@ fn exr_decodes_with_the_output_curve() {
     // Working Gamma 2.2 keeps the sRGB curve.
     let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, None, false, None);
     assert_near(exr_centre(&p, cid, "curve-gamma22"), band.map(effectcraft_color::srgb_to_linear), "Working Gamma 2.2");
+}
+
+/// The `chromaticities` attribute of an EXR file: red, green, blue, white (CIE xy), or `None`.
+fn chromaticities(path: &Path) -> Option<[[f32; 2]; 4]> {
+    let bytes = std::fs::read(path).expect("read");
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).expect("exr header");
+    meta.headers[0].shared_attributes.chromaticities.map(|c| [c.red, c.green, c.blue, c.white].map(|v| [v.0, v.1]))
+}
+
+/// The primaries (red, green, blue, white) the standards publish for each output space, typed in
+/// here rather than read from the colour crate: Rec. 709 / sRGB, Rec. 2020 (also Rec. 2100 PQ and
+/// HLG), Display P3 (D65), ACEScg (AP1) and ACES2065-1 (AP0) with the ACES white.
+const D65: [f32; 2] = [0.3127, 0.3290];
+const ACES_WHITE: [f32; 2] = [0.32168, 0.33767];
+const REC709: [[f32; 2]; 4] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], D65];
+const REC2020: [[f32; 2]; 4] = [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], D65];
+const P3: [[f32; 2]; 4] = [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060], D65];
+const AP1: [[f32; 2]; 4] = [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044], ACES_WHITE];
+const AP0: [[f32; 2]; 4] = [[0.7347, 0.2653], [0.0, 1.0], [0.0001, -0.0770], ACES_WHITE];
+
+/// A sequence frame names the output space's primaries and white, for every space a project knows.
+#[test]
+fn exr_writes_the_output_spaces_chromaticities() {
+    let table = [
+        (ColorSpace::Srgb, REC709),
+        (ColorSpace::Rec709, REC709),
+        (ColorSpace::Rec2020, REC2020),
+        (ColorSpace::DisplayP3, P3),
+        (ColorSpace::AcesCg, AP1),
+        (ColorSpace::Aces2065, AP0),
+        (ColorSpace::Rec2100Pq, REC2020),
+        (ColorSpace::Rec2100Hlg, REC2020),
+    ];
+    assert!(ColorSpace::ALL.iter().all(|c| table.iter().filter(|(t, _)| t == c).count() == 1), "every space once");
+    for (out, want) in table {
+        for ch in [Channels::Rgba, Channels::Rgb] {
+            let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, Some(ColorSpace::Srgb), true, Some(out));
+            let d = out_dir(&format!("chroma-{out:?}-{ch:?}"));
+            let f = render(&p, cid, OutputFormat::ExrSequence, ch, &d, "exr");
+            assert_eq!(chromaticities(&f), Some(want), "{out:?} {ch:?}");
+        }
+    }
+}
+
+/// The default project (no output space chosen, managed or not) writes the standard Rec. 709 /
+/// sRGB chromaticities; an unmanaged project ignores the output space (its frame is decoded with
+/// the Working Gamma's curve, Rec. 709 primaries).
+#[test]
+fn exr_default_is_rec709_chromaticities() {
+    for (name, ws, out) in [("default", None, None), ("managed", Some(ColorSpace::Srgb), None), ("unmanaged-p3", None, Some(ColorSpace::DisplayP3))] {
+        let (p, cid) = project(BitDepth::Bpc32, HdrMode::Clip, ws, false, out);
+        let d = out_dir(&format!("chroma-{name}"));
+        let f = render(&p, cid, OutputFormat::ExrSequence, Channels::Rgba, &d, "exr");
+        assert_eq!(chromaticities(&f), Some(REC709), "{name}");
+    }
 }

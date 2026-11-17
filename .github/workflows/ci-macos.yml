@@ -1,0 +1,28 @@
+name: CI (macOS)
+
+# The macOS leg of the gate: `cargo xtask ci` on Apple silicon, through the suite's shared gate
+# workflow. The Linux gate (ci.yml) has no real GPU and runs on x86, so GPU tests on Metal and
+# results that depend on the platform's math library first ran on a contributor's Mac.
+#
+# On pushes to main, not on every pull request: macOS runners are scarce. A newer push cancels the
+# older run, so main is checked at its latest commit. Pull requests that change this file run it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: [.github/workflows/ci-macos.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      os: '["macos-15"]'
+      timeout-minutes: 120

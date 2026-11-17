@@ -1,276 +1,15 @@
-//! SVG path data (SVG 1.1 §8.3 / SVG 2 §9.3): every command, implicit repeats, relative
-//! coordinates, smooth curves and elliptical arcs (converted to cubics through kurbo's `SvgArc`).
-//! Parsing stops at the first error, keeping what was read (as the specification asks).
+//! Prefix-preserving SVG path and numeric-list parsing is shared with craft-svg.
+//! App document budgets and geometry policy remain with the importer.
 
-use kurbo::{BezPath, Point, SvgArc, Vec2};
-
-/// Tokenizer over numbers and command letters.
-struct Lex<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl Lex<'_> {
-    fn skip_sep(&mut self) {
-        while self.i < self.b.len() && (self.b[self.i].is_ascii_whitespace() || self.b[self.i] == b',') {
-            self.i += 1;
-        }
-    }
-    fn command(&mut self) -> Option<u8> {
-        self.skip_sep();
-        let c = *self.b.get(self.i)?;
-        if c.is_ascii_alphabetic() && c != b'e' && c != b'E' {
-            self.i += 1;
-            Some(c)
-        } else {
-            None
-        }
-    }
-    fn at_number(&mut self) -> bool {
-        self.skip_sep();
-        self.b.get(self.i).is_some_and(|c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.'))
-    }
-    fn number(&mut self) -> Option<f64> {
-        self.skip_sep();
-        let start = self.i;
-        let b = self.b;
-        let mut i = self.i;
-        if i < b.len() && matches!(b[i], b'-' | b'+') {
-            i += 1;
-        }
-        let mut digits = false;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-            digits = true;
-        }
-        if i < b.len() && b[i] == b'.' {
-            i += 1;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
-                digits = true;
-            }
-        }
-        if !digits {
-            return None;
-        }
-        if i < b.len() && matches!(b[i], b'e' | b'E') {
-            let mut j = i + 1;
-            if j < b.len() && matches!(b[j], b'-' | b'+') {
-                j += 1;
-            }
-            if j < b.len() && b[j].is_ascii_digit() {
-                while j < b.len() && b[j].is_ascii_digit() {
-                    j += 1;
-                }
-                i = j;
-            }
-        }
-        self.i = i;
-        std::str::from_utf8(&b[start..i]).ok()?.parse().ok()
-    }
-    /// Arc flags may be written without separators ("a1 1 0 00 1 1").
-    fn flag(&mut self) -> Option<bool> {
-        self.skip_sep();
-        let c = *self.b.get(self.i)?;
-        self.i += 1;
-        match c {
-            b'0' => Some(false),
-            b'1' => Some(true),
-            _ => None,
-        }
-    }
-}
-
-/// All numbers in a list (`points`, `viewBox`, transform arguments).
-pub fn numbers(s: &str) -> Vec<f64> {
-    let mut l = Lex { b: s.as_bytes(), i: 0 };
-    let mut v = vec![];
-    while l.at_number() {
-        match l.number() {
-            Some(x) => v.push(x),
-            None => break,
-        }
-    }
-    v
-}
-
-/// Parse path data into a kurbo path.
-pub fn parse_path_data(d: &str) -> BezPath {
-    let mut l = Lex { b: d.as_bytes(), i: 0 };
-    let mut p = BezPath::new();
-    let mut cur = Point::ZERO;
-    let mut start = Point::ZERO;
-    // Last control point of the previous C/S (cubic) or Q/T (quad) command.
-    let mut last_cubic: Option<Point> = None;
-    let mut last_quad: Option<Point> = None;
-    let mut cmd: Option<u8> = None;
-    let mut open = false;
-    loop {
-        let c = match l.command() {
-            Some(c) => c,
-            None => match cmd {
-                // Implicit repeat (a moveto repeats as lineto). Z takes no numbers, so a number
-                // after it is an error: repeating Z would loop forever without consuming input.
-                Some(c) if l.at_number() && !c.eq_ignore_ascii_case(&b'z') => match c {
-                    b'M' => b'L',
-                    b'm' => b'l',
-                    other => other,
-                },
-                _ => break,
-            },
-        };
-        let rel = c.is_ascii_lowercase();
-        let base = if rel { cur.to_vec2() } else { Vec2::ZERO };
-        let pt = |l: &mut Lex| -> Option<Point> { Some(Point::new(l.number()?, l.number()?) + base) };
-        let ok = (|| -> Option<()> {
-            match c.to_ascii_uppercase() {
-                b'M' => {
-                    cur = pt(&mut l)?;
-                    p.move_to(cur);
-                    start = cur;
-                    open = true;
-                    last_cubic = None;
-                    last_quad = None;
-                }
-                b'Z' => {
-                    if open {
-                        p.close_path();
-                    }
-                    cur = start;
-                    last_cubic = None;
-                    last_quad = None;
-                }
-                _ if !open => {
-                    // A segment without a preceding moveto starts at the current point.
-                    p.move_to(cur);
-                    open = true;
-                    return segment(&mut l, c, base, &mut p, &mut cur, &mut last_cubic, &mut last_quad);
-                }
-                _ => return segment(&mut l, c, base, &mut p, &mut cur, &mut last_cubic, &mut last_quad),
-            }
-            Some(())
-        })();
-        if ok.is_none() {
-            break;
-        }
-        cmd = Some(c);
-        if c.eq_ignore_ascii_case(&b'z') {
-            // After Z a new segment starts from the subpath start (an unused move is dropped
-            // below).
-            p.move_to(start);
-            open = true;
-        }
-    }
-    strip_trailing_moves(p)
-}
-
-fn segment(l: &mut Lex, c: u8, base: Vec2, p: &mut BezPath, cur: &mut Point, last_cubic: &mut Option<Point>, last_quad: &mut Option<Point>) -> Option<()> {
-    let num = |l: &mut Lex| l.number();
-    let pt = |l: &mut Lex| -> Option<Point> { Some(Point::new(l.number()?, l.number()?) + base) };
-    match c.to_ascii_uppercase() {
-        b'L' => {
-            *cur = pt(l)?;
-            p.line_to(*cur);
-            *last_cubic = None;
-            *last_quad = None;
-        }
-        b'H' => {
-            let x = num(l)? + base.x;
-            *cur = Point::new(x, cur.y);
-            p.line_to(*cur);
-            *last_cubic = None;
-            *last_quad = None;
-        }
-        b'V' => {
-            let y = num(l)? + base.y;
-            *cur = Point::new(cur.x, y);
-            p.line_to(*cur);
-            *last_cubic = None;
-            *last_quad = None;
-        }
-        b'C' => {
-            let (c1, c2, e) = (pt(l)?, pt(l)?, pt(l)?);
-            p.curve_to(c1, c2, e);
-            *last_cubic = Some(c2);
-            *last_quad = None;
-            *cur = e;
-        }
-        b'S' => {
-            let c1 = last_cubic.map_or(*cur, |c| *cur + (*cur - c));
-            let (c2, e) = (pt(l)?, pt(l)?);
-            p.curve_to(c1, c2, e);
-            *last_cubic = Some(c2);
-            *last_quad = None;
-            *cur = e;
-        }
-        b'Q' => {
-            let (q, e) = (pt(l)?, pt(l)?);
-            p.quad_to(q, e);
-            *last_quad = Some(q);
-            *last_cubic = None;
-            *cur = e;
-        }
-        b'T' => {
-            let q = last_quad.map_or(*cur, |c| *cur + (*cur - c));
-            let e = pt(l)?;
-            p.quad_to(q, e);
-            *last_quad = Some(q);
-            *last_cubic = None;
-            *cur = e;
-        }
-        b'A' => {
-            let rx = num(l)?.abs();
-            let ry = num(l)?.abs();
-            let rot = num(l)?;
-            let large = l.flag()?;
-            let sweep = l.flag()?;
-            let e = pt(l)?;
-            let arc = SvgArc { from: *cur, to: e, radii: Vec2::new(rx, ry), x_rotation: rot.to_radians(), large_arc: large, sweep };
-            let mut last_end = None;
-            if let Some(a) = kurbo::Arc::from_svg_arc(&arc) {
-                // Scale tolerance with the radius so the segment count stays bounded.
-                let tol = 0.1_f64.max(a.radii.x.max(a.radii.y) * 1e-4);
-                a.to_cubic_beziers(tol, |c1, c2, end| {
-                    p.curve_to(c1, c2, end);
-                    last_end = Some(end);
-                });
-            }
-            // Degenerate arcs (e.g. huge radii) may emit nothing or stop short of the end point.
-            if last_end.is_none_or(|q| (q - e).hypot() > 1e-3 * (1.0 + e.to_vec2().hypot())) {
-                p.line_to(e);
-            }
-            *cur = e;
-            *last_cubic = None;
-            *last_quad = None;
-        }
-        _ => return None,
-    }
-    Some(())
-}
-
-/// Drop move-tos that start no segment (from closepath bookkeeping).
-fn strip_trailing_moves(p: BezPath) -> BezPath {
-    use kurbo::PathEl;
-    let els = p.elements();
-    let mut out = BezPath::new();
-    for (i, e) in els.iter().enumerate() {
-        if let PathEl::MoveTo(_) = e {
-            let next_is_seg = els.get(i + 1).is_some_and(|n| !matches!(n, PathEl::MoveTo(_)));
-            if !next_is_seg {
-                continue;
-            }
-        }
-        out.push(*e);
-    }
-    out
-}
+pub use craft_svg::prefix_path::{MAX_PATH_ELEMENTS, numbers_bounded, parse_path_data, parse_path_data_bounded};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kurbo::PathEl;
+    use kurbo::{PathEl, Point};
 
     #[test]
+    /// Huge arc radii stay bounded.
     fn huge_arc_radius_stays_bounded() {
         let p = parse_path_data("M0 0A1e36 1e36 0 1 1 1e30 0");
         assert!(p.elements().len() < 1000, "got {} elements", p.elements().len());
@@ -310,6 +49,7 @@ mod tests {
     }
 
     #[test]
+    /// Huge-radius arcs still reach their end point.
     fn huge_radius_arc_still_reaches_end_point() {
         for d in ["M0 0 A1e20 1e20 0 0 1 10 0 L10 10", "M0 0 A1e20 1e20 0 1 1 10 0 L10 10", "M0 0 a1e20 1e20 0 0 1 10 0 L10 10"] {
             let p = parse_path_data(d);
@@ -323,8 +63,25 @@ mod tests {
 
     #[test]
     fn number_lists() {
-        assert_eq!(numbers("0 0,100 50"), vec![0.0, 0.0, 100.0, 50.0]);
-        assert_eq!(numbers("-1-2.5.5"), vec![-1.0, -2.5, 0.5]);
-        assert_eq!(numbers("1e2,2E-1"), vec![100.0, 0.2]);
+        assert_eq!(numbers_bounded("0 0,100 50", 8).0, vec![0.0, 0.0, 100.0, 50.0]);
+        assert_eq!(numbers_bounded("-1-2.5.5", 8).0, vec![-1.0, -2.5, 0.5]);
+        assert_eq!(numbers_bounded("1e2,2E-1", 8).0, vec![100.0, 0.2]);
+    }
+
+    #[test]
+    /// The element cap stops expansion and reports truncation.
+    fn path_element_limit_stops_expansion_and_reports_truncation() {
+        let data = format!("M0 0{}", "h1".repeat(MAX_PATH_ELEMENTS + 1));
+        let (path, exceeded) = parse_path_data_bounded(&data, 32);
+        assert!(exceeded);
+        assert!(path.elements().len() <= 32);
+    }
+
+    #[test]
+    /// The number list cap stops retaining values.
+    fn number_list_limit_stops_retaining_values() {
+        let (values, exceeded) = numbers_bounded("1 2 3 4", 3);
+        assert_eq!(values, [1.0, 2.0, 3.0]);
+        assert!(exceeded);
     }
 }

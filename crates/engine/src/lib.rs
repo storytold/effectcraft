@@ -21,6 +21,7 @@ pub mod menus;
 mod output_guard;
 pub mod preview;
 pub mod render_queue;
+pub mod replay;
 pub mod scriptui;
 mod settings;
 mod system;
@@ -60,6 +61,7 @@ pub use effectcraft_track as track;
 pub use footage::doc_path;
 pub use footage::footage_check;
 pub use footage::footage_reload;
+pub use footage::lut_reload;
 pub use footage::media_browser;
 pub use footage::media_cache;
 pub use footage::sequence;
@@ -165,12 +167,22 @@ pub struct Session {
     pub journal: Vec<(String, Value)>,
     /// Processed-layer pixels reused across frames and edits (content-keyed, never stale).
     pub layer_cache: Arc<LayerCache>,
+    /// Set when this project closes ([`Session::replace_project`]), then replaced by a fresh flag
+    /// for the next one: work started for the project off the UI thread (Project panel
+    /// thumbnails) stops reading its footage and lets go of what it read, so it can't fill the
+    /// shared caches with a closed project's frames. Public only so that other crates can build a
+    /// `Session { .. }`.
+    #[doc(hidden)]
+    pub project_closed: Arc<std::sync::atomic::AtomicBool>,
     /// The last Cryptomatte pick probe (see [`Session::crypto_probe_job`]). Public only so that
     /// other crates can build a `Session { .. }`; its type is crate-private.
     #[doc(hidden)]
     pub crypto_probe: Arc<std::sync::Mutex<commands::CryptoProbeSlot>>,
     /// The persistent disk cache (Settings ▸ Media & Disk Cache), when enabled.
     pub disk_cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>,
+    /// Files File ▸ Reload Footage reloaded while the disk cache was off: their entries are
+    /// dropped when it is switched on ([`Session::configure_disk_cache`]), before it is used.
+    pub pending_disk_drops: std::collections::BTreeSet<String>,
     /// Settings (Preferences).
     pub prefs: prefs::Prefs,
     /// Bumped whenever settings change (frontends re-apply theme, labels…).
@@ -244,7 +256,8 @@ pub struct Session {
     pub next_task_id: u64,
     /// The running Learn tutorial (Home ▸ Learn), see [`learn`].
     pub learn: Option<learn::Progress>,
-    /// Check footage in the background after File ▸ Open ([`footage_check`]): frontends with an
+    /// Track footage availability automatically, after File ▸ Open ([`footage_check`]) and in
+    /// the desktop disk watcher. Frontends with an
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
@@ -253,8 +266,6 @@ pub struct Session {
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
-    /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
-    pub disk_salt: Option<(u64, u64)>,
     /// The footage files effects read the channels of, as last given to the footage source
     /// ([`Session::refresh_aux_footage`]); `None` = not given yet.
     pub aux_footage: Option<Vec<String>>,
@@ -347,8 +358,10 @@ impl Default for Session {
             events: vec![],
             journal: vec![],
             layer_cache: Arc::new(LayerCache::default()),
+            project_closed: Default::default(),
             crypto_probe: Default::default(),
             disk_cache: None,
+            pending_disk_drops: Default::default(),
             prefs: prefs::Prefs::default(),
             prefs_revision: 0,
             config: None,
@@ -384,7 +397,6 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
-            disk_salt: None,
             aux_footage: None,
             script_calls: ScriptCalls::default(),
         }

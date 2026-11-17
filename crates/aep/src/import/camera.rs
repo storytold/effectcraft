@@ -83,8 +83,8 @@ fn import_group(group: &AepGroup<'_, '_>, table: &[(&str, &str, Kind)], what: &s
         if !is_stored(&node) {
             continue;
         }
-        // Blur Level at 100 (the default) is neutral: stored explicitly, After Effects reads it
-        // back as 100 % (read-back o1); other values are not sampled.
+        // Blur Level at 100 (the default) is neutral: the exporter writes it explicitly and After
+        // Effects reads it back as 100 % (export read-back o1); other values are not sampled.
         if name == "ADBE Camera Blur Level"
             && !node.is_animated()
             && node.expression().is_none()

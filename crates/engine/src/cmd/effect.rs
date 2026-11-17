@@ -345,6 +345,7 @@ fn warning(s: &mut Session, p: &Value) -> Result<Value> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     Ok(json!({"effect": uid, "warning": effectcraft_effects::warning(g, &mut |pr| ctx.value(layer, pr))}))
 }
@@ -378,6 +379,7 @@ fn pick_color(s: &mut Session, p: &Value) -> Result<Value> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let mut r = effectcraft_render::Renderer::new(&s.project, &*s.footage, effectcraft_render::RenderOpts::default());
     r.expr = s.expr.as_deref();
@@ -515,14 +517,14 @@ impl CryptoProbe {
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
-            let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
             let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
             if !live() {
                 return Ok(None);
             }
-            let layer_name = aux.resolve_crypto_layer(want).ok_or(NO_CRYPTO)?;
+            let layer_name = effectcraft_effects::crypto_layer_named(&aux, params.s("layerName"), params.e("layer") as usize).ok_or(NO_CRYPTO)?;
             // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale
             // up, proxies have their own size, earlier effects can pad it), rendered and cached.
             if !live() {
@@ -587,6 +589,7 @@ fn probe_key<'a>(s: &'a Session, p: &Value, cmd: &str) -> Result<(ProbeKey, Tick
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let frame = probe_frame(&ctx, layer, pos);
     let o = s.render_opts(Default::default());
@@ -781,6 +784,7 @@ fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Hit> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let selection = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr)).s("selection").to_string();
     let driven = prop.expr.as_ref().is_some_and(|e| e.enabled);
@@ -1169,9 +1173,14 @@ fn reset(s: &mut Session, p: &Value) -> Result<Value> {
     }
     .ok_or_else(|| bad("effect.reset", "unknown effect"))?;
     let name = g.name.clone();
+    // Reset keeps a Cineon Converter's Version.
+    let cineon_version = if spec.id == "ec.utility.cineon" { g.get("version").map(|v| v.value.as_f64()) } else { None };
     s.edit(&format!("Reset {name}"), None, |proj, _| {
         let g = layer_mut(proj, cid, lid)?.props.find_group_mut(uid).ok_or_else(|| bad("effect.reset", "gone"))?;
         for ps in &spec.params {
+            if ps.id == "version" && cineon_version.is_some() {
+                continue;
+            }
             // (`group/param` ids live in twirl-down groups.)
             if let Some(pr) = g.prop_mut(ps.id) {
                 pr.set_value_at(lt, effectcraft_effects::default_value(ps, size));
@@ -1348,7 +1357,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Effect Plug-in...",
             [],
             None,
-            "{path (.wasm / .wat plug-in, API v1) | folder (loads every .wasm in it)}",
+            "{path (.wasm / .wat plug-in, WebAssembly ABI 1 or 2) | folder (loads every .wasm in it)}",
             super::always,
             plugins_load
         ),
