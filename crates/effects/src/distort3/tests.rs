@@ -251,12 +251,12 @@ fn power_pin_unstretch_expands_pinned_region() {
 }
 
 /// #3492: an Expansion side moves that edge of the source rectangle by a percent of the layer
-/// size. Below -100 % it crosses the opposite edge, so the rectangle flips: Top -200 and Bottom
-/// -100 take rows 40 down to 0 of a 20-row layer, a mirrored copy squeezed into the bottom half
-/// (the top half samples below the layer and is transparent). -100 for both would mirror the
-/// whole layer.
+/// size. When two opposite sides add up to less than -100 % the edges cross and the rectangle
+/// flips: Top -200 and Bottom -100 take rows 40 down to 0 of a 20-row layer, a mirrored copy
+/// squeezed into the bottom half (the top half samples below the layer and is transparent).
+/// -100 for both (the most the old minimum allowed) mirrors the whole layer.
 #[test]
-fn power_pin_expansion_below_minus_100_flips_the_source() {
+fn power_pin_crossed_expansion_flips_the_source() {
     let im = img(20, 20);
     let o = run("ec.distort.ccpowerpin", &[("expandTop", num(-200.0)), ("expandBottom", num(-100.0))], im.clone(), &[]);
     assert_eq!((o.img.width, o.img.height), (20, 20));
