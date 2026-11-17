@@ -468,7 +468,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(uid) = ctx.data_mut(|d| d.remove_temp::<u64>(reveal_id()))
         && let Some(&(_, top)) = tops.iter().find(|(u, _)| *u == uid)
     {
-        // (With the 4-point gap above the first header.)
+        // (With the 4-point gap above it: the panel starts with one and every effect ends with one.)
         let top = top - body.min.y + offset;
         widgets::PanelScroll::reveal(&ctx, egui::Id::unique("ec-scroll"), top - 4.0, top + ROW + 2.0, body.height());
         ctx.request_repaint();
