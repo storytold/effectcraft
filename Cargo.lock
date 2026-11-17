@@ -1485,9 +1485,9 @@ dependencies = [
 [[package]]
 name = "craft-svg"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=e52cd9a889adbeeda447c75a546133960cf3382d#e52cd9a889adbeeda447c75a546133960cf3382d"
+source = "git+https://github.com/storytold/craft-libs?rev=af9985523a079c9e25c638003dbd9aa09fa4d254#af9985523a079c9e25c638003dbd9aa09fa4d254"
 dependencies = [
- "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=e52cd9a889adbeeda447c75a546133960cf3382d)",
+ "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=af9985523a079c9e25c638003dbd9aa09fa4d254)",
  "flate2",
  "kurbo",
  "quick-xml 0.41.0",
@@ -1680,7 +1680,7 @@ dependencies = [
 [[package]]
 name = "craft-xml"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=b3643af6477326e840f86be78c89357f5308ba1d#b3643af6477326e840f86be78c89357f5308ba1d"
+source = "git+https://github.com/storytold/craft-libs?rev=af9985523a079c9e25c638003dbd9aa09fa4d254#af9985523a079c9e25c638003dbd9aa09fa4d254"
 dependencies = [
  "quick-xml 0.41.0",
  "serde",
@@ -1690,7 +1690,7 @@ dependencies = [
 [[package]]
 name = "craft-xml"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=e52cd9a889adbeeda447c75a546133960cf3382d#e52cd9a889adbeeda447c75a546133960cf3382d"
+source = "git+https://github.com/storytold/craft-libs?rev=b3643af6477326e840f86be78c89357f5308ba1d#b3643af6477326e840f86be78c89357f5308ba1d"
 dependencies = [
  "quick-xml 0.41.0",
  "serde",
