@@ -64,12 +64,18 @@ fn compatible(old: &Footage, new: &Footage) -> bool {
             || (old.native_rate.unwrap_or(old.frame_rate) == new.frame_rate && old.frame_rate.frame_at(old.duration) == new.frame_rate.frame_at(new.duration)))
 }
 
+/// The file name of a stored path, split at `/` and `\\` alike: a project saved on Windows keeps
+/// `D:\…\plate.png`, which `Path::file_name` on macOS and Linux takes whole.
+fn file_name(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).find(|p| !p.is_empty())
+}
+
 fn sequence_at(old: &Footage, path: &str) -> Option<Vec<String>> {
     let parent = Path::new(path).parent()?;
     old.sequence
         .iter()
         .map(|file| {
-            let mapped = parent.join(Path::new(file).file_name()?);
+            let mapped = parent.join(file_name(file)?);
             std::fs::symlink_metadata(&mapped).is_ok_and(|m| m.is_file()).then(|| mapped.to_str().map(str::to_string)).flatten()
         })
         .collect()
@@ -107,7 +113,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let supported = matches!(old.kind, FootageKind::Still | FootageKind::Sequence | FootageKind::Video | FootageKind::Audio)
                 && old.layer.is_none() && old.page == 0;
-            let name = Path::new(&old.path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
+            let name = file_name(&old.path).unwrap_or("");
             let paths = index.get(name).map_or(&[][..], Vec::as_slice);
             let mut candidates = vec![];
             let mut accepted = vec![];
@@ -288,6 +294,23 @@ mod tests {
         assert_eq!(key(&s), original_key);
         s.execute("edit.redo", json!({})).unwrap();
         assert_eq!(get(&s, id), expected);
+    }
+
+    #[test]
+    fn a_path_stored_with_the_other_systems_separator_is_found_by_its_file_name() {
+        // A project saved on Windows (or an imported .aep) stores `D:\...\plate.png`; on macOS and
+        // Linux the whole string used to be taken as the file name, so nothing was found.
+        let dir = Fixture::new();
+        let (mut s, id, old) = setup(&dir, "plate.png");
+        let foreign = Footage { path: "D:\\Work\\Job\\media\\plate.png".into(), ..old.clone() };
+        let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind else { panic!("footage") };
+        *f = foreign.clone();
+        let new = dir.file("new/plate.png", b"valid");
+        assert_eq!(search(&mut s, &dir, false)["relinked"], 1);
+        assert_eq!(get(&s, id), Footage { path: new, missing: false, ..foreign });
+        assert_eq!(file_name("/Volumes/Work/plate.png"), Some("plate.png"));
+        assert_eq!(file_name("\\\\server\\share\\a.png"), Some("a.png"));
+        assert_eq!(file_name(""), None);
     }
 
     #[test]
