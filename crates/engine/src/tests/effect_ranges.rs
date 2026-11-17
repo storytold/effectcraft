@@ -60,6 +60,7 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3471, "ec.distort.transform", "scaleHeight", -30000.0, 30000.0),
     (3471, "ec.distort.transform", "scaleWidth", -30000.0, 30000.0),
     (3470, "ec.distort.turbulentdisplace", "evolutionOptions/randomSeed", 0.0, 100000.0),
+    (3464, "ec.perspective.dropshadow", "softness", 0.0, 30000.0),
     (3467, "ec.blur.radial", "amount", 0.0, 1000.0),
     (3460, "ec.blur.gaussian", "blurriness", 0.0, 30000.0),
     (3469, "ec.distort.turbulentdisplace", "amount", -10000.0, 10000.0),

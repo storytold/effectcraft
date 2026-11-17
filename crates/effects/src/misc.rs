@@ -3,7 +3,7 @@
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
-use effectcraft_raster::{Image, gaussian_blur, hash_noise};
+use effectcraft_raster::{Image, gaussian_blur, gaussian_blur_unbounded_at, hash_noise};
 use rayon::prelude::*;
 
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
@@ -283,6 +283,12 @@ fn glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// The margin Drop Shadow asks for around a layer: its Distance and its blur's reach (three
+/// boxes of radius about σ = Softness / 2), both in buffer pixels. Shared with the GPU path.
+pub fn drop_shadow_pad(dist: f64, soft: f64) -> u32 {
+    ((dist + soft * 1.5).ceil() as u32).saturating_add(2)
+}
+
 fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let color = ctx.params.color("color");
     let opacity = ctx.params.f("opacity") as f32 / 100.0;
@@ -290,22 +296,41 @@ fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let dist = ctx.params.f("distance") * b.scale;
     let soft = ctx.params.f("softness") * b.scale;
     let only = ctx.params.b("shadowOnly");
-    let pad = (dist + soft * 1.5).ceil() as u32 + 2;
+    let pad = drop_shadow_pad(dist, soft);
+    // Whether the buffer holds the whole blur. The pixel budget (#2261) cuts the margin of a
+    // large Softness (After Effects' range reaches 30000, #3464); the shadow is then blurred
+    // before it is moved, as if the buffer went on with transparency, rather than dropping what
+    // the move or the blur takes past the buffer's edge, which would leave it far too faint or
+    // gone. An adjustment layer's buffer is the composition, as before.
+    let mut holds_blur = true;
     if !ctx.adjustment {
+        let (w0, h0) = (b.img.width, b.img.height);
         b.pad(pad);
+        let need = pad.saturating_mul(2);
+        holds_blur = b.img.width.saturating_sub(w0) >= need && b.img.height.saturating_sub(h0) >= need;
     }
     let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);
-    let mut sh = Image::new(b.img.width, b.img.height);
     let src = &b.img;
-    sh.rows_mut().for_each(|(y, row)| {
-        for (x, px) in row.iter_mut().enumerate() {
-            let a = src.sample_bilinear(x as f64 + 0.5 - dx, y as f64 + 0.5 - dy)[3] * opacity * color[3];
-            *px = [color[0] * a, color[1] * a, color[2] * a, a];
-        }
-    });
-    if soft > 0.0 {
-        sh = gaussian_blur(&sh, soft / 2.0, soft / 2.0, false);
-    }
+    let shadow = |sh: &mut Image, (dx, dy): (f64, f64)| {
+        sh.rows_mut().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                let a = src.sample_bilinear(x as f64 + 0.5 - dx, y as f64 + 0.5 - dy)[3] * opacity * color[3];
+                *px = [color[0] * a, color[1] * a, color[2] * a, a];
+            }
+        });
+    };
+    let mut sh = if soft > 0.0 && !holds_blur {
+        // Only the fraction of the move is sampled (into one more column and row); the blur
+        // moves the rest.
+        let (ix, iy) = (dx.floor(), dy.floor());
+        let mut near = Image::new(src.width.saturating_add(1), src.height.saturating_add(1));
+        shadow(&mut near, (dx - ix, dy - iy));
+        gaussian_blur_unbounded_at(&near, soft / 2.0, soft / 2.0, [ix as i64, iy as i64], src.width, src.height)
+    } else {
+        let mut sh = Image::new(src.width, src.height);
+        shadow(&mut sh, (dx, dy));
+        if soft > 0.0 { gaussian_blur(&sh, soft / 2.0, soft / 2.0, false) } else { sh }
+    };
     if !only {
         sh.data.par_iter_mut().zip(b.img.data.par_iter()).for_each(|(s, o)| {
             let k = 1.0 - o[3];
@@ -872,7 +897,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("opacity", "Opacity", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
                 p("direction", "Direction", num(135.0), ParamUi::Angle),
                 p("distance", "Distance", num(5.0), slider(0.0, 32000.0, 0.0, 120.0, 1)),
-                p("softness", "Softness", num(0.0), slider(0.0, 1000.0, 0.0, 250.0, 1)),
+                p("softness", "Softness", num(0.0), slider(0.0, 30000.0, 0.0, 250.0, 1)),
                 p("shadowOnly", "Shadow Only", Value::Bool(false), ParamUi::Checkbox),
             ],
             drop_shadow,
@@ -1035,6 +1060,72 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3464: Softness takes After Effects' valid range, 0..30000; the slider still shows 0..250.
+    #[test]
+    fn drop_shadow_softness_takes_the_after_effects_range() {
+        let spec = crate::find("ec.perspective.dropshadow").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "softness").unwrap().ui;
+        assert_eq!(*ui, slider(0.0, 30000.0, 0.0, 250.0, 1));
+    }
+
+    /// #3464: a Softness far past the range (an expression can set one) used to overflow the
+    /// padding's `u32` (a panic in debug builds). It renders, finite.
+    #[test]
+    fn drop_shadow_takes_a_huge_softness() {
+        for softness in [1e12, f64::INFINITY] {
+            let layer = effectcraft_raster::Image::filled(8, 8, [1.0, 1.0, 1.0, 1.0]);
+            let out = run_fx("ec.perspective.dropshadow", &[("softness", num(softness))], layer, 0.0, EffectEnv::default());
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "softness {softness}");
+        }
+    }
+
+    /// #3464: with the margin cut, a Distance that takes the whole layer past the buffer's edge
+    /// still leaves the shadow's blur inside it. A 64 × 48 layer moved 3000 px right, Softness
+    /// 8000: at the layer's centre the shadow is the Gaussian's share there (it was 0 when the
+    /// layer was moved out of the buffer before the blur).
+    #[test]
+    fn drop_shadow_moved_past_a_cut_margin_keeps_its_blur() {
+        let (w, h, dist, softness) = (64u32, 48u32, 3000.0, 8000.0);
+        let layer = effectcraft_raster::Image::filled(w, h, [1.0, 1.0, 1.0, 1.0]);
+        let vals = [("softness", num(softness)), ("opacity", num(100.0)), ("distance", num(dist)), ("direction", num(90.0)), ("shadowOnly", Value::Bool(true))];
+        let out = run_fx("ec.perspective.dropshadow", &vals, layer, 0.0, EffectEnv::default());
+        assert!(out.offset[0] + f64::from(w) + dist > f64::from(out.img.width), "the move takes the layer past the buffer");
+        let sigma = softness / 2.0;
+        // The Gaussian's share of a `len`-pixel side, at `d` pixels from its centre.
+        let share = |len: u32, d: f64| {
+            let sum: f64 = (0..len).map(|i| (-((f64::from(i) + 0.5 - f64::from(len) / 2.0 + d) / sigma).powi(2) / 2.0).exp()).sum();
+            sum / (sigma * (2.0 * std::f64::consts::PI).sqrt())
+        };
+        let want = share(w, dist) * share(h, 0.0);
+        let at = |v: f64, half: u32| (v + f64::from(half)) as i64;
+        let got = f64::from(out.img.get(at(out.offset[0], w / 2), at(out.offset[1], h / 2))[3]);
+        assert!((0.85..1.1).contains(&(got / want)), "centre alpha {got}, Gaussian {want}");
+    }
+
+    /// #3464: past the padding budget (#2261) the shadow keeps its whole blur (σ = Softness / 2)
+    /// up to the buffer's edge. A 64 × 48 layer's shadow at its centre is the Gaussian's share
+    /// of the layer, less the 6 % three boxes' peak is under a Gaussian's; dropping what the
+    /// boxes spread past the buffer left it at 0.11 of that at 8000.
+    #[test]
+    fn drop_shadow_keeps_its_blur_past_the_padding_budget() {
+        let (w, h) = (64u32, 48u32);
+        for softness in [500.0, 4000.0, 8000.0, 30000.0] {
+            let layer = effectcraft_raster::Image::filled(w, h, [1.0, 1.0, 1.0, 1.0]);
+            let vals = [("softness", num(softness)), ("opacity", num(100.0)), ("distance", num(0.0)), ("shadowOnly", Value::Bool(true))];
+            let out = run_fx("ec.perspective.dropshadow", &vals, layer, 0.0, EffectEnv::default());
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "softness {softness}");
+            let sigma = softness / 2.0;
+            let share = |len: u32| {
+                let sum: f64 = (0..len).map(|i| (-((f64::from(i) + 0.5 - f64::from(len) / 2.0) / sigma).powi(2) / 2.0).exp()).sum();
+                sum / (sigma * (2.0 * std::f64::consts::PI).sqrt())
+            };
+            let want = share(w) * share(h);
+            let at = |v: f64, half: u32| (v + f64::from(half)) as i64;
+            let got = f64::from(out.img.get(at(out.offset[0], w / 2), at(out.offset[1], h / 2))[3]);
+            assert!((0.85..1.02).contains(&(got / want)), "softness {softness}: centre alpha {got}, Gaussian {want}");
+        }
     }
 
     /// #3460: Blurriness goes up to After Effects' 30000. There the padding stays within the

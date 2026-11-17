@@ -726,7 +726,6 @@ mod tests {
         ("ec.blur.channel", "blueBlurriness", 3462),
         ("ec.blur.channel", "alphaBlurriness", 3462),
         ("ec.obsolete.gaussianlegacy", "blurriness", 3463),
-        ("ec.perspective.dropshadow", "softness", 3464),
         ("ec.blur.compound", "maximumBlur", 3465),
         ("ec.blur.ccradial", "amount", 3468),
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
