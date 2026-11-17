@@ -153,11 +153,17 @@ fn box_passes(img: &Image, rx: &[usize], ry: &[usize], repeat: bool) -> Image {
     a
 }
 
+/// Above this sigma (pixels) [`box_radii`] gives this sigma's radii: boxes far wider than any
+/// buffer ([`crate::MAX_PADDED_SIDE`]), and the `i64` arithmetic below overflows near 9e8.
+const MAX_BOX_SIGMA: f64 = 1e8;
+
 /// Box radii for `n` passes approximating a Gaussian of `sigma` (Kovesi / "boxes for Gauss").
-fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
-    if sigma <= 0.0 {
+/// A NaN sigma doesn't blur, and a sigma above [`MAX_BOX_SIGMA`] blurs as that.
+pub fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
+    if sigma.is_nan() || sigma <= 0.0 {
         return vec![0; n];
     }
+    let sigma = sigma.min(MAX_BOX_SIGMA);
     let w_ideal = (12.0 * sigma * sigma / n as f64 + 1.0).sqrt();
     let mut wl = w_ideal.floor() as i64;
     if wl % 2 == 0 {
