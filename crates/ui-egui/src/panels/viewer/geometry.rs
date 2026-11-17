@@ -260,13 +260,17 @@ pub(super) fn rotate_value(start_rot: f64, turned: f64, shift: bool) -> f64 {
 
 /// A drag `d` (comp pixels), kept to the axis it moves along most when `shift` is held.
 pub(super) fn one_axis(d: [f64; 2], shift: bool) -> [f64; 2] {
-    if !shift {
-        d
-    } else if d[0].abs() > d[1].abs() {
-        [d[0], 0.0]
-    } else {
-        [0.0, d[1]]
+    match drag_axis(d, shift) {
+        None => d,
+        Some(true) => [d[0], 0.0],
+        Some(false) => [0.0, d[1]],
     }
+}
+
+/// The axis [`one_axis`] keeps a drag `d` to: `Some(true)` along x, `Some(false)` along y, `None`
+/// without `shift` (both axes free). Its snapping keeps to the same axis (#3229).
+pub(super) fn drag_axis(d: [f64; 2], shift: bool) -> Option<bool> {
+    shift.then(|| d[0].abs() > d[1].abs())
 }
 
 pub(super) fn point_in_quad(p: [f64; 2], q: &[[f64; 2]; 4]) -> bool {

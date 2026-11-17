@@ -163,6 +163,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
@@ -182,8 +183,15 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
     m.get("comp")?.as_u64().map(effectcraft_engine::project::ItemId)
 }
 
+/// Whether [`invoke`]'s result says the command waits on a dialog (a guard or a form deferred it
+/// until the user answers, `{"dialog": …}`).
+pub fn waits_on_dialog(result: &Value) -> bool {
+    result.get("dialog").is_some()
+}
+
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    crate::control::check_script_render(app, id)?;
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -195,10 +203,16 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     }
     // A new folder (File ▸ New, its shortcut, the Project panel's button and context menu) opens
     // with its name ready to type, as in After Effects (#1658). The command selects it.
-    // `engine.execute` keeps the headless default.
-    if id == "project.newFolder" && no_params(&params) {
+    // `engine.execute` keeps the headless default. Items dropped on the New Folder button (only
+    // `items`, #3196) open the name too.
+    if id == "project.newFolder" && (no_params(&params) || params.as_object().is_some_and(|m| m.len() == 1 && m.contains_key("items"))) {
+        let dropped = params.get("items").is_some();
         let r = run_engine(app, ctx, id, params);
-        if r.is_ok() {
+        if let Ok(v) = &r {
+            // Open a folder that items were dropped into, so they stay in view.
+            if dropped && let Some(f) = v.get("item").and_then(Value::as_u64) {
+                app.ui.project_open_folders.insert(f);
+            }
             app.show_panel(PanelKind::Project);
             crate::panels::project::begin_rename(app, ctx);
         }
@@ -283,6 +297,10 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     // Deleting Project items that compositions use asks first, as in After Effects.
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
+    }
+    // Un-precompose that would change the picture lists why and asks before unpacking anyway.
+    if crate::panels::unprecompose::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "unprecompose"}));
     }
     // An After Effects import with a path that loses something asks first (the menu's file
     // dialog asks in `run_with_picked`).

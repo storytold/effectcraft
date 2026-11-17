@@ -47,8 +47,8 @@ Stills of any format EffectCraft reads can form a sequence: PNG, JPEG, TIFF, Ope
 WebP. Layered and vector documents (PSD, SVG, PDF) import one by one.
 
 **Missing frames.** Where the numbering skips a number (`shot_0003.png` is missing between
-`0002` and `0004`), the sequence shows a placeholder of colour bars for that frame, as After
-Effects does, so every other frame stays at its number. Render or copy the missing files into the
+`0002` and `0004`), the sequence holds the previous frame (`0002`) there, as After Effects 2026
+does, so every other frame stays at its number. Render or copy the missing files into the
 folder and choose File ▸ Reload Footage to fill the gaps.
 
 Agents: `file.import {"paths": ["/shots/shot_0001.png"], "sequence": true, "frameRate": 24}`.
@@ -69,6 +69,9 @@ next to it.
 
 Agents: `file.importProject {"path": "/projects/titles.ecproj"}` returns the comps, the root comps,
 `primaryComp` (the only root comp, if there is one) and any missing media.
+
+After Effects projects (`.aep`, `.aepx`) given to File ▸ Import ▸ File… or dropped on the window
+import as File ▸ Import ▸ Adobe After Effects Project… does ([aep-import.md](aep-import.md)).
 
 ## Finding a layer's source in the Project panel
 

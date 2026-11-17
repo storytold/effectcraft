@@ -77,12 +77,12 @@ fn position_anchor_and_effect_edits_present_intermediate_pixels() {
         (None, "transform/position", json!([22, 18, 0]), json!([18, 18, 0])),
         (None, "transform/anchor", json!([9, 8, 0]), json!([6, 8, 0])),
         (Some("Gaussian Blur"), "blurriness", json!(3), json!(6)),
-        (Some("CC Radial Fast Blur"), "center", json!([4, 4]), json!([18, 12])),
+        (Some("Fast Radial Blur"), "center", json!([4, 4]), json!([18, 12])),
     ] {
         let mut session = Session::default();
         session.execute("comp.new", json!({"width":64,"height":36,"duration":1})).unwrap();
         let layer = session.execute("layer.newSolid", json!({"color":"#ffffff","width":24,"height":16})).unwrap()["layer"].as_u64().unwrap();
-        if effect == Some("CC Radial Fast Blur") {
+        if effect == Some("Fast Radial Blur") {
             // A uniform solid is invariant under a radial blur; give the point edit visible detail.
             session.execute("effect.apply", json!({"layers":[layer],"effect":"Gradient Ramp"})).unwrap();
         }

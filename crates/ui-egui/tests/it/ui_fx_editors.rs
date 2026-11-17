@@ -130,7 +130,7 @@ fn undo(h: &mut Harness<'_, EffectcraftApp>) {
 
 #[test]
 fn lumetri_rgb_and_hue_saturation_curve_editors() {
-    let (s0, l, fx) = with_effect("Lumetri Color");
+    let (s0, l, fx) = with_effect("Color Grading");
     let mut h = harness(s0);
     only_groups(&mut h, l, fx, &["curves", "rgbCurves", "hueSaturationCurves"]);
     let pre = format!("effectControls.effect.{fx}.lumetri.rgbCurves");

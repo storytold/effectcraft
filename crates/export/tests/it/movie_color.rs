@@ -6,13 +6,13 @@
 use std::path::Path;
 use std::process::Command;
 
+use craft_media::isobmff::{ColorInfo, TrackKind};
 use effectcraft_color::Label;
 use effectcraft_export::render_queue::{OutputFormat, OutputModule, RenderSettings, TimeSpan};
 use effectcraft_export::{Job, export};
 use effectcraft_project::{ColorSpace, Comp, ItemKind, LayerSource, Project, Solid, build};
 use effectcraft_render::NoFootage;
 use effectcraft_time::{FrameRate, Tick};
-use filmcraft_isobmff::{ColorInfo, TrackKind};
 
 /// (name, Output color space, H.273 primaries / transfer / matrix, the same as ffprobe names them)
 const ROWS: &[(&str, Option<ColorSpace>, [u16; 3], [&str; 3])] = &[
@@ -81,7 +81,7 @@ fn mp4_tags_describe_the_frames() {
             render(output, format, &path);
 
             let bytes = std::fs::read(&path).expect("read movie");
-            let mp4 = filmcraft_isobmff::open(bytes.as_slice()).expect("demux");
+            let mp4 = craft_media::isobmff::open(bytes.as_slice()).expect("demux");
             let track = mp4.tracks.iter().find(|t| t.kind == TrackKind::Video).expect("video track");
             let colr = track.entries[0].video.as_ref().and_then(|v| v.color.clone());
             assert_eq!(colr, Some(ColorInfo::Nclx { primaries, transfer, matrix, full_range: false }), "{codec} {name}: colr");

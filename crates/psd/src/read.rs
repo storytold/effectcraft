@@ -85,7 +85,7 @@ impl<'a> Reader<'a> {
 }
 
 /// Mac OS Roman upper half (0x80..=0xFF), as published by the Unicode Consortium mapping table.
-fn mac_roman(b: u8) -> char {
+pub(crate) fn mac_roman(b: u8) -> char {
     const T: &str = "ÄÅÇÉÑÖÜáàâäãåçéèêëíìîïñóòôöõúùûü†°¢£§•¶ß®©™´¨≠ÆØ∞±≤≥¥µ∂∑∏π∫ªºΩæø¿¡¬√ƒ≈∆«»… ÀÃÕŒœ–—“”‘’÷◊ÿŸ⁄€‹›ﬁﬂ‡·‚„‰ÂÊÁËÈÍÎÏÌÓÔ\u{F8FF}ÒÚÛÙıˆ˜¯˘˙˚¸˝˛ˇ";
     T.chars().nth((b - 0x80) as usize).unwrap_or('?')
 }

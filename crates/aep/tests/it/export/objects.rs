@@ -190,6 +190,20 @@ fn with_props(p: &mut Project, c: effectcraft_project::ItemId, idx: usize, set: 
     });
 }
 
+/// The layers of the first composition as the importer reads `bytes` back.
+fn reimported_layers(bytes: &[u8]) -> Vec<effectcraft_project::Layer> {
+    let exists = |_: &str| true;
+    let options = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&exists) };
+    let mut p = Project::default();
+    let r = effectcraft_aep::import::import(&mut p, bytes, &options).expect("import");
+    p.comp(r.comps[0]).expect("comp").layers.iter().cloned().collect()
+}
+
+/// The value at `path` of a read-back layer.
+fn value(l: &effectcraft_project::Layer, path: &str) -> effectcraft_keyframe::Value {
+    l.props.prop(path).unwrap_or_else(|| panic!("no {path}")).value.clone()
+}
+
 fn first_comp_layers(bytes: &[u8], mut f: impl FnMut(&effectcraft_aep::Layer<'_, '_>)) {
     let file = parse(bytes).expect("parse");
     assert_eq!(effectcraft_aep::write(&file).expect("write"), bytes);
@@ -229,12 +243,18 @@ fn cameras_are_written_with_position_point_of_interest_and_options() {
         assert!(h.is_three_d() && h.is_auto_oriented(), "two-node camera");
         let pos = l.camera_position().expect("position");
         assert_eq!((pos.stored, pos.auto_state), ([100.0, 200.0, -1000.0], false));
-        assert_eq!(l.camera_point_of_interest(), Some([960.0, 540.0, 0.0]));
-        assert_eq!(l.camera_depth_of_field().map(|t| t.value), Some(true));
-        assert_eq!(l.camera_focus_distance().map(|t| t.value), Some(800.0));
-        assert_eq!(l.camera_aperture().map(|t| t.value), Some(30.0));
-        assert_eq!(l.camera_zoom().map(|t| t.value), Some(1500.0));
     });
+    // The importer reads the written options back.
+    let back = reimported_layers(&r.bytes);
+    for (path, want) in [
+        ("transform/poi", Value::Vec3([960.0, 540.0, 0.0])),
+        ("cameraOptions/dof", Value::Bool(true)),
+        ("cameraOptions/focusDistance", Value::Scalar(800.0)),
+        ("cameraOptions/aperture", Value::Scalar(30.0)),
+        ("cameraOptions/zoom", Value::Scalar(1500.0)),
+    ] {
+        assert_eq!(value(&back[0], path), want, "{path}");
+    }
     // One-node (auto-orient off): bit 0x40 clear (251).
     with_layer(&mut p, c, 0, |l| l.auto_orient = effectcraft_project::AutoOrient::Off);
     first_comp_layers(&export_all(&p).bytes, |l| assert!(!l.header().expect("h").is_auto_oriented()));
@@ -271,20 +291,25 @@ fn spot_and_point_lights_are_written_with_their_options() {
         seen.push(h.light_type());
         match h.light_type() {
             Some(effectcraft_aep::LightType::Spot) => {
-                assert_eq!(l.light_intensity().map(|t| t.value), Some(50.0));
-                assert_eq!(l.light_color().map(|t| t.value), Some([1.0, 1.0, 0.0, 0.0]));
-                assert_eq!(l.light_cone_angle().map(|t| t.value), Some(60.0));
-                assert_eq!(l.light_cone_feather().map(|t| t.value), Some(30.0));
                 assert_eq!(l.camera_position().map(|p| p.stored), Some([100.0, 50.0, -500.0]));
-                assert_eq!(l.camera_point_of_interest(), Some([960.0, 540.0, 0.0]));
             }
-            Some(effectcraft_aep::LightType::Point) => {
-                assert_eq!(l.light_intensity().map(|t| t.value), Some(100.0));
-            }
+            Some(effectcraft_aep::LightType::Point) => {}
             other => panic!("{other:?}"),
         }
     });
     assert_eq!(seen.len(), 2);
+    // The importer reads the written options back (layer 0 is the point light, 1 the spot).
+    let back = reimported_layers(&r.bytes);
+    assert_eq!(value(&back[0], "lightOptions/intensity"), Value::Scalar(100.0));
+    for (path, want) in [
+        ("lightOptions/intensity", Value::Scalar(50.0)),
+        ("lightOptions/color", Value::Color([1.0, 0.0, 0.0, 1.0])),
+        ("lightOptions/coneAngle", Value::Scalar(60.0)),
+        ("lightOptions/coneFeather", Value::Scalar(30.0)),
+        ("transform/poi", Value::Vec3([960.0, 540.0, 0.0])),
+    ] {
+        assert_eq!(value(&back[1], path), want, "{path}");
+    }
     // Parallel and ambient lights, and unsampled options, are reported.
     let mut q = Project::default();
     let c = add_comp(&mut q, "C", 640, 360, FrameRate::new(25, 1), 1.0, None);
@@ -468,7 +493,7 @@ fn shape_records(bytes: &[u8]) -> std::collections::BTreeMap<(usize, String), ef
     for item in view.all_items() {
         let Some(comp) = item.comp() else { continue };
         for (li, layer) in comp.layers().enumerate() {
-            if let Some(g) = layer.chunk().child_list(b"tdgp") {
+            if let Some(g) = layer.chunk().child_list(b"tdgp").map(|g| g.to_chunk()) {
                 walk(g.children(), "", li, false, &mut out);
             }
         }
@@ -593,7 +618,7 @@ fn keyed_shape_records(bytes: &[u8]) -> Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, 
     for item in view.all_items() {
         let Some(comp) = item.comp() else { continue };
         for layer in comp.layers() {
-            if let Some(g) = layer.chunk().child_list(b"tdgp") {
+            if let Some(g) = layer.chunk().child_list(b"tdgp").map(|g| g.to_chunk()) {
                 walk(g.children(), "", false, &mut out);
             }
         }
@@ -828,7 +853,8 @@ fn a_camera_transform_group_ends_with_its_group_end() {
     let view = effectcraft_aep::Project::new(&file).expect("project");
     let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
     let layer = comp.layers().next().expect("camera");
-    let root = layer.chunk().child_list(b"tdgp").expect("tree").children();
+    let tree = layer.chunk().child_list(b"tdgp").expect("tree").to_chunk();
+    let root = tree.children();
     let name =
         |c: &effectcraft_aep::Chunk<'_>| String::from_utf8_lossy(c.bytes().unwrap_or_default().split(|b| *b == 0).next().unwrap_or_default()).into_owned();
     let at = root.iter().position(|c| c.is(b"tdmn") && name(c) == "ADBE Transform Group").expect("transform");

@@ -79,6 +79,7 @@ pub fn install(s: &mut Session) {
     s.script = Some(runner);
     s.script_ui.dispatch = Some(dispatch_ui);
     s.script_ui.tasks = Some(run_tasks);
+    s.script_ui.poll_render = Some(ui::poll_render_wait);
 }
 
 /// Run `code` as a one-off script named `name`.

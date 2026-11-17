@@ -22,17 +22,25 @@ effectcraft-pdf = { workspace = true }
 effectcraft-model = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
-filmcraft-aac = { workspace = true }
-filmcraft-isobmff = { workspace = true }
-filmcraft-matroska = { workspace = true }
-filmcraft-mpegts = { workspace = true }
+craft-dpx = { workspace = true }
+craft-exr = { workspace = true, features = ["decode"] }
+craft-gif = { workspace = true, features = ["frames"] }
+craft-webp = { workspace = true, features = ["frames"] }
+craft-audio = { workspace = true, features = ["aac-decode"] }
+craft-media = { workspace = true, features = ["mpegts"] }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
-exr = { workspace = true }
-gif = { workspace = true }
 image = { workspace = true, features = ["gif", "webp", "tiff", "bmp", "exr", "tga", "hdr"] }
 rayon = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+exr = { workspace = true }
+# Writes the animated GIFs of the tests.
+gif = { workspace = true }
+tempfile = { workspace = true }
+# (tests render comps that read layers through effects; already a dependency of effectcraft-render)
+effectcraft-effects = { workspace = true }

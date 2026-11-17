@@ -11,8 +11,8 @@
 //!
 //! Not imported, and reported in [`LossCategory::TextLayers`]: wiggly and expression selectors,
 //! animator properties other than the ones mapped below (Character Value, Fill / Stroke
-//! Hue, Saturation, Brightness and Opacity, 3D rotations, variable font axes, ...), and a Tracking
-//! Type other than the default.
+//! Hue, Saturation and Brightness, Fill Opacity, 3D rotations, variable font axes, ...), and a
+//! Tracking Type other than the default.
 
 use crate::{PropGroup as AepGroup, PropNode, Property as AepProp};
 use effectcraft_project::build::{self, Ids};
@@ -37,6 +37,7 @@ const PROPS: &[(&str, &str, &str, Kind)] = &[
     ("ADBE Text Opacity", "opacity", "opacity", Kind::Number),
     ("ADBE Text Fill Color", "fillColor", "fillColor", Kind::EffectColor),
     ("ADBE Text Stroke Color", "strokeColor", "strokeColor", Kind::EffectColor),
+    ("ADBE Text Stroke Opacity", "strokeOpacity", "strokeOpacity", Kind::Number),
     ("ADBE Text Stroke Width", "strokeWidth", "strokeWidth", Kind::Number),
     ("ADBE Text Tracking Amount", "tracking", "tracking", Kind::Number),
     ("ADBE Text Line Spacing", "lineSpacing", "lineSpacing", Kind::Vec2),

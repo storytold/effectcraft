@@ -1,5 +1,5 @@
-//! Transition effects, batch 2: CC Glass Wipe, CC Image Wipe, CC Jaws, CC Line Sweep,
-//! CC Twister and CC WarpoMatic.
+//! Transition effects, batch 2: Glass Wipe, Luminance Image Wipe, Serrated Wipe, Line Sweep,
+//! Twist Wipe and Warp Dissolve.
 //!
 //! Written from the public descriptions of these transitions (gradient-driven wipes with glass
 //! refraction or warping, jagged "jaws" opening, staggered line sweeps, a ribbon twist that
@@ -68,7 +68,7 @@ fn grad(pl: &Plane, x: usize, y: usize) -> (f32, f32) {
     ((pl.get_clamped(xi + 1, yi) - pl.get_clamped(xi - 1, yi)) * 0.5, (pl.get_clamped(xi, yi + 1) - pl.get_clamped(xi, yi - 1)) * 0.5)
 }
 
-// ------------------------------------------------------------------ CC Glass Wipe
+// ------------------------------------------------------------------ Glass Wipe
 
 fn glass_wipe(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = completion(ctx);
@@ -105,7 +105,7 @@ fn glass_wipe(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Image Wipe
+// ------------------------------------------------------------------ Luminance Image Wipe
 
 fn image_wipe(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = completion(ctx);
@@ -132,7 +132,7 @@ fn image_wipe(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Jaws
+// ------------------------------------------------------------------ Serrated Wipe
 
 fn jaws(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = completion(ctx) as f64;
@@ -193,7 +193,7 @@ fn jaws(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Line Sweep
+// ------------------------------------------------------------------ Line Sweep
 
 fn line_sweep(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = completion(ctx) as f64;
@@ -235,7 +235,7 @@ fn line_sweep(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC Twister
+// ------------------------------------------------------------------ Twist Wipe
 
 fn twister(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = completion(ctx) as f64;
@@ -283,7 +283,7 @@ fn twister(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ------------------------------------------------------------------ CC WarpoMatic
+// ------------------------------------------------------------------ Warp Dissolve
 
 fn warpomatic(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = completion(ctx);
@@ -350,7 +350,7 @@ pub fn specs() -> Vec<EffectSpec> {
     vec![
         spec(
             "ec.transition.ccglasswipe",
-            "CC Glass Wipe",
+            "Glass Wipe",
             vec![
                 done(),
                 p("layerToReveal", "Layer to Reveal", Value::Layer(None), ParamUi::Layer),
@@ -362,7 +362,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccimagewipe",
-            "CC Image Wipe",
+            "Luminance Image Wipe",
             vec![
                 done(),
                 p("borderSoftness", "Border Softness", num(0.0), pct()),
@@ -376,7 +376,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccjaws",
-            "CC Jaws",
+            "Serrated Wipe",
             vec![
                 done(),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -389,7 +389,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.cclinesweep",
-            "CC Line Sweep",
+            "Line Sweep",
             vec![
                 done(),
                 p("direction", "Direction", num(0.0), ParamUi::Angle),
@@ -401,7 +401,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.cctwister",
-            "CC Twister",
+            "Twist Wipe",
             vec![
                 done(),
                 p("backside", "Backside", Value::Layer(None), ParamUi::Layer),
@@ -413,7 +413,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.transition.ccwarpomatic",
-            "CC WarpoMatic",
+            "Warp Dissolve",
             vec![
                 done(),
                 p("layerToReveal", "Layer to Reveal", Value::Layer(None), ParamUi::Layer),
