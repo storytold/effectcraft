@@ -312,12 +312,19 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
         }
     }
     // Color: what the file's Dolby Vision configuration says, and what is shown of it (read-only).
-    // Video the importer read no codec in has no picture yet; the import warning goes by the same
-    // answer (`Footage::codec_unread`).
+    // Video the importer read no codec in had no picture when it was imported or last reloaded;
+    // the import warning goes by the same answer (`Footage::codec_unread`). The stored codec isn't
+    // read again until Reload Footage, so in a later build that decodes the video the picture can
+    // come back before this note changes.
     if let Some(dv) = f.dolby_vision {
         let base = "the base layer is shown; the Dolby Vision metadata is not applied.";
-        let shown =
-            if f.codec_unread() { format!("this build can't decode this video yet, so it shows no picture. When it can, {base}") } else { base.to_string() };
+        let shown = if f.codec_unread() {
+            format!(
+                "when this footage was imported or last reloaded, EffectCraft couldn't decode the video, so it showed no picture; File ▸ Reload Footage checks again. When it can, {base}"
+            )
+        } else {
+            base.to_string()
+        };
         fields.push(Field::note("dolbyVision", &format!("{}: {shown}", dv.label())));
     }
     // After Frame Rate: an image sequence's frames (a missing one holds the previous frame),
@@ -1283,8 +1290,9 @@ mod tests {
     }
 
     /// Interpret Footage says what a movie's Dolby Vision configuration is, read-only (it is no
-    /// parameter of the command), and that only its base layer is shown, or that this build can't
-    /// decode its video yet when the importer read no codec in it; other footage has no such line.
+    /// parameter of the command), and that only its base layer is shown, or, when the importer
+    /// read no codec in its video, that the video couldn't be decoded when it was imported or last
+    /// reloaded and that Reload Footage checks again; other footage has no such line.
     #[test]
     fn interpret_footage_shows_the_dolby_vision_configuration() {
         use effectcraft_engine::project::{DolbyVisionInfo, Footage, FootageKind, ItemKind, UNREAD_CODEC};
@@ -1317,7 +1325,7 @@ mod tests {
         let Some(FieldKind::Note(text)) = note(&mut app, dvh1) else { panic!("no Dolby Vision note") };
         assert_eq!(
             text,
-            "Dolby Vision 8.4 (HLG base layer): this build can't decode this video yet, so it shows no picture. When it can, the base layer is shown; the Dolby Vision metadata is not applied."
+            "Dolby Vision 8.4 (HLG base layer): when this footage was imported or last reloaded, EffectCraft couldn't decode the video, so it showed no picture; File ▸ Reload Footage checks again. When it can, the base layer is shown; the Dolby Vision metadata is not applied."
         );
         assert!(note(&mut app, plain).is_none());
     }

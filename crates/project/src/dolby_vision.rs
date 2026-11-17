@@ -1,5 +1,5 @@
 //! What a movie's Dolby Vision configuration says, as the footage information shows it, and
-//! whether its video can be decoded.
+//! whether the importer could decode its video.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,13 +7,15 @@ use crate::Footage;
 
 /// The codec the importer names a video stream it reads no codec in (craft-media's
 /// `CodecConfig::Unknown`, as FilmCraft, which decodes movies, labels it): none of its decoders
-/// takes it, so the footage shows no picture.
+/// takes it, so in the build that probed it the footage had no picture.
 pub const UNREAD_CODEC: &str = "unknown";
 
 impl Footage {
-    /// The importer read no codec in the footage's video ([`UNREAD_CODEC`]), so this build can't
-    /// decode it. Import warnings and the footage information go by this one answer, so they
-    /// change together once the decoder reads the stream.
+    /// The importer read no codec in the footage's video ([`UNREAD_CODEC`]) when it was imported
+    /// or last reloaded, so the build that probed it couldn't decode it. The stored codec changes
+    /// only when the file is probed again (Reload Footage, Replace Footage), not when a project
+    /// opens. Import warnings and the footage information go by this one answer, so they change
+    /// together once a probe reads the stream.
     pub fn codec_unread(&self) -> bool {
         self.codec == UNREAD_CODEC
     }
@@ -85,10 +87,10 @@ mod tests {
         }
     }
 
-    /// Only the codec name the importer gives a stream it read no codec in says the video can't be
-    /// decoded; a named codec, or none at all (stills, data), doesn't.
+    /// Only the codec name the importer gives a stream it read no codec in says the importer
+    /// couldn't decode the video; a named codec, or none at all (stills, data), doesn't.
     #[test]
-    fn only_the_unread_codec_name_means_the_video_cannot_be_decoded() {
+    fn only_the_unread_codec_name_means_the_importer_could_not_decode_the_video() {
         let with = |codec: &str| Footage { codec: codec.into(), ..Footage::default() };
         assert!(with(UNREAD_CODEC).codec_unread());
         for codec in ["HEVC", "H.264 (High)", "", "Unknown", "unknown video"] {
