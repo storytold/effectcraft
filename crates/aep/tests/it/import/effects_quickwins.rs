@@ -177,3 +177,19 @@ fn color_stabilizer_points_sample_size_and_stabilize() {
     assert_eq!(v(&g, "stabilize"), Value::Enum(2), "Curves");
     near(&g, "sampleSize", 25.0);
 }
+
+/// An integer slider stored with a fraction (set through scripting) arrives as the whole number
+/// After Effects uses: Echo's Number Of Echoes stored as 1.75 reads back as 2 in After Effects
+/// 26.5, statically and in keys.
+#[test]
+fn integer_slider_fractions_arrive_as_whole_numbers() {
+    let (g, r) = run(&echo(vec![(2, 1.75)]), "ec.time.echo");
+    assert_eq!(losses(&r, LossCategory::Effects, "ADBE Echo"), Vec::<String>::new());
+    assert_eq!(v(&g.expect("imported"), "numberOfEchoes"), Value::Scalar(2.0));
+    let mut fx = echo(vec![]);
+    fx.keys = vec![(2, vec![(0, 3.25), (1000, 7.75)])];
+    let (g, _) = run(&fx, "ec.time.echo");
+    let g = g.expect("imported");
+    let keys: Vec<Value> = g.prop("numberOfEchoes").expect("numberOfEchoes").keys.iter().map(|k| k.value.clone()).collect();
+    assert_eq!(keys, [Value::Scalar(3.0), Value::Scalar(8.0)]);
+}
