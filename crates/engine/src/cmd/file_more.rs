@@ -61,8 +61,8 @@ fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
 
 /// The items `file.interpretFootage` changes for parameters `p` (with `proxy`, the items whose
 /// proxy `file.interpretProxy` changes): `items`/`item`, else the selection, keeping only
-/// footage (items with a proxy). The Interpret Footage dialog shows the first one, so OK
-/// writes its settings back to the footage they came from.
+/// footage (items with a proxy), as the commands skip the rest. The Interpret Footage dialog
+/// shows the first one, so OK writes its settings back to the footage they came from.
 pub fn interpretation_targets(s: &Session, p: &Value, proxy: bool) -> Vec<ItemId> {
     if proxy {
         return super::proxy::proxied(s, p);
@@ -1020,7 +1020,7 @@ pub(crate) fn guess_alpha(s: &Session, item: ItemId, f: &Footage) -> Option<(Alp
 }
 
 fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
-    let items = interpretation_targets(s, p, false);
+    let items = items_p(s, p);
     if items.is_empty() {
         return Err(bad("file.interpretFootage", "select footage"));
     }

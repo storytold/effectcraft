@@ -1342,7 +1342,8 @@ mod tests {
 
     /// Interpret Footage named at an item it can't change (missing, not footage, or for Proxy
     /// without a proxy) doesn't open on the selected footage: as with nothing selected, the
-    /// command runs and reports that there is nothing to interpret, and nothing changes.
+    /// command runs with the parameters given, and nothing changes. Main skips what isn't
+    /// footage and succeeds; Proxy reports that nothing named has a proxy.
     #[test]
     fn interpret_footage_named_at_no_footage_opens_no_dialog() {
         for command in ["file.interpretFootage", "file.interpretProxy"] {
@@ -1351,20 +1352,27 @@ mod tests {
             let ctx = egui::Context::default();
             app.session.execute("comp.new", json!({"name": "Comp", "width": 4, "height": 4, "frameRate": 24, "duration": 1})).unwrap();
             let comp = app.session.active_comp_id().unwrap();
+            app.session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+            let solid = app.session.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).unwrap().id;
             // Footage without a proxy.
             let kind = app.session.project.item(a).unwrap().kind.clone();
             let plain = std::sync::Arc::make_mut(&mut app.session.project).add_item("plain.mov", Default::default(), None, kind);
             app.session.state.project_selection = vec![a];
-            let mut invalid = vec![json!({"item": 999}), json!({"items": [999]}), json!({"item": comp.0})];
+            let mut invalid = vec![json!({"item": 999}), json!({"items": [999]}), json!({"item": comp.0}), json!({"item": solid.0})];
             if proxy {
                 invalid.push(json!({"item": plain.0}));
             }
             let before = app.session.project.clone();
             for params in invalid {
-                let e = crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap_err();
+                let r = crate::menus::invoke(&mut app, &ctx, command, params.clone());
                 assert!(app.dialog.is_none(), "{command}: {params}");
-                assert!(e.contains(if proxy { "no proxy" } else { "select footage" }), "{command}: {params}: {e}");
-                assert_eq!(app.ui.status, e, "the status line says why");
+                if proxy {
+                    let e = r.unwrap_err();
+                    assert!(e.contains("no proxy"), "{command}: {params}: {e}");
+                    assert_eq!(app.ui.status, e, "the status line says why");
+                } else {
+                    assert_eq!(r, Ok(json!({"items": []})), "{command}: {params}");
+                }
             }
             assert_eq!(*app.session.project, *before);
         }

@@ -319,7 +319,8 @@ fn interpret_proxy_settings_apply_to_the_proxy() {
 /// What both Interpret Footage commands change, and what their dialog shows first: `items` in
 /// order, else `item`, else the Project selection (for Main, the selected layers' footage when no
 /// footage is selected), keeping footage only, or for Proxy only items with a proxy. A missing or
-/// other item is no target, so the command reports that there is nothing to interpret.
+/// other item is no target: Main skips it and changes nothing, Proxy reports that nothing named
+/// has a proxy.
 #[test]
 fn interpretation_targets_follow_the_parameters_then_the_selection() {
     let mut s = session();
@@ -358,19 +359,24 @@ fn interpretation_targets_follow_the_parameters_then_the_selection() {
     assert_eq!(t(&s, json!({}), false), [c]);
     s.state.project_selection = vec![comp];
     assert_eq!(t(&s, json!({}), false), [c], "a selected composition is no footage");
-    // The commands change nothing when nothing is a target.
+    // Nothing named is a target: Main succeeds and changes nothing (scripts set a solid's
+    // mainSource.conformFrameRate through it), Proxy refuses. Named with footage, only the
+    // footage changes.
+    s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    let solid = s.project.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_))).unwrap().id;
     let before = s.project.clone();
-    for (command, params) in [
-        ("file.interpretFootage", json!({"item": 999, "loop": 2})),
-        ("file.interpretFootage", json!({"item": comp.0, "loop": 2})),
-        ("file.interpretProxy", json!({"item": 999, "loop": 2})),
-        ("file.interpretProxy", json!({"item": a.0, "loop": 2})),
-    ] {
-        let e = s.execute(command, params.clone()).unwrap_err().to_string();
-        let usual = if command == "file.interpretProxy" { "no proxy" } else { "select footage" };
-        assert!(e.contains(usual), "{command} {params}: {e}");
+    for params in [json!({"item": 999, "loop": 2}), json!({"item": comp.0, "loop": 2}), json!({"items": [solid.0, 999], "loop": 2})] {
+        assert_eq!(s.execute("file.interpretFootage", params.clone()).unwrap(), json!({"items": []}), "{params}");
+    }
+    for params in [json!({"item": 999, "loop": 2}), json!({"item": a.0, "loop": 2}), json!({"item": solid.0, "loop": 2})] {
+        let e = s.execute("file.interpretProxy", params.clone()).unwrap_err().to_string();
+        assert!(e.contains("no proxy"), "{params}: {e}");
     }
     assert_eq!(*s.project, *before);
+    let r = s.execute("file.interpretFootage", json!({"items": [solid.0, b.0], "loop": 2})).unwrap();
+    assert_eq!(r["items"].as_array().map(|a| a.iter().map(|i| i["item"].clone()).collect::<Vec<_>>()), Some(vec![json!(b.0)]), "{r}");
+    let ItemKind::Footage(f) = &s.project.item(b).unwrap().kind else { panic!("not footage") };
+    assert_eq!(f.loop_count, 2);
 }
 
 /// Use Proxy switches only the targets that have a proxy, and the first of those decides which
