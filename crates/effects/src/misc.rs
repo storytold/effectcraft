@@ -794,7 +794,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             radial,
         ),
-        spec("ec.blur.sharpen", "Sharpen", "Blur & Sharpen", vec![p("amount", "Sharpen Amount", num(0.0), slider(0.0, 500.0, 0.0, 100.0, 0))], sharpen),
+        spec("ec.blur.sharpen", "Sharpen", "Blur & Sharpen", vec![p("amount", "Sharpen Amount", num(0.0), slider(0.0, 4000.0, 0.0, 100.0, 0))], sharpen),
         spec(
             "ec.blur.unsharp",
             "Unsharp Mask",
@@ -1034,6 +1034,19 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3466: Sharpen Amount takes After Effects' valid range, 0..4000, and keeps its 0..100
+    /// slider. `prop.set` and the value editors clamp to the hard range.
+    #[test]
+    fn sharpen_amount_takes_the_after_effects_range() {
+        let spec = crate::find("ec.blur.sharpen").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "amount").unwrap().ui;
+        assert!(
+            matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. }
+                if *min == 0.0 && *max == 4000.0 && *slider_min == 0.0 && *slider_max == 100.0),
+            "{ui:?}"
+        );
     }
 
     #[test]
