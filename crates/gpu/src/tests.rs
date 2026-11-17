@@ -761,9 +761,9 @@ fn box_blur_horizontal_rows_match_cpu_beyond_256() {
 }
 
 /// #3464: Drop Shadow's Softness reaches 30000. While the padded buffer holds the blur the GPU
-/// runs it (1000, the old maximum, on a 70 × 44 layer); once the pixel budget cuts the padding
-/// the CPU blurs past the buffer's edge, so the GPU hands the effect over and the render still
-/// matches, with and without Shadow Only.
+/// runs it and matches the CPU (1000, the old maximum, on a 70 × 44 layer). Once the pixel
+/// budget cuts the padding only the CPU blurs past the buffer's edge, so the GPU declines the
+/// effect; the render then takes it on the CPU at 8 and 32 bpc, with and without Shadow Only.
 #[test]
 fn drop_shadow_large_softness_matches_cpu() {
     effect_case("ec.perspective.dropshadow", &[("distance", n(6.0)), ("softness", n(1000.0)), ("opacity", n(100.0))]);

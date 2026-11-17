@@ -1058,10 +1058,21 @@ mod tests {
         assert_eq!(*ui, slider(0.0, 30000.0, 0.0, 250.0, 1));
     }
 
+    /// #3464: a Softness far past the range (an expression can set one) used to overflow the
+    /// padding's `u32` (a panic in debug builds). It renders, finite.
+    #[test]
+    fn drop_shadow_takes_a_huge_softness() {
+        for softness in [1e12, f64::INFINITY] {
+            let layer = effectcraft_raster::Image::filled(8, 8, [1.0, 1.0, 1.0, 1.0]);
+            let out = run_fx("ec.perspective.dropshadow", &[("softness", num(softness))], layer, 0.0, EffectEnv::default());
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "softness {softness}");
+        }
+    }
+
     /// #3464: past the padding budget (#2261) the shadow keeps its whole blur (σ = Softness / 2)
     /// up to the buffer's edge. A 64 × 48 layer's shadow at its centre is the Gaussian's share
     /// of the layer, less the 6 % three boxes' peak is under a Gaussian's; dropping what the
-    /// boxes spread past the buffer left it at 0.2 of that at 8000 and 0.001 at 30000.
+    /// boxes spread past the buffer left it at 0.11 of that at 8000.
     #[test]
     fn drop_shadow_keeps_its_blur_past_the_padding_budget() {
         let (w, h) = (64u32, 48u32);
