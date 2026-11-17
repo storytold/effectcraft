@@ -955,10 +955,12 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("bottomRight", "Bottom Right", pt(1.0, 1.0), ParamUi::Point),
                 p("perspective", "Perspective", num(100.0), pct()),
                 p("unstretch", "Unstretch", Value::Bool(false), ParamUi::Checkbox),
-                p("expandTop", "Top", num(0.0), slider(-100.0, 1000.0, 0.0, 100.0, 1)),
-                p("expandLeft", "Left", num(0.0), slider(-100.0, 1000.0, 0.0, 100.0, 1)),
-                p("expandRight", "Right", num(0.0), slider(-100.0, 1000.0, 0.0, 100.0, 1)),
-                p("expandBottom", "Bottom", num(0.0), slider(-100.0, 1000.0, 0.0, 100.0, 1)),
+                // Expansion: percent of the layer size each source edge moves out (After Effects'
+                // valid range is -200..200; the maximum stays at 1000 so existing values are kept).
+                p("expandTop", "Top", num(0.0), slider(-200.0, 1000.0, 0.0, 100.0, 1)),
+                p("expandLeft", "Left", num(0.0), slider(-200.0, 1000.0, 0.0, 100.0, 1)),
+                p("expandRight", "Right", num(0.0), slider(-200.0, 1000.0, 0.0, 100.0, 1)),
+                p("expandBottom", "Bottom", num(0.0), slider(-200.0, 1000.0, 0.0, 100.0, 1)),
             ],
             cc_power_pin,
         ),
