@@ -182,6 +182,111 @@ pub fn gaussian_blur(img: &Image, sigma_x: f64, sigma_y: f64, repeat: bool) -> I
     box_passes(img, &rx, &ry, repeat)
 }
 
+/// [`gaussian_blur`] with transparent edges, as if the image went on with transparency on
+/// every side: what a box pass spreads past the edge still feeds the passes after it, where
+/// [`gaussian_blur`] drops it. For blurs that reach past the buffer holding them (an effect's
+/// padding cut to its pixel budget), which [`gaussian_blur`] leaves far too faint once the
+/// boxes are wider than the buffer. A line costs O(length) whatever the sigma.
+pub fn gaussian_blur_unbounded(img: &Image, sigma_x: f64, sigma_y: f64) -> Image {
+    let (w, h) = (img.width as usize, img.height as usize);
+    let mut out = img.clone();
+    if w == 0 || h == 0 {
+        return out;
+    }
+    if let Some(r) = unbounded_radii(sigma_x) {
+        out.data.par_chunks_mut(w).for_each(|row| boxes_unbounded(row, r));
+    }
+    if let Some(r) = unbounded_radii(sigma_y) {
+        let cols: Vec<Vec<Px>> = (0..w)
+            .into_par_iter()
+            .map(|x| {
+                let mut col: Vec<Px> = out.data.iter().skip(x).step_by(w).copied().collect();
+                boxes_unbounded(&mut col, r);
+                col
+            })
+            .collect();
+        out.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (o, col) in row.iter_mut().zip(&cols) {
+                if let Some(v) = col.get(y) {
+                    *o = *v;
+                }
+            }
+        });
+    }
+    out
+}
+
+/// [`gaussian_blur`]'s three box radii for `sigma`, or `None` where it doesn't blur (and for
+/// a sigma that isn't finite).
+fn unbounded_radii(sigma: f64) -> Option<[i64; 3]> {
+    if !(sigma > 0.05 && sigma.is_finite()) {
+        return None;
+    }
+    match box_radii(sigma, 3).as_slice() {
+        &[a, b, c] => Some([a, b, c].map(|r| i64::try_from(r).unwrap_or(i64::MAX / 8))),
+        _ => None,
+    }
+}
+
+/// Three transparent-edged box passes of radii `r` over `line`, as if it went on with zeros.
+///
+/// One box is a difference of prefix sums, `(S(x + r) − S(x − r − 1)) / (2r + 1)`, so three are
+/// eight signed terms of the third prefix sum `S3`. Past the line's ends the prefix sums are
+/// polynomials: `S3(m) = 0` before it, and after it, `j = m − n + 1` steps on,
+/// `S3(m) = S3(n − 1) + j·S2(n − 1) + T·j(j + 1)/2` with `T` the line's total. The sums are
+/// `f64`: the eight terms cancel to a value `(2r + 1)³` times smaller.
+fn boxes_unbounded(line: &mut [Px], r: [i64; 3]) {
+    let n = line.len();
+    let Ok(n_i) = i64::try_from(n) else { return };
+    if n == 0 {
+        return;
+    }
+    let mut s3 = Vec::with_capacity(n);
+    let (mut s1, mut s2, mut acc) = ([0.0f64; 4], [0.0f64; 4], [0.0f64; 4]);
+    for p in line.iter() {
+        for c in 0..4 {
+            s1[c] += f64::from(p[c]);
+            s2[c] += s1[c];
+            acc[c] += s2[c];
+        }
+        s3.push(acc);
+    }
+    let (total, s2_end, s3_end) = (s1, s2, acc);
+    let at = |m: i64| -> [f64; 4] {
+        if m < 0 {
+            return [0.0; 4];
+        }
+        if let Some(v) = usize::try_from(m).ok().and_then(|i| s3.get(i)) {
+            return *v;
+        }
+        let j = (m - n_i + 1) as f64;
+        std::array::from_fn(|c| s3_end[c] + j * s2_end[c] + total[c] * j * (j + 1.0) / 2.0)
+    };
+    // The eight shifts and signs: each box adds `S(x + r)` and subtracts `S(x − r − 1)`.
+    let mut terms = [(0i64, 1.0f64); 8];
+    for (k, t) in terms.iter_mut().enumerate() {
+        for (b, &ri) in r.iter().enumerate() {
+            if k >> b & 1 == 0 {
+                t.0 = t.0.saturating_add(ri);
+            } else {
+                t.0 = t.0.saturating_sub(ri.saturating_add(1));
+                t.1 = -t.1;
+            }
+        }
+    }
+    let norm: f64 = r.iter().map(|&ri| (2 * ri + 1) as f64).product();
+    for (x, o) in (0i64..).zip(line.iter_mut()) {
+        let mut v = [0.0f64; 4];
+        for &(shift, sign) in &terms {
+            let s = at(x.saturating_add(shift));
+            for c in 0..4 {
+                v[c] += sign * s[c];
+            }
+        }
+        *o = v.map(|v| (v / norm) as f32);
+    }
+}
+
 /// Below this sigma (pixels) three integer-radius box passes are too coarse (sigma under ~0.6 is
 /// a no-op and the result steps between a few shapes), so [`gaussian_blur_exact`] is used instead.
 const EXACT_SIGMA_BELOW: f64 = 3.0;
@@ -519,5 +624,48 @@ mod tests {
         let r = box_radii(10.0, 3);
         assert_eq!(r.len(), 3);
         assert!(r.iter().all(|&v| (7..=10).contains(&v)), "{r:?}");
+    }
+
+    /// #3464: [`gaussian_blur_unbounded`] is [`gaussian_blur`] on the image padded with enough
+    /// transparency to hold every pass, cropped back: what a pass spreads past the edge comes
+    /// back in the passes after it. Sigmas far wider than the image too, along each axis.
+    #[test]
+    fn unbounded_gaussian_matches_a_buffer_padded_past_its_reach() {
+        let pattern = |w: u32, h: u32| {
+            let mut img = Image::new(w, h);
+            for (i, p) in img.data.iter_mut().enumerate() {
+                let v = ((i * 7919) % 101) as f32 / 101.0;
+                *p = [v, v * 0.5, 1.0 - v, (v + 0.3).min(1.0)];
+            }
+            img
+        };
+        let cases = [
+            (pattern(23, 17), 4.0f64, 0.0f64, 1e-4),
+            (pattern(23, 17), 0.0, 6.0, 1e-4),
+            (pattern(23, 17), 7.5, 3.2, 1e-4),
+            (pattern(23, 17), 60.0, 45.0, 1e-4),
+            // The reference's f32 running sums drift over its 90 000-pixel line (by 1.5e-4 of
+            // the value against an f64 evaluation, which this matches to 1e-9).
+            (pattern(40, 1), 15000.0, 0.0, 1e-3),
+            (pattern(1, 40), 0.0, 15000.0, 1e-3),
+        ];
+        for (img, sx, sy, tol) in cases {
+            // Three boxes of radius about σ each reach at most 3σ + 2. Padded by hand, along
+            // the blurred axes only (`Image::padded` pads both and caps a side at 30000).
+            let reach = |s: f64| if s > 0.0 { (s * 3.0 + 4.0).ceil() as u32 } else { 0 };
+            let (px, py) = (reach(sx), reach(sy));
+            let mut big = Image::new(img.width + 2 * px, img.height + 2 * py);
+            for y in 0..img.height {
+                for x in 0..img.width {
+                    big.set(x + px, y + py, img.get(x as i64, y as i64));
+                }
+            }
+            let want = gaussian_blur(&big, sx, sy, false).crop(px as i64, py as i64, img.width, img.height);
+            let got = gaussian_blur_unbounded(&img, sx, sy);
+            let peak = want.data.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
+            for (a, b) in got.data.iter().flatten().zip(want.data.iter().flatten()) {
+                assert!((a - b).abs() <= tol * peak.max(1e-6), "σ ({sx}, {sy}) on {}×{}: {a} vs {b} (peak {peak})", img.width, img.height);
+            }
+        }
     }
 }
