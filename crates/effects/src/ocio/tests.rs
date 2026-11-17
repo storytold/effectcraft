@@ -547,3 +547,37 @@ fn an_ocio_transform_file_is_read_again_once_it_changes() {
     assert!(Arc::ptr_eq(&inline, &load_file(BLACK).unwrap()));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_3dl_with_a_hostile_mesh_is_refused_without_overflow() {
+    // #3830: 2 642 246³ is past usize::MAX, so cubing the mesh length overflowed.
+    let huge = "0 ".repeat(2_642_246) + "\n0 0 0\n";
+    assert!(parse_file(&huge, "3dl").is_none());
+    // A mesh longer than any lattice the readers accept, and a mesh whose rows run out.
+    let long = (0..130).map(|i| i.to_string()).collect::<Vec<_>>().join(" ") + "\n0 0 0\n";
+    assert!(parse_file(&long, "3dl").is_none());
+    let short = (0..17).map(|i| (i * 64).to_string()).collect::<Vec<_>>().join(" ") + "\n0 0 0\n1 1 1\n";
+    assert!(parse_file(&short, "3dl").is_none());
+    // A normal small table still loads.
+    let mut ok = String::from("0 511 1023\n");
+    for k in 0..27 {
+        ok += &format!("{} {} {}\n", k * 30, k * 30, k * 30);
+    }
+    assert!(matches!(parse_file(&ok, "3dl"), Some(FileXform::Lut { lut, .. }) if lut.n3 == 3 && lut.d3.len() == 27));
+}
+
+#[test]
+fn a_spi3d_without_its_rows_is_refused_before_the_lattice_is_reserved() {
+    // #3831: a header-only 129³ claim must not reach the reader that reserves the whole lattice.
+    let empty = "SPILUT 1.0\n3 3\n129 129 129\n";
+    assert!(!lut::spi3d_rows_present(empty));
+    assert!(!lut::spi3d_rows_present("SPILUT 1.0\n3 3\n2 2 2\n0 0 0 1 1 1\n"));
+    assert!(!lut::spi3d_rows_present("SPILUT 1.0\n3 3\n99999999999 2 2\n"));
+    assert!(parse_spi3d(empty).is_none());
+    let mut ok = String::from("SPILUT 1.0\n3 3\n2 2 2\n");
+    for i in 0..8 {
+        ok += &format!("{} {} {} 0 0 0\n", i & 1, (i >> 1) & 1, i >> 2);
+    }
+    assert!(lut::spi3d_rows_present(&ok));
+    assert!(parse_spi3d(&ok).is_some_and(|l| l.n3 == 2 && l.d3.len() == 8));
+}
