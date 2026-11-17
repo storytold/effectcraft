@@ -505,11 +505,17 @@ pub fn export_comp(project: &Project, comp: ItemId, opts: &ExportOptions, read: 
 
 /// Package an export as a dotLottie archive (`manifest.json` + `animations/<id>.json`).
 pub fn to_dotlottie(res: &ExportResult, id: &str) -> Vec<u8> {
+    try_to_dotlottie(res, id).unwrap_or_default()
+}
+
+/// Package an export, reporting serialization or ZIP failures before any output is written.
+pub fn try_to_dotlottie(res: &ExportResult, id: &str) -> Result<Vec<u8>, LottieError> {
     let id: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
     let id = if id.is_empty() { "animation".to_string() } else { id };
     let manifest = json!({"version": "1", "generator": "EffectCraft", "author": "", "animations": [{"id": id, "speed": 1, "loop": true}]});
-    crate::zip::store(&[
-        ("manifest.json".into(), serde_json::to_vec(&manifest).unwrap_or_default()),
-        (format!("animations/{id}.json"), serde_json::to_vec(&res.json).unwrap_or_default()),
+    crate::zip::try_store(&[
+        ("manifest.json".into(), serde_json::to_vec(&manifest).map_err(|e| LottieError::Invalid(e.to_string()))?),
+        (format!("animations/{id}.json"), serde_json::to_vec(&res.json).map_err(|e| LottieError::Invalid(e.to_string()))?),
     ])
+    .map_err(|e| LottieError::Invalid(format!("dotLottie ZIP: {e}")))
 }
