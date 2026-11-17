@@ -3152,6 +3152,7 @@ fn gpu_renders_in_flight_stay_within_the_cap() {
 #[test]
 fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
     use effectcraft_engine::render::{Accelerator, Backend};
+    crate::hold_gpu_lock();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("GPU worker route test skipped: no adapter");
         return;

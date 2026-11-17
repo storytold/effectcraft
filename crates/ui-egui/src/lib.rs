@@ -577,5 +577,27 @@ pub(crate) fn note_viewer_scale(app: &mut EffectcraftApp, scale: f64) {
     app.last_viewer_scale = Some(scale);
 }
 
+/// One GPU test at a time in this process, as `effectcraft-gpu`'s tests do: the calling test
+/// thread holds a process-wide lock until it exits (libtest runs every test on a thread of its
+/// own). Tests that each open their own Vulkan instance and device at once crash inside the
+/// Vulkan loader now and then (SIGSEGV, NVIDIA on Linux). Every test that opens a device calls
+/// this first, a kittest harness that renders or snapshots included; calling it again on the
+/// same thread is a no-op.
+#[cfg(test)]
+pub(crate) fn hold_gpu_lock() {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+    static GPU_LOCK: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+    HELD.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.is_none() {
+            *h = Some(GPU_LOCK.lock().unwrap_or_else(PoisonError::into_inner));
+        }
+    });
+}
+
 #[cfg(test)]
 mod lifecycle_tests;
