@@ -297,7 +297,15 @@ fn boxes_unbounded(line: &[Px], r: &[i64], shift: i64, out: &mut [Px]) {
         })
         .collect();
     let norm: f64 = r.iter().map(|&ri| 2.0 * ri as f64 + 1.0).product();
+    // The boxes read the line within `reach` of `x − shift`. Outside that the result is 0, and
+    // the polynomials far past the line would only cancel to their rounding error.
+    let reach = r.iter().fold(0i64, |s, &ri| s.saturating_add(ri));
     for (x, o) in (0i64..).zip(out.iter_mut()) {
+        let c = x.saturating_sub(shift);
+        if c.saturating_add(reach) < 0 || c.saturating_sub(reach) >= n_i {
+            *o = [0.0; 4];
+            continue;
+        }
         let mut v = [0.0f64; 4];
         for &(offset, sign) in &terms {
             let s = at(x.saturating_add(offset));
@@ -676,6 +684,19 @@ mod tests {
                 assert!((a - b).abs() <= 1e-5, "σ ({sx}, {sy}) {shift:?}: {a} vs {b}");
             }
         }
+    }
+
+    /// #3464: a window the blur doesn't reach stays exactly transparent, however far the move
+    /// (far past the line, the cancelling polynomials left a rounding residue of about 5).
+    #[test]
+    fn unbounded_gaussian_at_a_far_shift_is_exactly_transparent() {
+        let img = Image::filled(1, 1, [1.0, 1.0, 1.0, 1.0]);
+        for shift in [[-1_000_000_030i64, 0i64], [0, 1_000_000_030], [i64::MIN, i64::MAX]] {
+            let out = gaussian_blur_unbounded_at(&img, 1.5, 1.5, shift, 4, 3);
+            assert!(out.data.iter().flatten().all(|v| *v == 0.0), "{shift:?}");
+        }
+        // Next to the window the tail still reaches in.
+        assert!(gaussian_blur_unbounded_at(&img, 1.5, 1.5, [-1, 0], 4, 3).get(0, 0)[3] > 0.0);
     }
 
     /// #3464: a sigma past any buffer, or infinite, blurs as the widest one does: finite, no
