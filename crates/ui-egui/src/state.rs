@@ -277,6 +277,25 @@ pub struct ViewerState {
     /// View ▸ Panel Background Color (`None` = theme default).
     pub pasteboard: Option<[u8; 3]>,
     pub custom_pasteboard: [u8; 3],
+    /// The picture's magnification and pan of each layout position of a 2- or 4-view layout
+    /// while another position is active; the active one's are `zoom` and `pan`.
+    pub pane_frames: [PaneFrame; 4],
+    /// The comp id and layout position whose framing `zoom` and `pan` hold.
+    #[serde(skip)]
+    pub(crate) framed: Option<(u64, usize)>,
+    /// The comp id and layout position the frame on screen was shown for (a pane that became
+    /// active shows its own frame only once that has come).
+    #[serde(skip)]
+    pub(crate) shown_for: Option<(u64, usize)>,
+}
+
+/// One layout position's picture framing: magnification (None = fit) and pan, as in
+/// [`ViewerState`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PaneFrame {
+    pub zoom: Option<f32>,
+    pub pan: [f32; 2],
 }
 
 impl Default for ViewerState {
@@ -305,6 +324,9 @@ impl Default for ViewerState {
             extended: None,
             pasteboard: None,
             custom_pasteboard: [0x80, 0x80, 0x80],
+            pane_frames: Default::default(),
+            framed: None,
+            shown_for: None,
         }
     }
 }

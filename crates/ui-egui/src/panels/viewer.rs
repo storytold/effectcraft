@@ -118,6 +118,21 @@ pub(crate) fn grabs_at(ctx: &egui::Context, pos: Pos2) -> bool {
     })
 }
 
+/// The viewer's `zoom` and `pan` are the active pane's: after a pane of the active comp became
+/// active since the viewer's last pass (`view.activatePane`), its own framing comes out now, so a
+/// control request that reads or sets them acts on that pane.
+pub(crate) fn sync_framing(app: &mut EffectcraftApp) {
+    if let Some(cid) = app.session.active_comp_id() {
+        multiview::sync_framing(app, cid);
+    }
+}
+
+/// See [`multiview::stand_in`]: the picture that stands in for the frame on screen of another
+/// layout position, right after a pane became active.
+pub(crate) fn stand_in(app: &EffectcraftApp, ctx: &egui::Context, cid: effectcraft_engine::project::ItemId) -> Option<Option<egui::TextureId>> {
+    multiview::stand_in(app, ctx, cid)
+}
+
 pub fn comp_to_screen(ctx: &egui::Context, p: [f32; 2]) -> Option<Pos2> {
     let m: ViewerMap = ctx.data(|d| d.get_temp(map_id()))?;
     Some(m.to_screen([p[0] as f64, p[1] as f64]))
@@ -202,6 +217,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         empty_state(app, ui, rect);
         return;
     };
+    // A press in an inactive pane of the view layout activates it first: this pass then runs in
+    // that pane, through its view and with its framing, and takes the same press.
+    multiview::pre_activate(app, ui, cid, rect);
+    multiview::sync_framing(app, cid);
     let comp = app.session.project.comp_arc(cid).unwrap_or_else(|| effectcraft_engine::project::Comp::new(1920, 1080, Default::default(), Tick::ZERO).into());
     let comp_name = app.session.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
     let p = ui.painter().clone();
@@ -281,6 +300,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         phase_dblclick(app, &ectx, &resp, &mut v);
     }
     phase_tail(app, ui, &ectx, &mut v);
+    multiview::active_border(app, &ctx, &v.p, cid);
 }
 
 fn phase_nav(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut Vw<'_>) {
@@ -337,8 +357,8 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let err_bar = Rect::from_min_max(pos2(rect.min.x, bar.min.y - err_h), pos2(rect.max.x, bar.min.y));
     let full = Rect::from_min_max(pos2(rect.min.x, nav.max.y), pos2(rect.max.x, err_bar.min.y));
     let pasteboard = app.ui.viewer.pasteboard.map(|[r, g, b]| Color32::from_rgb(r, g, b)).unwrap_or(t.pasteboard);
-    // View ▸ Switch View Layout: extra views (Top / Front / Right) beside the main view, which
-    // keeps the overlays and the interaction.
+    // View ▸ Switch View Layout: the viewer runs in the active pane, with the overlays and the
+    // interaction; the other panes are drawn beside it.
     let full = locked_pane(app, ui, full, pasteboard);
     let area = aux_views(app, ui, comp, cid, full, pasteboard);
     p.rect_filled(area, 0.0, pasteboard);
@@ -347,17 +367,11 @@ fn phase_layout(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, v: &mut
     let area = vt::inset(app, area);
 
     let (cw, ch) = (comp.width as f32, comp.height as f32);
-    let fit = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).max(0.01);
-    // Fit up to 100% follows the panel's size like Fit does, and stops at 100%.
-    let fit = if app.ui.viewer.fit_up_to_100 { fit.min(1.0 / ctx.pixels_per_point()) } else { fit };
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("viewer-fit"), fit));
-    let zoom = app.ui.viewer.zoom.unwrap_or(fit);
-    let center = area.center() + vec2(app.ui.viewer.pan[0], app.ui.viewer.pan[1]);
-    // On the physical pixel grid, so at 100 % every comp pixel covers exactly one screen pixel
-    // instead of being blended with its neighbour (#882).
     let ppp = ctx.pixels_per_point();
-    let origin = snap_to_pixels(center - vec2(cw * zoom / 2.0, ch * zoom / 2.0), ppp);
-    let map = ViewerMap { origin, zoom, comp: [cw, ch], area };
+    let frame = crate::state::PaneFrame { zoom: app.ui.viewer.zoom, pan: app.ui.viewer.pan };
+    let (map, fit) = multiview::fit_map(area, [cw, ch], frame, app.ui.viewer.fit_up_to_100, ppp);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("viewer-fit"), fit));
+    let (origin, zoom) = (map.origin, map.zoom);
     ctx.data_mut(|d| d.insert_temp(map_id(), map));
     let comp_rect = Rect::from_min_size(origin, vec2(cw * zoom, ch * zoom));
     let painter = p.with_clip_rect(area);
@@ -413,6 +427,9 @@ fn phase_frame(app: &mut EffectcraftApp, v: &mut Vw<'_>) {
             // The same frame at a later revision (an edit elsewhere, an undo): it shows that one.
             s.revision = k.revision;
         }
+        // The frame on screen is the active pane's, also when that pane became active on the
+        // frame already there (two panes on the same view and magnification).
+        app.ui.viewer.shown_for = Some((cid.0, multiview::active_pos(app, cid)));
     }
     if app.ui.viewer.transparency_grid {
         checker(&painter, comp_rect);
@@ -525,9 +542,6 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
 
 fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &mut Vw<'_>) {
     let t = v.t;
-    let zoom = v.zoom;
-    let cw = v.cw;
-    let ch = v.ch;
     let map = v.map;
     let time = v.time;
     let ctx = v.ctx.clone();
@@ -651,35 +665,14 @@ fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: 
                 painter.line_segment([s - vec2(9.0, 0.0), s + vec2(9.0, 0.0)], Stroke::new(1.0, Color32::WHITE));
                 painter.line_segment([s - vec2(0.0, 9.0), s + vec2(0.0, 9.0)], Stroke::new(1.0, Color32::WHITE));
                 app.auto.add(&format!("viewer.anchor.{}", l.id.0), Rect::from_center_size(s, vec2(12.0, 12.0)), "anchor point");
-                // 3D axis gizmo.
+                // 3D axis gizmo (the side panes of a view layout draw the same arrows).
                 if l.is_3d() {
-                    let w = ectx.world_matrix(l);
-                    let pc = cam_state(ectx).projection(cw as f64, ch as f64) * w;
-                    let a3 = effectcraft_engine::geom::vec3(a[0], a[1], a[2]);
-                    let len = 60.0 / zoom as f64;
-                    let pinv = parent_world_inverse(ectx, l);
-                    for (axis, col, name) in [
-                        (effectcraft_engine::geom::vec3(len, 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
-                        (effectcraft_engine::geom::vec3(0.0, len, 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
-                        (effectcraft_engine::geom::vec3(0.0, 0.0, len), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
-                    ] {
-                        // (clipped at the camera's near plane, #572)
-                        let Some([o, e]) = project_segment(&pc, a3, a3 + axis) else { continue };
-                        // An axis pointing at the camera (Z in the default front view) projects to
-                        // a dot: draw it as a short diagonal stub so it can still be grabbed.
-                        let mut s = [e[0] - o[0], e[1] - o[1]];
-                        if (s[0] * s[0] + s[1] * s[1]).sqrt() * (zoom as f64) < 12.0 {
-                            let k = 24.0 / zoom as f64;
-                            s = [k, -k];
-                        }
-                        let (so, se) = (map.to_screen(o), map.to_screen([o[0] + s[0], o[1] + s[1]]));
-                        painter.arrow(so, se - so, Stroke::new(2.0, col));
+                    for g in axis_arrows(ectx, l, a, &map) {
+                        painter.arrow(g.tail, g.tip - g.tail, Stroke::new(2.0, g.color));
                         if !l.switches.locked {
-                            let dir = pinv.apply_vec(w.apply_vec(axis));
-                            let (ax, ay) = axis_drag([dir.x, dir.y, dir.z], s);
                             // The inner part stays on the anchor point, which drags the layer freely.
-                            axis_hits.push((l.id, [so + (se - so) * 0.35, se], ax, ay));
-                            app.auto.add(&format!("viewer.gizmo.{}.{name}", l.id.0), Rect::from_center_size(se, vec2(12.0, 12.0)), "3D axis");
+                            axis_hits.push((l.id, [g.tail + (g.tip - g.tail) * 0.35, g.tip], g.drag.0, g.drag.1));
+                            app.auto.add(&format!("viewer.gizmo.{}.{}", l.id.0, g.name), Rect::from_center_size(g.tip, vec2(12.0, 12.0)), "3D axis");
                         }
                     }
                 }
@@ -884,7 +877,9 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     super::viewer_drop::show(app, ui, &painter, &map, ectx);
 
     // Interaction.
-    let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
+    // Each pane of the view layout has its own id: a press that activated this pane in this pass
+    // (`multiview::pre_activate`) was its sensor's, and is this interaction's now.
+    let resp = ui.interact(area, multiview::input_id(multiview::active_pos(app, cid)), Sense::click_and_drag());
     let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
     // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
     let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));
@@ -2109,6 +2104,7 @@ pub(crate) use crate::widgets::hex_rgb;
 mod frame;
 mod geometry;
 mod gesture;
+mod multiview;
 mod shapes;
 mod tools;
 mod view;
@@ -2116,18 +2112,18 @@ mod view;
 use frame::{empty_state, rect_of, show_frame};
 pub(crate) use frame::{extended_region, minify_factor, snap_to_pixels, styled_line, zoom_sampler, zoom_texture_options};
 use geometry::{
-    anchor_in_comp, cam_state, drag_axis, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, project_segment, quad_intersects_box, rotate_value,
-    rotation_sign, selected_others, snap_handle, turn_delta,
+    anchor_in_comp, cam_state, drag_axis, drag_ratio, handle_axes, handle_cursor, handle_point, one_axis, quad_intersects_box, rotate_value, rotation_sign,
+    selected_others, snap_handle, turn_delta,
 };
 #[cfg(test)]
-use geometry::{box_corners, project_clipped};
+use geometry::{box_corners, project_clipped, project_segment};
 pub(crate) use geometry::{from_effect_space, fx2c, l2c, layer_outline, layer_quad};
 use gesture::{Gesture, HANDLE, ROTO_HINT, pen_id, roi_drag, roi_handles, vertex_grab_radius};
 pub(crate) use shapes::{click_pick, layer_at, layer_at_including_locked, layer_hit, layers_at, pick, selectable_layers};
 use shapes::{create_shape, draw_shape_ghost, shape_drag};
+use tools::{add_motion_key, axis_arrows, axis_at, drag_axes, draw_rigs, pen_cursor, pen_cursor_icon, pen_press, select_motion_key};
 #[cfg(test)]
-use tools::constrain_45;
-use tools::{add_motion_key, axis_at, axis_drag, drag_axes, draw_rigs, parent_world_inverse, pen_cursor, pen_cursor_icon, pen_press, select_motion_key};
+use tools::{axis_drag, constrain_45};
 pub(crate) use view::checker;
 use view::{aux_views, locked_pane};
 

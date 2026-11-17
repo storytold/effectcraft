@@ -362,3 +362,79 @@ fn layout_panes_choose_their_view() {
     let old: Views3D = serde_json::from_value(json!({"current": "Front"})).unwrap();
     assert_eq!((old.current, old.pane(0), old.pane(1), old.pane(2)), (View3D::Front, View3D::Top, View3D::Front, View3D::Right));
 }
+
+fn views_of(s: &Session) -> effectcraft_render::three_d::Views3D {
+    s.state.views3d.get(&s.active_comp_id().unwrap()).cloned().unwrap_or_default()
+}
+
+/// #3845: a press in any pane of a 2- or 4-view layout makes it the active pane
+/// (`view.activatePane`); the View menu's 3D views then act on that pane, and every pane keeps
+/// its view. A pane the layout does not show cannot be activated; going to 2 views, where the
+/// top-right and bottom-left panes are gone, makes the right pane active.
+#[test]
+fn activate_pane_moves_current_and_menus_follow() {
+    let mut s = session();
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    let r = s.execute("view.activatePane", json!({"position": 0})).unwrap();
+    assert_eq!(r, json!({"position": 0, "view": "top"}));
+    assert_eq!(views_of(&s).current, View3D::Top);
+    s.execute("view.3d.left", json!({})).unwrap();
+    let vs = views_of(&s);
+    assert_eq!((vs.view_at(0), vs.view_at(3)), (View3D::Left, View3D::ActiveCamera));
+    let got = s.execute("view.get3D", json!({})).unwrap();
+    assert_eq!((got["view"].clone(), got["activePosition"].clone()), (json!("left"), json!(0)));
+    assert_eq!(got["positions"], json!(["left", "front", "right", "activeCamera"]));
+    s.execute("view.layout", json!({"views": 2})).unwrap();
+    assert_eq!(views_of(&s).active(), 0, "position 0 is shown in the 2-view layout");
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    s.execute("view.activatePane", json!({"position": 1})).unwrap();
+    s.execute("view.layout", json!({"views": 2})).unwrap();
+    assert_eq!(views_of(&s).active(), 3, "top-right is not shown in 2 views: the right pane takes over");
+    assert!(s.execute("view.activatePane", json!({"position": 2})).is_err(), "bottom-left is not shown in 2 views");
+    assert!(s.execute("view.activatePane", json!({"position": 4})).is_err());
+    assert!(s.execute("view.activatePane", json!({})).is_err());
+    s.execute("view.layout", json!({"views": 1})).unwrap();
+    assert!(s.execute("view.activatePane", json!({"position": 0})).is_err(), "one view shows the active pane only");
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    let vs = views_of(&s);
+    assert_eq!((vs.active(), vs.view_at(0), vs.view_at(1)), (3, View3D::Left, View3D::Front), "4 -> 2 -> 1 -> 4 keeps every position's view");
+}
+
+/// `view.setPaneView` names a pane by its layout `position` (0 to 3) or, numbered as before, by
+/// `pane` (0 = the active pane, 1 to 3 = positions 0 to 2), and echoes a `pane` it was given.
+/// Choosing the active position's view is a 3D view switch (`current`, with Switch to Last 3D
+/// View); another position is just stored.
+#[test]
+fn set_pane_view_by_position_or_pane() {
+    let mut s = session();
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    let r = s.execute("view.setPaneView", json!({"position": 2, "view": "bottom"})).unwrap();
+    assert_eq!((r["position"].clone(), r["activePosition"].clone()), (json!(2), json!(3)));
+    assert!(r.get("pane").is_none(), "no pane number when the pane was named by position: {r}");
+    assert_eq!(r["positions"], json!(["top", "front", "bottom", "activeCamera"]));
+    assert_eq!(r["views"], json!(["activeCamera", "top", "front", "bottom"]));
+    s.execute("view.activatePane", json!({"position": 2})).unwrap();
+    assert_eq!(views_of(&s).current, View3D::Bottom);
+    // `pane` 0 is the active pane, wherever it is; the answer echoes the number.
+    let r = s.execute("view.setPaneView", json!({"pane": 0, "view": "custom1"})).unwrap();
+    assert_eq!((r["position"].clone(), r["pane"].clone()), (json!(2), json!(0)));
+    let vs = views_of(&s);
+    assert_eq!((vs.current, vs.last, vs.view_at(2)), (View3D::Custom1, View3D::Bottom, View3D::Custom1));
+    // `pane` 1 to 3 are positions 0 to 2; the bottom-right position is reached by `position`.
+    let r = s.execute("view.setPaneView", json!({"pane": 1, "view": "back"})).unwrap();
+    assert_eq!((r["position"].clone(), r["pane"].clone()), (json!(0), json!(1)));
+    s.execute("view.setPaneView", json!({"position": 3, "view": "custom3"})).unwrap();
+    let vs = views_of(&s);
+    assert_eq!([0, 1, 2, 3].map(|p| vs.view_at(p)), [View3D::Back, View3D::Front, View3D::Custom1, View3D::Custom3]);
+    assert!(s.execute("view.setPaneView", json!({"position": 4, "view": "top"})).is_err());
+    assert!(s.execute("view.setPaneView", json!({"view": "top"})).is_err(), "names no pane");
+    assert!(s.execute("view.setPaneView", json!({"pane": 1, "position": 0, "view": "top"})).is_err(), "names it twice");
+    // Editor states saved before positions existed load with the bottom-right pane active.
+    let old: effectcraft_render::three_d::Views3D = serde_json::from_value(json!({"current": "Front", "panes": ["Left"]})).unwrap();
+    assert_eq!((old.active(), old.current), (3, View3D::Front));
+    assert_eq!([0, 1, 2, 3].map(|p| old.view_at(p)), [View3D::Left, View3D::Front, View3D::Right, View3D::Front]);
+    let odd: effectcraft_render::three_d::Views3D = serde_json::from_value(json!({"current": "Top", "active": 200})).unwrap();
+    assert_eq!(odd.active(), 3, "a position past the fourth is the bottom-right one");
+    let back: crate::EditorState = serde_json::from_value(serde_json::to_value(&s.state).unwrap()).unwrap();
+    assert_eq!(back.views3d, s.state.views3d);
+}

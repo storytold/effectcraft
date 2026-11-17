@@ -547,8 +547,14 @@ pub fn arr(v: Vec3) -> [f64; 3] {
 }
 
 /// Per-comp 3D view state of the viewer (current view + edited view cameras).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// The panes of View ▸ Switch View Layout are layout positions: 0 top-left, 1 top-right,
+/// 2 bottom-left and 3 bottom-right (2 views show positions 0 and 3, 4 views all of them, 1 view
+/// the active one). The active position's view is `current`, so every command that acts on the
+/// current 3D view acts on the active pane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Views3D {
+    /// The view of the active position.
     pub current: View3D,
     /// The view before the last switch (View ▸ Switch to Last 3D View).
     #[serde(default)]
@@ -556,28 +562,85 @@ pub struct Views3D {
     /// Edited view cameras (views not present use their defaults).
     #[serde(default)]
     pub cams: BTreeMap<View3D, ViewCam>,
-    /// The views of the extra panes of a 2- or 4-view layout (pane 1 to 3, i.e. index 0 to 2);
-    /// panes not present show their default ([`Views3D::DEFAULT_PANES`]).
+    /// The stored views of positions 0 to 3; positions not present show their default
+    /// ([`Views3D::DEFAULT_PANES`]). The active position shows `current` instead.
     #[serde(default)]
     pub panes: Vec<View3D>,
+    /// The layout position `current` belongs to (states saved without it: [`Views3D::HOME`]).
+    #[serde(default = "Views3D::home")]
+    pub active: u8,
+}
+
+impl Default for Views3D {
+    fn default() -> Self {
+        Views3D { current: View3D::default(), last: View3D::default(), cams: BTreeMap::new(), panes: Vec::new(), active: Self::home() }
+    }
 }
 
 impl Views3D {
-    /// Views the extra panes of a multi-view layout start with: Top, Front and Right.
-    pub const DEFAULT_PANES: [View3D; 3] = [View3D::Top, View3D::Front, View3D::Right];
-    /// The view of extra pane `i` (0 = the first beside the main view).
-    pub fn pane(&self, i: usize) -> View3D {
-        self.panes.get(i).or_else(|| Self::DEFAULT_PANES.get(i)).copied().unwrap_or_default()
+    /// Views the positions start with: Top, Front and Right beside the Active Camera, which is
+    /// the bottom-right (main) pane.
+    pub const DEFAULT_PANES: [View3D; 4] = [View3D::Top, View3D::Front, View3D::Right, View3D::ActiveCamera];
+    /// The position that is active by default: the bottom-right pane, the main view of a 2- or
+    /// 4-view layout.
+    pub const HOME: usize = 3;
+    fn home() -> u8 {
+        Self::HOME as u8
     }
-    /// Choose the view of extra pane `i` (ignored past the third).
-    pub fn set_pane(&mut self, i: usize, v: View3D) {
-        if i >= Self::DEFAULT_PANES.len() {
+    /// The stored view of position `pos` (the active position shows `current`, see [`Self::view_at`]).
+    pub fn pane(&self, pos: usize) -> View3D {
+        self.panes.get(pos).or_else(|| Self::DEFAULT_PANES.get(pos)).copied().unwrap_or_default()
+    }
+    /// Store the view of position `pos` (ignored past the fourth).
+    pub fn set_pane(&mut self, pos: usize, v: View3D) {
+        if pos >= Self::DEFAULT_PANES.len() {
             return;
         }
-        while self.panes.len() <= i {
-            self.panes.push(Self::DEFAULT_PANES[self.panes.len()]);
+        while self.panes.len() <= pos {
+            let next = Self::DEFAULT_PANES.get(self.panes.len()).copied().unwrap_or_default();
+            self.panes.push(next);
         }
-        self.panes[i] = v;
+        if let Some(slot) = self.panes.get_mut(pos) {
+            *slot = v;
+        }
+    }
+    /// The active layout position (a stored value past the fourth counts as [`Self::HOME`]).
+    pub fn active(&self) -> usize {
+        match usize::from(self.active) {
+            p if p < Self::DEFAULT_PANES.len() => p,
+            _ => Self::HOME,
+        }
+    }
+    /// The view shown at position `pos`: `current` at the active position.
+    pub fn view_at(&self, pos: usize) -> View3D {
+        if pos == self.active() { self.current } else { self.pane(pos) }
+    }
+    /// Choose the view of position `pos`. At the active position this switches `current`
+    /// (and remembers the view it leaves for Switch to Last 3D View).
+    pub fn set_view_at(&mut self, pos: usize, v: View3D) {
+        if pos == self.active() {
+            self.last = self.current;
+            self.current = v;
+        } else {
+            self.set_pane(pos, v);
+        }
+    }
+    /// Make position `pos` the active one; every position keeps its view (ignored past the fourth).
+    pub fn activate(&mut self, pos: usize) {
+        if pos >= Self::DEFAULT_PANES.len() || pos == self.active() {
+            return;
+        }
+        self.set_pane(self.active(), self.current);
+        self.current = self.pane(pos);
+        self.active = pos as u8;
+    }
+    /// The positions a layout of `views` (1, 2 or 4) shows.
+    pub fn shown(&self, views: u8) -> Vec<usize> {
+        match views {
+            0 | 1 => vec![self.active()],
+            2 => vec![0, Self::HOME],
+            _ => vec![0, 1, 2, 3],
+        }
     }
     pub fn cam(&self, v: View3D, w: f64, h: f64) -> ViewCam {
         self.cams.get(&v).copied().unwrap_or_else(|| default_view_cam(v, w, h))

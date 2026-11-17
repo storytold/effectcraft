@@ -1,4 +1,4 @@
-use super::geometry::{cam_state, l2c, parent_inverse};
+use super::geometry::{cam_state, l2c, parent_inverse, project_segment};
 use super::gesture::{Gesture, pen_id};
 use super::{CameraState, Color32, EffectcraftApp, EvalCtx, Layer, LayerId, Mat3, Pos2, Rect, Stroke, Tool, ViewerMap, gv2, json, ov, three_d, vec2, vt};
 
@@ -17,6 +17,51 @@ pub(super) fn axis_at(hits: &[(LayerId, [Pos2; 2], [f64; 3], [f64; 3])], p: Pos2
         p.distance(a + ab * t)
     };
     hits.iter().filter(|h| dist(h.1) < 6.0).min_by(|a, b| dist(a.1).total_cmp(&dist(b.1))).copied()
+}
+
+/// One arrow of a 3D layer's axis gizmo.
+pub(super) struct Arrow {
+    /// `x`, `y` or `z`.
+    pub(super) name: &'static str,
+    pub(super) color: Color32,
+    /// Screen points; the tail is on the anchor point.
+    pub(super) tail: Pos2,
+    pub(super) tip: Pos2,
+    /// Position change per comp pixel of drag in x and y that moves the layer along the arrow.
+    pub(super) drag: ([f64; 3], [f64; 3]),
+}
+
+/// The axis gizmo of 3D layer `l` with anchor point `a`, 60 points long, through the current 3D
+/// view (`VIEW_CAM`) and `map`: the active pane's and the side panes' of a view layout alike.
+/// The axes are clipped at the camera's near plane (#572); an axis pointing at the camera (Z in
+/// the default front view) projects to a dot and gets a short diagonal stub instead, so it can
+/// still be grabbed.
+pub(super) fn axis_arrows(ectx: &EvalCtx, l: &Layer, a: [f64; 3], map: &ViewerMap) -> Vec<Arrow> {
+    use effectcraft_engine::geom::vec3;
+    let zoom = map.zoom as f64;
+    let w = ectx.world_matrix(l);
+    let pc = cam_state(ectx).projection(map.comp[0] as f64, map.comp[1] as f64) * w;
+    let a3 = vec3(a[0], a[1], a[2]);
+    let len = 60.0 / zoom;
+    let pinv = parent_world_inverse(ectx, l);
+    let axes = [
+        (vec3(len, 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
+        (vec3(0.0, len, 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
+        (vec3(0.0, 0.0, len), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
+    ];
+    axes.into_iter()
+        .filter_map(|(axis, color, name)| {
+            let [o, e] = project_segment(&pc, a3, a3 + axis)?;
+            let mut s = [e[0] - o[0], e[1] - o[1]];
+            if (s[0] * s[0] + s[1] * s[1]).sqrt() * zoom < 12.0 {
+                let k = 24.0 / zoom;
+                s = [k, -k];
+            }
+            let dir = pinv.apply_vec(w.apply_vec(axis));
+            let (tail, tip) = (map.to_screen(o), map.to_screen([o[0] + s[0], o[1] + s[1]]));
+            Some(Arrow { name, color, tail, tip, drag: axis_drag([dir.x, dir.y, dir.z], s) })
+        })
+        .collect()
 }
 
 /// World to parent space for a 3D layer (identity without a parent).

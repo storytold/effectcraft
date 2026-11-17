@@ -174,8 +174,13 @@ revolutions are `timeline.prop.<uid>.revolutions`, `effectControls.prop.<uid>.re
 label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an error; label `whole`, or
 `cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area),
 `viewer.cryptoSelect` (the Selection tool picking Cryptomatte IDs over the layer while its Cryptomatte
-effect is selected in Effect Controls, no eyedropper armed; label: the Selection's name) and
-`viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
+effect is selected in Effect Controls, no eyedropper armed; label: the Selection's name),
+`viewer.regionOfInterest`, and in a 2- or 4-view layout `viewer.pane.<pos>` (each pane by layout
+position: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right; a press in any pane of a comp
+with 3D layers makes it the active pane), a side pane's `viewer.view.<n>.type` (its view selector,
+`n` = position + 1, entries `viewer.view.<n>.typeItem.<k>`), `viewer.pane.<pos>.anchor.<layer>` and
+`viewer.pane.<pos>.gizmo.<layer>.<x|y|z>` (the selected layers' controls a side pane shows); the
+Graph Editor adds `timeline.graph.transformBox[.<i>]`,
 `timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
 
 Viewer state that agents drive headless too: `view.snapping`, `view.snappingOptions
@@ -190,12 +195,17 @@ Compositions and Text Layers), `view.channel {channel, colorized?}`,
 step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports it as
 `ui.viewer.res`), `view.setRegionOfInterest {rect}`, `view.addGuide {percent?}`,
 `view.addPercentGuide`, `view.convertGuides {to: percent|pixels, index?}`,
-`view.moveGuide` (comp pixels, whatever the guide's unit), `view.removeGuide`, `effect.setLabel {layer?, effect, label}`; editing: `shape.newPath` (Pen on shape layers),
+`view.moveGuide` (comp pixels, whatever the guide's unit), `view.removeGuide`, `view.layout {views: 1|2|4}`,
+`view.activatePane {position, comp?}` (the pane that takes the input in a comp with 3D layers,
+and that the 3D view and camera commands act on; `view.get3D` reports it as `activePosition`), `view.setPaneView {position |
+pane, view}` (`pane` keeps its numbering, 0 is the active pane), `effect.setLabel {layer?, effect, label}`; editing: `shape.newPath` (Pen on shape layers),
 `shape.newShape` (the shape tools: a new group in the selected shape layer, else a new shape layer),
 `shape.toolOptions` (the Tools bar's Tool Creates Shape / Mask and Fill and Stroke Options),
 `mask.insertVertex`, `mask.convertVertex`, `mask.deleteVertices`, `path.freeTransform` (masks and
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
-Editor transform box, timeline Alt-drag scaling).
+Editor transform box, timeline Alt-drag scaling). In a 2- or 4-view layout `ui.set {viewer: {zoom,
+pan}}`, `ui.viewer.locate` and `ui.viewer.hit` act on the pane that takes the input (the
+bottom-right one in a comp without 3D layers); each pane keeps its own zoom and pan.
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).

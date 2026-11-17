@@ -2,6 +2,7 @@
 //! headless-relevant editor state (the region of interest).
 
 use effectcraft_project::{Guide, Resolution};
+use effectcraft_render::three_d::Views3D;
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, bad, comp_id, f_p, has_comp, str_p};
@@ -143,6 +144,15 @@ fn view_layout(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("view.layout", "views: 1|2|4"));
     }
     s.state.view_layout = n as u8;
+    if n == 2 {
+        // Two views show the left and right panes (positions 0 and 3): an active top-right or
+        // bottom-left pane hands over to the right one.
+        for vs in s.state.views3d.values_mut() {
+            if !vs.shown(2).contains(&vs.active()) {
+                vs.activate(Views3D::HOME);
+            }
+        }
+    }
     Ok(json!({"views": n}))
 }
 
@@ -209,7 +219,15 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         // The Composition panel's Resolution popup (not in the View menu).
         res!("view.res.auto", "Resolution: Auto", [], None, Auto),
-        cmd!("view.layout", "Switch View Layout", [], None, "{views: 1|2|4}", has_comp, view_layout),
+        cmd!(
+            "view.layout",
+            "Switch View Layout",
+            [],
+            None,
+            "{views: 1|2|4} (2 views show the left and right panes: the right one becomes active when the active pane is not shown)",
+            has_comp,
+            view_layout
+        ),
         cmd!("view.shareViewOptions", "Share View Options", ["View", "Switch View Layout"], None, "{value?}", has_comp, share_view_options),
         cmd!("view.extendedViewer", "Extended Viewer", [], None, "{value?}", always, extended_viewer),
         cmd!("view.setRegionOfInterest", "Region of Interest", [], None, "{rect?: [x, y, w, h] | null}", always, region_of_interest),
