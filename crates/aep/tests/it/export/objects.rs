@@ -441,7 +441,13 @@ fn camera_fixtures_come_back_without_a_loss() {
         let r1 = import(&mut p, &bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).expect("import");
         assert!(r1.report.losses.is_empty(), "{name}: {:?}", r1.report.losses);
         let out = export_all(&p);
-        assert!(out.report.is_lossless(), "{name}: {:?}", out.report.losses);
+        if name.starts_with("537-") {
+            // Its 3D layer has X Rotation 30, which the exporter does not write: reported.
+            assert_eq!(out.report.losses.len(), 1, "{name}: {:?}", out.report.losses);
+            assert_eq!(out.report.count(LossCategory::TransformProperties), 1, "{name}: {:?}", out.report.losses);
+        } else {
+            assert!(out.report.is_lossless(), "{name}: {:?}", out.report.losses);
+        }
         let mut p2 = Project::default();
         let r2 = import(&mut p2, &out.bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).expect("reimport");
         assert!(r2.report.losses.is_empty(), "{name}: {:?}", r2.report.losses);
@@ -915,4 +921,22 @@ fn animated_camera_and_light_options_that_are_not_written_are_reported() {
             assert!(!strict(&p), "light {id} keyed {keyed}");
         }
     }
+}
+
+#[test]
+fn a_static_x_or_y_rotation_of_a_3d_layer_is_reported() {
+    // The exporter does not write X / Y Rotation; a value other than 0 must be reported, as
+    // Orientation is, not dropped silently (the property ids are `rotationX` / `rotationY`).
+    for path in ["transform/rotationX", "transform/rotationY"] {
+        let (mut p, c) = two_solids();
+        with_layer(&mut p, c, 0, |l| {
+            l.switches.three_d = true;
+            l.props.prop_mut(path).unwrap_or_else(|| panic!("{path}")).value = effectcraft_keyframe::Value::Scalar(30.0);
+        });
+        let r = export_all(&p);
+        assert_eq!(r.report.count(LossCategory::TransformProperties), 1, "{path}: {:?}", r.report.losses);
+    }
+    let (mut p, c) = two_solids();
+    with_layer(&mut p, c, 0, |l| l.switches.three_d = true);
+    assert_eq!(export_all(&p).report.count(LossCategory::TransformProperties), 0, "default rotation is no loss");
 }

@@ -1256,7 +1256,9 @@ fn is_non_default_extra(id: &str, p: &Property) -> bool {
     }
     let comps = p.value.components();
     match id {
-        "orientation" | "rotation_x" | "rotation_y" | "x_rotation" | "y_rotation" | "orient" => comps.iter().any(|c| c.abs() > 1e-9),
+        "orientation" | "rotationX" | "rotationY" | "rotation_x" | "rotation_y" | "x_rotation" | "y_rotation" | "orient" => {
+            comps.iter().any(|c| c.abs() > 1e-9)
+        }
         _ => false,
     }
 }
